@@ -14,7 +14,7 @@ cat >"$tmp/bin/gh" <<'SH'
 set -euo pipefail
 printf '%s\n' "$*" >>"$CALLS"
 if [ "$1" = api ] && [[ "$2" == */pulls/* ]]; then
-  printf '{"state":"%s","isDraft":%s,"title":%s,"labels":%s,"head":{"sha":"%s"},"base":{"ref":"%s","sha":"%s"}}\n' \
+  printf '{"state":"%s","draft":%s,"title":%s,"labels":%s,"head":{"sha":"%s"},"base":{"ref":"%s","sha":"%s"}}\n' \
     "${PR_STATE:-open}" "${PR_DRAFT:-false}" "${PR_TITLE:-\"change\"}" \
     "${PR_LABELS:-[]}" "${ACTUAL_HEAD:-$EXPECTED_HEAD_SHA}" \
     "${ACTUAL_BRANCH:-$DEFAULT_BRANCH}" "${ACTUAL_PR_BASE:-$AUTHORIZED_BASE_SHA}"
