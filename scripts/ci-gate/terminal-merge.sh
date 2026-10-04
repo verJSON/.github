@@ -20,7 +20,7 @@ jq -e --arg head "$EXPECTED_HEAD_SHA" --arg base "$AUTHORIZED_BASE_SHA" \
     ([.labels[].name | ascii_upcase | gsub("[ _-]+";" ")]) as $labels
     | .state == "open" and .head.sha == $head and
       .base.ref == $branch and .base.sha == $base and
-      .isDraft == false and
+   .draft == false and
       ($labels | index("HOLD") | not) and
       ($labels | index("DO NOT MERGE") | not) and
       ((.title | ascii_upcase |

@@ -135,7 +135,7 @@ write_base() {
   export WORKFLOW_BLOB_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa WORKFLOW_BLOB_TRUSTED=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   jq -nc --arg head "$EXPECTED_HEAD_SHA" '{state:"OPEN",isDraft:false,title:"change",labels:[],headRefOid:$head,headRepositoryOwner:{login:"Verjson"}}' >"$META_FILE"
   jq -nc --arg head "$EXPECTED_HEAD_SHA" --arg base "$AUTHORIZED_BASE_SHA" \
-    '{state:"open",isDraft:false,title:"change",labels:[],head:{sha:$head},base:{ref:"main",sha:$base}}' >"$BASE_META_FILE"
+    '{state:"open",draft:false,title:"change",labels:[],head:{sha:$head},base:{ref:"main",sha:$base}}' >"$BASE_META_FILE"
   cp "$BASE_META_FILE" "$TERMINAL_META_FILE"
   jq -nc --arg head "$EXPECTED_HEAD_SHA" \
     '{id:9001,name:"AI review authorization",head_sha:$head,status:"completed",conclusion:"success",app:{id:15368,slug:"github-actions"}}' >"$CHECK_FILE"
@@ -165,6 +165,13 @@ fi
 write_base; expect_pass "explicit bash invocation supports a non-executable sparse-checkout verifier" run_promote
 grep -q -- '--admin --squash --match-head-commit' "$CALLS" \
   && pass "all-success promotion merges the exact authorized head" || fail "terminal promotion did not use exact-head admin squash merge"
+write_base
+for draft_state in '.draft=true' 'del(.draft)' '.draft=null' '.draft="false"'; do
+  write_base
+  jq "$draft_state" "$TERMINAL_META_FILE" >"$tmp/x" && mv "$tmp/x" "$TERMINAL_META_FILE"
+  expect_fail "terminal REST draft guard rejects $draft_state" run_promote
+  ! grep -q 'pr merge' "$CALLS" || fail "terminal REST draft guard allowed $draft_state"
+done
 write_base
 # #1615: the reviewing token cannot always resolve author_association correctly (e.g. a
 # default GITHUB_TOKEN without org-membership read visibility reports a real org MEMBER as
