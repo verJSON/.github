@@ -120,3 +120,24 @@ or merge on its behalf).
 
 This closes #1323's design pass with no change to this decision: the terminal-merge
 credential shape it asks about was already decided here and is not superseded.
+
+
+## 2026-10-04 — REST draft guard correction
+
+[Issue #1685](https://github.com/Verjson/.github/issues/1685) identified a
+representation mismatch at the final App-token read: the REST pull request
+response has `draft`, while the CLI and GraphQL representation has `isDraft`.
+Reading the latter from REST rejected valid non-draft PRs, including
+[document-contracts #58](https://github.com/Verjson/verjson-document-contracts/pull/58).
+
+The terminal guard requires the REST `draft` value to be Boolean `false`.
+A draft, absent field, null, or string value continues to reject promotion.
+The earlier CLI metadata check keeps its own `isDraft` representation. This
+restores the existing authorization invariant without changing merge authority,
+hold handling, independent review requirements, or the exact-head merge check.
+
+Evidence: the real REST shape fails the original
+`scripts/ci-gate/native-automerge.test.sh` promotion fixture. The corrected
+predicate passes that fixture and explicit draft, absent, null, and malformed
+value rejection cases; `scripts/ci-gate/terminal-merge-app-token.test.py` also
+pins the REST predicate.
