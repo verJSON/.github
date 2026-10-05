@@ -563,7 +563,6 @@ jobs:
           token="$RUNNER_TEMP/container-cosign-oidc-token"
           buildkit="$RUNNER_TEMP/container-buildkit-provenance.json"
           reviewed="$RUNNER_TEMP/container-reviewed-platforms.json"
-          digest="${DIGEST#sha256:}"
           docker buildx imagetools inspect "$REPOSITORY@$DIGEST" --format '{{json .Provenance}}' > "$buildkit"
           jq -ce --arg variant "$VARIANT" '.images[] | select(.variant == $variant) | .platforms' "$CONFIG_PATH" > "$reviewed"
           python3 "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
@@ -889,7 +888,7 @@ jobs:
           token="$RUNNER_TEMP/container-cosign-oidc-token"
           buildkit="$RUNNER_TEMP/container-buildkit-provenance.json"
           reviewed="$RUNNER_TEMP/container-reviewed-platforms.json"
-          base_repository="${BASE_REPOSITORY%@*}"
+          BASE_REPOSITORY="${BASE_REPOSITORY%@*}"
           docker buildx imagetools inspect "$REPOSITORY@$DIGEST" --format '{{json .Provenance}}' > "$buildkit"
           jq -ce --arg variant "$VARIANT" '.images[] | select(.variant == $variant) | .platforms' "$CONFIG_PATH" > "$reviewed"
           python3 "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
@@ -897,7 +896,7 @@ jobs:
           receipt="$(python3 "$RUNNER_TEMP/container_cosign_provenance.py" attest-image \
             --identity-token "$token" --buildkit-provenance "$buildkit" \
             --reviewed-platforms "$reviewed" --image-repository "$REPOSITORY" \
-            --image-digest "$DIGEST" --base-repository "$base_repository" \
+            --image-digest "$DIGEST" --base-repository "$BASE_REPOSITORY" \
             --base-digest "$BASE_DIGEST" --bundle "$RUNNER_TEMP/provenance.sigstore.json" \
             --referrer-manifest "$RUNNER_TEMP/provenance-referrer.json")"
           echo "bundle-digest=$(jq -er .bundleDigest <<<"$receipt")" >> "$GITHUB_OUTPUT"
@@ -1065,9 +1064,11 @@ jobs:
             --identity-token "$token" --sbom sbom.spdx.json --bundle "$bundle" \
             --referrer-manifest "$referrer" --image-repository "$REPOSITORY" \
             --image-digest "$DIGEST")"
-          echo "bundle-digest=$(jq -er .bundleDigest <<<"$receipt")" >> "$GITHUB_OUTPUT"
-          echo "referrer-manifest-digest=$(jq -er .referrerManifestDigest <<<"$receipt")" >> "$GITHUB_OUTPUT"
-          echo "spdx-digest=$(jq -er .spdxDigest <<<"$receipt")" >> "$GITHUB_OUTPUT"
+          {
+            echo "bundle-digest=$(jq -er .bundleDigest <<<"$receipt")"
+            echo "referrer-manifest-digest=$(jq -er .referrerManifestDigest <<<"$receipt")"
+            echo "spdx-digest=$(jq -er .spdxDigest <<<"$receipt")"
+          } >> "$GITHUB_OUTPUT"
           rm -f "$token"
       - name: Record signed platform SBOM identity
         env:
