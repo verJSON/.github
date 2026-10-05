@@ -28,7 +28,7 @@ jobs:
     with:
       config-path: scripts/fixtures/container-candidate/canary.json
       contract-ref: ${{ github.sha }}
-      retry-sha256: '4a11c930f31cc9a07c3b5236511c3545a215c60ba93657e7bc473f7c2ad8fa62'
+      retry-sha256: 'c8c0e914948d63dc035566de70d74eacefeeefba0b76bcd155124564f4caa3ed'
       runner: ${{ github.repository_owner == 'Verjson' && (vars.CI_RUNNER_DEFAULT || '["self-hosted","general"]') || '["ubuntu-24.04"]' }}
 
   publish:
@@ -46,6 +46,6 @@ jobs:
       contract-ref: ${{ github.sha }}
       acquisition-sha256: '0000000000000000000000000000000000000000000000000000000000000000'
       transfer-sha256: 'db50956fd099f1641c030293f045944b4f5e21d221b030dddc55bb6e925396d7'
-      retry-sha256: '4a11c930f31cc9a07c3b5236511c3545a215c60ba93657e7bc473f7c2ad8fa62'
+      retry-sha256: 'c8c0e914948d63dc035566de70d74eacefeeefba0b76bcd155124564f4caa3ed'
       provenance-sha256: 'c866f5ef410b539650a652f9798c4d352846ecd2f9f7beef945c34434c7554de'
       runner: ${{ github.repository_owner == 'Verjson' && (vars.CI_RUNNER_DEFAULT || '["self-hosted","general"]') || '["ubuntu-24.04"]' }}

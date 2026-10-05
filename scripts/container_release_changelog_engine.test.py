@@ -27,7 +27,7 @@ def validate(workflow):
     promote = workflow["jobs"]["promote"]
     steps = promote["steps"]
     guard = named_step(promote, "Bind the immutable changelog contract to this workflow")
-    contract_checkout = named_step(promote, "Check out the immutable changelog engine")
+    contract_checkout = named_step(promote, "Check out the immutable provenance and changelog contract")
     mint = named_step(promote, "Mint exact-repository release App token")
     output = named_step(promote, "Canonical changelog, Git tag, release and machine output")
 
@@ -50,7 +50,7 @@ def validate(workflow):
         # The same pinned checkout carries the reconciliation enforcer (ADR 0158), so
         # the hook's allowlist is enforced by immutable contract code rather than by a
         # consumer-local copy. Widening beyond these two files is drift.
-        "sparse-checkout": "scripts/changelog.py\nscripts/container_release_reconcile.py\n",
+        "sparse-checkout": "scripts/changelog.py\nscripts/container_release_reconcile.py\nscripts/container_cosign_provenance.py\n",
         "sparse-checkout-cone-mode": False,
     }
     if contract_checkout.get("uses") != CHECKOUT or contract_checkout.get("with") != expected_checkout:
@@ -84,17 +84,17 @@ class ContainerReleaseChangelogEngineContractTest(unittest.TestCase):
 
     def test_rejects_mutable_contract_ref(self):
         mutant = copy.deepcopy(self.workflow)
-        named_step(mutant["jobs"]["promote"], "Check out the immutable changelog engine")["with"]["ref"] = "main"
+        named_step(mutant["jobs"]["promote"], "Check out the immutable provenance and changelog contract")["with"]["ref"] = "main"
         self.assertIn("changelog engine checkout is not exact", validate(mutant))
 
     def test_rejects_widened_contract_checkout(self):
         mutant = copy.deepcopy(self.workflow)
-        named_step(mutant["jobs"]["promote"], "Check out the immutable changelog engine")["with"].pop("sparse-checkout")
+        named_step(mutant["jobs"]["promote"], "Check out the immutable provenance and changelog contract")["with"].pop("sparse-checkout")
         self.assertIn("changelog engine checkout is not exact", validate(mutant))
 
     def test_rejects_persisted_contract_credential(self):
         mutant = copy.deepcopy(self.workflow)
-        named_step(mutant["jobs"]["promote"], "Check out the immutable changelog engine")["with"]["persist-credentials"] = True
+        named_step(mutant["jobs"]["promote"], "Check out the immutable provenance and changelog contract")["with"]["persist-credentials"] = True
         self.assertIn("changelog engine checkout is not exact", validate(mutant))
 
     def test_rejects_guard_after_acquisition(self):
@@ -144,7 +144,7 @@ class ContainerReleaseChangelogEngineContractTest(unittest.TestCase):
     def test_rejects_engine_acquisition_after_token_mint(self):
         mutant = copy.deepcopy(self.workflow)
         steps = mutant["jobs"]["promote"]["steps"]
-        checkout = named_step(mutant["jobs"]["promote"], "Check out the immutable changelog engine")
+        checkout = named_step(mutant["jobs"]["promote"], "Check out the immutable provenance and changelog contract")
         steps.remove(checkout)
         mint = named_step(mutant["jobs"]["promote"], "Mint exact-repository release App token")
         steps.insert(steps.index(mint) + 1, checkout)

@@ -309,6 +309,7 @@ jobs:
         name: Canonical changelog, Git tag, release and machine output
         env:
           VERSION: "${{ inputs.version }}"
+          CONTRACT_REF: "${{ inputs.contract-ref }}"
           RECONCILE_ALLOWLIST: "${{ inputs.reconcile-allowlist }}"
           GH_TOKEN: "${{ steps.release-app-token.outputs.token }}"
         run: |

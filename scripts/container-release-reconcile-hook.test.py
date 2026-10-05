@@ -36,7 +36,7 @@ def validate(workflow):
     except StopIteration:
         return errors + ["reconciliation step is absent"]
     plan = named_step(promote, "Fail-closed preflight and immutable plan")
-    contract = named_step(promote, "Check out the immutable changelog engine")
+    contract = named_step(promote, "Check out the immutable provenance and changelog contract")
     mint = named_step(promote, "Mint exact-repository release App token")
     output = named_step(promote, "Canonical changelog, Git tag, release and machine output")
 
@@ -83,8 +83,12 @@ def validate(workflow):
             errors.append(f"git {command} runs repository hooks with the release App token")
 
     sparse = contract.get("with", {}).get("sparse-checkout", "")
-    if "scripts/container_release_reconcile.py" not in sparse or "scripts/changelog.py" not in sparse:
-        errors.append("the pinned checkout does not carry both the engine and the enforcer")
+    if any(path not in sparse for path in (
+        "scripts/container_release_reconcile.py",
+        "scripts/changelog.py",
+        "scripts/container_cosign_provenance.py",
+    )):
+        errors.append("the pinned checkout does not carry the engine, enforcer, and provenance verifier")
     return errors
 
 

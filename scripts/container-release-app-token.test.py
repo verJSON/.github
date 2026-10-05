@@ -33,7 +33,6 @@ def validate(workflow):
     permissions = promote.get("permissions", {})
     expected = {
         "actions": "read",
-        "attestations": "write",
         "contents": "read",
         "id-token": "write",
         "packages": "write",
@@ -88,8 +87,19 @@ def validate(workflow):
         for step in job.get("steps", [])
         if str(step.get("uses", "")).startswith("docker/login-action@")
     ]
-    if not login_steps or any(step.get("with", {}).get("password") != "${{ github.token }}" for step in login_steps):
-        errors.append("registry login is not isolated to the job token")
+    ghcr_logins = [step for step in login_steps if step.get("with", {}).get("registry") == "ghcr.io"]
+    gar_logins = [
+        step for step in login_steps
+        if step.get("with", {}).get("registry") == "${{ steps.candidate.outputs.registry_host }}"
+    ]
+    if (
+        not ghcr_logins
+        or any(step.get("with", {}).get("password") != "${{ github.token }}" for step in ghcr_logins)
+        or len(gar_logins) != 1
+        or gar_logins[0].get("with", {}).get("username") != "oauth2accesstoken"
+        or gar_logins[0].get("with", {}).get("password") != "${{ steps.gar-auth.outputs.auth_token }}"
+    ):
+        errors.append("registry login is not isolated to job credentials")
 
     rendered = repr(workflow)
     legacy_release_token = "RELEASE_" + "TOKEN"
@@ -137,7 +147,7 @@ class ContainerReleaseAppTokenContractTest(unittest.TestCase):
         login["with"]["password"] = "${{ steps.release-app-token.outputs.token }}"
         errors = validate(mutant)
         self.assertIn("App token escaped terminal release step", errors)
-        self.assertIn("registry login is not isolated to the job token", errors)
+        self.assertIn("registry login is not isolated to job credentials", errors)
 
     def test_rejects_mint_after_first_mutation(self):
         mutant = copy.deepcopy(self.workflow)
