@@ -79,6 +79,8 @@ def validate_cosign_provenance(
     caller_workflow_sha: str,
     publisher_workflow_ref: str,
     contract_sha: str,
+    base_repository: str | None = None,
+    base_digest: str | None = None,
 ) -> str:
     statement = _object(statement, "Cosign provenance statement")
     if statement.get("_type") != "https://in-toto.io/Statement/v1":
@@ -156,6 +158,8 @@ def validate_cosign_provenance(
         reviewed_platforms,
         source_repository=source_repository,
         source_commit=source_commit,
+        base_repository=base_repository,
+        base_digest=base_digest,
     )
 
     canonical = json.dumps(statement, sort_keys=True, separators=(",", ":")).encode()

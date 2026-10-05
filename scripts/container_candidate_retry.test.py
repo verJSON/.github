@@ -295,8 +295,38 @@ class CosignProvenancePolicyTests(unittest.TestCase):
             caller_workflow_sha="c" * 40,
             publisher_workflow_ref="Verjson/.github/.github/workflows/container-candidate-publish.yml@" + "d" * 40,
             contract_sha="d" * 40,
+            base_repository=BASE_REPOSITORY,
+            base_digest=BASE_DIGEST,
         )
         self.assertRegex(identity, r"^statement-sha256:[0-9a-f]{64}$")
+
+    def test_rejects_derived_image_with_different_buildkit_base_digest(self):
+        provenance = buildkit_provenance()
+        provenance["linux/amd64"]["SLSA"]["buildDefinition"]["resolvedDependencies"][0]["digest"] = {
+            "sha256": "e" * 64
+        }
+        statement = candidate_statement()
+        statement["predicate"]["buildDefinition"]["externalParameters"]["buildkitProvenanceSha256"] = hashlib.sha256(
+            json.dumps(provenance, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        with self.assertRaisesRegex(MODULE.RetryEvidenceError, "base dependency"):
+            MODULE.validate_cosign_provenance(
+                statement,
+                buildkit_provenance=provenance,
+                reviewed_platforms=REVIEWED_PLATFORMS,
+                repository=REPOSITORY,
+                digest=DIGEST,
+                source_repository="Verjson/example",
+                source_repository_id="12345",
+                source_ref="refs/heads/main",
+                source_commit="c" * 40,
+                caller_workflow_ref="Verjson/example/.github/workflows/container-candidate.yml@refs/heads/main",
+                caller_workflow_sha="c" * 40,
+                publisher_workflow_ref="Verjson/.github/.github/workflows/container-candidate-publish.yml@" + "d" * 40,
+                contract_sha="d" * 40,
+                base_repository=BASE_REPOSITORY,
+                base_digest=BASE_DIGEST,
+            )
 
     def test_rejects_each_identity_dimension_when_it_differs(self):
         cases = (
