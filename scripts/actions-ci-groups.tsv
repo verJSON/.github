@@ -167,6 +167,7 @@ changelog-release	python3 scripts/container_candidate_pnpm.test.py
 changelog-release	python3 scripts/container_candidate_retry.test.py
 changelog-release	python3 scripts/container_cosign_provenance.test.py
 changelog-release	python3 scripts/container_cosign_workflow_contract.test.py
+changelog-release	python3 scripts/container_registry_destinations.test.py
 changelog-release	python3 scripts/container-candidate-retry-contract.test.py
 changelog-release	bash scripts/container-candidate-contract.test.sh
 changelog-release	bash scripts/container-release-contract.test.sh

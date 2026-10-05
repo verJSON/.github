@@ -33,7 +33,7 @@ class RetryWorkflowContractTests(unittest.TestCase):
                 "type": "string",
             },
         )
-        self.assertEqual(self.text.count('printf \'%s  %s\\n\' "$RETRY_SHA256" "$retry" | sha256sum --check --strict'), 2)
+        self.assertEqual(self.text.count('printf \'%s  %s\\n\' "$RETRY_SHA256" "$retry" | sha256sum --check --strict'), 7)
         prepare = next(
             step
             for step in self.workflow["jobs"]["prepare"]["steps"]

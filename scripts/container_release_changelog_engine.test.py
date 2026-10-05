@@ -49,8 +49,8 @@ def validate(workflow):
         "persist-credentials": False,
         # The same pinned checkout carries the reconciliation enforcer (ADR 0158), so
         # the hook's allowlist is enforced by immutable contract code rather than by a
-        # consumer-local copy. Widening beyond these two files is drift.
-        "sparse-checkout": "scripts/changelog.py\nscripts/container_release_reconcile.py\nscripts/container_cosign_provenance.py\n",
+        # consumer-local copy. The provenance verifier also imports the pinned retry module.
+        "sparse-checkout": "scripts/changelog.py\nscripts/container_release_reconcile.py\nscripts/container_cosign_provenance.py\nscripts/container_candidate_retry.py\n",
         "sparse-checkout-cone-mode": False,
     }
     if contract_checkout.get("uses") != CHECKOUT or contract_checkout.get("with") != expected_checkout:
