@@ -10,6 +10,7 @@ cp "$root/scripts/gen-container-candidate.sh" \
   "$root/scripts/container_private_dependencies.py" \
   "$root/scripts/container_dependency_transfer.py" \
   "$root/scripts/container_candidate_retry.py" \
+  "$root/scripts/container_cosign_provenance.py" \
   "$root/scripts/container_registry_destinations.py" \
   "$tmp/contract/scripts/"
 git -C "$tmp/contract" init -q
@@ -124,7 +125,6 @@ with open(os.environ["CANARY_WORKFLOW"], encoding="utf-8") as stream:
 validation_permissions = {"actions": "read", "contents": "read"}
 publication_permissions = {
     "actions": "read",
-    "attestations": "write",
     "contents": "read",
     "packages": "write",
     "id-token": "write",
@@ -820,17 +820,20 @@ JSON
 cat > "$lifecycle/package.json" <<'JSON'
 {"name":"consumer","version":"1.0.0","dependencies":{"lifecycle-probe":"file:package"}}
 JSON
-npm install --prefix "$lifecycle" --package-lock-only --ignore-scripts --no-audit --no-fund >/dev/null
-npm ci --prefix "$lifecycle" --ignore-scripts --no-audit --no-fund >/dev/null
+flock /tmp/npm-ci-host.lock npm install --prefix "$lifecycle" --package-lock-only --ignore-scripts --no-audit --no-fund >/dev/null
+flock /tmp/npm-ci-host.lock npm ci --prefix "$lifecycle" --ignore-scripts --no-audit --no-fund >/dev/null
 [ ! -e "$tmp/lifecycle-exfiltrated" ] || { echo "npm lifecycle executed during credentialed acquisition" >&2; exit 1; }
 grep -q "github.event_name == 'pull_request'" "$workflow"
 grep -q "github.event_name == 'push'" "$publish_workflow"
 grep -q 'github.event.repository.default_branch' "$publish_workflow"
 grep -q 'packages: write' "$publish_workflow"
 grep -q 'id-token: write' "$publish_workflow"
-grep -q 'attestations: write' "$publish_workflow"
-grep -q 'actions/attest-build-provenance@[0-9a-f]\{40\}' "$publish_workflow"
-grep -q 'actions/attest@[0-9a-f]\{40\}' "$publish_workflow"
+! grep -Eq 'attestations: write|actions/attest|gh attestation verify' "$publish_workflow"
+grep -q 'sigstore/cosign-installer@[0-9a-f]\{40\} # v4.1.2' "$publish_workflow"
+grep -q 'oras-project/setup-oras@[0-9a-f]\{40\} # v2.0.2' "$publish_workflow"
+grep -q '"attest-blob"' "$root/scripts/container_cosign_provenance.py"
+grep -q '"verify-blob-attestation"' "$root/scripts/container_cosign_provenance.py"
+grep -q 'promotionEligible:false' "$publish_workflow"
 grep -qF 'spdx-document --sbom-index "$RUNNER_TEMP/sbom-index.json"' "$publish_workflow"
 grep -qF -- '--platform "$platform_key" > sbom.spdx.json' "$publish_workflow"
 grep -qF 'predicateType:"https://spdx.dev/Document/v2.3"' "$publish_workflow"
@@ -846,12 +849,12 @@ grep -q 'id-token: write' <<<"$mirror_gar_job"
 grep -q 'google-github-actions/auth@[0-9a-f]\{40\}' <<<"$mirror_gar_job"
 grep -q 'steps.gar-auth.outputs.auth_token' <<<"$mirror_gar_job"
 grep -qF '[.[] | select(.variant == $variant)] | if length == 1 then (.[0] | del(.variant))' "$publish_workflow"
-grep -q -- '--preserve-digests' "$root/scripts/container_registry_destinations.py"
+grep -q -- '"cp", "--recursive"' "$root/scripts/container_registry_destinations.py"
+grep -q 'destination digest differs from the candidate digest' "$root/scripts/container_registry_destinations.py"
 grep -q 'needs.mirror-gar.result' "$publish_workflow"
-if grep -Eq 'GITHUB_WORKFLOW_(REF|SHA)|github\.workflow_(ref|sha)' "$workflow" "$publish_workflow"; then
-  echo "called workflows cannot prove their own pin through the caller-associated github workflow identity" >&2
-  exit 1
-fi
+grep -qF 'CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}' "$publish_workflow"
+grep -qF 'CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}' "$publish_workflow"
+grep -qF 'expected-publisher-workflow-ref "Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF"' "$publish_workflow"
 if awk '/^  pull-request-build:/{seen=1} /^  publish-base:/{seen=0} seen' "$workflow" | grep -E 'attestations: write|packages: write|id-token: write|docker/login-action|push: true' >/dev/null; then
   echo "pull-request build exposes a publication capability" >&2
   exit 1
@@ -861,13 +864,12 @@ attest_sbom_permissions="$(awk '
   /^    permissions:$/ { seen=1; next }
   seen && /^    [A-Za-z0-9_.-]+:/ { exit }
   seen { print }
-' <<<"$attest_sbom_job")"
+' <<<"$attest_sbom_job" | sed 's/^      //')"
 expected_attest_sbom_permissions="$(cat <<'PERMISSIONS'
-      actions: read
-      attestations: write
-      contents: read
-      id-token: write
-      packages: write
+actions: read
+contents: read
+id-token: write
+packages: write
 PERMISSIONS
 )"
 [ "$attest_sbom_permissions" = "$expected_attest_sbom_permissions" ] || {

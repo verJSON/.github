@@ -23,6 +23,10 @@ on:
         description: SHA-256 of the canonical exact-SHA retry verifier
         required: true
         type: string
+      provenance-sha256:
+        description: SHA-256 of the canonical Cosign provenance helper
+        required: true
+        type: string
       runner:
         description: Optional JSON runner labels for build-only jobs
         required: false
@@ -344,7 +348,6 @@ jobs:
       || needs.acquire-private-node-dependencies.result == 'skipped')
     needs: [prepare, acquire-private-node-dependencies]
     permissions:
-      attestations: write
       contents: read
       packages: write
       id-token: write
@@ -355,6 +358,21 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: sigstore/cosign-installer@af595e623eec1ede52d6322f53b635d5def0a95a # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2.0.2
+        with:
+          version: 1.3.4
+      - name: Download pinned Cosign provenance implementation
+        env:
+          CONTRACT_REF: ${{ inputs.contract-ref }}
+          PROVENANCE_SHA256: ${{ inputs.provenance-sha256 }}
+        run: |
+          set -euo pipefail
+          helper="$RUNNER_TEMP/container_cosign_provenance.py"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_cosign_provenance.py" -o "$helper"
+          printf '%s  %s\n' "$PROVENANCE_SHA256" "$helper" | sha256sum --check --strict
       - name: Download pinned dependency transfer implementation
         if: needs.prepare.outputs.has-private-node-packages == 'true'
         env:
@@ -435,6 +453,8 @@ jobs:
           CANDIDATE: ${{ needs.prepare.outputs.candidate }}
           CONFIG_PATH: ${{ inputs.config-path }}
           CONTRACT_REF: ${{ inputs.contract-ref }}
+          CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ matrix.repository }}
           RETRY_SHA256: ${{ inputs.retry-sha256 }}
@@ -461,25 +481,35 @@ jobs:
           raw="$RUNNER_TEMP/retry-index.json"
           buildkit="$RUNNER_TEMP/retry-buildkit-provenance.json"
           reviewed="$RUNNER_TEMP/retry-platforms.json"
-          verified="$RUNNER_TEMP/retry-provenance.json"
           docker buildx imagetools inspect "$REPOSITORY@$digest" --raw > "$raw"
           docker buildx imagetools inspect "$REPOSITORY@$digest" --format '{{json .Provenance}}' > "$buildkit"
           jq -ce --arg variant "$VARIANT" '.images[] | select(.variant == $variant) | .platforms' "$CONFIG_PATH" > "$reviewed"
           python3 "$oci" index --index "$raw" --reviewed-platforms "$reviewed" >/dev/null
-          gh attestation verify "oci://$REPOSITORY@$digest" --repo "$GITHUB_REPOSITORY" \
-            --signer-workflow Verjson/.github/.github/workflows/container-candidate-publish.yml \
-            --signer-digest "$CONTRACT_REF" --source-digest "$GITHUB_SHA" --source-ref refs/heads/main \
-            --predicate-type https://slsa.dev/provenance/v1 --format json > "$verified"
-          attestation_id="$(python3 "$retry" --verified-provenance "$verified" --repository "$REPOSITORY" --digest "$digest" \
-            --buildkit-provenance "$buildkit" --reviewed-platforms "$reviewed" \
-            --source-repository "$GITHUB_REPOSITORY" --source-commit "$GITHUB_SHA")"
+          token="$RUNNER_TEMP/retry-cosign-oidc-token"
+          trap 'rm -f "$token"' EXIT
+          python3 "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
+            --request-url "$ACTIONS_ID_TOKEN_REQUEST_URL" --output "$token"
+          receipt="$(python3 "$RUNNER_TEMP/container_cosign_provenance.py" verify-image \
+            --identity-token "$token" --buildkit-provenance "$buildkit" \
+            --reviewed-platforms "$reviewed" --image-repository "$REPOSITORY" \
+            --image-digest "$digest" \
+            --expected-source-repository "$GITHUB_REPOSITORY" \
+            --expected-source-repository-id "$GITHUB_REPOSITORY_ID" \
+            --expected-source-ref "$GITHUB_REF" --expected-source-commit "$GITHUB_SHA" \
+            --expected-caller-workflow-ref "$CALLER_WORKFLOW_REF" \
+            --expected-caller-workflow-sha "$CALLER_WORKFLOW_SHA" \
+            --expected-publisher-workflow-ref "Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF" \
+            --expected-contract-sha "$CONTRACT_REF")"
+          attestation_id="$(jq -er .bundleDigest <<<"$receipt")"
+          referrer_digest="$(jq -er .referrerManifestDigest <<<"$receipt")"
           docker buildx imagetools create -t "$REPOSITORY:$CANDIDATE" "$REPOSITORY@$digest"
           [ "$(docker buildx imagetools inspect "$REPOSITORY:$CANDIDATE" --format '{{json .Manifest.Digest}}' | tr -d '"')" = "$digest" ] \
             || { echo '::error::candidate alias reconciliation diverged'; exit 1; }
           {
             echo 'reused=true'
             echo "digest=$digest"
-            echo "attestation-id=$attestation_id"
+            echo "bundle-digest=$attestation_id"
+            echo "referrer-manifest-digest=$referrer_digest"
           } >> "$GITHUB_OUTPUT"
       - id: build
         if: matrix.baseVariant == '' && steps.retry.outputs.reused != 'true'
@@ -521,23 +551,46 @@ jobs:
             sleep "$((attempt * 2))"
           done
       - id: provenance
+        name: Sign controlled BuildKit provenance with Cosign
         if: matrix.baseVariant == '' && steps.retry.outputs.reused != 'true'
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ matrix.repository }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
+        env:
+          CONFIG_PATH: ${{ inputs.config-path }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          REPOSITORY: ${{ matrix.repository }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          token="$RUNNER_TEMP/container-cosign-oidc-token"
+          buildkit="$RUNNER_TEMP/container-buildkit-provenance.json"
+          reviewed="$RUNNER_TEMP/container-reviewed-platforms.json"
+          digest="${DIGEST#sha256:}"
+          docker buildx imagetools inspect "$REPOSITORY@$DIGEST" --format '{{json .Provenance}}' > "$buildkit"
+          jq -ce --arg variant "$VARIANT" '.images[] | select(.variant == $variant) | .platforms' "$CONFIG_PATH" > "$reviewed"
+          python3 "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
+            --request-url "$ACTIONS_ID_TOKEN_REQUEST_URL" --output "$token"
+          receipt="$(python3 "$RUNNER_TEMP/container_cosign_provenance.py" attest-image \
+            --identity-token "$token" --buildkit-provenance "$buildkit" \
+            --reviewed-platforms "$reviewed" --image-repository "$REPOSITORY" \
+            --image-digest "$DIGEST" --bundle "$RUNNER_TEMP/provenance.sigstore.json" \
+            --referrer-manifest "$RUNNER_TEMP/provenance-referrer.json")"
+          echo "bundle-digest=$(jq -er .bundleDigest <<<"$receipt")" >> "$GITHUB_OUTPUT"
+          echo "referrer-manifest-digest=$(jq -er .referrerManifestDigest <<<"$receipt")" >> "$GITHUB_OUTPUT"
+      - name: Remove Cosign OIDC token
+        if: always()
+        run: rm -f "$RUNNER_TEMP/container-cosign-oidc-token"
       - name: Record immutable image digest
         if: matrix.baseVariant == '' && steps.retry.outputs.reused != 'true'
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
           REPOSITORY: ${{ matrix.repository }}
           VARIANT: ${{ matrix.variant }}
-          ATTESTATION_ID: ${{ steps.provenance.outputs.attestation-id }}
+          BUNDLE_DIGEST: ${{ steps.provenance.outputs.bundle-digest }}
+          REFERRER_MANIFEST_DIGEST: ${{ steps.provenance.outputs.referrer-manifest-digest }}
         run: |
           set -euo pipefail
           [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
-          [ -n "$ATTESTATION_ID" ] || { echo "::error::provenance action returned no attestation identity"; exit 1; }
+          [[ "$BUNDLE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Cosign provenance bundle digest is missing"; exit 1; }
+          [[ "$REFERRER_MANIFEST_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Cosign provenance referrer digest is missing"; exit 1; }
           commit_tag="$REPOSITORY:sha-$GITHUB_SHA"
           error_file="$(mktemp)"
           if existing="$(docker buildx imagetools inspect "$commit_tag" --format '{{json .Manifest.Digest}}' 2>"$error_file" | tr -d '"')"; then
@@ -552,19 +605,24 @@ jobs:
             exit 1
           fi
           jq -n --arg variant "$VARIANT" --arg repository "$REPOSITORY" --arg digest "$DIGEST" \
-            --arg attestationId "$ATTESTATION_ID" \
-            '{variant:$variant,repository:$repository,indexDigest:$digest,provenanceAttestationId:$attestationId}' > image.json
+            --arg bundleDigest "$BUNDLE_DIGEST" --arg referrerManifestDigest "$REFERRER_MANIFEST_DIGEST" \
+            '{variant:$variant,repository:$repository,indexDigest:$digest,
+              provenance:{bundleDigest:$bundleDigest,referrerManifestDigest:$referrerManifestDigest}}' > image.json
       - name: Record verified reused image digest
         if: matrix.baseVariant == '' && steps.retry.outputs.reused == 'true'
         env:
-          ATTESTATION_ID: ${{ steps.retry.outputs.attestation-id }}
+          BUNDLE_DIGEST: ${{ steps.retry.outputs.bundle-digest }}
+          REFERRER_MANIFEST_DIGEST: ${{ steps.retry.outputs.referrer-manifest-digest }}
           DIGEST: ${{ steps.retry.outputs.digest }}
           REPOSITORY: ${{ matrix.repository }}
           VARIANT: ${{ matrix.variant }}
         run: |
+          [[ "$BUNDLE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          [[ "$REFERRER_MANIFEST_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
           jq -n --arg variant "$VARIANT" --arg repository "$REPOSITORY" --arg digest "$DIGEST" \
-            --arg attestationId "$ATTESTATION_ID" \
-            '{variant:$variant,repository:$repository,indexDigest:$digest,provenanceAttestationId:$attestationId}' > image.json
+            --arg bundleDigest "$BUNDLE_DIGEST" --arg referrerManifestDigest "$REFERRER_MANIFEST_DIGEST" \
+            '{variant:$variant,repository:$repository,indexDigest:$digest,
+              provenance:{bundleDigest:$bundleDigest,referrerManifestDigest:$referrerManifestDigest}}' > image.json
       - if: matrix.baseVariant == ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -587,7 +645,6 @@ jobs:
       && needs.publish-base.result == 'success'
     needs: [prepare, acquire-private-node-dependencies, publish-base]
     permissions:
-      attestations: write
       contents: read
       packages: write
       id-token: write
@@ -599,6 +656,26 @@ jobs:
     steps:
       - if: matrix.baseVariant != ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - if: matrix.baseVariant != ''
+        uses: sigstore/cosign-installer@af595e623eec1ede52d6322f53b635d5def0a95a # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - if: matrix.baseVariant != ''
+        uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2.0.2
+        with:
+          version: 1.3.4
+      - if: matrix.baseVariant != ''
+        name: Download pinned Cosign provenance implementation
+        env:
+          CONTRACT_REF: ${{ inputs.contract-ref }}
+          CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          PROVENANCE_SHA256: ${{ inputs.provenance-sha256 }}
+        run: |
+          set -euo pipefail
+          helper="$RUNNER_TEMP/container_cosign_provenance.py"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_cosign_provenance.py" -o "$helper"
+          printf '%s  %s\n' "$PROVENANCE_SHA256" "$helper" | sha256sum --check --strict
       - if: matrix.baseVariant != '' && needs.prepare.outputs.has-private-node-packages == 'true'
         name: Download pinned dependency transfer implementation
         env:
@@ -683,6 +760,8 @@ jobs:
           CANDIDATE: ${{ needs.prepare.outputs.candidate }}
           CONFIG_PATH: ${{ inputs.config-path }}
           CONTRACT_REF: ${{ inputs.contract-ref }}
+          CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ matrix.repository }}
           RETRY_SHA256: ${{ inputs.retry-sha256 }}
@@ -712,19 +791,28 @@ jobs:
           raw="$RUNNER_TEMP/retry-index.json"
           buildkit="$RUNNER_TEMP/retry-buildkit-provenance.json"
           reviewed="$RUNNER_TEMP/retry-platforms.json"
-          verified="$RUNNER_TEMP/retry-provenance.json"
           docker buildx imagetools inspect "$REPOSITORY@$digest" --raw > "$raw"
           docker buildx imagetools inspect "$REPOSITORY@$digest" --format '{{json .Provenance}}' > "$buildkit"
           jq -ce --arg variant "$VARIANT" '.images[] | select(.variant == $variant) | .platforms' "$CONFIG_PATH" > "$reviewed"
           python3 "$oci" index --index "$raw" --reviewed-platforms "$reviewed" >/dev/null
-          gh attestation verify "oci://$REPOSITORY@$digest" --repo "$GITHUB_REPOSITORY" \
-            --signer-workflow Verjson/.github/.github/workflows/container-candidate-publish.yml \
-            --signer-digest "$CONTRACT_REF" --source-digest "$GITHUB_SHA" --source-ref refs/heads/main \
-            --predicate-type https://slsa.dev/provenance/v1 --format json > "$verified"
-          attestation_id="$(python3 "$retry" --verified-provenance "$verified" --repository "$REPOSITORY" --digest "$digest" \
-            --buildkit-provenance "$buildkit" --reviewed-platforms "$reviewed" \
-            --source-repository "$GITHUB_REPOSITORY" --source-commit "$GITHUB_SHA" \
-            --base-repository "$base_repository" --base-digest "$base_digest")"
+          token="$RUNNER_TEMP/retry-cosign-oidc-token"
+          trap 'rm -f "$token"' EXIT
+          python3 "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
+            --request-url "$ACTIONS_ID_TOKEN_REQUEST_URL" --output "$token"
+          receipt="$(python3 "$RUNNER_TEMP/container_cosign_provenance.py" verify-image \
+            --identity-token "$token" --buildkit-provenance "$buildkit" \
+            --reviewed-platforms "$reviewed" --image-repository "$REPOSITORY" \
+            --image-digest "$digest" --base-repository "$base_repository" \
+            --base-digest "$base_digest" \
+            --expected-source-repository "$GITHUB_REPOSITORY" \
+            --expected-source-repository-id "$GITHUB_REPOSITORY_ID" \
+            --expected-source-ref "$GITHUB_REF" --expected-source-commit "$GITHUB_SHA" \
+            --expected-caller-workflow-ref "$CALLER_WORKFLOW_REF" \
+            --expected-caller-workflow-sha "$CALLER_WORKFLOW_SHA" \
+            --expected-publisher-workflow-ref "Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF" \
+            --expected-contract-sha "$CONTRACT_REF")"
+          attestation_id="$(jq -er .bundleDigest <<<"$receipt")"
+          referrer_digest="$(jq -er .referrerManifestDigest <<<"$receipt")"
           docker buildx imagetools create -t "$REPOSITORY:$CANDIDATE" "$REPOSITORY@$digest"
           [ "$(docker buildx imagetools inspect "$REPOSITORY:$CANDIDATE" --format '{{json .Manifest.Digest}}' | tr -d '"')" = "$digest" ] \
             || { echo '::error::candidate alias reconciliation diverged'; exit 1; }
@@ -732,7 +820,8 @@ jobs:
             echo 'reused=true'
             echo "digest=$digest"
             echo "base-digest=$base_digest"
-            echo "attestation-id=$attestation_id"
+            echo "bundle-digest=$attestation_id"
+            echo "referrer-manifest-digest=$referrer_digest"
           } >> "$GITHUB_OUTPUT"
       - id: base
         if: matrix.baseVariant != ''
@@ -786,23 +875,49 @@ jobs:
             sleep "$((attempt * 2))"
           done
       - id: provenance
+        name: Sign controlled BuildKit provenance with Cosign
         if: matrix.baseVariant != '' && steps.retry.outputs.reused != 'true'
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ matrix.repository }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
+        env:
+          BASE_DIGEST: ${{ steps.base.outputs.digest }}
+          BASE_REPOSITORY: ${{ steps.base.outputs.image }}
+          CONFIG_PATH: ${{ inputs.config-path }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          REPOSITORY: ${{ matrix.repository }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          token="$RUNNER_TEMP/container-cosign-oidc-token"
+          buildkit="$RUNNER_TEMP/container-buildkit-provenance.json"
+          reviewed="$RUNNER_TEMP/container-reviewed-platforms.json"
+          base_repository="${BASE_REPOSITORY%@*}"
+          docker buildx imagetools inspect "$REPOSITORY@$DIGEST" --format '{{json .Provenance}}' > "$buildkit"
+          jq -ce --arg variant "$VARIANT" '.images[] | select(.variant == $variant) | .platforms' "$CONFIG_PATH" > "$reviewed"
+          python3 "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
+            --request-url "$ACTIONS_ID_TOKEN_REQUEST_URL" --output "$token"
+          receipt="$(python3 "$RUNNER_TEMP/container_cosign_provenance.py" attest-image \
+            --identity-token "$token" --buildkit-provenance "$buildkit" \
+            --reviewed-platforms "$reviewed" --image-repository "$REPOSITORY" \
+            --image-digest "$DIGEST" --base-repository "$base_repository" \
+            --base-digest "$BASE_DIGEST" --bundle "$RUNNER_TEMP/provenance.sigstore.json" \
+            --referrer-manifest "$RUNNER_TEMP/provenance-referrer.json")"
+          echo "bundle-digest=$(jq -er .bundleDigest <<<"$receipt")" >> "$GITHUB_OUTPUT"
+          echo "referrer-manifest-digest=$(jq -er .referrerManifestDigest <<<"$receipt")" >> "$GITHUB_OUTPUT"
+      - name: Remove Cosign OIDC token
+        if: always()
+        run: rm -f "$RUNNER_TEMP/container-cosign-oidc-token"
       - if: matrix.baseVariant != '' && steps.retry.outputs.reused != 'true'
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
           BASE_DIGEST: ${{ steps.base.outputs.digest }}
-          ATTESTATION_ID: ${{ steps.provenance.outputs.attestation-id }}
+          BUNDLE_DIGEST: ${{ steps.provenance.outputs.bundle-digest }}
+          REFERRER_MANIFEST_DIGEST: ${{ steps.provenance.outputs.referrer-manifest-digest }}
           BASE_VARIANT: ${{ matrix.baseVariant }}
           IMAGE_VARIANT: ${{ matrix.variant }}
           REPOSITORY: ${{ matrix.repository }}
         run: |
           set -euo pipefail
-          [ -n "$ATTESTATION_ID" ] || { echo "::error::provenance action returned no attestation identity"; exit 1; }
+          [[ "$BUNDLE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Cosign provenance bundle digest is missing"; exit 1; }
+          [[ "$REFERRER_MANIFEST_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Cosign provenance referrer digest is missing"; exit 1; }
           commit_tag="$REPOSITORY:sha-$GITHUB_SHA"
           error_file="$(mktemp)"
           if existing="$(docker buildx imagetools inspect "$commit_tag" --format '{{json .Manifest.Digest}}' 2>"$error_file" | tr -d '"')"; then
@@ -818,22 +933,27 @@ jobs:
           fi
           jq -n --arg variant "$IMAGE_VARIANT" --arg repository "$REPOSITORY" \
             --arg digest "$DIGEST" --arg baseVariant "$BASE_VARIANT" --arg baseDigest "$BASE_DIGEST" \
-            --arg attestationId "$ATTESTATION_ID" \
-            '{variant:$variant,repository:$repository,indexDigest:$digest,base:{variant:$baseVariant,digest:$baseDigest},provenanceAttestationId:$attestationId}' > image.json
+            --arg bundleDigest "$BUNDLE_DIGEST" --arg referrerManifestDigest "$REFERRER_MANIFEST_DIGEST" \
+            '{variant:$variant,repository:$repository,indexDigest:$digest,base:{variant:$baseVariant,digest:$baseDigest},
+              provenance:{bundleDigest:$bundleDigest,referrerManifestDigest:$referrerManifestDigest}}' > image.json
       - name: Record verified reused derived image digest
         if: matrix.baseVariant != '' && steps.retry.outputs.reused == 'true'
         env:
-          ATTESTATION_ID: ${{ steps.retry.outputs.attestation-id }}
+          BUNDLE_DIGEST: ${{ steps.retry.outputs.bundle-digest }}
+          REFERRER_MANIFEST_DIGEST: ${{ steps.retry.outputs.referrer-manifest-digest }}
           BASE_DIGEST: ${{ steps.retry.outputs.base-digest }}
           BASE_VARIANT: ${{ matrix.baseVariant }}
           DIGEST: ${{ steps.retry.outputs.digest }}
           IMAGE_VARIANT: ${{ matrix.variant }}
           REPOSITORY: ${{ matrix.repository }}
         run: |
+          [[ "$BUNDLE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          [[ "$REFERRER_MANIFEST_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
           jq -n --arg variant "$IMAGE_VARIANT" --arg repository "$REPOSITORY" \
             --arg digest "$DIGEST" --arg baseVariant "$BASE_VARIANT" --arg baseDigest "$BASE_DIGEST" \
-            --arg attestationId "$ATTESTATION_ID" \
-            '{variant:$variant,repository:$repository,indexDigest:$digest,base:{variant:$baseVariant,digest:$baseDigest},provenanceAttestationId:$attestationId}' > image.json
+            --arg bundleDigest "$BUNDLE_DIGEST" --arg referrerManifestDigest "$REFERRER_MANIFEST_DIGEST" \
+            '{variant:$variant,repository:$repository,indexDigest:$digest,base:{variant:$baseVariant,digest:$baseDigest},
+              provenance:{bundleDigest:$bundleDigest,referrerManifestDigest:$referrerManifestDigest}}' > image.json
       - if: matrix.baseVariant != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -856,7 +976,6 @@ jobs:
     needs: [prepare, publish-base, publish-derived]
     permissions:
       actions: read
-      attestations: write
       contents: read
       id-token: write
       packages: write
@@ -867,6 +986,21 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: sigstore/cosign-installer@af595e623eec1ede52d6322f53b635d5def0a95a # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2.0.2
+        with:
+          version: 1.3.4
+      - name: Download pinned Cosign provenance implementation
+        env:
+          CONTRACT_REF: ${{ inputs.contract-ref }}
+          PROVENANCE_SHA256: ${{ inputs.provenance-sha256 }}
+        run: |
+          set -euo pipefail
+          helper="$RUNNER_TEMP/container_cosign_provenance.py"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_cosign_provenance.py" -o "$helper"
+          printf '%s  %s\n' "$PROVENANCE_SHA256" "$helper" | sha256sum --check --strict
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -916,26 +1050,45 @@ jobs:
             --platform "$platform_key" > sbom.spdx.json
           echo "digest=$platform_digest" >> "$GITHUB_OUTPUT"
       - id: sbom-attestation
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-name: ${{ matrix.repository }}
-          subject-digest: ${{ steps.sbom-subject.outputs.digest }}
-          sbom-path: sbom.spdx.json
-          push-to-registry: true
+        name: Sign the platform SBOM and preserve its original bundle
+        env:
+          DIGEST: ${{ steps.sbom-subject.outputs.digest }}
+          REPOSITORY: ${{ matrix.repository }}
+        run: |
+          set -euo pipefail
+          token="$RUNNER_TEMP/container-sbom-oidc-token"
+          bundle="$RUNNER_TEMP/sbom.sigstore.json"
+          referrer="$RUNNER_TEMP/sbom-referrer.json"
+          python3 "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
+            --request-url "$ACTIONS_ID_TOKEN_REQUEST_URL" --output "$token"
+          receipt="$(python3 "$RUNNER_TEMP/container_cosign_provenance.py" sign-sbom \
+            --identity-token "$token" --sbom sbom.spdx.json --bundle "$bundle" \
+            --referrer-manifest "$referrer" --image-repository "$REPOSITORY" \
+            --image-digest "$DIGEST")"
+          echo "bundle-digest=$(jq -er .bundleDigest <<<"$receipt")" >> "$GITHUB_OUTPUT"
+          echo "referrer-manifest-digest=$(jq -er .referrerManifestDigest <<<"$receipt")" >> "$GITHUB_OUTPUT"
+          echo "spdx-digest=$(jq -er .spdxDigest <<<"$receipt")" >> "$GITHUB_OUTPUT"
+          rm -f "$token"
       - name: Record signed platform SBOM identity
         env:
           ARCHITECTURE: ${{ matrix.architecture }}
-          ATTESTATION_ID: ${{ steps.sbom-attestation.outputs.attestation-id }}
+          BUNDLE_DIGEST: ${{ steps.sbom-attestation.outputs.bundle-digest }}
           DIGEST: ${{ steps.sbom-subject.outputs.digest }}
           IMAGE_VARIANT: ${{ matrix.imageVariant }}
           OS: ${{ matrix.os }}
           PLATFORM_VARIANT: ${{ matrix.platformVariant }}
+          REFERRER_MANIFEST_DIGEST: ${{ steps.sbom-attestation.outputs.referrer-manifest-digest }}
+          SPDX_DIGEST: ${{ steps.sbom-attestation.outputs.spdx-digest }}
         run: |
           set -euo pipefail
-          [ -n "$ATTESTATION_ID" ] || { echo "::error::SBOM action returned no attestation identity"; exit 1; }
+          [[ "$BUNDLE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Cosign SBOM bundle digest is missing"; exit 1; }
+          [[ "$REFERRER_MANIFEST_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Cosign SBOM referrer digest is missing"; exit 1; }
+          [[ "$SPDX_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::SPDX document digest is missing"; exit 1; }
           jq -n --arg imageVariant "$IMAGE_VARIANT" --arg os "$OS" --arg architecture "$ARCHITECTURE" \
-            --arg platformVariant "$PLATFORM_VARIANT" --arg digest "$DIGEST" --arg attestationId "$ATTESTATION_ID" \
-            '{imageVariant:$imageVariant,os:$os,architecture:$architecture,digest:$digest,attestationId:$attestationId}
+            --arg platformVariant "$PLATFORM_VARIANT" --arg digest "$DIGEST" --arg bundleDigest "$BUNDLE_DIGEST" \
+            --arg referrerManifestDigest "$REFERRER_MANIFEST_DIGEST" --arg spdxDigest "$SPDX_DIGEST" \
+            '{imageVariant:$imageVariant,os:$os,architecture:$architecture,digest:$digest,
+              bundleDigest:$bundleDigest,referrerManifestDigest:$referrerManifestDigest,spdxDigest:$spdxDigest}
              + if $platformVariant == "" then {} else {variant:$platformVariant} end' > sbom.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -969,6 +1122,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - uses: sigstore/cosign-installer@af595e623eec1ede52d6322f53b635d5def0a95a # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2.0.2
+        with:
+          version: 1.3.4
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ matrix.artifact }}
@@ -997,11 +1157,17 @@ jobs:
           CONFIG_PATH: ${{ inputs.config-path }}
           CONTRACT_REF: ${{ inputs.contract-ref }}
           GH_TOKEN: ${{ github.token }}
+          PROVENANCE_SHA256: ${{ inputs.provenance-sha256 }}
+          CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
           VARIANT: ${{ matrix.variant }}
         run: |
           set -euo pipefail
           helper="$RUNNER_TEMP/container_registry_destinations.py"
+          provenance_helper="$RUNNER_TEMP/container_cosign_provenance.py"
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_registry_destinations.py" -o "$helper"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_cosign_provenance.py" -o "$provenance_helper"
+          printf '%s  %s\n' "$PROVENANCE_SHA256" "$provenance_helper" | sha256sum --check --strict
           run_metadata="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
           [ "$(jq -er '.run_attempt | tostring' <<<"$run_metadata")" = "$GITHUB_RUN_ATTEMPT" ] || { echo "::error::candidate run attempt changed"; exit 1; }
           candidate_published_at="$(jq -er '.run_started_at' <<<"$run_metadata")"
@@ -1015,6 +1181,38 @@ jobs:
             --digest "$digest" \
             --authfile "$HOME/.docker/config.json" \
             --published-at "$candidate_published_at" > registry-receipt.json
+          source_repository="$(jq -er '.repository' candidate-image/image.json)"
+          gar_repository="$(jq -er '.repository' registry-receipt.json)"
+          bundle_digest="$(jq -er '.provenance.bundleDigest | select(test("^sha256:[0-9a-f]{64}$"))' candidate-image/image.json)"
+          referrer_digest="$(jq -er '.provenance.referrerManifestDigest | select(test("^sha256:[0-9a-f]{64}$"))' candidate-image/image.json)"
+          buildkit="$RUNNER_TEMP/container-gar-buildkit-provenance.json"
+          reviewed="$RUNNER_TEMP/container-gar-reviewed-platforms.json"
+          docker buildx imagetools inspect "$source_repository@$digest" --format '{{json .Provenance}}' > "$buildkit"
+          jq -ce --arg variant "$VARIANT" '.images[] | select(.variant == $variant) | .platforms' "$CONFIG_PATH" > "$reviewed"
+          token="$RUNNER_TEMP/container-gar-cosign-oidc-token"
+          trap 'rm -f "$token"' EXIT
+          python3 "$provenance_helper" request-oidc-token \
+            --request-url "$ACTIONS_ID_TOKEN_REQUEST_URL" --output "$token"
+          base_args=()
+          base_variant="$(jq -r '.base.variant // empty' candidate-image/image.json)"
+          if [ -n "$base_variant" ]; then
+            base_repository="$(jq -er --arg variant "$base_variant" '.images[] | select(.variant == $variant) | .repository' "$CONFIG_PATH")"
+            base_digest="$(jq -er '.base.digest | select(test("^sha256:[0-9a-f]{64}$"))' candidate-image/image.json)"
+            base_args=(--base-repository "$base_repository" --base-digest "$base_digest")
+          fi
+          python3 "$provenance_helper" verify-image \
+            --identity-token "$token" --buildkit-provenance "$buildkit" \
+            --reviewed-platforms "$reviewed" --image-repository "$source_repository" \
+            --registry-repository "$gar_repository" --image-digest "$digest" \
+            --expected-bundle-digest "$bundle_digest" \
+            --expected-referrer-digest "$referrer_digest" \
+            --expected-source-repository "$GITHUB_REPOSITORY" \
+            --expected-source-repository-id "$GITHUB_REPOSITORY_ID" \
+            --expected-source-ref "$GITHUB_REF" --expected-source-commit "$GITHUB_SHA" \
+            --expected-caller-workflow-ref "$CALLER_WORKFLOW_REF" \
+            --expected-caller-workflow-sha "$CALLER_WORKFLOW_SHA" \
+            --expected-publisher-workflow-ref "Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF" \
+            --expected-contract-sha "$CONTRACT_REF" "${base_args[@]}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: candidate-registry-${{ matrix.variant }}-gar
@@ -1039,13 +1237,24 @@ jobs:
     needs: [prepare, publish-base, publish-derived, attest-sbom, mirror-gar]
     permissions:
       actions: read
-      attestations: write
       contents: read
       id-token: write
       packages: read
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: sigstore/cosign-installer@af595e623eec1ede52d6322f53b635d5def0a95a # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - name: Download pinned Cosign provenance implementation
+        env:
+          CONTRACT_REF: ${{ inputs.contract-ref }}
+          PROVENANCE_SHA256: ${{ inputs.provenance-sha256 }}
+        run: |
+          set -euo pipefail
+          helper="$RUNNER_TEMP/container_cosign_provenance.py"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_cosign_provenance.py" -o "$helper"
+          printf '%s  %s\n' "$PROVENANCE_SHA256" "$helper" | sha256sum --check --strict
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -1114,18 +1323,21 @@ jobs:
             python3 "$helper" index --index "$raw_index" --reviewed-platforms "$reviewed_platforms" > "$inventory"
             platforms="$(jq -c .platforms "$inventory")"
             base="$(jq -c '.base // null' "$image")"
-            attestation_id="$(jq -r '.provenanceAttestationId' "$image")"
+            provenance_bundle_digest="$(jq -er '.provenance.bundleDigest | select(test("^sha256:[0-9a-f]{64}$"))' "$image")"
+            provenance_referrer_digest="$(jq -er '.provenance.referrerManifestDigest | select(test("^sha256:[0-9a-f]{64}$"))' "$image")"
             sbom_attestations="$(jq -sc --arg variant "$variant" \
               '[.[] | select(.imageVariant == $variant) | del(.imageVariant)] | sort_by(.os,.architecture,(.variant // ""))' \
               candidate-sboms/*/sbom.json)"
             jq -n --arg variant "$variant" --arg repository "$repository" --arg index "$index_digest" \
               --arg commit "sha-$GITHUB_SHA" --arg candidate "$CANDIDATE" --arg workflow "Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF" \
-              --arg attestationId "$attestation_id" --argjson platforms "$platforms" --argjson reviewed "$reviewed" \
+              --arg bundleDigest "$provenance_bundle_digest" --arg referrerManifestDigest "$provenance_referrer_digest" \
+              --argjson platforms "$platforms" --argjson reviewed "$reviewed" \
               --argjson base "$base" --argjson sbomAttestations "$sbom_attestations" --argjson destinations "$destinations" '
                 {variant:$variant,repository:$repository,indexDigest:$index,
                  identities:{commit:$commit,candidate:$candidate},
                  platforms:$platforms,
-                 provenance:{predicateType:$reviewed.provenance.predicateType,builderIdentity:$workflow,subjectDigest:$index,attestationId:$attestationId},
+                 provenance:{predicateType:$reviewed.provenance.predicateType,builderIdentity:$workflow,subjectDigest:$index,
+                   bundleDigest:$bundleDigest,referrerManifestDigest:$referrerManifestDigest},
                  sbom:{predicateType:"https://spdx.dev/Document/v2.3",attestations:$sbomAttestations},
                  destinations:$destinations}
                 + (if $base then {base:$base} else {} end)' \
@@ -1135,15 +1347,27 @@ jobs:
             --arg ref "$GITHUB_REF" --arg workflow "Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF" \
             --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" --arg publishedAt "$candidate_published_at" \
             '{schemaVersion:3,kind:"container-candidate",candidateVersion:$candidate,
+              promotionEligible:false,
               source:{repository:$repository,commit:$commit,ref:$ref,workflow:$workflow,runId:$run,runAttempt:$attempt,candidatePublishedAt:$publishedAt},images:.}' \
             image-*.json > candidate-manifest.json
           python3 scripts/container_release_manifest.py --manifest candidate-manifest.json --config "$CONFIG_PATH"
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: candidate-manifest.json
+      - name: Mint OIDC token and sign candidate manifest with Cosign
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          token="$RUNNER_TEMP/container-manifest-oidc-token"
+          python3 "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
+            --request-url "$ACTIONS_ID_TOKEN_REQUEST_URL" --output "$token"
+          python3 "$RUNNER_TEMP/container_cosign_provenance.py" sign-manifest \
+            --identity-token "$token" --manifest candidate-manifest.json \
+            --bundle candidate-manifest.sigstore.json
+          rm -f "$token"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: container-candidate-${{ needs.prepare.outputs.candidate }}
-          path: candidate-manifest.json
+          path: |
+            candidate-manifest.json
+            candidate-manifest.sigstore.json
           if-no-files-found: error
           retention-days: 90

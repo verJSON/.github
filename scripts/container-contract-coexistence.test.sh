@@ -25,6 +25,7 @@ cp \
   "$root/scripts/container_registry_destinations.py" \
   "$root/scripts/container_artifact_extract.py" \
   "$root/scripts/container_attestation_verify.py" \
+  "$root/scripts/container_cosign_provenance.py" \
   "$root/scripts/container_deployment_controller.py" \
   "$root/scripts/container_deployment_transport.py" \
   "$root/scripts/container_deployment_preflight.py" \
@@ -65,6 +66,7 @@ candidate_validator_digest="$(sha256sum "$consumer/scripts/container_release_man
 release_validator_digest="$(sha256sum "$consumer/scripts/container_release_manifest.py")"
 "$release" artifact-extractor "$ref" container-candidate.json >"$consumer/scripts/container_artifact_extract.py"
 "$release" attestation-verifier "$ref" container-candidate.json >"$consumer/scripts/container_attestation_verify.py"
+"$release" cosign-helper "$ref" container-candidate.json >"$consumer/scripts/container_cosign_provenance.py"
 "$release" contract-test "$ref" container-candidate.json >"$consumer/scripts/container-release-contract.test.sh"
 
 "$deployment" workflow "$ref" container-deployment.json >"$consumer/.github/workflows/container-deployment.yml"

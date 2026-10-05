@@ -6,6 +6,9 @@ on:
       - '.github/workflows/container-candidate.yml'
       - '.github/workflows/container-candidate-publish.yml'
       - '.github/workflows/container-candidate-reusable-contract.yml'
+      - 'scripts/container_cosign_provenance.py'
+      - 'scripts/container_cosign_provenance.test.py'
+      - 'scripts/container_cosign_workflow_contract.test.py'
       - 'scripts/container_oci_index.py'
       - 'scripts/container_private_dependencies.py'
       - 'scripts/container_private_dependencies.test.py'
@@ -34,7 +37,6 @@ jobs:
       && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     permissions:
       actions: read
-      attestations: write
       contents: read
       packages: write
       id-token: write
@@ -45,4 +47,5 @@ jobs:
       acquisition-sha256: '0000000000000000000000000000000000000000000000000000000000000000'
       transfer-sha256: 'db50956fd099f1641c030293f045944b4f5e21d221b030dddc55bb6e925396d7'
       retry-sha256: '4a11c930f31cc9a07c3b5236511c3545a215c60ba93657e7bc473f7c2ad8fa62'
+      provenance-sha256: 'c866f5ef410b539650a652f9798c4d352846ecd2f9f7beef945c34434c7554de'
       runner: ${{ github.repository_owner == 'Verjson' && (vars.CI_RUNNER_DEFAULT || '["self-hosted","general"]') || '["ubuntu-24.04"]' }}

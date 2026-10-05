@@ -52,6 +52,7 @@ def manifest():
         "schemaVersion": 3,
         "kind": "container-candidate",
         "candidateVersion": "2.4.0-rc.123.1",
+        "promotionEligible": False,
         "source": {
             "repository": "Verjson/verjson-github-runner",
             "commit": "a" * 40,
@@ -93,7 +94,8 @@ def manifest():
                     "predicateType": "https://slsa.dev/provenance/v1",
                     "builderIdentity": "Verjson/.github/.github/workflows/container-candidate-publish.yml@" + "b" * 40,
                     "subjectDigest": "sha256:" + "1" * 64,
-                    "attestationId": "https://github.com/Verjson/verjson-github-runner/attestations/42",
+                    "bundleDigest": "sha256:" + "4" * 64,
+                    "referrerManifestDigest": "sha256:" + "5" * 64,
                 },
                 "sbom": {
                     "predicateType": "https://spdx.dev/Document/v2.3",
@@ -102,14 +104,18 @@ def manifest():
                             "os": "linux",
                             "architecture": "amd64",
                             "digest": "sha256:" + "2" * 64,
-                            "attestationId": "https://github.com/Verjson/verjson-github-runner/attestations/43",
+                            "bundleDigest": "sha256:" + "6" * 64,
+                            "referrerManifestDigest": "sha256:" + "7" * 64,
+                            "spdxDigest": "sha256:" + "8" * 64,
                         },
                         {
                             "os": "linux",
                             "architecture": "arm64",
                             "variant": "v8",
                             "digest": "sha256:" + "3" * 64,
-                            "attestationId": "https://github.com/Verjson/verjson-github-runner/attestations/44",
+                            "bundleDigest": "sha256:" + "9" * 64,
+                            "referrerManifestDigest": "sha256:" + "a" * 64,
+                            "spdxDigest": "sha256:" + "b" * 64,
                         },
                     ],
                 },
@@ -143,6 +149,13 @@ class ContainerReleaseManifestTests(unittest.TestCase):
         historical["source"].pop("candidatePublishedAt")
         historical["images"][0].pop("destinations")
         self.schema_validator.validate(historical)
+
+    def test_candidate_manifest_is_ineligible_until_provenance_gates_are_enabled_by_contract(self):
+        candidate = manifest()
+        manifest_contract.validate_manifest(candidate, config())
+
+        candidate["promotionEligible"] = True
+        self.assert_rejected(candidate, "promotion eligibility is disabled")
 
     def test_candidate_schema_requires_v3_publication_evidence(self):
         candidate = manifest()
@@ -186,6 +199,16 @@ class ContainerReleaseManifestTests(unittest.TestCase):
         receipt["repository"] = (
             "us-central1-docker.pkg.dev/verjson-artifacts/containers/runner"
         )
+        receipt["evidenceReferrers"] = [
+            {
+                "artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+                "digest": "sha256:" + "c" * 64,
+            },
+            {
+                "artifactType": "application/spdx+json",
+                "digest": "sha256:" + "d" * 64,
+            },
+        ]
         self.schema_validator.validate(candidate)
 
     def test_accepts_complete_manifest_bound_to_reviewed_identity(self):
@@ -253,6 +276,16 @@ class ContainerReleaseManifestTests(unittest.TestCase):
                 "digest": "sha256:" + "1" * 64,
                 "candidateExpiresAt": "2026-11-01T00:00:00Z",
                 "verifiedAt": "2026-10-02T00:03:00Z",
+                "evidenceReferrers": [
+                    {
+                        "artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+                        "digest": "sha256:" + "c" * 64,
+                    },
+                    {
+                        "artifactType": "application/spdx+json",
+                        "digest": "sha256:" + "d" * 64,
+                    },
+                ],
             }
         )
         manifest_contract.validate_manifest(candidate, reviewed)
@@ -359,8 +392,8 @@ class ContainerReleaseManifestTests(unittest.TestCase):
 
     def test_rejects_unobserved_provenance_claim(self):
         candidate = manifest()
-        candidate["images"][0]["provenance"].pop("attestationId")
-        self.assert_rejected(candidate, "attestationId")
+        candidate["images"][0]["provenance"].pop("bundleDigest")
+        self.assert_rejected(candidate, "bundleDigest")
 
     def test_rejects_missing_platform_sbom_attestation(self):
         candidate = manifest()

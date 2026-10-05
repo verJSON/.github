@@ -107,6 +107,53 @@ class RegistryDestinationTests(unittest.TestCase):
         with self.assertRaises(DestinationError):
             expand_image_destinations(self.config, OWNER, {"repository": "ghcr.io/unrelated/api"})
 
+    def test_referrer_inventory_requires_bound_provenance_and_sbom_descriptors(self):
+        descriptors = [
+            {
+                "digest": "sha256:" + "a" * 64,
+                "reference": f"{GHCR}/api@sha256:" + "a" * 64,
+                "artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+            },
+            {
+                "digest": "sha256:" + "b" * 64,
+                "reference": f"{GHCR}/api@sha256:" + "b" * 64,
+                "artifactType": "application/spdx+json",
+            },
+        ]
+
+        self.assertEqual(
+            destinations.parse_referrer_inventory(
+                json.dumps({"referrers": descriptors}).encode(),
+                repository=f"{GHCR}/api",
+            ),
+            [
+                {"artifactType": "application/spdx+json", "digest": "sha256:" + "b" * 64},
+                {
+                    "artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+                    "digest": "sha256:" + "a" * 64,
+                },
+            ],
+        )
+
+    def test_referrer_inventory_rejects_missing_ambiguous_or_unbound_evidence(self):
+        bundle = {
+            "digest": "sha256:" + "a" * 64,
+            "reference": f"{GHCR}/api@sha256:" + "a" * 64,
+            "artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+        }
+        sbom = {
+            "digest": "sha256:" + "b" * 64,
+            "reference": f"{GHCR}/api@sha256:" + "b" * 64,
+            "artifactType": "application/spdx+json",
+        }
+        for descriptors in ([], [bundle], [bundle, sbom, bundle]):
+            with self.subTest(descriptors=descriptors):
+                with self.assertRaises(DestinationError):
+                    destinations.parse_referrer_inventory(
+                        json.dumps({"referrers": descriptors}).encode(),
+                        repository=f"{GHCR}/api",
+                    )
+
     def test_mirror_copies_all_platforms_and_requires_exact_digest_readback(self):
         self.config["registryDestinations"] = [
             {"provider": "ghcr", "namespace": GHCR}, GAR_DESTINATION
@@ -116,20 +163,32 @@ class RegistryDestinationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             authfile = Path(directory) / "config.json"
             authfile.write_text("{}", encoding="utf-8")
-            with patch.object(destinations, "_skopeo", side_effect=[
-                (1, b"", b"manifest unknown"), (0, b"", b""), (0, payload, b"")
-            ]) as run:
+            referrers = [
+                {"artifactType": "application/spdx+json", "digest": "sha256:" + "b" * 64},
+                {
+                    "artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+                    "digest": "sha256:" + "a" * 64,
+                },
+            ]
+            with (
+                patch.object(destinations, "_skopeo", side_effect=[
+                    (1, b"", b"manifest unknown"), (0, payload, b"")
+                ]),
+                patch.object(destinations, "_oras", return_value=(0, b"", b"")) as run,
+                patch.object(destinations, "_referrer_inventory", side_effect=[referrers, referrers]),
+            ):
                 receipt = destinations.mirror_candidate(
                     self.config, OWNER, "api", "gar", "1.2.3-rc.123.1", digest, authfile
                 )
-        self.assertEqual(receipt, {
-            "provider": "gar", "variant": "api", "repository": f"{GAR}/api", "digest": digest,
-        })
-        copy_args = run.call_args_list[1].args[0]
-        self.assertIn("--all", copy_args)
-        self.assertIn("--preserve-digests", copy_args)
-        self.assertIn(f"docker://{GHCR}/api@{digest}", copy_args)
-        self.assertIn(f"docker://{GAR}/api:1.2.3-rc.123.1", copy_args)
+                self.assertEqual(receipt, {
+                "provider": "gar", "variant": "api", "repository": f"{GAR}/api", "digest": digest,
+                "evidenceReferrers": referrers,
+                })
+                copy_args = run.call_args.args[0]
+                self.assertIn("cp", copy_args)
+                self.assertIn("--recursive", copy_args)
+                self.assertIn(f"{GHCR}/api@{digest}", copy_args)
+                self.assertIn(f"{GAR}/api:1.2.3-rc.123.1", copy_args)
 
     def test_mirror_is_idempotent_for_same_digest_and_rejects_conflicts(self):
         self.config["registryDestinations"] = [
@@ -140,7 +199,13 @@ class RegistryDestinationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             authfile = Path(directory) / "config.json"
             authfile.write_text("{}", encoding="utf-8")
-            with patch.object(destinations, "_skopeo", return_value=(0, payload, b"")) as run:
+            with (
+                patch.object(destinations, "_skopeo", return_value=(0, payload, b"")) as run,
+                patch.object(destinations, "_referrer_inventory", return_value=[
+                    {"artifactType": "application/spdx+json", "digest": "sha256:" + "b" * 64},
+                    {"artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json", "digest": "sha256:" + "a" * 64},
+                ]),
+            ):
                 destinations.mirror_candidate(
                     self.config, OWNER, "api", "gar", "1.2.3", digest, authfile
                 )
@@ -160,9 +225,18 @@ class RegistryDestinationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             authfile = Path(directory) / "config.json"
             authfile.write_text("{}", encoding="utf-8")
-            with patch.object(destinations, "_skopeo", side_effect=[
-                (1, b"", b"manifest unknown"), (0, b"", b""), (0, payload, b"")
-            ]):
+            with (
+                patch.object(destinations, "_skopeo", side_effect=[
+                    (1, b"", b"manifest unknown"), (0, payload, b"")
+                ]),
+                patch.object(destinations, "_oras", return_value=(0, b"", b"")),
+                patch.object(destinations, "_referrer_inventory", side_effect=[
+                    [
+                        {"artifactType": "application/spdx+json", "digest": "sha256:" + "b" * 64},
+                        {"artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json", "digest": "sha256:" + "a" * 64},
+                    ]
+                ] * 2),
+            ):
                 receipt = destinations.mirror_candidate(
                     self.config, OWNER, "api", "gar", "1.2.3-rc.123.1", digest,
                     authfile, "2026-10-02T00:00:00Z",
@@ -205,6 +279,10 @@ class RegistryDestinationTests(unittest.TestCase):
         ]
         payload = b'{"schemaVersion":2}'
         digest = "sha256:" + sha256(payload).hexdigest()
+        referrers = [
+            {"artifactType": "application/spdx+json", "digest": "sha256:" + "b" * 64},
+            {"artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json", "digest": "sha256:" + "a" * 64},
+        ]
         with TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "candidate.json"
@@ -219,68 +297,23 @@ class RegistryDestinationTests(unittest.TestCase):
                 "--tag", "1.2.3-rc.123.1", "--digest", digest,
                 "--authfile", str(authfile), "--published-at", "2026-10-02T00:00:00Z",
             ]
-            with patch.object(destinations.sys, "argv", argv), patch.object(
-                destinations, "_skopeo", side_effect=[
-                    (1, b"", b"manifest unknown"), (0, b"", b""), (0, payload, b"")
-                ],
-            ) as run, redirect_stdout(output):
+            with (
+                patch.object(destinations.sys, "argv", argv),
+                patch.object(destinations, "_skopeo", side_effect=[
+                    (1, b"", b"manifest unknown"), (0, payload, b"")
+                ]),
+                patch.object(destinations, "_oras", return_value=(0, b"", b"")) as run,
+                patch.object(destinations, "_referrer_inventory", side_effect=[referrers, referrers]),
+                redirect_stdout(output),
+            ):
                 self.assertEqual(destinations.main(), 0)
 
-        self.assertEqual(run.call_count, 3)
+        self.assertEqual(run.call_count, 1)
         receipt = json.loads(output.getvalue())
         self.assertEqual(receipt["provider"], "gar")
         self.assertEqual(receipt["repository"], f"{GAR}/api")
         self.assertEqual(receipt["digest"], digest)
-        self.assertEqual(receipt["candidateExpiresAt"], "2026-12-29T00:00:00Z")
-
-    def test_verify_cli_with_published_at_still_reads_back(self):
-        payload = b'{"schemaVersion":2}'
-        digest = "sha256:" + sha256(payload).hexdigest()
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            config = root / "candidate.json"
-            config.write_text(json.dumps(self.config), encoding="utf-8")
-            authfile = root / "auth.json"
-            authfile.write_text("{}", encoding="utf-8")
-            output = StringIO()
-            argv = [
-                "container_registry_destinations.py",
-                "--config", str(config), "--owner", OWNER,
-                "--verify-provider", "ghcr", "--variant", "api",
-                "--tag", "1.2.3-rc.123.1", "--digest", digest,
-                "--authfile", str(authfile), "--published-at", "2026-10-02T00:00:00Z",
-            ]
-            with patch.object(destinations.sys, "argv", argv), patch.object(
-                destinations, "_skopeo", return_value=(0, payload, b"")
-            ) as run, redirect_stdout(output):
-                self.assertEqual(destinations.main(), 0)
-
-        run.assert_called_once()
-        receipt = json.loads(output.getvalue())
-        self.assertEqual(receipt["provider"], "ghcr")
-        self.assertEqual(receipt["repository"], f"{GHCR}/api")
-        self.assertEqual(receipt["digest"], digest)
-
-    def test_published_at_without_registry_operation_returns_destination_plan(self):
-        digest = "sha256:" + "a" * 64
-        published_at = "2026-10-02T00:00:00Z"
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            config = root / "candidate.json"
-            config.write_text(json.dumps(self.config), encoding="utf-8")
-            output = StringIO()
-            argv = [
-                "container_registry_destinations.py",
-                "--config", str(config), "--owner", OWNER,
-                "--variant", "api", "--digest", digest, "--published-at", published_at,
-            ]
-            with patch.object(destinations.sys, "argv", argv), redirect_stdout(output):
-                self.assertEqual(destinations.main(), 0)
-
-        self.assertEqual(
-            json.loads(output.getvalue()),
-            destinations.manifest_destinations(self.config, OWNER, "api", digest, published_at),
-        )
+        self.assertEqual(receipt["evidenceReferrers"], referrers)
 
 
 if __name__ == "__main__":

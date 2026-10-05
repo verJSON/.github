@@ -25,6 +25,10 @@
       "type": "string",
       "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-rc\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
     },
+    "promotionEligible": {
+      "type": "boolean",
+      "const": false
+    },
     "source": {
       "type": "object",
       "required": [
@@ -187,6 +191,19 @@
                   "type": "string",
                   "format": "date-time",
                   "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+                },
+                "evidenceReferrers": {
+                  "type": "array",
+                  "minItems": 2,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["artifactType", "digest"],
+                    "properties": {
+                      "artifactType": { "type": "string", "minLength": 1 },
+                      "digest": { "$ref": "#/$defs/digest" }
+                    }
+                  }
                 }
               },
               "allOf": [
@@ -215,6 +232,7 @@
                     }
                   },
                   "then": {
+                    "required": ["evidenceReferrers"],
                     "properties": {
                       "repository": {
                         "pattern": "^[a-z]+(?:-[a-z0-9]+)*-docker\\.pkg\\.dev/[a-z][a-z0-9-]{4,28}[a-z0-9]/[a-z][a-z0-9-]{0,62}[a-z0-9](?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+$"
@@ -240,7 +258,8 @@
         "predicateType",
         "builderIdentity",
         "subjectDigest",
-        "attestationId"
+        "bundleDigest",
+        "referrerManifestDigest"
       ],
       "properties": {
         "predicateType": {
@@ -254,9 +273,11 @@
         "subjectDigest": {
           "$ref": "#/$defs/digest"
         },
-        "attestationId": {
-          "type": "string",
-          "minLength": 1
+        "bundleDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "referrerManifestDigest": {
+          "$ref": "#/$defs/digest"
         }
       }
     },
@@ -279,7 +300,9 @@
               "os",
               "architecture",
               "digest",
-              "attestationId"
+              "bundleDigest",
+              "referrerManifestDigest",
+              "spdxDigest"
             ],
             "properties": {
               "os": {
@@ -294,9 +317,14 @@
               "digest": {
                 "$ref": "#/$defs/digest"
               },
-              "attestationId": {
-                "type": "string",
-                "minLength": 1
+              "bundleDigest": {
+                "$ref": "#/$defs/digest"
+              },
+              "referrerManifestDigest": {
+                "$ref": "#/$defs/digest"
+              },
+              "spdxDigest": {
+                "$ref": "#/$defs/digest"
               }
             }
           }
@@ -355,6 +383,23 @@
                 "destinations"
               ]
             }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schemaVersion": {
+            "const": 3
+          }
+        }
+      },
+      "then": {
+        "required": ["promotionEligible"],
+        "properties": {
+          "promotionEligible": {
+            "const": false
           }
         }
       }

@@ -96,6 +96,10 @@ def validate_manifest(manifest: dict[str, Any], config: dict[str, Any]) -> None:
         )
     if manifest.get("kind") != "container-candidate":
         raise ManifestError("manifest.kind must be container-candidate")
+    if manifest.get("promotionEligible") is not False:
+        raise ManifestError(
+            "candidate promotion eligibility is disabled until provenance gates are enabled by contract"
+        )
 
     source = manifest.get("source")
     if not isinstance(source, dict):
@@ -170,7 +174,10 @@ def validate_manifest(manifest: dict[str, Any], config: dict[str, Any]) -> None:
         if len(destinations) != len(expected_destinations):
             raise ManifestError(f"candidate destination receipts differ for variant {variant!r}")
         for receipt, expected_destination in zip(destinations, expected_destinations, strict=True):
-            if set(receipt) != {*expected_destination, "verifiedAt"}:
+            expected_fields = {*expected_destination, "verifiedAt"}
+            if expected_destination["provider"] == "gar":
+                expected_fields.add("evidenceReferrers")
+            if set(receipt) != expected_fields:
                 raise ManifestError(f"candidate destination receipt fields differ for variant {variant!r}")
             if any(receipt.get(key) != value for key, value in expected_destination.items()):
                 raise ManifestError(f"candidate destination digest or expiry differs for variant {variant!r}")
@@ -181,8 +188,29 @@ def validate_manifest(manifest: dict[str, Any], config: dict[str, Any]) -> None:
                 receipt.get("candidateExpiresAt"),
                 f"manifest.images[{variant!r}].destinations.candidateExpiresAt",
             )
-            if verified_at < candidate_published_at or verified_at >= expiry:
-                raise ManifestError(f"candidate destination was not verified before expiry for variant {variant!r}")
+        if verified_at < candidate_published_at or verified_at >= expiry:
+            raise ManifestError(f"candidate destination was not verified before expiry for variant {variant!r}")
+        if expected_destination["provider"] == "gar":
+            referrers = receipt.get("evidenceReferrers")
+            if not isinstance(referrers, list):
+                raise ManifestError("GAR receipt is missing evidence referrers")
+            normalized_referrers = []
+            for referrer in referrers:
+                if not isinstance(referrer, dict) or set(referrer) != {"artifactType", "digest"}:
+                    raise ManifestError("GAR evidence referrer fields differ")
+                artifact_type = _text(referrer.get("artifactType"), "GAR evidence artifact type")
+                referrer_digest = _digest(referrer.get("digest"), "GAR evidence referrer digest")
+                normalized_referrers.append((artifact_type, referrer_digest))
+            if len(set(normalized_referrers)) != len(normalized_referrers):
+                raise ManifestError("GAR evidence referrers contain duplicates")
+            if sum(
+                artifact_type == "application/vnd.dev.sigstore.bundle.v0.3+json"
+                for artifact_type, _ in normalized_referrers
+            ) != 1 or not any(
+                artifact_type == "application/spdx+json"
+                for artifact_type, _ in normalized_referrers
+            ):
+                raise ManifestError("GAR evidence referrers are missing provenance or SBOM")
         identities = actual.get("identities")
         if not isinstance(identities, dict):
             raise ManifestError(f"identities must be an object for variant {variant!r}")
@@ -206,9 +234,13 @@ def validate_manifest(manifest: dict[str, Any], config: dict[str, Any]) -> None:
             raise ManifestError(f"provenance signer workflow differs for variant {variant!r}")
         if actual_provenance.get("builderIdentity") != expected_provenance.get("builderIdentity"):
             raise ManifestError(f"provenance builder identity differs for variant {variant!r}")
-        _text(
-            actual_provenance.get("attestationId"),
-            f"manifest.images[{variant!r}].provenance.attestationId",
+        _digest(
+            actual_provenance.get("bundleDigest"),
+            f"manifest.images[{variant!r}].provenance.bundleDigest",
+        )
+        _digest(
+            actual_provenance.get("referrerManifestDigest"),
+            f"manifest.images[{variant!r}].provenance.referrerManifestDigest",
         )
         provenance_subject = _digest(
             actual_provenance.get("subjectDigest"),
@@ -263,10 +295,11 @@ def validate_manifest(manifest: dict[str, Any], config: dict[str, Any]) -> None:
                 f"SBOM platform attestations differ for variant {variant!r}"
             )
         for identity, attestation in sbom_attestations.items():
-            _text(
-                attestation.get("attestationId"),
-                f"manifest.images[{variant!r}].sbom.attestations[{identity!r}].attestationId",
-            )
+            for field in ("bundleDigest", "referrerManifestDigest", "spdxDigest"):
+                _digest(
+                    attestation.get(field),
+                    f"manifest.images[{variant!r}].sbom.attestations[{identity!r}].{field}",
+                )
             digest = _digest(
                 attestation.get("digest"),
                 f"manifest.images[{variant!r}].sbom.attestations[{identity!r}].digest",

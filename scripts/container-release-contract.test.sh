@@ -2,7 +2,7 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/contract/scripts" "$tmp/consumer/.github/workflows" "$tmp/consumer/scripts"
-cp "$root/scripts/gen-container-release.sh" "$root/scripts/changelog.py" "$root/scripts/container_release_promotion.py" "$root/scripts/container_release_manifest.py" "$root/scripts/container_registry_destinations.py" "$root/scripts/container_artifact_extract.py" "$root/scripts/container_attestation_verify.py" "$tmp/contract/scripts/"
+cp "$root/scripts/gen-container-release.sh" "$root/scripts/changelog.py" "$root/scripts/container_release_promotion.py" "$root/scripts/container_release_manifest.py" "$root/scripts/container_registry_destinations.py" "$root/scripts/container_artifact_extract.py" "$root/scripts/container_attestation_verify.py" "$root/scripts/container_cosign_provenance.py" "$tmp/contract/scripts/"
 git -C "$tmp/contract" init -q; git -C "$tmp/contract" config user.name fixture; git -C "$tmp/contract" config user.email fixture@example.invalid
 git -C "$tmp/contract" add scripts; git -C "$tmp/contract" commit -qm fixture; ref="$(git -C "$tmp/contract" rev-parse HEAD)"
 generator="$tmp/contract/scripts/gen-container-release.sh"
@@ -12,6 +12,7 @@ generator="$tmp/contract/scripts/gen-container-release.sh"
 "$generator" destination-helper "$ref" >"$tmp/consumer/scripts/container_registry_destinations.py"
 "$generator" artifact-extractor "$ref" >"$tmp/consumer/scripts/container_artifact_extract.py"
 "$generator" attestation-verifier "$ref" >"$tmp/consumer/scripts/container_attestation_verify.py"
+"$generator" cosign-helper "$ref" >"$tmp/consumer/scripts/container_cosign_provenance.py"
 "$generator" contract-test "$ref" >"$tmp/consumer/scripts/container-release-contract.test.sh"
 (cd "$tmp/consumer" && bash scripts/container-release-contract.test.sh)
 mkdir -p "$tmp/consumer/NEXT"
@@ -110,6 +111,7 @@ fi
 "$generator" destination-helper "$ref" >"$tmp/adopter/scripts/container_registry_destinations.py"
 "$generator" artifact-extractor "$ref" >"$tmp/adopter/scripts/container_artifact_extract.py"
 "$generator" attestation-verifier "$ref" >"$tmp/adopter/scripts/container_attestation_verify.py"
+"$generator" cosign-helper "$ref" >"$tmp/adopter/scripts/container_cosign_provenance.py"
 "$generator" contract-test "$ref" container-candidate.json \
   --reconcile-allow Dockerfile --reconcile-allow deploy/values.yaml \
   >"$tmp/adopter/scripts/container-release-contract.test.sh"
@@ -194,12 +196,12 @@ PY
 grep -A8 '^  retention:$' "$workflow" | grep -x '    timeout-minutes: 30' >/dev/null
 assert_python3_extractor() {
   local candidate=$1
-  [ "$(grep -cE '^          python3 scripts/container_artifact_extract\.py candidate\.zip candidate\.json$' "$candidate")" -eq 1 ] &&
-    ! grep -Eq '^ +python scripts/container_artifact_extract\.py candidate\.zip candidate\.json$' "$candidate"
+  [ "$(grep -cE '^          python3 scripts/container_artifact_extract\.py candidate\.zip candidate\.json candidate-manifest\.sigstore\.json$' "$candidate")" -eq 1 ] &&
+    ! grep -Eq '^ +python scripts/container_artifact_extract\.py candidate\.zip candidate\.json candidate-manifest\.sigstore\.json$' "$candidate"
 }
 assert_python3_extractor "$workflow"
 cp "$workflow" "$tmp/container-release-python-mutation.yml"
-sed -i 's/^          python3 scripts\/container_artifact_extract\.py candidate\.zip candidate\.json$/          python scripts\/container_artifact_extract.py candidate.zip candidate.json/' \
+sed -i 's/^          python3 scripts\/container_artifact_extract\.py candidate\.zip candidate\.json candidate-manifest\.sigstore\.json$/          python scripts\/container_artifact_extract.py candidate.zip candidate.json/' \
   "$tmp/container-release-python-mutation.yml"
 if assert_python3_extractor "$tmp/container-release-python-mutation.yml"; then
   echo "container release contract accepted a python extractor mutation" >&2
@@ -218,13 +220,25 @@ grep -q 'docker/login-action@' "$workflow"
 legacy_release_token='RELEASE_'"TOKEN"
 legacy_org_release_token='VERJSON_RELEASE_'"TOKEN"
 ! grep -Eq "$legacy_release_token|$legacy_org_release_token" "$workflow"
-grep -q 'gh attestation verify' "$workflow"
+! grep -Eq 'gh attestation verify|actions/attest-build-provenance@' "$workflow"
+grep -q 'cosign verify-blob candidate.json' "$workflow"
+grep -q 'google-github-actions/auth@' "$workflow"
+grep -q 'oras-project/setup-oras@' "$workflow"
+grep -q 'container_cosign_provenance.py' "$workflow"
+grep -q -- '--repository-id "$GITHUB_REPOSITORY_ID"' "$workflow"
+grep -q -- '--expected-repository "$GITHUB_REPOSITORY"' "$workflow"
+grep -q -- '--expected-source-ref refs/heads/main' "$workflow"
+grep -q -- '--expected-source-commit "$(jq -er .head_sha candidate-run.json)"' "$workflow"
+grep -q -- '--contract-ref "$CONTRACT_REF"' "$workflow"
+grep -q -- '--cosign-helper ".container-release-contract/scripts/container_cosign_provenance.py"' "$workflow"
+grep -q 'candidate has no reviewed GAR destination' "$workflow"
+grep -q 'release-manifest.sigstore.json' "$workflow"
 grep -q 'container_attestation_verify.py' "$workflow"
 grep -q 'repository: Verjson/.github' "$workflow"
 grep -q 'ref: \${{ inputs.contract-ref }}' "$workflow"
 grep -q 'python3 .container-release-contract/scripts/changelog.py release' "$workflow"
 ! grep -Eq 'python3? scripts/changelog.py release' "$workflow"
-grep -q 'actions/attest-build-provenance@' "$workflow"
+! grep -Eq 'gh attestation verify|actions/attest-build-provenance@' "$workflow"
 ! grep -q 'container-release-${{ github.repository }}-${{ inputs.version }}' "$workflow"
 grep -q 'group: container-release-${{ github.repository }}' "$workflow"
 grep -q 'complete stable alias set diverged' "$workflow"
@@ -238,7 +252,7 @@ grep -q '\^\[0-9a-f\]{40}\$' "$workflow"
 guard_line="$(grep -n 'Validate the immutable retention contract ref' "$workflow" | tail -1 | cut -d: -f1)"
 checkout_line="$(grep -n 'path: .package-retention-contract' "$workflow" | cut -d: -f1)"
 [ "$guard_line" -lt "$checkout_line" ]
-grep -qx '          python3 scripts/container_artifact_extract.py candidate.zip candidate.json' "$workflow"
+grep -qx '          python3 scripts/container_artifact_extract.py candidate.zip candidate.json candidate-manifest.sigstore.json' "$workflow"
 grep -qx '          python3 scripts/container_attestation_verify.py --candidate candidate.json \\' "$workflow"
 grep -qx '          python3 scripts/container_release_promotion.py --candidate candidate.json \\' "$workflow"
 ! grep -Eq '^[[:space:]]+python scripts/container_(artifact_extract|attestation_verify|release_promotion)\.py' "$workflow"
