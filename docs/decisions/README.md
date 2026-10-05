@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0217](0217-bound-gar-canary-publishing-to-one-github-workflow/README.md) | 2026-10-05 | Bound GAR canary publishing to one GitHub workflow |
 | [0216](0216-keyless-container-provenance-is-verified-per-registry/README.md) | 2026-10-05 | Keyless container provenance is verified per registry |
 | [0215](0215-verified-oci-candidate-registry-destinations/README.md) | 2026-10-02 | Verify OCI candidate registry destinations |
 | [0214](0214-private-candidate-builds-skip-untrusted-pull-requests/README.md) | 2026-10-02 | Keep private package contents out of pull-request candidate builds |
