@@ -47,5 +47,5 @@ jobs:
       acquisition-sha256: '0000000000000000000000000000000000000000000000000000000000000000'
       transfer-sha256: 'db50956fd099f1641c030293f045944b4f5e21d221b030dddc55bb6e925396d7'
       retry-sha256: '1dbb8586bd3b1b68868ee908cb6c3eff352bca8961217d1f9369fbb8b30337bb'
-      provenance-sha256: 'c866f5ef410b539650a652f9798c4d352846ecd2f9f7beef945c34434c7554de'
+      provenance-sha256: '6a3ce1545de62902aa63022e52016dcb9d4c7fe9299c025cafec0899f3b5ec6a'
       runner: ${{ github.repository_owner == 'Verjson' && (vars.CI_RUNNER_DEFAULT || '["self-hosted","general"]') || '["ubuntu-24.04"]' }}

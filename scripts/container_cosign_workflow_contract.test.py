@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import hashlib
 import re
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 PUBLISH_WORKFLOW = ROOT / ".github/workflows/container-candidate-publish.yml"
 GENERATOR = ROOT / "scripts/gen-container-candidate.sh"
+CANARY = ROOT / ".github/workflows/container-candidate-reusable-contract.yml"
 
 
 class CosignWorkflowContractTests(unittest.TestCase):
@@ -37,6 +39,21 @@ class CosignWorkflowContractTests(unittest.TestCase):
         self.assertRegex(generator, r"provenance_sha256=.*container_cosign_provenance\.py")
         self.assertIn("provenance-sha256: $provenance_sha256", generator)
         self.assertNotIn("candidate-eligibility-enabled: false", generator)
+
+    def test_reusable_canary_pins_current_provenance_and_retry_helpers(self):
+        canary = yaml.safe_load(CANARY.read_text(encoding="utf-8"))
+        expected = {
+            "provenance-sha256": "container_cosign_provenance.py",
+            "retry-sha256": "container_candidate_retry.py",
+        }
+        for input_name, filename in expected.items():
+            digest = hashlib.sha256((ROOT / "scripts" / filename).read_bytes()).hexdigest()
+            with self.subTest(input=input_name):
+                self.assertEqual(canary["jobs"]["publish"]["with"][input_name], digest)
+        self.assertEqual(
+            canary["jobs"]["validate"]["with"]["retry-sha256"],
+            canary["jobs"]["publish"]["with"]["retry-sha256"],
+        )
 
     def test_publisher_pins_cosign_and_oras_installers(self):
         workflow = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
