@@ -88,6 +88,8 @@ was confirmed, since inspection-only claims go stale silently).
 
 - [#1692](https://github.com/Verjson/.github/issues/1692) — Target current `main` HEAD in dev via a fast, validated image path and promote one fully verified pinned digest set from nonprod to prod with separate environment controls; opened 2026-10-05 after confirming the candidate and release generators lack a general app deployment caller.
 
+- [#1696](https://github.com/Verjson/.github/issues/1696) — Provide a fail-closed bootstrap when a stale default-branch AI review caller cannot authorize its own canonical pin update.
+
 - [#1655](https://github.com/Verjson/.github/issues/1655) — Signed merge-gate provenance rollout, opened 2026-09-28 after #1339 met its evidence gate; ADR 0211 still requires a real `pull_request_target` capture before rollout.
 
 - [#1423](https://github.com/Verjson/.github/issues/1423) — CLI Projects PR admission accepts only the byte-exact generated caller; the previous-main digest is rollout-only. Strict admission freshness is defense in depth. Remove the rollout digest after [Verjson/verjson-cli-projects PR #142](https://github.com/Verjson/verjson-cli-projects/pull/142) updates main. See [ADR 0212](docs/decisions/0212-cli-projects-admission-accepts-only-generated-caller/README.md).
