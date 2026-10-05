@@ -86,6 +86,8 @@ was confirmed, since inspection-only claims go stale silently).
 
 - [#1667](https://github.com/Verjson/.github/issues/1667) — Track configurable generated OCI candidate destinations for GHCR, GAR, and Sonatype Nexus. Opened 2026-10-01 after live issue searches and checking related [.github#1264](https://github.com/Verjson/.github/issues/1264), [.github#1186](https://github.com/Verjson/.github/issues/1186), and [verjson-ci#30](https://github.com/Verjson/verjson-ci/issues/30); those cover adopter rollout and GitLab CE Nexus engine work, not registry-neutral canonical publisher destinations.
 
+- [#1692](https://github.com/Verjson/.github/issues/1692) — Generate dev, nonprod, and prod deployment from one immutable `main` candidate with separate environment controls; opened 2026-10-05 after confirming the candidate and release generators lack a general app deployment caller.
+
 - [#1655](https://github.com/Verjson/.github/issues/1655) — Signed merge-gate provenance rollout, opened 2026-09-28 after #1339 met its evidence gate; ADR 0211 still requires a real `pull_request_target` capture before rollout.
 
 - [#1423](https://github.com/Verjson/.github/issues/1423) — CLI Projects PR admission accepts only the byte-exact generated caller; the previous-main digest is rollout-only. Strict admission freshness is defense in depth. Remove the rollout digest after [Verjson/verjson-cli-projects PR #142](https://github.com/Verjson/verjson-cli-projects/pull/142) updates main. See [ADR 0212](docs/decisions/0212-cli-projects-admission-accepts-only-generated-caller/README.md).
