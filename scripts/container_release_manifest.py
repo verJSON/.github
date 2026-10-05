@@ -206,11 +206,8 @@ def validate_manifest(manifest: dict[str, Any], config: dict[str, Any]) -> None:
             if sum(
                 artifact_type == "application/vnd.dev.sigstore.bundle.v0.3+json"
                 for artifact_type, _ in normalized_referrers
-            ) != 1 or not any(
-                artifact_type == "application/spdx+json"
-                for artifact_type, _ in normalized_referrers
-            ):
-                raise ManifestError("GAR evidence referrers are missing provenance or SBOM")
+            ) != 1:
+                raise ManifestError("GAR index evidence must contain one provenance referrer")
         identities = actual.get("identities")
         if not isinstance(identities, dict):
             raise ManifestError(f"identities must be an object for variant {variant!r}")

@@ -368,11 +368,15 @@ jobs:
         env:
           CONTRACT_REF: ${{ inputs.contract-ref }}
           PROVENANCE_SHA256: ${{ inputs.provenance-sha256 }}
+          RETRY_SHA256: ${{ inputs.retry-sha256 }}
         run: |
           set -euo pipefail
           helper="$RUNNER_TEMP/container_cosign_provenance.py"
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_cosign_provenance.py" -o "$helper"
           printf '%s  %s\n' "$PROVENANCE_SHA256" "$helper" | sha256sum --check --strict
+          retry="$RUNNER_TEMP/container_candidate_retry.py"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_candidate_retry.py" -o "$retry"
+          printf '%s  %s\n' "$RETRY_SHA256" "$retry" | sha256sum --check --strict
       - name: Download pinned dependency transfer implementation
         if: needs.prepare.outputs.has-private-node-packages == 'true'
         env:
@@ -670,11 +674,15 @@ jobs:
           CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
           CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
           PROVENANCE_SHA256: ${{ inputs.provenance-sha256 }}
+          RETRY_SHA256: ${{ inputs.retry-sha256 }}
         run: |
           set -euo pipefail
           helper="$RUNNER_TEMP/container_cosign_provenance.py"
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_cosign_provenance.py" -o "$helper"
           printf '%s  %s\n' "$PROVENANCE_SHA256" "$helper" | sha256sum --check --strict
+          retry="$RUNNER_TEMP/container_candidate_retry.py"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_candidate_retry.py" -o "$retry"
+          printf '%s  %s\n' "$RETRY_SHA256" "$retry" | sha256sum --check --strict
       - if: matrix.baseVariant != '' && needs.prepare.outputs.has-private-node-packages == 'true'
         name: Download pinned dependency transfer implementation
         env:
@@ -995,11 +1003,15 @@ jobs:
         env:
           CONTRACT_REF: ${{ inputs.contract-ref }}
           PROVENANCE_SHA256: ${{ inputs.provenance-sha256 }}
+          RETRY_SHA256: ${{ inputs.retry-sha256 }}
         run: |
           set -euo pipefail
           helper="$RUNNER_TEMP/container_cosign_provenance.py"
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_cosign_provenance.py" -o "$helper"
           printf '%s  %s\n' "$PROVENANCE_SHA256" "$helper" | sha256sum --check --strict
+          retry="$RUNNER_TEMP/container_candidate_retry.py"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_candidate_retry.py" -o "$retry"
+          printf '%s  %s\n' "$RETRY_SHA256" "$retry" | sha256sum --check --strict
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -1159,6 +1171,7 @@ jobs:
           CONTRACT_REF: ${{ inputs.contract-ref }}
           GH_TOKEN: ${{ github.token }}
           PROVENANCE_SHA256: ${{ inputs.provenance-sha256 }}
+          RETRY_SHA256: ${{ inputs.retry-sha256 }}
           CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
           CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
           VARIANT: ${{ matrix.variant }}
@@ -1167,8 +1180,12 @@ jobs:
           helper="$RUNNER_TEMP/container_registry_destinations.py"
           provenance_helper="$RUNNER_TEMP/container_cosign_provenance.py"
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_registry_destinations.py" -o "$helper"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_oci_index.py" -o "$RUNNER_TEMP/container_oci_index.py"
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_cosign_provenance.py" -o "$provenance_helper"
           printf '%s  %s\n' "$PROVENANCE_SHA256" "$provenance_helper" | sha256sum --check --strict
+          retry="$RUNNER_TEMP/container_candidate_retry.py"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_candidate_retry.py" -o "$retry"
+          printf '%s  %s\n' "$RETRY_SHA256" "$retry" | sha256sum --check --strict
           run_metadata="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
           [ "$(jq -er '.run_attempt | tostring' <<<"$run_metadata")" = "$GITHUB_RUN_ATTEMPT" ] || { echo "::error::candidate run attempt changed"; exit 1; }
           candidate_published_at="$(jq -er '.run_started_at' <<<"$run_metadata")"
@@ -1251,11 +1268,15 @@ jobs:
         env:
           CONTRACT_REF: ${{ inputs.contract-ref }}
           PROVENANCE_SHA256: ${{ inputs.provenance-sha256 }}
+          RETRY_SHA256: ${{ inputs.retry-sha256 }}
         run: |
           set -euo pipefail
           helper="$RUNNER_TEMP/container_cosign_provenance.py"
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_cosign_provenance.py" -o "$helper"
           printf '%s  %s\n' "$PROVENANCE_SHA256" "$helper" | sha256sum --check --strict
+          retry="$RUNNER_TEMP/container_candidate_retry.py"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_candidate_retry.py" -o "$retry"
+          printf '%s  %s\n' "$RETRY_SHA256" "$retry" | sha256sum --check --strict
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:

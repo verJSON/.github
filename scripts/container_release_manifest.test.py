@@ -204,10 +204,6 @@ class ContainerReleaseManifestTests(unittest.TestCase):
                 "artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json",
                 "digest": "sha256:" + "c" * 64,
             },
-            {
-                "artifactType": "application/spdx+json",
-                "digest": "sha256:" + "d" * 64,
-            },
         ]
         self.schema_validator.validate(candidate)
 
@@ -280,10 +276,6 @@ class ContainerReleaseManifestTests(unittest.TestCase):
                     {
                         "artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json",
                         "digest": "sha256:" + "c" * 64,
-                    },
-                    {
-                        "artifactType": "application/spdx+json",
-                        "digest": "sha256:" + "d" * 64,
                     },
                 ],
             }

@@ -51,6 +51,24 @@ class CosignWorkflowContractTests(unittest.TestCase):
         )
         self.assertGreaterEqual(workflow.count("cosign-release: v3.1.3"), 1)
 
+    def test_every_cosign_job_downloads_its_verified_sibling_before_execution(self):
+        workflow = yaml.safe_load(PUBLISH_WORKFLOW.read_text(encoding="utf-8"))
+        for name in ("publish-base", "publish-derived", "attest-sbom", "mirror-gar", "candidate-manifest"):
+            with self.subTest(job=name):
+                steps = workflow["jobs"][name]["steps"]
+                download = next(
+                    index for index, step in enumerate(steps)
+                    if "scripts/container_cosign_provenance.py\" -o" in step.get("run", "")
+                )
+                script = steps[download]["run"]
+                self.assertEqual(steps[download]["env"]["RETRY_SHA256"], "${{ inputs.retry-sha256 }}")
+                self.assertIn("scripts/container_candidate_retry.py\" -o", script)
+                self.assertIn('"$RETRY_SHA256" "$retry" | sha256sum --check --strict', script)
+                self.assertLess(
+                    script.index("scripts/container_candidate_retry.py\" -o"),
+                    script.index("python3 ") if "python3 " in script else len(script),
+                )
+
     def test_gar_mirror_verifies_the_original_attestation_from_gar(self):
         workflow = yaml.safe_load(PUBLISH_WORKFLOW.read_text(encoding="utf-8"))
         mirror_job = workflow["jobs"]["mirror-gar"]
@@ -64,6 +82,7 @@ class CosignWorkflowContractTests(unittest.TestCase):
         self.assertIn("--registry-repository", run_scripts)
         self.assertIn("--expected-bundle-digest", run_scripts)
         self.assertIn("--expected-referrer-digest", run_scripts)
+        self.assertIn('scripts/container_oci_index.py" -o "$RUNNER_TEMP/container_oci_index.py"', run_scripts)
 
 
 if __name__ == "__main__":

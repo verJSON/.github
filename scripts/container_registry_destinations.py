@@ -168,7 +168,9 @@ def _oras(arguments: list[str]) -> tuple[int, bytes, bytes]:
     return result.returncode, result.stdout, result.stderr
 
 
-def parse_referrer_inventory(payload: bytes, *, repository: str) -> list[dict[str, str]]:
+def parse_referrer_inventory(
+    payload: bytes, *, repository: str, subject: str = "index"
+) -> list[dict[str, str]]:
     try:
         discovery = json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -194,13 +196,14 @@ def parse_referrer_inventory(payload: bytes, *, repository: str) -> list[dict[st
         seen.add(digest)
         referrers.append({"artifactType": artifact_type, "digest": digest})
 
-    provenance_count = sum(
-        item["artifactType"] == "application/vnd.dev.sigstore.bundle.v0.3+json"
-        for item in referrers
-    )
-    has_sbom = any(item["artifactType"] == "application/spdx+json" for item in referrers)
-    if provenance_count != 1 or not has_sbom:
-        raise DestinationError("registry image is missing unique provenance or SBOM referrers")
+    required_type = {
+        "index": "application/vnd.dev.sigstore.bundle.v0.3+json",
+        "platform": "application/spdx+json",
+    }.get(subject)
+    if required_type is None:
+        raise DestinationError("registry referrer subject is unsupported")
+    if sum(item["artifactType"] == required_type for item in referrers) != 1:
+        raise DestinationError(f"registry {subject} is missing one unique {required_type} referrer")
     return sorted(referrers, key=lambda item: (item["artifactType"], item["digest"]))
 
 
@@ -216,7 +219,9 @@ def _remote_digest(reference: str, authfile: Path) -> str | None:
     return "sha256:" + hashlib.sha256(output).hexdigest()
 
 
-def _referrer_inventory(repository: str, digest: str, authfile: Path) -> list[dict[str, str]]:
+def _referrer_inventory(
+    repository: str, digest: str, authfile: Path, subject: str = "index"
+) -> list[dict[str, str]]:
     status, output, _ = _oras([
         "discover",
         "--format",
@@ -229,7 +234,24 @@ def _referrer_inventory(repository: str, digest: str, authfile: Path) -> list[di
     ])
     if status != 0:
         raise DestinationError("registry referrer discovery failed")
-    return parse_referrer_inventory(output, repository=repository)
+    return parse_referrer_inventory(output, repository=repository, subject=subject)
+
+
+def _platform_subjects(
+    repository: str, digest: str, authfile: Path, reviewed_platforms: Any
+) -> list[str]:
+    from container_oci_index import OCIIndexError, validate_index
+
+    status, payload, _ = _skopeo([
+        "--authfile", str(authfile), "inspect", "--raw", f"docker://{repository}@{digest}"
+    ])
+    if status or "sha256:" + hashlib.sha256(payload).hexdigest() != digest:
+        raise DestinationError("source OCI index differs from the pinned candidate digest")
+    try:
+        inventory = validate_index(json.loads(payload), reviewed_platforms)
+    except (UnicodeDecodeError, json.JSONDecodeError, OCIIndexError) as error:
+        raise DestinationError("source OCI platform inventory is invalid") from error
+    return [platform["digest"] for platform in inventory["platforms"]]
 
 
 def mirror_candidate(
@@ -258,7 +280,12 @@ def mirror_candidate(
     existing = _remote_digest(target, authfile)
     if existing is not None and existing != digest:
         raise DestinationError("destination tag already names a different digest")
+    platforms = _platform_subjects(source, digest, authfile, image.get("platforms"))
     source_referrers = _referrer_inventory(source, digest, authfile)
+    platform_referrers = {
+        platform: _referrer_inventory(source, platform, authfile, "platform")
+        for platform in platforms
+    }
     if existing is None:
         status, _, _ = _oras([
             "cp", "--recursive",
@@ -273,7 +300,10 @@ def mirror_candidate(
         raise DestinationError("destination digest differs from the candidate digest")
     destination_referrers = _referrer_inventory(destination["repository"], digest, authfile)
     if destination_referrers != source_referrers:
-        raise DestinationError("destination Cosign and SBOM referrers differ from source evidence")
+        raise DestinationError("destination index provenance differs from source evidence")
+    for platform, referrers in platform_referrers.items():
+        if _referrer_inventory(destination["repository"], platform, authfile, "platform") != referrers:
+            raise DestinationError("destination platform SBOM differs from source evidence")
     receipt = {
         "provider": provider,
         "variant": variant,

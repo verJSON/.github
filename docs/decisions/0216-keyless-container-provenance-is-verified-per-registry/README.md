@@ -33,5 +33,5 @@ These gates do not retire the `dev` branch or authorize a production tag. Those 
 
 - Private candidate publishing no longer depends on GitHub Artifact Attestations billing eligibility.
 - Public Rekor records expose accepted signer, workflow, contract, source, and image-digest metadata; predicates must contain no credentials, private build arguments, or secret values.
-- GAR evidence preservation is an explicit promotion boundary. OCI referrer copying must be validated against the real registries; support or a CLI's preview status alone is not proof.
+- GAR evidence preservation is an explicit promotion boundary. The provenance referrer belongs to the image index; each signed SPDX referrer belongs to its platform manifest. Mirror read-back checks the index and every reviewed platform subject separately. OCI referrer copying must be validated against the real registries; support or a CLI's preview status alone is not proof.
 - The reusable-workflow identity shape is a rollout gate, distinct from ADR 0211's required-workflow capture.

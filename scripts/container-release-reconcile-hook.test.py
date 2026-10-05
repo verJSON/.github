@@ -3,6 +3,10 @@
 
 import copy
 import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 
 import yaml
@@ -98,6 +102,33 @@ class ReconcileHookWorkflowTest(unittest.TestCase):
 
     def test_exact_contract_is_accepted(self):
         self.assertEqual([], validate(self.workflow))
+
+    def test_every_pinned_release_helper_starts_from_the_sparse_checkout(self):
+        contract = named_step(
+            self.workflow["jobs"]["promote"],
+            "Check out the immutable provenance and changelog contract",
+        )
+        paths = contract["with"]["sparse-checkout"].splitlines()
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = pathlib.Path(directory)
+            for path in paths:
+                source = ROOT / path
+                destination = checkout / path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+            for helper in (
+                "scripts/changelog.py",
+                "scripts/container_release_reconcile.py",
+                "scripts/container_cosign_provenance.py",
+            ):
+                with self.subTest(helper=helper):
+                    result = subprocess.run(
+                        [sys.executable, str(checkout / helper), "--help"],
+                        cwd=checkout,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_rejects_reconciliation_after_credential_minting(self):
         mutant = copy.deepcopy(self.workflow)

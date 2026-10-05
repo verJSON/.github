@@ -107,7 +107,7 @@ class RegistryDestinationTests(unittest.TestCase):
         with self.assertRaises(DestinationError):
             expand_image_destinations(self.config, OWNER, {"repository": "ghcr.io/unrelated/api"})
 
-    def test_referrer_inventory_requires_bound_provenance_and_sbom_descriptors(self):
+    def test_referrer_inventory_requires_evidence_for_its_actual_subject(self):
         descriptors = [
             {
                 "digest": "sha256:" + "a" * 64,
@@ -123,16 +123,23 @@ class RegistryDestinationTests(unittest.TestCase):
 
         self.assertEqual(
             destinations.parse_referrer_inventory(
-                json.dumps({"referrers": descriptors}).encode(),
+                json.dumps({"referrers": descriptors[:1]}).encode(),
                 repository=f"{GHCR}/api",
             ),
             [
-                {"artifactType": "application/spdx+json", "digest": "sha256:" + "b" * 64},
                 {
                     "artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json",
                     "digest": "sha256:" + "a" * 64,
                 },
             ],
+        )
+        self.assertEqual(
+            destinations.parse_referrer_inventory(
+                json.dumps({"referrers": descriptors[1:]}).encode(),
+                repository=f"{GHCR}/api",
+                subject="platform",
+            ),
+            [{"artifactType": "application/spdx+json", "digest": "sha256:" + "b" * 64}],
         )
 
     def test_referrer_inventory_rejects_missing_ambiguous_or_unbound_evidence(self):
@@ -146,12 +153,20 @@ class RegistryDestinationTests(unittest.TestCase):
             "reference": f"{GHCR}/api@sha256:" + "b" * 64,
             "artifactType": "application/spdx+json",
         }
-        for descriptors in ([], [bundle], [bundle, sbom, bundle]):
+        for descriptors in ([], [sbom], [bundle, sbom, bundle]):
             with self.subTest(descriptors=descriptors):
                 with self.assertRaises(DestinationError):
                     destinations.parse_referrer_inventory(
                         json.dumps({"referrers": descriptors}).encode(),
                         repository=f"{GHCR}/api",
+                    )
+        for descriptors in ([], [bundle], [sbom, sbom]):
+            with self.subTest(platform_descriptors=descriptors):
+                with self.assertRaises(DestinationError):
+                    destinations.parse_referrer_inventory(
+                        json.dumps({"referrers": descriptors}).encode(),
+                        repository=f"{GHCR}/api",
+                        subject="platform",
                     )
 
     def test_mirror_copies_all_platforms_and_requires_exact_digest_readback(self):
@@ -175,6 +190,7 @@ class RegistryDestinationTests(unittest.TestCase):
                     (1, b"", b"manifest unknown"), (0, payload, b"")
                 ]),
                 patch.object(destinations, "_oras", return_value=(0, b"", b"")) as run,
+                patch.object(destinations, "_platform_subjects", return_value=[]),
                 patch.object(destinations, "_referrer_inventory", side_effect=[referrers, referrers]),
             ):
                 receipt = destinations.mirror_candidate(
@@ -190,6 +206,90 @@ class RegistryDestinationTests(unittest.TestCase):
                 self.assertIn(f"{GHCR}/api@{digest}", copy_args)
                 self.assertIn(f"{GAR}/api:1.2.3-rc.123.1", copy_args)
 
+    def test_mirror_verifies_platform_sbom_referrer_at_platform_digest(self):
+        self.config["registryDestinations"] = [
+            {"provider": "ghcr", "namespace": GHCR}, GAR_DESTINATION
+        ]
+        platform = "sha256:" + "c" * 64
+        index_referrers = [{
+            "artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+            "digest": "sha256:" + "a" * 64,
+        }]
+        sbom_referrers = [{
+            "artifactType": "application/spdx+json", "digest": "sha256:" + "b" * 64,
+        }]
+        payload = b"index"
+        digest = "sha256:" + sha256(payload).hexdigest()
+        with TemporaryDirectory() as directory:
+            authfile = Path(directory) / "config.json"
+            authfile.write_text("{}", encoding="utf-8")
+            with (
+                patch.object(destinations, "_skopeo", side_effect=[
+                    (1, b"", b"manifest unknown"), (0, payload, b"")
+                ]),
+                patch.object(destinations, "_oras", return_value=(0, b"", b"")),
+                patch.object(destinations, "_platform_subjects", return_value=[platform]),
+                patch.object(destinations, "_referrer_inventory", side_effect=[
+                    index_referrers, sbom_referrers, index_referrers, sbom_referrers,
+                ]) as discover,
+            ):
+                destinations.mirror_candidate(
+                    self.config, OWNER, "api", "gar", "1.2.3-rc.123.1", digest, authfile
+                )
+            self.assertEqual(discover.call_args_list[1].args[1], platform)
+            self.assertEqual(discover.call_args_list[3].args[1], platform)
+            self.assertEqual(discover.call_args_list[1].args[3], "platform")
+            with (
+                patch.object(destinations, "_skopeo", side_effect=[
+                    (1, b"", b"manifest unknown"), (0, payload, b"")
+                ]),
+                patch.object(destinations, "_oras", return_value=(0, b"", b"")),
+                patch.object(destinations, "_platform_subjects", return_value=[platform]),
+                patch.object(destinations, "_referrer_inventory", side_effect=[
+                    index_referrers, sbom_referrers, index_referrers, [],
+                ]),
+            ):
+                with self.assertRaisesRegex(DestinationError, "platform SBOM differs"):
+                    destinations.mirror_candidate(
+                        self.config, OWNER, "api", "gar", "1.2.3-rc.123.1", digest, authfile
+                    )
+
+    def test_platform_subjects_are_bound_to_the_pinned_index_and_reviewed_platforms(self):
+        platform = "sha256:" + "c" * 64
+        evidence = "sha256:" + "d" * 64
+        manifest = "application/vnd.oci.image.manifest.v1+json"
+        payload = json.dumps({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [
+                {"mediaType": manifest, "digest": platform,
+                 "platform": {"os": "linux", "architecture": "amd64"}},
+                {"mediaType": manifest, "digest": evidence,
+                 "platform": {"os": "unknown", "architecture": "unknown"},
+                 "annotations": {"vnd.docker.reference.type": "attestation-manifest",
+                                 "vnd.docker.reference.digest": platform}},
+            ],
+        }).encode()
+        digest = "sha256:" + sha256(payload).hexdigest()
+        with patch.object(destinations, "_skopeo", return_value=(0, payload, b"")):
+            self.assertEqual(
+                destinations._platform_subjects(
+                    f"{GHCR}/api", digest, Path("/tmp/auth.json"),
+                    [{"os": "linux", "architecture": "amd64"}],
+                ),
+                [platform],
+            )
+            with self.assertRaisesRegex(DestinationError, "pinned candidate digest"):
+                destinations._platform_subjects(
+                    f"{GHCR}/api", "sha256:" + "a" * 64, Path("/tmp/auth.json"),
+                    [{"os": "linux", "architecture": "amd64"}],
+                )
+            with self.assertRaisesRegex(DestinationError, "platform inventory"):
+                destinations._platform_subjects(
+                    f"{GHCR}/api", digest, Path("/tmp/auth.json"),
+                    [{"os": "linux", "architecture": "arm64"}],
+                )
+
     def test_mirror_is_idempotent_for_same_digest_and_rejects_conflicts(self):
         self.config["registryDestinations"] = [
             {"provider": "ghcr", "namespace": GHCR}, GAR_DESTINATION
@@ -201,6 +301,7 @@ class RegistryDestinationTests(unittest.TestCase):
             authfile.write_text("{}", encoding="utf-8")
             with (
                 patch.object(destinations, "_skopeo", return_value=(0, payload, b"")) as run,
+                patch.object(destinations, "_platform_subjects", return_value=[]),
                 patch.object(destinations, "_referrer_inventory", return_value=[
                     {"artifactType": "application/spdx+json", "digest": "sha256:" + "b" * 64},
                     {"artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json", "digest": "sha256:" + "a" * 64},
@@ -230,6 +331,7 @@ class RegistryDestinationTests(unittest.TestCase):
                     (1, b"", b"manifest unknown"), (0, payload, b"")
                 ]),
                 patch.object(destinations, "_oras", return_value=(0, b"", b"")),
+                patch.object(destinations, "_platform_subjects", return_value=[]),
                 patch.object(destinations, "_referrer_inventory", side_effect=[
                     [
                         {"artifactType": "application/spdx+json", "digest": "sha256:" + "b" * 64},
@@ -303,6 +405,7 @@ class RegistryDestinationTests(unittest.TestCase):
                     (1, b"", b"manifest unknown"), (0, payload, b"")
                 ]),
                 patch.object(destinations, "_oras", return_value=(0, b"", b"")) as run,
+                patch.object(destinations, "_platform_subjects", return_value=[]),
                 patch.object(destinations, "_referrer_inventory", side_effect=[referrers, referrers]),
                 redirect_stdout(output),
             ):
