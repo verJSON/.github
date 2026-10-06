@@ -21,7 +21,7 @@ Use a dedicated GitHub OIDC workload identity pool and provider for the private
 repository owner ID is `279365001`, numeric repository ID is `1356313946`, ref
 is `refs/heads/main`, event is `push`, and reusable publisher workflow identity
 is the reviewed `.github/workflows/container-candidate-publish.yml` at proposed
-contract commit `fe97219fd609c618b2238593c22d895d6fb18d15`. Check both the
+contract commit `f9b62501593a30406e2e25f041448827c2ea0a20`. Check both the
 reusable workflow path and `job_workflow_sha`; a caller-controlled workflow
 name or registry configuration is not sufficient authority. An absent or
 unexpected claim denies federation. The proposed commit is temporary canary
@@ -38,9 +38,9 @@ assertion.repository_owner_id == '279365001' &&
 assertion.repository_id == '1356313946' &&
 assertion.ref == 'refs/heads/main' &&
 assertion.event_name == 'push' &&
-assertion.job_workflow_sha == 'fe97219fd609c618b2238593c22d895d6fb18d15' &&
-(assertion.job_workflow_ref == 'Verjson/.github/.github/workflows/container-candidate-publish.yml@fe97219fd609c618b2238593c22d895d6fb18d15' ||
- assertion.job_workflow_ref == 'verJSON/.github/.github/workflows/container-candidate-publish.yml@fe97219fd609c618b2238593c22d895d6fb18d15')
+assertion.job_workflow_sha == 'f9b62501593a30406e2e25f041448827c2ea0a20' &&
+(assertion.job_workflow_ref == 'Verjson/.github/.github/workflows/container-candidate-publish.yml@f9b62501593a30406e2e25f041448827c2ea0a20' ||
+ assertion.job_workflow_ref == 'verJSON/.github/.github/workflows/container-candidate-publish.yml@f9b62501593a30406e2e25f041448827c2ea0a20')
 ```
 
 Grant only the matching repository principal set permission to impersonate a
