@@ -127,6 +127,7 @@ jobs:
           # value on stdout, then fails on the remainder, so stdout alone
           # cannot be trusted either. Require both: -e's exit status AND an
           # exact "true" on stdout.
+          # Capture the assignment's status here, before another command replaces $?.
           lane_check="$(jq -e '. == ["ubuntu-24.04"]' <<<"${PRIVILEGED_LANE:-}" 2>/dev/null)" \
             && lane_check_status=0 || lane_check_status=$?
           [ "$lane_check_status" -eq 0 ] && [ "$lane_check" = "true" ] || {
