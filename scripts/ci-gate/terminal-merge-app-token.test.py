@@ -117,7 +117,7 @@ def validate(document: dict, raw: str) -> list[str]:
         '''branch_path="$(jq -rn --arg branch "$DEFAULT_BRANCH" '$branch | @uri')"''',
         'repos/$TARGET_REPO/git/ref/heads/$branch_path',
         '.base.ref == $branch and .base.sha == $base',
-    ".draft == false",
+        ".draft == false",
         'index("HOLD")',
         'index("DO NOT MERGE")',
         'current_base_sha" = "$AUTHORIZED_BASE_SHA',
