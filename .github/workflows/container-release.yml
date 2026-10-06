@@ -152,7 +152,7 @@ jobs:
         with:
           registry: ${{ steps.candidate.outputs.registry_host }}
           username: oauth2accesstoken
-          password: ${{ steps.gar-auth.outputs.auth_token }}
+          password: ${{ steps.gar-auth.outputs.access_token }}
       - name: Fail-closed preflight and immutable plan
         env:
           VERSION: ${{ inputs.version }}

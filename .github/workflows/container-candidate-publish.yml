@@ -1175,7 +1175,7 @@ jobs:
         with:
           registry: ${{ matrix.gar.registryHost }}
           username: oauth2accesstoken
-          password: ${{ steps.gar-auth.outputs.auth_token }}
+          password: ${{ steps.gar-auth.outputs.access_token }}
       - name: Mirror and verify the complete OCI candidate
         env:
           CANDIDATE: ${{ needs.prepare.outputs.candidate }}

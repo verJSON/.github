@@ -92,12 +92,15 @@ def validate(workflow):
         step for step in login_steps
         if step.get("with", {}).get("registry") == "${{ steps.candidate.outputs.registry_host }}"
     ]
+    gar_auth = [step for step in promote["steps"] if step.get("id") == "gar-auth"]
+    if len(gar_auth) != 1 or gar_auth[0].get("with", {}).get("token_format") != "access_token":
+        errors.append("GAR authentication must mint an access token")
     if (
         not ghcr_logins
         or any(step.get("with", {}).get("password") != "${{ github.token }}" for step in ghcr_logins)
         or len(gar_logins) != 1
         or gar_logins[0].get("with", {}).get("username") != "oauth2accesstoken"
-        or gar_logins[0].get("with", {}).get("password") != "${{ steps.gar-auth.outputs.auth_token }}"
+        or gar_logins[0].get("with", {}).get("password") != "${{ steps.gar-auth.outputs.access_token }}"
     ):
         errors.append("registry login is not isolated to job credentials")
 
@@ -148,6 +151,21 @@ class ContainerReleaseAppTokenContractTest(unittest.TestCase):
         errors = validate(mutant)
         self.assertIn("App token escaped terminal release step", errors)
         self.assertIn("registry login is not isolated to job credentials", errors)
+
+    def test_rejects_intermediate_federation_token_for_gar(self):
+        mutant = copy.deepcopy(self.workflow)
+        login = next(
+            step for step in mutant["jobs"]["promote"]["steps"]
+            if step.get("with", {}).get("registry") == "${{ steps.candidate.outputs.registry_host }}"
+        )
+        login["with"]["password"] = "${{ steps.gar-auth.outputs.auth_token }}"
+        self.assertIn("registry login is not isolated to job credentials", validate(mutant))
+
+    def test_rejects_gar_auth_without_access_token_format(self):
+        mutant = copy.deepcopy(self.workflow)
+        auth = next(step for step in mutant["jobs"]["promote"]["steps"] if step.get("id") == "gar-auth")
+        auth["with"]["token_format"] = "id_token"
+        self.assertIn("GAR authentication must mint an access token", validate(mutant))
 
     def test_rejects_mint_after_first_mutation(self):
         mutant = copy.deepcopy(self.workflow)

@@ -137,6 +137,20 @@ class CosignWorkflowContractTests(unittest.TestCase):
             script,
         )
 
+    def test_gar_login_uses_the_generated_service_account_access_token(self):
+        workflow = yaml.safe_load(PUBLISH_WORKFLOW.read_text(encoding="utf-8"))
+        steps = workflow["jobs"]["mirror-gar"]["steps"]
+        auth = next(step for step in steps if step.get("id") == "gar-auth")
+        login = next(
+            step for step in steps
+            if step.get("with", {}).get("registry") == "${{ matrix.gar.registryHost }}"
+        )
+
+        self.assertEqual(auth["with"]["token_format"], "access_token")
+        self.assertEqual(
+            login["with"]["password"], "${{ steps.gar-auth.outputs.access_token }}"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
