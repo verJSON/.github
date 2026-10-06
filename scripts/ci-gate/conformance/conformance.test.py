@@ -786,6 +786,80 @@ class TheAllowlistIsExactlyWhatTheLaneMayAcquire(RefusalAssertions, unittest.Tes
             'refusal asserted below is satisfied by a validator that refuses '
             'every lock it is given')
 
+    def test_registry_scope_casing_does_not_change_an_approved_package_identity(self):
+        lock = npm_lock(APPROVED)
+        lock['packages'][f'node_modules/{APPROVED}']['resolved'] = (
+            github_packages_url('@verJSON/Compliance'))
+
+        self.assertAdmitted(
+            lock_validation([APPROVED], lock),
+            'the registry-issued URL differs in ASCII casing but names the '
+            'same package approved by the caller and recorded in the lock')
+
+    def test_registry_casing_does_not_approve_other_or_non_ascii_identities(self):
+        for identity in ('@verJSON/Unapproved', '@Other/Compliance',
+                         '@verjs\u043en/Compliance'):
+            with self.subTest(identity=identity):
+                lock = npm_lock(APPROVED)
+                lock['packages'][f'node_modules/{APPROVED}']['resolved'] = (
+                    github_packages_url(identity))
+
+                self.assertRefusedBecause(
+                    lock_validation([APPROVED], lock),
+                    f'unapproved GitHub Packages download: {identity}',
+                    'URL identity outside the exact ASCII approval was admitted')
+
+    def test_registry_casing_does_not_hide_a_mismatched_lock_name(self):
+        lock = npm_lock(APPROVED)
+        lock['packages'][f'node_modules/{APPROVED}'].update({
+            'name': '@verJSON/Compliance',
+            'resolved': github_packages_url('@verJSON/Compliance'),
+        })
+
+        self.assertRefusedBecause(
+            lock_validation([APPROVED], lock),
+            f'{APPROVED} lock entry aliases unexpected package',
+            'the URL casing exception also changed lock identity matching')
+
+    def test_registry_casing_does_not_relax_url_structure(self):
+        valid_url = github_packages_url('@verJSON/Compliance')
+        for resolved in (valid_url.replace('https:', 'http:', 1),
+                         valid_url + '?download=1', valid_url + '#archive',
+                         valid_url.replace('/download/', '/download/extra/', 1),
+                         valid_url.replace('@verJSON', '%40verJSON', 1)):
+            with self.subTest(resolved=resolved):
+                lock = npm_lock(APPROVED)
+                lock['packages'][f'node_modules/{APPROVED}']['resolved'] = resolved
+
+                self.assertRefusedBecause(
+                    lock_validation([APPROVED], lock),
+                    'invalid GitHub Packages download URL',
+                    'a malformed registry URL was admitted with mixed casing')
+
+    def test_registry_casing_keeps_integrity_and_digest_checks(self):
+        lock = npm_lock(APPROVED)
+        lock['packages'][f'node_modules/{APPROVED}']['resolved'] = (
+            github_packages_url('@verJSON/Compliance'))
+        invalid_integrity = json.loads(json.dumps(lock))
+        invalid_integrity['packages'][f'node_modules/{APPROVED}']['integrity'] = (
+            'sha512-invalid')
+        self.assertRefusedBecause(
+            lock_validation([APPROVED], invalid_integrity),
+            'requires one exact sha512 lock integrity',
+            'mixed URL casing bypassed the lock integrity check')
+
+        conflicting_digest = json.loads(json.dumps(lock))
+        conflicting_digest['packages'][f'node_modules/{APPROVED}']['integrity'] = (
+            lock_integrity(OUTSIDE_THE_ALLOWLIST))
+        nested_manifests = json.dumps(
+            [{'path': 'tools', 'approvedPackages': [APPROVED], 'scriptPlan': []}])
+        self.assertRefusedBecause(
+            lock_validation([APPROVED], lock,
+                            nested={'tools': conflicting_digest},
+                            nested_manifests=nested_manifests),
+            'repeats one download URL with different integrity',
+            'the same registry URL carried conflicting payload digests')
+
     def test_a_lane_with_no_internal_dependencies_is_acquirable(self):
         self.assertAdmitted(
             lock_validation([], npm_lock()),

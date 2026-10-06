@@ -910,7 +910,8 @@ jobs:
                               or any(part in ("", ".", "..") for part in parts[1:])):
                           sys.exit(f"invalid GitHub Packages download URL{where}: {resolved}")
                       registry_name = f"{parts[2]}/{parts[3]}"
-                      if parts[2] not in scopes or registry_name not in manifest_approved:
+                      if (not registry_name.isascii() or parts[2].lower() not in scopes
+                              or registry_name.lower() not in manifest_approved):
                           sys.exit(f"unapproved GitHub Packages download{where}: {registry_name}")
                       if not isinstance(integrity, str) or re.fullmatch(
                               r"sha512-[A-Za-z0-9+/]{86}==", integrity) is None:
@@ -930,7 +931,7 @@ jobs:
                       continue
                   if locked_name and locked_name != entry_name:
                       sys.exit(f"{entry_name} lock entry aliases unexpected package {locked_name}{where}")
-                  if registry_name != entry_name:
+                  if registry_name is None or registry_name.lower() != entry_name:
                       sys.exit(f"{entry_name} is not pinned to its GitHub Packages download URL{where}")
                   found.add(entry_name)
               return found
