@@ -136,6 +136,15 @@ class OidcTokenTests(unittest.TestCase):
             self.assertFalse(output.exists())
 
 
+class OrasAttachmentPathTests(unittest.TestCase):
+    def test_rejects_a_filename_that_changes_the_oras_media_type_argument(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "bundle:other.sigstore.json"
+            artifact.write_text("signed-bundle")
+            with self.assertRaisesRegex(MODULE.CosignEvidenceError, "media-type separator"):
+                MODULE._oras_relative_files(artifact)
+
+
 class SigstoreBundleTests(unittest.TestCase):
     def test_sbom_verification_reads_and_checks_the_original_gar_referrer(self):
         repository = "us-central1-docker.pkg.dev/verjson/candidates/example"
@@ -204,24 +213,34 @@ class SigstoreBundleTests(unittest.TestCase):
             )
         }
 
-        def run(command, check):
+        def run(command, check, cwd=None):
             self.assertTrue(check)
             if command[1] == "sign-blob":
                 Path(command[command.index("--bundle") + 1]).write_text("signed-bundle")
             elif command[1] == "attach":
+                self.assertIsNotNone(cwd)
+                self.assertTrue(Path(command[command.index("--export-manifest") + 1]).is_absolute())
+                for artifact in command[-2:]:
+                    relative = Path(artifact.split(":", 1)[0])
+                    self.assertFalse(relative.is_absolute())
+                    self.assertNotIn("..", relative.parts)
+                    self.assertTrue((Path(cwd) / relative).is_file())
                 Path(command[command.index("--export-manifest") + 1]).write_text(
                     '{"schemaVersion":2}'
                 )
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            sbom = root / "sbom.spdx.json"
+            (root / "source").mkdir()
+            (root / "temp").mkdir()
+            sbom = root / "source" / "sbom.spdx.json"
             sbom.write_text('{"spdxVersion":"SPDX-2.3"}')
             sbom_digest = "sha256:" + hashlib.sha256(sbom.read_bytes()).hexdigest()
             token_path = root / "oidc-token"
             token_path.write_text("header.payload.signature")
-            bundle = root / "sbom.sigstore.json"
-            referrer = root / "sbom-referrer.json"
+            bundle = root / "temp" / "sbom.sigstore.json"
+            referrer = root / "temp" / "sbom-referrer.json"
+            relative_referrer = Path(os.path.relpath(referrer))
             with patch.object(MODULE, "decode_github_oidc_claims", return_value=claims), patch.object(
                 subprocess, "run", side_effect=run
             ) as run_command:
@@ -229,7 +248,7 @@ class SigstoreBundleTests(unittest.TestCase):
                     sbom=sbom,
                     identity_token=token_path,
                     bundle=bundle,
-                    referrer_manifest=referrer,
+                    referrer_manifest=relative_referrer,
                     repository="ghcr.io/verjson/example",
                     digest="sha256:" + "a" * 64,
                 )
@@ -503,7 +522,7 @@ class SigstoreBundleTests(unittest.TestCase):
             "sha": "c" * 40,
         }
 
-        def run(command, check):
+        def run(command, check, cwd=None):
             self.assertTrue(check)
             if command[1] == "attest-blob":
                 bundle = Path(command[command.index("--bundle") + 1])
@@ -520,6 +539,12 @@ class SigstoreBundleTests(unittest.TestCase):
                     )
                 )
             elif command[1] == "attach":
+                self.assertIsNotNone(cwd)
+                self.assertTrue(Path(command[command.index("--export-manifest") + 1]).is_absolute())
+                relative = Path(command[-1].split(":", 1)[0])
+                self.assertFalse(relative.is_absolute())
+                self.assertNotIn("..", relative.parts)
+                self.assertTrue((Path(cwd) / relative).is_file())
                 manifest = Path(command[command.index("--export-manifest") + 1])
                 manifest.write_text('{"schemaVersion":2}')
 
@@ -529,13 +554,14 @@ class SigstoreBundleTests(unittest.TestCase):
             token.write_text("header.payload.signature")
             bundle = root / "provenance.sigstore.json"
             manifest = root / "referrer.json"
+            relative_manifest = Path(os.path.relpath(manifest))
             with patch.object(subprocess, "run", side_effect=run) as run_command:
                 receipt = MODULE.sign_and_attach_statement(
                     statement,
                     claims,
                     token,
                     bundle,
-                    manifest,
+                    relative_manifest,
                     repository="ghcr.io/verjson/example",
                     digest="sha256:" + "a" * 64,
                 )

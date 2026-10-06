@@ -142,6 +142,15 @@ def cosign_verify_blob_command(
     return command
 
 
+def _oras_relative_files(*paths: Path) -> tuple[Path, tuple[str, ...]]:
+    resolved = tuple(path.resolve(strict=True) for path in paths)
+    cwd = Path(os.path.commonpath([str(path.parent) for path in resolved]))
+    relative = tuple(path.relative_to(cwd).as_posix() for path in resolved)
+    if any(":" in name for name in relative):
+        raise CosignEvidenceError("ORAS artifact path contains a media-type separator")
+    return cwd, relative
+
+
 def sign_and_attach_statement(
     statement: dict[str, Any],
     identity_claims: dict[str, Any],
@@ -153,6 +162,7 @@ def sign_and_attach_statement(
     digest: str,
 ) -> dict[str, str]:
     image_digest = digest.removeprefix("sha256:")
+    referrer_manifest = referrer_manifest.resolve()
     publisher_ref = identity_claims.get("job_workflow_ref")
     if not isinstance(publisher_ref, str) or not publisher_ref:
         raise CosignEvidenceError("GitHub OIDC publisher workflow claim is missing")
@@ -185,6 +195,7 @@ def sign_and_attach_statement(
         if signed_statement != statement:
             raise CosignEvidenceError("Cosign bundle statement differs from controlled provenance")
         artifact_type = "application/vnd.dev.sigstore.bundle.v0.3+json"
+        oras_cwd, (bundle_file,) = _oras_relative_files(bundle)
         subprocess.run(
             [
                 "oras",
@@ -194,9 +205,10 @@ def sign_and_attach_statement(
                 "--export-manifest",
                 str(referrer_manifest),
                 f"{repository}@sha256:{image_digest}",
-                f"{bundle}:{artifact_type}",
+                f"{bundle_file}:{artifact_type}",
             ],
             check=True,
+            cwd=oras_cwd,
         )
     finally:
         statement_path.unlink(missing_ok=True)
@@ -248,6 +260,7 @@ def sign_and_attach_sbom(
     repository: str,
     digest: str,
 ) -> dict[str, str]:
+    referrer_manifest = referrer_manifest.resolve()
     receipt = sign_and_verify_blob(
         blob=sbom,
         identity_token=identity_token,
@@ -259,6 +272,7 @@ def sign_and_attach_sbom(
     image_digest = digest.removeprefix("sha256:")
     if len(image_digest) != 64 or any(character not in "0123456789abcdef" for character in image_digest):
         raise CosignEvidenceError("image digest must be a lowercase sha256 digest")
+    oras_cwd, (sbom_file, bundle_file) = _oras_relative_files(sbom, bundle)
     subprocess.run(
         [
             "oras",
@@ -268,10 +282,11 @@ def sign_and_attach_sbom(
             "--export-manifest",
             str(referrer_manifest),
             f"{repository}@sha256:{image_digest}",
-            f"{sbom}:application/spdx+json",
-            f"{bundle}:application/vnd.dev.sigstore.bundle.v0.3+json",
+            f"{sbom_file}:application/spdx+json",
+            f"{bundle_file}:application/vnd.dev.sigstore.bundle.v0.3+json",
         ],
         check=True,
+        cwd=oras_cwd,
     )
     return {
         **receipt,

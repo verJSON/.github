@@ -22,3 +22,5 @@ The third live canary exposed Buildx's single-platform provenance shape;
 the verifier accepts that exact shape after checking the published OCI index
 against the reviewed platform before requesting an OIDC token.
 The bounded canary identity follows the reviewed BuildKit-shape fix commit.
+ORAS attachments now use validated relative file paths so the signed
+provenance and SPDX bundles can be stored without disabling path validation.
