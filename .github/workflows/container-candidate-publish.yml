@@ -1327,14 +1327,26 @@ jobs:
           run_metadata="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
           [ "$(jq -er '.run_attempt | tostring' <<<"$run_metadata")" = "$GITHUB_RUN_ATTEMPT" ] || { echo "::error::candidate run attempt changed"; exit 1; }
           candidate_published_at="$(jq -er '.run_started_at' <<<"$run_metadata")"
-          for image in candidate-images/*/image.json; do
+          shopt -s nullglob
+          image_artifacts=(candidate-images/*/image.json)
+          sbom_artifacts=(candidate-sboms/*/sbom.json)
+          registry_artifacts=(candidate-registry/*/registry-receipt.json)
+          [ ! -f candidate-images/image.json ] || image_artifacts+=(candidate-images/image.json)
+          [ ! -f candidate-sboms/sbom.json ] || sbom_artifacts+=(candidate-sboms/sbom.json)
+          [ ! -f candidate-registry/registry-receipt.json ] || registry_artifacts+=(candidate-registry/registry-receipt.json)
+          [ "${#image_artifacts[@]}" -gt 0 ] || { echo "::error::candidate image artifacts are missing"; exit 1; }
+          [ "${#sbom_artifacts[@]}" -gt 0 ] || { echo "::error::candidate SBOM artifacts are missing"; exit 1; }
+          if [ "$HAS_GAR" = true ]; then
+            [ "${#registry_artifacts[@]}" -gt 0 ] || { echo "::error::GAR receipt artifacts are missing"; exit 1; }
+          fi
+          for image in "${image_artifacts[@]}"; do
             repository="$(jq -r '.repository' "$image")"
             variant="$(jq -r '.variant' "$image")"
             index_digest="$(jq -r '.indexDigest' "$image")"
             expected_destinations="$(python3 "$destination_helper" --config "$CONFIG_PATH" --owner "$GITHUB_REPOSITORY_OWNER" --variant "$variant" --digest "$index_digest" --published-at "$candidate_published_at")"
             ghcr_receipt="$(python3 "$destination_helper" --config "$CONFIG_PATH" --owner "$GITHUB_REPOSITORY_OWNER" --verify-provider ghcr --variant "$variant" --tag "$CANDIDATE" --digest "$index_digest" --authfile "$HOME/.docker/config.json" --published-at "$candidate_published_at")"
             if [ "$HAS_GAR" = true ]; then
-              gar_receipt="$(jq -cs --arg variant "$variant" '[.[] | select(.variant == $variant)] | if length == 1 then (.[0] | del(.variant)) else error("expected one verified GAR receipt for image variant") end' candidate-registry/*/registry-receipt.json)"
+              gar_receipt="$(jq -cs --arg variant "$variant" '[.[] | select(.variant == $variant)] | if length == 1 then (.[0] | del(.variant)) else error("expected one verified GAR receipt for image variant") end' "${registry_artifacts[@]}")"
               receipts="$(jq -cn --argjson ghcr "$ghcr_receipt" --argjson gar "$gar_receipt" '[$ghcr,$gar]')"
             else
               receipts="[$ghcr_receipt]"
@@ -1361,7 +1373,7 @@ jobs:
             provenance_referrer_digest="$(jq -er '.provenance.referrerManifestDigest | select(test("^sha256:[0-9a-f]{64}$"))' "$image")"
             sbom_attestations="$(jq -sc --arg variant "$variant" \
               '[.[] | select(.imageVariant == $variant) | del(.imageVariant)] | sort_by(.os,.architecture,(.variant // ""))' \
-              candidate-sboms/*/sbom.json)"
+              "${sbom_artifacts[@]}")"
             jq -n --arg variant "$variant" --arg repository "$repository" --arg index "$index_digest" \
               --arg commit "sha-$GITHUB_SHA" --arg candidate "$CANDIDATE" --arg workflow "Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF" \
               --arg bundleDigest "$provenance_bundle_digest" --arg referrerManifestDigest "$provenance_referrer_digest" \

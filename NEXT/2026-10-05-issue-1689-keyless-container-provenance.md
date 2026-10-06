@@ -47,3 +47,6 @@ GAR may surface the BuildKit attestation descriptor already present in the
 validated OCI index as an additional platform referrer. Mirror read-back
 accepts that exact descriptor while requiring the same SPDX and Cosign
 referrers and rejecting unrelated additions.
+Candidate manifest assembly now handles the direct extraction used when one
+artifact matches a download pattern and named subdirectories when several
+match; it rejects missing image, SBOM, or required GAR receipt artifacts.

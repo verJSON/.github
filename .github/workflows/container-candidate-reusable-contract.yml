@@ -9,6 +9,7 @@ on:
       - 'scripts/container_cosign_provenance.py'
       - 'scripts/container_cosign_provenance.test.py'
       - 'scripts/container_cosign_workflow_contract.test.py'
+      - 'scripts/container_candidate_artifact_layout.test.py'
       - 'scripts/container_oci_index.py'
       - 'scripts/container_private_dependencies.py'
       - 'scripts/container_private_dependencies.test.py'

@@ -456,6 +456,7 @@ for job in ("validate", "publish"):
     )
 PY
 python3 "$root/scripts/container_private_dependencies.test.py"
+python3 "$root/scripts/container_candidate_artifact_layout.test.py"
 python3 "$root/scripts/container_registry_destinations.test.py"
 python3 "$root/scripts/container_oci_index.test.py"
 [ "$(jq -r '((.privateNodePackages // []) | length > 0)' "$root/scripts/fixtures/container-candidate/single.json")" = false ]
