@@ -209,6 +209,7 @@ def sign_and_attach_statement(
             ],
             check=True,
             cwd=oras_cwd,
+            stdout=subprocess.DEVNULL,
         )
     finally:
         statement_path.unlink(missing_ok=True)
@@ -287,6 +288,7 @@ def sign_and_attach_sbom(
         ],
         check=True,
         cwd=oras_cwd,
+        stdout=subprocess.DEVNULL,
     )
     return {
         **receipt,
@@ -359,6 +361,7 @@ def verify_registry_image_provenance(
         subprocess.run(
             ["oras", "pull", "--output", directory, referrer["reference"]],
             check=True,
+            stdout=subprocess.DEVNULL,
         )
         bundles = list(Path(directory).rglob("*.sigstore.json"))
         if len(bundles) != 1:
@@ -587,6 +590,7 @@ def verify_registry_sbom(
         subprocess.run(
             ["oras", "pull", "--output", directory, matches[0]["reference"]],
             check=True,
+            stdout=subprocess.DEVNULL,
         )
         spdx_files = list(Path(directory).rglob("*.spdx.json"))
         bundles = list(Path(directory).rglob("*.sigstore.json"))

@@ -25,3 +25,7 @@ The bounded canary identity follows the reviewed BuildKit-shape fix commit.
 ORAS attachments now use validated relative file paths so the signed
 provenance and SPDX bundles can be stored without disabling path validation.
 The bounded GAR canary identity is repinned to that reviewed helper commit.
+ORAS attachment progress no longer enters the machine-readable Cosign receipt;
+the signed bundle and exported manifest remain the evidence inputs.
+ORAS pull progress is also isolated from JSON verification receipts while
+downloaded referrer files remain the verified evidence inputs.

@@ -180,6 +180,7 @@ class SigstoreBundleTests(unittest.TestCase):
                     "",
                 )
             if command[:2] == ["oras", "pull"]:
+                self.assertEqual(kwargs.get("stdout"), subprocess.DEVNULL)
                 output = Path(command[command.index("--output") + 1])
                 (output / "sbom.spdx.json").write_bytes(spdx)
                 (output / "sbom.sigstore.json").write_bytes(bundle)
@@ -213,12 +214,13 @@ class SigstoreBundleTests(unittest.TestCase):
             )
         }
 
-        def run(command, check, cwd=None):
+        def run(command, check, cwd=None, stdout=None):
             self.assertTrue(check)
             if command[1] == "sign-blob":
                 Path(command[command.index("--bundle") + 1]).write_text("signed-bundle")
             elif command[1] == "attach":
                 self.assertIsNotNone(cwd)
+                self.assertEqual(stdout, subprocess.DEVNULL)
                 self.assertTrue(Path(command[command.index("--export-manifest") + 1]).is_absolute())
                 for artifact in command[-2:]:
                     relative = Path(artifact.split(":", 1)[0])
@@ -522,7 +524,7 @@ class SigstoreBundleTests(unittest.TestCase):
             "sha": "c" * 40,
         }
 
-        def run(command, check, cwd=None):
+        def run(command, check, cwd=None, stdout=None):
             self.assertTrue(check)
             if command[1] == "attest-blob":
                 bundle = Path(command[command.index("--bundle") + 1])
@@ -540,6 +542,7 @@ class SigstoreBundleTests(unittest.TestCase):
                 )
             elif command[1] == "attach":
                 self.assertIsNotNone(cwd)
+                self.assertEqual(stdout, subprocess.DEVNULL)
                 self.assertTrue(Path(command[command.index("--export-manifest") + 1]).is_absolute())
                 relative = Path(command[-1].split(":", 1)[0])
                 self.assertFalse(relative.is_absolute())
@@ -610,10 +613,11 @@ class SigstoreBundleTests(unittest.TestCase):
             ]
         }
 
-        def run(command, **_kwargs):
+        def run(command, **kwargs):
             if command[1] == "discover":
                 return SimpleNamespace(stdout=json.dumps(discovery))
             if command[1] == "pull":
+                self.assertEqual(kwargs.get("stdout"), subprocess.DEVNULL)
                 bundle_path = Path(command[command.index("--output") + 1]) / "provenance.sigstore.json"
                 bundle_path.write_text(json.dumps(bundle))
             return SimpleNamespace(stdout="")
