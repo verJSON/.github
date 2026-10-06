@@ -1070,7 +1070,7 @@ jobs:
           docker buildx imagetools inspect "$REPOSITORY@$index_digest" --format '{{json .SBOM}}' \
             > "$RUNNER_TEMP/sbom-index.json"
           python3 "$helper" spdx-document --sbom-index "$RUNNER_TEMP/sbom-index.json" \
-            --platform "$platform_key" > sbom.spdx.json
+            --platform "$platform_key" --inventory "$inventory" > sbom.spdx.json
           echo "digest=$platform_digest" >> "$GITHUB_OUTPUT"
       - id: sbom-attestation
         name: Sign the platform SBOM and preserve its original bundle

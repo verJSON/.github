@@ -30,3 +30,6 @@ the signed bundle and exported manifest remain the evidence inputs.
 ORAS pull progress is also isolated from JSON verification receipts while
 downloaded referrer files remain the verified evidence inputs.
 The bounded GAR canary identity now follows that reviewed receipt fix commit.
+The SPDX export accepts Buildx's unwrapped document only when the validated
+OCI index has exactly the requested single platform; multi-platform exports
+still require an exact platform key.

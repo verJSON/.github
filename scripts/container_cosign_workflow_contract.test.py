@@ -121,5 +121,22 @@ class CosignWorkflowContractTests(unittest.TestCase):
                 )
 
 
+    def test_sbom_export_uses_validated_oci_inventory(self):
+        workflow = yaml.safe_load(PUBLISH_WORKFLOW.read_text(encoding="utf-8"))
+        steps = workflow["jobs"]["attest-sbom"]["steps"]
+        subject = next(step for step in steps if step.get("id") == "sbom-subject")
+        script = subject["run"]
+
+        self.assertIn(
+            'python3 "$helper" index --index "$raw_index" '
+            '--reviewed-platforms "$reviewed_platforms" > "$inventory"',
+            script,
+        )
+        self.assertIn(
+            '--platform "$platform_key" --inventory "$inventory" > sbom.spdx.json',
+            script,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

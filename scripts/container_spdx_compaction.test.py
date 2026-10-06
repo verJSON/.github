@@ -20,9 +20,15 @@ class SPDXCompactionTest(unittest.TestCase):
             "packages": [{"name": "example", "versionInfo": "1.0.0"}],
         }
         self.index = {"linux/amd64": {"SPDX": self.document}}
+        self.inventory = {
+            "platforms": [
+                {"os": "linux", "architecture": "amd64"},
+                {"os": "linux", "architecture": "arm64"},
+            ]
+        }
 
     def test_compaction_preserves_the_complete_spdx_document(self):
-        rendered = MODULE.compact_spdx_document(self.index, "linux/amd64")
+        rendered = MODULE.compact_spdx_document(self.index, "linux/amd64", self.inventory)
 
         self.assertEqual(json.loads(rendered), self.document)
         self.assertEqual(rendered, json.dumps(self.document, separators=(",", ":")) + "\n")
@@ -40,19 +46,19 @@ class SPDXCompactionTest(unittest.TestCase):
         self.addCleanup(setattr, MODULE, "MAX_ATTESTATION_PREDICATE_BYTES", original_limit)
         MODULE.MAX_ATTESTATION_PREDICATE_BYTES = compact_size
 
-        rendered = MODULE.compact_spdx_document(self.index, "linux/amd64")
+        rendered = MODULE.compact_spdx_document(self.index, "linux/amd64", self.inventory)
 
         self.assertEqual(len(rendered.encode("utf-8")), compact_size)
 
     def test_exact_platform_binding_rejects_missing_or_ambiguous_fallbacks(self):
         with self.assertRaisesRegex(MODULE.OCIIndexError, "no exact platform entry"):
-            MODULE.compact_spdx_document(self.index, "linux/arm64")
+            MODULE.compact_spdx_document(self.index, "linux/arm64", self.inventory)
 
     def test_malformed_spdx_identity_is_rejected(self):
         self.document["spdxVersion"] = "SPDX-2.2"
 
         with self.assertRaisesRegex(MODULE.OCIIndexError, "must be an SPDX 2.3 document"):
-            MODULE.compact_spdx_document(self.index, "linux/amd64")
+            MODULE.compact_spdx_document(self.index, "linux/amd64", self.inventory)
 
     def test_compact_document_over_the_github_limit_is_rejected(self):
         original_limit = MODULE.MAX_ATTESTATION_PREDICATE_BYTES
@@ -61,13 +67,13 @@ class SPDXCompactionTest(unittest.TestCase):
         self.document["name"] = "x" * 128
 
         with self.assertRaisesRegex(MODULE.OCIIndexError, "exceeds GitHub's .* predicate limit"):
-            MODULE.compact_spdx_document(self.index, "linux/amd64")
+            MODULE.compact_spdx_document(self.index, "linux/amd64", self.inventory)
 
     def test_non_standard_json_numbers_are_rejected(self):
         self.document["invalid"] = float("nan")
 
         with self.assertRaisesRegex(MODULE.OCIIndexError, "not strict JSON"):
-            MODULE.compact_spdx_document(self.index, "linux/amd64")
+            MODULE.compact_spdx_document(self.index, "linux/amd64", self.inventory)
 
 
 if __name__ == "__main__":
