@@ -25,19 +25,60 @@ class ArtifactExtractionTest(unittest.TestCase):
                 value.writestr(name, content)
         return path
 
-    def test_extracts_the_single_bounded_manifest(self):
+    def test_extracts_bounded_manifest_and_bundle(self):
         output = self.root / "candidate.json"
-        extractor.extract(self.archive([("candidate-manifest.json", b"{}")]), output)
+        bundle = self.root / "candidate.sigstore.json"
+        extractor.extract(
+            self.archive(
+                [
+                    ("candidate-manifest.json", b"{}"),
+                    ("candidate-manifest.sigstore.json", b"bundle"),
+                ]
+            ),
+            output,
+            bundle,
+        )
         self.assertEqual(b"{}", output.read_bytes())
+        self.assertEqual(b"bundle", bundle.read_bytes())
+
+    def test_extracts_manifest_and_cosign_bundle_as_the_exact_candidate_artifact(self):
+        output = self.root / "candidate.json"
+        bundle = self.root / "candidate.sigstore.json"
+        extractor.extract(
+            self.archive(
+                [
+                    ("candidate-manifest.json", b"{}"),
+                    ("candidate-manifest.sigstore.json", b"bundle"),
+                ]
+            ),
+            output,
+            bundle,
+        )
+
+        self.assertEqual(b"{}", output.read_bytes())
+        self.assertEqual(b"bundle", bundle.read_bytes())
 
     def test_rejects_extra_and_traversal_entries(self):
         for entries in ([('candidate-manifest.json', b'{}'), ('extra', b'x')], [('../candidate-manifest.json', b'{}')]):
             with self.subTest(entries=entries), self.assertRaisesRegex(ValueError, "exactly"):
-                extractor.extract(self.archive(entries), self.root / "output")
+                extractor.extract(
+                    self.archive(entries),
+                    self.root / "output",
+                    self.root / "bundle",
+                )
 
     def test_rejects_compressed_oversized_manifest(self):
         with self.assertRaisesRegex(ValueError, "oversized"):
-            extractor.extract(self.archive([("candidate-manifest.json", b"x" * (extractor.MAX_BYTES + 1))]), self.root / "output")
+            extractor.extract(
+                self.archive(
+                    [
+                        ("candidate-manifest.json", b"x" * (extractor.MAX_BYTES + 1)),
+                        ("candidate-manifest.sigstore.json", b"bundle"),
+                    ]
+                ),
+                self.root / "output",
+                self.root / "bundle",
+            )
 
 
 if __name__ == "__main__":

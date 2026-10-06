@@ -36,6 +36,7 @@ TAG = re.compile(
     r"^(?:sha-[0-9a-f]{40}|(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-rc\.[0-9]+\.[0-9]+)?)$"
 )
 DEFAULT_CANDIDATE_RETENTION_DAYS = 88
+DOCKER_ATTESTATION_REFERRER = "application/vnd.docker.attestation.manifest.v1+json"
 
 
 def _object(value: Any, field: str) -> dict[str, Any]:
@@ -155,16 +156,117 @@ def _skopeo(arguments: list[str]) -> tuple[int, bytes, bytes]:
     return result.returncode, result.stdout, result.stderr
 
 
+def _oras(arguments: list[str]) -> tuple[int, bytes, bytes]:
+    try:
+        result = subprocess.run(
+            ["oras", *arguments],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        raise DestinationError("ORAS is unavailable") from error
+    return result.returncode, result.stdout, result.stderr
+
+
+def parse_referrer_inventory(
+    payload: bytes, *, repository: str, subject: str = "index"
+) -> list[dict[str, str]]:
+    try:
+        discovery = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise DestinationError("registry referrer discovery returned invalid JSON") from error
+    if not isinstance(discovery, dict) or not isinstance(discovery.get("referrers"), list):
+        raise DestinationError("registry referrer discovery is malformed")
+
+    referrers: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for offset, raw in enumerate(discovery["referrers"]):
+        if not isinstance(raw, dict):
+            raise DestinationError(f"registry referrer {offset} is malformed")
+        digest = raw.get("digest")
+        artifact_type = raw.get("artifactType")
+        if not isinstance(digest, str) or not DIGEST.fullmatch(digest):
+            raise DestinationError(f"registry referrer {offset} digest is malformed")
+        if not isinstance(artifact_type, str) or not artifact_type:
+            raise DestinationError(f"registry referrer {offset} artifact type is missing")
+        if raw.get("reference") != f"{repository}@{digest}":
+            raise DestinationError(f"registry referrer {offset} is not bound to the image repository")
+        if digest in seen:
+            raise DestinationError("registry referrer inventory contains duplicate digests")
+        seen.add(digest)
+        referrers.append({"artifactType": artifact_type, "digest": digest})
+
+    required_type = {
+        "index": "application/vnd.dev.sigstore.bundle.v0.3+json",
+        "platform": "application/spdx+json",
+    }.get(subject)
+    if required_type is None:
+        raise DestinationError("registry referrer subject is unsupported")
+    if sum(item["artifactType"] == required_type for item in referrers) != 1:
+        raise DestinationError(f"registry {subject} is missing one unique {required_type} referrer")
+    return sorted(referrers, key=lambda item: (item["artifactType"], item["digest"]))
+
+
 def _remote_digest(reference: str, authfile: Path) -> str | None:
     status, output, error = _skopeo([
-        "--authfile", str(authfile), "inspect", "--raw", f"docker://{reference}"
+        "inspect", "--authfile", str(authfile), "--raw", f"docker://{reference}"
     ])
     if status:
         message = error.decode("utf-8", errors="replace").lower()
-        if any(marker in message for marker in ("manifest unknown", "manifest not found", "no such manifest")):
+        if any(marker in message for marker in (
+            "unauthorized", "denied", "forbidden", "authentication required",
+            "insufficient_scope", "permission denied",
+        )) or re.search(
+            r"\b(?:http(?:\s+status(?:\s*code)?)?|status(?:\s*code)?)\s*[:=]?\s*(?:401|403)\b",
+            message,
+        ):
+            raise DestinationError("registry observation failed: authorization")
+        if any(marker in message for marker in (
+            "name_unknown", "name unknown", "repository not found", "unknown repository",
+        )):
+            raise DestinationError("registry observation failed: repository")
+        if any(marker in message for marker in (
+            "manifest unknown", "manifest_unknown", "manifest not found", "no such manifest"
+        )):
             return None
-        raise DestinationError("registry observation failed")
+        raise DestinationError(f"registry observation failed: skopeo exit {status}")
     return "sha256:" + hashlib.sha256(output).hexdigest()
+
+
+def _referrer_inventory(
+    repository: str, digest: str, authfile: Path, subject: str = "index"
+) -> list[dict[str, str]]:
+    status, output, _ = _oras([
+        "discover",
+        "--format",
+        "json",
+        "--depth",
+        "1",
+        "--registry-config",
+        str(authfile),
+        f"{repository}@{digest}",
+    ])
+    if status != 0:
+        raise DestinationError("registry referrer discovery failed")
+    return parse_referrer_inventory(output, repository=repository, subject=subject)
+
+
+def _platform_subjects(
+    repository: str, digest: str, authfile: Path, reviewed_platforms: Any
+) -> dict[str, str]:
+    from container_oci_index import OCIIndexError, validate_index
+
+    status, payload, _ = _skopeo([
+        "inspect", "--authfile", str(authfile), "--raw", f"docker://{repository}@{digest}"
+    ])
+    if status or "sha256:" + hashlib.sha256(payload).hexdigest() != digest:
+        raise DestinationError("source OCI index differs from the pinned candidate digest")
+    try:
+        inventory = validate_index(json.loads(payload), reviewed_platforms)
+    except (UnicodeDecodeError, json.JSONDecodeError, OCIIndexError) as error:
+        raise DestinationError("source OCI platform inventory is invalid") from error
+    return {evidence["subjectDigest"]: evidence["digest"] for evidence in inventory["evidence"]}
 
 
 def mirror_candidate(
@@ -193,23 +295,44 @@ def mirror_candidate(
     existing = _remote_digest(target, authfile)
     if existing is not None and existing != digest:
         raise DestinationError("destination tag already names a different digest")
+    platforms = _platform_subjects(source, digest, authfile, image.get("platforms"))
+    source_referrers = _referrer_inventory(source, digest, authfile)
+    platform_referrers = {
+        platform: _referrer_inventory(source, platform, authfile, "platform")
+        for platform in platforms
+    }
     if existing is None:
-        status, _, _ = _skopeo([
-            "--src-authfile", str(authfile),
-            "--dest-authfile", str(authfile),
-            "copy", "--all", "--preserve-digests",
-            f"docker://{source}@{digest}", f"docker://{target}",
+        status, _, _ = _oras([
+            "cp", "--recursive",
+            "--from-registry-config", str(authfile),
+            "--to-registry-config", str(authfile),
+            f"{source}@{digest}", target,
         ])
         if status:
             raise DestinationError("registry mirror copy failed")
     observed = _remote_digest(target, authfile)
     if observed != digest:
         raise DestinationError("destination digest differs from the candidate digest")
+    destination_referrers = _referrer_inventory(destination["repository"], digest, authfile)
+    if destination_referrers != source_referrers:
+        raise DestinationError("destination index provenance differs from source evidence")
+    for platform, referrers in platform_referrers.items():
+        observed_referrers = _referrer_inventory(destination["repository"], platform, authfile, "platform")
+        indexed_attestation = {
+            "artifactType": DOCKER_ATTESTATION_REFERRER,
+            "digest": platforms[platform],
+        }
+        with_indexed_attestation = sorted(
+            [*referrers, indexed_attestation], key=lambda item: (item["artifactType"], item["digest"])
+        )
+        if observed_referrers != referrers and observed_referrers != with_indexed_attestation:
+            raise DestinationError("destination platform SBOM differs from source evidence")
     receipt = {
         "provider": provider,
         "variant": variant,
         "repository": destination["repository"],
         "digest": digest,
+        "evidenceReferrers": destination_referrers,
     }
     return _with_candidate_expiry(receipt, config, owner, variant, digest, published_at)
 

@@ -115,6 +115,48 @@ class OCIIndexTest(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.OCIIndexError, "exactly one SPDX layer"):
             MODULE.validate_spdx_evidence(candidate)
 
+    def test_unwrapped_sbom_uses_the_only_validated_platform(self):
+        document = {"spdxVersion": "SPDX-2.3", "SPDXID": "SPDXRef-DOCUMENT"}
+        inventory = {"platforms": [{"os": "linux", "architecture": "amd64"}]}
+
+        result = MODULE.compact_spdx_document({"SPDX": document}, "linux/amd64", inventory)
+
+        self.assertEqual(json.loads(result), document)
+
+    def test_unwrapped_sbom_rejects_multiple_validated_platforms(self):
+        document = {"spdxVersion": "SPDX-2.3", "SPDXID": "SPDXRef-DOCUMENT"}
+        inventory = {
+            "platforms": [
+                {"os": "linux", "architecture": "amd64"},
+                {"os": "linux", "architecture": "arm64"},
+            ]
+        }
+
+        with self.assertRaisesRegex(MODULE.OCIIndexError, "exact platform entry"):
+            MODULE.compact_spdx_document({"SPDX": document}, "linux/amd64", inventory)
+
+    def test_wrapped_sbom_keeps_exact_platform_selection(self):
+        document = {"spdxVersion": "SPDX-2.3", "SPDXID": "SPDXRef-DOCUMENT"}
+        inventory = {
+            "platforms": [
+                {"os": "linux", "architecture": "amd64"},
+                {"os": "linux", "architecture": "arm64"},
+            ]
+        }
+
+        result = MODULE.compact_spdx_document(
+            {"linux/amd64": {"SPDX": document}}, "linux/amd64", inventory
+        )
+
+        self.assertEqual(json.loads(result), document)
+
+    def test_sbom_rejects_platform_not_in_validated_inventory(self):
+        document = {"spdxVersion": "SPDX-2.3", "SPDXID": "SPDXRef-DOCUMENT"}
+        inventory = {"platforms": [{"os": "linux", "architecture": "amd64"}]}
+
+        with self.assertRaisesRegex(MODULE.OCIIndexError, "validated OCI inventory"):
+            MODULE.compact_spdx_document({"SPDX": document}, "linux/arm64", inventory)
+
 
 if __name__ == "__main__":
     unittest.main()

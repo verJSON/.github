@@ -64,6 +64,266 @@ def validate_verified_provenance(
     return "verified-bundle-sha256:" + hashlib.sha256(bundle).hexdigest()
 
 
+def validate_cosign_provenance(
+    statement: Any,
+    *,
+    buildkit_provenance: Any,
+    reviewed_platforms: Any,
+    repository: str,
+    digest: str,
+    source_repository: str,
+    source_repository_id: str,
+    source_ref: str,
+    source_commit: str,
+    caller_workflow_ref: str,
+    caller_workflow_sha: str,
+    publisher_workflow_ref: str,
+    contract_sha: str,
+    base_repository: str | None = None,
+    base_digest: str | None = None,
+) -> str:
+    statement = _object(statement, "Cosign provenance statement")
+    if statement.get("_type") != "https://in-toto.io/Statement/v1":
+        raise RetryEvidenceError("Cosign provenance statement type differs")
+    if statement.get("predicateType") != "https://slsa.dev/provenance/v1":
+        raise RetryEvidenceError("Cosign provenance predicate type differs")
+
+    subjects = statement.get("subject")
+    if not isinstance(subjects, list) or len(subjects) != 1:
+        raise RetryEvidenceError("Cosign provenance must name exactly one subject")
+    subject = _object(subjects[0], "Cosign provenance subject")
+    subject_name = _text(subject.get("name"), "Cosign provenance subject.name")
+    subject_digest = _object(subject.get("digest"), "Cosign provenance subject.digest")
+    if subject_name.removeprefix("pkg:docker/") not in {
+        repository,
+        repository.removeprefix("ghcr.io/"),
+    }:
+        raise RetryEvidenceError("Cosign provenance subject repository differs")
+    if subject_digest != {"sha256": digest.removeprefix("sha256:")}:
+        raise RetryEvidenceError("Cosign provenance subject digest differs")
+
+    predicate = _object(statement.get("predicate"), "Cosign provenance predicate")
+    build_definition = _object(
+        predicate.get("buildDefinition"), "Cosign provenance buildDefinition"
+    )
+    if build_definition.get("buildType") != (
+        "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md"
+    ):
+        raise RetryEvidenceError("Cosign provenance build type differs")
+    if not isinstance(build_definition.get("resolvedDependencies"), list):
+        raise RetryEvidenceError("Cosign provenance resolved dependencies are missing")
+
+    external_parameters = _object(
+        build_definition.get("externalParameters"),
+        "Cosign provenance externalParameters",
+    )
+    verjson = _object(external_parameters.get("verjson"), "Cosign provenance verjson")
+    provenance_digest = hashlib.sha256(
+        json.dumps(buildkit_provenance, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if external_parameters.get("buildkitProvenanceSha256") != provenance_digest:
+        raise RetryEvidenceError("Cosign provenance BuildKit evidence digest differs")
+    if external_parameters.get("reviewedPlatforms") != reviewed_platforms:
+        raise RetryEvidenceError("Cosign provenance reviewed platforms differ")
+    expected_claims = {
+        "source": {
+            "repository": source_repository,
+            "repository_id": source_repository_id,
+            "ref": source_ref,
+            "sha": source_commit,
+        },
+        "caller": {
+            "workflow_ref": caller_workflow_ref,
+            "workflow_sha": caller_workflow_sha,
+        },
+        "publisher": {
+            "workflow_ref": publisher_workflow_ref,
+            "workflow_sha": contract_sha,
+        },
+    }
+    if set(verjson) != set(expected_claims):
+        raise RetryEvidenceError("Cosign provenance identity dimensions are incomplete or ambiguous")
+    for name, expected in expected_claims.items():
+        actual = _object(verjson.get(name), f"Cosign provenance {name}")
+        if actual != expected:
+            raise RetryEvidenceError(f"Cosign provenance {name} authorization differs")
+    if not caller_workflow_ref.endswith(f"@{source_ref}"):
+        raise RetryEvidenceError("caller workflow ref does not match authorized source ref")
+    if not re.fullmatch(r"[0-9a-f]{40}", contract_sha):
+        raise RetryEvidenceError("contract SHA must be a 40-hex commit")
+    if not publisher_workflow_ref.endswith(f"@{contract_sha}"):
+        raise RetryEvidenceError("publisher workflow ref does not pin the contract SHA")
+    validate_buildkit_provenance(
+        buildkit_provenance,
+        reviewed_platforms,
+        source_repository=source_repository,
+        source_commit=source_commit,
+        base_repository=base_repository,
+        base_digest=base_digest,
+    )
+
+    canonical = json.dumps(statement, sort_keys=True, separators=(",", ":")).encode()
+    return "statement-sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def build_cosign_provenance_statement(
+    buildkit_provenance: Any,
+    reviewed_platforms: Any,
+    *,
+    identity_claims: Any,
+    image_repository: str,
+    image_digest: str,
+    base_repository: str | None = None,
+    base_digest: str | None = None,
+) -> dict[str, Any]:
+    claims = _object(identity_claims, "GitHub OIDC claims")
+    required = (
+        "iss",
+        "aud",
+        "repository",
+        "repository_id",
+        "ref",
+        "sha",
+        "workflow_ref",
+        "workflow_sha",
+        "job_workflow_ref",
+        "job_workflow_sha",
+        "run_id",
+        "run_attempt",
+    )
+    if any(name not in claims for name in required):
+        raise RetryEvidenceError("GitHub OIDC identity claims are incomplete")
+    if claims["iss"] != "https://token.actions.githubusercontent.com":
+        raise RetryEvidenceError("GitHub OIDC issuer differs")
+    audience = claims["aud"]
+    if audience != "sigstore" and not (
+        isinstance(audience, list) and "sigstore" in audience
+    ):
+        raise RetryEvidenceError("GitHub OIDC audience differs")
+
+    source_repository = _text(claims["repository"], "GitHub OIDC repository")
+    source_repository_id = claims["repository_id"]
+    if isinstance(source_repository_id, int):
+        source_repository_id = str(source_repository_id)
+    source_repository_id = _text(source_repository_id, "GitHub OIDC repository_id")
+    source_ref = _text(claims["ref"], "GitHub OIDC ref")
+    source_commit = _text(claims["sha"], "GitHub OIDC sha")
+    caller_workflow_ref = _text(claims["workflow_ref"], "GitHub OIDC workflow_ref")
+    caller_workflow_sha = _text(claims["workflow_sha"], "GitHub OIDC workflow_sha")
+    publisher_workflow_ref = _text(
+        claims["job_workflow_ref"], "GitHub OIDC job_workflow_ref"
+    )
+    publisher_workflow_sha = _text(
+        claims["job_workflow_sha"], "GitHub OIDC job_workflow_sha"
+    )
+    run_id = _text(claims["run_id"], "GitHub OIDC run_id")
+    run_attempt = _text(claims["run_attempt"], "GitHub OIDC run_attempt")
+    if not re.fullmatch(r"[0-9]+", source_repository_id):
+        raise RetryEvidenceError("GitHub OIDC repository_id must be numeric")
+    if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+        raise RetryEvidenceError("GitHub OIDC source SHA must be a 40-hex commit")
+    if caller_workflow_sha != source_commit or not caller_workflow_ref.endswith(
+        f"@{source_ref}"
+    ):
+        raise RetryEvidenceError("GitHub OIDC caller workflow identity differs from source")
+    if not re.fullmatch(r"[0-9a-f]{40}", publisher_workflow_sha) or not publisher_workflow_ref.endswith(
+        f"@{publisher_workflow_sha}"
+    ):
+        raise RetryEvidenceError("GitHub OIDC publisher workflow is not immutably pinned")
+    if not re.fullmatch(r"[0-9]+", run_id) or not re.fullmatch(r"[0-9]+", run_attempt):
+        raise RetryEvidenceError("GitHub OIDC run identity is malformed")
+    if not DIGEST.fullmatch(image_digest):
+        raise RetryEvidenceError("image digest must be a lowercase sha256 digest")
+
+    platform_provenance = validate_buildkit_provenance(
+        buildkit_provenance,
+        reviewed_platforms,
+        source_repository=source_repository,
+        source_commit=source_commit,
+        base_repository=base_repository,
+        base_digest=base_digest,
+    )
+    dependencies = {}
+    for evidence in platform_provenance.values():
+        definition = _object(
+            _object(evidence, "BuildKit platform evidence").get("SLSA"),
+            "BuildKit SLSA evidence",
+        ).get("buildDefinition")
+        definition = _object(definition, "BuildKit buildDefinition")
+        for offset, dependency in enumerate(definition.get("resolvedDependencies", [])):
+            item = _object(dependency, f"BuildKit resolvedDependencies[{offset}]")
+            key = json.dumps(item, sort_keys=True, separators=(",", ":"))
+            dependencies[key] = item
+
+    safe_claims = {
+        "source": {
+            "repository": source_repository,
+            "repository_id": source_repository_id,
+            "ref": source_ref,
+            "sha": source_commit,
+        },
+        "caller": {
+            "workflow_ref": caller_workflow_ref,
+            "workflow_sha": caller_workflow_sha,
+        },
+        "publisher": {
+            "workflow_ref": publisher_workflow_ref,
+            "workflow_sha": publisher_workflow_sha,
+        },
+    }
+    evidence_digest = hashlib.sha256(
+        json.dumps(buildkit_provenance, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    statement = {
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [
+            {
+                "name": image_repository,
+                "digest": {"sha256": image_digest.removeprefix("sha256:")},
+            }
+        ],
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "predicate": {
+            "buildDefinition": {
+                "buildType": "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md",
+                "externalParameters": {
+                    "buildkitProvenanceSha256": evidence_digest,
+                    "reviewedPlatforms": reviewed_platforms,
+                    "verjson": safe_claims,
+                },
+                "resolvedDependencies": [
+                    dependencies[key] for key in sorted(dependencies)
+                ],
+            },
+            "runDetails": {
+                "builder": {"id": publisher_workflow_ref},
+                "metadata": {
+                    "invocationId": (
+                        f"https://github.com/{source_repository}/actions/runs/"
+                        f"{run_id}/attempts/{run_attempt}"
+                    )
+                },
+            },
+        },
+    }
+    validate_cosign_provenance(
+        statement,
+        buildkit_provenance=buildkit_provenance,
+        reviewed_platforms=reviewed_platforms,
+        repository=image_repository,
+        digest=image_digest,
+        source_repository=source_repository,
+        source_repository_id=source_repository_id,
+        source_ref=source_ref,
+        source_commit=source_commit,
+        caller_workflow_ref=caller_workflow_ref,
+        caller_workflow_sha=caller_workflow_sha,
+        publisher_workflow_ref=publisher_workflow_ref,
+        contract_sha=publisher_workflow_sha,
+    )
+    return statement
+
+
 def validate_buildkit_provenance(
     provenance: Any,
     reviewed_platforms: Any,
@@ -72,7 +332,7 @@ def validate_buildkit_provenance(
     source_commit: str,
     base_repository: str | None = None,
     base_digest: str | None = None,
-) -> None:
+) -> dict[str, Any]:
     provenance = _object(provenance, "BuildKit provenance index")
     if not isinstance(reviewed_platforms, list) or not reviewed_platforms:
         raise RetryEvidenceError("reviewed platforms must be a non-empty array")
@@ -90,6 +350,8 @@ def validate_buildkit_provenance(
         if identity in reviewed:
             raise RetryEvidenceError("reviewed platforms contain a duplicate identity")
         reviewed.add(identity)
+    if set(provenance) == {"SLSA"} and len(reviewed) == 1:
+        provenance = {next(iter(reviewed)): provenance}
     if set(provenance) != reviewed:
         raise RetryEvidenceError("BuildKit provenance platforms differ from review")
     if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
@@ -164,6 +426,7 @@ def validate_buildkit_provenance(
                 raise RetryEvidenceError(
                     "BuildKit provenance does not bind exactly one immutable base dependency"
                 )
+    return provenance
 
 
 def _load(path: Path) -> Any:

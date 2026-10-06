@@ -3,6 +3,10 @@
 
 import copy
 import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 
 import yaml
@@ -36,7 +40,7 @@ def validate(workflow):
     except StopIteration:
         return errors + ["reconciliation step is absent"]
     plan = named_step(promote, "Fail-closed preflight and immutable plan")
-    contract = named_step(promote, "Check out the immutable changelog engine")
+    contract = named_step(promote, "Check out the immutable provenance and changelog contract")
     mint = named_step(promote, "Mint exact-repository release App token")
     output = named_step(promote, "Canonical changelog, Git tag, release and machine output")
 
@@ -83,8 +87,12 @@ def validate(workflow):
             errors.append(f"git {command} runs repository hooks with the release App token")
 
     sparse = contract.get("with", {}).get("sparse-checkout", "")
-    if "scripts/container_release_reconcile.py" not in sparse or "scripts/changelog.py" not in sparse:
-        errors.append("the pinned checkout does not carry both the engine and the enforcer")
+    if any(path not in sparse for path in (
+        "scripts/container_release_reconcile.py",
+        "scripts/changelog.py",
+        "scripts/container_cosign_provenance.py",
+    )):
+        errors.append("the pinned checkout does not carry the engine, enforcer, and provenance verifier")
     return errors
 
 
@@ -94,6 +102,33 @@ class ReconcileHookWorkflowTest(unittest.TestCase):
 
     def test_exact_contract_is_accepted(self):
         self.assertEqual([], validate(self.workflow))
+
+    def test_every_pinned_release_helper_starts_from_the_sparse_checkout(self):
+        contract = named_step(
+            self.workflow["jobs"]["promote"],
+            "Check out the immutable provenance and changelog contract",
+        )
+        paths = contract["with"]["sparse-checkout"].splitlines()
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = pathlib.Path(directory)
+            for path in paths:
+                source = ROOT / path
+                destination = checkout / path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+            for helper in (
+                "scripts/changelog.py",
+                "scripts/container_release_reconcile.py",
+                "scripts/container_cosign_provenance.py",
+            ):
+                with self.subTest(helper=helper):
+                    result = subprocess.run(
+                        [sys.executable, str(checkout / helper), "--help"],
+                        cwd=checkout,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_rejects_reconciliation_after_credential_minting(self):
         mutant = copy.deepcopy(self.workflow)

@@ -37,6 +37,7 @@ workflow)
   acquisition_sha256="$(git -C "$root" show "$ref:scripts/container_private_dependencies.py" | sha256sum | cut -d' ' -f1)"
   transfer_sha256="$(git -C "$root" show "$ref:scripts/container_dependency_transfer.py" | sha256sum | cut -d' ' -f1)"
   retry_sha256="$(git -C "$root" show "$ref:scripts/container_candidate_retry.py" | sha256sum | cut -d' ' -f1)"
+  provenance_sha256="$(git -C "$root" show "$ref:scripts/container_cosign_provenance.py" | sha256sum | cut -d' ' -f1)"
   private_packages="$(private_package_mode)"
   cat <<YAML
 # GENERATED FILE — do not edit by hand.
@@ -65,7 +66,6 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       actions: read
-      attestations: write
       contents: read
       packages: write
       id-token: write
@@ -76,6 +76,7 @@ jobs:
       acquisition-sha256: $acquisition_sha256
       transfer-sha256: $transfer_sha256
       retry-sha256: $retry_sha256
+      provenance-sha256: $provenance_sha256
 $(if [ "$private_packages" = true ]; then printf '%s\n' '    secrets:' '      NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}'; fi)
 YAML
   ;;
@@ -103,6 +104,7 @@ contract-test)
   acquisition_sha256="$(git -C "$root" show "$ref:scripts/container_private_dependencies.py" | sha256sum | cut -d' ' -f1)"
   transfer_sha256="$(git -C "$root" show "$ref:scripts/container_dependency_transfer.py" | sha256sum | cut -d' ' -f1)"
   retry_sha256="$(git -C "$root" show "$ref:scripts/container_candidate_retry.py" | sha256sum | cut -d' ' -f1)"
+  provenance_sha256="$(git -C "$root" show "$ref:scripts/container_cosign_provenance.py" | sha256sum | cut -d' ' -f1)"
   private_packages="$(private_package_mode)"
   workflow_digest="$("$0" workflow "$ref" "$config_path" | sha256sum | cut -d' ' -f1)"
   validator_digest="$("$0" validator "$ref" "$config_path" | sha256sum | cut -d' ' -f1)"
@@ -132,7 +134,9 @@ grep -qx '# Contract: $ref' "\$destination_helper" || fail "destination helper c
 [ "\$(grep -c 'retry-sha256: $retry_sha256' "\$caller")" -eq 2 ] || fail "both event paths do not pin the retry verifier digest"
 [ "\$(grep -c '^      actions: read$' "\$caller")" -eq 2 ] || fail "both event paths require Actions reads"
 [ "\$(grep -c '^      contents: read$' "\$caller")" -eq 2 ] || fail "both event paths require source reads"
-[ "\$(grep -c '^      attestations: write$' "\$caller")" -eq 1 ] || fail "only publication may write attestations"
+[ "\$(grep -c 'provenance-sha256: $provenance_sha256' "\$caller")" -eq 1 ] || fail "publication does not pin provenance helper"
+[ "\$(grep -c 'promotionEligible:false' "\$caller")" -eq 0 ] || fail "caller may not assert candidate eligibility"
+! grep -q '^      attestations: write$' "\$caller" || fail "caller may not request GitHub Artifact Attestations"
 [ "\$(grep -c '^      packages: write$' "\$caller")" -eq 1 ] || fail "only publication may write candidate images"
 [ "\$(grep -c '^      id-token: write$' "\$caller")" -eq 1 ] || fail "only publication may mint attestation identity"
 grep -q "if: github.event_name == 'pull_request'" "\$caller" || fail "validation is not restricted to pull requests"

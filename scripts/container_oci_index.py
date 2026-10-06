@@ -165,13 +165,28 @@ def validate_spdx_evidence(manifest):
     return {"spdxLayerDigest": spdx_layers[0]}
 
 
-def compact_spdx_document(sbom_index, platform):
+def compact_spdx_document(sbom_index, platform, inventory):
     sbom_index = _object(sbom_index, "SBOM index")
     if not isinstance(platform, str) or not platform:
         raise OCIIndexError("platform must be a non-empty string")
-    if platform not in sbom_index:
+    inventory = _object(inventory, "validated OCI inventory")
+    platforms = _array(inventory.get("platforms"), "validated OCI inventory.platforms")
+    platform_keys = []
+    for position, value in enumerate(platforms):
+        os_name, architecture, variant = _platform(
+            value, f"validated OCI inventory.platforms[{position}]"
+        )
+        platform_keys.append(f"{os_name}/{architecture}{f'/{variant}' if variant else ''}")
+    if len(set(platform_keys)) != len(platform_keys):
+        raise OCIIndexError("validated OCI inventory has duplicate platforms")
+    if platform not in platform_keys:
+        raise OCIIndexError(f"platform is absent from validated OCI inventory: {platform}")
+    if platform in sbom_index:
+        entry = _object(sbom_index[platform], f"SBOM index[{platform!r}]")
+    elif len(platform_keys) == 1 and set(sbom_index) == {"SPDX"}:
+        entry = sbom_index
+    else:
         raise OCIIndexError(f"SBOM index has no exact platform entry: {platform}")
-    entry = _object(sbom_index[platform], f"SBOM index[{platform!r}]")
     document = _object(entry.get("SPDX"), f"SBOM index[{platform!r}].SPDX")
     if document.get("spdxVersion") != "SPDX-2.3" or document.get("SPDXID") != "SPDXRef-DOCUMENT":
         raise OCIIndexError("platform SBOM must be an SPDX 2.3 document")
@@ -208,6 +223,7 @@ def main(argv=None):
     document_parser = subparsers.add_parser("spdx-document")
     document_parser.add_argument("--sbom-index", required=True)
     document_parser.add_argument("--platform", required=True)
+    document_parser.add_argument("--inventory", required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "index":
@@ -215,7 +231,9 @@ def main(argv=None):
         elif args.command == "spdx-evidence":
             result = validate_spdx_evidence(_read_json(args.manifest))
         else:
-            sys.stdout.write(compact_spdx_document(_read_json(args.sbom_index), args.platform))
+            sys.stdout.write(compact_spdx_document(
+                _read_json(args.sbom_index), args.platform, _read_json(args.inventory)
+            ))
             return 0
     except OCIIndexError as error:
         parser.error(str(error))

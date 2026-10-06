@@ -33,7 +33,7 @@ class RetryWorkflowContractTests(unittest.TestCase):
                 "type": "string",
             },
         )
-        self.assertEqual(self.text.count('printf \'%s  %s\\n\' "$RETRY_SHA256" "$retry" | sha256sum --check --strict'), 2)
+        self.assertEqual(self.text.count('printf \'%s  %s\\n\' "$RETRY_SHA256" "$retry" | sha256sum --check --strict'), 7)
         prepare = next(
             step
             for step in self.workflow["jobs"]["prepare"]["steps"]
@@ -72,20 +72,21 @@ class RetryWorkflowContractTests(unittest.TestCase):
             command = retry["run"]
             for required in (
                 'commit_tag="$REPOSITORY:sha-$GITHUB_SHA"',
-                '--repo "$GITHUB_REPOSITORY"',
-                "--signer-workflow Verjson/.github/.github/workflows/container-candidate-publish.yml",
-                '--signer-digest "$CONTRACT_REF"',
-                '--source-digest "$GITHUB_SHA"',
-                "--source-ref refs/heads/main",
+                "verify-image \\",
+                '--expected-source-repository "$GITHUB_REPOSITORY"',
+                '--expected-source-repository-id "$GITHUB_REPOSITORY_ID"',
+                '--expected-source-ref "$GITHUB_REF"',
+                '--expected-source-commit "$GITHUB_SHA"',
+                '--expected-caller-workflow-ref "$CALLER_WORKFLOW_REF"',
+                '--expected-caller-workflow-sha "$CALLER_WORKFLOW_SHA"',
+                '--expected-publisher-workflow-ref "Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF"',
+                '--expected-contract-sha "$CONTRACT_REF"',
                 "python3 \"$oci\" index",
-                "python3 \"$retry\" --verified-provenance",
                 '--buildkit-provenance "$buildkit"',
-                '--source-repository "$GITHUB_REPOSITORY"',
-                '--source-commit "$GITHUB_SHA"',
             ):
                 self.assertIn(required, command)
             self.assertNotIn("|| true", command)
-            self.assertLess(command.index("gh attestation verify"), command.index("imagetools create -t"))
+            self.assertLess(command.index("verify-image \\"), command.index("imagetools create -t"))
 
     def test_missing_or_unreadable_identity_fails_closed_and_immutable_guard_remains(self):
         self.assertEqual(self.text.count("could not prove immutable commit identity state"), 2)
