@@ -298,13 +298,11 @@ def jobs(lines: list[str]) -> dict[str, dict[str, tuple[str, list[str]]]]:
 
 
 GENERATED_TARGET = re.compile(
-    r"verJSON/\.github/\.github/workflows/generated-artifacts\.yml@([0-9a-f]{40})",
-    re.IGNORECASE,
+    r"(?:Verjson|verJSON)/\.github/\.github/workflows/generated-artifacts\.yml@([0-9a-f]{40})"
 )
 LEGACY_TARGET = re.compile(
-    r"(?:verJSON/\.github/\.github/workflows/changelog-validate\.yml@[0-9a-f]{40}|"
-    r"\./\.github/workflows/changelog-validate\.yml)",
-    re.IGNORECASE,
+    r"(?:(?:Verjson|verJSON)/\.github/\.github/workflows/changelog-validate\.yml@[0-9a-f]{40}|"
+    r"\./\.github/workflows/changelog-validate\.yml)"
 )
 
 

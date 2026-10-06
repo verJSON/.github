@@ -970,6 +970,15 @@ rc="$(run_audit)"
 stack helm; pulls s1 s2
 head_with s1 gate "ci / lint-template" "changelog / validate"
 head_with s2 gate "ci / lint-template" "changelog / validate"
+sed -i 's/generated-artifacts\.yml@/GENERATED-ARTIFACTS.yml@/' "$content_root/.github/workflows/changelog.yml"
+rc="$(run_audit)"
+{ [ "$rc" != "rc=0" ] && grep -q 'changelog-caller-missing' "$tmp/out.txt"; } \
+  && pass "workflow path case cannot satisfy the generated changelog caller" \
+  || { fail "a caller with the wrong workflow path case was accepted ($rc)"; out | sed 's/^/diag - /'; }
+
+stack helm; pulls s1 s2
+head_with s1 gate "ci / lint-template" "changelog / validate"
+head_with s2 gate "ci / lint-template" "changelog / validate"
 sed -i 's|^    uses: verJSON/|    # uses: verJSON/|' "$content_root/.github/workflows/changelog.yml"
 rc="$(run_audit)"
 { [ "$rc" != "rc=0" ] && grep -q 'changelog-caller-missing' "$tmp/out.txt"; } \
