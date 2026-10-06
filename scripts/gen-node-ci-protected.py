@@ -1241,7 +1241,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
             )
             if not any(existing == tool_prefix or existing in tool_prefix.parents for existing in tool_prefixes):
               tool_prefixes.append(tool_prefix)
-          npm_cli_candidates = {{}}
+          npm_cli_candidates = set()
           for npm_cli_candidate in (
             npm_executable.parent.parent / "lib/node_modules/npm/bin/npm-cli.js",
             npm_executable.parent / "node_modules/npm/bin/npm-cli.js",
@@ -1254,7 +1254,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
             resolved_npm_cli_candidate = npm_cli_candidate.resolve(strict=True)
             if not any(resolved_npm_cli_candidate.is_relative_to(prefix) for prefix in tool_prefixes):
               sys.exit("trusted npm CLI escapes validated tool prefixes")
-            npm_cli_candidates[resolved_npm_cli_candidate] = None
+            npm_cli_candidates.add(resolved_npm_cli_candidate)
           if len(npm_cli_candidates) > 1:
               sys.exit("trusted npm CLI is ambiguous")
           npm_cli_executable = next(iter(npm_cli_candidates), None)
