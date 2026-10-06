@@ -376,16 +376,37 @@ grep -qF "node-version: \${{ '24' }}" <<<"$default_release" \
   && grep -q "scope: '@verjson'" <<<"$default_release" \
   && pass "release-node keeps the verJSON and Node 24 defaults" \
   || fail "release-node changed its backward-compatible defaults"
+assert_explicit_release_version() {
+  local mode="$1" workflow="$2" version_input first_verify_step
+  version_input="$(sed -n '/^      version:$/,/^      prefix:$/p' <<<"$workflow" | sed '$d')"
+  first_verify_step="$(awk '/^  verify:$/ { in_verify=1 } in_verify && /^    steps:$/ { getline; print; exit }' <<<"$workflow")"
+  grep -qF 'description: Exact SemVer tag to release' <<<"$version_input" \
+    && grep -qF 'required: true' <<<"$version_input" \
+    && ! grep -qF 'default:' <<<"$version_input" \
+    && [ "$first_verify_step" = '      - name: Require an explicit release version' ] \
+    && pass "$mode requires a version before any release work" \
+    || fail "$mode permits a blank version or starts release work before validating it"
+}
+assert_explicit_release_version release-node "$default_release"
+version_guard="$(python3 -c 'import sys, yaml; print(yaml.safe_load(sys.stdin)["jobs"]["verify"]["steps"][0]["run"])' <<<"$default_release")"
+guard_utf8="$(python3 -c 'import sys, yaml; print(yaml.safe_load(sys.stdin)["jobs"]["verify"]["steps"][0]["env"].get("PYTHONUTF8", ""))' <<<"$default_release")"
+# Bash's \u escape is locale-dependent; exercise UTF-8 bytes with the emitted step's decoder.
+[ -n "$version_guard" ] && [ "$guard_utf8" = 1 ] \
+  && ! env LC_ALL=C PYTHONUTF8="$guard_utf8" INPUT_VERSION='' bash -c "$version_guard" >/dev/null 2>&1 \
+  && ! env LC_ALL=C PYTHONUTF8="$guard_utf8" INPUT_VERSION='  ' bash -c "$version_guard" >/dev/null 2>&1 \
+  && ! env LC_ALL=C PYTHONUTF8="$guard_utf8" INPUT_VERSION=$'\xc2\xa0' bash -c "$version_guard" >/dev/null 2>&1 \
+  && env LC_ALL=C PYTHONUTF8="$guard_utf8" INPUT_VERSION='v1.2.3' bash -c "$version_guard" >/dev/null 2>&1 \
+  && pass "release dispatch rejects blank versions before resolving a plan" \
+  || fail "release dispatch version guard accepts blank input or rejects an explicit version"
 component_trigger="$(sed -n '/^on:$/,/^permissions:$/p' <<<"$component_release" | sed '$d')"
 expected_component_trigger="$(cat <<'YAML'
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Optional exact SemVer tag; blank derives the next version from selected fragments
-        required: false
+        description: Exact SemVer tag to release
+        required: true
         type: string
-        default: ''
       prefix:
         description: Exact version namespace prefix; independent from component
         required: false
@@ -430,6 +451,7 @@ for component_mode in release-snapshot release-artifact; do
     component_mode_release="$(bash "$gen" "$component_mode" "$sha" --default-prefix schema-v --default-component cli-schema)"
   fi
   component_mode_trigger="$(sed -n '/^on:$/,/^permissions:$/p' <<<"$component_mode_release" | sed '$d')"
+  assert_explicit_release_version "$component_mode" "$component_mode_release"
   [ "$component_mode_trigger" = "$expected_component_trigger" ] \
     && pass "$component_mode emits the same byte-exact component workflow defaults (#1565)" \
     || fail "$component_mode component workflow defaults differ from release-node"

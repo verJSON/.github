@@ -80,8 +80,8 @@ if set(triggers) != {"workflow_dispatch"}:
     )
 inputs = (triggers.get("workflow_dispatch") or {}).get("inputs") or {}
 version_input = inputs.get("version") or {}
-if version_input.get("required") is not False or version_input.get("default") != "":
-    bad("workflow_dispatch must make `version` optional with an empty default")
+if version_input.get("required") is not True or "default" in version_input:
+    bad("workflow_dispatch must require `version` without a default")
 if (inputs.get("prefix") or {}).get("default") != "v":
     bad("workflow_dispatch does not default the independent release prefix to `v`")
 for receipt_input in ("expected_head", "selector_digest"):
@@ -199,7 +199,11 @@ cache_steps = [
 ]
 if (
     len(cache_steps) != 1
-    or steps_of(verify)[0] is not cache_steps[0]
+    or len(steps_of(verify)) < 2
+    or steps_of(verify)[0].get("name") != "Require an explicit release version"
+    or "if" in steps_of(verify)[0]
+    or "continue-on-error" in steps_of(verify)[0]
+    or steps_of(verify)[1] is not cache_steps[0]
     or cache_steps[0].get("run") != 'echo "VERJSON_CHANGELOG_TOOL_CACHE=$RUNNER_TEMP/verjson-changelog-tools" >> "$GITHUB_ENV"'
 ):
     bad("`verify` does not export a job-writable runner.temp cache before repository steps (#630)")
@@ -235,7 +239,7 @@ else:
     if "GITHUB_STEP_SUMMARY" not in selector_run or "GITHUB_SHA" not in selector_run:
         bad("the release-plan step does not publish the operator-facing resolution summary")
     if selector_env.get("INPUT_VERSION") != "${{ inputs.version }}":
-        bad("the release-plan step does not read the optional version input")
+        bad("the release-plan step does not read the required version input")
 
 
 # #465(1). A repository-scoped GITHUB_TOKEN cannot read a private GitHub

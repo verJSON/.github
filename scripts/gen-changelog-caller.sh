@@ -696,6 +696,24 @@ release_download_artifact='actions/download-artifact@3e5f45b2cfb9172054b4087a40e
 release_cache_save='actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0'
 release_cache_restore='actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0'
 
+release_version_guard_step=$(cat <<'EOF'
+      - name: Require an explicit release version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          PYTHONUTF8: '1'
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import sys
+
+          if not os.environ['INPUT_VERSION'].strip():
+              print('::error::version is required for release dispatch', file=sys.stderr)
+              raise SystemExit(1)
+          PY
+EOF
+)
+
 release_plan_step=$(cat <<'EOF'
       - name: Resolve the release selection and version
         id: release-version
@@ -797,7 +815,7 @@ emit_release_node() {
   package_dirs_shell="${package_dirs_shell% }"
   cat <<EOF
 name: Release
-run-name: Release \${{ inputs.version || 'auto' }} \${{ inputs.selector_digest || 'manual' }}
+run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}
 
 concurrency:
   group: release-\${{ github.repository }}
@@ -852,19 +870,18 @@ concurrency:
 # package.json; never assert a hardcoded version literal. This order is
 # intentional: the suite verifies the exact package metadata that will ship.
 #
-# The operator still explicitly dispatches publication, but may leave the version
-# blank. In that case the canonical release plan derives it from the selected
-# fragments on this exact source commit; no push trigger infers a version from
-# commit subjects (ADR 0038, ADR 0060).
+# The operator explicitly dispatches publication with the version to cut.
+# The canonical release plan validates it against selected fragments on this
+# exact source commit; no push trigger infers a version from commit subjects
+# (ADR 0038, ADR 0060).
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Optional exact SemVer tag; blank derives the next version from selected fragments
-        required: false
+        description: Exact SemVer tag to release
+        required: true
         type: string
-        default: ''
       prefix:
         description: Exact version namespace prefix; independent from component
         required: false
@@ -907,6 +924,7 @@ jobs:
       selection-digest: \${{ steps.release-version.outputs.selection-digest }}
       snapshot-exists: \${{ steps.release-state.outputs.snapshot-exists }}
     steps:
+${release_version_guard_step}
       - name: Prepare job-scoped changelog tool cache
         run: echo "VERJSON_CHANGELOG_TOOL_CACHE=\$RUNNER_TEMP/verjson-changelog-tools" >> "\$GITHUB_ENV"
       # changelog-release.yml carries this guard too, but there it fires inside
@@ -1288,7 +1306,7 @@ EOF
   fi
   cat <<EOF
 name: Release
-run-name: Release \${{ inputs.version || 'auto' }} \${{ inputs.selector_digest || 'manual' }}
+run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}
 
 concurrency:
   group: release-\${{ github.repository }}
@@ -1338,19 +1356,18 @@ concurrency:
 # package.json; never assert a hardcoded version literal. This order is
 # intentional: the suite verifies the exact package metadata that will ship.
 #
-# The operator still explicitly dispatches publication, but may leave the version
-# blank. In that case the canonical release plan derives it from the selected
-# fragments on this exact source commit; no push trigger infers a version from
-# commit subjects (ADR 0038, ADR 0060).
+# The operator explicitly dispatches publication with the version to cut.
+# The canonical release plan validates it against selected fragments on this
+# exact source commit; no push trigger infers a version from commit subjects
+# (ADR 0038, ADR 0060).
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Optional exact SemVer tag; blank derives the next version from selected fragments
-        required: false
+        description: Exact SemVer tag to release
+        required: true
         type: string
-        default: ''
       prefix:
         description: Exact version namespace prefix; independent from component
         required: false
@@ -1393,6 +1410,7 @@ jobs:
       selection-digest: \${{ steps.release-version.outputs.selection-digest }}
       snapshot-exists: \${{ steps.release-state.outputs.snapshot-exists }}
     steps:
+${release_version_guard_step}
       - name: Prepare job-scoped changelog tool cache
         run: echo "VERJSON_CHANGELOG_TOOL_CACHE=\$RUNNER_TEMP/verjson-changelog-tools" >> "\$GITHUB_ENV"
       # changelog-release.yml carries this guard too, but there it fires inside
@@ -1721,7 +1739,7 @@ emit_release_snapshot() {
   package_dirs_shell="${package_dirs_shell% }"
   cat <<EOF
 name: Release
-run-name: Release \${{ inputs.version || 'auto' }} \${{ inputs.selector_digest || 'manual' }}
+run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}
 
 concurrency:
   group: release-\${{ github.repository }}
@@ -1769,19 +1787,18 @@ concurrency:
 # package.json; never assert a hardcoded version literal. This order is
 # intentional: the suite verifies the exact package metadata that will ship.
 #
-# The operator still explicitly dispatches publication, but may leave the version
-# blank. In that case the canonical release plan derives it from the selected
-# fragments on this exact source commit; no push trigger infers a version from
-# commit subjects (ADR 0038, ADR 0060).
+# The operator explicitly dispatches publication with the version to cut.
+# The canonical release plan validates it against selected fragments on this
+# exact source commit; no push trigger infers a version from commit subjects
+# (ADR 0038, ADR 0060).
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Optional exact SemVer tag; blank derives the next version from selected fragments
-        required: false
+        description: Exact SemVer tag to release
+        required: true
         type: string
-        default: ''
       prefix:
         description: Exact version namespace prefix; independent from component
         required: false
@@ -1824,6 +1841,7 @@ jobs:
       selection-digest: \${{ steps.release-version.outputs.selection-digest }}
       snapshot-exists: \${{ steps.release-state.outputs.snapshot-exists }}
     steps:
+${release_version_guard_step}
       - name: Prepare job-scoped changelog tool cache
         run: echo "VERJSON_CHANGELOG_TOOL_CACHE=\$RUNNER_TEMP/verjson-changelog-tools" >> "\$GITHUB_ENV"
       # changelog-release.yml carries this guard too, but there it fires inside
@@ -2898,10 +2916,9 @@ EXPECTED_TRIGGER_BLOCK = (
     (2, "workflow_dispatch:"),
     (4, "inputs:"),
     (6, "version:"),
-    (8, "description: Optional exact SemVer tag; blank derives the next version from selected fragments"),
-    (8, "required: false"),
+    (8, "description: Exact SemVer tag to release"),
+    (8, "required: true"),
     (8, "type: string"),
-    (8, "default: ''"),
     (6, "prefix:"),
     (8, "description: Exact version namespace prefix; independent from component"),
     (8, "required: false"),
@@ -3164,7 +3181,7 @@ PY
     [ -n "$workflow_package_dirs_shell" ] \
       || fail "$release_workflow does not declare package_dirs for version stamping"
   fi
-  grep -qF "run-name: Release \${{ inputs.version || 'auto' }} \${{ inputs.selector_digest || 'manual' }}" "$release_workflow" \
+  grep -qF "run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}" "$release_workflow" \
     || fail "$release_workflow lacks the resolved-version run title required for idempotent dispatch"
 
   # Comments stripped before structural matching so a migration note naming a
@@ -3608,9 +3625,12 @@ PY
   grep -qF 'echo "VERJSON_CHANGELOG_TOOL_CACHE=$RUNNER_TEMP/verjson-changelog-tools" >> "$GITHUB_ENV"' \
     <<<"$verify_job" \
     || fail "$release_workflow does not give repository verification hooks a job-writable changelog cache beneath runner.temp (#630)"
-  first_verify_step="$(awk '/^[[:space:]]+- name:/ { print; exit }' <<<"$verify_job")"
-  grep -qF -- '- name: Prepare job-scoped changelog tool cache' <<<"$first_verify_step" \
-    || fail "$release_workflow does not prepare the writable changelog cache before repository verification steps (#630)"
+  first_two_verify_steps="$(awk '/^[[:space:]]+- name:/ { print; if (++count == 2) exit }' <<<"$verify_job")"
+  [ "$first_two_verify_steps" = $'      - name: Require an explicit release version\n      - name: Prepare job-scoped changelog tool cache' ] \
+    && grep -qF 'INPUT_VERSION: ${{ inputs.version }}' <<<"$verify_job" \
+    && grep -qF "PYTHONUTF8: '1'" <<<"$verify_job" \
+    && grep -qF "if not os.environ['INPUT_VERSION'].strip():" <<<"$verify_job" \
+    || fail "$release_workflow does not reject blank versions before repository verification"
   grep -qF "if: steps.release-version.outputs.selected == 'true' && steps.release-state.outputs.snapshot-exists == 'true'" <<<"$verify_job" \
     || fail "$release_workflow does not condition resumed verification on an existing snapshot"
   grep -qF 'ref: ${{ steps.release-version.outputs.version }}' <<<"$verify_job" \
