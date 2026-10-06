@@ -39,3 +39,4 @@ its prior global-flag order failed before registry access. A read-only GAR
 probe returned `MANIFEST_UNKNOWN` for the new candidate tag; the helper
 classifies that as absence while authorization and missing-repository errors
 remain fatal, with bounded diagnostics that never echo credentials.
+The bounded GAR canary identity follows the reviewed Skopeo inspection fix.
