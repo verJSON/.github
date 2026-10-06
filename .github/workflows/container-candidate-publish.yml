@@ -1351,7 +1351,7 @@ jobs:
             else
               receipts="[$ghcr_receipt]"
             fi
-            destinations="$(jq -ce --argjson expected "$expected_destinations" --argjson receipts "$receipts" '
+            destinations="$(jq -cne --argjson expected "$expected_destinations" --argjson receipts "$receipts" '
               if ($expected | length) != ($receipts | length) then error("registry receipt count differs from reviewed destinations")
               else [ $expected[] as $destination
                 | [$receipts[] | select(.provider == $destination.provider)] as $matches

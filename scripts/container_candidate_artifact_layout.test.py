@@ -1,3 +1,5 @@
+import json
+import os
 import pathlib
 import subprocess
 import tempfile
@@ -10,11 +12,15 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/container-candidate-publish.yml"
 
 
-def artifact_selection_script():
+def assembly_script():
     workflow = yaml.safe_load(WORKFLOW.read_text())
     steps = workflow["jobs"]["candidate-manifest"]["steps"]
     assembly = next(step for step in steps if step.get("name") == "Assemble complete candidate manifest")
-    script = assembly["run"]
+    return assembly["run"]
+
+
+def artifact_selection_script():
+    script = assembly_script()
     start = script.index("shopt -s nullglob")
     end = script.index('for image in "${image_artifacts[@]}"; do', start)
     return script[start:end]
@@ -91,6 +97,37 @@ class CandidateArtifactLayoutTests(unittest.TestCase):
             "candidate-images/image.json", "candidate-sboms/sbom.json"
         ], has_gar=False)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_destination_receipts_are_assembled_without_stdin(self):
+        script = assembly_script()
+        start = script.index('destinations="$(jq')
+        end = script.index('raw="$(docker', start)
+        command = "set -euo pipefail\n" + script[start:end] + "printf '%s\\n' \"$destinations\"\n"
+        destination = {
+            "provider": "ghcr",
+            "repository": "ghcr.io/verjson/canary",
+            "digest": "sha256:" + "a" * 64,
+            "candidateExpiresAt": "2026-11-05T00:00:00Z",
+        }
+        receipt = {**destination, "evidenceReferrers": []}
+        for receipts, accepted in [([receipt], True), ([{**receipt, "digest": "sha256:" + "b" * 64}], False), ([receipt, receipt], False)]:
+            with self.subTest(receipts=receipts):
+                result = subprocess.run(
+                    ["bash", "-c", command],
+                    input="",
+                    capture_output=True,
+                    text=True,
+                    env={
+                        **os.environ,
+                        "expected_destinations": json.dumps([destination]),
+                        "receipts": json.dumps(receipts),
+                    },
+                )
+                if accepted:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(json.loads(result.stdout), [receipt])
+                else:
+                    self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":

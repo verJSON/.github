@@ -50,3 +50,6 @@ referrers and rejecting unrelated additions.
 Candidate manifest assembly now handles the direct extraction used when one
 artifact matches a download pattern and named subdirectories when several
 match; it rejects missing image, SBOM, or required GAR receipt artifacts.
+Destination receipt assembly now runs jq in null-input mode, allowing its
+reviewed provider, repository, digest, and expiry comparison to produce a
+result when the manifest job has no stdin.
