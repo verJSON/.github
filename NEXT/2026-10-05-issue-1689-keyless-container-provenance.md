@@ -33,3 +33,4 @@ The bounded GAR canary identity now follows that reviewed receipt fix commit.
 The SPDX export accepts Buildx's unwrapped document only when the validated
 OCI index has exactly the requested single platform; multi-platform exports
 still require an exact platform key.
+The bounded GAR canary identity follows the reviewed SPDX inventory fix commit.
