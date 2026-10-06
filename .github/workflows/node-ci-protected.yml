@@ -22,7 +22,7 @@ name: node-ci (reusable)
 #                                 # is capped by the caller, so omitting this grant
 #                                 # makes the workflow fail at STARTUP before the
 #                                 # action's fail-open path can run (#148).
-#       uses: Verjson/.github/.github/workflows/node-ci.yml@v2.2.0
+#       uses: Verjson/.github/.github/workflows/node-ci.yml@<release-commit-sha>
 #       secrets: inherit          # passes NODE_AUTH_TOKEN (+ submodules-token)
 #       # with:
 #       #   node-version: '22.23.1'   # override when a repo pins a version

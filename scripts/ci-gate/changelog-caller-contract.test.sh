@@ -29,6 +29,9 @@ fail() { printf 'FAIL - %s\n' "$1"; fails=$((fails + 1)); }
 skip() { printf 'skip - %s\n' "$1"; }
 
 [ -x "$gen" ] || { echo "FAIL - $gen is not executable"; exit 1; }
+[ ! -e "$repo_root/.github/workflows/tag-major.yml" ] \
+  && pass "release publication has no moving-major tag workflow (#1644)" \
+  || fail "release publication still exposes the moving-major tag workflow"
 
 # `var="$(bash "$gen" mode "$sha")"` discards the generator's status, so a mode
 # that refuses leaves an empty capture and the assertions downstream report that
