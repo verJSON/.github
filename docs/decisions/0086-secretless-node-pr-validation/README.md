@@ -107,3 +107,7 @@ would weaken the boundary without granting package authority.
 ## 2026-10-02 amendment — compare GitHub repository identity without casing (#1682)
 
 GitHub can report different owner or organization-login casing for the same repository. The secretless pull-request boundary now normalizes the complete head and base `owner/repository` names before comparing them. Equality still requires the same owner and repository after normalization, so forks remain rejected. This restores the existing same-repository invariant rather than widening package access. The canonical regression contract verifies the normalization in `node-ci-secretless.test.sh`; the CI reproduction and linked PR are recorded in [issue #1682](https://github.com/verJSON/.github/issues/1682).
+
+## 2026-10-06 amendment — accept registry tarball scope casing (#1694)
+
+GitHub Packages can issue a tarball URL with different ASCII casing from the approved lowercase package name, as reproduced by [issue #1694](https://github.com/Verjson/.github/issues/1694). The acquisition validator compares the URL's ASCII scope and package identity after lowercasing against the exact caller approval and lock identity, including the npm installation path. It still rejects non-ASCII identities, unapproved packages or scopes, mismatched lock names, malformed URLs, and invalid or conflicting integrity. The registry-issued URL and integrity remain unchanged. The conformance regression runs the embedded validator against both accepted and rejected lockfiles.
