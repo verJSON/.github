@@ -1175,7 +1175,7 @@ emit_release_artifact() {
     else
       yaml_build_runner="'$build_runner'"
     fi
-    build_runners_yaml="${build_runners_yaml}          - build-runner: ${yaml_build_runner}
+    build_runners_yaml="${build_runners_yaml}          - os: ${yaml_build_runner}
             dependency-index: ${runner_index}
 "
     runner_index=$((runner_index + 1))
@@ -1214,7 +1214,7 @@ EOF
     build_condition="$build_condition && needs.acquire-private-dependencies.result == 'success'"
     private_acquisition_job="$(cat <<EOF
   acquire-private-dependencies:
-    name: Acquire approved private dependencies (\${{ matrix.build-runner }})
+    name: Acquire approved private dependencies (\${{ matrix.os }})
     needs: [verify, snapshot]
     if: always() && needs.verify.result == 'success' && needs.verify.outputs.selected == 'true' && (needs.snapshot.result == 'success' || needs.snapshot.result == 'skipped')
     strategy:
@@ -1222,7 +1222,7 @@ EOF
       matrix:
         include:
 ${build_runners_yaml%$'\n'}
-    runs-on: \${{ matrix.build-runner }}
+    runs-on: \${{ matrix.os }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -1259,7 +1259,7 @@ ${build_runners_yaml%$'\n'}
             if (entry.name && entry.name !== name) throw new Error('internal dependency aliases unexpected package: ' + name);
             const url = new URL(entry.resolved);
             const parts = url.pathname.split('/');
-            if (url.protocol !== 'https:' || url.host !== 'npm.pkg.github.com' || url.username || url.password || url.search || url.hash || url.pathname.includes('\\') || decodeURIComponent(url.pathname) !== url.pathname || parts.length !== 6 || parts[1] !== 'download' || parts[2] + '/' + parts[3] !== name || !parts[4] || !parts[5]) throw new Error('internal dependency is not pinned to its exact GitHub Packages download URL: ' + name);
+            if (url.protocol !== 'https:' || url.host !== 'npm.pkg.github.com' || url.username || url.password || url.search || url.hash || url.pathname.includes('\\\\') || decodeURIComponent(url.pathname) !== url.pathname || parts.length !== 6 || parts[1] !== 'download' || parts[2].toLowerCase() + '/' + parts[3] !== name || !parts[4] || !parts[5]) throw new Error('internal dependency is not pinned to its exact GitHub Packages download URL: ' + name);
             if (typeof entry.integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(entry.integrity)) throw new Error('internal dependency requires exact sha512 integrity: ' + name);
             found.add(name);
           }
@@ -1591,7 +1591,7 @@ ${required_lane_validation_step}
 
 ${private_acquisition_job}
   build:
-    name: Build release artifacts (\${{ matrix.build-runner }})
+    name: Build release artifacts (\${{ matrix.os }})
     needs: ${build_needs}
     if: ${build_condition}
     strategy:
@@ -1599,7 +1599,7 @@ ${private_acquisition_job}
       matrix:
         include:
 ${build_runners_yaml%$'\n'}
-    runs-on: \${{ matrix.build-runner }}
+    runs-on: \${{ matrix.os }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -3422,7 +3422,7 @@ for path, entry in lock["packages"].items():
     if (parsed.scheme != "https" or parsed.netloc != "npm.pkg.github.com"
             or parsed.query or parsed.fragment or resolved != f"https://npm.pkg.github.com{resolved_path}"
             or "\\" in resolved_path or len(parts) != 6 or parts[1] != "download"
-            or f"{parts[2]}/{parts[3]}" != name or not parts[4] or not parts[5]
+            or f"{parts[2].lower()}/{parts[3]}" != name or not parts[4] or not parts[5]
             or not isinstance(integrity, str)
             or re.fullmatch(r"sha512-[A-Za-z0-9+/]{86}==", integrity) is None):
         raise SystemExit(1)
@@ -3442,8 +3442,10 @@ PY
     fi
     grep -qE '^[[:space:]]+strategy:[[:space:]]*$' <<<"$build_job" \
       && grep -qE '^[[:space:]]+include:[[:space:]]*$' <<<"$build_job" \
-      && grep -qE '^[[:space:]]+- build-runner:[[:space:]]*[^[:space:]].*$' <<<"$build_job" \
-      || fail "$release_workflow build job has no non-empty build-runner matrix"
+      && grep -qE '^[[:space:]]+- os:[[:space:]]*[^[:space:]].*$' <<<"$build_job" \
+      || fail "$release_workflow build job has no non-empty runner matrix"
+    grep -qxF '    runs-on: ${{ matrix.os }}' <<<"$build_job" \
+      || fail "$release_workflow build job does not run on its approved OS matrix"
     while IFS= read -r runner_selector; do
       runner_selector="${runner_selector#*: }"
       [[ "$runner_selector" =~ ^\'[A-Za-z0-9][A-Za-z0-9._-]*\'$ ]] \
@@ -3461,7 +3463,7 @@ PY
           && grep -qF 'must be a non-empty JSON runner-label array' <<<"$verify_job" \
           || fail "$release_workflow does not fail loudly before snapshot when $lane_name is unset or malformed"
       fi
-    done < <(grep -E '^[[:space:]]+- build-runner:' <<<"$build_job")
+    done < <(grep -E '^[[:space:]]+- os:' <<<"$build_job")
     if [ -n "$EXPECTED_RELEASE_LANE_PREFLIGHT_SHA256" ]; then
       lane_preflight="$(awk '
         /^      - name: Validate required OS-scoped build lanes$/ { found = 1 }
@@ -3479,6 +3481,8 @@ PY
         || fail "$release_workflow OS lane preflight logic differs from the provenance-authorized contract"
     fi
     if [ -n "$acquisition_job" ]; then
+      grep -qxF '    runs-on: ${{ matrix.os }}' <<<"$acquisition_job" \
+        || fail "$release_workflow acquisition job does not run on its approved OS matrix"
       grep -qF 'timeout-minutes: 45' <<<"$acquisition_job" \
         || fail "$release_workflow acquisition matrix exceeds ADR 0103's 45-minute bound"
       grep -qF 'needs: [verify, snapshot, acquire-private-dependencies]' <<<"$build_job" \
@@ -3504,8 +3508,8 @@ PY
         && grep -qF 'fail-on-cache-miss: true' <<<"$build_job" \
         && grep -qF "NODE_AUTH_TOKEN: ''" <<<"$build_job" \
         || fail "$release_workflow private build does not restore dependencies with credentials blanked"
-      acquisition_selectors="$(grep -E '^[[:space:]]+- build-runner:' <<<"$acquisition_job" | sed 's/^[[:space:]]*//')"
-      build_selectors="$(grep -E '^[[:space:]]+- build-runner:' <<<"$build_job" | sed 's/^[[:space:]]*//')"
+      acquisition_selectors="$(grep -E '^[[:space:]]+- os:' <<<"$acquisition_job" | sed 's/^[[:space:]]*//')"
+      build_selectors="$(grep -E '^[[:space:]]+- os:' <<<"$build_job" | sed 's/^[[:space:]]*//')"
       [ "$acquisition_selectors" = "$build_selectors" ] \
         || fail "$release_workflow private acquisition and credentialless build runner matrices differ"
       acquisition_indices="$(grep -E '^[[:space:]]+dependency-index:' <<<"$acquisition_job" | sed 's/^[[:space:]]*//')"
@@ -3530,7 +3534,7 @@ PY
           && [[ "${runner_selector:1:${#runner_selector}-2}" =~ ^(macos|windows)- ]]; then
           fail "$release_workflow acquisition uses a literal metered OS selector forbidden by ADR 0103: $runner_selector"
         fi
-      done < <(grep -E '^[[:space:]]+- build-runner:' <<<"$acquisition_job")
+      done < <(grep -E '^[[:space:]]+- os:' <<<"$acquisition_job")
       [ "$(grep -cF 'key: release-dependencies-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.dependency-index }}' <<<"$acquisition_job")" -eq 1 ] \
         && [ "$(grep -cF 'key: release-dependencies-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.dependency-index }}' <<<"$build_job")" -eq 1 ] \
         || fail "$release_workflow dependency cache keys are not bound identically to run, attempt, and matrix OS index"
