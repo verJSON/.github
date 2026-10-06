@@ -143,7 +143,6 @@ merge-gate	python3 scripts/ci-gate/closing-issue-visibility.test.py
 merge-gate	bash scripts/ci-gate/terminal-live-base.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-pin.test.sh
 merge-gate	bash scripts/ci-gate/budget-exceeded.test.sh
-changelog-release	bash scripts/tag-major.test.sh
 changelog-release	bash scripts/gen-adr-index.sh --check
 changelog-release	bash scripts/ci-gate/gen-adr-index.test.sh
 changelog-release	python3 scripts/ci-gate/adr-live-coverage-claims.test.py

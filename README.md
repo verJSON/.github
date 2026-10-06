@@ -136,13 +136,13 @@ The repository ships all `.github/actions/*` actions and
 release when reproducibility matters:
 
 ```yaml
-uses: Verjson/.github/.github/workflows/node-ci.yml@v2.2.0
+uses: Verjson/.github/.github/workflows/node-ci.yml@<release-commit-sha>
 ```
 
-`@v2` is the moving major alias: it receives every compatible v2 release without
-a caller edit, but is intentionally mutable. See the
+Existing `@v2` and `@v3` major aliases are static compatibility references and
+receive no new releases. See the
 [versioning and release guide](docs/reusable-workflow-versioning.md) for the
-trade-off and release process.
+release and migration process.
 
 ## Reusable actionlint
 
