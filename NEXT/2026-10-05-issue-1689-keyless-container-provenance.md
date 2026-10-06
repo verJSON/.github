@@ -24,3 +24,4 @@ against the reviewed platform before requesting an OIDC token.
 The bounded canary identity follows the reviewed BuildKit-shape fix commit.
 ORAS attachments now use validated relative file paths so the signed
 provenance and SPDX bundles can be stored without disabling path validation.
+The bounded GAR canary identity is repinned to that reviewed helper commit.
