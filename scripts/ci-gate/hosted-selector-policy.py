@@ -268,7 +268,7 @@ CANONICAL_CONTAINER_CANDIDATE_SELECTOR = "${{ " + CANONICAL_CONTAINER_CANDIDATE_
 # that input would also accept `${{ fromJSON(inputs.runner) }}` by itself. New
 # routing shapes must therefore become visible code changes here.
 REVIEWED_SELECTOR_EXPRESSIONS = frozenset(
-    " ".join(expression.split())
+    " ".join(spelling.split())
     for expression in (
         'fromJSON(github.repository_owner == \'Verjson\' && (vars.CI_RUNNER_DEFAULT || \'["self-hosted","general"]\') || \'["ubuntu-24.04"]\')',
         "(github.repository_owner != 'Verjson' || inputs.github-hosted-runner) && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || github.event.repository.visibility == 'public' && fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')",
@@ -306,6 +306,7 @@ REVIEWED_SELECTOR_EXPRESSIONS = frozenset(
         "vars.CI_LANE_TRUSTED_WINDOWS",
         "vars.CI_LANE_TRUSTED_MACOS || vars.CI_LANE_FALLBACK",
     )
+    for spelling in (expression, expression.replace("'Verjson'", "'verJSON'"))
 )
 
 # The only job-level reusable-workflow inputs in the organization contract that
@@ -324,13 +325,14 @@ POLICY_CONTRACT_SHA_ENV = "VERJSON_HOSTED_SELECTOR_POLICY_SHA"
 # safe only because check_reusable_runner_inputs folds the complete strategy
 # source into the metered-family verdict.
 REVIEWED_REUSABLE_INPUT_EXPRESSIONS = frozenset(
-    " ".join(expression.split())
+    " ".join(spelling.split())
     for expression in (
         "github.repository_owner == 'Verjson' && (vars.CI_RUNNER_DEFAULT || '[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]'",
         "matrix.os",
         "matrix.runner",
         "matrix.runner_labels",
     )
+    for spelling in (expression, expression.replace("'Verjson'", "'verJSON'"))
 )
 
 

@@ -39,6 +39,13 @@ class GeneratedCallerPolicyTests(unittest.TestCase):
                 args = ('--autonomy', 'propose') if mode == 'release-propose' else ()
                 self.assert_allowed(self.generate(mode, *args))
 
+    def test_unreviewed_organization_spelling_does_not_expand_runner_policy(self):
+        workflow = self.generate('release-node')
+        self.assertIn("'verJSON'", workflow)
+        result = self.policy(workflow.replace("'verJSON'", "'verjson'"))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('UNDETERMINED', result.stdout + result.stderr)
+
     def test_gate_hosted_isolation_and_release_routing_remain_unchanged(self):
         job = self.gate['jobs']['changelog-contract']
         self.assertEqual(job['runs-on'], 'ubuntu-24.04')
