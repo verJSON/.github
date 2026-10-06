@@ -235,7 +235,7 @@ def build_cosign_provenance_statement(
     if not DIGEST.fullmatch(image_digest):
         raise RetryEvidenceError("image digest must be a lowercase sha256 digest")
 
-    validate_buildkit_provenance(
+    platform_provenance = validate_buildkit_provenance(
         buildkit_provenance,
         reviewed_platforms,
         source_repository=source_repository,
@@ -244,7 +244,7 @@ def build_cosign_provenance_statement(
         base_digest=base_digest,
     )
     dependencies = {}
-    for evidence in buildkit_provenance.values():
+    for evidence in platform_provenance.values():
         definition = _object(
             _object(evidence, "BuildKit platform evidence").get("SLSA"),
             "BuildKit SLSA evidence",
@@ -332,7 +332,7 @@ def validate_buildkit_provenance(
     source_commit: str,
     base_repository: str | None = None,
     base_digest: str | None = None,
-) -> None:
+) -> dict[str, Any]:
     provenance = _object(provenance, "BuildKit provenance index")
     if not isinstance(reviewed_platforms, list) or not reviewed_platforms:
         raise RetryEvidenceError("reviewed platforms must be a non-empty array")
@@ -350,6 +350,8 @@ def validate_buildkit_provenance(
         if identity in reviewed:
             raise RetryEvidenceError("reviewed platforms contain a duplicate identity")
         reviewed.add(identity)
+    if set(provenance) == {"SLSA"} and len(reviewed) == 1:
+        provenance = {next(iter(reviewed)): provenance}
     if set(provenance) != reviewed:
         raise RetryEvidenceError("BuildKit provenance platforms differ from review")
     if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
@@ -424,6 +426,7 @@ def validate_buildkit_provenance(
                 raise RetryEvidenceError(
                     "BuildKit provenance does not bind exactly one immutable base dependency"
                 )
+    return provenance
 
 
 def _load(path: Path) -> Any:

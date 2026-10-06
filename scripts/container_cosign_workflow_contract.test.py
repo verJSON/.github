@@ -101,6 +101,25 @@ class CosignWorkflowContractTests(unittest.TestCase):
         self.assertIn("--expected-referrer-digest", run_scripts)
         self.assertIn('scripts/container_oci_index.py" -o "$RUNNER_TEMP/container_oci_index.py"', run_scripts)
 
+    def test_new_builds_check_registry_index_before_requesting_oidc_token(self):
+        workflow = yaml.safe_load(PUBLISH_WORKFLOW.read_text(encoding="utf-8"))
+        for job_name in ("publish-base", "publish-derived"):
+            with self.subTest(job=job_name):
+                sign = next(
+                    step for step in workflow["jobs"][job_name]["steps"]
+                    if step.get("id") == "provenance"
+                )
+                script = sign["run"]
+                self.assertEqual(sign["env"]["CONTRACT_REF"], "${{ inputs.contract-ref }}")
+                self.assertLess(
+                    script.index('docker buildx imagetools inspect "$REPOSITORY@$DIGEST" --raw'),
+                    script.index('python3 "$oci" index --index "$raw" --reviewed-platforms "$reviewed"'),
+                )
+                self.assertLess(
+                    script.index('python3 "$oci" index --index "$raw" --reviewed-platforms "$reviewed"'),
+                    script.index("request-oidc-token"),
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

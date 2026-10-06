@@ -156,6 +156,25 @@ class RetryEvidenceTests(unittest.TestCase):
             base_digest=BASE_DIGEST,
         )
 
+    def test_accepts_unwrapped_buildx_provenance_only_for_one_reviewed_platform(self):
+        single = buildkit_provenance()["linux/amd64"]
+        self.assertEqual(
+            MODULE.validate_buildkit_provenance(
+                single,
+                [{"os": "linux", "architecture": "amd64"}],
+                source_repository="Verjson/example",
+                source_commit="c" * 40,
+            ),
+            {"linux/amd64": single},
+        )
+        with self.assertRaisesRegex(MODULE.RetryEvidenceError, "platforms differ"):
+            MODULE.validate_buildkit_provenance(
+                single,
+                REVIEWED_PLATFORMS,
+                source_repository="Verjson/example",
+                source_commit="c" * 40,
+            )
+
     def test_rejects_missing_mismatched_or_duplicate_base_material(self):
         cases = []
         missing = buildkit_provenance()
@@ -251,6 +270,47 @@ class CosignProvenancePolicyTests(unittest.TestCase):
             predicate["buildDefinition"]["externalParameters"]["buildkitProvenanceSha256"],
             r"^[0-9a-f]{64}$",
         )
+
+    def test_signs_and_verifies_unwrapped_single_platform_buildx_evidence(self):
+        provenance = buildkit_provenance()["linux/amd64"]
+        reviewed = [{"os": "linux", "architecture": "amd64"}]
+        claims = {
+            "iss": "https://token.actions.githubusercontent.com",
+            "aud": "sigstore",
+            "repository": "Verjson/example",
+            "repository_id": "12345",
+            "ref": "refs/heads/main",
+            "sha": "c" * 40,
+            "workflow_ref": "Verjson/example/.github/workflows/container-candidate.yml@refs/heads/main",
+            "workflow_sha": "c" * 40,
+            "job_workflow_ref": "Verjson/.github/.github/workflows/container-candidate-publish.yml@" + "d" * 40,
+            "job_workflow_sha": "d" * 40,
+            "run_id": "987654",
+            "run_attempt": "1",
+        }
+        statement = MODULE.build_cosign_provenance_statement(
+            provenance,
+            reviewed,
+            identity_claims=claims,
+            image_repository=REPOSITORY,
+            image_digest=DIGEST,
+        )
+        identity = MODULE.validate_cosign_provenance(
+            statement,
+            buildkit_provenance=provenance,
+            reviewed_platforms=reviewed,
+            repository=REPOSITORY,
+            digest=DIGEST,
+            source_repository="Verjson/example",
+            source_repository_id="12345",
+            source_ref="refs/heads/main",
+            source_commit="c" * 40,
+            caller_workflow_ref=claims["workflow_ref"],
+            caller_workflow_sha="c" * 40,
+            publisher_workflow_ref=claims["job_workflow_ref"],
+            contract_sha="d" * 40,
+        )
+        self.assertRegex(identity, r"^statement-sha256:[0-9a-f]{64}$")
 
     def test_refuses_buildkit_evidence_that_disagrees_with_oidc_source_claims(self):
         claims = {

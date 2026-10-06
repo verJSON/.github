@@ -18,3 +18,6 @@ The bounded canary identity tracks the reviewed publisher revision.
 An authenticated, non-secret runner probe also identified the regional
 `run-actions` request-host family, which the token fetcher now accepts.
 The GAR provider condition now pins the updated helper commit.
+The third live canary exposed Buildx's single-platform provenance shape;
+the verifier accepts that exact shape after checking the published OCI index
+against the reviewed platform before requesting an OIDC token.

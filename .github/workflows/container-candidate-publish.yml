@@ -559,6 +559,7 @@ jobs:
         if: matrix.baseVariant == '' && steps.retry.outputs.reused != 'true'
         env:
           CONFIG_PATH: ${{ inputs.config-path }}
+          CONTRACT_REF: ${{ inputs.contract-ref }}
           DIGEST: ${{ steps.build.outputs.digest }}
           REPOSITORY: ${{ matrix.repository }}
           VARIANT: ${{ matrix.variant }}
@@ -569,6 +570,11 @@ jobs:
           reviewed="$RUNNER_TEMP/container-reviewed-platforms.json"
           docker buildx imagetools inspect "$REPOSITORY@$DIGEST" --format '{{json .Provenance}}' > "$buildkit"
           jq -ce --arg variant "$VARIANT" '.images[] | select(.variant == $variant) | .platforms' "$CONFIG_PATH" > "$reviewed"
+          oci="$RUNNER_TEMP/container_oci_index.py"
+          raw="$RUNNER_TEMP/container-image-index.json"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_oci_index.py" -o "$oci"
+          docker buildx imagetools inspect "$REPOSITORY@$DIGEST" --raw > "$raw"
+          python3 "$oci" index --index "$raw" --reviewed-platforms "$reviewed" >/dev/null
           python3 "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
             --request-url "$ACTIONS_ID_TOKEN_REQUEST_URL" --output "$token"
           receipt="$(python3 "$RUNNER_TEMP/container_cosign_provenance.py" attest-image \
@@ -888,6 +894,7 @@ jobs:
           BASE_DIGEST: ${{ steps.base.outputs.digest }}
           BASE_REPOSITORY: ${{ steps.base.outputs.image }}
           CONFIG_PATH: ${{ inputs.config-path }}
+          CONTRACT_REF: ${{ inputs.contract-ref }}
           DIGEST: ${{ steps.build.outputs.digest }}
           REPOSITORY: ${{ matrix.repository }}
           VARIANT: ${{ matrix.variant }}
@@ -899,6 +906,11 @@ jobs:
           BASE_REPOSITORY="${BASE_REPOSITORY%@*}"
           docker buildx imagetools inspect "$REPOSITORY@$DIGEST" --format '{{json .Provenance}}' > "$buildkit"
           jq -ce --arg variant "$VARIANT" '.images[] | select(.variant == $variant) | .platforms' "$CONFIG_PATH" > "$reviewed"
+          oci="$RUNNER_TEMP/container_oci_index.py"
+          raw="$RUNNER_TEMP/container-image-index.json"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_oci_index.py" -o "$oci"
+          docker buildx imagetools inspect "$REPOSITORY@$DIGEST" --raw > "$raw"
+          python3 "$oci" index --index "$raw" --reviewed-platforms "$reviewed" >/dev/null
           python3 "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
             --request-url "$ACTIONS_ID_TOKEN_REQUEST_URL" --output "$token"
           receipt="$(python3 "$RUNNER_TEMP/container_cosign_provenance.py" attest-image \
