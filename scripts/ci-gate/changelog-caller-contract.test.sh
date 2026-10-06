@@ -2456,8 +2456,8 @@ grep -qE '^  build:$' <<<"$artifact_release" \
   && ! grep -q 'uses:.*node-release\.yml' <<<"$artifact_release" \
   && pass "release-artifact replaces node-release.yml with a build+publish pair" \
   || fail "release-artifact did not emit the expected build/publish shape"
-grep -qF -- "- build-runner: 'ubuntu-24.04'" <<<"$artifact_release" \
-  && grep -qF -- "- build-runner: 'self-hosted-release'" <<<"$artifact_release" \
+grep -qF -- "- os: 'ubuntu-24.04'" <<<"$artifact_release" \
+  && grep -qF -- "- os: 'self-hosted-release'" <<<"$artifact_release" \
   && pass "release-artifact's build matrix carries exactly the declared runner labels" \
   || fail "release-artifact's build matrix does not match --build-runner"
 
@@ -2537,6 +2537,103 @@ run_adopter "$private_artifact_adopter" \
   && pass "emitted suite accepts credential-separated private release acquisition" \
   || fail "emitted suite rejects canonical private release acquisition: $(tail -2 "$tmproot/run.out")"
 
+unbound_build_adopter="$tmproot/adopter-artifact-unbound-build"
+cp -a "$artifact_adopter" "$unbound_build_adopter"
+python3 - "$unbound_build_adopter/.github/workflows/release.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text()
+binding = '    runs-on: ${{ matrix.os }}'
+assert source.count(binding) == 1
+path.write_text(source.replace(binding, "    # runs-on: ${{ matrix.os }}\n    runs-on: 'general'", 1))
+PY
+if run_adopter "$unbound_build_adopter"; then
+  fail "emitted suite accepts a build job detached from its approved OS matrix"
+else
+  pass "emitted suite rejects a build job detached from its approved OS matrix"
+fi
+
+unbound_acquisition_adopter="$tmproot/adopter-artifact-unbound-acquisition"
+cp -a "$private_artifact_adopter" "$unbound_acquisition_adopter"
+python3 - "$unbound_acquisition_adopter/.github/workflows/release.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text()
+binding = '    runs-on: ${{ matrix.os }}'
+assert source.count(binding) == 2
+path.write_text(source.replace(binding, "    # runs-on: ${{ matrix.os }}\n    runs-on: 'general'", 1))
+PY
+if run_adopter "$unbound_acquisition_adopter"; then
+  fail "emitted suite accepts acquisition detached from its approved OS matrix"
+else
+  pass "emitted suite rejects acquisition detached from its approved OS matrix"
+fi
+
+if python3 "$repo_root/scripts/ci-gate/hosted-selector-policy.py" \
+  --consumer-policy "$private_artifact_adopter/.github/workflows" >"$tmproot/run.out" 2>&1; then
+  pass "generated private artifact caller satisfies canonical runner selector policy"
+else
+  fail "generated private artifact caller violates runner selector policy: $(tail -2 "$tmproot/run.out")"
+fi
+
+private_lock_validator="$tmproot/private-lock-validator.js"
+if python3 - "$private_artifact_adopter/.github/workflows/release.yml" "$private_lock_validator" >"$tmproot/run.out" 2>&1 <<'PY'
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+lines = Path(sys.argv[1]).read_text().splitlines()
+blocks = []
+for start, line in enumerate(lines):
+    if not re.search(r"\bnode <<(?:'NODE'|NODE)\s*$", line):
+        continue
+    end = next((index for index in range(start + 1, len(lines))
+                if re.fullmatch(r"\s*NODE", lines[index])), None)
+    if end is None:
+        raise SystemExit(f"unterminated generated Node block at line {start + 1}")
+    indent = len(lines[end]) - len(lines[end].lstrip())
+    body = "\n".join(value[indent:] for value in lines[start + 1:end]) + "\n"
+    checked = subprocess.run(["node", "--check", "-"], input=body, text=True, capture_output=True)
+    if checked.returncode:
+        raise SystemExit(f"generated Node block at line {start + 1}: {checked.stderr}")
+    blocks.append(body)
+validators = [block for block in blocks if "internal dependency is not pinned" in block]
+if not blocks or len(validators) != 1:
+    raise SystemExit("expected one private lock validator among generated Node blocks")
+Path(sys.argv[2]).write_text(validators[0])
+PY
+then
+  pass "every generated artifact caller Node block parses"
+else
+  fail "generated artifact caller contains invalid Node code: $(tail -2 "$tmproot/run.out")"
+fi
+
+upper_scope_adopter="$tmproot/adopter-artifact-private-upper-scope"
+cp -a "$private_artifact_adopter" "$upper_scope_adopter"
+sed -i 's|download/@verjson/ai/|download/@verJSON/ai/|g' "$upper_scope_adopter/package-lock.json"
+grep -qF 'download/@verJSON/ai/' "$upper_scope_adopter/package-lock.json" \
+  || fail "upper-scope fixture did not retain its authentic registry URL"
+run_adopter "$upper_scope_adopter" \
+  && (cd "$upper_scope_adopter" && APPROVED_INTERNAL_PACKAGES=@verjson/ai node "$private_lock_validator") >"$tmproot/run.out" 2>&1 \
+  && pass "generated private lock checks accept the authentic organization URL spelling" \
+  || fail "generated private lock checks reject the authentic organization URL spelling: $(tail -2 "$tmproot/run.out")"
+
+wrong_package_adopter="$tmproot/adopter-artifact-private-wrong-package"
+cp -a "$upper_scope_adopter" "$wrong_package_adopter"
+sed -i 's|download/@verJSON/ai/|download/@verJSON/wrong/|g' "$wrong_package_adopter/package-lock.json"
+if (cd "$wrong_package_adopter" && APPROVED_INTERNAL_PACKAGES=@verjson/ai node "$private_lock_validator") >"$tmproot/run.out" 2>&1; then
+  fail "generated private lock validator accepted a different package URL"
+else
+  grep -qF 'internal dependency is not pinned to its exact GitHub Packages download URL' "$tmproot/run.out" \
+    && pass "generated private lock validator rejects a different package URL" \
+    || fail "generated private lock validator rejected the wrong package for another reason: $(tail -2 "$tmproot/run.out")"
+fi
+
 private_allowlist_adopter="$tmproot/adopter-artifact-private-allowlist"
 cp -a "$private_artifact_adopter" "$private_allowlist_adopter"
 sed -i "s/APPROVED_INTERNAL_PACKAGES: '@verjson\/ai'/APPROVED_INTERNAL_PACKAGES: '@verjson\/ai,@verjson\/ai-gguf'/" \
@@ -2598,7 +2695,7 @@ fi
 
 private_mismatched_cache_adopter="$tmproot/adopter-artifact-private-mismatched-cache"
 cp -a "$private_artifact_adopter" "$private_mismatched_cache_adopter"
-sed -i '/^  build:/,/^  publish:/ s/matrix.dependency-index/matrix.build-runner/' \
+sed -i '/^  build:/,/^  publish:/ s/matrix.dependency-index/matrix.os/' \
   "$private_mismatched_cache_adopter/.github/workflows/release.yml"
 git -C "$private_mismatched_cache_adopter" commit -aqm 'mismatch restored dependency cache key'
 if run_adopter "$private_mismatched_cache_adopter"; then
@@ -2689,7 +2786,7 @@ fi
 
 private_selector_adopter="$tmproot/adopter-artifact-private-selector"
 cp -a "$private_artifact_adopter" "$private_selector_adopter"
-sed -i "s/- build-runner: \${{ fromJSON(vars.CI_LANE_TRUSTED_WINDOWS) }}/- build-runner: 'vars.CI_LANE_TRUSTED_WINDOWS'/g" \
+sed -i "s/- os: \${{ fromJSON(vars.CI_LANE_TRUSTED_WINDOWS) }}/- os: 'vars.CI_LANE_TRUSTED_WINDOWS'/g" \
   "$private_selector_adopter/.github/workflows/release.yml"
 git -C "$private_selector_adopter" commit -aqm 'replace runner expression with silent literal typo'
 if run_adopter "$private_selector_adopter"; then
