@@ -700,6 +700,7 @@ release_version_guard_step=$(cat <<'EOF'
       - name: Require an explicit release version
         env:
           INPUT_VERSION: ${{ inputs.version }}
+          PYTHONUTF8: '1'
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -3627,6 +3628,7 @@ PY
   first_two_verify_steps="$(awk '/^[[:space:]]+- name:/ { print; if (++count == 2) exit }' <<<"$verify_job")"
   [ "$first_two_verify_steps" = $'      - name: Require an explicit release version\n      - name: Prepare job-scoped changelog tool cache' ] \
     && grep -qF 'INPUT_VERSION: ${{ inputs.version }}' <<<"$verify_job" \
+    && grep -qF "PYTHONUTF8: '1'" <<<"$verify_job" \
     && grep -qF "if not os.environ['INPUT_VERSION'].strip():" <<<"$verify_job" \
     || fail "$release_workflow does not reject blank versions before repository verification"
   grep -qF "if: steps.release-version.outputs.selected == 'true' && steps.release-state.outputs.snapshot-exists == 'true'" <<<"$verify_job" \
