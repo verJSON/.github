@@ -810,13 +810,18 @@ jobs:
               for path, package in packages.items():
                   if path == "" or path in local_records:
                       continue
-                  marker = "node_modules/"
+                  marker = "/node_modules/"
                   locked_name = package.get("name")
-                  path_name = path.rsplit(marker, 1)[1] if marker in path else None
+                  installation_path = f"/{path}"
+                  path_parts = path.split("/")
+                  canonical_path = (path.isprintable() and "\\" not in path
+                                    and all(part not in ("", ".", "..") for part in path_parts))
+                  path_name = (installation_path.rsplit(marker, 1)[1]
+                               if canonical_path and marker in installation_path else None)
                   path_is_internal = (isinstance(path_name, str)
                                       and any(path_name.startswith(scope + "/") for scope in scopes))
                   entry_name = path_name if path_is_internal else locked_name
-                  collected.append((entry_name, locked_name, package.get("resolved", ""), package.get("integrity")))
+                  collected.append((entry_name, locked_name, package.get("resolved", ""), package.get("integrity"), path_name))
               return collected
 
           if package_manager == "npm":
@@ -890,13 +895,13 @@ jobs:
                   resolution = package.get("resolution", {})
                   if not isinstance(resolution, dict):
                       sys.exit(f"{key} has invalid pnpm resolution")
-                  candidates.append((name, name, resolution.get("tarball", ""), resolution.get("integrity")))
+                  candidates.append((name, name, resolution.get("tarball", ""), resolution.get("integrity"), name))
           else:
               sys.exit("package-manager accepts only npm or pnpm")
 
           def verify_candidates(candidates, manifest_approved, where):
               found = set()
-              for entry_name, locked_name, resolved, integrity in candidates:
+              for entry_name, locked_name, resolved, integrity, path_name in candidates:
                   parsed = urlparse(resolved)
                   resolved_path = unquote(parsed.path)
                   registry_name = None
@@ -926,12 +931,16 @@ jobs:
                       prior_digest = private_downloads.setdefault(resolved, digest_hex)
                       if prior_digest != digest_hex:
                           sys.exit(f"{registry_name} repeats one download URL with different integrity{where}")
+                      if path_name is None:
+                          sys.exit(f"{entry_name} has invalid npm installation path{where}")
+                      if path_name != registry_name.lower():
+                          sys.exit(f"{path_name} is not pinned to its GitHub Packages download URL{where}")
                   if (not isinstance(entry_name, str)
                           or not any(entry_name.startswith(scope + "/") for scope in scopes)):
                       continue
                   if locked_name and locked_name != entry_name:
                       sys.exit(f"{entry_name} lock entry aliases unexpected package {locked_name}{where}")
-                  if registry_name is None or registry_name.lower() != entry_name:
+                  if registry_name is None:
                       sys.exit(f"{entry_name} is not pinned to its GitHub Packages download URL{where}")
                   found.add(entry_name)
               return found

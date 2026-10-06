@@ -796,6 +796,16 @@ class TheAllowlistIsExactlyWhatTheLaneMayAcquire(RefusalAssertions, unittest.Tes
             'the registry-issued URL differs in ASCII casing but names the '
             'same package approved by the caller and recorded in the lock')
 
+    def test_nested_npm_installation_path_keeps_the_approved_identity(self):
+        lock = npm_lock(APPROVED)
+        package = lock['packages'].pop(f'node_modules/{APPROVED}')
+        package['resolved'] = github_packages_url('@verJSON/Compliance')
+        lock['packages'][f'node_modules/outer/node_modules/{APPROVED}'] = package
+
+        self.assertAdmitted(
+            lock_validation([APPROVED], lock),
+            'a nested npm installation path names the same approved package')
+
     def test_registry_casing_does_not_approve_other_or_non_ascii_identities(self):
         for identity in ('@verJSON/Unapproved', '@Other/Compliance',
                          '@verjs\u043en/Compliance'):
@@ -820,6 +830,48 @@ class TheAllowlistIsExactlyWhatTheLaneMayAcquire(RefusalAssertions, unittest.Tes
             lock_validation([APPROVED], lock),
             f'{APPROVED} lock entry aliases unexpected package',
             'the URL casing exception also changed lock identity matching')
+
+    def test_registry_casing_does_not_admit_a_mixed_case_lock_path(self):
+        for locked_name in (None, APPROVED):
+            with self.subTest(locked_name=locked_name):
+                lock = npm_lock(APPROVED)
+                mixed_path = 'node_modules/@verJSON/Compliance'
+                lock['packages'][mixed_path] = {
+                    'version': '1.0.0',
+                    'resolved': github_packages_url('@verJSON/Compliance'),
+                    'integrity': lock_integrity(APPROVED),
+                }
+                if locked_name:
+                    lock['packages'][mixed_path]['name'] = locked_name
+
+                self.assertRefusedBecause(
+                    lock_validation([APPROVED], lock),
+                    'is not pinned to its GitHub Packages download URL',
+                    'a mixed-case lock path added an unapproved installation')
+
+    def test_registry_tarball_requires_an_npm_installation_path(self):
+        for path in ('vendor/private', APPROVED,
+                     f'fake_node_modules/{APPROVED}',
+                     f'/node_modules/{APPROVED}',
+                     f'vendor//node_modules/{APPROVED}',
+                     f'vendor/../node_modules/{APPROVED}',
+                     f'vendor/./node_modules/{APPROVED}',
+                     f'vendor\\item/node_modules/{APPROVED}',
+                     f'vendor\x00/node_modules/{APPROVED}',
+                     f'vendor\nnode_modules/{APPROVED}'):
+            with self.subTest(path=path):
+                lock = npm_lock(APPROVED)
+                lock['packages'][path] = {
+                    'name': APPROVED,
+                    'version': '1.0.0',
+                    'resolved': github_packages_url('@verJSON/Compliance'),
+                    'integrity': lock_integrity(APPROVED),
+                }
+
+                self.assertRefusedBecause(
+                    lock_validation([APPROVED], lock),
+                    f'{APPROVED} has invalid npm installation path',
+                    'a registry package outside node_modules was counted as approved')
 
     def test_registry_casing_does_not_relax_url_structure(self):
         valid_url = github_packages_url('@verJSON/Compliance')
