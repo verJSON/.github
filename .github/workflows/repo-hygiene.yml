@@ -17,7 +17,7 @@ name: repository hygiene
 #
 #   jobs:
 #     hygiene:
-#       uses: Verjson/.github/.github/workflows/repo-hygiene.yml@<release-commit-sha>
+#       uses: Verjson/.github/.github/workflows/repo-hygiene.yml@v2
 #       with:
 #         hygiene_ref: <immutable Verjson/.github commit>
 
