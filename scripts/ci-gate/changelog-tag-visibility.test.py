@@ -78,7 +78,7 @@ class ChangelogTagVisibilityTests(unittest.TestCase):
             ).stdout
             with self.subTest(mode=mode):
                 self.assertIn(
-                    f"uses: Verjson/.github/.github/workflows/generated-artifacts.yml@{ref}",
+                    f"uses: verJSON/.github/.github/workflows/generated-artifacts.yml@{ref}",
                     output,
                 )
                 self.assertNotIn("scripts/changelog.py check-pr", output)
