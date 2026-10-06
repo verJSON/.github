@@ -21,3 +21,4 @@ The GAR provider condition now pins the updated helper commit.
 The third live canary exposed Buildx's single-platform provenance shape;
 the verifier accepts that exact shape after checking the published OCI index
 against the reviewed platform before requesting an OIDC token.
+The bounded canary identity follows the reviewed BuildKit-shape fix commit.
