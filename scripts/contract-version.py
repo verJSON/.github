@@ -207,6 +207,8 @@ HEADER_RE = re.compile(
 # rewriting prose. `USES_RE` keeps its flag because the hub name it also matches
 # really is case-folded by GitHub; this pattern contains no hub text at all.
 USES_KEY_RE = re.compile(r"""^\s*(?:-\s+)?(?:uses|"uses"|'uses')\s*:""")
+SOURCE_VARIABLE_REF_RE = re.compile(
+    r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})\Z")
 # What is left on the line once the key is consumed, when the value is not:
 # nothing (a plain scalar on the following line), a block-scalar indicator, or
 # an alias to an anchor defined elsewhere in the file.
@@ -450,14 +452,19 @@ def references(root):
         if text is None:
             unscanned.append((relative, problem))
             continue
+        is_yaml = relative.endswith((".yml", ".yaml"))
         # An anchor and a continuation line are both file-scoped in YAML, so a
         # file that never names the hub cannot carry a hub reference this scan
         # failed to read. That is what keeps the gap half quiet on the ~1500
         # third-party `uses:` keys the fleet actually has.
         names_hub = HUB_RE.search(text) is not None
         for number, line in enumerate(text.splitlines(), 1):
-            pins = list(USES_RE.finditer(line))
-            key = None if pins or not names_hub else USES_KEY_RE.match(line)
+            matches = list(USES_RE.finditer(line))
+            # Source files can quote or generate a caller using shell variables.
+            # YAML references are live Actions inputs and must still be pinned.
+            pins = [match for match in matches
+                    if is_yaml or not SOURCE_VARIABLE_REF_RE.fullmatch(match.group("ref"))]
+            key = None if matches or not names_hub else USES_KEY_RE.match(line)
             if key is not None and HUB_RE.search(line):
                 unresolved.append(
                     (relative, number,
