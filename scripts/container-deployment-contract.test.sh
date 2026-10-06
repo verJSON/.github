@@ -489,6 +489,12 @@ for expected_argument in (
     assert expected_argument in admit_step["run"]
 assert jobs["deploy"]["environment"] == "production"
 assert jobs["dry-run"]["environment"] == "production"
+preview_step = next(
+    step for step in jobs["dry-run"]["steps"]
+    if step.get("name") == "Produce exact mutation-free host plan"
+)
+assert preview_step["run"].count("--preview") == 2
+assert all("--preview" not in step.get("run", "") for step in jobs["deploy"]["steps"])
 assert workflow["concurrency"]["cancel-in-progress"] is False
 host_secrets = {
     "RUNNER_HOST_EVIDENCE_APP_PRIVATE_KEY",

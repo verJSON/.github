@@ -499,6 +499,105 @@ class HostExportRequestTests(unittest.TestCase):
                     )
         run.assert_not_called()
 
+    def test_preview_collects_a_run_bound_plan_without_deployment_authorization(self):
+        config = configuration()
+        candidate = evidence()
+        candidate.pop("authorization")
+        environment = {
+            **{name: "credential" for name in controller.HOST_EXPORT_SECRET_ENV},
+            "GITHUB_REPOSITORY": "Verjson/verjson-github-runner",
+            "GITHUB_REPOSITORY_ID": "42",
+            "GITHUB_RUN_ID": "9001",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_SHA": candidate["headCommit"],
+            "GITHUB_HEAD_TREE": candidate["headTree"],
+            "VERJSON_DEPLOYMENT_CONTRACT_REF": "a" * 40,
+        }
+
+        def export(request):
+            result = copy.deepcopy(candidate["hostExport"])
+            result["requestDigest"] = controller.canonical_digest(request)
+            result["releaseManifest"] = {
+                "manifestIdentity": candidate["manifestIdentity"],
+                "manifestBytes": candidate["manifestBytes"],
+                "manifest": candidate["manifest"],
+                "attestation": candidate["attestation"],
+            }
+            return result
+
+        with mock.patch.dict(controller.os.environ, environment, clear=True), \
+                mock.patch.object(controller.ProcessAdapter, "_run", return_value=candidate), \
+                mock.patch.object(controller, "_run_host_export_transport", side_effect=export):
+            collected = controller._collect_evidence(
+                config, candidate["manifestIdentity"], "production", preview=True
+            )
+        plan = controller.build_plan(
+            config, collected, "production", preview=True,
+            deployment_contract_ref="a" * 40,
+        )
+
+        self.assertNotIn("authorization", collected)
+        self.assertEqual(42, collected["observationAuthority"]["repositoryId"])
+        self.assertEqual("9001.1", plan["attemptId"])
+        self.assertIs(plan["preview"], True)
+        with self.assertRaisesRegex(controller.DeploymentError, "preview plan cannot be admitted"):
+            controller.validate_deployment_plan(
+                plan, config, collected, TEST_NOW,
+                fleet_selector="production", action="deploy",
+                deployment_contract_ref="a" * 40,
+            )
+        with self.assertRaisesRegex(controller.DeploymentError, "preview evidence cannot authorize deployment"):
+            controller.build_plan(config, collected, "production")
+        with self.assertRaisesRegex(controller.DeploymentError, "preview plan cannot be executed"):
+            controller.execute_plan(plan, config, collected, mock.Mock(), mock.Mock())
+
+    def test_preview_rejects_deployment_authorization_and_missing_run_identity(self):
+        candidate = evidence()
+        environment = {
+            **{name: "credential" for name in controller.HOST_EXPORT_SECRET_ENV},
+            "GITHUB_REPOSITORY": "Verjson/verjson-github-runner",
+            "GITHUB_REPOSITORY_ID": "42",
+            "GITHUB_RUN_ID": "9001",
+            "GITHUB_RUN_ATTEMPT": "1",
+        }
+        with mock.patch.dict(controller.os.environ, environment, clear=True), \
+                mock.patch.object(controller.ProcessAdapter, "_run", return_value=candidate), \
+                mock.patch.object(controller, "_run_host_export_transport") as export:
+            with self.assertRaisesRegex(controller.DeploymentError, "must omit deployment authorization"):
+                controller._collect_evidence(
+                    configuration(), candidate["manifestIdentity"], "production", preview=True
+                )
+        export.assert_not_called()
+
+        candidate.pop("authorization")
+        environment.pop("GITHUB_RUN_ATTEMPT")
+        with mock.patch.dict(controller.os.environ, environment, clear=True), \
+                mock.patch.object(controller.ProcessAdapter, "_run", return_value=candidate), \
+                mock.patch.object(controller, "_run_host_export_transport") as export:
+            with self.assertRaisesRegex(controller.DeploymentError, "preview workflow identity is unavailable"):
+                controller._collect_evidence(
+                    configuration(), candidate["manifestIdentity"], "production", preview=True
+                )
+        export.assert_not_called()
+
+    def test_mutating_collection_still_requires_run_bound_authorization(self):
+        candidate = evidence()
+        candidate.pop("authorization")
+        environment = {
+            **{name: "credential" for name in controller.HOST_EXPORT_SECRET_ENV},
+            "GITHUB_RUN_ID": "9001",
+        }
+        with mock.patch.dict(controller.os.environ, environment, clear=True), \
+                mock.patch.object(controller.ProcessAdapter, "_run", return_value=candidate), \
+                mock.patch.object(controller, "_run_host_export_transport") as export:
+            with self.assertRaisesRegex(
+                controller.DeploymentError, "evidence workflow run differs from workflow authority"
+            ):
+                controller._collect_evidence(
+                    configuration(), candidate["manifestIdentity"], "production"
+                )
+        export.assert_not_called()
+
 
 class FakeAdapter:
     def __init__(
