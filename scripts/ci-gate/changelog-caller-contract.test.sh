@@ -377,7 +377,7 @@ assert_explicit_release_version() {
     || fail "$mode permits a blank version or starts release work before validating it"
 }
 assert_explicit_release_version release-node "$default_release"
-version_guard="$(sed -n '/^      - name: Require an explicit release version$/,/^      - name: Prepare job-scoped changelog tool cache$/p' <<<"$default_release" | sed -e '1,4d' -e '$d' -e 's/^          //')"
+version_guard="$(python3 -c 'import sys, yaml; print(yaml.safe_load(sys.stdin)["jobs"]["verify"]["steps"][0]["run"])' <<<"$default_release")"
 [ -n "$version_guard" ] \
   && ! env INPUT_VERSION='' bash -c "$version_guard" >/dev/null 2>&1 \
   && ! env INPUT_VERSION='  ' bash -c "$version_guard" >/dev/null 2>&1 \
