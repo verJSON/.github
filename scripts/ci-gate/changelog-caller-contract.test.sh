@@ -389,10 +389,11 @@ assert_explicit_release_version() {
 }
 assert_explicit_release_version release-node "$default_release"
 version_guard="$(python3 -c 'import sys, yaml; print(yaml.safe_load(sys.stdin)["jobs"]["verify"]["steps"][0]["run"])' <<<"$default_release")"
+# Bash's \u escape is locale-dependent; UTF-8 bytes keep this case real under LC_ALL=C.
 [ -n "$version_guard" ] \
   && ! env INPUT_VERSION='' bash -c "$version_guard" >/dev/null 2>&1 \
   && ! env INPUT_VERSION='  ' bash -c "$version_guard" >/dev/null 2>&1 \
-  && ! env INPUT_VERSION=$'\u00a0' bash -c "$version_guard" >/dev/null 2>&1 \
+  && ! env LC_ALL=C INPUT_VERSION=$'\xc2\xa0' bash -c "$version_guard" >/dev/null 2>&1 \
   && env INPUT_VERSION='v1.2.3' bash -c "$version_guard" >/dev/null 2>&1 \
   && pass "release dispatch rejects blank versions before resolving a plan" \
   || fail "release dispatch version guard accepts blank input or rejects an explicit version"
