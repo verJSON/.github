@@ -97,3 +97,14 @@ Because the arm runs at the SHA stored in ruleset 20722935 and consumers pin
 `ai-review-merge.yml`, `ai-privileged-merge.yml`, and `ai-promotion-retry.yml`, the
 fix is live only after that ruleset is rotated to the merge commit and a contract
 release repins the adopters.
+
+## 2026-10-06 — Bind fallback finalization to the exact head
+
+Issue [#1650](https://github.com/verJSON/.github/issues/1650) identified a gap in
+the always-run finalizer: it checked that the head field in `external_id` was a
+valid SHA, but did not compare it with the authorized head. The finalizer now
+requires both the check run's `head_sha` and the head in `external_id` to equal
+`EXPECTED_HEAD_SHA` before it can update the check. A behavioral regression test
+shows each mismatched field independently blocks the mutation. This restores
+the existing exact-head requirement without changing check ownership or the
+recovery policy.
