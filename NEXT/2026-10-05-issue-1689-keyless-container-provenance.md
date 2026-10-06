@@ -15,3 +15,5 @@ The live private canary also exposed an OIDC request-host mismatch; the token
 fetcher now accepts GitHub Actions request hosts and refuses redirects before
 sending the bearer credential.
 The bounded canary identity is repinned to the corrected publisher revision.
+An authenticated, non-secret runner probe also identified the regional
+`run-actions` request-host family, which the token fetcher now accepts.

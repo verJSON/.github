@@ -56,31 +56,38 @@ class OidcTokenTests(unittest.TestCase):
             def read(self):
                 return b'{"value":"header.payload.signature"}'
 
-        with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / "oidc-token"
-            with patch.object(urllib.request, "build_opener") as build_opener:
-                build_opener.return_value.open.return_value = Response()
-                MODULE.write_github_oidc_token(
-                    output,
-                    "https://pipelinesghubeus13.actions.githubusercontent.com/_apis/oidc/token?foo=bar",
-                    "request-secret",
-                )
+        for host in (
+            "pipelinesghubeus13.actions.githubusercontent.com",
+            "run-actions-1-azure-eastus.actions.githubusercontent.com",
+        ):
+            with self.subTest(host=host), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "oidc-token"
+                with patch.object(urllib.request, "build_opener") as build_opener:
+                    build_opener.return_value.open.return_value = Response()
+                    MODULE.write_github_oidc_token(
+                        output,
+                        f"https://{host}/_apis/oidc/token?foo=bar",
+                        "request-secret",
+                    )
 
-            request = build_opener.return_value.open.call_args.args[0]
-            self.assertIsInstance(
-                build_opener.call_args.args[0], MODULE.NoOidcRedirectHandler
-            )
-            self.assertIn("audience=sigstore", request.full_url)
-            self.assertIn("foo=bar", request.full_url)
-            self.assertEqual(request.get_header("Authorization"), "Bearer request-secret")
-            self.assertEqual(output.read_text(), "header.payload.signature")
-            self.assertEqual(os.stat(output).st_mode & 0o777, 0o600)
+                request = build_opener.return_value.open.call_args.args[0]
+                self.assertIsInstance(
+                    build_opener.call_args.args[0], MODULE.NoOidcRedirectHandler
+                )
+                self.assertIn("audience=sigstore", request.full_url)
+                self.assertIn("foo=bar", request.full_url)
+                self.assertEqual(request.get_header("Authorization"), "Bearer request-secret")
+                self.assertEqual(output.read_text(), "header.payload.signature")
+                self.assertEqual(os.stat(output).st_mode & 0o777, 0o600)
 
     def test_rejects_lookalike_or_credential_bearing_request_endpoints(self):
         endpoints = (
             "http://pipelines.actions.githubusercontent.com/_apis/oidc/token",
             "https://pipelines.actions.githubusercontent.com.evil.example/token",
             "https://artifactcache.actions.githubusercontent.com/token",
+            "https://run-actions-1-azure-eastus.actions.githubusercontent.com.evil.example/token",
+            "https://run-actions-evil-azure-eastus.actions.githubusercontent.com/token",
+            "https://run-actions-1-cache.actions.githubusercontent.com/token",
             "https://evil.example@pipelines.actions.githubusercontent.com/token",
             "https://pipelines.actions.githubusercontent.com:444/token",
             "https://pipelines.actions.githubusercontent.com/token#fragment",

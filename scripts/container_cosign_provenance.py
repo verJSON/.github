@@ -417,7 +417,10 @@ def write_github_oidc_token(
     parsed = urllib.parse.urlsplit(request_url)
     host = parsed.hostname or ""
     github_request_host = host == "token.actions.githubusercontent.com" or bool(
-        re.fullmatch(r"pipelines[a-z0-9-]*\.actions\.githubusercontent\.com", host)
+        re.fullmatch(
+            r"(?:pipelines[a-z0-9-]*|run-actions-[0-9]+-azure-[a-z0-9]+(?:-[a-z0-9]+)*)\.actions\.githubusercontent\.com",
+            host,
+        )
     )
     if (
         parsed.scheme != "https"
