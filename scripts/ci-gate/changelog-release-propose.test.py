@@ -427,7 +427,7 @@ class GeneratedCallerTests(unittest.TestCase):
                 self.assertNotIn("autonomy", triggers["workflow_dispatch"]["inputs"])
                 job = document["jobs"]["release-propose"]
                 self.assertEqual(
-                    f"Verjson/.github/.github/workflows/{workflow}@{self.sha}",
+                    f"verJSON/.github/.github/workflows/{workflow}@{self.sha}",
                     job["uses"],
                 )
                 self.assertEqual(self.sha, job["with"]["contract_ref"])

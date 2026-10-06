@@ -209,14 +209,14 @@ cat >"$tmp/bin/curl" <<'CURL'
 #!/usr/bin/env bash
 url="${*: -1}"
 case "$url" in
-  https://raw.githubusercontent.com/Verjson/.github/*/scripts/changelog.py)
-    ref="${url#*Verjson/.github/}"; ref="${ref%%/*}"
+  https://raw.githubusercontent.com/[Vv]er[Jj][Ss][Oo][Nn]/.github/*/scripts/changelog.py)
+    ref="${url#*/.github/}"; ref="${ref%%/*}"
     git -C "$REPO_ROOT" show "$ref:scripts/changelog.py" ;;
-  https://raw.githubusercontent.com/Verjson/.github/*/scripts/gen-adr-index.sh)
-    ref="${url#*Verjson/.github/}"; ref="${ref%%/*}"
+  https://raw.githubusercontent.com/[Vv]er[Jj][Ss][Oo][Nn]/.github/*/scripts/gen-adr-index.sh)
+    ref="${url#*/.github/}"; ref="${ref%%/*}"
     git -C "$REPO_ROOT" show "$ref:scripts/gen-adr-index.sh" ;;
-  https://raw.githubusercontent.com/Verjson/.github/*/scripts/ci-gate/gen-adr-index.test.sh)
-    ref="${url#*Verjson/.github/}"; ref="${ref%%/*}"
+  https://raw.githubusercontent.com/[Vv]er[Jj][Ss][Oo][Nn]/.github/*/scripts/ci-gate/gen-adr-index.test.sh)
+    ref="${url#*/.github/}"; ref="${ref%%/*}"
     git -C "$REPO_ROOT" show "$ref:scripts/ci-gate/gen-adr-index.test.sh" ;;
   *) exit 1 ;;
 esac
@@ -970,7 +970,16 @@ rc="$(run_audit)"
 stack helm; pulls s1 s2
 head_with s1 gate "ci / lint-template" "changelog / validate"
 head_with s2 gate "ci / lint-template" "changelog / validate"
-sed -i 's|^    uses: Verjson/|    # uses: Verjson/|' "$content_root/.github/workflows/changelog.yml"
+sed -i 's/generated-artifacts\.yml@/GENERATED-ARTIFACTS.yml@/' "$content_root/.github/workflows/changelog.yml"
+rc="$(run_audit)"
+{ [ "$rc" != "rc=0" ] && grep -q 'changelog-caller-missing' "$tmp/out.txt"; } \
+  && pass "workflow path case cannot satisfy the generated changelog caller" \
+  || { fail "a caller with the wrong workflow path case was accepted ($rc)"; out | sed 's/^/diag - /'; }
+
+stack helm; pulls s1 s2
+head_with s1 gate "ci / lint-template" "changelog / validate"
+head_with s2 gate "ci / lint-template" "changelog / validate"
+sed -i 's|^    uses: verJSON/|    # uses: verJSON/|' "$content_root/.github/workflows/changelog.yml"
 rc="$(run_audit)"
 { [ "$rc" != "rc=0" ] && grep -q 'changelog-caller-missing' "$tmp/out.txt"; } \
   && pass "a commented uses lookalike cannot satisfy source inspection" \

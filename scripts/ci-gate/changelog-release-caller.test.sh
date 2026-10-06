@@ -144,7 +144,7 @@ if len(resume_checkouts) != 1 or str(resume_checkouts[0].get("if") or "") != "st
 
 uses = snapshot.get("uses", "")
 match = re.fullmatch(
-    r"Verjson/\.github/\.github/workflows/changelog-release\.yml@([0-9a-f]{40})", uses
+    r"verJSON/\.github/\.github/workflows/changelog-release\.yml@([0-9a-f]{40})", uses
 )
 if not match:
     bad("`snapshot` does not call changelog-release.yml at an immutable "
@@ -266,7 +266,7 @@ if installs != 1:
 # immutable contract pin. It consumes the version chosen by the snapshot job.
 publish_uses = str(publish.get("uses") or "")
 expected_publish = (
-    "Verjson/.github/.github/workflows/node-release.yml@%s" % match.group(1)
+    "verJSON/.github/.github/workflows/node-release.yml@%s" % match.group(1)
     if match else ""
 )
 if not expected_publish or publish_uses != expected_publish:

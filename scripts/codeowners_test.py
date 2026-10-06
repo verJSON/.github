@@ -50,13 +50,13 @@ class CodeownersTests(unittest.TestCase):
     def test_exact_generated_owner_covers_every_path_including_itself(self):
         owners.check(self.root)
         rules = [line for line in owners.CONTENT.splitlines() if line and not line.startswith('#')]
-        self.assertEqual(rules, ['* @Verjson/devs'])
+        self.assertEqual(rules, ['* @verJSON/devs'])
 
     def test_missing_wrong_owner_exceptions_and_generated_header_drift_fail(self):
         self.target.unlink()
         with self.assertRaises(owners.OwnershipError):
             owners.check(self.root)
-        for content in (owners.CONTENT.replace('@Verjson/devs', '@Verjson/other'),
+        for content in (owners.CONTENT.replace('@verJSON/devs', '@Verjson/other'),
                         owners.CONTENT + '/scripts/ @Verjson/other\n',
                         owners.CONTENT + '/.github/CODEOWNERS\n',
                         '* @Verjson/devs\n', owners.CONTENT.replace('\n', '\r\n')):

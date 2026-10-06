@@ -322,20 +322,17 @@ grep -qF 'vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED' "$workflows/actions-c
 #
 # runner-admission-reconcile.yml is absent because it must observe the general
 # pool from outside that pool (#401, ADR 0054).
-for local_workflow in \
-  rework-reconcile.yml \
-  tag-major.yml; do
-  off_lane="$(
-    grep -E '^    runs-on:' "$workflows/$local_workflow" \
-      | grep -vF "runs-on: \${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}" \
-      || true
-  )"
-  if [ -n "$off_lane" ]; then
-    fail "$local_workflow has a repository-local job that does not select the trusted lane: $off_lane"
-  else
-    pass "$local_workflow selects the trusted lane by name"
-  fi
-done
+local_workflow=rework-reconcile.yml
+off_lane="$(
+  grep -E '^    runs-on:' "$workflows/$local_workflow" \
+    | grep -vF "runs-on: \${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}" \
+    || true
+)"
+if [ -n "$off_lane" ]; then
+  fail "$local_workflow has a repository-local job that does not select the trusted lane: $off_lane"
+else
+  pass "$local_workflow selects the trusted lane by name"
+fi
 
 # Inverted AND pinned to the whole line. "No line says [self-hosted, general]"
 # would stay green if a second job were appended on any other literal; a prefix

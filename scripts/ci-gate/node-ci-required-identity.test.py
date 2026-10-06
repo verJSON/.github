@@ -561,6 +561,7 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             npm.chmod(0o755)
             node = tool_bin / "node"
             if npm_cli_layout:
+                # Match the npm CLI created from tool_package below; any other path must fail.
                 node.write_text(
                     "#!/usr/bin/env bash\n"
                     "case \"$1\" in */tool/lib/node_modules/npm/bin/npm-cli.js) "

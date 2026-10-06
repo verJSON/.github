@@ -1,0 +1,10 @@
+---
+date: 2026-10-06
+issue: 1698
+impact: patch
+title: Emit the canonical organization spelling in generated callers
+---
+
+The changelog caller generator now emits `verJSON` for organization-owned repositories, workflow references, renderer URLs, release runner selection, and CODEOWNERS. The npm scope and registry URLs remain unchanged. Contract tests cover the renamed output and the generated CODEOWNERS source.
+
+The required-checks audit and hosted-runner selector policy recognize the new caller spelling while continuing to verify historical callers against their own immutable generator pins. The selector policy still rejects other owner spellings. Release and generated-artifact contract tests assert the canonical spelling in new output.

@@ -26,27 +26,23 @@ else
   sed 's/^/diag - /' "$tmp/mutable-workflow-refs"
 fi
 
-release_block="$(awk '
-  /^[[:space:]]*```bash[[:space:]]*$/ { in_bash = 1; block = ""; next }
-  in_bash && /^[[:space:]]*```[[:space:]]*$/ {
-    if (block ~ /gh release create/) print block
-    in_bash = 0
-    next
-  }
-  in_bash { block = block $0 "\n" }
-' "$versioning_docs")"
+release_instructions="$(sed -n '/^## Cutting a release$/,$p' "$versioning_docs")"
 
-if grep -qE 'verified_sha=.*git rev-parse --verify [^[:space:]]+\^\{commit\}' <<<"$release_block"; then
-  pass "release instructions capture a verified full commit SHA"
+if grep -qF 'Dispatch the pinned `.github/workflows/release.yml` with that version' <<<"$release_instructions" \
+  && grep -qF 'dispatch commit' <<<"$release_instructions" \
+  && grep -qF 'concurrent change to `main` makes publication fail closed' <<<"$release_instructions" \
+  && ! grep -qF 'gh release create' <<<"$release_instructions"; then
+  pass "release instructions use an explicit-version dispatch bound to its verified source"
 else
-  fail "release instructions do not capture a verified full commit SHA"
+  fail "release instructions omit the exact-source dispatch or revive manual release creation"
 fi
 
-if grep -qF -- "--target \"\$verified_sha\"" <<<"$release_block" \
-  && ! grep -qE -- '--target[[:space:]]+(main|origin/main|HEAD)([[:space:]\\]|$)' <<<"$release_block"; then
-  pass "release creation targets the quoted verified SHA, never a mutable ref"
+if grep -qF 'immutable release commit' <<<"$release_instructions" \
+  && grep -qF 'pin that release commit SHA' <<<"$release_instructions" \
+  && grep -qF 'neither creates nor moves them' <<<"$release_instructions"; then
+  pass "release instructions require immutable readback and leave major aliases static"
 else
-  fail "release creation does not exclusively target the quoted verified SHA"
+  fail "release instructions omit immutable readback or static major-alias policy"
 fi
 
 if [ "$fails" -eq 0 ]; then

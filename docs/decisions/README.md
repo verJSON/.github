@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0219](0219-retire-moving-major-tags-for-contract-releases/README.md) | 2026-10-06 | Retire moving major tags for contract releases |
 | [0218](0218-require-explicit-release-dispatch-version/README.md) | 2026-10-06 | Require an explicit version for release dispatch |
 | [0217](0217-bound-gar-canary-publishing-to-one-github-workflow/README.md) | 2026-10-05 | Bound GAR canary publishing to one GitHub workflow |
 | [0216](0216-keyless-container-provenance-is-verified-per-registry/README.md) | 2026-10-05 | Keyless container provenance is verified per registry |
