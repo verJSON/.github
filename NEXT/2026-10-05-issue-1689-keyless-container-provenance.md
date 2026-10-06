@@ -34,3 +34,8 @@ The SPDX export accepts Buildx's unwrapped document only when the validated
 OCI index has exactly the requested single platform; multi-platform exports
 still require an exact platform key.
 The bounded GAR canary identity follows the reviewed SPDX inventory fix commit.
+The GAR mirror now passes authentication to Skopeo's `inspect` subcommand;
+its prior global-flag order failed before registry access. A read-only GAR
+probe returned `MANIFEST_UNKNOWN` for the new candidate tag; the helper
+classifies that as absence while authorization and missing-repository errors
+remain fatal, with bounded diagnostics that never echo credentials.

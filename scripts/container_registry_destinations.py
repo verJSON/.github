@@ -209,13 +209,27 @@ def parse_referrer_inventory(
 
 def _remote_digest(reference: str, authfile: Path) -> str | None:
     status, output, error = _skopeo([
-        "--authfile", str(authfile), "inspect", "--raw", f"docker://{reference}"
+        "inspect", "--authfile", str(authfile), "--raw", f"docker://{reference}"
     ])
     if status:
         message = error.decode("utf-8", errors="replace").lower()
-        if any(marker in message for marker in ("manifest unknown", "manifest not found", "no such manifest")):
+        if any(marker in message for marker in (
+            "unauthorized", "denied", "forbidden", "authentication required",
+            "insufficient_scope", "permission denied",
+        )) or re.search(
+            r"\b(?:http(?:\s+status(?:\s*code)?)?|status(?:\s*code)?)\s*[:=]?\s*(?:401|403)\b",
+            message,
+        ):
+            raise DestinationError("registry observation failed: authorization")
+        if any(marker in message for marker in (
+            "name_unknown", "name unknown", "repository not found", "unknown repository",
+        )):
+            raise DestinationError("registry observation failed: repository")
+        if any(marker in message for marker in (
+            "manifest unknown", "manifest_unknown", "manifest not found", "no such manifest"
+        )):
             return None
-        raise DestinationError("registry observation failed")
+        raise DestinationError(f"registry observation failed: skopeo exit {status}")
     return "sha256:" + hashlib.sha256(output).hexdigest()
 
 
@@ -243,7 +257,7 @@ def _platform_subjects(
     from container_oci_index import OCIIndexError, validate_index
 
     status, payload, _ = _skopeo([
-        "--authfile", str(authfile), "inspect", "--raw", f"docker://{repository}@{digest}"
+        "inspect", "--authfile", str(authfile), "--raw", f"docker://{repository}@{digest}"
     ])
     if status or "sha256:" + hashlib.sha256(payload).hexdigest() != digest:
         raise DestinationError("source OCI index differs from the pinned candidate digest")

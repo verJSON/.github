@@ -375,6 +375,85 @@ class RegistryDestinationTests(unittest.TestCase):
                         self.config, OWNER, "api", "gar", "1.2.3", "sha256:" + "a" * 64, authfile
                     )
 
+    def test_gar_manifest_unknown_code_means_the_candidate_tag_is_absent(self):
+        with TemporaryDirectory() as directory:
+            authfile = Path(directory) / "config.json"
+            authfile.write_text("{}", encoding="utf-8")
+            error = b'{"errors":[{"code":"MANIFEST_UNKNOWN","message":"Failed to fetch tag"}]}'
+
+            with patch.object(destinations, "_skopeo", return_value=(1, b"", error)):
+                observed = destinations._remote_digest(f"{GAR}/api:1.2.3", authfile)
+
+        self.assertIsNone(observed)
+
+    def test_registry_observation_passes_authfile_to_skopeo_inspect(self):
+        with TemporaryDirectory() as directory:
+            authfile = Path(directory) / "config.json"
+            reference = f"{GAR}/api:1.2.3"
+            with patch.object(destinations, "_skopeo", return_value=(1, b"", b"manifest unknown")) as run:
+                destinations._remote_digest(reference, authfile)
+
+        self.assertEqual(
+            run.call_args.args[0],
+            ["inspect", "--authfile", str(authfile), "--raw", f"docker://{reference}"],
+        )
+
+    def test_platform_inventory_passes_authfile_to_skopeo_inspect(self):
+        fixture = Path(__file__).resolve().parent / "fixtures/container-candidate/oci-index.json"
+        payload = fixture.read_bytes()
+        digest = "sha256:" + sha256(payload).hexdigest()
+        reviewed = [
+            {"os": "linux", "architecture": "amd64"},
+            {"os": "linux", "architecture": "arm64"},
+        ]
+        with TemporaryDirectory() as directory:
+            authfile = Path(directory) / "config.json"
+            with patch.object(destinations, "_skopeo", return_value=(0, payload, b"")) as run:
+                subjects = destinations._platform_subjects(GHCR + "/api", digest, authfile, reviewed)
+
+        self.assertEqual(len(subjects), 2)
+        self.assertEqual(
+            run.call_args.args[0],
+            ["inspect", "--authfile", str(authfile), "--raw", f"docker://{GHCR}/api@{digest}"],
+        )
+
+    def test_missing_tag_with_status_digits_is_not_an_authorization_failure(self):
+        with TemporaryDirectory() as directory:
+            authfile = Path(directory) / "config.json"
+            error = b'Error parsing image name "docker://example.invalid/api:1.2.401": manifest unknown'
+            with patch.object(destinations, "_skopeo", return_value=(1, b"", error)):
+                observed = destinations._remote_digest("example.invalid/api:1.2.401", authfile)
+
+        self.assertIsNone(observed)
+
+    def test_http_status_vetoes_manifest_absence(self):
+        with TemporaryDirectory() as directory:
+            authfile = Path(directory) / "config.json"
+            error = b'HTTP status code: 403; {"code":"MANIFEST_UNKNOWN"}'
+            with patch.object(destinations, "_skopeo", return_value=(1, b"", error)):
+                with self.assertRaisesRegex(DestinationError, "authorization"):
+                    destinations._remote_digest(f"{GAR}/api:1.2.3", authfile)
+
+    def test_manifest_unknown_does_not_hide_authorization_failure(self):
+        with TemporaryDirectory() as directory:
+            authfile = Path(directory) / "config.json"
+            authfile.write_text("{}", encoding="utf-8")
+            error = b'{"code":"MANIFEST_UNKNOWN"} unauthorized: token has insufficient_scope'
+
+            with patch.object(destinations, "_skopeo", return_value=(1, b"", error)):
+                with self.assertRaisesRegex(DestinationError, "authorization"):
+                    destinations._remote_digest(f"{GAR}/api:1.2.3", authfile)
+
+    def test_manifest_unknown_does_not_hide_missing_repository(self):
+        with TemporaryDirectory() as directory:
+            authfile = Path(directory) / "config.json"
+            authfile.write_text("{}", encoding="utf-8")
+            error = b'{"code":"NAME_UNKNOWN"} {"code":"MANIFEST_UNKNOWN"}'
+
+            with patch.object(destinations, "_skopeo", return_value=(1, b"", error)):
+                with self.assertRaisesRegex(DestinationError, "repository"):
+                    destinations._remote_digest(f"{GAR}/api:1.2.3", authfile)
+
     def test_mirror_cli_with_published_at_still_copies_and_reads_back(self):
         self.config["registryDestinations"] = [
             {"provider": "ghcr", "namespace": GHCR}, GAR_DESTINATION
