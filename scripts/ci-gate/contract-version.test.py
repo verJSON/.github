@@ -315,6 +315,27 @@ class ScanTotality(unittest.TestCase):
         track(root)
         self.assertEqual([f.kind for f in self.verify(root)], ["PIN_MISMATCH"])
 
+    def test_generated_shell_assertions_with_variable_refs_are_not_live_pins(self):
+        root = self.repo()
+        (root / "scripts").mkdir()
+        (root / "scripts" / "changelog-contract.test.sh").write_text(
+            "grep -qF 'uses: Verjson/.github/.github/workflows/changelog.yml@"
+            "$CONTRACT_REF' caller.yml\n"
+            "grep -qF 'uses: Verjson/.github/.github/workflows/changelog.yml@"
+            "${CONTRACT_REF}' caller.yml\n"
+            "uses: Verjson/.github/.github/workflows/changelog.yml@"
+            "${CONTRACT_REF}\n")
+        track(root)
+        self.assertEqual(self.verify(root), [])
+
+    def test_variable_ref_in_a_workflow_remains_unpinned(self):
+        root = self.repo()
+        (root / ".github" / "workflows" / "dynamic.yml").write_text(
+            "jobs:\n  ci:\n    uses: Verjson/.github/.github/workflows/node-ci.yml@"
+            "$CONTRACT_REF\n")
+        track(root)
+        self.assertEqual([f.kind for f in self.verify(root)], ["UNPINNED_REFERENCE"])
+
     def test_a_header_below_the_first_six_lines_is_still_a_claim(self):
         # gen-changelog-caller.sh stamps CONTRACT_REF on line 13 of the ADR
         # index test and emits its workflow header below `concurrency:`. A
