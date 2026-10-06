@@ -413,6 +413,11 @@ def _validate_runner_admission(fleet: dict[str, Any], inventory: Any) -> None:
             raise DeploymentError(f"runner {runner.get('name')} tools are incomplete")
 
 
+def _host_observation_authority(evidence: dict[str, Any]) -> dict[str, Any]:
+    name = "observationAuthority" if evidence.get("preview") is True else "authorization"
+    return _object(evidence.get(name), name)
+
+
 def _validate_host_export_binding(
     config: dict[str, Any],
     fleet: dict[str, Any],
@@ -433,7 +438,7 @@ def _validate_host_export_binding(
         or host_request.get("runnerNames") != fleet.get("runners")
         or request.get("configDigest") != canonical_digest(config)
         or github.get("repository") != release_evidence.get("repository")
-        or github.get("repositoryId") != _object(evidence.get("authorization"), "authorization").get("repositoryId")
+        or github.get("repositoryId") != _host_observation_authority(evidence).get("repositoryId")
         or github.get("appId") != authority.get("appId")
         or github.get("installationId") != authority.get("installationId")
         or release_request.get("manifestDigest") != evidence.get("manifestIdentity")
@@ -643,9 +648,16 @@ def build_plan(
     action: str = "deploy",
     rollback_source: dict[str, Any] | None = None,
     deployment_contract_ref: str = "0000000000000000000000000000000000000000",
+    preview: bool = False,
 ) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
-    _validate_deployment_authorization(evidence)
+    if preview:
+        if evidence.get("preview") is not True or "authorization" in evidence:
+            raise DeploymentError("preview evidence must omit deployment authorization")
+    else:
+        if "preview" in evidence or "observationAuthority" in evidence:
+            raise DeploymentError("preview evidence cannot authorize deployment")
+        _validate_deployment_authorization(evidence)
     _validate_commands(config)
     if re.fullmatch(r"[0-9a-f]{40}", deployment_contract_ref) is None:
         raise DeploymentError("deployment contract ref must be an immutable commit")
@@ -692,19 +704,20 @@ def build_plan(
     _, observed_release, baseline_identity = _validate_inventory(
         config, fleet, evidence, rollback_source if action == "rollback" else None
     )
-    authorization = _object(evidence.get("authorization"), "authorization")
+    authority = _host_observation_authority(evidence)
     head_commit = evidence.get("headCommit")
     if not isinstance(head_commit, str) or re.fullmatch(r"[0-9a-f]{40}", head_commit) is None:
         raise DeploymentError("checked-out head commit evidence is invalid")
     head_tree = evidence.get("headTree")
     if not isinstance(head_tree, str) or re.fullmatch(r"[0-9a-f]{40}", head_tree) is None:
         raise DeploymentError("checked-out head tree evidence is invalid")
-    if authorization.get("deployedCommit") != head_commit or authorization.get("deployedTree") != head_tree:
-        raise DeploymentError("deployment authority differs checked-out default-branch commit/tree")
-    if authorization.get("reviewedTree") != head_tree:
-        raise DeploymentError("reviewed pull-request tree differs deployed default-branch tree")
-    run_id = authorization.get("workflowRunId")
-    run_attempt = evidence.get("workflowRunAttempt", 1)
+    if not preview:
+        if authority.get("deployedCommit") != head_commit or authority.get("deployedTree") != head_tree:
+            raise DeploymentError("deployment authority differs checked-out default-branch commit/tree")
+        if authority.get("reviewedTree") != head_tree:
+            raise DeploymentError("reviewed pull-request tree differs deployed default-branch tree")
+    run_id = authority.get("workflowRunId")
+    run_attempt = authority.get("workflowRunAttempt") if preview else evidence.get("workflowRunAttempt", 1)
     if (
         not isinstance(run_id, int)
         or run_id < 1
@@ -746,7 +759,8 @@ def build_plan(
         "deploymentContractCommit": deployment_contract_ref,
         "headCommit": head_commit,
         "headTree": head_tree,
-        "authorizationDigest": canonical_digest(authorization),
+        "authorizationDigest": None if preview else canonical_digest(authority),
+        **({"preview": True} if preview else {}),
         "manifestIdentity": identity,
         "selectedRelease": selected_release,
         "targetDigest": target_digest,
@@ -773,6 +787,8 @@ def validate_deployment_plan(
     deployment_contract_ref: str,
 ) -> None:
     plan = _object(plan, "deployment plan")
+    if plan.get("preview") is True:
+        raise DeploymentError("preview plan cannot be admitted")
     if (
         plan.get("fleetSelector") != fleet_selector
         or plan.get("action") != action
@@ -1185,6 +1201,8 @@ def execute_plan(
     max_hosts: int | None = None,
     clock: Any | None = None,
 ) -> dict[str, Any]:
+    if plan.get("preview") is True:
+        raise DeploymentError("preview plan cannot be executed")
     if dry_run:
         return plan
     authorization = _object(evidence.get("authorization"), "authorization")
@@ -1788,15 +1806,15 @@ def _build_host_export_request(
         raise DeploymentError("exact release manifest bytes are unavailable")
     _manifest_with_identity(manifest, identity, "release manifest", manifest_bytes)
 
-    authorization = _object(evidence.get("authorization"), "authorization")
-    repository = _text(authorization.get("repository"), "authorization.repository")
-    repository_id = authorization.get("repositoryId")
+    authority = _host_observation_authority(evidence)
+    repository = _text(authority.get("repository"), "host observation repository")
+    repository_id = authority.get("repositoryId")
     if repository != expected.get("sourceRepository") or not isinstance(repository_id, int) or isinstance(repository_id, bool) or repository_id < 1:
         raise DeploymentError("host observation repository identity is unavailable")
     attempt_id = plan.get("attemptId") if plan else None
     if not attempt_id:
-        workflow_run_id = authorization.get("workflowRunId")
-        workflow_attempt = authorization.get("workflowRunAttempt", evidence.get("workflowRunAttempt", 1))
+        workflow_run_id = authority.get("workflowRunId")
+        workflow_attempt = authority.get("workflowRunAttempt", evidence.get("workflowRunAttempt", 1))
         if (
             not isinstance(workflow_run_id, int) or isinstance(workflow_run_id, bool) or workflow_run_id < 1
             or not isinstance(workflow_attempt, int) or isinstance(workflow_attempt, bool) or workflow_attempt < 1
@@ -1900,6 +1918,7 @@ def _collect_evidence(
     fleet_selector: str,
     rollback_receipt: str = "",
     authorization_path: Path | None = None,
+    preview: bool = False,
 ) -> dict[str, Any]:
     if MANIFEST_IDENTITY.fullmatch(manifest_identity) is None:
         raise DeploymentError("manifest identity must be an immutable digest reference")
@@ -1931,7 +1950,27 @@ def _collect_evidence(
     evidence = ProcessAdapter._run(
         command, timeout_seconds=ADMISSION_EVIDENCE_SECONDS
     )
-    if authorization_path is not None:
+    github_run_id = os.environ.get("GITHUB_RUN_ID")
+    github_run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT")
+    if preview:
+        if authorization_path is not None or "authorization" in evidence:
+            raise DeploymentError("preview evidence must omit deployment authorization")
+        repository = os.environ.get("GITHUB_REPOSITORY")
+        repository_id = os.environ.get("GITHUB_REPOSITORY_ID")
+        if not repository or any(
+            value is None or re.fullmatch(r"[1-9][0-9]*", value) is None
+            for value in (repository_id, github_run_id, github_run_attempt)
+        ):
+            raise DeploymentError("preview workflow identity is unavailable")
+        evidence["observationAuthority"] = {
+            "repository": repository,
+            "repositoryId": int(repository_id),
+            "workflowRunId": int(github_run_id),
+            "workflowRunAttempt": int(github_run_attempt),
+        }
+        evidence["workflowRunAttempt"] = int(github_run_attempt)
+        evidence["preview"] = True
+    elif authorization_path is not None:
         evidence["authorization"] = _load(authorization_path)
     github_sha = os.environ.get("GITHUB_SHA")
     if github_sha and evidence.get("headCommit") != github_sha:
@@ -1940,14 +1979,12 @@ def _collect_evidence(
     if github_tree and evidence.get("headTree") != github_tree:
         raise DeploymentError("evidence checked-out tree differs from workflow authority")
     authorization = evidence.get("authorization")
-    github_run_id = os.environ.get("GITHUB_RUN_ID")
-    github_run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT")
-    if github_run_id and (
+    if not preview and github_run_id and (
         not isinstance(authorization, dict)
         or authorization.get("workflowRunId") != int(github_run_id)
     ):
         raise DeploymentError("evidence workflow run differs from workflow authority")
-    if github_run_attempt and evidence.get("workflowRunAttempt") != int(github_run_attempt):
+    if not preview and github_run_attempt and evidence.get("workflowRunAttempt") != int(github_run_attempt):
         raise DeploymentError("evidence workflow attempt differs from workflow authority")
     observed_identity = evidence.get("manifestIdentity")
     if observed_identity not in (None, manifest_identity):
@@ -1986,6 +2023,7 @@ def main() -> int:
     collect.add_argument("--fleet", required=True)
     collect.add_argument("--rollback-receipt", default="")
     collect.add_argument("--authorization", type=Path)
+    collect.add_argument("--preview", action="store_true")
     collect.add_argument("--output", required=True, type=Path)
 
     plan_parser = subparsers.add_parser("plan")
@@ -1995,6 +2033,7 @@ def main() -> int:
     plan_parser.add_argument("--action", choices=("deploy", "rollback"), required=True)
     plan_parser.add_argument("--contract-ref", required=True)
     plan_parser.add_argument("--rollback-source", type=Path)
+    plan_parser.add_argument("--preview", action="store_true")
     plan_parser.add_argument("--output", required=True, type=Path)
 
     admit = subparsers.add_parser("admit")
@@ -2030,19 +2069,16 @@ def main() -> int:
                     config,
                     args.manifest_identity,
                     args.fleet,
-            args.rollback_receipt,
-            args.authorization,
+                    args.rollback_receipt,
+                    args.authorization,
+                    preview=args.preview,
                 ),
             )
         elif args.command == "plan":
             config = _load(args.config)
             evidence = _load(args.evidence)
-            resume_plan = retained_plan(
-                config,
-                evidence,
-                args.fleet,
-                args.action,
-                args.contract_ref,
+            resume_plan = None if args.preview else retained_plan(
+                config, evidence, args.fleet, args.action, args.contract_ref
             )
             rollback_source = (
                 _load(args.rollback_source)
@@ -2059,6 +2095,7 @@ def main() -> int:
                     action=args.action,
                     rollback_source=rollback_source,
                     deployment_contract_ref=args.contract_ref,
+                    preview=args.preview,
                 ),
             )
         elif args.command == "admit":

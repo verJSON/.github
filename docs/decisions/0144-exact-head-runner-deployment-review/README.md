@@ -82,3 +82,17 @@ schema-v3 receipts remain immutable and cannot be reinterpreted as this authorit
 The v4 controller rejects schema-v3 rollback sources explicitly. Operators must finish
 or roll back every active v3 attempt with the pinned v3 contract before cutting over;
 v3 human environment approval is never translated into v4 review authority.
+
+## 2026-10-06 — Keep observation-only previews separate from deployment authority
+
+Issue [#1654](https://github.com/verJSON/.github/issues/1654) showed that the
+dry-run workflow could not collect evidence: it had no reviewed deployment
+authorization, while the controller required that authorization whenever
+GitHub supplied a run ID. The subsequent plan builder required it too.
+
+A dry-run now records the workflow repository and run identity as observation
+authority and emits a marked preview plan. It still checks the immutable release,
+host observation receipt, fleet, and checked-out source. It cannot create an
+admitted receipt or execute a deployment. The mutating path still requires the
+reviewed authorization and exact workflow-run binding described above. This
+keeps the dry-run useful without treating observation as deployment approval.

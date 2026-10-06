@@ -140,10 +140,11 @@ jobs:
           [[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ ]]
           [[ "$MANIFEST_IDENTITY" =~ ^sha256:[0-9a-f]{64}$ ]]
           python3 scripts/container_deployment_controller.py collect-evidence \
+            --preview \
             --config "$CONFIG_PATH" --manifest-identity "$MANIFEST_IDENTITY" \
             --fleet "$FLEET_SELECTOR" --rollback-receipt "$ROLLBACK_RECEIPT" \
             --output deployment-evidence.json
-          args=(plan --config "$CONFIG_PATH" --evidence deployment-evidence.json \
+          args=(plan --preview --config "$CONFIG_PATH" --evidence deployment-evidence.json \
             --fleet "$FLEET_SELECTOR" --action "$ACTION" --contract-ref "$CONTRACT_REF" \
             --output deployment-plan.json)
           python3 scripts/container_deployment_controller.py "${args[@]}"
