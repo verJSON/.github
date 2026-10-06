@@ -29,3 +29,4 @@ ORAS attachment progress no longer enters the machine-readable Cosign receipt;
 the signed bundle and exported manifest remain the evidence inputs.
 ORAS pull progress is also isolated from JSON verification receipts while
 downloaded referrer files remain the verified evidence inputs.
+The bounded GAR canary identity now follows that reviewed receipt fix commit.
