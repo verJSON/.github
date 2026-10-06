@@ -2325,16 +2325,16 @@ jobs:
             "repos/$TARGET_REPO/check-runs/$AUTHORIZATION_CHECK_ID" >"$check_file"
           # Actions-owned checks store their own page as details_url (#1648).
           expected_details_url="$GITHUB_SERVER_URL/$TARGET_REPO/runs/$AUTHORIZATION_CHECK_ID"
-          jq -e --arg repo "$TARGET_REPO" --arg pr "$PR_NUMBER" \
+          jq -e --arg repo "$TARGET_REPO" --arg pr "$PR_NUMBER" --arg head "$EXPECTED_HEAD_SHA" \
             --arg run "$ARM_RUN_ID" --arg attempt "$ARM_RUN_ATTEMPT" \
             --arg details_url "$expected_details_url" --argjson id "$AUTHORIZATION_CHECK_ID" '
             (.external_id | split(":")) as $parts |
-            .id == $id and .name == "AI review authorization" and
+            .id == $id and .name == "AI review authorization" and .head_sha == $head and
             .app.id == 15368 and .app.slug == "github-actions" and
             .details_url == $details_url and ($parts | length) == 8 and
             $parts[0] == "ai-review" and $parts[1] == "v1" and
             $parts[2] == $repo and $parts[3] == $pr and
-            ($parts[4] | test("^[0-9a-f]{40}$")) and
+            $parts[4] == $head and
             $parts[5] == $run and $parts[6] == $attempt and
             ($parts[7] | test("^[0-9a-f]{64}$"))
           ' "$check_file" >/dev/null || {

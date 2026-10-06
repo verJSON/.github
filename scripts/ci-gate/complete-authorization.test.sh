@@ -194,12 +194,13 @@ cat >"$tmp/bin/gh" <<'SH'
 printf 'token=%s %s\n' "${GH_TOKEN:-}" "$*" >>"$CALLS"
 case "$*" in
   "api repos/Verjson/example/check-runs/9001")
-    jq -nc --argjson id "$AUTHORIZATION_CHECK_ID" --arg head "$EXPECTED_AUTHORIZED_HEAD_SHA" \
+    jq -nc --argjson id "$AUTHORIZATION_CHECK_ID" --arg head "${CHECK_RUN_HEAD:-$EXPECTED_AUTHORIZED_HEAD_SHA}" \
+            --arg external_head "${CHECK_EXTERNAL_HEAD:-$EXPECTED_AUTHORIZED_HEAD_SHA}" \
             --arg repo "$TARGET_REPO" --arg pr "$PR_NUMBER" --arg run "$ARM_RUN_ID" --arg attempt "$ARM_RUN_ATTEMPT" \
             --arg url "${FORGED_DETAILS_URL:-$GITHUB_SERVER_URL/$TARGET_REPO/runs/$AUTHORIZATION_CHECK_ID}" \
             --argjson check_app_id "${CHECK_APP_ID:-15368}" --arg check_app_slug "${CHECK_APP_SLUG:-github-actions}" \
             '{id:$id,name:"AI review authorization",head_sha:$head,
-             external_id:("ai-review:v1:"+$repo+":"+$pr+":"+$head+":"+$run+":"+$attempt+":"+("a"*64)),
+             external_id:("ai-review:v1:"+$repo+":"+$pr+":"+$external_head+":"+$run+":"+$attempt+":"+("a"*64)),
              details_url:$url,status:"in_progress",conclusion:null,app:{id:$check_app_id,slug:$check_app_slug}}' ;;
   "api --method POST "*)
     if [ "${APPROVAL_RC:-0}" -ne 0 ]; then
@@ -443,6 +444,26 @@ for forged_url in "https://github.com/Verjson/example/actions/runs/$ARM_RUN_ID" 
     fail "a forged details_url ($forged_url) reached the finalizer's mutation path"
   fi
 done
+
+: >"$CALLS"
+if ! CHECK_EXTERNAL_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa run_finalizer >"$tmp/out" 2>&1 \
+  && grep -Fq 'refusing to modify a check outside this exact arm run' "$tmp/out" \
+  && ! grep -q 'api --method PATCH' "$CALLS" \
+  && ! grep -q 'api --method POST' "$CALLS"; then
+  pass "another head in the authorization identity cannot reach finalizer mutation"
+else
+  fail "another head in the authorization identity reached finalizer mutation"
+fi
+
+: >"$CALLS"
+if ! CHECK_RUN_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa run_finalizer >"$tmp/out" 2>&1 \
+  && grep -Fq 'refusing to modify a check outside this exact arm run' "$tmp/out" \
+  && ! grep -q 'api --method PATCH' "$CALLS" \
+  && ! grep -q 'api --method POST' "$CALLS"; then
+  pass "a check run for another head cannot reach finalizer mutation"
+else
+  fail "a check run for another head reached finalizer mutation"
+fi
 
 : >"$CALLS"
 if ! CHECK_APP_ID=4242 CHECK_APP_SLUG=verjson-ai-review run_finalizer >"$tmp/out" 2>&1 \
