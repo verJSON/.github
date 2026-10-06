@@ -190,7 +190,7 @@ class RegistryDestinationTests(unittest.TestCase):
                     (1, b"", b"manifest unknown"), (0, payload, b"")
                 ]),
                 patch.object(destinations, "_oras", return_value=(0, b"", b"")) as run,
-                patch.object(destinations, "_platform_subjects", return_value=[]),
+                patch.object(destinations, "_platform_subjects", return_value={}),
                 patch.object(destinations, "_referrer_inventory", side_effect=[referrers, referrers]),
             ):
                 receipt = destinations.mirror_candidate(
@@ -211,6 +211,7 @@ class RegistryDestinationTests(unittest.TestCase):
             {"provider": "ghcr", "namespace": GHCR}, GAR_DESTINATION
         ]
         platform = "sha256:" + "c" * 64
+        attestation = "sha256:" + "d" * 64
         index_referrers = [{
             "artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json",
             "digest": "sha256:" + "a" * 64,
@@ -228,7 +229,7 @@ class RegistryDestinationTests(unittest.TestCase):
                     (1, b"", b"manifest unknown"), (0, payload, b"")
                 ]),
                 patch.object(destinations, "_oras", return_value=(0, b"", b"")),
-                patch.object(destinations, "_platform_subjects", return_value=[platform]),
+                patch.object(destinations, "_platform_subjects", return_value={platform: attestation}),
                 patch.object(destinations, "_referrer_inventory", side_effect=[
                     index_referrers, sbom_referrers, index_referrers, sbom_referrers,
                 ]) as discover,
@@ -244,7 +245,7 @@ class RegistryDestinationTests(unittest.TestCase):
                     (1, b"", b"manifest unknown"), (0, payload, b"")
                 ]),
                 patch.object(destinations, "_oras", return_value=(0, b"", b"")),
-                patch.object(destinations, "_platform_subjects", return_value=[platform]),
+                patch.object(destinations, "_platform_subjects", return_value={platform: attestation}),
                 patch.object(destinations, "_referrer_inventory", side_effect=[
                     index_referrers, sbom_referrers, index_referrers, [],
                 ]),
@@ -253,6 +254,54 @@ class RegistryDestinationTests(unittest.TestCase):
                     destinations.mirror_candidate(
                         self.config, OWNER, "api", "gar", "1.2.3-rc.123.1", digest, authfile
                     )
+
+    def test_mirror_accepts_only_the_attestation_in_the_validated_source_index(self):
+        self.config["registryDestinations"] = [
+            {"provider": "ghcr", "namespace": GHCR}, GAR_DESTINATION
+        ]
+        platform = "sha256:" + "c" * 64
+        attestation = "sha256:" + "d" * 64
+        index_referrers = [{
+            "artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+            "digest": "sha256:" + "a" * 64,
+        }]
+        sbom_referrers = [{
+            "artifactType": "application/spdx+json", "digest": "sha256:" + "b" * 64,
+        }]
+        payload = b"index"
+        digest = "sha256:" + sha256(payload).hexdigest()
+        for artifact_type, extra_digest, accepted in [
+            (destinations.DOCKER_ATTESTATION_REFERRER, attestation, True),
+            (destinations.DOCKER_ATTESTATION_REFERRER, "sha256:" + "e" * 64, False),
+            ("application/other+json", attestation, False),
+        ]:
+            with self.subTest(artifact_type=artifact_type, extra_digest=extra_digest):
+                with TemporaryDirectory() as directory:
+                    authfile = Path(directory) / "config.json"
+                    authfile.write_text("{}", encoding="utf-8")
+                    observed_platform = [
+                        *sbom_referrers,
+                        {"artifactType": artifact_type, "digest": extra_digest},
+                    ]
+                    with (
+                        patch.object(destinations, "_skopeo", side_effect=[
+                            (1, b"", b"manifest unknown"), (0, payload, b"")
+                        ]),
+                        patch.object(destinations, "_oras", return_value=(0, b"", b"")),
+                        patch.object(destinations, "_platform_subjects", return_value={platform: attestation}),
+                        patch.object(destinations, "_referrer_inventory", side_effect=[
+                            index_referrers, sbom_referrers, index_referrers, observed_platform,
+                        ]),
+                    ):
+                        if accepted:
+                            destinations.mirror_candidate(
+                                self.config, OWNER, "api", "gar", "1.2.3-rc.123.1", digest, authfile
+                            )
+                        else:
+                            with self.assertRaisesRegex(DestinationError, "platform SBOM differs"):
+                                destinations.mirror_candidate(
+                                    self.config, OWNER, "api", "gar", "1.2.3-rc.123.1", digest, authfile
+                                )
 
     def test_platform_subjects_are_bound_to_the_pinned_index_and_reviewed_platforms(self):
         platform = "sha256:" + "c" * 64
@@ -277,7 +326,7 @@ class RegistryDestinationTests(unittest.TestCase):
                     f"{GHCR}/api", digest, Path("/tmp/auth.json"),
                     [{"os": "linux", "architecture": "amd64"}],
                 ),
-                [platform],
+                {platform: evidence},
             )
             with self.assertRaisesRegex(DestinationError, "pinned candidate digest"):
                 destinations._platform_subjects(
@@ -301,7 +350,7 @@ class RegistryDestinationTests(unittest.TestCase):
             authfile.write_text("{}", encoding="utf-8")
             with (
                 patch.object(destinations, "_skopeo", return_value=(0, payload, b"")) as run,
-                patch.object(destinations, "_platform_subjects", return_value=[]),
+                patch.object(destinations, "_platform_subjects", return_value={}),
                 patch.object(destinations, "_referrer_inventory", return_value=[
                     {"artifactType": "application/spdx+json", "digest": "sha256:" + "b" * 64},
                     {"artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json", "digest": "sha256:" + "a" * 64},
@@ -331,7 +380,7 @@ class RegistryDestinationTests(unittest.TestCase):
                     (1, b"", b"manifest unknown"), (0, payload, b"")
                 ]),
                 patch.object(destinations, "_oras", return_value=(0, b"", b"")),
-                patch.object(destinations, "_platform_subjects", return_value=[]),
+                patch.object(destinations, "_platform_subjects", return_value={}),
                 patch.object(destinations, "_referrer_inventory", side_effect=[
                     [
                         {"artifactType": "application/spdx+json", "digest": "sha256:" + "b" * 64},
@@ -484,7 +533,7 @@ class RegistryDestinationTests(unittest.TestCase):
                     (1, b"", b"manifest unknown"), (0, payload, b"")
                 ]),
                 patch.object(destinations, "_oras", return_value=(0, b"", b"")) as run,
-                patch.object(destinations, "_platform_subjects", return_value=[]),
+                patch.object(destinations, "_platform_subjects", return_value={}),
                 patch.object(destinations, "_referrer_inventory", side_effect=[referrers, referrers]),
                 redirect_stdout(output),
             ):

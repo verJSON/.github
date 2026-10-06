@@ -36,6 +36,7 @@ TAG = re.compile(
     r"^(?:sha-[0-9a-f]{40}|(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-rc\.[0-9]+\.[0-9]+)?)$"
 )
 DEFAULT_CANDIDATE_RETENTION_DAYS = 88
+DOCKER_ATTESTATION_REFERRER = "application/vnd.docker.attestation.manifest.v1+json"
 
 
 def _object(value: Any, field: str) -> dict[str, Any]:
@@ -253,7 +254,7 @@ def _referrer_inventory(
 
 def _platform_subjects(
     repository: str, digest: str, authfile: Path, reviewed_platforms: Any
-) -> list[str]:
+) -> dict[str, str]:
     from container_oci_index import OCIIndexError, validate_index
 
     status, payload, _ = _skopeo([
@@ -265,7 +266,7 @@ def _platform_subjects(
         inventory = validate_index(json.loads(payload), reviewed_platforms)
     except (UnicodeDecodeError, json.JSONDecodeError, OCIIndexError) as error:
         raise DestinationError("source OCI platform inventory is invalid") from error
-    return [platform["digest"] for platform in inventory["platforms"]]
+    return {evidence["subjectDigest"]: evidence["digest"] for evidence in inventory["evidence"]}
 
 
 def mirror_candidate(
@@ -316,7 +317,15 @@ def mirror_candidate(
     if destination_referrers != source_referrers:
         raise DestinationError("destination index provenance differs from source evidence")
     for platform, referrers in platform_referrers.items():
-        if _referrer_inventory(destination["repository"], platform, authfile, "platform") != referrers:
+        observed_referrers = _referrer_inventory(destination["repository"], platform, authfile, "platform")
+        indexed_attestation = {
+            "artifactType": DOCKER_ATTESTATION_REFERRER,
+            "digest": platforms[platform],
+        }
+        with_indexed_attestation = sorted(
+            [*referrers, indexed_attestation], key=lambda item: (item["artifactType"], item["digest"])
+        )
+        if observed_referrers != referrers and observed_referrers != with_indexed_attestation:
             raise DestinationError("destination platform SBOM differs from source evidence")
     receipt = {
         "provider": provider,

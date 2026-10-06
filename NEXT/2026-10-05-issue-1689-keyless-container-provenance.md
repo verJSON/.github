@@ -43,3 +43,7 @@ The bounded GAR canary identity follows the reviewed Skopeo inspection fix.
 GAR Docker login now receives the action's generated service-account access
 token rather than its intermediate federation token; a workflow check guards
 the output selection.
+GAR may surface the BuildKit attestation descriptor already present in the
+validated OCI index as an additional platform referrer. Mirror read-back
+accepts that exact descriptor while requiring the same SPDX and Cosign
+referrers and rejecting unrelated additions.
