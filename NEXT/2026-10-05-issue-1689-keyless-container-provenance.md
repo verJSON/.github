@@ -11,3 +11,6 @@ The bounded canary trust decision scopes GitHub OIDC federation to one private
 repository, protected `main`, the proposed canonical publisher revision, and
 repository-level GAR writer access; external adopters provide their own
 reviewed identities.
+The live private canary also exposed an OIDC request-host mismatch; the token
+fetcher now accepts GitHub Actions request hosts and refuses redirects before
+sending the bearer credential.

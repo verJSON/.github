@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import tempfile
 import sys
@@ -405,14 +406,24 @@ def decode_github_oidc_claims(token: str) -> dict[str, Any]:
     return claims
 
 
+class NoOidcRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        raise CosignEvidenceError("GitHub OIDC request endpoint redirected")
+
+
 def write_github_oidc_token(
     output: Path, request_url: str, request_token: str
 ) -> None:
     parsed = urllib.parse.urlsplit(request_url)
+    host = parsed.hostname or ""
+    github_request_host = host == "token.actions.githubusercontent.com" or bool(
+        re.fullmatch(r"pipelines[a-z0-9-]*\.actions\.githubusercontent\.com", host)
+    )
     if (
         parsed.scheme != "https"
-        or parsed.netloc != "token.actions.githubusercontent.com"
-        or parsed.hostname != "token.actions.githubusercontent.com"
+        or parsed.netloc != host
+        or parsed.fragment
+        or not github_request_host
     ):
         raise CosignEvidenceError("GitHub OIDC request endpoint is invalid")
     if not request_token:
@@ -430,7 +441,9 @@ def write_github_oidc_token(
         headers={"Authorization": f"Bearer {request_token}", "Accept": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.build_opener(NoOidcRedirectHandler()).open(
+            request, timeout=30
+        ) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise CosignEvidenceError("GitHub OIDC token request failed") from error
