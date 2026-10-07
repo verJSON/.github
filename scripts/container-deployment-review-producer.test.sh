@@ -10,6 +10,10 @@ grep -qF 'uses: Verjson/.github/.github/workflows/container-deployment-review-pr
 grep -qF 'contract-ref: $ref' "$root/scripts/gen-container-deployment.sh"
 
 trusted="$root/.github/workflows/container-deployment-review-producer.yml"
+download_artifact_sha=9000827ccba6bdab643e8b6fd33ac0654aef8333
+download_artifact_pin="uses: actions/download-artifact@$download_artifact_sha # v8.0.2"
+test "$(grep -F -c "$download_artifact_pin" "$trusted")" -eq 3
+! grep -qF 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1' "$trusted"
 grep -qF 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' "$trusted"
 grep -qF 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1' "$trusted"
 grep -qF 'permission-checks: write' "$trusted"
