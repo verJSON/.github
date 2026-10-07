@@ -1105,7 +1105,7 @@ build_adopter() {
   # every migrated repository carried before #463/#464/#465: it verifies nothing
   # before the irreversible snapshot, installs with GITHUB_TOKEN, and lets the
   # two halves of one release route onto two runner pools.
-  local dir="$1" with_release="${2:-yes}" caller="${3:-workflow}"
+  local dir="$1" with_release="${2:-yes}" caller="${3:-workflow}" release_mode="${4:-release-node}"
   mkdir -p "$dir/NEXT" "$dir/scripts" "$dir/.github/workflows"
   bash "$gen" codeowners "$sha" >"$dir/.github/CODEOWNERS"
   bash "$gen" renderer "$sha" >"$dir/scripts/render-next.sh"
@@ -1121,7 +1121,11 @@ build_adopter() {
   cp "$emitted" "$dir/scripts/changelog-contract.test.sh"
   chmod +x "$dir/scripts/render-next.sh" "$dir/scripts/changelog-contract.test.sh"
   if [ "$with_release" = yes ]; then
-    bash "$gen" release-node "$sha" >"$dir/.github/workflows/release.yml"
+    if [ "$release_mode" = release-artifact ]; then
+      bash "$gen" "$release_mode" "$sha" --build-runner ubuntu-24.04 >"$dir/.github/workflows/release.yml"
+    else
+      bash "$gen" "$release_mode" "$sha" >"$dir/.github/workflows/release.yml"
+    fi
     bash "$gen" release-propose "$sha" --autonomy propose \
       >"$dir/.github/workflows/release-propose.yml"
   elif [ "$with_release" = legacy ]; then
@@ -1756,6 +1760,27 @@ expect_rejection() {
     || pass "emitted suite rejects $label"
 }
 
+expect_release_mode_rejection() {
+  local release_mode="$1" label="$2" mutator="$3" expected="$4" dir
+  reject_seq=$((reject_seq + 1))
+  dir="$tmproot/reject-$reject_seq"
+  build_adopter "$dir" yes workflow "$release_mode"
+  fingerprint "$dir" >"$tmproot/before-$reject_seq"
+  "$mutator" "$dir"
+  fingerprint "$dir" >"$tmproot/after-$reject_seq"
+  if cmp -s "$tmproot/before-$reject_seq" "$tmproot/after-$reject_seq"; then
+    fail "mutation '$label' changed nothing; vacuous"
+    return
+  fi
+  if run_adopter "$dir"; then
+    fail "emitted suite accepted $label"
+  elif grep -qF "$expected" "$tmproot/run.out"; then
+    pass "emitted suite rejects $label for the expected reason"
+  else
+    fail "emitted suite rejected $label for another reason: $(tail -2 "$tmproot/run.out")"
+  fi
+}
+
 break_pin() {
   sed -i 's/^CONTRACT_REF=.*/CONTRACT_REF="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"/' \
     "$1/scripts/render-next.sh"
@@ -1925,6 +1950,7 @@ PY
 add_escaped_defaults_explicit_key() {
   python3 - "$1/.github/workflows/release.yml" <<'PY'
 import sys
+import yaml
 
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
@@ -1935,12 +1961,15 @@ mapping = (
 )
 if text.count(anchor) != 1:
     raise SystemExit("verify job fixture no longer matches generated output")
-open(path, "w", encoding="utf-8").write(text.replace(anchor, anchor + mapping, 1))
+mutated = text.replace(anchor, anchor + mapping, 1)
+yaml.safe_load(mutated)
+open(path, "w", encoding="utf-8").write(mutated)
 PY
 }
 add_multiline_escaped_defaults_explicit_key() {
   python3 - "$1/.github/workflows/release.yml" <<'PY'
 import sys
+import yaml
 
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
@@ -1952,7 +1981,9 @@ mapping = (
 )
 if text.count(anchor) != 1:
     raise SystemExit("verify job fixture no longer matches generated output")
-open(path, "w", encoding="utf-8").write(text.replace(anchor, anchor + mapping, 1))
+mutated = text.replace(anchor, anchor + mapping, 1)
+yaml.safe_load(mutated)
+open(path, "w", encoding="utf-8").write(mutated)
 PY
 }
 shadow_stamped_version_header() {
@@ -2538,6 +2569,22 @@ text = text[:uses] + f'        uses: "{ref}"{separator}{comment}' + text[end:]
 open(path, "w", encoding="utf-8").write(text)
 PY
 }
+drift_canonical_selection_contract_checkout_ref() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+step = text.index("- name: Check out the canonical selection contract\n")
+ref = text.index("ref:", step)
+line_start = text.rfind("\n", 0, ref) + 1
+line_end = text.index("\n", ref)
+if not text[line_start:line_end].lstrip().startswith("ref:"):
+    raise SystemExit("canonical contract checkout ref fixture no longer matches generated output")
+text = text[:ref] + "main" + text[line_end:]
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
 inline_checkout_reference() {
   python3 - "$1/.github/workflows/release.yml" "$2" <<'PY'
 import re
@@ -2700,7 +2747,7 @@ import sys
 
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
-step = text.index("      - name: Capture trusted release verification path\n")
+step = text.index("      - name: Capture trusted release verification runtime\n")
 shell = text.index("        shell:", step)
 text = text[:shell] + "        env:\n          PATH: /tmp/attacker-bin\n" + text[shell:]
 open(path, "w", encoding="utf-8").write(text)
@@ -2837,7 +2884,7 @@ import sys
 path = sys.argv[1]
 lines = open(path, encoding="utf-8").readlines()
 capture = next(i for i, line in enumerate(lines)
-               if line == "      - name: Capture trusted release verification path\n")
+               if line == "      - name: Capture trusted release verification runtime\n")
 capture_end = next(i for i in range(capture + 1, len(lines))
                    if lines[i].startswith("      - "))
 block = lines[capture:capture_end]
@@ -2950,6 +2997,12 @@ grep -qF 'does not pin credentialed install step inputs and working directory (#
   "$tmproot/run.out" \
   && pass "the generated suite pins the credentialed install working directory" \
   || fail "a credentialed install working-directory override was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "canonical selection checkout uses an unpinned branch (#1717)" \
+  drift_canonical_selection_contract_checkout_ref
+grep -qF 'does not check out the canonical selection contract at its pinned ref (#1717)' \
+  "$tmproot/run.out" \
+  && pass "the generated suite binds its canonical checkout to the contract ref" \
+  || fail "a canonical selection checkout ref drift was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "an escaped YAML explicit key setting inherited working-directory defaults (#1717)" \
   add_escaped_defaults_explicit_key
 grep -qF 'uses unsupported explicit YAML mapping keys (#1717)' "$tmproot/run.out" \
@@ -3122,7 +3175,7 @@ grep -qF 'overrides the runner-managed PATH before release verification (#1717)'
   || fail "a job-level PATH override was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "release verification PATH is captured after dependency lifecycle code (#1717)" \
   move_capture_after_lifecycle_scripts
-grep -qF 'does not capture a trusted release verification path (#1717)' "$tmproot/run.out" \
+grep -qF 'does not capture trusted release verification runtime inputs (#1717)' "$tmproot/run.out" \
   && pass "the generated suite requires PATH capture immediately after setup-node" \
   || fail "a late PATH capture was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "an escaped flow-style environment key selects runner PATH (#1717)" \
@@ -3155,6 +3208,22 @@ expect_rejection "an existing release-plan step injects PYTHONPATH (#1717)" \
 grep -qF 'contains an unapproved verify step before credentialed dependency installation (#1717)' "$tmproot/run.out" \
   && pass "the generated suite pins pre-credential step environment fields" \
   || fail "a pre-credential PYTHONPATH mutation was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+expect_release_mode_rejection release-artifact \
+  "a release-artifact release-plan step writes Bash startup script through GITHUB_ENV (#1717)" \
+  add_in_place_precredential_environment_writer \
+  'contains an unapproved verify step before credentialed dependency installation (#1717)'
+expect_release_mode_rejection release-snapshot \
+  "a release-snapshot release-plan step writes Bash startup script through GITHUB_ENV (#1717)" \
+  add_in_place_precredential_environment_writer \
+  'contains an unapproved verify step before credentialed dependency installation (#1717)'
+expect_release_mode_rejection release-artifact \
+  "a release-artifact release-plan step injects PYTHONPATH (#1717)" \
+  add_precredential_pythonpath \
+  'contains an unapproved verify step before credentialed dependency installation (#1717)'
+expect_release_mode_rejection release-snapshot \
+  "a release-snapshot release-plan step injects PYTHONPATH (#1717)" \
+  add_precredential_pythonpath \
+  'contains an unapproved verify step before credentialed dependency installation (#1717)'
 expect_rejection "credentialed dependency install preloads repository Node code (#1717)" \
   add_install_node_options
 grep -qF 'does not allowlist the credentialed dependency installation environment (#1717)' "$tmproot/run.out" \
@@ -3172,10 +3241,10 @@ expect_rejection "stamped-version warning text shadowed outside generated header
 grep -qF 'does not carry the stamped-version warning inside the generated header before `on:` (#862)' "$tmproot/run.out" \
   && pass "the shadowed warning is rejected for leaving generated header" \
   || fail "the shadowed warning failed for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a no-op stamped-version failure diagnostic (#862)" noop_stamped_version_diagnostic
+expect_rejection "a modified release-verification failure diagnostic (#1717)" noop_stamped_version_diagnostic
 grep -qF 'does not match the approved release verification script (#1717)' "$tmproot/run.out" \
-  && pass "the no-op diagnostic is rejected by executing generated failure path" \
-  || fail "the changed failure diagnostic was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+  && pass "the generated suite rejects a changed verification script by its approved-script pin" \
+  || fail "the changed verification script was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "an unrelated release step exposed to private-package auth (#569)" expose_private_token_to_unrelated_step
 expect_rejection "a release caller reachable by a push to main" add_push_trigger
 expect_rejection "a release caller on a mutable reusable ref" unpin_release_ref
@@ -3618,7 +3687,7 @@ assert_release_path_mutation_rejected "$artifact_adopter" release-artifact artif
 assert_release_path_mutation_rejected "$artifact_adopter" release-artifact artifact-job-path-override \
   add_verify_job_path_override 'overrides the runner-managed PATH before release verification (#1717)'
 assert_release_path_mutation_rejected "$artifact_adopter" release-artifact artifact-late-path-capture \
-  move_capture_after_lifecycle_scripts 'does not capture a trusted release verification path (#1717)'
+  move_capture_after_lifecycle_scripts 'does not capture trusted release verification runtime inputs (#1717)'
 
 private_artifact_adopter="$tmproot/adopter-artifact-private"
 cp -a "$artifact_adopter" "$private_artifact_adopter"
@@ -4221,7 +4290,7 @@ assert_release_path_mutation_rejected "$snapshot_adopter" release-snapshot snaps
 assert_release_path_mutation_rejected "$snapshot_adopter" release-snapshot snapshot-job-path-override \
   add_verify_job_path_override 'overrides the runner-managed PATH before release verification (#1717)'
 assert_release_path_mutation_rejected "$snapshot_adopter" release-snapshot snapshot-late-path-capture \
-  move_capture_after_lifecycle_scripts 'does not capture a trusted release verification path (#1717)'
+  move_capture_after_lifecycle_scripts 'does not capture trusted release verification runtime inputs (#1717)'
 
 expected_release_fallback='    fail "$release_workflow is not a generated release caller at $CONTRACT_REF. Inspect the existing release workflow and repository configuration to determine its mode and all custom generator options. Regenerate the complete caller set at $CONTRACT_REF in a clean temporary checkout, review the full diff, then replace the committed set together. Supported release modes are release-node, release-artifact for GitHub Release assets, and release-snapshot when the release workflow publishes nothing."'
 grep -Fqx "$expected_release_fallback" "$emitted" \

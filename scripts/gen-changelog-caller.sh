@@ -1068,7 +1068,7 @@ ${release_plan_step}
           registry-url: https://npm.pkg.github.com
           scope: '${release_scope}'
           package-manager-cache: false
-      - name: Capture trusted release verification path
+      - name: Capture trusted release verification runtime
         id: release-verification-runtime
         if: steps.release-version.outputs.selected == 'true'
         shell: /bin/bash --noprofile --norc -e -o pipefail {0}
@@ -1077,10 +1077,17 @@ ${release_plan_step}
           import os
 
           path = os.environ["PATH"]
+          cache = os.environ["VERJSON_CHANGELOG_TOOL_CACHE"]
+          expected_cache = os.path.join(
+              os.environ["RUNNER_TEMP"], "verjson-changelog-tools"
+          )
           if chr(10) in path or chr(13) in path:
               raise SystemExit("release verification PATH must be a single line")
+          if cache != expected_cache or chr(10) in cache or chr(13) in cache:
+              raise SystemExit("release verification cache must be job-scoped")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write("path=" + path + chr(10))
+              output.write("cache=" + cache + chr(10))
           PY
       # \`publish\` delegates to node-release.yml, which runs npm publish — but it
       # only ever runs AFTER \`snapshot\` has consumed NEXT/, written the immutable
@@ -1153,6 +1160,7 @@ ${release_plan_step}
           NODE_AUTH_TOKEN: ''
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           RELEASE_VERIFICATION_PATH: \${{ steps.release-verification-runtime.outputs.path }}
+          VERJSON_CHANGELOG_TOOL_CACHE: \${{ steps.release-verification-runtime.outputs.cache }}
           CI: 'true'
           BASH_ENV: ''
           ENV: ''
@@ -1210,6 +1218,7 @@ ${release_plan_step}
               RUNNER_TOOL_CACHE="\$RUNNER_TOOL_CACHE" \\
               PACKAGE_VERSION="\$PACKAGE_VERSION" \\
               RELEASE_VERIFICATION_PATH="\$RELEASE_VERIFICATION_PATH" \\
+              VERJSON_CHANGELOG_TOOL_CACHE="\$VERJSON_CHANGELOG_TOOL_CACHE" \\
               NODE_AUTH_TOKEN='' \\
               GIT_TERMINAL_PROMPT=0 \\
               npm_config_script_shell=/bin/sh \\
@@ -1698,7 +1707,7 @@ ${required_lane_validation_step}
           registry-url: https://npm.pkg.github.com
           scope: '${release_scope}'
           package-manager-cache: false
-      - name: Capture trusted release verification path
+      - name: Capture trusted release verification runtime
         id: release-verification-runtime
         if: steps.release-version.outputs.selected == 'true'
         shell: /bin/bash --noprofile --norc -e -o pipefail {0}
@@ -1707,10 +1716,17 @@ ${required_lane_validation_step}
           import os
 
           path = os.environ["PATH"]
+          cache = os.environ["VERJSON_CHANGELOG_TOOL_CACHE"]
+          expected_cache = os.path.join(
+              os.environ["RUNNER_TEMP"], "verjson-changelog-tools"
+          )
           if chr(10) in path or chr(13) in path:
               raise SystemExit("release verification PATH must be a single line")
+          if cache != expected_cache or chr(10) in cache or chr(13) in cache:
+              raise SystemExit("release verification cache must be job-scoped")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write("path=" + path + chr(10))
+              output.write("cache=" + cache + chr(10))
           PY
       - name: Install dependencies
         if: steps.release-version.outputs.selected == 'true'
@@ -1762,6 +1778,7 @@ ${required_lane_validation_step}
           NODE_AUTH_TOKEN: ''
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           RELEASE_VERIFICATION_PATH: \${{ steps.release-verification-runtime.outputs.path }}
+          VERJSON_CHANGELOG_TOOL_CACHE: \${{ steps.release-verification-runtime.outputs.cache }}
           CI: 'true'
           BASH_ENV: ''
           ENV: ''
@@ -1818,6 +1835,7 @@ ${required_lane_validation_step}
               RUNNER_TEMP="\$RUNNER_TEMP" \\
               RUNNER_TOOL_CACHE="\$RUNNER_TOOL_CACHE" \\
               PACKAGE_VERSION="\$PACKAGE_VERSION" \\
+              VERJSON_CHANGELOG_TOOL_CACHE="\$VERJSON_CHANGELOG_TOOL_CACHE" \\
               NODE_AUTH_TOKEN='' \\
               GIT_TERMINAL_PROMPT=0 \\
               npm_config_script_shell=/bin/sh \\
@@ -2273,7 +2291,7 @@ ${release_plan_step}
           registry-url: https://npm.pkg.github.com
           scope: '${release_scope}'
           package-manager-cache: false
-      - name: Capture trusted release verification path
+      - name: Capture trusted release verification runtime
         id: release-verification-runtime
         if: steps.release-version.outputs.selected == 'true'
         shell: /bin/bash --noprofile --norc -e -o pipefail {0}
@@ -2282,10 +2300,17 @@ ${release_plan_step}
           import os
 
           path = os.environ["PATH"]
+          cache = os.environ["VERJSON_CHANGELOG_TOOL_CACHE"]
+          expected_cache = os.path.join(
+              os.environ["RUNNER_TEMP"], "verjson-changelog-tools"
+          )
           if chr(10) in path or chr(13) in path:
               raise SystemExit("release verification PATH must be a single line")
+          if cache != expected_cache or chr(10) in cache or chr(13) in cache:
+              raise SystemExit("release verification cache must be job-scoped")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write("path=" + path + chr(10))
+              output.write("cache=" + cache + chr(10))
           PY
       - name: Install dependencies
         if: steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''
@@ -2337,6 +2362,7 @@ ${release_plan_step}
           NODE_AUTH_TOKEN: ''
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           RELEASE_VERIFICATION_PATH: \${{ steps.release-verification-runtime.outputs.path }}
+          VERJSON_CHANGELOG_TOOL_CACHE: \${{ steps.release-verification-runtime.outputs.cache }}
           CI: 'true'
           BASH_ENV: ''
           ENV: ''
@@ -2393,6 +2419,7 @@ ${release_plan_step}
               RUNNER_TEMP="\$RUNNER_TEMP" \\
               RUNNER_TOOL_CACHE="\$RUNNER_TOOL_CACHE" \\
               PACKAGE_VERSION="\$PACKAGE_VERSION" \\
+              VERJSON_CHANGELOG_TOOL_CACHE="\$VERJSON_CHANGELOG_TOOL_CACHE" \\
               NODE_AUTH_TOKEN='' \\
               GIT_TERMINAL_PROMPT=0 \\
               npm_config_script_shell=/bin/sh \\
@@ -3217,6 +3244,7 @@ Anything this parser cannot read confidently is an error, never a pass.
 """
 import hashlib
 import json
+import os
 import re
 import shlex
 import sys
@@ -3991,19 +4019,19 @@ APPROVED_RELEASE_STATE_SCRIPT_SHA256 = {
     "release-snapshot": "0860f7c804f4e5111e9461230e9e999ac3b1a0761a54ea57488c9772854ce22c",
 }
 APPROVED_RELEASE_VERIFICATION_SCRIPT_SHA256 = {
-    "release-node": "8952422ed4c624b77c090a2cf7060e65851bc64655ddde5ac86698a56994e510",
-    "release-artifact": "d0e32cdcaea1fd315d01354a0838cd2d3e38a4c50f4acbbc9dbb38281bb78867",
-    "release-snapshot": "77422816154e9659b2fce3d1afca3d051ad50b24a3daf27ffdfb4bfefc0a7c5f",
+    "release-node": "e5ef5c336250974f04c46ff20a58aa5a77094cd4904034ffc02c2e2b97c321aa",
+    "release-artifact": "d134c7a33458939fdca9c9d68f7009c8fdac44e1be2598fbf9960cfde2ffe924",
+    "release-snapshot": "42c7403411bce28e1a890854b4dd36af68bf40f0408d5f0d079cab748d6882fc",
 }
-APPROVED_RELEASE_VERIFICATION_PATH_SCRIPT_SHA256 = {
-    "release-node": "93f62fec317b8f2dc95af19882b6784c7b7dc42d0e4de01a54eefc85792c46bf",
-    "release-artifact": "93f62fec317b8f2dc95af19882b6784c7b7dc42d0e4de01a54eefc85792c46bf",
-    "release-snapshot": "93f62fec317b8f2dc95af19882b6784c7b7dc42d0e4de01a54eefc85792c46bf",
+APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
+    "release-node": "65c9bdf63f9032dd4ecdf2d1123586f3deca3a5f9b11dc7b2a29106b7d238502",
+    "release-artifact": "65c9bdf63f9032dd4ecdf2d1123586f3deca3a5f9b11dc7b2a29106b7d238502",
+    "release-snapshot": "65c9bdf63f9032dd4ecdf2d1123586f3deca3a5f9b11dc7b2a29106b7d238502",
 }
 APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256 = {
-    "release-node": "59421f4bd2fe330c4035c17bf9842ffb04dc4194d4074ce9c17023ee9691c98a",
-    "release-artifact": "d6c6f6ea0bb1a63ca6e9466e651d128b687236077a0b56177182f0cd3011479e",
-    "release-snapshot": "8fe092b1fc65843a7cb81ac4f6f444a587294ab067943eb706a57c554225184b",
+    "release-node": "19c0db4a50fea67d2c999495a34227e19c642059824533a3673fc8c151482d27",
+    "release-artifact": "57a4aafc159687ccb3879c7ad5aff6ea940c753380233b7cbf18ba0606bd2ab1",
+    "release-snapshot": "c7531cc0f0f4e67fe00ff6c41c37d8a487091706bd5cbf688290cf891347dd57",
 }
 EXPECTED_RELEASE_STATE_ENV = {
     "VERSION": "${{ steps.release-version.outputs.version }}",
@@ -4035,6 +4063,7 @@ EXPECTED_RELEASE_VERIFICATION_ENV = {
     "PACKAGE_VERSION": "${{ steps.release-version.outputs.package-version }}",
     "RELEASE_VERIFICATION_PATH": "${{ steps.release-verification-runtime.outputs.path }}",
     "CI": "'true'",
+    "VERJSON_CHANGELOG_TOOL_CACHE": "${{ steps.release-verification-runtime.outputs.cache }}",
     "BASH_ENV": "''",
     "ENV": "''",
     "SHELLOPTS": "''",
@@ -4474,7 +4503,7 @@ expected_verification_step_identities = [
     ("Resolve restart-safe release state", ""),
     ("Check out the existing snapshot for resumed verification", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"),
     ("", "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"),
-    ("Capture trusted release verification path", ""),
+    ("Capture trusted release verification runtime", ""),
 ]
 if release_mode == "release-node":
     expected_verification_step_identities.append(
@@ -4559,6 +4588,21 @@ for step in verification_job_steps:
     digest_fields = dict(fields)
     if "uses" in digest_fields:
         digest_fields["uses"] = yaml_scalar_value(digest_fields["uses"])
+    if step_name == "Check out the canonical selection contract":
+        expected_selection_checkout = {
+            "repository": "verJSON/.github",
+            "ref": os.environ.get("CONTRACT_REF", ""),
+            "path": ".changelog-contract",
+            "persist-credentials": "false",
+        }
+        if action_inputs != expected_selection_checkout:
+            problems.append(
+                "does not check out the canonical selection contract at its pinned ref (#1717)"
+            )
+        else:
+            digest_fields["with"] = "<canonical-selection-contract-checkout>"
+            action_inputs = dict(action_inputs)
+            action_inputs["ref"] = "<contract-ref>"
     preacquisition_steps.append(json.dumps({
         "fields": digest_fields,
         "env": environment,
@@ -4574,13 +4618,14 @@ if (
     != APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256.get(release_mode)
 ):
     problems.append(
-        "contains an unapproved verify step before credentialed dependency installation (#1717)"
+        "contains an unapproved verify step before credentialed dependency installation "
+        f"(#1717): {release_mode} pre-credential step digest {preacquisition_digest}"
     )
 verification_runtime_steps = [
     step for step in verification_job_steps
     if (fields := step_mapping_entries(step)) is not None
     and yaml_scalar_value(fields.get("name", ""))
-    == "Capture trusted release verification path"
+    == "Capture trusted release verification runtime"
 ]
 verification_runtime_step = (
     verification_runtime_steps[0] if len(verification_runtime_steps) == 1 else None
@@ -4613,12 +4658,12 @@ if (
     or len(verification_runtime_positions) != 1
     or len(setup_node_positions) != 1
     or verification_runtime_positions[0] != setup_node_positions[0] + 1
-    or release_mode not in APPROVED_RELEASE_VERIFICATION_PATH_SCRIPT_SHA256
+    or release_mode not in APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256
     or run_body(verification_runtime_step) is None
     or hashlib.sha256(run_body(verification_runtime_step).encode()).hexdigest()
-    != APPROVED_RELEASE_VERIFICATION_PATH_SCRIPT_SHA256.get(release_mode)
+    != APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256.get(release_mode)
 ):
-    problems.append("does not capture a trusted release verification path (#1717)")
+    problems.append("does not capture trusted release verification runtime inputs (#1717)")
 
 verification_steps = [
     step for step in workflow_steps
@@ -4658,15 +4703,21 @@ else:
         problems.append(
             "cannot diagnose the stamped dispatch version when verification fails (#862)"
         )
+    verification_script_body = run_body(verification_step)
+    verification_script_sha256 = (
+        hashlib.sha256(verification_script_body.encode()).hexdigest()
+        if verification_script_body is not None else "unparseable"
+    )
     if (
         verification_fields is None
         or release_mode not in APPROVED_RELEASE_VERIFICATION_SCRIPT_SHA256
-        or run_body(verification_step) is None
-        or hashlib.sha256(run_body(verification_step).encode()).hexdigest()
+        or verification_script_body is None
+        or verification_script_sha256
         != APPROVED_RELEASE_VERIFICATION_SCRIPT_SHA256.get(release_mode)
     ):
         problems.append(
-            "does not match the approved release verification script (#1717)"
+            "does not match the approved release verification script "
+            f"(#1717): {verification_script_sha256}"
         )
 for index, line in enumerate(lines):
     if "NODE_AUTH_TOKEN" not in line or not PRIVATE_NODE_TOKEN.search(line):
@@ -5305,7 +5356,7 @@ PY
   # PyYAML is deliberately not used: the canonical contract runs on a bare
   # python3 with no third-party dependency, and a "use it if importable"
   # fallback would put every adopter without it on the untested path.
-  python3 "$work/release-shape.py" "$release_workflow" \
+  CONTRACT_REF="$CONTRACT_REF" python3 "$work/release-shape.py" "$release_workflow" \
     || fail "$release_workflow: see above"
 
   # Text presence is not behavior: a no-op shell command can carry the entire
