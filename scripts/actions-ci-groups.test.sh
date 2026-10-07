@@ -28,7 +28,7 @@ assert set(jobs) == {
 }
 
 groups = jobs["shell-test-groups"]
-assert groups["timeout-minutes"] == 24
+assert groups["timeout-minutes"] == 30
 assert groups["strategy"] == {
     "fail-fast": False,
     "max-parallel": 3,

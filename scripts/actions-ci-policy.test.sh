@@ -18,7 +18,7 @@ required_timeout="$(awk '/^  shell-tests:/{cap=1; next} cap && /^    timeout-min
 [ "$cancel_expr" = '${{ github.ref != '"'"'refs/heads/main'"'"' }}' ] \
   && pass "only main is exempt from cancellation" \
   || fail "unexpected cancel-in-progress predicate: $cancel_expr"
-[ "$group_timeout" = 24 ] && [ "$required_timeout" = 2 ] \
+[ "$group_timeout" = 30 ] && [ "$required_timeout" = 2 ] \
   && pass "group workers and required-context aggregation have exact ceilings" \
   || fail "actions-ci group/aggregate timeouts drifted: ${group_timeout:-unset}/${required_timeout:-unset}"
 
