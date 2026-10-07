@@ -353,6 +353,8 @@ else:
             "clear NODE_AUTH_TOKEN (#1712)")
     if str(suite_env.get("PACKAGE_VERSION") or "").strip() != "${{ steps.release-version.outputs.package-version }}":
         bad("the release verification suite cannot diagnose the stamped dispatch version (#862)")
+    if str(suite_env.get("VERJSON_CHANGELOG_TOOL_CACHE") or "").strip() != "${{ steps.release-verification-runtime.outputs.cache }}":
+        bad("the release verification suite does not use its captured job-scoped cache (#1717)")
     diagnostic_command = (
         'echo "::error::Release verification failed against stamped dispatch version '
         '$PACKAGE_VERSION. Check for the hardcoded-version footgun: version assertions '
@@ -630,6 +632,9 @@ version_guard="$tmp/version-guard.sh"
 extract_run verify "selection and version" >"$version_guard" || fail "cannot extract the selection and version plan"
 tag_guard="$tmp/tag-guard.sh"
 extract_run verify "restart-safe release state" >"$tag_guard" || fail "cannot extract the tag guard"
+runtime_step="$tmp/runtime-step.sh"
+extract_run verify "Capture trusted release verification runtime" >"$runtime_step" \
+  || fail "cannot extract trusted release runtime capture"
 suite_step="$tmp/suite.sh"
 extract_run verify "verification suite" >"$suite_step" || fail "cannot extract the suite step"
 
@@ -836,13 +841,35 @@ if run_guard "$tag_guard" VERSION=v1.2.4 GITHUB_OUTPUT="$tmp/release-state"; the
 else
   pass "the release-state guard rejects an untagged released snapshot"
 fi
+runtime_temp="$tmp/runtime-runner"
+runtime_output="$tmp/runtime-output"
+mkdir -p "$runtime_temp"
+if run_guard "$runtime_step" "RUNNER_TEMP=$runtime_temp" \
+  "VERJSON_CHANGELOG_TOOL_CACHE=$runtime_temp/verjson-changelog-tools" \
+  "GITHUB_OUTPUT=$runtime_output"; then
+  grep -Fx "cache=$runtime_temp/verjson-changelog-tools" "$runtime_output" \
+    && pass "the runtime capture pins the job-scoped changelog cache before verification" \
+    || fail "the runtime capture omitted the trusted changelog cache output"
+else
+  fail "the runtime capture rejected its canonical cache path: $(cat "$tmp/guard.out")"
+fi
+: >"$runtime_output"
+if run_guard "$runtime_step" "RUNNER_TEMP=$runtime_temp" \
+  "VERJSON_CHANGELOG_TOOL_CACHE=$tmp/attacker-cache" \
+  "GITHUB_OUTPUT=$runtime_output"; then
+  fail "the runtime capture accepted a cache outside runner.temp"
+else
+  grep -qF "release verification cache must be job-scoped" "$tmp/guard.out" \
+    && pass "the runtime capture rejects a cache redirected through GITHUB_ENV" \
+    || fail "the runtime capture rejected an attacker cache for another reason: $(cat "$tmp/guard.out")"
+fi
 rm -rf "$tmp/sandbox/CHANGELOG"
 
 # The escape hatch that keeps the generated file un-edited: an adopter whose
 # suite is not `npm test` commits scripts/release-verify.sh instead.
 printf '%s\n' '#!/usr/bin/env bash' 'echo "npm $*"' >"$tmp/bin/npm"
 chmod +x "$tmp/bin/npm"
-if run_guard "$suite_step" "PATH=$tmp/bin:$PATH"; then
+if run_guard "$suite_step" "PATH=$tmp/bin:$PATH" "RELEASE_VERIFICATION_PATH=$tmp/bin:$PATH"; then
   pass "the default suite runs when no release-verify.sh is present"
 else
   fail "the default suite failed: $(cat "$tmp/guard.out")"
@@ -854,7 +881,7 @@ grep -q '^npm test$' "$tmp/guard.out" \
 printf '%s\n' '#!/usr/bin/env bash' \
   'echo "npm $*"' \
   'if [ "$1 $2" = "run typecheck" ]; then exit 4; fi' >"$tmp/bin/npm"
-if run_guard "$suite_step" "PATH=$tmp/bin:$PATH" PACKAGE_VERSION=4.5.6; then
+if run_guard "$suite_step" "PATH=$tmp/bin:$PATH" "RELEASE_VERIFICATION_PATH=$tmp/bin:$PATH" PACKAGE_VERSION=4.5.6; then
   fail "a failing default suite still passed the verify job"
 else
   suite_rc=$?
@@ -872,14 +899,17 @@ printf '%s\n' '#!/usr/bin/env bash' 'echo "npm $*"' >"$tmp/bin/npm"
 chmod +x "$tmp/bin/npm"
 
 mkdir -p "$tmp/sandbox/scripts"
-printf '%s\n' '#!/usr/bin/env bash' \
-  'set -e' \
-  'test "$VERJSON_CHANGELOG_TOOL_CACHE" = "$EXPECTED_CHANGELOG_CACHE"' \
-  'mkdir -p "$VERJSON_CHANGELOG_TOOL_CACHE/$CONTRACT_SHA"' \
-  'printf verified >"$VERJSON_CHANGELOG_TOOL_CACHE/$CONTRACT_SHA/changelog.py"' \
-  'echo REPO_HOOK_RAN' >"$tmp/sandbox/scripts/release-verify.sh"
+cat >"$tmp/sandbox/scripts/release-verify.sh" <<EOF
+#!/usr/bin/env bash
+set -e
+test "\$VERJSON_CHANGELOG_TOOL_CACHE" = "\$RUNNER_TEMP/verjson-changelog-tools"
+mkdir -p "\$VERJSON_CHANGELOG_TOOL_CACHE/$sha"
+printf verified >"\$VERJSON_CHANGELOG_TOOL_CACHE/$sha/changelog.py"
+echo REPO_HOOK_RAN
+EOF
 chmod +x "$tmp/sandbox/scripts/release-verify.sh"
 release_runner_temp="$tmp/release-runner-temp"
+mkdir -p "$release_runner_temp"
 ambient_release_cache="/proc/verjson-persistent-changelog-cache"
 export VERJSON_CHANGELOG_TOOL_CACHE="$ambient_release_cache"
 verify_cache_step="$tmp/verify-cache-step.sh"
@@ -894,9 +924,8 @@ verify_github_env="$tmp/verify-github-env"
 RUNNER_TEMP="$release_runner_temp" GITHUB_ENV="$verify_github_env" \
   bash -eo pipefail "$verify_cache_step"
 release_cache="$(sed -n 's/^VERJSON_CHANGELOG_TOOL_CACHE=//p' "$verify_github_env")"
-if run_guard "$suite_step" "PATH=$tmp/bin:$PATH" \
-  "VERJSON_CHANGELOG_TOOL_CACHE=$release_cache" "EXPECTED_CHANGELOG_CACHE=$release_cache" \
-  "CONTRACT_SHA=$sha"; then
+if run_guard "$suite_step" "PATH=$tmp/bin:$PATH" "RELEASE_VERIFICATION_PATH=$tmp/bin:$PATH" \
+  "RUNNER_TEMP=$release_runner_temp" "VERJSON_CHANGELOG_TOOL_CACHE=$release_cache"; then
   pass "the suite step runs an adopter's release-verify.sh"
 else
   fail "the suite step failed with a hook present: $(cat "$tmp/guard.out")"
@@ -924,9 +953,8 @@ for step in doc["jobs"]["verify"]["steps"]:
         print(step["run"])
 PY
 [ ! -s "$missing_cache_step" ] || fail "the verify-cache removal mutation left an override step"
-if run_guard "$suite_step" "PATH=$tmp/bin:$PATH" \
-  "VERJSON_CHANGELOG_TOOL_CACHE=$ambient_release_cache" \
-  "EXPECTED_CHANGELOG_CACHE=$ambient_release_cache" "CONTRACT_SHA=$sha"; then
+if run_guard "$suite_step" "PATH=$tmp/bin:$PATH" "RELEASE_VERIFICATION_PATH=$tmp/bin:$PATH" \
+  "VERJSON_CHANGELOG_TOOL_CACHE=$ambient_release_cache"; then
   fail "the verify hook survived removal of the runner.temp cache override"
 else
   pass "removing the verify override reproduces the hostile persistent-cache failure (#630)"
@@ -935,7 +963,7 @@ unset VERJSON_CHANGELOG_TOOL_CACHE
 
 # A failing hook must fail the job, or the verify gate is decorative.
 printf '%s\n' '#!/usr/bin/env bash' 'exit 3' >"$tmp/sandbox/scripts/release-verify.sh"
-if run_guard "$suite_step" "PATH=$tmp/bin:$PATH" PACKAGE_VERSION=9.8.7 NODE_AUTH_TOKEN=do-not-print-this; then
+if run_guard "$suite_step" "PATH=$tmp/bin:$PATH" "RELEASE_VERIFICATION_PATH=$tmp/bin:$PATH" PACKAGE_VERSION=9.8.7 NODE_AUTH_TOKEN=do-not-print-this; then
   fail "a failing release-verify.sh still passed the verify job"
 else
   suite_rc=$?
@@ -956,7 +984,7 @@ fi
 # verified by a suite they deliberately replaced.
 printf '%s\n' '#!/usr/bin/env bash' 'echo REPO_HOOK_RAN' >"$tmp/sandbox/scripts/release-verify.sh"
 chmod 644 "$tmp/sandbox/scripts/release-verify.sh"
-if run_guard "$suite_step" "PATH=$tmp/bin:$PATH"; then
+if run_guard "$suite_step" "PATH=$tmp/bin:$PATH" "RELEASE_VERIFICATION_PATH=$tmp/bin:$PATH"; then
   fail "a non-executable release-verify.sh was ignored and the job passed on the wrong suite"
 else
   pass "a non-executable release-verify.sh fails the job instead of falling back"

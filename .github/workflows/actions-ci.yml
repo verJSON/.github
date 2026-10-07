@@ -54,10 +54,11 @@ concurrency:
 jobs:
   shell-test-groups:
     # The changelog-release group completed all 62 commands at 18m47s but the old
-    # 18-minute bound cancelled it during job finalization on 2026-09-23. Twenty-four
-    # minutes keeps the job bounded with margin for runner variance and cleanup.
+    # 18-minute bound cancelled it during job finalization on 2026-09-23. The expanded
+    # release-caller security contract took about 20 minutes by itself on 2026-10-07;
+    # thirty minutes keeps the full group bounded with margin for runner variance and cleanup.
     runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
-    timeout-minutes: 24
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       max-parallel: 3

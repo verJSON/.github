@@ -88,9 +88,12 @@ jq -e '.changelog_contract == "valid" and .pull_request == true and .path_filter
   || fail "the generated pr-gate and workflow classifier contract drifted"
 run_generator generated-artifacts "$contract_pin" >"$content_root/.github/workflows/changelog.yml"
 run_generator renderer "$contract_pin" >"$content_root/scripts/render-next.sh"
-run_generator contract-test "$contract_pin" >"$content_root/scripts/changelog-contract.test.sh"
+run_generator contract-test "$contract_pin" --only-package-dir packages/cli-schema \
+  --release-caller-package-dirs .github/workflows/release-extra.yml=compat \
+  >"$content_root/scripts/changelog-contract.test.sh"
 run_generator codeowners "$contract_pin" >"$content_root/.github/CODEOWNERS"
-run_generator release-node "$contract_pin" >"$content_root/.github/workflows/release.yml"
+run_generator release-node "$contract_pin" --only-package-dir packages/cli-schema >"$content_root/.github/workflows/release.yml"
+run_generator release-node "$contract_pin" --only-package-dir compat >"$content_root/.github/workflows/release-extra.yml"
 run_generator pr-gate "$contract_pin" >"$content_root/.github/workflows/changelog-contract.yml"
 mkdir -p "$tmp/artifact-baseline/.github/workflows" "$tmp/artifact-baseline/scripts"
 cp "$content_root/.github/workflows/changelog.yml" "$tmp/artifact-baseline/.github/workflows/changelog.yml"

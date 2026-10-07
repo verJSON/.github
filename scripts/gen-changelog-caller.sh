@@ -14,7 +14,7 @@
 #   scripts/gen-changelog-caller.sh adr-index-generator <sha> > scripts/gen-adr-index.sh
 #   scripts/gen-changelog-caller.sh adr-index-test <sha> > scripts/gen-adr-index.test.sh
 #   scripts/gen-changelog-caller.sh renderer <sha> > scripts/render-next.sh
-#   scripts/gen-changelog-caller.sh contract-test <sha> [--scope <scope>] [--node-version <version>] > scripts/changelog-contract.test.sh
+#   scripts/gen-changelog-caller.sh contract-test <sha> [--scope <scope>] [--node-version <version>] [--release-caller-package-dirs <workflow-path>=<dir>[,<dir>...]]... > scripts/changelog-contract.test.sh
 #   scripts/gen-changelog-caller.sh codeowners <sha> > .github/CODEOWNERS
 #   scripts/gen-changelog-caller.sh pr-gate <sha> [--untrusted-runner <label>[,<label>...]] > .github/workflows/changelog-contract.yml
 #   scripts/gen-changelog-caller.sh release-node <sha> [--scope <scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--release-asset <path>]... > .github/workflows/release.yml
@@ -73,7 +73,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $(basename "$0") {workflow|generated-artifacts|generated-artifacts-with-adr-index|renovate-attribution|adr-index-generator|adr-index-test|codeowners|renderer|contract-test|pr-gate|release-node|release-artifact|release-snapshot|release-propose} <40-hex-commit> [--scope <npm-scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--package-dir <relative-dir>]... [--only-package-dir <relative-dir>]... [--release-asset <path>]... [--build-runner <selector>]... [--approved-internal-package <@verjson/name>]... [--autonomy {propose|dispatch}] [--untrusted-runner <label>[,<label>...]]" >&2
+  echo "usage: $(basename "$0") {workflow|generated-artifacts|generated-artifacts-with-adr-index|renovate-attribution|adr-index-generator|adr-index-test|codeowners|renderer|contract-test|pr-gate|release-node|release-artifact|release-snapshot|release-propose} <40-hex-commit> [--scope <npm-scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--package-dir <relative-dir>]... [--only-package-dir <relative-dir>]... [--release-caller-package-dirs <workflow-path>=<dir>[,<dir>...]]... [--release-asset <path>]... [--build-runner <selector>]... [--approved-internal-package <@verjson/name>]... [--autonomy {propose|dispatch}] [--untrusted-runner <label>[,<label>...]]" >&2
   echo "required check: changelog / validate" >&2
   exit 2
 }
@@ -94,6 +94,7 @@ release_default_component_set=false
 release_package_dirs=(".")
 release_package_dirs_set=false
 release_package_dirs_exact=false
+release_caller_package_dir_specs=()
 release_assets=()
 release_build_runners=()
 release_approved_internal_packages=()
@@ -141,6 +142,11 @@ while [ "$#" -gt 0 ]; do
       fi
       release_package_dirs+=("$2")
       release_package_dirs_set=true
+      shift 2
+      ;;
+    --release-caller-package-dirs)
+      [ "$#" -ge 2 ] && [ "$mode" = contract-test ] || usage
+      release_caller_package_dir_specs+=("$2")
       shift 2
       ;;
     --release-asset)
@@ -1013,6 +1019,7 @@ ${release_plan_step}
           export -n git_auth_header
           unset GITHUB_TOKEN
           git_with_release_token() {
+          # shellcheck disable=SC2016 # This literal is executed by the isolated child Bash.
           builtin printf '%s\n' "\$git_auth_header" | /usr/bin/env -i /bin/bash --noprofile --norc -c '
           IFS= read -r git_auth_header
           GIT_CONFIG_VALUE_0="AUTHORIZATION: basic \$git_auth_header"
@@ -1067,6 +1074,27 @@ ${release_plan_step}
           registry-url: https://npm.pkg.github.com
           scope: '${release_scope}'
           package-manager-cache: false
+      - name: Capture trusted release verification runtime
+        id: release-verification-runtime
+        if: steps.release-version.outputs.selected == 'true'
+        shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          /usr/bin/python3 - <<'PY'
+          import os
+
+          path = os.environ["PATH"]
+          cache = os.environ["VERJSON_CHANGELOG_TOOL_CACHE"]
+          expected_cache = os.path.join(
+              os.environ["RUNNER_TEMP"], "verjson-changelog-tools"
+          )
+          if chr(10) in path or chr(13) in path:
+              raise SystemExit("release verification PATH must be a single line")
+          if cache != expected_cache or chr(10) in cache or chr(13) in cache:
+              raise SystemExit("release verification cache must be job-scoped")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("path=" + path + chr(10))
+              output.write("cache=" + cache + chr(10))
+          PY
       # \`publish\` delegates to node-release.yml, which runs npm publish — but it
       # only ever runs AFTER \`snapshot\` has consumed NEXT/, written the immutable
       # CHANGELOG/<version>.md, committed, tagged and pushed. A package npm can
@@ -1089,7 +1117,13 @@ ${release_plan_step}
           done
       - name: Install dependencies
         if: steps.release-version.outputs.selected == 'true'
-        run: npm ci --ignore-scripts
+        run: |
+          workspace_root="\$(git rev-parse --show-toplevel)"
+          if [ -e "\$workspace_root/.npmrc" ] || [ -L "\$workspace_root/.npmrc" ]; then
+            echo "::error::repository-controlled .npmrc is not allowed during credentialed release installation"
+            exit 1
+          fi
+          npm ci --ignore-scripts
         env:
           # NOT GITHUB_TOKEN (#465). A repository-scoped GITHUB_TOKEN cannot read
           # a private GitHub Packages package owned by a DIFFERENT repository, so
@@ -1127,10 +1161,78 @@ ${release_plan_step}
           done
       - name: Run the release verification suite
         if: steps.release-version.outputs.selected == 'true'
+        shell: /bin/bash --noprofile --norc -e -o pipefail {0}
         env:
           NODE_AUTH_TOKEN: ''
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
+          RELEASE_VERIFICATION_PATH: \${{ steps.release-verification-runtime.outputs.path }}
+          VERJSON_CHANGELOG_TOOL_CACHE: \${{ steps.release-verification-runtime.outputs.cache }}
+          CI: 'true'
+          BASH_ENV: ''
+          ENV: ''
+          SHELLOPTS: ''
+          BASHOPTS: ''
+          BASH_XTRACEFD: ''
+          PS4: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
+          NODE_PATH: ''
+          npm_config_script_shell: /bin/sh
+          npm_config_ignore_scripts: 'false'
+          npm_config_userconfig: /dev/null
+          npm_config_globalconfig: /dev/null
+          GIT_TRACE_CURL: ''
+          GIT_TRACE_REDACT: ''
+          GIT_EXEC_PATH: ''
+          GIT_CURL_VERBOSE: ''
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_SYSTEM: /dev/null
+          GIT_CONFIG_PARAMETERS: ''
+          GIT_TRACE2: ''
+          GIT_TRACE2_EVENT: ''
+          GIT_TRACE2_PERF: ''
+          GIT_TRACE2_ENV_VARS: ''
+          GIT_TRACE2_CONFIG_PARAMS: ''
         run: |
+          verification_home="\$(/usr/bin/mktemp -d "\$RUNNER_TEMP/verjson-release-verification.XXXXXX")"
+          trap '/usr/bin/rm -rf -- "\$verification_home"' EXIT
+          run_clean() {
+            /usr/bin/env -i \\
+              PATH="\$RELEASE_VERIFICATION_PATH" \\
+              HOME="\$verification_home" \\
+              CI=true \\
+              GITHUB_ACTIONS="\$GITHUB_ACTIONS" \\
+              GITHUB_WORKFLOW="\$GITHUB_WORKFLOW" \\
+              GITHUB_JOB="\$GITHUB_JOB" \\
+              GITHUB_RUN_ID="\$GITHUB_RUN_ID" \\
+              GITHUB_RUN_NUMBER="\$GITHUB_RUN_NUMBER" \\
+              GITHUB_REPOSITORY="\$GITHUB_REPOSITORY" \\
+              GITHUB_REPOSITORY_OWNER="\$GITHUB_REPOSITORY_OWNER" \\
+              GITHUB_REF="\$GITHUB_REF" \\
+              GITHUB_REF_NAME="\$GITHUB_REF_NAME" \\
+              GITHUB_REF_TYPE="\$GITHUB_REF_TYPE" \\
+              GITHUB_SHA="\$GITHUB_SHA" \\
+              GITHUB_EVENT_NAME="\$GITHUB_EVENT_NAME" \\
+              GITHUB_EVENT_PATH="\$GITHUB_EVENT_PATH" \\
+              GITHUB_WORKSPACE="\$GITHUB_WORKSPACE" \\
+              GITHUB_STEP_SUMMARY="\$GITHUB_STEP_SUMMARY" \\
+              RUNNER_OS="\$RUNNER_OS" \\
+              RUNNER_ARCH="\$RUNNER_ARCH" \\
+              RUNNER_TEMP="\$RUNNER_TEMP" \\
+              RUNNER_TOOL_CACHE="\$RUNNER_TOOL_CACHE" \\
+              PACKAGE_VERSION="\$PACKAGE_VERSION" \\
+              RELEASE_VERIFICATION_PATH="\$RELEASE_VERIFICATION_PATH" \\
+              VERJSON_CHANGELOG_TOOL_CACHE="\$VERJSON_CHANGELOG_TOOL_CACHE" \\
+              NODE_AUTH_TOKEN='' \\
+              GIT_TERMINAL_PROMPT=0 \\
+              npm_config_script_shell=/bin/sh \\
+              npm_config_ignore_scripts=false \\
+              npm_config_userconfig=/dev/null \\
+              npm_config_globalconfig=/dev/null \\
+              "\$@"
+          }
           # Existence and executability are checked separately on purpose. A
           # single \`-x\` test reads a hook committed without the executable bit
           # as "no hook here" and quietly runs the Node default instead — so an
@@ -1143,13 +1245,13 @@ ${release_plan_step}
           if [ -x scripts/release-verify.sh ]; then
             echo "Running this repository's scripts/release-verify.sh"
             verification_status=0
-            scripts/release-verify.sh || verification_status=\$?
+            run_clean scripts/release-verify.sh || verification_status=\$?
           else
             verification_status=0
-            npm run build --if-present &&
-              npm run typecheck --if-present &&
-              npm run lint --if-present &&
-              npm test || verification_status=\$?
+            run_clean npm run build --if-present &&
+              run_clean npm run typecheck --if-present &&
+              run_clean npm run lint --if-present &&
+              run_clean npm test || verification_status=\$?
           fi
           if [ "\$verification_status" -ne 0 ]; then
             echo "::error::Release verification failed against stamped dispatch version \$PACKAGE_VERSION. Check for the hardcoded-version footgun: version assertions can pass in pull requests and local runs, then fail only here; read the expected version dynamically from package.json."
@@ -1556,6 +1658,7 @@ ${required_lane_validation_step}
           export -n git_auth_header
           unset GITHUB_TOKEN
           git_with_release_token() {
+          # shellcheck disable=SC2016 # This literal is executed by the isolated child Bash.
           builtin printf '%s\n' "\$git_auth_header" | /usr/bin/env -i /bin/bash --noprofile --norc -c '
           IFS= read -r git_auth_header
           GIT_CONFIG_VALUE_0="AUTHORIZATION: basic \$git_auth_header"
@@ -1610,9 +1713,36 @@ ${required_lane_validation_step}
           registry-url: https://npm.pkg.github.com
           scope: '${release_scope}'
           package-manager-cache: false
+      - name: Capture trusted release verification runtime
+        id: release-verification-runtime
+        if: steps.release-version.outputs.selected == 'true'
+        shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          /usr/bin/python3 - <<'PY'
+          import os
+
+          path = os.environ["PATH"]
+          cache = os.environ["VERJSON_CHANGELOG_TOOL_CACHE"]
+          expected_cache = os.path.join(
+              os.environ["RUNNER_TEMP"], "verjson-changelog-tools"
+          )
+          if chr(10) in path or chr(13) in path:
+              raise SystemExit("release verification PATH must be a single line")
+          if cache != expected_cache or chr(10) in cache or chr(13) in cache:
+              raise SystemExit("release verification cache must be job-scoped")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("path=" + path + chr(10))
+              output.write("cache=" + cache + chr(10))
+          PY
       - name: Install dependencies
         if: steps.release-version.outputs.selected == 'true'
-        run: npm ci --ignore-scripts
+        run: |
+          workspace_root="\$(git rev-parse --show-toplevel)"
+          if [ -e "\$workspace_root/.npmrc" ] || [ -L "\$workspace_root/.npmrc" ]; then
+            echo "::error::repository-controlled .npmrc is not allowed during credentialed release installation"
+            exit 1
+          fi
+          npm ci --ignore-scripts
         env:
           # NOT GITHUB_TOKEN (#465). A repository-scoped GITHUB_TOKEN cannot read
           # a private GitHub Packages package owned by a DIFFERENT repository, so
@@ -1649,10 +1779,77 @@ ${required_lane_validation_step}
           done
       - name: Run the release verification suite
         if: steps.release-version.outputs.selected == 'true'
+        shell: /bin/bash --noprofile --norc -e -o pipefail {0}
         env:
           NODE_AUTH_TOKEN: ''
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
+          RELEASE_VERIFICATION_PATH: \${{ steps.release-verification-runtime.outputs.path }}
+          VERJSON_CHANGELOG_TOOL_CACHE: \${{ steps.release-verification-runtime.outputs.cache }}
+          CI: 'true'
+          BASH_ENV: ''
+          ENV: ''
+          SHELLOPTS: ''
+          BASHOPTS: ''
+          BASH_XTRACEFD: ''
+          PS4: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
+          NODE_PATH: ''
+          npm_config_script_shell: /bin/sh
+          npm_config_ignore_scripts: 'false'
+          npm_config_userconfig: /dev/null
+          npm_config_globalconfig: /dev/null
+          GIT_TRACE_CURL: ''
+          GIT_TRACE_REDACT: ''
+          GIT_EXEC_PATH: ''
+          GIT_CURL_VERBOSE: ''
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_SYSTEM: /dev/null
+          GIT_CONFIG_PARAMETERS: ''
+          GIT_TRACE2: ''
+          GIT_TRACE2_EVENT: ''
+          GIT_TRACE2_PERF: ''
+          GIT_TRACE2_ENV_VARS: ''
+          GIT_TRACE2_CONFIG_PARAMS: ''
         run: |
+          verification_home="\$(/usr/bin/mktemp -d "\$RUNNER_TEMP/verjson-release-verification.XXXXXX")"
+          trap '/usr/bin/rm -rf -- "\$verification_home"' EXIT
+          run_clean() {
+            /usr/bin/env -i \\
+              PATH="\$RELEASE_VERIFICATION_PATH" \\
+              HOME="\$verification_home" \\
+              CI=true \\
+              GITHUB_ACTIONS="\$GITHUB_ACTIONS" \\
+              GITHUB_WORKFLOW="\$GITHUB_WORKFLOW" \\
+              GITHUB_JOB="\$GITHUB_JOB" \\
+              GITHUB_RUN_ID="\$GITHUB_RUN_ID" \\
+              GITHUB_RUN_NUMBER="\$GITHUB_RUN_NUMBER" \\
+              GITHUB_REPOSITORY="\$GITHUB_REPOSITORY" \\
+              GITHUB_REPOSITORY_OWNER="\$GITHUB_REPOSITORY_OWNER" \\
+              GITHUB_REF="\$GITHUB_REF" \\
+              GITHUB_REF_NAME="\$GITHUB_REF_NAME" \\
+              GITHUB_REF_TYPE="\$GITHUB_REF_TYPE" \\
+              GITHUB_SHA="\$GITHUB_SHA" \\
+              GITHUB_EVENT_NAME="\$GITHUB_EVENT_NAME" \\
+              GITHUB_EVENT_PATH="\$GITHUB_EVENT_PATH" \\
+              GITHUB_WORKSPACE="\$GITHUB_WORKSPACE" \\
+              GITHUB_STEP_SUMMARY="\$GITHUB_STEP_SUMMARY" \\
+              RUNNER_OS="\$RUNNER_OS" \\
+              RUNNER_ARCH="\$RUNNER_ARCH" \\
+              RUNNER_TEMP="\$RUNNER_TEMP" \\
+              RUNNER_TOOL_CACHE="\$RUNNER_TOOL_CACHE" \\
+              PACKAGE_VERSION="\$PACKAGE_VERSION" \\
+              VERJSON_CHANGELOG_TOOL_CACHE="\$VERJSON_CHANGELOG_TOOL_CACHE" \\
+              NODE_AUTH_TOKEN='' \\
+              GIT_TERMINAL_PROMPT=0 \\
+              npm_config_script_shell=/bin/sh \\
+              npm_config_ignore_scripts=false \\
+              npm_config_userconfig=/dev/null \\
+              npm_config_globalconfig=/dev/null \\
+              "\$@"
+          }
           # Existence and executability are checked separately on purpose. A
           # single \`-x\` test reads a hook committed without the executable bit
           # as "no hook here" and quietly runs the Node default instead — so an
@@ -1665,13 +1862,13 @@ ${required_lane_validation_step}
           if [ -x scripts/release-verify.sh ]; then
             echo "Running this repository's scripts/release-verify.sh"
             verification_status=0
-            scripts/release-verify.sh || verification_status=\$?
+            run_clean scripts/release-verify.sh || verification_status=\$?
           else
             verification_status=0
-            npm run build --if-present &&
-              npm run typecheck --if-present &&
-              npm run lint --if-present &&
-              npm test || verification_status=\$?
+            run_clean npm run build --if-present &&
+              run_clean npm run typecheck --if-present &&
+              run_clean npm run lint --if-present &&
+              run_clean npm test || verification_status=\$?
           fi
           if [ "\$verification_status" -ne 0 ]; then
             echo "::error::Release verification failed against stamped dispatch version \$PACKAGE_VERSION. Check for the hardcoded-version footgun: version assertions can pass in pull requests and local runs, then fail only here; read the expected version dynamically from package.json."
@@ -2042,6 +2239,7 @@ ${release_plan_step}
           export -n git_auth_header
           unset GITHUB_TOKEN
           git_with_release_token() {
+          # shellcheck disable=SC2016 # This literal is executed by the isolated child Bash.
           builtin printf '%s\n' "\$git_auth_header" | /usr/bin/env -i /bin/bash --noprofile --norc -c '
           IFS= read -r git_auth_header
           GIT_CONFIG_VALUE_0="AUTHORIZATION: basic \$git_auth_header"
@@ -2099,9 +2297,36 @@ ${release_plan_step}
           registry-url: https://npm.pkg.github.com
           scope: '${release_scope}'
           package-manager-cache: false
+      - name: Capture trusted release verification runtime
+        id: release-verification-runtime
+        if: steps.release-version.outputs.selected == 'true'
+        shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          /usr/bin/python3 - <<'PY'
+          import os
+
+          path = os.environ["PATH"]
+          cache = os.environ["VERJSON_CHANGELOG_TOOL_CACHE"]
+          expected_cache = os.path.join(
+              os.environ["RUNNER_TEMP"], "verjson-changelog-tools"
+          )
+          if chr(10) in path or chr(13) in path:
+              raise SystemExit("release verification PATH must be a single line")
+          if cache != expected_cache or chr(10) in cache or chr(13) in cache:
+              raise SystemExit("release verification cache must be job-scoped")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("path=" + path + chr(10))
+              output.write("cache=" + cache + chr(10))
+          PY
       - name: Install dependencies
         if: steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''
-        run: npm ci --ignore-scripts
+        run: |
+          workspace_root="\$(git rev-parse --show-toplevel)"
+          if [ -e "\$workspace_root/.npmrc" ] || [ -L "\$workspace_root/.npmrc" ]; then
+            echo "::error::repository-controlled .npmrc is not allowed during credentialed release installation"
+            exit 1
+          fi
+          npm ci --ignore-scripts
         env:
           # NOT GITHUB_TOKEN (#465). A repository-scoped GITHUB_TOKEN cannot read
           # a private GitHub Packages package owned by a DIFFERENT repository, so
@@ -2138,10 +2363,77 @@ ${release_plan_step}
           done
       - name: Run the release verification suite
         if: steps.release-version.outputs.selected == 'true'
+        shell: /bin/bash --noprofile --norc -e -o pipefail {0}
         env:
           NODE_AUTH_TOKEN: ''
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
+          RELEASE_VERIFICATION_PATH: \${{ steps.release-verification-runtime.outputs.path }}
+          VERJSON_CHANGELOG_TOOL_CACHE: \${{ steps.release-verification-runtime.outputs.cache }}
+          CI: 'true'
+          BASH_ENV: ''
+          ENV: ''
+          SHELLOPTS: ''
+          BASHOPTS: ''
+          BASH_XTRACEFD: ''
+          PS4: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
+          NODE_PATH: ''
+          npm_config_script_shell: /bin/sh
+          npm_config_ignore_scripts: 'false'
+          npm_config_userconfig: /dev/null
+          npm_config_globalconfig: /dev/null
+          GIT_TRACE_CURL: ''
+          GIT_TRACE_REDACT: ''
+          GIT_EXEC_PATH: ''
+          GIT_CURL_VERBOSE: ''
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_SYSTEM: /dev/null
+          GIT_CONFIG_PARAMETERS: ''
+          GIT_TRACE2: ''
+          GIT_TRACE2_EVENT: ''
+          GIT_TRACE2_PERF: ''
+          GIT_TRACE2_ENV_VARS: ''
+          GIT_TRACE2_CONFIG_PARAMS: ''
         run: |
+          verification_home="\$(/usr/bin/mktemp -d "\$RUNNER_TEMP/verjson-release-verification.XXXXXX")"
+          trap '/usr/bin/rm -rf -- "\$verification_home"' EXIT
+          run_clean() {
+            /usr/bin/env -i \\
+              PATH="\$RELEASE_VERIFICATION_PATH" \\
+              HOME="\$verification_home" \\
+              CI=true \\
+              GITHUB_ACTIONS="\$GITHUB_ACTIONS" \\
+              GITHUB_WORKFLOW="\$GITHUB_WORKFLOW" \\
+              GITHUB_JOB="\$GITHUB_JOB" \\
+              GITHUB_RUN_ID="\$GITHUB_RUN_ID" \\
+              GITHUB_RUN_NUMBER="\$GITHUB_RUN_NUMBER" \\
+              GITHUB_REPOSITORY="\$GITHUB_REPOSITORY" \\
+              GITHUB_REPOSITORY_OWNER="\$GITHUB_REPOSITORY_OWNER" \\
+              GITHUB_REF="\$GITHUB_REF" \\
+              GITHUB_REF_NAME="\$GITHUB_REF_NAME" \\
+              GITHUB_REF_TYPE="\$GITHUB_REF_TYPE" \\
+              GITHUB_SHA="\$GITHUB_SHA" \\
+              GITHUB_EVENT_NAME="\$GITHUB_EVENT_NAME" \\
+              GITHUB_EVENT_PATH="\$GITHUB_EVENT_PATH" \\
+              GITHUB_WORKSPACE="\$GITHUB_WORKSPACE" \\
+              GITHUB_STEP_SUMMARY="\$GITHUB_STEP_SUMMARY" \\
+              RUNNER_OS="\$RUNNER_OS" \\
+              RUNNER_ARCH="\$RUNNER_ARCH" \\
+              RUNNER_TEMP="\$RUNNER_TEMP" \\
+              RUNNER_TOOL_CACHE="\$RUNNER_TOOL_CACHE" \\
+              PACKAGE_VERSION="\$PACKAGE_VERSION" \\
+              VERJSON_CHANGELOG_TOOL_CACHE="\$VERJSON_CHANGELOG_TOOL_CACHE" \\
+              NODE_AUTH_TOKEN='' \\
+              GIT_TERMINAL_PROMPT=0 \\
+              npm_config_script_shell=/bin/sh \\
+              npm_config_ignore_scripts=false \\
+              npm_config_userconfig=/dev/null \\
+              npm_config_globalconfig=/dev/null \\
+              "\$@"
+          }
           # Existence and executability are checked separately on purpose. A
           # single \`-x\` test reads a hook committed without the executable bit
           # as "no hook here" and quietly runs the Node default instead — so an
@@ -2154,16 +2446,16 @@ ${release_plan_step}
           if [ -x scripts/release-verify.sh ]; then
             echo "Running this repository's scripts/release-verify.sh"
             verification_status=0
-            scripts/release-verify.sh || verification_status=\$?
+            run_clean scripts/release-verify.sh || verification_status=\$?
           elif [ ! -f package.json ]; then
             echo "::error::No package.json and no executable scripts/release-verify.sh: nothing verifies this tree before the snapshot. Commit scripts/release-verify.sh (#1206)."
             exit 1
           else
             verification_status=0
-            npm run build --if-present &&
-              npm run typecheck --if-present &&
-              npm run lint --if-present &&
-              npm test || verification_status=\$?
+            run_clean npm run build --if-present &&
+              run_clean npm run typecheck --if-present &&
+              run_clean npm run lint --if-present &&
+              run_clean npm test || verification_status=\$?
           fi
           if [ "\$verification_status" -ne 0 ]; then
             echo "::error::Release verification failed against stamped dispatch version \$PACKAGE_VERSION. Check for the hardcoded-version footgun: version assertions can pass in pull requests and local runs, then fail only here; read the expected version dynamically from package.json."
@@ -2421,13 +2713,69 @@ emit_contract_test() {
   # The interpolated preamble is kept deliberately small: everything below it is
   # a quoted heredoc, so the body cannot accidentally expand a generator-side
   # variable into an adopter's test.
-  local release_package_dirs_json="$selected_package_dirs_json"
-  local release_package_dirs_shell=''
   local release_assets_json='[' release_asset_sep=''
+  local generator_release_package_dirs_json="$selected_package_dirs_json"
+  local generator_release_package_dirs_shell=''
+  local generator_release_package_dir_flag=--package-dir
+  local expected_release_caller_package_dirs_json
+  local release_caller_spec release_caller_path release_caller_dirs
+  local release_caller_dir
+  local release_caller_dirs_json release_caller_dirs_separator
+  local -a expected_release_caller_paths=(".github/workflows/release.yml")
+  local -a expected_release_caller_dirs=()
+  local -a expected_release_caller_dirs_seen=()
   local release_approved_packages_csv='' release_approved_package=''
   local release_lane_names='' release_lane_env='' release_lane_preflight='' release_lane_preflight_sha256=''
-  printf -v release_package_dirs_shell '%q ' "${release_package_dirs[@]}"
-  release_package_dirs_shell="${release_package_dirs_shell% }"
+  [ "$release_package_dirs_exact" = true ] \
+    && generator_release_package_dir_flag=--only-package-dir
+  expected_release_caller_package_dirs_json="{\".github/workflows/release.yml\":$selected_package_dirs_json"
+  for release_caller_spec in "${release_caller_package_dir_specs[@]}"; do
+    [[ "$release_caller_spec" == *=* ]] || {
+      echo "$(basename "$0"): --release-caller-package-dirs must be <workflow-path>=<dir>[,<dir>...]" >&2
+      return 2
+    }
+    release_caller_path="${release_caller_spec%%=*}"
+    release_caller_dirs="${release_caller_spec#*=}"
+    [[ "$release_caller_path" =~ ^\.github/workflows/[A-Za-z0-9._-]+\.ya?ml$ ]] \
+      && [ -n "$release_caller_dirs" ] || {
+      echo "$(basename "$0"): invalid --release-caller-package-dirs value '$release_caller_spec'" >&2
+      return 2
+    }
+    for expected_release_caller_path in "${expected_release_caller_paths[@]}"; do
+      [ "$expected_release_caller_path" != "$release_caller_path" ] || {
+        echo "$(basename "$0"): duplicate expected release caller '$release_caller_path'" >&2
+        return 2
+      }
+    done
+    IFS=',' read -r -a expected_release_caller_dirs <<<"$release_caller_dirs"
+    release_caller_dirs_json='['
+    release_caller_dirs_separator=''
+    expected_release_caller_dirs_seen=()
+    for release_caller_dir in "${expected_release_caller_dirs[@]}"; do
+      [[ "$release_caller_dir" =~ ^[A-Za-z0-9._][A-Za-z0-9._-]*(/[A-Za-z0-9._][A-Za-z0-9._-]*)*$ ]] \
+        && { [ "$release_caller_dir" = . ] \
+          || { [[ "/$release_caller_dir/" != */./* ]] \
+            && [[ "/$release_caller_dir/" != */../* ]]; }; } || {
+        echo "$(basename "$0"): invalid expected package directory '$release_caller_dir'" >&2
+        return 2
+      }
+      for earlier_release_caller_dir in "${expected_release_caller_dirs_seen[@]}"; do
+        [ "$earlier_release_caller_dir" != "$release_caller_dir" ] || {
+          echo "$(basename "$0"): duplicate expected package directory '$release_caller_dir'" >&2
+          return 2
+        }
+      done
+      expected_release_caller_dirs_seen+=("$release_caller_dir")
+      release_caller_dirs_json="$release_caller_dirs_json$release_caller_dirs_separator\"$release_caller_dir\""
+      release_caller_dirs_separator=,
+    done
+    release_caller_dirs_json="$release_caller_dirs_json]"
+    expected_release_caller_package_dirs_json="$expected_release_caller_package_dirs_json,\"$release_caller_path\":$release_caller_dirs_json"
+    expected_release_caller_paths+=("$release_caller_path")
+  done
+  expected_release_caller_package_dirs_json="$expected_release_caller_package_dirs_json}"
+  printf -v generator_release_package_dirs_shell '%q ' "${release_package_dirs[@]}"
+  generator_release_package_dirs_shell="${generator_release_package_dirs_shell% }"
   for release_asset in "${release_assets[@]}"; do
     release_assets_json="$release_assets_json$release_asset_sep\"$release_asset\""
     release_asset_sep=,
@@ -2498,8 +2846,11 @@ ADR_INDEX_TEST_SHA256="${adr_index_test_sha256}"
 EXPECTED_CODEOWNERS_SHA256="${codeowners_sha256}"
 EXPECTED_RELEASE_SCOPE="${release_scope}"
 EXPECTED_RELEASE_NODE_VERSION="${release_node_version}"
-EXPECTED_RELEASE_PACKAGE_DIRS_JSON='${release_package_dirs_json}'
-EXPECTED_RELEASE_PACKAGE_DIRS_SHELL='${release_package_dirs_shell}'
+# Generator parameters and expected per-caller package selections.
+GENERATOR_RELEASE_PACKAGE_DIRS_JSON='${generator_release_package_dirs_json}'
+GENERATOR_RELEASE_PACKAGE_DIRS_SHELL='${generator_release_package_dirs_shell}'
+GENERATOR_RELEASE_PACKAGE_DIR_FLAG='${generator_release_package_dir_flag}'
+EXPECTED_RELEASE_CALLER_PACKAGE_DIRS_JSON='${expected_release_caller_package_dirs_json}'
 EXPECTED_RELEASE_ASSETS_JSON='${release_assets_json}'
 EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES='${release_approved_packages_csv}'
 EXPECTED_RELEASE_LANE_PREFLIGHT_SHA256='${release_lane_preflight_sha256}'
@@ -2957,6 +3308,8 @@ ways that report green:
 Anything this parser cannot read confidently is an error, never a pass.
 """
 import hashlib
+import json
+import os
 import re
 import shlex
 import sys
@@ -3094,6 +3447,114 @@ def release_mode_and_defaults():
     return mode, prefix, component
 
 
+def generator_provenance_tokens():
+    provenance_prefix = (
+        "# Generated by verJSON/.github scripts/gen-changelog-caller.sh "
+    )
+    provenance = [line for line in raw_lines if line.startswith(provenance_prefix)]
+    if len(provenance) != 1:
+        return None
+    try:
+        return shlex.split(provenance[0][len(provenance_prefix):])
+    except ValueError:
+        return None
+
+
+def expected_package_directories_assignment():
+    tokens = generator_provenance_tokens()
+    if tokens is None:
+        return None
+    try:
+        caller_package_directories = json.loads(
+            os.environ.get("RELEASE_CALLER_PACKAGE_DIRS_JSON", "")
+        )
+    except ValueError:
+        return None
+    if (
+        not isinstance(caller_package_directories, list)
+        or not caller_package_directories
+        or any(
+            not isinstance(directory, str)
+            or re.fullmatch(
+                r"[A-Za-z0-9._][A-Za-z0-9._-]*(/[A-Za-z0-9._][A-Za-z0-9._-]*)*",
+                directory,
+            ) is None
+            or (directory != "." and any(
+                segment in (".", "..") for segment in directory.split("/")
+            ))
+            for directory in caller_package_directories
+        )
+        or len(set(caller_package_directories)) != len(caller_package_directories)
+    ):
+        return None
+    package_directories = ["."]
+    package_directory_mode = None
+    index = 2
+    while index < len(tokens):
+        option = tokens[index]
+        if option not in ("--package-dir", "--only-package-dir"):
+            index += 1
+            continue
+        if index + 1 >= len(tokens):
+            return None
+        directory = tokens[index + 1]
+        if not re.fullmatch(
+            r"[A-Za-z0-9._][A-Za-z0-9._-]*(/[A-Za-z0-9._][A-Za-z0-9._-]*)*",
+            directory,
+        ):
+            return None
+        if directory != "." and any(
+            segment in (".", "..") for segment in directory.split("/")
+        ):
+            return None
+        if package_directory_mode is not None and option != package_directory_mode:
+            return None
+        if package_directory_mode is None and option == "--only-package-dir":
+            package_directories = []
+        package_directory_mode = option
+        if directory in package_directories:
+            return None
+        package_directories.append(directory)
+        index += 2
+    if package_directories != caller_package_directories:
+        return None
+    package_directories_shell = " ".join(
+        shlex.quote(directory) for directory in package_directories
+    )
+    return "package_dirs=(" + package_directories_shell + ")"
+
+
+def expected_setup_node_inputs():
+    tokens = generator_provenance_tokens()
+    if tokens is None:
+        return None
+    values = {"--scope": "@verjson", "--node-version": "24"}
+    for option in values:
+        found = [
+            tokens[index + 1]
+            for index, token in enumerate(tokens[:-1])
+            if token == option
+        ]
+        if len(found) > 1:
+            return None
+        if found:
+            values[option] = found[0]
+    scope = values["--scope"]
+    node_version = values["--node-version"]
+    if (
+        re.fullmatch(r"@[a-z0-9][a-z0-9._~-]*", scope) is None
+        or len(scope) > 214
+        or re.fullmatch(r"(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)){0,2}", node_version) is None
+    ):
+        return None
+    return {
+        "node-version": "${{ '" + node_version + "' }}",
+        "registry-url": "https://npm.pkg.github.com",
+        "scope": "'" + scope + "'",
+        "package-manager-cache": "false",
+    }
+
+
 release_mode, release_default_prefix, release_default_component = release_mode_and_defaults()
 release_default_prefix_yaml = (
     "v" if release_default_prefix == "v" else f"'{release_default_prefix}'"
@@ -3217,7 +3678,7 @@ PRIVATE_NODE_TOKEN = re.compile(
     re.IGNORECASE,
 )
 SECRETS_CONTEXT = re.compile(r"\bsecrets\b", re.IGNORECASE)
-LIST_ITEM = re.compile(r"^(\s*)-\s")
+LIST_ITEM = re.compile(r"^(\s*)-(?:\s+|$)")
 YAML_ANCHOR_ALIAS = re.compile(
     r"(?m)(?:^|[\s,:{\[])(?:&(?!&)|\*(?=\S))[^\s,\[\]{}]+"
 )
@@ -3231,6 +3692,7 @@ def yaml_structure_text(source_lines):
         indentation = len(line) - len(line.lstrip())
         if block_scalar_indent is not None:
             if not line.strip() or indentation > block_scalar_indent:
+                output.append("")
                 continue
             block_scalar_indent = None
         output.append(line)
@@ -3242,6 +3704,8 @@ def yaml_structure_text(source_lines):
 if YAML_ANCHOR_ALIAS.search(yaml_structure_text(lines)):
     problems.append("uses YAML anchors or aliases in a release workflow (#1712)")
 workflow_structure = yaml_structure_text(lines)
+if re.search(r"(?m)(?:^|[,{])[ \t]*\?(?:[ \t]+|$)", workflow_structure):
+    problems.append("uses unsupported explicit YAML mapping keys (#1717)")
 workflow_keys = yaml_mapping_keys(workflow_structure.splitlines())
 if (
     workflow_keys is None
@@ -3269,6 +3733,233 @@ def enclosing_step(index):
             return None
         cursor -= 1
     return None
+
+
+def step_mapping_entries(step):
+    """Read one step's top-level fields, including inline sequence mappings."""
+    if not step:
+        return None
+    item = LIST_ITEM.match(step[0])
+    if item is None:
+        return None
+    list_indent = len(item.group(1))
+    entries = []
+    first_entry = step[0][item.end():].strip()
+    if first_entry:
+        entries.append(first_entry)
+    for line in step[1:]:
+        if not line.strip():
+            continue
+        indentation = len(line) - len(line.lstrip())
+        if indentation <= list_indent:
+            break
+        if indentation == list_indent + 2:
+            entries.append(line.strip())
+    fields = {}
+    for entry in entries:
+        try:
+            key, _, value = mapping_entry(entry)
+        except ValueError:
+            return None
+        if key in fields:
+            return None
+        fields[key] = value
+    return fields
+
+
+UNSUPPORTED_STEP_COLLECTIONS = set()
+
+
+def workflow_step_blocks(job_name=None):
+    """Yield step mappings from every top-level job, at any valid indentation."""
+    structure_lines = workflow_structure.splitlines()
+    jobs_headers = []
+    for index, line in enumerate(structure_lines):
+        if not line.strip() or len(line) != len(line.lstrip()):
+            continue
+        try:
+            key, _, inline_value = mapping_entry(line.strip())
+        except ValueError:
+            continue
+        if key == "jobs":
+            jobs_headers.append((index, inline_value))
+    if len(jobs_headers) != 1 or jobs_headers[0][1]:
+        UNSUPPORTED_STEP_COLLECTIONS.add(-1)
+        return
+
+    jobs_start = jobs_headers[0][0]
+    jobs_end = len(structure_lines)
+    for index in range(jobs_start + 1, len(structure_lines)):
+        line = structure_lines[index]
+        if line.strip() and len(line) == len(line.lstrip()):
+            jobs_end = index
+            break
+
+    job_headers = []
+    for index in range(jobs_start + 1, jobs_end):
+        line = structure_lines[index]
+        if not line.strip():
+            continue
+        indentation = len(line) - len(line.lstrip())
+        if indentation <= 0:
+            continue
+        try:
+            key, _, inline_value = mapping_entry(line.strip())
+        except ValueError:
+            continue
+        if indentation == min(
+            (len(candidate) - len(candidate.lstrip())
+             for candidate in structure_lines[jobs_start + 1:jobs_end]
+             if candidate.strip()
+             and len(candidate) - len(candidate.lstrip()) > 0),
+            default=indentation,
+        ):
+            job_headers.append((index, key, inline_value, indentation))
+
+    if not job_headers:
+        UNSUPPORTED_STEP_COLLECTIONS.add(jobs_start)
+        return
+
+    jobs_indent = job_headers[0][3]
+    for job_number, (job_start, current_job_name, job_value, job_indent) in enumerate(job_headers):
+        if job_name is not None and current_job_name != job_name:
+            continue
+        if job_indent != jobs_indent or job_value:
+            UNSUPPORTED_STEP_COLLECTIONS.add(job_start)
+            continue
+        job_end = job_headers[job_number + 1][0] if job_number + 1 < len(job_headers) else jobs_end
+        child_indent = None
+        for index in range(job_start + 1, job_end):
+            line = structure_lines[index]
+            if not line.strip():
+                continue
+            indentation = len(line) - len(line.lstrip())
+            if indentation <= job_indent:
+                continue
+            try:
+                mapping_entry(line.strip())
+            except ValueError:
+                continue
+            child_indent = indentation
+            break
+        if child_indent is None:
+            UNSUPPORTED_STEP_COLLECTIONS.add(job_start)
+            continue
+
+        for index in range(job_start + 1, job_end):
+            line = structure_lines[index]
+            if not line.strip():
+                continue
+            indentation = len(line) - len(line.lstrip())
+            try:
+                key, _, inline_value = mapping_entry(line.strip())
+            except ValueError:
+                continue
+            if key != "steps":
+                continue
+            if indentation != child_indent or inline_value:
+                UNSUPPORTED_STEP_COLLECTIONS.add(index)
+                yield None
+                continue
+            cursor = index + 1
+            step_count = 0
+            while cursor < job_end:
+                current = structure_lines[cursor]
+                if current.strip() and len(current) - len(current.lstrip()) <= indentation:
+                    break
+                item = LIST_ITEM.match(current)
+                if item is not None:
+                    if len(item.group(1)) != indentation + 2:
+                        UNSUPPORTED_STEP_COLLECTIONS.add(cursor)
+                        yield None
+                    else:
+                        step_count += 1
+                        yield enclosing_step(cursor)
+                cursor += 1
+            if not step_count:
+                UNSUPPORTED_STEP_COLLECTIONS.add(index)
+
+
+def mapping_key_counts(source_lines):
+    """Count structural mapping keys without counting comments or scalar text."""
+    counts = {}
+    environment_indent = None
+    for line in source_lines:
+        indentation = len(line) - len(line.lstrip())
+        text = line.strip()
+        if not text:
+            continue
+        if environment_indent is not None:
+            if indentation <= environment_indent:
+                environment_indent = None
+            else:
+                environment_entry = text
+                list_item = LIST_ITEM.match(environment_entry)
+                if list_item is not None:
+                    environment_entry = environment_entry[len(list_item.group(1)):].lstrip()
+                try:
+                    environment_key, _, environment_value = mapping_entry(environment_entry)
+                except ValueError:
+                    counts["__unsupported_flow_environment_mapping__"] = 1
+                    continue
+                if indentation != environment_indent + 2:
+                    counts["__unsupported_flow_environment_mapping__"] = 1
+                counts[environment_key] = counts.get(environment_key, 0) + 1
+                if environment_value.lstrip().startswith(("{", "[")):
+                    for protected_key in CREDENTIAL_PROCESS_ENV_KEYS + ("PATH",):
+                        if re.search(rf"\b{re.escape(protected_key)}\b", environment_value):
+                            counts[protected_key] = counts.get(protected_key, 0) + 1
+                continue
+        list_item = LIST_ITEM.match(text)
+        if list_item is not None:
+            text = text[len(list_item.group(1)):].lstrip()
+        try:
+            key, _, value = mapping_entry(text)
+        except ValueError:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+        if key == "env" and value.lstrip().startswith(("!", "&", "*", "{", "[")):
+            counts["__unsupported_flow_environment_mapping__"] = 1
+        elif key == "env" and value:
+            counts["__unsupported_flow_environment_mapping__"] = 1
+        elif key == "env":
+            environment_indent = indentation
+        if value.lstrip().startswith(("{", "[")):
+            for protected_key in CREDENTIAL_PROCESS_ENV_KEYS + ("PATH",):
+                if re.search(rf"\b{re.escape(protected_key)}\b", value):
+                    counts[protected_key] = counts.get(protected_key, 0) + 1
+    return counts
+
+
+def mapping_keys_at_indent(source_lines, start, end, indentation):
+    """Read one mapping level and refuse duplicate or ambiguous keys."""
+    keys = set()
+    for line in source_lines[start:end]:
+        if not line.strip() or len(line) - len(line.lstrip()) != indentation:
+            continue
+        try:
+            key, _, _ = mapping_entry(line.strip())
+        except ValueError:
+            return None
+        if key in keys:
+            return None
+        keys.add(key)
+    return keys
+
+
+def yaml_scalar_value(value):
+    """Read the simple quoted scalar forms accepted in generated callers."""
+    value = value.strip()
+    if not value or value[0] not in "'\"":
+        return value
+    if len(value) < 2 or value[-1] != value[0]:
+        return None
+    if value[0] == "'":
+        return value[1:-1].replace("''", "'")
+    try:
+        return json.loads(value)
+    except ValueError:
+        return None
 
 
 def action_expressions(text):
@@ -3328,13 +4019,14 @@ def context_match_lines(pattern, start, end):
 
 
 def named_step(name):
-    matches = [
-        index for index, line in enumerate(lines)
-        if line.strip() == "- name: " + name
-    ]
+    matches = []
+    for step in workflow_step_blocks():
+        fields = step_mapping_entries(step)
+        if fields is not None and yaml_scalar_value(fields.get("name", "")) == name:
+            matches.append(step)
     if len(matches) != 1:
         return None
-    return enclosing_step(matches[0])
+    return matches[0]
 
 
 def run_body(step):
@@ -3371,15 +4063,35 @@ def step_mapping_values(step, name):
     """Read one plain mapping from a step, refusing duplicates or nesting."""
     if step is None:
         return None
-    matches = [
-        index for index, line in enumerate(step)
-        if line.strip() == name + ":"
-    ]
+    item = LIST_ITEM.match(step[0])
+    if item is None:
+        return None
+    list_indent = len(item.group(1))
+    matches = []
+    for index, line in enumerate(step):
+        if index == 0:
+            entry = line[item.end():].strip()
+            indentation = list_indent + 2
+        else:
+            if not line.strip() or len(line) - len(line.lstrip()) != list_indent + 2:
+                continue
+            entry = line.strip()
+            indentation = list_indent + 2
+        if not entry:
+            continue
+        try:
+            key, _, value = mapping_entry(entry)
+        except ValueError:
+            return None
+        if key == name:
+            matches.append((index, indentation, value))
     if len(matches) != 1:
         return None
-    indentation = len(step[matches[0]]) - len(step[matches[0]].lstrip())
+    index, indentation, value = matches[0]
+    if value:
+        return None
     values = {}
-    for line in step[matches[0] + 1:]:
+    for line in step[index + 1:]:
         if not line.strip():
             continue
         current_indentation = len(line) - len(line.lstrip())
@@ -3400,9 +4112,24 @@ def step_mapping_values(step, name):
 # This is the only release step that receives github.token. Pin its whole script
 # per mode so additional shell commands cannot forward or persist that token.
 APPROVED_RELEASE_STATE_SCRIPT_SHA256 = {
-    "release-node": "ec8e3a9157b40c0aaf9fdbebf920733609b297027b1fa972c190a3ef8cc52fca",
-    "release-artifact": "ec8e3a9157b40c0aaf9fdbebf920733609b297027b1fa972c190a3ef8cc52fca",
-    "release-snapshot": "ec8e3a9157b40c0aaf9fdbebf920733609b297027b1fa972c190a3ef8cc52fca",
+    "release-node": "0860f7c804f4e5111e9461230e9e999ac3b1a0761a54ea57488c9772854ce22c",
+    "release-artifact": "0860f7c804f4e5111e9461230e9e999ac3b1a0761a54ea57488c9772854ce22c",
+    "release-snapshot": "0860f7c804f4e5111e9461230e9e999ac3b1a0761a54ea57488c9772854ce22c",
+}
+APPROVED_RELEASE_VERIFICATION_SCRIPT_SHA256 = {
+    "release-node": "e5ef5c336250974f04c46ff20a58aa5a77094cd4904034ffc02c2e2b97c321aa",
+    "release-artifact": "d134c7a33458939fdca9c9d68f7009c8fdac44e1be2598fbf9960cfde2ffe924",
+    "release-snapshot": "42c7403411bce28e1a890854b4dd36af68bf40f0408d5f0d079cab748d6882fc",
+}
+APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
+    "release-node": "65c9bdf63f9032dd4ecdf2d1123586f3deca3a5f9b11dc7b2a29106b7d238502",
+    "release-artifact": "65c9bdf63f9032dd4ecdf2d1123586f3deca3a5f9b11dc7b2a29106b7d238502",
+    "release-snapshot": "65c9bdf63f9032dd4ecdf2d1123586f3deca3a5f9b11dc7b2a29106b7d238502",
+}
+APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256 = {
+    "release-node": "897b9aa99ddd22187414228b463d8bdeab8609b8e15acad66708b86654d5e407",
+    "release-artifact": "57a4aafc159687ccb3879c7ad5aff6ea940c753380233b7cbf18ba0606bd2ab1",
+    "release-snapshot": "c7531cc0f0f4e67fe00ff6c41c37d8a487091706bd5cbf688290cf891347dd57",
 }
 EXPECTED_RELEASE_STATE_ENV = {
     "VERSION": "${{ steps.release-version.outputs.version }}",
@@ -3429,9 +4156,47 @@ EXPECTED_RELEASE_STATE_ENV = {
     "GIT_TRACE2_ENV_VARS": "''",
     "GIT_TRACE2_CONFIG_PARAMS": "''",
 }
+EXPECTED_RELEASE_VERIFICATION_ENV = {
+    "NODE_AUTH_TOKEN": "''",
+    "PACKAGE_VERSION": "${{ steps.release-version.outputs.package-version }}",
+    "RELEASE_VERIFICATION_PATH": "${{ steps.release-verification-runtime.outputs.path }}",
+    "CI": "'true'",
+    "VERJSON_CHANGELOG_TOOL_CACHE": "${{ steps.release-verification-runtime.outputs.cache }}",
+    "BASH_ENV": "''",
+    "ENV": "''",
+    "SHELLOPTS": "''",
+    "BASHOPTS": "''",
+    "BASH_XTRACEFD": "''",
+    "PS4": "''",
+    "LD_PRELOAD": "''",
+    "LD_AUDIT": "''",
+    "LD_LIBRARY_PATH": "''",
+    "NODE_OPTIONS": "''",
+    "NODE_PATH": "''",
+    "npm_config_script_shell": "/bin/sh",
+    "npm_config_ignore_scripts": "'false'",
+    "npm_config_userconfig": "/dev/null",
+    "npm_config_globalconfig": "/dev/null",
+    "GIT_TRACE_CURL": "''",
+    "GIT_TRACE_REDACT": "''",
+    "GIT_EXEC_PATH": "''",
+    "GIT_CURL_VERBOSE": "''",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_CONFIG_PARAMETERS": "''",
+    "GIT_TRACE2": "''",
+    "GIT_TRACE2_EVENT": "''",
+    "GIT_TRACE2_PERF": "''",
+    "GIT_TRACE2_ENV_VARS": "''",
+    "GIT_TRACE2_CONFIG_PARAMS": "''",
+}
 CREDENTIAL_PROCESS_ENV_KEYS = (
     "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "BASH_XTRACEFD", "PS4",
     "LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH",
+    "NODE_OPTIONS", "NODE_PATH", "PYTHONPATH", "PYTHONHOME",
+    "NPM_CONFIG_USERCONFIG", "NPM_CONFIG_GLOBALCONFIG",
+    "npm_config_userconfig", "npm_config_globalconfig",
+    "npm_config_script_shell", "npm_config_ignore_scripts",
     "GIT_TRACE_CURL", "GIT_TRACE_REDACT",
     "GIT_EXEC_PATH",
     "GIT_CURL_VERBOSE", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
@@ -3466,16 +4231,68 @@ def permission_values(start, end, indentation):
     return values
 
 
-for index, line in enumerate(lines):
-    if not re.match(r"^\s*uses:\s*actions/checkout@", line):
+for checkout_step in workflow_step_blocks():
+    if checkout_step is None:
         continue
-    checkout_step = enclosing_step(index)
-    if checkout_step is None or not any(
-        entry.strip() == "persist-credentials: false" for entry in checkout_step
+    fields = step_mapping_entries(checkout_step)
+    if fields is None:
+        problems.append("cannot safely inspect a release workflow step (#1717)")
+        continue
+    raw_uses = fields.get("uses")
+    uses = yaml_scalar_value(raw_uses) if raw_uses is not None else None
+    unsupported_uses_scalar = (
+        raw_uses is not None
+        and (
+            uses is None
+            or not uses
+            or raw_uses.lstrip().startswith((">", "|", "!", "&", "*", "[", "{"))
+        )
+    )
+    if unsupported_uses_scalar:
+        problems.append("cannot safely inspect a release workflow action reference (#1717)")
+    elif uses is not None and uses.casefold().startswith("actions/checkout@"):
+        with_values = step_mapping_values(checkout_step, "with")
+        raw_persist_credentials = (
+            with_values.get("persist-credentials")
+            if with_values is not None
+            else None
+        )
+        persist_credentials = (
+            yaml_scalar_value(raw_persist_credentials)
+            if raw_persist_credentials is not None
+            else None
+        )
+        if persist_credentials is None or persist_credentials.lower() != "false":
+            problems.append(
+                "persists checkout credentials into release repository code (#1712)"
+            )
+if UNSUPPORTED_STEP_COLLECTIONS:
+    problems.append("cannot safely inspect flow-style release workflow steps (#1717)")
+
+private_acquisition_steps = list(workflow_step_blocks("acquire-private-dependencies"))
+expected_private_acquisition_env = {}
+if private_acquisition_steps:
+    acquisition_steps = [
+        step for step in private_acquisition_steps
+        if (fields := step_mapping_entries(step)) is not None
+        and yaml_scalar_value(fields.get("name", ""))
+        == "Acquire dependencies without lifecycle execution"
+    ]
+    expected_acquisition_env = {
+        "NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}",
+        "NPM_CONFIG_GLOBALCONFIG": "${{ runner.temp }}/release-empty-global.npmrc",
+        "NPM_CONFIG_USERCONFIG": "${{ runner.temp }}/release-acquisition.npmrc",
+    }
+    if (
+        len(acquisition_steps) != 1
+        or step_mapping_values(acquisition_steps[0], "env")
+        != expected_acquisition_env
     ):
         problems.append(
-            "persists checkout credentials into release repository code (#1712)"
+            "does not allowlist the private dependency acquisition environment (#1712)"
         )
+    else:
+        expected_private_acquisition_env = expected_acquisition_env
 
 release_state_step = named_step("Resolve restart-safe release state")
 if release_state_step is None or not any(
@@ -3495,7 +4312,12 @@ elif step_mapping_values(release_state_step, "env") != EXPECTED_RELEASE_STATE_EN
         "does not restrict the restart-safe release-state environment (#1712)"
     )
 elif any(
-    len(re.findall(rf"\b{re.escape(key)}\b", workflow_structure)) != 1
+    mapping_key_counts(workflow_structure.splitlines()).get(key, 0)
+    != (
+        (key in EXPECTED_RELEASE_STATE_ENV)
+        + (key in EXPECTED_RELEASE_VERIFICATION_ENV)
+        + (key in expected_private_acquisition_env)
+    )
     for key in CREDENTIAL_PROCESS_ENV_KEYS
 ):
     problems.append("configures credential-sensitive environment outside the credentialed step (#1712)")
@@ -3518,6 +4340,8 @@ jobs_index = next(
     len(lines),
 )
 workflow_scope = "\n".join(lines[:jobs_index])
+if re.search(r"(?m)^env\s*:", workflow_scope):
+    problems.append("uses unapproved workflow-level environment (#1717)")
 if (
     re.search(r"(?m)^\s*(?:GITHUB_TOKEN|GH_TOKEN)\s*:", workflow_scope)
     or any(
@@ -3529,20 +4353,59 @@ if (
 ):
     problems.append("exposes a GitHub token at workflow scope (#1712)")
 
-verify_job_start = next(
-    (index for index, line in enumerate(lines) if line == "  verify:"),
+workflow_structure_lines = workflow_structure.splitlines()
+jobs_end = len(workflow_structure_lines)
+for index in range(jobs_index + 1, len(workflow_structure_lines)):
+    line = workflow_structure_lines[index]
+    if line.strip() and len(line) == len(line.lstrip()):
+        jobs_end = index
+        break
+job_headers = []
+for index in range(jobs_index + 1, jobs_end):
+    line = workflow_structure_lines[index]
+    if not line.strip():
+        continue
+    indentation = len(line) - len(line.lstrip())
+    if indentation <= 0:
+        continue
+    try:
+        key, _, value = mapping_entry(line.strip())
+    except ValueError:
+        continue
+    job_headers.append((index, indentation, key, value))
+jobs_indent = min((entry[1] for entry in job_headers), default=None)
+verify_job_header = next(
+    (entry for entry in job_headers if entry[1] == jobs_indent and entry[2] == "verify"),
     None,
 )
+verify_job_start = verify_job_header[0] if verify_job_header is not None else None
+verify_job_fields_indent = None
 if verify_job_start is None:
     problems.append("has no readable verify job for credential checks (#1712)")
 else:
     verify_job_end = next(
-        (
-            index for index in range(verify_job_start + 1, len(lines))
-            if re.match(r"^  [A-Za-z0-9_.-]+:\s*$", lines[index])
-        ),
-        len(lines),
+        (entry[0] for entry in job_headers if entry[1] == jobs_indent and entry[0] > verify_job_start),
+        jobs_end,
     )
+    verify_job_fields_indent = min(
+        (
+            len(line) - len(line.lstrip())
+            for line in workflow_structure_lines[verify_job_start + 1:verify_job_end]
+            if line.strip()
+            and len(line) - len(line.lstrip()) > jobs_indent
+            and re.fullmatch(r"[A-Za-z0-9_.-]+:", line.strip())
+        ),
+        default=None,
+    )
+    verify_job_keys = mapping_keys_at_indent(
+        lines, verify_job_start + 1, verify_job_end, verify_job_fields_indent
+    )
+    if verify_job_keys is None:
+        problems.append("cannot safely inspect release verification job settings (#1717)")
+    elif "continue-on-error" in verify_job_keys:
+        problems.append("allows the release verification job to continue after failure (#1717)")
+    elif "env" in verify_job_keys:
+        problems.append("inherits unapproved job-level environment in release verification (#1717)")
     credential_context_lines = (
         context_match_lines(GITHUB_TOKEN, verify_job_start + 1, verify_job_end)
         | context_match_lines(GITHUB_CONTEXT_OBJECT, verify_job_start + 1, verify_job_end)
@@ -3653,14 +4516,43 @@ if acquisition_job_start is not None:
 if permission_values(0, jobs_index, 0) != {"contents": "read"}:
     problems.append("requires workflow permissions to be exactly contents: read (#1712)")
 if verify_job_start is not None and permission_values(
-    verify_job_start, verify_job_end, 4
+    verify_job_start, verify_job_end, verify_job_fields_indent
 ) != {"contents": "read"}:
     problems.append("requires verify-job permissions to be exactly contents: read (#1712)")
 
 install_step = named_step("Install dependencies")
-if run_body(install_step) != "npm ci --ignore-scripts":
+install_fields = step_mapping_entries(install_step)
+expected_install_condition = "steps.release-version.outputs.selected == 'true'"
+if release_mode == "release-snapshot":
+    expected_install_condition += " && hashFiles('package.json') != ''"
+if (
+    install_fields is None
+    or set(install_fields) != {"name", "if", "run", "env"}
+    or yaml_scalar_value(install_fields.get("name", "")) != "Install dependencies"
+    or yaml_scalar_value(install_fields.get("if", ""))
+    != expected_install_condition
+    or install_fields.get("env") != ""
+):
     problems.append(
-        "runs an unexpected credentialed acquisition command (#1712)"
+        "does not pin credentialed install step inputs and working directory (#1717)"
+    )
+expected_install_run = "\n".join((
+    'workspace_root="$(git rev-parse --show-toplevel)"',
+    'if [ -e "$workspace_root/.npmrc" ] || [ -L "$workspace_root/.npmrc" ]; then',
+    '  echo "::error::repository-controlled .npmrc is not allowed during credentialed release installation"',
+    "  exit 1",
+    "fi",
+    "npm ci --ignore-scripts",
+))
+if run_body(install_step) != expected_install_run:
+    problems.append(
+        "does not reject repository-controlled npm configuration before credentialed install (#1717)"
+    )
+if step_mapping_values(install_step, "env") != {
+    "NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}"
+}:
+    problems.append(
+        "does not allowlist the credentialed dependency installation environment (#1717)"
     )
 
 for name in (
@@ -3696,16 +4588,267 @@ for index, line in enumerate(lines):
             % (index + 1)
         )
 
+workflow_steps = list(workflow_step_blocks())
+verification_job_steps = list(workflow_step_blocks("verify"))
+expected_verification_step_identities = [
+    ("Require an explicit release version", ""),
+    ("Prepare job-scoped changelog tool cache", ""),
+    ("Release only from the default branch", ""),
+    ("Bind a proposer dispatch to its exact derived head", ""),
+    ("Check out the tree that will be released", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"),
+    ("Check out the canonical selection contract", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"),
+    ("Resolve the release selection and version", ""),
+    ("Resolve restart-safe release state", ""),
+    ("Check out the existing snapshot for resumed verification", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"),
+    ("", "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"),
+    ("Capture trusted release verification runtime", ""),
+]
+if release_mode == "release-node":
+    expected_verification_step_identities.append(
+        ("Refuse a package this release can never publish", "")
+    )
+expected_verification_step_identities.extend((
+    ("Install dependencies", ""),
+    ("Run dependency lifecycle scripts without credentials", ""),
+    ("Prepare release package metadata", ""),
+    ("Stamp the dispatched package versions", ""),
+    ("Run the release verification suite", ""),
+))
+verification_step_identities = []
+for step in verification_job_steps:
+    fields = step_mapping_entries(step)
+    if fields is None:
+        verification_step_identities.append(None)
+        continue
+    verification_step_identities.append((
+        yaml_scalar_value(fields.get("name", "")) or "",
+        yaml_scalar_value(fields.get("uses", "")) or "",
+    ))
+lane_preflight_identity = ("Validate required OS-scoped build lanes", "")
+if lane_preflight_identity in verification_step_identities:
+    preflight_position = expected_verification_step_identities.index(
+        ("Resolve the release selection and version", "")
+    ) + 1
+    expected_verification_step_identities.insert(
+        preflight_position, lane_preflight_identity
+    )
+if verification_step_identities != expected_verification_step_identities:
+    problems.append("does not use the approved verify-job step sequence (#1717)")
+setup_node_steps = [
+    step for step in verification_job_steps
+    if (fields := step_mapping_entries(step)) is not None
+    and yaml_scalar_value(fields.get("uses", ""))
+    == "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+]
+if (
+    len(setup_node_steps) != 1
+    or expected_setup_node_inputs() is None
+    or step_mapping_values(setup_node_steps[0], "with")
+    != expected_setup_node_inputs()
+):
+    problems.append("does not use the approved setup-node inputs (#1717)")
+preacquisition_steps = []
+package_directories_assignment = expected_package_directories_assignment()
+if package_directories_assignment is None:
+    problems.append("does not declare valid package directories in generator provenance (#1717)")
+for step in verification_job_steps:
+    fields = step_mapping_entries(step)
+    if fields is None:
+        continue
+    step_name = yaml_scalar_value(fields.get("name", "")) or ""
+    if step_name == "Install dependencies":
+        break
+    if step_name == "Validate required OS-scoped build lanes":
+        # The generated contract pins this step to the dispatch options and
+        # hashes its complete YAML block. Omit it here because runner labels vary.
+        continue
+    body = run_body(step)
+    if body is not None:
+        contract_ref = os.environ.get("CONTRACT_REF", "")
+        if contract_ref:
+            body = body.replace(
+                f"release-snapshot {contract_ref}",
+                "release-snapshot <contract-ref>",
+            )
+    if body is not None and step_name == "Refuse a package this release can never publish":
+        body_lines = body.splitlines()
+        assignment_lines = [
+            index for index, line in enumerate(body_lines)
+            if line.startswith("package_dirs=(")
+        ]
+        if (
+            len(assignment_lines) != 1
+            or body_lines[assignment_lines[0]] != package_directories_assignment
+        ):
+            problems.append(
+                f"has an unapproved package-directory assignment in {step_name} (#1717)"
+            )
+        else:
+            body_lines[assignment_lines[0]] = "package_dirs=(<approved-directories>)"
+            body = "\n".join(body_lines)
+    environment = step_mapping_values(step, "env") if "env" in fields else {}
+    action_inputs = step_mapping_values(step, "with") if "with" in fields else {}
+    if ("env" in fields and environment is None) or ("with" in fields and action_inputs is None):
+        problems.append("cannot safely inspect pre-credential verify-step settings (#1717)")
+    if step_name == "" and fields.get("uses", "").startswith("actions/setup-node@"):
+        action_inputs = None
+    digest_fields = dict(fields)
+    if "uses" in digest_fields:
+        digest_fields["uses"] = yaml_scalar_value(digest_fields["uses"])
+    if step_name == "Check out the canonical selection contract":
+        expected_selection_checkout = {
+            "repository": "verJSON/.github",
+            "ref": os.environ.get("CONTRACT_REF", ""),
+            "path": ".changelog-contract",
+            "persist-credentials": "false",
+        }
+        if action_inputs != expected_selection_checkout:
+            problems.append(
+                "does not check out the canonical selection contract at its pinned ref (#1717)"
+            )
+        else:
+            digest_fields["with"] = "<canonical-selection-contract-checkout>"
+            action_inputs = dict(action_inputs)
+            action_inputs["ref"] = "<contract-ref>"
+    preacquisition_steps.append(json.dumps({
+        "fields": digest_fields,
+        "env": environment,
+        "with": action_inputs,
+        "run": body,
+    }, sort_keys=True, separators=(",", ":")))
+stamp_steps = [
+    step for step in verification_job_steps
+    if (fields := step_mapping_entries(step)) is not None
+    and yaml_scalar_value(fields.get("name", "")) == "Stamp the dispatched package versions"
+]
+if len(stamp_steps) != 1:
+    problems.append("does not use one approved version-stamp step (#1717)")
+else:
+    stamp_step = stamp_steps[0]
+    stamp_fields = step_mapping_entries(stamp_step)
+    stamp_environment = step_mapping_values(stamp_step, "env")
+    stamp_body = run_body(stamp_step)
+    stamp_lines = stamp_body.splitlines() if stamp_body is not None else []
+    stamp_assignment_lines = [
+        index for index, line in enumerate(stamp_lines)
+        if line.startswith("package_dirs=(")
+    ]
+    if (
+        package_directories_assignment is None
+        or len(stamp_assignment_lines) != 1
+        or stamp_lines[stamp_assignment_lines[0]] != package_directories_assignment
+    ):
+        problems.append(
+            "has an unapproved package-directory assignment in Stamp the dispatched package versions (#1717)"
+        )
+    else:
+        stamp_lines[stamp_assignment_lines[0]] = "package_dirs(<approved-directories>)"
+    approved_stamp_condition = "steps.release-version.outputs.selected == 'true'"
+    if release_mode == "release-snapshot":
+        approved_stamp_condition += " && hashFiles('package.json') != ''"
+    approved_stamp_fields = {
+        "name": "Stamp the dispatched package versions",
+        "if": approved_stamp_condition,
+        "env": "",
+        "run": "|",
+    }
+    approved_stamp_environment = {
+        "PACKAGE_VERSION": "${{ steps.release-version.outputs.package-version }}",
+        "NODE_AUTH_TOKEN": "''",
+    }
+    approved_stamp_body = "\n".join((
+        "package_dirs(<approved-directories>)",
+        'for package_dir in "${package_dirs[@]}"; do',
+        '  npm version --prefix "$package_dir" "$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version',
+        "done",
+    ))
+    if (
+        stamp_fields != approved_stamp_fields
+        or stamp_environment != approved_stamp_environment
+        or "\n".join(stamp_lines) != approved_stamp_body
+    ):
+        problems.append(
+            "does not match the approved package-version stamp step (#1717)"
+        )
+preacquisition_digest = hashlib.sha256(
+    "\n".join(preacquisition_steps).encode()
+).hexdigest()
+if (
+    release_mode not in APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256
+    or preacquisition_digest
+    != APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256.get(release_mode)
+):
+    problems.append(
+        "contains an unapproved verify step before credentialed dependency installation "
+        f"(#1717): {release_mode} pre-credential step digest {preacquisition_digest}"
+    )
+verification_runtime_steps = [
+    step for step in verification_job_steps
+    if (fields := step_mapping_entries(step)) is not None
+    and yaml_scalar_value(fields.get("name", ""))
+    == "Capture trusted release verification runtime"
+]
+verification_runtime_step = (
+    verification_runtime_steps[0] if len(verification_runtime_steps) == 1 else None
+)
+verification_runtime_fields = step_mapping_entries(verification_runtime_step)
+verification_runtime_positions = [
+    index for index, step in enumerate(verification_job_steps)
+    if step is verification_runtime_step
+]
+setup_node_positions = [
+    index for index, step in enumerate(verification_job_steps)
+    if (fields := step_mapping_entries(step)) is not None
+    and yaml_scalar_value(fields.get("uses", "")) is not None
+    and yaml_scalar_value(fields.get("uses", "")).casefold().startswith("actions/setup-node@")
+]
+workflow_mapping_key_counts = mapping_key_counts(workflow_structure.splitlines())
+if workflow_mapping_key_counts.get("__unsupported_flow_environment_mapping__", 0):
+    problems.append("uses an unsupported or ambiguous environment mapping (#1717)")
+if workflow_mapping_key_counts.get("PATH", 0):
+    problems.append("overrides the runner-managed PATH before release verification (#1717)")
+if (
+    verification_runtime_fields is None
+    or set(verification_runtime_fields)
+    != {"name", "id", "if", "shell", "run"}
+    or verification_runtime_fields.get("id") != "release-verification-runtime"
+    or verification_runtime_fields.get("if")
+    != "steps.release-version.outputs.selected == 'true'"
+    or verification_runtime_fields.get("shell")
+    != "/bin/bash --noprofile --norc -e -o pipefail {0}"
+    or len(verification_runtime_positions) != 1
+    or len(setup_node_positions) != 1
+    or verification_runtime_positions[0] != setup_node_positions[0] + 1
+    or release_mode not in APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256
+    or run_body(verification_runtime_step) is None
+    or hashlib.sha256(run_body(verification_runtime_step).encode()).hexdigest()
+    != APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256.get(release_mode)
+):
+    problems.append("does not capture trusted release verification runtime inputs (#1717)")
+
 verification_steps = [
-    index for index, line in enumerate(lines)
-    if line.strip() == "- name: Run the release verification suite"
+    step for step in workflow_steps
+    if (fields := step_mapping_entries(step)) is not None
+    and yaml_scalar_value(fields.get("name", "")) == "Run the release verification suite"
 ]
 if len(verification_steps) != 1:
     problems.append(
         "must contain exactly one named release verification suite step (#569)"
     )
 else:
-    verification_step = enclosing_step(verification_steps[0])
+    verification_step = verification_steps[0]
+    verification_fields = step_mapping_entries(verification_step)
+    if verification_fields is None:
+        problems.append("cannot safely inspect the release verification step (#1717)")
+    else:
+        if verification_fields.get("shell") != "/bin/bash --noprofile --norc -e -o pipefail {0}":
+            problems.append("does not pin release verification to an absolute Bash executable (#1717)")
+        if verification_fields.get("if") != "steps.release-version.outputs.selected == 'true'":
+            problems.append("does not require a selected version before release verification (#1717)")
+        if "continue-on-error" in verification_fields:
+            problems.append("allows the release verification step to continue after failure (#1717)")
+        if step_mapping_values(verification_step, "env") != EXPECTED_RELEASE_VERIFICATION_ENV:
+            problems.append("does not isolate release verification from prior lifecycle environment (#1717)")
     if verification_step is None or any(
         "NODE_AUTH_TOKEN" in entry and PRIVATE_NODE_TOKEN.search(entry)
         for entry in verification_step
@@ -3720,6 +4863,22 @@ else:
     ):
         problems.append(
             "cannot diagnose the stamped dispatch version when verification fails (#862)"
+        )
+    verification_script_body = run_body(verification_step)
+    verification_script_sha256 = (
+        hashlib.sha256(verification_script_body.encode()).hexdigest()
+        if verification_script_body is not None else "unparseable"
+    )
+    if (
+        verification_fields is None
+        or release_mode not in APPROVED_RELEASE_VERIFICATION_SCRIPT_SHA256
+        or verification_script_body is None
+        or verification_script_sha256
+        != APPROVED_RELEASE_VERIFICATION_SCRIPT_SHA256.get(release_mode)
+    ):
+        problems.append(
+            "does not match the approved release verification script "
+            f"(#1717): {verification_script_sha256}"
         )
 for index, line in enumerate(lines):
     if "NODE_AUTH_TOKEN" not in line or not PRIVATE_NODE_TOKEN.search(line):
@@ -3756,7 +4915,14 @@ for index, line in enumerate(lines):
     )
     expected_run = None
     if "- name: Install dependencies" in step_names:
-        expected_run = "npm ci --ignore-scripts"
+        expected_run = "\n".join((
+            'workspace_root="$(git rev-parse --show-toplevel)"',
+            'if [ -e "$workspace_root/.npmrc" ] || [ -L "$workspace_root/.npmrc" ]; then',
+            '  echo "::error::repository-controlled .npmrc is not allowed during credentialed release installation"',
+            "  exit 1",
+            "fi",
+            "npm ci --ignore-scripts",
+        ))
     elif "- name: Acquire dependencies without lifecycle execution" in step_names:
         expected_run = "\n".join((
             "set -euo pipefail",
@@ -3816,30 +4982,36 @@ while IFS= read -r release_workflow; do
   fi
   workflow_package_dirs_json=""
   workflow_package_dirs_shell=""
-  if [ "$release_mode" = release-node ]; then
-    workflow_package_dirs_json="$(sed -n -E "s/^[[:space:]]+package-dirs: '([^']+)'$/\1/p" "$release_workflow" | head -n 1)"
-    [ -n "$workflow_package_dirs_json" ] \
-      || fail "$release_workflow does not declare package-dirs in its node release caller"
-    workflow_package_dirs_shell="$(python3 - "$workflow_package_dirs_json" <<'PY'
+  workflow_relative_path="${release_workflow#"$root"/}"
+  if ! workflow_package_dirs_json="$(python3 - "$EXPECTED_RELEASE_CALLER_PACKAGE_DIRS_JSON" "$workflow_relative_path" <<'PY'
+import json
+import sys
+
+try:
+    callers = json.loads(sys.argv[1])
+except ValueError as error:
+    raise SystemExit(f"expected release caller selections are invalid: {error}")
+if not isinstance(callers, dict):
+    raise SystemExit("expected release caller selections must be a JSON object")
+directories = callers.get(sys.argv[2])
+if not isinstance(directories, list) or not directories:
+    raise SystemExit("release caller has no pinned package-directory selection")
+print(json.dumps(directories, separators=(",", ":")))
+PY
+)"; then
+    fail "$release_workflow has no pinned package-directory selection; regenerate the contract test with --release-caller-package-dirs"
+    continue
+  fi
+  if ! workflow_package_dirs_shell="$(python3 - "$workflow_package_dirs_json" <<'PY'
 import json
 import shlex
 import sys
 
-directories = json.loads(sys.argv[1])
-if (
-    not isinstance(directories, list)
-    or not directories
-    or any(not isinstance(directory, str) or not directory for directory in directories)
-):
-    raise SystemExit("package-dirs must be a non-empty JSON array of non-empty strings")
-print(" ".join(shlex.quote(directory) for directory in directories))
+print(" ".join(shlex.quote(directory) for directory in json.loads(sys.argv[1])))
 PY
-    )" \
-      || fail "$release_workflow has invalid package-dirs JSON"
-  else
-    workflow_package_dirs_shell="$(sed -n -E 's/^[[:space:]]+package_dirs=\((.*)\)$/\1/p' "$release_workflow" | head -n 1)"
-    [ -n "$workflow_package_dirs_shell" ] \
-      || fail "$release_workflow does not declare package_dirs for version stamping"
+)"; then
+    fail "$release_workflow has invalid pinned package-directory JSON"
+    continue
   fi
   grep -qF "run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}" "$release_workflow" \
     || fail "$release_workflow lacks the resolved-version run title required for idempotent dispatch"
@@ -3879,11 +5051,16 @@ PY
     /^jobs:[[:space:]]*$/ { in_jobs = 1; next }
     !in_jobs { next }
     /^[^[:space:]]/ { in_jobs = 0; next }
-    /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
+    {
+      indentation = match($0, /[^ ]/) - 1
+      job_header = $0 ~ /^[ ]+[A-Za-z0-9_.-]+:[[:space:]]*$/
+      if (job_header && !job_indent) job_indent = indentation
+      if (job_header && indentation == job_indent) {
       if (block ~ /changelog-release\.yml@/) { printf "%s", block; done = 1; exit }
       block = ""
+      }
+      if (job_indent && indentation >= job_indent) block = block $0 "\n"
     }
-    { block = block $0 "\n" }
     END { if (!done && block ~ /changelog-release\.yml@/) printf "%s", block }
   ' "$release_workflow")"
 
@@ -3893,15 +5070,27 @@ PY
   grep -qE '^[[:space:]]+release_environment:[[:space:]]+release-app[[:space:]]*$' \
     <<<"$snapshot_job" \
     || fail "$release_workflow does not select the release-app environment"
-  grep -qE '^    secrets: inherit$' <<<"$snapshot_job" \
+  grep -qE '^[[:space:]]+secrets: inherit$' <<<"$snapshot_job" \
     || fail "$release_workflow snapshot lacks inherited environment context"
   ! sed 's/#.*//' <<<"$snapshot_job" \
     | grep -qE 'PRIVATE_KEY|ORG_ADMIN_TOKEN|push_token|github\.token' \
     || fail "$release_workflow snapshot forwards credentials instead of selecting its environment"
   snapshot_permissions="$(awk '
-    /^    permissions:[[:space:]]*$/ { in_permissions = 1; next }
-    in_permissions && /^    [^[:space:]]/ { exit }
-    in_permissions { print }
+    NR == 1 { job_indent = match($0, /[^ ]/) - 1; next }
+    {
+      if ($0 ~ /^[[:space:]]*$/) {
+        if (in_permissions) print
+        next
+      }
+      indentation = match($0, /[^ ]/) - 1
+      if (!field_indent && indentation > job_indent) field_indent = indentation
+      if (indentation == field_indent && $0 ~ /^[ ]+permissions:[[:space:]]*$/) {
+        in_permissions = 1
+        next
+      }
+      if (in_permissions && indentation <= field_indent) exit
+      if (in_permissions) print
+    }
   ' <<<"$snapshot_job")"
   snapshot_permissions_effective="$(sed 's/#.*//' <<<"$snapshot_permissions" | sed '/^[[:space:]]*$/d')"
   [ "$(grep -c . <<<"$snapshot_permissions_effective")" -eq 2 ] \
@@ -3990,11 +5179,15 @@ PY
     # node-release.yml cannot refuse an unpublishable package in time: it only
     # ever runs as `publish`, after `snapshot` has already pushed the immutable
     # tag. `verify` is the last stage that still precedes that push (#1206).
-    private_guard_step="$(awk '
-      /^      - name: Refuse a package this release can never publish$/ { found = 1; next }
-      found && /^      - / { exit }
-      found { print }
-    ' <<<"$verify_job")"
+private_guard_step="$(awk '
+  /^[[:space:]]*- name: Refuse a package this release can never publish$/ {
+    found = 1
+    step_indent = match($0, /[^ ]/) - 1
+    next
+  }
+  found && /^[[:space:]]*-[[:space:]]/ && match($0, /[^ ]/) - 1 == step_indent { exit }
+  found { print }
+' <<<"$verify_job")"
     grep -qF 'private === true' <<<"$private_guard_step" \
       && grep -qF 'exit 1' <<<"$private_guard_step" \
       || fail "$release_workflow does not refuse a private, unpublishable package before the snapshot is tagged (#1206)"
@@ -4139,6 +5332,9 @@ PY
       fi
       [ "$lane_preflight_sha256" = "$EXPECTED_RELEASE_LANE_PREFLIGHT_SHA256" ] \
         || fail "$release_workflow OS lane preflight logic differs from the provenance-authorized contract"
+    else
+      ! grep -qF 'Validate required OS-scoped build lanes' <<<"$verify_job" \
+        || fail "$release_workflow includes an OS lane preflight without approved trusted lanes"
     fi
     if [ -n "$acquisition_job" ]; then
       grep -qxF '    runs-on: ${{ matrix.os }}' <<<"$acquisition_job" \
@@ -4289,8 +5485,8 @@ PY
   grep -qF 'echo "VERJSON_CHANGELOG_TOOL_CACHE=$RUNNER_TEMP/verjson-changelog-tools" >> "$GITHUB_ENV"' \
     <<<"$verify_job" \
     || fail "$release_workflow does not give repository verification hooks a job-writable changelog cache beneath runner.temp (#630)"
-  first_two_verify_steps="$(awk '/^[[:space:]]+- name:/ { print; if (++count == 2) exit }' <<<"$verify_job")"
-  [ "$first_two_verify_steps" = $'      - name: Require an explicit release version\n      - name: Prepare job-scoped changelog tool cache' ] \
+  first_two_verify_steps="$(awk '/^[[:space:]]+- name:/ { sub(/^[[:space:]]*/, ""); print; if (++count == 2) exit }' <<<"$verify_job")"
+  [ "$first_two_verify_steps" = $'- name: Require an explicit release version\n- name: Prepare job-scoped changelog tool cache' ] \
     && grep -qF 'INPUT_VERSION: ${{ inputs.version }}' <<<"$verify_job" \
     && grep -qF "PYTHONUTF8: '1'" <<<"$verify_job" \
     && grep -qF "if not os.environ['INPUT_VERSION'].strip():" <<<"$verify_job" \
@@ -4327,7 +5523,9 @@ PY
   # PyYAML is deliberately not used: the canonical contract runs on a bare
   # python3 with no third-party dependency, and a "use it if importable"
   # fallback would put every adopter without it on the untested path.
-  python3 "$work/release-shape.py" "$release_workflow" \
+  CONTRACT_REF="$CONTRACT_REF" \
+    RELEASE_CALLER_PACKAGE_DIRS_JSON="$workflow_package_dirs_json" \
+    python3 "$work/release-shape.py" "$release_workflow" \
     || fail "$release_workflow: see above"
 
   # Text presence is not behavior: a no-op shell command can carry the entire
@@ -4336,21 +5534,49 @@ PY
   verification_fixture="$(mktemp -d "$work/release-verification.XXXXXX")"
   verification_script="$verification_fixture/verify.sh"
   awk '
-    /^      - name: Run the release verification suite$/ { found = 1; next }
-    found && /^        run: \|$/ { capture = 1; next }
-    capture && /^      - / { exit }
-    capture { sub(/^          /, ""); print }
+    function indent(line, trimmed) {
+      trimmed = line
+      sub(/^[ ]*/, "", trimmed)
+      return length(line) - length(trimmed)
+    }
+    {
+      current_indent = indent($0)
+      trimmed = $0
+      sub(/^[ ]*/, "", trimmed)
+    }
+    !found && trimmed == "- name: Run the release verification suite" {
+      step_indent = current_indent
+      found = 1
+      next
+    }
+    found && !capture && current_indent == step_indent + 2 && trimmed == "run: |" {
+      run_indent = current_indent
+      capture = 1
+      next
+    }
+    capture {
+      if (trimmed != "" && current_indent <= run_indent) exit
+      if (trimmed == "") {
+        print ""
+        next
+      }
+      if (!body_indent) body_indent = current_indent
+      print substr($0, body_indent + 1)
+    }
   ' "$release_workflow" >"$verification_script"
   [ -s "$verification_script" ] \
     || fail "$release_workflow has no executable release verification body"
-  mkdir -p "$verification_fixture/scripts"
-  printf '%s\n' '#!/usr/bin/env bash' 'exit 23' \
+mkdir -p "$verification_fixture/scripts"
+mkdir -p "$verification_fixture/tmp"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 23' \
     >"$verification_fixture/scripts/release-verify.sh"
   chmod +x "$verification_fixture/scripts/release-verify.sh"
   verification_rc=0
   (
     cd "$verification_fixture"
-    PACKAGE_VERSION=9.8.7 NODE_AUTH_TOKEN=do-not-print-this \
+  RUNNER_TEMP="$verification_fixture/tmp" \
+  RELEASE_VERIFICATION_PATH="$PATH" \
+  PACKAGE_VERSION=9.8.7 NODE_AUTH_TOKEN=do-not-print-this \
       bash -eo pipefail "$verification_script"
   ) >"$verification_fixture/output" 2>&1 || verification_rc=$?
   [ "$verification_rc" -eq 23 ] \

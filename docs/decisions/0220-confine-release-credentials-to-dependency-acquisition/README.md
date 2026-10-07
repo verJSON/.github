@@ -23,6 +23,16 @@ All generated Node release callers use the same short-lived credential boundary:
 
 The credential-boundary test generates all three release modes and performs private registry acquisition against a local token-checking server. It proves install hooks did not run during acquisition and run only after the token is cleared. The structural contract rejects workflow mutations that expose credentials to lifecycle scripts, verification, inherited process environments, or persisted Git configuration.
 
+## Implementation refinement (2026-10-07; issue #1717)
+
+The clean verification process uses the trusted runner PATH and job-scoped changelog cache path captured as step outputs before dependency code runs; ambient GITHUB_ENV changes from lifecycle hooks cannot redirect verification.
+
+The canonical generator contract also pins the verification step's selected-version condition, blocking behavior, command body, and approved environments across all three release modes. It validates the canonical selection-contract checkout's repository, path, immutable ref, and `persist-credentials: false` before normalizing the ref for the step digest. This keeps the guard stable as the contract advances without allowing a moving or altered checkout to pass. Regression cases reject skipped or nonblocking verification, changed checkout inputs, and credential-environment leakage.
+
+This refinement makes the existing credential boundary fail closed in generated callers; it does not grant credentials to additional steps or change release authority.
+
+Package-directory provenance applies the generator's normalized relative-path and duplicate checks. For node-release callers, the forwarded package list must agree with the validated provenance and version-stamp command. The emitted contract validates the post-install version-stamp step's condition, environment, and full command separately from the pre-install digest, so a changed package set or an added command cannot hide behind the digest's installation boundary. The generated contract test pins expected package directories by workflow path. Additional release callers require an explicit path-to-package mapping in contract-test generation, and mixed additive/exact selection flags are rejected. Distinct release callers may select distinct valid package sets when each is pinned explicitly. Executable regression tests run the emitted `.npmrc` guard and verification command; they prove a workspace config blocks npm and the repository verification hook observes an empty package token.
+
 ## Consequences
 
 Installed dependencies remain available to release verification without a registry credential. A lifecycle or verification hook that tries to fetch additional private packages must be redesigned; it cannot reuse the acquisition credential. Dependency lifecycle scripts still run after acquisition, subject to the package manager's existing script-approval policy.
