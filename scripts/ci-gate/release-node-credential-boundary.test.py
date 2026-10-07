@@ -27,8 +27,15 @@ PACKAGE_VERSION = "1.0.0"
 PACKAGE_TOKEN = "fixture-package-token"
 GITHUB_TOKEN_EXPRESSION = "${{ github.token }}"
 PACKAGE_TOKEN_EXPRESSION = "${{ secrets.NODE_AUTH_TOKEN }}"
+EXPECTED_INSTALL_COMMAND = """\
+workspace_root="$(git rev-parse --show-toplevel)"
+if [ -e "$workspace_root/.npmrc" ] || [ -L "$workspace_root/.npmrc" ]; then
+  echo "::error::repository-controlled .npmrc is not allowed during credentialed release installation"
+  exit 1
+fi
+npm ci --ignore-scripts"""
 APPROVED_RELEASE_STATE_SCRIPT_SHA256 = {
-    "ec8e3a9157b40c0aaf9fdbebf920733609b297027b1fa972c190a3ef8cc52fca",
+    "693948193bdfaa07608ffa3faa3005974e5e13dd83d3aa200382c3b63937d33c",
 }
 EXPECTED_RELEASE_STATE_ENV = {
     "VERSION": "${{ steps.release-version.outputs.version }}",
@@ -162,8 +169,8 @@ def validate_generated_workflow(workflow):
 
     install = find_step(steps, "Install dependencies")
     require(
-        str(install.get("run") or "").strip() == "npm ci --ignore-scripts",
-        "package acquisition runs lifecycle scripts with credentials",
+        str(install.get("run") or "").strip() == EXPECTED_INSTALL_COMMAND,
+        "credentialed package installation does not reject workspace .npmrc files before npm ci",
     )
     require(
         (install.get("env") or {}).get("NODE_AUTH_TOKEN") == PACKAGE_TOKEN_EXPRESSION,
@@ -230,9 +237,15 @@ def validate_generated_workflow(workflow):
         "dependency lifecycle step does not run exactly npm rebuild",
     )
     verify_suite = find_step(steps, downstream_names[-1])
+    verification_run = str(verify_suite.get("run") or "")
     require(
-        "NODE_AUTH_TOKEN" not in str(verify_suite.get("run") or ""),
+        PACKAGE_TOKEN_EXPRESSION not in verification_run
+        and GITHUB_TOKEN_EXPRESSION not in verification_run,
         "release verification script interpolates package credentials",
+    )
+    require(
+        "NODE_AUTH_TOKEN=''" in verification_run,
+        "release verification does not clear package credentials in its clean environment",
     )
     publish = jobs.get("publish") or {}
     publish_secrets = publish.get("secrets") or {}
@@ -296,6 +309,125 @@ class ReleaseNodeCredentialBoundaryTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 validate_generated_workflow(workflow)
 
+    def test_emitted_install_command_blocks_workspace_npmrc_before_npm(self):
+        install = find_step(self.workflow["jobs"]["verify"]["steps"], "Install dependencies")
+        with tempfile.TemporaryDirectory(prefix="release-node-install-guard-") as temporary:
+            root = Path(temporary)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            runner_npmrc = runner_temp / ".npmrc"
+            runner_npmrc.write_text("//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}\n", encoding="utf-8")
+            npm_marker = root / "npm-called"
+            npm = bin_dir / "npm"
+            npm.write_text(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$NPM_STUB_MARKER\"\n",
+                encoding="utf-8",
+            )
+            npm.chmod(0o755)
+            environment = {
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+                "RUNNER_TEMP": str(runner_temp),
+                "NPM_CONFIG_USERCONFIG": str(runner_npmrc),
+                "NPM_STUB_MARKER": str(npm_marker),
+            }
+
+            for npmrc_kind in ("file", "symlink"):
+                with self.subTest(npmrc_kind=npmrc_kind):
+                    npmrc = workspace / ".npmrc"
+                    npmrc.unlink(missing_ok=True)
+                    if npmrc_kind == "file":
+                        npmrc.write_text("registry=https://attacker.invalid/\n", encoding="utf-8")
+                    else:
+                        npmrc.symlink_to(workspace / "attacker-npmrc")
+                    npm_marker.unlink(missing_ok=True)
+                    result = subprocess.run(
+                        ["/bin/bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", install["run"]],
+                        cwd=workspace,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn(
+                        "repository-controlled .npmrc is not allowed",
+                        result.stdout + result.stderr,
+                    )
+                    self.assertFalse(npm_marker.exists(), "npm ran before the workspace config guard")
+
+            (workspace / ".npmrc").unlink()
+            result = subprocess.run(
+                ["/bin/bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", install["run"]],
+                cwd=workspace,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(npm_marker.read_text(encoding="utf-8"), "ci --ignore-scripts\n")
+
+    def test_emitted_verification_command_clears_package_token_for_hook(self):
+        verify = find_step(
+            self.workflow["jobs"]["verify"]["steps"], "Run the release verification suite"
+        )
+        with tempfile.TemporaryDirectory(prefix="release-node-verification-hook-") as temporary:
+            root = Path(temporary)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            observed_token = root / "observed-token"
+            hook = scripts / "release-verify.sh"
+            hook.write_text(
+                "#!/bin/sh\nprintf '%s' \"${NODE_AUTH_TOKEN-<unset>}\" > \"$GITHUB_WORKSPACE/observed-token\"\n",
+                encoding="utf-8",
+            )
+            hook.chmod(0o755)
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            environment = {
+                **os.environ,
+                "NODE_AUTH_TOKEN": PACKAGE_TOKEN,
+                "PACKAGE_VERSION": PACKAGE_VERSION,
+                "RELEASE_VERIFICATION_PATH": "/usr/bin:/bin",
+                "VERJSON_CHANGELOG_TOOL_CACHE": str(root / "tool-cache"),
+                "GITHUB_ACTIONS": "true",
+                "GITHUB_WORKFLOW": "release",
+                "GITHUB_JOB": "verify",
+                "GITHUB_RUN_ID": "1",
+                "GITHUB_RUN_NUMBER": "1",
+                "GITHUB_REPOSITORY": "verJSON/fixture",
+                "GITHUB_REPOSITORY_OWNER": "verJSON",
+                "GITHUB_REF": "refs/heads/main",
+                "GITHUB_REF_NAME": "main",
+                "GITHUB_REF_TYPE": "branch",
+                "GITHUB_SHA": "0" * 40,
+                "GITHUB_EVENT_NAME": "workflow_dispatch",
+                "GITHUB_EVENT_PATH": str(root / "event.json"),
+                "GITHUB_WORKSPACE": str(root),
+                "GITHUB_STEP_SUMMARY": str(root / "summary.md"),
+                "RUNNER_OS": "Linux",
+                "RUNNER_ARCH": "X64",
+                "RUNNER_TEMP": str(runner_temp),
+                "RUNNER_TOOL_CACHE": str(root / "tool-cache"),
+            }
+            result = subprocess.run(
+                ["/bin/bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", verify["run"]],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(observed_token.exists(), "verification hook did not run")
+            self.assertEqual(observed_token.read_text(encoding="utf-8"), "")
+
     def test_workflow_audit_rejects_credentials_in_lifecycle_or_persisted_checkout(self):
         with self.subTest("lifecycle token"):
             mutated = deepcopy(self.workflow)
@@ -309,7 +441,7 @@ class ReleaseNodeCredentialBoundaryTests(unittest.TestCase):
             mutated = deepcopy(self.workflow)
             install = find_step(mutated["jobs"]["verify"]["steps"], "Install dependencies")
             install["run"] += "\nnode ./scripts/leak-token.js"
-            with self.assertRaisesRegex(ValueError, "lifecycle scripts with credentials"):
+            with self.assertRaisesRegex(ValueError, "credentialed package installation"):
                 validate_generated_workflow(mutated)
 
         with self.subTest("persisted checkout token"):

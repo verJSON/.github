@@ -2707,13 +2707,9 @@ emit_contract_test() {
   # The interpolated preamble is kept deliberately small: everything below it is
   # a quoted heredoc, so the body cannot accidentally expand a generator-side
   # variable into an adopter's test.
-  local release_package_dirs_json="$selected_package_dirs_json"
-  local release_package_dirs_shell=''
   local release_assets_json='[' release_asset_sep=''
   local release_approved_packages_csv='' release_approved_package=''
   local release_lane_names='' release_lane_env='' release_lane_preflight='' release_lane_preflight_sha256=''
-  printf -v release_package_dirs_shell '%q ' "${release_package_dirs[@]}"
-  release_package_dirs_shell="${release_package_dirs_shell% }"
   for release_asset in "${release_assets[@]}"; do
     release_assets_json="$release_assets_json$release_asset_sep\"$release_asset\""
     release_asset_sep=,
@@ -2784,8 +2780,6 @@ ADR_INDEX_TEST_SHA256="${adr_index_test_sha256}"
 EXPECTED_CODEOWNERS_SHA256="${codeowners_sha256}"
 EXPECTED_RELEASE_SCOPE="${release_scope}"
 EXPECTED_RELEASE_NODE_VERSION="${release_node_version}"
-EXPECTED_RELEASE_PACKAGE_DIRS_JSON='${release_package_dirs_json}'
-EXPECTED_RELEASE_PACKAGE_DIRS_SHELL='${release_package_dirs_shell}'
 EXPECTED_RELEASE_ASSETS_JSON='${release_assets_json}'
 EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES='${release_approved_packages_csv}'
 EXPECTED_RELEASE_LANE_PREFLIGHT_SHA256='${release_lane_preflight_sha256}'
@@ -3415,15 +3409,39 @@ def expected_package_directories_assignment():
             directory,
         ):
             return None
+        if directory != "." and any(
+            segment in (".", "..") for segment in directory.split("/")
+        ):
+            return None
         if option == "--only-package-dir":
             if not exact_directories:
                 package_directories = []
                 exact_directories = True
         elif exact_directories:
             return None
+        if directory in package_directories:
+            return None
         package_directories.append(directory)
         index += 2
-    return "package_dirs=(" + " ".join(package_directories) + ")"
+    package_directories_shell = " ".join(
+        shlex.quote(directory) for directory in package_directories
+    )
+    caller_package_directories_shell = os.environ.get(
+        "RELEASE_CALLER_PACKAGE_DIRS_SHELL"
+    )
+    if package_directories_shell != caller_package_directories_shell:
+        return None
+    caller_package_directories_json = os.environ.get(
+        "RELEASE_CALLER_PACKAGE_DIRS_JSON", ""
+    )
+    if caller_package_directories_json:
+        try:
+            caller_package_directories = json.loads(caller_package_directories_json)
+        except ValueError:
+            return None
+        if caller_package_directories != package_directories:
+            return None
+    return "package_dirs=(" + package_directories_shell + ")"
 
 
 def expected_setup_node_inputs():
@@ -4029,7 +4047,7 @@ APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
     "release-snapshot": "65c9bdf63f9032dd4ecdf2d1123586f3deca3a5f9b11dc7b2a29106b7d238502",
 }
 APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256 = {
-    "release-node": "19c0db4a50fea67d2c999495a34227e19c642059824533a3673fc8c151482d27",
+    "release-node": "ff401d1c53b4cfa4f794bd3989d809a2b1952388722553784fcc2ccdf4c56638",
     "release-artifact": "57a4aafc159687ccb3879c7ad5aff6ea940c753380233b7cbf18ba0606bd2ab1",
     "release-snapshot": "c7531cc0f0f4e67fe00ff6c41c37d8a487091706bd5cbf688290cf891347dd57",
 }
@@ -4575,7 +4593,9 @@ for step in verification_job_steps:
             len(assignment_lines) != 1
             or body_lines[assignment_lines[0]] != package_directories_assignment
         ):
-            problems.append("has an unapproved private-package guard assignment (#1717)")
+            problems.append(
+                f"has an unapproved package-directory assignment in {step_name} (#1717)"
+            )
         else:
             body_lines[assignment_lines[0]] = "package_dirs=(<approved-directories>)"
             body = "\n".join(body_lines)
@@ -4609,6 +4629,60 @@ for step in verification_job_steps:
         "with": action_inputs,
         "run": body,
     }, sort_keys=True, separators=(",", ":")))
+stamp_steps = [
+    step for step in verification_job_steps
+    if (fields := step_mapping_entries(step)) is not None
+    and yaml_scalar_value(fields.get("name", "")) == "Stamp the dispatched package versions"
+]
+if len(stamp_steps) != 1:
+    problems.append("does not use one approved version-stamp step (#1717)")
+else:
+    stamp_step = stamp_steps[0]
+    stamp_fields = step_mapping_entries(stamp_step)
+    stamp_environment = step_mapping_values(stamp_step, "env")
+    stamp_body = run_body(stamp_step)
+    stamp_lines = stamp_body.splitlines() if stamp_body is not None else []
+    stamp_assignment_lines = [
+        index for index, line in enumerate(stamp_lines)
+        if line.startswith("package_dirs=(")
+    ]
+    if (
+        package_directories_assignment is None
+        or len(stamp_assignment_lines) != 1
+        or stamp_lines[stamp_assignment_lines[0]] != package_directories_assignment
+    ):
+        problems.append(
+            "has an unapproved package-directory assignment in Stamp the dispatched package versions (#1717)"
+        )
+    else:
+        stamp_lines[stamp_assignment_lines[0]] = "package_dirs(<approved-directories>)"
+    approved_stamp_condition = "steps.release-version.outputs.selected == 'true'"
+    if release_mode == "release-snapshot":
+        approved_stamp_condition += " && hashFiles('package.json') != ''"
+    approved_stamp_fields = {
+        "name": "Stamp the dispatched package versions",
+        "if": approved_stamp_condition,
+        "env": "",
+        "run": "|",
+    }
+    approved_stamp_environment = {
+        "PACKAGE_VERSION": "${{ steps.release-version.outputs.package-version }}",
+        "NODE_AUTH_TOKEN": "''",
+    }
+    approved_stamp_body = "\n".join((
+        "package_dirs(<approved-directories>)",
+        'for package_dir in "${package_dirs[@]}"; do',
+        '  npm version --prefix "$package_dir" "$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version',
+        "done",
+    ))
+    if (
+        stamp_fields != approved_stamp_fields
+        or stamp_environment != approved_stamp_environment
+        or "\n".join(stamp_lines) != approved_stamp_body
+    ):
+        problems.append(
+            "does not match the approved package-version stamp step (#1717)"
+        )
 preacquisition_digest = hashlib.sha256(
     "\n".join(preacquisition_steps).encode()
 ).hexdigest()
@@ -5356,7 +5430,10 @@ PY
   # PyYAML is deliberately not used: the canonical contract runs on a bare
   # python3 with no third-party dependency, and a "use it if importable"
   # fallback would put every adopter without it on the untested path.
-  CONTRACT_REF="$CONTRACT_REF" python3 "$work/release-shape.py" "$release_workflow" \
+  CONTRACT_REF="$CONTRACT_REF" \
+    RELEASE_CALLER_PACKAGE_DIRS_JSON="$workflow_package_dirs_json" \
+    RELEASE_CALLER_PACKAGE_DIRS_SHELL="$workflow_package_dirs_shell" \
+    python3 "$work/release-shape.py" "$release_workflow" \
     || fail "$release_workflow: see above"
 
   # Text presence is not behavior: a no-op shell command can carry the entire

@@ -31,6 +31,8 @@ The canonical generator contract also pins the verification step's selected-vers
 
 This refinement makes the existing credential boundary fail closed in generated callers; it does not grant credentials to additional steps or change release authority.
 
+Package-directory provenance applies the generator's normalized relative-path and duplicate checks. For node-release callers, the forwarded package list must agree with the validated provenance and version-stamp command. The emitted contract validates the post-install version-stamp step's condition, environment, and full command separately from the pre-install digest, so a changed package set or an added command cannot hide behind the digest's installation boundary. Distinct release callers may select distinct valid package sets. Executable regression tests run the emitted `.npmrc` guard and verification command; they prove a workspace config blocks npm and the repository verification hook observes an empty package token.
+
 ## Consequences
 
 Installed dependencies remain available to release verification without a registry credential. A lifecycle or verification hook that tries to fetch additional private packages must be redesigned; it cannot reuse the acquisition credential. Dependency lifecycle scripts still run after acquisition, subject to the package manager's existing script-approval policy.
