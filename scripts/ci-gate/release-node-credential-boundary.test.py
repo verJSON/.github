@@ -323,9 +323,10 @@ class ReleaseNodeCredentialBoundaryTests(unittest.TestCase):
             runner_npmrc = runner_temp / ".npmrc"
             runner_npmrc.write_text("//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}\n", encoding="utf-8")
             npm_marker = root / "npm-called"
+            npm_config_marker = root / "npm-user-config"
             npm = bin_dir / "npm"
             npm.write_text(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$NPM_STUB_MARKER\"\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$NPM_STUB_MARKER\"\nprintf '%s\\n' \"${NPM_CONFIG_USERCONFIG-}\" > \"$NPM_CONFIG_MARKER\"\n",
                 encoding="utf-8",
             )
             npm.chmod(0o755)
@@ -334,6 +335,7 @@ class ReleaseNodeCredentialBoundaryTests(unittest.TestCase):
                 "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
                 "RUNNER_TEMP": str(runner_temp),
                 "NPM_CONFIG_USERCONFIG": str(runner_npmrc),
+                "NPM_CONFIG_MARKER": str(npm_config_marker),
                 "NPM_STUB_MARKER": str(npm_marker),
             }
 
@@ -372,6 +374,7 @@ class ReleaseNodeCredentialBoundaryTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(npm_marker.read_text(encoding="utf-8"), "ci --ignore-scripts\n")
+            self.assertEqual(npm_config_marker.read_text(encoding="utf-8"), f"{runner_npmrc}\n")
 
     def test_emitted_verification_command_clears_package_token_for_hook(self):
         verify = find_step(
