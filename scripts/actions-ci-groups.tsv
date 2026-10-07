@@ -180,6 +180,7 @@ changelog-release	bash scripts/container-deployment-contract.test.sh
 changelog-release	bash scripts/container-deployment-review-producer.test.sh
 changelog-release	python3 scripts/runner-canary-contract.test.py
 changelog-release	bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release	python3 scripts/ci-gate/release-node-credential-boundary.test.py
 changelog-release	node --test scripts/ci-gate/contract-tools-package.test.js
 changelog-release	bash scripts/ci-gate/release-node-restart.test.sh
 changelog-release	bash scripts/ci-gate/release-node-assets.test.sh

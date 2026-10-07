@@ -185,11 +185,9 @@ test_line="$(grep -nF 'bash scripts/changelog-contract.test.sh' <<<"$pr_gate" | 
 
 # #959. `actions/checkout` persists the job's GITHUB_TOKEN into `.git/config` by
 # default, and every generated caller then runs repository code out of that same
-# workspace — PR-authored code, in the pr-gate case. A checkout may keep the
-# credential only where a later step of the same job actually uses it for a
-# remote operation; that exception is named here, so a mode that grows a new
-# checkout cannot inherit the persisting default unnoticed. Audited across every
-# workflow-emitting mode rather than only the one the report arrived about.
+# workspace — PR-authored code, in the pr-gate case. A release state lookup may
+# use a step-scoped token for its remote read, but no checkout persists credentials.
+# Audited across every workflow-emitting mode rather than only the reported one.
 audit_checkout_credentials() {
   MODE="$1" WORKFLOW="$2" python3 - <<'PY'
 import os
@@ -197,16 +195,20 @@ import os
 import yaml
 
 mode = os.environ["MODE"]
-# (mode, checkout step name) -> the later step, in the same job, that must
-# still exist and still perform the remote git operation the exemption is
-# named for. #971: checked structurally below, not just matched by name, so
-# renaming or deleting that consuming step re-flags the checkout instead of
-# silently keeping the exemption alive.
-justified = {
-    ("release-node", "Check out the tree that will be released"): {
+# (mode, checkout step name) -> the later step in the same job that may use
+# read-only remote Git access through process-scoped config. The checkout itself
+# must still set persist-credentials: false. #971: checked structurally below,
+# not just matched by name, so renaming or deleting the consumer re-flags it.
+remote_reads = {
+    (mode, checkout_name): {
         "consumer": "Resolve restart-safe release state",
-        "requires": ("git ls-remote", "git fetch"),
-    },
+        "requires": ("git_with_release_token ls-remote", "git_with_release_token fetch"),
+    }
+    for mode, checkout_name in (
+        ("release-node", "Check out the tree that will be released"),
+        ("release-artifact", "Check out the tree that will be released"),
+        ("release-snapshot", "Check out the tree that will be released"),
+    )
 }
 workflow = yaml.safe_load(os.environ["WORKFLOW"])
 checkouts = 0
@@ -219,25 +221,29 @@ for job_name, job in (workflow.get("jobs") or {}).items():
             continue
         checkouts += 1
         name = step.get("name")
-        exemption = justified.get((mode, name))
-        if exemption is not None:
+        remote_read = remote_reads.get((mode, name))
+        if remote_read is not None:
             consumer_index, consumer = steps_by_name.get(
-                exemption["consumer"], (None, None)
+                remote_read["consumer"], (None, None)
             )
             consumer_run = str((consumer or {}).get("run") or "")
+            consumer_env = (consumer or {}).get("env") or {}
             if (
                 consumer is not None
                 and consumer_index is not None
                 and consumer_index > index
-                and all(needle in consumer_run for needle in exemption["requires"])
+                and all(needle in consumer_run for needle in remote_read["requires"])
+                and consumer_env.get("GITHUB_TOKEN") == "${{ github.token }}"
+                and "GIT_CONFIG_COUNT=1" in consumer_run
+                and "GIT_CONFIG_VALUE_0" in consumer_run
             ):
-                continue
-            violations.append(
-                f"{name} (exemption stale: consumer {exemption['consumer']!r} "
-                "missing, not after this checkout, or no longer performs the "
-                "justifying remote operation)"
-            )
-            continue
+                pass
+            else:
+                violations.append(
+                    f"{name} (exemption stale: consumer {remote_read['consumer']!r} "
+                    "missing, not after this checkout, lacks process-scoped auth, "
+                    "or no longer performs the remote operation)"
+                )
         if ((step.get("with") or {}).get("persist-credentials")) is not False:
             violations.append(name or f"{job_name}[{index}] (unnamed)")
 print(f"{checkouts} checkout(s)", end="")
@@ -247,9 +253,10 @@ if violations:
 print()
 PY
 }
-for audited_mode in pr-gate release-node release-propose workflow \
+for audited_mode in pr-gate release-node release-artifact release-snapshot release-propose workflow \
   generated-artifacts generated-artifacts-with-adr-index renovate-attribution; do
   audit_args=("$audited_mode" "$sha")
+  [ "$audited_mode" != release-artifact ] || audit_args+=(--build-runner ubuntu-24.04)
   [ "$audited_mode" != release-propose ] || audit_args+=(--autonomy propose)
   audit_report="$(audit_checkout_credentials "$audited_mode" \
     "$(bash "$gen" "${audit_args[@]}")" 2>&1)" \
@@ -1057,10 +1064,13 @@ grep -q "CONTRACT_REF=\"$sha\"" "$emitted" \
 # Implementation digests are exempt, and only they: CONTRACT_SHA256,
 # ADR_INDEX_SHA256 and ADR_INDEX_TEST_SHA256 pin code that is executed, and
 # EXPECTED_CODEOWNERS_SHA256 pins a generated member of the adopter set
-# (ADR 0210); none of them changes with a release. The shape this guards against is an assertion pinned to
-# repository CONTENT — a released entry's hash — which every release
+# (ADR 0210), and #1712 pins the restart-safe release-state script per mode.
+# None of those code hashes changes with a release. The shape this guards
+# against is an assertion pinned to repository CONTENT — a released entry's
+# hash — which every release
 # invalidates (#304, #309).
 grep -vE '^(CONTRACT_SHA256|ADR_INDEX_SHA256|ADR_INDEX_TEST_SHA256|EXPECTED_CODEOWNERS_SHA256)="[0-9a-f]{64}"$' "$emitted" \
+  | grep -vE '^[[:space:]]+"release-(node|artifact|snapshot)": "[0-9a-f]{64}",$' \
   | grep -E '[0-9a-f]{64}' >/dev/null \
   && fail "emitted test hardcodes a content hash of a released entry" \
   || pass "no hashed released entries (a release adds sections)"
@@ -1845,8 +1855,29 @@ enable_stamp_lifecycle_scripts() {
 reject_same_version_stamp() {
   sed -i 's/ --allow-same-version//g' "$1/.github/workflows/release.yml"
 }
-drop_verification_suite_token() {
-  sed -i '/^      - name: Run the release verification suite$/,/^      - name:/ {/NODE_AUTH_TOKEN:/d;}' \
+expose_private_token_to_verification_suite() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+start = text.index("      - name: Run the release verification suite")
+needle = "          NODE_AUTH_TOKEN: ''\n"
+token_index = text.find(needle, start)
+publish_index = text.find("  publish:", start)
+if token_index < 0 or (publish_index >= 0 and token_index > publish_index):
+    raise SystemExit("verification credential fixture no longer matches generated output")
+replacement = needle.replace(
+    "NODE_AUTH_TOKEN: ''", "NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}"
+)
+text = text[:token_index] + replacement + text[token_index + len(needle):]
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+append_credentialed_install_command() {
+  sed -i '/^        run: npm ci --ignore-scripts$/c\        run: |\
+          npm ci --ignore-scripts\
+          node ./scripts/leak-token.js' \
     "$1/.github/workflows/release.yml"
 }
 shadow_stamped_version_header() {
@@ -2021,6 +2052,329 @@ for line in open(path):
 open(path, "w").write("".join(out))
 PY
 }
+expose_github_token_to_verify_job() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+needle = "  verify:\n"
+if text.count(needle) != 1:
+    raise SystemExit("verification job fixture no longer has one canonical job key")
+text = text.replace(
+    needle,
+    needle + "    env:\n      GITHUB_TOKEN: ${{ github.token }}\n",
+    1,
+)
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+expose_wrapped_package_token_to_verification_suite() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+start = text.index("      - name: Run the release verification suite")
+needle = "          NODE_AUTH_TOKEN: ''\n"
+token_index = text.find(needle, start)
+publish_index = text.find("  publish:", start)
+if token_index < 0 or (publish_index >= 0 and token_index > publish_index):
+    raise SystemExit("wrapped verification credential fixture no longer matches generated output")
+replacement = needle + "          PRIVATE_REGISTRY_CREDENTIAL: ${{ format('{{{0}}}', secrets.NODE_AUTH_TOKEN) }}\n"
+text = text[:token_index] + replacement + text[token_index + len(needle):]
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+expose_folded_wrapped_package_token_to_verification_suite() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+start = text.index("      - name: Run the release verification suite")
+needle = "          NODE_AUTH_TOKEN: ''\n"
+token_index = text.find(needle, start)
+publish_index = text.find("  publish:", start)
+if token_index < 0 or (publish_index >= 0 and token_index > publish_index):
+    raise SystemExit("folded verification credential fixture no longer matches generated output")
+replacement = needle + """          PRIVATE_REGISTRY_CREDENTIAL: >-
+            ${{ format(
+              '{{{0}}}', secrets.NODE_AUTH_TOKEN
+            ) }}
+"""
+text = text[:token_index] + replacement + text[token_index + len(needle):]
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+expose_serialized_secrets_to_verification_suite() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+start = text.index("      - name: Run the release verification suite")
+needle = "          NODE_AUTH_TOKEN: ''\n"
+token_index = text.find(needle, start)
+publish_index = text.find("  publish:", start)
+if token_index < 0 or (publish_index >= 0 and token_index > publish_index):
+    raise SystemExit("serialized verification credential fixture no longer matches generated output")
+replacement = needle + "          PRIVATE_REGISTRY_CREDENTIALS: ${{ toJSON(secrets) }}\n"
+text = text[:token_index] + replacement + text[token_index + len(needle):]
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+expose_serialized_github_context_to_verification_suite() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+start = text.index("      - name: Run the release verification suite")
+needle = "          NODE_AUTH_TOKEN: ''\n"
+token_index = text.find(needle, start)
+publish_index = text.find("  publish:", start)
+if token_index < 0 or (publish_index >= 0 and token_index > publish_index):
+    raise SystemExit("serialized GitHub context fixture no longer matches generated output")
+replacement = needle + "          PRIVATE_GITHUB_CONTEXT: ${{ toJSON(github) }}\n"
+text = text[:token_index] + replacement + text[token_index + len(needle):]
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+expose_indexed_github_token_to_verification_suite() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+start = text.index("      - name: Run the release verification suite")
+needle = "          NODE_AUTH_TOKEN: ''\n"
+token_index = text.find(needle, start)
+publish_index = text.find("  publish:", start)
+if token_index < 0 or (publish_index >= 0 and token_index > publish_index):
+    raise SystemExit("indexed GitHub token fixture no longer matches generated output")
+replacement = needle + "          PRIVATE_GITHUB_TOKEN: ${{ github['token'] }}\n"
+text = text[:token_index] + replacement + text[token_index + len(needle):]
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+expose_release_state_token_through_yaml_alias() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+state_start = text.index("      - name: Resolve restart-safe release state")
+state_env = text.index("        env:\n", state_start)
+text = text[:state_env] + text[state_env:].replace(
+    "        env:\n", "        env: &release_state_credentials\n", 1
+)
+verify_start = text.index("      - name: Run the release verification suite")
+needle = "          NODE_AUTH_TOKEN: ''\n"
+token_index = text.find(needle, verify_start)
+publish_index = text.find("  publish:", verify_start)
+if token_index < 0 or (publish_index >= 0 and token_index > publish_index):
+    raise SystemExit("verification YAML alias fixture no longer matches generated output")
+replacement = "          <<: *release_state_credentials\n" + needle
+text = text[:token_index] + replacement + text[token_index + len(needle):]
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+persist_release_token_in_git_config_file() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+state_start = text.index("      - name: Resolve restart-safe release state")
+needle = "        run: |\n"
+run_start = text.find(needle, state_start)
+next_step = text.find("      - name:", state_start + len(needle))
+if run_start < 0 or (next_step >= 0 and run_start > next_step):
+    raise SystemExit("release state run fixture no longer matches generated output")
+insert_at = run_start + len(needle)
+text = text[:insert_at] + "          printf '%s\\n' \"$GITHUB_TOKEN\" >> \"$GITHUB_WORKSPACE/.git/config\"\n" + text[insert_at:]
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+persist_release_token_to_github_env() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+state_start = text.index("      - name: Resolve restart-safe release state")
+needle = "        run: |\n"
+run_start = text.find(needle, state_start)
+next_step = text.find("      - name:", state_start + len(needle))
+if run_start < 0 or (next_step >= 0 and run_start > next_step):
+    raise SystemExit("release state run fixture no longer matches generated output")
+insert_at = run_start + len(needle)
+text = text[:insert_at] + "          printf 'LEAKED_TOKEN=%s\\n' \"$GITHUB_TOKEN\" >> \"$GITHUB_ENV\"\n" + text[insert_at:]
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+configure_token_step_bash_env() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+state_start = text.index("      - name: Resolve restart-safe release state")
+token_line = "          GITHUB_TOKEN: ${{ github.token }}\n"
+token_index = text.find(token_line, state_start)
+next_step = text.find("      - name:", state_start + len(token_line))
+if token_index < 0 or (next_step >= 0 and token_index > next_step):
+    raise SystemExit("release state environment fixture no longer matches generated output")
+insert_at = token_index + len(token_line)
+text = text[:insert_at] + "          \"BASH_ENV\": .bash_env\n" + text[insert_at:]
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+configure_token_step_custom_shell() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+state_start = text.index("      - name: Resolve restart-safe release state")
+run_line = "        run: |\n"
+run_index = text.find(run_line, state_start)
+next_step = text.find("      - name:", state_start + len(run_line))
+if run_index < 0 or (next_step >= 0 and run_index > next_step):
+    raise SystemExit("release state shell fixture no longer matches generated output")
+text = text[:run_index] + "        shell: bash --noprofile {0}\n" + text[run_index:]
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+configure_verify_job_default_shell() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+needle = "  verify:\n"
+if text.count(needle) != 1:
+    raise SystemExit("verify job fixture no longer matches generated output")
+text = text.replace(
+    needle,
+    needle + "    \"defaults\":\n      run:\n        shell: bash --noprofile {0}\n",
+    1,
+)
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+configure_workflow_shelopts() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+marker = "  verify:" + chr(10)
+if text.count(marker) != 1:
+    raise SystemExit("verify job fixture no longer matches generated output")
+addition = chr(10).join(("    env:", '      "SHELLOPTS": xtrace', ""))
+text = text.replace(marker, marker + addition, 1)
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+configure_workflow_loader_env() {
+  python3 - "$1/.github/workflows/release.yml" "$2" <<'PY'
+import sys
+
+path, key = sys.argv[1:]
+text = open(path, encoding="utf-8").read()
+marker = "  verify:" + chr(10)
+if text.count(marker) != 1:
+    raise SystemExit("verify job fixture no longer matches generated output")
+addition = chr(10).join(("    env:", f'      "{key}": /tmp/credential-boundary-hostile.so', ""))
+text = text.replace(marker, marker + addition, 1)
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+configure_workflow_git_trace() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+marker = "  verify:" + chr(10)
+if text.count(marker) != 1:
+    raise SystemExit("verify job fixture no longer matches generated output")
+addition = chr(10).join((
+    "    env:",
+    "      GIT_TRACE_CURL: '1'",
+    "      GIT_CURL_VERBOSE: '1'",
+    "      GIT_TRACE_REDACT: '0'",
+    "      GIT_TRACE2: '1'",
+    "      GIT_TRACE2_ENV_VARS: GIT_CONFIG_VALUE_0",
+    "",
+))
+text = text.replace(marker, marker + addition, 1)
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+configure_workflow_git_config_sources() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+marker = "  verify:" + chr(10)
+if text.count(marker) != 1:
+    raise SystemExit("verify job fixture no longer matches generated output")
+addition = chr(10).join((
+    "    env:",
+    "      GIT_CONFIG_GLOBAL: /tmp/attacker.gitconfig",
+    "      GIT_CONFIG_SYSTEM: /tmp/attacker-system.gitconfig",
+    "",
+))
+text = text.replace(marker, marker + addition, 1)
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+configure_workflow_config_parameters() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+marker = "  verify:" + chr(10)
+if text.count(marker) != 1:
+    raise SystemExit("verify job fixture no longer matches generated output")
+addition = chr(10).join((
+    "    env:",
+    "      GIT_CONFIG_PARAMETERS: --global=credential.helper=",
+    "",
+))
+text = text.replace(marker, marker + addition, 1)
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+make_lifecycle_step_print_instead_of_rebuild() {
+  sed -i 's/^        run: npm rebuild$/        run: echo npm rebuild/' \
+    "$1/.github/workflows/release.yml"
+}
+grant_verify_job_write_permissions() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").readlines()
+start = next(index for index, line in enumerate(lines) if line.rstrip("\n") == "  verify:")
+end = next(
+    (index for index in range(start + 1, len(lines)) if re.match(r"^  [A-Za-z0-9_.-]+:\s*$", lines[index])),
+    len(lines),
+)
+section = "".join(lines[start:end])
+needle = "      contents: read\n"
+if section.count(needle) != 1:
+    raise SystemExit("verify permissions fixture no longer has one contents-read grant")
+section = section.replace(needle, "      contents: write\n", 1)
+open(path, "w", encoding="utf-8").write("".join(lines[:start]) + section + "".join(lines[end:]))
+PY
+}
 # Keying the checks on one filename let any other name collect none of them.
 rename_release_caller() {
   mv "$1/.github/workflows/release.yml" "$1/.github/workflows/publish-package.yml"
@@ -2071,14 +2425,106 @@ expect_rejection "a verification job without package metadata preparation (#550)
 expect_rejection "a verification suite with no dispatched version stamp (#519)" drop_verify_stamp
 expect_rejection "version stamps that can run package lifecycle scripts (#519)" enable_stamp_lifecycle_scripts
 expect_rejection "a first release whose scaffold version already matches the dispatch (#579)" reject_same_version_stamp
-expect_rejection "a release verification suite without private-package auth (#569)" drop_verification_suite_token
-expect_rejection "stamped-version warning text shadowed outside the generated header (#862)" shadow_stamped_version_header
+expect_rejection "a release verification suite receiving package credentials (#1712)" expose_private_token_to_verification_suite
+expect_rejection "a credentialed install step with an extra command (#1712)" append_credentialed_install_command
+grep -qF 'runs an unexpected credentialed acquisition command (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects extra commands beside credentialed npm ci" \
+  || fail "the generated suite rejected an extra credentialed command for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verification job inheriting GITHUB_TOKEN (#1712)" expose_github_token_to_verify_job
+grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects Git credentials inherited by release verification" \
+  || fail "the generated suite rejected an inherited Git token for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verification suite receiving a wrapped package token (#1712)" expose_wrapped_package_token_to_verification_suite
+grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects a wrapped package secret in verification" \
+  || fail "the generated suite rejected a wrapped package token for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verification suite receiving a folded wrapped package token (#1712)" expose_folded_wrapped_package_token_to_verification_suite
+grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects a folded package secret in verification" \
+  || fail "the generated suite rejected a folded wrapped package token for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verification suite serializing the secrets context (#1712)" expose_serialized_secrets_to_verification_suite
+grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects serialization of the secrets object in verification" \
+  || fail "the generated suite rejected serialized secrets for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verification suite serializing the GitHub context (#1712)" expose_serialized_github_context_to_verification_suite
+grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects serialization of the GitHub context in verification" \
+  || fail "the generated suite rejected serialized GitHub context for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verification suite reading github['token'] (#1712)" expose_indexed_github_token_to_verification_suite
+grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects indexed GitHub token access in verification" \
+  || fail "the generated suite rejected indexed GitHub token for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verification suite inheriting a GitHub token through YAML aliases (#1712)" expose_release_state_token_through_yaml_alias
+grep -qF 'uses YAML anchors or aliases in a release workflow (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects YAML aliases that merge release-state credentials into verification" \
+  || fail "the generated suite rejected an aliased Git token for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a release state step writing its token directly into .git/config (#1712)" persist_release_token_in_git_config_file
+grep -qF 'does not match the approved restart-safe release-state script (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects unapproved credential-bearing release-state commands" \
+  || fail "the generated suite rejected a modified release-state command for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a release state step forwarding its token through GITHUB_ENV (#1712)" persist_release_token_to_github_env
+grep -qF 'does not match the approved restart-safe release-state script (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects release-state token forwarding through runner command files" \
+  || fail "the generated suite rejected a GITHUB_ENV mutation for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a release state step loading repository code through quoted BASH_ENV (#1712)" configure_token_step_bash_env
+grep -qF 'does not restrict the restart-safe release-state environment (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects shell startup code in token environment" \
+  || fail "the generated suite rejected BASH_ENV mutation for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a release state step selecting custom shell (#1712)" configure_token_step_custom_shell
+grep -qF 'configures a custom shell or action in the credentialed release-state step (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects custom shells in credentialed workflows" \
+  || fail "the generated suite rejected a custom shell mutation for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify job setting custom shell through quoted defaults (#1712)" configure_verify_job_default_shell
+grep -qF 'configures run defaults (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects inherited custom shells in verify job" \
+  || fail "the generated suite rejected a default-shell mutation for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a workflow enabling Bash xtrace through quoted SHELLOPTS (#1712)" configure_workflow_shelopts
+grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects inherited Bash xtrace in token step" \
+  || fail "the generated suite rejected SHELLOPTS mutation for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a workflow preloading library in credentialed steps (#1712)" configure_workflow_loader_env LD_PRELOAD
+grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects inherited LD_PRELOAD in token step" \
+  || fail "the generated suite rejected an LD_PRELOAD mutation for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a workflow adding dynamic loader audit library (#1712)" configure_workflow_loader_env LD_AUDIT
+grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects inherited LD_AUDIT in token step" \
+  || fail "the generated suite rejected an LD_AUDIT mutation for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a workflow changing dynamic library search paths (#1712)" configure_workflow_loader_env LD_LIBRARY_PATH
+grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects inherited LD_LIBRARY_PATH in token step" \
+  || fail "the generated suite rejected an LD_LIBRARY_PATH mutation for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a workflow logging Git authorization values through curl and Trace2 (#1712)" configure_workflow_git_trace
+grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects Git curl and Trace2 environment logging in token step" \
+  || fail "the generated suite rejected Git tracing mutation for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a workflow redirecting Git remote helpers (#1712)" configure_workflow_loader_env GIT_EXEC_PATH
+grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects repository-controlled remote helper in token step" \
+  || fail "the generated suite rejected a Git remote-helper mutation for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a workflow selecting hostile Git config sources (#1712)" configure_workflow_git_config_sources
+grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects inherited system and global Git config paths" \
+  || fail "the generated suite rejected Git config-source mutation for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a workflow overriding Git config parameters (#1712)" configure_workflow_config_parameters
+grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite rejects inherited Git config parameters" \
+  || fail "the generated suite rejected Git config-parameters mutation for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a lifecycle step that only prints npm rebuild (#1712)" make_lifecycle_step_print_instead_of_rebuild
+grep -qF 'does not restore dependency lifecycle execution after acquisition (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite requires lifecycle command to execute exactly" \
+  || fail "the generated suite rejected a lifecycle mutation for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a release verification job granting contents-write (#1712)" grant_verify_job_write_permissions
+grep -qF 'requires verify-job permissions to be exactly contents: read (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite holds verification to read-only contents permission" \
+  || fail "the generated suite rejected a write-permission mutation for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "stamped-version warning text shadowed outside generated header (#862)" shadow_stamped_version_header
 grep -qF 'does not carry the stamped-version warning inside the generated header before `on:` (#862)' "$tmproot/run.out" \
-  && pass "the shadowed warning is rejected for leaving the generated header" \
+  && pass "the shadowed warning is rejected for leaving generated header" \
   || fail "the shadowed warning failed for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a no-op stamped-version failure diagnostic (#862)" noop_stamped_version_diagnostic
 grep -qF 'does not emit the stamped-version failure diagnostic (#862)' "$tmproot/run.out" \
-  && pass "the no-op diagnostic is rejected by executing the generated failure path" \
+  && pass "the no-op diagnostic is rejected by executing generated failure path" \
   || fail "the no-op diagnostic failed without exercising its behavior: $(tail -2 "$tmproot/run.out")"
 expect_rejection "an unrelated release step exposed to private-package auth (#569)" expose_private_token_to_unrelated_step
 expect_rejection "a release caller reachable by a push to main" add_push_trigger
@@ -2784,6 +3230,32 @@ else
     || fail "emitted suite rejected acquisition secret widening for the wrong reason: $(tail -2 "$tmproot/run.out")"
 fi
 
+acquisition_github_token_adopter="$tmproot/adopter-artifact-acquisition-github-token"
+cp -a "$private_artifact_adopter" "$acquisition_github_token_adopter"
+python3 - "$acquisition_github_token_adopter/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+start = text.index("  acquire-private-dependencies:\n")
+end = text.index("\n  build:", start)
+needle = "          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}\n"
+token_index = text.find(needle, start, end)
+if token_index < 0:
+    raise SystemExit("private acquisition token fixture no longer matches generated output")
+replacement = needle + "          PRIVATE_GITHUB_TOKEN: ${{ format('{{{0}}}', github.token) }}\n"
+text = text[:token_index] + replacement + text[token_index + len(needle):]
+open(path, "w", encoding="utf-8").write(text)
+PY
+git -C "$acquisition_github_token_adopter" commit -aqm 'leak github.token into private acquisition'
+if run_adopter "$acquisition_github_token_adopter"; then
+  fail "emitted suite accepted a release-artifact acquisition step receiving github.token"
+else
+  grep -qF 'private acquisition exposes credentials or another secret context' "$tmproot/run.out" \
+    && pass "emitted suite rejects GitHub token access during private acquisition" \
+    || fail "emitted suite rejected the acquisition token leak for the wrong reason: $(tail -2 "$tmproot/run.out")"
+fi
+
 private_selector_adopter="$tmproot/adopter-artifact-private-selector"
 cp -a "$private_artifact_adopter" "$private_selector_adopter"
 sed -i "s/- os: \${{ fromJSON(vars.CI_LANE_TRUSTED_WINDOWS) }}/- os: 'vars.CI_LANE_TRUSTED_WINDOWS'/g" \
@@ -2899,6 +3371,64 @@ else
     || fail "emitted suite rejected the toJSON(secrets) leak, but for the wrong reason: $(tail -2 "$tmproot/run.out")"
 fi
 
+github_token_build_adopter="$tmproot/adopter-artifact-github-token-build"
+cp -a "$artifact_adopter" "$github_token_build_adopter"
+python3 - "$github_token_build_adopter/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+start = text.index("  build:\n")
+end = text.index("\n  publish:", start)
+needle = "          RELEASE_VERSION: ${{ needs.verify.outputs.version }}\n"
+token_index = text.find(needle, start, end)
+if token_index < 0:
+    raise SystemExit("build GitHub token fixture no longer matches generated output")
+replacement = needle + "          PRIVATE_GITHUB_TOKEN: ${{ format('{{{0}}}', github.token) }}\n"
+text = text[:token_index] + replacement + text[token_index + len(needle):]
+open(path, "w", encoding="utf-8").write(text)
+PY
+grep -qF "PRIVATE_GITHUB_TOKEN: \${{ format('{{{0}}}', github.token) }}" \
+  "$github_token_build_adopter/.github/workflows/release.yml" \
+  || fail "test setup did not inject a wrapped github.token into the release-artifact build job"
+git -C "$github_token_build_adopter" commit -aqm 'leak wrapped github.token into build environment'
+if run_adopter "$github_token_build_adopter"; then
+  fail "emitted suite accepted a release-artifact caller exposing github.token to its build job"
+else
+  grep -qF 'build job references a secrets context' "$tmproot/run.out" \
+    && pass "emitted suite rejects a release-artifact build job receiving github.token" \
+    || fail "emitted suite rejected the build token leak, but for the wrong reason: $(tail -2 "$tmproot/run.out")"
+fi
+
+github_context_build_adopter="$tmproot/adopter-artifact-github-context-build"
+cp -a "$artifact_adopter" "$github_context_build_adopter"
+python3 - "$github_context_build_adopter/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+start = text.index("  build:\n")
+end = text.index("\n  publish:", start)
+needle = "          RELEASE_VERSION: ${{ needs.verify.outputs.version }}\n"
+token_index = text.find(needle, start, end)
+if token_index < 0:
+    raise SystemExit("build GitHub context fixture no longer matches generated output")
+replacement = needle + "          PRIVATE_GITHUB_CONTEXT: ${{ toJSON(github) }}\n"
+text = text[:token_index] + replacement + text[token_index + len(needle):]
+open(path, "w", encoding="utf-8").write(text)
+PY
+grep -qF 'PRIVATE_GITHUB_CONTEXT: ${{ toJSON(github) }}' \
+  "$github_context_build_adopter/.github/workflows/release.yml" \
+  || fail "test setup did not inject a serialized github context into the release-artifact build job"
+git -C "$github_context_build_adopter" commit -aqm 'leak github context into build environment'
+if run_adopter "$github_context_build_adopter"; then
+  fail "emitted suite accepted a release-artifact caller serializing the github context in its build job"
+else
+  grep -qF 'build job references a secrets context' "$tmproot/run.out" \
+    && pass "emitted suite rejects a release-artifact build job serializing github context" \
+    || fail "emitted suite rejected the serialized GitHub context, but for the wrong reason: $(tail -2 "$tmproot/run.out")"
+fi
+
 toplevel_env_secret_adopter="$tmproot/adopter-artifact-toplevel-env-secret"
 cp -a "$artifact_adopter" "$toplevel_env_secret_adopter"
 awk '
@@ -2970,10 +3500,10 @@ grep -qE '^  verify:$' <<<"$snapshot_release" \
 # guarded on package.json and a repository without one must verify through its
 # own scripts/release-verify.sh rather than falling back to npm test.
 snapshot_verify_job="$(awk '/^  verify:[[:space:]]*$/{seen=1} /^  snapshot:[[:space:]]*$/{seen=0} seen' <<<"$snapshot_release")"
-[ "$(grep -cF "&& hashFiles('package.json') != ''" <<<"$snapshot_verify_job")" -eq 3 ] \
+[ "$(grep -cF "&& hashFiles('package.json') != ''" <<<"$snapshot_verify_job")" -eq 4 ] \
   && grep -qF 'elif [ ! -f package.json ]; then' <<<"$snapshot_verify_job" \
   && grep -qF 'No package.json and no executable scripts/release-verify.sh' <<<"$snapshot_verify_job" \
-  && pass "release-snapshot guards setup-node, npm ci, and version stamping on package.json and fails closed without a verify hook (#1206)" \
+  && pass "release-snapshot guards setup-node, npm ci, lifecycle execution, and version stamping on package.json and fails closed without a verify hook (#1206)" \
   || fail "release-snapshot still assumes a Node project: a non-npm adopter would fail at npm ci or verify nothing"
 snapshot_publish_job="$(awk '/^  publish:[[:space:]]*$/{seen=1} seen' <<<"$snapshot_release")"
 grep -qF 'VERSION: ${{ needs.verify.outputs.version }}' <<<"$snapshot_publish_job" \
