@@ -14,7 +14,7 @@
 #   scripts/gen-changelog-caller.sh adr-index-generator <sha> > scripts/gen-adr-index.sh
 #   scripts/gen-changelog-caller.sh adr-index-test <sha> > scripts/gen-adr-index.test.sh
 #   scripts/gen-changelog-caller.sh renderer <sha> > scripts/render-next.sh
-#   scripts/gen-changelog-caller.sh contract-test <sha> [--scope <scope>] [--node-version <version>] > scripts/changelog-contract.test.sh
+#   scripts/gen-changelog-caller.sh contract-test <sha> [--scope <scope>] [--node-version <version>] [--release-caller-package-dirs <workflow-path>=<dir>[,<dir>...]]... > scripts/changelog-contract.test.sh
 #   scripts/gen-changelog-caller.sh codeowners <sha> > .github/CODEOWNERS
 #   scripts/gen-changelog-caller.sh pr-gate <sha> [--untrusted-runner <label>[,<label>...]] > .github/workflows/changelog-contract.yml
 #   scripts/gen-changelog-caller.sh release-node <sha> [--scope <scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--release-asset <path>]... > .github/workflows/release.yml
@@ -73,7 +73,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $(basename "$0") {workflow|generated-artifacts|generated-artifacts-with-adr-index|renovate-attribution|adr-index-generator|adr-index-test|codeowners|renderer|contract-test|pr-gate|release-node|release-artifact|release-snapshot|release-propose} <40-hex-commit> [--scope <npm-scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--package-dir <relative-dir>]... [--only-package-dir <relative-dir>]... [--release-asset <path>]... [--build-runner <selector>]... [--approved-internal-package <@verjson/name>]... [--autonomy {propose|dispatch}] [--untrusted-runner <label>[,<label>...]]" >&2
+  echo "usage: $(basename "$0") {workflow|generated-artifacts|generated-artifacts-with-adr-index|renovate-attribution|adr-index-generator|adr-index-test|codeowners|renderer|contract-test|pr-gate|release-node|release-artifact|release-snapshot|release-propose} <40-hex-commit> [--scope <npm-scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--package-dir <relative-dir>]... [--only-package-dir <relative-dir>]... [--release-caller-package-dirs <workflow-path>=<dir>[,<dir>...]]... [--release-asset <path>]... [--build-runner <selector>]... [--approved-internal-package <@verjson/name>]... [--autonomy {propose|dispatch}] [--untrusted-runner <label>[,<label>...]]" >&2
   echo "required check: changelog / validate" >&2
   exit 2
 }
@@ -94,6 +94,7 @@ release_default_component_set=false
 release_package_dirs=(".")
 release_package_dirs_set=false
 release_package_dirs_exact=false
+release_caller_package_dir_specs=()
 release_assets=()
 release_build_runners=()
 release_approved_internal_packages=()
@@ -141,6 +142,11 @@ while [ "$#" -gt 0 ]; do
       fi
       release_package_dirs+=("$2")
       release_package_dirs_set=true
+      shift 2
+      ;;
+    --release-caller-package-dirs)
+      [ "$#" -ge 2 ] && [ "$mode" = contract-test ] || usage
+      release_caller_package_dir_specs+=("$2")
       shift 2
       ;;
     --release-asset)
@@ -2711,10 +2717,63 @@ emit_contract_test() {
   local generator_release_package_dirs_json="$selected_package_dirs_json"
   local generator_release_package_dirs_shell=''
   local generator_release_package_dir_flag=--package-dir
+  local expected_release_caller_package_dirs_json
+  local release_caller_spec release_caller_path release_caller_dirs
+  local release_caller_dir
+  local release_caller_dirs_json release_caller_dirs_separator
+  local -a expected_release_caller_paths=(".github/workflows/release.yml")
+  local -a expected_release_caller_dirs=()
+  local -a expected_release_caller_dirs_seen=()
   local release_approved_packages_csv='' release_approved_package=''
   local release_lane_names='' release_lane_env='' release_lane_preflight='' release_lane_preflight_sha256=''
   [ "$release_package_dirs_exact" = true ] \
     && generator_release_package_dir_flag=--only-package-dir
+  expected_release_caller_package_dirs_json="{\".github/workflows/release.yml\":$selected_package_dirs_json"
+  for release_caller_spec in "${release_caller_package_dir_specs[@]}"; do
+    [[ "$release_caller_spec" == *=* ]] || {
+      echo "$(basename "$0"): --release-caller-package-dirs must be <workflow-path>=<dir>[,<dir>...]" >&2
+      return 2
+    }
+    release_caller_path="${release_caller_spec%%=*}"
+    release_caller_dirs="${release_caller_spec#*=}"
+    [[ "$release_caller_path" =~ ^\.github/workflows/[A-Za-z0-9._-]+\.ya?ml$ ]] \
+      && [ -n "$release_caller_dirs" ] || {
+      echo "$(basename "$0"): invalid --release-caller-package-dirs value '$release_caller_spec'" >&2
+      return 2
+    }
+    for expected_release_caller_path in "${expected_release_caller_paths[@]}"; do
+      [ "$expected_release_caller_path" != "$release_caller_path" ] || {
+        echo "$(basename "$0"): duplicate expected release caller '$release_caller_path'" >&2
+        return 2
+      }
+    done
+    IFS=',' read -r -a expected_release_caller_dirs <<<"$release_caller_dirs"
+    release_caller_dirs_json='['
+    release_caller_dirs_separator=''
+    expected_release_caller_dirs_seen=()
+    for release_caller_dir in "${expected_release_caller_dirs[@]}"; do
+      [[ "$release_caller_dir" =~ ^[A-Za-z0-9._][A-Za-z0-9._-]*(/[A-Za-z0-9._][A-Za-z0-9._-]*)*$ ]] \
+        && { [ "$release_caller_dir" = . ] \
+          || { [[ "/$release_caller_dir/" != */./* ]] \
+            && [[ "/$release_caller_dir/" != */../* ]]; }; } || {
+        echo "$(basename "$0"): invalid expected package directory '$release_caller_dir'" >&2
+        return 2
+      }
+      for earlier_release_caller_dir in "${expected_release_caller_dirs_seen[@]}"; do
+        [ "$earlier_release_caller_dir" != "$release_caller_dir" ] || {
+          echo "$(basename "$0"): duplicate expected package directory '$release_caller_dir'" >&2
+          return 2
+        }
+      done
+      expected_release_caller_dirs_seen+=("$release_caller_dir")
+      release_caller_dirs_json="$release_caller_dirs_json$release_caller_dirs_separator\"$release_caller_dir\""
+      release_caller_dirs_separator=,
+    done
+    release_caller_dirs_json="$release_caller_dirs_json]"
+    expected_release_caller_package_dirs_json="$expected_release_caller_package_dirs_json,\"$release_caller_path\":$release_caller_dirs_json"
+    expected_release_caller_paths+=("$release_caller_path")
+  done
+  expected_release_caller_package_dirs_json="$expected_release_caller_package_dirs_json}"
   printf -v generator_release_package_dirs_shell '%q ' "${release_package_dirs[@]}"
   generator_release_package_dirs_shell="${generator_release_package_dirs_shell% }"
   for release_asset in "${release_assets[@]}"; do
@@ -2787,10 +2846,11 @@ ADR_INDEX_TEST_SHA256="${adr_index_test_sha256}"
 EXPECTED_CODEOWNERS_SHA256="${codeowners_sha256}"
 EXPECTED_RELEASE_SCOPE="${release_scope}"
 EXPECTED_RELEASE_NODE_VERSION="${release_node_version}"
-# Source-audit parameters only; runtime validation derives each caller's set from provenance.
+# Generator parameters and expected per-caller package selections.
 GENERATOR_RELEASE_PACKAGE_DIRS_JSON='${generator_release_package_dirs_json}'
 GENERATOR_RELEASE_PACKAGE_DIRS_SHELL='${generator_release_package_dirs_shell}'
 GENERATOR_RELEASE_PACKAGE_DIR_FLAG='${generator_release_package_dir_flag}'
+EXPECTED_RELEASE_CALLER_PACKAGE_DIRS_JSON='${expected_release_caller_package_dirs_json}'
 EXPECTED_RELEASE_ASSETS_JSON='${release_assets_json}'
 EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES='${release_approved_packages_csv}'
 EXPECTED_RELEASE_LANE_PREFLIGHT_SHA256='${release_lane_preflight_sha256}'
@@ -3404,8 +3464,31 @@ def expected_package_directories_assignment():
     tokens = generator_provenance_tokens()
     if tokens is None:
         return None
+    try:
+        caller_package_directories = json.loads(
+            os.environ.get("RELEASE_CALLER_PACKAGE_DIRS_JSON", "")
+        )
+    except ValueError:
+        return None
+    if (
+        not isinstance(caller_package_directories, list)
+        or not caller_package_directories
+        or any(
+            not isinstance(directory, str)
+            or re.fullmatch(
+                r"[A-Za-z0-9._][A-Za-z0-9._-]*(/[A-Za-z0-9._][A-Za-z0-9._-]*)*",
+                directory,
+            ) is None
+            or (directory != "." and any(
+                segment in (".", "..") for segment in directory.split("/")
+            ))
+            for directory in caller_package_directories
+        )
+        or len(set(caller_package_directories)) != len(caller_package_directories)
+    ):
+        return None
     package_directories = ["."]
-    exact_directories = False
+    package_directory_mode = None
     index = 2
     while index < len(tokens):
         option = tokens[index]
@@ -3424,34 +3507,20 @@ def expected_package_directories_assignment():
             segment in (".", "..") for segment in directory.split("/")
         ):
             return None
-        if option == "--only-package-dir":
-            if not exact_directories:
-                package_directories = []
-                exact_directories = True
-        elif exact_directories:
+        if package_directory_mode is not None and option != package_directory_mode:
             return None
+        if package_directory_mode is None and option == "--only-package-dir":
+            package_directories = []
+        package_directory_mode = option
         if directory in package_directories:
             return None
         package_directories.append(directory)
         index += 2
+    if package_directories != caller_package_directories:
+        return None
     package_directories_shell = " ".join(
         shlex.quote(directory) for directory in package_directories
     )
-    caller_package_directories_shell = os.environ.get(
-        "RELEASE_CALLER_PACKAGE_DIRS_SHELL"
-    )
-    if package_directories_shell != caller_package_directories_shell:
-        return None
-    caller_package_directories_json = os.environ.get(
-        "RELEASE_CALLER_PACKAGE_DIRS_JSON", ""
-    )
-    if caller_package_directories_json:
-        try:
-            caller_package_directories = json.loads(caller_package_directories_json)
-        except ValueError:
-            return None
-        if caller_package_directories != package_directories:
-            return None
     return "package_dirs=(" + package_directories_shell + ")"
 
 
@@ -4913,30 +4982,36 @@ while IFS= read -r release_workflow; do
   fi
   workflow_package_dirs_json=""
   workflow_package_dirs_shell=""
-  if [ "$release_mode" = release-node ]; then
-    workflow_package_dirs_json="$(sed -n -E "s/^[[:space:]]+package-dirs: '([^']+)'$/\1/p" "$release_workflow" | head -n 1)"
-    [ -n "$workflow_package_dirs_json" ] \
-      || fail "$release_workflow does not declare package-dirs in its node release caller"
-    workflow_package_dirs_shell="$(python3 - "$workflow_package_dirs_json" <<'PY'
+  workflow_relative_path="${release_workflow#"$root"/}"
+  if ! workflow_package_dirs_json="$(python3 - "$EXPECTED_RELEASE_CALLER_PACKAGE_DIRS_JSON" "$workflow_relative_path" <<'PY'
+import json
+import sys
+
+try:
+    callers = json.loads(sys.argv[1])
+except ValueError as error:
+    raise SystemExit(f"expected release caller selections are invalid: {error}")
+if not isinstance(callers, dict):
+    raise SystemExit("expected release caller selections must be a JSON object")
+directories = callers.get(sys.argv[2])
+if not isinstance(directories, list) or not directories:
+    raise SystemExit("release caller has no pinned package-directory selection")
+print(json.dumps(directories, separators=(",", ":")))
+PY
+)"; then
+    fail "$release_workflow has no pinned package-directory selection; regenerate the contract test with --release-caller-package-dirs"
+    continue
+  fi
+  if ! workflow_package_dirs_shell="$(python3 - "$workflow_package_dirs_json" <<'PY'
 import json
 import shlex
 import sys
 
-directories = json.loads(sys.argv[1])
-if (
-    not isinstance(directories, list)
-    or not directories
-    or any(not isinstance(directory, str) or not directory for directory in directories)
-):
-    raise SystemExit("package-dirs must be a non-empty JSON array of non-empty strings")
-print(" ".join(shlex.quote(directory) for directory in directories))
+print(" ".join(shlex.quote(directory) for directory in json.loads(sys.argv[1])))
 PY
-    )" \
-      || fail "$release_workflow has invalid package-dirs JSON"
-  else
-    workflow_package_dirs_shell="$(sed -n -E 's/^[[:space:]]+package_dirs=\((.*)\)$/\1/p' "$release_workflow" | head -n 1)"
-    [ -n "$workflow_package_dirs_shell" ] \
-      || fail "$release_workflow does not declare package_dirs for version stamping"
+)"; then
+    fail "$release_workflow has invalid pinned package-directory JSON"
+    continue
   fi
   grep -qF "run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}" "$release_workflow" \
     || fail "$release_workflow lacks the resolved-version run title required for idempotent dispatch"
@@ -5450,7 +5525,6 @@ PY
   # fallback would put every adopter without it on the untested path.
   CONTRACT_REF="$CONTRACT_REF" \
     RELEASE_CALLER_PACKAGE_DIRS_JSON="$workflow_package_dirs_json" \
-    RELEASE_CALLER_PACKAGE_DIRS_SHELL="$workflow_package_dirs_shell" \
     python3 "$work/release-shape.py" "$release_workflow" \
     || fail "$release_workflow: see above"
 

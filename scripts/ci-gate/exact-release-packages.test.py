@@ -54,6 +54,10 @@ class ExactReleasePackagesTests(unittest.TestCase):
                     self.assertIn("GENERATOR_RELEASE_PACKAGE_DIRS_JSON='[\"packages/cli-schema\"]'", result.stdout)
                     self.assertIn("GENERATOR_RELEASE_PACKAGE_DIRS_SHELL='packages/cli-schema'", result.stdout)
                     self.assertIn("GENERATOR_RELEASE_PACKAGE_DIR_FLAG='--only-package-dir'", result.stdout)
+                    self.assertIn(
+                        "EXPECTED_RELEASE_CALLER_PACKAGE_DIRS_JSON='{\".github/workflows/release.yml\":[\"packages/cli-schema\"]}'",
+                        result.stdout,
+                    )
                 else:
                     self.assertIn('--only-package-dir packages/cli-schema', result.stdout)
                     self.assertIn('package_dirs=(packages/cli-schema)', result.stdout)

@@ -517,8 +517,8 @@ grep -q 'EXPECTED_RELEASE_NODE_VERSION="22.23.1"' <<<"$custom_contract" \
   && grep -q 'EXPECTED_RELEASE_SCOPE="@acme"' <<<"$custom_contract" \
   && grep -qF "GENERATOR_RELEASE_PACKAGE_DIRS_JSON='[\".\",\"compat\"]'" <<<"$custom_contract" \
   && grep -qF 'RELEASE_CALLER_PACKAGE_DIRS_JSON="$workflow_package_dirs_json"' <<<"$custom_contract" \
-  && grep -qF 'RELEASE_CALLER_PACKAGE_DIRS_SHELL="$workflow_package_dirs_shell"' <<<"$custom_contract" \
   && grep -qF "GENERATOR_RELEASE_PACKAGE_DIR_FLAG='--package-dir'" <<<"$custom_contract" \
+  && grep -qF "EXPECTED_RELEASE_CALLER_PACKAGE_DIRS_JSON='{\".github/workflows/release.yml\":[\".\",\"compat\"]}'" <<<"$custom_contract" \
   && grep -qF "EXPECTED_RELEASE_ASSETS_JSON='[\"contract/schema.graphql\",\"contract/schema.sha256\"]'" <<<"$custom_contract" \
   && grep -qF "package-dirs: '[\".\",\"compat\"]'" <<<"$custom_release" \
   && pass "contract-test preserves generator parameters and checks caller-specific directories" \
@@ -1345,7 +1345,9 @@ build_adopter "$multi_release_adopter"
 bash "$gen" release-node "$sha" >"$multi_release_adopter/.github/workflows/release.yml"
 bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
   >"$multi_release_adopter/.github/workflows/release-cli-schema.yml"
-bash "$gen" contract-test "$sha" >"$multi_release_adopter/scripts/changelog-contract.test.sh"
+bash "$gen" contract-test "$sha" \
+  --release-caller-package-dirs .github/workflows/release-cli-schema.yml=packages/cli-schema \
+  >"$multi_release_adopter/scripts/changelog-contract.test.sh"
 chmod +x "$multi_release_adopter/scripts/changelog-contract.test.sh"
 run_adopter "$multi_release_adopter" \
   && pass "generated contract validates multiple release callers with distinct package selections" \
@@ -1368,6 +1370,25 @@ chmod +x "$custom_adopter/scripts/changelog-contract.test.sh"
 run_adopter "$custom_adopter" \
   && pass "custom release caller and contract test accept the same parameters (#520)" \
   || fail "matching custom release parameters were rejected: $(tail -2 "$tmproot/run.out")"
+sed -i 's/--package-dir compat/--package-dir ignored --only-package-dir . --only-package-dir compat/' \
+  "$custom_adopter/.github/workflows/release.yml"
+run_adopter "$custom_adopter" \
+  && fail "custom contract accepted mixed additive and exact package selection flags" \
+  || {
+    grep -qF 'does not declare valid package directories in generator provenance (#1717)' "$tmproot/run.out" \
+      && pass "custom contract rejects mixed package selection modes" \
+      || fail "mixed package selection was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+  }
+printf '%s\n' "$custom_release" >"$custom_adopter/.github/workflows/release.yml"
+sed -i 's/compat/other/g' "$custom_adopter/.github/workflows/release.yml"
+run_adopter "$custom_adopter" \
+  && fail "custom contract accepted a coordinated package-selection change" \
+  || {
+    grep -qF 'does not declare valid package directories in generator provenance (#1717)' "$tmproot/run.out" \
+      && pass "custom contract pins package selection independently of workflow provenance" \
+      || fail "coordinated package selection was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+  }
+printf '%s\n' "$custom_release" >"$custom_adopter/.github/workflows/release.yml"
 sed -i "s/scope: '@acme'/scope: '@other'/" \
   "$custom_adopter/.github/workflows/release.yml"
 run_adopter "$custom_adopter" \

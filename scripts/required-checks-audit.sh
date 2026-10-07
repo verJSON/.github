@@ -281,7 +281,26 @@ if not dirs_match:
 dirs = json.loads(dirs_match.group(1))
 if not isinstance(dirs, list) or not dirs or not all(isinstance(item, str) for item in dirs):
     raise SystemExit(1)
-print(json.dumps({"scope": scope, "node": node, "package_dir_flag": package_dir_flag, "package_dirs": dirs}, separators=(",", ":")))
+callers = json.loads(value("EXPECTED_RELEASE_CALLER_PACKAGE_DIRS_JSON", "'"))
+if not isinstance(callers, dict) or callers.get(".github/workflows/release.yml") != dirs:
+    raise SystemExit(1)
+for path, package_dirs in callers.items():
+    if (
+        not isinstance(path, str)
+        or re.fullmatch(r"\.github/workflows/[A-Za-z0-9._-]+\.ya?ml", path) is None
+        or any(part in (".", "..") for part in path.split("/"))
+        or not isinstance(package_dirs, list)
+        or not package_dirs
+        or any(
+            not isinstance(item, str)
+            or re.fullmatch(r"[A-Za-z0-9._][A-Za-z0-9._-]*(/[A-Za-z0-9._][A-Za-z0-9._-]*)*", item) is None
+            or (item != "." and any(part in (".", "..") for part in item.split("/")))
+            for item in package_dirs
+        )
+        or len(set(package_dirs)) != len(package_dirs)
+    ):
+        raise SystemExit(1)
+print(json.dumps({"scope": scope, "node": node, "package_dir_flag": package_dir_flag, "package_dirs": dirs, "expected_release_callers": callers}, separators=(",", ":")))
 PY
   )" || {
     echo "::error::phase=audit repo=$repo result=generated-contract-parameters-invalid"
@@ -306,6 +325,10 @@ PY
     fi
     args+=("$package_dir_flag" "$package_dir")
   done < <(jq -r '.package_dirs[]' <<<"$params")
+  while IFS=$'\t' read -r caller_path caller_dirs; do
+    [ "$caller_path" = .github/workflows/release.yml ] && continue
+    args+=(--release-caller-package-dirs "$caller_path=$caller_dirs")
+  done < <(jq -r '.expected_release_callers | to_entries[] | [.key, (.value | join(","))] | @tsv' <<<"$params")
 
   # `pr-gate` takes the pin plus an optional `--untrusted-runner` label list —
   # the one knob that changes its output. That knob is not recorded anywhere
