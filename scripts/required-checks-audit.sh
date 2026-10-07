@@ -325,9 +325,10 @@ PY
     fi
     args+=("$package_dir_flag" "$package_dir")
   done < <(jq -r '.package_dirs[]' <<<"$params")
+  local contract_test_args=("${args[@]}")
   while IFS=$'\t' read -r caller_path caller_dirs; do
     [ "$caller_path" = .github/workflows/release.yml ] && continue
-    args+=(--release-caller-package-dirs "$caller_path=$caller_dirs")
+    contract_test_args+=(--release-caller-package-dirs "$caller_path=$caller_dirs")
   done < <(jq -r '.expected_release_callers | to_entries[] | [.key, (.value | join(","))] | @tsv' <<<"$params")
 
   # `pr-gate` takes the pin plus an optional `--untrusted-runner` label list —
@@ -362,7 +363,7 @@ PY
   local generator_env=(env -i "PATH=$PATH" "HOME=$tmp/home" "LC_ALL=C" "REPO_ROOT=$repo_root")
   if ! "${generator_env[@]}" "$tmp/gen-changelog-caller.sh" "$mode" "$pin" >"$tmp/expected/changelog.yml" 2>/dev/null ||
     ! "${generator_env[@]}" "$tmp/gen-changelog-caller.sh" renderer "$pin" >"$tmp/expected/render-next.sh" 2>/dev/null ||
-    ! "${generator_env[@]}" "$tmp/gen-changelog-caller.sh" contract-test "$pin" "${args[@]}" >"$tmp/expected/changelog-contract.test.sh" 2>/dev/null ||
+    ! "${generator_env[@]}" "$tmp/gen-changelog-caller.sh" contract-test "$pin" "${contract_test_args[@]}" >"$tmp/expected/changelog-contract.test.sh" 2>/dev/null ||
     ! "${generator_env[@]}" "$tmp/gen-changelog-caller.sh" release-node "$pin" "${args[@]}" >"$tmp/expected/release.yml" 2>/dev/null ||
     ! "${generator_env[@]}" "$tmp/gen-changelog-caller.sh" pr-gate "$pin" "${pr_gate_args[@]}" >"$tmp/expected/changelog-contract.yml" 2>/dev/null; then
     echo "::error::phase=audit repo=$repo result=canonical-generation-failed pin=$pin"

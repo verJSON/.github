@@ -1384,7 +1384,7 @@ sed -i 's/compat/other/g' "$custom_adopter/.github/workflows/release.yml"
 run_adopter "$custom_adopter" \
   && fail "custom contract accepted a coordinated package-selection change" \
   || {
-    grep -qF 'does not declare valid package directories in generator provenance (#1717)' "$tmproot/run.out" \
+    grep -qF 'does not stamp every package directory selected for publication (#557)' "$tmproot/run.out" \
       && pass "custom contract pins package selection independently of workflow provenance" \
       || fail "coordinated package selection was rejected for another reason: $(tail -2 "$tmproot/run.out")"
   }
@@ -3186,8 +3186,8 @@ grep -qF 'configures credential-sensitive environment outside the credentialed s
   && pass "the generated suite rejects inherited LD_AUDIT in token step" \
   || fail "the generated suite rejected an LD_AUDIT mutation for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a workflow changing dynamic library search paths (#1712)" configure_workflow_loader_env LD_LIBRARY_PATH
-grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
-  && pass "the generated suite rejects inherited LD_LIBRARY_PATH in token step" \
+grep -qF 'inherits unapproved job-level environment in release verification (#1717)' "$tmproot/run.out" \
+  && pass "the generated suite rejects job-level LD_LIBRARY_PATH in release verification" \
   || fail "the generated suite rejected an LD_LIBRARY_PATH mutation for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a workflow logging Git authorization values through curl and Trace2 (#1712)" configure_workflow_git_trace
 grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
