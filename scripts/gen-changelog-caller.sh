@@ -2710,8 +2710,11 @@ emit_contract_test() {
   local release_assets_json='[' release_asset_sep=''
   local generator_release_package_dirs_json="$selected_package_dirs_json"
   local generator_release_package_dirs_shell=''
+  local generator_release_package_dir_flag=--package-dir
   local release_approved_packages_csv='' release_approved_package=''
   local release_lane_names='' release_lane_env='' release_lane_preflight='' release_lane_preflight_sha256=''
+  [ "$release_package_dirs_exact" = true ] \
+    && generator_release_package_dir_flag=--only-package-dir
   printf -v generator_release_package_dirs_shell '%q ' "${release_package_dirs[@]}"
   generator_release_package_dirs_shell="${generator_release_package_dirs_shell% }"
   for release_asset in "${release_assets[@]}"; do
@@ -2787,6 +2790,7 @@ EXPECTED_RELEASE_NODE_VERSION="${release_node_version}"
 # Source-audit parameters only; runtime validation derives each caller's set from provenance.
 GENERATOR_RELEASE_PACKAGE_DIRS_JSON='${generator_release_package_dirs_json}'
 GENERATOR_RELEASE_PACKAGE_DIRS_SHELL='${generator_release_package_dirs_shell}'
+GENERATOR_RELEASE_PACKAGE_DIR_FLAG='${generator_release_package_dir_flag}'
 EXPECTED_RELEASE_ASSETS_JSON='${release_assets_json}'
 EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES='${release_approved_packages_csv}'
 EXPECTED_RELEASE_LANE_PREFLIGHT_SHA256='${release_lane_preflight_sha256}'
@@ -4054,7 +4058,7 @@ APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
     "release-snapshot": "65c9bdf63f9032dd4ecdf2d1123586f3deca3a5f9b11dc7b2a29106b7d238502",
 }
 APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256 = {
-    "release-node": "ff401d1c53b4cfa4f794bd3989d809a2b1952388722553784fcc2ccdf4c56638",
+    "release-node": "897b9aa99ddd22187414228b463d8bdeab8609b8e15acad66708b86654d5e407",
     "release-artifact": "57a4aafc159687ccb3879c7ad5aff6ea940c753380233b7cbf18ba0606bd2ab1",
     "release-snapshot": "c7531cc0f0f4e67fe00ff6c41c37d8a487091706bd5cbf688290cf891347dd57",
 }
@@ -4590,6 +4594,13 @@ for step in verification_job_steps:
         # hashes its complete YAML block. Omit it here because runner labels vary.
         continue
     body = run_body(step)
+    if body is not None:
+        contract_ref = os.environ.get("CONTRACT_REF", "")
+        if contract_ref:
+            body = body.replace(
+                f"release-snapshot {contract_ref}",
+                "release-snapshot <contract-ref>",
+            )
     if body is not None and step_name == "Refuse a package this release can never publish":
         body_lines = body.splitlines()
         assignment_lines = [

@@ -53,6 +53,7 @@ class ExactReleasePackagesTests(unittest.TestCase):
                 if mode == 'contract-test':
                     self.assertIn("GENERATOR_RELEASE_PACKAGE_DIRS_JSON='[\"packages/cli-schema\"]'", result.stdout)
                     self.assertIn("GENERATOR_RELEASE_PACKAGE_DIRS_SHELL='packages/cli-schema'", result.stdout)
+                    self.assertIn("GENERATOR_RELEASE_PACKAGE_DIR_FLAG='--only-package-dir'", result.stdout)
                 else:
                     self.assertIn('--only-package-dir packages/cli-schema', result.stdout)
                     self.assertIn('package_dirs=(packages/cli-schema)', result.stdout)

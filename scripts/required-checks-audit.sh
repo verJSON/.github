@@ -272,13 +272,16 @@ if contract_ref != sys.argv[2]:
     raise SystemExit(1)
 scope = value("EXPECTED_RELEASE_SCOPE")
 node = value("EXPECTED_RELEASE_NODE_VERSION")
+package_dir_flag = value("GENERATOR_RELEASE_PACKAGE_DIR_FLAG", "'")
+if package_dir_flag not in ("--package-dir", "--only-package-dir"):
+    raise SystemExit(1)
 dirs_match = re.search(r"^GENERATOR_RELEASE_PACKAGE_DIRS_JSON='([^']*)'$", text, re.MULTILINE)
 if not dirs_match:
     raise SystemExit(1)
 dirs = json.loads(dirs_match.group(1))
 if not isinstance(dirs, list) or not dirs or not all(isinstance(item, str) for item in dirs):
     raise SystemExit(1)
-print(json.dumps({"scope": scope, "node": node, "package_dirs": dirs}, separators=(",", ":")))
+print(json.dumps({"scope": scope, "node": node, "package_dir_flag": package_dir_flag, "package_dirs": dirs}, separators=(",", ":")))
 PY
   )" || {
     echo "::error::phase=audit repo=$repo result=generated-contract-parameters-invalid"
@@ -296,9 +299,12 @@ PY
   mkdir -p "$tmp/home"
 
   local args=(--scope "$scope" --node-version "$node")
+  package_dir_flag="$(jq -r .package_dir_flag <<<"$params")"
   while IFS= read -r package_dir; do
-    [ "$package_dir" = . ] && continue
-    args+=(--package-dir "$package_dir")
+    if [ "$package_dir_flag" = --package-dir ] && [ "$package_dir" = . ]; then
+      continue
+    fi
+    args+=("$package_dir_flag" "$package_dir")
   done < <(jq -r '.package_dirs[]' <<<"$params")
 
   # `pr-gate` takes the pin plus an optional `--untrusted-runner` label list —

@@ -518,6 +518,7 @@ grep -q 'EXPECTED_RELEASE_NODE_VERSION="22.23.1"' <<<"$custom_contract" \
   && grep -qF "GENERATOR_RELEASE_PACKAGE_DIRS_JSON='[\".\",\"compat\"]'" <<<"$custom_contract" \
   && grep -qF 'RELEASE_CALLER_PACKAGE_DIRS_JSON="$workflow_package_dirs_json"' <<<"$custom_contract" \
   && grep -qF 'RELEASE_CALLER_PACKAGE_DIRS_SHELL="$workflow_package_dirs_shell"' <<<"$custom_contract" \
+  && grep -qF "GENERATOR_RELEASE_PACKAGE_DIR_FLAG='--package-dir'" <<<"$custom_contract" \
   && grep -qF "EXPECTED_RELEASE_ASSETS_JSON='[\"contract/schema.graphql\",\"contract/schema.sha256\"]'" <<<"$custom_contract" \
   && grep -qF "package-dirs: '[\".\",\"compat\"]'" <<<"$custom_release" \
   && pass "contract-test preserves generator parameters and checks caller-specific directories" \
