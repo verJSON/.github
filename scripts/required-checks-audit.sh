@@ -272,7 +272,7 @@ if contract_ref != sys.argv[2]:
     raise SystemExit(1)
 scope = value("EXPECTED_RELEASE_SCOPE")
 node = value("EXPECTED_RELEASE_NODE_VERSION")
-dirs_match = re.search(r"^EXPECTED_RELEASE_PACKAGE_DIRS_JSON='([^']*)'$", text, re.MULTILINE)
+dirs_match = re.search(r"^GENERATOR_RELEASE_PACKAGE_DIRS_JSON='([^']*)'$", text, re.MULTILINE)
 if not dirs_match:
     raise SystemExit(1)
 dirs = json.loads(dirs_match.group(1))

@@ -2708,8 +2708,12 @@ emit_contract_test() {
   # a quoted heredoc, so the body cannot accidentally expand a generator-side
   # variable into an adopter's test.
   local release_assets_json='[' release_asset_sep=''
+  local generator_release_package_dirs_json="$selected_package_dirs_json"
+  local generator_release_package_dirs_shell=''
   local release_approved_packages_csv='' release_approved_package=''
   local release_lane_names='' release_lane_env='' release_lane_preflight='' release_lane_preflight_sha256=''
+  printf -v generator_release_package_dirs_shell '%q ' "${release_package_dirs[@]}"
+  generator_release_package_dirs_shell="${generator_release_package_dirs_shell% }"
   for release_asset in "${release_assets[@]}"; do
     release_assets_json="$release_assets_json$release_asset_sep\"$release_asset\""
     release_asset_sep=,
@@ -2780,6 +2784,9 @@ ADR_INDEX_TEST_SHA256="${adr_index_test_sha256}"
 EXPECTED_CODEOWNERS_SHA256="${codeowners_sha256}"
 EXPECTED_RELEASE_SCOPE="${release_scope}"
 EXPECTED_RELEASE_NODE_VERSION="${release_node_version}"
+# Source-audit parameters only; runtime validation derives each caller's set from provenance.
+GENERATOR_RELEASE_PACKAGE_DIRS_JSON='${generator_release_package_dirs_json}'
+GENERATOR_RELEASE_PACKAGE_DIRS_SHELL='${generator_release_package_dirs_shell}'
 EXPECTED_RELEASE_ASSETS_JSON='${release_assets_json}'
 EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES='${release_approved_packages_csv}'
 EXPECTED_RELEASE_LANE_PREFLIGHT_SHA256='${release_lane_preflight_sha256}'

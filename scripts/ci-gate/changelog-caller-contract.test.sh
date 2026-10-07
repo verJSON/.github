@@ -515,11 +515,12 @@ rm -rf "$stamp_root"
 
 grep -q 'EXPECTED_RELEASE_NODE_VERSION="22.23.1"' <<<"$custom_contract" \
   && grep -q 'EXPECTED_RELEASE_SCOPE="@acme"' <<<"$custom_contract" \
+  && grep -qF "GENERATOR_RELEASE_PACKAGE_DIRS_JSON='[\".\",\"compat\"]'" <<<"$custom_contract" \
   && grep -qF 'RELEASE_CALLER_PACKAGE_DIRS_JSON="$workflow_package_dirs_json"' <<<"$custom_contract" \
   && grep -qF 'RELEASE_CALLER_PACKAGE_DIRS_SHELL="$workflow_package_dirs_shell"' <<<"$custom_contract" \
   && grep -qF "EXPECTED_RELEASE_ASSETS_JSON='[\"contract/schema.graphql\",\"contract/schema.sha256\"]'" <<<"$custom_contract" \
   && grep -qF "package-dirs: '[\".\",\"compat\"]'" <<<"$custom_release" \
-  && pass "contract-test checks caller-specific package-directory parameters" \
+  && pass "contract-test preserves generator parameters and checks caller-specific directories" \
   || fail "contract-test does not bind the selected release parameters"
 
 for bad_args in \
