@@ -3483,6 +3483,20 @@ fi
 # --------------------------------------------------------------------------
 
 snapshot_release="$(bash "$gen" release-snapshot "$sha")"
+release_auth_environment_note='# The step clears shell startup, loader, and Git settings that could alter this lookup.'
+release_auth_isolation_note='# Run Git with env -i and send its auth header over stdin; do not export it.'
+grep -qF -- "$release_auth_environment_note" <<<"$release_node_workflow" \
+  && grep -qF -- "$release_auth_isolation_note" <<<"$release_node_workflow" \
+  && pass "release-node documents its isolated release-state Git environment (#1715)" \
+  || fail "release-node omits the release-state environment explanation (#1715)"
+grep -qF -- "$release_auth_environment_note" <<<"$artifact_release" \
+  && grep -qF -- "$release_auth_isolation_note" <<<"$artifact_release" \
+  && pass "release-artifact documents its isolated release-state Git environment (#1715)" \
+  || fail "release-artifact omits the release-state environment explanation (#1715)"
+grep -qF -- "$release_auth_environment_note" <<<"$snapshot_release" \
+  && grep -qF -- "$release_auth_isolation_note" <<<"$snapshot_release" \
+  && pass "release-snapshot documents its isolated release-state Git environment (#1715)" \
+  || fail "release-snapshot omits the release-state environment explanation (#1715)"
 grep -qE '^  verify:$' <<<"$snapshot_release" \
   && grep -qE '^  snapshot:$' <<<"$snapshot_release" \
   && grep -qE '^  publish:$' <<<"$snapshot_release" \

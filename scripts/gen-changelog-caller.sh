@@ -982,6 +982,8 @@ ${release_plan_step}
       - name: Resolve restart-safe release state
         id: release-state
         if: steps.release-version.outputs.selected == 'true'
+        # The step clears shell startup, loader, and Git settings that could alter this lookup.
+        # Run Git with env -i and send its auth header over stdin; do not export it.
         env:
           VERSION: \${{ steps.release-version.outputs.version }}
           GITHUB_TOKEN: \${{ github.token }}
@@ -1523,6 +1525,8 @@ ${release_plan_step}
 ${required_lane_validation_step}
       - name: Resolve restart-safe release state
         id: release-state
+        # The step clears shell startup, loader, and Git settings that could alter this lookup.
+        # Run Git with env -i and send its auth header over stdin; do not export it.
         env:
           VERSION: \${{ steps.release-version.outputs.version }}
           GITHUB_TOKEN: \${{ github.token }}
@@ -2007,6 +2011,8 @@ ${release_version_guard_step}
 ${release_plan_step}
       - name: Resolve restart-safe release state
         id: release-state
+        # The step clears shell startup, loader, and Git settings that could alter this lookup.
+        # Run Git with env -i and send its auth header over stdin; do not export it.
         env:
           VERSION: \${{ steps.release-version.outputs.version }}
           GITHUB_TOKEN: \${{ github.token }}
