@@ -337,12 +337,8 @@ if "scripts/release-verify.sh" not in suite:
     bad("`verify` offers no scripts/release-verify.sh hook, so an adopter whose "
         "suite is not `npm test` must edit a generated artifact")
 
-# #569. setup-node's npmrc expands NODE_AUTH_TOKEN at command execution time.
-# The install step already receives the private-package read credential, but the
-# supported verification hook/default suite is a separate step and must receive
-# it independently. Keep the grant step-scoped: never job-wide, and never on an
-# unrelated step.
-private_token = "${{ secrets.NODE_AUTH_TOKEN }}"
+# #1712. The verification hook runs repository-controlled code after private
+# dependencies have been acquired, so it must explicitly clear the package token.
 suite_steps = [
     step for step in steps_of(verify)
     if step.get("name") == "Run the release verification suite"
@@ -352,10 +348,9 @@ if len(suite_steps) != 1:
 else:
     suite_step = suite_steps[0]
     suite_env = suite_step.get("env") or {}
-    token = str(suite_env.get("NODE_AUTH_TOKEN") or "")
-    if token.strip() != private_token:
-        bad("the release verification hook/default suite does not receive "
-            "NODE_AUTH_TOKEN from secrets.NODE_AUTH_TOKEN (#569)")
+    if suite_env.get("NODE_AUTH_TOKEN") != "":
+        bad("the release verification hook/default suite must explicitly "
+            "clear NODE_AUTH_TOKEN (#1712)")
     if str(suite_env.get("PACKAGE_VERSION") or "").strip() != "${{ steps.release-version.outputs.package-version }}":
         bad("the release verification suite cannot diagnose the stamped dispatch version (#862)")
     diagnostic_command = (
@@ -370,6 +365,8 @@ else:
     ):
         bad("the release verification step does not execute the canonical "
             "stamped-version failure diagnostic (#862)")
+# Used to reject the private credential anywhere outside dependency acquisition.
+private_token = "${{ secrets.NODE_AUTH_TOKEN }}"
 for job_name, job in jobs.items():
     job_token = str((job.get("env") or {}).get("NODE_AUTH_TOKEN") or "")
     if job_token == private_token:
@@ -465,7 +462,7 @@ hollow_out_the_suite() {
   sed -i '/npm test || verification_status=/c\              echo skipping || verification_status=$?' "$1"
 }
 drop_verify_hook() { sed -i '/scripts\/release-verify.sh/d' "$1"; }
-drop_verify_suite_token() {
+drop_verify_suite_token_blank() {
   sed -i '/^      - name: Run the release verification suite$/,/^      - name:/ {/NODE_AUTH_TOKEN:/d;}' "$1"
 }
 shadow_stamped_version_header() {
@@ -532,7 +529,7 @@ expect_shape_rejection "the temporary ORG_ADMIN_TOKEN release credential" restor
 expect_shape_rejection "verifying a ref other than github.sha" verify_a_different_ref
 expect_shape_rejection "a verify job that runs no suite" hollow_out_the_suite
 expect_shape_rejection "a verify job with no release-verify.sh hook" drop_verify_hook
-expect_shape_rejection "a release verification suite without private-package auth (#569)" drop_verify_suite_token
+expect_shape_rejection "a release verification suite without an explicit credential blank (#1712)" drop_verify_suite_token_blank
 expect_shape_rejection "stamped-version warning text shadowed outside the generated header (#862)" shadow_stamped_version_header
 grep -qF 'the stamped-version warning is not inside the generated header before `on:` (#862)' "$tmp/shape.out" \
   && pass "the shape validator rejects the shadowed warning for leaving the header" \
@@ -666,6 +663,14 @@ title: Plan
 
 Plan preview.
 EOF
+git init -q --bare "$tmp/release-remote.git"
+git -C "$tmp/sandbox" init -q --initial-branch=main
+git -C "$tmp/sandbox" config user.name 'Changelog caller test'
+git -C "$tmp/sandbox" config user.email 'changelog-caller-test@example.invalid'
+git -C "$tmp/sandbox" add CHANGELOG NEXT .changelog-contract
+git -C "$tmp/sandbox" commit -qm 'Set up release-state fixture'
+git -C "$tmp/sandbox" remote add origin "$tmp/release-remote.git"
+git -C "$tmp/sandbox" push -qu origin main
 
 if run_guard "$branch_guard" DISPATCH_REF=refs/heads/main DEFAULT_BRANCH=main; then
   pass "the branch guard admits a dispatch from the default branch"
@@ -784,35 +789,49 @@ else
   fail "an empty component stream failed instead of producing a no-release plan: $(cat "$tmp/guard.out")"
 fi
 
-mkdir -p "$tmp/sandbox/CHANGELOG"
 printf 'immutable\n' >"$tmp/sandbox/CHANGELOG/v1.2.3.md"
-printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$tmp/bin/git"
-chmod +x "$tmp/bin/git"
-if run_guard "$tag_guard" VERSION=v1.2.3 GITHUB_OUTPUT="$tmp/release-state" "PATH=$tmp/bin:$PATH"; then
+git -C "$tmp/sandbox" add CHANGELOG/v1.2.3.md
+git -C "$tmp/sandbox" commit -qm 'Add tagged immutable release snapshot'
+git -C "$tmp/sandbox" tag v1.2.3
+git -C "$tmp/sandbox" push -qu origin main
+git -C "$tmp/sandbox" push -qu origin refs/tags/v1.2.3
+: >"$tmp/release-state"
+if run_guard "$tag_guard" VERSION=v1.2.3 GITHUB_OUTPUT="$tmp/release-state"; then
   grep -q '^snapshot-exists=true$' "$tmp/release-state" \
     && pass "the release-state guard resumes a matching existing snapshot" \
-    || fail "the release-state guard did not expose the existing snapshot"
+    || fail "the release-state guard did not expose an existing snapshot"
 else
   fail "the release-state guard rejected a matching existing snapshot: $(cat "$tmp/guard.out")"
 fi
-printf '%s\n' '#!/usr/bin/env bash' \
-  'if [ "$1" = diff ]; then exit 1; fi' \
-  'exit 0' >"$tmp/bin/git"
-if run_guard "$tag_guard" VERSION=v1.2.3 GITHUB_OUTPUT="$tmp/release-state" "PATH=$tmp/bin:$PATH"; then
+printf 'changed after release\n' >"$tmp/sandbox/CHANGELOG/v1.2.3.md"
+git -C "$tmp/sandbox" add CHANGELOG/v1.2.3.md
+git -C "$tmp/sandbox" commit -qm 'Change released snapshot on default branch'
+git -C "$tmp/sandbox" push -qu origin main
+: >"$tmp/release-state"
+if run_guard "$tag_guard" VERSION=v1.2.3 GITHUB_OUTPUT="$tmp/release-state"; then
   fail "the release-state guard admitted a conflicting existing tag"
 else
   pass "the release-state guard rejects a conflicting existing tag"
 fi
-rm -rf "$tmp/sandbox/CHANGELOG"
-printf '%s\n' '#!/usr/bin/env bash' 'exit 2' >"$tmp/bin/git"
-if run_guard "$tag_guard" VERSION=v1.2.3 GITHUB_OUTPUT="$tmp/release-state" "PATH=$tmp/bin:$PATH"; then
-  pass "the release-state guard admits an unused version"
+: >"$tmp/release-state"
+if run_guard "$tag_guard" VERSION=v1.2.4 GITHUB_OUTPUT="$tmp/release-state"; then
+  grep -q '^snapshot-exists=false$' "$tmp/release-state" \
+    && pass "the release-state guard admits an unused version" \
+    || fail "the release-state guard did not expose unused release state"
 else
   fail "the release-state guard rejected an unused version: $(cat "$tmp/guard.out")"
 fi
-mkdir -p "$tmp/sandbox/CHANGELOG"
-printf 'immutable\n' >"$tmp/sandbox/CHANGELOG/v1.2.3.md"
-if run_guard "$tag_guard" VERSION=v1.2.3 GITHUB_OUTPUT="$tmp/release-state" "PATH=$tmp/bin:$PATH"; then
+: >"$tmp/release-state"
+git -C "$tmp/sandbox" remote remove origin
+if run_guard "$tag_guard" VERSION=v1.2.4 GITHUB_OUTPUT="$tmp/release-state"; then
+  fail "the release-state guard admitted a version when remote tag state was unavailable"
+else
+  pass "the release-state guard fails closed when remote tag state is unavailable"
+fi
+git -C "$tmp/sandbox" remote add origin "$tmp/release-remote.git"
+printf 'immutable\n' >"$tmp/sandbox/CHANGELOG/v1.2.4.md"
+: >"$tmp/release-state"
+if run_guard "$tag_guard" VERSION=v1.2.4 GITHUB_OUTPUT="$tmp/release-state"; then
   fail "the release-state guard admitted an untagged released snapshot"
 else
   pass "the release-state guard rejects an untagged released snapshot"

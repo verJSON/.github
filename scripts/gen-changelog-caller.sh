@@ -970,6 +970,7 @@ ${release_version_guard_step}
           # pinning only one of them reintroduces the window (#463, #464).
           ref: \${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
       - name: Check out the canonical selection contract
         uses: ${release_checkout}
         with:
@@ -983,13 +984,56 @@ ${release_plan_step}
         if: steps.release-version.outputs.selected == 'true'
         env:
           VERSION: \${{ steps.release-version.outputs.version }}
+          GITHUB_TOKEN: \${{ github.token }}
+          BASH_ENV: ''
+          ENV: ''
+          SHELLOPTS: ''
+          BASHOPTS: ''
+          BASH_XTRACEFD: ''
+          PS4: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          GIT_TRACE_CURL: ''
+          GIT_TRACE_REDACT: ''
+          GIT_EXEC_PATH: ''
+          GIT_CURL_VERBOSE: ''
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_SYSTEM: /dev/null
+          GIT_CONFIG_PARAMETERS: ''
+          GIT_TRACE2: ''
+          GIT_TRACE2_EVENT: ''
+          GIT_TRACE2_PERF: ''
+          GIT_TRACE2_ENV_VARS: ''
+          GIT_TRACE2_CONFIG_PARAMS: ''
         run: |
-          if git ls-remote --exit-code --tags origin "refs/tags/\$VERSION" >/dev/null 2>&1; then
-            git fetch --force origin "refs/tags/\$VERSION:refs/tags/\$VERSION"
+          git_auth_header="\$(builtin printf 'x-access-token:%s' "\$GITHUB_TOKEN" | GITHUB_TOKEN='' /usr/bin/base64 | GITHUB_TOKEN='' /usr/bin/tr -d '\n')"
+          export -n git_auth_header
+          unset GITHUB_TOKEN
+          git_with_release_token() {
+          builtin printf '%s\n' "\$git_auth_header" | /usr/bin/env -i /bin/bash --noprofile --norc -c '
+          IFS= read -r git_auth_header
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic \$git_auth_header"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_GLOBAL=/dev/null
+          export GIT_CONFIG_SYSTEM=/dev/null
+          export GIT_CONFIG_PARAMETERS=''
+          export GIT_CONFIG_VALUE_0
+          exec /usr/bin/git "\$@"
+          ' release-state-git "\$@"
+          }
+          if git_with_release_token ls-remote --exit-code --tags origin "refs/tags/\$VERSION" >/dev/null; then
+            release_tag_lookup_status=0
+          else
+            release_tag_lookup_status=\$?
+          fi
+          if [ "\$release_tag_lookup_status" -eq 0 ]; then
+            git_with_release_token fetch --force origin "refs/tags/\$VERSION:refs/tags/\$VERSION"
             if [ ! -f "CHANGELOG/\$VERSION.md" ] ||
-              ! git cat-file -e "\$VERSION:CHANGELOG/\$VERSION.md" ||
-              ! git merge-base --is-ancestor "\$VERSION" HEAD ||
-              ! git diff --quiet "\$VERSION" HEAD -- "CHANGELOG/\$VERSION.md"; then
+              ! /usr/bin/git cat-file -e "\$VERSION:CHANGELOG/\$VERSION.md" ||
+              ! /usr/bin/git merge-base --is-ancestor "\$VERSION" HEAD ||
+              ! /usr/bin/git diff --quiet "\$VERSION" HEAD -- "CHANGELOG/\$VERSION.md"; then
               echo "::error::Tag \$VERSION exists but is not the immutable release snapshot reachable from this default-branch head. Refusing to resume a conflicting release."
               exit 1
             fi
@@ -998,6 +1042,9 @@ ${release_plan_step}
           elif [ -e "CHANGELOG/\$VERSION.md" ]; then
             echo "::error::CHANGELOG/\$VERSION.md already exists, and a released snapshot is immutable (ADR 0059). Cut the next version instead."
             exit 1
+          elif [ "\$release_tag_lookup_status" -ne 2 ]; then
+            echo "::error::Unable to resolve remote release tag state (git ls-remote exited \$release_tag_lookup_status)." >&2
+            exit "\$release_tag_lookup_status"
           else
             echo "snapshot-exists=false" >> "\$GITHUB_OUTPUT"
             echo "\$VERSION is unused."
@@ -1040,17 +1087,24 @@ ${release_plan_step}
           done
       - name: Install dependencies
         if: steps.release-version.outputs.selected == 'true'
-        run: npm ci
+        run: npm ci --ignore-scripts
         env:
           # NOT GITHUB_TOKEN (#465). A repository-scoped GITHUB_TOKEN cannot read
           # a private GitHub Packages package owned by a DIFFERENT repository, so
           # an adopter with a private @verjson devDependency 401s here. Canonical
-          # node-ci.yml states the same requirement for the same reason.
+          # node-ci.yml states the same requirement for the same reason. Lifecycle
+          # scripts wait until this step-scoped package credential is gone.
           NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}
+      - name: Run dependency lifecycle scripts without credentials
+        if: steps.release-version.outputs.selected == 'true'
+        run: npm rebuild
+        env:
+          NODE_AUTH_TOKEN: ''
       - name: Prepare release package metadata
         if: steps.release-version.outputs.selected == 'true'
         env:
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
+          NODE_AUTH_TOKEN: ''
         run: |
           if [ -e scripts/release-prepare-packages.sh ] && [ ! -x scripts/release-prepare-packages.sh ]; then
             echo "::error::scripts/release-prepare-packages.sh exists but is not executable."
@@ -1063,6 +1117,7 @@ ${release_plan_step}
         if: steps.release-version.outputs.selected == 'true'
         env:
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
+          NODE_AUTH_TOKEN: ''
         run: |
           package_dirs=(${package_dirs_shell})
           for package_dir in "\${package_dirs[@]}"; do
@@ -1071,7 +1126,7 @@ ${release_plan_step}
       - name: Run the release verification suite
         if: steps.release-version.outputs.selected == 'true'
         env:
-          NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}
+          NODE_AUTH_TOKEN: ''
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
         run: |
           # Existence and executability are checked separately on purpose. A
@@ -1456,6 +1511,7 @@ ${release_version_guard_step}
           # pinning only one of them reintroduces the window (#463, #464).
           ref: \${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
       - name: Check out the canonical selection contract
         uses: ${release_checkout}
         with:
@@ -1469,13 +1525,56 @@ ${required_lane_validation_step}
         id: release-state
         env:
           VERSION: \${{ steps.release-version.outputs.version }}
+          GITHUB_TOKEN: \${{ github.token }}
+          BASH_ENV: ''
+          ENV: ''
+          SHELLOPTS: ''
+          BASHOPTS: ''
+          BASH_XTRACEFD: ''
+          PS4: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          GIT_TRACE_CURL: ''
+          GIT_TRACE_REDACT: ''
+          GIT_EXEC_PATH: ''
+          GIT_CURL_VERBOSE: ''
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_SYSTEM: /dev/null
+          GIT_CONFIG_PARAMETERS: ''
+          GIT_TRACE2: ''
+          GIT_TRACE2_EVENT: ''
+          GIT_TRACE2_PERF: ''
+          GIT_TRACE2_ENV_VARS: ''
+          GIT_TRACE2_CONFIG_PARAMS: ''
         run: |
-          if git ls-remote --exit-code --tags origin "refs/tags/\$VERSION" >/dev/null 2>&1; then
-            git fetch --force origin "refs/tags/\$VERSION:refs/tags/\$VERSION"
+          git_auth_header="\$(builtin printf 'x-access-token:%s' "\$GITHUB_TOKEN" | GITHUB_TOKEN='' /usr/bin/base64 | GITHUB_TOKEN='' /usr/bin/tr -d '\n')"
+          export -n git_auth_header
+          unset GITHUB_TOKEN
+          git_with_release_token() {
+          builtin printf '%s\n' "\$git_auth_header" | /usr/bin/env -i /bin/bash --noprofile --norc -c '
+          IFS= read -r git_auth_header
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic \$git_auth_header"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_GLOBAL=/dev/null
+          export GIT_CONFIG_SYSTEM=/dev/null
+          export GIT_CONFIG_PARAMETERS=''
+          export GIT_CONFIG_VALUE_0
+          exec /usr/bin/git "\$@"
+          ' release-state-git "\$@"
+          }
+          if git_with_release_token ls-remote --exit-code --tags origin "refs/tags/\$VERSION" >/dev/null; then
+            release_tag_lookup_status=0
+          else
+            release_tag_lookup_status=\$?
+          fi
+          if [ "\$release_tag_lookup_status" -eq 0 ]; then
+            git_with_release_token fetch --force origin "refs/tags/\$VERSION:refs/tags/\$VERSION"
             if [ ! -f "CHANGELOG/\$VERSION.md" ] ||
-              ! git cat-file -e "\$VERSION:CHANGELOG/\$VERSION.md" ||
-              ! git merge-base --is-ancestor "\$VERSION" HEAD ||
-              ! git diff --quiet "\$VERSION" HEAD -- "CHANGELOG/\$VERSION.md"; then
+              ! /usr/bin/git cat-file -e "\$VERSION:CHANGELOG/\$VERSION.md" ||
+              ! /usr/bin/git merge-base --is-ancestor "\$VERSION" HEAD ||
+              ! /usr/bin/git diff --quiet "\$VERSION" HEAD -- "CHANGELOG/\$VERSION.md"; then
               echo "::error::Tag \$VERSION exists but is not the immutable release snapshot reachable from this default-branch head. Refusing to resume a conflicting release."
               exit 1
             fi
@@ -1484,6 +1583,9 @@ ${required_lane_validation_step}
           elif [ -e "CHANGELOG/\$VERSION.md" ]; then
             echo "::error::CHANGELOG/\$VERSION.md already exists, and a released snapshot is immutable (ADR 0059). Cut the next version instead."
             exit 1
+          elif [ "\$release_tag_lookup_status" -ne 2 ]; then
+            echo "::error::Unable to resolve remote release tag state (git ls-remote exited \$release_tag_lookup_status)." >&2
+            exit "\$release_tag_lookup_status"
           else
             echo "snapshot-exists=false" >> "\$GITHUB_OUTPUT"
             echo "\$VERSION is unused."
@@ -1506,17 +1608,23 @@ ${required_lane_validation_step}
           package-manager-cache: false
       - name: Install dependencies
         if: steps.release-version.outputs.selected == 'true'
-        run: npm ci
+        run: npm ci --ignore-scripts
         env:
           # NOT GITHUB_TOKEN (#465). A repository-scoped GITHUB_TOKEN cannot read
           # a private GitHub Packages package owned by a DIFFERENT repository, so
           # an adopter with a private @verjson devDependency 401s here. Canonical
           # node-ci.yml states the same requirement for the same reason.
           NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}
+      - name: Run dependency lifecycle scripts without credentials
+        if: steps.release-version.outputs.selected == 'true'
+        run: npm rebuild
+        env:
+          NODE_AUTH_TOKEN: ''
       - name: Prepare release package metadata
         if: steps.release-version.outputs.selected == 'true'
         env:
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
+          NODE_AUTH_TOKEN: ''
         run: |
           if [ -e scripts/release-prepare-packages.sh ] && [ ! -x scripts/release-prepare-packages.sh ]; then
             echo "::error::scripts/release-prepare-packages.sh exists but is not executable."
@@ -1529,6 +1637,7 @@ ${required_lane_validation_step}
         if: steps.release-version.outputs.selected == 'true'
         env:
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
+          NODE_AUTH_TOKEN: ''
         run: |
           package_dirs=(${package_dirs_shell})
           for package_dir in "\${package_dirs[@]}"; do
@@ -1537,7 +1646,7 @@ ${required_lane_validation_step}
       - name: Run the release verification suite
         if: steps.release-version.outputs.selected == 'true'
         env:
-          NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}
+          NODE_AUTH_TOKEN: ''
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
         run: |
           # Existence and executability are checked separately on purpose. A
@@ -1887,6 +1996,7 @@ ${release_version_guard_step}
           # pinning only one of them reintroduces the window (#463, #464).
           ref: \${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
       - name: Check out the canonical selection contract
         uses: ${release_checkout}
         with:
@@ -1899,13 +2009,56 @@ ${release_plan_step}
         id: release-state
         env:
           VERSION: \${{ steps.release-version.outputs.version }}
+          GITHUB_TOKEN: \${{ github.token }}
+          BASH_ENV: ''
+          ENV: ''
+          SHELLOPTS: ''
+          BASHOPTS: ''
+          BASH_XTRACEFD: ''
+          PS4: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          GIT_TRACE_CURL: ''
+          GIT_TRACE_REDACT: ''
+          GIT_EXEC_PATH: ''
+          GIT_CURL_VERBOSE: ''
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_SYSTEM: /dev/null
+          GIT_CONFIG_PARAMETERS: ''
+          GIT_TRACE2: ''
+          GIT_TRACE2_EVENT: ''
+          GIT_TRACE2_PERF: ''
+          GIT_TRACE2_ENV_VARS: ''
+          GIT_TRACE2_CONFIG_PARAMS: ''
         run: |
-          if git ls-remote --exit-code --tags origin "refs/tags/\$VERSION" >/dev/null 2>&1; then
-            git fetch --force origin "refs/tags/\$VERSION:refs/tags/\$VERSION"
+          git_auth_header="\$(builtin printf 'x-access-token:%s' "\$GITHUB_TOKEN" | GITHUB_TOKEN='' /usr/bin/base64 | GITHUB_TOKEN='' /usr/bin/tr -d '\n')"
+          export -n git_auth_header
+          unset GITHUB_TOKEN
+          git_with_release_token() {
+          builtin printf '%s\n' "\$git_auth_header" | /usr/bin/env -i /bin/bash --noprofile --norc -c '
+          IFS= read -r git_auth_header
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic \$git_auth_header"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_GLOBAL=/dev/null
+          export GIT_CONFIG_SYSTEM=/dev/null
+          export GIT_CONFIG_PARAMETERS=''
+          export GIT_CONFIG_VALUE_0
+          exec /usr/bin/git "\$@"
+          ' release-state-git "\$@"
+          }
+          if git_with_release_token ls-remote --exit-code --tags origin "refs/tags/\$VERSION" >/dev/null; then
+            release_tag_lookup_status=0
+          else
+            release_tag_lookup_status=\$?
+          fi
+          if [ "\$release_tag_lookup_status" -eq 0 ]; then
+            git_with_release_token fetch --force origin "refs/tags/\$VERSION:refs/tags/\$VERSION"
             if [ ! -f "CHANGELOG/\$VERSION.md" ] ||
-              ! git cat-file -e "\$VERSION:CHANGELOG/\$VERSION.md" ||
-              ! git merge-base --is-ancestor "\$VERSION" HEAD ||
-              ! git diff --quiet "\$VERSION" HEAD -- "CHANGELOG/\$VERSION.md"; then
+              ! /usr/bin/git cat-file -e "\$VERSION:CHANGELOG/\$VERSION.md" ||
+              ! /usr/bin/git merge-base --is-ancestor "\$VERSION" HEAD ||
+              ! /usr/bin/git diff --quiet "\$VERSION" HEAD -- "CHANGELOG/\$VERSION.md"; then
               echo "::error::Tag \$VERSION exists but is not the immutable release snapshot reachable from this default-branch head. Refusing to resume a conflicting release."
               exit 1
             fi
@@ -1914,6 +2067,9 @@ ${release_plan_step}
           elif [ -e "CHANGELOG/\$VERSION.md" ]; then
             echo "::error::CHANGELOG/\$VERSION.md already exists, and a released snapshot is immutable (ADR 0059). Cut the next version instead."
             exit 1
+          elif [ "\$release_tag_lookup_status" -ne 2 ]; then
+            echo "::error::Unable to resolve remote release tag state (git ls-remote exited \$release_tag_lookup_status)." >&2
+            exit "\$release_tag_lookup_status"
           else
             echo "snapshot-exists=false" >> "\$GITHUB_OUTPUT"
             echo "\$VERSION is unused."
@@ -1939,17 +2095,23 @@ ${release_plan_step}
           package-manager-cache: false
       - name: Install dependencies
         if: steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''
-        run: npm ci
+        run: npm ci --ignore-scripts
         env:
           # NOT GITHUB_TOKEN (#465). A repository-scoped GITHUB_TOKEN cannot read
           # a private GitHub Packages package owned by a DIFFERENT repository, so
           # an adopter with a private @verjson devDependency 401s here. Canonical
           # node-ci.yml states the same requirement for the same reason.
           NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}
+      - name: Run dependency lifecycle scripts without credentials
+        if: steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''
+        run: npm rebuild
+        env:
+          NODE_AUTH_TOKEN: ''
       - name: Prepare release package metadata
         if: steps.release-version.outputs.selected == 'true'
         env:
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
+          NODE_AUTH_TOKEN: ''
         run: |
           if [ -e scripts/release-prepare-packages.sh ] && [ ! -x scripts/release-prepare-packages.sh ]; then
             echo "::error::scripts/release-prepare-packages.sh exists but is not executable."
@@ -1962,6 +2124,7 @@ ${release_plan_step}
         if: steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''
         env:
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
+          NODE_AUTH_TOKEN: ''
         run: |
           package_dirs=(${package_dirs_shell})
           for package_dir in "\${package_dirs[@]}"; do
@@ -1970,7 +2133,7 @@ ${release_plan_step}
       - name: Run the release verification suite
         if: steps.release-version.outputs.selected == 'true'
         env:
-          NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}
+          NODE_AUTH_TOKEN: ''
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
         run: |
           # Existence and executability are checked separately on purpose. A
@@ -2781,12 +2944,13 @@ ways that report green:
   * the trigger set must be EXACTLY {workflow_dispatch}. A blocklist accepts
     every trigger nobody listed, and an anchor on a bare `on:` line never sees
     the flow spelling `on: {workflow_dispatch: {...}, push: {...}}`.
-  * a GITHUB_TOKEN bound to NODE_AUTH_TOKEN is legitimate only inside the step
-    that runs `npm publish`. Checking the install step alone misses the same
-    credential inherited from a job-level or workflow-level `env:`.
+  * package credentials belong only in the scriptless dependency acquisition
+    step. Lifecycle and verification code must run after that step has ended.
+  * actions/checkout must not persist Git credentials into repository code.
 
 Anything this parser cannot read confidently is an error, never a pass.
 """
+import hashlib
 import re
 import shlex
 import sys
@@ -2854,25 +3018,46 @@ def mapping_entry(text):
     return key, quoted, text[colon + 1:].strip()
 
 
+def yaml_mapping_keys(source_lines):
+    """Read mapping keys including quoted keys; unsupported escaped keys fail closed."""
+    keys = []
+    for line in source_lines:
+        text = line.strip()
+        if text.startswith("-"):
+            text = text[1:].lstrip()
+        if not text or ":" not in text:
+            continue
+        raw_key = text.split(":", 1)[0].strip()
+        if raw_key[:1] in ("'", '"') and "\\" in raw_key:
+            return None
+        try:
+            key, _, _ = mapping_entry(text)
+        except ValueError:
+            continue
+        keys.append(key)
+    return keys
+
+
 def trigger_identity(key, quoted):
     if quoted:
         return "on" if key == "on" else None
     return "on" if key.casefold() in {"y", "yes", "true", "on"} else None
 
 
-def release_defaults():
+def release_mode_and_defaults():
     provenance_prefix = (
         "# Generated by verJSON/.github scripts/gen-changelog-caller.sh "
     )
     provenance = [line for line in raw_lines if line.startswith(provenance_prefix)]
     if len(provenance) != 1:
         problems.append("requires exactly one canonical generator provenance line")
-        return "v", ""
+        return "", "v", ""
     try:
         tokens = shlex.split(provenance[0][len(provenance_prefix):])
     except ValueError as error:
         problems.append(f"has malformed generator provenance: {error}")
-        return "v", ""
+        return "", "v", ""
+    mode = tokens[0] if tokens else ""
 
     def values(name):
         found = []
@@ -2888,22 +3073,22 @@ def release_defaults():
     prefixes = values("--default-prefix")
     components = values("--default-component")
     if not prefixes and not components:
-        return "v", ""
+        return mode, "v", ""
     if len(prefixes) != 1 or len(components) != 1:
         problems.append(
             "must declare --default-prefix and --default-component exactly once together"
         )
-        return "v", ""
+        return mode, "v", ""
     prefix = prefixes[0]
     component = components[0]
     if re.fullmatch(r"[a-z0-9][a-z0-9._-]*-v", prefix) is None:
         problems.append("has an invalid component release default prefix")
     if re.fullmatch(r"[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?", component) is None:
         problems.append("has an invalid component release default component")
-    return prefix, component
+    return mode, prefix, component
 
 
-release_default_prefix, release_default_component = release_defaults()
+release_mode, release_default_prefix, release_default_component = release_mode_and_defaults()
 release_default_prefix_yaml = (
     "v" if release_default_prefix == "v" else f"'{release_default_prefix}'"
 )
@@ -3016,12 +3201,48 @@ if not trigger_separator or header_warning not in header:
     )
 
 GITHUB_TOKEN = re.compile(
-    r"\$\{\{\s*(secrets\.GITHUB_TOKEN|github\.token)\s*\}\}", re.IGNORECASE
+    r"\b(?:github\s*(?:\.|\[\s*['\"]?)\s*token|"
+    r"secrets\s*(?:\.|\[\s*['\"]?)\s*GITHUB_TOKEN)\b",
+    re.IGNORECASE,
 )
+GITHUB_CONTEXT_OBJECT = re.compile(r"(?<![\w.])github\b(?!\s*\.)", re.IGNORECASE)
 PRIVATE_NODE_TOKEN = re.compile(
-    r"\$\{\{\s*secrets\.NODE_AUTH_TOKEN\s*\}\}", re.IGNORECASE
+    r"\bsecrets\s*(?:\.|\[\s*['\"]?)\s*NODE_AUTH_TOKEN\b",
+    re.IGNORECASE,
 )
+SECRETS_CONTEXT = re.compile(r"\bsecrets\b", re.IGNORECASE)
 LIST_ITEM = re.compile(r"^(\s*)-\s")
+YAML_ANCHOR_ALIAS = re.compile(
+    r"(?m)(?:^|[\s,:{\[])(?:&(?!&)|\*(?=\S))[^\s,\[\]{}]+"
+)
+
+
+def yaml_structure_text(source_lines):
+    """Remove block-scalar bodies before looking for YAML references."""
+    output = []
+    block_scalar_indent = None
+    for line in source_lines:
+        indentation = len(line) - len(line.lstrip())
+        if block_scalar_indent is not None:
+            if not line.strip() or indentation > block_scalar_indent:
+                continue
+            block_scalar_indent = None
+        output.append(line)
+        if re.match(r"^\s*[^#].*:\s*[|>][+-]?\s*$", line):
+            block_scalar_indent = indentation
+    return "\n".join(output)
+
+
+if YAML_ANCHOR_ALIAS.search(yaml_structure_text(lines)):
+    problems.append("uses YAML anchors or aliases in a release workflow (#1712)")
+workflow_structure = yaml_structure_text(lines)
+workflow_keys = yaml_mapping_keys(workflow_structure.splitlines())
+if (
+    workflow_keys is None
+    or "defaults" in workflow_keys
+    or re.search(r"\bdefaults\b", workflow_structure)
+):
+    problems.append("configures run defaults (#1712)")
 
 
 def enclosing_step(index):
@@ -3042,6 +3263,417 @@ def enclosing_step(index):
             return None
         cursor -= 1
     return None
+
+
+def action_expressions(text):
+    """Yield GitHub expressions, respecting braces inside quoted strings."""
+    cursor = 0
+    while True:
+        start = text.find("${{", cursor)
+        if start < 0:
+            return
+        position = start + 3
+        in_string = False
+        while position < len(text):
+            if text[position] == "'":
+                if in_string and text.startswith("''", position):
+                    position += 2
+                    continue
+                in_string = not in_string
+            elif not in_string and text.startswith("}}", position):
+                end = position + 2
+                yield start, text[start:end]
+                cursor = end
+                break
+            position += 1
+        else:
+            yield start, text[start:]
+            return
+
+
+def expression_code(expression):
+    """Blank single-quoted literals so text inside them is not a context read."""
+    output = []
+    position = 0
+    in_string = False
+    while position < len(expression):
+        character = expression[position]
+        if character == "'":
+            output.append(" ")
+            if in_string and expression.startswith("''", position):
+                output.append(" ")
+                position += 2
+                continue
+            in_string = not in_string
+        else:
+            output.append(" " if in_string else character)
+        position += 1
+    return "".join(output)
+
+
+def context_match_lines(pattern, start, end):
+    """Find source lines for sensitive contexts, including folded scalars."""
+    block = "\n".join(lines[start:end])
+    matched_lines = set()
+    for offset, expression in action_expressions(block):
+        if pattern.search(expression_code(expression)):
+            matched_lines.add(start + block.count("\n", 0, offset))
+    return matched_lines
+
+
+def named_step(name):
+    matches = [
+        index for index, line in enumerate(lines)
+        if line.strip() == "- name: " + name
+    ]
+    if len(matches) != 1:
+        return None
+    return enclosing_step(matches[0])
+
+
+def run_body(step):
+    """Read one run command without accepting a second hidden command field."""
+    if step is None:
+        return None
+    run_entries = [
+        (index, line) for index, line in enumerate(step)
+        if re.match(r"^\s*run\s*:", line)
+    ]
+    if len(run_entries) != 1:
+        return None
+    index, declaration = run_entries[0]
+    value = declaration.split(":", 1)[1].strip()
+    if value != "|":
+        return value
+    indentation = len(declaration) - len(declaration.lstrip())
+    body = []
+    for line in step[index + 1:]:
+        if line.strip() and len(line) - len(line.lstrip()) <= indentation:
+            break
+        if not line.strip():
+            body.append("")
+            continue
+        if len(line) - len(line.lstrip()) <= indentation:
+            return None
+        body.append(line[indentation + 2:])
+    while body and not body[-1]:
+        body.pop()
+    return "\n".join(body)
+
+
+def step_mapping_values(step, name):
+    """Read one plain mapping from a step, refusing duplicates or nesting."""
+    if step is None:
+        return None
+    matches = [
+        index for index, line in enumerate(step)
+        if line.strip() == name + ":"
+    ]
+    if len(matches) != 1:
+        return None
+    indentation = len(step[matches[0]]) - len(step[matches[0]].lstrip())
+    values = {}
+    for line in step[matches[0] + 1:]:
+        if not line.strip():
+            continue
+        current_indentation = len(line) - len(line.lstrip())
+        if current_indentation <= indentation:
+            break
+        if current_indentation != indentation + 2:
+            return None
+        try:
+            key, quoted, value = mapping_entry(line.strip())
+        except ValueError:
+            return None
+        if quoted or key in values:
+            return None
+        values[key] = value
+    return values
+
+
+# This is the only release step that receives github.token. Pin its whole script
+# per mode so additional shell commands cannot forward or persist that token.
+APPROVED_RELEASE_STATE_SCRIPT_SHA256 = {
+    "release-node": "ec8e3a9157b40c0aaf9fdbebf920733609b297027b1fa972c190a3ef8cc52fca",
+    "release-artifact": "ec8e3a9157b40c0aaf9fdbebf920733609b297027b1fa972c190a3ef8cc52fca",
+    "release-snapshot": "ec8e3a9157b40c0aaf9fdbebf920733609b297027b1fa972c190a3ef8cc52fca",
+}
+EXPECTED_RELEASE_STATE_ENV = {
+    "VERSION": "${{ steps.release-version.outputs.version }}",
+    "GITHUB_TOKEN": "${{ github.token }}",
+    "BASH_ENV": "''",
+    "ENV": "''",
+    "SHELLOPTS": "''",
+    "BASHOPTS": "''",
+    "BASH_XTRACEFD": "''",
+    "PS4": "''",
+    "LD_PRELOAD": "''",
+    "LD_AUDIT": "''",
+    "LD_LIBRARY_PATH": "''",
+    "GIT_TRACE_CURL": "''",
+    "GIT_TRACE_REDACT": "''",
+    "GIT_EXEC_PATH": "''",
+    "GIT_CURL_VERBOSE": "''",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_CONFIG_PARAMETERS": "''",
+    "GIT_TRACE2": "''",
+    "GIT_TRACE2_EVENT": "''",
+    "GIT_TRACE2_PERF": "''",
+    "GIT_TRACE2_ENV_VARS": "''",
+    "GIT_TRACE2_CONFIG_PARAMS": "''",
+}
+CREDENTIAL_PROCESS_ENV_KEYS = (
+    "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "BASH_XTRACEFD", "PS4",
+    "LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH",
+    "GIT_TRACE_CURL", "GIT_TRACE_REDACT",
+    "GIT_EXEC_PATH",
+    "GIT_CURL_VERBOSE", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF",
+    "GIT_TRACE2_ENV_VARS", "GIT_TRACE2_CONFIG_PARAMS",
+)
+
+
+def permission_values(start, end, indentation):
+    """Read one plain permission map, refusing duplicate or expanded entries."""
+    heading = " " * indentation + "permissions:"
+    matches = [index for index in range(start, end) if lines[index] == heading]
+    if len(matches) != 1:
+        return None
+    values = {}
+    for line in lines[matches[0] + 1:end]:
+        if not line.strip():
+            continue
+        current_indentation = len(line) - len(line.lstrip())
+        if current_indentation <= indentation:
+            break
+        if current_indentation != indentation + 2:
+            return None
+        try:
+            key, quoted, value = mapping_entry(line.strip())
+        except ValueError:
+            return None
+        if quoted or key in values or value not in ("read", "write", "none"):
+            return None
+        values[key] = value
+    return values
+
+
+for index, line in enumerate(lines):
+    if not re.match(r"^\s*uses:\s*actions/checkout@", line):
+        continue
+    checkout_step = enclosing_step(index)
+    if checkout_step is None or not any(
+        entry.strip() == "persist-credentials: false" for entry in checkout_step
+    ):
+        problems.append(
+            "persists checkout credentials into release repository code (#1712)"
+        )
+
+release_state_step = named_step("Resolve restart-safe release state")
+if release_state_step is None or not any(
+    entry.strip() == "GITHUB_TOKEN: ${{ github.token }}" for entry in release_state_step
+):
+    problems.append(
+        "does not scope the read token to restart-safe release state resolution (#1712)"
+    )
+elif not any("GIT_CONFIG_COUNT=1" in entry for entry in release_state_step) or not any(
+    "GIT_CONFIG_VALUE_0" in entry for entry in release_state_step
+):
+    problems.append(
+        "does not confine remote Git authorization to the release-state process (#1712)"
+    )
+elif step_mapping_values(release_state_step, "env") != EXPECTED_RELEASE_STATE_ENV:
+    problems.append(
+        "does not restrict the restart-safe release-state environment (#1712)"
+    )
+elif any(
+    len(re.findall(rf"\b{re.escape(key)}\b", workflow_structure)) != 1
+    for key in CREDENTIAL_PROCESS_ENV_KEYS
+):
+    problems.append("configures credential-sensitive environment outside the credentialed step (#1712)")
+elif any(re.match(r"^\s*(?:shell|uses)\s*:", entry) for entry in release_state_step):
+    problems.append(
+        "configures a custom shell or action in the credentialed release-state step (#1712)"
+    )
+elif (
+    release_mode not in APPROVED_RELEASE_STATE_SCRIPT_SHA256
+    or run_body(release_state_step) is None
+    or hashlib.sha256(run_body(release_state_step).encode()).hexdigest()
+    != APPROVED_RELEASE_STATE_SCRIPT_SHA256.get(release_mode)
+):
+    problems.append(
+        "does not match the approved restart-safe release-state script (#1712)"
+    )
+
+jobs_index = next(
+    (index for index, line in enumerate(lines) if line == "jobs:"),
+    len(lines),
+)
+workflow_scope = "\n".join(lines[:jobs_index])
+if (
+    re.search(r"(?m)^\s*(?:GITHUB_TOKEN|GH_TOKEN)\s*:", workflow_scope)
+    or any(
+        GITHUB_TOKEN.search(expression_code(expression))
+        or GITHUB_CONTEXT_OBJECT.search(expression_code(expression))
+        or SECRETS_CONTEXT.search(expression_code(expression))
+        for _, expression in action_expressions(workflow_scope)
+    )
+):
+    problems.append("exposes a GitHub token at workflow scope (#1712)")
+
+verify_job_start = next(
+    (index for index, line in enumerate(lines) if line == "  verify:"),
+    None,
+)
+if verify_job_start is None:
+    problems.append("has no readable verify job for credential checks (#1712)")
+else:
+    verify_job_end = next(
+        (
+            index for index in range(verify_job_start + 1, len(lines))
+            if re.match(r"^  [A-Za-z0-9_.-]+:\s*$", lines[index])
+        ),
+        len(lines),
+    )
+    credential_context_lines = (
+        context_match_lines(GITHUB_TOKEN, verify_job_start + 1, verify_job_end)
+        | context_match_lines(GITHUB_CONTEXT_OBJECT, verify_job_start + 1, verify_job_end)
+        | context_match_lines(SECRETS_CONTEXT, verify_job_start + 1, verify_job_end)
+    )
+    for index in range(verify_job_start + 1, verify_job_end):
+        line = lines[index]
+        if not (
+            re.match(r"^\s*(?:GITHUB_TOKEN|GH_TOKEN)\s*:", line)
+            or index in credential_context_lines
+        ):
+            continue
+        step = enclosing_step(index)
+        step_names = [
+            entry.strip() for entry in (step or [])
+            if entry.strip().startswith("- name: ")
+        ]
+        is_release_state = "- name: Resolve restart-safe release state" in step_names
+        is_package_acquisition = (
+            line.strip() == "NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}"
+            and any(
+                name in (
+                    "- name: Install dependencies",
+                    "- name: Acquire dependencies without lifecycle execution",
+                )
+                for name in step_names
+            )
+        )
+        if is_release_state and line.strip() == "GITHUB_TOKEN: ${{ github.token }}":
+            continue
+        if is_package_acquisition:
+            continue
+        if (
+            re.match(r"^\s*(?:GITHUB_TOKEN|GH_TOKEN)\s*:", line)
+            or index in credential_context_lines
+        ):
+            problems.append("exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)")
+            break
+
+build_job_start = next(
+    (index for index, line in enumerate(lines) if line == "  build:"),
+    None,
+)
+if build_job_start is not None:
+    build_job_end = next(
+        (
+            index for index in range(build_job_start + 1, len(lines))
+            if re.match(r"^  [A-Za-z0-9_.-]+:\s*$", lines[index])
+        ),
+        len(lines),
+    )
+    build_context_lines = (
+        context_match_lines(GITHUB_TOKEN, build_job_start + 1, build_job_end)
+        | context_match_lines(GITHUB_CONTEXT_OBJECT, build_job_start + 1, build_job_end)
+        | context_match_lines(SECRETS_CONTEXT, build_job_start + 1, build_job_end)
+    )
+    if any(
+        (
+            re.match(r"^\s*(?:GITHUB_TOKEN|GH_TOKEN)\s*:", lines[index])
+            and lines[index].partition(":")[2].strip() not in ("''", '""')
+        )
+        or index in build_context_lines
+        for index in range(build_job_start + 1, build_job_end)
+    ):
+        problems.append(
+            "build job references a secrets context or GitHub token context (#1712)"
+        )
+
+acquisition_job_start = next(
+    (index for index, line in enumerate(lines) if line == "  acquire-private-dependencies:"),
+    None,
+)
+if acquisition_job_start is not None:
+    acquisition_job_end = next(
+        (
+            index for index in range(acquisition_job_start + 1, len(lines))
+            if re.match(r"^  [A-Za-z0-9_.-]+:\s*$", lines[index])
+        ),
+        len(lines),
+    )
+    acquisition_context_lines = (
+        context_match_lines(GITHUB_TOKEN, acquisition_job_start + 1, acquisition_job_end)
+        | context_match_lines(GITHUB_CONTEXT_OBJECT, acquisition_job_start + 1, acquisition_job_end)
+        | context_match_lines(SECRETS_CONTEXT, acquisition_job_start + 1, acquisition_job_end)
+    )
+    for index in range(acquisition_job_start + 1, acquisition_job_end):
+        line = lines[index]
+        if not (
+            re.match(r"^\s*(?:GITHUB_TOKEN|GH_TOKEN)\s*:", line)
+            or index in acquisition_context_lines
+        ):
+            continue
+        step = enclosing_step(index)
+        step_names = [
+            entry.strip() for entry in (step or [])
+            if entry.strip().startswith("- name: ")
+        ]
+        is_package_acquisition = (
+            line.strip() == "NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}"
+            and "- name: Acquire dependencies without lifecycle execution" in step_names
+        )
+        if not is_package_acquisition:
+            problems.append(
+                "private acquisition exposes credentials or another secret context (#1712)"
+            )
+            break
+
+if permission_values(0, jobs_index, 0) != {"contents": "read"}:
+    problems.append("requires workflow permissions to be exactly contents: read (#1712)")
+if verify_job_start is not None and permission_values(
+    verify_job_start, verify_job_end, 4
+) != {"contents": "read"}:
+    problems.append("requires verify-job permissions to be exactly contents: read (#1712)")
+
+install_step = named_step("Install dependencies")
+if run_body(install_step) != "npm ci --ignore-scripts":
+    problems.append(
+        "runs an unexpected credentialed acquisition command (#1712)"
+    )
+
+for name in (
+    "Run dependency lifecycle scripts without credentials",
+    "Prepare release package metadata",
+    "Stamp the dispatched package versions",
+    "Run the release verification suite",
+):
+    step = named_step(name)
+    if step is None or not any(
+        entry.strip() == "NODE_AUTH_TOKEN: ''" for entry in step
+    ):
+        problems.append(
+            "does not explicitly clear package credentials before %s (#1712)" % name
+        )
+    if name == "Run dependency lifecycle scripts without credentials" and run_body(step) != "npm rebuild":
+        problems.append(
+            "does not restore dependency lifecycle execution after acquisition (#1712)"
+        )
 
 
 for index, line in enumerate(lines):
@@ -3068,13 +3700,12 @@ if len(verification_steps) != 1:
     )
 else:
     verification_step = enclosing_step(verification_steps[0])
-    if verification_step is None or not any(
+    if verification_step is None or any(
         "NODE_AUTH_TOKEN" in entry and PRIVATE_NODE_TOKEN.search(entry)
         for entry in verification_step
     ):
         problems.append(
-            "does not expose secrets.NODE_AUTH_TOKEN to the release verification "
-            "hook/default suite step (#569)"
+            "exposes secrets.NODE_AUTH_TOKEN to the release verification suite (#1712)"
         )
     if verification_step is None or not any(
         "PACKAGE_VERSION" in entry
@@ -3105,14 +3736,37 @@ for index, line in enumerate(lines):
             "exposes secrets.NODE_AUTH_TOKEN outside a step-scoped environment (#569)"
         )
         continue
-    is_install = any(re.search(r"\bnpm ci\b", entry) for entry in step)
-    is_verification = any(
-        entry.strip() == "- name: Run the release verification suite"
+    step_names = [
+        entry.strip()
         for entry in step
+        if entry.strip().startswith("- name: ")
+    ]
+    is_acquisition = any(
+        name in (
+            "- name: Install dependencies",
+            "- name: Acquire dependencies without lifecycle execution",
+        )
+        for name in step_names
     )
-    if not (is_install or is_verification):
+    expected_run = None
+    if "- name: Install dependencies" in step_names:
+        expected_run = "npm ci --ignore-scripts"
+    elif "- name: Acquire dependencies without lifecycle execution" in step_names:
+        expected_run = "\n".join((
+            "set -euo pipefail",
+            "umask 077",
+            '[ -n "$NODE_AUTH_TOKEN" ] || { echo "::error::private release acquisition requires NODE_AUTH_TOKEN"; exit 1; }',
+            ': > "$NPM_CONFIG_GLOBALCONFIG"',
+            r'''printf '%s\n' 'registry=https://registry.npmjs.org/' '@verjson:registry=https://npm.pkg.github.com/' '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' > "$NPM_CONFIG_USERCONFIG"''',
+            "npm ci --ignore-scripts --audit=false --fund=false",
+            '[ -d node_modules ] || { echo "::error::npm produced no dependency tree"; exit 1; }',
+            'if grep -R -a -F -q -- "$NODE_AUTH_TOKEN" node_modules; then echo "::error::dependency tree contains the acquisition credential"; exit 1; fi',
+            r"""[ "$(du -sk node_modules | awk '{print $1}')" -le 2097152 ] || { echo "::error::dependency transfer exceeds 2 GiB"; exit 1; }""",
+            'rm -f "$NPM_CONFIG_USERCONFIG" "$NPM_CONFIG_GLOBALCONFIG"',
+        ))
+    if not is_acquisition or run_body(step) != expected_run:
         problems.append(
-            "exposes secrets.NODE_AUTH_TOKEN to an unrelated release step (#569)"
+            "runs an unexpected credentialed acquisition command (#1712)"
         )
 for problem in problems:
     sys.stderr.write("FAIL - %s %s\n" % (path, problem))
