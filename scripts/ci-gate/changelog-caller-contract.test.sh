@@ -3345,10 +3345,10 @@ while IFS='|' read -r package_directory_options package_directories_json package
     && pass "the generated suite rejects unsafe package-directory provenance" \
     || fail "unsafe package-directory provenance rejected for another reason: $(tail -2 "$tmproot/run.out")"
 done <<'EOF'
---only-package-dir ../compat|["../compat"]|package_dirs=(../compat)|does not declare valid package directories in generator provenance (#1717)
---only-package-dir compat/../compat|["compat/../compat"]|package_dirs=(compat/../compat)|does not declare valid package directories in generator provenance (#1717)
---only-package-dir compat/.|["compat/."]|package_dirs=(compat/.)|does not declare valid package directories in generator provenance (#1717)
---only-package-dir compat --only-package-dir compat|["compat","compat"]|package_dirs=(compat compat)|does not declare valid package directories in generator provenance (#1717)
+--only-package-dir ../compat|["../compat"]|package_dirs=(../compat)|does not stamp every package directory selected for publication (#557)
+--only-package-dir compat/../compat|["compat/../compat"]|package_dirs=(compat/../compat)|does not stamp every package directory selected for publication (#557)
+--only-package-dir compat/.|["compat/."]|package_dirs=(compat/.)|does not stamp every package directory selected for publication (#557)
+--only-package-dir compat --only-package-dir compat|["compat","compat"]|package_dirs=(compat compat)|does not stamp every package directory selected for publication (#557)
 EOF
 expect_release_mode_rejection release-artifact \
   "a release-artifact release-plan step writes Bash startup script through GITHUB_ENV (#1717)" \
