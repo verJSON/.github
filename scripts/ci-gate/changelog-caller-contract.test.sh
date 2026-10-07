@@ -3337,13 +3337,26 @@ expect_rejection "generator provenance changes the contract-pinned package set (
 grep -qF 'does not declare valid package directories in generator provenance (#1717)' "$tmproot/run.out" \
   && pass "the generated suite binds provenance to canonical package-directory inputs" \
   || fail "altered generator provenance was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+while IFS= read -r package_directory_options; do
+  expect_rejection "generator provenance alone uses unsafe or duplicate package directories: $package_directory_options (#1717)" \
+    drift_generator_provenance_only "$package_directory_options"
+  grep -qF 'does not declare valid package directories in generator provenance (#1717)' "$tmproot/run.out" \
+    && pass "the generated suite rejects unsafe provenance independently of workflow stamps" \
+    || fail "unsafe provenance was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+done <<'EOF'
+--package-dir ../compat
+--only-package-dir compat/../compat
+--only-package-dir compat/.
+--package-dir compat --package-dir compat
+--only-package-dir compat --only-package-dir compat
+EOF
 while IFS='|' read -r package_directory_options package_directories_json package_directories_assignment expected_error; do
-  expect_rejection "generator provenance uses unsafe or duplicate package directories: $package_directory_options (#1717)" \
+  expect_rejection "workflow package selection drifts from its contract-pinned directories: $package_directory_options (#1717)" \
     drift_generator_provenance_package_directories \
     "$package_directory_options" "$package_directories_json" "$package_directories_assignment"
   grep -qF "$expected_error" "$tmproot/run.out" \
-    && pass "the generated suite rejects unsafe package-directory provenance" \
-    || fail "unsafe package-directory provenance rejected for another reason: $(tail -2 "$tmproot/run.out")"
+    && pass "the generated suite rejects workflow package-selection drift" \
+    || fail "workflow package-selection drift was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 done <<'EOF'
 --only-package-dir ../compat|["../compat"]|package_dirs=(../compat)|does not stamp every package directory selected for publication (#557)
 --only-package-dir compat/../compat|["compat/../compat"]|package_dirs=(compat/../compat)|does not stamp every package directory selected for publication (#557)
