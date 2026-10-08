@@ -19,6 +19,14 @@ on:
         description: SHA-256 of the canonical private dependency transfer implementation
         required: true
         type: string
+      disk-sha256:
+        description: SHA-256 of the canonical candidate runner diagnostics implementation
+        required: true
+        type: string
+      cleanup-unused-docker-images:
+        description: Opt-in removal of unused preloaded images on isolated GitHub-hosted build jobs
+        required: true
+        type: boolean
       retry-sha256:
         description: SHA-256 of the canonical exact-SHA retry verifier
         required: true
@@ -53,6 +61,7 @@ jobs:
       candidate: ${{ steps.config.outputs.candidate }}
       private-node-packages: ${{ steps.config.outputs.private-node-packages }}
       has-private-node-packages: ${{ steps.config.outputs.has-private-node-packages }}
+      cleanup-unused-docker-images: ${{ steps.config.outputs.cleanup-unused-docker-images }}
       package-manager: ${{ steps.config.outputs.package-manager }}
       lock-file: ${{ steps.config.outputs.lock-file }}
       registry-destinations: ${{ steps.config.outputs.registry-destinations }}
@@ -71,6 +80,7 @@ jobs:
           # static schema predates job.workflow_sha.
           JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
           RETRY_SHA256: ${{ inputs.retry-sha256 }}
+          CLEANUP_UNUSED_DOCKER_IMAGES: ${{ inputs.cleanup-unused-docker-images }}
           SOURCE_PATH: .container-candidate-source-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
@@ -90,7 +100,8 @@ jobs:
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_registry_destinations.py" -o "$destination_helper"
           destination_contract="$(python3 "$destination_helper" --config "$CONFIG_PATH" --owner "$GITHUB_REPOSITORY_OWNER")"
           expected_namespace="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
-          jq -e --arg repository "$GITHUB_REPOSITORY" --arg namespace "$expected_namespace" '
+          jq -e --arg repository "$GITHUB_REPOSITORY" --arg namespace "$expected_namespace" \
+            --argjson cleanup_unused_docker_images "$CLEANUP_UNUSED_DOCKER_IMAGES" '
             def safe_component:
               type == "string" and length <= 64
               and test("^[a-z0-9]+(?:[._-][a-z0-9]+)*$");
@@ -107,6 +118,8 @@ jobs:
             and ((.privateNodePackages // []) | type == "array")
             and ((.privateNodePackages // []) | all(.[]; type == "string" and test("^@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$")))
             and ((.privateNodePackages // []) | length == (unique | length))
+            and (if has("cleanupUnusedDockerImages") then (.cleanupUnusedDockerImages | type == "boolean") else true end)
+            and ((.cleanupUnusedDockerImages // false) == $cleanup_unused_docker_images)
             and ((.packageManager // "npm") | . == "npm" or . == "pnpm")
             and (.nextStableVersion | test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))
             and (.images | type == "array" and length > 0)
@@ -158,6 +171,7 @@ jobs:
             echo "candidate=$candidate"
             echo "private-node-packages=$(jq -c '.privateNodePackages // []' "$CONFIG_PATH")"
             echo "has-private-node-packages=$(jq -r '((.privateNodePackages // []) | length > 0)' "$CONFIG_PATH")"
+            echo "cleanup-unused-docker-images=$(jq -r '.cleanupUnusedDockerImages // false' "$CONFIG_PATH")"
             echo "package-manager=$(jq -r '.packageManager // "npm"' "$CONFIG_PATH")"
             echo "lock-file=$(jq -r 'if (.packageManager // "npm") == "pnpm" then "pnpm-lock.yaml" else "package-lock.json" end' "$CONFIG_PATH")"
             echo "registry-destinations=$(jq -c '.destinations' <<<"$destination_contract")"
@@ -358,6 +372,18 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Download pinned candidate disk diagnostics helper
+        env:
+          CONTRACT_REF: ${{ inputs.contract-ref }}
+          DISK_SHA256: ${{ inputs.disk-sha256 }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ && "$DISK_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          helper="$RUNNER_TEMP/container_candidate_disk_usage.sh"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_candidate_disk_usage.sh" -o "$helper"
+          printf '%s  %s\n' "$DISK_SHA256" "$helper" | sha256sum --check --strict
+          bash "$helper" snapshot
       - uses: sigstore/cosign-installer@af595e623eec1ede52d6322f53b635d5def0a95a # v4.1.2
         with:
           cosign-release: v3.1.3
@@ -391,11 +417,38 @@ jobs:
           transfer="$RUNNER_TEMP/container_dependency_transfer.py"
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${CONTRACT_REF}/scripts/container_dependency_transfer.py" -o "$transfer"
           printf '%s  %s\n' "$TRANSFER_SHA256" "$transfer" | sha256sum --check --strict
+      - id: buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Measure runner usage before Docker image cleanup
+        if: always() && steps.buildx.outcome == 'success'
+        continue-on-error: true
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" measure before-cleanup
+      - name: Clean unused preloaded Docker images
+        if: always() && steps.buildx.outcome == 'success'
+        env:
+          CLEANUP_UNUSED_DOCKER_IMAGES: ${{ needs.prepare.outputs.cleanup-unused-docker-images }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" cleanup
+      - name: Measure runner usage after Docker image cleanup
+        if: always()
+        continue-on-error: true
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" measure after-cleanup
+      - name: Measure runner usage before Node dependency restoration
+        if: always()
+        continue-on-error: true
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" measure before-node-restoration
       - name: Prepare credential-free dependency build context
         env:
           ACTIONS_ID_TOKEN_REQUEST_TOKEN: ''
           ACTIONS_ID_TOKEN_REQUEST_URL: ''
           GITHUB_TOKEN: ''
+          HAS_PRIVATE_NODE_PACKAGES: ${{ needs.prepare.outputs.has-private-node-packages }}
           NODE_AUTH_TOKEN: ''
           NPM_TOKEN: ''
         run: |
@@ -405,7 +458,11 @@ jobs:
             echo "::error::reserved container dependency context exists"
             exit 1
           }
-          mkdir "$context"
+          case "$HAS_PRIVATE_NODE_PACKAGES" in
+            true) ;;
+            false) mkdir "$context" ;;
+            *) echo "::error::invalid private package setting"; exit 1 ;;
+          esac
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: needs.prepare.outputs.has-private-node-packages == 'true'
         with:
@@ -431,11 +488,10 @@ jobs:
         run: |
           set -euo pipefail
           context="$RUNNER_TEMP/container-node-modules-context"
-          TRANSFER_KEY="$TRANSFER_KEY" python3 "$RUNNER_TEMP/container_dependency_transfer.py" decrypt \
+          trap 'status=$?; if [ "$status" -ne 0 ]; then rm -rf -- "$context" || true; fi; exit "$status"' EXIT
+          TRANSFER_KEY="$TRANSFER_KEY" python3 "$RUNNER_TEMP/container_dependency_transfer.py" restore-tar \
             --source "$TRANSFER_DIR/container-node-modules.tgz.enc" \
-            --destination "$RUNNER_TEMP/container-node-modules.tgz"
-          tar -xzf "$RUNNER_TEMP/container-node-modules.tgz" -C "$context"
-          rm -f "$RUNNER_TEMP/container-node-modules.tgz"
+            --destination "$context"
           case "$LOCK_FILE" in package-lock.json|pnpm-lock.yaml) ;; *) echo "::error::invalid lock-file output"; exit 1 ;; esac
           expected="$(sha256sum "$LOCK_FILE" | cut -d' ' -f1)"
           [ "$(cat "$context/.verjson-lock-sha256")" = "$expected" ] || { echo "::error::node_modules artifact does not match $LOCK_FILE"; exit 1; }
@@ -443,8 +499,13 @@ jobs:
         if: always() && needs.prepare.outputs.has-private-node-packages == 'true'
         env:
           TRANSFER_DIR: ${{ github.workspace }}/.verjson-container-node-modules-${{ github.run_id }}-${{ github.run_attempt }}
-        run: rm -rf "$TRANSFER_DIR" "$RUNNER_TEMP/container_dependency_transfer.py" "$RUNNER_TEMP/container-node-modules.tgz"
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        run: rm -rf "$TRANSFER_DIR" "$RUNNER_TEMP/container_dependency_transfer.py"
+      - name: Measure runner usage after Node dependency restoration
+        if: always()
+        continue-on-error: true
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" measure after-node-restoration
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -515,6 +576,12 @@ jobs:
             echo "bundle-digest=$attestation_id"
             echo "referrer-manifest-digest=$referrer_digest"
           } >> "$GITHUB_OUTPUT"
+      - name: Measure runner usage before base image build
+        if: matrix.baseVariant == '' && steps.retry.outputs.reused != 'true'
+        continue-on-error: true
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" measure before-image-build
       - id: build
         if: matrix.baseVariant == '' && steps.retry.outputs.reused != 'true'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -534,6 +601,21 @@ jobs:
           provenance: mode=max
           sbom: true
           build-contexts: verjson_node_modules=${{ runner.temp }}/container-node-modules-context
+      - name: Measure runner usage after base image build
+        if: always() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure')
+        continue-on-error: true
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" measure after-image-build
+      - name: Upload candidate runner usage diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: oci-candidate-runner-usage-base-${{ matrix.variant }}
+          path: ${{ runner.temp }}/container-candidate-disk-usage.log
+          if-no-files-found: warn
+          retention-days: 7
       - name: Wait for pushed manifest registry visibility
         if: matrix.baseVariant == '' && steps.retry.outputs.reused != 'true'
         env:
@@ -666,6 +748,19 @@ jobs:
       - if: matrix.baseVariant != ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - if: matrix.baseVariant != ''
+        name: Download pinned candidate disk diagnostics helper
+        env:
+          CONTRACT_REF: ${{ inputs.contract-ref }}
+          DISK_SHA256: ${{ inputs.disk-sha256 }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ && "$DISK_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          helper="$RUNNER_TEMP/container_candidate_disk_usage.sh"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_candidate_disk_usage.sh" -o "$helper"
+          printf '%s  %s\n' "$DISK_SHA256" "$helper" | sha256sum --check --strict
+          bash "$helper" snapshot
+      - if: matrix.baseVariant != ''
         uses: sigstore/cosign-installer@af595e623eec1ede52d6322f53b635d5def0a95a # v4.1.2
         with:
           cosign-release: v3.1.3
@@ -703,12 +798,40 @@ jobs:
           transfer="$RUNNER_TEMP/container_dependency_transfer.py"
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${CONTRACT_REF}/scripts/container_dependency_transfer.py" -o "$transfer"
           printf '%s  %s\n' "$TRANSFER_SHA256" "$transfer" | sha256sum --check --strict
+      - if: matrix.baseVariant != ''
+        id: buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Measure runner usage before Docker image cleanup
+        if: always() && matrix.baseVariant != '' && steps.buildx.outcome == 'success'
+        continue-on-error: true
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" measure before-cleanup
+      - name: Clean unused preloaded Docker images
+        if: always() && matrix.baseVariant != '' && steps.buildx.outcome == 'success'
+        env:
+          CLEANUP_UNUSED_DOCKER_IMAGES: ${{ needs.prepare.outputs.cleanup-unused-docker-images }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" cleanup
+      - name: Measure runner usage after Docker image cleanup
+        if: always() && matrix.baseVariant != ''
+        continue-on-error: true
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" measure after-cleanup
+      - name: Measure runner usage before Node dependency restoration
+        if: always() && matrix.baseVariant != ''
+        continue-on-error: true
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" measure before-node-restoration
       - name: Prepare credential-free dependency build context
         if: matrix.baseVariant != ''
         env:
           ACTIONS_ID_TOKEN_REQUEST_TOKEN: ''
           ACTIONS_ID_TOKEN_REQUEST_URL: ''
           GITHUB_TOKEN: ''
+          HAS_PRIVATE_NODE_PACKAGES: ${{ needs.prepare.outputs.has-private-node-packages }}
           NODE_AUTH_TOKEN: ''
           NPM_TOKEN: ''
         run: |
@@ -718,7 +841,11 @@ jobs:
             echo "::error::reserved container dependency context exists"
             exit 1
           }
-          mkdir "$context"
+          case "$HAS_PRIVATE_NODE_PACKAGES" in
+            true) ;;
+            false) mkdir "$context" ;;
+            *) echo "::error::invalid private package setting"; exit 1 ;;
+          esac
       - if: matrix.baseVariant != '' && needs.prepare.outputs.has-private-node-packages == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -744,11 +871,10 @@ jobs:
         run: |
           set -euo pipefail
           context="$RUNNER_TEMP/container-node-modules-context"
-          TRANSFER_KEY="$TRANSFER_KEY" python3 "$RUNNER_TEMP/container_dependency_transfer.py" decrypt \
+          trap 'status=$?; if [ "$status" -ne 0 ]; then rm -rf -- "$context" || true; fi; exit "$status"' EXIT
+          TRANSFER_KEY="$TRANSFER_KEY" python3 "$RUNNER_TEMP/container_dependency_transfer.py" restore-tar \
             --source "$TRANSFER_DIR/container-node-modules.tgz.enc" \
-            --destination "$RUNNER_TEMP/container-node-modules.tgz"
-          tar -xzf "$RUNNER_TEMP/container-node-modules.tgz" -C "$context"
-          rm -f "$RUNNER_TEMP/container-node-modules.tgz"
+            --destination "$context"
           case "$LOCK_FILE" in package-lock.json|pnpm-lock.yaml) ;; *) echo "::error::invalid lock-file output"; exit 1 ;; esac
           expected="$(sha256sum "$LOCK_FILE" | cut -d' ' -f1)"
           [ "$(cat "$context/.verjson-lock-sha256")" = "$expected" ] || { echo "::error::node_modules artifact does not match $LOCK_FILE"; exit 1; }
@@ -756,9 +882,13 @@ jobs:
         name: Remove local node_modules transfer state
         env:
           TRANSFER_DIR: ${{ github.workspace }}/.verjson-container-node-modules-${{ github.run_id }}-${{ github.run_attempt }}
-        run: rm -rf "$TRANSFER_DIR" "$RUNNER_TEMP/container_dependency_transfer.py" "$RUNNER_TEMP/container-node-modules.tgz"
-      - if: matrix.baseVariant != ''
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        run: rm -rf "$TRANSFER_DIR" "$RUNNER_TEMP/container_dependency_transfer.py"
+      - name: Measure runner usage after Node dependency restoration
+        if: always() && matrix.baseVariant != ''
+        continue-on-error: true
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" measure after-node-restoration
       - if: matrix.baseVariant != ''
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -847,6 +977,12 @@ jobs:
           [[ "$base_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
           echo "image=$base_repository@$base_digest" >> "$GITHUB_OUTPUT"
           echo "digest=$base_digest" >> "$GITHUB_OUTPUT"
+      - name: Measure runner usage before derived image build
+        if: matrix.baseVariant != '' && steps.retry.outputs.reused != 'true'
+        continue-on-error: true
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" measure before-image-build
       - id: build
         if: matrix.baseVariant != '' && steps.retry.outputs.reused != 'true'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -867,6 +1003,21 @@ jobs:
           provenance: mode=max
           sbom: true
           build-contexts: verjson_node_modules=${{ runner.temp }}/container-node-modules-context
+      - name: Measure runner usage after derived image build
+        if: always() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure')
+        continue-on-error: true
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" measure after-image-build
+      - name: Upload candidate runner usage diagnostics
+        if: always() && matrix.baseVariant != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: oci-candidate-runner-usage-derived-${{ matrix.variant }}
+          path: ${{ runner.temp }}/container-candidate-disk-usage.log
+          if-no-files-found: warn
+          retention-days: 7
       - name: Wait for pushed manifest registry visibility
         if: matrix.baseVariant != '' && steps.retry.outputs.reused != 'true'
         env:

@@ -20,6 +20,10 @@ on:
         required: false
         default: ''
         type: string
+      cleanup-unused-docker-images:
+        description: Opt-in removal of unused preloaded images on isolated GitHub-hosted build jobs
+        required: true
+        type: boolean
 
 permissions:
   contents: read
@@ -37,6 +41,7 @@ jobs:
       candidate: ${{ steps.config.outputs.candidate }}
       private-node-packages: ${{ steps.config.outputs.private-node-packages }}
       has-private-node-packages: ${{ steps.config.outputs.has-private-node-packages }}
+      cleanup-unused-docker-images: ${{ steps.config.outputs.cleanup-unused-docker-images }}
       package-manager: ${{ steps.config.outputs.package-manager }}
       lock-file: ${{ steps.config.outputs.lock-file }}
       registry-destinations: ${{ steps.config.outputs.registry-destinations }}
@@ -54,6 +59,7 @@ jobs:
           # static schema predates job.workflow_sha.
           JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
           RETRY_SHA256: ${{ inputs.retry-sha256 }}
+          CLEANUP_UNUSED_DOCKER_IMAGES: ${{ inputs.cleanup-unused-docker-images }}
           SOURCE_PATH: .container-candidate-source-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
@@ -73,7 +79,8 @@ jobs:
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_registry_destinations.py" -o "$destination_helper"
           destination_contract="$(python3 "$destination_helper" --config "$CONFIG_PATH" --owner "$GITHUB_REPOSITORY_OWNER")"
           expected_namespace="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
-          jq -e --arg repository "$GITHUB_REPOSITORY" --arg namespace "$expected_namespace" '
+          jq -e --arg repository "$GITHUB_REPOSITORY" --arg namespace "$expected_namespace" \
+            --argjson cleanup_unused_docker_images "$CLEANUP_UNUSED_DOCKER_IMAGES" '
             def safe_component:
               type == "string" and length <= 64
               and test("^[a-z0-9]+(?:[._-][a-z0-9]+)*$");
@@ -90,6 +97,8 @@ jobs:
             and ((.privateNodePackages // []) | type == "array")
             and ((.privateNodePackages // []) | all(.[]; type == "string" and test("^@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$")))
             and ((.privateNodePackages // []) | length == (unique | length))
+            and (if has("cleanupUnusedDockerImages") then (.cleanupUnusedDockerImages | type == "boolean") else true end)
+            and ((.cleanupUnusedDockerImages // false) == $cleanup_unused_docker_images)
             and ((.packageManager // "npm") | . == "npm" or . == "pnpm")
             and (.nextStableVersion | test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))
             and (.images | type == "array" and length > 0)
@@ -140,6 +149,7 @@ jobs:
             echo "candidate=$candidate"
             echo "private-node-packages=$(jq -c '.privateNodePackages // []' "$CONFIG_PATH")"
             echo "has-private-node-packages=$(jq -r '((.privateNodePackages // []) | length > 0)' "$CONFIG_PATH")"
+            echo "cleanup-unused-docker-images=$(jq -r '.cleanupUnusedDockerImages // false' "$CONFIG_PATH")"
             echo "package-manager=$(jq -r '.packageManager // "npm"' "$CONFIG_PATH")"
             echo "lock-file=$(jq -r 'if (.packageManager // "npm") == "pnpm" then "pnpm-lock.yaml" else "package-lock.json" end' "$CONFIG_PATH")"
             echo "registry-destinations=$(jq -c '.destinations' <<<"$destination_contract")"

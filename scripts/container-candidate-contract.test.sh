@@ -9,6 +9,7 @@ cp "$root/scripts/gen-container-candidate.sh" \
   "$root/scripts/container_release_manifest.py" \
   "$root/scripts/container_private_dependencies.py" \
   "$root/scripts/container_dependency_transfer.py" \
+  "$root/scripts/container_candidate_disk_usage.sh" \
   "$root/scripts/container_candidate_retry.py" \
   "$root/scripts/container_cosign_provenance.py" \
   "$root/scripts/container_registry_destinations.py" \
@@ -68,7 +69,7 @@ done
 
 private_consumer="$tmp/private-generated"
 mkdir -p "$private_consumer/.github/workflows" "$private_consumer/scripts"
-jq '.privateNodePackages = ["@verjson/private-package"]' \
+jq '.privateNodePackages = ["@verjson/private-package"] | .cleanupUnusedDockerImages = true' \
   "$root/scripts/fixtures/container-candidate/single.json" \
   > "$private_consumer/container-candidate.json"
 (cd "$private_consumer" && "$generator" workflow "$ref" container-candidate.json) \
@@ -88,6 +89,7 @@ with open(os.environ["PRIVATE_CALLER"], encoding="utf-8") as stream:
     caller = yaml.safe_load(stream)
 
 validate = caller["jobs"]["validate"]
+assert validate["with"]["cleanup-unused-docker-images"] is True
 assert validate["permissions"] == {"actions": "read", "contents": "read"}, (
     "private-package pull-request validation must remain credential-free"
 )
@@ -95,11 +97,22 @@ assert "secrets" not in validate, (
     "private-package contents and credentials must not enter PR validation"
 )
 publish = caller["jobs"]["publish"]
+assert publish["with"]["cleanup-unused-docker-images"] is True
 assert publish["secrets"] == {
     "NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}"
 }, "trusted publication must retain the narrowly scoped package credential"
 PY
 bash "$private_consumer/scripts/container-candidate-contract.test.sh"
+
+invalid_cleanup_consumer="$tmp/invalid-cleanup-generated"
+mkdir -p "$invalid_cleanup_consumer/.github/workflows"
+jq '.cleanupUnusedDockerImages = "true"' \
+  "$root/scripts/fixtures/container-candidate/single.json" \
+  > "$invalid_cleanup_consumer/container-candidate.json"
+if (cd "$invalid_cleanup_consumer" && "$generator" workflow "$ref" container-candidate.json) >/dev/null 2>&1; then
+  echo "candidate generator accepted a non-boolean cleanup setting" >&2
+  exit 1
+fi
 
 workflow="$root/.github/workflows/container-candidate.yml"
 publish_workflow="$root/.github/workflows/container-candidate-publish.yml"
@@ -108,7 +121,9 @@ CALLER_WORKFLOW="$tmp/single/.github/workflows/container-candidate.yml" \
 CALLEE_WORKFLOW="$workflow" PUBLISH_WORKFLOW="$publish_workflow" \
 CANARY_WORKFLOW="$canary" python3 - <<'PY'
 import copy
+import hashlib
 import os
+from pathlib import Path
 
 import yaml
 
@@ -121,6 +136,11 @@ with open(os.environ["PUBLISH_WORKFLOW"], encoding="utf-8") as stream:
     publisher = yaml.safe_load(stream)
 with open(os.environ["CANARY_WORKFLOW"], encoding="utf-8") as stream:
     canary = yaml.safe_load(stream)
+transfer_helper = (
+    Path(os.environ["CANARY_WORKFLOW"]).parents[2]
+    / "scripts/container_dependency_transfer.py"
+)
+transfer_digest = hashlib.sha256(transfer_helper.read_bytes()).hexdigest()
 
 validation_permissions = {"actions": "read", "contents": "read"}
 publication_permissions = {
@@ -445,6 +465,9 @@ assert canary["jobs"]["publish"]["if"] == (
     "github.event_name == 'workflow_dispatch' "
     "&& github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
 ), "privileged canary dispatch must be bound to the repository default branch"
+assert canary["jobs"]["publish"]["with"]["transfer-sha256"] == transfer_digest, (
+    "reusable-call canary transfer helper digest must match the checked-in helper"
+)
 expected_runner = (
     "${{ github.repository_owner == 'Verjson' && "
     "(vars.CI_RUNNER_DEFAULT || '[\"self-hosted\",\"general\"]') || "
@@ -663,6 +686,7 @@ first_adoption_output="$tmp/first-adoption-output"
     GITHUB_RUN_ATTEMPT=1 \
     GITHUB_RUN_ID=12345 \
     JOB_WORKFLOW_SHA="$ref" \
+    CLEANUP_UNUSED_DOCKER_IMAGES=false \
     RETRY_SHA256="$(printf 'c%.0s' {1..64})" \
     RUNNER_TEMP="$runner_temp" \
     PATH="$mock_bin:$PATH" \
@@ -687,6 +711,7 @@ case_variant_output="$tmp/case-variant-output"
     GITHUB_RUN_ATTEMPT=1 \
     GITHUB_RUN_ID=12345 \
     JOB_WORKFLOW_SHA="$ref" \
+    CLEANUP_UNUSED_DOCKER_IMAGES=true \
     RETRY_SHA256="$(printf 'c%.0s' {1..64})" \
     RUNNER_TEMP="$runner_temp" \
     PATH="$mock_bin:$PATH" \
@@ -708,9 +733,10 @@ run_invalid_config() {
       GITHUB_REPOSITORY=Verjson/example \
       GITHUB_REPOSITORY_OWNER=Verjson \
       GITHUB_RUN_ATTEMPT=1 \
-      GITHUB_RUN_ID=12345 \
-      JOB_WORKFLOW_SHA="$ref" \
-      RETRY_SHA256="$(printf 'c%.0s' {1..64})" \
+    GITHUB_RUN_ID=12345 \
+    JOB_WORKFLOW_SHA="$ref" \
+    CLEANUP_UNUSED_DOCKER_IMAGES=false \
+    RETRY_SHA256="$(printf 'c%.0s' {1..64})" \
       RUNNER_TEMP="$runner_temp" \
       PATH="$mock_bin:$PATH" \
       SOURCE_PATH=. \
@@ -720,6 +746,15 @@ run_invalid_config() {
     exit 1
   fi
 }
+
+jq '.cleanupUnusedDockerImages = true' \
+  "$root/scripts/fixtures/container-candidate/single.json" \
+  > "$first_adoption/cleanup-setting-mismatch.json"
+run_invalid_config cleanup-setting-mismatch.json "$tmp/cleanup-setting-mismatch-output"
+jq '.cleanupUnusedDockerImages = "true"' \
+  "$root/scripts/fixtures/container-candidate/single.json" \
+  > "$first_adoption/cleanup-setting-invalid-type.json"
+run_invalid_config cleanup-setting-invalid-type.json "$tmp/cleanup-setting-invalid-type-output"
 
 cp "$root/scripts/fixtures/container-candidate/single.json" "$tmp/outside-candidate.json"
 run_invalid_config ../outside-candidate.json "$tmp/traversal-output"
@@ -1119,5 +1154,62 @@ if "$generator" validator "$(printf 'a%.0s' {1..40})" >/dev/null 2>&1; then
 fi
 
 bash "$root/scripts/container-contract-coexistence.test.sh"
+
+PUBLISHER="$root/.github/workflows/container-candidate-publish.yml" \
+DISK_HELPER="$root/scripts/container_candidate_disk_usage.sh" \
+CONFIG_SCHEMA="$root/docs/decisions/0078-container-release-and-runner-deployment-contract/candidate-config.schema.json" \
+python3 - <<'PY'
+import json
+import os
+import yaml
+
+with open(os.environ["PUBLISHER"], encoding="utf-8") as stream:
+    workflow = yaml.safe_load(stream)
+with open(os.environ["CONFIG_SCHEMA"], encoding="utf-8") as stream:
+    schema = json.load(stream)
+with open(os.environ["DISK_HELPER"], encoding="utf-8") as stream:
+    disk_helper = stream.read()
+
+cleanup_schema = schema["properties"]["cleanupUnusedDockerImages"]
+assert cleanup_schema["type"] == "boolean"
+assert cleanup_schema["default"] is False
+assert "prune" not in disk_helper.lower(), "global prune is forbidden by the publisher contract"
+assert "docker image rm \"$removal_target\"" in disk_helper
+
+prepare = workflow["jobs"]["prepare"]["steps"]
+config_step = next(step for step in prepare if step.get("id") == "config")
+assert 'type == "boolean"' in config_step["run"]
+assert 'cleanup-unused-docker-images=$(jq -r' in config_step["run"]
+workflow_call = workflow.get("on", workflow.get(True, {})).get("workflow_call", {})
+assert "disk-sha256" in workflow_call["inputs"]
+
+for job_name in ("publish-base", "publish-derived"):
+    job = workflow["jobs"][job_name]
+    assert job["runs-on"] == "ubuntu-24.04"
+    steps = job["steps"]
+    disk_steps = [step for step in steps if "container_candidate_disk_usage.sh" in step.get("run", "")]
+    assert disk_steps
+    assert all(step.get("env", {}).get("RUNNER_ENVIRONMENT") == "${{ runner.environment }}" for step in disk_steps)
+    cleanup = next(step for step in steps if step.get("name") == "Clean unused preloaded Docker images")
+    assert "steps.buildx.outcome == 'success'" in cleanup["if"]
+    assert cleanup["env"]["CLEANUP_UNUSED_DOCKER_IMAGES"] == (
+        "${{ needs.prepare.outputs.cleanup-unused-docker-images }}"
+    )
+    restore = next(step for step in steps if "Restore and verify credential-free node_modules" in step.get("name", ""))
+    assert "restore-tar" in restore["run"]
+    assert "$RUNNER_TEMP/container-node-modules.tgz\"" not in restore["run"]
+    assert "tar -xzf" not in restore["run"]
+    assert any(step.get("name") == "Upload candidate runner usage diagnostics" and step.get("if", "").startswith("always()") for step in steps)
+    measurements = [step for step in disk_steps if " measure " in step.get("run", "")]
+    assert measurements
+    assert all(step.get("continue-on-error") is True for step in measurements)
+    assert cleanup.get("continue-on-error") is not True
+
+publisher_text = open(os.environ["PUBLISHER"], encoding="utf-8").read()
+assert all(phase in publisher_text for phase in (
+    "before-cleanup", "after-cleanup",
+    "before-node-restoration", "after-node-restoration", "before-image-build", "after-image-build"
+))
+PY
 
 echo "container candidate canonical contract passed"

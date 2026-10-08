@@ -14,6 +14,13 @@ on:
       - 'scripts/container_private_dependencies.py'
       - 'scripts/container_private_dependencies.test.py'
       - 'scripts/container_candidate_retry.py'
+      - 'scripts/container_dependency_transfer.py'
+      - 'scripts/container_dependency_transfer.test.py'
+      - 'scripts/container_candidate_disk_usage.sh'
+      - 'scripts/container_candidate_disk_usage.test.sh'
+      - 'scripts/container_candidate_config.test.py'
+      - 'scripts/container-candidate-contract.test.sh'
+      - 'docs/decisions/0078-container-release-and-runner-deployment-contract/candidate-config.schema.json'
       - 'scripts/gen-container-candidate.sh'
       - 'scripts/fixtures/container-candidate/canary/**'
       - 'scripts/fixtures/container-candidate/canary.json'
@@ -28,6 +35,7 @@ jobs:
     uses: ./.github/workflows/container-candidate.yml
     with:
       config-path: scripts/fixtures/container-candidate/canary.json
+      cleanup-unused-docker-images: true
       contract-ref: ${{ github.sha }}
       retry-sha256: '9072934bc1c5262623dfbe7c325665dfc58a7373d666d5ac4fd9e394bd5bfc2f'
       runner: ${{ github.repository_owner == 'Verjson' && (vars.CI_RUNNER_DEFAULT || '["self-hosted","general"]') || '["ubuntu-24.04"]' }}
@@ -44,9 +52,11 @@ jobs:
     uses: ./.github/workflows/container-candidate-publish.yml
     with:
       config-path: scripts/fixtures/container-candidate/canary.json
+      cleanup-unused-docker-images: true
       contract-ref: ${{ github.sha }}
       acquisition-sha256: '0000000000000000000000000000000000000000000000000000000000000000'
-      transfer-sha256: 'db50956fd099f1641c030293f045944b4f5e21d221b030dddc55bb6e925396d7'
+      transfer-sha256: '6bbd22f2e0c4814d661cb74e1e31e6ed1cb9b5cf744b35571749221579c0b14a'
+      disk-sha256: '9b1d77af25f26af137bcfc50900073b7db89575cb65a126dfee1f5202e66c39d'
       retry-sha256: '9072934bc1c5262623dfbe7c325665dfc58a7373d666d5ac4fd9e394bd5bfc2f'
       provenance-sha256: 'e785ad9fb49d60d0de25dd2214e2c03fbf7fa348a7df2407ee7f187757a91c74'
       runner: ${{ github.repository_owner == 'Verjson' && (vars.CI_RUNNER_DEFAULT || '["self-hosted","general"]') || '["ubuntu-24.04"]' }}

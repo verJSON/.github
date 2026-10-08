@@ -2,6 +2,7 @@
   "repository": "verJSON/.github",
   "registryNamespace": "ghcr.io/verjson",
   "nextStableVersion": "0.0.1",
+  "cleanupUnusedDockerImages": true,
   "images": [
     {
       "variant": "contract-canary",

@@ -32,13 +32,27 @@ private_package_mode() {
   ' "$config"
 }
 
+cleanup_unused_docker_images_mode() {
+  local config="$PWD/$config_path"
+  [ -f "$config" ] || { echo "config not found: $config_path" >&2; exit 2; }
+  jq -r '
+    if has("cleanupUnusedDockerImages") and (.cleanupUnusedDockerImages | type) != "boolean" then
+      error("cleanupUnusedDockerImages must be a boolean")
+    else
+      (.cleanupUnusedDockerImages // false)
+    end
+  ' "$config"
+}
+
 case "$mode" in
 workflow)
   acquisition_sha256="$(git -C "$root" show "$ref:scripts/container_private_dependencies.py" | sha256sum | cut -d' ' -f1)"
   transfer_sha256="$(git -C "$root" show "$ref:scripts/container_dependency_transfer.py" | sha256sum | cut -d' ' -f1)"
+  disk_sha256="$(git -C "$root" show "$ref:scripts/container_candidate_disk_usage.sh" | sha256sum | cut -d' ' -f1)"
   retry_sha256="$(git -C "$root" show "$ref:scripts/container_candidate_retry.py" | sha256sum | cut -d' ' -f1)"
   provenance_sha256="$(git -C "$root" show "$ref:scripts/container_cosign_provenance.py" | sha256sum | cut -d' ' -f1)"
   private_packages="$(private_package_mode)"
+  cleanup_unused_docker_images="$(cleanup_unused_docker_images_mode)"
   cat <<YAML
 # GENERATED FILE — do not edit by hand.
 # Contract: $ref
@@ -60,6 +74,7 @@ jobs:
     uses: Verjson/.github/.github/workflows/container-candidate.yml@$ref
     with:
       config-path: $config_path
+      cleanup-unused-docker-images: $cleanup_unused_docker_images
       contract-ref: $ref
       retry-sha256: $retry_sha256
   publish:
@@ -72,12 +87,14 @@ jobs:
     uses: Verjson/.github/.github/workflows/container-candidate-publish.yml@$ref
     with:
       config-path: $config_path
+      cleanup-unused-docker-images: $cleanup_unused_docker_images
       contract-ref: $ref
       acquisition-sha256: $acquisition_sha256
       transfer-sha256: $transfer_sha256
+      disk-sha256: $disk_sha256
       retry-sha256: $retry_sha256
       provenance-sha256: $provenance_sha256
-$(if [ "$private_packages" = true ]; then printf '%s\n' '    secrets:' '      NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}'; fi)
+$(if [ "$private_packages" = true ]; then printf '%s\n' '    secrets:' "      NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}"; fi)
 YAML
   ;;
 validator)
@@ -103,9 +120,11 @@ HEADER
 contract-test)
   acquisition_sha256="$(git -C "$root" show "$ref:scripts/container_private_dependencies.py" | sha256sum | cut -d' ' -f1)"
   transfer_sha256="$(git -C "$root" show "$ref:scripts/container_dependency_transfer.py" | sha256sum | cut -d' ' -f1)"
+  disk_sha256="$(git -C "$root" show "$ref:scripts/container_candidate_disk_usage.sh" | sha256sum | cut -d' ' -f1)"
   retry_sha256="$(git -C "$root" show "$ref:scripts/container_candidate_retry.py" | sha256sum | cut -d' ' -f1)"
   provenance_sha256="$(git -C "$root" show "$ref:scripts/container_cosign_provenance.py" | sha256sum | cut -d' ' -f1)"
   private_packages="$(private_package_mode)"
+  cleanup_unused_docker_images="$(cleanup_unused_docker_images_mode)"
   workflow_digest="$("$0" workflow "$ref" "$config_path" | sha256sum | cut -d' ' -f1)"
   validator_digest="$("$0" validator "$ref" "$config_path" | sha256sum | cut -d' ' -f1)"
   destination_helper_digest="$("$0" destination-helper "$ref" "$config_path" | sha256sum | cut -d' ' -f1)"
@@ -129,8 +148,10 @@ grep -qx '# Contract: $ref' "\$destination_helper" || fail "destination helper c
 [ "\$(grep -c 'uses: Verjson/.github/.github/workflows/container-candidate.yml@$ref' "\$caller")" -eq 1 ] || fail "validation does not use the pinned read-only reusable workflow"
 [ "\$(grep -c 'uses: Verjson/.github/.github/workflows/container-candidate-publish.yml@$ref' "\$caller")" -eq 1 ] || fail "publication does not use the pinned publication reusable workflow"
 [ "\$(grep -c 'contract-ref: $ref' "\$caller")" -eq 2 ] || fail "caller does not pass the shared pin to both event paths"
+[ "\$(grep -c 'cleanup-unused-docker-images: $cleanup_unused_docker_images' "\$caller")" -eq 2 ] || fail "caller does not pass the reviewed cleanup setting to both event paths"
 [ "\$(grep -c 'acquisition-sha256: $acquisition_sha256' "\$caller")" -eq 1 ] || fail "only trusted publication may pin the acquisition implementation digest"
 [ "\$(grep -c 'transfer-sha256: $transfer_sha256' "\$caller")" -eq 1 ] || fail "trusted publication does not pin the dependency transfer implementation digest"
+[ "\$(grep -c 'disk-sha256: $disk_sha256' "\$caller")" -eq 1 ] || fail "trusted publication does not pin disk diagnostics implementation digest"
 [ "\$(grep -c 'retry-sha256: $retry_sha256' "\$caller")" -eq 2 ] || fail "both event paths do not pin the retry verifier digest"
 [ "\$(grep -c '^      actions: read$' "\$caller")" -eq 2 ] || fail "both event paths require Actions reads"
 [ "\$(grep -c '^      contents: read$' "\$caller")" -eq 2 ] || fail "both event paths require source reads"
