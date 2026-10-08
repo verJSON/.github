@@ -169,6 +169,9 @@ changelog-release	python3 scripts/container_cosign_workflow_contract.test.py
 changelog-release	python3 scripts/container_registry_destinations.test.py
 changelog-release	python3 scripts/container-candidate-retry-contract.test.py
 changelog-release	bash scripts/container-candidate-contract.test.sh
+changelog-release	python3 scripts/container_dependency_transfer.test.py
+changelog-release	bash scripts/container_candidate_disk_usage.test.sh
+changelog-release	python3 scripts/container_candidate_config.test.py
 changelog-release	bash scripts/container-release-contract.test.sh
 changelog-release	python3 scripts/container-release-app-token.test.py
 changelog-release	python3 scripts/container_release_changelog_engine.test.py

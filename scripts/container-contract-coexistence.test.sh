@@ -21,6 +21,7 @@ cp \
   "$root/scripts/container_release_manifest.py" \
   "$root/scripts/container_private_dependencies.py" \
   "$root/scripts/container_dependency_transfer.py" \
+  "$root/scripts/container_candidate_disk_usage.sh" \
   "$root/scripts/container_candidate_retry.py" \
   "$root/scripts/container_registry_destinations.py" \
   "$root/scripts/container_artifact_extract.py" \

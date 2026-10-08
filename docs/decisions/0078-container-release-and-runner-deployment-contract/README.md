@@ -45,6 +45,8 @@ Each consumer commits a reviewed release configuration containing one exact
 `nextStableVersion`. It is a `MAJOR.MINOR.PATCH` SemVer greater than the latest stable
 release. Changing the next stable line therefore passes through the consumer's normal
 pull-request controls; a workflow input or an arbitrary branch cannot select it.
+The publisher configuration surface, including the opt-in runner image cleanup setting,
+is described by [candidate-config.schema.json](./candidate-config.schema.json).
 
 A successful build of the consumer's default branch has the SemVer prerelease identity
 `<nextStableVersion>-rc.<run_id>.<run_attempt>`. The GitHub run ID and attempt are numeric,
