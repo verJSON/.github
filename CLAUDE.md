@@ -75,6 +75,8 @@ Each entry states the concrete fact and how/when it was last verified — a live
 not just inspection of prose (#956: an entry asserting external status should say how it
 was confirmed, since inspection-only claims go stale silently).
 
+- [#1721](https://github.com/verJSON/.github/issues/1721) — Bound disk use in generated OCI candidate publishers. Verified 2026-10-08 against TTP PR #1600 and candidate run #37715009092; TTP #1352 is natively blocked by this contract work. That run separately failed GitHub provenance attestation for the `terptechpub` organization; the consumer billing gate stays outside this issue.
+
 - [#1663](https://github.com/Verjson/.github/issues/1663) — The generated label re-arm caller also subscribed to lifecycle events already handled by `gate-rearm.yml`; confirmed 2026-09-30 by comparing both generators and caller contracts.
 
 - [#1669](https://github.com/Verjson/.github/issues/1669) — Node 26 places npm’s CLI under the validated tool prefix’s `lib` tree while the launcher looks below `bin`; the registered credentialless consumer script plan regression and protected identity harness pass locally on 2026-10-01, pending canonical CI.
