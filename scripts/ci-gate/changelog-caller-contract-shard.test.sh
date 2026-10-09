@@ -42,13 +42,17 @@ import sys
 
 caller, shard, manifest = sys.argv[1:]
 text = open(caller, encoding="utf-8").read()
+expected_calls = 215
 calls = len(re.findall(r"^schedule_adopter_script ", text, re.M))
 calls += len(re.findall(r"^[ \t]*expect_rejection ", text, re.M))
 calls += len(re.findall(r"^expect_release_mode_rejection ", text, re.M))
 calls += len(re.findall(r"^[ \t]*expect_unestablished_pin ", text, re.M))
 calls += len(re.findall(r"^(?:if )?run_adopter ", text, re.M))
-if calls < 100:
-    raise SystemExit(f"parser saw only {calls} caller-contract cases")
+if calls != expected_calls:
+    raise SystemExit(
+        f"parser saw {calls} caller-contract cases; expected {expected_calls}; "
+        "review and update the case inventory when cases change"
+    )
 
 width = 4
 owners = {index: [] for index in range(1, calls + 1)}
