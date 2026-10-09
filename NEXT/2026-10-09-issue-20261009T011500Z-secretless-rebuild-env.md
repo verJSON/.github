@@ -10,8 +10,9 @@ On GitHub-hosted runners, the workflow provisions and verifies its
 bubblewrap/AppArmor boundary before the rebuild; other runner types fail closed.
 It starts from a temporary filesystem root, isolates network access, and mounts
 only system tools, the selected Node toolchain, required configuration, the
-checkout, and (for pnpm) its Corepack cache. Directory descriptors preserve the
-checkout and tool sources after host paths are hidden. The checkout stays
+checkout, and (for pnpm) its Corepack cache. Directory descriptors hold the
+checkout and tool sources through Bubblewrap setup, then a trusted bootstrap closes
+all inherited descriptors before any package-manager lifecycle code runs. The checkout stays
 read-only and only `node_modules` is writable. The package manager gets no
 credentials, raw caller input, or GitHub command-file paths. Secretless pnpm
 installs ignore repository pnpmfile hooks, and the rebuild mounts only the

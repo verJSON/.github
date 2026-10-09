@@ -156,3 +156,5 @@ does not add network or credential access.
 The Node 26 path is covered by
 `scripts/ci-gate/node-ci-secretless-consumer.test.sh` and the protected
 `scripts/ci-gate/node-ci-required-identity.test.py` harness.
+
+The secretless lifecycle entrypoint starts through a trusted Python bootstrap that closes inherited bind-source descriptors before npm or Corepack runs. Regression coverage attempts writes to host command files through every visible directory descriptor under real Bubblewrap.

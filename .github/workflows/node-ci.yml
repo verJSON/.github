@@ -4959,7 +4959,21 @@ jobs:
           }
           for name, value in sorted(rebuild_process_env.items()):
               arguments.extend(("--setenv", name, value))
-          arguments.extend(("--", *command, *requested))
+          sandbox_entrypoint = (
+              "import os, sys\n"
+              "max_fd = os.sysconf('SC_OPEN_MAX')\n"
+              "if max_fd < 3: raise SystemExit('invalid file descriptor limit')\n"
+              "os.closerange(3, max_fd)\n"
+              "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
+          )
+          arguments.extend((
+              "--",
+              "/usr/bin/python3",
+              "-c",
+              sandbox_entrypoint,
+              *command,
+              *requested,
+          ))
           os.execve(str(bubblewrap), arguments, {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"})
           PY
       - name: Run exact credentialless consumer script plan

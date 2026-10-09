@@ -63,7 +63,9 @@ rebuild = next(step for step in build["steps"] if step.get("name") == "Rebuild e
 plan = next(step for step in build["steps"] if step.get("name") == "Run exact credentialless consumer script plan")
 assert "inputs.secretless-pr" in rebuild["if"] and "secrets." not in str(rebuild.get("env", {}))
 assert "inputs.secretless-pr" in plan["if"] and "secrets." not in str(plan.get("env", {}))
-assert 'arguments.extend(("--", *command, *requested))' in rebuild["run"]
+assert "sandbox_entrypoint" in rebuild["run"]
+assert "os.closerange(3, max_fd)" in rebuild["run"]
+assert "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)" in rebuild["run"]
 assert 'os.execve(str(bubblewrap), arguments,' in rebuild["run"]
 assert 'subprocess.run([*npm_command, "run", name]' in plan["run"]
 assert "env=script_env" in plan["run"]

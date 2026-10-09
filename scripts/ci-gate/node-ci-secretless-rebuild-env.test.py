@@ -85,6 +85,22 @@ def run_rebuild(
             "else:\n"
             "    hidden_path_writes.append('workspace-root-writable')\n"
         )
+        hidden_path_checks += (
+            f"forbidden_host_paths = {hidden_targets!r}\n"
+            "for descriptor_name in os.listdir('/proc/self/fd'):\n"
+            "    descriptor = Path('/proc/self/fd') / descriptor_name\n"
+            "    try:\n"
+            "        if not descriptor.is_dir():\n"
+            "            continue\n"
+            "        source_path = os.readlink(descriptor)\n"
+            "        for host_path in forbidden_host_paths:\n"
+            "            relative = os.path.relpath(host_path, source_path)\n"
+            "            with (descriptor / relative).open('a', encoding='utf-8') as command_file:\n"
+            "                command_file.write('COMPROMISED=1\\n')\n"
+            "            hidden_path_writes.append(f'inherited-fd:{descriptor_name}:{host_path}')\n"
+            "    except OSError:\n"
+            "        continue\n"
+        )
     package_manager_stub.write_text(
         "#!/usr/bin/python3\n"
         "import json\n"
@@ -434,6 +450,9 @@ def main():
         assert "bind_source(workspace, sandbox_workspace)" in step["run"]
         assert 'bind_source(node_modules, f"{sandbox_workspace}/node_modules", writable=True)' in step["run"]
         assert '"PATH": f"{toolchain_bin}:/usr/bin:/bin"' in step["run"]
+        assert "sandbox_entrypoint" in step["run"]
+        assert "os.closerange(3, max_fd)" in step["run"]
+        assert "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)" in step["run"]
         assert '"GITHUB_ENV"' not in step["run"]
         if workflow_path == PROTECTED_WORKFLOW:
             steps = build["steps"]
