@@ -9,6 +9,15 @@ set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
+# shellcheck source=scripts/changelog-caller-contract-shard.sh
+source "$repo_root/scripts/changelog-caller-contract-shard.sh"
+if ! changelog_caller_shard_name_ok "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}"; then
+  printf 'FAIL - CHANGELOG_CALLER_CONTRACT_SHARD must be all or 1..4\n' >&2
+  exit 1
+fi
+caller_case_count=0
+caller_case_ran=0
+caller_assertions_suspended=0
 gen="$repo_root/scripts/gen-changelog-caller.sh"
 # A ref that actually resolves. The generator pins the SHA-256 of the engine at
 # the contract commit (#304), so it must be able to read that commit's content —
@@ -20,8 +29,15 @@ sha="$(git -C "$repo_root" rev-parse HEAD)"
 unresolvable_sha="0123456789abcdef0123456789abcdef01234567"
 fails=0
 
-pass() { printf 'ok   - %s\n' "$1"; }
-fail() { printf 'FAIL - %s\n' "$1"; fails=$((fails + 1)); }
+pass() {
+  [ "${caller_assertions_suspended:-}" = 1 ] && return 0
+  printf 'ok   - %s\n' "$1"
+}
+fail() {
+  [ "${caller_assertions_suspended:-}" = 1 ] && return 0
+  printf 'FAIL - %s\n' "$1"
+  fails=$((fails + 1))
+}
 # A case whose FIXTURE cannot be built in this environment. It is not a pass:
 # reporting "ok" for an assertion that never ran is the defect class this suite
 # exists to close, and a silent omission is worse. Use it only where the reason
@@ -1214,6 +1230,13 @@ build_split_adopter() {
 
 run_adopter() {
   local status=0 adopter_log cache_env=()
+  if [ "${caller_case_nested:-}" != 1 ]; then
+    if ! changelog_caller_case_selected "$(basename "$1")"; then
+      caller_assertions_suspended=1
+      return 0
+    fi
+    caller_assertions_suspended=0
+  fi
   # A synchronous suite keeps running beside scheduled snapshots. It does not
   # wait for them: isolation already keeps their logs off this run.out (#1733).
   adopter_log="$1.contract-out"
@@ -1333,7 +1356,13 @@ drain_adopter_jobs() {
 
 
 schedule_adopter_script() {
-  local dir="$1" script="$2" seq result copy
+  local dir="$1" script="$2" seq result copy case_id
+  case_id="$(basename "$dir")"
+  if ! changelog_caller_case_selected "$case_id"; then
+    caller_assertions_suspended=1
+    return 0
+  fi
+  caller_assertions_suspended=0
   reject_seq=$((reject_seq + 1))
   seq="$reject_seq"
   result="$tmproot/sched-result-$seq"
@@ -1343,6 +1372,7 @@ schedule_adopter_script() {
   (
     fails=0
     status=0
+    caller_case_nested=1
     ADOPTER_ISOLATED_LOG=1
     run_adopter "$copy" || status=$?
     # shellcheck disable=SC2034 # read by the assertion script evaluated below
@@ -2148,11 +2178,17 @@ expect_rejection() {
   # expect_rejection <label> <mutator-fn> [mutator-args...]
   local label="$1" mutator="$2" seq result
   shift 2
+  if ! changelog_caller_case_selected "$label"; then
+    caller_assertions_suspended=1
+    return 0
+  fi
+  caller_assertions_suspended=0
   reject_seq=$((reject_seq + 1))
   seq="$reject_seq"
   result="$tmproot/reject-result-$seq"
   (
     fails=0
+    caller_case_nested=1
     ADOPTER_ISOLATED_LOG=1
     expect_rejection_body "$seq" "$label" "$mutator" "$@"
     printf '%s\n' "$fails" >"$result"
@@ -2188,11 +2224,17 @@ expect_release_mode_rejection_body() {
 
 expect_release_mode_rejection() {
   local release_mode="$1" label="$2" mutator="$3" expected="$4" seq result
+  if ! changelog_caller_case_selected "$label"; then
+    caller_assertions_suspended=1
+    return 0
+  fi
+  caller_assertions_suspended=0
   reject_seq=$((reject_seq + 1))
   seq="$reject_seq"
   result="$tmproot/reject-result-$seq"
   (
     fails=0
+    caller_case_nested=1
     ADOPTER_ISOLATED_LOG=1
     expect_release_mode_rejection_body "$seq" "$release_mode" "$label" "$mutator" "$expected"
     printf '%s\n' "$fails" >"$result"
@@ -5592,11 +5634,17 @@ expect_unestablished_pin() {
   # picks the member up and reports it anyway. An arm that only changes the
   # message needs the message asserted or it is not covered at all.
   local label="$1" member="$2" mutator="$3" phrase="${4:-}" seq result
+  if ! changelog_caller_case_selected "$label"; then
+    caller_assertions_suspended=1
+    return 0
+  fi
+  caller_assertions_suspended=0
   malformed_seq=$((malformed_seq + 1))
   seq="$malformed_seq"
   result="$tmproot/malformed-result-$seq"
   (
     fails=0
+    caller_case_nested=1
     ADOPTER_ISOLATED_LOG=1
     expect_unestablished_pin_body "$seq" "$label" "$member" "$mutator" "$phrase"
     printf '%s\n' "$fails" >"$result"
@@ -5812,5 +5860,11 @@ SCHED_SCRIPT
   || fail "a command named in an adopter-controlled header was executed by the checker"
 
 drain_adopter_jobs
+if [ "$caller_case_count" -lt 1 ]; then
+  fail "changelog caller contract recorded no cases"
+fi
+if [ "$caller_case_ran" -lt 1 ]; then
+  fail "changelog caller contract ran no cases"
+fi
 [ "$fails" -eq 0 ] || exit 1
 echo "All tests passed."

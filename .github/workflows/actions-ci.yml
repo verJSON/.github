@@ -91,17 +91,24 @@ jobs:
   shell-test-groups:
     needs: change-scope
     if: needs.change-scope.outputs.heavy == 'true'
-    # The changelog-release group completed all 62 commands at 18m47s but the old
-    # 18-minute bound cancelled it during job finalization on 2026-09-23. The expanded
-    # release-caller security contract took about 20 minutes by itself on 2026-10-07;
-    # thirty minutes keeps the full group bounded with margin for runner variance and cleanup.
+    # Thirty minutes still bounds one cell, including runner variance and cleanup.
+    # changelog-release is four cells so the caller-contract shards overlap
+    # platform and merge-gate; max-parallel matches that width (ADR 0224).
     runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 6
       matrix:
-        group: [platform, merge-gate, changelog-release]
+        group:
+          [
+            platform,
+            merge-gate,
+            changelog-release-1,
+            changelog-release-2,
+            changelog-release-3,
+            changelog-release-4,
+          ]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

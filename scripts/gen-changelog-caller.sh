@@ -2865,6 +2865,7 @@ pr_gate_workflow="$root/.github/workflows/changelog-contract.yml"
 fail() { echo "FAIL - $1" >&2; exit 1; }
 
 contract_fail() { fail "$1"; }
+
 EOF
   emit_contract_resolution
   cat <<'EOF' 
@@ -5638,6 +5639,10 @@ done <<RELEASE_WORKFLOWS
 $release_workflows
 RELEASE_WORKFLOWS
 echo "ok - render, validation and release automation share one immutable pin"
+# Every discovered release caller was parsed and restricted to workflow_dispatch
+# inside the loop above. Do not inspect the loop variable here: after the loop it
+# identifies only the last caller and silently drops coverage for every earlier one.
+echo "ok - every release caller is dispatched explicitly, not derived from pushes to main"
 
 # The regression this file exists to prevent was a hand-written local renderer
 # that kept working while silently diverging from the contract.
@@ -5830,10 +5835,6 @@ echo "ok - NEXT/ is the only unreleased store"
 # silently reintroduces release-on-merge, which never consumes a fragment.
 [ ! -e "$root/.releaserc.json" ] \
   || fail ".releaserc.json reintroduces semantic-release outside the contract"
-# Every discovered release caller was parsed and restricted to workflow_dispatch
-# inside the loop above. Do not inspect the loop variable here: after the loop it
-# identifies only the last caller and silently drops coverage for every earlier one.
-echo "ok - every release caller is dispatched explicitly, not derived from pushes to main"
 
 new_fixture() {
   rm -rf "$fixture_root/case"

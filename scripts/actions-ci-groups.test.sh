@@ -51,11 +51,16 @@ assert any(
 
 groups = jobs["shell-test-groups"]
 assert groups["timeout-minutes"] == 30
-assert groups["strategy"] == {
-    "fail-fast": False,
-    "max-parallel": 3,
-    "matrix": {"group": ["platform", "merge-gate", "changelog-release"]},
-}
+assert groups["strategy"]["fail-fast"] is False
+assert groups["strategy"]["max-parallel"] == 6
+assert groups["strategy"]["matrix"]["group"] == [
+    "platform",
+    "merge-gate",
+    "changelog-release-1",
+    "changelog-release-2",
+    "changelog-release-3",
+    "changelog-release-4",
+]
 checkout = next(step for step in groups["steps"] if "uses" in step)
 assert checkout["with"]["path"] == (
     ".actions-ci-source-${{ github.run_id }}-"
@@ -395,14 +400,17 @@ validate_manifest() {
     BEGIN { valid = 1 }
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
     NF != 2 { valid = 0; next }
-    $1 !~ /^(platform|merge-gate|changelog-release|docs)$/ { valid = 0; next }
+    $1 !~ /^(platform|merge-gate|changelog-release-[1-4]|docs)$/ { valid = 0; next }
     seen[$2]++ { valid = 0 }
     { groups[$1]++; total++ }
     END {
       if (!(total >= 60 &&
         groups["platform"] > 0 &&
         groups["merge-gate"] > 0 &&
-        groups["changelog-release"] > 0 &&
+        groups["changelog-release-1"] > 0 &&
+        groups["changelog-release-2"] > 0 &&
+        groups["changelog-release-3"] > 0 &&
+        groups["changelog-release-4"] > 0 &&
         groups["docs"] > 0)) {
         valid = 0
       }
@@ -421,11 +429,14 @@ merge-gate	bash scripts/ci-gate/arm-receipt.test.sh
 merge-gate	bash scripts/ci-gate/gate-hold-disable.test.sh
 merge-gate	bash scripts/ci-gate/native-automerge.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-pin.test.sh
-changelog-release	bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-1	CHANGELOG_CALLER_CONTRACT_SHARD=1 bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-2	CHANGELOG_CALLER_CONTRACT_SHARD=2 bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-3	CHANGELOG_CALLER_CONTRACT_SHARD=3 bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-4	CHANGELOG_CALLER_CONTRACT_SHARD=4 bash scripts/ci-gate/changelog-caller-contract.test.sh
 platform	bash scripts/runner-selector-health.test.sh
 docs	python3 scripts/changelog.py validate --repo-root .
 docs	bash scripts/changelog-fragment-schema.test.sh
-changelog-release	python3 scripts/v1-readiness-contract.test.py
+changelog-release-2	python3 scripts/v1-readiness-contract.test.py
 platform	bash scripts/actions-ci-python-dependencies.test.sh
 platform	bash scripts/shellcheck-tracked.test.sh
 platform	bash scripts/shellcheck-tracked.sh
@@ -434,7 +445,7 @@ LOAD_BEARING_COMMANDS
 }
 
 if validate_manifest "$manifest"; then
-  pass "manifest assigns every command once across four non-empty cohesive groups"
+  pass "manifest assigns every command once across the platform, merge-gate, docs, and changelog-release cells"
 else
   fail "manifest is missing, malformed, duplicated, or incompletely grouped"
 fi

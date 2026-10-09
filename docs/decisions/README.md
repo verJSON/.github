@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0224](0224-shard-changelog-release-actions-ci/README.md) | 2026-10-09 | Shard the changelog-release actions-ci group |
 | [0222](0222-documentation-diffs-skip-heavy-actions-ci/README.md) | 2026-10-09 | Documentation diffs skip the heavy actions-ci matrix |
 | [0221](0221-separate-node-release-runner-boundaries/README.md) | 2026-10-09 | Isolate Node release jobs on fresh hosted runners |
 | [0220](0220-confine-release-credentials-to-dependency-acquisition/README.md) | 2026-10-07 | Confine release credentials to dependency acquisition |
