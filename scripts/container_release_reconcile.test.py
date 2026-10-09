@@ -474,6 +474,18 @@ class GitControlSurfaceTest(unittest.TestCase):
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertIn("Git control surface", result.stderr)
 
+    def test_rejects_a_hook_that_hides_a_changed_contract_engine_in_the_index(self):
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            'printf "tag\\n" > Dockerfile\n'
+            "git -C .container-release-contract update-index --skip-worktree scripts/changelog.py\n"
+            "printf '# changed engine\\n' > .container-release-contract/scripts/changelog.py\n"
+        )
+        result = self.fixture.run()
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("Git control surface", result.stderr)
+        self.assertIn("index-entries", result.stderr)
+
     def test_hook_cannot_reach_the_runner_home_directory(self):
         """A writable `$HOME` is a `~/.gitconfig` away from the same escalation."""
         self.fixture.write_hook(
@@ -506,6 +518,20 @@ class GitControlSurfaceTest(unittest.TestCase):
         result = self.fixture.run()
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertIn("ignored output", result.stderr)
+
+    def test_rejects_a_hook_that_changes_a_preexisting_untracked_parent_directory_mode(self):
+        directory = self.fixture.repo / "preexisting-input"
+        directory.mkdir()
+        (directory / "payload.txt").write_text("release input\n", encoding="utf-8")
+        directory.chmod(0o500)
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            'printf "tag\\n" > Dockerfile\n'
+            "chmod 700 preexisting-input\n"
+        )
+        result = self.fixture.run()
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("modified pre-existing untracked output: preexisting-input/", result.stderr)
 
 
 class AllowlistShapeTest(unittest.TestCase):

@@ -141,8 +141,10 @@ def control_surface(root: Path, git_dir: Path) -> dict:
 
     Covers `core.hooksPath`, `core.fsmonitor`, `credential.helper`, content
     filters and aliases (all of which live in `config`), directly installed
-    hooks, the exclude file that could hide the hook's own output, and the commit
-    the release will be built on.
+    hooks, the exclude file that could hide the hook's own output, index entries
+    and flags, and the commit the release will be built on. The index projection
+    excludes refreshable stat-cache data while preserving flags such as
+    `skip-worktree` that can hide a modified file from `git status`.
     """
     surface = {}
     for name in GIT_CONFIG_SURFACES:
@@ -156,6 +158,7 @@ def control_surface(root: Path, git_dir: Path) -> dict:
             if entry.is_file() and not entry.is_symlink()
             else "not-a-regular-file"
         )
+    surface["index-entries"] = git(root, "ls-files", "--stage", "-v", "-z")
     surface["HEAD"] = git(root, "rev-parse", "HEAD").strip()
     surface["HEAD-ref"] = git(root, "rev-parse", "--symbolic-full-name", "HEAD").strip()
     return surface
@@ -301,10 +304,21 @@ def path_fingerprint(path: Path, contract_git_dir: Path):
 
 def path_fingerprints(root: Path, paths: set, contract_root: str) -> dict:
     contract_git_dir = root / contract_root / ".git"
-    return {
-        path: path_fingerprint(root / path.rstrip("/"), contract_git_dir)
-        for path in paths
-    }
+    fingerprints = {}
+    for path in paths:
+        fingerprints[path] = path_fingerprint(root / path.rstrip("/"), contract_git_dir)
+        parent = (root / path.rstrip("/")).parent
+        while parent != root:
+            try:
+                info = parent.lstat()
+            except FileNotFoundError:
+                break
+            if not stat.S_ISDIR(info.st_mode):
+                break
+            relative = parent.relative_to(root).as_posix() + "/"
+            fingerprints.setdefault(relative, ("directory", stat.S_IMODE(info.st_mode)))
+            parent = parent.parent
+    return fingerprints
 
 
 def validate_preserved_paths(
@@ -314,7 +328,7 @@ def validate_preserved_paths(
     contract_root: str,
     label: str,
 ) -> None:
-    missing = sorted(set(fingerprints) - paths)
+    missing = sorted(path for path in fingerprints if not path.endswith("/") and path not in paths)
     if missing:
         raise ReconcileError(f"hook removed pre-existing {label}: {missing[0]}")
     for path, expected in fingerprints.items():

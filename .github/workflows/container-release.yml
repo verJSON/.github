@@ -325,6 +325,10 @@ jobs:
             || { echo "::error::pinned changelog engine is not at the bound contract ref"; exit 1; }
           [ -z "$(git -C .container-release-contract status --porcelain -- scripts/changelog.py)" ] \
             || { echo "::error::pinned changelog engine was modified after checkout"; exit 1; }
+          GIT_NO_REPLACE_OBJECTS=1 git -C .container-release-contract show \
+            "$CONTRACT_REF:scripts/changelog.py" \
+            | cmp -s .container-release-contract/scripts/changelog.py - \
+            || { echo "::error::changelog engine does not match the pinned contract commit"; exit 1; }
           gh auth setup-git
           if [ "$(cat git-state)" = new ]; then
             mkdir -p RELEASES/containers
