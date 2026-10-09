@@ -3,6 +3,7 @@
 - **Date:** 2026-08-07
 - **Issue:** [#455](https://github.com/Verjson/.github/issues/455)
 - **Supersedes:** ADR 0060's refusal-only `node-release.yml`
+- **Superseded in part by:** [ADR 0221](../0221-separate-node-release-runner-boundaries/README.md)
 - **Extends:** ADR 0038 (canonical changelog contract), ADR 0062 (verify before tag)
 - **Category:** release authority and package credentials — **sensitive class**
 

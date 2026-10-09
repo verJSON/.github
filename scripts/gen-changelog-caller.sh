@@ -1295,6 +1295,7 @@ ${release_plan_step}
       version: \${{ needs.verify.outputs.version }}
       prefix: \${{ inputs.prefix }}
       contract-ref: ${ref}
+      # Legacy compatibility input; all Node release jobs use fresh ubuntu-24.04 runners.
       runner: \${{ ${release_runner_expr} }}
       # Keep this byte-coupled input Renovate-inert for the same reason as the
       # setup-node input in verify (#700).

@@ -22,17 +22,17 @@ on:
         type: string
         default: '24'
       timeout-minutes:
-        description: Maximum publish-job runtime after a runner starts it
+        description: Maximum runtime of each release job after its runner starts
         required: false
         type: number
         default: 30
       cache:
-        description: Upload a job-scoped npm cache when cache-dependency-path matches a lockfile
+        description: Persist npm downloads only when no private dependency token is supplied
         required: false
         type: boolean
         default: false
       cache-max-mb:
-        description: Maximum job-scoped npm cache size to upload when cache is enabled
+        description: Maximum npm download cache size to retain when cache is enabled
         required: false
         type: number
         default: 1024
@@ -68,11 +68,11 @@ on:
         type: string
         default: '[]'
       contract-ref:
-        description: Immutable Verjson/.github commit supplying the retention implementation
+        description: Immutable Verjson/.github commit supplying release-artifact validation and retention implementations
         required: true
         type: string
       runner:
-        description: Optional JSON runner labels; Verjson defaults general, external callers ubuntu-24.04.
+        description: Deprecated compatibility input from existing callers; ignored because preparation, publication, and retention use fresh GitHub-hosted ubuntu-24.04 runners.
         required: false
         type: string
         default: ''
@@ -92,10 +92,323 @@ permissions:
   contents: read
 
 jobs:
+  prepare:
+    name: Prepare release packages without publication credentials
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    env:
+      NODE_AUTH_TOKEN: ''
+    outputs:
+      package-artifact-id: ${{ steps.upload-packages.outputs.artifact-id }}
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Require a fresh GitHub-hosted preparation runner
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          if [[ "$RUNNER_ENVIRONMENT" != "github-hosted" ]]; then
+            echo "::error::Node release preparation requires a fresh GitHub-hosted runner."
+            exit 1
+          fi
+      - name: Require the contract's exact release tag
+        id: release-tag
+        env:
+          PREFIX: ${{ inputs.prefix }}
+          SCOPE: ${{ inputs.scope }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$PREFIX" =~ ^([a-z0-9][a-z0-9._-]*-)?v$ ]]; then
+            echo "::error::'$PREFIX' is not a canonical v or stream-v release namespace."
+            exit 1
+          fi
+          package_version="${VERSION#"$PREFIX"}"
+          if [ "$package_version" = "$VERSION" ] ||
+            [[ ! "$package_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$VERSION' is not exact SemVer in namespace '$PREFIX'."
+            exit 1
+          fi
+          if [[ ! "$SCOPE" =~ ^@[a-z0-9][a-z0-9._~-]*$ || ${#SCOPE} -gt 214 ]]; then
+            echo "::error::scope must be a non-empty lowercase npm scope such as @verjson."
+            exit 1
+          fi
+          printf 'package-version=%s\n' "$package_version" >>"$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.version }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the checked-out tag and immutable release note
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          test "$(git describe --tags --exact-match HEAD)" = "$VERSION"
+          test -f "CHANGELOG/$VERSION.md"
+      - name: Decide whether npm download caching is safe
+        id: npm-cache-policy
+        env:
+          CACHE_REQUESTED: ${{ inputs.cache }}
+          HAS_PRIVATE_PACKAGE_TOKEN: ${{ secrets.NODE_AUTH_TOKEN != '' }}
+          LOCKFILE_MATCHED: ${{ hashFiles(inputs.cache-dependency-path) != '' }}
+        run: |
+          set -euo pipefail
+          if [[ "$CACHE_REQUESTED" == "true" && "$HAS_PRIVATE_PACKAGE_TOKEN" != "true" && "$LOCKFILE_MATCHED" == "true" ]]; then
+            printf 'enabled=true\n' >>"$GITHUB_OUTPUT"
+          else
+            printf 'enabled=false\n' >>"$GITHUB_OUTPUT"
+            if [[ "$CACHE_REQUESTED" == "true" && "$HAS_PRIVATE_PACKAGE_TOKEN" == "true" ]]; then
+              echo "npm download caching is disabled because private package credentials were supplied." >>"$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+      - name: Configure the bounded npm cache
+        if: steps.npm-cache-policy.outputs.enabled == 'true'
+        run: |
+          cache_dir="$RUNNER_TEMP/verjson-npm-cache"
+          mkdir -p "$cache_dir"
+          printf 'npm_config_cache=%s\n' "$cache_dir" >> "$GITHUB_ENV"
+      - name: Create npm cache namespace marker in caller workspace
+        id: npm-cache-namespace
+        if: steps.npm-cache-policy.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          marker="$GITHUB_WORKSPACE/.verjson-node-release-cache-namespace-v2"
+          if [[ -e "$marker" || -L "$marker" ]]; then
+            echo "::error::reserved npm cache namespace path already exists."
+            exit 1
+          fi
+          cleanup_marker() {
+            local status=$?
+            trap - EXIT
+            rm -f -- "$marker" || status=1
+            exit "$status"
+          }
+          trap cleanup_marker EXIT
+          printf '%s\n' 'verjson-node-release-cache-v2' > "$marker"
+          printf 'created=true\n' >> "$GITHUB_OUTPUT"
+          trap - EXIT
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ steps.npm-cache-policy.outputs.enabled == 'true' && 'npm' || '' }}
+          cache-dependency-path: |
+            ${{ inputs.cache-dependency-path }}
+            .verjson-node-release-cache-namespace-v2
+          package-manager-cache: false
+          registry-url: https://npm.pkg.github.com
+          scope: ${{ inputs.scope }}
+      - name: Remove npm cache namespace marker
+        if: always() && steps.npm-cache-namespace.outputs.created == 'true'
+        run: rm -f -- "$GITHUB_WORKSPACE/.verjson-node-release-cache-namespace-v2"
+      - name: Validate release package directories
+        env:
+          PACKAGE_DIRS: ${{ inputs.package-dirs }}
+          PACKAGE_VERSION: ${{ steps.release-tag.outputs.package-version }}
+          SCOPE: ${{ inputs.scope }}
+        run: |
+          node - "$PACKAGE_DIRS" "$PACKAGE_VERSION" "$SCOPE" <<'NODE'
+          const packageDirs = JSON.parse(process.argv[2]);
+          const packageVersion = process.argv[3];
+          const scope = process.argv[4];
+          if (!Array.isArray(packageDirs) || packageDirs.length === 0) {
+            throw new Error("package-dirs must be a non-empty JSON array");
+          }
+          const seen = new Set();
+          for (const packageDir of packageDirs) {
+            if (
+              typeof packageDir !== "string" ||
+              (packageDir !== "." && !/^[A-Za-z0-9._][A-Za-z0-9._-]*(\/[A-Za-z0-9._][A-Za-z0-9._-]*)*$/.test(packageDir)) ||
+              (packageDir !== "." && packageDir.split("/").some((segment) => segment === "." || segment === "..")) ||
+              seen.has(packageDir)
+            ) {
+              throw new Error(`invalid or duplicate package directory: ${packageDir}`);
+            }
+            seen.add(packageDir);
+            const packageJson = require(require("path").resolve(packageDir, "package.json"));
+            if (packageJson.private === true) {
+              throw new Error(`package in ${packageDir} is marked private and cannot be published`);
+            }
+            const prefix = `${scope}/`;
+            if (typeof packageJson.name !== "string" || !packageJson.name.startsWith(prefix)) {
+              throw new Error(`package in ${packageDir} is not owned by configured scope ${scope}`);
+            }
+            if (!/^[a-z0-9][a-z0-9._-]*$/.test(packageJson.name.slice(prefix.length))) {
+              throw new Error(`package in ${packageDir} has an invalid GitHub Packages basename`);
+            }
+          }
+          if (typeof packageVersion !== "string" || packageVersion === "") {
+            throw new Error("the dispatched package version is missing");
+          }
+          NODE
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          project_npmrc="$GITHUB_WORKSPACE/.npmrc"
+          if [[ -e "$project_npmrc" || -L "$project_npmrc" ]]; then
+            quarantine_dir="$(mktemp -d "$RUNNER_TEMP/verjson-npmrc-isolation.XXXXXX")"
+            mv -- "$project_npmrc" "$quarantine_dir/project.npmrc"
+            restore_project_npmrc() {
+              local status=$?
+              trap - EXIT
+              if [[ -e "$project_npmrc" || -L "$project_npmrc" ]]; then
+                echo "::error::the project .npmrc was recreated during credentialed dependency installation."
+                status=1
+              elif ! mv -- "$quarantine_dir/project.npmrc" "$project_npmrc"; then
+                echo "::error::could not restore the project .npmrc after credentialed dependency installation."
+                status=1
+              fi
+              rm -rf -- "$quarantine_dir" || status=1
+              exit "$status"
+            }
+            trap restore_project_npmrc EXIT
+          fi
+          npm ci --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+      - name: Run dependency lifecycle scripts without credentials
+        run: npm ci --prefer-offline
+      - name: Prepare release package metadata
+        env:
+          PACKAGE_VERSION: ${{ steps.release-tag.outputs.package-version }}
+        run: |
+          # RELEASE_PREPARE_PACKAGES_BEGIN
+          if [ -e scripts/release-prepare-packages.sh ] && [ ! -x scripts/release-prepare-packages.sh ]; then
+            echo "::error::scripts/release-prepare-packages.sh exists but is not executable."
+            exit 1
+          fi
+          if [ -x scripts/release-prepare-packages.sh ]; then
+            scripts/release-prepare-packages.sh "$PACKAGE_VERSION"
+          fi
+          # RELEASE_PREPARE_PACKAGES_END
+      - name: Stamp the dispatched package version
+        env:
+          PACKAGE_VERSION: ${{ steps.release-tag.outputs.package-version }}
+          PACKAGE_DIRS_JSON: ${{ inputs.package-dirs }}
+        run: |
+          mapfile -t package_dirs < <(jq -r '.[]' <<<"$PACKAGE_DIRS_JSON")
+          for package_dir in "${package_dirs[@]}"; do
+            if [ "$package_dir" = "." ]; then
+              package_path=.
+            else
+              package_path="./$package_dir"
+            fi
+            [ -d "$package_path" ] \
+              || { echo "::error::Configured release package directory '$package_dir' does not exist." >&2; exit 1; }
+            npm version "$PACKAGE_VERSION" --prefix "$package_path" --no-git-tag-version --ignore-scripts --allow-same-version
+          done
+      - run: npm run build --if-present
+      - name: Build every selected release package
+        env:
+          PACKAGE_DIRS_JSON: ${{ inputs.package-dirs }}
+        run: |
+          mapfile -t package_dirs < <(jq -r '.[]' <<<"$PACKAGE_DIRS_JSON")
+          for package_dir in "${package_dirs[@]}"; do
+            [ "$package_dir" = "." ] && continue
+            npm --prefix "$package_dir" run build --if-present
+          done
+      - name: Pack selected release packages
+        env:
+          PACKAGE_DIRS_JSON: ${{ inputs.package-dirs }}
+          PACKAGE_VERSION: ${{ steps.release-tag.outputs.package-version }}
+          SCOPE: ${{ inputs.scope }}
+        run: |
+          set -euo pipefail
+          archive_dir="$RUNNER_TEMP/verjson-release-packages"
+          rm -rf -- "$archive_dir"
+          mkdir -p "$archive_dir"
+          pack_json="$(mktemp "$RUNNER_TEMP/verjson-npm-pack.XXXXXX")"
+          trap 'rm -f -- "$pack_json"' EXIT
+          manifest="$archive_dir/package-artifacts.json"
+          printf '[]\n' >"$manifest"
+          mapfile -t package_dirs < <(jq -r '.[]' <<<"$PACKAGE_DIRS_JSON")
+          for package_dir in "${package_dirs[@]}"; do
+            # LOCAL_PACKAGE_PATH_BEGIN
+            if [ "$package_dir" = . ]; then
+              package_path="$GITHUB_WORKSPACE"
+            else
+              package_path="$GITHUB_WORKSPACE/$package_dir"
+            fi
+            # LOCAL_PACKAGE_PATH_END
+            npm pack "$package_path" --json --ignore-scripts --pack-destination "$archive_dir" >"$pack_json"
+            node - "$pack_json" "$PACKAGE_VERSION" "$SCOPE" "$archive_dir" "$manifest" <<'NODE'
+          // NPM_PACK_JSON_BEGIN
+          const fs = require("fs");
+          const path = require("path");
+          const [packPath, expectedVersion, scope, archiveDir, manifestPath] = process.argv.slice(2);
+          const output = JSON.parse(fs.readFileSync(packPath, "utf8"));
+          let packed;
+          if (Array.isArray(output)) {
+            packed = output;
+          } else if (output && typeof output === "object") {
+            const entries = Object.entries(output);
+            if (entries.some(([key, item]) => !item || typeof item !== "object" || item.name !== key)) {
+              throw new Error("npm pack object key does not match package metadata");
+            }
+            packed = entries.map(([, item]) => item);
+          } else {
+            throw new Error("npm pack output was not an array or package map");
+          }
+          if (packed.length !== 1 || !packed[0] || typeof packed[0] !== "object") {
+            throw new Error("npm pack did not describe exactly one package");
+          }
+          const item = packed[0];
+          for (const key of ["name", "version", "integrity", "filename"]) {
+            if (typeof item[key] !== "string" || item[key] === "") {
+              throw new Error(`npm pack omitted ${key}`);
+            }
+          }
+          if (!item.name.startsWith(`${scope}/`) || item.version !== expectedVersion) {
+            throw new Error("packed package identity or version does not match the release inputs");
+          }
+          if (!/^sha512-[A-Za-z0-9+/]{86}==$/.test(item.integrity)) {
+            throw new Error("npm pack returned a non-sha512 integrity");
+          }
+          if (!/^[A-Za-z0-9][A-Za-z0-9._+-]*\.tgz$/.test(item.filename) || path.basename(item.filename) !== item.filename) {
+            throw new Error("npm pack returned an unsafe filename");
+          }
+          if (!fs.statSync(path.join(archiveDir, item.filename)).isFile()) {
+            throw new Error("npm pack did not create the reported archive");
+          }
+          const entries = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+          if (entries.some((entry) => entry.name === item.name || entry.filename === item.filename)) {
+            throw new Error("npm pack returned a duplicate package or archive filename");
+          }
+          entries.push({name: item.name, version: item.version, integrity: item.integrity, filename: item.filename});
+          fs.writeFileSync(manifestPath, `${JSON.stringify(entries)}\n`);
+          // NPM_PACK_JSON_END
+          NODE
+          done
+      - name: Bound npm cache upload
+        if: always() && steps.npm-cache-policy.outputs.enabled == 'true'
+        env:
+          CACHE_MAX_MB: ${{ inputs.cache-max-mb }}
+        run: |
+          set -euo pipefail
+          cache_dir="$RUNNER_TEMP/verjson-npm-cache"
+          mkdir -p "$cache_dir"
+          size_kb="$(du -sk "$cache_dir" | cut -f1)"
+          size_mb="$(( (size_kb + 1023) / 1024 ))"
+          echo "npm cache: ${size_mb} MB (upload limit: ${CACHE_MAX_MB} MB)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$size_kb" -gt "$(( CACHE_MAX_MB * 1024 ))" ]; then
+            echo "::warning::npm cache is ${size_mb} MB; clearing it instead of uploading more than ${CACHE_MAX_MB} MB"
+            find "$cache_dir" -mindepth 1 -delete
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload-packages
+        with:
+          name: node-release-packages-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.version }}
+          path: ${{ runner.temp }}/verjson-release-packages/*
+          if-no-files-found: error
+          retention-days: 1
+          # The package tarballs are already compressed; keep API size close to extracted bytes.
+          compression-level: 0
+
   release:
-    runs-on: ${{ inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    needs: prepare
+    runs-on: ubuntu-24.04
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
+      actions: read
       contents: write
       packages: write
     outputs:
@@ -103,6 +416,14 @@ jobs:
       new-release-version: ${{ steps.result.outputs.new-release-version }}
       retention-targets: ${{ steps.package-dirs.outputs.retention-targets }}
     steps:
+      - name: Require a fresh GitHub-hosted publication runner
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          if [[ "$RUNNER_ENVIRONMENT" != "github-hosted" ]]; then
+            echo "::error::Node publication requires a fresh GitHub-hosted runner."
+            exit 1
+          fi
       - name: Require the contract's exact release tag
         id: release-tag
         env:
@@ -134,6 +455,16 @@ jobs:
         with:
           ref: ${{ inputs.version }}
           fetch-depth: 0
+          persist-credentials: false
+      - name: Validate the immutable release-artifact contract ref
+        env:
+          CONTRACT_REF: ${{ inputs.contract-ref }}
+        run: '[[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ ]]'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: Verjson/.github
+          ref: ${{ inputs.contract-ref }}
+          path: .node-release-contract
           persist-credentials: false
       - name: Prepare job-scoped changelog tool cache
         run: |
@@ -227,17 +558,10 @@ jobs:
               output.write(f"manifest={json.dumps(entries, separators=(',', ':'))}\n")
           PY
           # BOUNDED_RELEASE_ASSETS_END
-      - name: Prepare job-scoped npm cache
-        if: inputs.cache
-        run: echo "npm_config_cache=$RUNNER_TEMP/verjson-npm-cache" >> "$GITHUB_ENV"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ inputs.node-version }}
-          cache: ${{ inputs.cache && hashFiles(inputs.cache-dependency-path) != '' && 'npm' || '' }}
-          cache-dependency-path: ${{ inputs.cache-dependency-path }}
           package-manager-cache: false
-          registry-url: https://npm.pkg.github.com
-          scope: ${{ inputs.scope }}
       - name: Validate release package directories
         id: package-dirs
         env:
@@ -264,6 +588,7 @@ jobs:
             }
             seen.add(packageDir);
           }
+          const expectedPackages = [];
           const targets = packageDirs.map((packageDir) => {
             const packageJson = require(require("path").resolve(packageDir, "package.json"));
             if (packageJson.private === true) {
@@ -281,141 +606,88 @@ jobs:
             if (!/^[a-z0-9][a-z0-9._-]*$/.test(name)) {
               throw new Error(`package in ${packageDir} has an invalid GitHub Packages basename`);
             }
+            expectedPackages.push({name: packageJson.name, version: packageVersion});
             return {type: "npm", name, releasedVersion: packageVersion};
           });
+          const expectedManifest = require("path").join(process.env.RUNNER_TEMP, "verjson-release-expected-packages.json");
+          require("fs").writeFileSync(expectedManifest, JSON.stringify(expectedPackages));
           require("fs").appendFileSync(process.env.GITHUB_OUTPUT, `retention-targets=${JSON.stringify(targets)}\n`);
+          require("fs").appendFileSync(process.env.GITHUB_OUTPUT, `expected-manifest=${expectedManifest}\n`);
           NODE
-      - name: Install dependencies
-        run: npm ci
+      - name: Enforce prepared package artifact size before download
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
-      - name: Prepare release package metadata
-        env:
-          PACKAGE_VERSION: ${{ steps.release-tag.outputs.package-version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACT_ID: ${{ needs.prepare.outputs.package-artifact-id }}
+          MAX_ARTIFACT_BYTES: '2147483648'
         run: |
-          # RELEASE_PREPARE_PACKAGES_BEGIN
-          if [ -e scripts/release-prepare-packages.sh ] && [ ! -x scripts/release-prepare-packages.sh ]; then
-            echo "::error::scripts/release-prepare-packages.sh exists but is not executable."
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]] \
+            || { echo "::error::prepared package artifact ID is missing or invalid"; exit 1; }
+          artifact_size="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" --jq .size_in_bytes)"
+          [[ "$artifact_size" =~ ^[0-9]+$ ]] \
+            || { echo "::error::prepared package artifact size is missing or invalid"; exit 1; }
+          if (( artifact_size > MAX_ARTIFACT_BYTES )); then
+            echo "::error::prepared package artifact exceeds the 2 GiB download limit"
             exit 1
           fi
-          if [ -x scripts/release-prepare-packages.sh ]; then
-            scripts/release-prepare-packages.sh "$PACKAGE_VERSION"
-          fi
-          # RELEASE_PREPARE_PACKAGES_END
-      - name: Stamp the dispatched package version
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.package-artifact-id }}
+          path: ${{ runner.temp }}/verjson-release-packages
+      - name: Validate prepared package artifacts against the release tag
         env:
-          PACKAGE_VERSION: ${{ steps.release-tag.outputs.package-version }}
-          PACKAGE_DIRS_JSON: ${{ inputs.package-dirs }}
+          ARTIFACT_DIR: ${{ runner.temp }}/verjson-release-packages
+          EXPECTED_MANIFEST: ${{ steps.package-dirs.outputs.expected-manifest }}
+          CONTRACT_ROOT: ${{ github.workspace }}/.node-release-contract
+          VALIDATED_MANIFEST: ${{ runner.temp }}/verjson-release-validated-packages.json
         run: |
-          mapfile -t package_dirs < <(jq -r '.[]' <<<"$PACKAGE_DIRS_JSON")
-          for package_dir in "${package_dirs[@]}"; do
-            if [ "$package_dir" = "." ]; then
-              package_path=.
-            else
-              package_path="./$package_dir"
-            fi
-            [ -d "$package_path" ] \
-              || { echo "::error::Configured release package directory '$package_dir' does not exist." >&2; exit 1; }
-            npm version "$PACKAGE_VERSION" --prefix "$package_path" --no-git-tag-version --ignore-scripts --allow-same-version
-          done
-      - run: npm run build --if-present
-      - name: Build every selected release package
-        env:
-          PACKAGE_DIRS_JSON: ${{ inputs.package-dirs }}
-        run: |
-          mapfile -t package_dirs < <(jq -r '.[]' <<<"$PACKAGE_DIRS_JSON")
-          for package_dir in "${package_dirs[@]}"; do
-            [ "$package_dir" = "." ] && continue
-            npm --prefix "$package_dir" run build --if-present
-          done
-      - name: Publish the exact snapshot version
+          python3 "$CONTRACT_ROOT/scripts/node_release_artifact_manifest.py" \
+            --artifact-dir "$ARTIFACT_DIR" \
+            --expected-manifest "$EXPECTED_MANIFEST" \
+            --output "$VALIDATED_MANIFEST"
+      - name: Publish validated package archives
+        working-directory: ${{ runner.temp }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PACKAGE_VERSION: ${{ steps.release-tag.outputs.package-version }}
-          PACKAGE_DIRS_JSON: ${{ inputs.package-dirs }}
           REQUESTED_TAG: ${{ inputs.version }}
+          SCOPE: ${{ inputs.scope }}
+          ARTIFACT_DIR: ${{ runner.temp }}/verjson-release-packages
+          VALIDATED_MANIFEST: ${{ runner.temp }}/verjson-release-validated-packages.json
         run: |
           # RESTART_SAFE_NPM_PUBLISH_BEGIN
-          pack_json="$(mktemp)"
-          package_meta="$(mktemp)"
-          registry_json="$(mktemp)"
-          package_file=
-          trap 'rm -f "$pack_json" "$package_meta" "$registry_json"; [ -z "$package_file" ] || rm -f -- "$package_file"' EXIT
-          expected_version="$PACKAGE_VERSION"
-          mapfile -t package_dirs < <(jq -r '.[]' <<<"$PACKAGE_DIRS_JSON")
+          set -euo pipefail
+          npm_config_dir="$(mktemp -d "$RUNNER_TEMP/verjson-publish-npm-config.XXXXXX")"
+          registry_json="$(mktemp "$RUNNER_TEMP/verjson-published-package.XXXXXX")"
+          view_stderr="$(mktemp "$RUNNER_TEMP/verjson-publish-stderr.XXXXXX")"
+          trap 'rm -rf -- "$npm_config_dir"; rm -f -- "$registry_json" "$view_stderr"' EXIT
+          umask 077
+          user_config="$npm_config_dir/user"
+          global_config="$npm_config_dir/global"
+          printf "%s:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=\${NODE_AUTH_TOKEN}\n" "$SCOPE" >"$user_config"
+          : >"$global_config"
+          mapfile -t package_records < <(jq -r '.[] | [.name, .version, .integrity, .filename] | @tsv' "$VALIDATED_MANIFEST")
+          [ "${#package_records[@]}" -gt 0 ] || { echo "::error::No validated package archives were provided."; exit 1; }
 
-          for package_dir in "${package_dirs[@]}"; do
-            # LOCAL_PACKAGE_PATH_BEGIN
-            if [ "$package_dir" = . ]; then
-              package_path=.
-            else
-              package_path="./$package_dir"
-            fi
-            # LOCAL_PACKAGE_PATH_END
-            [ -d "$package_path" ] \
-              || { echo "::error::Configured release package directory '$package_dir' does not exist."; exit 1; }
-            npm pack "$package_path" --json --ignore-scripts >"$pack_json"
-            node - "$pack_json" "$expected_version" >"$package_meta" <<'NODE'
-          // NPM_PACK_JSON_BEGIN
-          const fs = require("fs");
-          const path = require("path");
-          const [packPath, expectedVersion] = process.argv.slice(2);
-          const output = JSON.parse(fs.readFileSync(packPath, "utf8"));
-          let packed;
-          let objectKey;
-          if (Array.isArray(output)) {
-            packed = output;
-          } else if (output && typeof output === "object") {
-            const entries = Object.entries(output);
-            packed = entries.map(([, item]) => item);
-            objectKey = entries.length === 1 ? entries[0][0] : undefined;
-          } else {
-            packed = [];
-          }
-          if (packed.length !== 1) {
-            throw new Error("npm pack did not describe exactly one package");
-          }
-          const item = packed[0];
-          for (const key of ["name", "version", "integrity", "filename"]) {
-            if (typeof item[key] !== "string" || item[key] === "") {
-              throw new Error(`npm pack omitted ${key}`);
-            }
-          }
-          if (objectKey !== undefined && objectKey !== item.name) {
-            throw new Error(`npm pack object key ${objectKey} does not match package name ${item.name}`);
-          }
-          if (item.version !== expectedVersion) {
-            throw new Error(`packed version ${item.version} does not match dispatched ${expectedVersion}`);
-          }
-          if (!item.integrity.startsWith("sha512-")) {
-            throw new Error("npm pack returned a non-sha512 integrity");
-          }
-          if (path.basename(item.filename) !== item.filename) {
-            throw new Error("npm pack returned an unsafe filename");
-          }
-          process.stdout.write([item.name, item.version, item.integrity, item.filename].join("\t") + "\n");
-          // NPM_PACK_JSON_END
-          NODE
-            IFS=$'\t' read -r package_name published_version package_integrity package_file <"$package_meta"
-
-            if npm publish "$package_file" --ignore-scripts --registry=https://npm.pkg.github.com; then
+          for record in "${package_records[@]}"; do
+            IFS=$'\t' read -r package_name published_version package_integrity package_filename <<<"$record"
+            package_file="$ARTIFACT_DIR/$package_filename"
+            if npm publish "$package_file" --ignore-scripts --registry=https://npm.pkg.github.com --userconfig="$user_config" --globalconfig="$global_config"; then
               echo "Published $package_name@$published_version."
             else
               echo "::warning::npm publish failed; proving whether an identical immutable version already exists before continuing."
-              view_stderr="$(mktemp)"
               if ! npm view "$package_name@$published_version" --json \
-                --registry=https://npm.pkg.github.com >"$registry_json" 2>"$view_stderr"; then
+                --registry=https://npm.pkg.github.com --userconfig="$user_config" --globalconfig="$global_config" >"$registry_json" 2>"$view_stderr"; then
                 if grep -qE '\bE404\b' "$view_stderr"; then
                   registry_state="the registry returned 404 for it, which is not a confirmed-missing version by itself: GitHub Packages also returns 404 for a private package this job's token cannot read, so this could equally be an authorization gap rather than proof the version was never published"
                 else
                   registry_state="the registry could not confirm either way (its response indicated an auth, network, or other transient error, not a confirmed-missing version)"
                 fi
                 cat "$view_stderr" >&2
-                rm -f "$view_stderr"
                 echo "::error::npm publish failed for $package_name@$published_version and $registry_state. Either way, this is expected-recoverable state, not a wedged release: tag $REQUESTED_TAG and its immutable CHANGELOG/$REQUESTED_TAG.md already exist on the default branch (changelog-release.yml completed before this job ever started, per ADR 0069's verify-then-snapshot-then-publish ordering), and re-dispatching this exact same version is safe. The dispatched caller's verify job will detect the existing tag/snapshot and skip snapshot automatically, retrying only publication."
                 exit 1
               fi
-              rm -f "$view_stderr"
+              : >"$view_stderr"
               node - "$registry_json" "$package_name" "$published_version" "$package_integrity" <<'NODE'
           const fs = require("fs");
           const [viewPath, expectedName, expectedVersion, expectedIntegrity] = process.argv.slice(2);
@@ -431,8 +703,6 @@ jobs:
           NODE
               echo "Registry already contains the identical $package_name@$published_version; package publication is complete."
             fi
-            rm -f -- "$package_file"
-            package_file=
           done
           # RESTART_SAFE_NPM_PUBLISH_END
       - name: Publish the snapshot release notes
@@ -567,6 +837,7 @@ jobs:
           # RESTART_SAFE_GH_RELEASE_END
       - name: Deprecate renamed package names
         if: inputs.deprecates != '[]'
+        working-directory: ${{ runner.temp }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SCOPE: ${{ inputs.scope }}
@@ -575,7 +846,13 @@ jobs:
           # DEPRECATE_RENAMED_PACKAGES_BEGIN
           set -euo pipefail
           entries="$(mktemp)"
-          trap 'rm -f "$entries"' EXIT
+          npm_config_dir="$(mktemp -d "$RUNNER_TEMP/verjson-deprecate-npm-config.XXXXXX")"
+          trap 'rm -f "$entries"; rm -rf -- "$npm_config_dir"' EXIT
+          umask 077
+          user_config="$npm_config_dir/user"
+          global_config="$npm_config_dir/global"
+          printf "%s:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=\${NODE_AUTH_TOKEN}\n" "$SCOPE" >"$user_config"
+          : >"$global_config"
           node - "$DEPRECATES" "$SCOPE" "$entries" <<'NODE'
           const fs = require("fs");
           const [raw, scope, outPath] = process.argv.slice(2);
@@ -618,7 +895,8 @@ jobs:
           while IFS=$'\t' read -r package_name message; do
             [ -n "$package_name" ] || continue
             echo "Deprecating $package_name: $message"
-            npm deprecate "$package_name@*" "$message" --registry=https://npm.pkg.github.com
+            npm deprecate "$package_name@*" "$message" \
+              --registry=https://npm.pkg.github.com --userconfig="$user_config" --globalconfig="$global_config"
           done <"$entries"
           # DEPRECATE_RENAMED_PACKAGES_END
       - name: Report successful publication
@@ -628,32 +906,25 @@ jobs:
         run: |
           echo "new-release-published=true" >> "$GITHUB_OUTPUT"
           echo "new-release-version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
-      - name: Bound npm cache upload
-        if: always() && inputs.cache
-        env:
-          CACHE_MAX_MB: ${{ inputs.cache-max-mb }}
-        run: |
-          set -euo pipefail
-          cache_dir="$RUNNER_TEMP/verjson-npm-cache"
-          mkdir -p "$cache_dir"
-          size_kb="$(du -sk "$cache_dir" | cut -f1)"
-          size_mb="$(( (size_kb + 1023) / 1024 ))"
-          echo "npm cache: ${size_mb} MB (upload limit: ${CACHE_MAX_MB} MB)" >> "$GITHUB_STEP_SUMMARY"
-          if [ "$size_kb" -gt "$(( CACHE_MAX_MB * 1024 ))" ]; then
-            echo "::warning::npm cache is ${size_mb} MB; clearing it instead of uploading more than ${CACHE_MAX_MB} MB"
-            find "$cache_dir" -mindepth 1 -delete
-          fi
 
   retention:
     name: Retain three numbered package releases
     needs: release
     if: needs.release.outputs.new-release-published == 'true'
-    runs-on: ${{ inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
       packages: write
     steps:
+      - name: Require a fresh GitHub-hosted retention runner
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          if [[ "$RUNNER_ENVIRONMENT" != "github-hosted" ]]; then
+            echo "::error::Node retention requires a fresh GitHub-hosted runner."
+            exit 1
+          fi
       - name: Validate the immutable retention contract ref
         env:
           CONTRACT_REF: ${{ inputs.contract-ref }}

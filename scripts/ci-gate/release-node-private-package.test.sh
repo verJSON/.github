@@ -19,9 +19,12 @@ root="$(cd "$here/../.." && pwd)"
 workflow="$root/.github/workflows/node-release.yml"
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
+mkdir -p "$work/tmp"
 
 awk '
-  /^      - name: Validate release package directories$/ { found = 1; next }
+  /^      - name: Validate release package directories$/ { candidate = 1; next }
+  candidate && /^        id: package-dirs$/ { found = 1; candidate = 0; next }
+  candidate && /^      - / { candidate = 0 }
   found && /^        run: \|$/ { body = 1; next }
   body && /^      - / { exit }
   body { sub(/^          /, ""); print }
@@ -45,7 +48,7 @@ run_validate() {
   local dir="$1" package_dirs="$2"
   : >"$work/output"
   (cd "$dir" && PACKAGE_DIRS="$package_dirs" PACKAGE_VERSION=1.2.3 SCOPE=@verjson \
-    GITHUB_OUTPUT="$work/output" bash -euo pipefail "$work/validate.sh") \
+    RUNNER_TEMP="$work/tmp" GITHUB_OUTPUT="$work/output" bash -euo pipefail "$work/validate.sh") \
     >"$work/run.out" 2>&1
 }
 

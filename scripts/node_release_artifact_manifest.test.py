@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""Behavioral tests for validating artifacts from an unprivileged build job."""
+
+from __future__ import annotations
+
+import base64
+import gzip
+import hashlib
+import io
+import json
+import pathlib
+import sys
+import tarfile
+import tempfile
+import unittest
+from unittest.mock import patch
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import node_release_artifact_manifest as validator  # noqa: E402
+
+
+class ArtifactManifestTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temporary.name)
+        self.artifact_dir = self.root / "artifacts"
+        self.artifact_dir.mkdir()
+        self.name = "@verjson/example"
+        self.version = "1.2.3"
+        self.filename = "example-1.2.3.tgz"
+        self.expected = [{"name": self.name, "version": self.version}]
+        self.write_archive()
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def write_archive(self, package: dict[str, str] | None = None, extra: tuple[str, bytes] | None = None) -> None:
+        package = package or {"name": self.name, "version": self.version}
+        entries = [
+            ("package/package.json", json.dumps(package).encode("utf-8")),
+            ("package/index.js", b"module.exports = true;\n"),
+        ]
+        if extra is not None:
+            entries.append(extra)
+        self.write_archive_entries(entries)
+
+    def write_archive_entries(self, entries: list[tuple[str, bytes]]) -> None:
+        archive_path = self.artifact_dir / self.filename
+        with tarfile.open(archive_path, mode="w:gz") as archive:
+            for name, body in entries:
+                info = tarfile.TarInfo(name)
+                info.size = len(body)
+                archive.addfile(info, io.BytesIO(body))
+        self.refresh_manifest_integrity()
+
+    def refresh_manifest_integrity(self) -> None:
+        archive_path = self.artifact_dir / self.filename
+        digest = base64.b64encode(hashlib.sha512(archive_path.read_bytes()).digest()).decode("ascii")
+        self.artifact_manifest = [{
+            "name": self.name,
+            "version": self.version,
+            "integrity": f"sha512-{digest}",
+            "filename": self.filename,
+        }]
+        (self.artifact_dir / "package-artifacts.json").write_text(
+            json.dumps(self.artifact_manifest), encoding="utf-8"
+        )
+
+    def test_accepts_a_digest_bound_archive_matching_the_trusted_package_identity(self) -> None:
+        result = validator.validate_artifacts(self.artifact_dir, self.expected)
+
+        self.assertEqual(1, len(result))
+        self.assertEqual(self.name, result[0]["name"])
+        self.assertEqual(self.version, result[0]["version"])
+        self.assertEqual(str(self.artifact_dir / self.filename), result[0]["path"])
+
+    def test_rejects_an_artifact_manifest_with_a_different_package_identity(self) -> None:
+        self.artifact_manifest[0]["name"] = "@verjson/other"
+        (self.artifact_dir / "package-artifacts.json").write_text(
+            json.dumps(self.artifact_manifest), encoding="utf-8"
+        )
+
+        with self.assertRaisesRegex(ValueError, "trusted package identity"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_archive_identity_that_differs_from_the_manifest(self) -> None:
+        self.write_archive({"name": "@verjson/other", "version": self.version})
+
+        with self.assertRaisesRegex(ValueError, "identity does not match"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_tampering_after_the_archive_integrity_was_recorded(self) -> None:
+        with (self.artifact_dir / self.filename).open("ab") as archive_file:
+            archive_file.write(b"tampered")
+
+        with self.assertRaisesRegex(ValueError, "integrity does not match"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_unsafe_tar_paths(self) -> None:
+        self.write_archive(extra=("package/../outside", b"unsafe"))
+
+        with self.assertRaisesRegex(ValueError, "unsafe or duplicate path"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_file_paths_that_alias_after_trailing_slash_normalization(self) -> None:
+        package_json = json.dumps({"name": self.name, "version": self.version}).encode("utf-8")
+        self.write_archive(extra=("package/package.json/", package_json))
+
+        with self.assertRaisesRegex(ValueError, "unsafe or duplicate path"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_file_entries_that_conflict_with_descendant_paths(self) -> None:
+        package_json = json.dumps({"name": self.name, "version": self.version}).encode("utf-8")
+        for entries in (
+            [("package", b"not a directory"), ("package/package.json", package_json)],
+            [("package/package.json", package_json), ("package", b"not a directory")],
+            [
+                ("package/package.json", package_json),
+                ("package/nested", b"not a directory"),
+                ("package/nested/index.js", b"child"),
+            ],
+            [
+                ("package/package.json", package_json),
+                ("package/a", b"not a directory"),
+                ("package/a-b", b"sibling"),
+                ("package/a/child", b"child"),
+            ],
+        ):
+            with self.subTest(entries=tuple(name for name, _ in entries)):
+                self.write_archive_entries(entries)
+                with self.assertRaisesRegex(ValueError, "unsafe or duplicate path"):
+                    validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_links_inside_the_tarball(self) -> None:
+        archive_path = self.artifact_dir / self.filename
+        with tarfile.open(archive_path, mode="w:gz") as archive:
+            link = tarfile.TarInfo("package/link")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "../../outside"
+            archive.addfile(link)
+        digest = base64.b64encode(hashlib.sha512(archive_path.read_bytes()).digest()).decode("ascii")
+        self.artifact_manifest[0]["integrity"] = f"sha512-{digest}"
+        (self.artifact_dir / "package-artifacts.json").write_text(
+            json.dumps(self.artifact_manifest), encoding="utf-8"
+        )
+
+        with self.assertRaisesRegex(ValueError, "link or special file"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_unexpected_files_in_the_downloaded_artifact(self) -> None:
+        (self.artifact_dir / "unexpected.txt").write_text("extra", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "unexpected files"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_oversized_artifact_manifests_before_parsing(self) -> None:
+        (self.artifact_dir / "package-artifacts.json").write_bytes(
+            b" " * (validator.MAX_MANIFEST_BYTES + 1)
+        )
+
+        with self.assertRaisesRegex(ValueError, "within the size limit"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_oversized_pax_metadata_before_tarfile_reads_it(self) -> None:
+        archive_path = self.artifact_dir / self.filename
+        with tarfile.open(archive_path, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
+            member = tarfile.TarInfo("package/index.js")
+            member.pax_headers = {"comment": "x" * (validator.MAX_TAR_METADATA_BYTES + 1)}
+            member.size = 0
+            archive.addfile(member, io.BytesIO())
+        self.refresh_manifest_integrity()
+
+        with self.assertRaisesRegex(ValueError, "metadata field exceeds the read limit"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_gnu_sparse_extension_headers(self) -> None:
+        archive_path = self.artifact_dir / self.filename
+        header = bytearray(tarfile.TarInfo("package/package.json").tobuf(format=tarfile.GNU_FORMAT))
+        header[156:157] = tarfile.GNUTYPE_SPARSE
+        header[482] = 1
+        header[148:156] = b"        "
+        checksum = sum(header[:512])
+        header[148:156] = f"{checksum:06o}\0 ".encode("ascii")
+        with gzip.open(archive_path, "wb") as archive:
+            archive.write(header)
+            archive.write(bytes(512))
+            archive.write(bytes(1024))
+        self.refresh_manifest_integrity()
+
+        with self.assertRaisesRegex(ValueError, "sparse package archives are not supported"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_pax_sparse_metadata(self) -> None:
+        archive_path = self.artifact_dir / self.filename
+        member = tarfile.TarInfo("package/package.json")
+        member.size = 0
+        member.pax_headers = {
+            "GNU.sparse.map": "0,1",
+            "GNU.sparse.size": "1",
+        }
+        with tarfile.open(archive_path, "w:gz", format=tarfile.PAX_FORMAT) as archive:
+            archive.addfile(member)
+        self.refresh_manifest_integrity()
+
+        with self.assertRaisesRegex(ValueError, "sparse package archives are not supported"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_pax_sparse_format_00(self) -> None:
+        archive_path = self.artifact_dir / self.filename
+        member = tarfile.TarInfo("package/package.json")
+        member.size = 0
+        member.pax_headers = {
+            "GNU.sparse.size": "1",
+            "GNU.sparse.numblocks": "1",
+            "GNU.sparse.offset": "0",
+            "GNU.sparse.numbytes": "1",
+        }
+        with tarfile.open(archive_path, "w:gz", format=tarfile.PAX_FORMAT) as archive:
+            archive.addfile(member)
+        self.refresh_manifest_integrity()
+
+        with self.assertRaisesRegex(ValueError, "sparse package archives are not supported"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_pax_sparse_format_10(self) -> None:
+        archive_path = self.artifact_dir / self.filename
+        member = tarfile.TarInfo("package/package.json")
+        member.size = 512
+        member.pax_headers = {
+            "GNU.sparse.major": "1",
+            "GNU.sparse.minor": "0",
+            "GNU.sparse.realsize": "1",
+        }
+        with tarfile.open(archive_path, "w:gz", format=tarfile.PAX_FORMAT) as archive:
+            archive.addfile(member, io.BytesIO(b"0\n" + bytes(510)))
+        self.refresh_manifest_integrity()
+
+        with self.assertRaisesRegex(ValueError, "sparse package archives are not supported"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_cumulative_global_pax_metadata(self) -> None:
+        archive_path = self.artifact_dir / self.filename
+
+        def pax_record(key: str, value: str) -> bytes:
+            body = f"{key}={value}\n"
+            length = len(body) + 2
+            while True:
+                record = f"{length} {body}".encode("utf-8")
+                if len(record) == length:
+                    return record
+                length = len(record)
+
+        with tarfile.open(archive_path, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
+            for index in range(6):
+                payload = pax_record(f"custom{index}", "x" * 800_000)
+                header = tarfile.TarInfo("global")
+                header.type = tarfile.XGLTYPE
+                header.size = len(payload)
+                archive.addfile(header, io.BytesIO(payload))
+        self.refresh_manifest_integrity()
+
+        with self.assertRaisesRegex(ValueError, "metadata exceeds the aggregate limit"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_aggregate_compressed_archive_bytes_over_the_limit(self) -> None:
+        archive_size = (self.artifact_dir / self.filename).stat().st_size
+        with patch.object(validator, "MAX_TOTAL_ARCHIVE_BYTES", archive_size - 1):
+            with self.assertRaisesRegex(ValueError, "aggregate compressed size"):
+                validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_aggregate_expanded_archive_bytes_over_the_limit(self) -> None:
+        with patch.object(validator, "MAX_TOTAL_EXPANDED_BYTES", 1):
+            with self.assertRaisesRegex(ValueError, "aggregate expanded size"):
+                validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_duplicate_expected_package_names(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid or duplicate package"):
+            validator._expected_packages(self.expected * 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
