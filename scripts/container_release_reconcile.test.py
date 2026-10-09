@@ -7,6 +7,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 
@@ -145,6 +146,16 @@ class ReconcileTest(unittest.TestCase):
         result = self.fixture.run()
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(["deploy/values.yaml"], self.fixture.staged())
+
+    def test_tolerates_an_unchanged_preexisting_untracked_directory(self):
+        directory = self.fixture.repo / "preexisting-input"
+        directory.mkdir()
+        (directory / "payload.txt").write_text("release input\n", encoding="utf-8")
+
+        result = self.fixture.run()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([], self.fixture.staged())
 
     def test_rejects_modifying_a_preexisting_untracked_release_manifest(self):
         self.fixture.write_hook(
@@ -485,6 +496,23 @@ class GitControlSurfaceTest(unittest.TestCase):
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertIn("Git control surface", result.stderr)
         self.assertIn("index-entries", result.stderr)
+
+    def test_kills_a_hook_descendant_that_escapes_its_process_group(self):
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'setsid bash -c "sleep 0.2; printf \'# detached change\\n\' > '
+            '.container-release-contract/scripts/changelog.py" </dev/null >/dev/null 2>&1 &\n'
+        )
+        result = self.fixture.run()
+        self.assertEqual(0, result.returncode, result.stderr)
+
+        time.sleep(0.3)
+
+        self.assertEqual(
+            "# pinned engine\n",
+            (self.fixture.contract / "scripts/changelog.py").read_text(encoding="utf-8"),
+        )
 
     def test_hook_cannot_reach_the_runner_home_directory(self):
         """A writable `$HOME` is a `~/.gitconfig` away from the same escalation."""

@@ -2,6 +2,7 @@
 """Fail-closed pre-credential release-tree reconciliation."""
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -204,6 +206,7 @@ def run_hook(root: Path, version: str, manifest: str, timeout: int) -> None:
     home is one `~/.gitconfig` away from `core.hooksPath` — an escalation that
     would take effect in the `git commit` that runs with the token.
     """
+    become_child_subreaper()
     with tempfile.TemporaryDirectory(prefix="release-reconcile-home-", ignore_cleanup_errors=True) as home:
         environment = {
             "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
@@ -226,9 +229,10 @@ def run_hook(root: Path, version: str, manifest: str, timeout: int) -> None:
                 terminate_group(process, group)
                 raise ReconcileError(f"{HOOK} timed out after {timeout}s") from None
             finally:
-                # Anything the hook backgrounded must not outlive this bounded step and
-                # observe the release App token that is minted immediately afterwards.
+                # A descendant can escape this process group with `setsid`, so reap
+                # every adopted child before a later step receives the release token.
                 terminate_group(process, group)
+                terminate_descendants()
     if returncode != 0:
         raise ReconcileError(f"{HOOK} exited {returncode}")
 
@@ -239,6 +243,50 @@ def terminate_group(process: subprocess.Popen, group: int) -> None:
     except (ProcessLookupError, PermissionError):
         pass
     process.wait()
+
+
+def become_child_subreaper() -> None:
+    """Adopt orphaned hook descendants so they can be killed before returning."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+        error = ctypes.get_errno()
+        raise ReconcileError(f"cannot contain reconciliation hook descendants: {os.strerror(error)}")
+
+
+def direct_child_pids() -> list:
+    children = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            record = (entry / "stat").read_text(encoding="ascii")
+            fields = record[record.rfind(")") + 2 :].split()
+            if int(fields[1]) == os.getpid():
+                children.append(int(entry.name))
+        except (FileNotFoundError, ProcessLookupError, ValueError, IndexError):
+            continue
+    return children
+
+
+def terminate_descendants() -> None:
+    deadline = time.monotonic() + 5
+    while True:
+        children = direct_child_pids()
+        if not children:
+            return
+        for child in children:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        for child in children:
+            try:
+                os.waitpid(child, os.WNOHANG)
+            except ChildProcessError:
+                pass
+        if time.monotonic() >= deadline:
+            raise ReconcileError("reconciliation hook descendants did not exit")
+        time.sleep(0.01)
 
 
 def status_entries(root: Path, *extra: str) -> list:
@@ -306,7 +354,7 @@ def path_fingerprints(root: Path, paths: set, contract_root: str) -> dict:
     contract_git_dir = root / contract_root / ".git"
     fingerprints = {}
     for path in paths:
-        fingerprints[path] = path_fingerprint(root / path.rstrip("/"), contract_git_dir)
+        fingerprints[("path", path)] = path_fingerprint(root / path.rstrip("/"), contract_git_dir)
         parent = (root / path.rstrip("/")).parent
         while parent != root:
             try:
@@ -316,9 +364,21 @@ def path_fingerprints(root: Path, paths: set, contract_root: str) -> dict:
             if not stat.S_ISDIR(info.st_mode):
                 break
             relative = parent.relative_to(root).as_posix() + "/"
-            fingerprints.setdefault(relative, ("directory", stat.S_IMODE(info.st_mode)))
+            fingerprints.setdefault(
+                ("directory", relative), ("directory", stat.S_IMODE(info.st_mode))
+            )
             parent = parent.parent
     return fingerprints
+
+
+def directory_mode_fingerprint(path: Path):
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise ReconcileError(f"cannot fingerprint pre-existing directory {path}: {error}") from None
+    if not stat.S_ISDIR(info.st_mode):
+        raise ReconcileError(f"pre-existing directory changed type: {path}")
+    return ("directory", stat.S_IMODE(info.st_mode))
 
 
 def validate_preserved_paths(
@@ -328,11 +388,18 @@ def validate_preserved_paths(
     contract_root: str,
     label: str,
 ) -> None:
-    missing = sorted(path for path in fingerprints if not path.endswith("/") and path not in paths)
+    missing = sorted(
+        path for kind, path in fingerprints if kind == "path" and path not in paths
+    )
     if missing:
         raise ReconcileError(f"hook removed pre-existing {label}: {missing[0]}")
-    for path, expected in fingerprints.items():
-        current = path_fingerprint(root / path.rstrip("/"), root / contract_root / ".git")
+    for (kind, path), expected in fingerprints.items():
+        target = root / path.rstrip("/")
+        current = (
+            directory_mode_fingerprint(target)
+            if kind == "directory"
+            else path_fingerprint(target, root / contract_root / ".git")
+        )
         if current != expected:
             raise ReconcileError(f"hook modified pre-existing {label}: {path}")
 
