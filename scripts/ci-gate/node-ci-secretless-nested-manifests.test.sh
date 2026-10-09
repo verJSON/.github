@@ -99,7 +99,9 @@ assert jobs["acquire-secretless-dependencies"]["outputs"]["transfer-encryption-k
 # The protected script runner also carries the default command plan when no root
 # plan is supplied, so it runs for every admitted secretless lane.
 assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in plan["if"]
-assert plan["env"]["RUN_DEFAULTS"] == "${{ inputs.secretless-ci-script-plan == '' }}"
+assert "RUN_DEFAULTS" not in plan["env"]
+assert "run_defaults = not plan_source" in plan["run"]
+assert "if run_defaults:" in plan["run"]
 
 # The credentialless job still receives no package-read credential.
 for credential in ("GH_TOKEN", "GITHUB_TOKEN", "NODE_AUTH_TOKEN", "NPM_TOKEN"):
@@ -428,7 +430,7 @@ mkdir -p "$plan_toolchain/bin"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$plan_toolchain/bin/node"
 cp "$tmp/bin/npm" "$plan_toolchain/bin/npm"
 chmod +x "$plan_toolchain/bin/node" "$plan_toolchain/bin/npm"
-printf '%s\n' '{"name":"root","version":"1.0.0","scripts":{"root-verify":"true"}}' \
+printf '%s\n' '{"name":"root","version":"1.0.0","scripts":{"root-verify":"true","build":"true","typecheck":"true","test":"true","lint":"true"}}' \
   > "$plan_fixture/package.json"
 printf '%s\n' '{"name":"nested","version":"1.0.0","scripts":{"verify":"true"}}' \
   > "$plan_fixture/examples/nested/package.json"
@@ -454,12 +456,18 @@ else
   fail "the nested script plan did not run in its own manifest directory"
 fi
 
+# An empty root plan selects the default build/typecheck/test/lint scripts.
+# The nested manifest's own plan still runs beside those defaults.
 if run_plan '' "$both_plan" >/dev/null \
-    && [ "$(wc -l < "$plan_fixture/node_modules/.npm.log")" -eq 1 ] \
+    && [ "$(wc -l < "$plan_fixture/node_modules/.npm.log")" -eq 5 ] \
+    && grep -qFx '/workspace	run build' "$plan_fixture/node_modules/.npm.log" \
+    && grep -qFx '/workspace	run typecheck' "$plan_fixture/node_modules/.npm.log" \
+    && grep -qFx '/workspace	run test' "$plan_fixture/node_modules/.npm.log" \
+    && grep -qFx '/workspace	run lint' "$plan_fixture/node_modules/.npm.log" \
     && grep -qFx '/workspace/examples/nested	run verify' "$plan_fixture/node_modules/.npm.log"; then
-  pass "a nested script plan runs without any root script plan"
+  pass "an empty root plan runs defaults and the nested manifest plan"
 else
-  fail "a nested-only script plan did not run on its own"
+  fail "an empty root plan did not run defaults beside the nested manifest plan"
 fi
 
 # The root package.json declares root-verify; the nested one does not. Script

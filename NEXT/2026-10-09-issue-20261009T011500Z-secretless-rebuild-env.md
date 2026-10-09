@@ -79,6 +79,7 @@ loopback hosts or the exact database endpoint emitted by the workflow's
 remote credentialed URL.
 Query and DSN fields commonly used for credentials, including `key`, `code`,
 and signed-query aliases, are rejected.
+The nested-manifest contract follows that same split: structural checks and the live Bubblewrap script-plan run execute on the hosted Ubuntu lane, because the persistent fastlane image does not provide the verified Bubblewrap binary. An empty root script plan selects the default build, typecheck, test, and lint scripts and still runs the nested manifest's own plan.
 The documented `OPENAI_API_KEY=ci-dummy-key` test sentinel remains available;
 other credential-bearing variables are rejected. Service values must remain
 test-only and must not carry secrets outside that local URL or exact dummy
