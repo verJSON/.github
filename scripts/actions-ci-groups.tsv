@@ -17,7 +17,6 @@ platform	bash scripts/make-portability.test.sh
 platform	bash scripts/node-workflow-pins.test.sh
 platform	bash scripts/node-workflow-controls.test.sh
 platform	bash scripts/ci-gate/node-ci-secretless.test.sh
-platform	python3 scripts/ci-gate/node-ci-secretless-rebuild-env.test.py
 platform	python3 scripts/ci-gate/protected-type-surface-baseline.test.py
 platform	python3 scripts/gen-node-ci-protected-move-step.test.py
 platform	python3 scripts/ci-gate/node-ci-secretless-range-resolution.test.py

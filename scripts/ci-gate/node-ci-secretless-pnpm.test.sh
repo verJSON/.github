@@ -109,8 +109,25 @@ while (($#)); do
 done
 [ "$#" -gt 0 ] || { echo 'test bubblewrap found no command separator' >&2; exit 1; }
 case "$1" in
+  /usr/bin/python3) ;;
+  *) echo "test bubblewrap received unexpected bootstrap: $1" >&2; exit 1 ;;
+esac
+shift
+[ "${1-}" = "-c" ] || { echo 'test bubblewrap found no trusted bootstrap source' >&2; exit 1; }
+shift
+bootstrap_source="${1-}"
+[[ "$bootstrap_source" == *"os.closerange(3, max_fd)"* ]] || {
+  echo 'test bubblewrap found no inherited-descriptor closure' >&2
+  exit 1
+}
+[[ "$bootstrap_source" == *"os.execvpe(sys.argv[1], sys.argv[1:], os.environ)"* ]] || {
+  echo 'test bubblewrap found no trusted lifecycle handoff' >&2
+  exit 1
+}
+shift
+case "$1" in
   /opt/verjson-node-toolchain/bin/corepack|corepack) ;;
-  *) echo "test bubblewrap received unexpected command: $1" >&2; exit 1 ;;
+  *) echo "test bubblewrap received unexpected lifecycle command: $1" >&2; exit 1 ;;
 esac
 shift
 cd "@WORKSPACE@"
