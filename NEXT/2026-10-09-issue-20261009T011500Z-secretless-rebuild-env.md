@@ -57,7 +57,11 @@ Only those scripts receive configured database/cache variables, and the
 workflow rejects service-enabled plans on self-hosted runners. Compatibility
 service variables receive the same credential-name and service-value checks as
 regular candidate scripts, and the validator's trusted database-host input is
-removed before consumer execution. The generated
+removed before consumer execution. Compatibility validation accepts credentialed
+database URLs only when they target the job's exact database service host, and
+opaque `*_URL`, `*_URI`, and `*_DSN` values reject literal or encoded userinfo,
+including host-only values and forms such as `user:secret@tcp(host)`.
+Whitespace-only script plans select the default compatibility test sequence. The generated
 protected workflow grants network access only to service-enabled scripts; the
 source reusable retains the caller-selected runner's normal network policy.
 Whitespace-only script-plan input is normalized to empty before selecting the
@@ -85,3 +89,6 @@ sandbox. Contract tests cover default-plan execution, hostile `BASH_ENV`, a real
 Bubblewrap inherited-FD write probe, signed-query and local-URL service
 filtering, self-hosted service-plan rejection, and npm/Corepack-pnpm rebuild
 paths.
+The connection-string name matcher also covers bare and suffixed `CONN_STRING` aliases.
+The `mailto:` exception accepts only ordinary email addresses; credential-like
+local parts and connection-string-shaped endpoints remain rejected.

@@ -97,6 +97,22 @@ def compatibility_service_env_from_script(
         )
 
 
+def compatibility_child_environment_from_script(
+    script, policy_script, environment, service_names, service_env,
+):
+    start = script.rindex("script_env = os.environ.copy()")
+    start = script.rindex("\n", 0, start) + 1
+    end = script.index("script_env.update({", start)
+    namespace = credential_environment_policy_from_script(policy_script)
+    namespace.update({
+        "compatibility_service_names": set(service_names),
+        "compatibility_service_env": service_env,
+    })
+    with patch.dict(os.environ, environment, clear=True):
+        exec(textwrap.dedent(script[start:end]), namespace)
+    return namespace["script_env"]
+
+
 def credential_environment_policy_from_script(script):
     start = script.index("credential_environment_name_pattern = re.compile")
     end = script.index("if any(requires_services for _directory", start)
@@ -735,17 +751,24 @@ def main():
         assert compatibility_step["env"]["CI_SCRIPT_PLAN"] == "${{ inputs.secretless-ci-script-plan }}"
         assert compatibility_step["env"]["DB_ENV"] == "${{ inputs.db-env }}"
         assert compatibility_step["env"]["CACHE_ENV"] == "${{ inputs.cache-env }}"
+        assert compatibility_step["env"]["VERJSON_CI_TRUSTED_DB_HOST"] == (
+            "${{ steps.db-service.outputs.host }}"
+        )
         accepted_service_env = candidate_service_env_from_script(
             service_plan_step["run"],
             {
                 "DB_HOST": "127.0.0.1",
                 "DB_PORT": "5432",
-                "DB_ENV": "DATABASE_URL=local\nOPENAI_API_KEY=ci-dummy-key",
+                "DB_ENV": "DATABASE_URL=local\nOPENAI_API_KEY=ci-dummy-key\nTEST_EMAIL=ci@example.com\nMAIL_FROM=mailto:ci@example.com",
                 "DATABASE_URL": "postgres://app:secret@127.0.0.1:5432/app_test",
                 "OPENAI_API_KEY": "ci-dummy-key",
+                "TEST_EMAIL": "ci@example.com",
+                "MAIL_FROM": "mailto:ci@example.com",
             },
         )
         assert accepted_service_env["OPENAI_API_KEY"] == "ci-dummy-key"
+        assert accepted_service_env["TEST_EMAIL"] == "ci@example.com"
+        assert accepted_service_env["MAIL_FROM"] == "mailto:ci@example.com"
         for name, value in (
             ("CACHE_URL", "https://cache.example.invalid/#access_token=secret"),
             ("CACHE_URL", "https://cache.example.invalid/#x=access_token=secret"),
@@ -985,10 +1008,63 @@ def main():
                 "DATABASE_URL": "postgres://localhost:5432/app_test",
                 "CACHE_URL": "redis://localhost:6379/0",
             }
+            assert compatibility_service_env_from_script(
+                compatibility_step["run"],
+                "test:compat",
+                '[{"script":"test:compat","requiresServices":true}]',
+                "TEST_EMAIL=ci@example.com",
+                "",
+                {"TEST_EMAIL": "ci@example.com"},
+            ) == {"TEST_EMAIL": "ci@example.com"}
+            assert compatibility_service_env_from_script(
+                compatibility_step["run"],
+                "test:compat",
+                '[{"script":"test:compat","requiresServices":true}]',
+                "MAIL_FROM=mailto:ci@example.com",
+                "",
+                {"MAIL_FROM": "mailto:ci@example.com"},
+            ) == {"MAIL_FROM": "mailto:ci@example.com"}
+            compatibility_bridge_environment = {
+                "DB_HOST": "172.18.0.2",
+                "DB_PORT": "5432",
+                "VERJSON_CI_TRUSTED_DB_HOST": "172.18.0.2",
+                "DATABASE_URL": "postgres://app:secret@172.18.0.2:5432/app_test",
+            }
+            compatibility_bridge_services = compatibility_service_env_from_script(
+                compatibility_step["run"],
+                "test:compat",
+                '[{"script":"test:compat","requiresServices":true}]',
+                "DATABASE_URL=postgres://app:secret@172.18.0.2:5432/app_test",
+                "",
+                compatibility_bridge_environment,
+            )
+            assert compatibility_bridge_services["DATABASE_URL"].endswith("/app_test")
+            compatibility_child_environment = compatibility_child_environment_from_script(
+                compatibility_step["run"],
+                service_plan_step["run"],
+                compatibility_bridge_environment,
+                {"DB_HOST", "DB_PORT", "DATABASE_URL"},
+                compatibility_bridge_services,
+            )
+            assert "VERJSON_CI_TRUSTED_DB_HOST" not in compatibility_child_environment
+            assert compatibility_child_environment["DATABASE_URL"].endswith("/app_test")
             for name, value in (
                 ("CUSTOM_TOKEN", "present"),
                 ("OPENAI_API_KEY", "sk-real-secret"),
                 ("DATABASE_URL", "postgres://app:secret@db.example.com/app_test"),
+                ("DATABASE_URL", "user:secret@tcp(attacker.example:3306)/db"),
+                ("DATABASE_URL", "user:secret%40tcp(attacker.example:3306)/db"),
+                ("DATABASE_URL", "user@tcp(attacker.example:3306)/db"),
+                ("DATABASE_URL", "user:secret@attacker.example"),
+                ("DATABASE_URL", "user@attacker.example"),
+                ("DATABASE_DSN", "user@attacker.example"),
+                ("DB_CONN_STRING", "user@attacker.example"),
+                ("CONN_STRING", "user@attacker.example"),
+                ("MONGO_URI", "user@attacker.example"),
+                ("DATABASE_URL", "user@[2001:db8::1]:3306/db"),
+                ("DATABASE_URL", "ci@example.com;user:secret@tcp(attacker.example:3306)/db"),
+                ("MAIL_FROM", "mailto:alice:secret@example.com"),
+                ("MAIL_FROM", "mailto:ci@tcp(attacker.example:3306)/db"),
                 ("DATABASE_URL", "host=127.0.0.1 password=secret"),
                 ("REDIS_URL", "redis://localhost:6379/?sig=secret"),
             ):
@@ -1016,6 +1092,15 @@ def main():
                 compatibility_environment,
             )
             assert default_test_services == allowed_compatibility_services
+            whitespace_default_test_services = compatibility_service_env_from_script(
+                compatibility_step["run"],
+                "test:compat",
+                " \t ",
+                "DATABASE_URL=postgres://localhost:5432/app_test",
+                "CACHE_URL=redis://localhost:6379/0",
+                compatibility_environment,
+            )
+            assert whitespace_default_test_services == allowed_compatibility_services
             omitted_custom_script_services = compatibility_service_env_from_script(
                 compatibility_step["run"],
                 "compat:verify",
@@ -1027,6 +1112,19 @@ def main():
             assert omitted_custom_script_services == {}
             for name, value in (
                 ("DATABASE_URL", "postgres://app:secret@db.example.com/app_test"),
+                ("DATABASE_URL", "user:secret@tcp(attacker.example:3306)/db"),
+                ("DATABASE_URL", "user:secret%40tcp(attacker.example:3306)/db"),
+                ("DATABASE_URL", "user@tcp(attacker.example:3306)/db"),
+                ("DATABASE_URL", "user:secret@attacker.example"),
+                ("DATABASE_URL", "user@attacker.example"),
+                ("DATABASE_DSN", "user@attacker.example"),
+                ("DB_CONN_STRING", "user@attacker.example"),
+                ("CONN_STRING", "user@attacker.example"),
+                ("MONGO_URI", "user@attacker.example"),
+                ("DATABASE_URL", "user@[2001:db8::1]:3306/db"),
+                ("DATABASE_URL", "ci@example.com;user:secret@tcp(attacker.example:3306)/db"),
+                ("MAIL_FROM", "mailto:alice:secret@example.com"),
+                ("MAIL_FROM", "mailto:ci@tcp(attacker.example:3306)/db"),
                 ("DATABASE_URL", "host=127.0.0.1 password=secret"),
                 ("REDIS_URL", "redis://localhost:6379/?sig=secret"),
                 ("REDIS_URL", "redis://localhost:6379/?Signature=secret"),
