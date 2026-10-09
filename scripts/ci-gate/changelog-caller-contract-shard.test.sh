@@ -126,8 +126,13 @@ expected = {
     f"changelog-release-{(shard_id - 1) % 4 + 1}\tADOPTER_SLOTS=1 CHANGELOG_CALLER_CONTRACT_SHARD={shard_id} bash scripts/ci-gate/changelog-caller-contract.test.sh"
     for shard_id in range(1, width + 1)
 }
-if not expected.issubset(manifest_text):
-    raise SystemExit("manifest is missing a caller-contract shard command")
+actual_shards = [
+    line
+    for line in manifest_text
+    if "\tADOPTER_SLOTS=1 CHANGELOG_CALLER_CONTRACT_SHARD=" in line
+]
+if len(actual_shards) != width or set(actual_shards) != expected:
+    raise SystemExit("manifest caller-contract shard commands are not an exact one-to-one inventory")
 generator_commands = {
     "changelog-release-1\tCHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY=1 bash scripts/ci-gate/changelog-caller-contract.test.sh"
 }
