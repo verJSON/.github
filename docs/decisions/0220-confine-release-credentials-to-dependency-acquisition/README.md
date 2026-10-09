@@ -31,6 +31,10 @@ The canonical generator contract also pins the verification step's selected-vers
 
 This refinement makes the existing credential boundary fail closed in generated callers; it does not grant credentials to additional steps or change release authority.
 
+## Implementation refinement (2026-10-09; issue #1724)
+
+The canonical `node-release` publication workflow applies the same boundary to private dependency acquisition: it runs `npm ci --ignore-scripts` with `NODE_AUTH_TOKEN` only in that command's environment, then removes the token and runs `npm ci --prefer-offline` to replay the locked install from npm's cache. This preserves npm's normal dependency and root lifecycle, including its implicit `node-gyp rebuild` for root packages with `binding.gyp`; publication credentials and provenance behavior stay unchanged. Its offline contract test compares hook counts and per-package order with a normal install, verifies token absence from lifecycle environments, and covers empty dependency trees.
+
 Package-directory provenance applies the generator's normalized relative-path and duplicate checks. For node-release callers, the forwarded package list must agree with the validated provenance and version-stamp command. The emitted contract validates the post-install version-stamp step's condition, environment, and full command separately from the pre-install digest, so a changed package set or an added command cannot hide behind the digest's installation boundary. The generated contract test pins expected package directories by workflow path. Additional release callers require an explicit path-to-package mapping in contract-test generation, and mixed additive/exact selection flags are rejected. Distinct release callers may select distinct valid package sets when each is pinned explicitly. Executable regression tests run the emitted `.npmrc` guard and verification command; they prove a workspace config blocks npm and the repository verification hook observes an empty package token.
 
 ## Consequences

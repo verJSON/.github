@@ -44,7 +44,7 @@ assert all("node -" not in (step.get("run") or "") for step in steps[:setup_node
     "no JavaScript may run before setup-node on bootstrap-clean runners"
 publish = next(step for step in steps if "npm publish" in (step.get("run") or ""))
 assert publish["env"]["NODE_AUTH_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
-install = next(step for step in steps if (step.get("run") or "").strip() == "npm ci")
+install = next(step for step in steps if (step.get("run") or "").strip() == "bash scripts/install-node-release-dependencies.sh")
 assert install["env"]["NODE_AUTH_TOKEN"] == "${{ secrets.NODE_AUTH_TOKEN }}"
 release = next(step for step in steps if "gh release create" in (step.get("run") or ""))
 assert "--verify-tag" in release["run"]
@@ -57,7 +57,10 @@ assert '"assets" not in release' in release["run"]
 assert 'not isinstance(release["assets"], list)' in release["run"]
 assert 'not isinstance(asset, dict)' in release["run"]
 assets = next(step for step in steps if "BOUNDED_RELEASE_ASSETS_BEGIN" in (step.get("run") or ""))
-assert steps.index(assets) < next(i for i, step in enumerate(steps) if (step.get("run") or "").strip() == "npm ci")
+assert steps.index(assets) < next(
+    i for i, step in enumerate(steps)
+    if (step.get("run") or "").strip() == "bash scripts/install-node-release-dependencies.sh"
+)
 for guard in ("at most 16 paths", "symlink", "100 MiB", "250 MiB", 'git cat-file blob "HEAD:$asset"'):
     assert guard in assets["run"], "missing bounded release-asset guard: %s" % guard
 stamp_index = next(i for i, step in enumerate(steps) if "npm version" in (step.get("run") or ""))
