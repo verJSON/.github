@@ -43,6 +43,8 @@ jobs:
     needs: app-key-policy
     if: ${{ needs.app-key-policy.result == 'success' && (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.event.repository.default_branch == 'main') }}
     runs-on: ubuntu-24.04
+    env:
+      GIT_NO_REPLACE_OBJECTS: "1"
     permissions:
       actions: read
       contents: read
@@ -85,6 +87,45 @@ jobs:
             scripts/container_cosign_provenance.py
             scripts/container_candidate_retry.py
           sparse-checkout-cone-mode: false
+      - name: Prepare the release reconciliation sandbox
+        if: ${{ inputs.reconcile-allowlist != '' }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes apparmor apparmor-profiles bubblewrap
+
+          verify_package_floor() {
+            local package_name="$1"
+            local package_floor="$2"
+            local package_record package_status package_version
+            package_record="$(dpkg-query -W -f='${db:Status-Abbrev} ${Version}\n' "$package_name")"
+            read -r package_status package_version <<<"$package_record"
+            if [ "$package_status" != "ii" ] \
+              || ! dpkg --compare-versions "$package_version" ge "$package_floor"; then
+              echo "::error::release reconciliation sandbox package is below its verified floor: $package_name"
+              exit 1
+            fi
+          }
+          verify_package_floor bubblewrap '0.9.0-1build1'
+          verify_package_floor apparmor '4.0.1really4.0.1-0ubuntu0.24.04.3'
+          verify_package_floor apparmor-profiles '4.0.1really4.0.1-0ubuntu0.24.04.3'
+
+          profile='/usr/share/apparmor/extra-profiles/bwrap-userns-restrict'
+          [ "$(dpkg-query -S /usr/bin/bwrap)" = 'bubblewrap: /usr/bin/bwrap' ]
+          [ "$(dpkg-query -S /sbin/apparmor_parser)" = 'apparmor: /sbin/apparmor_parser' ]
+          [ "$(dpkg-query -S "$profile")" = "apparmor-profiles: $profile" ]
+          [ -f "$profile" ] && [ ! -L "$profile" ]
+          sudo /sbin/apparmor_parser --replace "$profile"
+
+          /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent /usr/bin/bwrap \
+            --unshare-user --unshare-pid --unshare-net --unshare-ipc --unshare-uts \
+            --die-with-parent --new-session --disable-userns --cap-drop ALL \
+            --ro-bind /usr /usr --ro-bind-try /bin /bin \
+            --ro-bind-try /lib /lib --ro-bind-try /lib64 /lib64 \
+            --ro-bind-try /etc /etc --proc /proc --dev /dev \
+            --tmpfs /run --tmpfs /tmp --dir /workspace \
+            --bind "$GITHUB_WORKSPACE" /workspace --chdir /workspace \
+            --clearenv --setenv PATH /usr/bin:/bin -- /usr/bin/true
       - uses: sigstore/cosign-installer@af595e623eec1ede52d6322f53b635d5def0a95a # v4.1.2
         with:
           cosign-release: v3.1.3

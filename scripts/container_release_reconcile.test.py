@@ -453,6 +453,28 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertIn("Git control surface", result.stderr)
 
+    def test_rejects_a_hook_that_installs_a_git_replacement_ref(self):
+        git(self.fixture.repo, "commit", "--allow-empty", "-qm", "second commit")
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            'printf "tag\\n" > Dockerfile\n'
+            'git replace HEAD HEAD^\n'
+        )
+
+        result = self.fixture.run()
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("Git replacement refs are not allowed", result.stderr)
+
+    def test_rejects_preexisting_git_replacement_refs(self):
+        git(self.fixture.repo, "commit", "--allow-empty", "-qm", "second commit")
+        git(self.fixture.repo, "replace", "HEAD", "HEAD^")
+
+        result = self.fixture.run()
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("Git replacement refs are not allowed", result.stderr)
+
     def test_rejects_a_hook_that_rewrites_the_repository_exclude_file(self):
         self.fixture.write_hook(
             "#!/usr/bin/env bash\n"
@@ -569,6 +591,19 @@ class ReconcileTest(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("host-only credential\n", host_secret.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(shutil.which("unshare"), "unshare is required to test the nested namespace boundary")
+    def test_hook_cannot_create_a_nested_user_namespace(self):
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "if unshare --user true >/dev/null 2>&1; then exit 1; fi\n"
+            'printf "tag\\n" > Dockerfile\n'
+        )
+
+        result = self.fixture.run()
+
+        self.assertEqual(0, result.returncode, result.stderr)
 
     def test_rejects_a_hook_that_hides_output_in_an_ignored_path(self):
         (self.fixture.repo / ".gitignore").write_text("build/\n", encoding="utf-8")

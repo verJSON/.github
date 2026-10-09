@@ -43,8 +43,11 @@ class ReconcileError(Exception):
 
 
 def git(root: Path, *args: str) -> str:
+    environment = os.environ.copy()
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     result = subprocess.run(
         ["git", "-C", str(root), *args], capture_output=True, text=True,
+        env=environment,
     )
     if result.returncode != 0:
         raise ReconcileError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
@@ -161,6 +164,14 @@ def control_surface(root: Path, git_dir: Path) -> dict:
             else "not-a-regular-file"
         )
     surface["index-entries"] = git(root, "ls-files", "--stage", "-v", "-z")
+    surface["replace-refs"] = git(
+        root, "for-each-ref", "--format=%(refname) %(objectname)", "refs/replace",
+    ).strip()
+    if surface["replace-refs"]:
+        raise ReconcileError(
+            "Git replacement refs are not allowed during release reconciliation: "
+            + surface["replace-refs"].replace("\n", ", ")
+        )
     surface["HEAD"] = git(root, "rev-parse", "HEAD").strip()
     surface["HEAD-ref"] = git(root, "rev-parse", "--symbolic-full-name", "HEAD").strip()
     return surface
@@ -219,6 +230,8 @@ def run_hook(root: Path, version: str, manifest: str, timeout: int) -> None:
         "--unshare-uts",
         "--die-with-parent",
         "--new-session",
+        "--disable-userns",
+        "--cap-drop", "ALL",
         "--ro-bind", "/usr", "/usr",
         "--ro-bind-try", "/bin", "/bin",
         "--ro-bind-try", "/lib", "/lib",
