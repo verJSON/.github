@@ -219,6 +219,7 @@ def run_hook(root: Path, version: str, manifest: str, timeout: int) -> None:
             process = subprocess.Popen(
                 [f"./{HOOK}", version, manifest],
                 cwd=str(root), env=environment, stdin=stdin, start_new_session=True,
+                preexec_fn=set_no_new_privileges,
             )
             # Resolve the group while the leader is alive: after `wait()` reaps it the
             # pid is gone, but the group can still hold processes the hook backgrounded.
@@ -251,6 +252,14 @@ def become_child_subreaper() -> None:
     if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
         error = ctypes.get_errno()
         raise ReconcileError(f"cannot contain reconciliation hook descendants: {os.strerror(error)}")
+
+
+def set_no_new_privileges() -> None:
+    """Prevent hook descendants from gaining runner privileges through sudo/setuid."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(38, 1, 0, 0, 0) != 0:  # PR_SET_NO_NEW_PRIVS
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
 
 
 def direct_child_pids() -> list:

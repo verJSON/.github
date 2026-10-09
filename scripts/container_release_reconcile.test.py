@@ -514,6 +514,20 @@ class GitControlSurfaceTest(unittest.TestCase):
             (self.fixture.contract / "scripts/changelog.py").read_text(encoding="utf-8"),
         )
 
+    def test_hook_cannot_gain_runner_privileges_for_a_persistent_service(self):
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "grep -q '^NoNewPrivs:[[:space:]]*1$' /proc/self/status\n"
+            "if command -v sudo >/dev/null 2>&1 && sudo -n -- true >/dev/null 2>&1; then\n"
+            "  exit 42\n"
+            "fi\n"
+        )
+
+        result = self.fixture.run()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+
     def test_hook_cannot_reach_the_runner_home_directory(self):
         """A writable `$HOME` is a `~/.gitconfig` away from the same escalation."""
         self.fixture.write_hook(
