@@ -34,6 +34,13 @@ SENSITIVE_ENV = COMMAND_FILE_ENV + (
     "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
     "ACTIONS_ID_TOKEN_REQUEST_URL",
 )
+EXPECTED_SANDBOX_ENTRYPOINT = (
+    "import os, sys\n"
+    "max_fd = os.sysconf('SC_OPEN_MAX')\n"
+    "if max_fd < 3: raise SystemExit('invalid file descriptor limit')\n"
+    "os.closerange(3, max_fd)\n"
+    "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
+)
 
 
 def run_rebuild(
@@ -250,11 +257,9 @@ def run_rebuild(
             "command = arguments[separator + 1:]\n"
             "if len(command) < 4 or command[:2] != ['/usr/bin/python3', '-c']:\n"
             "    raise SystemExit('trusted Python bootstrap is missing')\n"
-            "bootstrap_source = command[2]\n"
-            "if 'os.closerange(3, max_fd)' not in bootstrap_source:\n"
-            "    raise SystemExit('trusted bootstrap does not close inherited descriptors')\n"
-            "if 'os.execvpe(sys.argv[1], sys.argv[1:], os.environ)' not in bootstrap_source:\n"
-            "    raise SystemExit('trusted bootstrap does not hand off to the lifecycle command')\n"
+            f"expected_bootstrap = {EXPECTED_SANDBOX_ENTRYPOINT!r}\n"
+            "if command[2] != expected_bootstrap:\n"
+            "    raise SystemExit('unexpected trusted Python bootstrap')\n"
             f"expected_lifecycle = {expected_lifecycle!r}\n"
             "if command[3:] != expected_lifecycle:\n"
             "    raise SystemExit(f'unexpected lifecycle command: {command[3:]!r}')\n"
@@ -368,8 +373,7 @@ def assert_bubblewrap_arguments(arguments_path, workspace, package_manager):
     ]
     command = receipt["command"]
     assert command[:2] == ["/usr/bin/python3", "-c"]
-    assert "os.closerange(3, max_fd)" in command[2]
-    assert "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)" in command[2]
+    assert command[2] == EXPECTED_SANDBOX_ENTRYPOINT
     assert command[3:] == expected_lifecycle
     for option in (
         "--unshare-user",
