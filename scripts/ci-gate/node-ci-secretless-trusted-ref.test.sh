@@ -57,8 +57,12 @@ assert "npm ci --ignore-scripts" in install["run"]
 assert "printf '%s=\\n' \"$name\"" in install["run"]
 assert 'command = ["npm", "rebuild"] if package_manager == "npm" else ["corepack", "pnpm", "rebuild"]' in rebuild["run"]
 assert 'unset -v GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN' in rebuild["run"]
+assert "exec python3 - <<'PY'" in rebuild["run"]
 assert 'rebuild_process_env.pop("REBUILD_ENV", None)' in rebuild["run"]
-assert 'subprocess.run([*command, *requested], check=True, env=rebuild_process_env)' in rebuild["run"]
+for name in ("GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_PATH", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"):
+    assert f'"{name}"' in rebuild["run"]
+assert "rebuild_process_env.pop(name, None)" in rebuild["run"]
+assert "os.execvpe(command[0], [*command, *requested], rebuild_process_env)" in rebuild["run"]
 # Each planned script runs in the manifest that declared it (#1229), so the
 # pinned execution call carries that directory rather than assuming the root.
 assert re.search(r'(?m)^\s*npm_command\s*=\s*\["npm"\]\s*$', plan["run"])

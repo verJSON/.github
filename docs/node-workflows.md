@@ -217,6 +217,13 @@ identical across the event split.
 
 Consumers that need a reviewed private auxiliary tree, selective lifecycle
 rebuilds, or a repository-specific command sequence keep those choices explicit.
+`secretless-rebuild-env` currently accepts only `ONNXRUNTIME_NODE_INSTALL=skip`
+for an approved `onnxruntime-node` rebuild. The rebuild step replaces its Bash
+and validator processes before starting npm or Corepack, and removes credentials
+and GitHub Actions command-file paths from the package-manager environment. This
+keeps lifecycle code from reading the previous step environment through its
+process ancestors or changing a later step through `GITHUB_ENV`.
+
 The auxiliary source accepts exactly `repository`, `pinFile`, `checkoutPath`, and
 `sparsePath`; the pin file must name the same repository and a lowercase 40-hex
 commit. Rebuild entries must be exact locked package names. The script plan must

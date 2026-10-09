@@ -119,8 +119,12 @@ The credentialless lifecycle rebuild accepts only the exact
 approves `onnxruntime-node` for rebuild. The value lets ONNX Runtime skip its
 optional CUDA binary download. General environment overrides are not permitted:
 an arbitrary key could carry a credential despite its name, and dynamic-loader
-variables can alter process behavior. The raw JSON input is removed from the
-child environment before npm runs, so lifecycle code receives only the single
-validated setting. The canonical and generated protected workflow tests verify
-the accepted pair, reject other names and values, confirm credentials and raw
-input are absent from npm, and reject use with a different rebuild package.
+variables can alter process behavior. Before package-manager execution, the
+step replaces Bash with the validator and then replaces the validator with npm
+or Corepack. It removes credentials, the raw JSON input, and all GitHub Actions
+command-file paths from the package-manager environment. This prevents
+lifecycle code from inspecting the step shell's prior environment through its
+process ancestors or appending commands to a later step. Canonical and
+generated protected workflow tests cover npm and pnpm, the accepted pair,
+rejected names and values, absent credentials and command-file paths, and
+rejection when a different package is approved.

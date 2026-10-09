@@ -3019,11 +3019,10 @@ jobs:
           REBUILD_ENV: ${{ inputs.secretless-rebuild-env }}
         run: |
           unset -v GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN NPM_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GOOGLE_APPLICATION_CREDENTIALS AZURE_CREDENTIALS ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
-          python3 - <<'PY'
+          exec python3 - <<'PY'
           import json
           import os
           import re
-          import subprocess
           import sys
           from pathlib import Path
 
@@ -3135,8 +3134,16 @@ jobs:
           rebuild_process_env = dict(os.environ)
           rebuild_process_env.pop("REBUILD_ENV", None)
           rebuild_process_env.pop("ONNXRUNTIME_NODE_INSTALL", None)
+          for name in (
+              "GITHUB_ENV",
+              "GITHUB_OUTPUT",
+              "GITHUB_PATH",
+              "GITHUB_STATE",
+              "GITHUB_STEP_SUMMARY",
+          ):
+              rebuild_process_env.pop(name, None)
           rebuild_process_env.update(rebuild_env)
-          subprocess.run([*command, *requested], check=True, env=rebuild_process_env)
+          os.execvpe(command[0], [*command, *requested], rebuild_process_env)
           PY
       - name: Run exact credentialless consumer script plan
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && (inputs.secretless-ci-script-plan != '' || inputs.secretless-nested-manifests != '')
