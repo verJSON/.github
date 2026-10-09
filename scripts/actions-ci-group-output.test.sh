@@ -64,6 +64,11 @@ if ACTIONS_CI_COMMAND_BUDGET_SECONDS=60 ACTIONS_CI_GROUP_MANIFEST="$tmp/fast.tsv
   else
     fail "a passing command did not report its elapsed time"
   fi
+  if grep -q 'actions-ci group=platform command_parallelism=1 command_count=1' "$tmp/fast.out"; then
+    pass "the group reports its effective command parallelism"
+  else
+    fail "the group did not report its effective command parallelism"
+  fi
 else
   fail "a command inside its budget failed the group"
 fi
@@ -121,6 +126,47 @@ if ACTIONS_CI_COMMAND_BUDGET_SECONDS=10 \
   fi
 else
   fail "independent manifest commands did not complete concurrently"
+fi
+
+cat >"$tmp/normal-check.sh" <<'EOF'
+#!/usr/bin/env bash
+if [ -e "$ACTIONS_CI_EXCLUSIVE_ACTIVE" ]; then
+  exit 11
+fi
+mkdir "$ACTIONS_CI_NORMAL_ACTIVE" || exit 12
+sleep 0.1
+if [ -e "$ACTIONS_CI_EXCLUSIVE_ACTIVE" ]; then
+  exit 13
+fi
+rmdir "$ACTIONS_CI_NORMAL_ACTIVE"
+EOF
+cat >"$tmp/exclusive-check.sh" <<'EOF'
+#!/usr/bin/env bash
+if [ -e "$ACTIONS_CI_NORMAL_ACTIVE" ]; then
+  exit 21
+fi
+mkdir "$ACTIONS_CI_EXCLUSIVE_ACTIVE" || exit 22
+sleep 0.1
+if [ -e "$ACTIONS_CI_NORMAL_ACTIVE" ]; then
+  exit 23
+fi
+rmdir "$ACTIONS_CI_EXCLUSIVE_ACTIVE"
+EOF
+chmod +x "$tmp/normal-check.sh" "$tmp/exclusive-check.sh"
+printf 'platform\tbash %q\nplatform\t@exclusive bash %q\nplatform\tbash %q\n' \
+  "$tmp/normal-check.sh" "$tmp/exclusive-check.sh" "$tmp/normal-check.sh" \
+  >"$tmp/exclusive.tsv"
+
+if ACTIONS_CI_COMMAND_BUDGET_SECONDS=10 \
+  ACTIONS_CI_GROUP_MANIFEST="$tmp/exclusive.tsv" \
+  ACTIONS_CI_NORMAL_ACTIVE="$tmp/normal-active" \
+  ACTIONS_CI_EXCLUSIVE_ACTIVE="$tmp/exclusive-active" \
+  PATH="$tmp/bin:$PATH" bash "$runner" platform \
+  >"$tmp/exclusive.out" 2>"$tmp/exclusive.err"; then
+  pass "exclusive manifest commands run without sibling rows"
+else
+  cat "$tmp/exclusive.out" "$tmp/exclusive.err" >&2
+  fail "an exclusive command overlapped a sibling manifest row"
 fi
 
 [ "$fails" -eq 0 ] || exit 1

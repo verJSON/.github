@@ -19,6 +19,15 @@ import yaml
 with open(sys.argv[1], encoding="utf-8") as stream:
     document = yaml.safe_load(stream)
 manifest_text = open(sys.argv[2], encoding="utf-8").read()
+exclusive_commands = {
+    line
+    for line in manifest_text.splitlines()
+    if "\t@exclusive " in line
+}
+assert exclusive_commands == {
+    "platform\t@exclusive bash scripts/required-checks-audit.test.sh",
+    "merge-gate\t@exclusive bash scripts/ci-gate/privileged-merge-conformance.test.sh",
+}
 jobs = document["jobs"]
 assert document[True]["pull_request"]["types"] == [
     "opened", "reopened", "synchronize", "ready_for_review", "converted_to_draft",
@@ -569,6 +578,9 @@ NON_GATE_MODULES = {
     ),
     "scripts/ci-gate/conformance/model.py": (
         "workflow model imported by the conformance modules"
+    ),
+    "scripts/ci-gate/conformance/yaml_documents.py": (
+        "cached workflow loader imported by the conformance modules"
     ),
 }
 

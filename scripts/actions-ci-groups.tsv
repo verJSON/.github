@@ -62,7 +62,7 @@ platform	python3 scripts/ci-gate/untrusted-runner-cutover-doc.test.py
 platform	bash scripts/fleet-watchdog.test.sh
 platform	bash scripts/fleet-watchdog-cadence.test.sh
 platform	bash scripts/runner-selector-health.test.sh
-platform	bash scripts/required-checks-audit.test.sh
+platform	@exclusive bash scripts/required-checks-audit.test.sh
 platform	bash scripts/required-checks-rollout.test.sh
 platform	bash scripts/required-checks-rollback.test.sh
 platform	python3 scripts/gate_coverage_audit_test.py
@@ -135,7 +135,7 @@ merge-gate	bash scripts/ci-gate/elide-lockfiles.test.sh
 merge-gate	bash scripts/ci-gate/rereview-skip.test.sh
 merge-gate	bash scripts/ci-gate/dispatch-target-guard.test.sh
 merge-gate	bash scripts/ci-gate/target-visibility.test.sh
-merge-gate	bash scripts/ci-gate/privileged-merge-conformance.test.sh
+merge-gate	@exclusive bash scripts/ci-gate/privileged-merge-conformance.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-pin-extractor-differential.test.sh
 merge-gate	bash scripts/ci-gate/require-secrets.test.sh
 merge-gate	bash scripts/ci-gate/dispatch-permission.test.sh

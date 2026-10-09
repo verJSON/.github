@@ -46,6 +46,7 @@ case "$command_parallelism" in
 esac
 
 declare -a commands=()
+declare -a command_exclusive=()
 declare -A command_index_by_pid=()
 declare -A worker_wait_status_by_index=()
 worker_wait_failures=0
@@ -58,7 +59,23 @@ while IFS=$'\t' read -r command_group command; do
     printf 'empty command in actions-ci group %s\n' "$group" >&2
     exit 2
   }
+  exclusive=0
+  case "$command" in
+    '@exclusive '*)
+      exclusive=1
+      command="${command#@exclusive }"
+      ;;
+    @exclusive*)
+      printf 'invalid exclusive command in actions-ci group %s\n' "$group" >&2
+      exit 2
+      ;;
+  esac
+  [ -n "$command" ] || {
+    printf 'empty command in actions-ci group %s\n' "$group" >&2
+    exit 2
+  }
   commands+=("$command")
+  command_exclusive+=("$exclusive")
 done <"$manifest"
 
 if [ "${#commands[@]}" -eq 0 ]; then
@@ -69,6 +86,8 @@ fi
 if [ "$command_parallelism" -gt "${#commands[@]}" ]; then
   command_parallelism="${#commands[@]}"
 fi
+printf 'actions-ci group=%s command_parallelism=%s command_count=%s\n' \
+  "$group" "$command_parallelism" "${#commands[@]}"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf -- "$tmp"' EXIT
@@ -119,15 +138,26 @@ wait_for_worker() {
 
 active=0
 for index in "${!commands[@]}"; do
-  while [ "$active" -ge "$command_parallelism" ]; do
-    wait_for_worker
-    active=$((active - 1))
-  done
+  if [ "${command_exclusive[$index]}" -eq 1 ]; then
+    while [ "$active" -gt 0 ]; do
+      wait_for_worker
+      active=$((active - 1))
+    done
+  else
+    while [ "$active" -ge "$command_parallelism" ]; do
+      wait_for_worker
+      active=$((active - 1))
+    done
+  fi
   printf 'running actions-ci command %s/%s in %s: %s\n' \
     "$((index + 1))" "${#commands[@]}" "$group" "${commands[$index]}"
   run_command "$index" "${commands[$index]}" &
   command_index_by_pid["$!"]="$index"
   active=$((active + 1))
+  if [ "${command_exclusive[$index]}" -eq 1 ]; then
+    wait_for_worker
+    active=$((active - 1))
+  fi
 done
 
 while [ "$active" -gt 0 ]; do
