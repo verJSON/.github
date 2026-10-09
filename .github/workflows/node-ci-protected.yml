@@ -206,8 +206,8 @@ on:
           grants network access only to those scripts. The standard test, test:*,
           and *:test names retain service access by default; custom test names
           must set requiresServices to true. The unprotected reusable workflow
-          retains its caller-selected network policy. Empty preserves the
-          standard build/typecheck/test/lint sequence.
+          retains its caller-selected network policy. Empty or whitespace-only
+          input preserves the standard build/typecheck/test/lint sequence.
         required: false
         type: string
         default: ''
@@ -2267,6 +2267,7 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_ID: ${{ github.run_id }}
           SECRETLESS_RUNTIME_PUBLIC_CACHE: ${{ inputs.secretless-runtime-public-cache }}
+          VERJSON_CI_TRUSTED_DB_HOST: ${{ steps.db-service.outputs.host }}
           SECRETLESS_CACHE_DIR: ${{ runner.temp }}/secretless-build-cache-${{ github.run_id }}-${{ github.run_attempt }}
           PNPM_STORE_DIR: ${{ runner.temp }}/secretless-pnpm-store-${{ github.run_id }}-${{ github.run_attempt }}
           TRANSFER_DIR: ${{ github.workspace }}/.verjson-secretless-transfer-${{ github.run_id }}
@@ -5763,7 +5764,6 @@ jobs:
           VERJSON_CHANGELOG_CONTRACT_REF: ${{ steps.warm-changelog-contract.outputs.contract_ref }}
           VERJSON_CHANGELOG_CONTRACT_SHA256: ${{ steps.warm-changelog-contract.outputs.contract_sha256 }}
           NESTED_MANIFESTS: ${{ inputs.secretless-nested-manifests }}
-          RUN_DEFAULTS: ${{ inputs.secretless-ci-script-plan == '' }}
           DB_ENV: ${{ inputs.db-env }}
           CACHE_ENV: ${{ inputs.cache-env }}
           VERJSON_CI_TRUSTED_DB_HOST: ${{ steps.db-service.outputs.host }}
@@ -5863,6 +5863,7 @@ jobs:
           checkout_root = Path.cwd().resolve()
           normalized = []
           plan_source = os.environ.get("CI_SCRIPT_PLAN", "").strip()
+          run_defaults = not plan_source
           if plan_source:
               try:
                   plan = json.loads(plan_source)
@@ -5900,7 +5901,7 @@ jobs:
                       normalized.extend(normalize_plan(
                           nested_plan, nested_directory, f"{nested_path} scriptPlan",
                           f"{nested_path}/package.json"))
-          if os.environ.get("RUN_DEFAULTS") == "true":
+          if run_defaults:
               root_scripts = json.loads(
                   (checkout_root / "package.json").read_text(encoding="utf-8")
               ).get("scripts", {})
@@ -7000,6 +7001,7 @@ jobs:
           import tarfile
           import tempfile
           from pathlib import Path
+          from urllib.parse import parse_qsl, unquote, urlsplit
 
           protected = {
               "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL",
@@ -7067,6 +7069,132 @@ jobs:
                   sys.exit("secretless-ci-script-plan accepts unique script names")
               return bool(matches and matches[0])
 
+          blocked_service_env = {
+              "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
+              "GITHUB_STEP_SUMMARY", "VERJSON_CI_TRUSTED_DB_HOST",
+              "VERJSON_CI_COMMAND_FILES_DIR", "GH_TOKEN",
+              "GITHUB_TOKEN", "NODE_AUTH_TOKEN",
+              "NPM_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "FTP_PROXY",
+              "AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS",
+              "AZURE_CREDENTIALS", "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+              "ACTIONS_ID_TOKEN_REQUEST_URL", "BASH_ENV", "BASH_XTRACEFD", "ENV",
+              "PS4", "SHELLOPTS", "BASHOPTS", "PATH", "NODE_OPTIONS", "NODE_PATH",
+              "NODE_EXTRA_CA_CERTS", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
+              "PYTHONUSERBASE", "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
+              "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS",
+              "GIT_ASKPASS", "SSH_ASKPASS", "GIT_SSL_CAINFO", "GIT_SSL_CAPATH",
+              "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE",
+              "GCONV_PATH", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+              "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+          }
+          blocked_service_prefixes = (
+              "GITHUB_", "RUNNER_", "ACTIONS_", "GH_", "DOCKER_", "AWS_", "GOOGLE_",
+              "AZURE_", "GCP_", "COREPACK_", "NPM_CONFIG_", "GIT_CONFIG_",
+              "LD_", "DYLD_", "POSTGRES_",
+          )
+          credential_environment_name_pattern = re.compile(
+              r"(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|PRIVATE[_-]?KEY|"
+              r"API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|BEARER|COOKIE|SESSION|JWT|AUTH)",
+              re.IGNORECASE,
+          )
+          credential_environment_ambiguous_name_pattern = re.compile(
+              r"(?<![A-Z0-9])(?:KEY|CODE|SIG)(?![A-Z0-9])",
+              re.IGNORECASE,
+          )
+
+          def credential_environment_name_is_sensitive(name):
+              normalized_name = name.upper()
+              if normalized_name.startswith("NPM_CONFIG_") and normalized_name != "NPM_CONFIG_CACHE":
+                  return True
+              if normalized_name == "PWD":
+                  return False
+              if credential_environment_name_pattern.search(name) is not None:
+                  return True
+              if normalized_name in {"EXIT_CODE", "CACHE_KEY", "PUBLIC_KEY"}:
+                  return False
+              return credential_environment_ambiguous_name_pattern.search(name) is not None
+
+          credential_parameter_name_pattern = re.compile(
+              r"(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|PRIVATE[_-]?KEY|"
+              r"API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|"
+              r"(?<![A-Z0-9])KEY(?![A-Z0-9])|(?<![A-Z0-9])CODE(?![A-Z0-9])|"
+              r"(?<![A-Z0-9])SIG(?![A-Z0-9])|BEARER|COOKIE|SESSION|JWT|"
+              r"(?<![A-Z0-9])AUTH(?:ORIZATION|ENTICATION)?(?![A-Z0-9]))",
+              re.IGNORECASE,
+          )
+          credential_parameter_pattern = re.compile(
+              r"(?:^|[;?&#=\s])(?:[A-Z0-9]+[_-])*(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|"
+              r"PRIVATE[_-]?KEY|API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|"
+              r"(?<![A-Z0-9])KEY(?![A-Z0-9])|(?<![A-Z0-9])CODE(?![A-Z0-9])|"
+              r"(?<![A-Z0-9])SIG(?![A-Z0-9])|"
+              r"BEARER|COOKIE|SESSION|JWT|"
+              r"(?<![A-Z0-9])AUTH(?:ORIZATION|ENTICATION)?(?![A-Z0-9]))\s*=",
+              re.IGNORECASE,
+          )
+
+          def credential_component_is_present(component):
+              for _ in range(8):
+                  if credential_parameter_pattern.search(component):
+                      return True
+                  if "=" in component and any(
+                      credential_parameter_name_pattern.search(key)
+                      for key, _value in parse_qsl(
+                          component, keep_blank_values=True, max_num_fields=128
+                      )
+                  ):
+                      return True
+                  decoded = unquote(component)
+                  if decoded == component:
+                      return False
+                  component = decoded
+              return True
+
+          def credential_environment_value_is_sensitive(name, value):
+              if name.upper() not in {"HTTP_PROXY", "HTTPS_PROXY", "FTP_PROXY", "ALL_PROXY"}:
+                  return False
+              try:
+                  parsed = urlsplit(value if "://" in value else f"//{value}")
+              except ValueError:
+                  return True
+              if parsed.username is not None or parsed.password is not None:
+                  return True
+              return any(
+                  credential_component_is_present(component)
+                  for component in (parsed.query, parsed.fragment)
+              )
+
+          def validate_candidate_service_value(name, value):
+              if credential_environment_name_is_sensitive(name) and not (
+                  name.upper() == "OPENAI_API_KEY" and value == "ci-dummy-key"
+              ):
+                  sys.exit("candidate service environment includes a credential-bearing variable")
+              if "://" not in value:
+                  if credential_component_is_present(value):
+                      sys.exit("candidate service value contains credential-bearing data")
+                  return
+              if credential_parameter_pattern.search(value):
+                  sys.exit("candidate service value contains credential-bearing data")
+              try:
+                  parsed = urlsplit(value)
+                  has_credential_fields = any(
+                      credential_component_is_present(component)
+                      for component in (parsed.query, parsed.fragment)
+                  )
+              except ValueError:
+                  sys.exit("candidate service URL is malformed")
+              if has_credential_fields:
+                  sys.exit("candidate service URL contains credential-bearing data")
+              if parsed.username is not None or parsed.password is not None:
+                  local_service_hosts = {"localhost", "127.0.0.1", "::1"}
+                  trusted_db_host = os.environ.get(
+                      "VERJSON_CI_TRUSTED_DB_HOST", ""
+                  ).strip().strip("[]").lower()
+                  if trusted_db_host:
+                      local_service_hosts.add(trusted_db_host)
+                  if parsed.hostname is None or parsed.hostname.lower() not in local_service_hosts:
+                      sys.exit("credentialed candidate service URLs must target the local service")
+
+
           def configured_compatibility_service_names(db_env, cache_env):
               names = {"DB_HOST", "DB_PORT", "CACHE_PORT"}
               for source in (db_env, cache_env):
@@ -7086,11 +7214,22 @@ jobs:
           ):
               if not compatibility_service_script_requires_services(script_name, plan_source):
                   return {}
-              return {
-                  name: environment[name]
-                  for name in sorted(configured_compatibility_service_names(db_env, cache_env))
-                  if name in environment
-              }
+              service_environment = {}
+              for name in sorted(configured_compatibility_service_names(db_env, cache_env)):
+                  if name not in environment:
+                      continue
+                  normalized_name = name.upper()
+                  if normalized_name in blocked_service_env or any(
+                      normalized_name.startswith(prefix)
+                      for prefix in blocked_service_prefixes
+                  ):
+                      sys.exit("compatibility service environment includes a protected variable")
+                  try:
+                      validate_candidate_service_value(name, environment[name])
+                  except SystemExit as error:
+                      sys.exit(f"compatibility service environment rejected: {error}")
+                  service_environment[name] = environment[name]
+              return service_environment
 
           compatibility_service_names = configured_compatibility_service_names(
               os.environ.get("DB_ENV", ""), os.environ.get("CACHE_ENV", ""),
@@ -8261,6 +8400,7 @@ jobs:
                   for env_name in (
                       "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
                       "GITHUB_STEP_SUMMARY", "CI_SCRIPT_PLAN", "DB_ENV", "CACHE_ENV",
+                      "VERJSON_CI_TRUSTED_DB_HOST",
                   ):
                       script_env.pop(env_name, None)
                   for service_name in compatibility_service_names:

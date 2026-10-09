@@ -81,11 +81,20 @@ def compatibility_service_env_from_script(
     end = script.index(
         "compatibility_service_names = configured_compatibility_service_names(", start
     )
-    namespace = {"json": json, "re": re, "sys": sys}
+    namespace = {
+        "json": json,
+        "os": os,
+        "parse_qsl": parse_qsl,
+        "re": re,
+        "sys": sys,
+        "unquote": unquote,
+        "urlsplit": urlsplit,
+    }
     exec(textwrap.dedent(script[start:end]), namespace)
-    return namespace["compatibility_service_environment"](
-        script_name, plan_source, db_env, cache_env, environment,
-    )
+    with patch.dict(os.environ, environment, clear=True):
+        return namespace["compatibility_service_environment"](
+            script_name, plan_source, db_env, cache_env, environment,
+        )
 
 
 def credential_environment_policy_from_script(script):
@@ -149,6 +158,12 @@ def candidate_plan_normalizer(script):
     namespace = {"json": json, "os": os, "re": re, "sys": sys, "Path": Path}
     exec(source, namespace)
     return namespace["normalize_plan"]
+
+
+def candidate_service_validation_source(script, end_marker):
+    start = script.index("blocked_service_env = {")
+    end = script.index(end_marker, start)
+    return textwrap.dedent(script[start:end]).strip()
 
 
 def require_service_runner_from_script(script, normalized, runner_environment):
@@ -712,6 +727,11 @@ def main():
             for candidate in build["steps"]
             if candidate.get("name") == "Run runtime-resolved compatibility lanes without credentials"
         )
+        assert candidate_service_validation_source(
+            service_plan_step["run"], "if any(requires_services for _directory"
+        ) == candidate_service_validation_source(
+            compatibility_step["run"], "def configured_compatibility_service_names("
+        )
         assert compatibility_step["env"]["CI_SCRIPT_PLAN"] == "${{ inputs.secretless-ci-script-plan }}"
         assert compatibility_step["env"]["DB_ENV"] == "${{ inputs.db-env }}"
         assert compatibility_step["env"]["CACHE_ENV"] == "${{ inputs.cache-env }}"
@@ -793,7 +813,9 @@ def main():
             assert '"COREPACK_"' in script_plan["run"]
             assert '"COREPACK_ENABLE_NETWORK": "0"' in script_plan["run"]
             assert '"COREPACK_HOME": str(corepack_home) if corepack_home is not None' in script_plan["run"]
-            assert "RUN_DEFAULTS" in script_plan["env"]
+            assert "RUN_DEFAULTS" not in script_plan["env"]
+            assert "run_defaults = not plan_source" in script_plan["run"]
+            assert "if run_defaults:" in script_plan["run"]
             assert candidate_variables_for_script(script_plan["run"], False) == {"CI": "true"}
             assert candidate_variables_for_script(script_plan["run"], True) == {
                 "CI": "true",
@@ -963,6 +985,28 @@ def main():
                 "DATABASE_URL": "postgres://localhost:5432/app_test",
                 "CACHE_URL": "redis://localhost:6379/0",
             }
+            for name, value in (
+                ("CUSTOM_TOKEN", "present"),
+                ("OPENAI_API_KEY", "sk-real-secret"),
+                ("DATABASE_URL", "postgres://app:secret@db.example.com/app_test"),
+                ("DATABASE_URL", "host=127.0.0.1 password=secret"),
+                ("REDIS_URL", "redis://localhost:6379/?sig=secret"),
+            ):
+                try:
+                    compatibility_service_env_from_script(
+                        compatibility_step["run"],
+                        "test:compat",
+                        '[{"script":"test:compat","requiresServices":true}]',
+                        f"{name}={value}",
+                        "",
+                        {name: value},
+                    )
+                except SystemExit as error:
+                    assert "compatibility service" in str(error)
+                else:
+                    raise AssertionError(
+                        f"compatibility service accepted credential-bearing {name}"
+                    )
             default_test_services = compatibility_service_env_from_script(
                 compatibility_step["run"],
                 "test:compat",

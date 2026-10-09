@@ -759,6 +759,7 @@ fs.writeFileSync('compat-results/service-env.json', JSON.stringify({
   DB_ENV: process.env.DB_ENV ?? null,
   CACHE_ENV: process.env.CACHE_ENV ?? null,
   CI_SCRIPT_PLAN: process.env.CI_SCRIPT_PLAN ?? null,
+  VERJSON_CI_TRUSTED_DB_HOST: process.env.VERJSON_CI_TRUSTED_DB_HOST ?? null,
 }));
 try {
   fs.appendFileSync('.git/config', '\n# consumer write probe\n');
@@ -773,14 +774,14 @@ if (process.env.REJECT_COMPATIBILITY === 'true') {
 }
 JS
 consumer_stderr="$tmp/e2e/consumer/run.stderr"
-if (cd "$tmp/e2e/consumer" && CI_SCRIPT_PLAN='[{"script":"test:compat","requiresServices":false}]' DB_ENV='DATABASE_URL=postgres://localhost:5432/app_test' CACHE_ENV='CACHE_URL=redis://localhost:6379/0' DB_HOST=127.0.0.1 DB_PORT=5432 CACHE_PORT=6379 DATABASE_URL=postgres://localhost:5432/app_test CACHE_URL=redis://localhost:6379/0 COMPATIBILITY_ARTIFACT_DIR="$tmp/e2e/consumer/artifacts" COMPATIBILITY_RANGES="$request" EXPECTED_COMPATIBILITY_PROVENANCE_SHA256="$provenance_sha" REJECT_COMPATIBILITY=false bash "$tmp/run-lanes.sh") >"$tmp/e2e/consumer/run.stdout" 2>"$consumer_stderr"; then
+if (cd "$tmp/e2e/consumer" && CI_SCRIPT_PLAN='[{"script":"test:compat","requiresServices":false}]' DB_ENV='DATABASE_URL=postgres://localhost:5432/app_test' CACHE_ENV='CACHE_URL=redis://localhost:6379/0' DB_HOST=127.0.0.1 DB_PORT=5432 CACHE_PORT=6379 DATABASE_URL=postgres://localhost:5432/app_test CACHE_URL=redis://localhost:6379/0 VERJSON_CI_TRUSTED_DB_HOST=127.0.0.1 COMPATIBILITY_ARTIFACT_DIR="$tmp/e2e/consumer/artifacts" COMPATIBILITY_RANGES="$request" EXPECTED_COMPATIBILITY_PROVENANCE_SHA256="$provenance_sha" REJECT_COMPATIBILITY=false bash "$tmp/run-lanes.sh") >"$tmp/e2e/consumer/run.stdout" 2>"$consumer_stderr"; then
   consumer_status=0
 else
   consumer_status=$?
 fi
 if [ "$consumer_status" -eq 0 ] \
   && grep -qFx 0.2.2 "$tmp/e2e/consumer/compat-results/observed-version" \
-  && grep -qFx '{"DB_HOST":null,"DB_PORT":null,"CACHE_PORT":null,"DATABASE_URL":null,"CACHE_URL":null,"DB_ENV":null,"CACHE_ENV":null,"CI_SCRIPT_PLAN":null}' "$tmp/e2e/consumer/compat-results/service-env.json"; then
+  && grep -qFx '{"DB_HOST":null,"DB_PORT":null,"CACHE_PORT":null,"DATABASE_URL":null,"CACHE_URL":null,"DB_ENV":null,"CACHE_ENV":null,"CI_SCRIPT_PLAN":null,"VERJSON_CI_TRUSTED_DB_HOST":null}' "$tmp/e2e/consumer/compat-results/service-env.json"; then
   pass "the resolved in-range artifact reaches the declared consumer test"
 else
   fail "the resolved artifact did not reach the declared consumer test"
@@ -794,8 +795,8 @@ if [ "${VERJSON_DIAGNOSTIC_MUTATION_CHILD:-false}" != true ]; then
   else
     fail "compatibility sandbox exposed a writable host .git configuration"
   fi
-  if (cd "$tmp/e2e/consumer" && CI_SCRIPT_PLAN='[{"script":"test:compat","requiresServices":true}]' DB_ENV='DATABASE_URL=postgres://localhost:5432/app_test' CACHE_ENV='CACHE_URL=redis://localhost:6379/0' DB_HOST=127.0.0.1 DB_PORT=5432 CACHE_PORT=6379 DATABASE_URL=postgres://localhost:5432/app_test CACHE_URL=redis://localhost:6379/0 COMPATIBILITY_ARTIFACT_DIR="$tmp/e2e/consumer/artifacts" COMPATIBILITY_RANGES="$request" EXPECTED_COMPATIBILITY_PROVENANCE_SHA256="$provenance_sha" REJECT_COMPATIBILITY=false bash "$tmp/run-lanes.sh") >"$tmp/e2e/authorized-services.log" 2>&1; then
-    if grep -qFx '{"DB_HOST":"127.0.0.1","DB_PORT":"5432","CACHE_PORT":"6379","DATABASE_URL":"postgres://localhost:5432/app_test","CACHE_URL":"redis://localhost:6379/0","DB_ENV":null,"CACHE_ENV":null,"CI_SCRIPT_PLAN":null}' "$tmp/e2e/consumer/compat-results/service-env.json"; then
+  if (cd "$tmp/e2e/consumer" && CI_SCRIPT_PLAN='[{"script":"test:compat","requiresServices":true}]' DB_ENV='DATABASE_URL=postgres://localhost:5432/app_test' CACHE_ENV='CACHE_URL=redis://localhost:6379/0' DB_HOST=127.0.0.1 DB_PORT=5432 CACHE_PORT=6379 DATABASE_URL=postgres://localhost:5432/app_test CACHE_URL=redis://localhost:6379/0 VERJSON_CI_TRUSTED_DB_HOST=127.0.0.1 COMPATIBILITY_ARTIFACT_DIR="$tmp/e2e/consumer/artifacts" COMPATIBILITY_RANGES="$request" EXPECTED_COMPATIBILITY_PROVENANCE_SHA256="$provenance_sha" REJECT_COMPATIBILITY=false bash "$tmp/run-lanes.sh") >"$tmp/e2e/authorized-services.log" 2>&1; then
+    if grep -qFx '{"DB_HOST":"127.0.0.1","DB_PORT":"5432","CACHE_PORT":"6379","DATABASE_URL":"postgres://localhost:5432/app_test","CACHE_URL":"redis://localhost:6379/0","DB_ENV":null,"CACHE_ENV":null,"CI_SCRIPT_PLAN":null,"VERJSON_CI_TRUSTED_DB_HOST":null}' "$tmp/e2e/consumer/compat-results/service-env.json"; then
       pass "only the declared service-enabled compatibility script receives service values"
     else
       fail "declared service-enabled compatibility script received an incorrect environment"

@@ -95,7 +95,9 @@ assert "unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_S
 assert "exec /usr/bin/python3 - <<'PY'" in compatibility["run"]
 for command_file in ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"):
     assert f'"{command_file}"' in compatibility["run"]
-assert plan["env"]["RUN_DEFAULTS"] == "${{ inputs.secretless-ci-script-plan == '' }}"
+assert "RUN_DEFAULTS" not in plan["env"]
+assert "run_defaults = not plan_source" in plan["run"]
+assert "if run_defaults:" in plan["run"]
 assert "inputs.secretless-pr" in plan["if"] and "inputs.secretless-trusted-ref" in plan["if"]
 assert "subprocess.run(" in plan["run"]
 assert '"--chdir", str(sandbox_directory), "--",' in plan["run"]
@@ -132,6 +134,7 @@ assert '"COREPACK_HOME": str(corepack_home) if corepack_home is not None' in pro
 assert '"COREPACK_ENABLE_NETWORK": "0"' in protected_plan["run"]
 assert '"--bind" if tool_prefix == browser_cache else "--ro-bind"' in protected_plan["run"]
 assert 'from urllib.parse import parse_qsl, unquote, urlsplit' in protected_plan["run"]
+assert 'from urllib.parse import parse_qsl, unquote, urlsplit' in compatibility["run"]
 assert '"/usr/bin/python3", "-I", "-c", sandbox_entrypoint' in protected_plan["run"]
 assert "os.closerange(3, max_fd)" in protected_plan["run"]
 assert "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)" in protected_plan["run"]
@@ -168,6 +171,7 @@ bin_dir.mkdir(parents=True)
 )
 command_log = fixture / "node_modules" / ".npm-commands"
 service_log = fixture / "node_modules" / ".npm-services"
+host_path_probe_log = fixture / "node_modules" / ".host-path-probes"
 command_files_dir = Path(os.environ["RUNNER_TEMP"]) / "_runner_file_commands"
 command_files_dir.mkdir(parents=True)
 command_file = command_files_dir / "set_env_probe"
@@ -261,6 +265,33 @@ assert service_log.read_text(encoding="utf-8").splitlines() == [
     "run test|postgres://app:pw@127.0.0.1:5432/app|ci-dummy-key|unset|unset",
     "run lint|unset|unset|unset|unset",
 ]
+command_log.write_text("", encoding="utf-8")
+service_log.write_text("", encoding="utf-8")
+host_path_probe_log.write_text("", encoding="utf-8")
+runner_environment["CI_SCRIPT_PLAN"] = " \t "
+runner_environment["RUN_DEFAULTS"] = "false"
+result = subprocess.run(
+    ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", plan["run"]],
+    cwd=fixture,
+    env=runner_environment,
+    check=False,
+    capture_output=True,
+    text=True,
+)
+assert result.returncode == 0, result.stderr
+assert command_log.read_text(encoding="utf-8").splitlines() == [
+    "run build", "run typecheck", "run test", "run lint"
+], "whitespace-only script plan skipped default consumer scripts"
+assert service_log.read_text(encoding="utf-8").splitlines() == [
+    "run build|unset|unset|unset|unset",
+    "run typecheck|unset|unset|unset|unset",
+    "run test|postgres://app:pw@127.0.0.1:5432/app|ci-dummy-key|unset|unset",
+    "run lint|unset|unset|unset|unset",
+]
+command_log.write_text("", encoding="utf-8")
+service_log.write_text("", encoding="utf-8")
+runner_environment["CI_SCRIPT_PLAN"] = ""
+runner_environment["RUN_DEFAULTS"] = "true"
 assert (fixture / "node_modules/.host-path-probes").read_text(encoding="utf-8").splitlines() == [
     "hidden",
     "hidden",

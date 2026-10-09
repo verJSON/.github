@@ -54,9 +54,14 @@ the workflow bounds its files and bytes before saving it. Scripts named
 `test`, `test:*`, or `*:test` retain service access by default; custom test
 scripts can request it with the strict JSON boolean `requiresServices: true`.
 Only those scripts receive configured database/cache variables, and the
-workflow rejects service-enabled plans on self-hosted runners. The generated
+workflow rejects service-enabled plans on self-hosted runners. Compatibility
+service variables receive the same credential-name and service-value checks as
+regular candidate scripts, and the validator's trusted database-host input is
+removed before consumer execution. The generated
 protected workflow grants network access only to service-enabled scripts; the
 source reusable retains the caller-selected runner's normal network policy.
+Whitespace-only script-plan input is normalized to empty before selecting the
+default build, typecheck, test, and lint sequence, so it cannot skip consumer CI.
 Network access on the permitted GitHub-hosted runner is unrestricted egress,
 not a firewall limited to the configured services. Credential-bearing variable
 names, nested encoded query/fragment aliases, and credential key/value DSNs are
