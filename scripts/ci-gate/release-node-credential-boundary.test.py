@@ -247,6 +247,14 @@ def validate_generated_workflow(workflow):
         "NODE_AUTH_TOKEN=''" in verification_run,
         "release verification does not clear package credentials in its clean environment",
     )
+    require(
+        'umask 077' in verification_run
+        and ': > "$verification_home/npm-userconfig"' in verification_run
+        and ': > "$verification_home/npm-globalconfig"' in verification_run
+        and 'npm_config_userconfig="$verification_home/npm-userconfig"' in verification_run
+        and 'npm_config_globalconfig="$verification_home/npm-globalconfig"' in verification_run,
+        "release verification does not use distinct private npm config files",
+    )
     publish = jobs.get("publish") or {}
     publish_secrets = publish.get("secrets") or {}
     require(
@@ -377,59 +385,97 @@ class ReleaseNodeCredentialBoundaryTests(unittest.TestCase):
             self.assertEqual(npm_config_marker.read_text(encoding="utf-8"), f"{runner_npmrc}\n")
 
     def test_emitted_verification_command_clears_package_token_for_hook(self):
-        verify = find_step(
-            self.workflow["jobs"]["verify"]["steps"], "Run the release verification suite"
+        npm = shutil.which("npm")
+        node = shutil.which("node")
+        self.assertIsNotNone(npm, "the generated runtime regression requires real npm")
+        self.assertIsNotNone(node, "the generated runtime regression requires Node.js")
+        runtime_path = os.pathsep.join(
+            dict.fromkeys((str(Path(npm).parent), str(Path(node).parent), "/usr/bin", "/bin"))
         )
-        with tempfile.TemporaryDirectory(prefix="release-node-verification-hook-") as temporary:
-            root = Path(temporary)
-            scripts = root / "scripts"
-            scripts.mkdir()
-            observed_token = root / "observed-token"
-            hook = scripts / "release-verify.sh"
-            hook.write_text(
-                "#!/bin/sh\nprintf '%s' \"${NODE_AUTH_TOKEN-<unset>}\" > \"$GITHUB_WORKSPACE/observed-token\"\n",
-                encoding="utf-8",
-            )
-            hook.chmod(0o755)
-            runner_temp = root / "runner-temp"
-            runner_temp.mkdir()
-            environment = {
-                **os.environ,
-                "NODE_AUTH_TOKEN": PACKAGE_TOKEN,
-                "PACKAGE_VERSION": PACKAGE_VERSION,
-                "RELEASE_VERIFICATION_PATH": "/usr/bin:/bin",
-                "VERJSON_CHANGELOG_TOOL_CACHE": str(root / "tool-cache"),
-                "GITHUB_ACTIONS": "true",
-                "GITHUB_WORKFLOW": "release",
-                "GITHUB_JOB": "verify",
-                "GITHUB_RUN_ID": "1",
-                "GITHUB_RUN_NUMBER": "1",
-                "GITHUB_REPOSITORY": "verJSON/fixture",
-                "GITHUB_REPOSITORY_OWNER": "verJSON",
-                "GITHUB_REF": "refs/heads/main",
-                "GITHUB_REF_NAME": "main",
-                "GITHUB_REF_TYPE": "branch",
-                "GITHUB_SHA": "0" * 40,
-                "GITHUB_EVENT_NAME": "workflow_dispatch",
-                "GITHUB_EVENT_PATH": str(root / "event.json"),
-                "GITHUB_WORKSPACE": str(root),
-                "GITHUB_STEP_SUMMARY": str(root / "summary.md"),
-                "RUNNER_OS": "Linux",
-                "RUNNER_ARCH": "X64",
-                "RUNNER_TEMP": str(runner_temp),
-                "RUNNER_TOOL_CACHE": str(root / "tool-cache"),
-            }
-            result = subprocess.run(
-                ["/bin/bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", verify["run"]],
-                cwd=root,
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertTrue(observed_token.exists(), "verification hook did not run")
-            self.assertEqual(observed_token.read_text(encoding="utf-8"), "")
+
+        for mode, workflow in self.workflows.items():
+            with self.subTest(mode=mode):
+                verify = find_step(
+                    workflow["jobs"]["verify"]["steps"], "Run the release verification suite"
+                )
+                with tempfile.TemporaryDirectory(prefix="release-node-verification-hook-") as temporary:
+                    root = Path(temporary)
+                    scripts = root / "scripts"
+                    scripts.mkdir()
+                    (root / "package.json").write_text(
+                        json.dumps(
+                            {
+                                "name": "generated-release-verification-fixture",
+                                "version": PACKAGE_VERSION,
+                                "scripts": {
+                                    "build": "node -e \"require('fs').writeFileSync('npm-build-marker', 'ran')\""
+                                },
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    observed_token = root / "observed-token"
+                    observed_configs = root / "observed-configs"
+                    hook = scripts / "release-verify.sh"
+                    hook.write_text(
+                        "#!/bin/sh\n"
+                        "set -eu\n"
+                        "user_config=${npm_config_userconfig:?missing user npm config}\n"
+                        "global_config=${npm_config_globalconfig:?missing global npm config}\n"
+                        "test \"$user_config\" != \"$global_config\"\n"
+                        "test -f \"$user_config\" && test ! -s \"$user_config\"\n"
+                        "test -f \"$global_config\" && test ! -s \"$global_config\"\n"
+                        "case \"$user_config\" in \"$HOME\"/*) ;; *) exit 1 ;; esac\n"
+                        "case \"$global_config\" in \"$HOME\"/*) ;; *) exit 1 ;; esac\n"
+                        "printf '%s\\n%s\\n' \"$user_config\" \"$global_config\" > \"$GITHUB_WORKSPACE/observed-configs\"\n"
+                        "npm run build --if-present\n"
+                        "printf '%s' \"${NODE_AUTH_TOKEN-<unset>}\" > \"$GITHUB_WORKSPACE/observed-token\"\n",
+                        encoding="utf-8",
+                    )
+                    hook.chmod(0o755)
+                    runner_temp = root / "runner-temp"
+                    runner_temp.mkdir()
+                    environment = {
+                        **os.environ,
+                        "NODE_AUTH_TOKEN": PACKAGE_TOKEN,
+                        "PACKAGE_VERSION": PACKAGE_VERSION,
+                        "RELEASE_VERIFICATION_PATH": runtime_path,
+                        "VERJSON_CHANGELOG_TOOL_CACHE": str(root / "tool-cache"),
+                        "GITHUB_ACTIONS": "true",
+                        "GITHUB_WORKFLOW": "release",
+                        "GITHUB_JOB": "verify",
+                        "GITHUB_RUN_ID": "1",
+                        "GITHUB_RUN_NUMBER": "1",
+                        "GITHUB_REPOSITORY": "verJSON/fixture",
+                        "GITHUB_REPOSITORY_OWNER": "verJSON",
+                        "GITHUB_REF": "refs/heads/main",
+                        "GITHUB_REF_NAME": "main",
+                        "GITHUB_REF_TYPE": "branch",
+                        "GITHUB_SHA": "0" * 40,
+                        "GITHUB_EVENT_NAME": "workflow_dispatch",
+                        "GITHUB_EVENT_PATH": str(root / "event.json"),
+                        "GITHUB_WORKSPACE": str(root),
+                        "GITHUB_STEP_SUMMARY": str(root / "summary.md"),
+                        "RUNNER_OS": "Linux",
+                        "RUNNER_ARCH": "X64",
+                        "RUNNER_TEMP": str(runner_temp),
+                        "RUNNER_TOOL_CACHE": str(root / "tool-cache"),
+                    }
+                    result = subprocess.run(
+                        ["/bin/bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", verify["run"]],
+                        cwd=root,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertTrue((root / "npm-build-marker").exists(), "real npm build did not run")
+                    self.assertEqual(observed_token.read_text(encoding="utf-8"), "")
+                    config_paths = observed_configs.read_text(encoding="utf-8").splitlines()
+                    self.assertEqual(len(config_paths), 2)
+                    self.assertNotEqual(config_paths[0], config_paths[1])
+                    self.assertFalse(Path(config_paths[0]).parent.exists(), "temporary npm config home was not cleaned up")
 
     def test_workflow_audit_rejects_credentials_in_lifecycle_or_persisted_checkout(self):
         with self.subTest("lifecycle token"):

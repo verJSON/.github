@@ -1181,8 +1181,6 @@ ${release_plan_step}
           NODE_PATH: ''
           npm_config_script_shell: /bin/sh
           npm_config_ignore_scripts: 'false'
-          npm_config_userconfig: /dev/null
-          npm_config_globalconfig: /dev/null
           GIT_TRACE_CURL: ''
           GIT_TRACE_REDACT: ''
           GIT_EXEC_PATH: ''
@@ -1198,6 +1196,9 @@ ${release_plan_step}
         run: |
           verification_home="\$(/usr/bin/mktemp -d "\$RUNNER_TEMP/verjson-release-verification.XXXXXX")"
           trap '/usr/bin/rm -rf -- "\$verification_home"' EXIT
+          umask 077
+          : > "\$verification_home/npm-userconfig"
+          : > "\$verification_home/npm-globalconfig"
           run_clean() {
             /usr/bin/env -i \\
               PATH="\$RELEASE_VERIFICATION_PATH" \\
@@ -1229,8 +1230,8 @@ ${release_plan_step}
               GIT_TERMINAL_PROMPT=0 \\
               npm_config_script_shell=/bin/sh \\
               npm_config_ignore_scripts=false \\
-              npm_config_userconfig=/dev/null \\
-              npm_config_globalconfig=/dev/null \\
+              npm_config_userconfig="\$verification_home/npm-userconfig" \\
+              npm_config_globalconfig="\$verification_home/npm-globalconfig" \\
               "\$@"
           }
           # Existence and executability are checked separately on purpose. A
@@ -1799,8 +1800,6 @@ ${required_lane_validation_step}
           NODE_PATH: ''
           npm_config_script_shell: /bin/sh
           npm_config_ignore_scripts: 'false'
-          npm_config_userconfig: /dev/null
-          npm_config_globalconfig: /dev/null
           GIT_TRACE_CURL: ''
           GIT_TRACE_REDACT: ''
           GIT_EXEC_PATH: ''
@@ -1816,6 +1815,9 @@ ${required_lane_validation_step}
         run: |
           verification_home="\$(/usr/bin/mktemp -d "\$RUNNER_TEMP/verjson-release-verification.XXXXXX")"
           trap '/usr/bin/rm -rf -- "\$verification_home"' EXIT
+          umask 077
+          : > "\$verification_home/npm-userconfig"
+          : > "\$verification_home/npm-globalconfig"
           run_clean() {
             /usr/bin/env -i \\
               PATH="\$RELEASE_VERIFICATION_PATH" \\
@@ -1846,8 +1848,8 @@ ${required_lane_validation_step}
               GIT_TERMINAL_PROMPT=0 \\
               npm_config_script_shell=/bin/sh \\
               npm_config_ignore_scripts=false \\
-              npm_config_userconfig=/dev/null \\
-              npm_config_globalconfig=/dev/null \\
+              npm_config_userconfig="\$verification_home/npm-userconfig" \\
+              npm_config_globalconfig="\$verification_home/npm-globalconfig" \\
               "\$@"
           }
           # Existence and executability are checked separately on purpose. A
@@ -2383,8 +2385,6 @@ ${release_plan_step}
           NODE_PATH: ''
           npm_config_script_shell: /bin/sh
           npm_config_ignore_scripts: 'false'
-          npm_config_userconfig: /dev/null
-          npm_config_globalconfig: /dev/null
           GIT_TRACE_CURL: ''
           GIT_TRACE_REDACT: ''
           GIT_EXEC_PATH: ''
@@ -2400,6 +2400,9 @@ ${release_plan_step}
         run: |
           verification_home="\$(/usr/bin/mktemp -d "\$RUNNER_TEMP/verjson-release-verification.XXXXXX")"
           trap '/usr/bin/rm -rf -- "\$verification_home"' EXIT
+          umask 077
+          : > "\$verification_home/npm-userconfig"
+          : > "\$verification_home/npm-globalconfig"
           run_clean() {
             /usr/bin/env -i \\
               PATH="\$RELEASE_VERIFICATION_PATH" \\
@@ -2430,8 +2433,8 @@ ${release_plan_step}
               GIT_TERMINAL_PROMPT=0 \\
               npm_config_script_shell=/bin/sh \\
               npm_config_ignore_scripts=false \\
-              npm_config_userconfig=/dev/null \\
-              npm_config_globalconfig=/dev/null \\
+              npm_config_userconfig="\$verification_home/npm-userconfig" \\
+              npm_config_globalconfig="\$verification_home/npm-globalconfig" \\
               "\$@"
           }
           # Existence and executability are checked separately on purpose. A
@@ -4117,9 +4120,9 @@ APPROVED_RELEASE_STATE_SCRIPT_SHA256 = {
     "release-snapshot": "0860f7c804f4e5111e9461230e9e999ac3b1a0761a54ea57488c9772854ce22c",
 }
 APPROVED_RELEASE_VERIFICATION_SCRIPT_SHA256 = {
-    "release-node": "e5ef5c336250974f04c46ff20a58aa5a77094cd4904034ffc02c2e2b97c321aa",
-    "release-artifact": "d134c7a33458939fdca9c9d68f7009c8fdac44e1be2598fbf9960cfde2ffe924",
-    "release-snapshot": "42c7403411bce28e1a890854b4dd36af68bf40f0408d5f0d079cab748d6882fc",
+    "release-node": "914b18059a48cc42dfbed8b3b8823a6bf77c0e00d628d914cfb2b04252083345",
+    "release-artifact": "1635cf1d6d0ae9d94469c7da1c1d386ec72aac70c599e8a92efaca27c9f911d7",
+    "release-snapshot": "5de64b89d651333b1a2a2fc11d13a114fd23b2393147ffd68e2e0d81956c5edc",
 }
 APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
     "release-node": "65c9bdf63f9032dd4ecdf2d1123586f3deca3a5f9b11dc7b2a29106b7d238502",
@@ -4175,8 +4178,6 @@ EXPECTED_RELEASE_VERIFICATION_ENV = {
     "NODE_PATH": "''",
     "npm_config_script_shell": "/bin/sh",
     "npm_config_ignore_scripts": "'false'",
-    "npm_config_userconfig": "/dev/null",
-    "npm_config_globalconfig": "/dev/null",
     "GIT_TRACE_CURL": "''",
     "GIT_TRACE_REDACT": "''",
     "GIT_EXEC_PATH": "''",
