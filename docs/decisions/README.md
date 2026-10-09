@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0225](0225-bound-actions-ci-command-runtimes/README.md) | 2026-10-09 | Bound actions-ci command runtimes |
 | [0224](0224-shard-changelog-release-actions-ci/README.md) | 2026-10-09 | Shard the changelog-release actions-ci group |
 | [0223](0223-draft-pull-requests-defer-heavy-ci/README.md) | 2026-10-09 | Draft pull requests defer heavy CI and keep fast checks |
 | [0222](0222-documentation-diffs-skip-heavy-actions-ci/README.md) | 2026-10-09 | Documentation diffs skip the heavy actions-ci matrix |

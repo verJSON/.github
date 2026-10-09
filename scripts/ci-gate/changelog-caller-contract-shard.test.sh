@@ -20,19 +20,22 @@ source "$repo_root/scripts/changelog-caller-contract-shard.sh"
 
 if changelog_caller_shard_name_ok all \
   && changelog_caller_shard_name_ok 1 \
-  && changelog_caller_shard_name_ok 4 \
+  && changelog_caller_shard_name_ok 233 \
   && ! changelog_caller_shard_name_ok 0 \
-  && ! changelog_caller_shard_name_ok 5 \
+  && ! changelog_caller_shard_name_ok 234 \
+  && ! changelog_caller_shard_name_ok 001 \
   && ! changelog_caller_shard_name_ok changelog; then
-  pass "caller-contract shard names are all and 1..4"
+  pass "caller-contract shard names are all and 1..233"
 else
   fail "caller-contract shard names accepted an unknown value or rejected a valid one"
 fi
 
-if grep -q 'contract_section_selected\|CHANGELOG_CONTRACT_SECTIONS' "$caller" "$gen"; then
-  fail "the caller contract or its generator can still skip a generated section"
+if ! grep -qE 'CHANGELOG_CONTRACT_SECTIONS|contract_section_selected|contract_sections_finish' "$gen" \
+  && ! grep -qE 'CHANGELOG_CONTRACT_SECTIONS|changelog_contract_run_for|contract_section_selected' "$caller" \
+  && grep -Fq 'env "${cache_env[@]}" ./scripts/changelog-contract.test.sh' "$caller"; then
+  pass "each selected caller mutation runs the complete generated contract"
 else
-  pass "a caller-contract case cannot skip a generated section"
+  fail "caller mutations can skip assertions in the generated contract"
 fi
 
 python3 - "$caller" "$shard" "$manifest" <<'PY' || fails=$((fails + 1))
@@ -42,29 +45,43 @@ import sys
 
 caller, shard, manifest = sys.argv[1:]
 text = open(caller, encoding="utf-8").read()
-expected_calls = 215
+expected_calls = 223
 calls = len(re.findall(r"^schedule_adopter_script ", text, re.M))
 calls += len(re.findall(r"^[ \t]*expect_rejection ", text, re.M))
 calls += len(re.findall(r"^expect_release_mode_rejection ", text, re.M))
 calls += len(re.findall(r"^[ \t]*expect_unestablished_pin ", text, re.M))
 calls += len(re.findall(r"^(?:if )?run_adopter ", text, re.M))
+calls += len(
+    re.findall(
+        r"^assert_(?:mutable_verification_path|release_path_mutation)_rejected\s+",
+        text,
+        re.M,
+    )
+)
 if calls != expected_calls:
     raise SystemExit(
         f"parser saw {calls} caller-contract cases; expected {expected_calls}; "
         "review and update the case inventory when cases change"
     )
 
-width = 4
+width = 233
 owners = {index: [] for index in range(1, calls + 1)}
 for shard_id in range(1, width + 1):
     script = f'''
 source "$SHARD"
 caller_case_count=0
 caller_case_ran=0
+caller_case_reserved_count=0
+caller_adopter_cases_seen=0
 CHANGELOG_CALLER_CONTRACT_SHARD={shard_id}
 selected=""
-for _ in $(seq 1 {calls}); do
-  if changelog_caller_case_selected ignored; then
+for index in $(seq 1 {calls}); do
+  case_id=ignored
+  case "$index" in
+    1|2) case_id=adopter ;;
+    3) case_id=snapshot-capture-path-override ;;
+  esac
+  if changelog_caller_case_selected "$case_id"; then
     selected="$selected $caller_case_count"
   fi
 done
@@ -81,39 +98,65 @@ printf '%s\\n' "$selected"
         raise SystemExit(probe.stderr)
     for token in probe.stdout.split():
         owners[int(token)].append(shard_id)
-bad = [str(index) for index, found in owners.items() if found != [((index - 1) % width) + 1]]
+def expected_owner(index):
+    if index == 1:
+        return width - 2
+    if index == 2:
+        return width - 1
+    if index == 3:
+        return width
+    return ((index - 4) % (width - 3)) + 1
+
+bad = [str(index) for index, found in owners.items() if found != [expected_owner(index)]]
 if bad:
     raise SystemExit("shard map is not a partition: " + ", ".join(bad[:8]))
 
 manifest_text = open(manifest, encoding="utf-8").read().splitlines()
 expected = {
-    f"changelog-release-{shard_id}\tCHANGELOG_CALLER_CONTRACT_SHARD={shard_id} bash scripts/ci-gate/changelog-caller-contract.test.sh"
-    for shard_id in range(1, 5)
+    f"changelog-release-{(shard_id - 1) % 4 + 1}\tADOPTER_SLOTS=1 CHANGELOG_CALLER_CONTRACT_SHARD={shard_id} bash scripts/ci-gate/changelog-caller-contract.test.sh"
+    for shard_id in range(1, width + 1)
 }
 if not expected.issubset(manifest_text):
     raise SystemExit("manifest is missing a caller-contract shard command")
+generator_commands = {
+    "changelog-release-1\tCHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY=1 bash scripts/ci-gate/changelog-caller-contract.test.sh"
+}
+if not generator_commands.issubset(manifest_text):
+    raise SystemExit("manifest is missing the per-cell generator contract command")
 if any(
     line.endswith("\tbash scripts/ci-gate/changelog-caller-contract.test.sh")
+    and "CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY=1" not in line
     for line in manifest_text
 ):
-    raise SystemExit("manifest still runs the caller contract without a shard")
-print(f"ok   - caller-contract cases partition across {width} shards ({calls} cases)")
+    raise SystemExit("manifest still runs the caller contract without a shard or generator-only mode")
+print(f"ok   - {calls} caller-contract declarations partition across {width} shards")
 PY
 
 sha="$(git -C "$repo_root" rev-parse HEAD)"
 bash "$gen" contract-test "$sha" >"$tmp/suite.sh"
-if grep -q 'contract_section_selected\|CHANGELOG_CONTRACT_SECTIONS' "$tmp/suite.sh"; then
-  fail "the generated contract suite can skip a section"
+if grep -qE 'CHANGELOG_CONTRACT_SECTIONS|contract_section_selected|contract_sections_finish' "$tmp/suite.sh"; then
+  fail "the generated contract suite exposes a section selector"
 else
-  pass "the generated contract suite runs every section"
+  pass "the generated contract suite has no section selector"
 fi
 
-if CHANGELOG_CALLER_CONTRACT_SHARD=9 bash "$caller" >"$tmp/shard.out" 2>&1; then
-  fail "the caller contract accepted shard 9"
-elif grep -q 'CHANGELOG_CALLER_CONTRACT_SHARD must be all or 1..4' "$tmp/shard.out"; then
+if CHANGELOG_CALLER_CONTRACT_SHARD=234 bash "$caller" >"$tmp/shard.out" 2>&1; then
+  fail "the caller contract accepted shard 234"
+elif grep -q 'CHANGELOG_CALLER_CONTRACT_SHARD must be all or 1..233' "$tmp/shard.out"; then
   pass "the caller contract rejects an unknown shard before it runs cases"
 else
-  fail "the caller contract rejected shard 9 without the shard diagnostic"
+  fail "the caller contract rejected shard 234 without the shard diagnostic"
+fi
+
+cache_file="$tmp/not-a-directory"
+: >"$cache_file"
+if CHANGELOG_CALLER_CONTRACT_CACHE="$cache_file" CHANGELOG_CALLER_CONTRACT_SHARD=1 \
+  bash "$caller" >"$tmp/cache.out" 2>&1; then
+  fail "the caller contract accepted a cache path that is a file"
+elif grep -q "capture_mode could not create the cached output directory for generator mode 'contract-test'" "$tmp/cache.out"; then
+  pass "cache setup failures name the actual failed operation"
+else
+  fail "a cache setup failure was misreported as a generator failure"
 fi
 
 [ "$fails" -eq 0 ] || exit 1

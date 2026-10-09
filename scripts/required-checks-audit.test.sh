@@ -95,6 +95,36 @@ run_generator codeowners "$contract_pin" >"$content_root/.github/CODEOWNERS"
 run_generator release-node "$contract_pin" --only-package-dir packages/cli-schema >"$content_root/.github/workflows/release.yml"
 run_generator release-node "$contract_pin" --only-package-dir compat >"$content_root/.github/workflows/release-extra.yml"
 run_generator pr-gate "$contract_pin" >"$content_root/.github/workflows/changelog-contract.yml"
+generator_cache_dir="$tmp/generated-caller-cache"
+mkdir -p "$generator_cache_dir"
+printf -v generator_source_literal '%q' "$generator_source"
+printf -v generator_cache_literal '%q' "$generator_cache_dir"
+{
+  printf '#!/usr/bin/bash\nset -euo pipefail\n'
+  printf 'real_generator=%s\ncache_dir=%s\n' \
+    "$generator_source_literal" "$generator_cache_literal"
+  cat <<'GENERATOR_CACHE'
+args_file="$(mktemp "$cache_dir/.args.XXXXXX")"
+trap 'rm -f -- "$args_file"' EXIT
+{
+  printf '%s\0' "${REPO_ROOT:-}"
+  printf '%s\0' "$@"
+} >"$args_file"
+cache_key="$(sha256sum "$args_file" | cut -d' ' -f1)"
+cached_output="$cache_dir/$cache_key"
+if [ ! -f "$cached_output" ]; then
+  generated_output="$(mktemp "$cache_dir/.output.XXXXXX")"
+  if ! (cd "$REPO_ROOT" && bash -s -- "$@" <"$real_generator") \
+    >"$generated_output"; then
+    rm -f -- "$generated_output"
+    exit 1
+  fi
+  mv -- "$generated_output" "$cached_output"
+fi
+cat "$cached_output"
+GENERATOR_CACHE
+} >"$tmp/cached-gen-changelog-caller.sh"
+chmod +x "$tmp/cached-gen-changelog-caller.sh"
 mkdir -p "$tmp/artifact-baseline/.github/workflows" "$tmp/artifact-baseline/scripts"
 cp "$content_root/.github/workflows/changelog.yml" "$tmp/artifact-baseline/.github/workflows/changelog.yml"
 cp "$content_root/.github/workflows/release.yml" "$tmp/artifact-baseline/.github/workflows/release.yml"
@@ -106,7 +136,7 @@ cp "$content_root/scripts/changelog-contract.test.sh" "$tmp/artifact-baseline/sc
 # would read as "nothing found" — the audit would then report every context
 # missing and the tests would pass for the wrong reason.
 cat >"$tmp/bin/gh" <<'GH'
-#!/usr/bin/env bash
+#!/usr/bin/bash
 filter=""
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
@@ -146,7 +176,12 @@ case "$*" in
     exit 0 ;;
   *"repos/Verjson/.github/contents/scripts/gen-changelog-caller.sh"*)
     printf 'fetch\n' >>"$GENERATOR_FETCHES"
-    git -C "$REPO_ROOT" show "$CONTRACT_PIN:scripts/gen-changelog-caller.sh"; exit 0 ;;
+    if [ "${GENERATOR_USE_REAL:-false}" = true ]; then
+      git -C "$REPO_ROOT" show "$CONTRACT_PIN:scripts/gen-changelog-caller.sh"
+    else
+      cat "$GENERATOR_WRAPPER"
+    fi
+    exit 0 ;;
   *"commits?per_page=1"*)
 printf '[{"sha":"%s"}]\n' "$CONTRACT_PIN" | jq -r "$filter"; exit 0 ;;
  *"repos/Verjson/.github/compare/"*) printf '{"status":"%s"}\n' "${PIN_ANCESTRY_STATUS:-identical}" | { if [ -n "$filter" ]; then jq -r "$filter"; else cat; fi; }; exit 0 ;;
@@ -209,7 +244,7 @@ GH
 chmod +x "$tmp/bin/gh"
 
 cat >"$tmp/bin/curl" <<'CURL'
-#!/usr/bin/env bash
+#!/usr/bin/bash
 url="${*: -1}"
 case "$url" in
   https://raw.githubusercontent.com/[Vv]er[Jj][Ss][Oo][Nn]/.github/*/scripts/changelog.py)
@@ -236,6 +271,8 @@ export WORKFLOW_CONTENT_FILE="$tmp/workflow-content.json"
 export CONTENT_ROOT="$content_root"
 export CONTRACT_PIN="$contract_pin"
 export GENERATOR_FETCHES="$tmp/generator-fetches.log"
+export GENERATOR_WRAPPER="$tmp/cached-gen-changelog-caller.sh"
+export GENERATOR_USE_REAL=false
 export REPO_ROOT="$here/.."
 export STUB_TMP="$tmp"
 export RCA_ORG=Verjson
@@ -293,7 +330,12 @@ head_with() { local sha="$1"; shift; jq -n --args '{check_runs: ($ARGS.positiona
 printf '[{"name":"alpha","archived":false}]\n' >"$REPOS_FILE"
 workflow_for none
 
-run_audit() { ( bash "$script" "$@" >"$tmp/out.txt" 2>&1; echo "rc=$?" ); }
+run_audit() {
+  local status
+  "$BASH" "$script" "$@" >"$tmp/out.txt" 2>&1
+  status=$?
+  printf 'rc=%s\n' "$status"
+}
 out() { cat "$tmp/out.txt"; }
 
 # ADR 0128 removed universal authorization contexts from this deterministic
@@ -345,7 +387,9 @@ stack_for beta-node node
 pulls s1 s2
 head_with s1 "ci / build-test" "ci / eligibility" changelog-contract "changelog / validate"
 head_with s2 "ci / build-test" "ci / eligibility" changelog-contract "changelog / validate"
+GENERATOR_USE_REAL=true
 rc="$(RCA_REPOS="none-repo beta-node" run_audit)"
+GENERATOR_USE_REAL=false
 { [ "$rc" = "rc=0" ] \
   && grep -q 'repo=none-repo .*result=skipped' "$tmp/out.txt" \
   && grep -q 'repo=beta-node .*result=conformant' "$tmp/out.txt" \

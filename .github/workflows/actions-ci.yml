@@ -93,8 +93,8 @@ jobs:
     needs: change-scope
     if: ${{ needs.change-scope.outputs.heavy == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     # Thirty minutes still bounds one cell, including runner variance and cleanup.
-    # changelog-release is four cells so the caller-contract shards overlap
-    # platform and merge-gate; max-parallel matches that width (ADR 0224).
+    # Caller-contract shards run within the four matrix cells so they use
+    # command-level parallelism without multiplying runner setup.
     runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     timeout-minutes: 30
     strategy:
@@ -141,6 +141,9 @@ jobs:
       - name: Run ${{ matrix.group }} shell contracts without hiding sibling failures
         env:
           RUNNER_LABELS: ''
+          ACTIONS_CI_SHELLCHECK_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+          ACTIONS_CI_SHELLCHECK_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.sha || '' }}
+          ACTIONS_CI_COMMAND_BUDGET_SECONDS: ${{ github.event_name == 'pull_request' && '60' || '' }}
         run: |
           source_root="$GITHUB_WORKSPACE/.actions-ci-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.group }}"
           group_root="$(mktemp -d "$RUNNER_TEMP/actions-ci-${{ matrix.group }}.XXXXXX")"

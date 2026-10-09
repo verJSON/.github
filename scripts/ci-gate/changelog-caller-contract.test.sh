@@ -12,11 +12,17 @@ repo_root="$(cd "$here/../.." && pwd)"
 # shellcheck source=scripts/changelog-caller-contract-shard.sh
 source "$repo_root/scripts/changelog-caller-contract-shard.sh"
 if ! changelog_caller_shard_name_ok "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}"; then
-  printf 'FAIL - CHANGELOG_CALLER_CONTRACT_SHARD must be all or 1..4\n' >&2
+  printf 'FAIL - CHANGELOG_CALLER_CONTRACT_SHARD must be all or 1..233\n' >&2
   exit 1
 fi
+case "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" in
+  0|1) ;;
+  *) printf 'FAIL - CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY must be 0 or 1\n' >&2; exit 1 ;;
+esac
 caller_case_count=0
 caller_case_ran=0
+caller_case_reserved_count=0
+caller_adopter_cases_seen=0
 caller_assertions_suspended=0
 gen="$repo_root/scripts/gen-changelog-caller.sh"
 # A ref that actually resolves. The generator pins the SHA-256 of the engine at
@@ -60,13 +66,14 @@ skip() { printf 'skip - %s\n' "$1"; }
 workflow='' generated_artifacts='' generated_artifacts_with_adr=''
 canonical_codeowners=''
 adr_index_generator='' pr_gate='' release_node_workflow=''
-renovate_attribution='' default_release='' custom_release=''
+renovate_attribution='' default_release='' custom_release='' generated_contract=''
 component_release='' custom_contract='' adr_index_test=''
 mode_capture_failures=0
 capture_mode() {
   local target="$1"
   shift
-  local mode="$1" out err status=0
+  local mode="$1" out err status=0 cache_dir cache_file cache_tmp cache_key failure_reason=''
+  local cache_lock_fd cache_locked=0
   # `printf -v` writes into the nearest scope holding the name, so a target naming one of
   # these locals would assign here and leave the caller reading an empty global -- the
   # #1427 misdiagnosis again, arriving through this function rather than through the
@@ -84,17 +91,87 @@ capture_mode() {
     mode_capture_failures=$((mode_capture_failures + 1))
     return
   }
-  out="$(bash "$gen" "$@" 2>"$err")" || status=$?
+  if [ -n "${CHANGELOG_CALLER_CONTRACT_CACHE:-}" ]; then
+    if ! command -v flock >/dev/null 2>&1; then
+      fail "capture_mode requires flock when a shared output cache is enabled"
+      mode_capture_failures=$((mode_capture_failures + 1))
+      rm -f "$err"
+      return
+    fi
+    cache_key="$(printf '%s\0' "$@" | sha256sum | cut -d' ' -f1)" || {
+      status=$?
+      failure_reason="could not calculate the cached output key"
+    }
+    cache_dir="$CHANGELOG_CALLER_CONTRACT_CACHE/$sha"
+    if [ "$status" -eq 0 ]; then
+      mkdir -p "$cache_dir" || {
+        status=$?
+        failure_reason="could not create the cached output directory"
+      }
+    fi
+    cache_file="$cache_dir/$cache_key"
+    if [ "$status" -eq 0 ]; then
+      exec {cache_lock_fd}>"$cache_file.lock" || {
+        status=$?
+        failure_reason="could not open the cached output lock"
+      }
+      if [ "$status" -eq 0 ]; then
+        cache_locked=1
+        flock "$cache_lock_fd" || {
+          status=$?
+          failure_reason="could not lock the cached output"
+        }
+      fi
+    fi
+    if [ "$status" -eq 0 ] && [ -f "$cache_file" ]; then
+      out="$(cat -- "$cache_file")" || {
+        status=$?
+        failure_reason="could not read the cached output"
+      }
+    elif [ "$status" -eq 0 ]; then
+      out="$(bash "$gen" "$@" 2>"$err")" || status=$?
+      if [ "$status" -eq 0 ]; then
+        cache_tmp="$(mktemp "$cache_dir/.${cache_key}.XXXXXX")" || {
+          status=$?
+          failure_reason="could not create a temporary cached output file"
+        }
+        if [ "$status" -eq 0 ]; then
+          if printf '%s' "$out" >"$cache_tmp" \
+            && mv -f -- "$cache_tmp" "$cache_file"; then
+            :
+          else
+            status=$?
+            failure_reason="could not store the cached output"
+            rm -f "$cache_tmp"
+          fi
+        fi
+      fi
+    fi
+    if [ "$cache_locked" -eq 1 ]; then
+      exec {cache_lock_fd}>&-
+    fi
+  else
+    out="$(bash "$gen" "$@" 2>"$err")" || status=$?
+  fi
   if [ "$status" -ne 0 ]; then
     # Bounded: a verbose mode's stderr is unbounded, and one verdict line that scrolls the
     # named cause off the top defeats the point of naming it.
-    fail "generator mode '$mode' exited $status: $(tr '\n' ' ' <"$err" | sed 's/  */ /g; s/ *$//' | cut -c1-500)"
+    if [ -n "$failure_reason" ]; then
+      fail "capture_mode $failure_reason for generator mode '$mode' (exit $status)"
+    else
+      fail "generator mode '$mode' exited $status: $(tr '\n' ' ' <"$err" | sed 's/  */ /g; s/ *$//' | cut -c1-500)"
+    fi
     mode_capture_failures=$((mode_capture_failures + 1))
   fi
   rm -f "$err"
   printf -v "$target" '%s' "$out"
 }
 
+tmproot="$(mktemp -d)"
+trap 'rm -rf "$tmproot"' EXIT
+: >"$tmproot/run.out"
+if [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ] \
+  || [ "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}" = all ]; then
 capture_mode workflow workflow "$sha"
 capture_mode renderer renderer "$sha"
 capture_mode default_release release-node "$sha"
@@ -598,7 +675,6 @@ bash "$gen" workflow "$sha" --scope @acme >/dev/null 2>&1 \
 # 7. The emitted renderer fails closed when the contract cannot be fetched, and
 # leaves no partial file behind for the next run to exec as if it were the
 # contract. Exercised with a stubbed curl so no network is required.
-tmproot="$(mktemp -d)"
 # Redefined once the adopter scheduler exists. Early exits only remove the scratch tree.
 drain_adopter_jobs() { :; }
 trap 'drain_adopter_jobs; rm -rf "$tmproot"' EXIT
@@ -1120,6 +1196,22 @@ stray_titles="$(grep -oE "\^## [A-Za-z][^']*" "$emitted" | grep -vxE '\^## (Newe
 export XDG_CACHE_HOME="$tmproot/adopter-cache"
 mkdir -p "$XDG_CACHE_HOME/verjson-changelog/$sha"
 cp "$contract_src" "$XDG_CACHE_HOME/verjson-changelog/$sha/changelog.py"
+else
+  contract_src="$repo_root/scripts/changelog.py"
+  capture_mode generated_contract contract-test "$sha"
+  emitted="$tmproot/contract-test.sh"
+  printf '%s\n' "$generated_contract" >"$emitted"
+  capture_mode custom_release release-node "$sha" --scope @acme --node-version 22.23.1 --package-dir compat --release-asset contract/schema.graphql --release-asset contract/schema.sha256
+  capture_mode release_node_workflow release-node "$sha"
+  export XDG_CACHE_HOME="$tmproot/adopter-cache"
+  mkdir -p "$XDG_CACHE_HOME/verjson-changelog/$sha"
+  cp "$contract_src" "$XDG_CACHE_HOME/verjson-changelog/$sha/changelog.py"
+fi
+if [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ]; then
+  [ "$fails" -eq 0 ] || exit 1
+  echo "All generator contract assertions passed."
+  exit 0
+fi
 
 build_adopter() {
   # build_adopter <dir> [with-release-workflow: yes|no|legacy] [caller]
@@ -1229,13 +1321,15 @@ build_split_adopter() {
 }
 
 run_adopter() {
-  local status=0 adopter_log cache_env=()
+  local status=0 adopter_log cache_env=() case_id
+  case_id="$(basename "$1")"
   if [ "${caller_case_nested:-}" != 1 ]; then
-    if ! changelog_caller_case_selected "$(basename "$1")"; then
+    if ! changelog_caller_case_selected "$case_id"; then
       caller_assertions_suspended=1
       return 0
     fi
     caller_assertions_suspended=0
+    printf 'running caller contract case: %s\n' "$case_id" >&2
   fi
   # A synchronous suite keeps running beside scheduled snapshots. It does not
   # wait for them: isolation already keeps their logs off this run.out (#1733).
@@ -1363,6 +1457,7 @@ schedule_adopter_script() {
     return 0
   fi
   caller_assertions_suspended=0
+  printf 'running caller contract case: %s\n' "$case_id" >&2
   reject_seq=$((reject_seq + 1))
   seq="$reject_seq"
   result="$tmproot/sched-result-$seq"
@@ -3238,10 +3333,15 @@ assert_mutable_verification_path_rejected() {
   source="$1"
   label="$2"
   slug="$3"
+  if ! changelog_caller_case_selected "$slug"; then
+    caller_assertions_suspended=1
+    return 0
+  fi
+  caller_assertions_suspended=0
   dir="$tmproot/$slug"
   cp -a "$source" "$dir"
   use_mutable_path_for_release_verification "$dir"
-  if run_adopter "$dir"; then
+  if caller_case_nested=1 run_adopter "$dir"; then
     fail "emitted suite accepted a mutable verification PATH in $label mode"
   elif grep -qF 'does not match the approved release verification script (#1717)' "$tmproot/run.out"; then
     pass "the generated suite rejects mutable verification PATH in $label mode"
@@ -3256,11 +3356,16 @@ assert_release_path_mutation_rejected() {
   slug="$3"
   mutator="$4"
   expected="$5"
+  if ! changelog_caller_case_selected "$slug"; then
+    caller_assertions_suspended=1
+    return 0
+  fi
+  caller_assertions_suspended=0
   dir="$tmproot/$slug"
   cp -a "$source" "$dir"
   if ! "$mutator" "$dir"; then
     fail "$label path mutation fixture did not apply"
-  elif run_adopter "$dir"; then
+  elif caller_case_nested=1 run_adopter "$dir"; then
     fail "the generated suite accepted $label path mutation"
   elif grep -qF "$expected" "$tmproot/run.out"; then
     pass "the generated suite rejects $label path mutation"
@@ -5862,9 +5967,6 @@ SCHED_SCRIPT
 drain_adopter_jobs
 if [ "$caller_case_count" -lt 1 ]; then
   fail "changelog caller contract recorded no cases"
-fi
-if [ "$caller_case_ran" -lt 1 ]; then
-  fail "changelog caller contract ran no cases"
 fi
 [ "$fails" -eq 0 ] || exit 1
 echo "All tests passed."

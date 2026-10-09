@@ -141,34 +141,37 @@ esac
 GH
 chmod +x "$tmp/bin/gh"
 
+canonical_caller_baseline="$(bash "$generator" "$contract_sha" "$required_checks" | base64 | tr -d '\n')"
+canonical_retry_caller_baseline="$(bash "$generator" "$contract_sha" --retry "$retry_workflow_names" "$required_checks" | base64 | tr -d '\n')"
+historical_workflow_baseline="$(printf '%s\n' \
+  'on:' \
+  '  workflow_call:' \
+  '    inputs:' \
+  '      required_checks:' \
+  '        required: true' \
+  '        type: string' \
+  '      privileged_lane:' \
+  '        required: false' \
+  '        type: string' \
+  'jobs:' \
+  '  privileged_merge:' \
+  '    runs-on: ubuntu-24.04' | base64 | tr -d '\n')"
+historical_retry_workflow_baseline="$(printf '%s\n' \
+  'on:' \
+  '  workflow_call:' \
+  '    inputs:' \
+  '      required_checks:' \
+  '        required: true' \
+  '        type: string' \
+  'jobs:' \
+  '  retry:' \
+  '    runs-on: ubuntu-24.04' | base64 | tr -d '\n')"
+canonical_workflow_baseline="$(base64 <"$root/.github/workflows/ai-privileged-merge.yml" | tr -d '\n')"
+canonical_retry_workflow_baseline="$(base64 <"$root/.github/workflows/ai-promotion-retry.yml" | tr -d '\n')"
+historical_generator_baseline="$(base64 <"$generator" | tr -d '\n')"
+
 run_audit() {
-  local canonical canonical_retry historical_workflow historical_retry_workflow
   : >"$tmp/gh-calls"
-  canonical="$(bash "$generator" "$contract_sha" "$required_checks" | base64 | tr -d '\n')"
-  canonical_retry="$(bash "$generator" "$contract_sha" --retry "$retry_workflow_names" "$required_checks" | base64 | tr -d '\n')"
-  historical_workflow="$(printf '%s\n' \
-    'on:' \
-    '  workflow_call:' \
-    '    inputs:' \
-    '      required_checks:' \
-    '        required: true' \
-    '        type: string' \
-    '      privileged_lane:' \
-    '        required: false' \
-    '        type: string' \
-    'jobs:' \
-    '  privileged_merge:' \
-    '    runs-on: ubuntu-24.04' | base64 | tr -d '\n')"
-  historical_retry_workflow="$(printf '%s\n' \
-    'on:' \
-    '  workflow_call:' \
-    '    inputs:' \
-    '      required_checks:' \
-    '        required: true' \
-    '        type: string' \
-    'jobs:' \
-    '  retry:' \
-    '    runs-on: ubuntu-24.04' | base64 | tr -d '\n')"
   PATH="$tmp/bin:$PATH" GH_TOKEN="${GH_TOKEN-test-token}" \
     ACTIVE_REPOSITORIES="${ACTIVE_REPOSITORIES-Verjson/alpha}" \
     SECRET_VISIBILITY="${SECRET_VISIBILITY-selected}" \
@@ -179,15 +182,15 @@ run_audit() {
     ALPHA_RETRY_CALLER="${ALPHA_RETRY_CALLER-present}" \
     BETA_RETRY_CALLER="${BETA_RETRY_CALLER-present}" \
     CANONICAL_RETRY_CALLER="${CANONICAL_RETRY_CALLER-present}" \
-    ALPHA_CONTENT="${ALPHA_CONTENT-$canonical}" \
-    BETA_CONTENT="${BETA_CONTENT-$canonical}" \
-    CANONICAL_CONTENT="${CANONICAL_CONTENT-$(base64 <"$root/.github/workflows/ai-privileged-merge.yml" | tr -d '\n')}" \
-    ALPHA_RETRY_CONTENT="${ALPHA_RETRY_CONTENT-$canonical_retry}" \
-    BETA_RETRY_CONTENT="${BETA_RETRY_CONTENT-$canonical_retry}" \
-    CANONICAL_RETRY_CONTENT="${CANONICAL_RETRY_CONTENT-$(base64 <"$root/.github/workflows/ai-promotion-retry.yml" | tr -d '\n')}" \
-    HISTORICAL_GENERATOR_CONTENT="${HISTORICAL_GENERATOR_CONTENT-$(base64 <"$generator" | tr -d '\n')}" \
-    HISTORICAL_WORKFLOW_CONTENT="${HISTORICAL_WORKFLOW_CONTENT-$historical_workflow}" \
-    HISTORICAL_RETRY_WORKFLOW_CONTENT="${HISTORICAL_RETRY_WORKFLOW_CONTENT-$historical_retry_workflow}" \
+    ALPHA_CONTENT="${ALPHA_CONTENT-$canonical_caller_baseline}" \
+    BETA_CONTENT="${BETA_CONTENT-$canonical_caller_baseline}" \
+    CANONICAL_CONTENT="${CANONICAL_CONTENT-$canonical_workflow_baseline}" \
+    ALPHA_RETRY_CONTENT="${ALPHA_RETRY_CONTENT-$canonical_retry_caller_baseline}" \
+    BETA_RETRY_CONTENT="${BETA_RETRY_CONTENT-$canonical_retry_caller_baseline}" \
+    CANONICAL_RETRY_CONTENT="${CANONICAL_RETRY_CONTENT-$canonical_retry_workflow_baseline}" \
+    HISTORICAL_GENERATOR_CONTENT="${HISTORICAL_GENERATOR_CONTENT-$historical_generator_baseline}" \
+    HISTORICAL_WORKFLOW_CONTENT="${HISTORICAL_WORKFLOW_CONTENT-$historical_workflow_baseline}" \
+    HISTORICAL_RETRY_WORKFLOW_CONTENT="${HISTORICAL_RETRY_WORKFLOW_CONTENT-$historical_retry_workflow_baseline}" \
     PIN_RELATION="${PIN_RELATION-ahead}" \
     GH_CALLS="$tmp/gh-calls" \
     WORKFLOW_EVIDENCE_MODE="${WORKFLOW_EVIDENCE_MODE-valid}" \
