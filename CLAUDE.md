@@ -38,6 +38,8 @@ Gate shell tests execute the current named workflow steps against stubbed
 dependencies or exercise checked-in helpers directly. Add or extend a behavioral
 test for every gate change and register it in `scripts/actions-ci-groups.tsv`; an
 unregistered test does not run in Actions.
+Pull-request workload tiers and their current classifications are documented in
+[`docs/ci-workflow-tiers.md`](docs/ci-workflow-tiers.md).
 
 ## Autonomous batches — review before AI merge authority is enabled
 
@@ -74,6 +76,8 @@ exception as a release fix.
 Each entry states the concrete fact and how/when it was last verified — a live re-check,
 not just inspection of prose (#956: an entry asserting external status should say how it
 was confirmed, since inspection-only claims go stale silently).
+
+- [#1739](https://github.com/Verjson/.github/issues/1739) — Keep fast pull-request checks active on drafts and defer full CI suites and candidate builds until `ready_for_review`; the tier policy, workflow matrix, and conformance test are being implemented.
 
 
 - [#1663](https://github.com/Verjson/.github/issues/1663) — The generated label re-arm caller also subscribed to lifecycle events already handled by `gate-rearm.yml`; confirmed 2026-09-30 by comparing both generators and caller contracts.
