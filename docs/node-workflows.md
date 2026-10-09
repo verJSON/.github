@@ -446,6 +446,12 @@ Two properties to respect:
   workflow uses its repository-scoped `GITHUB_TOKEN` only to publish that
   repository's package and GitHub release.
 
+The credentialed acquisition step temporarily moves the tagged workspace's
+root `.npmrc` out of npm's project-config search path, then restores it on
+success or failure. Persistent npm caching is opt-in and disabled whenever
+`NODE_AUTH_TOKEN` is supplied because GitHub-hosted Actions caches cross
+workflow runs and must not retain private dependency tarballs.
+
 ## Compatibility sandbox filesystem contract
 
 Compatibility scripts run inside a credentialless bubblewrap namespace. Both npm cache

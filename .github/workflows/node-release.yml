@@ -27,12 +27,12 @@ on:
         type: number
         default: 30
       cache:
-        description: Upload a job-scoped npm cache when cache-dependency-path matches a lockfile
+        description: Persist npm downloads only when no private dependency token is supplied
         required: false
         type: boolean
         default: false
       cache-max-mb:
-        description: Maximum job-scoped npm cache size to upload when cache is enabled
+        description: Maximum npm download cache size to retain when cache is enabled
         required: false
         type: number
         default: 1024
@@ -145,8 +145,24 @@ jobs:
         run: |
           test "$(git describe --tags --exact-match HEAD)" = "$VERSION"
           test -f "CHANGELOG/$VERSION.md"
+      - name: Decide whether npm download caching is safe
+        id: npm-cache-policy
+        env:
+          CACHE_REQUESTED: ${{ inputs.cache }}
+          HAS_PRIVATE_PACKAGE_TOKEN: ${{ secrets.NODE_AUTH_TOKEN != '' }}
+          LOCKFILE_MATCHED: ${{ hashFiles(inputs.cache-dependency-path) != '' }}
+        run: |
+          set -euo pipefail
+          if [[ "$CACHE_REQUESTED" == "true" && "$HAS_PRIVATE_PACKAGE_TOKEN" != "true" && "$LOCKFILE_MATCHED" == "true" ]]; then
+            printf 'enabled=true\n' >>"$GITHUB_OUTPUT"
+          else
+            printf 'enabled=false\n' >>"$GITHUB_OUTPUT"
+            if [[ "$CACHE_REQUESTED" == "true" && "$HAS_PRIVATE_PACKAGE_TOKEN" == "true" ]]; then
+              echo "npm download caching is disabled because private package credentials were supplied." >>"$GITHUB_STEP_SUMMARY"
+            fi
+          fi
       - name: Configure the bounded npm cache
-        if: inputs.cache && hashFiles(inputs.cache-dependency-path) != ''
+        if: steps.npm-cache-policy.outputs.enabled == 'true'
         run: |
           cache_dir="$RUNNER_TEMP/verjson-npm-cache"
           mkdir -p "$cache_dir"
@@ -154,7 +170,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ inputs.node-version }}
-          cache: ${{ inputs.cache && hashFiles(inputs.cache-dependency-path) != '' && 'npm' || '' }}
+          cache: ${{ steps.npm-cache-policy.outputs.enabled == 'true' && 'npm' || '' }}
           cache-dependency-path: ${{ inputs.cache-dependency-path }}
           package-manager-cache: false
           registry-url: https://npm.pkg.github.com
@@ -200,7 +216,28 @@ jobs:
           }
           NODE
       - name: Install dependencies
-        run: npm ci --ignore-scripts
+        run: |
+          set -euo pipefail
+          project_npmrc="$GITHUB_WORKSPACE/.npmrc"
+          if [[ -e "$project_npmrc" || -L "$project_npmrc" ]]; then
+            quarantine_dir="$(mktemp -d "$RUNNER_TEMP/verjson-npmrc-isolation.XXXXXX")"
+            mv -- "$project_npmrc" "$quarantine_dir/project.npmrc"
+            restore_project_npmrc() {
+              local status=$?
+              trap - EXIT
+              if [[ -e "$project_npmrc" || -L "$project_npmrc" ]]; then
+                echo "::error::the project .npmrc was recreated during credentialed dependency installation."
+                status=1
+              elif ! mv -- "$quarantine_dir/project.npmrc" "$project_npmrc"; then
+                echo "::error::could not restore the project .npmrc after credentialed dependency installation."
+                status=1
+              fi
+              rm -rf -- "$quarantine_dir" || status=1
+              exit "$status"
+            }
+            trap restore_project_npmrc EXIT
+          fi
+          npm ci --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
       - name: Run dependency lifecycle scripts without credentials
@@ -317,7 +354,7 @@ jobs:
           NODE
           done
       - name: Bound npm cache upload
-        if: always() && inputs.cache
+        if: always() && steps.npm-cache-policy.outputs.enabled == 'true'
         env:
           CACHE_MAX_MB: ${{ inputs.cache-max-mb }}
         run: |

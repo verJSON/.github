@@ -67,7 +67,9 @@ steps = release["steps"]
 assert "semantic-release" not in raw
 
 install = next(step for step in prepare_steps if step.get("name") == "Install dependencies")
-assert (install.get("run") or "").strip() == "npm ci --ignore-scripts"
+assert "npm ci --ignore-scripts" in (install.get("run") or "")
+assert "project_npmrc=\"$GITHUB_WORKSPACE/.npmrc\"" in (install.get("run") or "")
+assert "trap restore_project_npmrc EXIT" in (install.get("run") or "")
 assert install.get("env") == {"NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}"}
 lifecycle = next(step for step in prepare_steps if step.get("name") == "Run dependency lifecycle scripts without credentials")
 assert (lifecycle.get("run") or "").strip() == "npm ci --prefer-offline"
@@ -102,13 +104,18 @@ prepare_setup_node_index = next(
     i for i, step in enumerate(prepare_steps) if step.get("uses", "").startswith("actions/setup-node@")
 )
 cache_setup = next(step for step in prepare_steps if step.get("name") == "Configure the bounded npm cache")
+cache_policy = next(step for step in prepare_steps if step.get("id") == "npm-cache-policy")
 cache_cleanup = next(step for step in prepare_steps if step.get("name") == "Bound npm cache upload")
-assert cache_setup["if"] == "inputs.cache && hashFiles(inputs.cache-dependency-path) != ''"
-assert prepare_steps.index(cache_setup) < prepare_setup_node_index, "npm cache path must be configured before setup-node"
+assert cache_policy["env"]["HAS_PRIVATE_PACKAGE_TOKEN"] == "${{ secrets.NODE_AUTH_TOKEN != '' }}"
+assert "enabled=false" in cache_policy["run"]
+assert cache_setup["if"] == "steps.npm-cache-policy.outputs.enabled == 'true'"
+assert prepare_steps.index(cache_policy) < prepare_steps.index(cache_setup) < prepare_setup_node_index, "cache policy and path must precede setup-node"
+assert prepare_steps[prepare_setup_node_index]["with"]["cache"] == "${{ steps.npm-cache-policy.outputs.enabled == 'true' && 'npm' || '' }}"
 assert 'cache_dir="$RUNNER_TEMP/verjson-npm-cache"' in cache_setup["run"]
 assert "npm_config_cache=%s\\n" in cache_setup["run"]
 assert '"$GITHUB_ENV"' in cache_setup["run"]
 assert 'cache_dir="$RUNNER_TEMP/verjson-npm-cache"' in cache_cleanup["run"]
+assert cache_cleanup["if"] == "always() && steps.npm-cache-policy.outputs.enabled == 'true'"
 package_dirs = next(step for step in steps if "package-dirs must be a non-empty JSON array" in (step.get("run") or ""))
 assert setup_node_index < steps.index(package_dirs), "Node-dependent validation must run after setup-node"
 assert all("node -" not in (step.get("run") or "") for step in steps[:setup_node_index]),     "no JavaScript may run before setup-node on bootstrap-clean runners"

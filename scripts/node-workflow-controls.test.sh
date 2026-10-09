@@ -76,12 +76,12 @@ for workflow in "$ci" "$release"; do
       || fail "$name does not expose the expected public/private scope contract"
   fi
 
-  cache_guard="cache: \${{ inputs.cache && hashFiles(inputs.cache-dependency-path) != '' && 'npm' || '' }}"
+  cache_guard="cache: \${{ steps.npm-cache-policy.outputs.enabled == 'true' && 'npm' || '' }}"
   [ "$workflow" = "$ci" ] \
     && cache_guard="cache: \${{ !(inputs.secretless-pr || inputs.secretless-trusted-ref) && inputs.cache && hashFiles(inputs.cache-dependency-path) != '' && 'npm' || '' }}"
   grep -qF "$cache_guard" "$workflow" \
-    && pass "$name enables setup-node's npm cache only for a matching lockfile" \
-    || fail "$name does not condition npm caching on cache-dependency-path"
+    && pass "$name enables setup-node caching only through its allowed cache policy" \
+    || fail "$name does not condition npm caching on its allowed cache policy"
   grep -qF 'cache-dependency-path: ${{ inputs.cache-dependency-path }}' "$workflow" \
     && pass "$name keys setup-node caching by the caller-selected lockfile" \
     || fail "$name does not pass cache-dependency-path to setup-node"
@@ -141,28 +141,38 @@ def one_step(predicate, label):
 
 cache_index, cache_step = one_step(
     lambda step: step.get("name") == "Configure the bounded npm cache", "cache configuration")
+policy_index, policy_step = one_step(
+    lambda step: step.get("id") == "npm-cache-policy", "npm cache policy")
 setup_index, setup_step = one_step(
     lambda step: str(step.get("uses", "")).startswith("actions/setup-node@"), "setup-node")
 bound_index, bound_step = one_step(
     lambda step: step.get("name") == "Bound npm cache upload", "cache bound")
 cache_run = cache_step.get("run", "")
-require(cache_step.get("if") == "inputs.cache && hashFiles(inputs.cache-dependency-path) != ''",
-        "cache configuration must remain opt-in and lockfile-gated")
+require(policy_step.get("env") == {
+            "CACHE_REQUESTED": "${{ inputs.cache }}",
+            "HAS_PRIVATE_PACKAGE_TOKEN": "${{ secrets.NODE_AUTH_TOKEN != '' }}",
+            "LOCKFILE_MATCHED": "${{ hashFiles(inputs.cache-dependency-path) != '' }}",
+        }, "cache policy may receive only the boolean private-token state")
+require("HAS_PRIVATE_PACKAGE_TOKEN" in policy_step.get("run", "")
+        and "enabled=false" in policy_step.get("run", ""),
+        "persistent npm caching must be disabled when private credentials are supplied")
+require(cache_step.get("if") == "steps.npm-cache-policy.outputs.enabled == 'true'",
+        "cache configuration must depend on the safe cache-policy result")
 cache_dir_assignment = cache_run.find('cache_dir="$RUNNER_TEMP/verjson-npm-cache"')
 cache_export = cache_run.find("printf 'npm_config_cache=%s\\n' \"$cache_dir\" >> \"$GITHUB_ENV\"")
 require(cache_dir_assignment >= 0 and cache_export > cache_dir_assignment,
         "the job-scoped cache path must be assigned before export to GITHUB_ENV")
 setup_inputs = setup_step.get("with", {})
-require(setup_inputs.get("cache") == "${{ inputs.cache && hashFiles(inputs.cache-dependency-path) != '' && 'npm' || '' }}",
-        "setup-node cache must stay opt-in and lockfile-gated in prepare")
+require(setup_inputs.get("cache") == "${{ steps.npm-cache-policy.outputs.enabled == 'true' && 'npm' || '' }}",
+        "setup-node cache must stay opt-in, lockfile-gated, and disabled with private credentials")
 require(setup_inputs.get("cache-dependency-path") == "${{ inputs.cache-dependency-path }}",
         "setup-node cache must use the caller-selected dependency lock")
 require(setup_inputs.get("package-manager-cache") is False,
         "setup-node automatic package-manager caching must stay disabled")
-require(cache_index < setup_index < bound_index,
-        "cache configuration must precede setup-node and bounded cleanup must follow it")
-require(bound_step.get("if") == "always() && inputs.cache",
-        "cache cleanup must run after failures when opt-in caching is enabled")
+require(policy_index < cache_index < setup_index < bound_index,
+        "cache policy must precede setup-node and bounded cleanup must follow it")
+require(bound_step.get("if") == "always() && steps.npm-cache-policy.outputs.enabled == 'true'",
+        "cache cleanup must run after failures only when safe opt-in caching is enabled")
 require(bound_step.get("env", {}).get("CACHE_MAX_MB") == "${{ inputs.cache-max-mb }}",
         "cache cleanup must receive the caller size limit")
 require('find "$cache_dir" -mindepth 1 -delete' in bound_step.get("run", ""),
