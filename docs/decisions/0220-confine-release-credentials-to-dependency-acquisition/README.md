@@ -36,3 +36,7 @@ Package-directory provenance applies the generator's normalized relative-path an
 ## Consequences
 
 Installed dependencies remain available to release verification without a registry credential. A lifecycle or verification hook that tries to fetch additional private packages must be redesigned; it cannot reuse the acquisition credential. Dependency lifecycle scripts still run after acquisition, subject to the package manager's existing script-approval policy.
+
+## 2026-10-09 refinement — separate npm configuration files (#1725)
+
+The generated credentialless verification environment must assign npm's user and global configuration namespaces to distinct, controlled files. npm rejects loading the same `/dev/null` path for both namespaces before it runs the verification commands. Each generated release-node, release-artifact, and release-snapshot verification step now creates separate empty files under its private temporary home, applies a restrictive umask, and removes that home at step exit. A regression executes the generated verification command with real npm and a fixture build script in all three modes; it checks the two files are distinct, empty, private to the temporary home, and cleaned up afterward. This refinement preserves the existing credential boundary and release authority.
