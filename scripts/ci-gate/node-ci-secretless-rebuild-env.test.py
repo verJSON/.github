@@ -717,6 +717,8 @@ def main():
                 ("REDIS_URL", "redis://localhost:6379/?sig=secret"),
                 ("REDIS_URL", "redis://localhost:6379/?Signature=secret"),
                 ("REDIS_URL", "redis://localhost:6379/?ACCESS_KEY=secret"),
+                ("CACHE_URL", "https://cache.example.invalid/?key=private-value"),
+                ("CACHE_URL", "https://cache.example.invalid/?CODE=authorization-value"),
                 ("DB_PWD", "secret"),
                 ("S3_ACCESS_KEY", "value"),
                 ("OPENAI_API_KEY", "sk-secret"),

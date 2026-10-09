@@ -245,7 +245,8 @@ names keep service access by default; set it to `true` for custom test names.
 Only service-enabled scripts receive configured DB/cache values or network
 access, and they fail closed on self-hosted runners. Their network access on a
 GitHub-hosted runner has unrestricted egress, not a service-only firewall.
-Credential-bearing variables and credential query/DSN fields are rejected;
+Credential-bearing variables and credential query/DSN fields (including `key`,
+`code`, and signed-query aliases) are rejected;
 the documented `OPENAI_API_KEY=ci-dummy-key` test sentinel is the only variable
 name exception. Credentialed URLs are allowed only for localhost or the exact
 workflow-selected service endpoint. Both features execute only after credential

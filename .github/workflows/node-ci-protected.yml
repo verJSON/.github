@@ -6172,12 +6172,14 @@ jobs:
           credential_name_pattern = re.compile(
               r"(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|PRIVATE[_-]?KEY|"
               r"API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|"
+              r"(?<![A-Z0-9])KEY(?![A-Z0-9])|CODE|"
               r"(?<![A-Z0-9])SIG(?![A-Z0-9])|BEARER|COOKIE|SESSION|JWT|AUTH)",
               re.IGNORECASE,
           )
           credential_parameter_pattern = re.compile(
               r"(?:^|[;?&\s])(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|"
               r"PRIVATE[_-]?KEY|API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|"
+              r"(?<![A-Z0-9])KEY(?![A-Z0-9])|CODE|"
               r"(?<![A-Z0-9])SIG(?![A-Z0-9])|"
               r"BEARER|COOKIE|SESSION|JWT|AUTH)\s*=",
               re.IGNORECASE,

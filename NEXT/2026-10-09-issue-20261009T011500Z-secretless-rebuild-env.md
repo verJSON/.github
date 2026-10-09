@@ -48,6 +48,8 @@ not a firewall limited to the configured services. Credential-bearing variable
 names, signed-query aliases, and credential key/value DSNs are rejected. A URL
 with user information is accepted only when it targets localhost or the exact
 workflow-selected DB_HOST/CACHE_HOST; remote credentialed URLs are rejected.
+Query and DSN fields commonly used for credentials, including `key`, `code`,
+and signed-query aliases, are rejected.
 The documented `OPENAI_API_KEY=ci-dummy-key` test sentinel remains available;
 other credential-bearing variables are rejected. Service values must remain
 test-only and must not carry secrets outside that local URL or exact dummy
