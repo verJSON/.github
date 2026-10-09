@@ -88,10 +88,16 @@ for workflow in "$ci" "$release"; do
   grep -qF 'package-manager-cache: false' "$workflow" \
     && pass "$name disables setup-node automatic package-manager caching" \
     || fail "$name can bypass the explicit cache/lockfile controls via setup-node auto-caching"
-  { grep -qF 'echo "npm_config_cache=$RUNNER_TEMP/verjson-npm-cache" >> "$GITHUB_ENV"' "$workflow" \
-      && grep -qF 'cache_dir="$RUNNER_TEMP/verjson-npm-cache"' "$workflow" \
-      && grep -qF 'find "$cache_dir" -mindepth 1 -delete' "$workflow" \
-      && grep -qF 'CACHE_MAX_MB: ${{ inputs.cache-max-mb }}' "$workflow"; } \
+  if [ "$workflow" = "$release" ]; then
+    grep -qF "printf 'npm_config_cache=%s" "$workflow"
+  else
+    grep -qF 'echo "npm_config_cache=$RUNNER_TEMP/verjson-npm-cache" >> "$GITHUB_ENV"' "$workflow"
+  fi
+  cache_export_status=$?
+  { [ "$cache_export_status" -eq 0 ] \
+    && grep -qF 'cache_dir="$RUNNER_TEMP/verjson-npm-cache"' "$workflow" \
+    && grep -qF 'find "$cache_dir" -mindepth 1 -delete' "$workflow" \
+    && grep -qF 'CACHE_MAX_MB: ${{ inputs.cache-max-mb }}' "$workflow"; } \
     && pass "$name scopes and bounds explicitly enabled cache uploads" \
     || fail "$name can archive an accumulated or unbounded persistent-runner npm cache"
   if [ "$workflow" = "$release" ]; then
@@ -111,9 +117,63 @@ done
   && ! grep -qF 'cleanup-secretless-transfer:' "$ci" \
   && pass "node-ci bounds eligibility, acquisition, and build-test jobs" \
   || fail "node-ci does not apply the caller bound to every job"
-[ "$(grep -cF 'timeout-minutes: ${{ inputs.timeout-minutes }}' "$release")" -eq 1 ] \
-  && pass "node-release bounds its release job" \
-  || fail "node-release does not apply the caller bound to its job"
+python3 - "$release" <<'PY'
+from pathlib import Path
+import sys
+import yaml
+
+def require(condition, message):
+    if not condition:
+        raise SystemExit(message)
+
+workflow = yaml.safe_load(Path(sys.argv[1]).read_text(encoding="utf-8"))
+jobs = workflow["jobs"]
+expected_timeout = "${{ inputs.timeout-minutes }}"
+for job_name in ("prepare", "release"):
+    require(jobs[job_name].get("timeout-minutes") == expected_timeout,
+            f"{job_name} must carry the caller timeout at job level")
+
+prepare_steps = jobs["prepare"]["steps"]
+def one_step(predicate, label):
+    matches = [index for index, step in enumerate(prepare_steps) if predicate(step)]
+    require(len(matches) == 1, f"expected one {label} step in prepare")
+    return matches[0], prepare_steps[matches[0]]
+
+cache_index, cache_step = one_step(
+    lambda step: step.get("name") == "Configure the bounded npm cache", "cache configuration")
+setup_index, setup_step = one_step(
+    lambda step: str(step.get("uses", "")).startswith("actions/setup-node@"), "setup-node")
+bound_index, bound_step = one_step(
+    lambda step: step.get("name") == "Bound npm cache upload", "cache bound")
+cache_run = cache_step.get("run", "")
+require(cache_step.get("if") == "inputs.cache && hashFiles(inputs.cache-dependency-path) != ''",
+        "cache configuration must remain opt-in and lockfile-gated")
+cache_dir_assignment = cache_run.find('cache_dir="$RUNNER_TEMP/verjson-npm-cache"')
+cache_export = cache_run.find("printf 'npm_config_cache=%s\\n' \"$cache_dir\" >> \"$GITHUB_ENV\"")
+require(cache_dir_assignment >= 0 and cache_export > cache_dir_assignment,
+        "the job-scoped cache path must be assigned before export to GITHUB_ENV")
+setup_inputs = setup_step.get("with", {})
+require(setup_inputs.get("cache") == "${{ inputs.cache && hashFiles(inputs.cache-dependency-path) != '' && 'npm' || '' }}",
+        "setup-node cache must stay opt-in and lockfile-gated in prepare")
+require(setup_inputs.get("cache-dependency-path") == "${{ inputs.cache-dependency-path }}",
+        "setup-node cache must use the caller-selected dependency lock")
+require(setup_inputs.get("package-manager-cache") is False,
+        "setup-node automatic package-manager caching must stay disabled")
+require(cache_index < setup_index < bound_index,
+        "cache configuration must precede setup-node and bounded cleanup must follow it")
+require(bound_step.get("if") == "always() && inputs.cache",
+        "cache cleanup must run after failures when opt-in caching is enabled")
+require(bound_step.get("env", {}).get("CACHE_MAX_MB") == "${{ inputs.cache-max-mb }}",
+        "cache cleanup must receive the caller size limit")
+require('find "$cache_dir" -mindepth 1 -delete' in bound_step.get("run", ""),
+        "oversized cache cleanup must remove entries before the setup-node post action")
+PY
+release_contract_status=$?
+if [ "$release_contract_status" -eq 0 ]; then
+  pass "node-release scopes bounded cache export and caller timeouts to prepare/publish"
+else
+  fail "node-release cache export or job-level timeout contract is invalid"
+fi
 
 { grep -qF 'submodules: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '\''false'\'' || '\''recursive'\'' }}' "$ci" \
   && grep -qF "inputs.schema-dir != ''" "$ci" \
