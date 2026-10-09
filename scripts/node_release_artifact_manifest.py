@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import bisect
 import gzip
 import hashlib
 import json
@@ -167,8 +168,12 @@ def _archive_package_metadata(archive_path: pathlib.Path) -> tuple[dict[str, Any
     if seen.get("package") is False:
         raise ValueError(f"package archive contains an unsafe or duplicate path: {archive_path.name}")
     ordered_names = sorted(seen)
-    for index, name in enumerate(ordered_names[:-1]):
-        if not seen[name] and ordered_names[index + 1].startswith(f"{name}/"):
+    for name in ordered_names:
+        if seen[name]:
+            continue
+        prefix = f"{name}/"
+        child_index = bisect.bisect_left(ordered_names, prefix)
+        if child_index < len(ordered_names) and ordered_names[child_index].startswith(prefix):
             raise ValueError(f"package archive contains an unsafe or duplicate path: {archive_path.name}")
     if not isinstance(package_json, dict):
         raise ValueError(f"package archive has no package/package.json: {archive_path.name}")

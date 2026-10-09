@@ -119,6 +119,12 @@ class ArtifactManifestTest(unittest.TestCase):
                 ("package/nested", b"not a directory"),
                 ("package/nested/index.js", b"child"),
             ],
+            [
+                ("package/package.json", package_json),
+                ("package/a", b"not a directory"),
+                ("package/a-b", b"sibling"),
+                ("package/a/child", b"child"),
+            ],
         ):
             with self.subTest(entries=tuple(name for name, _ in entries)):
                 self.write_archive_entries(entries)
