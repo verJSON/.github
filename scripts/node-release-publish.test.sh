@@ -81,6 +81,17 @@ assert any('git describe --tags --exact-match HEAD' in (step.get("run") or "") f
 assert any('test -f "CHANGELOG/$VERSION.md"' in (step.get("run") or "") for step in steps)
 
 setup_node_index = next(i for i, step in enumerate(steps) if step.get("uses", "").startswith("actions/setup-node@"))
+prepare_setup_node_index = next(
+    i for i, step in enumerate(prepare_steps) if step.get("uses", "").startswith("actions/setup-node@")
+)
+cache_setup = next(step for step in prepare_steps if step.get("name") == "Configure the bounded npm cache")
+cache_cleanup = next(step for step in prepare_steps if step.get("name") == "Bound npm cache upload")
+assert cache_setup["if"] == "inputs.cache && hashFiles(inputs.cache-dependency-path) != ''"
+assert prepare_steps.index(cache_setup) < prepare_setup_node_index, "npm cache path must be configured before setup-node"
+assert 'cache_dir="$RUNNER_TEMP/verjson-npm-cache"' in cache_setup["run"]
+assert "npm_config_cache=%s\\n" in cache_setup["run"]
+assert '"$GITHUB_ENV"' in cache_setup["run"]
+assert 'cache_dir="$RUNNER_TEMP/verjson-npm-cache"' in cache_cleanup["run"]
 package_dirs = next(step for step in steps if "package-dirs must be a non-empty JSON array" in (step.get("run") or ""))
 assert setup_node_index < steps.index(package_dirs), "Node-dependent validation must run after setup-node"
 assert all("node -" not in (step.get("run") or "") for step in steps[:setup_node_index]),     "no JavaScript may run before setup-node on bootstrap-clean runners"

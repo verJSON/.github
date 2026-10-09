@@ -135,6 +135,12 @@ jobs:
         run: |
           test "$(git describe --tags --exact-match HEAD)" = "$VERSION"
           test -f "CHANGELOG/$VERSION.md"
+      - name: Configure the bounded npm cache
+        if: inputs.cache && hashFiles(inputs.cache-dependency-path) != ''
+        run: |
+          cache_dir="$RUNNER_TEMP/verjson-npm-cache"
+          mkdir -p "$cache_dir"
+          printf 'npm_config_cache=%s\n' "$cache_dir" >> "$GITHUB_ENV"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ inputs.node-version }}

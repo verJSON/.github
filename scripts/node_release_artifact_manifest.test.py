@@ -174,6 +174,39 @@ class ArtifactManifestTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "sparse package archives are not supported"):
             validator.validate_artifacts(self.artifact_dir, self.expected)
 
+    def test_rejects_pax_sparse_format_00(self) -> None:
+        archive_path = self.artifact_dir / self.filename
+        member = tarfile.TarInfo("package/package.json")
+        member.size = 0
+        member.pax_headers = {
+            "GNU.sparse.size": "1",
+            "GNU.sparse.numblocks": "1",
+            "GNU.sparse.offset": "0",
+            "GNU.sparse.numbytes": "1",
+        }
+        with tarfile.open(archive_path, "w:gz", format=tarfile.PAX_FORMAT) as archive:
+            archive.addfile(member)
+        self.refresh_manifest_integrity()
+
+        with self.assertRaisesRegex(ValueError, "sparse package archives are not supported"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_pax_sparse_format_10(self) -> None:
+        archive_path = self.artifact_dir / self.filename
+        member = tarfile.TarInfo("package/package.json")
+        member.size = 512
+        member.pax_headers = {
+            "GNU.sparse.major": "1",
+            "GNU.sparse.minor": "0",
+            "GNU.sparse.realsize": "1",
+        }
+        with tarfile.open(archive_path, "w:gz", format=tarfile.PAX_FORMAT) as archive:
+            archive.addfile(member, io.BytesIO(b"0\n" + bytes(510)))
+        self.refresh_manifest_integrity()
+
+        with self.assertRaisesRegex(ValueError, "sparse package archives are not supported"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
     def test_rejects_cumulative_global_pax_metadata(self) -> None:
         archive_path = self.artifact_dir / self.filename
 
