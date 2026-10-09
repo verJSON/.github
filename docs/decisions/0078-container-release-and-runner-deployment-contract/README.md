@@ -74,7 +74,10 @@ image. GAR receipts also bind the index provenance referrer and each platform SB
 referrer to the recorded attestation digests. Historical v2 and v3 candidates remain
 readable, but the release validator requires v4 and directs callers to rebuild older
 candidates before promotion. The candidate schema rejects v3-only fields when
-`schemaVersion` is 2.
+`schemaVersion` is 2. Promotion keeps the validated candidate digest in the release
+manifest and projects destination receipts to their stable provider, repository,
+digest, expiry, and verification fields. GAR evidence-referrer records remain bound by
+that candidate digest instead of being copied into the unchanged release schema.
 
 Convenience tags such as `candidate`, `stable`, a major line, or `latest` may remain for
 humans and development tools. They are mutable aliases, are excluded from manifests,
