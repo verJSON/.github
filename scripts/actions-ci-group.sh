@@ -6,7 +6,7 @@ manifest="${ACTIONS_CI_GROUP_MANIFEST:-$root/scripts/actions-ci-groups.tsv}"
 group="${1-}"
 
 case "$group" in
-  platform|merge-gate|changelog-release|docs) ;;
+  platform|merge-gate|changelog-release-1|changelog-release-2|changelog-release-3|changelog-release-4|docs) ;;
   *)
     printf 'unknown actions-ci group: %s\n' "$group" >&2
     exit 2
