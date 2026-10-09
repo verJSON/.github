@@ -237,3 +237,21 @@ uses only the bridge address belonging to the captured container ID; it neither
 discovers arbitrary labelled containers nor probes a caller-supplied host. The
 original first-party caller trust boundary and unmasked-test-credential rule are
 unchanged.
+
+## Amendment — 2026-10-09: keep service environment from controlling the runner (#1729)
+
+The protected Node workflow uses a GitHub token for a later pull-request identity
+check. Service inputs are caller-controlled data, so exporting arbitrary `db-env`
+or `cache-env` keys through `$GITHUB_ENV` could set `BASH_ENV`, `PATH`, or another
+process-startup control before that token-bearing step. The service steps now
+validate variable names and reject carriage returns, shell startup hooks, interpreter and
+dynamic-loader injection variables, runner/workflow state, GitHub CLI host
+overrides, proxy/TLS trust overrides, Git credential or configuration hooks,
+and npm configuration overrides before starting Docker. Matching is
+case-insensitive. Ordinary test configuration remains available, and values
+remain unmasked, non-secret inputs.
+
+`node-ci-db-service.test.sh` and `node-ci-cache-service.test.sh` prove each
+service rejects runner-control keys before Docker or `$GITHUB_ENV`, including a
+`BASH_ENV` script that would read a later shell's `GH_TOKEN`. The protected
+workflow is regenerated from `node-ci.yml` and checked against its generator.

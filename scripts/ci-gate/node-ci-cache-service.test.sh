@@ -12,6 +12,15 @@ guard="$(awk '$0=="        id: cache-service"{f=1} f&&/^        if:/{print;exit}
 grep -qF "inputs.cache-image != ''" <<< "$guard" \
   && pass "cache service is default-off" || fail "cache service is not guarded by cache-image"
 
+for workflow in "$root/.github/workflows/node-ci.yml" \
+    "$root/.github/workflows/node-ci-protected.yml"; do
+  if grep -Fq "DB_SERVICE_ENABLED: \${{ inputs.db-image != '' }}" "$workflow"; then
+    pass "$(basename "$workflow") maps the database-service input to cache validation"
+  else
+    fail "$(basename "$workflow") does not protect DB_HOST/DB_PORT when db-image is enabled"
+  fi
+done
+
 start="$tmp/start.sh"
 awk '
   $0=="        id: cache-service"{f=1}
@@ -63,7 +72,15 @@ export RUNNER_NAME=runner-1 RUNNER_WORKSPACE=/runner/_work/example
 run_start(){
   : > "$tmp/docker.log"; : > "$tmp/env"; : > "$tmp/output"
   DOCKER_LOG="$tmp/docker.log" GITHUB_ENV="$tmp/env" GITHUB_OUTPUT="$tmp/output" \
-    MAPPED_PORT="${MAPPED_PORT:-49321}" bash -eo pipefail "$start" >"$tmp/out" 2>&1
+    MAPPED_PORT="${MAPPED_PORT:-49321}" DB_SERVICE_ENABLED="${DB_SERVICE_ENABLED:-false}" \
+    bash -eo pipefail "$start" >"$tmp/out" 2>&1
+}
+
+run_start_preserving_env(){
+  : > "$tmp/docker.log"; : > "$tmp/output"
+  DOCKER_LOG="$tmp/docker.log" GITHUB_ENV="$tmp/env" GITHUB_OUTPUT="$tmp/output" \
+    MAPPED_PORT="${MAPPED_PORT:-49321}" DB_SERVICE_ENABLED="${DB_SERVICE_ENABLED:-false}" \
+    bash -eo pipefail "$start" >"$tmp/out" 2>&1
 }
 
 if run_start \
@@ -78,6 +95,17 @@ else
   fail "cache start contract failed: $(tail -1 "$tmp/out")"
 fi
 
+if CACHE_ENV='DB_HOST=cache-only.invalid
+DB_PORT=12345' DB_SERVICE_ENABLED=false run_start \
+    && grep -Fxq 'DB_HOST=cache-only.invalid' "$tmp/env" \
+    && grep -Fxq 'DB_PORT=12345' "$tmp/env" \
+    && grep -Fq -- '-e DB_HOST=cache-only.invalid' "$tmp/docker.log" \
+    && grep -Fq -- '-e DB_PORT=12345' "$tmp/docker.log"; then
+  pass "cache-only callers may use DB_HOST and DB_PORT as ordinary configuration"
+else
+  fail "cache-only DB_HOST/DB_PORT configuration was rejected or not passed through: $(cat "$tmp/out")"
+fi
+
 if grep -Fxq 'container-id=cache-container-id' "$tmp/output"; then
   pass "cache publishes its immutable container handle"
 else
@@ -87,8 +115,77 @@ fi
 bad_env='not-a-pair'
 if CACHE_ENV="$bad_env" run_start; then
   fail "malformed cache-env was accepted"
-else
+elif [ ! -s "$tmp/env" ] && [ ! -s "$tmp/docker.log" ]; then
   pass "malformed cache-env fails at the input boundary"
+else
+  fail "malformed cache-env was rejected after Docker or GITHUB_ENV side effects"
+fi
+
+if CACHE_ENV='BAD-KEY=value' run_start; then
+  fail "cache-env accepted an invalid environment variable name"
+elif grep -qF "cache-env: 'BAD-KEY' is not a valid environment variable name" "$tmp/out" \
+    && [ ! -s "$tmp/env" ] && [ ! -s "$tmp/docker.log" ]; then
+  pass "an invalid cache-env variable name fails before Docker or GITHUB_ENV"
+else
+  fail "cache-env did not reject an invalid variable name before side effects: $(cat "$tmp/out")"
+fi
+
+for key in BASH_ENV PATH NODE_OPTIONS LD_PRELOAD GITHUB_ENV GH_TOKEN GH_HOST gh_host \
+    GIT_CONFIG_COUNT HTTPS_PROXY https_proxy SSL_CERT_FILE GCONV_PATH PS4 \
+    NPM_CONFIG_USERCONFIG Npm_Config_Userconfig NPM_CONFIG_GLOBALCONFIG \
+    Npm_Config_Globalconfig npm_config_globalconfig NPM_CONFIG_HTTPS_PROXY \
+    NPM_CONFIG_STRICT_SSL NPM_CONFIG_CAFILE; do
+  if CACHE_ENV="$key=unsafe" run_start; then
+    fail "cache-env accepted runner-control key $key"
+  elif grep -qF "cache-env: '$key' cannot override runner execution" "$tmp/out" \
+      && [ ! -s "$tmp/env" ] && [ ! -s "$tmp/docker.log" ]; then
+    pass "cache-env rejects runner-control key $key before Docker or GITHUB_ENV"
+  else
+    fail "cache-env did not reject $key before Docker or GITHUB_ENV: $(cat "$tmp/out")"
+  fi
+done
+
+# The cache service follows optional DB setup in the same job. When enabled, its
+# input cannot replace the selected DB endpoint in the shared workflow env.
+printf 'DB_HOST=127.0.0.1\nDB_PORT=49187\n' > "$tmp/env"
+cp "$tmp/env" "$tmp/db-env-before-cache"
+if CACHE_ENV='DB_HOST=attacker.example
+DB_PORT=12345' DB_SERVICE_ENABLED=true run_start_preserving_env; then
+  fail "cache-env accepted database endpoint keys after DB setup"
+elif grep -qF 'is reserved while the database service is enabled' "$tmp/out" \
+    && cmp -s "$tmp/env" "$tmp/db-env-before-cache" \
+    && [ ! -s "$tmp/docker.log" ]; then
+  pass "cache-env preserves the database endpoint and rejects overrides before Docker"
+else
+  fail "cache-env changed the established DB endpoint or started Docker: $(cat "$tmp/out")"
+fi
+
+# A BASH_ENV value from cache-env must not reach a later token-bearing shell.
+cache_env_hook="$tmp/cache-env-hook.sh"
+cache_env_hook_marker="$tmp/cache-env-hook-marker"
+cat > "$cache_env_hook" <<'HOOK'
+printf '%s\n' "${GH_TOKEN:-}" > "$CACHE_ENV_HOOK_MARKER"
+HOOK
+if CACHE_ENV="SAFE=ok"$'\r'"BASH_ENV=$cache_env_hook" run_start; then
+  fail "cache-env accepted a carriage-return BASH_ENV injection"
+elif grep -qF 'cache-env: carriage returns are not permitted' "$tmp/out" \
+    && [ ! -s "$tmp/env" ] && [ ! -s "$tmp/docker.log" ]; then
+  pass "a carriage return cannot smuggle BASH_ENV into GITHUB_ENV"
+else
+  fail "cache-env accepted carriage-return input or started Docker before rejection"
+fi
+if CACHE_ENV="BASH_ENV=$cache_env_hook" run_start; then
+  fail "cache-env accepted a caller BASH_ENV script"
+else
+  exported_bash_env="$(sed -n 's/^BASH_ENV=//p' "$tmp/env")"
+  if [ -n "$exported_bash_env" ]; then
+    env -u BASH_ENV GH_TOKEN=fixture-token CACHE_ENV_HOOK_MARKER="$cache_env_hook_marker" \
+      BASH_ENV="$exported_bash_env" bash -c ':'
+  fi
+  { [ -z "$exported_bash_env" ] && [ ! -e "$cache_env_hook_marker" ] \
+      && [ ! -s "$tmp/docker.log" ]; } \
+    && pass "a caller BASH_ENV script cannot run in a later token-bearing shell" \
+    || fail "cache-env exposed BASH_ENV to a later shell (token marker exists: $([ -e "$cache_env_hook_marker" ] && echo yes || echo no))"
 fi
 
 : > "$tmp/docker.log"

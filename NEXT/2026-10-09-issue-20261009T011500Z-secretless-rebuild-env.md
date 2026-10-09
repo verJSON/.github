@@ -21,3 +21,12 @@ untrusted scripts so command-file changes cannot inject code into a later token
 step. GitHub-hosted non-Linux runners fail with an explicit platform error.
 Tests cover npm and pnpm, host process scans, and writes to known host
 command-file paths. The explicit hosted Actions CI lane runs the inherited-descriptor write probe and consumer sandbox harness against the verified Bubblewrap binary; persistent fastlane groups keep the deterministic command stubs.
+
+Database and cache service inputs now reject environment keys that can alter
+runner process startup, executable resolution, GitHub CLI host selection,
+network/TLS routing, Git credentials, or workflow command files. Regressions
+prove supplied `BASH_ENV` and `GH_HOST` cannot capture or redirect a later
+token-bearing identity check; case-mixed npm configuration overrides, carriage-return
+smuggling, and database endpoint overrides from the cache service are rejected
+before side effects when the database service is enabled. Cache-only callers
+retain `DB_HOST` and `DB_PORT` as ordinary configuration.

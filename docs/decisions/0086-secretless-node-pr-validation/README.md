@@ -138,3 +138,17 @@ non-Linux runners fail with a clear platform error. Canonical and generated
 protected workflow tests cover npm and pnpm, the accepted pair,
 rejected names and values, absent credentials and command-file paths, a known
 host command-file probe, and rejection when a different package is approved.
+
+Service `db-env` and `cache-env` inputs are also treated as caller-controlled
+data. Their runner exports reject carriage returns, shell startup, interpreter, dynamic-loader,
+path, GitHub CLI host, proxy/TLS trust, Git credential/configuration, and
+workflow command variables before starting a service container. Matching is
+case-insensitive and rejects npm configuration overrides. This prevents a
+caller-provided `BASH_ENV` from running in the later identity check that carries
+`GH_TOKEN`, or `GH_HOST` from redirecting that token. Ordinary test configuration
+and the existing unmasked, non-secret service contract remain. The service tests
+exercise these token-bearing paths in both inputs.
+
+When the database service is enabled, `cache-env` also rejects `DB_HOST` and
+`DB_PORT` so a later cache step cannot overwrite the endpoint published by
+`db-env`. Cache-only callers retain those names as ordinary configuration.

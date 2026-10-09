@@ -309,7 +309,12 @@ on:
           Newline-separated KEY=VALUE pairs (dotenv style) used only when
           `db-image` is set. Every POSTGRES_* pair is passed into the database
           container; every pair (including DATABASE_URL) is exported to
-          `$GITHUB_ENV` so `npm test` sees it. Example:
+          `$GITHUB_ENV` so `npm test` sees it. Runner control, shell startup,
+          case-insensitive runner and interpreter controls, executable path,
+          GitHub CLI host, proxy/TLS, npm configuration, and workflow command
+          variables are rejected before the container starts. Carriage returns
+          are rejected before parsing to prevent command-file line injection.
+          Values remain unmasked and must not contain secrets. Example:
             POSTGRES_USER=app
             POSTGRES_PASSWORD=secret
             POSTGRES_DB=app_test
@@ -383,7 +388,12 @@ on:
           exported to later steps. Use the literal ${CACHE_PORT} placeholder in
           values such as REDIS_URL=redis://127.0.0.1:${CACHE_PORT}. Values are
           ordinary workflow inputs, not masked secrets; do not put credentials
-          here.
+          here. Case-insensitive runner control, shell startup, interpreter injection,
+          executable path, GitHub CLI host, proxy/TLS, npm configuration, and
+          workflow command variables are rejected before the container starts.
+          Carriage returns are rejected before parsing to prevent command-file
+          line injection. DB_HOST and DB_PORT are reserved only when db-image is
+          enabled; cache-only callers may use those names as ordinary configuration.
         required: false
         type: string
         default: ''
@@ -3194,6 +3204,10 @@ jobs:
             printf '%s' "$container_scope" | sha256sum | cut -c1-12)"
           docker_env=()
           db_env_lines=()
+          if [[ "$DB_ENV" == *$'\r'* ]]; then
+            echo "db-env: carriage returns are not permitted" >&2
+            exit 1
+          fi
           while IFS= read -r line; do
             # `db-env` is dotenv-shaped, so blank lines and `#` comments are a
             # natural thing to write in the caller's block scalar. Skip them at
@@ -3201,6 +3215,34 @@ jobs:
             # enforced where the lines are exported below.
             case "${line#"${line%%[![:space:]]*}"}" in
               ''|'#'*) continue ;;
+            esac
+            case "$line" in
+              *=*) ;;
+              *)
+                echo "db-env: '$line' is not a KEY=VALUE pair. Every db-env line" \
+                     "must be KEY=VALUE; blank lines and #-comments are ignored." >&2
+                exit 1 ;;
+            esac
+            key="${line%%=*}"
+            if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              echo "db-env: '$key' is not a valid environment variable name" >&2
+              exit 1
+            fi
+            key_upper="${key^^}"
+            case "$key_upper" in
+              BASH_ENV|BASH_XTRACEFD|ENV|PS4|SHELLOPTS|BASHOPTS|PATH|\
+              NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|\
+              PYTHONPATH|PYTHONHOME|PYTHONSTARTUP|PYTHONUSERBASE|\
+              PERL5OPT|PERL5LIB|RUBYOPT|RUBYLIB|JAVA_TOOL_OPTIONS|\
+              JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_*|DYLD_*|GITHUB_*|RUNNER_*|\
+              ACTIONS_*|GH_*|\
+              GIT_ASKPASS|SSH_ASKPASS|GIT_CONFIG_*|GIT_SSL_CAINFO|\
+              GIT_SSL_CAPATH|NPM_CONFIG_*|\
+              HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|\
+              all_proxy|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|\
+              REQUESTS_CA_BUNDLE|GCONV_PATH)
+                echo "db-env: '$key' cannot override runner execution or workflow state" >&2
+                exit 1 ;;
             esac
             db_env_lines+=("$line")
             case "$line" in
@@ -3377,17 +3419,6 @@ jobs:
           # `https://internal.svc:49187/v1`) nor reject one whose shape it fails
           # to recognise (`--port=3000` used to fail the whole job).
           for line in ${db_env_lines[@]+"${db_env_lines[@]}"}; do
-            # Rejected HERE, not deferred to the runner: a line with no `=`
-            # written straight to $GITHUB_ENV fails the job with an "Invalid
-            # format" error that never mentions db-env, leaving the caller to
-            # guess which of their inputs produced it.
-            case "$line" in
-              *=*) ;;
-              *)
-                echo "db-env: '$line' is not a KEY=VALUE pair. Every db-env line" \
-                     "must be KEY=VALUE; blank lines and #-comments are ignored." >&2
-                exit 1 ;;
-            esac
             key="${line%%=*}"
             value="${line#*=}"
             # $GITHUB_ENV is last-wins and the db-env lines are appended after the
@@ -3502,16 +3533,22 @@ jobs:
           CACHE_IMAGE: ${{ inputs.cache-image }}
           CACHE_ENV: ${{ inputs.cache-env }}
           CACHE_HEALTH_CMD: ${{ inputs.cache-health-cmd }}
+          DB_SERVICE_ENABLED: ${{ inputs.db-image != '' }}
         run: |
           set -euo pipefail
           # Mirrors the workflow_call `default:` above so the extracted run:
           # block behaves identically when exercised directly (test harness).
           CACHE_HEALTH_CMD="${CACHE_HEALTH_CMD:-redis-cli ping}"
+          DB_SERVICE_ENABLED="${DB_SERVICE_ENABLED:-false}"
           container_scope="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB:-}-${RUNNER_NAME:-}-${RUNNER_WORKSPACE:-}"
           CONTAINER_NAME="ci-cache-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(
             printf '%s' "$container_scope" | sha256sum | cut -c1-12)"
           docker_env=()
           cache_env_lines=()
+          if [[ "$CACHE_ENV" == *$'\r'* ]]; then
+            echo "cache-env: carriage returns are not permitted" >&2
+            exit 1
+          fi
           while IFS= read -r line; do
             case "${line#"${line%%[![:space:]]*}"}" in
               ''|'#'*) continue ;;
@@ -3519,6 +3556,32 @@ jobs:
             case "$line" in
               *=*) ;;
               *) echo "cache-env: '$line' is not a KEY=VALUE pair" >&2; exit 1 ;;
+            esac
+            key="${line%%=*}"
+            if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              echo "cache-env: '$key' is not a valid environment variable name" >&2
+              exit 1
+            fi
+            key_upper="${key^^}"
+            case "$key_upper" in
+              DB_HOST|DB_PORT)
+                if [ "$DB_SERVICE_ENABLED" = true ]; then
+                  echo "cache-env: '$key' is reserved while the database service is enabled" >&2
+                  exit 1
+                fi ;;
+              BASH_ENV|BASH_XTRACEFD|ENV|PS4|SHELLOPTS|BASHOPTS|PATH|\
+              NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|\
+              PYTHONPATH|PYTHONHOME|PYTHONSTARTUP|PYTHONUSERBASE|\
+              PERL5OPT|PERL5LIB|RUBYOPT|RUBYLIB|JAVA_TOOL_OPTIONS|\
+              JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_*|DYLD_*|GITHUB_*|RUNNER_*|\
+              ACTIONS_*|GH_*|\
+              GIT_ASKPASS|SSH_ASKPASS|GIT_CONFIG_*|GIT_SSL_CAINFO|\
+              GIT_SSL_CAPATH|NPM_CONFIG_*|\
+              HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|\
+              all_proxy|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|\
+              REQUESTS_CA_BUNDLE|GCONV_PATH)
+                echo "cache-env: '$key' cannot override runner execution or workflow state" >&2
+                exit 1 ;;
             esac
             cache_env_lines+=("$line")
             docker_env+=(-e "$line")

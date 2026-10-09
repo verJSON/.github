@@ -372,6 +372,16 @@ break a cold contract fetch. The unpredictable directory name and the
 generated tooling's pinned digest prevent repository content or persistent
 runner state from selecting executable contract bytes.
 
+Database and cache `*-env` inputs support ordinary `KEY=VALUE` test configuration
+and their documented port placeholders. They reject shell startup hooks, runtime
+code injection and loader variables, executable search path changes, Git
+credential/configuration hooks, GitHub CLI host overrides, proxy and TLS trust
+overrides, npm configuration overrides, and GitHub Actions runner or
+command-file state before starting Docker. Matching is case-insensitive. These
+inputs reject carriage returns before parsing so they cannot create extra
+workflow command-file lines. Values remain unmasked and must not contain
+credentials.
+
 ## Runner security tiers
 
 | Tier | Workload | Route | Cache and credential posture |
@@ -481,3 +491,8 @@ scratch directory in place, or create and remove scratch directories beneath it,
 of deleting the mountpoint itself. Top-level checkout symlinks must be relative and resolve
 inside the checkout; absolute, dangling, cyclic, and workspace-escaping links fail before
 consumer execution.
+
+`cache-env` is validated before the cache container starts. When `db-image` is
+enabled, `DB_HOST` and `DB_PORT` are reserved for the selected database endpoint
+and cache configuration cannot replace them. Cache-only callers may use those
+names as ordinary container configuration.
