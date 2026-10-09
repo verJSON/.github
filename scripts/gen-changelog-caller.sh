@@ -2876,56 +2876,6 @@ fail() { echo "FAIL - $1" >&2; exit 1; }
 
 contract_fail() { fail "$1"; }
 
-# BEGIN CHANGELOG_CONTRACT_SECTIONS
-# Unset CHANGELOG_CONTRACT_SECTIONS runs every section. A named list runs only
-# those sections. An empty list or an unknown name fails before any assertion.
-CHANGELOG_CONTRACT_SECTION_NAMES='generated-set workflow-callers release-workflows renderer fixtures'
-contract_sections_completed=''
-contract_sections_validate() {
-  [ -z "${CHANGELOG_CONTRACT_SECTIONS+x}" ] && return 0
-  [ -n "${CHANGELOG_CONTRACT_SECTIONS}" ] || fail "CHANGELOG_CONTRACT_SECTIONS is empty; name at least one section or unset it to run every section"
-  local item
-  for item in ${CHANGELOG_CONTRACT_SECTIONS}; do
-    case " ${CHANGELOG_CONTRACT_SECTION_NAMES} " in
-      *" ${item} "*) ;;
-      *) fail "unknown changelog contract section: ${item}" ;;
-    esac
-  done
-}
-contract_section_selected() {
-  local name="$1" item
-  case " ${CHANGELOG_CONTRACT_SECTION_NAMES} " in
-    *" ${name} "*) ;;
-    *) fail "unknown changelog contract section marker: ${name}" ;;
-  esac
-  [ -z "${CHANGELOG_CONTRACT_SECTIONS+x}" ] && return 0
-  for item in ${CHANGELOG_CONTRACT_SECTIONS}; do
-    [ "${item}" = "${name}" ] && return 0
-  done
-  return 1
-}
-contract_section_complete() {
-  case " ${contract_sections_completed} " in
-    *" $1 "*) fail "changelog contract section $1 completed twice" ;;
-  esac
-  contract_sections_completed="${contract_sections_completed} $1"
-}
-contract_sections_finish() {
-  local expected item
-  if [ -z "${CHANGELOG_CONTRACT_SECTIONS+x}" ]; then
-    expected="${CHANGELOG_CONTRACT_SECTION_NAMES}"
-  else
-    expected="${CHANGELOG_CONTRACT_SECTIONS}"
-  fi
-  for item in ${expected}; do
-    case " ${contract_sections_completed} " in
-      *" ${item} "*) ;;
-      *) fail "changelog contract section ${item} produced no assertions" ;;
-    esac
-  done
-}
-contract_sections_validate
-# END CHANGELOG_CONTRACT_SECTIONS
 EOF
   emit_contract_resolution
   cat <<'EOF' 
@@ -2934,7 +2884,6 @@ work="$(mktemp -d)"
 fixture_root="$(mktemp -d)"
 trap 'rm -rf "$work" "$fixture_root"' EXIT
 
-if contract_section_selected generated-set; then
 python3 "$contract" validate --repo-root "$root"
 echo "ok - canonical validation accepts this repository"
 
@@ -3250,9 +3199,6 @@ validate_optional_adr_artifacts
 if grep -qE '^ +adr-index: true$' "$validation_workflow"; then
   validate_adr_generator
 fi
-contract_section_complete generated-set
-fi
-if contract_section_selected workflow-callers; then
 changelog_caller_count=0
 for candidate in "$root"/.github/workflows/*.yml "$root"/.github/workflows/*.yaml; do
   [ -f "$candidate" ] || continue
@@ -3349,9 +3295,6 @@ if [ -e "$release_propose_workflow" ]; then
       || fail "$release_propose_workflow dispatch mode must grant actions-write and not issues-write"
   fi
 fi
-contract_section_complete workflow-callers
-fi
-if contract_section_selected release-workflows; then
 grep -q "CONTRACT_REF=\"$CONTRACT_REF\"" "$renderer" \
   || fail "$renderer does not pin the same contract commit"
 cat >"$work/release-shape.py" <<'RELEASE_SHAPE_PY'
@@ -5654,9 +5597,7 @@ echo "ok - render, validation and release automation share one immutable pin"
 # inside the loop above. Do not inspect the loop variable here: after the loop it
 # identifies only the last caller and silently drops coverage for every earlier one.
 echo "ok - every release caller is dispatched explicitly, not derived from pushes to main"
-contract_section_complete release-workflows
-fi
-if contract_section_selected renderer; then
+
 # The regression this file exists to prevent was a hand-written local renderer
 # that kept working while silently diverging from the contract.
 grep -q 'gen-changelog-caller.sh' "$renderer" \
@@ -5848,9 +5789,7 @@ echo "ok - NEXT/ is the only unreleased store"
 # silently reintroduces release-on-merge, which never consumes a fragment.
 [ ! -e "$root/.releaserc.json" ] \
   || fail ".releaserc.json reintroduces semantic-release outside the contract"
-contract_section_complete renderer
-fi
-if contract_section_selected fixtures; then
+
 new_fixture() {
   rm -rf "$fixture_root/case"
   mkdir -p "$fixture_root/case/NEXT"
@@ -6295,9 +6234,6 @@ if python3 "$contract" render-next --repo-root "$fixture_root/case" >/dev/null 2
   fail "render-next succeeded on an emptied NEXT/; the guard above is now dead code"
 fi
 echo "ok - a real release produces exactly the state asserted above"
-contract_section_complete fixtures
-fi
-contract_sections_finish
 EOF
 }
 

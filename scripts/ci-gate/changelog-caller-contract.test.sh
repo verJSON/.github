@@ -9,8 +9,8 @@ set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
-# shellcheck source=changelog-contract-sections.sh
-source "$here/changelog-contract-sections.sh"
+# shellcheck source=scripts/changelog-caller-contract-shard.sh
+source "$repo_root/scripts/changelog-caller-contract-shard.sh"
 if ! changelog_caller_shard_name_ok "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}"; then
   printf 'FAIL - CHANGELOG_CALLER_CONTRACT_SHARD must be all or 1..4\n' >&2
   exit 1
@@ -599,8 +599,6 @@ bash "$gen" workflow "$sha" --scope @acme >/dev/null 2>&1 \
 # leaves no partial file behind for the next run to exec as if it were the
 # contract. Exercised with a stubbed curl so no network is required.
 tmproot="$(mktemp -d)"
-CHANGELOG_CONTRACT_UNMAPPED_FILE="$tmproot/unmapped-contract-cases"
-: >"$CHANGELOG_CONTRACT_UNMAPPED_FILE"
 # Redefined once the adopter scheduler exists. Early exits only remove the scratch tree.
 drain_adopter_jobs() { :; }
 trap 'drain_adopter_jobs; rm -rf "$tmproot"' EXIT
@@ -1231,18 +1229,14 @@ build_split_adopter() {
 }
 
 run_adopter() {
-  local status=0 adopter_log cache_env=() case_id
+  local status=0 adopter_log cache_env=()
   if [ "${caller_case_nested:-}" != 1 ]; then
-    case_id="${CHANGELOG_CONTRACT_CASE_ID:-$(basename "$1")}"
-    if ! changelog_caller_case_selected "$case_id"; then
+    if ! changelog_caller_case_selected "$(basename "$1")"; then
       caller_assertions_suspended=1
       return 0
     fi
     caller_assertions_suspended=0
-    CHANGELOG_CONTRACT_CASE_ID="$case_id"
   fi
-  case_id="${CHANGELOG_CONTRACT_CASE_ID:-$(basename "$1")}"
-  changelog_contract_apply_sections "$case_id"
   # A synchronous suite keeps running beside scheduled snapshots. It does not
   # wait for them: isolation already keeps their logs off this run.out (#1733).
   adopter_log="$1.contract-out"
@@ -1379,8 +1373,6 @@ schedule_adopter_script() {
     fails=0
     status=0
     caller_case_nested=1
-    CHANGELOG_CONTRACT_CASE_ID="$case_id"
-    export CHANGELOG_CONTRACT_CASE_ID
     ADOPTER_ISOLATED_LOG=1
     run_adopter "$copy" || status=$?
     # shellcheck disable=SC2034 # read by the assertion script evaluated below
@@ -2197,8 +2189,6 @@ expect_rejection() {
   (
     fails=0
     caller_case_nested=1
-    CHANGELOG_CONTRACT_CASE_ID="$label"
-    export CHANGELOG_CONTRACT_CASE_ID
     ADOPTER_ISOLATED_LOG=1
     expect_rejection_body "$seq" "$label" "$mutator" "$@"
     printf '%s\n' "$fails" >"$result"
@@ -2245,8 +2235,6 @@ expect_release_mode_rejection() {
   (
     fails=0
     caller_case_nested=1
-    CHANGELOG_CONTRACT_CASE_ID="$label"
-    export CHANGELOG_CONTRACT_CASE_ID
     ADOPTER_ISOLATED_LOG=1
     expect_release_mode_rejection_body "$seq" "$release_mode" "$label" "$mutator" "$expected"
     printf '%s\n' "$fails" >"$result"
@@ -5657,8 +5645,6 @@ expect_unestablished_pin() {
   (
     fails=0
     caller_case_nested=1
-    CHANGELOG_CONTRACT_CASE_ID="$label"
-    export CHANGELOG_CONTRACT_CASE_ID
     ADOPTER_ISOLATED_LOG=1
     expect_unestablished_pin_body "$seq" "$label" "$member" "$mutator" "$phrase"
     printf '%s\n' "$fails" >"$result"
@@ -5877,8 +5863,8 @@ drain_adopter_jobs
 if [ "$caller_case_count" -lt 1 ]; then
   fail "changelog caller contract recorded no cases"
 fi
-if [ -s "$CHANGELOG_CONTRACT_UNMAPPED_FILE" ]; then
-  fail "changelog contract cases have no section map: $(tr '\n' ' ' <"$CHANGELOG_CONTRACT_UNMAPPED_FILE")"
+if [ "$caller_case_ran" -lt 1 ]; then
+  fail "changelog caller contract ran no cases"
 fi
 [ "$fails" -eq 0 ] || exit 1
 echo "All tests passed."

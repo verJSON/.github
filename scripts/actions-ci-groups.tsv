@@ -145,7 +145,7 @@ merge-gate	bash scripts/ci-gate/terminal-live-base.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-pin.test.sh
 merge-gate	bash scripts/ci-gate/budget-exceeded.test.sh
 docs	bash scripts/gen-adr-index.sh --check
-changelog-release-1	bash scripts/ci-gate/changelog-contract-sections.test.sh
+changelog-release-1	bash scripts/ci-gate/changelog-caller-contract-shard.test.sh
 changelog-release-1	bash scripts/ci-gate/gen-adr-index.test.sh
 changelog-release-2	python3 scripts/ci-gate/adr-live-coverage-claims.test.py
 changelog-release-3	python3 scripts/ci-gate/adr-number-collision.test.py
