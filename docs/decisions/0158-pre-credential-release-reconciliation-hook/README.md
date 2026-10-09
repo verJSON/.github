@@ -103,7 +103,9 @@ object alternates, merge/cherry-pick/revert state including `MERGE_HEAD`, every 
 `hooks/` (content *and* executable bit), index entries and flags, `HEAD`, and the complete
 refs listing — for both the release checkout and the pinned contract checkout, resolving
 each `--absolute-git-dir` from the trusted pre-hook state. Any replacement ref, including
-one that existed before the hook, fails closed. The
+one that existed before the hook, fails closed. Pre-existing merge, cherry-pick, revert,
+and squash operation state is rejected before the hook runs, since `MERGE_HEAD` can add an
+unreviewed parent to the release commit. The
 first post-hook comparison reads these filesystem surfaces directly and rejects any change
 before invoking Git. This ordering matters: if the hook changed `.git/config` to set
 `core.fsmonitor`, a Git probe could otherwise execute that helper outside Bubblewrap before

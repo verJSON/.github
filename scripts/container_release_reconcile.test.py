@@ -521,6 +521,21 @@ class ReconcileTest(unittest.TestCase):
         self.assertIn("Git control surface", result.stderr)
         self.assertIn("MERGE_HEAD", result.stderr)
 
+    def test_rejects_pre_existing_merge_state_before_running_the_hook(self):
+        marker = self.fixture.repo / "hook-ran"
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            f"printf ran > {shlex.quote(str(marker))}\n"
+        )
+        (self.fixture.repo / ".git" / "MERGE_HEAD").write_text("a" * 40 + "\n", encoding="ascii")
+
+        result = self.fixture.run()
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("Git operation state is not allowed", result.stderr)
+        self.assertIn("MERGE_HEAD", result.stderr)
+        self.assertFalse(marker.exists(), "reconciliation hook ran with pre-existing merge state")
+
     def test_rejects_a_hook_that_installs_a_git_replacement_ref(self):
         git(self.fixture.repo, "commit", "--allow-empty", "-qm", "second commit")
         self.fixture.write_hook(

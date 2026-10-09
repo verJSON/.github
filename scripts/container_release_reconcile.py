@@ -37,6 +37,13 @@ GIT_FILESYSTEM_SURFACES = (
     "REVERT_HEAD",
     "SQUASH_MSG",
 )
+GIT_OPERATION_STATE_SURFACES = (
+    "MERGE_HEAD",
+    "MERGE_MSG",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "SQUASH_MSG",
+)
 # Surfaces the release engine itself owns, or that decide what code runs with the
 # release App token. Reconciliation may never be pointed at any of them.
 PROTECTED_ROOTS = frozenset({"RELEASES", "CHANGELOG", "NEXT"})
@@ -182,6 +189,18 @@ def filesystem_control_surface(root: Path, git_dir: Path) -> dict:
     for entry in listing:
         surface[f"filesystem/hooks/{entry.name}"] = filesystem_entry_surface(entry)
     return surface
+
+
+def reject_pre_existing_git_operation_state(checkouts: dict) -> None:
+    for label, (_, git_dir) in checkouts.items():
+        present = [
+            name for name in GIT_OPERATION_STATE_SURFACES
+            if filesystem_entry_surface(git_dir / name) is not None
+        ]
+        if present:
+            raise ReconcileError(
+                f"Git operation state is not allowed in the {label}: " + ", ".join(present)
+            )
 
 
 def control_surface(root: Path, git_dir: Path) -> dict:
@@ -589,7 +608,6 @@ def reconcile(root: Path, args) -> list:
     require_untracked_staged_list(root, args.staged_list)
     require_pinned_contract(root, args.contract_root, args.contract_ref, "before reconciliation")
     require_reviewed_hook(root)
-    require_clean_tracked_tree(root)
     # Resolve the git directories from the trusted pre-hook state: once the hook has
     # run, the answer to "where is .git" is exactly what an attacker would redirect.
     contract = root / args.contract_root
@@ -599,6 +617,8 @@ def reconcile(root: Path, args) -> list:
             contract, Path(git(contract, "rev-parse", "--absolute-git-dir").strip()),
         ),
     }
+    reject_pre_existing_git_operation_state(checkouts)
+    require_clean_tracked_tree(root)
     baseline = control_surfaces(checkouts)
     pre_existing_untracked = untracked_paths(root)
     pre_existing_ignored = ignored_paths(root)
