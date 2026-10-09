@@ -9,6 +9,8 @@ platform	python3 scripts/action-pin-conformance.test.py
 platform	python3 scripts/workflow-checkout-isolation.test.py
 platform	bash scripts/actions-ci-policy.test.sh
 platform	bash scripts/actions-ci-groups.test.sh
+platform	bash scripts/actions-ci-group-output.test.sh
+platform	bash scripts/actions-ci-change-scope.test.sh
 platform	bash scripts/actions-ci-python-dependencies.test.sh
 platform	bash scripts/ci-gate/organization-neutral-ci-contract.test.sh
 platform	bash scripts/ci-gate/verjson-ci-canonical-contract.test.sh
@@ -144,14 +146,14 @@ merge-gate	python3 scripts/ci-gate/closing-issue-visibility.test.py
 merge-gate	bash scripts/ci-gate/terminal-live-base.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-pin.test.sh
 merge-gate	bash scripts/ci-gate/budget-exceeded.test.sh
-changelog-release	bash scripts/gen-adr-index.sh --check
+docs	bash scripts/gen-adr-index.sh --check
 changelog-release	bash scripts/ci-gate/gen-adr-index.test.sh
 changelog-release	python3 scripts/ci-gate/adr-live-coverage-claims.test.py
 changelog-release	python3 scripts/ci-gate/adr-number-collision.test.py
-changelog-release	bash scripts/render-next.sh >/dev/null
+docs	bash scripts/render-next.sh >/dev/null
 changelog-release	bash scripts/ci-gate/render-next.test.sh
 changelog-release	python3 scripts/changelog.test.py
-changelog-release	bash scripts/changelog-fragment-schema.test.sh
+docs	bash scripts/changelog-fragment-schema.test.sh
 changelog-release	python3 scripts/v1-readiness-contract.test.py
 changelog-release	python3 scripts/changelog-pre-contract-migration.test.py
 changelog-release	python3 scripts/ci-gate/changelog-tag-visibility.test.py
@@ -201,16 +203,16 @@ changelog-release	python3 scripts/render_changelog_adoption_issue_test.py
 changelog-release	bash scripts/component-changelog-contract.test.sh
 changelog-release	bash scripts/changelog-pr-gate-generator.test.sh
 changelog-release	bash scripts/changelog-migration.test.sh
-changelog-release	python3 scripts/changelog.py validate --repo-root .
+docs	python3 scripts/changelog.py validate --repo-root .
 changelog-release	bash scripts/changelog-release-permissions.test.sh
 changelog-release	python3 scripts/changelog-release-app-token.test.py
 changelog-release	python3 scripts/renovate-changelog.test.py
 changelog-release	python3 scripts/ci-gate/renovate-changelog.test.py
 changelog-release	python3 scripts/release-app-canary.test.py
 changelog-release	bash scripts/changelog-release-branch-guard.test.sh
-changelog-release	bash scripts/doc-tag-pins.test.sh
-changelog-release	bash scripts/doc-fragment-names.test.sh
-changelog-release	bash scripts/trigger-scope.test.sh
+docs	bash scripts/doc-tag-pins.test.sh
+docs	bash scripts/doc-fragment-names.test.sh
+docs	bash scripts/trigger-scope.test.sh
 merge-gate	python3 scripts/ci-gate/app-slug-fail-closed.test.py
 merge-gate	bash scripts/ci-gate/orphaned-authorization-recovery.test.sh
 merge-gate	bash scripts/assert-no-deferred-checks.test.sh

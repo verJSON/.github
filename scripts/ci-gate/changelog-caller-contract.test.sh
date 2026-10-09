@@ -583,7 +583,9 @@ bash "$gen" workflow "$sha" --scope @acme >/dev/null 2>&1 \
 # leaves no partial file behind for the next run to exec as if it were the
 # contract. Exercised with a stubbed curl so no network is required.
 tmproot="$(mktemp -d)"
-trap 'rm -rf "$tmproot"' EXIT
+# Redefined once the adopter scheduler exists. Early exits only remove the scratch tree.
+drain_adopter_jobs() { :; }
+trap 'drain_adopter_jobs; rm -rf "$tmproot"' EXIT
 mkdir -p "$tmproot/repo/scripts" "$tmproot/repo/NEXT" "$tmproot/bin" "$tmproot/cache"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$tmproot/bin/curl"
 chmod +x "$tmproot/bin/curl"
@@ -1112,6 +1114,14 @@ build_adopter() {
   # before the irreversible snapshot, installs with GITHUB_TOKEN, and lets the
   # two halves of one release route onto two runner pools.
   local dir="$1" with_release="${2:-yes}" caller="${3:-workflow}" release_mode="${4:-release-node}"
+  # Default adopters are identical. Later cases copy the pristine snapshot instead of
+  # regenerating the caller set and committing it again (#1733).
+  if [ "$with_release" = yes ] && [ "$caller" = workflow ] && [ "$release_mode" = release-node ] \
+    && [ -n "${adopter_template:-}" ] && [ -d "$adopter_template" ]; then
+    rm -rf "$dir"
+    cp -a "$adopter_template" "$dir"
+    return 0
+  fi
   mkdir -p "$dir/NEXT" "$dir/scripts" "$dir/.github/workflows"
   bash "$gen" codeowners "$sha" >"$dir/.github/CODEOWNERS"
   bash "$gen" renderer "$sha" >"$dir/scripts/render-next.sh"
@@ -1203,11 +1213,156 @@ build_split_adopter() {
 }
 
 run_adopter() {
-  ( cd "$1" && ./scripts/changelog-contract.test.sh ) >"$tmproot/run.out" 2>&1
+  local status=0 adopter_log cache_env=()
+  # A synchronous suite keeps running beside scheduled snapshots. It does not
+  # wait for them: isolation already keeps their logs off this run.out (#1733).
+  adopter_log="$1.contract-out"
+  if [ "${ADOPTER_ISOLATED_LOG:-}" = 1 ]; then
+    mkdir -p "$1.cache/verjson-changelog/$sha"
+    cp -a "$XDG_CACHE_HOME/verjson-changelog/$sha/." "$1.cache/verjson-changelog/$sha/"
+    cache_env=("XDG_CACHE_HOME=$1.cache")
+  fi
+  (
+    cd "$1" && env "${cache_env[@]}" ./scripts/changelog-contract.test.sh
+  ) >"$adopter_log" 2>&1 || status=$?
+  if [ "${ADOPTER_ISOLATED_LOG:-}" != 1 ]; then
+    last_rejection_pid=
+    cp "$adopter_log" "$tmproot/run.out"
+  fi
+  return "$status"
+}
+
+# Independent adopter mutations share no directory. Run several at once on this
+# job's CPUs instead of occupying the runner for one suite at a time (#1733).
+ADOPTER_SLOTS="${ADOPTER_SLOTS:-$(nproc 2>/dev/null || echo 2)}"
+[ "$ADOPTER_SLOTS" -gt 16 ] && ADOPTER_SLOTS=16
+[ "$ADOPTER_SLOTS" -ge 1 ] || ADOPTER_SLOTS=1
+adopter_job_pids=()
+adopter_job_results=()
+reject_seq=0
+
+record_adopter_job() {
+  local result="$1" status="$2" count=0
+  if [ -f "$result" ]; then
+    count="$(tr -cd '0-9' <"$result")"
+    [ -n "$count" ] || count=1
+    fails=$((fails + count))
+  else
+    fails=$((fails + 1))
+    printf 'FAIL - adopter job exited %s without a result\n' "$status"
+  fi
+}
+
+reap_adopter_pid() {
+  local target="$1" i pid result status
+  local -a kept_pids=() kept_results=()
+  for i in "${!adopter_job_pids[@]}"; do
+    pid="${adopter_job_pids[$i]}"
+    result="${adopter_job_results[$i]}"
+    if [ "$pid" != "$target" ]; then
+      kept_pids+=("$pid")
+      kept_results+=("$result")
+      continue
+    fi
+    status=0
+    wait "$pid" || status=$?
+    record_adopter_job "$result" "$status"
+  done
+  if [ "${#kept_pids[@]}" -eq 0 ]; then
+    adopter_job_pids=()
+    adopter_job_results=()
+  else
+    adopter_job_pids=("${kept_pids[@]}")
+    adopter_job_results=("${kept_results[@]}")
+  fi
+}
+
+sync_last_rejection() {
+  if [ -n "${last_rejection_pid:-}" ]; then
+    reap_adopter_pid "$last_rejection_pid"
+    if [ -n "${last_rejection_log:-}" ] && [ -f "$last_rejection_log" ]; then
+      cp "$last_rejection_log" "$tmproot/run.out"
+      # Suites print the tree they ran in. Scheduled jobs run on a snapshot so
+      # the caller can keep mutating the original; rewrite that snapshot path
+      # back before assertions that name the caller's directory.
+      if [ -n "${last_rejection_copy:-}" ] && [ -n "${last_rejection_origin:-}" ]; then
+        sed -i "s|$last_rejection_copy|$last_rejection_origin|g" "$tmproot/run.out"
+      fi
+    fi
+    last_rejection_pid=
+    last_rejection_copy=
+    last_rejection_origin=
+  fi
+}
+
+pump_adopter_jobs() {
+  local pid result status
+  while [ "${#adopter_job_pids[@]}" -ge "$ADOPTER_SLOTS" ]; do
+    pid="${adopter_job_pids[0]}"
+    result="${adopter_job_results[0]}"
+    status=0
+    wait "$pid" || status=$?
+    record_adopter_job "$result" "$status"
+    if [ "${#adopter_job_pids[@]}" -gt 1 ]; then
+      adopter_job_pids=("${adopter_job_pids[@]:1}")
+      adopter_job_results=("${adopter_job_results[@]:1}")
+    else
+      adopter_job_pids=()
+      adopter_job_results=()
+    fi
+  done
+}
+
+drain_adopter_jobs() {
+  local pid result status
+  while [ "${#adopter_job_pids[@]}" -gt 0 ]; do
+    pid="${adopter_job_pids[0]}"
+    result="${adopter_job_results[0]}"
+    status=0
+    wait "$pid" || status=$?
+    record_adopter_job "$result" "$status"
+    if [ "${#adopter_job_pids[@]}" -gt 1 ]; then
+      adopter_job_pids=("${adopter_job_pids[@]:1}")
+      adopter_job_results=("${adopter_job_results[@]:1}")
+    else
+      adopter_job_pids=()
+      adopter_job_results=()
+    fi
+  done
+}
+
+
+schedule_adopter_script() {
+  local dir="$1" script="$2" seq result copy
+  reject_seq=$((reject_seq + 1))
+  seq="$reject_seq"
+  result="$tmproot/sched-result-$seq"
+  copy="$tmproot/sched-$seq"
+  rm -rf "$copy"
+  cp -a "$dir" "$copy"
+  (
+    fails=0
+    status=0
+    ADOPTER_ISOLATED_LOG=1
+    run_adopter "$copy" || status=$?
+    # shellcheck disable=SC2034 # read by the assertion script evaluated below
+    ADOPTER_LOG="$copy.contract-out"
+    eval "$script" || true
+    printf '%s\n' "$fails" >"$result"
+  ) &
+  last_rejection_pid="$!"
+  last_rejection_log="$copy.contract-out"
+  last_rejection_copy="$copy"
+  last_rejection_origin="$dir"
+  adopter_job_pids+=("$last_rejection_pid")
+  adopter_job_results+=("$result")
+  pump_adopter_jobs
 }
 
 adopter="$tmproot/adopter"
 build_adopter "$adopter"
+adopter_template="$tmproot/adopter-template"
+cp -a "$adopter" "$adopter_template"
 [ -f "$adopter/.github/workflows/release.yml" ] \
   && [ ! -e "$adopter/.github/workflows/changelog-release.yml" ] \
   && pass "generated adopter installs the canonical release caller path" \
@@ -1220,41 +1375,66 @@ grep -q "release-propose.yml@$sha" "$adopter/.github/workflows/release-propose.y
   && grep -qE "^ +contract_ref: $sha$" "$adopter/.github/workflows/release-propose.yml" \
   && pass "canonical release proposer pins uses and contract_ref to the same commit" \
   || fail "canonical release proposer does not bind uses and contract_ref to $sha"
-run_adopter "$adopter" \
-  && pass "emitted suite passes against an unreleased adopter" \
-  || fail "emitted suite failed before any release: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite passes against an unreleased adopter"
+else
+  fail "emitted suite failed before any release: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 
 stale_renovate_caller="$tmproot/adopter-stale-renovate-caller"
 cp -a "$adopter" "$stale_renovate_caller"
 sed -i "s/renovate-changelog.yml@$sha/renovate-changelog.yml@0000000000000000000000000000000000000000/" \
   "$stale_renovate_caller/.github/workflows/renovate-changelog.yml"
-run_adopter "$stale_renovate_caller" \
-  && fail "emitted suite accepted a stale Renovate attribution reusable pin" \
-  || pass "emitted suite rejects a stale Renovate attribution reusable pin"
+schedule_adopter_script "$stale_renovate_caller" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a stale Renovate attribution reusable pin"
+else
+  pass "emitted suite rejects a stale Renovate attribution reusable pin"
+fi
+SCHED_SCRIPT
+)"
 
 overprivileged_renovate_caller="$tmproot/adopter-overprivileged-renovate-caller"
 cp -a "$adopter" "$overprivileged_renovate_caller"
 sed -i 's/^  contents: read$/  contents: write/' \
   "$overprivileged_renovate_caller/.github/workflows/renovate-changelog.yml"
-run_adopter "$overprivileged_renovate_caller" \
-  && fail "emitted suite accepted a Contents-write Renovate attribution caller" \
-  || pass "emitted suite rejects a Contents-write Renovate attribution caller"
+schedule_adopter_script "$overprivileged_renovate_caller" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a Contents-write Renovate attribution caller"
+else
+  pass "emitted suite rejects a Contents-write Renovate attribution caller"
+fi
+SCHED_SCRIPT
+)"
 
 wrong_event_renovate_caller="$tmproot/adopter-wrong-event-renovate-caller"
 cp -a "$adopter" "$wrong_event_renovate_caller"
 sed -i 's/^  pull_request_target:$/  pull_request:/' \
   "$wrong_event_renovate_caller/.github/workflows/renovate-changelog.yml"
-run_adopter "$wrong_event_renovate_caller" \
-  && fail "emitted suite accepted an event that cannot write the bot head" \
-  || pass "emitted suite rejects a Renovate attribution caller on the wrong event"
+schedule_adopter_script "$wrong_event_renovate_caller" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted an event that cannot write the bot head"
+else
+  pass "emitted suite rejects a Renovate attribution caller on the wrong event"
+fi
+SCHED_SCRIPT
+)"
 
 missing_gate_renovate_caller="$tmproot/adopter-missing-renovate-gate"
 cp -a "$adopter" "$missing_gate_renovate_caller"
 sed -i '/^    if: >-$/,/^    uses:/ { /^    uses:/!d; }' \
   "$missing_gate_renovate_caller/.github/workflows/renovate-changelog.yml"
-run_adopter "$missing_gate_renovate_caller" \
-  && fail "emitted suite accepted a Renovate caller with no admission gate" \
-  || pass "emitted suite rejects a Renovate caller with no admission gate (#1014)"
+schedule_adopter_script "$missing_gate_renovate_caller" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a Renovate caller with no admission gate"
+else
+  pass "emitted suite rejects a Renovate caller with no admission gate (#1014)"
+fi
+SCHED_SCRIPT
+)"
 
 for mutation in fork actor branch duplicate-if; do
   mutated_renovate_caller="$tmproot/adopter-mutated-renovate-$mutation"
@@ -1286,25 +1466,40 @@ stale_proposer="$tmproot/adopter-stale-proposer"
 cp -a "$adopter" "$stale_proposer"
 sed -i "s/release-propose.yml@$sha/release-propose.yml@0000000000000000000000000000000000000000/" \
   "$stale_proposer/.github/workflows/release-propose.yml"
-run_adopter "$stale_proposer" \
-  && fail "emitted suite accepted a release proposer on another pin" \
-  || pass "emitted suite rejects a release proposer on another pin"
+schedule_adopter_script "$stale_proposer" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a release proposer on another pin"
+else
+  pass "emitted suite rejects a release proposer on another pin"
+fi
+SCHED_SCRIPT
+)"
 
 overprivileged_proposer="$tmproot/adopter-overprivileged-proposer"
 cp -a "$adopter" "$overprivileged_proposer"
 sed -i '/^      issues: write$/a\      actions: write' \
   "$overprivileged_proposer/.github/workflows/release-propose.yml"
-run_adopter "$overprivileged_proposer" \
-  && fail "emitted suite accepted both issue and dispatch authority in propose mode" \
-  || pass "emitted suite rejects mixed release-proposer write authority"
+schedule_adopter_script "$overprivileged_proposer" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted both issue and dispatch authority in propose mode"
+else
+  pass "emitted suite rejects mixed release-proposer write authority"
+fi
+SCHED_SCRIPT
+)"
 
 event_selected_proposer="$tmproot/adopter-event-selected-proposer"
 cp -a "$adopter" "$event_selected_proposer"
 sed -i '/^      contract_ref:/a\      autonomy: ${{ inputs.autonomy }}' \
   "$event_selected_proposer/.github/workflows/release-propose.yml"
-run_adopter "$event_selected_proposer" \
-  && fail "emitted suite accepted event-selected release autonomy" \
-  || pass "emitted suite rejects event-selected release autonomy"
+schedule_adopter_script "$event_selected_proposer" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted event-selected release autonomy"
+else
+  pass "emitted suite rejects event-selected release autonomy"
+fi
+SCHED_SCRIPT
+)"
 
 nested_adopter="$tmproot/adopter-nested-only-release"
 build_adopter "$nested_adopter"
@@ -1312,36 +1507,61 @@ bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
   --default-prefix schema-v --default-component cli-schema \
   >"$nested_adopter/.github/workflows/release.yml"
 bash "$gen" contract-test "$sha" --only-package-dir packages/cli-schema >"$nested_adopter/scripts/changelog-contract.test.sh"
-run_adopter "$nested_adopter" \
-  && pass "nested-only release and contract agree on component defaults without selecting root (#1286, #1565)" \
-  || fail "nested-only generated contract failed: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "nested-only release and contract agree on component defaults without selecting root (#1286, #1565)"
+else
+  fail "nested-only generated contract failed: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 sed -i "s/default: 'schema-v'/default: v/" \
   "$nested_adopter/.github/workflows/release.yml"
-run_adopter "$nested_adopter" \
-  && fail "component release contract accepted a mutated default prefix" \
-  || pass "component release contract rejects default-prefix byte drift (#1565)"
+schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "component release contract accepted a mutated default prefix"
+else
+  pass "component release contract rejects default-prefix byte drift (#1565)"
+fi
+SCHED_SCRIPT
+)"
 bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
   --default-prefix schema-v --default-component cli-schema \
   >"$nested_adopter/.github/workflows/release.yml"
 sed -i "s/default: 'cli-schema'/default: ''/" \
   "$nested_adopter/.github/workflows/release.yml"
-run_adopter "$nested_adopter" \
-  && fail "component release contract accepted a mutated default component" \
-  || pass "component release contract rejects default-component byte drift (#1565)"
+schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "component release contract accepted a mutated default component"
+else
+  pass "component release contract rejects default-component byte drift (#1565)"
+fi
+SCHED_SCRIPT
+)"
 bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
   --default-prefix schema-v --default-component cli-schema \
   >"$nested_adopter/.github/workflows/release.yml"
 sed -i 's/package_dirs=(packages\/cli-schema)/package_dirs=(. packages\/cli-schema)/' "$nested_adopter/.github/workflows/release.yml"
-run_adopter "$nested_adopter" \
-  && fail "nested-only contract accepted an extra root verification stamp" \
-  || pass "nested-only contract rejects extra root verification stamp (#1286)"
+schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "nested-only contract accepted an extra root verification stamp"
+else
+  pass "nested-only contract rejects extra root verification stamp (#1286)"
+fi
+SCHED_SCRIPT
+)"
 bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
   --default-prefix schema-v --default-component cli-schema \
   >"$nested_adopter/.github/workflows/release.yml"
 sed -i 's/\["packages\/cli-schema"\]/[".","packages\/cli-schema"]/' "$nested_adopter/.github/workflows/release.yml"
-run_adopter "$nested_adopter" \
-  && fail "nested-only contract accepted root publication" \
-  || pass "nested-only contract rejects extra root publication (#1286)"
+schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "nested-only contract accepted root publication"
+else
+  pass "nested-only contract rejects extra root publication (#1286)"
+fi
+SCHED_SCRIPT
+)"
 
 multi_release_adopter="$tmproot/adopter-multi-release"
 build_adopter "$multi_release_adopter"
@@ -1352,14 +1572,25 @@ bash "$gen" contract-test "$sha" \
   --release-caller-package-dirs .github/workflows/release-cli-schema.yml=packages/cli-schema \
   >"$multi_release_adopter/scripts/changelog-contract.test.sh"
 chmod +x "$multi_release_adopter/scripts/changelog-contract.test.sh"
-run_adopter "$multi_release_adopter" \
-  && pass "generated contract validates multiple release callers with distinct package selections" \
-  || fail "generated contract rejects multiple release callers with distinct package selections"
+schedule_adopter_script "$multi_release_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "generated contract validates multiple release callers with distinct package selections"
+else
+  fail "generated contract rejects multiple release callers with distinct package selections"
+fi
+SCHED_SCRIPT
+)"
 sed -i '0,/^  workflow_dispatch:$/s//  push:/' \
   "$multi_release_adopter/.github/workflows/release-cli-schema.yml"
-run_adopter "$multi_release_adopter" \
-  && fail "generated contract accepted a push trigger on the first of multiple release callers" \
-  || pass "generated contract checks the trigger on every release caller (#1488)"
+schedule_adopter_script "$multi_release_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "generated contract accepted a push trigger on the first of multiple release callers"
+else
+  pass "generated contract checks the trigger on every release caller (#1488)"
+fi
+SCHED_SCRIPT
+)"
+sync_last_rejection
 grep -qF "$multi_release_adopter/.github/workflows/release-cli-schema.yml declares no readable top-level" \
   "$tmproot/run.out" \
   && pass "multi-release trigger failure names the non-final caller" \
@@ -1370,33 +1601,49 @@ build_adopter "$custom_adopter"
 printf '%s\n' "$custom_release" >"$custom_adopter/.github/workflows/release.yml"
 printf '%s\n' "$custom_contract" >"$custom_adopter/scripts/changelog-contract.test.sh"
 chmod +x "$custom_adopter/scripts/changelog-contract.test.sh"
-run_adopter "$custom_adopter" \
-  && pass "custom release caller and contract test accept the same parameters (#520)" \
-  || fail "matching custom release parameters were rejected: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$custom_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "custom release caller and contract test accept the same parameters (#520)"
+else
+  fail "matching custom release parameters were rejected: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 sed -i 's/--package-dir compat/--package-dir ignored --only-package-dir . --only-package-dir compat/' \
   "$custom_adopter/.github/workflows/release.yml"
-run_adopter "$custom_adopter" \
-  && fail "custom contract accepted mixed additive and exact package selection flags" \
-  || {
-    grep -qF 'does not declare valid package directories in generator provenance (#1717)' "$tmproot/run.out" \
+schedule_adopter_script "$custom_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "custom contract accepted mixed additive and exact package selection flags"
+else
+    grep -qF 'does not declare valid package directories in generator provenance (#1717)' "$ADOPTER_LOG" \
       && pass "custom contract rejects mixed package selection modes" \
-      || fail "mixed package selection was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-  }
+      || fail "mixed package selection was rejected for another reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 printf '%s\n' "$custom_release" >"$custom_adopter/.github/workflows/release.yml"
 sed -i 's/compat/other/g' "$custom_adopter/.github/workflows/release.yml"
-run_adopter "$custom_adopter" \
-  && fail "custom contract accepted a coordinated package-selection change" \
-  || {
-    grep -qF 'does not stamp every package directory selected for publication (#557)' "$tmproot/run.out" \
+schedule_adopter_script "$custom_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "custom contract accepted a coordinated package-selection change"
+else
+    grep -qF 'does not stamp every package directory selected for publication (#557)' "$ADOPTER_LOG" \
       && pass "custom contract pins package selection independently of workflow provenance" \
-      || fail "coordinated package selection was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-  }
+      || fail "coordinated package selection was rejected for another reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 printf '%s\n' "$custom_release" >"$custom_adopter/.github/workflows/release.yml"
 sed -i "s/scope: '@acme'/scope: '@other'/" \
   "$custom_adopter/.github/workflows/release.yml"
-run_adopter "$custom_adopter" \
-  && fail "custom contract accepted a release scope that drifted after generation" \
-  || pass "custom contract rejects release parameter drift (#520)"
+schedule_adopter_script "$custom_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "custom contract accepted a release scope that drifted after generation"
+else
+  pass "custom contract rejects release parameter drift (#520)"
+fi
+SCHED_SCRIPT
+)"
 
 omitted_stamp_adopter="$tmproot/adopter-omitted-secondary-stamp"
 build_adopter "$omitted_stamp_adopter"
@@ -1405,15 +1652,25 @@ printf '%s\n' "$custom_contract" >"$omitted_stamp_adopter/scripts/changelog-cont
 chmod +x "$omitted_stamp_adopter/scripts/changelog-contract.test.sh"
 sed -i 's/package_dirs=(. compat)/package_dirs=(.)/' \
   "$omitted_stamp_adopter/.github/workflows/release.yml"
-run_adopter "$omitted_stamp_adopter" \
-  && fail "custom contract accepted a verification stamp that omitted a published package" \
-  || pass "custom contract rejects a verification stamp that omits a published package (#557)"
+schedule_adopter_script "$omitted_stamp_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "custom contract accepted a verification stamp that omitted a published package"
+else
+  pass "custom contract rejects a verification stamp that omits a published package (#557)"
+fi
+SCHED_SCRIPT
+)"
 
 generated_adopter="$tmproot/adopter-generated-artifacts"
 build_adopter "$generated_adopter" no generated-artifacts
-run_adopter "$generated_adopter" \
-  && pass "emitted suite accepts the generated-artifacts caller" \
-  || fail "emitted suite rejects the generated-artifacts caller: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$generated_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite accepts the generated-artifacts caller"
+else
+  fail "emitted suite rejects the generated-artifacts caller: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 
 retired_adopter="$tmproot/adopter-retired-changelog-workflow"
 build_adopter "$retired_adopter" no workflow
@@ -1421,9 +1678,14 @@ sed -i \
   -e "s#generated-artifacts.yml@$sha#changelog-validate.yml@$sha#" \
   -e '/^      changelog: true$/d' \
   "$retired_adopter/.github/workflows/changelog.yml"
-run_adopter "$retired_adopter" \
-  && fail "emitted suite accepts the retired changelog-validate workflow" \
-  || pass "emitted suite requires the generated workflow behind the required context (#835)"
+schedule_adopter_script "$retired_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepts the retired changelog-validate workflow"
+else
+  pass "emitted suite requires the generated workflow behind the required context (#835)"
+fi
+SCHED_SCRIPT
+)"
 
 cross_job_adopter="$tmproot/adopter-cross-job-generated-artifacts-caller"
 build_adopter "$cross_job_adopter" no workflow
@@ -1435,63 +1697,103 @@ cat >>"$cross_job_adopter/.github/workflows/changelog.yml" <<'YAML'
     steps:
       - run: 'true'
 YAML
-run_adopter "$cross_job_adopter" \
-  && fail "emitted suite accepts canonical fields spread across different jobs" \
-  || pass "emitted suite binds the canonical caller fields to the changelog job (#835)"
+schedule_adopter_script "$cross_job_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepts canonical fields spread across different jobs"
+else
+  pass "emitted suite binds the canonical caller fields to the changelog job (#835)"
+fi
+SCHED_SCRIPT
+)"
 
 named_job_adopter="$tmproot/adopter-named-changelog-job"
 cp -a "$generated_adopter" "$named_job_adopter"
 sed -i '/^  changelog:$/a\    name: renamed required check' \
   "$named_job_adopter/.github/workflows/changelog.yml"
-run_adopter "$named_job_adopter" \
-  && fail "emitted suite accepts a changelog job with a check-name override" \
-  || pass "emitted suite rejects a job-level name that changes the required context (#835)"
+schedule_adopter_script "$named_job_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepts a changelog job with a check-name override"
+else
+  pass "emitted suite rejects a job-level name that changes the required context (#835)"
+fi
+SCHED_SCRIPT
+)"
 
 matrix_job_adopter="$tmproot/adopter-matrix-changelog-job"
 cp -a "$generated_adopter" "$matrix_job_adopter"
 sed -i '/^  changelog:$/a\    strategy:\n      matrix:\n        shard: [one, two]' \
   "$matrix_job_adopter/.github/workflows/changelog.yml"
-run_adopter "$matrix_job_adopter" \
-  && fail "emitted suite accepts a matrixed changelog job" \
-  || pass "emitted suite rejects strategy fields that suffix the required context (#835)"
+schedule_adopter_script "$matrix_job_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepts a matrixed changelog job"
+else
+  pass "emitted suite rejects strategy fields that suffix the required context (#835)"
+fi
+SCHED_SCRIPT
+)"
 
 secrets_job_adopter="$tmproot/adopter-secrets-changelog-job"
 cp -a "$generated_adopter" "$secrets_job_adopter"
 sed -i 's/^    with:$/    secrets:/' \
   "$secrets_job_adopter/.github/workflows/changelog.yml"
-run_adopter "$secrets_job_adopter" \
-  && fail "emitted suite accepts changelog inputs nested under secrets" \
-  || pass "emitted suite binds changelog inputs to the canonical with mapping (#835)"
+schedule_adopter_script "$secrets_job_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepts changelog inputs nested under secrets"
+else
+  pass "emitted suite binds changelog inputs to the canonical with mapping (#835)"
+fi
+SCHED_SCRIPT
+)"
 
 typo_job_adopter="$tmproot/adopter-typo-changelog-job"
 cp -a "$generated_adopter" "$typo_job_adopter"
 sed -i 's/^    with:$/    wiht:/' \
   "$typo_job_adopter/.github/workflows/changelog.yml"
-run_adopter "$typo_job_adopter" \
-  && fail "emitted suite accepts changelog inputs nested under a typo mapping" \
-  || pass "emitted suite rejects a typo in the canonical with mapping (#835)"
+schedule_adopter_script "$typo_job_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepts changelog inputs nested under a typo mapping"
+else
+  pass "emitted suite rejects a typo in the canonical with mapping (#835)"
+fi
+SCHED_SCRIPT
+)"
 
 extra_input_adopter="$tmproot/adopter-extra-changelog-input"
 cp -a "$generated_adopter" "$extra_input_adopter"
 sed -i '/^      contract_ref:/a\      unexpected_input: true' \
   "$extra_input_adopter/.github/workflows/changelog.yml"
-run_adopter "$extra_input_adopter" \
-  && fail "emitted suite accepts an additional changelog caller input" \
-  || pass "emitted suite enforces the exact changelog caller input set (#835)"
+schedule_adopter_script "$extra_input_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepts an additional changelog caller input"
+else
+  pass "emitted suite enforces the exact changelog caller input set (#835)"
+fi
+SCHED_SCRIPT
+)"
 
 split_adopter="$tmproot/adopter-split-generated-artifacts"
 build_split_adopter "$split_adopter"
-run_adopter "$split_adopter" \
-  && fail "emitted suite accepts duplicate changelog callers at two paths" \
-  || pass "emitted suite retires the ambiguous split caller topology (#835)"
+schedule_adopter_script "$split_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepts duplicate changelog callers at two paths"
+else
+  pass "emitted suite retires the ambiguous split caller topology (#835)"
+fi
+SCHED_SCRIPT
+)"
 
 renamed_duplicate_adopter="$tmproot/adopter-renamed-duplicate-changelog"
 cp -a "$generated_adopter" "$renamed_duplicate_adopter"
 cp "$renamed_duplicate_adopter/.github/workflows/changelog.yml" \
   "$renamed_duplicate_adopter/.github/workflows/docs-validation.yml"
-run_adopter "$renamed_duplicate_adopter" \
-  && fail "emitted suite accepts a duplicate caller hidden behind another filename" \
-  || pass "emitted suite scans every workflow for renamed duplicate callers (#835)"
+schedule_adopter_script "$renamed_duplicate_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepts a duplicate caller hidden behind another filename"
+else
+  pass "emitted suite scans every workflow for renamed duplicate callers (#835)"
+fi
+SCHED_SCRIPT
+)"
 
 legacy_duplicate_adopter="$tmproot/adopter-legacy-duplicate-changelog"
 cp -a "$generated_adopter" "$legacy_duplicate_adopter"
@@ -1505,74 +1807,106 @@ jobs:
     with:
       contract_ref: $sha
 YAML
-run_adopter "$legacy_duplicate_adopter" \
-  && fail "emitted suite accepts a legacy caller beside the canonical caller" \
-  || pass "emitted suite rejects an additional changelog-validate caller (#835)"
+schedule_adopter_script "$legacy_duplicate_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepts a legacy caller beside the canonical caller"
+else
+  pass "emitted suite rejects an additional changelog-validate caller (#835)"
+fi
+SCHED_SCRIPT
+)"
 
 adr_adopter="$tmproot/adopter-generated-artifacts-adr"
 build_adopter "$adr_adopter" no generated-artifacts-with-adr-index
-run_adopter "$adr_adopter" \
-  && pass "emitted suite accepts ADR checking with the acquired pinned generator" \
-  || fail "emitted suite rejects the acquired ADR generator: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$adr_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite accepts ADR checking with the acquired pinned generator"
+else
+  fail "emitted suite rejects the acquired ADR generator: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 
 # A repository that acquired the generator but kept a hand-written suite is the
 # state #1380 found across the fleet. It must not read as conformant.
 missing_adr_test_adopter="$tmproot/adopter-adr-without-suite"
 cp -a "$adr_adopter" "$missing_adr_test_adopter"
 rm -f "$missing_adr_test_adopter/scripts/gen-adr-index.test.sh"
-run_adopter "$missing_adr_test_adopter" \
-  && fail "emitted suite accepts ADR checking without the pinned generator suite" \
-  || pass "emitted suite rejects ADR checking without its pinned generator suite (#1380)"
+schedule_adopter_script "$missing_adr_test_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepts ADR checking without the pinned generator suite"
+else
+  pass "emitted suite rejects ADR checking without its pinned generator suite (#1380)"
+fi
+SCHED_SCRIPT
+)"
 
 handwritten_adr_test_adopter="$tmproot/adopter-handwritten-adr-suite"
 cp -a "$adr_adopter" "$handwritten_adr_test_adopter"
 printf '#!/usr/bin/env bash\necho "ok - looks like a test"\n' \
   >"$handwritten_adr_test_adopter/scripts/gen-adr-index.test.sh"
-run_adopter "$handwritten_adr_test_adopter" \
-  && fail "emitted suite accepts a hand-written ADR generator suite" \
-  || pass "emitted suite rejects a hand-written ADR generator suite (#1380)"
+schedule_adopter_script "$handwritten_adr_test_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepts a hand-written ADR generator suite"
+else
+  pass "emitted suite rejects a hand-written ADR generator suite (#1380)"
+fi
+SCHED_SCRIPT
+)"
 rm -f "$adr_adopter/scripts/gen-adr-index.sh"
-if run_adopter "$adr_adopter"; then
+schedule_adopter_script "$adr_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepts adr-index: true without scripts/gen-adr-index.sh"
 else
-  grep -q 'adr-index: true requires the pinned scripts/gen-adr-index.sh' "$tmproot/run.out" \
+  grep -q 'adr-index: true requires the pinned scripts/gen-adr-index.sh' "$ADOPTER_LOG" \
     && pass "emitted suite rejects ADR checking without its pinned generator" \
-    || fail "missing ADR generator fails without an acquisition remedy: $(tail -2 "$tmproot/run.out")"
+    || fail "missing ADR generator fails without an acquisition remedy: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 bash "$gen" adr-index-generator "$sha" >"$adr_adopter/scripts/gen-adr-index.sh"
 chmod +x "$adr_adopter/scripts/gen-adr-index.sh"
 printf '\n# local drift\n' >>"$adr_adopter/scripts/gen-adr-index.sh"
-if run_adopter "$adr_adopter"; then
+schedule_adopter_script "$adr_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepts a divergent ADR index generator"
 else
-  grep -q 'is not the generator pinned at' "$tmproot/run.out" \
+  grep -q 'is not the generator pinned at' "$ADOPTER_LOG" \
     && pass "emitted suite rejects a divergent ADR index generator" \
-    || fail "divergent ADR generator fails without a regeneration remedy: $(tail -2 "$tmproot/run.out")"
+    || fail "divergent ADR generator fails without a regeneration remedy: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 optional_generator_adopter="$tmproot/adopter-optional-adr-generator"
 build_adopter "$optional_generator_adopter" yes generated-artifacts
 bash "$gen" adr-index-generator "$sha" >"$optional_generator_adopter/scripts/gen-adr-index.sh"
 chmod +x "$optional_generator_adopter/scripts/gen-adr-index.sh"
 printf '\n# local payload drift with current pin\n' >>"$optional_generator_adopter/scripts/gen-adr-index.sh"
-if run_adopter "$optional_generator_adopter"; then
+schedule_adopter_script "$optional_generator_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "changelog-only caller accepts stale optional ADR generator payload with current pin"
 else
-  grep -qF 'is not the generator pinned at' "$tmproot/run.out" \
+  grep -qF 'is not the generator pinned at' "$ADOPTER_LOG" \
     && pass "changelog-only caller verifies optional ADR generator payload, not just its pin marker" \
-    || fail "stale optional ADR generator failed without a content-digest diagnosis: $(tail -2 "$tmproot/run.out")"
+    || fail "stale optional ADR generator failed without a content-digest diagnosis: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 optional_adr_test_adopter="$tmproot/adopter-optional-adr-test"
 build_adopter "$optional_adr_test_adopter" yes generated-artifacts
 bash "$gen" adr-index-test "$sha" >"$optional_adr_test_adopter/scripts/gen-adr-index.test.sh"
 printf '\n# local payload drift with current pin\n' >>"$optional_adr_test_adopter/scripts/gen-adr-index.test.sh"
-if run_adopter "$optional_adr_test_adopter"; then
+schedule_adopter_script "$optional_adr_test_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "changelog-only caller accepts stale optional ADR test payload with current pin"
 else
-  grep -qF 'is not the test pinned at' "$tmproot/run.out" \
+  grep -qF 'is not the test pinned at' "$ADOPTER_LOG" \
     && pass "changelog-only caller verifies optional ADR test payload, not just its pin marker" \
-    || fail "stale optional ADR test failed without content-digest diagnosis: $(tail -2 "$tmproot/run.out")"
+    || fail "stale optional ADR test failed without content-digest diagnosis: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 python3 "$contract_src" release --repo-root "$adopter" --version v1.0.0 >/dev/null 2>&1
 { [ -f "$adopter/CHANGELOG/v1.0.0.md" ] && [ -e "$adopter/CHANGELOG.md" ]; } \
@@ -1580,9 +1914,14 @@ python3 "$contract_src" release --repo-root "$adopter" --version v1.0.0 >/dev/nu
   || fail "fixture release produced no released tree; the next check would be vacuous"
 
 # The regression. Nothing in the hand-copied shape survived this step.
-run_adopter "$adopter" \
-  && pass "emitted suite still passes AFTER a real release (#309)" \
-  || fail "emitted suite breaks on the first release: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite still passes AFTER a real release (#309)"
+else
+  fail "emitted suite breaks on the first release: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 
 # --------------------------------------------------------------------------
 # #399 (duplicate #419): the render guard must tolerate ONLY an emptied NEXT/.
@@ -1623,19 +1962,22 @@ BROKEN
 broken="$tmproot/adopter-broken-renderer"
 build_adopter "$broken"
 break_renderer "$broken"
-if run_adopter "$broken"; then
+schedule_adopter_script "$broken" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "#399: a broken renderer with fragments still in NEXT/ reported success"
 else
   pass "#399: a broken renderer with fragments present fails the suite"
   # The cause must reach the operator. Swallowing stderr is half the defect: a
   # failure that names nothing sends the adopter to the wrong file.
-  grep -q 'could not fetch the pinned contract' "$tmproot/run.out" \
+  grep -q 'could not fetch the pinned contract' "$ADOPTER_LOG" \
     && pass "#399: the renderer's own stderr is surfaced, not discarded" \
-    || fail "#399: the failure hid the renderer's diagnostic: $(tail -3 "$tmproot/run.out")"
-  grep -qE 'unreleased fragment\(s\) still in NEXT/' "$tmproot/run.out" \
+    || fail "#399: the failure hid the renderer's diagnostic: $(tail -3 "$ADOPTER_LOG")"
+  grep -qE 'unreleased fragment\(s\) still in NEXT/' "$ADOPTER_LOG" \
     && pass "#399: the failure says why this is not the post-release case" \
     || fail "#399: the failure does not distinguish itself from an emptied NEXT/"
 fi
+SCHED_SCRIPT
+)"
 
 # B. The tolerated case, still tolerated. Without this, the fix could satisfy A
 #    by failing on every non-zero exit — which would break every adopter the
@@ -1648,9 +1990,14 @@ python3 "$contract_src" release --repo-root "$released_broken" --version v1.0.0 
   && pass "#399 fixture: the release really emptied NEXT/, so case B is not vacuous" \
   || fail "#399 fixture: NEXT/ still holds fragments; case B would prove nothing"
 break_renderer "$released_broken"
-run_adopter "$released_broken" \
-  && pass "#399: an emptied NEXT/ still tolerates a non-zero renderer exit" \
-  || fail "#399: the fix broke the post-release case it exists to allow: $(tail -3 "$tmproot/run.out")"
+schedule_adopter_script "$released_broken" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "#399: an emptied NEXT/ still tolerates a non-zero renderer exit"
+else
+  fail "#399: the fix broke the post-release case it exists to allow: $(tail -3 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 
 inject_render_failure() { # inject_render_failure <dir> <renderer|download|digest|python>
   local renderer="$1/scripts/render-next.sh"
@@ -1703,6 +2050,7 @@ for failure in renderer download digest python; do
   build_adopter "$emptied"
   python3 "$contract_src" release --repo-root "$emptied" --version v1.0.0 >/dev/null 2>&1
   inject_render_failure "$emptied" "$failure"
+sync_last_rejection
   run_adopter "$emptied" \
     && pass "a genuinely emptied NEXT/ remains distinct from a $failure failure" \
     || fail "an emptied NEXT/ is mistaken for a $failure failure: $(tail -3 "$tmproot/run.out")"
@@ -1711,9 +2059,14 @@ done
 # An adopter with nothing to publish has no release.yml; `agents` and
 # `github-runner` are in exactly that shape and must not be forced to invent one.
 build_adopter "$tmproot/adopter-norelease" no
-run_adopter "$tmproot/adopter-norelease" \
-  && pass "emitted suite tolerates an adopter with no release workflow" \
-  || fail "emitted suite requires a release workflow: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$tmproot/adopter-norelease" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite tolerates an adopter with no release workflow"
+else
+  fail "emitted suite requires a release workflow: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 
 # An unreleased NEXT/ has no upper bound: fragments are per-change, never
 # batched, and only a release consumes them. Crossing 128 KiB of rendered output
@@ -1750,13 +2103,18 @@ rendered_bytes="$( (cd "$oversize" && ./scripts/render-next.sh) | wc -c )"
 # reports "no unreleased fragments" and exits 0 for *any* renderer failure — so a
 # ceiling that migrated into the renderer would leave this case green with the
 # render assertions never executed. Require the positive line.
-{ run_adopter "$oversize" \
-  && grep -q 'every unreleased fragment renders with its metadata linkage' "$tmproot/run.out"; } \
-  && pass "emitted suite survives a NEXT/ larger than MAX_ARG_STRLEN (#398)" \
-  || fail "emitted suite dies on or skips a large unreleased log: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$oversize" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ] && grep -q 'every unreleased fragment renders with its metadata linkage' "$ADOPTER_LOG"; then
+  pass "emitted suite survives a NEXT/ larger than MAX_ARG_STRLEN (#398)"
+else
+  fail "emitted suite dies on or skips a large unreleased log: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 
 # A suite that passes everywhere is worthless. Each case below breaks exactly one
 # invariant in a fresh adopter and requires a non-zero exit.
+drain_adopter_jobs
 reject_seq=0
 # Mode as well as content: one of the mutations below only clears the executable
 # bit, and a content-only fingerprint reports that as "changed nothing".
@@ -1764,48 +2122,88 @@ fingerprint() {
   ( cd "$1" && find . -type f -printf '%m %p\n' -exec sha256sum {} + | sort )
 }
 
-expect_rejection() {
-  # expect_rejection <label> <mutator-fn> [mutator-args...]
-  local label="$1" mutator="$2" dir
-  shift 2
-  reject_seq=$((reject_seq + 1))
-  dir="$tmproot/reject-$reject_seq"
+expect_rejection_body() {
+  # expect_rejection_body <seq> <label> <mutator-fn> [mutator-args...]
+  local seq="$1" label="$2" mutator="$3" dir
+  shift 3
+  dir="$tmproot/reject-$seq"
   build_adopter "$dir"
   # A mutation that edits nothing is rejected by nothing, and the case still
   # reads green — which is how a guard that cannot fail survives a review. The
   # fixture is fingerprinted before and after so a silently no-op mutator is a
   # failure of this file, not an endorsement of the emitted suite.
-  fingerprint "$dir" >"$tmproot/before-$reject_seq"
+  fingerprint "$dir" >"$tmproot/before-$seq"
   "$mutator" "$dir" "$@"
-  fingerprint "$dir" >"$tmproot/after-$reject_seq"
-  if cmp -s "$tmproot/before-$reject_seq" "$tmproot/after-$reject_seq"; then
+  fingerprint "$dir" >"$tmproot/after-$seq"
+  if cmp -s "$tmproot/before-$seq" "$tmproot/after-$seq"; then
     fail "mutation for '$label' changed nothing; the case is vacuous"
     return
   fi
-  run_adopter "$dir" \
+  ADOPTER_ISOLATED_LOG=1 run_adopter "$dir" \
     && fail "emitted suite accepted $label" \
     || pass "emitted suite rejects $label"
 }
 
-expect_release_mode_rejection() {
-  local release_mode="$1" label="$2" mutator="$3" expected="$4" dir
+expect_rejection() {
+  # expect_rejection <label> <mutator-fn> [mutator-args...]
+  local label="$1" mutator="$2" seq result
+  shift 2
   reject_seq=$((reject_seq + 1))
-  dir="$tmproot/reject-$reject_seq"
+  seq="$reject_seq"
+  result="$tmproot/reject-result-$seq"
+  (
+    fails=0
+    ADOPTER_ISOLATED_LOG=1
+    expect_rejection_body "$seq" "$label" "$mutator" "$@"
+    printf '%s\n' "$fails" >"$result"
+  ) &
+  last_rejection_pid="$!"
+  last_rejection_log="$tmproot/reject-$seq.contract-out"
+  last_rejection_copy=
+  last_rejection_origin=
+  adopter_job_pids+=("$last_rejection_pid")
+  adopter_job_results+=("$result")
+  pump_adopter_jobs
+}
+
+expect_release_mode_rejection_body() {
+  local seq="$1" release_mode="$2" label="$3" mutator="$4" expected="$5" dir
+  dir="$tmproot/reject-$seq"
   build_adopter "$dir" yes workflow "$release_mode"
-  fingerprint "$dir" >"$tmproot/before-$reject_seq"
+  fingerprint "$dir" >"$tmproot/before-$seq"
   "$mutator" "$dir"
-  fingerprint "$dir" >"$tmproot/after-$reject_seq"
-  if cmp -s "$tmproot/before-$reject_seq" "$tmproot/after-$reject_seq"; then
+  fingerprint "$dir" >"$tmproot/after-$seq"
+  if cmp -s "$tmproot/before-$seq" "$tmproot/after-$seq"; then
     fail "mutation '$label' changed nothing; vacuous"
     return
   fi
-  if run_adopter "$dir"; then
+  if ADOPTER_ISOLATED_LOG=1 run_adopter "$dir"; then
     fail "emitted suite accepted $label"
-  elif grep -qF "$expected" "$tmproot/run.out"; then
+  elif grep -qF "$expected" "$dir.contract-out"; then
     pass "emitted suite rejects $label for the expected reason"
   else
-    fail "emitted suite rejected $label for another reason: $(tail -2 "$tmproot/run.out")"
+    fail "emitted suite rejected $label for another reason: $(tail -2 "$dir.contract-out")"
   fi
+}
+
+expect_release_mode_rejection() {
+  local release_mode="$1" label="$2" mutator="$3" expected="$4" seq result
+  reject_seq=$((reject_seq + 1))
+  seq="$reject_seq"
+  result="$tmproot/reject-result-$seq"
+  (
+    fails=0
+    ADOPTER_ISOLATED_LOG=1
+    expect_release_mode_rejection_body "$seq" "$release_mode" "$label" "$mutator" "$expected"
+    printf '%s\n' "$fails" >"$result"
+  ) &
+  last_rejection_pid="$!"
+  last_rejection_log="$tmproot/reject-$seq.contract-out"
+  last_rejection_copy=
+  last_rejection_origin=
+  adopter_job_pids+=("$last_rejection_pid")
+  adopter_job_results+=("$result")
+  pump_adopter_jobs
 }
 
 break_pin() {
@@ -3054,6 +3452,7 @@ expect_rejection "a release caller wiring GITHUB_TOKEN" wire_github_token
 # Rejected for the stated reason, not incidentally. expect_rejection only asserts
 # a non-zero exit, so without this the guard could rot while its case stays green.
 # It reads the LAST run, so it has to sit immediately after the credential cases.
+sync_last_rejection
 grep -qE 'snapshot forwards credentials|release-app environment' "$tmproot/run.out" \
   && pass "the broad-token rejection names the dedicated release App remedy" \
   || fail "the last credential case failed for some other reason: $(tail -2 "$tmproot/run.out")"
@@ -3069,252 +3468,318 @@ expect_rejection "version stamps that can run package lifecycle scripts (#519)" 
 expect_rejection "a first release whose scaffold version already matches the dispatch (#579)" reject_same_version_stamp
 expect_rejection "a release verification suite receiving package credentials (#1712)" expose_private_token_to_verification_suite
 expect_rejection "a credentialed install step with an extra command (#1712)" append_credentialed_install_command
+sync_last_rejection
 grep -qF 'runs an unexpected credentialed acquisition command (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects extra commands beside credentialed npm ci" \
   || fail "the generated suite rejected an extra credentialed command for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a credentialed install step without a repository npm configuration guard (#1717)" \
   remove_credentialed_install_npmrc_guard
+sync_last_rejection
 grep -qF 'does not reject repository-controlled npm configuration before credentialed install (#1717)' \
   "$tmproot/run.out" \
   && pass "the generated suite requires a repository npm configuration guard before credentialed install" \
   || fail "a missing credentialed npm configuration guard was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a credentialed install working-directory override (#1717)" \
   add_install_working_directory
+sync_last_rejection
 grep -qF 'does not pin credentialed install step inputs and working directory (#1717)' \
   "$tmproot/run.out" \
   && pass "the generated suite pins the credentialed install working directory" \
   || fail "a credentialed install working-directory override was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "canonical selection checkout uses an unpinned branch (#1717)" \
   drift_canonical_selection_contract_checkout_ref
+sync_last_rejection
 grep -qF 'does not check out the canonical selection contract at its pinned ref (#1717)' \
   "$tmproot/run.out" \
   && pass "the generated suite binds its canonical checkout to the contract ref" \
   || fail "a canonical selection checkout ref drift was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "an escaped YAML explicit key setting inherited working-directory defaults (#1717)" \
   add_escaped_defaults_explicit_key
+sync_last_rejection
 grep -qF 'uses unsupported explicit YAML mapping keys (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects explicit YAML mapping keys before environment checks" \
   || fail "an escaped explicit defaults key was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a multiline escaped YAML explicit key setting inherited working-directory defaults (#1717)" \
   add_multiline_escaped_defaults_explicit_key
+sync_last_rejection
 grep -qF 'uses unsupported explicit YAML mapping keys (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects multiline explicit YAML mapping keys" \
   || fail "a multiline escaped explicit defaults key was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a verification job inheriting GITHUB_TOKEN (#1712)" expose_github_token_to_verify_job
+sync_last_rejection
 grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects Git credentials inherited by release verification" \
   || fail "the generated suite rejected an inherited Git token for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a verification suite receiving a wrapped package token (#1712)" expose_wrapped_package_token_to_verification_suite
+sync_last_rejection
 grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects a wrapped package secret in verification" \
   || fail "the generated suite rejected a wrapped package token for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a verification suite receiving a folded wrapped package token (#1712)" expose_folded_wrapped_package_token_to_verification_suite
+sync_last_rejection
 grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects a folded package secret in verification" \
   || fail "the generated suite rejected a folded wrapped package token for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a verification suite serializing the secrets context (#1712)" expose_serialized_secrets_to_verification_suite
+sync_last_rejection
 grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects serialization of the secrets object in verification" \
   || fail "the generated suite rejected serialized secrets for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a verification suite serializing the GitHub context (#1712)" expose_serialized_github_context_to_verification_suite
+sync_last_rejection
 grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects serialization of the GitHub context in verification" \
   || fail "the generated suite rejected serialized GitHub context for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a verification suite reading github['token'] (#1712)" expose_indexed_github_token_to_verification_suite
+sync_last_rejection
 grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects indexed GitHub token access in verification" \
   || fail "the generated suite rejected indexed GitHub token for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a verification suite inheriting a GitHub token through YAML aliases (#1712)" expose_release_state_token_through_yaml_alias
+sync_last_rejection
 grep -qF 'uses YAML anchors or aliases in a release workflow (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects YAML aliases that merge release-state credentials into verification" \
   || fail "the generated suite rejected an aliased Git token for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a release state step writing its token directly into .git/config (#1712)" persist_release_token_in_git_config_file
+sync_last_rejection
 grep -qF 'does not match the approved restart-safe release-state script (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects unapproved credential-bearing release-state commands" \
   || fail "the generated suite rejected a modified release-state command for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a release state step forwarding its token through GITHUB_ENV (#1712)" persist_release_token_to_github_env
+sync_last_rejection
 grep -qF 'does not match the approved restart-safe release-state script (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects release-state token forwarding through runner command files" \
   || fail "the generated suite rejected a GITHUB_ENV mutation for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a release state step loading repository code through quoted BASH_ENV (#1712)" configure_token_step_bash_env
+sync_last_rejection
 grep -qF 'does not restrict the restart-safe release-state environment (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects shell startup code in token environment" \
   || fail "the generated suite rejected BASH_ENV mutation for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a release state step selecting custom shell (#1712)" configure_token_step_custom_shell
+sync_last_rejection
 grep -qF 'configures a custom shell or action in the credentialed release-state step (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects custom shells in credentialed workflows" \
   || fail "the generated suite rejected a custom shell mutation for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a verify job setting custom shell through quoted defaults (#1712)" configure_verify_job_default_shell
+sync_last_rejection
 grep -qF 'configures run defaults (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects inherited custom shells in verify job" \
   || fail "the generated suite rejected a default-shell mutation for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a workflow enabling Bash xtrace through quoted SHELLOPTS (#1712)" configure_workflow_shelopts
+sync_last_rejection
 grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects inherited Bash xtrace in token step" \
   || fail "the generated suite rejected SHELLOPTS mutation for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a workflow preloading library in credentialed steps (#1712)" configure_workflow_loader_env LD_PRELOAD
+sync_last_rejection
 grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects inherited LD_PRELOAD in token step" \
   || fail "the generated suite rejected an LD_PRELOAD mutation for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a workflow adding dynamic loader audit library (#1712)" configure_workflow_loader_env LD_AUDIT
+sync_last_rejection
 grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects inherited LD_AUDIT in token step" \
   || fail "the generated suite rejected an LD_AUDIT mutation for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a workflow changing dynamic library search paths (#1712)" configure_workflow_loader_env LD_LIBRARY_PATH
+sync_last_rejection
 grep -qF 'inherits unapproved job-level environment in release verification (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects job-level LD_LIBRARY_PATH in release verification" \
   || fail "the generated suite rejected an LD_LIBRARY_PATH mutation for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a workflow logging Git authorization values through curl and Trace2 (#1712)" configure_workflow_git_trace
+sync_last_rejection
 grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects Git curl and Trace2 environment logging in token step" \
   || fail "the generated suite rejected Git tracing mutation for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a workflow redirecting Git remote helpers (#1712)" configure_workflow_loader_env GIT_EXEC_PATH
+sync_last_rejection
 grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects repository-controlled remote helper in token step" \
   || fail "the generated suite rejected a Git remote-helper mutation for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a workflow selecting hostile Git config sources (#1712)" configure_workflow_git_config_sources
+sync_last_rejection
 grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects inherited system and global Git config paths" \
   || fail "the generated suite rejected Git config-source mutation for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a workflow overriding Git config parameters (#1712)" configure_workflow_config_parameters
+sync_last_rejection
 grep -qF 'configures credential-sensitive environment outside the credentialed step (#1712)' "$tmproot/run.out" \
   && pass "the generated suite rejects inherited Git config parameters" \
   || fail "the generated suite rejected Git config-parameters mutation for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a lifecycle step that only prints npm rebuild (#1712)" make_lifecycle_step_print_instead_of_rebuild
+sync_last_rejection
 grep -qF 'does not restore dependency lifecycle execution after acquisition (#1712)' "$tmproot/run.out" \
   && pass "the generated suite requires lifecycle command to execute exactly" \
   || fail "the generated suite rejected a lifecycle mutation for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a release verification job granting contents-write (#1712)" grant_verify_job_write_permissions
+sync_last_rejection
 grep -qF 'requires verify-job permissions to be exactly contents: read (#1712)' "$tmproot/run.out" \
   && pass "the generated suite holds verification to read-only contents permission" \
   || fail "the generated suite rejected a write-permission mutation for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a release verification job that continues after failure (#1717)" allow_verify_job_to_continue_on_error
+sync_last_rejection
 grep -qF 'allows the release verification job to continue after failure (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects job-level continue-on-error for verification" \
   || fail "job-level continue-on-error was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a release verification step that continues after failure (#1717)" allow_verification_step_to_continue_on_error
+sync_last_rejection
 grep -qF 'allows the release verification step to continue after failure (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects step-level continue-on-error for verification" \
   || fail "step-level continue-on-error was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a release verification step skipped by its condition (#1717)" skip_release_verification
+sync_last_rejection
 grep -qF 'does not require a selected version before release verification (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects a skipped verification step" \
   || fail "a skipped verification step was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a release verification step replaced with a no-op (#1717)" replace_release_verification_with_noop
+sync_last_rejection
 grep -qF 'does not stamp the dispatched package version before the verification build or suite (#519)' "$tmproot/run.out" \
   && pass "the generated suite rejects a no-op that skips the version stamp" \
   || fail "a no-op verification script was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "release verification failure handler removed (#1717)" \
   remove_release_verification_failure_handler
+sync_last_rejection
 grep -qF 'does not match the approved release verification script (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects removal of the verification failure handler" \
   || fail "a removed verification failure handler was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 quoted_checkout="$tmproot/adopter-quoted-checkout"
 cp -a "$adopter" "$quoted_checkout"
 quote_checkout_reference "$quoted_checkout"
-run_adopter "$quoted_checkout" \
-  && pass "the generated suite accepts a quoted checkout reference with credentials disabled" \
-  || fail "the generated suite rejected a quoted safe checkout reference: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$quoted_checkout" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "the generated suite accepts a quoted checkout reference with credentials disabled"
+else
+  fail "the generated suite rejected a quoted safe checkout reference: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 inline_checkout="$tmproot/adopter-inline-checkout"
 cp -a "$adopter" "$inline_checkout"
 inline_checkout_with_persist_credentials "$inline_checkout"
-run_adopter "$inline_checkout" \
-  && pass "the generated suite accepts an inline checkout mapping with credentials disabled" \
-  || fail "the generated suite rejected a safe inline checkout mapping: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$inline_checkout" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "the generated suite accepts an inline checkout mapping with credentials disabled"
+else
+  fail "the generated suite rejected a safe inline checkout mapping: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 expect_rejection "an inline checkout mapping without disabled credentials (#1717)" inline_checkout_without_persist_credentials
+sync_last_rejection
 grep -qF 'persists checkout credentials into release repository code (#1712)' "$tmproot/run.out" \
   && pass "the generated suite detects checkout credential persistence in inline YAML" \
   || fail "an inline checkout credential mutation was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "checkout reference uses case-variant owner and repository (#1717)" \
   uppercase_checkout_without_disabled_credentials
+sync_last_rejection
 grep -qF 'persists checkout credentials into release repository code (#1712)' "$tmproot/run.out" \
   && pass "the generated suite checks checkout references case-insensitively" \
   || fail "a case-variant checkout reference was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "checkout reference uses a folded YAML scalar (#1717)" \
   folded_checkout_reference_without_disabled_credentials
+sync_last_rejection
 grep -qF 'cannot safely inspect a release workflow action reference (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects unsupported folded checkout references" \
   || fail "a folded checkout reference was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "release job hides steps in a flow-style sequence (#1717)" \
   add_flow_style_checkout_step
+sync_last_rejection
 grep -qF 'cannot safely inspect flow-style release workflow steps (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects unparsed flow-style step collections" \
   || fail "flow-style release steps were rejected for another reason: $(tail -2 "$tmproot/run.out")"
 reindented_adopter="$tmproot/adopter-reindented-jobs"
 cp -a "$adopter" "$reindented_adopter"
 reindent_release_job_fields "$reindented_adopter"
-run_adopter "$reindented_adopter" \
-  && pass "the generated suite finds release steps with valid noncanonical job indentation" \
-  || fail "valid job indentation was rejected: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$reindented_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "the generated suite finds release steps with valid noncanonical job indentation"
+else
+  fail "valid job indentation was rejected: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 expect_rejection "release verifier uses PATH modified by dependency lifecycle scripts (#1717)" \
   use_mutable_path_for_release_verification
+sync_last_rejection
 grep -qF 'does not match the approved release verification script (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects runner PATH in release verification" \
   || fail "a mutable verifier PATH was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "release verification PATH capture overrides runner PATH (#1717)" \
   add_capture_path_override
+sync_last_rejection
 grep -qF 'overrides the runner-managed PATH before release verification (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects a PATH override in the trusted capture step" \
   || fail "a capture-step PATH override was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "verify job overrides runner PATH (#1717)" add_verify_job_path_override
+sync_last_rejection
 grep -qF 'overrides the runner-managed PATH before release verification (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects a job-level PATH override" \
   || fail "a job-level PATH override was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "release verification PATH is captured after dependency lifecycle code (#1717)" \
   move_capture_after_lifecycle_scripts
+sync_last_rejection
 grep -qF 'does not capture trusted release verification runtime inputs (#1717)' "$tmproot/run.out" \
   && pass "the generated suite requires PATH capture immediately after setup-node" \
   || fail "a late PATH capture was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "an escaped flow-style environment key selects runner PATH (#1717)" \
   add_escaped_flow_path_environment
+sync_last_rejection
 grep -qF 'uses an unsupported or ambiguous environment mapping (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects escaped flow-style PATH environment keys" \
   || fail "an escaped flow-style PATH key was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a tagged flow-style environment key selects Bash startup script (#1717)" \
   add_tagged_flow_bash_env
+sync_last_rejection
 grep -qF 'uses an unsupported or ambiguous environment mapping (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects tagged flow-style BASH_ENV environment keys" \
   || fail "a tagged flow-style BASH_ENV key was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "an explicit-key BASH_ENV mapping selects Bash startup script (#1717)" \
   add_explicit_bash_env_key
+sync_last_rejection
 grep -qF 'uses an unsupported or ambiguous environment mapping (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects explicit-key BASH_ENV mappings" \
   || fail "an explicit-key BASH_ENV mapping was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "an inserted verify step writes Bash startup script through GITHUB_ENV (#1717)" \
   add_pre_capture_environment_writer
+sync_last_rejection
 grep -qF 'does not use the approved verify-job step sequence (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects unapproved verify-job steps before dependency credentials" \
   || fail "an inserted environment-writing step was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "an existing release-plan step writes Bash startup script through GITHUB_ENV (#1717)" \
   add_in_place_precredential_environment_writer
+sync_last_rejection
 grep -qF 'contains an unapproved verify step before credentialed dependency installation (#1717)' "$tmproot/run.out" \
   && pass "the generated suite pins existing verify-job commands before dependency credentials" \
   || fail "an in-place environment-writing mutation was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "an existing release-plan step injects PYTHONPATH (#1717)" \
   add_precredential_pythonpath
+sync_last_rejection
 grep -qF 'contains an unapproved verify step before credentialed dependency installation (#1717)' "$tmproot/run.out" \
   && pass "the generated suite pins pre-credential step environment fields" \
   || fail "a pre-credential PYTHONPATH mutation was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "the stamped-version step changes generator-declared package directories (#1717)" \
   drift_verify_stamp_package_directories
+sync_last_rejection
 grep -qF 'has an unapproved package-directory assignment in Stamp the dispatched package versions (#1717)' "$tmproot/run.out" \
   && pass "the generated suite pins package directories in the version-stamp step" \
   || fail "an altered version-stamp package directory was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 for stamp_mutation in command condition environment; do
   expect_rejection "the version-stamp step changes its $stamp_mutation (#1717)" \
     drift_verify_stamp_step "$stamp_mutation"
+sync_last_rejection
   grep -qF 'does not match the approved package-version stamp step (#1717)' "$tmproot/run.out" \
     && pass "the generated suite pins the full version-stamp step" \
     || fail "a changed version-stamp $stamp_mutation was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 done
 expect_rejection "generator provenance changes the contract-pinned package set (#1717)" \
   drift_generator_provenance_only '--only-package-dir compat'
+sync_last_rejection
 grep -qF 'does not declare valid package directories in generator provenance (#1717)' "$tmproot/run.out" \
   && pass "the generated suite binds provenance to canonical package-directory inputs" \
   || fail "altered generator provenance was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 while IFS= read -r package_directory_options; do
   expect_rejection "generator provenance alone uses an unsafe or duplicate package directory: $package_directory_options (#1717)" \
     drift_generator_provenance_only "$package_directory_options"
+sync_last_rejection
   grep -qF 'does not declare valid package directories in generator provenance (#1717)' "$tmproot/run.out" \
     && pass "the generated suite rejects unsafe provenance independently of workflow stamps" \
     || fail "unsafe provenance was rejected for another reason: $(tail -2 "$tmproot/run.out")"
@@ -3340,22 +3805,27 @@ expect_release_mode_rejection release-snapshot \
   'contains an unapproved verify step before credentialed dependency installation (#1717)'
 expect_rejection "credentialed dependency install preloads repository Node code (#1717)" \
   add_install_node_options
+sync_last_rejection
 grep -qF 'does not allowlist the credentialed dependency installation environment (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects NODE_OPTIONS during credentialed installation" \
   || fail "a credentialed NODE_OPTIONS mutation was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "release verifier overrides npm script shell (#1717)" replace_verification_script_shell
+sync_last_rejection
 grep -qF 'does not isolate release verification from prior lifecycle environment (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects an npm script-shell override" \
   || fail "an npm script-shell override was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "release verifier inherits Bash startup script (#1717)" replace_verification_bash_env
+sync_last_rejection
 grep -qF 'does not isolate release verification from prior lifecycle environment (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects a Bash startup script override" \
   || fail "a Bash startup script override was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "stamped-version warning text shadowed outside generated header (#862)" shadow_stamped_version_header
+sync_last_rejection
 grep -qF 'does not carry the stamped-version warning inside the generated header before `on:` (#862)' "$tmproot/run.out" \
   && pass "the shadowed warning is rejected for leaving generated header" \
   || fail "the shadowed warning failed for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a modified release-verification failure diagnostic (#1717)" noop_stamped_version_diagnostic
+sync_last_rejection
 grep -qF 'does not match the approved release verification script (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects a changed verification script by its approved-script pin" \
   || fail "the changed verification script was rejected for another reason: $(tail -2 "$tmproot/run.out")"
@@ -3393,6 +3863,7 @@ expect_rejection "a release caller under any other filename (#463, #464)" rename
 # ...and the renamed caller must be rejected for its real defect, not merely for
 # no longer being called release.yml. A checker that only notices the name would
 # pass the identical file back under its old one.
+sync_last_rejection
 grep -q 'publish-package.yml' "$tmproot/run.out" \
   && pass "the renamed release caller is checked under the name it actually has" \
   || fail "the renamed caller's rejection never names it: $(tail -2 "$tmproot/run.out")"
@@ -3401,9 +3872,14 @@ grep -q 'publish-package.yml' "$tmproot/run.out" \
 # regenerating would change nothing an adopter could observe.
 legacy_release="$tmproot/adopter-legacy-release"
 build_adopter "$legacy_release" legacy
-run_adopter "$legacy_release" \
-  && fail "emitted suite accepted the hand-copied verjson-payments release shape" \
-  || pass "emitted suite rejects the hand-copied verjson-payments release shape"
+schedule_adopter_script "$legacy_release" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted the hand-copied verjson-payments release shape"
+else
+  pass "emitted suite rejects the hand-copied verjson-payments release shape"
+fi
+SCHED_SCRIPT
+)"
 # The set-level atomicity verdict runs before every per-member assertion and is
 # fatal, so it is what a legacy release.yml now hits first: a hand-copied file
 # declares no generator-mode header at all. That is the correct diagnosis --
@@ -3420,7 +3896,9 @@ run_adopter "$legacy_release" \
 # `head`: a hand-copied release.yml declares no generator-mode header, so this
 # matches exactly one line, and a pipe-fed early-exiting consumer would kill the
 # producer on SIGPIPE under pipefail (#1430/#1445).
+sync_last_rejection
 legacy_release_finding="$(grep -F '.github/workflows/release.yml declares' "$tmproot/run.out")"
+sync_last_rejection
 { grep -qF 'possible modes are release-node, release-artifact, release-snapshot' <<<"$legacy_release_finding" \
   && grep -qF 'release-artifact publishes GitHub Release assets' "$tmproot/run.out" \
   && grep -qF 'release-snapshot publishes nothing from the release workflow' "$tmproot/run.out" \
@@ -3435,9 +3913,14 @@ commented="$tmproot/adopter-commented"
 build_adopter "$commented"
 sed -i 's|^      release_environment:|      # ORG_ADMIN_TOKEN and push_token are retired by ADR 0099.\n      release_environment:|' \
   "$commented/.github/workflows/release.yml"
-run_adopter "$commented" \
-  && pass "emitted suite ignores retired-token names in comments" \
-  || fail "emitted suite treated a comment as credential wiring: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$commented" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite ignores retired-token names in comments"
+else
+  fail "emitted suite treated a comment as credential wiring: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 
 # A quoted title is the correct spelling, not a tolerated one, so the emitted
 # suite has to read it the way the engine does. Both quote styles, because the
@@ -3460,9 +3943,14 @@ The argument beneath it, which a release note does not.
 FRAGMENT
 git -C "$quoted" add -A >/dev/null 2>&1
 git -C "$quoted" -c user.email=t@t -c user.name=t commit -qm quoted >/dev/null 2>&1
-run_adopter "$quoted" \
-  && pass "emitted suite accepts the quoted titles YAML requires of conventional commits" \
-  || fail "emitted suite rejected a quoted title: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$quoted" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite accepts the quoted titles YAML requires of conventional commits"
+else
+  fail "emitted suite rejected a quoted title: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 
 commit_fixture() {
   # commit_fixture <dir> <message>
@@ -3488,15 +3976,25 @@ title: 'fix(caller): an entry that links a second issue'
 Body.
 FRAGMENT
 commit_fixture "$refs_adopter" refs
-run_adopter "$refs_adopter" \
-  && pass "emitted suite accepts an issue-form fragment carrying refs (#461)" \
-  || fail "emitted suite rejected a refs: fragment: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$refs_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite accepts an issue-form fragment carrying refs (#461)"
+else
+  fail "emitted suite rejected a refs: fragment: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 refs_released="$tmproot/adopter-refs-released"
 cp -a "$refs_adopter" "$refs_released"
 python3 "$contract_src" release --repo-root "$refs_released" --version v1.0.0 >/dev/null 2>&1
-run_adopter "$refs_released" \
-  && pass "emitted suite still accepts refs metadata after the exact release path" \
-  || fail "emitted suite rejects refs metadata after release: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$refs_released" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite still accepts refs metadata after the exact release path"
+else
+  fail "emitted suite rejects refs metadata after release: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 
 # Two refs, because one leaves the repeated group in the pattern unproven.
 multi_refs="$tmproot/adopter-refs-multi"
@@ -3512,9 +4010,14 @@ title: 'fix(caller): an entry that links two other issues'
 Body.
 FRAGMENT
 commit_fixture "$multi_refs" multi-refs
-run_adopter "$multi_refs" \
-  && pass "emitted suite accepts a fragment refs-ing several issues (#461)" \
-  || fail "emitted suite rejected a multi-ref fragment: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$multi_refs" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite accepts a fragment refs-ing several issues (#461)"
+else
+  fail "emitted suite rejected a multi-ref fragment: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 
 # Widening the pattern to accept `refs` is only safe if it can still fail. Nothing
 # an adopter writes can produce a back-link that disagrees with its own fragment —
@@ -3579,10 +4082,12 @@ corrupt_render "$large_backlink" 's/issue #5;/issue #55;/'
 for attempt in 1 2 3 4 5; do
   if run_adopter "$large_backlink"; then
     fail "large rendered back-link mutation was accepted on attempt $attempt"
+sync_last_rejection
   elif grep -q 'back-link missing from the rendered log' "$tmproot/run.out" \
        && ! grep -qi 'broken pipe' "$tmproot/run.out"; then
     pass "large rendered rejection reports the intended diagnostic on attempt $attempt"
   else
+sync_last_rejection
     fail "large rendered rejection raced into another failure on attempt $attempt: $(tail -2 "$tmproot/run.out")"
   fi
 done
@@ -3642,9 +4147,14 @@ edited="$tmproot/adopter-edited"
 build_adopter "$edited"
 python3 "$contract_src" release --repo-root "$edited" --version v1.0.0 >/dev/null 2>&1
 printf '\nhand-written addition\n' >>"$edited/CHANGELOG.md"
-run_adopter "$edited" \
-  && fail "emitted suite accepted a hand-edited CHANGELOG.md" \
-  || pass "emitted suite rejects a hand-edited CHANGELOG.md"
+schedule_adopter_script "$edited" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a hand-edited CHANGELOG.md"
+else
+  pass "emitted suite rejects a hand-edited CHANGELOG.md"
+fi
+SCHED_SCRIPT
+)"
 
 # Generation is fail-closed on an unresolvable ref: emitting a caller whose engine
 # cannot be verified would hand adopters a contract that only looks pinned.
@@ -3726,15 +4236,18 @@ done
 artifact_release="$(bash "$gen" release-artifact "$sha" \
   --build-runner ubuntu-24.04 --build-runner self-hosted-release)"
 
+sync_last_rejection
 grep -qF "gen-changelog-caller.sh release-artifact $sha --build-runner ubuntu-24.04 --build-runner self-hosted-release" \
   <<<"$artifact_release" \
   && pass "release-artifact records its exact regeneration command, including build runners" \
   || fail "release-artifact does not record a regenerable provenance comment"
+sync_last_rejection
 grep -qE '^  build:$' <<<"$artifact_release" \
   && grep -qE '^  publish:$' <<<"$artifact_release" \
   && ! grep -q 'uses:.*node-release\.yml' <<<"$artifact_release" \
   && pass "release-artifact replaces node-release.yml with a build+publish pair" \
   || fail "release-artifact did not emit the expected build/publish shape"
+sync_last_rejection
 grep -qF -- "- os: 'ubuntu-24.04'" <<<"$artifact_release" \
   && grep -qF -- "- os: 'self-hosted-release'" <<<"$artifact_release" \
   && pass "release-artifact's build matrix carries exactly the declared runner labels" \
@@ -3743,6 +4256,7 @@ grep -qF -- "- os: 'ubuntu-24.04'" <<<"$artifact_release" \
 private_artifact_release="$(bash "$gen" release-artifact "$sha" \
   --build-runner "$lane_expression" --build-runner "$windows_lane_expression" \
   --approved-internal-package @verjson/ai --approved-internal-package @verjson/ai-gguf)"
+sync_last_rejection
 grep -qF 'acquire-private-dependencies:' <<<"$private_artifact_release" \
   && grep -qF 'permissions:' <<<"$private_artifact_release" \
   && grep -qF 'packages: read' <<<"$private_artifact_release" \
@@ -3792,9 +4306,14 @@ FRAGMENT
 
 artifact_adopter="$tmproot/adopter-artifact"
 build_artifact_adopter "$artifact_adopter"
-run_adopter "$artifact_adopter" \
-  && pass "emitted suite accepts a generated release-artifact caller" \
-  || fail "emitted suite rejects a generated release-artifact caller: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$artifact_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite accepts a generated release-artifact caller"
+else
+  fail "emitted suite rejects a generated release-artifact caller: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 assert_mutable_verification_path_rejected "$artifact_adopter" release-artifact artifact-mutable-path
 assert_release_path_mutation_rejected "$artifact_adopter" release-artifact artifact-capture-path-override \
   add_capture_path_override 'overrides the runner-managed PATH before release verification (#1717)'
@@ -3819,9 +4338,14 @@ cat >"$private_artifact_adopter/package-lock.json" <<'LOCK'
 LOCK
 git -C "$private_artifact_adopter" add .github/workflows/release.yml scripts/changelog-contract.test.sh package-lock.json
 git -C "$private_artifact_adopter" commit -qm 'enable private release dependency acquisition'
-run_adopter "$private_artifact_adopter" \
-  && pass "emitted suite accepts credential-separated private release acquisition" \
-  || fail "emitted suite rejects canonical private release acquisition: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$private_artifact_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite accepts credential-separated private release acquisition"
+else
+  fail "emitted suite rejects canonical private release acquisition: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 
 unbound_build_adopter="$tmproot/adopter-artifact-unbound-build"
 cp -a "$artifact_adopter" "$unbound_build_adopter"
@@ -3835,11 +4359,14 @@ binding = '    runs-on: ${{ matrix.os }}'
 assert source.count(binding) == 1
 path.write_text(source.replace(binding, "    # runs-on: ${{ matrix.os }}\n    runs-on: 'general'", 1))
 PY
-if run_adopter "$unbound_build_adopter"; then
+schedule_adopter_script "$unbound_build_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepts a build job detached from its approved OS matrix"
 else
   pass "emitted suite rejects a build job detached from its approved OS matrix"
 fi
+SCHED_SCRIPT
+)"
 
 unbound_acquisition_adopter="$tmproot/adopter-artifact-unbound-acquisition"
 cp -a "$private_artifact_adopter" "$unbound_acquisition_adopter"
@@ -3859,14 +4386,17 @@ else
   pass "emitted suite rejects acquisition detached from its approved OS matrix"
 fi
 
+sync_last_rejection
 if python3 "$repo_root/scripts/ci-gate/hosted-selector-policy.py" \
   --consumer-policy "$private_artifact_adopter/.github/workflows" >"$tmproot/run.out" 2>&1; then
   pass "generated private artifact caller satisfies canonical runner selector policy"
 else
+sync_last_rejection
   fail "generated private artifact caller violates runner selector policy: $(tail -2 "$tmproot/run.out")"
 fi
 
 private_lock_validator="$tmproot/private-lock-validator.js"
+sync_last_rejection
 if python3 - "$private_artifact_adopter/.github/workflows/release.yml" "$private_lock_validator" >"$tmproot/run.out" 2>&1 <<'PY'
 from pathlib import Path
 import re
@@ -3896,14 +4426,17 @@ PY
 then
   pass "every generated artifact caller Node block parses"
 else
+sync_last_rejection
   fail "generated artifact caller contains invalid Node code: $(tail -2 "$tmproot/run.out")"
 fi
 
 upper_scope_adopter="$tmproot/adopter-artifact-private-upper-scope"
 cp -a "$private_artifact_adopter" "$upper_scope_adopter"
 sed -i 's|download/@verjson/ai/|download/@verJSON/ai/|g' "$upper_scope_adopter/package-lock.json"
+sync_last_rejection
 grep -qF 'download/@verJSON/ai/' "$upper_scope_adopter/package-lock.json" \
   || fail "upper-scope fixture did not retain its authentic registry URL"
+sync_last_rejection
 run_adopter "$upper_scope_adopter" \
   && (cd "$upper_scope_adopter" && APPROVED_INTERNAL_PACKAGES=@verjson/ai node "$private_lock_validator") >"$tmproot/run.out" 2>&1 \
   && pass "generated private lock checks accept the authentic organization URL spelling" \
@@ -3912,9 +4445,11 @@ run_adopter "$upper_scope_adopter" \
 wrong_package_adopter="$tmproot/adopter-artifact-private-wrong-package"
 cp -a "$upper_scope_adopter" "$wrong_package_adopter"
 sed -i 's|download/@verJSON/ai/|download/@verJSON/wrong/|g' "$wrong_package_adopter/package-lock.json"
+sync_last_rejection
 if (cd "$wrong_package_adopter" && APPROVED_INTERNAL_PACKAGES=@verjson/ai node "$private_lock_validator") >"$tmproot/run.out" 2>&1; then
   fail "generated private lock validator accepted a different package URL"
 else
+sync_last_rejection
   grep -qF 'internal dependency is not pinned to its exact GitHub Packages download URL' "$tmproot/run.out" \
     && pass "generated private lock validator rejects a different package URL" \
     || fail "generated private lock validator rejected the wrong package for another reason: $(tail -2 "$tmproot/run.out")"
@@ -3936,13 +4471,16 @@ lock.packages['node_modules/@verjson/ai-gguf'] = {
 fs.writeFileSync(path, JSON.stringify(lock));
 NODE
 git -C "$private_allowlist_adopter" commit -aqm 'widen generated private package allowlist'
-if run_adopter "$private_allowlist_adopter"; then
+schedule_adopter_script "$private_allowlist_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a consumer-widened private package allowlist"
 else
-  grep -qF 'allowlist differs from the generated contract' "$tmproot/run.out" \
+  grep -qF 'allowlist differs from the generated contract' "$ADOPTER_LOG" \
     && pass "emitted suite rejects consumer-widened private package allowlists" \
-    || fail "emitted suite rejected allowlist widening for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected allowlist widening for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 private_lock_adopter="$tmproot/adopter-artifact-private-lock"
 cp -a "$private_artifact_adopter" "$private_lock_adopter"
@@ -3958,117 +4496,144 @@ lock.packages['node_modules/@verjson/ai-gguf'] = {
 fs.writeFileSync(path, JSON.stringify(lock));
 NODE
 git -C "$private_lock_adopter" commit -aqm 'add unauthorized private lock entry'
-if run_adopter "$private_lock_adopter"; then
+schedule_adopter_script "$private_lock_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted an unauthorized private lock entry"
 else
-  grep -qF 'repository lock differs from the generated private package authorization' "$tmproot/run.out" \
+  grep -qF 'repository lock differs from the generated private package authorization' "$ADOPTER_LOG" \
     && pass "emitted suite rejects unauthorized private lock entries" \
-    || fail "emitted suite rejected private lock widening for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected private lock widening for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 private_static_cache_adopter="$tmproot/adopter-artifact-private-static-cache"
 cp -a "$private_artifact_adopter" "$private_static_cache_adopter"
 sed -i 's/release-dependencies-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.dependency-index }}/release-dependencies-shared/g' \
   "$private_static_cache_adopter/.github/workflows/release.yml"
 git -C "$private_static_cache_adopter" commit -aqm 'share dependency cache across runs'
-if run_adopter "$private_static_cache_adopter"; then
+schedule_adopter_script "$private_static_cache_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a shared static dependency cache key"
 else
-  grep -qF 'cache keys are not bound identically to run, attempt, and matrix OS index' "$tmproot/run.out" \
+  grep -qF 'cache keys are not bound identically to run, attempt, and matrix OS index' "$ADOPTER_LOG" \
     && pass "emitted suite rejects shared static dependency cache keys" \
-    || fail "emitted suite rejected static cache key for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected static cache key for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 private_mismatched_cache_adopter="$tmproot/adopter-artifact-private-mismatched-cache"
 cp -a "$private_artifact_adopter" "$private_mismatched_cache_adopter"
 sed -i '/^  build:/,/^  publish:/ s/matrix.dependency-index/matrix.os/' \
   "$private_mismatched_cache_adopter/.github/workflows/release.yml"
 git -C "$private_mismatched_cache_adopter" commit -aqm 'mismatch restored dependency cache key'
-if run_adopter "$private_mismatched_cache_adopter"; then
+schedule_adopter_script "$private_mismatched_cache_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted mismatched acquisition and build cache keys"
 else
-  grep -qF 'cache keys are not bound identically to run, attempt, and matrix OS index' "$tmproot/run.out" \
+  grep -qF 'cache keys are not bound identically to run, attempt, and matrix OS index' "$ADOPTER_LOG" \
     && pass "emitted suite rejects mismatched acquisition and build cache keys" \
-    || fail "emitted suite rejected mismatched cache key for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected mismatched cache key for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 private_lane_preflight_adopter="$tmproot/adopter-artifact-private-lane-preflight"
 cp -a "$private_artifact_adopter" "$private_lane_preflight_adopter"
 sed -i 's/must be a non-empty JSON runner-label array/must contain labels/g' \
   "$private_lane_preflight_adopter/.github/workflows/release.yml"
 git -C "$private_lane_preflight_adopter" commit -aqm 'remove fail-loud lane diagnostic'
-if run_adopter "$private_lane_preflight_adopter"; then
+schedule_adopter_script "$private_lane_preflight_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a weakened OS lane preflight"
 else
-  grep -qF 'does not fail loudly before snapshot' "$tmproot/run.out" \
+  grep -qF 'does not fail loudly before snapshot' "$ADOPTER_LOG" \
     && pass "emitted suite rejects weakened OS lane preflight" \
-    || fail "emitted suite rejected lane preflight mutation for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected lane preflight mutation for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 private_noop_lane_preflight_adopter="$tmproot/adopter-artifact-private-noop-lane-preflight"
 cp -a "$private_artifact_adopter" "$private_noop_lane_preflight_adopter"
 sed -i '/for lane_name in /c\          for lane_name in; do' \
   "$private_noop_lane_preflight_adopter/.github/workflows/release.yml"
 git -C "$private_noop_lane_preflight_adopter" commit -aqm 'make lane preflight a no-op'
-if run_adopter "$private_noop_lane_preflight_adopter"; then
+schedule_adopter_script "$private_noop_lane_preflight_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a no-op OS lane preflight"
 else
-  grep -qF 'OS lane preflight logic differs from the provenance-authorized contract' "$tmproot/run.out" \
+  grep -qF 'OS lane preflight logic differs from the provenance-authorized contract' "$ADOPTER_LOG" \
     && pass "emitted suite rejects a no-op OS lane preflight" \
-    || fail "emitted suite rejected no-op lane preflight for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected no-op lane preflight for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 private_timeout_adopter="$tmproot/adopter-artifact-private-timeout"
 cp -a "$private_artifact_adopter" "$private_timeout_adopter"
 sed -i '/^  build:/,/^  publish:/ s/timeout-minutes: 45/timeout-minutes: 60/' \
   "$private_timeout_adopter/.github/workflows/release.yml"
 git -C "$private_timeout_adopter" commit -aqm 'widen metered build timeout'
-if run_adopter "$private_timeout_adopter"; then
+schedule_adopter_script "$private_timeout_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a build timeout above ADR 0103"
 else
-  grep -qF "exceeds ADR 0103's 45-minute bound" "$tmproot/run.out" \
+  grep -qF "exceeds ADR 0103's 45-minute bound" "$ADOPTER_LOG" \
     && pass "emitted suite rejects build timeouts above ADR 0103" \
-    || fail "emitted suite rejected timeout mutation for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected timeout mutation for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 private_acquisition_timeout_adopter="$tmproot/adopter-artifact-private-acquisition-timeout"
 cp -a "$private_artifact_adopter" "$private_acquisition_timeout_adopter"
 sed -i '/^  acquire-private-dependencies:/,/^  build:/ s/timeout-minutes: 45/timeout-minutes: 60/' \
   "$private_acquisition_timeout_adopter/.github/workflows/release.yml"
 git -C "$private_acquisition_timeout_adopter" commit -aqm 'widen metered acquisition timeout'
-if run_adopter "$private_acquisition_timeout_adopter"; then
+schedule_adopter_script "$private_acquisition_timeout_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted an acquisition timeout above ADR 0103"
 else
-  grep -qF "acquisition matrix exceeds ADR 0103's 45-minute bound" "$tmproot/run.out" \
+  grep -qF "acquisition matrix exceeds ADR 0103's 45-minute bound" "$ADOPTER_LOG" \
     && pass "emitted suite rejects acquisition timeouts above ADR 0103" \
-    || fail "emitted suite rejected acquisition timeout mutation for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected acquisition timeout mutation for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 private_lifecycle_adopter="$tmproot/adopter-artifact-private-lifecycle"
 cp -a "$private_artifact_adopter" "$private_lifecycle_adopter"
 sed -i 's/npm ci --ignore-scripts --audit=false --fund=false/npm ci --audit=false --fund=false/' \
   "$private_lifecycle_adopter/.github/workflows/release.yml"
 git -C "$private_lifecycle_adopter" commit -aqm 'execute lifecycle scripts beside package credential'
-if run_adopter "$private_lifecycle_adopter"; then
+schedule_adopter_script "$private_lifecycle_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted lifecycle execution inside credentialed acquisition"
 else
-  grep -qF 'private acquisition weakened its credentialless handoff' "$tmproot/run.out" \
+  grep -qF 'private acquisition weakened its credentialless handoff' "$ADOPTER_LOG" \
     && pass "emitted suite rejects lifecycle execution inside credentialed acquisition" \
-    || fail "emitted suite rejected private lifecycle mutation for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected private lifecycle mutation for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 private_extra_secret_adopter="$tmproot/adopter-artifact-private-extra-secret"
 cp -a "$private_artifact_adopter" "$private_extra_secret_adopter"
 sed -i '/^  acquire-private-dependencies:/,/^  build:/ s/NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}/NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}\n          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}/' \
   "$private_extra_secret_adopter/.github/workflows/release.yml"
 git -C "$private_extra_secret_adopter" commit -aqm 'expose another secret during acquisition'
-if run_adopter "$private_extra_secret_adopter"; then
+schedule_adopter_script "$private_extra_secret_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a second acquisition secret"
 else
-  grep -qF 'another secret' "$tmproot/run.out" \
+  grep -qF 'another secret' "$ADOPTER_LOG" \
     && pass "emitted suite rejects additional acquisition secrets" \
-    || fail "emitted suite rejected acquisition secret widening for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected acquisition secret widening for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 acquisition_github_token_adopter="$tmproot/adopter-artifact-acquisition-github-token"
 cp -a "$private_artifact_adopter" "$acquisition_github_token_adopter"
@@ -4088,39 +4653,48 @@ text = text[:token_index] + replacement + text[token_index + len(needle):]
 open(path, "w", encoding="utf-8").write(text)
 PY
 git -C "$acquisition_github_token_adopter" commit -aqm 'leak github.token into private acquisition'
-if run_adopter "$acquisition_github_token_adopter"; then
+schedule_adopter_script "$acquisition_github_token_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release-artifact acquisition step receiving github.token"
 else
-  grep -qF 'private acquisition exposes credentials or another secret context' "$tmproot/run.out" \
+  grep -qF 'private acquisition exposes credentials or another secret context' "$ADOPTER_LOG" \
     && pass "emitted suite rejects GitHub token access during private acquisition" \
-    || fail "emitted suite rejected the acquisition token leak for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected the acquisition token leak for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 private_selector_adopter="$tmproot/adopter-artifact-private-selector"
 cp -a "$private_artifact_adopter" "$private_selector_adopter"
 sed -i "s/- os: \${{ fromJSON(vars.CI_LANE_TRUSTED_WINDOWS) }}/- os: 'vars.CI_LANE_TRUSTED_WINDOWS'/g" \
   "$private_selector_adopter/.github/workflows/release.yml"
 git -C "$private_selector_adopter" commit -aqm 'replace runner expression with silent literal typo'
-if run_adopter "$private_selector_adopter"; then
+schedule_adopter_script "$private_selector_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a silent variable-name runner literal"
 else
-  grep -qF 'unreviewed runner selector' "$tmproot/run.out" \
+  grep -qF 'unreviewed runner selector' "$ADOPTER_LOG" \
     && pass "emitted suite rejects silent variable-name runner literals" \
-    || fail "emitted suite rejected runner typo for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected runner typo for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 broken_artifact_adopter="$tmproot/adopter-artifact-broken-build-gate"
 cp -a "$artifact_adopter" "$broken_artifact_adopter"
 sed -i 's/needs: \[verify, snapshot\]$/needs: verify/' \
   "$broken_artifact_adopter/.github/workflows/release.yml"
 git -C "$broken_artifact_adopter" commit -aqm 'drop the build job ordering gate'
-if run_adopter "$broken_artifact_adopter"; then
+schedule_adopter_script "$broken_artifact_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release-artifact caller whose build job dropped needs: [verify, snapshot]"
 else
-  grep -qF 'does not gate the build matrix on both verification and snapshot state' "$tmproot/run.out" \
+  grep -qF 'does not gate the build matrix on both verification and snapshot state' "$ADOPTER_LOG" \
     && pass "emitted suite rejects a release-artifact caller with a broken build-job gate" \
-    || fail "emitted suite rejected the broken build job, but for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected the broken build job, but for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 # Reproduces a real, empirically-verified exploit: the generated contract-test
 # must reject a build job hand-edited to escalate permissions or to smuggle in
@@ -4146,30 +4720,37 @@ awk '
   | grep -F 'contents: write' >/dev/null \
   || fail "test setup did not actually escalate the build job's permissions to contents: write"
 git -C "$escalated_permissions_adopter" commit -aqm 'escalate the build job to contents: write'
-if run_adopter "$escalated_permissions_adopter"; then
+schedule_adopter_script "$escalated_permissions_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release-artifact caller whose build job was escalated to contents: write"
 else
-  grep -qF 'build job grants more than contents-read' "$tmproot/run.out" \
+  grep -qF 'build job grants more than contents-read' "$ADOPTER_LOG" \
     && pass "emitted suite rejects a release-artifact caller with an escalated build-job permission" \
-    || fail "emitted suite rejected the escalated build job, but for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected the escalated build job, but for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 leaked_secret_adopter="$tmproot/adopter-artifact-leaked-secret"
 cp -a "$artifact_adopter" "$leaked_secret_adopter"
 sed -i \
   's/RELEASE_VERSION: \${{ needs.verify.outputs.version }}/RELEASE_VERSION: ${{ needs.verify.outputs.version }}\n          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}/' \
   "$leaked_secret_adopter/.github/workflows/release.yml"
+sync_last_rejection
 grep -qF 'RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}' \
   "$leaked_secret_adopter/.github/workflows/release.yml" \
   || fail "test setup did not actually inject RELEASE_APP_PRIVATE_KEY into the build step's env"
 git -C "$leaked_secret_adopter" commit -aqm 'leak the release App private key into the build step env'
-if run_adopter "$leaked_secret_adopter"; then
+schedule_adopter_script "$leaked_secret_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release-artifact caller whose build step env leaked RELEASE_APP_PRIVATE_KEY"
 else
-  grep -qF 'build job references a secrets context' "$tmproot/run.out" \
+  grep -qF 'build job references a secrets context' "$ADOPTER_LOG" \
     && pass "emitted suite rejects a release-artifact caller with a release-App secret leaked into the build job" \
-    || fail "emitted suite rejected the leaked secret, but for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected the leaked secret, but for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 # A second independent review found the dot-accessor-only pattern above
 # (secrets\.) is itself bypassable three ways, all reproduced end-to-end
@@ -4182,34 +4763,42 @@ cp -a "$artifact_adopter" "$bracket_secret_adopter"
 sed -i \
   "s/RELEASE_VERSION: \${{ needs.verify.outputs.version }}/RELEASE_VERSION: \${{ needs.verify.outputs.version }}\n          RELEASE_APP_PRIVATE_KEY: \${{ secrets['RELEASE_APP_PRIVATE_KEY'] }}/" \
   "$bracket_secret_adopter/.github/workflows/release.yml"
+sync_last_rejection
 grep -qF "RELEASE_APP_PRIVATE_KEY: \${{ secrets['RELEASE_APP_PRIVATE_KEY'] }}" \
   "$bracket_secret_adopter/.github/workflows/release.yml" \
   || fail "test setup did not actually inject a bracket-syntax secrets[...] reference into the build step's env"
 git -C "$bracket_secret_adopter" commit -aqm 'leak the release App private key via secrets[...] bracket syntax'
-if run_adopter "$bracket_secret_adopter"; then
+schedule_adopter_script "$bracket_secret_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release-artifact caller whose build step env leaked a secret via bracket syntax (secrets['NAME'])"
 else
-  grep -qF 'build job references a secrets context' "$tmproot/run.out" \
+  grep -qF 'build job references a secrets context' "$ADOPTER_LOG" \
     && pass "emitted suite rejects a release-artifact caller leaking a secret via bracket syntax" \
-    || fail "emitted suite rejected the bracket-syntax leak, but for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected the bracket-syntax leak, but for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 tojson_secret_adopter="$tmproot/adopter-artifact-tojson-secret"
 cp -a "$artifact_adopter" "$tojson_secret_adopter"
 sed -i \
   's/RELEASE_VERSION: \${{ needs.verify.outputs.version }}/RELEASE_VERSION: ${{ needs.verify.outputs.version }}\n          ALL_SECRETS: ${{ toJSON(secrets) }}/' \
   "$tojson_secret_adopter/.github/workflows/release.yml"
+sync_last_rejection
 grep -qF 'ALL_SECRETS: ${{ toJSON(secrets) }}' \
   "$tojson_secret_adopter/.github/workflows/release.yml" \
   || fail "test setup did not actually inject a toJSON(secrets) dump into the build step's env"
 git -C "$tojson_secret_adopter" commit -aqm 'dump every secret into the build step env via toJSON(secrets)'
-if run_adopter "$tojson_secret_adopter"; then
+schedule_adopter_script "$tojson_secret_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release-artifact caller whose build step env dumped the entire secrets context via toJSON(secrets)"
 else
-  grep -qF 'build job references a secrets context' "$tmproot/run.out" \
+  grep -qF 'build job references a secrets context' "$ADOPTER_LOG" \
     && pass "emitted suite rejects a release-artifact caller dumping secrets via toJSON(secrets)" \
-    || fail "emitted suite rejected the toJSON(secrets) leak, but for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected the toJSON(secrets) leak, but for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 github_token_build_adopter="$tmproot/adopter-artifact-github-token-build"
 cp -a "$artifact_adopter" "$github_token_build_adopter"
@@ -4228,17 +4817,21 @@ replacement = needle + "          PRIVATE_GITHUB_TOKEN: ${{ format('{{{0}}}', gi
 text = text[:token_index] + replacement + text[token_index + len(needle):]
 open(path, "w", encoding="utf-8").write(text)
 PY
+sync_last_rejection
 grep -qF "PRIVATE_GITHUB_TOKEN: \${{ format('{{{0}}}', github.token) }}" \
   "$github_token_build_adopter/.github/workflows/release.yml" \
   || fail "test setup did not inject a wrapped github.token into the release-artifact build job"
 git -C "$github_token_build_adopter" commit -aqm 'leak wrapped github.token into build environment'
-if run_adopter "$github_token_build_adopter"; then
+schedule_adopter_script "$github_token_build_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release-artifact caller exposing github.token to its build job"
 else
-  grep -qF 'build job references a secrets context' "$tmproot/run.out" \
+  grep -qF 'build job references a secrets context' "$ADOPTER_LOG" \
     && pass "emitted suite rejects a release-artifact build job receiving github.token" \
-    || fail "emitted suite rejected the build token leak, but for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected the build token leak, but for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 github_context_build_adopter="$tmproot/adopter-artifact-github-context-build"
 cp -a "$artifact_adopter" "$github_context_build_adopter"
@@ -4257,17 +4850,21 @@ replacement = needle + "          PRIVATE_GITHUB_CONTEXT: ${{ toJSON(github) }}\
 text = text[:token_index] + replacement + text[token_index + len(needle):]
 open(path, "w", encoding="utf-8").write(text)
 PY
+sync_last_rejection
 grep -qF 'PRIVATE_GITHUB_CONTEXT: ${{ toJSON(github) }}' \
   "$github_context_build_adopter/.github/workflows/release.yml" \
   || fail "test setup did not inject a serialized github context into the release-artifact build job"
 git -C "$github_context_build_adopter" commit -aqm 'leak github context into build environment'
-if run_adopter "$github_context_build_adopter"; then
+schedule_adopter_script "$github_context_build_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release-artifact caller serializing the github context in its build job"
 else
-  grep -qF 'build job references a secrets context' "$tmproot/run.out" \
+  grep -qF 'build job references a secrets context' "$ADOPTER_LOG" \
     && pass "emitted suite rejects a release-artifact build job serializing github context" \
-    || fail "emitted suite rejected the serialized GitHub context, but for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected the serialized GitHub context, but for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 toplevel_env_secret_adopter="$tmproot/adopter-artifact-toplevel-env-secret"
 cp -a "$artifact_adopter" "$toplevel_env_secret_adopter"
@@ -4286,8 +4883,10 @@ mv "$toplevel_env_secret_adopter/.github/workflows/release.yml.new" \
 sed -i \
   's/RELEASE_VERSION: \${{ needs.verify.outputs.version }}/RELEASE_VERSION: ${{ needs.verify.outputs.version }}\n          RELEASE_APP_PRIVATE_KEY: ${{ env.RELEASE_APP_PRIVATE_KEY }}/' \
   "$toplevel_env_secret_adopter/.github/workflows/release.yml"
+sync_last_rejection
 grep -qE '^env:[[:space:]]*$' "$toplevel_env_secret_adopter/.github/workflows/release.yml" \
   || fail "test setup did not actually add a workflow-level env: block"
+sync_last_rejection
 grep -qF 'RELEASE_APP_PRIVATE_KEY: ${{ env.RELEASE_APP_PRIVATE_KEY }}' \
   "$toplevel_env_secret_adopter/.github/workflows/release.yml" \
   || fail "test setup did not actually make the build step consume the workflow-level env indirection"
@@ -4304,13 +4903,16 @@ build_job_slice="$(awk '
 ! grep -q 'secrets' <<<"$build_job_slice" \
   || fail "test setup leaked the literal word secrets into the build job block, which would make this test pass for the wrong reason"
 git -C "$toplevel_env_secret_adopter" commit -aqm 'leak the release App private key via a workflow-level env: indirection'
-if run_adopter "$toplevel_env_secret_adopter"; then
+schedule_adopter_script "$toplevel_env_secret_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release-artifact caller smuggling a secret through a workflow-level env: block"
 else
-  grep -qF 'declares a workflow-level env: block' "$tmproot/run.out" \
+  grep -qF 'declares a workflow-level env: block' "$ADOPTER_LOG" \
     && pass "emitted suite rejects a release-artifact caller smuggling a secret through a workflow-level env: block" \
-    || fail "emitted suite rejected the workflow-level env indirection, but for the wrong reason: $(tail -2 "$tmproot/run.out")"
+    || fail "emitted suite rejected the workflow-level env indirection, but for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
+SCHED_SCRIPT
+)"
 
 # --------------------------------------------------------------------------
 # release-snapshot (#1206): a snapshot-only release caller for adopters that
@@ -4325,18 +4927,22 @@ fi
 snapshot_release="$(bash "$gen" release-snapshot "$sha")"
 release_auth_environment_note='# The step clears shell startup, loader, and Git settings that could alter this lookup.'
 release_auth_isolation_note='# Run Git with env -i and send its auth header over stdin; do not export it.'
+sync_last_rejection
 grep -qF -- "$release_auth_environment_note" <<<"$release_node_workflow" \
   && grep -qF -- "$release_auth_isolation_note" <<<"$release_node_workflow" \
   && pass "release-node documents its isolated release-state Git environment (#1715)" \
   || fail "release-node omits the release-state environment explanation (#1715)"
+sync_last_rejection
 grep -qF -- "$release_auth_environment_note" <<<"$artifact_release" \
   && grep -qF -- "$release_auth_isolation_note" <<<"$artifact_release" \
   && pass "release-artifact documents its isolated release-state Git environment (#1715)" \
   || fail "release-artifact omits the release-state environment explanation (#1715)"
+sync_last_rejection
 grep -qF -- "$release_auth_environment_note" <<<"$snapshot_release" \
   && grep -qF -- "$release_auth_isolation_note" <<<"$snapshot_release" \
   && pass "release-snapshot documents its isolated release-state Git environment (#1715)" \
   || fail "release-snapshot omits the release-state environment explanation (#1715)"
+sync_last_rejection
 grep -qE '^  verify:$' <<<"$snapshot_release" \
   && grep -qE '^  snapshot:$' <<<"$snapshot_release" \
   && grep -qE '^  publish:$' <<<"$snapshot_release" \
@@ -4360,6 +4966,7 @@ snapshot_verify_job="$(awk '/^  verify:[[:space:]]*$/{seen=1} /^  snapshot:[[:sp
   && pass "release-snapshot guards setup-node, npm ci, lifecycle execution, and version stamping on package.json and fails closed without a verify hook (#1206)" \
   || fail "release-snapshot still assumes a Node project: a non-npm adopter would fail at npm ci or verify nothing"
 snapshot_publish_job="$(awk '/^  publish:[[:space:]]*$/{seen=1} seen' <<<"$snapshot_release")"
+sync_last_rejection
 grep -qF 'VERSION: ${{ needs.verify.outputs.version }}' <<<"$snapshot_publish_job" \
   && ! grep -qF 'steps.release-version' <<<"$snapshot_publish_job" \
   && pass "release-snapshot publish job resolves VERSION from needs.verify, not the unreachable verify-job step" \
@@ -4395,9 +5002,14 @@ FRAGMENT
 
 snapshot_adopter="$tmproot/adopter-snapshot"
 build_snapshot_adopter "$snapshot_adopter"
-run_adopter "$snapshot_adopter" \
-  && pass "emitted suite accepts a generated release-snapshot caller" \
-  || fail "emitted suite rejects a generated release-snapshot caller: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$snapshot_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite accepts a generated release-snapshot caller"
+else
+  fail "emitted suite rejects a generated release-snapshot caller: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 assert_mutable_verification_path_rejected "$snapshot_adopter" release-snapshot snapshot-mutable-path
 assert_release_path_mutation_rejected "$snapshot_adopter" release-snapshot snapshot-capture-path-override \
   add_capture_path_override 'overrides the runner-managed PATH before release verification (#1717)'
@@ -4407,6 +5019,7 @@ assert_release_path_mutation_rejected "$snapshot_adopter" release-snapshot snaps
   move_capture_after_lifecycle_scripts 'does not capture trusted release verification runtime inputs (#1717)'
 
 expected_release_fallback='    fail "$release_workflow is not a generated release caller at $CONTRACT_REF. Inspect the existing release workflow and repository configuration to determine its mode and all custom generator options. Regenerate the complete caller set at $CONTRACT_REF in a clean temporary checkout, review the full diff, then replace the committed set together. Supported release modes are release-node, release-artifact for GitHub Release assets, and release-snapshot when the release workflow publishes nothing."'
+sync_last_rejection
 grep -Fqx "$expected_release_fallback" "$emitted" \
   && pass "release-specific unknown-provenance fallback is prose-only" \
   || fail "release-specific unknown-provenance fallback diverged or included an unapproved command"
@@ -4415,10 +5028,11 @@ unknown_release="$tmproot/adopter-unrecognized-release"
 build_adopter "$unknown_release" yes generated-artifacts-with-adr-index
 sed -i '/^# Generated by verJSON\/\.github scripts\/gen-changelog-caller\.sh release-node /d' \
   "$unknown_release/.github/workflows/release.yml"
-if run_adopter "$unknown_release"; then
+schedule_adopter_script "$unknown_release" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release workflow without recognized provenance"
 else
-  unknown_release_finding="$(grep -F 'Affected member: .github/workflows/release.yml;' "$tmproot/run.out")"
+  unknown_release_finding="$(grep -F 'Affected member: .github/workflows/release.yml;' "$ADOPTER_LOG")"
   unknown_release_guidance="${unknown_release_finding#*Affected member: .github/workflows/release.yml; }"
   expected_unknown_release_guidance='its mode cannot be established by this check; possible modes are release-node, release-artifact, release-snapshot. Inspect the existing caller and related generated artifacts to derive the exact mode and all custom generator options; preserve them. Generate into a clean temporary checkout, review the full diff, then replace the committed set together. This diagnostic intentionally prints no single-file command. Name the mode this repository already adopted: release-artifact publishes GitHub Release assets, and release-snapshot publishes nothing from the release workflow.'
   [ "$unknown_release_guidance" = "$expected_unknown_release_guidance" ] \
@@ -4426,6 +5040,8 @@ else
     && pass "unrecognized release provenance is rejected with exact prose-only guidance" \
     || fail "unrecognized release provenance guidance diverged or included a command: ${unknown_release_guidance:-<no release guidance>}"
 fi
+SCHED_SCRIPT
+)"
 
 # --------------------------------------------------------------------------
 # release-node refuses an unpublishable package BEFORE the snapshot (#1206).
@@ -4494,9 +5110,14 @@ end = next(
 )
 open(path, "w", encoding="utf-8").writelines(lines[:start] + lines[end:])
 PY
-run_adopter "$stripped_guard_adopter" \
-  && fail "emitted suite accepted a release-node caller with its pre-snapshot refusal deleted" \
-  || pass "emitted suite rejects a release-node caller whose pre-snapshot refusal was deleted (#1206)"
+schedule_adopter_script "$stripped_guard_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a release-node caller with its pre-snapshot refusal deleted"
+else
+  pass "emitted suite rejects a release-node caller whose pre-snapshot refusal was deleted (#1206)"
+fi
+SCHED_SCRIPT
+)"
 
 
 # --------------------------------------------------------------------------
@@ -4633,6 +5254,7 @@ known_remedy="$tmproot/adopter-changelog-remedy"
 build_adopter "$known_remedy" yes generated-artifacts-with-adr-index
 stale_pin "$known_remedy" .github/workflows/changelog.yml
 run_adopter "$known_remedy"
+sync_last_rejection
 known_finding="$(grep -F '.github/workflows/changelog.yml is still at' "$tmproot/run.out")"
 known_guidance="${known_finding#*Affected member: .github/workflows/changelog.yml; }"
 expected_known_guidance='mode hint: generated-artifacts-with-adr-index; verify it against existing artifacts. Inspect the existing caller and related generated artifacts to derive the exact mode and all custom generator options; preserve them. Generate into a clean temporary checkout, review the full diff, then replace the committed set together. This diagnostic intentionally prints no single-file command. Name the mode this repository already adopted: generated-artifacts-with-adr-index also wires adr-index: true and the pinned scripts/gen-adr-index.sh, and workflow is the compatibility alias.'
@@ -4644,6 +5266,7 @@ unknown_remedy="$tmproot/adopter-changelog-remedy-unknown"
 build_adopter "$unknown_remedy" yes generated-artifacts-with-adr-index
 rm -f "$unknown_remedy/.github/workflows/changelog.yml"
 run_adopter "$unknown_remedy"
+sync_last_rejection
 unknown_finding="$(grep -F '.github/workflows/changelog.yml is absent' "$tmproot/run.out")"
 unknown_guidance="${unknown_finding#*Affected member: .github/workflows/changelog.yml; }"
 expected_unknown_guidance='its mode cannot be established by this check; possible modes are generated-artifacts, generated-artifacts-with-adr-index, workflow. Inspect the existing caller and related generated artifacts to derive the exact mode and all custom generator options; preserve them. Generate into a clean temporary checkout, review the full diff, then replace the committed set together. This diagnostic intentionally prints no single-file command. Name the mode this repository already adopted: generated-artifacts-with-adr-index also wires adr-index: true and the pinned scripts/gen-adr-index.sh, and workflow is the compatibility alias.'
@@ -4695,6 +5318,7 @@ else
 fi
 paste_safety_unreported=''
 for member in $paste_safety_members; do
+sync_last_rejection
   grep -qF "Affected member: $member;" "$tmproot/run.out" \
     || paste_safety_unreported="$paste_safety_unreported $member"
 done
@@ -4704,6 +5328,7 @@ done
 # Every generated-set finding carries prose guidance only. This checker
 # cannot recover every caller-specific option from the target workflow, and a
 # shell redirect truncates the destination before generation succeeds.
+sync_last_rejection
 remedy_guidance="$(grep -F 'Regenerate the complete generated set' "$tmproot/run.out" || true)"
 [ -n "$remedy_guidance" ] \
   && grep -qF 'Generate into a clean temporary checkout, review the full diff, then replace the committed set together.' <<<"$remedy_guidance" \
@@ -4802,6 +5427,7 @@ remedy_first_arm_line="$(grep -n 'generated_set_note ' <<<"$generated_set_check_
   || fail "generated_set_check no longer emits one unmodified composed remedy for all its arms, so the arms this section does not drive can emit a remedy it never runs ($arm_findings_shared_remedy of $arm_findings findings append \$remedy; the generator holds $arm_findings_in_generator arms in total; $remedy_decls declarations, $remedy_from_mode \$mode and $remedy_from_declared \$declared compositions, each wanted exactly once; first composition at body line ${remedy_mode_line:-none} against first arm at ${remedy_first_arm_line:-none}; lines touching \$remedy that fit no permitted form:${remedy_unaccounted:- none})"
 
 remedy_scan="$tmproot/remedy-scan.out"
+sync_last_rejection
 cat "$tmproot/run.out" >"$remedy_scan"
 
 custom_modes="$tmproot/adopter-remedy-custom-modes"
@@ -4810,20 +5436,23 @@ bash "$gen" release-artifact "$sha" --build-runner ubuntu-24.04 \
   >"$custom_modes/.github/workflows/release.yml"
 bash "$gen" pr-gate "$sha" --untrusted-runner linux-x64 \
   >"$custom_modes/.github/workflows/changelog-contract.yml"
+sync_last_rejection
 grep -qF -- '--build-runner ubuntu-24.04' "$custom_modes/.github/workflows/release.yml" \
   && pass "custom release-artifact fixture records its build-runner option" \
   || fail "custom release-artifact fixture lost its build-runner option"
+sync_last_rejection
 grep -qF 'runs-on: [linux-x64]' "$custom_modes/.github/workflows/changelog-contract.yml" \
   && pass "custom pr-gate fixture records its untrusted-runner option" \
   || fail "custom pr-gate fixture lost its untrusted-runner option"
 stale_pin "$custom_modes" .github/workflows/release.yml
 stale_pin "$custom_modes" .github/workflows/changelog-contract.yml
-if run_adopter "$custom_modes"; then
+schedule_adopter_script "$custom_modes" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted custom release callers with stale pins"
 else
-release_finding="$(grep -F 'Affected member: .github/workflows/release.yml;' "$tmproot/run.out")"
+release_finding="$(grep -F 'Affected member: .github/workflows/release.yml;' "$ADOPTER_LOG")"
 release_guidance="${release_finding#*Affected member: .github/workflows/release.yml; }"
-pr_gate_finding="$(grep -F 'Affected member: .github/workflows/changelog-contract.yml;' "$tmproot/run.out")"
+pr_gate_finding="$(grep -F 'Affected member: .github/workflows/changelog-contract.yml;' "$ADOPTER_LOG")"
 pr_gate_guidance="${pr_gate_finding#*Affected member: .github/workflows/changelog-contract.yml; }"
 expected_release_guidance='mode hint: release-artifact; verify it against existing artifacts. Inspect the existing caller and related generated artifacts to derive the exact mode and all custom generator options; preserve them. Generate into a clean temporary checkout, review the full diff, then replace the committed set together. This diagnostic intentionally prints no single-file command. Name the mode this repository already adopted: release-artifact publishes GitHub Release assets, and release-snapshot publishes nothing from the release workflow.'
 expected_pr_gate_guidance='mode hint: pr-gate; verify it against existing artifacts. Inspect the existing caller and related generated artifacts to derive the exact mode and all custom generator options; preserve them. Generate into a clean temporary checkout, review the full diff, then replace the committed set together. This diagnostic intentionally prints no single-file command.'
@@ -4831,35 +5460,43 @@ expected_pr_gate_guidance='mode hint: pr-gate; verify it against existing artifa
   && pass "custom stale caller guidance preserves exact safe prose and mode hints" \
   || fail "custom stale caller guidance diverged or included a command: ${release_guidance:-<no release guidance>} ${pr_gate_guidance:-<no pr-gate guidance>}"
 fi
+SCHED_SCRIPT
+)"
 
 paste_modes="$tmproot/adopter-remedy-paste-modes"
 build_adopter "$paste_modes" yes generated-artifacts-with-adr-index
 stale_pin "$paste_modes" .github/workflows/changelog.yml
 sed -i '/^# Generated by verJSON\/\.github scripts\/gen-changelog-caller\.sh /d' "$paste_modes/.github/workflows/changelog.yml"
-if run_adopter "$paste_modes"; then
+schedule_adopter_script "$paste_modes" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a generated caller with unknown mode provenance"
 else
-  stale_guidance="$(grep -F 'Affected member: .github/workflows/changelog.yml;' "$tmproot/run.out")"
+  stale_guidance="$(grep -F 'Affected member: .github/workflows/changelog.yml;' "$ADOPTER_LOG")"
   expected_stale_guidance='its mode cannot be established by this check; possible modes are generated-artifacts, generated-artifacts-with-adr-index, workflow. Inspect the existing caller and related generated artifacts to derive the exact mode and all custom generator options; preserve them. Generate into a clean temporary checkout, review the full diff, then replace the committed set together. This diagnostic intentionally prints no single-file command. Name the mode this repository already adopted: generated-artifacts-with-adr-index also wires adr-index: true and the pinned scripts/gen-adr-index.sh, and workflow is the compatibility alias.'
   actual_stale_guidance="${stale_guidance#*Affected member: .github/workflows/changelog.yml; }"
   [ "$actual_stale_guidance" = "$expected_stale_guidance" ] \
     && pass "unknown-mode caller guidance matches approved prose exactly" \
     || fail "unknown-mode caller guidance diverged (actual: ${actual_stale_guidance:-<none>}; expected: $expected_stale_guidance)"
 fi
+SCHED_SCRIPT
+)"
 
 paste_self="$tmproot/adopter-remedy-paste-self"
 build_adopter "$paste_self" yes generated-artifacts-with-adr-index
 duplicate_pin_line "$paste_self/scripts/changelog-contract.test.sh"
-if run_adopter "$paste_self"; then
+schedule_adopter_script "$paste_self" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted its own duplicate pin"
 else
-    self_finding="$(grep -F 'Affected member: scripts/changelog-contract.test.sh;' "$tmproot/run.out")"
+    self_finding="$(grep -F 'Affected member: scripts/changelog-contract.test.sh;' "$ADOPTER_LOG")"
     self_guidance="${self_finding#*Affected member: scripts/changelog-contract.test.sh; }"
     expected_self_guidance='mode hint: contract-test; verify it against existing artifacts. Inspect the existing caller and related generated artifacts to derive the exact mode and all custom generator options; preserve them. Generate into a clean temporary checkout, review the full diff, then replace the committed set together. This diagnostic intentionally prints no single-file command.'
     [ "$self_guidance" = "$expected_self_guidance" ] \
       && pass "the contract-suite duplicate-pin remedy stays prose-only" \
       || fail "the contract-suite duplicate-pin remedy diverged (actual: ${self_guidance:-<none>}; expected: $expected_self_guidance)"
 fi
+SCHED_SCRIPT
+)"
 
 # The header states which MODE produced the file, and that is part of the claim.
 # A `changelog.yml` carrying a `pr-gate` header at the correct pin is not the
@@ -4874,6 +5511,7 @@ sed -i -E \
   's|^(# Generated by verJSON/\.github scripts/gen-changelog-caller\.sh )[a-z][a-z-]*( [0-9a-f]{40})|\1pr-gate\2|' \
   "$forged_mode/.github/workflows/changelog.yml"
 run_adopter "$forged_mode"
+sync_last_rejection
 { ! grep -qF "every generated member of the adopter set pins $sha" "$tmproot/run.out" \
   && grep -qF 'the generated adopter set is not atomic' "$tmproot/run.out" \
   && grep -qF '.github/workflows/changelog.yml' "$tmproot/run.out"; } \
@@ -4893,9 +5531,11 @@ for member_mode in \
     "s|^(# Generated by verJSON/\\.github scripts/gen-changelog-caller\\.sh )${expected_mode}( [0-9a-f]{40})|\\1${wrong_mode}\\2|" \
     "$wrong_mode_adopter/$member"
   run_adopter "$wrong_mode_adopter"
+sync_last_rejection
   if grep -qF "$member declares generator mode '$wrong_mode'" "$tmproot/run.out"; then
     pass "the set-level verdict rejects $member when it declares the valid but wrong mode '$wrong_mode'"
   else
+sync_last_rejection
     fail "the set-level verdict accepted $member with wrong generator mode '$wrong_mode': $(tr '\n' ' ' <"$tmproot/run.out" | tail -c 400)"
   fi
 done
@@ -4905,10 +5545,14 @@ done
 # state it is supposed to accept.
 atomic_adopter="$tmproot/adopter-atomic-set"
 build_adopter "$atomic_adopter"
-{ run_adopter "$atomic_adopter" \
-  && grep -qF "every generated member of the adopter set pins $sha" "$tmproot/run.out"; } \
-  && pass "a whole-set regeneration passes and says so" \
-  || fail "a whole-set regeneration did not report the set as atomic: $(tail -2 "$tmproot/run.out")"
+schedule_adopter_script "$atomic_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ] && grep -qF "every generated member of the adopter set pins $sha" "$ADOPTER_LOG"; then
+  pass "a whole-set regeneration passes and says so"
+else
+  fail "a whole-set regeneration did not report the set as atomic: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 
 # Two members left behind at once. The per-member assertions further down stop
 # at the first one they reach, which is exactly the reporting the set-level
@@ -4921,6 +5565,7 @@ stale_pin "$two_stale" .github/workflows/changelog-contract.yml
 if run_adopter "$two_stale"; then
   fail "emitted suite accepted two members left at an earlier contract commit"
 else
+sync_last_rejection
   { grep -qF 'scripts/render-next.sh is still at' "$tmproot/run.out" \
     && grep -qF '.github/workflows/changelog-contract.yml is still at' "$tmproot/run.out"; } \
     && pass "a subset regeneration names every divergent member, not just the first" \
@@ -4946,25 +5591,44 @@ expect_unestablished_pin() {
   # entirely leaves this section green, because the trailing pin-mismatch arm
   # picks the member up and reports it anyway. An arm that only changes the
   # message needs the message asserted or it is not covered at all.
-  local label="$1" member="$2" mutator="$3" phrase="${4:-}" dir
+  local label="$1" member="$2" mutator="$3" phrase="${4:-}" seq result
   malformed_seq=$((malformed_seq + 1))
-  dir="$tmproot/set-malformed-$malformed_seq"
+  seq="$malformed_seq"
+  result="$tmproot/malformed-result-$seq"
+  (
+    fails=0
+    ADOPTER_ISOLATED_LOG=1
+    expect_unestablished_pin_body "$seq" "$label" "$member" "$mutator" "$phrase"
+    printf '%s\n' "$fails" >"$result"
+  ) &
+  last_rejection_pid="$!"
+  last_rejection_log="$tmproot/set-malformed-$seq.contract-out"
+  last_rejection_copy=
+  last_rejection_origin=
+  adopter_job_pids+=("$last_rejection_pid")
+  adopter_job_results+=("$result")
+  pump_adopter_jobs
+}
+
+expect_unestablished_pin_body() {
+  local seq="$1" label="$2" member="$3" mutator="$4" phrase="${5:-}" dir
+  dir="$tmproot/set-malformed-$seq"
   build_adopter "$dir"
   "$mutator" "$dir/$member"
-  if run_adopter "$dir"; then
+  if ADOPTER_ISOLATED_LOG=1 run_adopter "$dir"; then
     chmod -R u+rwX "$dir" 2>/dev/null || true
     fail "emitted suite read $label as conformance"
     return
   fi
-  { grep -qF 'the generated adopter set is not atomic' "$tmproot/run.out" \
-    && grep -qF "$member" "$tmproot/run.out" \
-    && grep -qF "$sha" "$tmproot/run.out"; } \
+  { grep -qF 'the generated adopter set is not atomic' "$dir.contract-out" \
+    && grep -qF "$member" "$dir.contract-out" \
+    && grep -qF "$sha" "$dir.contract-out"; } \
     && pass "$label is reported against the pinned commit, not skipped" \
-    || fail "$label reddened for some other reason: $(tr '\n' ' ' <"$tmproot/run.out" | tail -c 400)"
+    || fail "$label reddened for some other reason: $(tr '\n' ' ' <"$dir.contract-out" | tail -c 400)"
   if [ -n "$phrase" ]; then
-    grep -qF "$phrase" "$tmproot/run.out" \
+    grep -qF "$phrase" "$dir.contract-out" \
       && pass "$label is reported in the wording only its own arm emits" \
-      || fail "$label was reported by some other arm; \"$phrase\" is absent: $(tr '\n' ' ' <"$tmproot/run.out" | tail -c 400)"
+      || fail "$label was reported by some other arm; \"$phrase\" is absent: $(tr '\n' ' ' <"$dir.contract-out" | tail -c 400)"
   fi
   # chmod 000 would otherwise defeat this file's own cleanup.
   chmod -R u+rwX "$dir" 2>/dev/null || true
@@ -5045,6 +5709,7 @@ verify_safe_symlink_repair() { # verify_safe_symlink_repair <label> <path> <muta
     fail "$label symlink unexpectedly passed the generated-set check"
     return
   fi
+sync_last_rejection
   grep -qF "symlinked path component $expected_component" "$tmproot/run.out" \
     || fail "$label symlink was not identified by its path component"
   [ -L "$dir/$member" ] \
@@ -5057,6 +5722,7 @@ verify_safe_symlink_repair() { # verify_safe_symlink_repair <label> <path> <muta
       print
       exit
     }
+sync_last_rejection
   ' "$tmproot/run.out")"
   [ -n "$repair" ] \
     || { fail "$label finding did not provide a safe path repair command"; return; }
@@ -5133,12 +5799,18 @@ else:
     raise SystemExit("fixture has no CONTRACT_REF line to replace")
 open(path, "w", encoding="utf-8").writelines(lines)
 INJECT
-run_adopter "$injection_adopter" \
-  && fail "emitted suite accepted a header whose pin is a command substitution" \
-  || pass "emitted suite refuses a header whose pin is a command substitution"
+schedule_adopter_script "$injection_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a header whose pin is a command substitution"
+else
+  pass "emitted suite refuses a header whose pin is a command substitution"
+fi
+SCHED_SCRIPT
+)"
 [ ! -e "$injection_witness" ] \
   && pass "a member's header is read as a claim and never executed" \
   || fail "a command named in an adopter-controlled header was executed by the checker"
 
+drain_adopter_jobs
 [ "$fails" -eq 0 ] || exit 1
 echo "All tests passed."

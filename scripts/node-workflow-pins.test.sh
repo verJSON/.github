@@ -30,10 +30,9 @@ for wf in "$ci" "$release" "$actions_ci"; do
     expected_checkouts=4
     expected_setups=2
   elif [ "$wf" = "$actions_ci" ]; then
-    # shell-test-groups' own checkout, plus adr-number-collision's isolated
-    # checkout of live PR state (Verjson/.github#983), plus the hosted
-    # compatibility contract's isolated checkout (Verjson/.github#1114).
-    expected_checkouts=3
+    # shell-test-groups, adr-number-collision (#983), hosted compatibility
+    # (#1114), changed-path classification, and the documentation contracts.
+    expected_checkouts=5
   fi
   if [ "$wf" != "$actions_ci" ]; then
     [ "$wf" = "$ci" ] || expected_setups=2
