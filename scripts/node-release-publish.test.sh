@@ -11,8 +11,12 @@ pass() { printf 'ok   - %s\n' "$1"; }
 fail() { printf 'FAIL - %s\n' "$1"; fails=$((fails + 1)); }
 
 python3 - "$workflow" <<'PY' || fails=$((fails + 1))
+import pathlib
 import sys
 import yaml
+
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]).resolve().parents[2] / "scripts"))
+import node_release_artifact_manifest as artifact_manifest
 
 raw = open(sys.argv[1], encoding="utf-8").read()
 doc = yaml.safe_load(raw)
@@ -32,10 +36,11 @@ prepare = doc["jobs"]["prepare"]
 release = doc["jobs"]["release"]
 retention = doc["jobs"]["retention"]
 assert prepare["permissions"] == {"contents": "read", "packages": "read"}
+assert prepare["outputs"]["package-artifact-id"] == "${{ steps.upload-packages.outputs.artifact-id }}"
 assert "inputs.runner" in prepare["runs-on"]
 assert release["needs"] == "prepare"
 assert release["runs-on"] == "ubuntu-24.04", "publication must run on a fresh hosted runner"
-assert release["permissions"] == {"contents": "write", "packages": "write"}
+assert release["permissions"] == {"actions": "read", "contents": "write", "packages": "write"}
 assert retention["runs-on"] == "ubuntu-24.04", "retention must not reuse a preparation runner"
 assert "NODE_AUTH_TOKEN" not in (doc.get("env") or {})
 assert "NODE_AUTH_TOKEN" not in (prepare.get("env") or {})
@@ -83,7 +88,16 @@ assert 'expectedPackages.push({name: packageJson.name, version: packageVersion})
 assert 'expected-manifest=${expectedManifest}' in package_dirs["run"]
 download = next(step for step in steps if step.get("uses", "").startswith("actions/download-artifact@"))
 assert download["uses"] == "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
-assert "github.run_id" in download["with"]["name"] and "inputs.version" in download["with"]["name"]
+assert download["with"]["artifact-ids"] == "${{ needs.prepare.outputs.package-artifact-id }}"
+upload = next(step for step in prepare["steps"] if step.get("uses", "").startswith("actions/upload-artifact@"))
+assert upload["id"] == "upload-packages"
+assert upload["with"]["name"].find("github.run_attempt") >= 0
+assert upload["with"]["compression-level"] == 0
+artifact_size = next(step for step in steps if step.get("name") == "Enforce prepared package artifact size before download")
+assert artifact_size["env"]["ARTIFACT_ID"] == "${{ needs.prepare.outputs.package-artifact-id }}"
+assert int(artifact_size["env"]["MAX_ARTIFACT_BYTES"]) == artifact_manifest.MAX_ARTIFACT_BYTES
+assert 'actions/artifacts/$ARTIFACT_ID' in artifact_size["run"]
+assert steps.index(artifact_size) < steps.index(download), "artifact size must be checked before download"
 contract_checkout = next(step for step in steps if step.get("with", {}).get("repository") == "Verjson/.github")
 assert contract_checkout["with"]["ref"] == "${{ inputs.contract-ref }}"
 assert contract_checkout["with"]["persist-credentials"] is False

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import gzip
 import hashlib
 import json
 import pathlib
@@ -18,9 +19,45 @@ ARCHIVE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*\.tgz$")
 MAX_ARCHIVES = 256
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
 MAX_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024
+MAX_ARTIFACT_BYTES = 2 * 1024 * 1024 * 1024
+MAX_TOTAL_ARCHIVE_BYTES = MAX_ARTIFACT_BYTES - 16 * 1024 * 1024
+MAX_TOTAL_EXPANDED_BYTES = 8 * 1024 * 1024 * 1024
 MAX_MEMBERS = 100_000
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_PACKAGE_JSON_BYTES = 1024 * 1024
+MAX_TAR_METADATA_BYTES = 1024 * 1024
+
+
+class _BoundedTarStream:
+    def __init__(self, stream, archive_name: str) -> None:
+        self.stream = stream
+        self.archive_name = archive_name
+        self.bytes_read = 0
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            raise ValueError(f"package archive requests an unbounded read: {self.archive_name}")
+        remaining = MAX_EXPANDED_BYTES - self.bytes_read
+        data = self.stream.read(min(size, remaining + 1))
+        self.bytes_read += len(data)
+        if self.bytes_read > MAX_EXPANDED_BYTES:
+            raise ValueError(f"package archive expands beyond the supported size: {self.archive_name}")
+        return data
+
+    def close(self) -> None:
+        self.stream.close()
+
+
+class _BoundedTarInfo(tarfile.TarInfo):
+    def _proc_pax(self, archive) -> tarfile.TarInfo:
+        if self.size > MAX_TAR_METADATA_BYTES:
+            raise ValueError("package archive metadata field exceeds the read limit")
+        return super()._proc_pax(archive)
+
+    def _proc_gnulong(self, archive) -> tarfile.TarInfo:
+        if self.size > MAX_TAR_METADATA_BYTES:
+            raise ValueError("package archive metadata field exceeds the read limit")
+        return super()._proc_gnulong(archive)
 
 
 def _read_json(path: pathlib.Path) -> Any:
@@ -52,7 +89,7 @@ def _expected_packages(value: Any) -> dict[str, str]:
     return expected
 
 
-def _archive_package_metadata(archive_path: pathlib.Path) -> dict[str, Any]:
+def _archive_package_metadata(archive_path: pathlib.Path) -> tuple[dict[str, Any], int]:
     if archive_path.is_symlink() or not archive_path.is_file():
         raise ValueError(f"package archive is not a regular file: {archive_path.name}")
     archive_size = archive_path.stat().st_size
@@ -63,44 +100,45 @@ def _archive_package_metadata(archive_path: pathlib.Path) -> dict[str, Any]:
     seen: set[str] = set()
     expanded_bytes = 0
     try:
-        with tarfile.open(archive_path, mode="r:gz") as archive:
-            for index, member in enumerate(archive):
-                if index >= MAX_MEMBERS:
-                    raise ValueError(f"package archive contains too many entries: {archive_path.name}")
-                name = member.name
-                if (
-                    not name
-                    or "\\" in name
-                    or name.startswith("/")
-                    or "\x00" in name
-                    or any(part in {"", ".", ".."} for part in name.rstrip("/").split("/"))
-                    or not name.startswith("package/")
-                    or name in seen
-                ):
-                    raise ValueError(f"package archive contains an unsafe or duplicate path: {archive_path.name}")
-                seen.add(name)
-                if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
-                    raise ValueError(f"package archive contains a link or special file: {archive_path.name}")
-                expanded_bytes += member.size
-                if expanded_bytes > MAX_EXPANDED_BYTES:
-                    raise ValueError(f"package archive expands beyond the supported size: {archive_path.name}")
-                if name.rstrip("/") == "package/package.json":
-                    if not member.isfile() or member.size > MAX_PACKAGE_JSON_BYTES:
-                        raise ValueError(f"package archive has an invalid package.json: {archive_path.name}")
-                    stream = archive.extractfile(member)
-                    if stream is None:
-                        raise ValueError(f"package archive omits readable package.json: {archive_path.name}")
-                    raw = stream.read(MAX_PACKAGE_JSON_BYTES + 1)
-                    if len(raw) > MAX_PACKAGE_JSON_BYTES:
-                        raise ValueError(f"package archive package.json is too large: {archive_path.name}")
-                    package_json = json.loads(raw.decode("utf-8"))
+        with gzip.open(archive_path, mode="rb") as compressed:
+            stream = _BoundedTarStream(compressed, archive_path.name)
+            with tarfile.open(fileobj=stream, mode="r|", tarinfo=_BoundedTarInfo) as archive:
+                for index, member in enumerate(archive):
+                    if index >= MAX_MEMBERS:
+                        raise ValueError(f"package archive contains too many entries: {archive_path.name}")
+                    name = member.name
+                    if (
+                        not name
+                        or "\\" in name
+                        or name.startswith("/")
+                        or "\x00" in name
+                        or any(part in {"", ".", ".."} for part in name.rstrip("/").split("/"))
+                        or not name.startswith("package/")
+                        or name in seen
+                    ):
+                        raise ValueError(f"package archive contains an unsafe or duplicate path: {archive_path.name}")
+                    seen.add(name)
+                    if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
+                        raise ValueError(f"package archive contains a link or special file: {archive_path.name}")
+                    expanded_bytes += member.size
+                    if expanded_bytes > MAX_EXPANDED_BYTES:
+                        raise ValueError(f"package archive expands beyond the supported size: {archive_path.name}")
+                    if name.rstrip("/") == "package/package.json":
+                        if not member.isfile() or member.size > MAX_PACKAGE_JSON_BYTES:
+                            raise ValueError(f"package archive has an invalid package.json: {archive_path.name}")
+                        package_stream = archive.extractfile(member)
+                        if package_stream is None:
+                            raise ValueError(f"package archive omits readable package.json: {archive_path.name}")
+                        raw = package_stream.read(MAX_PACKAGE_JSON_BYTES + 1)
+                        if len(raw) > MAX_PACKAGE_JSON_BYTES:
+                            raise ValueError(f"package archive package.json is too large: {archive_path.name}")
+                        package_json = json.loads(raw.decode("utf-8"))
     except (OSError, tarfile.TarError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError(f"could not inspect package archive {archive_path.name}: {error}") from error
 
     if not isinstance(package_json, dict):
         raise ValueError(f"package archive has no package/package.json: {archive_path.name}")
-    return package_json
-
+    return package_json, stream.bytes_read
 
 def validate_artifacts(
     artifact_dir: pathlib.Path,
@@ -119,6 +157,8 @@ def validate_artifacts(
     validated: list[dict[str, str]] = []
     seen_names: set[str] = set()
     seen_files: set[str] = {manifest_path.name}
+    total_archive_bytes = 0
+    total_expanded_bytes = 0
     for item in artifact_manifest:
         if (
             not isinstance(item, dict)
@@ -148,6 +188,9 @@ def validate_artifacts(
         archive_path = artifact_dir / filename
         if archive_path.is_symlink() or not archive_path.is_file():
             raise ValueError(f"package archive is missing or is not a regular file: {filename}")
+        total_archive_bytes += archive_path.stat().st_size
+        if total_archive_bytes > MAX_TOTAL_ARCHIVE_BYTES:
+            raise ValueError("package archives exceed the aggregate compressed size limit")
         hasher = hashlib.sha512()
         with archive_path.open("rb") as archive_file:
             for chunk in iter(lambda: archive_file.read(1024 * 1024), b""):
@@ -155,7 +198,10 @@ def validate_artifacts(
         digest = base64.b64encode(hasher.digest()).decode("ascii")
         if f"sha512-{digest}" != integrity:
             raise ValueError(f"package archive integrity does not match its manifest: {filename}")
-        package_json = _archive_package_metadata(archive_path)
+        package_json, archive_expanded_bytes = _archive_package_metadata(archive_path)
+        total_expanded_bytes += archive_expanded_bytes
+        if total_expanded_bytes > MAX_TOTAL_EXPANDED_BYTES:
+            raise ValueError("package archives exceed the aggregate expanded size limit")
         if package_json.get("name") != name or package_json.get("version") != version:
             raise ValueError(f"package archive identity does not match its manifest: {filename}")
 

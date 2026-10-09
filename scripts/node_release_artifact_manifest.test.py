@@ -12,6 +12,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import node_release_artifact_manifest as validator  # noqa: E402
@@ -47,6 +48,10 @@ class ArtifactManifestTest(unittest.TestCase):
                 info = tarfile.TarInfo(extra[0])
                 info.size = len(extra[1])
                 archive.addfile(info, io.BytesIO(extra[1]))
+        self.refresh_manifest_integrity()
+
+    def refresh_manifest_integrity(self) -> None:
+        archive_path = self.artifact_dir / self.filename
         digest = base64.b64encode(hashlib.sha512(archive_path.read_bytes()).digest()).decode("ascii")
         self.artifact_manifest = [{
             "name": self.name,
@@ -123,6 +128,29 @@ class ArtifactManifestTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "within the size limit"):
             validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_oversized_pax_metadata_before_tarfile_reads_it(self) -> None:
+        archive_path = self.artifact_dir / self.filename
+        with tarfile.open(archive_path, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
+            member = tarfile.TarInfo("package/index.js")
+            member.pax_headers = {"comment": "x" * (validator.MAX_TAR_METADATA_BYTES + 1)}
+            member.size = 0
+            archive.addfile(member, io.BytesIO())
+        self.refresh_manifest_integrity()
+
+        with self.assertRaisesRegex(ValueError, "metadata field exceeds the read limit"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_aggregate_compressed_archive_bytes_over_the_limit(self) -> None:
+        archive_size = (self.artifact_dir / self.filename).stat().st_size
+        with patch.object(validator, "MAX_TOTAL_ARCHIVE_BYTES", archive_size - 1):
+            with self.assertRaisesRegex(ValueError, "aggregate compressed size"):
+                validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_aggregate_expanded_archive_bytes_over_the_limit(self) -> None:
+        with patch.object(validator, "MAX_TOTAL_EXPANDED_BYTES", 1):
+            with self.assertRaisesRegex(ValueError, "aggregate expanded size"):
+                validator.validate_artifacts(self.artifact_dir, self.expected)
 
     def test_rejects_duplicate_expected_package_names(self) -> None:
         with self.assertRaisesRegex(ValueError, "invalid or duplicate package"):

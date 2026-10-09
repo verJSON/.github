@@ -96,6 +96,8 @@ jobs:
     name: Prepare release packages without publication credentials
     runs-on: ${{ inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
+    outputs:
+      package-artifact-id: ${{ steps.upload-packages.outputs.artifact-id }}
     permissions:
       contents: read
       packages: read
@@ -299,17 +301,21 @@ jobs:
             find "$cache_dir" -mindepth 1 -delete
           fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload-packages
         with:
           name: node-release-packages-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.version }}
           path: ${{ runner.temp }}/verjson-release-packages/*
           if-no-files-found: error
           retention-days: 1
+          # The package tarballs are already compressed; keep API size close to extracted bytes.
+          compression-level: 0
 
   release:
     needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
+      actions: read
       contents: write
       packages: write
     outputs:
@@ -507,9 +513,25 @@ jobs:
           require("fs").appendFileSync(process.env.GITHUB_OUTPUT, `retention-targets=${JSON.stringify(targets)}\n`);
           require("fs").appendFileSync(process.env.GITHUB_OUTPUT, `expected-manifest=${expectedManifest}\n`);
           NODE
+      - name: Enforce prepared package artifact size before download
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACT_ID: ${{ needs.prepare.outputs.package-artifact-id }}
+          MAX_ARTIFACT_BYTES: '2147483648'
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]] \
+            || { echo "::error::prepared package artifact ID is missing or invalid"; exit 1; }
+          artifact_size="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" --jq .size_in_bytes)"
+          [[ "$artifact_size" =~ ^[0-9]+$ ]] \
+            || { echo "::error::prepared package artifact size is missing or invalid"; exit 1; }
+          if (( artifact_size > MAX_ARTIFACT_BYTES )); then
+            echo "::error::prepared package artifact exceeds the 2 GiB download limit"
+            exit 1
+          fi
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: node-release-packages-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.version }}
+          artifact-ids: ${{ needs.prepare.outputs.package-artifact-id }}
           path: ${{ runner.temp }}/verjson-release-packages
       - name: Validate prepared package artifacts against the release tag
         env:
