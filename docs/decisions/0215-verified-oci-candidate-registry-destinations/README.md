@@ -43,5 +43,21 @@ OIDC multi-platform index publisher and live acceptance.
 - Destination receipts advance candidate and release manifests to schema v3. Existing
   v2 candidates must be rebuilt; the validator does not infer missing receipts or expiry.
 - The published candidate and release JSON Schemas continue to validate immutable v2
-  records for readers. Schema v3 requires publication timestamps and destination receipts;
-  release promotion still rejects v2 candidates because they do not prove those facts.
+  records for readers. Candidate v3 added publication timestamps and destination receipts;
+  release promotion rejects candidates that lack the evidence required by its current
+  contract.
+
+## Amendment — 2026-10-09 ([#1726](https://github.com/Verjson/.github/issues/1726))
+
+Candidate manifests advance to schema v4 so a registry receipt records the exact
+provenance evidence observed at readback. Every destination timestamp is checked
+against candidate publication and expiry independently. A GAR receipt records the
+index referrers plus referrers for each platform subject digest. Validation requires
+the index Sigstore bundle referrer to match the image provenance referrer digest,
+and each platform SPDX referrer to match that platform's SBOM attestation referrer
+digest. Candidate schema v2 and v3 remain readable as historical records, but the
+promotion validator requires v4 and directs older candidates to be rebuilt.
+
+The TTP candidate consumer case is tracked in
+[self-publish-ai-app#1352](https://github.com/terptechpub/self-publish-ai-app/issues/1352);
+its generated caller must pin a merged immutable contract revision before acceptance.

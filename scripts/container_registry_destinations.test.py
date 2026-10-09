@@ -185,20 +185,42 @@ class RegistryDestinationTests(unittest.TestCase):
                     "digest": "sha256:" + "a" * 64,
                 },
             ]
+            platform_subject = "sha256:" + "2" * 64
+            platform_digest = "sha256:" + "d" * 64
+            platform_referrers = [
+                {"artifactType": "application/spdx+json", "digest": "sha256:" + "e" * 64}
+            ]
             with (
                 patch.object(destinations, "_skopeo", side_effect=[
                     (1, b"", b"manifest unknown"), (0, payload, b"")
                 ]),
                 patch.object(destinations, "_oras", return_value=(0, b"", b"")) as run,
-                patch.object(destinations, "_platform_subjects", return_value={}),
-                patch.object(destinations, "_referrer_inventory", side_effect=[referrers, referrers]),
+                patch.object(
+                    destinations,
+                    "_platform_subjects",
+                    return_value={platform_subject: platform_digest},
+                ),
+                patch.object(
+                    destinations,
+                    "_referrer_inventory",
+                    side_effect=[referrers, platform_referrers, referrers, platform_referrers],
+                ),
             ):
                 receipt = destinations.mirror_candidate(
                     self.config, OWNER, "api", "gar", "1.2.3-rc.123.1", digest, authfile
                 )
                 self.assertEqual(receipt, {
-                "provider": "gar", "variant": "api", "repository": f"{GAR}/api", "digest": digest,
-                "evidenceReferrers": referrers,
+                    "provider": "gar",
+                    "variant": "api",
+                    "repository": f"{GAR}/api",
+                    "digest": digest,
+                    "evidenceReferrers": referrers,
+                    "platformEvidenceReferrers": [
+                        {
+                            "subjectDigest": platform_subject,
+                            "evidenceReferrers": platform_referrers,
+                        }
+                    ],
                 })
                 copy_args = run.call_args.args[0]
                 self.assertIn("cp", copy_args)
@@ -510,8 +532,23 @@ class RegistryDestinationTests(unittest.TestCase):
         payload = b'{"schemaVersion":2}'
         digest = "sha256:" + sha256(payload).hexdigest()
         referrers = [
-            {"artifactType": "application/spdx+json", "digest": "sha256:" + "b" * 64},
             {"artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json", "digest": "sha256:" + "a" * 64},
+        ]
+        platform_referrers = {
+            "sha256:" + "2" * 64: [
+                {"artifactType": "application/spdx+json", "digest": "sha256:" + "b" * 64}
+            ],
+            "sha256:" + "3" * 64: [
+                {"artifactType": "application/spdx+json", "digest": "sha256:" + "c" * 64}
+            ],
+        }
+        readback_referrers = [
+            referrers,
+            platform_referrers["sha256:" + "2" * 64],
+            platform_referrers["sha256:" + "3" * 64],
+            referrers,
+            platform_referrers["sha256:" + "2" * 64],
+            platform_referrers["sha256:" + "3" * 64],
         ]
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -533,8 +570,12 @@ class RegistryDestinationTests(unittest.TestCase):
                     (1, b"", b"manifest unknown"), (0, payload, b"")
                 ]),
                 patch.object(destinations, "_oras", return_value=(0, b"", b"")) as run,
-                patch.object(destinations, "_platform_subjects", return_value={}),
-                patch.object(destinations, "_referrer_inventory", side_effect=[referrers, referrers]),
+                patch.object(
+                    destinations,
+                    "_platform_subjects",
+                    return_value={subject: "sha256:" + "d" * 64 for subject in platform_referrers},
+                ),
+                patch.object(destinations, "_referrer_inventory", side_effect=readback_referrers),
                 redirect_stdout(output),
             ):
                 self.assertEqual(destinations.main(), 0)
@@ -545,6 +586,13 @@ class RegistryDestinationTests(unittest.TestCase):
         self.assertEqual(receipt["repository"], f"{GAR}/api")
         self.assertEqual(receipt["digest"], digest)
         self.assertEqual(receipt["evidenceReferrers"], referrers)
+        self.assertEqual(
+            receipt["platformEvidenceReferrers"],
+            [
+                {"subjectDigest": subject, "evidenceReferrers": platform_referrers[subject]}
+                for subject in sorted(platform_referrers)
+            ],
+        )
 
 
 if __name__ == "__main__":

@@ -49,7 +49,7 @@ def config():
 
 def manifest():
     return {
-        "schemaVersion": 3,
+        "schemaVersion": 4,
         "kind": "container-candidate",
         "candidateVersion": "2.4.0-rc.123.1",
         "promotionEligible": False,
@@ -124,6 +124,51 @@ def manifest():
     }
 
 
+def multi_registry_config():
+    reviewed = config()
+    reviewed["registryDestinations"] = [
+        {"provider": "ghcr", "namespace": "ghcr.io/verjson"},
+        {
+            "provider": "gar",
+            "namespace": "us-central1-docker.pkg.dev/verjson-artifacts/containers",
+            "workloadIdentityProvider": "projects/123456789/locations/global/workloadIdentityPools/github/providers/verjson",
+            "serviceAccount": "container-publisher@verjson-artifacts.iam.gserviceaccount.com",
+            "candidateRetentionDays": 30,
+        },
+    ]
+    return reviewed
+
+
+def gar_receipt():
+    return {
+        "provider": "gar",
+        "repository": "us-central1-docker.pkg.dev/verjson-artifacts/containers/runner",
+        "digest": "sha256:" + "1" * 64,
+        "candidateExpiresAt": "2026-11-01T00:00:00Z",
+        "verifiedAt": "2026-10-02T00:03:00Z",
+        "evidenceReferrers": [
+            {
+                "artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+                "digest": "sha256:" + "5" * 64,
+            },
+        ],
+        "platformEvidenceReferrers": [
+            {
+                "subjectDigest": "sha256:" + "2" * 64,
+                "evidenceReferrers": [
+                    {"artifactType": "application/spdx+json", "digest": "sha256:" + "7" * 64},
+                ],
+            },
+            {
+                "subjectDigest": "sha256:" + "3" * 64,
+                "evidenceReferrers": [
+                    {"artifactType": "application/spdx+json", "digest": "sha256:" + "a" * 64},
+                ],
+            },
+        ],
+    }
+
+
 class ContainerReleaseManifestTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -141,14 +186,21 @@ class ContainerReleaseManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(manifest_contract.ManifestError, expected):
             manifest_contract.validate_manifest(candidate, config())
 
-    def test_candidate_schema_accepts_v3_and_historical_v2_manifests(self):
+    def test_candidate_schema_accepts_v4_and_historical_v3_and_v2_manifests(self):
         self.schema_validator.validate(manifest())
 
-        historical = manifest()
-        historical["schemaVersion"] = 2
-        historical["source"].pop("candidatePublishedAt")
-        historical["images"][0].pop("destinations")
-        self.schema_validator.validate(historical)
+        historical_v3 = manifest()
+        historical_v3["schemaVersion"] = 3
+        historical_gar_receipt = gar_receipt()
+        historical_gar_receipt.pop("platformEvidenceReferrers")
+        historical_v3["images"][0]["destinations"].append(historical_gar_receipt)
+        self.schema_validator.validate(historical_v3)
+
+        historical_v2 = manifest()
+        historical_v2["schemaVersion"] = 2
+        historical_v2["source"].pop("candidatePublishedAt")
+        historical_v2["images"][0].pop("destinations")
+        self.schema_validator.validate(historical_v2)
 
     def test_candidate_manifest_is_ineligible_until_provenance_gates_are_enabled_by_contract(self):
         candidate = manifest()
@@ -157,7 +209,7 @@ class ContainerReleaseManifestTests(unittest.TestCase):
         candidate["promotionEligible"] = True
         self.assert_rejected(candidate, "promotion eligibility is disabled")
 
-    def test_candidate_schema_requires_v3_publication_evidence(self):
+    def test_candidate_schema_requires_v4_publication_evidence(self):
         candidate = manifest()
         candidate["images"][0].pop("destinations")
         self.assertTrue(
@@ -176,7 +228,7 @@ class ContainerReleaseManifestTests(unittest.TestCase):
             )
         )
 
-    def test_candidate_schema_rejects_each_v3_field_on_v2(self):
+    def test_candidate_schema_rejects_each_v4_field_on_v2(self):
         cases = (
             ("timestamp", "destinations"),
             ("destinations", "candidatePublishedAt"),
@@ -194,18 +246,21 @@ class ContainerReleaseManifestTests(unittest.TestCase):
 
     def test_candidate_schema_accepts_gar_destination_receipt(self):
         candidate = manifest()
-        receipt = candidate["images"][0]["destinations"][0]
-        receipt["provider"] = "gar"
-        receipt["repository"] = (
-            "us-central1-docker.pkg.dev/verjson-artifacts/containers/runner"
-        )
-        receipt["evidenceReferrers"] = [
-            {
-                "artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json",
-                "digest": "sha256:" + "c" * 64,
-            },
-        ]
+        candidate["images"][0]["destinations"] = [gar_receipt()]
         self.schema_validator.validate(candidate)
+
+    def test_candidate_schema_requires_platform_evidence_for_v4_gar_receipts(self):
+        candidate = manifest()
+        receipt = gar_receipt()
+        receipt.pop("platformEvidenceReferrers")
+        candidate["images"][0]["destinations"].append(receipt)
+
+        self.assertTrue(
+            any(
+                "platformEvidenceReferrers" in error.message
+                for error in self.schema_validator.iter_errors(candidate)
+            )
+        )
 
     def test_accepts_complete_manifest_bound_to_reviewed_identity(self):
         manifest_contract.validate_manifest(manifest(), config())
@@ -217,7 +272,15 @@ class ContainerReleaseManifestTests(unittest.TestCase):
         candidate["images"][0].pop("destinations")
         self.assert_rejected(
             candidate,
-            "manifest.schemaVersion must be 3; rebuild candidates published with schema v2",
+            "manifest.schemaVersion must be 4; rebuild candidates published with schema v2 or v3",
+        )
+
+    def test_rejects_legacy_v3_candidate_with_rebuild_guidance(self):
+        candidate = manifest()
+        candidate["schemaVersion"] = 3
+        self.assert_rejected(
+            candidate,
+            "manifest.schemaVersion must be 4; rebuild candidates published with schema v2 or v3",
         )
 
     def test_accepts_case_insensitive_github_repository_identity(self):
@@ -253,34 +316,40 @@ class ContainerReleaseManifestTests(unittest.TestCase):
         manifest_contract.validate_manifest(candidate, reviewed)
 
     def test_accepts_verified_multi_registry_destinations(self):
-        reviewed = config()
-        reviewed["registryDestinations"] = [
-            {"provider": "ghcr", "namespace": "ghcr.io/verjson"},
-            {
-                "provider": "gar",
-                "namespace": "us-central1-docker.pkg.dev/verjson-artifacts/containers",
-                "workloadIdentityProvider": "projects/123456789/locations/global/workloadIdentityPools/github/providers/verjson",
-                "serviceAccount": "container-publisher@verjson-artifacts.iam.gserviceaccount.com",
-                "candidateRetentionDays": 30,
-            },
-        ]
+        reviewed = multi_registry_config()
         candidate = manifest()
-        candidate["images"][0]["destinations"].append(
-            {
-                "provider": "gar",
-                "repository": "us-central1-docker.pkg.dev/verjson-artifacts/containers/runner",
-                "digest": "sha256:" + "1" * 64,
-                "candidateExpiresAt": "2026-11-01T00:00:00Z",
-                "verifiedAt": "2026-10-02T00:03:00Z",
-                "evidenceReferrers": [
-                    {
-                        "artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json",
-                        "digest": "sha256:" + "c" * 64,
-                    },
-                ],
-            }
-        )
+        candidate["images"][0]["destinations"].append(gar_receipt())
         manifest_contract.validate_manifest(candidate, reviewed)
+
+    def test_rejects_earlier_invalid_destination_receipt_when_last_is_valid(self):
+        candidate = manifest()
+        candidate["images"][0]["destinations"][0]["verifiedAt"] = "2026-10-01T23:59:59Z"
+        later_receipt = gar_receipt()
+        later_receipt.pop("platformEvidenceReferrers")
+        candidate["images"][0]["destinations"].append(later_receipt)
+
+        with self.assertRaisesRegex(manifest_contract.ManifestError, "not verified before expiry"):
+            manifest_contract.validate_manifest(candidate, multi_registry_config())
+
+    def test_rejects_gar_provenance_referrer_digest_mismatch(self):
+        candidate = manifest()
+        receipt = gar_receipt()
+        receipt["evidenceReferrers"][0]["digest"] = "sha256:" + "c" * 64
+        candidate["images"][0]["destinations"].append(receipt)
+
+        with self.assertRaisesRegex(manifest_contract.ManifestError, "provenance referrer"):
+            manifest_contract.validate_manifest(candidate, multi_registry_config())
+
+    def test_rejects_gar_platform_sbom_referrer_digest_mismatch(self):
+        candidate = manifest()
+        receipt = gar_receipt()
+        receipt["platformEvidenceReferrers"][0]["evidenceReferrers"][0]["digest"] = (
+            "sha256:" + "c" * 64
+        )
+        candidate["images"][0]["destinations"].append(receipt)
+
+        with self.assertRaisesRegex(manifest_contract.ManifestError, "SBOM referrer"):
+            manifest_contract.validate_manifest(candidate, multi_registry_config())
 
     def test_rejects_missing_registry_receipt(self):
         reviewed = config()
