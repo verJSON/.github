@@ -27,6 +27,8 @@ fail() { printf 'not ok - %s\n' "$1" >&2; failures=$((failures + 1)); }
 python3 - "$workflow" "$tmp" <<'PY' \
   && pass "consumer extensions remain validated, credentialless, and canonical" \
   || fail "consumer extension workflow structure violates the secretless contract"
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -79,9 +81,100 @@ assert "unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_S
 assert "exec /usr/bin/python3 - <<'PY'" in compatibility["run"]
 for command_file in ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"):
     assert f'"{command_file}"' in compatibility["run"]
-for command in ("npm run build", "npm run typecheck --if-present", "npm test", "npm run lint --if-present"):
-    step = next(step for step in build["steps"] if step.get("run") == command)
-    assert "secretless-ci-script-plan" in step["if"]
+secretless_bash_env = "${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '/dev/null' || env.BASH_ENV }}"
+secretless_mode = "${{ inputs.secretless-pr || inputs.secretless-trusted-ref }}"
+command_files = (
+    "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
+    "GITHUB_STEP_SUMMARY", "BASH_ENV",
+)
+command_file_scrub = "unset -v " + " ".join(command_files)
+default_plans = []
+for workflow_path in (
+    Path(sys.argv[1]),
+    Path(sys.argv[1]).with_name("node-ci-protected.yml"),
+):
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    workflow_build = workflow["jobs"]["build-test"]
+    steps = workflow_build["steps"]
+    if workflow_path.name == "node-ci.yml":
+        defaults = [
+            step for step in steps
+            if step.get("env", {}).get("SECRETLESS_MODE") == secretless_mode
+        ]
+        assert len(defaults) == 4
+    else:
+        defaults = [
+            step for step in steps
+            if step.get("name") == "Run default build, typecheck, test, and lint plan"
+        ]
+        assert len(defaults) == 1
+    for step in defaults:
+        assert step["env"]["BASH_ENV"] == secretless_bash_env
+        assert step["env"]["SECRETLESS_MODE"] == secretless_mode
+        assert command_file_scrub in step["run"]
+        assert "secretless-ci-script-plan" in step["if"]
+    default_plans.append((workflow_path.name, defaults))
+
+for workflow_name, defaults in default_plans:
+    fixture = Path(sys.argv[2]) / f"default-plan-{workflow_name}"
+    bin_dir = fixture / "bin"
+    bin_dir.mkdir(parents=True)
+    command_file = fixture / "runner-env"
+    command_file.write_text("", encoding="utf-8")
+    marker = fixture / "injected-bash-env-ran"
+    attack = fixture / "injected-bash-env"
+    attack.write_text(f"touch {marker}\n", encoding="utf-8")
+    command_log = fixture / "npm-commands"
+    environment_log = fixture / "npm-command-file-env"
+    npm = bin_dir / "npm"
+    npm.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "%s\\n" "$*" >> "$NPM_COMMAND_LOG"\n'
+        'for name in GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE '
+        'GITHUB_STEP_SUMMARY BASH_ENV; do\n'
+        '  if [[ -v "$name" ]]; then printf "%s\\n" "$name" >> "$NPM_ENV_LOG"; fi\n'
+        "done\n"
+        'if [[ -v GITHUB_ENV ]]; then printf "BASH_ENV=%s\\n" "$BASH_ENV_ATTACK" >> "$GITHUB_ENV"; fi\n',
+        encoding="utf-8",
+    )
+    npm.chmod(0o755)
+    runner_environment = os.environ.copy()
+    runner_environment.update({
+        "PATH": f"{bin_dir}:{runner_environment['PATH']}",
+        "BASH_ENV": str(attack),
+        "BASH_ENV_ATTACK": str(attack),
+        "GITHUB_ENV": str(command_file),
+        "GITHUB_PATH": str(fixture / "runner-path"),
+        "GITHUB_OUTPUT": str(fixture / "runner-output"),
+        "GITHUB_STATE": str(fixture / "runner-state"),
+        "GITHUB_STEP_SUMMARY": str(fixture / "runner-summary"),
+        "NPM_COMMAND_LOG": str(command_log),
+        "NPM_ENV_LOG": str(environment_log),
+        "SECRETLESS_MODE": "true",
+    })
+    # GitHub expands the step-level expression to this value for secretless mode.
+    runner_environment["BASH_ENV"] = "/dev/null"
+    for step in defaults:
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", step["run"]],
+            cwd=fixture,
+            env=runner_environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert not marker.exists(), f"{workflow_name} sourced an injected BASH_ENV"
+        assert command_file.read_text(encoding="utf-8") == ""
+        assert not environment_log.exists(), "npm received a runner command-file path"
+    expected_commands = sum(
+        line.strip().startswith("npm ")
+        for step in defaults
+        for line in step["run"].splitlines()
+    )
+    assert len(command_log.read_text(encoding="utf-8").splitlines()) == expected_commands
+print("secretless default plans cannot write runner command files or inject BASH_ENV")
 assert inputs["db-image"]["default"] == ""
 assert inputs["cache-image"]["default"] == ""
 assert next(step for step in build["steps"] if step.get("name") == "Start database service")

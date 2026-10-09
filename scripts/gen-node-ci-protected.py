@@ -1787,18 +1787,52 @@ def render() -> str:
         + verifier_step(plan_if)
         + "      - name: Run exact credentialless consumer script plan\n",
     )
-    default_commands = """      - run: npm run build
+    default_commands = """      - run: |
+          if [[ "$SECRETLESS_MODE" == "true" ]]; then
+            unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY BASH_ENV
+          fi
+          npm run build
+        env:
+          BASH_ENV: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '/dev/null' || env.BASH_ENV }}
+          SECRETLESS_MODE: ${{ inputs.secretless-pr || inputs.secretless-trusted-ref }}
         if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-      - run: npm run typecheck --if-present
+      - run: |
+          if [[ "$SECRETLESS_MODE" == "true" ]]; then
+            unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY BASH_ENV
+          fi
+          npm run typecheck --if-present
+        env:
+          BASH_ENV: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '/dev/null' || env.BASH_ENV }}
+          SECRETLESS_MODE: ${{ inputs.secretless-pr || inputs.secretless-trusted-ref }}
         if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-      - run: npm test
+      - run: |
+          if [[ "$SECRETLESS_MODE" == "true" ]]; then
+            unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY BASH_ENV
+          fi
+          npm test
+        env:
+          BASH_ENV: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '/dev/null' || env.BASH_ENV }}
+          SECRETLESS_MODE: ${{ inputs.secretless-pr || inputs.secretless-trusted-ref }}
         if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-      - run: npm run lint --if-present
+      - run: |
+          if [[ "$SECRETLESS_MODE" == "true" ]]; then
+            unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY BASH_ENV
+          fi
+          npm run lint --if-present
+        env:
+          BASH_ENV: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '/dev/null' || env.BASH_ENV }}
+          SECRETLESS_MODE: ${{ inputs.secretless-pr || inputs.secretless-trusted-ref }}
         if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
 """
     grouped_default = """      - name: Run default build, typecheck, test, and lint plan
         if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
+        env:
+          BASH_ENV: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '/dev/null' || env.BASH_ENV }}
+          SECRETLESS_MODE: ${{ inputs.secretless-pr || inputs.secretless-trusted-ref }}
         run: |
+          if [[ "$SECRETLESS_MODE" == "true" ]]; then
+            unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY BASH_ENV
+          fi
           npm run build
           npm run typecheck --if-present
           npm test

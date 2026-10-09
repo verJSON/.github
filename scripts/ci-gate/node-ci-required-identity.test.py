@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LEGACY = ROOT / ".github/workflows/node-ci.yml"
 PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 HEAD = "a" * 40
-LEGACY_SHA256 = "b347d475a89b8a2646f0452df9fe8d38812ae6dfb47ce901fa9c842f959da5b8"
+LEGACY_SHA256 = "a625e3ec4d5ec116bc7f5c04bad488a0da8e64fed3f0632f1f224ab401bd24b3"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
@@ -449,7 +449,18 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         self.assertEqual(build[verifier_by_condition[default_condition]]["if"], grouped["if"])
         self.assertEqual(
             ["npm run build", "npm run typecheck --if-present", "npm test",
-             "npm run lint --if-present"], grouped["run"].splitlines()[1:])
+             "npm run lint --if-present"],
+            [line.strip() for line in grouped["run"].splitlines()
+             if line.strip().startswith("npm ")],
+        )
+        self.assertEqual(
+            "${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '/dev/null' || env.BASH_ENV }}",
+            grouped["env"]["BASH_ENV"],
+        )
+        self.assertLess(
+            grouped["run"].index("unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE"),
+            grouped["run"].index("npm run build"),
+        )
         compatibility_step = next(
             i for i, step in enumerate(build)
             if step.get("name") == "Run runtime-resolved compatibility lanes without credentials"

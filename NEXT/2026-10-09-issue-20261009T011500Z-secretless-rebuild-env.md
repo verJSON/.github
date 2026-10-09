@@ -31,3 +31,9 @@ token-bearing identity check; case-mixed npm configuration overrides, carriage-r
 smuggling, and database endpoint overrides from the cache service are rejected
 before side effects when the database service is enabled. Cache-only callers
 retain `DB_HOST` and `DB_PORT` as ordinary configuration.
+
+Secretless default build, typecheck, test, and lint scripts run with `BASH_ENV`
+neutralized before shell startup and without GitHub command-file paths. This
+prevents a consumer script from planting a startup file or changing later CI
+steps. The generated protected workflow carries the same guard, covered by a
+hostile npm-script regression test.
