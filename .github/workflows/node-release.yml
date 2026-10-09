@@ -171,7 +171,10 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
           cache: ${{ steps.npm-cache-policy.outputs.enabled == 'true' && 'npm' || '' }}
-          cache-dependency-path: ${{ inputs.cache-dependency-path }}
+          # Changing this marker invalidates exact npm cache keys from credentialed runs before this policy.
+          cache-dependency-path: |
+            ${{ inputs.cache-dependency-path }}
+            scripts/node-release-cache-namespace-v2
           package-manager-cache: false
           registry-url: https://npm.pkg.github.com
           scope: ${{ inputs.scope }}

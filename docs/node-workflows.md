@@ -44,6 +44,8 @@ rejects metadata, symlinks, unexpected paths, corrupt content, internal package
 identities, and private/public digest collisions before npm runs. Credentialed
 acquisition state, private blobs, npm configuration, and credentials never enter
 the persistent cache. Secretless pnpm keeps its existing uncached behavior.
+The canonical node-release publisher also hashes a versioned namespace marker into its exact
+npm cache key, so tokenless runs cannot restore entries written by earlier credentialed runs.
 Registry authentication is independent of the job token and caching: callers
 that install private `@verjson` packages pass
 `NODE_AUTH_TOKEN`. Every caller also grants `packages: read` because the reusable

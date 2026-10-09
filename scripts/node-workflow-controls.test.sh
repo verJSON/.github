@@ -82,9 +82,17 @@ for workflow in "$ci" "$release"; do
   grep -qF "$cache_guard" "$workflow" \
     && pass "$name enables setup-node caching only through its allowed cache policy" \
     || fail "$name does not condition npm caching on its allowed cache policy"
-  grep -qF 'cache-dependency-path: ${{ inputs.cache-dependency-path }}' "$workflow" \
-    && pass "$name keys setup-node caching by the caller-selected lockfile" \
-    || fail "$name does not pass cache-dependency-path to setup-node"
+  if [ "$workflow" = "$release" ]; then
+    grep -qF 'cache-dependency-path: |' "$workflow" \
+      && grep -qF '            ${{ inputs.cache-dependency-path }}' "$workflow" \
+      && grep -qF '            scripts/node-release-cache-namespace-v2' "$workflow" \
+      && pass "$name keys npm caching by the caller lockfile and isolated namespace" \
+      || fail "$name can restore pre-policy credentialed npm cache entries"
+  else
+    grep -qF 'cache-dependency-path: ${{ inputs.cache-dependency-path }}' "$workflow" \
+      && pass "$name keys setup-node caching by the caller-selected lockfile" \
+      || fail "$name does not pass cache-dependency-path to setup-node"
+  fi
   grep -qF 'package-manager-cache: false' "$workflow" \
     && pass "$name disables setup-node automatic package-manager caching" \
     || fail "$name can bypass the explicit cache/lockfile controls via setup-node auto-caching"
@@ -165,8 +173,10 @@ require(cache_dir_assignment >= 0 and cache_export > cache_dir_assignment,
 setup_inputs = setup_step.get("with", {})
 require(setup_inputs.get("cache") == "${{ steps.npm-cache-policy.outputs.enabled == 'true' && 'npm' || '' }}",
         "setup-node cache must stay opt-in, lockfile-gated, and disabled with private credentials")
-require(setup_inputs.get("cache-dependency-path") == "${{ inputs.cache-dependency-path }}",
-        "setup-node cache must use the caller-selected dependency lock")
+require(setup_inputs.get("cache-dependency-path", "").splitlines() == [
+            "${{ inputs.cache-dependency-path }}",
+            "scripts/node-release-cache-namespace-v2",
+        ], "setup-node cache must include the caller dependency lock and new namespace")
 require(setup_inputs.get("package-manager-cache") is False,
         "setup-node automatic package-manager caching must stay disabled")
 require(policy_index < cache_index < setup_index < bound_index,

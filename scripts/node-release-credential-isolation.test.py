@@ -178,6 +178,17 @@ def main():
         "LOCKFILE_MATCHED": "${{ hashFiles(inputs.cache-dependency-path) != '' }}",
     }
     verify_npm_cache_policy(cache_policy_step["run"])
+    setup_node_step = next(
+        step for step in prepare_job["steps"]
+        if str(step.get("uses", "")).startswith("actions/setup-node@")
+    )
+    assert setup_node_step["with"]["cache-dependency-path"].splitlines() == [
+        "${{ inputs.cache-dependency-path }}",
+        "scripts/node-release-cache-namespace-v2",
+    ]
+    assert (repo_root / "scripts/node-release-cache-namespace-v2").read_text(
+        encoding="utf-8"
+    ) == "v2\n"
 
     lifecycle_recorder = (
         "const fs = require('node:fs');\n"
