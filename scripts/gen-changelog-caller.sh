@@ -1308,6 +1308,36 @@ ${release_plan_step}
 EOF
 }
 
+emit_release_lane_preflight() {
+  local lane_names="$1" lane_env="$2"
+  cat <<EOF
+      - name: Validate required OS-scoped build lanes
+        if: steps.release-version.outputs.selected == 'true'
+        shell: bash
+        env:
+          REQUIRED_BUILD_LANES: '${lane_names}'
+${lane_env%$'\n'}
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra lane_names <<<"\$REQUIRED_BUILD_LANES"
+          for lane_name in "\${lane_names[@]}"; do
+            lane_value="\${!lane_name:-}"
+            LANE_NAME="\$lane_name" LANE_VALUE="\$lane_value" node <<'NODE'
+          const name = process.env.LANE_NAME;
+          let value;
+          try { value = JSON.parse(process.env.LANE_VALUE); } catch { throw new Error(name + ' must be a non-empty JSON runner-label array'); }
+          if (!Array.isArray(value) || value.length === 0 || value.some(label => typeof label !== 'string' || !label)) throw new Error(name + ' must be a non-empty JSON runner-label array');
+          const isMacOS = name.endsWith('_MACOS');
+          const pinnedLabel = isMacOS ? /^macos-[0-9]+(?:-[a-z0-9]+)*$/i : /^windows-[0-9]+(?:-[a-z0-9]+)*$/i;
+          if (value.some(label => label.trim() !== label || !pinnedLabel.test(label) || /(?:^|-)latest(?:-|$)/i.test(label))) {
+            const laneFamily = isMacOS ? 'macOS' : 'Windows';
+            throw new Error(name + ' must contain pinned ' + laneFamily + ' labels without padding or latest segments');
+          }
+          NODE
+          done
+EOF
+}
+
 emit_release_artifact() {
   local generation_command="release-artifact ${ref}"
   local package_dirs_shell=''
@@ -1348,27 +1378,7 @@ emit_release_artifact() {
   printf -v package_dirs_shell '%q ' "${release_package_dirs[@]}"
   package_dirs_shell="${package_dirs_shell% }"
   if [ -n "$required_lane_names" ]; then
-    required_lane_validation_step="$(cat <<EOF
-      - name: Validate required OS-scoped build lanes
-        if: steps.release-version.outputs.selected == 'true'
-        shell: bash
-        env:
-          REQUIRED_BUILD_LANES: '${required_lane_names}'
-${required_lane_env%$'\n'}
-        run: |
-          set -euo pipefail
-          IFS=',' read -ra lane_names <<<"\$REQUIRED_BUILD_LANES"
-          for lane_name in "\${lane_names[@]}"; do
-            lane_value="\${!lane_name:-}"
-            LANE_NAME="\$lane_name" LANE_VALUE="\$lane_value" node <<'NODE'
-          const name = process.env.LANE_NAME;
-          let value;
-          try { value = JSON.parse(process.env.LANE_VALUE); } catch { throw new Error(name + ' must be a non-empty JSON runner-label array'); }
-          if (!Array.isArray(value) || value.length === 0 || value.some(label => typeof label !== 'string' || !label)) throw new Error(name + ' must be a non-empty JSON runner-label array');
-          NODE
-          done
-EOF
-)"
+    required_lane_validation_step="$(emit_release_lane_preflight "$required_lane_names" "$required_lane_env")"
   fi
   if [ "${#release_approved_internal_packages[@]}" -gt 0 ]; then
     build_needs='[verify, snapshot, acquire-private-dependencies]'
@@ -2799,27 +2809,7 @@ emit_contract_test() {
     fi
   done
   if [ -n "$release_lane_names" ]; then
-    release_lane_preflight="$(cat <<EOF
-      - name: Validate required OS-scoped build lanes
-        if: steps.release-version.outputs.selected == 'true'
-        shell: bash
-        env:
-          REQUIRED_BUILD_LANES: '${release_lane_names}'
-${release_lane_env%$'\n'}
-        run: |
-          set -euo pipefail
-          IFS=',' read -ra lane_names <<<"\$REQUIRED_BUILD_LANES"
-          for lane_name in "\${lane_names[@]}"; do
-            lane_value="\${!lane_name:-}"
-            LANE_NAME="\$lane_name" LANE_VALUE="\$lane_value" node <<'NODE'
-          const name = process.env.LANE_NAME;
-          let value;
-          try { value = JSON.parse(process.env.LANE_VALUE); } catch { throw new Error(name + ' must be a non-empty JSON runner-label array'); }
-          if (!Array.isArray(value) || value.length === 0 || value.some(label => typeof label !== 'string' || !label)) throw new Error(name + ' must be a non-empty JSON runner-label array');
-          NODE
-          done
-EOF
-)"
+    release_lane_preflight="$(emit_release_lane_preflight "$release_lane_names" "$release_lane_env")"
     release_lane_preflight_sha256="$(printf '%s' "$release_lane_preflight" | digest_of)"
   fi
   cat <<EOF
@@ -5335,6 +5325,62 @@ PY
       fi
       [ "$lane_preflight_sha256" = "$EXPECTED_RELEASE_LANE_PREFLIGHT_SHA256" ] \
         || fail "$release_workflow OS lane preflight logic differs from the provenance-authorized contract"
+      lane_preflight_run="$(awk '
+        /^        run: \|$/ { in_run = 1; next }
+        in_run && /^      - name:/ { exit }
+        in_run { sub(/^          /, ""); print }
+      ' <<<"$lane_preflight")"
+      lane_names="$(sed -n "s/^[[:space:]]*REQUIRED_BUILD_LANES: '\\(.*\\)'$/\\1/p" <<<"$lane_preflight")"
+      [ -n "$lane_preflight_run" ] && [ -n "$lane_names" ] \
+        || fail "$release_workflow OS lane preflight has no executable body or lane list"
+      run_lane_preflight_case() {
+        env -i PATH="$PATH" REQUIRED_BUILD_LANES="$lane_names" \
+          CI_LANE_TRUSTED_MACOS="$1" CI_LANE_TRUSTED_WINDOWS="$2" \
+          bash --noprofile --norc -c "$lane_preflight_run"
+      }
+      assert_lane_preflight_rejects() {
+        local case_name="$1" macos_value="$2" windows_value="$3" diagnostic="$4" output
+        if output="$(run_lane_preflight_case "$macos_value" "$windows_value" 2>&1)"; then
+          fail "$release_workflow OS lane preflight accepted $case_name"
+        elif grep -qF "$diagnostic" <<<"$output"; then
+          printf 'ok - %s OS lane preflight rejects %s with a lane-specific diagnostic\n' \
+            "$release_workflow" "$case_name"
+        else
+          fail "$release_workflow OS lane preflight reported the wrong diagnostic for $case_name"
+        fi
+      }
+      if run_lane_preflight_case '["macos-15","macos-15-large"]' '["windows-2025"]' >/dev/null 2>&1; then
+        printf 'ok - %s OS lane preflight accepts pinned labels from each required family\n' \
+          "$release_workflow"
+      else
+        fail "$release_workflow OS lane preflight rejects valid pinned labels"
+      fi
+      if [[ ",$lane_names," == *,CI_LANE_TRUSTED_MACOS,* ]]; then
+        assert_lane_preflight_rejects "wrong-family macOS labels" '["ubuntu-24.04"]' '["windows-2025"]' \
+          'CI_LANE_TRUSTED_MACOS must contain pinned macOS labels without padding or latest segments'
+        assert_lane_preflight_rejects "rolling macOS labels" '["macos-latest"]' '["windows-2025"]' \
+          'CI_LANE_TRUSTED_MACOS must contain pinned macOS labels without padding or latest segments'
+        assert_lane_preflight_rejects "unversioned macOS labels" '["macos-preview"]' '["windows-2025"]' \
+          'CI_LANE_TRUSTED_MACOS must contain pinned macOS labels without padding or latest segments'
+        assert_lane_preflight_rejects "padded macOS labels" '["macos-15 "]' '["windows-2025"]' \
+          'CI_LANE_TRUSTED_MACOS must contain pinned macOS labels without padding or latest segments'
+        assert_lane_preflight_rejects "empty macOS selector" '[]' '["windows-2025"]' \
+          'CI_LANE_TRUSTED_MACOS must be a non-empty JSON runner-label array'
+        assert_lane_preflight_rejects "unset macOS selector" '' '["windows-2025"]' \
+          'CI_LANE_TRUSTED_MACOS must be a non-empty JSON runner-label array'
+      fi
+      if [[ ",$lane_names," == *,CI_LANE_TRUSTED_WINDOWS,* ]]; then
+        assert_lane_preflight_rejects "wrong-family Windows labels" '["macos-15"]' '["macos-15"]' \
+          'CI_LANE_TRUSTED_WINDOWS must contain pinned Windows labels without padding or latest segments'
+        assert_lane_preflight_rejects "rolling Windows labels" '["macos-15"]' '["windows-latest"]' \
+          'CI_LANE_TRUSTED_WINDOWS must contain pinned Windows labels without padding or latest segments'
+        assert_lane_preflight_rejects "unversioned Windows labels" '["macos-15"]' '["windows-next"]' \
+          'CI_LANE_TRUSTED_WINDOWS must contain pinned Windows labels without padding or latest segments'
+        assert_lane_preflight_rejects "padded Windows labels" '["macos-15"]' '[" windows-2025"]' \
+          'CI_LANE_TRUSTED_WINDOWS must contain pinned Windows labels without padding or latest segments'
+        assert_lane_preflight_rejects "malformed Windows selector" '["macos-15"]' '{invalid' \
+          'CI_LANE_TRUSTED_WINDOWS must be a non-empty JSON runner-label array'
+      fi
     else
       ! grep -qF 'Validate required OS-scoped build lanes' <<<"$verify_job" \
         || fail "$release_workflow includes an OS lane preflight without approved trusted lanes"
