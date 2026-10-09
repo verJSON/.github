@@ -11,7 +11,7 @@ import json
 import pathlib
 import re
 import tarfile
-from typing import Any
+from typing import Any, NoReturn
 
 
 PACKAGE_NAME = re.compile(r"^@[a-z0-9][a-z0-9._~-]*/[a-z0-9][a-z0-9._-]*$")
@@ -26,6 +26,7 @@ MAX_MEMBERS = 100_000
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_PACKAGE_JSON_BYTES = 1024 * 1024
 MAX_TAR_METADATA_BYTES = 1024 * 1024
+MAX_TOTAL_TAR_METADATA_BYTES = 4 * 1024 * 1024
 
 
 class _BoundedTarStream:
@@ -49,15 +50,37 @@ class _BoundedTarStream:
 
 
 class _BoundedTarInfo(tarfile.TarInfo):
-    def _proc_pax(self, archive) -> tarfile.TarInfo:
+    def _check_metadata_size(self, archive) -> None:
+        # TarFile accumulates global PAX headers, so bound their total too.
         if self.size > MAX_TAR_METADATA_BYTES:
             raise ValueError("package archive metadata field exceeds the read limit")
+        total = getattr(archive, "_verjson_metadata_bytes", 0) + self.size
+        if total > MAX_TOTAL_TAR_METADATA_BYTES:
+            raise ValueError("package archive metadata exceeds the aggregate limit")
+        archive._verjson_metadata_bytes = total
+
+    def _proc_pax(self, archive) -> tarfile.TarInfo:
+        self._check_metadata_size(archive)
         return super()._proc_pax(archive)
 
     def _proc_gnulong(self, archive) -> tarfile.TarInfo:
-        if self.size > MAX_TAR_METADATA_BYTES:
-            raise ValueError("package archive metadata field exceeds the read limit")
+        self._check_metadata_size(archive)
         return super()._proc_gnulong(archive)
+
+    def _reject_sparse(self) -> NoReturn:
+        raise ValueError("sparse package archives are not supported")
+
+    def _proc_sparse(self, archive) -> tarfile.TarInfo:
+        self._reject_sparse()
+
+    def _proc_gnusparse_00(self, member, raw_headers) -> None:
+        self._reject_sparse()
+
+    def _proc_gnusparse_01(self, member, pax_headers) -> None:
+        self._reject_sparse()
+
+    def _proc_gnusparse_10(self, member, pax_headers, archive) -> None:
+        self._reject_sparse()
 
 
 def _read_json(path: pathlib.Path) -> Any:

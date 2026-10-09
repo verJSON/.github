@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 import io
 import json
@@ -139,6 +140,62 @@ class ArtifactManifestTest(unittest.TestCase):
         self.refresh_manifest_integrity()
 
         with self.assertRaisesRegex(ValueError, "metadata field exceeds the read limit"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_gnu_sparse_extension_headers(self) -> None:
+        archive_path = self.artifact_dir / self.filename
+        header = bytearray(tarfile.TarInfo("package/package.json").tobuf(format=tarfile.GNU_FORMAT))
+        header[156:157] = tarfile.GNUTYPE_SPARSE
+        header[482] = 1
+        header[148:156] = b"        "
+        checksum = sum(header[:512])
+        header[148:156] = f"{checksum:06o}\0 ".encode("ascii")
+        with gzip.open(archive_path, "wb") as archive:
+            archive.write(header)
+            archive.write(bytes(512))
+            archive.write(bytes(1024))
+        self.refresh_manifest_integrity()
+
+        with self.assertRaisesRegex(ValueError, "sparse package archives are not supported"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_pax_sparse_metadata(self) -> None:
+        archive_path = self.artifact_dir / self.filename
+        member = tarfile.TarInfo("package/package.json")
+        member.size = 0
+        member.pax_headers = {
+            "GNU.sparse.map": "0,1",
+            "GNU.sparse.size": "1",
+        }
+        with tarfile.open(archive_path, "w:gz", format=tarfile.PAX_FORMAT) as archive:
+            archive.addfile(member)
+        self.refresh_manifest_integrity()
+
+        with self.assertRaisesRegex(ValueError, "sparse package archives are not supported"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_cumulative_global_pax_metadata(self) -> None:
+        archive_path = self.artifact_dir / self.filename
+
+        def pax_record(key: str, value: str) -> bytes:
+            body = f"{key}={value}\n"
+            length = len(body) + 2
+            while True:
+                record = f"{length} {body}".encode("utf-8")
+                if len(record) == length:
+                    return record
+                length = len(record)
+
+        with tarfile.open(archive_path, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
+            for index in range(6):
+                payload = pax_record(f"custom{index}", "x" * 800_000)
+                header = tarfile.TarInfo("global")
+                header.type = tarfile.XGLTYPE
+                header.size = len(payload)
+                archive.addfile(header, io.BytesIO(payload))
+        self.refresh_manifest_integrity()
+
+        with self.assertRaisesRegex(ValueError, "metadata exceeds the aggregate limit"):
             validator.validate_artifacts(self.artifact_dir, self.expected)
 
     def test_rejects_aggregate_compressed_archive_bytes_over_the_limit(self) -> None:
