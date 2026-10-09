@@ -233,6 +233,17 @@ disable repository pnpmfile hooks, the sandbox accepts only the runner's
 canonical Corepack cache, and protected identity checks run before untrusted
 scripts. GitHub-hosted non-Linux runners fail with an explicit platform error.
 
+Explicit, nested, and default consumer scripts in secretless mode also run in
+Bubblewrap on GitHub-hosted Linux. The workspace remains writable for build
+outputs while `.git` is read-only; `RUNNER_TEMP` is replaced by a private
+temporary filesystem, so scripts cannot discover or modify the runner's
+workflow command files even if they search the host temp directory. The source
+reusable preserves its caller-selected network policy; the generated protected
+workflow applies its existing service-aware network isolation.
+Candidate npm uses `/dev/null` for user configuration and a fresh empty global
+configuration file inside the sandbox, while retaining only the generated
+private cache setting.
+
 The auxiliary source accepts exactly `repository`, `pinFile`, `checkoutPath`, and
 `sparsePath`; the pin file must name the same repository and a lowercase 40-hex
 commit. Rebuild entries must be exact locked package names. The script plan must
@@ -241,12 +252,17 @@ required `script` and optional `unsetEnv` and `requiresServices` fields.
 `unsetEnv` may remove up to 16 non-credential environment names for that single
 script; package, Git, cloud, and OIDC credential controls cannot be removed.
 `requiresServices` is a JSON boolean. The standard `test`, `test:*`, and `*:test`
-names keep service access by default; set it to `true` for custom test names.
-Only service-enabled scripts receive configured DB/cache values or network
-access, and they fail closed on self-hosted runners. Their network access on a
-GitHub-hosted runner has unrestricted egress, not a service-only firewall.
-Credential-bearing variables and credential query/DSN fields (including `key`,
-`code`, and signed-query aliases) are rejected;
+names keep service-variable access by default; set it to `true` for custom test
+names. Only service-enabled scripts receive configured DB/cache values, and
+the compatibility lane applies the same exact-script gate and does not inherit
+DB/cache service values when its script is not service-enabled. They fail closed
+on self-hosted runners. The generated protected workflow also
+isolates network access for scripts without this capability. The source reusable
+workflow keeps the caller-selected runner's normal network policy. Even in the
+protected workflow, service-enabled scripts on GitHub-hosted runners have
+unrestricted egress, not a service-only firewall.
+Credential-bearing variables and credential query, fragment, or DSN fields
+(including nested encoded fields, `key`, `code`, and signed-query aliases) are rejected;
 the documented `OPENAI_API_KEY=ci-dummy-key` test sentinel is the only variable
 name exception. Credentialed URLs are allowed only for localhost or the exact
 workflow-selected service endpoint. Both features execute only after credential

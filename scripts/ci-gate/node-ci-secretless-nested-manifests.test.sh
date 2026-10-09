@@ -421,7 +421,13 @@ open(sys.argv[2], "w", encoding="utf-8").write(step["run"])
 PY
 
 plan_fixture="$tmp/plan-fixture"
-mkdir -p "$plan_fixture/examples/nested"
+mkdir -p "$plan_fixture/examples/nested" "$plan_fixture/.git" "$plan_fixture/node_modules" \
+  "$plan_fixture/runner-temp/_runner_file_commands"
+plan_toolchain="$tmp/plan-tool-cache/node/22.0.0/x64"
+mkdir -p "$plan_toolchain/bin"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$plan_toolchain/bin/node"
+cp "$tmp/bin/npm" "$plan_toolchain/bin/npm"
+chmod +x "$plan_toolchain/bin/node" "$plan_toolchain/bin/npm"
 printf '%s\n' '{"name":"root","version":"1.0.0","scripts":{"root-verify":"true"}}' \
   > "$plan_fixture/package.json"
 printf '%s\n' '{"name":"nested","version":"1.0.0","scripts":{"verify":"true"}}' \
@@ -429,23 +435,28 @@ printf '%s\n' '{"name":"nested","version":"1.0.0","scripts":{"verify":"true"}}' 
 
 run_plan() {
   local root_plan="$1" nested="$2"
-  rm -f "$plan_fixture/npm.log"
-  (cd "$plan_fixture" && PATH="$tmp/bin:$PATH" NPM_STUB_LOG="$plan_fixture/npm.log" \
-    CI_SCRIPT_PLAN="$root_plan" NESTED_MANIFESTS="$nested" bash "$tmp/plan.sh")
+  rm -f "$plan_fixture/node_modules/.npm.log"
+  (cd "$plan_fixture" && PATH="$plan_toolchain/bin:$PATH" \
+    RUNNER_TOOL_CACHE="$tmp/plan-tool-cache" NPM_STUB_LOG=/workspace/node_modules/.npm.log \
+    CI_SCRIPT_PLAN="$root_plan" NESTED_MANIFESTS="$nested" \
+    RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux \
+    RUNNER_TEMP="$plan_fixture/runner-temp" \
+    GITHUB_ENV="$plan_fixture/runner-temp/_runner_file_commands/GITHUB_ENV" \
+    bash "$tmp/plan.sh")
 }
 
 both_plan='[{"path":"examples/nested","approvedPackages":["@verjson/nested-lib"],"scriptPlan":["verify"]}]'
-if run_plan '["root-verify"]' "$both_plan" >/dev/null 2>&1 \
-    && grep -qFx "$plan_fixture	run root-verify" "$plan_fixture/npm.log" \
-    && grep -qFx "$plan_fixture/examples/nested	run verify" "$plan_fixture/npm.log"; then
+if run_plan '["root-verify"]' "$both_plan" >/dev/null \
+    && grep -qFx '/workspace	run root-verify' "$plan_fixture/node_modules/.npm.log" \
+    && grep -qFx '/workspace/examples/nested	run verify' "$plan_fixture/node_modules/.npm.log"; then
   pass "each manifest's script plan runs in that manifest's own directory"
 else
   fail "the nested script plan did not run in its own manifest directory"
 fi
 
-if run_plan '' "$both_plan" >/dev/null 2>&1 \
-    && [ "$(wc -l < "$plan_fixture/npm.log")" -eq 1 ] \
-    && grep -qFx "$plan_fixture/examples/nested	run verify" "$plan_fixture/npm.log"; then
+if run_plan '' "$both_plan" >/dev/null \
+    && [ "$(wc -l < "$plan_fixture/node_modules/.npm.log")" -eq 1 ] \
+    && grep -qFx '/workspace/examples/nested	run verify' "$plan_fixture/node_modules/.npm.log"; then
   pass "a nested script plan runs without any root script plan"
 else
   fail "a nested-only script plan did not run on its own"
@@ -457,7 +468,7 @@ if run_plan '["root-verify"]' \
     '[{"path":"examples/nested","approvedPackages":["@verjson/nested-lib"],"scriptPlan":["root-verify"]}]' \
     >/dev/null 2>&1; then
   fail "a nested plan ran a script declared only by the root package.json"
-elif [ ! -s "$plan_fixture/npm.log" ]; then
+elif [ ! -s "$plan_fixture/node_modules/.npm.log" ]; then
   pass "a nested plan naming a script absent from its own package.json fails before npm"
 else
   fail "a nested plan naming a foreign script reached npm before failing"
@@ -493,7 +504,7 @@ printf '%s\n' '{"name":"outside","version":"1.0.0","scripts":{"verify":"true"}}'
 ln -s "$tmp/outside-plan" "$plan_fixture/examples/linked"
 reject_plan "a symlinked nested path escaping the checkout is rejected before any script runs" '' \
   '[{"path":"examples/linked","approvedPackages":[],"scriptPlan":["verify"]}]'
-if [ ! -s "$plan_fixture/npm.log" ]; then
+if [ ! -s "$plan_fixture/node_modules/.npm.log" ]; then
   pass "no script ran for any rejected nested plan"
 else
   fail "a rejected nested plan still reached npm"
@@ -511,7 +522,7 @@ doc = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 step = next(step for job in doc["jobs"].values() for step in job.get("steps", [])
             if step.get("name") == "Run exact credentialless consumer script plan")
 body = step["run"]
-assert "for index, (script_directory, name, unset_env) in enumerate(normalized):" in body
+assert "for index, (script_directory, name, unset_env, requires_services) in enumerate(normalized):" in body
 assert '"--chdir", str(script_directory),' in body
 assert '"--chdir", str(workspace),' not in body
 PY

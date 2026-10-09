@@ -152,3 +152,18 @@ exercise these token-bearing paths in both inputs.
 When the database service is enabled, `cache-env` also rejects `DB_HOST` and
 `DB_PORT` so a later cache step cannot overwrite the endpoint published by
 `db-env`. Cache-only callers retain those names as ordinary configuration.
+
+## 2026-10-09 amendment — isolate all secretless consumer scripts (#1729)
+
+The canonical reusable now runs explicit, nested, and default consumer scripts
+inside Bubblewrap for secretless PR and trusted-ref calls. Its writable
+workspace permits build outputs while `.git` stays read-only; `RUNNER_TEMP` is
+replaced by private temporary storage, preventing scripts from finding and
+modifying active GitHub Actions command files. This boundary requires
+GitHub-hosted Linux. The source reusable retains the caller-selected network
+policy; the generated protected workflow applies its existing service-aware
+network isolation. The regression harness verifies that a real Bubblewrap run
+cannot alter a host command-file sentinel. Candidate npm reads no host or
+repository configuration: user configuration resolves to `/dev/null`, global
+configuration is an empty file inside the sandbox, and only the generated
+private cache setting remains.

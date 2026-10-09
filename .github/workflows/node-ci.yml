@@ -200,12 +200,13 @@ on:
           Optional JSON array of exact package.json script names or objects with
           script and optional unsetEnv/requiresServices fields. unsetEnv removes
           up to 16 non-credential environment names for that script only.
-          requiresServices must be a JSON boolean; true grants that script the
-          configured database/cache variables and network access. Entries named
-          test, test:*, or *:test retain this capability by default; custom test
-          script names must set requiresServices to true. Entries run in order
-          after the credentialless private-cache install and any approved rebuild.
-          Empty preserves the standard build/typecheck/test/lint sequence.
+          requiresServices must be a JSON boolean; true grants configured
+          database/cache variables to that script. The protected workflow also
+          grants network access only to those scripts. The standard test, test:*,
+          and *:test names retain service access by default; custom test names
+          must set requiresServices to true. The unprotected reusable workflow
+          retains its caller-selected network policy. Empty preserves the
+          standard build/typecheck/test/lint sequence.
         required: false
         type: string
         default: ''
@@ -2637,10 +2638,10 @@ jobs:
               PYTHONPATH|PYTHONHOME|PYTHONSTARTUP|PYTHONUSERBASE|\
               PERL5OPT|PERL5LIB|RUBYOPT|RUBYLIB|JAVA_TOOL_OPTIONS|\
               JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_*|DYLD_*|GITHUB_*|RUNNER_*|\
-              ACTIONS_*|GH_*|\
+              ACTIONS_*|GH_*|DOCKER_*|\
               GIT_ASKPASS|SSH_ASKPASS|GIT_CONFIG_*|GIT_SSL_CAINFO|\
               GIT_SSL_CAPATH|NPM_CONFIG_*|\
-              HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|\
+              HTTP_PROXY|HTTPS_PROXY|FTP_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|ftp_proxy|\
               all_proxy|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|\
               REQUESTS_CA_BUNDLE|GCONV_PATH)
                 echo "db-env: '$key' cannot override runner execution or workflow state" >&2
@@ -2976,10 +2977,10 @@ jobs:
               PYTHONPATH|PYTHONHOME|PYTHONSTARTUP|PYTHONUSERBASE|\
               PERL5OPT|PERL5LIB|RUBYOPT|RUBYLIB|JAVA_TOOL_OPTIONS|\
               JDK_JAVA_OPTIONS|_JAVA_OPTIONS|LD_*|DYLD_*|GITHUB_*|RUNNER_*|\
-              ACTIONS_*|GH_*|\
+              ACTIONS_*|GH_*|DOCKER_*|\
               GIT_ASKPASS|SSH_ASKPASS|GIT_CONFIG_*|GIT_SSL_CAINFO|\
               GIT_SSL_CAPATH|NPM_CONFIG_*|\
-              HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|\
+              HTTP_PROXY|HTTPS_PROXY|FTP_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|ftp_proxy|\
               all_proxy|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|\
               REQUESTS_CA_BUNDLE|GCONV_PATH)
                 echo "cache-env: '$key' cannot override runner execution or workflow state" >&2
@@ -3079,7 +3080,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
       - name: Provision trusted compatibility sandbox
-        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && (inputs.secretless-compatibility-ranges != '' || inputs.secretless-rebuild-packages != '') && runner.environment == 'github-hosted'
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && runner.environment == 'github-hosted'
         env:
           ACTIONS_ID_TOKEN_REQUEST_TOKEN: ''
           ACTIONS_ID_TOKEN_REQUEST_URL: ''
@@ -5051,8 +5052,15 @@ jobs:
           RUN_DEFAULTS: ${{ inputs.secretless-ci-script-plan == '' }}
           DB_ENV: ${{ inputs.db-env }}
           CACHE_ENV: ${{ inputs.cache-env }}
+          VERJSON_CI_TRUSTED_DB_HOST: ${{ steps.db-service.outputs.host }}
           BASH_ENV: /dev/null
         run: |
+          set -euo pipefail
+          if [[ -z "${GITHUB_ENV:-}" || "$GITHUB_ENV" != */* ]]; then
+            echo '::error::runner command-file directory is unavailable' >&2
+            exit 1
+          fi
+          export VERJSON_CI_COMMAND_FILES_DIR="${GITHUB_ENV%/*}"
           unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY
           python3 - <<'PY'
           import json
@@ -5061,7 +5069,9 @@ jobs:
           import shutil
           import subprocess
           import sys
+          import tempfile
           from pathlib import Path
+          from urllib.parse import parse_qsl, unquote, urlsplit
 
           script_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._-]*")
           env_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -5081,6 +5091,7 @@ jobs:
                       script = entry
                       unset_env = []
                       requires_services = None
+                      requires_services_specified = False
                   elif (
                       isinstance(entry, dict)
                       and "script" in entry
@@ -5089,16 +5100,17 @@ jobs:
                       script = entry["script"]
                       unset_env = entry.get("unsetEnv", [])
                       requires_services = entry.get("requiresServices")
+                      requires_services_specified = "requiresServices" in entry
                   else:
                       sys.exit(f"{label} entries must be script names or script objects with supported fields")
-                  if requires_services is None:
+                  if not isinstance(script, str) or script_pattern.fullmatch(script) is None:
+                      sys.exit(f"{label} contains an invalid script name")
+                  if not requires_services_specified:
                       requires_services = (
                           script == "test" or script.startswith("test:") or script.endswith(":test")
                       )
                   elif type(requires_services) is not bool:
                       sys.exit(f"{label} requiresServices must be a JSON boolean")
-                  if not isinstance(script, str) or script_pattern.fullmatch(script) is None:
-                      sys.exit(f"{label} contains an invalid script name")
                   if (not isinstance(unset_env, list) or len(unset_env) > 16
                           or len(unset_env) != len(set(unset_env))
                           or any(not isinstance(name, str) or env_pattern.fullmatch(name) is None
@@ -5173,8 +5185,402 @@ jobs:
                   sys.exit(
                       "candidate scripts requiring services need an isolated GitHub-hosted runner"
                   )
+          # BEGIN source candidate sandbox preflight
+          if (
+              os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
+              or os.environ.get("RUNNER_OS") != "Linux"
+          ):
+              sys.exit(
+                  "secretless candidate scripts require a GitHub-hosted Linux runner"
+              )
+          bubblewrap = Path("/usr/bin/bwrap")
+          if not bubblewrap.is_file() or bubblewrap.is_symlink():
+              sys.exit("trusted candidate Bubblewrap sandbox is unavailable")
+          runner_temp = Path(os.environ.get("RUNNER_TEMP", ""))
+          command_files_dir = Path(
+              os.environ.get("VERJSON_CI_COMMAND_FILES_DIR", "")
+          )
+          if (
+              not runner_temp.is_absolute()
+              or runner_temp.is_symlink()
+              or not runner_temp.is_dir()
+              or runner_temp.resolve() != runner_temp
+              or not command_files_dir.is_absolute()
+              or command_files_dir.is_symlink()
+              or not command_files_dir.is_dir()
+              or command_files_dir.resolve() != command_files_dir
+          ):
+              sys.exit("runner command-file directory is not canonical")
+          try:
+              command_files_dir.relative_to(runner_temp)
+          except ValueError:
+              sys.exit("runner command-file directory is outside RUNNER_TEMP")
+          if command_files_dir == runner_temp:
+              sys.exit("runner command-file directory cannot be RUNNER_TEMP")
+          workspace = checkout_root
+          git_metadata = workspace / ".git"
+          if git_metadata.is_symlink() or not git_metadata.is_dir():
+              sys.exit("candidate workspace Git metadata is not a real directory")
+          home = Path(os.environ.get("HOME", ""))
+          if not home.is_absolute() or home.is_symlink() or not home.is_dir() or home.resolve() != home:
+              sys.exit("candidate runner home is not canonical")
+          corepack_home = home / ".cache/node/corepack"
+          configured_corepack_home = os.environ.get("COREPACK_HOME")
+          if configured_corepack_home and Path(configured_corepack_home) != corepack_home:
+              sys.exit("candidate Corepack cache path is not canonical")
+          if corepack_home.exists() or corepack_home.is_symlink():
+              if (
+                  corepack_home.is_symlink()
+                  or not corepack_home.is_dir()
+                  or corepack_home.resolve() != corepack_home
+              ):
+                  sys.exit("candidate Corepack cache is not a canonical directory")
+          else:
+              corepack_home = None
+          browser_cache = None
+          browser_cache_fd = None
+          browser_cache_value = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+          if browser_cache_value:
+              browser_cache = Path(browser_cache_value)
+              expected_browser_cache = runner_temp / (
+                  "verjson-playwright-browsers-"
+                  + os.environ.get("GITHUB_RUN_ID", "")
+                  + "-"
+                  + os.environ.get("GITHUB_RUN_ATTEMPT", "")
+              )
+              if (
+                  browser_cache != expected_browser_cache
+                  or browser_cache.is_symlink()
+                  or not browser_cache.is_dir()
+                  or browser_cache.resolve() != browser_cache
+              ):
+                  sys.exit("candidate Playwright cache is not the validated job-scoped directory")
+              browser_cache_fd = os.open(
+                  browser_cache,
+                  os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+              )
+          # END source candidate sandbox preflight
+          candidate_service_env = {}
+          blocked_service_env = {
+              "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
+              "GITHUB_STEP_SUMMARY", "VERJSON_CI_TRUSTED_DB_HOST",
+              "VERJSON_CI_COMMAND_FILES_DIR", "GH_TOKEN",
+              "GITHUB_TOKEN", "NODE_AUTH_TOKEN",
+              "NPM_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "FTP_PROXY",
+              "AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS",
+              "AZURE_CREDENTIALS", "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+              "ACTIONS_ID_TOKEN_REQUEST_URL", "BASH_ENV", "BASH_XTRACEFD", "ENV",
+              "PS4", "SHELLOPTS", "BASHOPTS", "PATH", "NODE_OPTIONS", "NODE_PATH",
+              "NODE_EXTRA_CA_CERTS", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
+              "PYTHONUSERBASE", "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
+              "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS",
+              "GIT_ASKPASS", "SSH_ASKPASS", "GIT_SSL_CAINFO", "GIT_SSL_CAPATH",
+              "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE",
+              "GCONV_PATH", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+              "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+          }
+          blocked_service_prefixes = (
+              "GITHUB_", "RUNNER_", "ACTIONS_", "GH_", "DOCKER_", "AWS_", "GOOGLE_",
+              "AZURE_", "GCP_", "COREPACK_", "NPM_CONFIG_", "GIT_CONFIG_",
+              "LD_", "DYLD_", "POSTGRES_",
+          )
+          credential_environment_name_pattern = re.compile(
+              r"(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|PRIVATE[_-]?KEY|"
+              r"API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|BEARER|COOKIE|SESSION|JWT|AUTH)",
+              re.IGNORECASE,
+          )
+          credential_environment_ambiguous_name_pattern = re.compile(
+              r"(?<![A-Z0-9])(?:KEY|CODE|SIG)(?![A-Z0-9])",
+              re.IGNORECASE,
+          )
+
+          def credential_environment_name_is_sensitive(name):
+              normalized_name = name.upper()
+              if normalized_name.startswith("NPM_CONFIG_") and normalized_name != "NPM_CONFIG_CACHE":
+                  return True
+              if normalized_name == "PWD":
+                  return False
+              if credential_environment_name_pattern.search(name) is not None:
+                  return True
+              if normalized_name in {"EXIT_CODE", "CACHE_KEY", "PUBLIC_KEY"}:
+                  return False
+              return credential_environment_ambiguous_name_pattern.search(name) is not None
+
+          credential_parameter_name_pattern = re.compile(
+              r"(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|PRIVATE[_-]?KEY|"
+              r"API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|"
+              r"(?<![A-Z0-9])KEY(?![A-Z0-9])|(?<![A-Z0-9])CODE(?![A-Z0-9])|"
+              r"(?<![A-Z0-9])SIG(?![A-Z0-9])|BEARER|COOKIE|SESSION|JWT|"
+              r"(?<![A-Z0-9])AUTH(?:ORIZATION|ENTICATION)?(?![A-Z0-9]))",
+              re.IGNORECASE,
+          )
+          credential_parameter_pattern = re.compile(
+              r"(?:^|[;?&#=\s])(?:[A-Z0-9]+[_-])*(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|"
+              r"PRIVATE[_-]?KEY|API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|"
+              r"(?<![A-Z0-9])KEY(?![A-Z0-9])|(?<![A-Z0-9])CODE(?![A-Z0-9])|"
+              r"(?<![A-Z0-9])SIG(?![A-Z0-9])|"
+              r"BEARER|COOKIE|SESSION|JWT|"
+              r"(?<![A-Z0-9])AUTH(?:ORIZATION|ENTICATION)?(?![A-Z0-9]))\s*=",
+              re.IGNORECASE,
+          )
+
+          def credential_component_is_present(component):
+              for _ in range(8):
+                  if credential_parameter_pattern.search(component):
+                      return True
+                  if "=" in component and any(
+                      credential_parameter_name_pattern.search(key)
+                      for key, _value in parse_qsl(
+                          component, keep_blank_values=True, max_num_fields=128
+                      )
+                  ):
+                      return True
+                  decoded = unquote(component)
+                  if decoded == component:
+                      return False
+                  component = decoded
+              return True
+
+          def credential_environment_value_is_sensitive(name, value):
+              if name.upper() not in {"HTTP_PROXY", "HTTPS_PROXY", "FTP_PROXY", "ALL_PROXY"}:
+                  return False
+              try:
+                  parsed = urlsplit(value if "://" in value else f"//{value}")
+              except ValueError:
+                  return True
+              if parsed.username is not None or parsed.password is not None:
+                  return True
+              return any(
+                  credential_component_is_present(component)
+                  for component in (parsed.query, parsed.fragment)
+              )
+
+          def validate_candidate_service_value(name, value):
+              if credential_environment_name_is_sensitive(name) and not (
+                  name.upper() == "OPENAI_API_KEY" and value == "ci-dummy-key"
+              ):
+                  sys.exit("candidate service environment includes a credential-bearing variable")
+              if "://" not in value:
+                  if credential_component_is_present(value):
+                      sys.exit("candidate service value contains credential-bearing data")
+                  return
+              if credential_parameter_pattern.search(value):
+                  sys.exit("candidate service value contains credential-bearing data")
+              try:
+                  parsed = urlsplit(value)
+                  has_credential_fields = any(
+                      credential_component_is_present(component)
+                      for component in (parsed.query, parsed.fragment)
+                  )
+              except ValueError:
+                  sys.exit("candidate service URL is malformed")
+              if has_credential_fields:
+                  sys.exit("candidate service URL contains credential-bearing data")
+              if parsed.username is not None or parsed.password is not None:
+                  local_service_hosts = {"localhost", "127.0.0.1", "::1"}
+                  trusted_db_host = os.environ.get(
+                      "VERJSON_CI_TRUSTED_DB_HOST", ""
+                  ).strip().strip("[]").lower()
+                  if trusted_db_host:
+                      local_service_hosts.add(trusted_db_host)
+                  if parsed.hostname is None or parsed.hostname.lower() not in local_service_hosts:
+                      sys.exit("credentialed candidate service URLs must target the local service")
+
+          if any(requires_services for _directory, _name, _unset_env, requires_services in normalized):
+              for service_name in ("DB_HOST", "DB_PORT", "CACHE_PORT"):
+                  if service_name in os.environ:
+                      service_value = os.environ[service_name]
+                      validate_candidate_service_value(service_name, service_value)
+                      candidate_service_env[service_name] = service_value
+              for source_name in ("DB_ENV", "CACHE_ENV"):
+                  for service_line in os.environ.get(source_name, "").splitlines():
+                      stripped_line = service_line.strip()
+                      if not stripped_line or stripped_line.startswith("#"):
+                          continue
+                      service_name, separator, _service_value = stripped_line.partition("=")
+                      if not separator or env_pattern.fullmatch(service_name) is None:
+                          sys.exit("candidate service environment is malformed")
+                      normalized_service_name = service_name.upper()
+                      if normalized_service_name.startswith("POSTGRES_"):
+                          continue
+                      if normalized_service_name in blocked_service_env or any(
+                          normalized_service_name.startswith(prefix)
+                          for prefix in blocked_service_prefixes
+                      ):
+                          sys.exit("candidate service environment includes a protected variable")
+                      if service_name in os.environ:
+                          service_value = os.environ[service_name]
+                          validate_candidate_service_value(service_name, service_value)
+                          candidate_service_env[service_name] = service_value
+          # BEGIN source candidate script execution
+          node_path_value = shutil.which("node")
+          npm_path_value = shutil.which("npm")
+          if node_path_value is None or npm_path_value is None:
+              sys.exit("trusted Node and npm executables are unavailable")
+          node_path = Path(node_path_value).resolve(strict=True)
+          node_toolchain_root = None
+          node_toolchain_destination = None
+          node_toolchain_bin = "/usr/local/bin"
+          if not node_path.is_relative_to(Path("/usr")):
+              runner_tool_cache = Path(os.environ.get("RUNNER_TOOL_CACHE", ""))
+              if (
+                  not runner_tool_cache.is_absolute()
+                  or runner_tool_cache.is_symlink()
+                  or not runner_tool_cache.is_dir()
+                  or runner_tool_cache.resolve() != runner_tool_cache
+                  or node_path.parent.name != "bin"
+              ):
+                  sys.exit("trusted Node toolchain is outside the runner tool cache")
+              node_tool_cache = (runner_tool_cache / "node").resolve(strict=True)
+              node_toolchain_root = node_path.parent.parent.resolve(strict=True)
+              if (
+                  not node_toolchain_root.is_relative_to(node_tool_cache)
+                  or node_toolchain_root == node_tool_cache
+                  or node_toolchain_root == workspace
+                  or node_toolchain_root.is_relative_to(workspace)
+                  or workspace.is_relative_to(node_toolchain_root)
+                  or node_toolchain_root == home
+                  or node_toolchain_root.is_relative_to(home)
+                  or home.is_relative_to(node_toolchain_root)
+                  or node_toolchain_root == runner_temp
+                  or node_toolchain_root.is_relative_to(runner_temp)
+                  or runner_temp.is_relative_to(node_toolchain_root)
+              ):
+                  sys.exit("trusted Node toolchain is outside the runner tool cache")
+              node_toolchain_destination = "/opt/verjson-node-toolchain"
+              node_toolchain_bin = f"{node_toolchain_destination}/bin"
+              node_command = Path(node_toolchain_destination) / node_path.relative_to(node_toolchain_root)
+          else:
+              node_command = node_path
+          npm_executable = Path(npm_path_value)
+          resolved_npm_executable = npm_executable.resolve(strict=True)
+          npm_cli_candidates = list(dict.fromkeys(
+              candidate.resolve(strict=True)
+              for candidate in (
+                  npm_executable.parent.parent / "lib/node_modules/npm/bin/npm-cli.js",
+                  npm_executable.parent / "node_modules/npm/bin/npm-cli.js",
+                  resolved_npm_executable.parent.parent / "bin/npm-cli.js",
+              )
+              if candidate.is_file()
+          ))
+          if len(npm_cli_candidates) > 1:
+              sys.exit("trusted npm CLI is ambiguous")
+          if npm_cli_candidates:
+              npm_cli_path = npm_cli_candidates[0]
+              if node_toolchain_root is None:
+                  if not npm_cli_path.is_relative_to(Path("/usr")):
+                      sys.exit("trusted npm CLI is outside the system toolchain")
+                  npm_command = [str(node_command), str(npm_cli_path)]
+              else:
+                  if not npm_cli_path.is_relative_to(node_toolchain_root):
+                      sys.exit("trusted npm CLI is outside the Node toolchain")
+                  npm_cli_command = str(
+                      Path(node_toolchain_destination)
+                      / npm_cli_path.relative_to(node_toolchain_root)
+                  )
+                  npm_command = [str(node_command), npm_cli_command]
+          else:
+              if node_toolchain_root is None:
+                  if not resolved_npm_executable.is_relative_to(Path("/usr")):
+                      sys.exit("trusted npm executable is outside the system toolchain")
+                  npm_command = [str(resolved_npm_executable)]
+              else:
+                  if not resolved_npm_executable.is_relative_to(node_toolchain_root):
+                      sys.exit("trusted npm executable is outside the Node toolchain")
+                  npm_command = [
+                      str(
+                          Path(node_toolchain_destination)
+                          / resolved_npm_executable.relative_to(node_toolchain_root)
+                      )
+                  ]
+          global_config_file = tempfile.TemporaryFile(dir=runner_temp)
+          sandbox_workspace = "/workspace"
+          sandbox_entrypoint = (
+              "import os, sys\n"
+              "max_fd = os.sysconf('SC_OPEN_MAX')\n"
+              "if max_fd < 3: raise SystemExit('invalid file descriptor limit')\n"
+              "os.closerange(3, max_fd)\n"
+              "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
+          )
+          system_mounts = (
+              (Path("/usr"), "/usr"),
+              (Path("/bin").resolve(strict=True), "/bin"),
+              (Path("/lib").resolve(strict=True), "/lib"),
+              (Path("/lib64").resolve(strict=True), "/lib64"),
+              (Path("/etc/ssl").resolve(strict=True), "/etc/ssl"),
+              (Path("/etc/hosts").resolve(strict=True), "/etc/hosts"),
+              (Path("/etc/resolv.conf").resolve(strict=True), "/etc/resolv.conf"),
+              (Path("/etc/nsswitch.conf").resolve(strict=True), "/etc/nsswitch.conf"),
+              (Path("/etc/passwd").resolve(strict=True), "/etc/passwd"),
+              (Path("/etc/group").resolve(strict=True), "/etc/group"),
+          )
+          sandbox_directories = {
+              Path("/usr"), Path("/bin"), Path("/lib"), Path("/lib64"),
+              Path("/etc"), Path("/etc/ssl"), Path("/opt"),
+              Path(sandbox_workspace), Path("/dev/shm/home"),
+              Path("/dev/shm/home/.cache/node/corepack"),
+              Path("/dev/shm/npm-cache"), Path("/dev/shm/playwright-browsers"),
+          }
+          if node_toolchain_destination is not None:
+              sandbox_directories.add(Path(node_toolchain_destination))
+          namespace_directories = set()
+          for target in sandbox_directories:
+              namespace_directories.add(target)
+              namespace_directories.update(target.parents)
+          namespace_directories.discard(Path("/"))
+          mount_fds = []
+
+          def bind_source(source, destination, *, writable=False):
+              source = Path(source).resolve(strict=True)
+              expected = source.stat()
+              if not (source.is_dir() or source.is_file()):
+                  sys.exit("trusted candidate sandbox mount source has an unsupported type")
+              open_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+              if source.is_dir():
+                  open_flags |= os.O_DIRECTORY
+              descriptor = os.open(source, open_flags)
+              actual = os.fstat(descriptor)
+              if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+                  os.close(descriptor)
+                  sys.exit("trusted candidate sandbox mount source changed before bind")
+              os.set_inheritable(descriptor, True)
+              mount_fds.append(descriptor)
+              arguments.extend((
+                  "--bind" if writable else "--ro-bind",
+                  f"/proc/self/fd/{descriptor}",
+                  destination,
+              ))
+
           for directory, name, unset_env, requires_services in normalized:
               script_env = os.environ.copy()
+              service_env_names = {"DB_HOST", "DB_PORT", "CACHE_PORT"}
+              for source_name in ("DB_ENV", "CACHE_ENV"):
+                  for service_line in os.environ.get(source_name, "").splitlines():
+                      service_name, separator, _service_value = service_line.partition("=")
+                      if separator and env_pattern.fullmatch(service_name):
+                          service_env_names.add(service_name)
+              for env_name in (
+                  "DB_ENV", "CACHE_ENV", "CI_SCRIPT_PLAN", "NESTED_MANIFESTS",
+                  "RUN_DEFAULTS", "VERJSON_CI_TRUSTED_DB_HOST",
+                  "VERJSON_CI_COMMAND_FILES_DIR", "RUNNER_TOOL_CACHE",
+              ):
+                  script_env.pop(env_name, None)
+              for env_name in service_env_names:
+                  script_env.pop(env_name, None)
+              for env_name, value in tuple(script_env.items()):
+                  if (
+                      credential_environment_name_is_sensitive(env_name)
+                      or credential_environment_value_is_sensitive(env_name, value)
+                  ) and not (
+                      env_name.upper() == "OPENAI_API_KEY" and value == "ci-dummy-key"
+                  ):
+                      script_env.pop(env_name, None)
+              if requires_services:
+                  script_env.update(candidate_service_env)
+              if requires_services and os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
+                  sys.exit(
+                      "candidate scripts requiring services need an isolated GitHub-hosted runner"
+                  )
               for env_name in (
                   "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
                   "GITHUB_STEP_SUMMARY",
@@ -5182,26 +5588,103 @@ jobs:
                   script_env.pop(env_name, None)
               for env_name in unset_env:
                   script_env.pop(env_name, None)
-              npm_command = ["npm"]
-              npm_path = shutil.which("npm")
-              node_path = shutil.which("node")
-              if npm_path is not None and node_path is not None:
-                  npm_executable = Path(npm_path)
-                  resolved_npm_executable = npm_executable.resolve()
-                  npm_cli_candidates = list(dict.fromkeys(
-                      candidate.resolve()
-                      for candidate in (
-                          npm_executable.parent.parent / "lib/node_modules/npm/bin/npm-cli.js",
-                          npm_executable.parent / "node_modules/npm/bin/npm-cli.js",
-                          resolved_npm_executable.parent.parent / "bin/npm-cli.js",
+              script_env.update({
+                  "COREPACK_HOME": "/dev/shm/home/.cache/node/corepack",
+                  "HOME": "/dev/shm/home",
+                  "NPM_CONFIG_CACHE": "/dev/shm/npm-cache",
+                  "NPM_CONFIG_GLOBALCONFIG": "/dev/shm/npm-globalconfig",
+                  "NPM_CONFIG_USERCONFIG": "/dev/null",
+                  "PATH": f"{node_toolchain_bin}:/usr/bin:/bin",
+                  "RUNNER_TEMP": "/tmp",
+                  "TEMP": "/tmp",
+                  "TMP": "/tmp",
+                  "TMPDIR": "/tmp",
+                  "GITHUB_WORKSPACE": sandbox_workspace,
+                  "npm_config_cache": "/dev/shm/npm-cache",
+                  "npm_config_globalconfig": "/dev/shm/npm-globalconfig",
+                  "npm_config_userconfig": "/dev/null",
+              })
+              sandbox_directory = Path(sandbox_workspace) / directory.relative_to(workspace)
+              arguments = [
+                  str(bubblewrap),
+                  "--unshare-user",
+                  "--unshare-pid",
+                  "--unshare-ipc",
+                  "--unshare-uts",
+                  "--unshare-cgroup-try",
+                  "--disable-userns",
+                  "--die-with-parent",
+                  "--new-session",
+                  "--cap-drop", "ALL",
+                  "--tmpfs", "/",
+                  "--tmpfs", "/tmp",
+                  "--dev", "/dev",
+                  "--tmpfs", "/dev/shm",
+                  "--proc", "/proc",
+                  "--dir", "/dev/shm/home",
+                  "--dir", "/dev/shm/home/.cache",
+                  "--dir", "/dev/shm/home/.cache/node",
+                  "--dir", "/dev/shm/home/.cache/node/corepack",
+                  "--dir", "/dev/shm/npm-cache",
+                  "--dir", "/dev/shm/playwright-browsers",
+                  *(
+                      option
+                      for directory_path in sorted(
+                          namespace_directories,
+                          key=lambda path: (len(path.parts), str(path)),
                       )
-                      if candidate.is_file()
+                      if directory_path not in {
+                          Path("/dev"), Path("/dev/shm"), Path("/proc"),
+                          Path("/tmp"), Path("/dev/shm/home"),
+                          Path("/dev/shm/home/.cache"),
+                          Path("/dev/shm/home/.cache/node"),
+                          Path("/dev/shm/home/.cache/node/corepack"),
+                          Path("/dev/shm/npm-cache"),
+                          Path("/dev/shm/playwright-browsers"),
+                      }
+                      for option in ("--dir", str(directory_path))
+                  ),
+                  "--file", str(global_config_file.fileno()), "/dev/shm/npm-globalconfig",
+              ]
+              for source, destination in system_mounts:
+                  bind_source(source, destination)
+              if node_toolchain_root is not None:
+                  bind_source(node_toolchain_root, node_toolchain_destination)
+              bind_source(workspace, sandbox_workspace, writable=True)
+              bind_source(git_metadata, f"{sandbox_workspace}/.git")
+              if corepack_home is not None:
+                  bind_source(corepack_home, "/dev/shm/home/.cache/node/corepack")
+              if browser_cache is not None and browser_cache_fd is not None:
+                  arguments.extend((
+                      "--bind", f"/proc/self/fd/{browser_cache_fd}",
+                      "/dev/shm/playwright-browsers",
                   ))
-                  if len(npm_cli_candidates) > 1:
-                      raise SystemExit("trusted npm CLI is ambiguous")
-                  if npm_cli_candidates:
-                      npm_command = [node_path, str(npm_cli_candidates[0])]
-              subprocess.run([*npm_command, "run", name], check=True, env=script_env, cwd=directory)
+                  script_env["PLAYWRIGHT_BROWSERS_PATH"] = "/dev/shm/playwright-browsers"
+              arguments.extend((
+                  "--chdir", str(sandbox_directory), "--",
+                  "/usr/bin/python3", "-c", sandbox_entrypoint,
+                  *npm_command, "run", name,
+              ))
+              subprocess.run(
+                  arguments,
+                  check=True,
+                  env=script_env,
+                  cwd="/",
+                  pass_fds=tuple(
+                      mount_fds
+                      + [
+                          fd for fd in (browser_cache_fd, global_config_file.fileno())
+                          if fd is not None
+                      ]
+                  ),
+              )
+              for descriptor in mount_fds:
+                  os.close(descriptor)
+              mount_fds.clear()
+          if browser_cache_fd is not None:
+              os.close(browser_cache_fd)
+          global_config_file.close()
+          # END source candidate script execution
           PY
       - run: npm run build
         if: needs.eligibility.outputs.should-run != 'false' && !(inputs.secretless-pr || inputs.secretless-trusted-ref)
@@ -5220,8 +5703,11 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ''
           AWS_SESSION_TOKEN: ''
           AZURE_CREDENTIALS: ''
+          CACHE_ENV: ${{ inputs.cache-env }}
+          CI_SCRIPT_PLAN: ${{ inputs.secretless-ci-script-plan }}
           COMPATIBILITY_ARTIFACT_DIR: ${{ runner.temp }}/secretless-compatibility-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
           COMPATIBILITY_RANGES: ${{ inputs.secretless-compatibility-ranges }}
+          DB_ENV: ${{ inputs.db-env }}
           EXPECTED_COMPATIBILITY_PROVENANCE_SHA256: ${{ needs.acquire-secretless-dependencies.outputs.compatibility-provenance-sha256 }}
           GH_TOKEN: ''
           GITHUB_TOKEN: ''
@@ -5277,6 +5763,84 @@ jobs:
           scripts = package_json.get("scripts")
           if not isinstance(scripts, dict) or request["script"] not in scripts:
               sys.exit("compatibility script is absent from package.json")
+
+          def compatibility_service_script_requires_services(script_name, plan_source):
+              is_test_script = (
+                  script_name == "test"
+                  or script_name.startswith("test:")
+                  or script_name.endswith(":test")
+              )
+              if not plan_source.strip():
+                  return is_test_script
+              try:
+                  plan = json.loads(plan_source)
+              except json.JSONDecodeError as error:
+                  sys.exit(f"secretless-ci-script-plan must be valid JSON: {error}")
+              if not isinstance(plan, list):
+                  sys.exit("secretless-ci-script-plan must be a JSON array")
+              matches = []
+              for entry in plan:
+                  if isinstance(entry, str):
+                      planned_script = entry
+                      requires_services = is_test_script if entry else False
+                  elif isinstance(entry, dict):
+                      planned_script = entry.get("script")
+                      planned_script_is_test = (
+                          isinstance(planned_script, str)
+                          and (
+                              planned_script == "test"
+                              or planned_script.startswith("test:")
+                              or planned_script.endswith(":test")
+                          )
+                      )
+                      requires_services = entry.get(
+                          "requiresServices", planned_script_is_test,
+                      )
+                      if not isinstance(requires_services, bool):
+                          sys.exit("secretless-ci-script-plan requiresServices must be a JSON boolean")
+                  else:
+                      sys.exit("secretless-ci-script-plan entries must be strings or objects")
+                  if planned_script == script_name:
+                      matches.append(requires_services)
+              if len(matches) > 1:
+                  sys.exit("secretless-ci-script-plan accepts unique script names")
+              return bool(matches and matches[0])
+
+          def configured_compatibility_service_names(db_env, cache_env):
+              names = {"DB_HOST", "DB_PORT", "CACHE_PORT"}
+              for source in (db_env, cache_env):
+                  for line in source.splitlines():
+                      stripped_line = line.strip()
+                      if not stripped_line or stripped_line.startswith("#"):
+                          continue
+                      name, separator, _value = stripped_line.partition("=")
+                      if not separator or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None:
+                          sys.exit("compatibility service environment is malformed")
+                      if not name.upper().startswith("POSTGRES_"):
+                          names.add(name)
+              return names
+
+          def compatibility_service_environment(
+              script_name, plan_source, db_env, cache_env, environment,
+          ):
+              if not compatibility_service_script_requires_services(script_name, plan_source):
+                  return {}
+              return {
+                  name: environment[name]
+                  for name in sorted(configured_compatibility_service_names(db_env, cache_env))
+                  if name in environment
+              }
+
+          compatibility_service_names = configured_compatibility_service_names(
+              os.environ.get("DB_ENV", ""), os.environ.get("CACHE_ENV", ""),
+          )
+          compatibility_service_env = compatibility_service_environment(
+              request["script"],
+              os.environ.get("CI_SCRIPT_PLAN", ""),
+              os.environ.get("DB_ENV", ""),
+              os.environ.get("CACHE_ENV", ""),
+              os.environ,
+          )
           package_parts = request["package"].split("/")
           if (not package_parts
                   or any(not part or part in (".", "..") or "/" in part or "\\" in part
@@ -6074,6 +6638,47 @@ jobs:
               sandbox_workspace = "/dev/shm/verjson-compatibility-workspace"
               sandbox_node_modules = f"{sandbox_workspace}/node_modules"
               sandbox_target = "/".join((sandbox_node_modules, *package_parts))
+              node_path_value = shutil.which(
+                  "node", path=script_environment.get("PATH", "")
+              )
+              npm_path_value = shutil.which(
+                  "npm", path=script_environment.get("PATH", "")
+              )
+              if node_path_value is None or npm_path_value is None:
+                  raise SystemExit("trusted Node and npm executables are unavailable")
+              node_path = Path(node_path_value).resolve(strict=True)
+              npm_path = Path(npm_path_value).resolve(strict=True)
+              node_toolchain_root = None
+              node_toolchain_destination = None
+              node_toolchain_bin = "/usr/local/bin"
+              if node_path.is_relative_to(Path("/usr")) and npm_path.is_relative_to(Path("/usr")):
+                  pass
+              else:
+                  runner_tool_cache = Path(
+                      script_environment.get("RUNNER_TOOL_CACHE", "")
+                  )
+                  if (
+                      not runner_tool_cache.is_absolute()
+                      or runner_tool_cache.is_symlink()
+                      or not runner_tool_cache.is_dir()
+                      or runner_tool_cache.resolve() != runner_tool_cache
+                      or node_path.parent.name != "bin"
+                  ):
+                      raise SystemExit(
+                          "trusted Node toolchain is outside the runner tool cache"
+                      )
+                  node_tool_cache = (runner_tool_cache / "node").resolve(strict=True)
+                  node_toolchain_root = node_path.parent.parent.resolve(strict=True)
+                  if (
+                      not node_toolchain_root.is_relative_to(node_tool_cache)
+                      or node_toolchain_root == node_tool_cache
+                      or not npm_path.is_relative_to(node_toolchain_root)
+                  ):
+                      raise SystemExit(
+                          "trusted npm and Node executables are outside one toolchain"
+                      )
+                  node_toolchain_destination = "/opt/verjson-node-toolchain"
+                  node_toolchain_bin = f"{node_toolchain_destination}/bin"
               arguments = [
                   str(bubblewrap),
                   "--unshare-user",
@@ -6085,10 +6690,38 @@ jobs:
                   "--die-with-parent",
                   "--new-session",
                   "--cap-drop", "ALL",
-                  "--ro-bind", "/", "/",
+                  "--tmpfs", "/",
+                  "--tmpfs", "/tmp",
+                  "--dir", "/usr",
+                  "--dir", "/bin",
+                  "--dir", "/lib",
+                  "--dir", "/lib64",
+                  "--dir", "/etc",
+                  "--dir", "/etc/ssl",
+                  "--dir", "/opt",
                   "--dev", "/dev",
                   "--proc", "/proc",
                   "--tmpfs", "/dev/shm",
+                  *(
+                      ["--dir", node_toolchain_destination]
+                      if node_toolchain_destination is not None
+                      else []
+                  ),
+                  "--ro-bind", "/usr", "/usr",
+                  "--ro-bind", Path("/bin").resolve(strict=True).as_posix(), "/bin",
+                  "--ro-bind", Path("/lib").resolve(strict=True).as_posix(), "/lib",
+                  "--ro-bind", Path("/lib64").resolve(strict=True).as_posix(), "/lib64",
+                  "--ro-bind", Path("/etc/ssl").resolve(strict=True).as_posix(), "/etc/ssl",
+                  "--ro-bind", Path("/etc/hosts").resolve(strict=True).as_posix(), "/etc/hosts",
+                  "--ro-bind", Path("/etc/resolv.conf").resolve(strict=True).as_posix(), "/etc/resolv.conf",
+                  "--ro-bind", Path("/etc/nsswitch.conf").resolve(strict=True).as_posix(), "/etc/nsswitch.conf",
+                  "--ro-bind", Path("/etc/passwd").resolve(strict=True).as_posix(), "/etc/passwd",
+                  "--ro-bind", Path("/etc/group").resolve(strict=True).as_posix(), "/etc/group",
+                  *(
+                      ["--ro-bind", str(node_toolchain_root), node_toolchain_destination]
+                      if node_toolchain_root is not None
+                      else []
+                  ),
                   "--ro-bind", "/dev/null", "/dev/shm/npm-globalconfig",
                   "--ro-bind", "/dev/null", "/dev/shm/npm-userconfig",
                   "--dir", "/dev/shm/tmp",
@@ -6160,6 +6793,8 @@ jobs:
                       pass
                   else:
                       raise SystemExit("ambient npm path resolves into compatibility workspace")
+                  if not candidate_path.is_relative_to(Path("/usr")):
+                      continue
                   if str(candidate_path) in masked_targets:
                       continue
                   if any(
@@ -6197,7 +6832,7 @@ jobs:
                       arguments,
                       entry,
                       f"{sandbox_workspace}/{entry.name}",
-                      writable=True,
+                      writable=entry.name != ".git",
                   )
               mirror_node_modules(
                   arguments,
@@ -6255,6 +6890,7 @@ jobs:
                       "NPM_CONFIG_GLOBALCONFIG": "/dev/shm/npm-globalconfig",
                       "NPM_CONFIG_USERCONFIG": "/dev/shm/npm-userconfig",
                       "RUNNER_TEMP": "/dev/shm/tmp",
+                      "PATH": f"{node_toolchain_bin}:/usr/bin:/bin",
                       "TEMP": "/dev/shm/tmp",
                       "TMP": "/dev/shm/tmp",
                       "TMPDIR": "/dev/shm/tmp",
@@ -6363,9 +6999,12 @@ jobs:
                   script_env = os.environ.copy()
                   for env_name in (
                       "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
-                      "GITHUB_STEP_SUMMARY",
+                      "GITHUB_STEP_SUMMARY", "CI_SCRIPT_PLAN", "DB_ENV", "CACHE_ENV",
                   ):
                       script_env.pop(env_name, None)
+                  for service_name in compatibility_service_names:
+                      script_env.pop(service_name, None)
+                  script_env.update(compatibility_service_env)
                   script_env.update({
                       "VERJSON_COMPATIBILITY_ARTIFACT": str(artifact),
                       "VERJSON_COMPATIBILITY_PACKAGE": lane["package"],

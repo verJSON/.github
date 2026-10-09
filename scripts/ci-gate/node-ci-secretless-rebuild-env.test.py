@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 from unittest.mock import patch
 
 import yaml
@@ -49,18 +49,97 @@ EXPECTED_SANDBOX_ENTRYPOINT = (
 
 def candidate_service_env_from_script(script, environment):
     start = script.index("candidate_service_env = {")
-    end = script.index("trusted_tool_root_input = Path", start)
+    end = min(
+        position
+        for marker in (
+            "for directory, name, unset_env, requires_services in normalized:",
+            "# BEGIN source candidate script execution",
+            "max_cache_files =",
+        )
+        if (position := script.find(marker, start)) >= 0
+    )
     policy_source = textwrap.dedent(script[start:end])
     namespace = {
         "os": os,
         "re": re,
         "sys": sys,
+        "normalized": [(Path("."), "test", [], True)],
+        "env_pattern": re.compile(r"[A-Za-z_][A-Za-z0-9_]*"),
         "urlsplit": urlsplit,
         "parse_qsl": parse_qsl,
+        "unquote": unquote,
     }
     with patch.dict(os.environ, environment, clear=True):
         exec(policy_source, namespace)
     return namespace["candidate_service_env"]
+
+
+def compatibility_service_env_from_script(
+    script, script_name, plan_source, db_env, cache_env, environment,
+):
+    start = script.index("def compatibility_service_script_requires_services(")
+    end = script.index(
+        "compatibility_service_names = configured_compatibility_service_names(", start
+    )
+    namespace = {"json": json, "re": re, "sys": sys}
+    exec(textwrap.dedent(script[start:end]), namespace)
+    return namespace["compatibility_service_environment"](
+        script_name, plan_source, db_env, cache_env, environment,
+    )
+
+
+def credential_environment_policy_from_script(script):
+    start = script.index("credential_environment_name_pattern = re.compile")
+    end = script.index("if any(requires_services for _directory", start)
+    source = textwrap.dedent(script[start:end])
+    namespace = {
+        "os": os,
+        "parse_qsl": parse_qsl,
+        "re": re,
+        "sys": sys,
+        "unquote": unquote,
+        "urlsplit": urlsplit,
+    }
+    exec(source, namespace)
+    return namespace
+
+
+def credential_environment_name_filter_from_script(script):
+    namespace = credential_environment_policy_from_script(script)
+    return namespace["credential_environment_name_is_sensitive"]
+
+
+def candidate_child_environment_from_script(script, environment):
+    start = script.index("script_env = os.environ.copy()")
+    end = script.index("for env_name in unset_env:", start)
+    source = textwrap.dedent(script[start:end])
+    namespace = credential_environment_policy_from_script(script)
+    namespace.update({
+        "env_pattern": re.compile(r"[A-Za-z_][A-Za-z0-9_]*"),
+        "requires_services": False,
+        "unset_env": [],
+    })
+    with patch.dict(os.environ, environment, clear=True):
+        exec(source, namespace)
+        names = (
+            "PWD", "EXIT_CODE", "CACHE_KEY", "NPM_TOKEN", "DATABASE_PASSWORD",
+            "AZURE_STORAGE_KEY", "HTTPS_PROXY", "HTTP_PROXY", "FTP_PROXY",
+            "ALL_PROXY", "ENCRYPTION_KEY_CACHE_KEY", "MFA_CODE_EXIT_CODE",
+            "OPENAI_API_KEY",
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import json, os, sys; print(json.dumps({name: os.environ.get(name) for name in sys.argv[1:]}))",
+                *names,
+            ],
+            check=True,
+            capture_output=True,
+            env=namespace["script_env"],
+            text=True,
+        )
+    return json.loads(result.stdout)
 
 
 def candidate_plan_normalizer(script):
@@ -74,7 +153,7 @@ def candidate_plan_normalizer(script):
 
 def require_service_runner_from_script(script, normalized, runner_environment):
     start = script.index("if any(requires_services for _directory")
-    end = script.index("max_cache_files =", start)
+    end = script.index("candidate_service_env = {", start)
     source = textwrap.dedent(script[start:end])
     namespace = {"os": os, "sys": sys, "normalized": normalized}
     with patch.dict(os.environ, {"RUNNER_ENVIRONMENT": runner_environment}, clear=True):
@@ -623,12 +702,77 @@ def main():
         assert "os.closerange(3, max_fd)" in step["run"]
         assert "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)" in step["run"]
         assert '"GITHUB_ENV"' not in step["run"]
+        service_plan_step = next(
+            candidate
+            for candidate in build["steps"]
+            if candidate.get("name") == "Run exact credentialless consumer script plan"
+        )
+        compatibility_step = next(
+            candidate
+            for candidate in build["steps"]
+            if candidate.get("name") == "Run runtime-resolved compatibility lanes without credentials"
+        )
+        assert compatibility_step["env"]["CI_SCRIPT_PLAN"] == "${{ inputs.secretless-ci-script-plan }}"
+        assert compatibility_step["env"]["DB_ENV"] == "${{ inputs.db-env }}"
+        assert compatibility_step["env"]["CACHE_ENV"] == "${{ inputs.cache-env }}"
+        accepted_service_env = candidate_service_env_from_script(
+            service_plan_step["run"],
+            {
+                "DB_HOST": "127.0.0.1",
+                "DB_PORT": "5432",
+                "DB_ENV": "DATABASE_URL=local\nOPENAI_API_KEY=ci-dummy-key",
+                "DATABASE_URL": "postgres://app:secret@127.0.0.1:5432/app_test",
+                "OPENAI_API_KEY": "ci-dummy-key",
+            },
+        )
+        assert accepted_service_env["OPENAI_API_KEY"] == "ci-dummy-key"
+        for name, value in (
+            ("CACHE_URL", "https://cache.example.invalid/#access_token=secret"),
+            ("CACHE_URL", "https://cache.example.invalid/#x=access_token=secret"),
+            ("CACHE_URL", "https://cache.example.invalid/#x=client_secret=secret"),
+            ("CACHE_URL", "https://cache.example.invalid/#x=authentication=secret"),
+                    ("CACHE_URL", "https://cache.example.invalid/#client_secret=secret"),
+                    ("CACHE_URL", "https://cache.example.invalid/#refresh_token=secret"),
+            ("CACHE_URL", "https://cache.example.invalid/#%61ccess_token=secret"),
+            ("CACHE_URL", "https://cache.example.invalid/#x=authorization=secret"),
+            ("CACHE_URL", "https://cache.example.invalid/#x=1%26access_token=secret"),
+            ("CACHE_URL", "https://cache.example.invalid/#x=1%2526access_token%253Dsecret"),
+            (
+                "CACHE_URL",
+                "https://cache.example.invalid/#x=1%2526%2561ccess%255ftoken%253Dsecret",
+            ),
+            ("OPENAI_API_KEY", "sk-real-secret"),
+        ):
+            try:
+                candidate_service_env_from_script(
+                    service_plan_step["run"],
+                    {
+                        "DB_HOST": "127.0.0.1",
+                        "DB_ENV": f"{name}=configured",
+                        name: value,
+                    },
+                )
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError(
+                    f"credential-bearing service value accepted by {workflow_path.name}: {name}"
+                )
+        if workflow_path == WORKFLOW:
+            assert '"--tmpfs", "/"' in service_plan_step["run"]
+            assert '"--ro-bind", "/", "/"' not in service_plan_step["run"]
+            assert '"GITHUB_WORKSPACE": sandbox_workspace' in service_plan_step["run"]
+            assert '"RUNNER_TEMP": "/tmp"' in service_plan_step["run"]
+            assert 'bind_source(workspace, sandbox_workspace, writable=True)' in service_plan_step["run"]
+            assert 'bind_source(git_metadata, f"{sandbox_workspace}/.git")' in service_plan_step["run"]
+            assert '"--chdir", str(sandbox_directory), "--",' in service_plan_step["run"]
+            assert '"/usr/bin/python3", "-c", sandbox_entrypoint' in service_plan_step["run"]
+            assert "pass_fds=tuple(" in service_plan_step["run"]
+            assert "global_config_file.fileno()" in service_plan_step["run"]
         if workflow_path == PROTECTED_WORKFLOW:
-            script_plan = next(
-                candidate
-                for candidate in build["steps"]
-                if candidate.get("name") == "Run exact credentialless consumer script plan"
-            )
+            script_plan = service_plan_step
+            assert '"--tmpfs", "/"' in script_plan["run"]
+            assert '"--ro-bind", "/", "/"' not in script_plan["run"]
             assert "for index, (script_directory, name, unset_env, requires_services) in enumerate(normalized):" in script_plan["run"]
             assert "if requires_services:" in script_plan["run"]
             assert "script_env.update(candidate_service_env)" in script_plan["run"]
@@ -640,7 +784,9 @@ def main():
             assert "script_env = {" in script_plan["run"]
             assert "os.environ.copy()" not in script_plan["run"]
             assert "candidate_service_env" in script_plan["run"]
-            assert "credential_name_pattern" in script_plan["run"]
+            assert "credential_environment_name_pattern" in script_plan["run"]
+            assert "credential_parameter_name_pattern" in script_plan["run"]
+            assert "VERJSON_CI_TRUSTED_DB_HOST" in script_plan["env"]
             assert "candidate service URL contains credential-bearing data" in script_plan["run"]
             assert "candidate service value contains credential-bearing data" in script_plan["run"]
             assert "credentialed candidate service URLs must target the local service" in script_plan["run"]
@@ -687,6 +833,7 @@ def main():
                 )
                 for bad_plan in (
                     [{"script": "integration", "requiresServices": "true"}],
+                    [{"script": "integration", "requiresServices": None}],
                     [{"script": "integration", "unexpected": True}],
                 ):
                     try:
@@ -711,6 +858,129 @@ def main():
                 "postgres://app:secret@127.0.0.1:5432/app_test"
             )
             assert accepted_service_env["OPENAI_API_KEY"] == "ci-dummy-key"
+            environment_name_is_sensitive = credential_environment_name_filter_from_script(
+                script_plan["run"]
+            )
+            for name in ("PWD", "EXIT_CODE", "CACHE_KEY", "NPM_CONFIG_CACHE", "npm_config_cache"):
+                assert not environment_name_is_sensitive(name), name
+            for name in (
+                "DB_PWD", "DATABASE_PASSWORD", "NPM_TOKEN", "CLIENT_SECRET",
+                "NPM_CONFIG_USERCONFIG", "npm_config_userconfig",
+                "NPM_CONFIG_GLOBALCONFIG", "npm_config_//registry.npmjs.org/:_authToken",
+                "AZURE_STORAGE_KEY", "AWS_ACCESS_KEY_ID",
+                "DATABASE_PASSWORD_CACHE_KEY", "API_TOKEN_EXIT_CODE",
+                "AWS_SECRET_ACCESS_KEY_CACHE_KEY", "ENCRYPTION_KEY_CACHE_KEY",
+                "MFA_CODE_EXIT_CODE",
+            ):
+                assert environment_name_is_sensitive(name), name
+            if workflow_path == WORKFLOW:
+                child_environment = candidate_child_environment_from_script(
+                    service_plan_step["run"],
+                    {
+                        "PATH": os.environ.get("PATH", ""),
+                        "PWD": "/tmp/runner-workspace",
+                        "EXIT_CODE": "7",
+                        "CACHE_KEY": "job-local-cache",
+                        "NPM_CONFIG_CACHE": "/tmp/npm-cache",
+                        "npm_config_cache": "/tmp/npm-cache",
+                        "NPM_CONFIG_USERCONFIG": "/home/runner/.npmrc",
+                        "npm_config_userconfig": "/home/runner/.npmrc",
+                        "NPM_CONFIG_GLOBALCONFIG": "/home/runner/.npmrc",
+                        "npm_config_//registry.npmjs.org/:_authToken": "must-not-reach-candidate",
+                        "NPM_TOKEN": "must-not-reach-candidate",
+                        "DATABASE_PASSWORD": "must-not-reach-candidate",
+                        "AZURE_STORAGE_KEY": "must-not-reach-candidate",
+                        "ENCRYPTION_KEY_CACHE_KEY": "must-not-reach-candidate",
+                        "MFA_CODE_EXIT_CODE": "must-not-reach-candidate",
+                        "HTTPS_PROXY": "user:password@proxy.example.invalid:8443",
+                        "HTTP_PROXY": "http://proxy.example.invalid:8080",
+                        "FTP_PROXY": "user:password@ftp-proxy.example.invalid:2121",
+                        "ALL_PROXY": "socks5://user:password@proxy.example.invalid:1080",
+                        "OPENAI_API_KEY": "ci-dummy-key",
+                    },
+                )
+                assert child_environment == {
+                    "PWD": "/tmp/runner-workspace",
+                    "EXIT_CODE": "7",
+                    "CACHE_KEY": "job-local-cache",
+                    "NPM_CONFIG_CACHE": "/tmp/npm-cache",
+                    "npm_config_cache": "/tmp/npm-cache",
+                    "NPM_CONFIG_USERCONFIG": None,
+                    "npm_config_userconfig": None,
+                    "NPM_CONFIG_GLOBALCONFIG": None,
+                    "npm_config_//registry.npmjs.org/:_authToken": None,
+                    "NPM_TOKEN": None,
+                    "DATABASE_PASSWORD": None,
+                    "AZURE_STORAGE_KEY": None,
+                    "ENCRYPTION_KEY_CACHE_KEY": None,
+                    "MFA_CODE_EXIT_CODE": None,
+                    "HTTPS_PROXY": None,
+                    "HTTP_PROXY": "http://proxy.example.invalid:8080",
+                    "FTP_PROXY": None,
+                "ALL_PROXY": None,
+                    "OPENAI_API_KEY": "ci-dummy-key",
+                }
+            bridge_service_env = candidate_service_env_from_script(
+                script_plan["run"],
+                {
+                    "DB_HOST": "172.18.0.2",
+                    "DB_PORT": "5432",
+                    "VERJSON_CI_TRUSTED_DB_HOST": "172.18.0.2",
+                    "DB_ENV": "DATABASE_URL=postgres://app:secret@172.18.0.2:5432/app_test",
+                    "DATABASE_URL": "postgres://app:secret@172.18.0.2:5432/app_test",
+                },
+            )
+            assert bridge_service_env["DATABASE_URL"].endswith("/app_test")
+            compatibility_environment = {
+                "DB_HOST": "127.0.0.1",
+                "DB_PORT": "5432",
+                "CACHE_PORT": "6379",
+                "DATABASE_URL": "postgres://localhost:5432/app_test",
+                "CACHE_URL": "redis://localhost:6379/0",
+                "UNDECLARED_SECRET": "must-not-reach-consumer",
+            }
+            denied_compatibility_services = compatibility_service_env_from_script(
+                compatibility_step["run"],
+                "test:compat",
+                '[{"script":"test:compat","requiresServices":false}]',
+                "DATABASE_URL=postgres://localhost:5432/app_test",
+                "CACHE_URL=redis://localhost:6379/0",
+                compatibility_environment,
+            )
+            assert denied_compatibility_services == {}
+            allowed_compatibility_services = compatibility_service_env_from_script(
+                compatibility_step["run"],
+                "test:compat",
+                '[{"script":"test:compat","requiresServices":true}]',
+                "DATABASE_URL=postgres://localhost:5432/app_test",
+                "CACHE_URL=redis://localhost:6379/0",
+                compatibility_environment,
+            )
+            assert allowed_compatibility_services == {
+                "DB_HOST": "127.0.0.1",
+                "DB_PORT": "5432",
+                "CACHE_PORT": "6379",
+                "DATABASE_URL": "postgres://localhost:5432/app_test",
+                "CACHE_URL": "redis://localhost:6379/0",
+            }
+            default_test_services = compatibility_service_env_from_script(
+                compatibility_step["run"],
+                "test:compat",
+                "",
+                "DATABASE_URL=postgres://localhost:5432/app_test",
+                "CACHE_URL=redis://localhost:6379/0",
+                compatibility_environment,
+            )
+            assert default_test_services == allowed_compatibility_services
+            omitted_custom_script_services = compatibility_service_env_from_script(
+                compatibility_step["run"],
+                "compat:verify",
+                '[{"script":"build"}]',
+                "DATABASE_URL=postgres://localhost:5432/app_test",
+                "CACHE_URL=redis://localhost:6379/0",
+                compatibility_environment,
+            )
+            assert omitted_custom_script_services == {}
             for name, value in (
                 ("DATABASE_URL", "postgres://app:secret@db.example.com/app_test"),
                 ("DATABASE_URL", "host=127.0.0.1 password=secret"),
@@ -719,6 +989,8 @@ def main():
                 ("REDIS_URL", "redis://localhost:6379/?ACCESS_KEY=secret"),
                 ("CACHE_URL", "https://cache.example.invalid/?key=private-value"),
                 ("CACHE_URL", "https://cache.example.invalid/?CODE=authorization-value"),
+                ("CACHE_URL", "https://cache.example.invalid/#access_token=secret"),
+                ("CACHE_URL", "https://cache.example.invalid/#%61ccess_token=secret"),
                 ("DB_PWD", "secret"),
                 ("S3_ACCESS_KEY", "value"),
                 ("OPENAI_API_KEY", "sk-secret"),
@@ -738,6 +1010,43 @@ def main():
                     pass
                 else:
                     raise AssertionError(f"credential-bearing service value accepted: {name}={value}")
+            for name, value in (
+                ("CACHE_URL", "https://cache.example.invalid/?zipcode=02139"),
+                ("CACHE_URL", "https://cache.example.invalid/?author=alice"),
+            ):
+                accepted = candidate_service_env_from_script(
+                    service_plan_step["run"],
+                    {"CACHE_ENV": f"{name}={value}", name: value},
+                )
+                assert accepted[name] == value, f"benign service field rejected: {name}={value}"
+            try:
+                candidate_service_env_from_script(
+                    script_plan["run"],
+                    {
+                        "CACHE_ENV": (
+                            "CACHE_HOST=attacker.example\n"
+                            "CACHE_URL=https://user:secret@attacker.example/cache"
+                        ),
+                        "CACHE_HOST": "attacker.example",
+                        "CACHE_URL": "https://user:secret@attacker.example/cache",
+                    },
+                )
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("caller-controlled CACHE_HOST authorized remote URL credentials")
+            try:
+                candidate_service_env_from_script(
+                    script_plan["run"],
+                    {
+                        "CACHE_ENV": "FTP_PROXY=user:secret@proxy.example.invalid:2121",
+                        "FTP_PROXY": "user:secret@proxy.example.invalid:2121",
+                    },
+                )
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("service inputs admitted credentialed FTP_PROXY")
             try:
                 candidate_service_env_from_script(
                     script_plan["run"],
@@ -750,6 +1059,25 @@ def main():
                 pass
             else:
                 raise AssertionError("service environment overrode Corepack's offline mode")
+
+            for source_name, variable_name, value in (
+                ("DB_ENV", "DOCKER_HOST", "tcp://127.0.0.1:2375"),
+                ("CACHE_ENV", "docker_context", "caller-selected"),
+            ):
+                try:
+                    candidate_service_env_from_script(
+                        script_plan["run"],
+                        {
+                            source_name: f"{variable_name}={value}",
+                            variable_name: value,
+                        },
+                    )
+                except SystemExit:
+                    pass
+                else:
+                    raise AssertionError(
+                        f"{source_name} forwarded Docker control variable {variable_name}"
+                    )
             assert '"--unshare-net"' in step["run"]
             steps = build["steps"]
             script_names = {

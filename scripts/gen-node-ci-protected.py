@@ -707,7 +707,9 @@ def isolate_candidate_runtime_cache(document: str) -> str:
           import shutil
           import subprocess
           import sys
+          import tempfile
           from pathlib import Path
+          from urllib.parse import parse_qsl, unquote, urlsplit
 """
     protected_imports = """          import hashlib
           import json
@@ -720,41 +722,24 @@ def isolate_candidate_runtime_cache(document: str) -> str:
           import sys
           import time
           from pathlib import Path
-          from urllib.parse import parse_qsl, urlsplit
+          from urllib.parse import parse_qsl, unquote, urlsplit
 """
     if step.count(imports) != 1:
         raise SystemExit("protected candidate script plan imports changed")
     step = step.replace(imports, protected_imports, 1)
-    execution = """          for directory, name, unset_env, requires_services in normalized:
-              script_env = os.environ.copy()
-              for env_name in (
-                  "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
-                  "GITHUB_STEP_SUMMARY",
-              ):
-                  script_env.pop(env_name, None)
-              for env_name in unset_env:
-                  script_env.pop(env_name, None)
-              npm_command = ["npm"]
-              npm_path = shutil.which("npm")
-              node_path = shutil.which("node")
-              if npm_path is not None and node_path is not None:
-                  npm_executable = Path(npm_path)
-                  resolved_npm_executable = npm_executable.resolve()
-                  npm_cli_candidates = list(dict.fromkeys(
-                      candidate.resolve()
-                      for candidate in (
-                          npm_executable.parent.parent / "lib/node_modules/npm/bin/npm-cli.js",
-                          npm_executable.parent / "node_modules/npm/bin/npm-cli.js",
-                          resolved_npm_executable.parent.parent / "bin/npm-cli.js",
-                      )
-                      if candidate.is_file()
-                  ))
-                  if len(npm_cli_candidates) > 1:
-                      raise SystemExit("trusted npm CLI is ambiguous")
-                  if npm_cli_candidates:
-                      npm_command = [node_path, str(npm_cli_candidates[0])]
-              subprocess.run([*npm_command, "run", name], check=True, env=script_env, cwd=directory)
-"""
+    source_preflight = (
+        "          # BEGIN source candidate sandbox preflight\n",
+        "          # END source candidate sandbox preflight\n",
+    )
+    if any(step.count(marker) != 1 for marker in source_preflight):
+        raise SystemExit("source candidate sandbox preflight markers changed")
+    preflight_start = step.index(source_preflight[0])
+    preflight_end = step.index(source_preflight[1], preflight_start) + len(source_preflight[1])
+    step = step[:preflight_start] + step[preflight_end:]
+    execution_markers = (
+        "          # BEGIN source candidate script execution\n",
+        "          # END source candidate script execution\n",
+    )
     candidate_sandbox_entrypoint = (
         "import os, sys\n"
         "max_fd = os.sysconf('SC_OPEN_MAX')\n"
@@ -1002,102 +987,6 @@ def isolate_candidate_runtime_cache(document: str) -> str:
               sys.exit("candidate cache roots are not exact RUNNER_TEMP children")
           if baseline is not None and (baseline == cache_root or baseline in cache_root.parents or cache_root in baseline.parents):
               sys.exit("candidate cache baseline and isolation root overlap")
-          candidate_service_env = {{}}
-          blocked_service_env = {{
-              "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
-              "GITHUB_STEP_SUMMARY", "GH_TOKEN", "GITHUB_TOKEN", "NODE_AUTH_TOKEN",
-              "NPM_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
-              "AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS",
-              "AZURE_CREDENTIALS", "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
-              "ACTIONS_ID_TOKEN_REQUEST_URL", "BASH_ENV", "BASH_XTRACEFD", "ENV",
-              "PS4", "SHELLOPTS", "BASHOPTS", "PATH", "NODE_OPTIONS", "NODE_PATH",
-              "NODE_EXTRA_CA_CERTS", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
-              "PYTHONUSERBASE", "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
-              "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS",
-              "GIT_ASKPASS", "SSH_ASKPASS", "GIT_SSL_CAINFO", "GIT_SSL_CAPATH",
-              "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE",
-              "GCONV_PATH",
-              "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-              "http_proxy", "https_proxy", "all_proxy", "no_proxy",
-          }}
-          blocked_service_prefixes = (
-              "GITHUB_", "RUNNER_", "ACTIONS_", "GH_", "AWS_", "GOOGLE_",
-              "AZURE_", "GCP_", "COREPACK_", "NPM_CONFIG_", "GIT_CONFIG_",
-              "LD_", "DYLD_",
-              "POSTGRES_",
-          )
-          service_env_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-          credential_name_pattern = re.compile(
-              r"(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|PRIVATE[_-]?KEY|"
-              r"API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|"
-              r"(?<![A-Z0-9])KEY(?![A-Z0-9])|CODE|"
-              r"(?<![A-Z0-9])SIG(?![A-Z0-9])|BEARER|COOKIE|SESSION|JWT|AUTH)",
-              re.IGNORECASE,
-          )
-          credential_parameter_pattern = re.compile(
-              r"(?:^|[;?&\\s])(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|"
-              r"PRIVATE[_-]?KEY|API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|"
-              r"(?<![A-Z0-9])KEY(?![A-Z0-9])|CODE|"
-              r"(?<![A-Z0-9])SIG(?![A-Z0-9])|"
-              r"BEARER|COOKIE|SESSION|JWT|AUTH)\\s*=",
-              re.IGNORECASE,
-          )
-
-          def validate_candidate_service_value(name, value):
-              # The documented test fixture is a deliberately invalid credential
-              # sentinel; no caller-provided real credential is forwarded.
-              if credential_name_pattern.search(name) and not (
-                  name.upper() == "OPENAI_API_KEY" and value == "ci-dummy-key"
-              ):
-                  sys.exit("candidate service environment includes a credential-bearing variable")
-              if credential_parameter_pattern.search(value):
-                  sys.exit("candidate service value contains credential-bearing data")
-              if "://" not in value:
-                  return
-              try:
-                  parsed = urlsplit(value)
-                  query_names = (
-                      key for key, _value in parse_qsl(parsed.query, keep_blank_values=True)
-                  )
-              except ValueError:
-                  sys.exit("candidate service URL is malformed")
-              if any(credential_name_pattern.search(key) for key in query_names):
-                  sys.exit("candidate service URL contains credential-bearing data")
-              if parsed.username is not None or parsed.password is not None:
-                  local_service_hosts = {{"localhost", "127.0.0.1", "::1"}}
-                  for endpoint_name in ("DB_HOST", "CACHE_HOST"):
-                      endpoint = os.environ.get(endpoint_name, "").strip().strip("[]").lower()
-                      if endpoint:
-                          local_service_hosts.add(endpoint)
-                  if parsed.hostname is None or parsed.hostname.lower() not in local_service_hosts:
-                      sys.exit("credentialed candidate service URLs must target the local service")
-
-          for service_name in ("DB_HOST", "DB_PORT", "CACHE_PORT"):
-              if service_name in os.environ:
-                  service_value = os.environ[service_name]
-                  validate_candidate_service_value(service_name, service_value)
-                  candidate_service_env[service_name] = service_value
-          for source_name in ("DB_ENV", "CACHE_ENV"):
-              for service_line in os.environ.get(source_name, "").splitlines():
-                  stripped_line = service_line.strip()
-                  if not stripped_line or stripped_line.startswith("#"):
-                      continue
-                  service_name, separator, _service_value = stripped_line.partition("=")
-                  if not separator or service_env_pattern.fullmatch(service_name) is None:
-                      sys.exit("candidate service environment is malformed")
-                  normalized_service_name = service_name.upper()
-                  if normalized_service_name.startswith("POSTGRES_"):
-                      continue
-                  if normalized_service_name in blocked_service_env or any(
-                      normalized_service_name.startswith(prefix)
-                      for prefix in blocked_service_prefixes
-                  ):
-                      sys.exit("candidate service environment includes a protected variable")
-                  if service_name in os.environ:
-                      service_value = os.environ[service_name]
-                      validate_candidate_service_value(service_name, service_value)
-                      candidate_service_env[service_name] = service_value
-
           trusted_tool_root_input = Path(os.environ.get("RUNNER_TOOL_CACHE", ""))
           if (
               not trusted_tool_root_input.is_absolute()
@@ -1532,6 +1421,9 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                       "COREPACK_ENABLE_NETWORK": "0",
                       "NPM_CONFIG_CACHE": str(script_cache),
                       "npm_config_cache": str(script_cache),
+                      "VERJSON_CHANGELOG_TOOL_CACHE": str(changelog_cache_root),
+                      "VERJSON_CHANGELOG_CONTRACT_REF": changelog_ref,
+                      "VERJSON_CHANGELOG_CONTRACT_SHA256": changelog_sha256,
                   }}
                   for env_name in (
                       "GITHUB_REF", "GITHUB_REF_NAME", "GITHUB_SHA", "GITHUB_REPOSITORY",
@@ -1712,9 +1604,17 @@ def isolate_candidate_runtime_cache(document: str) -> str:
           if cache_root.exists() or (baseline is not None and inventory(baseline) != baseline_inventory):
               sys.exit("candidate cache root cleanup or final baseline integrity check failed")
 """
-    if step.count(execution) != 1:
-        raise SystemExit("protected candidate script execution block changed")
-    step = step.replace(execution, isolated_execution, 1)
+    if any(step.count(marker) != 1 for marker in execution_markers):
+        raise SystemExit("protected candidate script execution markers changed")
+    execution_start = step.index(execution_markers[0])
+    execution_end = step.index(execution_markers[1], execution_start) + len(execution_markers[1])
+    step = (
+        step[:execution_start]
+        + execution_markers[0]
+        + isolated_execution
+        + execution_markers[1]
+        + step[execution_end:]
+    )
     python_start = "          python3 - <<'PY'\n"
     python_end = "          PY"
     if step.count(python_start) != 1 or step.count(python_end) != 1:
@@ -2033,8 +1933,6 @@ def render() -> str:
     hosted_provisioning_if = (
         "needs.eligibility.outputs.should-run != 'false' && "
         "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
-        "(inputs.secretless-compatibility-ranges != '' || "
-        "inputs.secretless-rebuild-packages != '') && "
         "runner.environment == 'github-hosted'"
     )
     if document.count(hosted_provisioning_if) != 1:

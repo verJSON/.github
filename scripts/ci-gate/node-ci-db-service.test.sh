@@ -539,7 +539,8 @@ rc=$?
 # Caller data may configure tests, but it cannot change how later runner
 # processes start or redirect the workflow's command files.
 for key in BASH_ENV PATH NODE_OPTIONS LD_PRELOAD GITHUB_ENV GH_TOKEN GH_HOST gh_host \
-    GIT_CONFIG_COUNT HTTPS_PROXY https_proxy SSL_CERT_FILE GCONV_PATH PS4 \
+  DOCKER_HOST DOCKER_CONTEXT docker_context \
+    GIT_CONFIG_COUNT HTTPS_PROXY https_proxy FTP_PROXY ftp_proxy SSL_CERT_FILE GCONV_PATH PS4 \
     NPM_CONFIG_USERCONFIG Npm_Config_Userconfig NPM_CONFIG_GLOBALCONFIG \
     Npm_Config_Globalconfig npm_config_globalconfig NPM_CONFIG_HTTPS_PROXY \
     NPM_CONFIG_STRICT_SSL NPM_CONFIG_CAFILE; do

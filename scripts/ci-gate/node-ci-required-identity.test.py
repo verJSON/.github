@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LEGACY = ROOT / ".github/workflows/node-ci.yml"
 PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 HEAD = "a" * 40
-LEGACY_SHA256 = "c91c4eebc6b45d8dd6caa52f282825431678c5117ddc6baba999f75bf5c529e4"
+LEGACY_SHA256 = "164ff2e6dac140c14fdc197de1dc418355deb937e061eb5ed983f9f936f13026"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
@@ -426,13 +426,13 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             build[index]["if"] for index in verifier_indexes
             if "inputs.secretless-rebuild-packages != ''" in build[index]["if"]
         )
-        plan_condition = next(
-            build[index]["if"] for index in verifier_indexes
-            if "inputs.secretless-ci-script-plan != ''" in build[index]["if"]
+        plan_condition = (
+            "needs.eligibility.outputs.should-run != 'false' && "
+            "(inputs.secretless-pr || inputs.secretless-trusted-ref)"
         )
-        default_condition = next(
-            build[index]["if"] for index in verifier_indexes
-            if "inputs.secretless-ci-script-plan == ''" in build[index]["if"]
+        default_condition = (
+            "needs.eligibility.outputs.should-run != 'false' && "
+            "!(inputs.secretless-pr || inputs.secretless-trusted-ref)"
         )
         self.assertIn(rebuild_condition, verifier_by_condition)
         self.assertIn(plan_condition, verifier_by_condition)
@@ -458,12 +458,9 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             [line.strip() for line in grouped["run"].splitlines()
              if line.strip().startswith("npm ")],
         )
-        self.assertEqual(
-            "${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '/dev/null' || env.BASH_ENV }}",
-            grouped["env"]["BASH_ENV"],
-        )
+        self.assertNotIn("BASH_ENV", grouped.get("env", {}))
         self.assertLess(
-            grouped["run"].index("unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE"),
+            grouped["run"].index("unset -v " + " ".join(self.credential_keys)),
             grouped["run"].index("npm run build"),
         )
         compatibility_step = next(
@@ -562,11 +559,16 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         decoy_npm_cli=False,
         symlink_npm_cli_layout=False,
         extra_npm_cli=False,
+        script_plan=None,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             runner_temp = root / "runner-temp"
             runner_temp.mkdir()
+            command_files_dir = runner_temp / "_runner_file_commands"
+            command_files_dir.mkdir()
+            command_file = command_files_dir / "GITHUB_ENV"
+            command_file.touch()
             baseline = runner_temp / "baseline"
             baseline.mkdir()
             changelog_cache_root, changelog_ref, changelog_bytes = (
@@ -577,9 +579,11 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             if workspace_symlink:
                 workspace_real = workspace_parent / "workspace-real"
                 workspace_real.mkdir()
+                (workspace_real / ".git").mkdir()
                 workspace.symlink_to(workspace_real, target_is_directory=True)
             else:
                 workspace.mkdir()
+                (workspace / ".git").mkdir()
             cache_setup(baseline)
             (workspace / "package.json").write_text(
                 json.dumps({"scripts": {"first": "true", "second": "true"}}),
@@ -725,13 +729,19 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                 **os.environ,
                 "PATH": path,
                 "RUNNER_TEMP": str(runner_temp),
-                "CI_SCRIPT_PLAN": json.dumps(["first", "second"]),
+                "RUNNER_ENVIRONMENT": "github-hosted",
+                "RUNNER_OS": "Linux",
+                "GITHUB_ENV": str(command_file),
+                "CI_SCRIPT_PLAN": json.dumps(
+                    ["first", "second"] if script_plan is None else script_plan
+                ),
                 "CANDIDATE_CACHE_ROOT": str(runner_temp / "verjson-candidate-caches-test"),
                 "npm_config_cache": str(baseline),
                 "RUNNER_TOOL_CACHE": str(tool_bin.parent),
                 "VERJSON_CHANGELOG_TOOL_CACHE": str(changelog_cache_root),
                 "VERJSON_CHANGELOG_CONTRACT_REF": changelog_ref,
                 "VERJSON_CHANGELOG_CONTRACT_SHA256": hashlib.sha256(changelog_bytes).hexdigest(),
+                "COREPACK_HOME": str(root / "corepack-cache-not-present"),
                 "PWD": str(workspace),
             }
             env.update(environment_updates or {})
@@ -831,13 +841,17 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         cases = (
             ("workspace-runner-temp", {}, True),
             ("baseline-root", {"CANDIDATE_CACHE_ROOT": "BASELINE"}, False),
-            ("shared-service-network", {"DB_PORT": "5432"}, False),
+            ("service-variable-hidden", {"DB_PORT": "5432"}, False),
         )
         for name, updates, nested_workspace in cases:
             if updates.get("CANDIDATE_CACHE_ROOT") == "BASELINE":
                 with tempfile.TemporaryDirectory() as directory:
                     runner_temp = Path(directory) / "runner-temp"
                     runner_temp.mkdir()
+                    command_files_dir = runner_temp / "_runner_file_commands"
+                    command_files_dir.mkdir()
+                    command_file = command_files_dir / "GITHUB_ENV"
+                    command_file.touch()
                     baseline = runner_temp / "baseline"
                     baseline.mkdir()
                     changelog_cache_root, changelog_ref, changelog_bytes = (
@@ -846,6 +860,7 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                     (baseline / "blob").write_text("verified", encoding="utf-8")
                     workspace = Path(directory) / "workspace"
                     workspace.mkdir()
+                    (workspace / ".git").mkdir()
                     (workspace / "package.json").write_text(
                         json.dumps({"scripts": {"first": "true"}}), encoding="utf-8"
                     )
@@ -856,12 +871,16 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                         env={
                             **os.environ,
                             "RUNNER_TEMP": str(runner_temp),
+                            "RUNNER_ENVIRONMENT": "github-hosted",
+                            "RUNNER_OS": "Linux",
+                            "GITHUB_ENV": str(command_file),
                             "CI_SCRIPT_PLAN": '["first"]',
                             "CANDIDATE_CACHE_ROOT": str(baseline),
                             "npm_config_cache": str(baseline),
                             "VERJSON_CHANGELOG_TOOL_CACHE": str(changelog_cache_root),
                             "VERJSON_CHANGELOG_CONTRACT_REF": changelog_ref,
                             "VERJSON_CHANGELOG_CONTRACT_SHA256": hashlib.sha256(changelog_bytes).hexdigest(),
+                            "COREPACK_HOME": str(Path(directory) / "corepack-cache-not-present"),
                         },
                         capture_output=True,
                         text=True,
@@ -869,15 +888,62 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                     self.assertNotEqual(0, result.returncode)
                     self.assertIn("candidate cache root exists before script execution", result.stderr)
                 continue
+            npm_body = (
+                'test -z "${DB_PORT+x}"\n'
+                if name == "service-variable-hidden"
+                else "exit 0\n"
+            )
             result, remaining = self.run_candidate_plan(
                 cache_setup,
-                "exit 0\n",
+                npm_body,
                 environment_updates=updates,
                 workspace_in_runner_temp=nested_workspace,
             )
             with self.subTest(case=name):
-                self.assertNotEqual(0, result.returncode)
+                if name == "service-variable-hidden":
+                    self.assertEqual(0, result.returncode, result.stderr)
+                else:
+                    self.assertNotEqual(0, result.returncode)
                 self.assertEqual([], remaining)
+
+    def test_service_enabled_candidate_script_gets_only_validated_service_env_without_network_unshare(self):
+        result, remaining = self.run_candidate_plan(
+            lambda baseline: (baseline / "blob").write_text(
+                "verified", encoding="utf-8"
+            ),
+            'test "$DB_HOST" = "172.18.0.2"\n'
+            'test "$DB_PORT" = "5432"\n'
+            'test "$DATABASE_URL" = "postgres://app:secret@172.18.0.2:5432/app_test"\n'
+            'test "$OPENAI_API_KEY" = "ci-dummy-key"\n'
+            'test -z "${POSTGRES_PASSWORD+x}"\n'
+            'printf "service variables reached candidate npm script\\n"\n',
+            environment_updates={
+                "RUNNER_ENVIRONMENT": "github-hosted",
+                "DB_HOST": "172.18.0.2",
+                "DB_PORT": "5432",
+                "VERJSON_CI_TRUSTED_DB_HOST": "172.18.0.2",
+                "DB_ENV": (
+                    "DATABASE_URL=postgres://app:secret@172.18.0.2:5432/app_test\n"
+                    "OPENAI_API_KEY=ci-dummy-key\n"
+                    "POSTGRES_PASSWORD=postgres"
+                ),
+                "DATABASE_URL": "postgres://app:secret@172.18.0.2:5432/app_test",
+                "OPENAI_API_KEY": "ci-dummy-key",
+                "POSTGRES_PASSWORD": "postgres",
+            },
+            script_plan=[{"script": "first", "requiresServices": True}],
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("service variables reached candidate npm script", result.stdout)
+        plan_run = self.candidate_plan_step()["run"]
+        self.assertIn('*([] if requires_services else ["--unshare-net"])', plan_run)
+        self.assertIn(
+            "if any(requires_services for _directory, _name, _unset_env, requires_services in normalized):",
+            plan_run,
+        )
+        self.assertIn('os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"', plan_run)
+        self.assertEqual([], remaining)
 
     def test_candidate_path_shadow_cannot_replace_setup_node_tools(self):
         result, remaining = self.run_candidate_plan(
@@ -1146,7 +1212,7 @@ second) [ "$(cat "$NPM_CONFIG_CACHE/blob")" = verified ] ;;
 esac
 [ "$NPM_CONFIG_CACHE" = "$npm_config_cache" ]
 [ ! -e "$RUNNER_TEMP/baseline/blob" ]
-if mv "$CANDIDATE_CACHE_ROOT" "$CANDIDATE_CACHE_ROOT-renamed" 2>/dev/null; then exit 92; fi
+[ -z "${CANDIDATE_CACHE_ROOT+x}" ]
 [ ! -e /run/docker.sock ]
 [ ! -e /var/run/docker.sock ]
 [ ! -e /root ]
@@ -1247,6 +1313,10 @@ PY
             root = Path(directory)
             runner_temp = root / "runner-temp"
             runner_temp.mkdir()
+            command_files_dir = runner_temp / "_runner_file_commands"
+            command_files_dir.mkdir()
+            command_file = command_files_dir / "GITHUB_ENV"
+            command_file.touch()
             baseline = runner_temp / "baseline"
             baseline.mkdir()
             changelog_cache_root, changelog_ref, changelog_bytes = (
@@ -1254,6 +1324,7 @@ PY
             )
             workspace = root / "workspace"
             workspace.mkdir()
+            (workspace / ".git").mkdir()
             (baseline / "blob").write_text("verified", encoding="utf-8")
             (workspace / "package.json").write_text(
                 json.dumps({"scripts": {"first": "true"}}), encoding="utf-8"
@@ -1287,6 +1358,9 @@ PY
                     **os.environ,
                     "PATH": f"{tool_bin}:{os.environ['PATH']}",
                     "RUNNER_TEMP": str(runner_temp),
+                    "RUNNER_ENVIRONMENT": "github-hosted",
+                    "RUNNER_OS": "Linux",
+                    "GITHUB_ENV": str(command_file),
                     "CI_SCRIPT_PLAN": '["first"]',
                     "CANDIDATE_CACHE_ROOT": str(runner_temp / "verjson-candidate-caches-test"),
                     "npm_config_cache": str(baseline),
@@ -1294,6 +1368,7 @@ PY
                     "VERJSON_CHANGELOG_TOOL_CACHE": str(changelog_cache_root),
                     "VERJSON_CHANGELOG_CONTRACT_REF": changelog_ref,
                     "VERJSON_CHANGELOG_CONTRACT_SHA256": hashlib.sha256(changelog_bytes).hexdigest(),
+                    "COREPACK_HOME": str(root / "corepack-cache-not-present"),
                 },
             )
             for _ in range(100):
