@@ -82,4 +82,4 @@ Restore the manifest commands as sequential steps under the unmatrixed
 
 ## Amendment — 2026-10-09: four changelog-release cells ([#1733](https://github.com/Verjson/.github/issues/1733))
 
-[ADR 0223](../0223-shard-changelog-release-actions-ci/README.md) replaces the single `changelog-release` matrix value with four cells. `platform` and `merge-gate` stay as decided here, and `shell-tests` remains the required context.
+[ADR 0224](../0224-shard-changelog-release-actions-ci/README.md) replaces the single `changelog-release` matrix value with four cells. `platform` and `merge-gate` stay as decided here, and `shell-tests` remains the required context.
