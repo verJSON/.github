@@ -130,23 +130,27 @@ def _archive_package_metadata(archive_path: pathlib.Path) -> tuple[dict[str, Any
                     if index >= MAX_MEMBERS:
                         raise ValueError(f"package archive contains too many entries: {archive_path.name}")
                     name = member.name
+                    is_directory = member.isdir()
+                    if name.endswith("/") and (not is_directory or name.endswith("//")):
+                        raise ValueError(f"package archive contains an unsafe or duplicate path: {archive_path.name}")
+                    normalized_name = name[:-1] if is_directory and name.endswith("/") else name
                     if (
-                        not name
-                        or "\\" in name
-                        or name.startswith("/")
-                        or "\x00" in name
-                        or any(part in {"", ".", ".."} for part in name.rstrip("/").split("/"))
-                        or not name.startswith("package/")
-                        or name in seen
+                        not normalized_name
+                        or "\\" in normalized_name
+                        or normalized_name.startswith("/")
+                        or "\x00" in normalized_name
+                        or any(part in {"", ".", ".."} for part in normalized_name.split("/"))
+                        or (normalized_name != "package" and not normalized_name.startswith("package/"))
+                        or normalized_name in seen
                     ):
                         raise ValueError(f"package archive contains an unsafe or duplicate path: {archive_path.name}")
-                    seen.add(name)
+                    seen.add(normalized_name)
                     if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
                         raise ValueError(f"package archive contains a link or special file: {archive_path.name}")
                     expanded_bytes += member.size
                     if expanded_bytes > MAX_EXPANDED_BYTES:
                         raise ValueError(f"package archive expands beyond the supported size: {archive_path.name}")
-                    if name.rstrip("/") == "package/package.json":
+                    if normalized_name == "package/package.json":
                         if not member.isfile() or member.size > MAX_PACKAGE_JSON_BYTES:
                             raise ValueError(f"package archive has an invalid package.json: {archive_path.name}")
                         package_stream = archive.extractfile(member)

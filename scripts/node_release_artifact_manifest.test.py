@@ -100,6 +100,13 @@ class ArtifactManifestTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsafe or duplicate path"):
             validator.validate_artifacts(self.artifact_dir, self.expected)
 
+    def test_rejects_file_paths_that_alias_after_trailing_slash_normalization(self) -> None:
+        package_json = json.dumps({"name": self.name, "version": self.version}).encode("utf-8")
+        self.write_archive(extra=("package/package.json/", package_json))
+
+        with self.assertRaisesRegex(ValueError, "unsafe or duplicate path"):
+            validator.validate_artifacts(self.artifact_dir, self.expected)
+
     def test_rejects_links_inside_the_tarball(self) -> None:
         archive_path = self.artifact_dir / self.filename
         with tarfile.open(archive_path, mode="w:gz") as archive:
