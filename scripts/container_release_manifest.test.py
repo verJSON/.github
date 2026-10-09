@@ -196,6 +196,14 @@ class ContainerReleaseManifestTests(unittest.TestCase):
         historical_v3["images"][0]["destinations"].append(historical_gar_receipt)
         self.schema_validator.validate(historical_v3)
 
+        v3_receipt_with_v4_field = copy.deepcopy(historical_gar_receipt)
+        v3_receipt_with_v4_field["platformEvidenceReferrers"] = gar_receipt()[
+            "platformEvidenceReferrers"
+        ]
+        v4_receipt_in_v3 = copy.deepcopy(historical_v3)
+        v4_receipt_in_v3["images"][0]["destinations"][-1] = v3_receipt_with_v4_field
+        self.assertTrue(list(self.schema_validator.iter_errors(v4_receipt_in_v3)))
+
         historical_v2 = manifest()
         historical_v2["schemaVersion"] = 2
         historical_v2["source"].pop("candidatePublishedAt")

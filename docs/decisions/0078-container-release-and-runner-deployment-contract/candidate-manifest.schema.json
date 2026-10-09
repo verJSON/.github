@@ -421,6 +421,19 @@
         "properties": {
           "promotionEligible": {
             "const": false
+          },
+          "images": {
+            "items": {
+              "properties": {
+                "destinations": {
+                  "items": {
+                    "not": {
+                      "required": ["platformEvidenceReferrers"]
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }
