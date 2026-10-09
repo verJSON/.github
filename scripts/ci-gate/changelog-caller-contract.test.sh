@@ -383,6 +383,9 @@ grep -qF "node-version: \${{ '24' }}" <<<"$default_release" \
   && grep -q "scope: '@verjson'" <<<"$default_release" \
   && pass "release-node keeps the verJSON and Node 24 defaults" \
   || fail "release-node changed its backward-compatible defaults"
+grep -qF '# Legacy compatibility input; all Node release jobs use fresh ubuntu-24.04 runners.' <<<"$default_release" \
+  && pass "release-node documents its hosted-runner contract" \
+  || fail "release-node runner input no longer documents its compatibility scope"
 assert_explicit_release_version() {
   local mode="$1" workflow="$2" version_input first_verify_step
   version_input="$(sed -n '/^      version:$/,/^      prefix:$/p' <<<"$workflow" | sed '$d')"

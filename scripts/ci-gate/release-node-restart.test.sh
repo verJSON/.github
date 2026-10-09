@@ -14,15 +14,41 @@ extract_block() {
     active { sub(/^          /, ""); print }
     index($0, end) { exit }
   ' "$release_workflow" >"$output"
+  grep -qF "$begin" "$output" && grep -qF "$end" "$output" || {
+    echo "FAIL - could not extract bounded $begin/$end workflow block" >&2
+    exit 1
+  }
   bash -n "$output"
 }
 
+extract_run_body() {
+  local step_name="$1" output="$2"
+  awk -v step_name="$step_name" '
+    $0 == "      - name: " step_name { selected = 1; next }
+    selected && $0 == "        run: |" { active = 1; next }
+    active && /^      - / { exit }
+    active { sub(/^          /, ""); print }
+  ' "$release_workflow" >"$output"
+  [ -s "$output" ] || { echo "FAIL - could not extract run body for $step_name" >&2; exit 1; }
+}
+
+extract_run_body "Publish validated package archives" "$work/publish-step.sh"
+[ "$(awk 'NF { print; exit }' "$work/publish-step.sh")" = "# RESTART_SAFE_NPM_PUBLISH_BEGIN" ] \
+  || { echo "FAIL - publisher shell was added before the tested restart-safe block" >&2; exit 1; }
+[ "$(awk 'NF { last = $0 } END { print last }' "$work/publish-step.sh")" = "# RESTART_SAFE_NPM_PUBLISH_END" ] \
+  || { echo "FAIL - publisher shell was added after the tested restart-safe block" >&2; exit 1; }
 extract_block RESTART_SAFE_NPM_PUBLISH_BEGIN RESTART_SAFE_NPM_PUBLISH_END "$work/publish.sh"
 extract_block RESTART_SAFE_GH_RELEASE_BEGIN RESTART_SAFE_GH_RELEASE_END "$work/release-notes.sh"
 extract_block RELEASE_PREPARE_PACKAGES_BEGIN RELEASE_PREPARE_PACKAGES_END "$work/prepare.sh"
 
-mkdir -p "$work/bin" "$work/repo/CHANGELOG" "$work/repo/compat" "$work/repo/scripts" "$work/state"
+mkdir -p "$work/bin" "$work/repo/CHANGELOG" "$work/repo/compat" "$work/repo/scripts" "$work/repo/artifacts" "$work/state"
+mkdir -p "$work/tmp"
 printf '%s\n' notes >"$work/repo/CHANGELOG/v1.2.3.md"
+printf '%s\n' root-archive >"$work/repo/artifacts/acme-pkg-1.2.3.tgz"
+printf '%s\n' compat-archive >"$work/repo/artifacts/acme-compat-1.2.3.tgz"
+cat >"$work/repo/validated-packages.json" <<'JSON'
+[{"name":"@acme/pkg","version":"1.2.3","integrity":"sha512-expected","filename":"acme-pkg-1.2.3.tgz"},{"name":"@acme/compat","version":"1.2.3","integrity":"sha512-compat","filename":"acme-compat-1.2.3.tgz"}]
+JSON
 cat >"$work/repo/scripts/release-prepare-packages.sh" <<'HOOK'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -39,26 +65,6 @@ command="$1"
 shift
 case "$command" in
   version) ;;
-  pack)
-    case "${PACK_MODE:-matching}:$1" in
-      multi:.)
-        touch acme-pkg-1.2.3.tgz
-        printf '%s\n' '[{"name":"@acme/pkg","version":"1.2.3","integrity":"sha512-expected","filename":"acme-pkg-1.2.3.tgz"},{"name":"@acme/other","version":"1.2.3","integrity":"sha512-other","filename":"acme-other-1.2.3.tgz"}]'
-        ;;
-      wrong-version:.)
-        touch acme-pkg-9.9.9.tgz
-        printf '%s\n' '[{"name":"@acme/pkg","version":"9.9.9","integrity":"sha512-expected","filename":"acme-pkg-9.9.9.tgz"}]'
-        ;;
-      *:./compat)
-        touch acme-compat-1.2.3.tgz
-        printf '%s\n' '[{"name":"@acme/compat","version":"1.2.3","integrity":"sha512-compat","filename":"acme-compat-1.2.3.tgz"}]'
-        ;;
-      *:.)
-        touch acme-pkg-1.2.3.tgz
-        printf '%s\n' '[{"name":"@acme/pkg","version":"1.2.3","integrity":"sha512-expected","filename":"acme-pkg-1.2.3.tgz"}]'
-        ;;
-    esac
-    ;;
   publish)
     [ "${PUBLISH_FAIL:-0}" != 1 ] || exit 1
     case "$1" in
@@ -115,12 +121,12 @@ STUB
 chmod +x "$work/bin/npm" "$work/bin/gh"
 
 run_publish() {
-  ( cd "$work/repo" && PATH="$work/bin:$PATH" TEST_STATE="$work/state" PACKAGE_VERSION=1.2.3 \
+  ( cd "$work/repo" && PATH="$work/bin:$PATH" TEST_STATE="$work/state" RUNNER_TEMP="$work/tmp" PACKAGE_VERSION=1.2.3 \
       bash -euo pipefail "$work/prepare.sh" && \
-    PATH="$work/bin:$PATH" TEST_STATE="$work/state" \
-      REQUESTED_TAG=v1.2.3 PACKAGE_VERSION=1.2.3 NODE_AUTH_TOKEN=test PACKAGE_DIRS_JSON='[".","compat"]' \
-      VIEW_MODE="${VIEW_MODE:-}" PACK_MODE="${PACK_MODE:-matching}" \
-      AUTH_FAIL="${AUTH_FAIL:-0}" NETWORK_FAIL="${NETWORK_FAIL:-0}" \
+    PATH="$work/bin:$PATH" TEST_STATE="$work/state" RUNNER_TEMP="$work/tmp" \
+      ARTIFACT_DIR="$work/repo/artifacts" VALIDATED_MANIFEST="$work/repo/validated-packages.json" \
+      REQUESTED_TAG=v1.2.3 PACKAGE_VERSION=1.2.3 NODE_AUTH_TOKEN=test SCOPE=@acme \
+      VIEW_MODE="${VIEW_MODE:-}" AUTH_FAIL="${AUTH_FAIL:-0}" NETWORK_FAIL="${NETWORK_FAIL:-0}" \
       PUBLISH_FAIL="${PUBLISH_FAIL:-0}" \
       bash -euo pipefail "$work/publish.sh" )
 }
@@ -147,19 +153,6 @@ echo "ok - npm success plus GitHub Release failure completes safely on rerun"
 run_publish
 run_notes env GH_CREATE_FAIL=0
 echo "ok - a fully completed release rerun reconciles without rewriting package or tag"
-
-for mode in multi wrong-version; do
-  rm -rf "$work/state"; mkdir -p "$work/state"
-  if PACK_MODE="$mode" run_publish >/dev/null 2>&1; then
-    echo "FAIL - publication accepted $mode npm pack metadata" >&2
-    exit 1
-  fi
-  [ ! -e "$work/state/registry-root" ] && [ ! -e "$work/state/registry-compat" ] || {
-    echo "FAIL - $mode npm pack metadata reached publication" >&2
-    exit 1
-  }
-  echo "ok - publication rejects $mode npm pack metadata before registry mutation"
-done
 
 for mode in mismatch spoof; do
   rm -rf "$work/state"; mkdir -p "$work/state"; touch "$work/state/registry-root"

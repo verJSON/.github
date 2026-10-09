@@ -22,7 +22,7 @@ awk '
 ' "$workflow" >"$work/deprecate.sh"
 bash -n "$work/deprecate.sh"
 
-mkdir -p "$work/bin" "$work/state"
+mkdir -p "$work/bin" "$work/state" "$work/tmp"
 cat >"$work/bin/npm" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -36,6 +36,7 @@ run_deprecate() {
   env -i \
     PATH="$work/bin:$node_bin:/usr/bin:/bin" \
     TEST_STATE="$work/state" \
+    RUNNER_TEMP="$work/tmp" \
     SCOPE='@verjson' \
     DEPRECATES="$1" \
     bash "$work/deprecate.sh"

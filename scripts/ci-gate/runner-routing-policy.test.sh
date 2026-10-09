@@ -71,6 +71,7 @@ expected_literal_hosted_sites="$(printf '%s\n' \
   "$expected_literal_hosted_sites" \
   $'changelog-contract-fleet-report.yml:report:    runs-on: ubuntu-24.04' \
   $'cli-projects-package-surface-required.yml:admission:    runs-on: ubuntu-24.04\ncli-projects-package-surface-required.yml:package-surface:    runs-on: ubuntu-24.04' \
+  $'node-release.yml:prepare:    runs-on: ubuntu-24.04\nnode-release.yml:release:    runs-on: ubuntu-24.04\nnode-release.yml:retention:    runs-on: ubuntu-24.04' \
   $'node-ci.yml:deferred-ci:    runs-on: ubuntu-24.04\nnode-ci-protected.yml:deferred-ci:    runs-on: ubuntu-24.04' \
   | sort)"
 
@@ -1002,7 +1003,6 @@ policy_jobs() {
   cat <<'TARGETS'
 node-ci.yml eligibility
 node-ci.yml build-test
-node-release.yml release
 notify-umbrella.yml dispatch
 helm-ci.yml lint-template
 ui-ci.yml build-test
@@ -1063,7 +1063,6 @@ while read -r wf_name job; do
 done <<'TARGETS'
 node-ci.yml eligibility
 node-ci.yml build-test
-node-release.yml release
 notify-umbrella.yml dispatch
 helm-ci.yml lint-template
 ui-ci.yml build-test
@@ -1137,9 +1136,14 @@ job_count=0
 for name in $policy_files; do
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    job_count=$((job_count + 1))
     value="${line#*runs-on:}"
     value="${value# }"
+    # Node release jobs deliberately use fresh GitHub-hosted VMs because their
+    # lifecycle scripts and publication credentials cross a trust boundary.
+    # Their exact job inventory is pinned above; they are not generic routed jobs.
+    if [ "$name" = node-release.yml ] && [ "$value" = 'ubuntu-24.04' ]; then
+      continue
+    fi
     if [ "$name" = node-ci.yml ] \
         && [ "$value" = '${{ fromJSON(vars.CI_LANE_UNTRUSTED || '\''["ubuntu-24.04"]'\'') }}' ]; then
       continue
@@ -1151,6 +1155,7 @@ for name in $policy_files; do
     if [ "$name" = node-ci.yml ] && [ "$value" = 'ubuntu-24.04' ]; then
       continue
     fi
+    job_count=$((job_count + 1))
     if ! grep -qF 'CI_LANE_TRUSTED' <<<"$value" \
         || ! grep -qF 'CI_LANE_UNTRUSTED' <<<"$value" \
         || ! grep -qF 'CI_LANE_FALLBACK' <<<"$value"; then

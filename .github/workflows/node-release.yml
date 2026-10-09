@@ -72,7 +72,7 @@ on:
         required: true
         type: string
       runner:
-        description: Optional JSON labels for the unprivileged preparation job; publication and retention use isolated ubuntu-24.04 runners.
+        description: Deprecated compatibility input from existing callers; ignored because preparation, publication, and retention use fresh GitHub-hosted ubuntu-24.04 runners.
         required: false
         type: string
         default: ''
@@ -94,14 +94,24 @@ permissions:
 jobs:
   prepare:
     name: Prepare release packages without publication credentials
-    runs-on: ${{ inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: ${{ inputs.timeout-minutes }}
+    env:
+      NODE_AUTH_TOKEN: ''
     outputs:
       package-artifact-id: ${{ steps.upload-packages.outputs.artifact-id }}
     permissions:
       contents: read
       packages: read
     steps:
+      - name: Require a fresh GitHub-hosted preparation runner
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          if [[ "$RUNNER_ENVIRONMENT" != "github-hosted" ]]; then
+            echo "::error::Node release preparation requires a fresh GitHub-hosted runner."
+            exit 1
+          fi
       - name: Require the contract's exact release tag
         id: release-tag
         env:
@@ -250,18 +260,32 @@ jobs:
           printf '[]\n' >"$manifest"
           mapfile -t package_dirs < <(jq -r '.[]' <<<"$PACKAGE_DIRS_JSON")
           for package_dir in "${package_dirs[@]}"; do
+            # LOCAL_PACKAGE_PATH_BEGIN
             if [ "$package_dir" = . ]; then
               package_path="$GITHUB_WORKSPACE"
             else
               package_path="$GITHUB_WORKSPACE/$package_dir"
             fi
+            # LOCAL_PACKAGE_PATH_END
             npm pack "$package_path" --json --ignore-scripts --pack-destination "$archive_dir" >"$pack_json"
             node - "$pack_json" "$PACKAGE_VERSION" "$SCOPE" "$archive_dir" "$manifest" <<'NODE'
+          // NPM_PACK_JSON_BEGIN
           const fs = require("fs");
           const path = require("path");
           const [packPath, expectedVersion, scope, archiveDir, manifestPath] = process.argv.slice(2);
           const output = JSON.parse(fs.readFileSync(packPath, "utf8"));
-          const packed = Array.isArray(output) ? output : Object.values(output || {});
+          let packed;
+          if (Array.isArray(output)) {
+            packed = output;
+          } else if (output && typeof output === "object") {
+            const entries = Object.entries(output);
+            if (entries.some(([key, item]) => !item || typeof item !== "object" || item.name !== key)) {
+              throw new Error("npm pack object key does not match package metadata");
+            }
+            packed = entries.map(([, item]) => item);
+          } else {
+            throw new Error("npm pack output was not an array or package map");
+          }
           if (packed.length !== 1 || !packed[0] || typeof packed[0] !== "object") {
             throw new Error("npm pack did not describe exactly one package");
           }
@@ -289,6 +313,7 @@ jobs:
           }
           entries.push({name: item.name, version: item.version, integrity: item.integrity, filename: item.filename});
           fs.writeFileSync(manifestPath, `${JSON.stringify(entries)}\n`);
+          // NPM_PACK_JSON_END
           NODE
           done
       - name: Bound npm cache upload
@@ -329,6 +354,14 @@ jobs:
       new-release-version: ${{ steps.result.outputs.new-release-version }}
       retention-targets: ${{ steps.package-dirs.outputs.retention-targets }}
     steps:
+      - name: Require a fresh GitHub-hosted publication runner
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          if [[ "$RUNNER_ENVIRONMENT" != "github-hosted" ]]; then
+            echo "::error::Node publication requires a fresh GitHub-hosted runner."
+            exit 1
+          fi
       - name: Require the contract's exact release tag
         id: release-tag
         env:
@@ -560,6 +593,7 @@ jobs:
           ARTIFACT_DIR: ${{ runner.temp }}/verjson-release-packages
           VALIDATED_MANIFEST: ${{ runner.temp }}/verjson-release-validated-packages.json
         run: |
+          # RESTART_SAFE_NPM_PUBLISH_BEGIN
           set -euo pipefail
           npm_config_dir="$(mktemp -d "$RUNNER_TEMP/verjson-publish-npm-config.XXXXXX")"
           registry_json="$(mktemp "$RUNNER_TEMP/verjson-published-package.XXXXXX")"
@@ -608,6 +642,7 @@ jobs:
               echo "Registry already contains the identical $package_name@$published_version; package publication is complete."
             fi
           done
+          # RESTART_SAFE_NPM_PUBLISH_END
       - name: Publish the snapshot release notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -820,6 +855,14 @@ jobs:
       contents: read
       packages: write
     steps:
+      - name: Require a fresh GitHub-hosted retention runner
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          if [[ "$RUNNER_ENVIRONMENT" != "github-hosted" ]]; then
+            echo "::error::Node retention requires a fresh GitHub-hosted runner."
+            exit 1
+          fi
       - name: Validate the immutable retention contract ref
         env:
           CONTRACT_REF: ${{ inputs.contract-ref }}

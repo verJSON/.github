@@ -20,6 +20,9 @@ import node_release_artifact_manifest as artifact_manifest
 
 raw = open(sys.argv[1], encoding="utf-8").read()
 doc = yaml.safe_load(raw)
+node_docs = pathlib.Path(sys.argv[1]).resolve().parents[2] / "docs/node-workflows.md"
+node_docs_text = " ".join(node_docs.read_text(encoding="utf-8").split())
+assert "The legacy `runner` input remains accepted for compatibility but is ignored; all Node release jobs use fresh GitHub-hosted `ubuntu-24.04` runners." in node_docs_text
 on = doc.get("on", doc.get(True))
 assert set(on) == {"workflow_call"}, "node-release must not be triggerable by push or dispatch"
 inputs = on["workflow_call"]["inputs"]
@@ -27,7 +30,8 @@ assert inputs["version"]["required"] is True, "version must be required"
 assert inputs["prefix"]["default"] == "v"
 assert inputs["scope"]["default"] == "@verjson"
 assert "Required lowercase npm scope" in inputs["scope"]["description"]
-assert "unprivileged preparation job" in inputs["runner"]["description"]
+assert "Deprecated compatibility input from existing callers; ignored" in inputs["runner"]["description"]
+assert "preparation, publication, and retention use fresh GitHub-hosted ubuntu-24.04 runners" in inputs["runner"]["description"]
 assert inputs["package-dirs"]["default"] == '["."]'
 assert inputs["release-assets"]["default"] == "[]"
 assert inputs["contract-ref"]["required"] is True
@@ -35,15 +39,28 @@ assert set(doc["jobs"]) == {"prepare", "release", "retention"}
 prepare = doc["jobs"]["prepare"]
 release = doc["jobs"]["release"]
 retention = doc["jobs"]["retention"]
+runner_guard_names = {
+    "prepare": "Require a fresh GitHub-hosted preparation runner",
+    "release": "Require a fresh GitHub-hosted publication runner",
+    "retention": "Require a fresh GitHub-hosted retention runner",
+}
+for job_name, expected_name in runner_guard_names.items():
+    job = doc["jobs"][job_name]
+    assert job["runs-on"] == "ubuntu-24.04", f"{job_name} must use a fresh hosted runner"
+    guard = job["steps"][0]
+    assert guard["name"] == expected_name, f"{job_name} must guard its runner before other steps"
+    assert guard["env"] == {"RUNNER_ENVIRONMENT": "${{ runner.environment }}"}
+    assert '"$RUNNER_ENVIRONMENT" != "github-hosted"' in guard["run"]
+    assert "requires a fresh GitHub-hosted runner" in guard["run"]
 assert prepare["permissions"] == {"contents": "read", "packages": "read"}
+assert prepare["env"] == {"NODE_AUTH_TOKEN": ""}, "preparation must mask runner-inherited credentials"
 assert prepare["outputs"]["package-artifact-id"] == "${{ steps.upload-packages.outputs.artifact-id }}"
-assert "inputs.runner" in prepare["runs-on"]
+assert prepare["runs-on"] == "ubuntu-24.04", "preparation must not route to a shared caller-selected runner"
 assert release["needs"] == "prepare"
 assert release["runs-on"] == "ubuntu-24.04", "publication must run on a fresh hosted runner"
 assert release["permissions"] == {"actions": "read", "contents": "write", "packages": "write"}
 assert retention["runs-on"] == "ubuntu-24.04", "retention must not reuse a preparation runner"
 assert "NODE_AUTH_TOKEN" not in (doc.get("env") or {})
-assert "NODE_AUTH_TOKEN" not in (prepare.get("env") or {})
 assert "NODE_AUTH_TOKEN" not in (release.get("env") or {})
 prepare_steps = prepare["steps"]
 steps = release["steps"]

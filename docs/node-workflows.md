@@ -420,13 +420,18 @@ jobs:
       - run: echo "published ${{ needs.publish.outputs.new-release-version }}"
 ```
 
-The generated caller pins both reusable workflows to one immutable contract SHA
-and passes the same Node version, required GitHub Packages scope, package
-directory set, and runner policy to verification and publication. An empty
-publication scope is rejected at the reusable boundary; this workflow does not
-claim public-npm support while its credentials and restart proof target GitHub
-Packages. Regenerate the caller and its contract test together when any of
-those parameters change; never use `@main`.
+The generated caller pins both reusable workflows to one immutable contract SHA.
+It routes changelog verification and snapshot through the configured runner
+policy, then passes the Node release inputs to `node-release.yml`. The legacy
+`runner` input remains accepted for compatibility but is ignored; all Node
+release jobs use fresh GitHub-hosted `ubuntu-24.04` runners. Callers need hosted
+GitHub Actions capacity for the full Node release workflow. This runner
+boundary is recorded in
+[ADR 0221](decisions/0221-separate-node-release-runner-boundaries/README.md).
+An empty publication scope is rejected at the reusable
+boundary; this workflow does not claim public-npm support while its credentials
+and restart proof target GitHub Packages. Regenerate the caller and its contract
+test together when any of those parameters change; never use `@main`.
 
 Two properties to respect:
 

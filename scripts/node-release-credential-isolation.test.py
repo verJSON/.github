@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import yaml
 
 
 def run(command, *, cwd, env):
@@ -28,6 +29,28 @@ def write_package(directory, manifest, recorder):
 def main():
     repo_root = Path(__file__).resolve().parent.parent
     workflow = (repo_root / ".github/workflows/node-release.yml").read_text()
+    workflow_document = yaml.safe_load(workflow)
+    prepare_job = workflow_document["jobs"]["prepare"]
+    assert prepare_job.get("env") == {"NODE_AUTH_TOKEN": ""}, (
+        "the preparation job must mask runner-inherited package credentials"
+    )
+    assert prepare_job["runs-on"] == "ubuntu-24.04", (
+        "preparation must use a fresh GitHub-hosted runner"
+    )
+    runner_guard_names = {
+        "prepare": "Require a fresh GitHub-hosted preparation runner",
+        "release": "Require a fresh GitHub-hosted publication runner",
+        "retention": "Require a fresh GitHub-hosted retention runner",
+    }
+    runner_guard_commands = {}
+    for job_name, expected_name in runner_guard_names.items():
+        runner_guard = workflow_document["jobs"][job_name]["steps"][0]
+        assert runner_guard.get("name") == expected_name
+        assert runner_guard.get("env") == {"RUNNER_ENVIRONMENT": "${{ runner.environment }}"}
+        runner_guard_command = runner_guard.get("run")
+        assert isinstance(runner_guard_command, str)
+        assert '"$RUNNER_ENVIRONMENT" != "github-hosted"' in runner_guard_command
+        runner_guard_commands[job_name] = runner_guard_command
     install_step = re.search(
         r"(?ms)^      - name: Install dependencies\n(?P<step>.*?)(?=^      - name: |\Z)",
         workflow,
@@ -45,7 +68,7 @@ def main():
 
     lifecycle_recorder = (
         "const fs = require('node:fs');\n"
-        "const token = process.env.NODE_AUTH_TOKEN ?? '<unset>';\n"
+        "const token = process.env.NODE_AUTH_TOKEN || '<unset>';\n"
         "const tokenEnvKeys = Object.entries(process.env)\n"
         "  .filter(([, value]) => typeof value === 'string' && value.includes('synthetic-package-token'))\n"
         "  .map(([key]) => key);\n"
@@ -86,6 +109,29 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="node-release-credential-isolation-") as temp:
         root = Path(temp)
+        for job_name, runner_guard_command in runner_guard_commands.items():
+            hosted_runner_env = os.environ.copy()
+            hosted_runner_env["RUNNER_ENVIRONMENT"] = "github-hosted"
+            hosted_runner = subprocess.run(
+                ["bash", "-c", runner_guard_command],
+                cwd=root,
+                env=hosted_runner_env,
+                text=True,
+                capture_output=True,
+            )
+            assert hosted_runner.returncode == 0, f"{job_name}: {hosted_runner.stderr}"
+            self_hosted_env = os.environ.copy()
+            self_hosted_env["RUNNER_ENVIRONMENT"] = "self-hosted"
+            self_hosted = subprocess.run(
+                ["bash", "-c", runner_guard_command],
+                cwd=root,
+                env=self_hosted_env,
+                text=True,
+                capture_output=True,
+            )
+            assert self_hosted.returncode != 0, f"{job_name}: runner guard accepted self-hosted"
+            assert "requires a fresh GitHub-hosted runner" in self_hosted.stdout
+
         write_package(
             root / "fixture-transitive-dependency",
             {
@@ -177,7 +223,7 @@ def main():
         }
         run(["npm", "ci", "--ignore-scripts"], cwd=root, env=helper_env)
         lifecycle_env = helper_env.copy()
-        lifecycle_env.pop("NODE_AUTH_TOKEN")
+        lifecycle_env["NODE_AUTH_TOKEN"] = ""
         run(["npm", "ci", "--prefer-offline"], cwd=root, env=lifecycle_env)
         assert npm_trace.read_text().splitlines() == [
             "ci --ignore-scripts|present",
