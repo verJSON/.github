@@ -190,3 +190,7 @@ undeclared `scripts/release-reconcile.sh` — so a hook cannot appear without re
   general class is not disproven). The mitigation is that the hook, its allowlist, and the
   pinned contract SHA are all reviewed in the consumer's own PR before any release can use
   them.
+
+## Amendment — 2026-10-09 (#1726): preserve pre-existing release inputs
+
+The reconciler fingerprints the contents and modes of every pre-existing untracked or ignored path before running the hook, then rejects deletion or any change to those paths. This includes the generated release manifest, candidate artifact ZIP, and verification receipts that are not tracked in the consumer checkout. The pinned contract checkout is separately checked for its exact commit, clean worktree, and Git control surfaces; its `.git` metadata is excluded from the filesystem snapshot.

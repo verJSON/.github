@@ -7,6 +7,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -272,8 +273,70 @@ def ignored_paths(root: Path) -> set:
     }
 
 
-def validate_tree(root: Path, allowlist: list, pre_existing_untracked: set, pre_existing_ignored: set) -> list:
-    for path in sorted(ignored_paths(root) - pre_existing_ignored):
+def path_fingerprint(path: Path, contract_git_dir: Path):
+    """Fingerprint a pre-existing untracked path without following symlinks."""
+    try:
+        info = path.lstat()
+        mode = stat.S_IMODE(info.st_mode)
+        if stat.S_ISREG(info.st_mode):
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return ("file", mode, digest.hexdigest())
+        if stat.S_ISLNK(info.st_mode):
+            return ("symlink", os.readlink(path))
+        if stat.S_ISDIR(info.st_mode):
+            children = []
+            for child in sorted(path.iterdir(), key=lambda item: item.name):
+                if child == contract_git_dir and child.is_dir() and not child.is_symlink():
+                    # The pinned checkout's ref and worktree are independently checked.
+                    continue
+                children.append((child.name, path_fingerprint(child, contract_git_dir)))
+            return ("directory", mode, tuple(children))
+    except OSError as error:
+        raise ReconcileError(f"cannot fingerprint pre-existing path {path}: {error}") from None
+    raise ReconcileError(f"pre-existing path is not a regular file, symlink, or directory: {path}")
+
+
+def path_fingerprints(root: Path, paths: set, contract_root: str) -> dict:
+    contract_git_dir = root / contract_root / ".git"
+    return {
+        path: path_fingerprint(root / path.rstrip("/"), contract_git_dir)
+        for path in paths
+    }
+
+
+def validate_preserved_paths(
+    root: Path,
+    paths: set,
+    fingerprints: dict,
+    contract_root: str,
+    label: str,
+) -> None:
+    missing = sorted(set(fingerprints) - paths)
+    if missing:
+        raise ReconcileError(f"hook removed pre-existing {label}: {missing[0]}")
+    for path, expected in fingerprints.items():
+        current = path_fingerprint(root / path.rstrip("/"), root / contract_root / ".git")
+        if current != expected:
+            raise ReconcileError(f"hook modified pre-existing {label}: {path}")
+
+
+def validate_tree(
+    root: Path,
+    allowlist: list,
+    pre_existing_untracked: set,
+    pre_existing_ignored: set,
+    untracked_before: dict,
+    ignored_before: dict,
+    contract_root: str,
+) -> list:
+    current_untracked = untracked_paths(root)
+    current_ignored = ignored_paths(root)
+    validate_preserved_paths(root, current_untracked, untracked_before, contract_root, "untracked output")
+    validate_preserved_paths(root, current_ignored, ignored_before, contract_root, "ignored output")
+    for path in sorted(current_ignored - pre_existing_ignored):
         raise ReconcileError(f"hook produced ignored output: {path}")
     changed = []
     for staged, worktree, path in status_entries(root):
@@ -353,12 +416,17 @@ def reconcile(root: Path, args) -> list:
     baseline = control_surfaces(checkouts)
     pre_existing_untracked = untracked_paths(root)
     pre_existing_ignored = ignored_paths(root)
+    untracked_before = path_fingerprints(root, pre_existing_untracked, args.contract_root)
+    ignored_before = path_fingerprints(root, pre_existing_ignored, args.contract_root)
 
     def validate():
         # Control surfaces first: every later check reads `git` output, which
         # `.git/config` itself can be made to falsify.
         require_intact_control_surfaces(checkouts, baseline)
-        return validate_tree(root, allowlist, pre_existing_untracked, pre_existing_ignored)
+        return validate_tree(
+            root, allowlist, pre_existing_untracked, pre_existing_ignored,
+            untracked_before, ignored_before, args.contract_root,
+        )
 
     try:
         run_hook(root, args.version, args.manifest, args.timeout)

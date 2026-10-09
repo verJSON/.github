@@ -146,6 +146,37 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(["deploy/values.yaml"], self.fixture.staged())
 
+    def test_rejects_modifying_a_preexisting_untracked_release_manifest(self):
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf '{\\\"releaseVersion\\\":\\\"9.9.9\\\"}\\n' > release-manifest.json\n"
+        )
+        result = self.fixture.run()
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("modified pre-existing untracked output: release-manifest.json", result.stderr)
+
+    def test_rejects_modifying_a_preexisting_untracked_candidate_archive(self):
+        candidate_archive = self.fixture.repo / "candidate-manifest.zip"
+        candidate_archive.write_bytes(b"verified candidate archive")
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'altered candidate archive\\n' > candidate-manifest.zip\n"
+        )
+        result = self.fixture.run()
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("modified pre-existing untracked output: candidate-manifest.zip", result.stderr)
+
+    def test_rejects_modifying_a_preexisting_ignored_release_file(self):
+        (self.fixture.repo / ".gitignore").write_text(".release-state.json\n", encoding="utf-8")
+        git(self.fixture.repo, "add", ".gitignore")
+        git(self.fixture.repo, "commit", "-qm", "ignore local release state")
+        ignored_state = self.fixture.repo / ".release-state.json"
+        ignored_state.write_text("original\n", encoding="utf-8")
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'changed\\n' > .release-state.json\n"
+        )
+        result = self.fixture.run()
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("modified pre-existing ignored output: .release-state.json", result.stderr)
+
     def test_rejects_deletion_of_an_allowlisted_path(self):
         self.fixture.write_hook("#!/usr/bin/env bash\nset -euo pipefail\nrm Dockerfile\n")
         result = self.fixture.run()
