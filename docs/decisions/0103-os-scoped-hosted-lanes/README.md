@@ -320,6 +320,16 @@ checks both matrices, their equality, the credential boundary, and hostile lifec
 selector mutations. Evidence is the registered
 `scripts/ci-gate/changelog-caller-contract.test.sh` suite.
 
+### Amendment (2026-10-09) — validate generated OS lane selectors before acquisition (#1723)
+
+The generated `release-artifact` caller now validates its OS lane before snapshots,
+artifact transfer, or metered build work. The credentialless preflight accepts only an
+exact, versioned label from the requested OS family and rejects missing, malformed,
+whitespace-padded, rolling, unversioned, and wrong-family selectors. It preserves the
+validated selector unchanged so the selected lane remains paired with its matrix entry;
+no credentials are introduced into this preflight. The generated contract test exercises
+valid and rejected selectors against the emitted caller.
+
 ## Consequences
 
 - The metered SKUs are refused by a check rather than by a spending limit, which is what
