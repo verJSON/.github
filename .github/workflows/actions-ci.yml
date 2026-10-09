@@ -7,6 +7,7 @@ name: actions-ci
 
 on:
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
     paths:
       - '.github/actions/**'
       - '.github/actionlint.yaml'
@@ -90,7 +91,7 @@ jobs:
 
   shell-test-groups:
     needs: change-scope
-    if: needs.change-scope.outputs.heavy == 'true'
+    if: ${{ needs.change-scope.outputs.heavy == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     # Thirty minutes still bounds one cell, including runner variance and cleanup.
     # changelog-release is four cells so the caller-contract shards overlap
     # platform and merge-gate; max-parallel matches that width (ADR 0224).
@@ -189,7 +190,7 @@ jobs:
 
   hosted-compatibility-tests:
     needs: change-scope
-    if: needs.change-scope.outputs.heavy == 'true'
+    if: ${{ needs.change-scope.outputs.heavy == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     # The compatibility consumer is intentionally isolated with bubblewrap.
     # Persistent fleet images are not required to carry that host dependency;
     # keep this security contract on the explicit hosted Ubuntu image instead.
@@ -1879,7 +1880,7 @@ jobs:
   # the aggregate result after every group reaches a terminal state.
   shell-tests:
     needs: [change-scope, shell-test-groups, docs-contracts, hosted-compatibility-tests, adr-number-collision]
-    if: ${{ always() }}
+    if: ${{ always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     timeout-minutes: 2
     steps:

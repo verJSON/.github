@@ -33,9 +33,14 @@ name: CLI projects required package surface
 
 on:
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
 
 permissions:
   contents: read
+
+concurrency:
+  group: cli-projects-required-${{{{ github.event.pull_request.number || github.ref }}}}
+  cancel-in-progress: ${{{{ github.event_name == 'pull_request' }}}}
 
 jobs:
   admission:
@@ -88,6 +93,7 @@ jobs:
           }} >>"$GITHUB_OUTPUT"
   ci:
     needs: admission
+    if: ${{{{ !github.event.pull_request.draft }}}}
     permissions:
       actions: read
       contents: read
@@ -109,6 +115,7 @@ jobs:
       head-sha: ${{{{ needs.admission.outputs.head-sha }}}}
   ci-node-floor:
     needs: admission
+    if: ${{{{ !github.event.pull_request.draft }}}}
     permissions:
       actions: read
       contents: read
@@ -128,7 +135,7 @@ jobs:
       head-sha: ${{{{ needs.admission.outputs.head-sha }}}}
   package-surface:
     needs: [admission, ci, ci-node-floor]
-    if: ${{{{ always() && needs.admission.result == 'success' && needs.ci.result == 'success' && needs.ci-node-floor.result == 'success' }}}}
+    if: ${{{{ always() && !github.event.pull_request.draft && needs.admission.result == 'success' && needs.ci.result == 'success' && needs.ci-node-floor.result == 'success' }}}}
     runs-on: ubuntu-24.04
     permissions:
       contents: read

@@ -20,6 +20,9 @@ with open(sys.argv[1], encoding="utf-8") as stream:
     document = yaml.safe_load(stream)
 manifest_text = open(sys.argv[2], encoding="utf-8").read()
 jobs = document["jobs"]
+assert document[True]["pull_request"]["types"] == [
+    "opened", "reopened", "synchronize", "ready_for_review", "converted_to_draft",
+]
 assert set(jobs) == {
     "change-scope",
     "shell-test-groups",
@@ -29,9 +32,22 @@ assert set(jobs) == {
     "shell-tests",
 }
 assert jobs["shell-test-groups"]["needs"] == "change-scope"
-assert jobs["shell-test-groups"]["if"] == "needs.change-scope.outputs.heavy == 'true'"
+assert jobs["shell-test-groups"]["if"] == (
+    "${{ needs.change-scope.outputs.heavy == 'true' && "
+    "(github.event_name != 'pull_request' || !github.event.pull_request.draft) }}"
+)
 assert jobs["hosted-compatibility-tests"]["needs"] == "change-scope"
-assert jobs["hosted-compatibility-tests"]["if"] == "needs.change-scope.outputs.heavy == 'true'"
+assert jobs["hosted-compatibility-tests"]["if"] == (
+    "${{ needs.change-scope.outputs.heavy == 'true' && "
+    "(github.event_name != 'pull_request' || !github.event.pull_request.draft) }}"
+)
+assert "if" not in jobs["change-scope"]
+assert "if" not in jobs["docs-contracts"]
+assert jobs["adr-number-collision"]["if"] == "github.event_name == 'pull_request'"
+assert jobs["shell-tests"]["if"] == (
+    "${{ always() && (github.event_name != 'pull_request' "
+    "|| !github.event.pull_request.draft) }}"
+)
 assert jobs["docs-contracts"]["timeout-minutes"] == 10
 assert jobs["change-scope"]["outputs"]["heavy"] == "${{ steps.scope.outputs.heavy }}"
 scope_run = next(
@@ -247,7 +263,10 @@ assert required["needs"] == [
     "hosted-compatibility-tests",
     "adr-number-collision",
 ]
-assert required["if"] == "${{ always() }}"
+assert required["if"] == (
+    "${{ always() && (github.event_name != 'pull_request' "
+    "|| !github.event.pull_request.draft) }}"
+)
 assert required["timeout-minutes"] == 2
 assert "strategy" not in required
 assert required["steps"][0]["env"] == {

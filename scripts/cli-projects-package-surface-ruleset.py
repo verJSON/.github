@@ -160,8 +160,27 @@ def validate_workflow(path=WORKFLOW):
     require(path.read_text(encoding="utf-8") == generated.stdout,
             "required workflow differs from canonical generator output")
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    require(document.get(True) == {"pull_request": None},
-            "required workflow must trigger only on pull_request")
+    pull_request_types = [
+        "opened",
+        "reopened",
+        "synchronize",
+        "ready_for_review",
+        "converted_to_draft",
+    ]
+    require(
+        document.get(True) == {"pull_request": {"types": pull_request_types}},
+        "required workflow must trigger only on the pull-request draft lifecycle",
+    )
+    require(
+        "github.event.pull_request.number || github.ref"
+        in document.get("concurrency", {}).get("group", ""),
+        "required workflow concurrency must be scoped to the pull request",
+    )
+    require(
+        document.get("concurrency", {}).get("cancel-in-progress")
+        == "${{ github.event_name == 'pull_request' }}",
+        "required workflow must cancel superseded pull-request runs",
+    )
     require(document.get("permissions") == {"contents": "read"},
             "required workflow permissions drifted")
     require(set(document.get("jobs", {})) == {
@@ -181,6 +200,17 @@ def validate_workflow(path=WORKFLOW):
         "head-repository": "${{ steps.identity.outputs.head-repository }}",
         "head-sha": "${{ steps.identity.outputs.head-sha }}",
     }, "identity admission outputs drifted")
+    require("draft" not in str(admission.get("if", "")),
+            "fast identity admission must continue to run on draft pull requests")
+    for job_name in ("ci", "ci-node-floor"):
+        require(document["jobs"][job_name].get("if")
+                == "${{ !github.event.pull_request.draft }}",
+                f"{job_name} must skip draft pull requests")
+    require(
+        "!github.event.pull_request.draft"
+        in str(document["jobs"]["package-surface"].get("if", "")),
+        "package surface must skip draft pull requests",
+    )
     require(len(admission.get("steps", [])) == 1,
             "identity admission step count drifted")
     admission_step = admission["steps"][0]

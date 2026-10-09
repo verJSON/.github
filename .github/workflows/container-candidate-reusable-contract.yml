@@ -2,6 +2,7 @@ name: container candidate reusable-call contract
 
 on:
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
     paths:
       - '.github/workflows/container-candidate.yml'
       - '.github/workflows/container-candidate-publish.yml'
@@ -26,9 +27,13 @@ on:
       - 'scripts/fixtures/container-candidate/canary.json'
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   validate:
-    if: github.event_name == 'pull_request'
+    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft }}
     permissions:
       actions: read
       contents: read
