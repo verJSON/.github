@@ -36,19 +36,21 @@ class ArtifactManifestTest(unittest.TestCase):
 
     def write_archive(self, package: dict[str, str] | None = None, extra: tuple[str, bytes] | None = None) -> None:
         package = package or {"name": self.name, "version": self.version}
+        entries = [
+            ("package/package.json", json.dumps(package).encode("utf-8")),
+            ("package/index.js", b"module.exports = true;\n"),
+        ]
+        if extra is not None:
+            entries.append(extra)
+        self.write_archive_entries(entries)
+
+    def write_archive_entries(self, entries: list[tuple[str, bytes]]) -> None:
         archive_path = self.artifact_dir / self.filename
         with tarfile.open(archive_path, mode="w:gz") as archive:
-            for name, body in (
-                ("package/package.json", json.dumps(package).encode("utf-8")),
-                ("package/index.js", b"module.exports = true;\n"),
-            ):
+            for name, body in entries:
                 info = tarfile.TarInfo(name)
                 info.size = len(body)
                 archive.addfile(info, io.BytesIO(body))
-            if extra is not None:
-                info = tarfile.TarInfo(extra[0])
-                info.size = len(extra[1])
-                archive.addfile(info, io.BytesIO(extra[1]))
         self.refresh_manifest_integrity()
 
     def refresh_manifest_integrity(self) -> None:
@@ -106,6 +108,22 @@ class ArtifactManifestTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "unsafe or duplicate path"):
             validator.validate_artifacts(self.artifact_dir, self.expected)
+
+    def test_rejects_file_entries_that_conflict_with_descendant_paths(self) -> None:
+        package_json = json.dumps({"name": self.name, "version": self.version}).encode("utf-8")
+        for entries in (
+            [("package", b"not a directory"), ("package/package.json", package_json)],
+            [("package/package.json", package_json), ("package", b"not a directory")],
+            [
+                ("package/package.json", package_json),
+                ("package/nested", b"not a directory"),
+                ("package/nested/index.js", b"child"),
+            ],
+        ):
+            with self.subTest(entries=tuple(name for name, _ in entries)):
+                self.write_archive_entries(entries)
+                with self.assertRaisesRegex(ValueError, "unsafe or duplicate path"):
+                    validator.validate_artifacts(self.artifact_dir, self.expected)
 
     def test_rejects_links_inside_the_tarball(self) -> None:
         archive_path = self.artifact_dir / self.filename

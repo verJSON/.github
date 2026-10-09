@@ -120,7 +120,7 @@ def _archive_package_metadata(archive_path: pathlib.Path) -> tuple[dict[str, Any
         raise ValueError(f"package archive has an unsupported size: {archive_path.name}")
 
     package_json: dict[str, Any] | None = None
-    seen: set[str] = set()
+    seen: dict[str, bool] = {}
     expanded_bytes = 0
     try:
         with gzip.open(archive_path, mode="rb") as compressed:
@@ -134,17 +134,18 @@ def _archive_package_metadata(archive_path: pathlib.Path) -> tuple[dict[str, Any
                     if name.endswith("/") and (not is_directory or name.endswith("//")):
                         raise ValueError(f"package archive contains an unsafe or duplicate path: {archive_path.name}")
                     normalized_name = name[:-1] if is_directory and name.endswith("/") else name
+                    parts = normalized_name.split("/")
                     if (
                         not normalized_name
                         or "\\" in normalized_name
                         or normalized_name.startswith("/")
                         or "\x00" in normalized_name
-                        or any(part in {"", ".", ".."} for part in normalized_name.split("/"))
+                        or any(part in {"", ".", ".."} for part in parts)
                         or (normalized_name != "package" and not normalized_name.startswith("package/"))
                         or normalized_name in seen
                     ):
                         raise ValueError(f"package archive contains an unsafe or duplicate path: {archive_path.name}")
-                    seen.add(normalized_name)
+                    seen[normalized_name] = is_directory
                     if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
                         raise ValueError(f"package archive contains a link or special file: {archive_path.name}")
                     expanded_bytes += member.size
@@ -163,6 +164,12 @@ def _archive_package_metadata(archive_path: pathlib.Path) -> tuple[dict[str, Any
     except (OSError, tarfile.TarError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError(f"could not inspect package archive {archive_path.name}: {error}") from error
 
+    if seen.get("package") is False:
+        raise ValueError(f"package archive contains an unsafe or duplicate path: {archive_path.name}")
+    ordered_names = sorted(seen)
+    for index, name in enumerate(ordered_names[:-1]):
+        if not seen[name] and ordered_names[index + 1].startswith(f"{name}/"):
+            raise ValueError(f"package archive contains an unsafe or duplicate path: {archive_path.name}")
     if not isinstance(package_json, dict):
         raise ValueError(f"package archive has no package/package.json: {archive_path.name}")
     return package_json, stream.bytes_read
