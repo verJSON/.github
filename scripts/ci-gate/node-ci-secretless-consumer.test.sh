@@ -71,6 +71,7 @@ assert "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)" in rebuild["run"]
 assert 'os.execve(str(bubblewrap), arguments,' in rebuild["run"]
 assert 'subprocess.run([*npm_command, "run", name]' in plan["run"]
 assert "env=script_env" in plan["run"]
+assert plan["env"]["BASH_ENV"] == "/dev/null"
 for command_file in ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"):
     assert f'"{command_file}"' in plan["run"]
 compatibility = next(
@@ -81,100 +82,117 @@ assert "unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_S
 assert "exec /usr/bin/python3 - <<'PY'" in compatibility["run"]
 for command_file in ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"):
     assert f'"{command_file}"' in compatibility["run"]
-secretless_bash_env = "${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '/dev/null' || env.BASH_ENV }}"
-secretless_mode = "${{ inputs.secretless-pr || inputs.secretless-trusted-ref }}"
-command_files = (
-    "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
-    "GITHUB_STEP_SUMMARY", "BASH_ENV",
+assert plan["env"]["RUN_DEFAULTS"] == "${{ inputs.secretless-ci-script-plan == '' }}"
+assert "inputs.secretless-pr" in plan["if"] and "inputs.secretless-trusted-ref" in plan["if"]
+assert 'subprocess.run([*npm_command, "run", name]' in plan["run"]
+assert "env=script_env" in plan["run"]
+for command_file in ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"):
+    assert f'"{command_file}"' in plan["run"]
+protected_doc = yaml.safe_load(
+    Path(sys.argv[1]).with_name("node-ci-protected.yml").read_text(encoding="utf-8")
 )
-command_file_scrub = "unset -v " + " ".join(command_files)
-default_plans = []
-for workflow_path in (
-    Path(sys.argv[1]),
-    Path(sys.argv[1]).with_name("node-ci-protected.yml"),
-):
-    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
-    workflow_build = workflow["jobs"]["build-test"]
-    steps = workflow_build["steps"]
-    if workflow_path.name == "node-ci.yml":
-        defaults = [
-            step for step in steps
-            if step.get("env", {}).get("SECRETLESS_MODE") == secretless_mode
-        ]
-        assert len(defaults) == 4
-    else:
-        defaults = [
-            step for step in steps
-            if step.get("name") == "Run default build, typecheck, test, and lint plan"
-        ]
-        assert len(defaults) == 1
-    for step in defaults:
-        assert step["env"]["BASH_ENV"] == secretless_bash_env
-        assert step["env"]["SECRETLESS_MODE"] == secretless_mode
-        assert command_file_scrub in step["run"]
-        assert "secretless-ci-script-plan" in step["if"]
-    default_plans.append((workflow_path.name, defaults))
+protected_build = protected_doc["jobs"]["build-test"]
+protected_plan = next(
+    step for step in protected_build["steps"]
+    if step.get("name") == "Run exact credentialless consumer script plan"
+)
+assert '"--tmpfs", "/"' in protected_plan["run"]
+assert 'is_test_script = name == "test"' in protected_plan["run"]
+assert '*([] if is_test_script else ["--unshare-net"])' in protected_plan["run"]
+assert '"--unshare-net"' in protected_plan["run"]
+assert 'script_env = {' in protected_plan["run"]
+assert "candidate_service_env" in protected_plan["run"]
+assert "credential_name_pattern" in protected_plan["run"]
+assert "candidate service URL contains credential-bearing data" in protected_plan["run"]
+assert "git_metadata" in protected_plan["run"] and "git_mount_args" in protected_plan["run"]
+assert '"COREPACK_HOME": str(corepack_home) if corepack_home is not None' in protected_plan["run"]
+assert '"COREPACK_ENABLE_NETWORK": "0"' in protected_plan["run"]
+assert '"--bind" if tool_prefix == browser_cache else "--ro-bind"' in protected_plan["run"]
+assert 'from urllib.parse import parse_qsl, urlsplit' in protected_plan["run"]
+assert '"/usr/bin/python3", "-I", "-c", sandbox_entrypoint' in protected_plan["run"]
+assert "os.closerange(3, max_fd)" in protected_plan["run"]
+assert "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)" in protected_plan["run"]
+assert "BASH_ENV" in protected_plan["run"]
+assert "env.BASH_ENV" not in protected_plan["run"]
+assert '"--unshare-net"' in rebuild["run"]
+source_defaults = [
+    step for step in build["steps"]
+    if step.get("run") in (
+        "npm run build", "npm run typecheck --if-present", "npm test", "npm run lint --if-present"
+    )
+]
+assert len(source_defaults) == 4
+assert all("!(inputs.secretless-pr || inputs.secretless-trusted-ref)" in step["if"]
+           for step in source_defaults)
+protected_defaults = next(
+    step for step in protected_build["steps"]
+    if step.get("name") == "Run default build, typecheck, test, and lint plan"
+)
+assert "!(inputs.secretless-pr || inputs.secretless-trusted-ref)" in protected_defaults["if"]
+assert "env.BASH_ENV" not in protected_defaults["run"]
 
-for workflow_name, defaults in default_plans:
-    fixture = Path(sys.argv[2]) / f"default-plan-{workflow_name}"
-    bin_dir = fixture / "bin"
-    bin_dir.mkdir(parents=True)
-    command_file = fixture / "runner-env"
-    command_file.write_text("", encoding="utf-8")
-    marker = fixture / "injected-bash-env-ran"
-    attack = fixture / "injected-bash-env"
-    attack.write_text(f"touch {marker}\n", encoding="utf-8")
-    command_log = fixture / "npm-commands"
-    environment_log = fixture / "npm-command-file-env"
-    npm = bin_dir / "npm"
-    npm.write_text(
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        'printf "%s\\n" "$*" >> "$NPM_COMMAND_LOG"\n'
-        'for name in GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE '
-        'GITHUB_STEP_SUMMARY BASH_ENV; do\n'
-        '  if [[ -v "$name" ]]; then printf "%s\\n" "$name" >> "$NPM_ENV_LOG"; fi\n'
-        "done\n"
-        'if [[ -v GITHUB_ENV ]]; then printf "BASH_ENV=%s\\n" "$BASH_ENV_ATTACK" >> "$GITHUB_ENV"; fi\n',
-        encoding="utf-8",
-    )
-    npm.chmod(0o755)
-    runner_environment = os.environ.copy()
-    runner_environment.update({
-        "PATH": f"{bin_dir}:{runner_environment['PATH']}",
-        "BASH_ENV": str(attack),
-        "BASH_ENV_ATTACK": str(attack),
-        "GITHUB_ENV": str(command_file),
-        "GITHUB_PATH": str(fixture / "runner-path"),
-        "GITHUB_OUTPUT": str(fixture / "runner-output"),
-        "GITHUB_STATE": str(fixture / "runner-state"),
-        "GITHUB_STEP_SUMMARY": str(fixture / "runner-summary"),
-        "NPM_COMMAND_LOG": str(command_log),
-        "NPM_ENV_LOG": str(environment_log),
-        "SECRETLESS_MODE": "true",
-    })
-    # GitHub expands the step-level expression to this value for secretless mode.
-    runner_environment["BASH_ENV"] = "/dev/null"
-    for step in defaults:
-        result = subprocess.run(
-            ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", step["run"]],
-            cwd=fixture,
-            env=runner_environment,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 0, result.stderr
-        assert not marker.exists(), f"{workflow_name} sourced an injected BASH_ENV"
-        assert command_file.read_text(encoding="utf-8") == ""
-        assert not environment_log.exists(), "npm received a runner command-file path"
-    expected_commands = sum(
-        line.strip().startswith("npm ")
-        for step in defaults
-        for line in step["run"].splitlines()
-    )
-    assert len(command_log.read_text(encoding="utf-8").splitlines()) == expected_commands
-print("secretless default plans cannot write runner command files or inject BASH_ENV")
+fixture = Path(sys.argv[2]) / "default-plan"
+fixture.mkdir()
+bin_dir = fixture / "bin"
+bin_dir.mkdir()
+(fixture / "package.json").write_text(
+    '{"scripts":{"build":"fixture","typecheck":"fixture","test":"fixture","lint":"fixture"}}',
+    encoding="utf-8",
+)
+command_log = fixture / "npm-commands"
+npm = bin_dir / "npm"
+npm.write_text(
+    "#!/usr/bin/env bash\n"
+    "set -euo pipefail\n"
+    'printf "%s\\n" "$*" >> "$NPM_COMMAND_LOG"\n'
+    'for name in GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY; do\n'
+    '  if [[ -v "$name" ]]; then exit 9; fi\n'
+    "done\n",
+    encoding="utf-8",
+)
+npm.chmod(0o755)
+runner_environment = os.environ.copy()
+runner_environment.update({
+    "PATH": f"{bin_dir}:/usr/bin:/bin",
+    "HOME": str(fixture),
+    "NPM_COMMAND_LOG": str(command_log),
+    "CI_SCRIPT_PLAN": "",
+    "NESTED_MANIFESTS": "",
+    "RUN_DEFAULTS": "true",
+    "RUNNER_ENVIRONMENT": "github-hosted",
+    "GITHUB_WORKSPACE": str(fixture),
+    "GITHUB_OUTPUT": str(fixture / "runner-output"),
+})
+hostile_bash_env = fixture / "hostile-bash-env"
+startup_marker = fixture / "bash-env-sourced"
+hostile_bash_env.write_text(f"printf sourced > {startup_marker}\n", encoding="utf-8")
+hostile_environment = runner_environment.copy()
+hostile_environment["BASH_ENV"] = str(hostile_bash_env)
+control = subprocess.run(
+    ["bash", "--noprofile", "--norc", "-c", "true"],
+    cwd=fixture,
+    env=hostile_environment,
+    check=False,
+    capture_output=True,
+    text=True,
+)
+assert control.returncode == 0 and startup_marker.exists(), "hostile BASH_ENV control did not execute"
+startup_marker.unlink()
+runner_environment["BASH_ENV"] = plan["env"]["BASH_ENV"]
+result = subprocess.run(
+    ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", plan["run"]],
+    cwd=fixture,
+    env=runner_environment,
+    check=False,
+    capture_output=True,
+    text=True,
+)
+assert result.returncode == 0, result.stderr
+assert not startup_marker.exists(), "step-level BASH_ENV guard allowed hostile startup code"
+assert command_log.read_text(encoding="utf-8").splitlines() == [
+    "run build", "run typecheck", "run test", "run lint"
+]
+print("secretless default scripts are serialized through the sandbox runner")
 assert inputs["db-image"]["default"] == ""
 assert inputs["cache-image"]["default"] == ""
 assert next(step for step in build["steps"] if step.get("name") == "Start database service")

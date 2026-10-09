@@ -96,10 +96,10 @@ assert jobs["acquire-secretless-dependencies"]["outputs"]["transfer-encryption-k
     "${{ steps.package-secretless-transfer.outputs.encryption-key }}"
 )
 
-# A caller may declare nested script plans without a root plan, so the plan step
-# can no longer be gated on the root plan alone.
-assert "inputs.secretless-nested-manifests != ''" in plan["if"]
-assert "inputs.secretless-ci-script-plan != ''" in plan["if"]
+# The protected script runner also carries the default command plan when no root
+# plan is supplied, so it runs for every admitted secretless lane.
+assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in plan["if"]
+assert plan["env"]["RUN_DEFAULTS"] == "${{ inputs.secretless-ci-script-plan == '' }}"
 
 # The credentialless job still receives no package-read credential.
 for credential in ("GH_TOKEN", "GITHUB_TOKEN", "NODE_AUTH_TOKEN", "NPM_TOKEN"):

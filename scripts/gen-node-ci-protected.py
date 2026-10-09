@@ -675,9 +675,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
     step_name = "Run exact credentialless consumer script plan"
     plan_if = (
         "needs.eligibility.outputs.should-run != 'false' && "
-        "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
-        "(inputs.secretless-ci-script-plan != '' || "
-        "inputs.secretless-nested-manifests != '')"
+        "(inputs.secretless-pr || inputs.secretless-trusted-ref)"
     )
     step_marker = f"      - name: {step_name}\n"
     step_start = document.index(step_marker)
@@ -724,6 +722,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
           import sys
           import time
           from pathlib import Path
+          from urllib.parse import parse_qsl, urlsplit
 """
     if step.count(imports) != 1:
         raise SystemExit("protected candidate script plan imports changed")
@@ -758,8 +757,16 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                       npm_command = [node_path, str(npm_cli_candidates[0])]
               subprocess.run([*npm_command, "run", name], check=True, env=script_env, cwd=directory)
 """
+    candidate_sandbox_entrypoint = (
+        "import os, sys\n"
+        "max_fd = os.sysconf('SC_OPEN_MAX')\n"
+        "if max_fd < 3: raise SystemExit('invalid file descriptor limit')\n"
+        "os.closerange(3, max_fd)\n"
+        "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
+    )
     isolated_execution = f"""          max_cache_files = {CANDIDATE_CACHE_MAX_FILES}
           max_cache_bytes = {CANDIDATE_CACHE_MAX_BYTES}
+          sandbox_entrypoint = {candidate_sandbox_entrypoint!r}
           runner_temp_input = Path(os.environ["RUNNER_TEMP"])
           if (
               not runner_temp_input.is_absolute()
@@ -769,6 +776,42 @@ def isolate_candidate_runtime_cache(document: str) -> str:
           ):
               sys.exit("RUNNER_TEMP is not a canonical directory")
           runner_temp = runner_temp_input
+          corepack_default = Path.home() / ".cache/node/corepack"
+          configured_corepack_home = os.environ.get("COREPACK_HOME")
+          corepack_home_input = (
+              Path(configured_corepack_home) if configured_corepack_home else corepack_default
+          )
+          corepack_home = None
+          if corepack_home_input.exists() or corepack_home_input.is_symlink():
+              if (
+                  not corepack_home_input.is_absolute()
+                  or corepack_home_input.is_symlink()
+                  or not corepack_home_input.is_dir()
+                  or corepack_home_input.resolve() != corepack_home_input
+              ):
+                  sys.exit("Corepack cache is not a canonical directory")
+              expected_corepack_home = corepack_default.resolve()
+              if corepack_home_input != expected_corepack_home:
+                  sys.exit("Corepack cache is outside the runner's canonical cache path")
+              corepack_home = corepack_home_input
+          browser_cache = None
+          browser_cache_value = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+          if browser_cache_value:
+              expected_browser_cache = runner_temp / (
+                  "verjson-playwright-browsers-"
+                  + os.environ.get("GITHUB_RUN_ID", "")
+                  + "-"
+                  + os.environ.get("GITHUB_RUN_ATTEMPT", "")
+              )
+              browser_cache = Path(browser_cache_value)
+              if (
+                  browser_cache != expected_browser_cache
+                  or browser_cache.is_symlink()
+                  or not browser_cache.is_dir()
+                  or browser_cache.resolve() != browser_cache
+                  or browser_cache.parent != runner_temp
+              ):
+                  sys.exit("Playwright browser cache is not the validated job-scoped RUNNER_TEMP directory")
           changelog_ref = os.environ.get("VERJSON_CHANGELOG_CONTRACT_REF", "")
           changelog_sha256 = os.environ.get("VERJSON_CHANGELOG_CONTRACT_SHA256", "")
           if (
@@ -939,14 +982,99 @@ def isolate_candidate_runtime_cache(document: str) -> str:
             or not workspace.is_dir()
           ):
             sys.exit("candidate workspace is not a canonical directory")
+          git_metadata = workspace / ".git"
+          if (
+              git_metadata.is_symlink()
+              or not git_metadata.is_dir()
+              or git_metadata.resolve() != git_metadata
+          ):
+              sys.exit("candidate workspace Git metadata is not a canonical directory")
+          git_metadata_stat = git_metadata.stat(follow_symlinks=False)
+          if not stat.S_ISDIR(git_metadata_stat.st_mode) or git_metadata_stat.st_uid != os.getuid():
+              sys.exit("candidate workspace Git metadata has unexpected type or ownership")
+          git_metadata_identity = (
+              git_metadata_stat.st_dev,
+              git_metadata_stat.st_ino,
+              git_metadata_stat.st_uid,
+              stat.S_IMODE(git_metadata_stat.st_mode),
+          )
           if workspace == runner_temp or workspace in runner_temp.parents or runner_temp in workspace.parents:
               sys.exit("candidate workspace and RUNNER_TEMP overlap")
           if (baseline is not None and baseline.parent != runner_temp) or cache_root.parent != runner_temp:
               sys.exit("candidate cache roots are not exact RUNNER_TEMP children")
           if baseline is not None and (baseline == cache_root or baseline in cache_root.parents or cache_root in baseline.parents):
               sys.exit("candidate cache baseline and isolation root overlap")
-          if any(os.environ.get(name) for name in ("DB_HOST", "DB_PORT", "CACHE_PORT")):
-              sys.exit("protected candidate scripts do not permit shared service networking")
+          candidate_service_env = {{}}
+          blocked_service_env = {{
+              "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
+              "GITHUB_STEP_SUMMARY", "GH_TOKEN", "GITHUB_TOKEN", "NODE_AUTH_TOKEN",
+              "NPM_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+              "AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS",
+              "AZURE_CREDENTIALS", "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+              "ACTIONS_ID_TOKEN_REQUEST_URL", "BASH_ENV", "BASH_XTRACEFD", "ENV",
+              "PS4", "SHELLOPTS", "BASHOPTS", "PATH", "NODE_OPTIONS", "NODE_PATH",
+              "NODE_EXTRA_CA_CERTS", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
+              "PYTHONUSERBASE", "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
+              "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS",
+              "GIT_ASKPASS", "SSH_ASKPASS", "GIT_SSL_CAINFO", "GIT_SSL_CAPATH",
+              "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE",
+              "GCONV_PATH",
+              "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+              "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+          }}
+          blocked_service_prefixes = (
+              "GITHUB_", "RUNNER_", "ACTIONS_", "GH_", "AWS_", "GOOGLE_",
+              "AZURE_", "GCP_", "NPM_CONFIG_", "GIT_CONFIG_", "LD_", "DYLD_",
+              "POSTGRES_",
+          )
+          service_env_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+          credential_name_pattern = re.compile(
+              r"(?:PASS(?:WORD|WD)?|SECRET|TOKEN|CREDENTIAL|PRIVATE[_-]?KEY|API[_-]?KEY|AUTH)",
+              re.IGNORECASE,
+          )
+
+          def validate_candidate_service_value(name, value):
+              if credential_name_pattern.search(name):
+                  sys.exit("candidate service environment includes a credential-bearing variable")
+              if "://" not in value:
+                  return
+              try:
+                  parsed = urlsplit(value)
+                  query_names = (
+                      key for key, _value in parse_qsl(parsed.query, keep_blank_values=True)
+                  )
+              except ValueError:
+                  sys.exit("candidate service URL is malformed")
+              if parsed.username is not None or parsed.password is not None or any(
+                  credential_name_pattern.search(key) for key in query_names
+              ):
+                  sys.exit("candidate service URL contains credential-bearing data")
+
+          for service_name in ("DB_HOST", "DB_PORT", "CACHE_PORT"):
+              if service_name in os.environ:
+                  service_value = os.environ[service_name]
+                  validate_candidate_service_value(service_name, service_value)
+                  candidate_service_env[service_name] = service_value
+          for source_name in ("DB_ENV", "CACHE_ENV"):
+              for service_line in os.environ.get(source_name, "").splitlines():
+                  stripped_line = service_line.strip()
+                  if not stripped_line or stripped_line.startswith("#"):
+                      continue
+                  service_name, separator, _service_value = stripped_line.partition("=")
+                  if not separator or service_env_pattern.fullmatch(service_name) is None:
+                      sys.exit("candidate service environment is malformed")
+                  normalized_service_name = service_name.upper()
+                  if normalized_service_name.startswith("POSTGRES_"):
+                      continue
+                  if normalized_service_name in blocked_service_env or any(
+                      normalized_service_name.startswith(prefix)
+                      for prefix in blocked_service_prefixes
+                  ):
+                      sys.exit("candidate service environment includes a protected variable")
+                  if service_name in os.environ:
+                      service_value = os.environ[service_name]
+                      validate_candidate_service_value(service_name, service_value)
+                      candidate_service_env[service_name] = service_value
 
           trusted_tool_root_input = Path(os.environ.get("RUNNER_TOOL_CACHE", ""))
           if (
@@ -1165,6 +1293,8 @@ def isolate_candidate_runtime_cache(document: str) -> str:
             for executable in tool_executables.values()
             if not executable.is_relative_to("/usr")
           }}
+          if corepack_home is not None:
+            tool_prefix_candidates.add(corepack_home)
           tool_prefixes = []
           tool_prefix_identities = {{}}
 
@@ -1227,6 +1357,14 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                 "trusted tool prefix",
                 require_unwritable=trusted_tool_tree_requires_unwritable,
               )
+            elif tool_prefix == corepack_home:
+              validate_trusted_ancestry(
+                Path.home(),
+                tool_prefix,
+                (os.getuid(),),
+                "trusted Corepack cache",
+                require_unwritable=True,
+              )
             prefix_metadata = tool_prefix.stat(follow_symlinks=False)
             if not stat.S_ISDIR(prefix_metadata.st_mode):
               sys.exit("trusted tool prefix is not a directory")
@@ -1235,9 +1373,14 @@ def isolate_candidate_runtime_cache(document: str) -> str:
             # the admitted hosted tool cache is world-writable throughout by the same
             # image convention; only those prefixes relax the write-bit requirement.
             prefix_in_hosted_tool_cache = tool_prefix.is_relative_to(hosted_tool_cache_root)
+            prefix_in_corepack_cache = tool_prefix == corepack_home
             validate_trusted_tool_tree(
               tool_prefix,
-              allowed_uids=trusted_tool_uids if prefix_in_hosted_tool_cache else (0,),
+              allowed_uids=(
+                (os.getuid(),) if prefix_in_corepack_cache
+                else trusted_tool_uids if prefix_in_hosted_tool_cache
+                else (0,)
+              ),
               require_unwritable=not (
                 tool_prefix.is_relative_to("/opt/microsoft/powershell")
                 or (prefix_in_hosted_tool_cache and not trusted_tool_tree_requires_unwritable)
@@ -1325,6 +1468,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
               signal.signal(caught_signal, handle_signal)
           try:
               for index, (script_directory, name, unset_env) in enumerate(normalized):
+                  is_test_script = name == "test" or name.startswith("test:") or name.endswith(":test")
                   if baseline is not None and inventory(baseline) != baseline_inventory:
                       sys.exit("verified runtime cache changed before candidate script")
                   script_cache = cache_root / str(index)
@@ -1354,18 +1498,32 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                       inventory(script_cache) != baseline_inventory
                   ):
                       sys.exit("isolated candidate cache copy failed integrity verification")
-                  script_env = os.environ.copy()
+                  script_env = {{
+                      "CI": "true",
+                      "GITHUB_ACTIONS": "true",
+                      "GITHUB_WORKSPACE": str(workspace),
+                      "RUNNER_TEMP": str(script_tmp),
+                      "HOME": str(script_home),
+                      "TMPDIR": str(script_tmp),
+                      "COREPACK_HOME": str(corepack_home) if corepack_home is not None else str(
+                          script_home / ".cache/node/corepack"
+                      ),
+                      "COREPACK_ENABLE_NETWORK": "0",
+                      "NPM_CONFIG_CACHE": str(script_cache),
+                      "npm_config_cache": str(script_cache),
+                  }}
                   for env_name in (
-                      "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
-                      "GITHUB_STEP_SUMMARY",
+                      "GITHUB_REF", "GITHUB_REF_NAME", "GITHUB_SHA", "GITHUB_REPOSITORY",
+                      "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_JOB",
+                      "GITHUB_WORKFLOW", "GITHUB_EVENT_NAME", "RUNNER_OS", "RUNNER_ARCH",
                   ):
-                      script_env.pop(env_name, None)
+                      if env_name in os.environ:
+                          script_env[env_name] = os.environ[env_name]
+                  if browser_cache is not None:
+                      script_env["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_cache)
+                  script_env.update(candidate_service_env)
                   for env_name in unset_env:
                       script_env.pop(env_name, None)
-                  script_env["NPM_CONFIG_CACHE"] = str(script_cache)
-                  script_env["npm_config_cache"] = str(script_cache)
-                  script_env["HOME"] = str(script_home)
-                  script_env["TMPDIR"] = str(script_tmp)
                   tool_path_entries = [
                       *(str(executable.parent) for executable in tool_executables.values()),
                       "/usr/local/bin",
@@ -1384,10 +1542,12 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                       sys.exit("candidate writable mount paths overlap")
                   mount_targets = (
                       workspace,
+                      git_metadata,
                       cache_root,
                       changelog_cache_root,
                       *isolated_paths,
                       *tool_prefixes,
+                      *((browser_cache,) if browser_cache is not None else ()),
                   )
                   namespace_directories = set()
                   for target in mount_targets:
@@ -1404,11 +1564,28 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                   for directory in sorted(protected_parents, key=str):
                       chmod_args.extend(("--chmod", "0555", str(directory)))
               tool_mount_args = []
+              git_mount_args = []
               tool_prefix_fds = []
               readonly_mount_identities = dict(tool_prefix_identities)
               readonly_mount_identities[changelog_cache_root] = changelog_cache_root_identity
+              readonly_mount_identities[git_metadata] = git_metadata_identity
+              if browser_cache is not None:
+                  browser_cache_metadata = browser_cache.stat(follow_symlinks=False)
+                  if not stat.S_ISDIR(browser_cache_metadata.st_mode):
+                      sys.exit("validated Playwright browser cache changed type before namespace bind")
+                  readonly_mount_identities[browser_cache] = (
+                      browser_cache_metadata.st_dev,
+                      browser_cache_metadata.st_ino,
+                      browser_cache_metadata.st_uid,
+                      stat.S_IMODE(browser_cache_metadata.st_mode),
+                  )
               try:
-                for tool_prefix in (*tool_prefixes, changelog_cache_root):
+                for tool_prefix in (
+                    *tool_prefixes,
+                    changelog_cache_root,
+                    git_metadata,
+                    *((browser_cache,) if browser_cache is not None else ()),
+                ):
                   descriptor = os.open(
                     tool_prefix,
                     os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
@@ -1424,9 +1601,12 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                     os.close(descriptor)
                     sys.exit("verified read-only mount changed before namespace bind")
                   tool_prefix_fds.append(descriptor)
-                  tool_mount_args.extend(
-                    ("--ro-bind", f"/proc/self/fd/{{descriptor}}", str(tool_prefix))
-                  )
+                  mount_flag = "--bind" if tool_prefix == browser_cache else "--ro-bind"
+                  mount_args = (mount_flag, f"/proc/self/fd/{{descriptor}}", str(tool_prefix))
+                  if tool_prefix == git_metadata:
+                    git_mount_args.extend(mount_args)
+                  else:
+                    tool_mount_args.extend(mount_args)
               except BaseException:
                 for descriptor in tool_prefix_fds:
                   os.close(descriptor)
@@ -1440,13 +1620,13 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                               "--unshare-ipc",
                               "--unshare-uts",
                               "--unshare-cgroup-try",
-                              "--unshare-net",
                               "--disable-userns",
                               "--die-with-parent",
                               "--new-session",
                               "--cap-drop", "ALL",
                               "--tmpfs", "/",
                               "--tmpfs", "/tmp",
+                              *([] if is_test_script else ["--unshare-net"]),
                               *directory_args,
                               *chmod_args,
                               "--ro-bind", "/usr", "/usr",
@@ -1461,6 +1641,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                               "--ro-bind", "/etc/group", "/etc/group",
                               *tool_mount_args,
                               "--bind", str(workspace), str(workspace),
+                              *git_mount_args,
                               "--bind", str(script_cache), str(script_cache),
                               "--bind", str(script_home), str(script_home),
                               "--bind", str(script_tmp), str(script_tmp),
@@ -1468,6 +1649,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                               "--dev", "/dev",
                               "--chdir", str(script_directory),
                               "--",
+                              "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
                               *npm_command, "run", name,
                           ],
                           env=script_env,
@@ -1777,8 +1959,8 @@ def render() -> str:
     checkout = "        with:\n          submodules: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'false' || 'recursive' }}\n"
     document = replace_once(document, checkout, "        with:\n          ref: ${{ inputs.head-sha }}\n          submodules: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'false' || 'recursive' }}\n")
     rebuild_if = "needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && inputs.secretless-rebuild-packages != ''"
-    plan_if = "needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && (inputs.secretless-ci-script-plan != '' || inputs.secretless-nested-manifests != '')"
-    default_if = "needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')"
+    plan_if = "needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)"
+    default_if = "needs.eligibility.outputs.should-run != 'false' && !(inputs.secretless-pr || inputs.secretless-trusted-ref)"
     document = replace_once(document, "      - name: Rebuild exact approved lifecycle packages without credentials\n", verifier_step(rebuild_if) + "      - name: Rebuild exact approved lifecycle packages without credentials\n")
     document = replace_once(
         document,
@@ -1787,58 +1969,21 @@ def render() -> str:
         + verifier_step(plan_if)
         + "      - name: Run exact credentialless consumer script plan\n",
     )
-    default_commands = """      - run: |
-          if [[ "$SECRETLESS_MODE" == "true" ]]; then
-            unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY BASH_ENV
-          fi
-          npm run build
-        env:
-          BASH_ENV: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '/dev/null' || env.BASH_ENV }}
-          SECRETLESS_MODE: ${{ inputs.secretless-pr || inputs.secretless-trusted-ref }}
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-      - run: |
-          if [[ "$SECRETLESS_MODE" == "true" ]]; then
-            unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY BASH_ENV
-          fi
-          npm run typecheck --if-present
-        env:
-          BASH_ENV: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '/dev/null' || env.BASH_ENV }}
-          SECRETLESS_MODE: ${{ inputs.secretless-pr || inputs.secretless-trusted-ref }}
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-      - run: |
-          if [[ "$SECRETLESS_MODE" == "true" ]]; then
-            unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY BASH_ENV
-          fi
-          npm test
-        env:
-          BASH_ENV: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '/dev/null' || env.BASH_ENV }}
-          SECRETLESS_MODE: ${{ inputs.secretless-pr || inputs.secretless-trusted-ref }}
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-      - run: |
-          if [[ "$SECRETLESS_MODE" == "true" ]]; then
-            unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY BASH_ENV
-          fi
-          npm run lint --if-present
-        env:
-          BASH_ENV: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '/dev/null' || env.BASH_ENV }}
-          SECRETLESS_MODE: ${{ inputs.secretless-pr || inputs.secretless-trusted-ref }}
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-"""
+    default_step_start = "      - run: npm run build\n"
+    default_step_end = "      - name: Run runtime-resolved compatibility lanes without credentials\n"
     grouped_default = """      - name: Run default build, typecheck, test, and lint plan
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-        env:
-          BASH_ENV: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '/dev/null' || env.BASH_ENV }}
-          SECRETLESS_MODE: ${{ inputs.secretless-pr || inputs.secretless-trusted-ref }}
+        if: needs.eligibility.outputs.should-run != 'false' && !(inputs.secretless-pr || inputs.secretless-trusted-ref)
         run: |
-          if [[ "$SECRETLESS_MODE" == "true" ]]; then
-            unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY BASH_ENV
-          fi
           npm run build
           npm run typecheck --if-present
           npm test
           npm run lint --if-present
 """
-    document = replace_once(document, default_commands, grouped_default)
+    if document.count(default_step_start) != 1 or document.count(default_step_end) != 1:
+        raise SystemExit("protected node-ci default consumer steps drifted")
+    default_start = document.index(default_step_start)
+    default_end = document.index(default_step_end, default_start)
+    document = document[:default_start] + grouped_default + document[default_end:]
     compatibility_if = (
         "needs.eligibility.outputs.should-run != 'false' && "
         "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
@@ -1876,11 +2021,6 @@ def render() -> str:
         hosted_provisioning_if,
         "needs.eligibility.outputs.should-run != 'false' && "
         "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
-        "(inputs.protected-type-surface-declaration-path != '' || "
-        "inputs.secretless-compatibility-ranges != '' || "
-        "inputs.secretless-ci-script-plan != '' || "
-        "inputs.secretless-nested-manifests != '' || "
-        "inputs.secretless-rebuild-packages != '') && "
         "runner.environment == 'github-hosted'",
     )
     document = remove_step(document, "Install schema submodule deps")

@@ -32,8 +32,21 @@ smuggling, and database endpoint overrides from the cache service are rejected
 before side effects when the database service is enabled. Cache-only callers
 retain `DB_HOST` and `DB_PORT` as ordinary configuration.
 
-Secretless default build, typecheck, test, and lint scripts run with `BASH_ENV`
-neutralized before shell startup and without GitHub command-file paths. This
-prevents a consumer script from planting a startup file or changing later CI
-steps. The generated protected workflow carries the same guard, covered by a
-hostile npm-script regression test.
+The generated protected workflow runs explicit, nested, and default consumer
+scripts one at a time inside Bubblewrap. It gives each script a fresh npm cache,
+uses a minimal environment without runner command-file paths or `BASH_ENV`, and
+keeps `.git` read-only while leaving build outputs writable. A trusted Python
+bootstrap closes all inherited mount descriptors before npm starts. Only the
+validated, job-scoped Playwright cache is writable for browser installation;
+the workflow bounds its files and bytes before saving it. Scripts named `test`,
+`test:*`, or `*:test` share the GitHub-hosted network for configured services;
+all other scripts have network access disabled. Only explicitly configured
+database/cache variables pass through alongside public CI metadata. Credential
+variable names and URLs containing user information or credential query keys
+are rejected, and service values must remain test-only and contain no secrets.
+The canonical Corepack cache is mounted read-only with downloads disabled so
+pnpm scripts use the pinned manager already installed by dependency restoration.
+Lifecycle rebuilds keep their separate network-isolated sandbox. Contract tests
+cover default-plan execution, hostile `BASH_ENV`, a real Bubblewrap inherited-FD
+write probe, service environment filtering, runner gating, and npm/Corepack-pnpm
+rebuild paths.

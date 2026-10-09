@@ -426,6 +426,84 @@ def assert_bubblewrap_arguments(arguments_path, workspace, package_manager):
         assert "/tmp/corepack" not in receipt["resolved_sources"]
 
 
+def run_consumer_descriptor_probe():
+    bubblewrap = Path("/usr/bin/bwrap")
+    assert bubblewrap.is_file(), "real Bubblewrap is required for the consumer descriptor probe"
+    with tempfile.TemporaryDirectory(dir=str(Path.home())) as temporary:
+        fixture = Path(temporary)
+        workspace = fixture / "workspace"
+        runner_temp = fixture / "runner-temp"
+        command_file = runner_temp / "_runner_file_commands" / "set_env_probe"
+        (workspace / ".git").mkdir(parents=True)
+        command_file.parent.mkdir(parents=True)
+        command_file.write_text("ORIGINAL=1\n", encoding="utf-8")
+        git_descriptor = os.open(workspace / ".git", os.O_RDONLY | os.O_DIRECTORY)
+        probe = (
+            "import json, os\n"
+            "from pathlib import Path\n"
+            f"target = {str(command_file)!r}\n"
+            "writes = []\n"
+            "for name in os.listdir('/proc/self/fd'):\n"
+            "    descriptor = Path('/proc/self/fd') / name\n"
+            "    try:\n"
+            "        if not descriptor.is_dir():\n"
+            "            continue\n"
+            "        source = os.readlink(descriptor)\n"
+            "        relative = os.path.relpath(target, source)\n"
+            "        with (descriptor / relative).open('a', encoding='utf-8') as stream:\n"
+            "            stream.write('COMPROMISED=1\\n')\n"
+            "        writes.append(name)\n"
+            "    except OSError:\n"
+            "        pass\n"
+            "print(json.dumps({'writes': writes}))\n"
+        )
+        common_arguments = [
+            str(bubblewrap),
+            "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+            "--unshare-cgroup-try", "--disable-userns", "--die-with-parent", "--new-session",
+            "--cap-drop", "ALL", "--tmpfs", "/", "--tmpfs", "/tmp", "--dir", "/workspace",
+            "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin",
+            "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64",
+            "--bind", str(workspace), "/workspace",
+            "--ro-bind", f"/proc/self/fd/{git_descriptor}", "/workspace/.git",
+            "--proc", "/proc", "--dev", "/dev", "--chdir", "/workspace", "--",
+        ]
+        environment = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"}
+        try:
+            vulnerable_control = subprocess.run(
+                [*common_arguments, "/usr/bin/python3", "-I", "-c", probe],
+                pass_fds=(git_descriptor,),
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert vulnerable_control.returncode == 0, vulnerable_control.stderr
+            assert json.loads(vulnerable_control.stdout)["writes"], (
+                "hostile descriptor control did not reach the sibling command file"
+            )
+            assert "COMPROMISED=1" in command_file.read_text(encoding="utf-8")
+
+            command_file.write_text("ORIGINAL=1\n", encoding="utf-8")
+            hardened = subprocess.run(
+                [
+                    *common_arguments,
+                    "/usr/bin/python3", "-I", "-c", EXPECTED_SANDBOX_ENTRYPOINT,
+                    "/usr/bin/python3", "-I", "-c", probe,
+                ],
+                pass_fds=(git_descriptor,),
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert hardened.returncode == 0, hardened.stderr
+            assert json.loads(hardened.stdout)["writes"] == [], hardened.stdout
+            assert command_file.read_text(encoding="utf-8") == "ORIGINAL=1\n"
+        finally:
+            os.close(git_descriptor)
+
+
 def main():
     invalid_values = (
         {"NODE_AUTH_TOKEN": "secret"},
@@ -467,7 +545,7 @@ def main():
         assert build["steps"].index(install) < build["steps"].index(cleanup) < build["steps"].index(step)
         assert 'rm -rf "$SECRETLESS_CACHE_DIR" "$PNPM_STORE_DIR"' in install["run"]
         assert "PNPM_STORE_DIR" in cleanup["env"]
-        assert "inputs.secretless-rebuild-packages != ''" in provision["if"]
+        assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in provision["if"]
         assert "runner.environment == 'github-hosted'" in provision["if"]
         assert provision["shell"] == "bash"
         assert 'if [ "${RUNNER_OS:-}" != "Linux" ]; then' in provision["run"]
@@ -494,6 +572,26 @@ def main():
         assert "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)" in step["run"]
         assert '"GITHUB_ENV"' not in step["run"]
         if workflow_path == PROTECTED_WORKFLOW:
+            script_plan = next(
+                candidate
+                for candidate in build["steps"]
+                if candidate.get("name") == "Run exact credentialless consumer script plan"
+            )
+            assert 'is_test_script = name == "test"' in script_plan["run"]
+            assert '*([] if is_test_script else ["--unshare-net"])' in script_plan["run"]
+            assert '"--unshare-net"' in script_plan["run"]
+            assert '"--ro-bind"' in script_plan["run"]
+            assert '"--bind" if tool_prefix == browser_cache else "--ro-bind"' in script_plan["run"]
+            assert "git_metadata" in script_plan["run"]
+            assert "script_env = {" in script_plan["run"]
+            assert "os.environ.copy()" not in script_plan["run"]
+            assert "candidate_service_env" in script_plan["run"]
+            assert "credential_name_pattern" in script_plan["run"]
+            assert "candidate service URL contains credential-bearing data" in script_plan["run"]
+            assert '"COREPACK_ENABLE_NETWORK": "0"' in script_plan["run"]
+            assert '"COREPACK_HOME": str(corepack_home) if corepack_home is not None' in script_plan["run"]
+            assert "RUN_DEFAULTS" in script_plan["env"]
+            assert '"--unshare-net"' in step["run"]
             steps = build["steps"]
             script_names = {
                 "Run exact credentialless consumer script plan",
@@ -615,6 +713,7 @@ def main():
                     assert result.returncode == 0, result.stderr
                     assert_rebuild_capture(capture, package_manager, "skip")
                     assert_no_lifecycle_command_file_access(command_files, marker)
+        run_consumer_descriptor_probe()
 
     print("secretless rebuild environment contract passed")
 

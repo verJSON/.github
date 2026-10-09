@@ -5040,10 +5040,14 @@ jobs:
           os.execve(str(bubblewrap), arguments, {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"})
           PY
       - name: Run exact credentialless consumer script plan
-        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && (inputs.secretless-ci-script-plan != '' || inputs.secretless-nested-manifests != '')
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         env:
           CI_SCRIPT_PLAN: ${{ inputs.secretless-ci-script-plan }}
           NESTED_MANIFESTS: ${{ inputs.secretless-nested-manifests }}
+          RUN_DEFAULTS: ${{ inputs.secretless-ci-script-plan == '' }}
+          DB_ENV: ${{ inputs.db-env }}
+          CACHE_ENV: ${{ inputs.cache-env }}
+          BASH_ENV: /dev/null
         run: |
           unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY
           python3 - <<'PY'
@@ -5139,6 +5143,15 @@ jobs:
                       normalized.extend(normalize_plan(
                           nested_plan, nested_directory, f"{nested_path} scriptPlan",
                           f"{nested_path}/package.json"))
+          if os.environ.get("RUN_DEFAULTS") == "true":
+              root_scripts = json.loads(
+                  (checkout_root / "package.json").read_text(encoding="utf-8")
+              ).get("scripts", {})
+              if not isinstance(root_scripts, dict):
+                  sys.exit("package.json scripts must be an object")
+              for name in ("build", "typecheck", "test", "lint"):
+                  if name in ("build", "test") or name in root_scripts:
+                      normalized.append((checkout_root, name, []))
           for directory, name, unset_env in normalized:
               script_env = os.environ.copy()
               for env_name in (
@@ -5169,42 +5182,14 @@ jobs:
                       npm_command = [node_path, str(npm_cli_candidates[0])]
               subprocess.run([*npm_command, "run", name], check=True, env=script_env, cwd=directory)
           PY
-      - run: |
-          if [[ "$SECRETLESS_MODE" == "true" ]]; then
-            unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY BASH_ENV
-          fi
-          npm run build
-        env:
-          BASH_ENV: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '/dev/null' || env.BASH_ENV }}
-          SECRETLESS_MODE: ${{ inputs.secretless-pr || inputs.secretless-trusted-ref }}
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-      - run: |
-          if [[ "$SECRETLESS_MODE" == "true" ]]; then
-            unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY BASH_ENV
-          fi
-          npm run typecheck --if-present
-        env:
-          BASH_ENV: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '/dev/null' || env.BASH_ENV }}
-          SECRETLESS_MODE: ${{ inputs.secretless-pr || inputs.secretless-trusted-ref }}
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-      - run: |
-          if [[ "$SECRETLESS_MODE" == "true" ]]; then
-            unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY BASH_ENV
-          fi
-          npm test
-        env:
-          BASH_ENV: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '/dev/null' || env.BASH_ENV }}
-          SECRETLESS_MODE: ${{ inputs.secretless-pr || inputs.secretless-trusted-ref }}
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-      - run: |
-          if [[ "$SECRETLESS_MODE" == "true" ]]; then
-            unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY BASH_ENV
-          fi
-          npm run lint --if-present
-        env:
-          BASH_ENV: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && '/dev/null' || env.BASH_ENV }}
-          SECRETLESS_MODE: ${{ inputs.secretless-pr || inputs.secretless-trusted-ref }}
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
+      - run: npm run build
+        if: needs.eligibility.outputs.should-run != 'false' && !(inputs.secretless-pr || inputs.secretless-trusted-ref)
+      - run: npm run typecheck --if-present
+        if: needs.eligibility.outputs.should-run != 'false' && !(inputs.secretless-pr || inputs.secretless-trusted-ref)
+      - run: npm test
+        if: needs.eligibility.outputs.should-run != 'false' && !(inputs.secretless-pr || inputs.secretless-trusted-ref)
+      - run: npm run lint --if-present
+        if: needs.eligibility.outputs.should-run != 'false' && !(inputs.secretless-pr || inputs.secretless-trusted-ref)
       - name: Run runtime-resolved compatibility lanes without credentials
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && inputs.secretless-compatibility-ranges != ''
         env:
