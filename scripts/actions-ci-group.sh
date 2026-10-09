@@ -46,6 +46,9 @@ case "$command_parallelism" in
 esac
 
 declare -a commands=()
+declare -A command_index_by_pid=()
+declare -A worker_wait_status_by_index=()
+worker_wait_failures=0
 while IFS=$'\t' read -r command_group command; do
   case "$command_group" in
     ''|\#*) continue ;;
@@ -91,28 +94,94 @@ run_command() {
   printf '%s\t%s\n' "$status" "$elapsed" >"$tmp/$index.status"
 }
 
+record_worker_wait() {
+  local finished_pid="$1" worker_status="$2"
+  local index=''
+  if [ -n "$finished_pid" ]; then
+    index="${command_index_by_pid[$finished_pid]:-}"
+  fi
+  if [ -z "$finished_pid" ] || [ -z "$index" ]; then
+    worker_wait_failures=$((worker_wait_failures + 1))
+  elif [ "$worker_status" -ne 0 ]; then
+    worker_wait_status_by_index["$index"]="$worker_status"
+  fi
+}
+
+wait_for_worker() {
+  local finished_pid='' worker_status=0
+  if wait -n -p finished_pid; then
+    :
+  else
+    worker_status=$?
+  fi
+  record_worker_wait "$finished_pid" "$worker_status"
+}
+
 active=0
 for index in "${!commands[@]}"; do
   while [ "$active" -ge "$command_parallelism" ]; do
-    wait -n || true
+    wait_for_worker
     active=$((active - 1))
   done
   printf 'running actions-ci command %s/%s in %s: %s\n' \
     "$((index + 1))" "${#commands[@]}" "$group" "${commands[$index]}"
   run_command "$index" "${commands[$index]}" &
+  command_index_by_pid["$!"]="$index"
   active=$((active + 1))
 done
 
 while [ "$active" -gt 0 ]; do
-  wait -n || true
+  wait_for_worker
   active=$((active - 1))
 done
 
 failures=0
 for index in "${!commands[@]}"; do
-  IFS=$'\t' read -r status elapsed <"$tmp/$index.status"
+  status_file="$tmp/$index.status"
+  log_file="$tmp/$index.log"
   printf '::group::%s\n' "${commands[$index]}"
-  cat "$tmp/$index.log"
+  if [ ! -f "$status_file" ] || [ ! -f "$log_file" ]; then
+    printf '::error::group=%s command=%q worker did not produce complete result files\n' \
+      "$group" "${commands[$index]}"
+    if [ -f "$log_file" ] && ! cat -- "$log_file"; then
+      printf '::error::group=%s command=%q log could not be read\n' \
+        "$group" "${commands[$index]}"
+    fi
+    printf 'actions-ci command group=%s status=missing elapsed=unknown command=%q\n' \
+      "$group" "${commands[$index]}"
+    printf '::endgroup::\n'
+    failures=$((failures + 1))
+    continue
+  fi
+
+  status=''
+  elapsed=''
+  if ! IFS=$'\t' read -r status elapsed <"$status_file" \
+    || [[ ! "$status" =~ ^[0-9]+$ || ! "$elapsed" =~ ^[0-9]+$ ]]; then
+    printf '::error::group=%s command=%q worker result is malformed\n' \
+      "$group" "${commands[$index]}"
+    if ! cat -- "$log_file"; then
+      printf '::error::group=%s command=%q log could not be read\n' \
+        "$group" "${commands[$index]}"
+    fi
+    printf 'actions-ci command group=%s status=invalid elapsed=unknown command=%q\n' \
+      "$group" "${commands[$index]}"
+    printf '::endgroup::\n'
+    failures=$((failures + 1))
+    continue
+  fi
+
+  if ! cat -- "$log_file"; then
+    printf '::error::group=%s command=%q log could not be read\n' \
+      "$group" "${commands[$index]}"
+    [ "$status" -ne 0 ] || status=1
+  fi
+  worker_status="${worker_wait_status_by_index[$index]:-0}"
+  if [ "$worker_status" -ne 0 ]; then
+    printf '::error::group=%s command=%q worker exited with status=%d\n' \
+      "$group" "${commands[$index]}" "$worker_status"
+    [ "$status" -ne 0 ] || status="$worker_status"
+  fi
 
   if [ "$status" -ne 0 ]; then
     if [ -n "$command_budget" ] \
@@ -134,6 +203,12 @@ for index in "${!commands[@]}"; do
     "$group" "$status" "$elapsed" "${commands[$index]}"
   printf '::endgroup::\n'
 done
+
+if [ "$worker_wait_failures" -ne 0 ]; then
+  printf '::error::actions-ci group=%s could not identify %d completed worker(s)\n' \
+    "$group" "$worker_wait_failures"
+  failures=$((failures + worker_wait_failures))
+fi
 
 if [ "$failures" -ne 0 ]; then
   printf '%d command(s) failed in actions-ci group %s\n' "$failures" "$group" >&2

@@ -65,7 +65,10 @@ if calls != expected_calls:
     )
 
 width = 233
-owners = {index: [] for index in range(1, calls + 1)}
+# Some declarations expand into multiple executions. Pin the runtime inventory
+# too; the caller suite requires exactly one selected case in every shard.
+expanded_cases = 233
+owners = {index: [] for index in range(1, expanded_cases + 1)}
 for shard_id in range(1, width + 1):
     script = f'''
 source "$SHARD"
@@ -75,7 +78,7 @@ caller_case_reserved_count=0
 caller_adopter_cases_seen=0
 CHANGELOG_CALLER_CONTRACT_SHARD={shard_id}
 selected=""
-for index in $(seq 1 {calls}); do
+for index in $(seq 1 {expanded_cases}); do
   case_id=ignored
   case "$index" in
     1|2) case_id=adopter ;;
@@ -110,6 +113,13 @@ def expected_owner(index):
 bad = [str(index) for index, found in owners.items() if found != [expected_owner(index)]]
 if bad:
     raise SystemExit("shard map is not a partition: " + ", ".join(bad[:8]))
+empty_shards = [
+    shard_id
+    for shard_id in range(1, width + 1)
+    if not any(found == [shard_id] for found in owners.values())
+]
+if empty_shards:
+    raise SystemExit("caller-contract shards own no case: " + ", ".join(map(str, empty_shards)))
 
 manifest_text = open(manifest, encoding="utf-8").read().splitlines()
 expected = {
@@ -129,7 +139,10 @@ if any(
     for line in manifest_text
 ):
     raise SystemExit("manifest still runs the caller contract without a shard or generator-only mode")
-print(f"ok   - {calls} caller-contract declarations partition across {width} shards")
+print(
+    f"ok   - {calls} caller-contract declarations expand to {expanded_cases} "
+    f"single-case executions across {width} shards"
+)
 PY
 
 sha="$(git -C "$repo_root" rev-parse HEAD)"

@@ -21,7 +21,9 @@ case "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" in
 esac
 caller_case_count=0
 caller_case_ran=0
+# shellcheck disable=SC2034 # Updated by the sourced shard helper.
 caller_case_reserved_count=0
+# shellcheck disable=SC2034 # Updated by the sourced shard helper.
 caller_adopter_cases_seen=0
 caller_assertions_suspended=0
 gen="$repo_root/scripts/gen-changelog-caller.sh"
@@ -5967,6 +5969,10 @@ SCHED_SCRIPT
 drain_adopter_jobs
 if [ "$caller_case_count" -lt 1 ]; then
   fail "changelog caller contract recorded no cases"
+fi
+if [ "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}" != all ] \
+  && [ "$caller_case_ran" -ne 1 ]; then
+  fail "caller-contract shard ${CHANGELOG_CALLER_CONTRACT_SHARD} ran $caller_case_ran cases; expected exactly one"
 fi
 [ "$fails" -eq 0 ] || exit 1
 echo "All tests passed."

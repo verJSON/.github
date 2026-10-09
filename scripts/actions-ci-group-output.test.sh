@@ -68,6 +68,30 @@ else
   fail "a command inside its budget failed the group"
 fi
 
+mkdir -p "$tmp/single-bin"
+cat >"$tmp/single-bin/nproc" <<'EOF'
+#!/usr/bin/env bash
+printf '1\n'
+EOF
+chmod +x "$tmp/single-bin/nproc"
+cat >"$tmp/worker-dies.tsv" <<'EOF'
+platform	true
+platform	kill -KILL "$PPID"
+EOF
+
+if ACTIONS_CI_COMMAND_BUDGET_SECONDS='' \
+  ACTIONS_CI_GROUP_MANIFEST="$tmp/worker-dies.tsv" \
+  PATH="$tmp/single-bin:$PATH" bash "$runner" platform \
+  >"$tmp/worker-dies.out" 2>"$tmp/worker-dies.err"; then
+  fail "the group runner accepted a worker that died before writing its result"
+elif grep -q 'worker did not produce complete result files' "$tmp/worker-dies.out" \
+  && grep -q '1 command(s) failed' "$tmp/worker-dies.err"; then
+  pass "a killed worker without complete result files fails the group"
+else
+  printf '%s\n' "$tmp/worker-dies.out" "$tmp/worker-dies.err" >&2
+  fail "a killed worker was not diagnosed as a missing result"
+fi
+
 mkdir -p "$tmp/bin"
 cat >"$tmp/bin/nproc" <<'EOF'
 #!/usr/bin/env bash
