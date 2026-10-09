@@ -25,7 +25,6 @@ platform	python3 scripts/ci-gate/compatibility-sandbox-acquirer.test.py
 platform	bash scripts/ci-gate/node-ci-secretless-pnpm.test.sh
 platform	bash scripts/ci-gate/node-ci-secretless-pnpm-install.test.sh
 platform	bash scripts/ci-gate/node-ci-secretless-trusted-ref.test.sh
-platform	bash scripts/ci-gate/node-ci-secretless-consumer.test.sh
 platform	bash scripts/ci-gate/node-ci-secretless-transfer.test.sh
 platform	bash scripts/ci-gate/node-ci-secretless-nested-manifests.test.sh
 platform	bash scripts/immutable-release-docs.test.sh

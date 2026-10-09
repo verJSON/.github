@@ -108,6 +108,10 @@ def run_rebuild(
         "from pathlib import Path\n"
         "import re\n"
         "import sys\n"
+        "invocation = [Path(sys.argv[0]).name, *sys.argv[1:]]\n"
+        "with Path('node_modules/.package-manager-invocations.jsonl')"
+        ".open('a', encoding='utf-8') as log:\n"
+        "    log.write(json.dumps(invocation) + '\\n')\n"
         "\n"
         f"sensitive = {SENSITIVE_ENV!r}\n"
         "visible = set()\n"
@@ -145,7 +149,7 @@ def run_rebuild(
         + "hidden_path_writes = locals().get('hidden_path_writes', [])\n"
         "Path('node_modules/.contract-capture.json').write_text(json.dumps({\n"
         "    'onnxruntime_node_install': os.environ.get('ONNXRUNTIME_NODE_INSTALL', '<unset>'),\n"
-        "    'argv': [Path(sys.argv[0]).name, *sys.argv[1:]],\n"
+        "    'argv': invocation,\n"
         "    'rebuild_env': os.environ.get('REBUILD_ENV', '<unset>'),\n"
         "    'visible_command_files': sorted(name for name in os.environ if name in "
         f"{COMMAND_FILE_ENV!r}),\n"
@@ -186,6 +190,7 @@ def run_rebuild(
         (workspace / "pnpm-lock.yaml").write_text(yaml.safe_dump(lock), encoding="utf-8")
     (workspace / "node_modules/onnxruntime-node").mkdir(parents=True, exist_ok=True)
     capture = workspace / "node_modules/.contract-capture.json"
+    invocation_log = workspace / "node_modules/.package-manager-invocations.jsonl"
     malicious_bash_env = workspace / "node_modules/malicious-bash-env"
     marker = workspace / "node_modules/later-step-token-exposed"
     malicious_bash_env.write_text(
@@ -196,10 +201,16 @@ def run_rebuild(
     for command_file in command_files.values():
         command_file.write_text("ORIGINAL=preserved\n", encoding="utf-8")
     capture.unlink(missing_ok=True)
+    invocation_log.unlink(missing_ok=True)
     marker.unlink(missing_ok=True)
 
     bwrap_stub = stub / "bwrap"
     if not real_bwrap:
+        if package_manager == "npm":
+            expected_lifecycle = ["npm", "rebuild"]
+        else:
+            expected_lifecycle = ["corepack", "pnpm", "rebuild"]
+        expected_lifecycle.extend(line for line in rebuild_packages.splitlines() if line)
         bwrap_stub.write_text(
             f"#!{sys.executable}\n"
             "import json\n"
@@ -232,12 +243,23 @@ def run_rebuild(
             "        index += 1\n"
             "if workspace is None:\n"
             "    raise SystemExit('workspace bind missing')\n"
-            f"Path(__file__).with_name('bwrap-arguments.json').write_text(json.dumps({{'options': options, 'resolved_sources': resolved_sources}}))\n"
             "os.chdir(workspace)\n"
             "environment['PATH'] = environment['PATH'].replace('/opt/verjson-node-toolchain/bin', "
             f"{str(tool_bin)!r})\n"
             "environment['TEST_HARNESS_PID'] = str(os.getppid())\n"
             "command = arguments[separator + 1:]\n"
+            "if len(command) < 4 or command[:2] != ['/usr/bin/python3', '-c']:\n"
+            "    raise SystemExit('trusted Python bootstrap is missing')\n"
+            "bootstrap_source = command[2]\n"
+            "if 'os.closerange(3, max_fd)' not in bootstrap_source:\n"
+            "    raise SystemExit('trusted bootstrap does not close inherited descriptors')\n"
+            "if 'os.execvpe(sys.argv[1], sys.argv[1:], os.environ)' not in bootstrap_source:\n"
+            "    raise SystemExit('trusted bootstrap does not hand off to the lifecycle command')\n"
+            f"expected_lifecycle = {expected_lifecycle!r}\n"
+            "if command[3:] != expected_lifecycle:\n"
+            "    raise SystemExit(f'unexpected lifecycle command: {command[3:]!r}')\n"
+            "arguments_receipt = {'options': options, 'resolved_sources': resolved_sources, 'command': command}\n"
+            "Path(__file__).with_name('bwrap-arguments.json').write_text(json.dumps(arguments_receipt))\n"
             "os.execvpe(command[0], command, environment)\n",
             encoding="utf-8",
         )
@@ -330,12 +352,25 @@ def assert_rebuild_capture(capture, package_manager, onnx_value):
     assert all(observed.get(key) == value for key, value in expected.items() if key != "readable_processes"), (
         f"unexpected package-manager execution environment: {observed!r}"
     )
+    invocation_log = capture.with_name(".package-manager-invocations.jsonl")
+    invocations = [
+        json.loads(line) for line in invocation_log.read_text(encoding="utf-8").splitlines()
+    ]
+    assert invocations == [expected["argv"]], f"unexpected package-manager invocations: {invocations!r}"
     assert observed["readable_processes"], "process ancestry scan inspected no environments"
 
 
 def assert_bubblewrap_arguments(arguments_path, workspace, package_manager):
     receipt = json.loads(arguments_path.read_text(encoding="utf-8"))
     arguments = receipt["options"]
+    expected_lifecycle = ["npm", "rebuild", "onnxruntime-node"] if package_manager == "npm" else [
+        "corepack", "pnpm", "rebuild", "onnxruntime-node"
+    ]
+    command = receipt["command"]
+    assert command[:2] == ["/usr/bin/python3", "-c"]
+    assert "os.closerange(3, max_fd)" in command[2]
+    assert "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)" in command[2]
+    assert command[3:] == expected_lifecycle
     for option in (
         "--unshare-user",
         "--unshare-pid",

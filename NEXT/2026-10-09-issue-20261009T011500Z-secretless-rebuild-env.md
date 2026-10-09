@@ -20,4 +20,4 @@ runner's canonical Corepack cache. Protected identity checks run before
 untrusted scripts so command-file changes cannot inject code into a later token
 step. GitHub-hosted non-Linux runners fail with an explicit platform error.
 Tests cover npm and pnpm, host process scans, and writes to known host
-command-file paths. The explicit hosted Actions CI lane runs the inherited-descriptor write probe against the verified Bubblewrap binary; persistent fastlane groups keep the deterministic command stub.
+command-file paths. The explicit hosted Actions CI lane runs the inherited-descriptor write probe and consumer sandbox harness against the verified Bubblewrap binary; persistent fastlane groups keep the deterministic command stubs.
