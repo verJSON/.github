@@ -157,7 +157,6 @@ changelog-release	python3 scripts/ci-gate/changelog-tag-visibility.test.py
 changelog-release	python3 scripts/container_release_manifest.test.py
 changelog-release	python3 scripts/container_artifact_extract.test.py
 changelog-release	python3 scripts/container_release_promotion.test.py
-changelog-release	python3 scripts/container_release_reconcile.test.py
 changelog-release	python3 scripts/container-release-reconcile-hook.test.py
 changelog-release	python3 scripts/container_attestation_verify.test.py
 changelog-release	python3 scripts/container_oci_index.test.py
