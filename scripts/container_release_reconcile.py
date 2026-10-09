@@ -31,6 +31,11 @@ GIT_FILESYSTEM_SURFACES = (
     "shallow",
     "objects/info/alternates",
     "objects/info/http-alternates",
+    "MERGE_HEAD",
+    "MERGE_MSG",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "SQUASH_MSG",
 )
 # Surfaces the release engine itself owns, or that decide what code runs with the
 # release App token. Reconciliation may never be pointed at any of them.

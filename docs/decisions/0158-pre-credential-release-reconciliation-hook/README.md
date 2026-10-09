@@ -99,10 +99,11 @@ and git reads `$HOME/.config/git/config` too.
 
 **The Git control surface is fingerprinted before and after the hook.** The validator records
 the `.git` pointer, `config`, `config.worktree`, `info/exclude`, `info/grafts`, `shallow`,
-object alternates, every file under `hooks/` (content *and* executable bit), index entries
-and flags, `HEAD`, and the complete refs listing — for both the release checkout and the
-pinned contract checkout, resolving each `--absolute-git-dir` from the trusted pre-hook
-state. Any replacement ref, including one that existed before the hook, fails closed. The
+object alternates, merge/cherry-pick/revert state including `MERGE_HEAD`, every file under
+`hooks/` (content *and* executable bit), index entries and flags, `HEAD`, and the complete
+refs listing — for both the release checkout and the pinned contract checkout, resolving
+each `--absolute-git-dir` from the trusted pre-hook state. Any replacement ref, including
+one that existed before the hook, fails closed. The
 first post-hook comparison reads these filesystem surfaces directly and rejects any change
 before invoking Git. This ordering matters: if the hook changed `.git/config` to set
 `core.fsmonitor`, a Git probe could otherwise execute that helper outside Bubblewrap before

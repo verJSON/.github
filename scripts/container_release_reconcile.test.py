@@ -508,6 +508,19 @@ class ReconcileTest(unittest.TestCase):
         self.assertIn("Git control surface", result.stderr)
         self.assertIn("shallow", result.stderr)
 
+    def test_rejects_merge_state_that_would_add_an_unreviewed_release_parent(self):
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "git rev-parse HEAD^ > .git/MERGE_HEAD\n"
+        )
+
+        result = self.fixture.run()
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("Git control surface", result.stderr)
+        self.assertIn("MERGE_HEAD", result.stderr)
+
     def test_rejects_a_hook_that_installs_a_git_replacement_ref(self):
         git(self.fixture.repo, "commit", "--allow-empty", "-qm", "second commit")
         self.fixture.write_hook(
