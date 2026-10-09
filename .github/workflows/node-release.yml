@@ -286,9 +286,11 @@ jobs:
           require("fs").appendFileSync(process.env.GITHUB_OUTPUT, `retention-targets=${JSON.stringify(targets)}\n`);
           NODE
       - name: Install dependencies
-        run: bash scripts/install-node-release-dependencies.sh
+        run: npm ci --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+      - name: Run dependency lifecycle scripts without credentials
+        run: npm ci --prefer-offline
       - name: Prepare release package metadata
         env:
           PACKAGE_VERSION: ${{ steps.release-tag.outputs.package-version }}

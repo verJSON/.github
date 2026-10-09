@@ -32,10 +32,16 @@ def main():
         r"(?ms)^      - name: Install dependencies\n(?P<step>.*?)(?=^      - name: |\Z)",
         workflow,
     )
-    assert install_step, "node-release workflow is missing its dependency install step"
-    assert "run: bash scripts/install-node-release-dependencies.sh" in install_step["step"]
+    lifecycle_step = re.search(
+        r"(?ms)^      - name: Run dependency lifecycle scripts without credentials\n(?P<step>.*?)(?=^      - name: |\Z)",
+        workflow,
+    )
+    assert install_step, "node-release workflow is missing its dependency acquisition step"
+    assert lifecycle_step, "node-release workflow is missing its tokenless lifecycle step"
+    assert "run: npm ci --ignore-scripts" in install_step["step"]
     assert "NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}" in install_step["step"]
-    assert "run: npm ci" not in install_step["step"]
+    assert "run: npm ci --prefer-offline" in lifecycle_step["step"]
+    assert "NODE_AUTH_TOKEN" not in lifecycle_step["step"]
 
     lifecycle_recorder = (
         "const fs = require('node:fs');\n"
@@ -43,8 +49,22 @@ def main():
         "const tokenEnvKeys = Object.entries(process.env)\n"
         "  .filter(([, value]) => typeof value === 'string' && value.includes('synthetic-package-token'))\n"
         "  .map(([key]) => key);\n"
+        "const tokenAncestorPids = [];\n"
+        "let parentPid = process.ppid;\n"
+        "while (parentPid > 1) {\n"
+        "  let parentEnvironment;\n"
+        "  let parentStatus;\n"
+        "  try {\n"
+        "    parentEnvironment = fs.readFileSync(`/proc/${parentPid}/environ`, 'utf8').split('\\0');\n"
+        "    parentStatus = fs.readFileSync(`/proc/${parentPid}/status`, 'utf8');\n"
+        "  } catch { break; }\n"
+        "  if (parentEnvironment.includes('NODE_AUTH_TOKEN=synthetic-package-token')) tokenAncestorPids.push(parentPid);\n"
+        "  const parentPidMatch = parentStatus.match(/^PPid:\\s*(\\d+)/m);\n"
+        "  if (!parentPidMatch) break;\n"
+        "  parentPid = Number(parentPidMatch[1]);\n"
+        "}\n"
         "fs.appendFileSync(process.env.LIFECYCLE_LOG, "
-        "`${process.env.npm_package_name}:${process.argv[2]}:${token}:${JSON.stringify(tokenEnvKeys)}\\n`);\n"
+        "`${process.env.npm_package_name}:${process.argv[2]}:${token}:${JSON.stringify(tokenEnvKeys)}:${JSON.stringify(tokenAncestorPids)}\\n`);\n"
     )
     root_scripts = {
         hook: f"node record-lifecycle.cjs root-{hook}"
@@ -155,18 +175,17 @@ def main():
             "REAL_NPM": real_npm,
             "NPM_TRACE": str(npm_trace),
         }
-        run(
-            ["bash", str(repo_root / "scripts/install-node-release-dependencies.sh")],
-            cwd=root,
-            env=helper_env,
-        )
+        run(["npm", "ci", "--ignore-scripts"], cwd=root, env=helper_env)
+        lifecycle_env = helper_env.copy()
+        lifecycle_env.pop("NODE_AUTH_TOKEN")
+        run(["npm", "ci", "--prefer-offline"], cwd=root, env=lifecycle_env)
         assert npm_trace.read_text().splitlines() == [
             "ci --ignore-scripts|present",
             "ci --prefer-offline|absent",
         ]
 
         records = lifecycle_log.read_text().splitlines()
-        assert all(record.endswith(":<unset>:[]") for record in records), records
+        assert all(record.endswith(":<unset>:[]:[]") for record in records), records
 
         baseline_root = root / "npm-ci-baseline"
         for package_name in ("fixture-transitive-dependency", "fixture-dependency"):
@@ -233,6 +252,9 @@ def main():
         assert any(":synthetic-package-token:" in record for record in baseline_records), (
             "baseline fixture must demonstrate the credential reaches npm ci lifecycle hooks"
         )
+        assert any(
+            json.loads(record.rsplit(":", 1)[-1]) for record in baseline_records
+        ), "baseline fixture must demonstrate lifecycle code can read an ancestor environment"
 
         empty_root = root / "empty-dependency-fixture"
         write_package(
@@ -264,21 +286,23 @@ def main():
             cwd=empty_root,
             env=empty_env,
         )
-        traced_helper = subprocess.run(
-            ["bash", "-x", str(repo_root / "scripts/install-node-release-dependencies.sh")],
+        empty_acquisition_env = empty_env | {
+            "PATH": f"{wrapper_dir}{os.pathsep}{empty_env['PATH']}",
+            "REAL_NPM": real_npm,
+            "NPM_TRACE": str(npm_trace),
+        }
+        run(["npm", "ci", "--ignore-scripts"], cwd=empty_root, env=empty_acquisition_env)
+        empty_lifecycle_env = empty_acquisition_env.copy()
+        empty_lifecycle_env.pop("NODE_AUTH_TOKEN")
+        run(
+            ["npm", "ci", "--prefer-offline"],
             cwd=empty_root,
-            env=empty_env,
-            text=True,
-            capture_output=True,
+            env=empty_lifecycle_env,
         )
-        traced_output = traced_helper.stdout + traced_helper.stderr
-        assert traced_helper.returncode == 0, traced_output
-        assert "synthetic-package-token" not in traced_output, (
-            "bash xtrace exposed the package token"
-        )
-        assert (root / "empty-lifecycle.log").read_text().splitlines() == [
-            "empty-dependency-fixture:empty-postinstall:<unset>:[]"
-        ]
+        empty_records = (root / "empty-lifecycle.log").read_text().splitlines()
+        assert empty_records == [
+            "empty-dependency-fixture:empty-postinstall:<unset>:[]:[]"
+        ], empty_records
 
 if __name__ == "__main__":
     main()

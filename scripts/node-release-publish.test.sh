@@ -29,6 +29,8 @@ assert inputs["contract-ref"]["required"] is True
 assert set(doc["jobs"]) == {"release", "retention"}
 job = doc["jobs"]["release"]
 assert job["permissions"] == {"contents": "write", "packages": "write"}
+assert "NODE_AUTH_TOKEN" not in (doc.get("env") or {})
+assert "NODE_AUTH_TOKEN" not in (job.get("env") or {})
 steps = job["steps"]
 assert "semantic-release" not in raw
 assert any('gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION"' in (step.get("run") or "") for step in steps)
@@ -44,8 +46,19 @@ assert all("node -" not in (step.get("run") or "") for step in steps[:setup_node
     "no JavaScript may run before setup-node on bootstrap-clean runners"
 publish = next(step for step in steps if "npm publish" in (step.get("run") or ""))
 assert publish["env"]["NODE_AUTH_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
-install = next(step for step in steps if (step.get("run") or "").strip() == "bash scripts/install-node-release-dependencies.sh")
-assert install["env"]["NODE_AUTH_TOKEN"] == "${{ secrets.NODE_AUTH_TOKEN }}"
+install = next(step for step in steps if step.get("name") == "Install dependencies")
+assert (install.get("run") or "").strip() == "npm ci --ignore-scripts"
+assert install.get("env") == {"NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}"}
+lifecycle = next(step for step in steps if step.get("name") == "Run dependency lifecycle scripts without credentials")
+assert (lifecycle.get("run") or "").strip() == "npm ci --prefer-offline"
+assert "NODE_AUTH_TOKEN" not in (lifecycle.get("env") or {})
+assert steps.index(install) < steps.index(lifecycle)
+package_token_steps = [
+    step
+    for step in steps
+    if (step.get("env") or {}).get("NODE_AUTH_TOKEN") == "${{ secrets.NODE_AUTH_TOKEN }}"
+]
+assert package_token_steps == [install]
 release = next(step for step in steps if "gh release create" in (step.get("run") or ""))
 assert "--verify-tag" in release["run"]
 assert 'CHANGELOG/$VERSION.md' in release["run"]
@@ -59,7 +72,7 @@ assert 'not isinstance(asset, dict)' in release["run"]
 assets = next(step for step in steps if "BOUNDED_RELEASE_ASSETS_BEGIN" in (step.get("run") or ""))
 assert steps.index(assets) < next(
     i for i, step in enumerate(steps)
-    if (step.get("run") or "").strip() == "bash scripts/install-node-release-dependencies.sh"
+    if step.get("name") == "Install dependencies"
 )
 for guard in ("at most 16 paths", "symlink", "100 MiB", "250 MiB", 'git cat-file blob "HEAD:$asset"'):
     assert guard in assets["run"], "missing bounded release-asset guard: %s" % guard
