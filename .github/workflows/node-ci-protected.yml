@@ -5760,6 +5760,7 @@ jobs:
           NESTED_MANIFESTS: ${{ inputs.secretless-nested-manifests }}
         run: |
           unset -v GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN NPM_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GOOGLE_APPLICATION_CREDENTIALS AZURE_CREDENTIALS ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
+          unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY
           candidate_cache_supervisor_pid=''
           # shellcheck disable=SC2329 # invoked indirectly by the INT/TERM traps below.
           forward_candidate_signal() {
@@ -6465,6 +6466,11 @@ jobs:
                   ):
                       sys.exit("isolated candidate cache copy failed integrity verification")
                   script_env = os.environ.copy()
+                  for env_name in (
+                      "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
+                      "GITHUB_STEP_SUMMARY",
+                  ):
+                      script_env.pop(env_name, None)
                   for env_name in unset_env:
                       script_env.pop(env_name, None)
                   script_env["NPM_CONFIG_CACHE"] = str(script_cache)
@@ -6666,7 +6672,8 @@ jobs:
           SECRETLESS_RUNTIME_PUBLIC_CACHE: ${{ inputs.secretless-runtime-public-cache }}
         run: |
           unset -v GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN NPM_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GOOGLE_APPLICATION_CREDENTIALS AZURE_CREDENTIALS ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
-          python3 - <<'PY'
+          unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY
+          exec /usr/bin/python3 - <<'PY'
           import ctypes
           import errno
           import fcntl
@@ -7792,6 +7799,11 @@ jobs:
                       lane, index, owned_target_identity,
                   )
                   script_env = os.environ.copy()
+                  for env_name in (
+                      "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
+                      "GITHUB_STEP_SUMMARY",
+                  ):
+                      script_env.pop(env_name, None)
                   script_env.update({
                       "VERJSON_COMPATIBILITY_ARTIFACT": str(artifact),
                       "VERJSON_COMPATIBILITY_PACKAGE": lane["package"],

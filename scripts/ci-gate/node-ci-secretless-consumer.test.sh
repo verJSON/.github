@@ -69,6 +69,16 @@ assert "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)" in rebuild["run"]
 assert 'os.execve(str(bubblewrap), arguments,' in rebuild["run"]
 assert 'subprocess.run([*npm_command, "run", name]' in plan["run"]
 assert "env=script_env" in plan["run"]
+for command_file in ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"):
+    assert f'"{command_file}"' in plan["run"]
+compatibility = next(
+    step for step in build["steps"]
+    if step.get("name") == "Run runtime-resolved compatibility lanes without credentials"
+)
+assert "unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY" in compatibility["run"]
+assert "exec /usr/bin/python3 - <<'PY'" in compatibility["run"]
+for command_file in ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"):
+    assert f'"{command_file}"' in compatibility["run"]
 for command in ("npm run build", "npm run typecheck --if-present", "npm test", "npm run lint --if-present"):
     step = next(step for step in build["steps"] if step.get("run") == command)
     assert "secretless-ci-script-plan" in step["if"]
@@ -158,10 +168,20 @@ else
 fi
 
 mkdir -p "$tmp/bin" "$tmp/commands"
-printf '%s\n' '#!/usr/bin/env bash' \
-  'printf '\''%s\n'\'' "$*" >> "$NPM_STUB_LOG"' \
-  '[ -z "${NPM_STUB_ENV_LOG:-}" ] || printf '\''%s=%s\n'\'' "${*: -1}" "${OTEL_SDK_DISABLED-unset}" >> "$NPM_STUB_ENV_LOG"' \
-  > "$tmp/bin/npm"
+cat > "$tmp/bin/npm" <<'NPM'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$NPM_STUB_LOG"
+if [ -n "${NPM_STUB_ENV_LOG:-}" ]; then
+  printf '%s=%s\n' "${*: -1}" "${OTEL_SDK_DISABLED-unset}" >> "$NPM_STUB_ENV_LOG"
+  for name in GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY; do
+    if [[ -v $name ]]; then
+      printf '%s=%s\n' "$name" "${!name}" >> "$NPM_STUB_ENV_LOG"
+    else
+      printf '%s=unset\n' "$name" >> "$NPM_STUB_ENV_LOG"
+    fi
+  done
+fi
+NPM
 chmod +x "$tmp/bin/npm"
 printf '%s\n' '{"scripts":{"verify:worker-schema":"fixture","build":"fixture","audit:deps":"fixture","lint":"fixture","test":"fixture","typecheck:smoke":"fixture","smoke:otel":"fixture"}}' \
   > "$tmp/commands/package.json"
@@ -172,6 +192,9 @@ mkdir -p "$tmp/commands/node_modules/argon2" "$tmp/commands/node_modules/esbuild
 plan='["verify:worker-schema","build","audit:deps","lint","test","typecheck:smoke",{"script":"smoke:otel","unsetEnv":["OTEL_SDK_DISABLED"]}]'
 if (cd "$tmp/commands" && PATH="$tmp/bin:$PATH" NPM_STUB_LOG="$tmp/plan.log" \
     NPM_STUB_ENV_LOG="$tmp/plan-env.log" OTEL_SDK_DISABLED=true \
+    GITHUB_ENV="$tmp/runner-env" GITHUB_PATH="$tmp/runner-path" \
+    GITHUB_OUTPUT="$tmp/runner-output" GITHUB_STATE="$tmp/runner-state" \
+    GITHUB_STEP_SUMMARY="$tmp/runner-summary" \
     CI_SCRIPT_PLAN="$plan" bash "$tmp/plan.sh") \
     && [ "$(wc -l < "$tmp/plan.log")" -eq 7 ] \
     && [ "$(head -1 "$tmp/plan.log")" = 'run verify:worker-schema' ] \
@@ -181,6 +204,11 @@ if (cd "$tmp/commands" && PATH="$tmp/bin:$PATH" NPM_STUB_LOG="$tmp/plan.log" \
 else
   fail "the exact consumer npm script plan did not run in order"
 fi
+for command_file in GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY; do
+  grep -qFx "$command_file=unset" "$tmp/plan-env.log" \
+    && pass "untrusted consumer cannot access $command_file" \
+    || fail "untrusted consumer received $command_file"
+done
 
 # Node 26's validated toolcache layout keeps the launcher in bin/ but the npm
 # package in lib/node_modules/npm. The launcher fixture resolves npm-prefix.js

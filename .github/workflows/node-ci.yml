@@ -5045,6 +5045,7 @@ jobs:
           CI_SCRIPT_PLAN: ${{ inputs.secretless-ci-script-plan }}
           NESTED_MANIFESTS: ${{ inputs.secretless-nested-manifests }}
         run: |
+          unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY
           python3 - <<'PY'
           import json
           import os
@@ -5140,6 +5141,11 @@ jobs:
                           f"{nested_path}/package.json"))
           for directory, name, unset_env in normalized:
               script_env = os.environ.copy()
+              for env_name in (
+                  "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
+                  "GITHUB_STEP_SUMMARY",
+              ):
+                  script_env.pop(env_name, None)
               for env_name in unset_env:
                   script_env.pop(env_name, None)
               npm_command = ["npm"]
@@ -5194,7 +5200,8 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           SECRETLESS_RUNTIME_PUBLIC_CACHE: ${{ inputs.secretless-runtime-public-cache }}
         run: |
-          python3 - <<'PY'
+          unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY
+          exec /usr/bin/python3 - <<'PY'
           import ctypes
           import errno
           import fcntl
@@ -6320,6 +6327,11 @@ jobs:
                       lane, index, owned_target_identity,
                   )
                   script_env = os.environ.copy()
+                  for env_name in (
+                      "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
+                      "GITHUB_STEP_SUMMARY",
+                  ):
+                      script_env.pop(env_name, None)
                   script_env.update({
                       "VERJSON_COMPATIBILITY_ARTIFACT": str(artifact),
                       "VERJSON_COMPATIBILITY_PACKAGE": lane["package"],

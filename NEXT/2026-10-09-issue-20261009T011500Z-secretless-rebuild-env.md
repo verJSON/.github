@@ -17,8 +17,9 @@ read-only and only `node_modules` is writable. The package manager gets no
 credentials, raw caller input, or GitHub command-file paths. Secretless pnpm
 installs ignore repository pnpmfile hooks, and the rebuild mounts only the
 runner's canonical Corepack cache. Protected identity checks run before
-untrusted scripts so command-file changes cannot inject code into a later token
-step. GitHub-hosted non-Linux runners fail with an explicit platform error.
+untrusted scripts. Consumer scripts cannot access runner command-file paths, and
+the compatibility validator uses `/usr/bin/python3` so caller path additions
+cannot shadow its checks. GitHub-hosted non-Linux runners fail with an explicit platform error.
 Tests cover npm and pnpm, host process scans, and writes to known host
 command-file paths. The explicit hosted Actions CI lane runs the inherited-descriptor write probe and consumer sandbox harness against the verified Bubblewrap binary; persistent fastlane groups keep the deterministic command stubs.
 

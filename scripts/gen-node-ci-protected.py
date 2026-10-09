@@ -730,6 +730,11 @@ def isolate_candidate_runtime_cache(document: str) -> str:
     step = step.replace(imports, protected_imports, 1)
     execution = """          for directory, name, unset_env in normalized:
               script_env = os.environ.copy()
+              for env_name in (
+                  "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
+                  "GITHUB_STEP_SUMMARY",
+              ):
+                  script_env.pop(env_name, None)
               for env_name in unset_env:
                   script_env.pop(env_name, None)
               npm_command = ["npm"]
@@ -1350,6 +1355,11 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                   ):
                       sys.exit("isolated candidate cache copy failed integrity verification")
                   script_env = os.environ.copy()
+                  for env_name in (
+                      "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
+                      "GITHUB_STEP_SUMMARY",
+                  ):
+                      script_env.pop(env_name, None)
                   for env_name in unset_env:
                       script_env.pop(env_name, None)
                   script_env["NPM_CONFIG_CACHE"] = str(script_cache)
