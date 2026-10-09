@@ -120,11 +120,21 @@ approves `onnxruntime-node` for rebuild. The value lets ONNX Runtime skip its
 optional CUDA binary download. General environment overrides are not permitted:
 an arbitrary key could carry a credential despite its name, and dynamic-loader
 variables can alter process behavior. Before package-manager execution, the
-step replaces Bash with the validator and then replaces the validator with npm
-or Corepack. It removes credentials, the raw JSON input, and all GitHub Actions
-command-file paths from the package-manager environment. This prevents
-lifecycle code from inspecting the step shell's prior environment through its
-process ancestors or appending commands to a later step. Canonical and
-generated protected workflow tests cover npm and pnpm, the accepted pair,
-rejected names and values, absent credentials and command-file paths, and
-rejection when a different package is approved.
+step replaces Bash with the validator, then executes npm or Corepack inside a
+Bubblewrap user, PID, and network namespace. On GitHub-hosted runners, the workflow first
+provisions and verifies the bubblewrap/AppArmor boundary; rebuilds fail
+closed on other runner types. The sandbox starts from a temporary root and
+mounts only system tools, the selected Node toolchain, required configuration,
+the checkout, and (for pnpm) its Corepack cache. Tool and checkout source mounts
+use already-open directory descriptors so hiding host paths cannot hide their
+sources. The checkout is read-only and only `node_modules` is mounted writable.
+The package manager receives a small environment with no credentials, caller
+JSON, or GitHub command-file paths. Lifecycle code cannot inspect host process
+ancestry, access the host filesystem outside those mounts, or use network
+egress. Secretless pnpm installs disable repository pnpmfile hooks, the sandbox
+accepts only the runner's canonical Corepack cache, and protected identity checks
+run before untrusted scripts can modify workflow command files. GitHub-hosted
+non-Linux runners fail with a clear platform error. Canonical and generated
+protected workflow tests cover npm and pnpm, the accepted pair,
+rejected names and values, absent credentials and command-file paths, a known
+host command-file probe, and rejection when a different package is approved.

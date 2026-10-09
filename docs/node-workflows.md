@@ -218,11 +218,20 @@ identical across the event split.
 Consumers that need a reviewed private auxiliary tree, selective lifecycle
 rebuilds, or a repository-specific command sequence keep those choices explicit.
 `secretless-rebuild-env` currently accepts only `ONNXRUNTIME_NODE_INSTALL=skip`
-for an approved `onnxruntime-node` rebuild. The rebuild step replaces its Bash
-and validator processes before starting npm or Corepack, and removes credentials
-and GitHub Actions command-file paths from the package-manager environment. This
-keeps lifecycle code from reading the previous step environment through its
-process ancestors or changing a later step through `GITHUB_ENV`.
+for an approved `onnxruntime-node` rebuild. On GitHub-hosted runners, the
+workflow first provisions and verifies its bubblewrap/AppArmor boundary;
+the rebuild fails closed on other runner types. npm or Corepack runs in a
+Bubblewrap user, PID, and network namespace from a temporary root with only
+system tools, the selected Node toolchain, required configuration, the checkout,
+and (for pnpm) its Corepack cache mounted. Directory descriptors keep checkout
+and tool mounts available after host paths are hidden. The checkout is read-only
+and only `node_modules` is mounted writable. The package manager receives a
+small environment with no credentials or GitHub Actions command-file paths.
+Lifecycle code cannot inspect host process ancestry, use network egress, or
+change later workflow commands through `GITHUB_ENV`. Secretless pnpm installs
+disable repository pnpmfile hooks, the sandbox accepts only the runner's
+canonical Corepack cache, and protected identity checks run before untrusted
+scripts. GitHub-hosted non-Linux runners fail with an explicit platform error.
 
 The auxiliary source accepts exactly `repository`, `pinFile`, `checkoutPath`, and
 `sparsePath`; the pin file must name the same repository and a lowercase 40-hex

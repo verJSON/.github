@@ -45,6 +45,7 @@ assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in checkout["with
 restore = next(step for step in steps if str(step.get("uses", "")).startswith("actions/cache/restore@"))
 install = next(step for step in steps if step.get("name") == "Install from verified secretless npm cache")
 rebuild = next(step for step in steps if step.get("name") == "Rebuild exact approved lifecycle packages without credentials")
+provision = next(step for step in steps if step.get("name") == "Provision trusted compatibility sandbox")
 plan = next(step for step in steps if step.get("name") == "Run exact credentialless consumer script plan")
 for step in (restore, install, rebuild, plan):
     assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in step["if"]
@@ -58,11 +59,23 @@ assert "printf '%s=\\n' \"$name\"" in install["run"]
 assert 'command = ["npm", "rebuild"] if package_manager == "npm" else ["corepack", "pnpm", "rebuild"]' in rebuild["run"]
 assert 'unset -v GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN' in rebuild["run"]
 assert "exec python3 - <<'PY'" in rebuild["run"]
-assert 'rebuild_process_env.pop("REBUILD_ENV", None)' in rebuild["run"]
-for name in ("GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_PATH", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"):
-    assert f'"{name}"' in rebuild["run"]
-assert "rebuild_process_env.pop(name, None)" in rebuild["run"]
-assert "os.execvpe(command[0], [*command, *requested], rebuild_process_env)" in rebuild["run"]
+assert rebuild["env"]["BWRAP_BINARY"] == "/usr/bin/bwrap"
+assert steps.index(provision) < steps.index(rebuild)
+assert "inputs.secretless-rebuild-packages != ''" in provision["if"]
+assert "runner.environment == 'github-hosted'" in provision["if"]
+assert "bubblewrap_metadata.st_uid not in (0, os.getuid())" in rebuild["run"]
+assert '"--unshare-pid"' in rebuild["run"]
+assert '"--unshare-net"' in rebuild["run"]
+assert '"--tmpfs", "/"' in rebuild["run"]
+assert '"--ro-bind", "/", "/"' not in rebuild["run"]
+assert "bind_source(workspace, sandbox_workspace)" in rebuild["run"]
+assert 'bind_source(node_modules, f"{sandbox_workspace}/node_modules", writable=True)' in rebuild["run"]
+assert '"GITHUB_WORKSPACE": sandbox_workspace' in rebuild["run"]
+assert '"RUNNER_TEMP": "/tmp"' in rebuild["run"]
+assert '"NPM_CONFIG_USERCONFIG": "/dev/null"' in rebuild["run"]
+assert '"GITHUB_ENV"' not in rebuild["run"]
+assert 'rebuild_process_env = {' in rebuild["run"]
+assert 'os.execve(str(bubblewrap), arguments, {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"})' in rebuild["run"]
 # Each planned script runs in the manifest that declared it (#1229), so the
 # pinned execution call carries that directory rather than assuming the root.
 assert re.search(r'(?m)^\s*npm_command\s*=\s*\["npm"\]\s*$', plan["run"])

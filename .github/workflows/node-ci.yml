@@ -2472,7 +2472,7 @@ jobs:
               lock_text = lock_text[:start] + replacement + lock_text[end:]
           lock_path.write_text(lock_text, encoding="utf-8")
           PY
-            NPM_CONFIG_USERCONFIG="$MOCK_REGISTRY_NPMRC" corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline \
+            PNPM_CONFIG_IGNORE_PNPMFILE=true NPM_CONFIG_USERCONFIG="$MOCK_REGISTRY_NPMRC" corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline \
               --store-dir "$PNPM_STORE_DIR"
           fi
       - name: Stage verified public npm blobs for cross-run reuse
@@ -3011,274 +3011,8 @@ jobs:
         if: needs.eligibility.outputs.should-run != 'false' && !(inputs.secretless-pr || inputs.secretless-trusted-ref)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
-      - name: Rebuild exact approved lifecycle packages without credentials
-        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && inputs.secretless-rebuild-packages != ''
-        env:
-          PACKAGE_MANAGER: ${{ inputs.package-manager }}
-          REBUILD_PACKAGES: ${{ inputs.secretless-rebuild-packages }}
-          REBUILD_ENV: ${{ inputs.secretless-rebuild-env }}
-        run: |
-          unset -v GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN NPM_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GOOGLE_APPLICATION_CREDENTIALS AZURE_CREDENTIALS ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
-          exec python3 - <<'PY'
-          import json
-          import os
-          import re
-          import sys
-          from pathlib import Path
-
-          requested = [line.strip() for line in os.environ["REBUILD_PACKAGES"].splitlines() if line.strip()]
-          package_pattern = re.compile(r"(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*")
-          if not requested or len(requested) != len(set(requested)) \
-                  or any(package_pattern.fullmatch(name) is None for name in requested):
-              sys.exit("secretless-rebuild-packages accepts unique exact npm package names only")
-          raw_rebuild_env = os.environ.get("REBUILD_ENV", "{}")
-          if len(raw_rebuild_env) > 4096:
-              sys.exit("secretless-rebuild-env must not exceed 4096 characters")
-          try:
-              rebuild_env = json.loads(raw_rebuild_env)
-          except json.JSONDecodeError as error:
-              sys.exit(f"secretless-rebuild-env must be valid JSON: {error}")
-          if not isinstance(rebuild_env, dict) or len(rebuild_env) > 1:
-              sys.exit("secretless-rebuild-env must be an object with at most one approved entry")
-          for name, value in rebuild_env.items():
-              if name != "ONNXRUNTIME_NODE_INSTALL" or value != "skip":
-                  sys.exit("secretless-rebuild-env only accepts ONNXRUNTIME_NODE_INSTALL=skip")
-          if rebuild_env and "onnxruntime-node" not in requested:
-              sys.exit("ONNXRUNTIME_NODE_INSTALL=skip requires onnxruntime-node in secretless-rebuild-packages")
-          package_manager = os.environ.get("PACKAGE_MANAGER", "npm")
-          if package_manager == "npm":
-              lock = json.loads(Path("package-lock.json").read_text(encoding="utf-8"))
-              installed = set()
-              lifecycle_scoped = set()
-              for path, package in lock.get("packages", {}).items():
-                  if "node_modules/" not in path:
-                      continue
-                  path_name = path.rsplit("node_modules/", 1)[1]
-                  locked_name = package.get("name")
-                  resolved_name = locked_name if isinstance(locked_name, str) else path_name
-                  installed.add(resolved_name)
-                  if package.get("hasInstallScript") is True:
-                      lifecycle_scoped.add(resolved_name)
-          else:
-              import yaml
-              lock = yaml.safe_load(Path("pnpm-lock.yaml").read_text(encoding="utf-8"))
-              def pnpm_package_name(key):
-                  if not isinstance(key, str) or any(ord(char) < 32 for char in key):
-                      raise ValueError("pnpm package key must be a printable string")
-                  scoped = re.fullmatch(
-                      r"(@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*)@(.+)", key)
-                  unscoped = re.fullmatch(r"([a-z0-9][a-z0-9._-]*)@(.+)", key)
-                  match = scoped or unscoped
-                  if match is None:
-                      raise ValueError(f"invalid pnpm package key: {key}")
-                  reference = match.group(2)
-                  if reference.startswith("npm:"):
-                      raise ValueError(f"pnpm package alias is not an exact package identity: {key}")
-                  depth = 0
-                  for char in reference:
-                      if char == "(":
-                          depth += 1
-                      elif char == ")":
-                          depth -= 1
-                          if depth < 0:
-                              raise ValueError(f"unbalanced pnpm peer context: {key}")
-                  if depth != 0:
-                      raise ValueError(f"unbalanced pnpm peer context: {key}")
-                  return match.group(1)
-              package_sets = (lock.get("packages", {}), lock.get("snapshots", {}))
-              if any(not isinstance(package_set, dict) for package_set in package_sets):
-                  sys.exit("pnpm lock packages and snapshots must be mappings")
-              try:
-                  installed = {pnpm_package_name(key) for package_set in package_sets
-                               for key in package_set}
-                  lifecycle_scoped = {
-                      pnpm_package_name(key)
-                      for package_set in package_sets
-                      for key, entry in package_set.items()
-                      if isinstance(entry, dict) and entry.get("requiresBuild") is True
-                  }
-              except ValueError as error:
-                  sys.exit(str(error))
-          # A pnpm or npm lock records every platform variant of an optional
-          # native dependency (e.g. @esbuild/darwin-arm64, @esbuild/linux-x64),
-          # but --frozen-lockfile/--ignore-scripts installed only the ones this
-          # runner's os/cpu actually match. Scoping to the lock's full declared
-          # universe would force the allowlist to name a package that was never
-          # installed here, then fail rebuilding it (#941). node_modules/ on
-          # disk after that install is the platform-accurate source of truth.
-          lifecycle_scoped = {
-              name for name in lifecycle_scoped
-              if (Path("node_modules") / name).is_dir()
-          }
-          missing = sorted(set(requested) - installed)
-          if missing:
-              sys.exit("approved rebuild packages absent from lock: " + ", ".join(missing))
-          # secretless-rebuild-packages is the complete, reviewed set of packages
-          # allowed to execute code at install time under --ignore-scripts (#932):
-          # an exact match, not a hint, so a dependency update that silently adds
-          # or drops a lifecycle script anywhere in the tree fails closed instead
-          # of passing unreviewed.
-          undeclared = sorted(lifecycle_scoped - set(requested))
-          if undeclared:
-              sys.exit(
-                  "lock declares install scripts for packages absent from "
-                  "secretless-rebuild-packages: " + ", ".join(undeclared)
-              )
-          unnecessary = sorted(set(requested) - lifecycle_scoped)
-          if unnecessary:
-              sys.exit(
-                  "secretless-rebuild-packages names packages the lock does not mark "
-                  "as needing install scripts: " + ", ".join(unnecessary)
-              )
-          command = ["npm", "rebuild"] if package_manager == "npm" else ["corepack", "pnpm", "rebuild"]
-          rebuild_process_env = dict(os.environ)
-          rebuild_process_env.pop("REBUILD_ENV", None)
-          rebuild_process_env.pop("ONNXRUNTIME_NODE_INSTALL", None)
-          for name in (
-              "GITHUB_ENV",
-              "GITHUB_OUTPUT",
-              "GITHUB_PATH",
-              "GITHUB_STATE",
-              "GITHUB_STEP_SUMMARY",
-          ):
-              rebuild_process_env.pop(name, None)
-          rebuild_process_env.update(rebuild_env)
-          os.execvpe(command[0], [*command, *requested], rebuild_process_env)
-          PY
-      - name: Run exact credentialless consumer script plan
-        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && (inputs.secretless-ci-script-plan != '' || inputs.secretless-nested-manifests != '')
-        env:
-          CI_SCRIPT_PLAN: ${{ inputs.secretless-ci-script-plan }}
-          NESTED_MANIFESTS: ${{ inputs.secretless-nested-manifests }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import re
-          import shutil
-          import subprocess
-          import sys
-          from pathlib import Path
-
-          script_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._-]*")
-          env_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-          protected_env = {
-              "GH_TOKEN", "GITHUB_TOKEN", "NODE_AUTH_TOKEN", "NPM_TOKEN",
-              "NPM_CONFIG_CACHE", "NPM_CONFIG_GLOBALCONFIG", "NPM_CONFIG_USERCONFIG",
-              "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
-              "GOOGLE_APPLICATION_CREDENTIALS", "AZURE_CREDENTIALS",
-              "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL",
-          }
-          def normalize_plan(plan, directory, label, manifest_label):
-              if not isinstance(plan, list) or not plan or len(plan) > 32:
-                  sys.exit(f"{label} accepts 1-32 unique exact npm script entries")
-              entries = []
-              for entry in plan:
-                  if isinstance(entry, str):
-                      script = entry
-                      unset_env = []
-                  elif isinstance(entry, dict) and set(entry) == {"script", "unsetEnv"}:
-                      script = entry["script"]
-                      unset_env = entry["unsetEnv"]
-                  else:
-                      sys.exit(f"{label} entries must be script names or exact script/unsetEnv objects")
-                  if not isinstance(script, str) or script_pattern.fullmatch(script) is None:
-                      sys.exit(f"{label} contains an invalid script name")
-                  if (not isinstance(unset_env, list) or len(unset_env) > 16
-                          or len(unset_env) != len(set(unset_env))
-                          or any(not isinstance(name, str) or env_pattern.fullmatch(name) is None
-                                 or name in protected_env for name in unset_env)):
-                      sys.exit(f"{label} unsetEnv accepts up to 16 unique non-credential environment names")
-                  entries.append((directory, script, unset_env))
-              scripts_in_plan = [script for _, script, _ in entries]
-              if len(scripts_in_plan) != len(set(scripts_in_plan)):
-                  sys.exit(f"{label} accepts unique script names")
-              # Script existence is proved against the manifest that will run the
-              # script, so a nested plan can never reach a root-only script.
-              package = json.loads((directory / "package.json").read_text(encoding="utf-8"))
-              scripts = package.get("scripts")
-              if not isinstance(scripts, dict):
-                  sys.exit(f"{manifest_label} has no scripts object")
-              missing = [name for name in scripts_in_plan if name not in scripts]
-              if missing:
-                  sys.exit(f"planned npm scripts absent from {manifest_label}: " + ", ".join(missing))
-              return entries
-
-          checkout_root = Path.cwd().resolve()
-          normalized = []
-          plan_source = os.environ.get("CI_SCRIPT_PLAN", "").strip()
-          if plan_source:
-              try:
-                  plan = json.loads(plan_source)
-              except json.JSONDecodeError as error:
-                  sys.exit(f"secretless-ci-script-plan must be valid JSON: {error}")
-              normalized.extend(normalize_plan(
-                  plan, checkout_root, "secretless-ci-script-plan", "package.json"))
-          nested_source = os.environ.get("NESTED_MANIFESTS", "").strip()
-          if nested_source:
-              try:
-                  nested_manifests = json.loads(nested_source)
-              except json.JSONDecodeError as error:
-                  sys.exit(f"secretless-nested-manifests must be valid JSON: {error}")
-              if not isinstance(nested_manifests, list) or not 1 <= len(nested_manifests) <= 8:
-                  sys.exit("secretless-nested-manifests accepts 1-8 nested manifest objects")
-              segment_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-              for nested in nested_manifests:
-                  if (not isinstance(nested, dict)
-                          or set(nested) != {"path", "approvedPackages", "scriptPlan"}):
-                      sys.exit("each nested manifest requires exactly path, approvedPackages, and scriptPlan")
-                  nested_path = nested["path"]
-                  if (not isinstance(nested_path, str) or not nested_path
-                          or any(segment_pattern.fullmatch(segment) is None
-                                 for segment in nested_path.split("/"))):
-                      sys.exit("each nested manifest path must be a relative checkout directory")
-                  # The checkout is PR-authored here, so containment is proved
-                  # again before this job reads anything below the declared path.
-                  nested_directory = Path(nested_path).resolve()
-                  if not nested_directory.is_dir() or checkout_root not in nested_directory.parents:
-                      sys.exit(f"{nested_path} must resolve to a directory inside the checkout")
-                  nested_plan = nested["scriptPlan"]
-                  if not isinstance(nested_plan, list) or len(nested_plan) > 8:
-                      sys.exit(f"{nested_path} scriptPlan accepts at most 8 entries")
-                  if nested_plan:
-                      normalized.extend(normalize_plan(
-                          nested_plan, nested_directory, f"{nested_path} scriptPlan",
-                          f"{nested_path}/package.json"))
-          for directory, name, unset_env in normalized:
-              script_env = os.environ.copy()
-              for env_name in unset_env:
-                  script_env.pop(env_name, None)
-              npm_command = ["npm"]
-              npm_path = shutil.which("npm")
-              node_path = shutil.which("node")
-              if npm_path is not None and node_path is not None:
-                  npm_executable = Path(npm_path)
-                  resolved_npm_executable = npm_executable.resolve()
-                  npm_cli_candidates = list(dict.fromkeys(
-                      candidate.resolve()
-                      for candidate in (
-                          npm_executable.parent.parent / "lib/node_modules/npm/bin/npm-cli.js",
-                          npm_executable.parent / "node_modules/npm/bin/npm-cli.js",
-                          resolved_npm_executable.parent.parent / "bin/npm-cli.js",
-                      )
-                      if candidate.is_file()
-                  ))
-                  if len(npm_cli_candidates) > 1:
-                      raise SystemExit("trusted npm CLI is ambiguous")
-                  if npm_cli_candidates:
-                      npm_command = [node_path, str(npm_cli_candidates[0])]
-              subprocess.run([*npm_command, "run", name], check=True, env=script_env, cwd=directory)
-          PY
-      - run: npm run build
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-      - run: npm run typecheck --if-present
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-      - run: npm test
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-      - run: npm run lint --if-present
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
       - name: Provision trusted compatibility sandbox
-        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && inputs.secretless-compatibility-ranges != '' && runner.environment == 'github-hosted'
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && (inputs.secretless-compatibility-ranges != '' || inputs.secretless-rebuild-packages != '') && runner.environment == 'github-hosted'
         env:
           ACTIONS_ID_TOKEN_REQUEST_TOKEN: ''
           ACTIONS_ID_TOKEN_REQUEST_URL: ''
@@ -3291,8 +3025,13 @@ jobs:
           GOOGLE_APPLICATION_CREDENTIALS: ''
           NODE_AUTH_TOKEN: ''
           NPM_TOKEN: ''
+        shell: bash
         run: |
           set -euo pipefail
+          if [ "${RUNNER_OS:-}" != "Linux" ]; then
+            echo '::error::trusted compatibility sandbox requires a Linux GitHub-hosted runner' >&2
+            exit 1
+          fi
           sandbox_acquirer_source() {
             /usr/bin/cat <<'PY'
           import errno
@@ -4894,6 +4633,467 @@ jobs:
             exit 1
           fi
 
+      - name: Rebuild exact approved lifecycle packages without credentials
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && inputs.secretless-rebuild-packages != ''
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+          REBUILD_PACKAGES: ${{ inputs.secretless-rebuild-packages }}
+          REBUILD_ENV: ${{ inputs.secretless-rebuild-env }}
+          BWRAP_BINARY: /usr/bin/bwrap
+        run: |
+          unset -v GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN NPM_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GOOGLE_APPLICATION_CREDENTIALS AZURE_CREDENTIALS ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
+          exec python3 - <<'PY'
+          import json
+          import errno
+          import os
+          import re
+          import shutil
+          import stat
+          import sys
+          from pathlib import Path
+
+          requested = [line.strip() for line in os.environ["REBUILD_PACKAGES"].splitlines() if line.strip()]
+          package_pattern = re.compile(r"(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*")
+          if not requested or len(requested) != len(set(requested)) \
+                  or any(package_pattern.fullmatch(name) is None for name in requested):
+              sys.exit("secretless-rebuild-packages accepts unique exact npm package names only")
+          raw_rebuild_env = os.environ.get("REBUILD_ENV", "{}")
+          if len(raw_rebuild_env) > 4096:
+              sys.exit("secretless-rebuild-env must not exceed 4096 characters")
+          try:
+              rebuild_env = json.loads(raw_rebuild_env)
+          except json.JSONDecodeError as error:
+              sys.exit(f"secretless-rebuild-env must be valid JSON: {error}")
+          if not isinstance(rebuild_env, dict) or len(rebuild_env) > 1:
+              sys.exit("secretless-rebuild-env must be an object with at most one approved entry")
+          for name, value in rebuild_env.items():
+              if name != "ONNXRUNTIME_NODE_INSTALL" or value != "skip":
+                  sys.exit("secretless-rebuild-env only accepts ONNXRUNTIME_NODE_INSTALL=skip")
+          if rebuild_env and "onnxruntime-node" not in requested:
+              sys.exit("ONNXRUNTIME_NODE_INSTALL=skip requires onnxruntime-node in secretless-rebuild-packages")
+          package_manager = os.environ.get("PACKAGE_MANAGER", "npm")
+          if package_manager == "npm":
+              lock = json.loads(Path("package-lock.json").read_text(encoding="utf-8"))
+              installed = set()
+              lifecycle_scoped = set()
+              for path, package in lock.get("packages", {}).items():
+                  if "node_modules/" not in path:
+                      continue
+                  path_name = path.rsplit("node_modules/", 1)[1]
+                  locked_name = package.get("name")
+                  resolved_name = locked_name if isinstance(locked_name, str) else path_name
+                  installed.add(resolved_name)
+                  if package.get("hasInstallScript") is True:
+                      lifecycle_scoped.add(resolved_name)
+          else:
+              import yaml
+              lock = yaml.safe_load(Path("pnpm-lock.yaml").read_text(encoding="utf-8"))
+              def pnpm_package_name(key):
+                  if not isinstance(key, str) or any(ord(char) < 32 for char in key):
+                      raise ValueError("pnpm package key must be a printable string")
+                  scoped = re.fullmatch(
+                      r"(@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*)@(.+)", key)
+                  unscoped = re.fullmatch(r"([a-z0-9][a-z0-9._-]*)@(.+)", key)
+                  match = scoped or unscoped
+                  if match is None:
+                      raise ValueError(f"invalid pnpm package key: {key}")
+                  reference = match.group(2)
+                  if reference.startswith("npm:"):
+                      raise ValueError(f"pnpm package alias is not an exact package identity: {key}")
+                  depth = 0
+                  for char in reference:
+                      if char == "(":
+                          depth += 1
+                      elif char == ")":
+                          depth -= 1
+                          if depth < 0:
+                              raise ValueError(f"unbalanced pnpm peer context: {key}")
+                  if depth != 0:
+                      raise ValueError(f"unbalanced pnpm peer context: {key}")
+                  return match.group(1)
+              package_sets = (lock.get("packages", {}), lock.get("snapshots", {}))
+              if any(not isinstance(package_set, dict) for package_set in package_sets):
+                  sys.exit("pnpm lock packages and snapshots must be mappings")
+              try:
+                  installed = {pnpm_package_name(key) for package_set in package_sets
+                               for key in package_set}
+                  lifecycle_scoped = {
+                      pnpm_package_name(key)
+                      for package_set in package_sets
+                      for key, entry in package_set.items()
+                      if isinstance(entry, dict) and entry.get("requiresBuild") is True
+                  }
+              except ValueError as error:
+                  sys.exit(str(error))
+          # A pnpm or npm lock records every platform variant of an optional
+          # native dependency (e.g. @esbuild/darwin-arm64, @esbuild/linux-x64),
+          # but --frozen-lockfile/--ignore-scripts installed only the ones this
+          # runner's os/cpu actually match. Scoping to the lock's full declared
+          # universe would force the allowlist to name a package that was never
+          # installed here, then fail rebuilding it (#941). node_modules/ on
+          # disk after that install is the platform-accurate source of truth.
+          lifecycle_scoped = {
+              name for name in lifecycle_scoped
+              if (Path("node_modules") / name).is_dir()
+          }
+          missing = sorted(set(requested) - installed)
+          if missing:
+              sys.exit("approved rebuild packages absent from lock: " + ", ".join(missing))
+          # secretless-rebuild-packages is the complete, reviewed set of packages
+          # allowed to execute code at install time under --ignore-scripts (#932):
+          # an exact match, not a hint, so a dependency update that silently adds
+          # or drops a lifecycle script anywhere in the tree fails closed instead
+          # of passing unreviewed.
+          undeclared = sorted(lifecycle_scoped - set(requested))
+          if undeclared:
+              sys.exit(
+                  "lock declares install scripts for packages absent from "
+                  "secretless-rebuild-packages: " + ", ".join(undeclared)
+              )
+          unnecessary = sorted(set(requested) - lifecycle_scoped)
+          if unnecessary:
+              sys.exit(
+                  "secretless-rebuild-packages names packages the lock does not mark "
+                  "as needing install scripts: " + ", ".join(unnecessary)
+              )
+          command = ["npm", "rebuild"] if package_manager == "npm" else ["corepack", "pnpm", "rebuild"]
+          if os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
+              sys.exit("secretless lifecycle rebuild requires a GitHub-hosted runner")
+          bubblewrap = Path(os.environ["BWRAP_BINARY"])
+          try:
+              bubblewrap_metadata = bubblewrap.lstat()
+              if (
+                  not stat.S_ISREG(bubblewrap_metadata.st_mode)
+                  or bubblewrap_metadata.st_uid not in (0, os.getuid())
+                  or bubblewrap_metadata.st_mode & (0o022 | stat.S_ISUID | stat.S_ISGID)
+              ):
+                  sys.exit("trusted bubblewrap binary is unsafe")
+              try:
+                  capabilities = os.getxattr(bubblewrap, "security.capability", follow_symlinks=False)
+              except OSError as error:
+                  absent_capability = {errno.ENODATA}
+                  if hasattr(errno, "ENOATTR"):
+                      absent_capability.add(errno.ENOATTR)
+                  if error.errno not in absent_capability:
+                      raise
+              else:
+                  if capabilities:
+                      sys.exit("trusted bubblewrap binary has file capabilities")
+              workspace = Path.cwd().resolve(strict=True)
+              node_modules = workspace / "node_modules"
+              node_modules_metadata = node_modules.lstat()
+              if not stat.S_ISDIR(node_modules_metadata.st_mode):
+                  sys.exit("secretless lifecycle rebuild requires a real node_modules directory")
+              node_modules = node_modules.resolve(strict=True)
+              if not node_modules.is_relative_to(workspace):
+                  sys.exit("node_modules resolves outside the checked-out workspace")
+              home = Path(os.environ["HOME"]).resolve(strict=True)
+              runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+              if any(not path.is_dir() or path == Path("/") for path in (home, runner_temp)):
+                  sys.exit("trusted runner isolation paths are unsafe")
+              tool_names = ("node", "npm") if package_manager == "npm" else ("node", "corepack")
+              tool_paths = {}
+              for name in tool_names:
+                  candidate = shutil.which(name)
+                  if candidate is None:
+                      sys.exit(f"trusted {name} executable is unavailable")
+                  tool_path = Path(candidate).resolve(strict=True)
+                  if not tool_path.is_file() or not os.access(tool_path, os.X_OK):
+                      sys.exit(f"trusted {name} executable is unsafe")
+                  tool_paths[name] = tool_path
+              node_path = tool_paths["node"]
+              if node_path.parent.name != "bin":
+                  sys.exit("trusted node executable has an unexpected installation layout")
+              toolchain_root = node_path.parent.parent
+              if (
+                  toolchain_root == Path("/")
+                  or toolchain_root == workspace
+                  or toolchain_root.is_relative_to(workspace)
+                  or workspace.is_relative_to(toolchain_root)
+              ):
+                  sys.exit("trusted Node toolchain overlaps the checked-out workspace")
+              if any(
+                  not path.is_relative_to(toolchain_root) and not path.is_relative_to("/usr")
+                  for path in tool_paths.values()
+              ):
+                  sys.exit("trusted package-manager executable is outside the Node toolchain")
+              toolchain_in_usr = toolchain_root.is_relative_to("/usr")
+              runner_tool_cache = None
+              if not toolchain_in_usr:
+                  runner_tool_cache = Path(os.environ["RUNNER_TOOL_CACHE"]).resolve(strict=True)
+                  if (
+                      not runner_tool_cache.is_dir()
+                      or not toolchain_root.is_relative_to(runner_tool_cache)
+                      or toolchain_root.is_relative_to(home)
+                      or home.is_relative_to(toolchain_root)
+                      or toolchain_root.is_relative_to(runner_temp)
+                      or runner_temp.is_relative_to(toolchain_root)
+                  ):
+                      sys.exit("trusted Node toolchain is outside the runner tool cache")
+              toolchain_destination = str(toolchain_root) if toolchain_in_usr else "/opt/verjson-node-toolchain"
+              toolchain_bin = f"{toolchain_destination}/bin"
+              corepack_home = None
+              if package_manager == "pnpm":
+                  configured_corepack_home = os.environ.get("COREPACK_HOME")
+                  corepack_candidate = Path(configured_corepack_home) if configured_corepack_home else Path.home() / ".cache/node/corepack"
+                  corepack_home = corepack_candidate.resolve(strict=True)
+                  if (
+                      not corepack_home.is_dir()
+                      or corepack_home != (home / ".cache/node/corepack").resolve(strict=True)
+                      or corepack_home == workspace
+                      or corepack_home.is_relative_to(workspace)
+                      or corepack_home == runner_temp
+                      or corepack_home.is_relative_to(runner_temp)
+                      or runner_temp.is_relative_to(corepack_home)
+                  ):
+                      sys.exit("trusted Corepack cache is unavailable")
+              sandbox_workspace = "/tmp/verjson-secretless-workspace"
+              if any(
+                  runner_temp == path or runner_temp.is_relative_to(path)
+                  or path.is_relative_to(runner_temp)
+                  for path in (workspace,)
+              ):
+                  sys.exit("runner temporary directory overlaps the workspace")
+          except OSError:
+              sys.exit("trusted bubblewrap isolation is unavailable")
+
+          arguments = [
+              str(bubblewrap),
+              "--unshare-user",
+              "--unshare-pid",
+              "--unshare-ipc",
+              "--unshare-uts",
+              "--unshare-net",
+              "--unshare-cgroup-try",
+              "--disable-userns",
+              "--die-with-parent",
+              "--new-session",
+              "--cap-drop", "ALL",
+              "--tmpfs", "/",
+              "--tmpfs", "/tmp",
+              "--dir", "/usr",
+              "--dir", "/bin",
+              "--dir", "/lib",
+              "--dir", "/lib64",
+              "--dir", "/etc",
+              "--dir", "/etc/ssl",
+              "--dir", "/opt",
+          ]
+          mount_targets = [Path(sandbox_workspace), Path("/tmp/home"), Path("/tmp/npm-cache"), Path("/tmp/corepack")]
+          if not toolchain_in_usr:
+              mount_targets.append(Path(toolchain_destination))
+          namespace_directories = set()
+          for target in mount_targets:
+              namespace_directories.add(target)
+              namespace_directories.update(target.parents)
+          namespace_directories.discard(Path("/"))
+          for directory in sorted(namespace_directories, key=lambda path: (len(path.parts), str(path))):
+              if directory == Path("/usr") or directory.is_relative_to("/usr"):
+                  continue
+              if directory in (Path("/tmp"), Path("/bin"), Path("/lib"), Path("/lib64"), Path("/etc"), Path("/etc/ssl"), Path("/opt")):
+                  continue
+              arguments.extend(("--dir", str(directory)))
+
+          mount_fds = []
+          def bind_source(source, destination, *, writable=False):
+              expected = source.stat()
+              if not (stat.S_ISDIR(expected.st_mode) or stat.S_ISREG(expected.st_mode)):
+                  sys.exit("trusted sandbox mount source has an unsupported file type")
+              open_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+              if stat.S_ISDIR(expected.st_mode):
+                  open_flags |= os.O_DIRECTORY
+              descriptor = os.open(
+                  source,
+                  open_flags,
+              )
+              actual = os.fstat(descriptor)
+              if (
+                  not (stat.S_ISDIR(actual.st_mode) or stat.S_ISREG(actual.st_mode))
+                  or (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino)
+              ):
+                  os.close(descriptor)
+                  sys.exit("trusted sandbox mount source changed before namespace bind")
+              os.set_inheritable(descriptor, True)
+              mount_fds.append(descriptor)
+              arguments.extend(("--bind" if writable else "--ro-bind", f"/proc/self/fd/{descriptor}", destination))
+
+          for source, destination in (
+              (Path("/usr"), "/usr"),
+              (Path("/bin").resolve(strict=True), "/bin"),
+              (Path("/lib").resolve(strict=True), "/lib"),
+              (Path("/lib64").resolve(strict=True), "/lib64"),
+              (Path("/etc/ssl"), "/etc/ssl"),
+              (Path("/etc/hosts"), "/etc/hosts"),
+              (Path("/etc/nsswitch.conf"), "/etc/nsswitch.conf"),
+              (Path("/etc/passwd"), "/etc/passwd"),
+              (Path("/etc/group"), "/etc/group"),
+          ):
+              bind_source(source, destination)
+          if not toolchain_in_usr:
+              bind_source(toolchain_root, toolchain_destination)
+          if corepack_home is not None:
+              bind_source(corepack_home, "/tmp/corepack")
+          bind_source(workspace, sandbox_workspace)
+          bind_source(node_modules, f"{sandbox_workspace}/node_modules", writable=True)
+          arguments.extend(("--dev", "/dev", "--proc", "/proc"))
+          arguments.extend(("--chdir", sandbox_workspace))
+
+          rebuild_process_env = {
+              "PATH": f"{toolchain_bin}:/usr/bin:/bin",
+              "HOME": "/tmp/home",
+              "TMPDIR": "/tmp",
+              "TMP": "/tmp",
+              "TEMP": "/tmp",
+              "RUNNER_TEMP": "/tmp",
+              "GITHUB_WORKSPACE": sandbox_workspace,
+              "CI": "true",
+              "NPM_CONFIG_CACHE": "/tmp/npm-cache",
+              "NPM_CONFIG_GLOBALCONFIG": "/dev/null",
+              "NPM_CONFIG_USERCONFIG": "/dev/null",
+              "npm_config_cache": "/tmp/npm-cache",
+              "npm_config_globalconfig": "/dev/null",
+              "npm_config_userconfig": "/dev/null",
+              "COREPACK_HOME": "/tmp/corepack",
+              "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+              **rebuild_env,
+          }
+          for name, value in sorted(rebuild_process_env.items()):
+              arguments.extend(("--setenv", name, value))
+          arguments.extend(("--", *command, *requested))
+          os.execve(str(bubblewrap), arguments, {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"})
+          PY
+      - name: Run exact credentialless consumer script plan
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && (inputs.secretless-ci-script-plan != '' || inputs.secretless-nested-manifests != '')
+        env:
+          CI_SCRIPT_PLAN: ${{ inputs.secretless-ci-script-plan }}
+          NESTED_MANIFESTS: ${{ inputs.secretless-nested-manifests }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import shutil
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          script_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._-]*")
+          env_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+          protected_env = {
+              "GH_TOKEN", "GITHUB_TOKEN", "NODE_AUTH_TOKEN", "NPM_TOKEN",
+              "NPM_CONFIG_CACHE", "NPM_CONFIG_GLOBALCONFIG", "NPM_CONFIG_USERCONFIG",
+              "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+              "GOOGLE_APPLICATION_CREDENTIALS", "AZURE_CREDENTIALS",
+              "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL",
+          }
+          def normalize_plan(plan, directory, label, manifest_label):
+              if not isinstance(plan, list) or not plan or len(plan) > 32:
+                  sys.exit(f"{label} accepts 1-32 unique exact npm script entries")
+              entries = []
+              for entry in plan:
+                  if isinstance(entry, str):
+                      script = entry
+                      unset_env = []
+                  elif isinstance(entry, dict) and set(entry) == {"script", "unsetEnv"}:
+                      script = entry["script"]
+                      unset_env = entry["unsetEnv"]
+                  else:
+                      sys.exit(f"{label} entries must be script names or exact script/unsetEnv objects")
+                  if not isinstance(script, str) or script_pattern.fullmatch(script) is None:
+                      sys.exit(f"{label} contains an invalid script name")
+                  if (not isinstance(unset_env, list) or len(unset_env) > 16
+                          or len(unset_env) != len(set(unset_env))
+                          or any(not isinstance(name, str) or env_pattern.fullmatch(name) is None
+                                 or name in protected_env for name in unset_env)):
+                      sys.exit(f"{label} unsetEnv accepts up to 16 unique non-credential environment names")
+                  entries.append((directory, script, unset_env))
+              scripts_in_plan = [script for _, script, _ in entries]
+              if len(scripts_in_plan) != len(set(scripts_in_plan)):
+                  sys.exit(f"{label} accepts unique script names")
+              # Script existence is proved against the manifest that will run the
+              # script, so a nested plan can never reach a root-only script.
+              package = json.loads((directory / "package.json").read_text(encoding="utf-8"))
+              scripts = package.get("scripts")
+              if not isinstance(scripts, dict):
+                  sys.exit(f"{manifest_label} has no scripts object")
+              missing = [name for name in scripts_in_plan if name not in scripts]
+              if missing:
+                  sys.exit(f"planned npm scripts absent from {manifest_label}: " + ", ".join(missing))
+              return entries
+
+          checkout_root = Path.cwd().resolve()
+          normalized = []
+          plan_source = os.environ.get("CI_SCRIPT_PLAN", "").strip()
+          if plan_source:
+              try:
+                  plan = json.loads(plan_source)
+              except json.JSONDecodeError as error:
+                  sys.exit(f"secretless-ci-script-plan must be valid JSON: {error}")
+              normalized.extend(normalize_plan(
+                  plan, checkout_root, "secretless-ci-script-plan", "package.json"))
+          nested_source = os.environ.get("NESTED_MANIFESTS", "").strip()
+          if nested_source:
+              try:
+                  nested_manifests = json.loads(nested_source)
+              except json.JSONDecodeError as error:
+                  sys.exit(f"secretless-nested-manifests must be valid JSON: {error}")
+              if not isinstance(nested_manifests, list) or not 1 <= len(nested_manifests) <= 8:
+                  sys.exit("secretless-nested-manifests accepts 1-8 nested manifest objects")
+              segment_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+              for nested in nested_manifests:
+                  if (not isinstance(nested, dict)
+                          or set(nested) != {"path", "approvedPackages", "scriptPlan"}):
+                      sys.exit("each nested manifest requires exactly path, approvedPackages, and scriptPlan")
+                  nested_path = nested["path"]
+                  if (not isinstance(nested_path, str) or not nested_path
+                          or any(segment_pattern.fullmatch(segment) is None
+                                 for segment in nested_path.split("/"))):
+                      sys.exit("each nested manifest path must be a relative checkout directory")
+                  # The checkout is PR-authored here, so containment is proved
+                  # again before this job reads anything below the declared path.
+                  nested_directory = Path(nested_path).resolve()
+                  if not nested_directory.is_dir() or checkout_root not in nested_directory.parents:
+                      sys.exit(f"{nested_path} must resolve to a directory inside the checkout")
+                  nested_plan = nested["scriptPlan"]
+                  if not isinstance(nested_plan, list) or len(nested_plan) > 8:
+                      sys.exit(f"{nested_path} scriptPlan accepts at most 8 entries")
+                  if nested_plan:
+                      normalized.extend(normalize_plan(
+                          nested_plan, nested_directory, f"{nested_path} scriptPlan",
+                          f"{nested_path}/package.json"))
+          for directory, name, unset_env in normalized:
+              script_env = os.environ.copy()
+              for env_name in unset_env:
+                  script_env.pop(env_name, None)
+              npm_command = ["npm"]
+              npm_path = shutil.which("npm")
+              node_path = shutil.which("node")
+              if npm_path is not None and node_path is not None:
+                  npm_executable = Path(npm_path)
+                  resolved_npm_executable = npm_executable.resolve()
+                  npm_cli_candidates = list(dict.fromkeys(
+                      candidate.resolve()
+                      for candidate in (
+                          npm_executable.parent.parent / "lib/node_modules/npm/bin/npm-cli.js",
+                          npm_executable.parent / "node_modules/npm/bin/npm-cli.js",
+                          resolved_npm_executable.parent.parent / "bin/npm-cli.js",
+                      )
+                      if candidate.is_file()
+                  ))
+                  if len(npm_cli_candidates) > 1:
+                      raise SystemExit("trusted npm CLI is ambiguous")
+                  if npm_cli_candidates:
+                      npm_command = [node_path, str(npm_cli_candidates[0])]
+              subprocess.run([*npm_command, "run", name], check=True, env=script_env, cwd=directory)
+          PY
+      - run: npm run build
+        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
+      - run: npm run typecheck --if-present
+        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
+      - run: npm test
+        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
+      - run: npm run lint --if-present
+        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
       - name: Run runtime-resolved compatibility lanes without credentials
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && inputs.secretless-compatibility-ranges != ''
         env:

@@ -3074,7 +3074,7 @@ jobs:
               lock_text = lock_text[:start] + replacement + lock_text[end:]
           lock_path.write_text(lock_text, encoding="utf-8")
           PY
-            NPM_CONFIG_USERCONFIG="$MOCK_REGISTRY_NPMRC" corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline \
+            PNPM_CONFIG_IGNORE_PNPMFILE=true NPM_CONFIG_USERCONFIG="$MOCK_REGISTRY_NPMRC" corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline \
               --store-dir "$PNPM_STORE_DIR"
           fi
       - name: Stage verified public npm blobs for cross-run reuse
@@ -3607,179 +3607,8 @@ jobs:
         if: needs.eligibility.outputs.should-run != 'false' && !(inputs.secretless-pr || inputs.secretless-trusted-ref)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
-      - name: Revalidate protected pull-request identity
-        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && inputs.secretless-rebuild-packages != ''
-        env:
-          ADMITTED_EVENT: ${{ inputs.event-name }}
-          ADMITTED_HEAD_REPOSITORY: ${{ inputs.head-repository }}
-          ADMITTED_HEAD_SHA: ${{ inputs.head-sha }}
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          [ "$ADMITTED_EVENT" = pull_request ]
-          [ -n "$ADMITTED_HEAD_REPOSITORY" ]
-          [[ "$ADMITTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
-          run_record="$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID" --jq '[.event,.head_sha,(.pull_requests|length),(.pull_requests[0].number//"")]|@tsv')"
-          IFS=$'\t' read -r run_event run_head binding_count pr_number <<<"$run_record"
-          [ "$run_event" = "$ADMITTED_EVENT" ]
-          [ "$run_head" = "$ADMITTED_HEAD_SHA" ]
-          [ "$binding_count" = 1 ]
-          [[ "$pr_number" =~ ^[1-9][0-9]*$ ]]
-          pr_record="$(gh api "repos/$REPOSITORY/pulls/$pr_number" --jq '[.state,.head.repo.full_name,.head.sha]|@tsv')"
-          IFS=$'\t' read -r pr_state pr_head_repository pr_head_sha <<<"$pr_record"
-          [ "$pr_state" = open ]
-          [ "$pr_head_repository" = "$ADMITTED_HEAD_REPOSITORY" ]
-          [ "$pr_head_sha" = "$ADMITTED_HEAD_SHA" ]
-      - name: Rebuild exact approved lifecycle packages without credentials
-        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && inputs.secretless-rebuild-packages != ''
-        env:
-          PACKAGE_MANAGER: ${{ inputs.package-manager }}
-          REBUILD_PACKAGES: ${{ inputs.secretless-rebuild-packages }}
-          REBUILD_ENV: ${{ inputs.secretless-rebuild-env }}
-        run: |
-          unset -v GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN NPM_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GOOGLE_APPLICATION_CREDENTIALS AZURE_CREDENTIALS ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
-          exec python3 - <<'PY'
-          import json
-          import os
-          import re
-          import sys
-          from pathlib import Path
-
-          requested = [line.strip() for line in os.environ["REBUILD_PACKAGES"].splitlines() if line.strip()]
-          package_pattern = re.compile(r"(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*")
-          if not requested or len(requested) != len(set(requested)) \
-                  or any(package_pattern.fullmatch(name) is None for name in requested):
-              sys.exit("secretless-rebuild-packages accepts unique exact npm package names only")
-          raw_rebuild_env = os.environ.get("REBUILD_ENV", "{}")
-          if len(raw_rebuild_env) > 4096:
-              sys.exit("secretless-rebuild-env must not exceed 4096 characters")
-          try:
-              rebuild_env = json.loads(raw_rebuild_env)
-          except json.JSONDecodeError as error:
-              sys.exit(f"secretless-rebuild-env must be valid JSON: {error}")
-          if not isinstance(rebuild_env, dict) or len(rebuild_env) > 1:
-              sys.exit("secretless-rebuild-env must be an object with at most one approved entry")
-          for name, value in rebuild_env.items():
-              if name != "ONNXRUNTIME_NODE_INSTALL" or value != "skip":
-                  sys.exit("secretless-rebuild-env only accepts ONNXRUNTIME_NODE_INSTALL=skip")
-          if rebuild_env and "onnxruntime-node" not in requested:
-              sys.exit("ONNXRUNTIME_NODE_INSTALL=skip requires onnxruntime-node in secretless-rebuild-packages")
-          package_manager = os.environ.get("PACKAGE_MANAGER", "npm")
-          if package_manager == "npm":
-              lock = json.loads(Path("package-lock.json").read_text(encoding="utf-8"))
-              installed = set()
-              lifecycle_scoped = set()
-              for path, package in lock.get("packages", {}).items():
-                  if "node_modules/" not in path:
-                      continue
-                  path_name = path.rsplit("node_modules/", 1)[1]
-                  locked_name = package.get("name")
-                  resolved_name = locked_name if isinstance(locked_name, str) else path_name
-                  installed.add(resolved_name)
-                  if package.get("hasInstallScript") is True:
-                      lifecycle_scoped.add(resolved_name)
-          else:
-              import yaml
-              lock = yaml.safe_load(Path("pnpm-lock.yaml").read_text(encoding="utf-8"))
-              def pnpm_package_name(key):
-                  if not isinstance(key, str) or any(ord(char) < 32 for char in key):
-                      raise ValueError("pnpm package key must be a printable string")
-                  scoped = re.fullmatch(
-                      r"(@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*)@(.+)", key)
-                  unscoped = re.fullmatch(r"([a-z0-9][a-z0-9._-]*)@(.+)", key)
-                  match = scoped or unscoped
-                  if match is None:
-                      raise ValueError(f"invalid pnpm package key: {key}")
-                  reference = match.group(2)
-                  if reference.startswith("npm:"):
-                      raise ValueError(f"pnpm package alias is not an exact package identity: {key}")
-                  depth = 0
-                  for char in reference:
-                      if char == "(":
-                          depth += 1
-                      elif char == ")":
-                          depth -= 1
-                          if depth < 0:
-                              raise ValueError(f"unbalanced pnpm peer context: {key}")
-                  if depth != 0:
-                      raise ValueError(f"unbalanced pnpm peer context: {key}")
-                  return match.group(1)
-              package_sets = (lock.get("packages", {}), lock.get("snapshots", {}))
-              if any(not isinstance(package_set, dict) for package_set in package_sets):
-                  sys.exit("pnpm lock packages and snapshots must be mappings")
-              try:
-                  installed = {pnpm_package_name(key) for package_set in package_sets
-                               for key in package_set}
-                  lifecycle_scoped = {
-                      pnpm_package_name(key)
-                      for package_set in package_sets
-                      for key, entry in package_set.items()
-                      if isinstance(entry, dict) and entry.get("requiresBuild") is True
-                  }
-              except ValueError as error:
-                  sys.exit(str(error))
-          # A pnpm or npm lock records every platform variant of an optional
-          # native dependency (e.g. @esbuild/darwin-arm64, @esbuild/linux-x64),
-          # but --frozen-lockfile/--ignore-scripts installed only the ones this
-          # runner's os/cpu actually match. Scoping to the lock's full declared
-          # universe would force the allowlist to name a package that was never
-          # installed here, then fail rebuilding it (#941). node_modules/ on
-          # disk after that install is the platform-accurate source of truth.
-          lifecycle_scoped = {
-              name for name in lifecycle_scoped
-              if (Path("node_modules") / name).is_dir()
-          }
-          missing = sorted(set(requested) - installed)
-          if missing:
-              sys.exit("approved rebuild packages absent from lock: " + ", ".join(missing))
-          # secretless-rebuild-packages is the complete, reviewed set of packages
-          # allowed to execute code at install time under --ignore-scripts (#932):
-          # an exact match, not a hint, so a dependency update that silently adds
-          # or drops a lifecycle script anywhere in the tree fails closed instead
-          # of passing unreviewed.
-          undeclared = sorted(lifecycle_scoped - set(requested))
-          if undeclared:
-              sys.exit(
-                  "lock declares install scripts for packages absent from "
-                  "secretless-rebuild-packages: " + ", ".join(undeclared)
-              )
-          unnecessary = sorted(set(requested) - lifecycle_scoped)
-          if unnecessary:
-              sys.exit(
-                  "secretless-rebuild-packages names packages the lock does not mark "
-                  "as needing install scripts: " + ", ".join(unnecessary)
-              )
-          command = ["npm", "rebuild"] if package_manager == "npm" else ["corepack", "pnpm", "rebuild"]
-          rebuild_process_env = dict(os.environ)
-          rebuild_process_env.pop("REBUILD_ENV", None)
-          rebuild_process_env.pop("ONNXRUNTIME_NODE_INSTALL", None)
-          for name in (
-              "GITHUB_ENV",
-              "GITHUB_OUTPUT",
-              "GITHUB_PATH",
-              "GITHUB_STATE",
-              "GITHUB_STEP_SUMMARY",
-          ):
-              rebuild_process_env.pop(name, None)
-          rebuild_process_env.update(rebuild_env)
-          os.execvpe(command[0], [*command, *requested], rebuild_process_env)
-          PY
-      - name: Export protected type-surface base SHA
-        if: needs.eligibility.outputs.should-run != 'false' && inputs.protected-type-surface-declaration-path != ''
-        env:
-          BASE_SHA: ${{ needs.acquire-secretless-dependencies.outputs.protected-baseline-base-sha }}
-        run: |
-          set -euo pipefail
-          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
-            echo "::error::protected type-surface base SHA is unavailable"
-            exit 1
-          }
-          echo "VERJSON_TYPE_SURFACE_BASE_SHA=$BASE_SHA" >> "$GITHUB_ENV"
       - name: Provision trusted compatibility sandbox
-        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && (inputs.protected-type-surface-declaration-path != '' || inputs.secretless-compatibility-ranges != '' || inputs.secretless-ci-script-plan != '' || inputs.secretless-nested-manifests != '') && runner.environment == 'github-hosted'
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && (inputs.protected-type-surface-declaration-path != '' || inputs.secretless-compatibility-ranges != '' || inputs.secretless-ci-script-plan != '' || inputs.secretless-nested-manifests != '' || inputs.secretless-rebuild-packages != '') && runner.environment == 'github-hosted'
         env:
           ACTIONS_ID_TOKEN_REQUEST_TOKEN: ''
           ACTIONS_ID_TOKEN_REQUEST_URL: ''
@@ -3792,8 +3621,13 @@ jobs:
           GOOGLE_APPLICATION_CREDENTIALS: ''
           NODE_AUTH_TOKEN: ''
           NPM_TOKEN: ''
+        shell: bash
         run: |
           set -euo pipefail
+          if [ "${RUNNER_OS:-}" != "Linux" ]; then
+            echo '::error::trusted compatibility sandbox requires a Linux GitHub-hosted runner' >&2
+            exit 1
+          fi
           sandbox_acquirer_source() {
             /usr/bin/cat <<'PY'
           import errno
@@ -5396,7 +5230,425 @@ jobs:
           fi
 
       - name: Revalidate protected pull-request identity
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && inputs.secretless-rebuild-packages != ''
+        env:
+          ADMITTED_EVENT: ${{ inputs.event-name }}
+          ADMITTED_HEAD_REPOSITORY: ${{ inputs.head-repository }}
+          ADMITTED_HEAD_SHA: ${{ inputs.head-sha }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          [ "$ADMITTED_EVENT" = pull_request ]
+          [ -n "$ADMITTED_HEAD_REPOSITORY" ]
+          [[ "$ADMITTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          run_record="$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID" --jq '[.event,.head_sha,(.pull_requests|length),(.pull_requests[0].number//"")]|@tsv')"
+          IFS=$'\t' read -r run_event run_head binding_count pr_number <<<"$run_record"
+          [ "$run_event" = "$ADMITTED_EVENT" ]
+          [ "$run_head" = "$ADMITTED_HEAD_SHA" ]
+          [ "$binding_count" = 1 ]
+          [[ "$pr_number" =~ ^[1-9][0-9]*$ ]]
+          pr_record="$(gh api "repos/$REPOSITORY/pulls/$pr_number" --jq '[.state,.head.repo.full_name,.head.sha]|@tsv')"
+          IFS=$'\t' read -r pr_state pr_head_repository pr_head_sha <<<"$pr_record"
+          [ "$pr_state" = open ]
+          [ "$pr_head_repository" = "$ADMITTED_HEAD_REPOSITORY" ]
+          [ "$pr_head_sha" = "$ADMITTED_HEAD_SHA" ]
+      - name: Rebuild exact approved lifecycle packages without credentials
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && inputs.secretless-rebuild-packages != ''
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+          REBUILD_PACKAGES: ${{ inputs.secretless-rebuild-packages }}
+          REBUILD_ENV: ${{ inputs.secretless-rebuild-env }}
+          BWRAP_BINARY: /usr/bin/bwrap
+        run: |
+          unset -v GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN NPM_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GOOGLE_APPLICATION_CREDENTIALS AZURE_CREDENTIALS ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
+          exec python3 - <<'PY'
+          import json
+          import errno
+          import os
+          import re
+          import shutil
+          import stat
+          import sys
+          from pathlib import Path
+
+          requested = [line.strip() for line in os.environ["REBUILD_PACKAGES"].splitlines() if line.strip()]
+          package_pattern = re.compile(r"(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*")
+          if not requested or len(requested) != len(set(requested)) \
+                  or any(package_pattern.fullmatch(name) is None for name in requested):
+              sys.exit("secretless-rebuild-packages accepts unique exact npm package names only")
+          raw_rebuild_env = os.environ.get("REBUILD_ENV", "{}")
+          if len(raw_rebuild_env) > 4096:
+              sys.exit("secretless-rebuild-env must not exceed 4096 characters")
+          try:
+              rebuild_env = json.loads(raw_rebuild_env)
+          except json.JSONDecodeError as error:
+              sys.exit(f"secretless-rebuild-env must be valid JSON: {error}")
+          if not isinstance(rebuild_env, dict) or len(rebuild_env) > 1:
+              sys.exit("secretless-rebuild-env must be an object with at most one approved entry")
+          for name, value in rebuild_env.items():
+              if name != "ONNXRUNTIME_NODE_INSTALL" or value != "skip":
+                  sys.exit("secretless-rebuild-env only accepts ONNXRUNTIME_NODE_INSTALL=skip")
+          if rebuild_env and "onnxruntime-node" not in requested:
+              sys.exit("ONNXRUNTIME_NODE_INSTALL=skip requires onnxruntime-node in secretless-rebuild-packages")
+          package_manager = os.environ.get("PACKAGE_MANAGER", "npm")
+          if package_manager == "npm":
+              lock = json.loads(Path("package-lock.json").read_text(encoding="utf-8"))
+              installed = set()
+              lifecycle_scoped = set()
+              for path, package in lock.get("packages", {}).items():
+                  if "node_modules/" not in path:
+                      continue
+                  path_name = path.rsplit("node_modules/", 1)[1]
+                  locked_name = package.get("name")
+                  resolved_name = locked_name if isinstance(locked_name, str) else path_name
+                  installed.add(resolved_name)
+                  if package.get("hasInstallScript") is True:
+                      lifecycle_scoped.add(resolved_name)
+          else:
+              import yaml
+              lock = yaml.safe_load(Path("pnpm-lock.yaml").read_text(encoding="utf-8"))
+              def pnpm_package_name(key):
+                  if not isinstance(key, str) or any(ord(char) < 32 for char in key):
+                      raise ValueError("pnpm package key must be a printable string")
+                  scoped = re.fullmatch(
+                      r"(@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*)@(.+)", key)
+                  unscoped = re.fullmatch(r"([a-z0-9][a-z0-9._-]*)@(.+)", key)
+                  match = scoped or unscoped
+                  if match is None:
+                      raise ValueError(f"invalid pnpm package key: {key}")
+                  reference = match.group(2)
+                  if reference.startswith("npm:"):
+                      raise ValueError(f"pnpm package alias is not an exact package identity: {key}")
+                  depth = 0
+                  for char in reference:
+                      if char == "(":
+                          depth += 1
+                      elif char == ")":
+                          depth -= 1
+                          if depth < 0:
+                              raise ValueError(f"unbalanced pnpm peer context: {key}")
+                  if depth != 0:
+                      raise ValueError(f"unbalanced pnpm peer context: {key}")
+                  return match.group(1)
+              package_sets = (lock.get("packages", {}), lock.get("snapshots", {}))
+              if any(not isinstance(package_set, dict) for package_set in package_sets):
+                  sys.exit("pnpm lock packages and snapshots must be mappings")
+              try:
+                  installed = {pnpm_package_name(key) for package_set in package_sets
+                               for key in package_set}
+                  lifecycle_scoped = {
+                      pnpm_package_name(key)
+                      for package_set in package_sets
+                      for key, entry in package_set.items()
+                      if isinstance(entry, dict) and entry.get("requiresBuild") is True
+                  }
+              except ValueError as error:
+                  sys.exit(str(error))
+          # A pnpm or npm lock records every platform variant of an optional
+          # native dependency (e.g. @esbuild/darwin-arm64, @esbuild/linux-x64),
+          # but --frozen-lockfile/--ignore-scripts installed only the ones this
+          # runner's os/cpu actually match. Scoping to the lock's full declared
+          # universe would force the allowlist to name a package that was never
+          # installed here, then fail rebuilding it (#941). node_modules/ on
+          # disk after that install is the platform-accurate source of truth.
+          lifecycle_scoped = {
+              name for name in lifecycle_scoped
+              if (Path("node_modules") / name).is_dir()
+          }
+          missing = sorted(set(requested) - installed)
+          if missing:
+              sys.exit("approved rebuild packages absent from lock: " + ", ".join(missing))
+          # secretless-rebuild-packages is the complete, reviewed set of packages
+          # allowed to execute code at install time under --ignore-scripts (#932):
+          # an exact match, not a hint, so a dependency update that silently adds
+          # or drops a lifecycle script anywhere in the tree fails closed instead
+          # of passing unreviewed.
+          undeclared = sorted(lifecycle_scoped - set(requested))
+          if undeclared:
+              sys.exit(
+                  "lock declares install scripts for packages absent from "
+                  "secretless-rebuild-packages: " + ", ".join(undeclared)
+              )
+          unnecessary = sorted(set(requested) - lifecycle_scoped)
+          if unnecessary:
+              sys.exit(
+                  "secretless-rebuild-packages names packages the lock does not mark "
+                  "as needing install scripts: " + ", ".join(unnecessary)
+              )
+          command = ["npm", "rebuild"] if package_manager == "npm" else ["corepack", "pnpm", "rebuild"]
+          if os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
+              sys.exit("secretless lifecycle rebuild requires a GitHub-hosted runner")
+          bubblewrap = Path(os.environ["BWRAP_BINARY"])
+          try:
+              bubblewrap_metadata = bubblewrap.lstat()
+              if (
+                  not stat.S_ISREG(bubblewrap_metadata.st_mode)
+                  or bubblewrap_metadata.st_uid not in (0, os.getuid())
+                  or bubblewrap_metadata.st_mode & (0o022 | stat.S_ISUID | stat.S_ISGID)
+              ):
+                  sys.exit("trusted bubblewrap binary is unsafe")
+              try:
+                  capabilities = os.getxattr(bubblewrap, "security.capability", follow_symlinks=False)
+              except OSError as error:
+                  absent_capability = {errno.ENODATA}
+                  if hasattr(errno, "ENOATTR"):
+                      absent_capability.add(errno.ENOATTR)
+                  if error.errno not in absent_capability:
+                      raise
+              else:
+                  if capabilities:
+                      sys.exit("trusted bubblewrap binary has file capabilities")
+              workspace = Path.cwd().resolve(strict=True)
+              node_modules = workspace / "node_modules"
+              node_modules_metadata = node_modules.lstat()
+              if not stat.S_ISDIR(node_modules_metadata.st_mode):
+                  sys.exit("secretless lifecycle rebuild requires a real node_modules directory")
+              node_modules = node_modules.resolve(strict=True)
+              if not node_modules.is_relative_to(workspace):
+                  sys.exit("node_modules resolves outside the checked-out workspace")
+              home = Path(os.environ["HOME"]).resolve(strict=True)
+              runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+              if any(not path.is_dir() or path == Path("/") for path in (home, runner_temp)):
+                  sys.exit("trusted runner isolation paths are unsafe")
+              tool_names = ("node", "npm") if package_manager == "npm" else ("node", "corepack")
+              tool_paths = {}
+              for name in tool_names:
+                  candidate = shutil.which(name)
+                  if candidate is None:
+                      sys.exit(f"trusted {name} executable is unavailable")
+                  tool_path = Path(candidate).resolve(strict=True)
+                  if not tool_path.is_file() or not os.access(tool_path, os.X_OK):
+                      sys.exit(f"trusted {name} executable is unsafe")
+                  tool_paths[name] = tool_path
+              node_path = tool_paths["node"]
+              if node_path.parent.name != "bin":
+                  sys.exit("trusted node executable has an unexpected installation layout")
+              toolchain_root = node_path.parent.parent
+              if (
+                  toolchain_root == Path("/")
+                  or toolchain_root == workspace
+                  or toolchain_root.is_relative_to(workspace)
+                  or workspace.is_relative_to(toolchain_root)
+              ):
+                  sys.exit("trusted Node toolchain overlaps the checked-out workspace")
+              if any(
+                  not path.is_relative_to(toolchain_root) and not path.is_relative_to("/usr")
+                  for path in tool_paths.values()
+              ):
+                  sys.exit("trusted package-manager executable is outside the Node toolchain")
+              toolchain_in_usr = toolchain_root.is_relative_to("/usr")
+              runner_tool_cache = None
+              if not toolchain_in_usr:
+                  runner_tool_cache = Path(os.environ["RUNNER_TOOL_CACHE"]).resolve(strict=True)
+                  if (
+                      not runner_tool_cache.is_dir()
+                      or not toolchain_root.is_relative_to(runner_tool_cache)
+                      or toolchain_root.is_relative_to(home)
+                      or home.is_relative_to(toolchain_root)
+                      or toolchain_root.is_relative_to(runner_temp)
+                      or runner_temp.is_relative_to(toolchain_root)
+                  ):
+                      sys.exit("trusted Node toolchain is outside the runner tool cache")
+              toolchain_destination = str(toolchain_root) if toolchain_in_usr else "/opt/verjson-node-toolchain"
+              toolchain_bin = f"{toolchain_destination}/bin"
+              corepack_home = None
+              if package_manager == "pnpm":
+                  configured_corepack_home = os.environ.get("COREPACK_HOME")
+                  corepack_candidate = Path(configured_corepack_home) if configured_corepack_home else Path.home() / ".cache/node/corepack"
+                  corepack_home = corepack_candidate.resolve(strict=True)
+                  if (
+                      not corepack_home.is_dir()
+                      or corepack_home != (home / ".cache/node/corepack").resolve(strict=True)
+                      or corepack_home == workspace
+                      or corepack_home.is_relative_to(workspace)
+                      or corepack_home == runner_temp
+                      or corepack_home.is_relative_to(runner_temp)
+                      or runner_temp.is_relative_to(corepack_home)
+                  ):
+                      sys.exit("trusted Corepack cache is unavailable")
+              sandbox_workspace = "/tmp/verjson-secretless-workspace"
+              if any(
+                  runner_temp == path or runner_temp.is_relative_to(path)
+                  or path.is_relative_to(runner_temp)
+                  for path in (workspace,)
+              ):
+                  sys.exit("runner temporary directory overlaps the workspace")
+          except OSError:
+              sys.exit("trusted bubblewrap isolation is unavailable")
+
+          arguments = [
+              str(bubblewrap),
+              "--unshare-user",
+              "--unshare-pid",
+              "--unshare-ipc",
+              "--unshare-uts",
+              "--unshare-net",
+              "--unshare-cgroup-try",
+              "--disable-userns",
+              "--die-with-parent",
+              "--new-session",
+              "--cap-drop", "ALL",
+              "--tmpfs", "/",
+              "--tmpfs", "/tmp",
+              "--dir", "/usr",
+              "--dir", "/bin",
+              "--dir", "/lib",
+              "--dir", "/lib64",
+              "--dir", "/etc",
+              "--dir", "/etc/ssl",
+              "--dir", "/opt",
+          ]
+          mount_targets = [Path(sandbox_workspace), Path("/tmp/home"), Path("/tmp/npm-cache"), Path("/tmp/corepack")]
+          if not toolchain_in_usr:
+              mount_targets.append(Path(toolchain_destination))
+          namespace_directories = set()
+          for target in mount_targets:
+              namespace_directories.add(target)
+              namespace_directories.update(target.parents)
+          namespace_directories.discard(Path("/"))
+          for directory in sorted(namespace_directories, key=lambda path: (len(path.parts), str(path))):
+              if directory == Path("/usr") or directory.is_relative_to("/usr"):
+                  continue
+              if directory in (Path("/tmp"), Path("/bin"), Path("/lib"), Path("/lib64"), Path("/etc"), Path("/etc/ssl"), Path("/opt")):
+                  continue
+              arguments.extend(("--dir", str(directory)))
+
+          mount_fds = []
+          def bind_source(source, destination, *, writable=False):
+              expected = source.stat()
+              if not (stat.S_ISDIR(expected.st_mode) or stat.S_ISREG(expected.st_mode)):
+                  sys.exit("trusted sandbox mount source has an unsupported file type")
+              open_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+              if stat.S_ISDIR(expected.st_mode):
+                  open_flags |= os.O_DIRECTORY
+              descriptor = os.open(
+                  source,
+                  open_flags,
+              )
+              actual = os.fstat(descriptor)
+              if (
+                  not (stat.S_ISDIR(actual.st_mode) or stat.S_ISREG(actual.st_mode))
+                  or (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino)
+              ):
+                  os.close(descriptor)
+                  sys.exit("trusted sandbox mount source changed before namespace bind")
+              os.set_inheritable(descriptor, True)
+              mount_fds.append(descriptor)
+              arguments.extend(("--bind" if writable else "--ro-bind", f"/proc/self/fd/{descriptor}", destination))
+
+          for source, destination in (
+              (Path("/usr"), "/usr"),
+              (Path("/bin").resolve(strict=True), "/bin"),
+              (Path("/lib").resolve(strict=True), "/lib"),
+              (Path("/lib64").resolve(strict=True), "/lib64"),
+              (Path("/etc/ssl"), "/etc/ssl"),
+              (Path("/etc/hosts"), "/etc/hosts"),
+              (Path("/etc/nsswitch.conf"), "/etc/nsswitch.conf"),
+              (Path("/etc/passwd"), "/etc/passwd"),
+              (Path("/etc/group"), "/etc/group"),
+          ):
+              bind_source(source, destination)
+          if not toolchain_in_usr:
+              bind_source(toolchain_root, toolchain_destination)
+          if corepack_home is not None:
+              bind_source(corepack_home, "/tmp/corepack")
+          bind_source(workspace, sandbox_workspace)
+          bind_source(node_modules, f"{sandbox_workspace}/node_modules", writable=True)
+          arguments.extend(("--dev", "/dev", "--proc", "/proc"))
+          arguments.extend(("--chdir", sandbox_workspace))
+
+          rebuild_process_env = {
+              "PATH": f"{toolchain_bin}:/usr/bin:/bin",
+              "HOME": "/tmp/home",
+              "TMPDIR": "/tmp",
+              "TMP": "/tmp",
+              "TEMP": "/tmp",
+              "RUNNER_TEMP": "/tmp",
+              "GITHUB_WORKSPACE": sandbox_workspace,
+              "CI": "true",
+              "NPM_CONFIG_CACHE": "/tmp/npm-cache",
+              "NPM_CONFIG_GLOBALCONFIG": "/dev/null",
+              "NPM_CONFIG_USERCONFIG": "/dev/null",
+              "npm_config_cache": "/tmp/npm-cache",
+              "npm_config_globalconfig": "/dev/null",
+              "npm_config_userconfig": "/dev/null",
+              "COREPACK_HOME": "/tmp/corepack",
+              "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+              **rebuild_env,
+          }
+          for name, value in sorted(rebuild_process_env.items()):
+              arguments.extend(("--setenv", name, value))
+          arguments.extend(("--", *command, *requested))
+          os.execve(str(bubblewrap), arguments, {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"})
+          PY
+      - name: Export protected type-surface base SHA
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.protected-type-surface-declaration-path != ''
+        env:
+          BASE_SHA: ${{ needs.acquire-secretless-dependencies.outputs.protected-baseline-base-sha }}
+        run: |
+          set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::protected type-surface base SHA is unavailable"
+            exit 1
+          }
+          echo "VERJSON_TYPE_SURFACE_BASE_SHA=$BASE_SHA" >> "$GITHUB_ENV"
+      - name: Revalidate protected pull-request identity
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && (inputs.secretless-ci-script-plan != '' || inputs.secretless-nested-manifests != '')
+        env:
+          ADMITTED_EVENT: ${{ inputs.event-name }}
+          ADMITTED_HEAD_REPOSITORY: ${{ inputs.head-repository }}
+          ADMITTED_HEAD_SHA: ${{ inputs.head-sha }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          [ "$ADMITTED_EVENT" = pull_request ]
+          [ -n "$ADMITTED_HEAD_REPOSITORY" ]
+          [[ "$ADMITTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          run_record="$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID" --jq '[.event,.head_sha,(.pull_requests|length),(.pull_requests[0].number//"")]|@tsv')"
+          IFS=$'\t' read -r run_event run_head binding_count pr_number <<<"$run_record"
+          [ "$run_event" = "$ADMITTED_EVENT" ]
+          [ "$run_head" = "$ADMITTED_HEAD_SHA" ]
+          [ "$binding_count" = 1 ]
+          [[ "$pr_number" =~ ^[1-9][0-9]*$ ]]
+          pr_record="$(gh api "repos/$REPOSITORY/pulls/$pr_number" --jq '[.state,.head.repo.full_name,.head.sha]|@tsv')"
+          IFS=$'\t' read -r pr_state pr_head_repository pr_head_sha <<<"$pr_record"
+          [ "$pr_state" = open ]
+          [ "$pr_head_repository" = "$ADMITTED_HEAD_REPOSITORY" ]
+          [ "$pr_head_sha" = "$ADMITTED_HEAD_SHA" ]
+      - name: Revalidate protected pull-request identity
+        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
+        env:
+          ADMITTED_EVENT: ${{ inputs.event-name }}
+          ADMITTED_HEAD_REPOSITORY: ${{ inputs.head-repository }}
+          ADMITTED_HEAD_SHA: ${{ inputs.head-sha }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          [ "$ADMITTED_EVENT" = pull_request ]
+          [ -n "$ADMITTED_HEAD_REPOSITORY" ]
+          [[ "$ADMITTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          run_record="$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID" --jq '[.event,.head_sha,(.pull_requests|length),(.pull_requests[0].number//"")]|@tsv')"
+          IFS=$'\t' read -r run_event run_head binding_count pr_number <<<"$run_record"
+          [ "$run_event" = "$ADMITTED_EVENT" ]
+          [ "$run_head" = "$ADMITTED_HEAD_SHA" ]
+          [ "$binding_count" = 1 ]
+          [[ "$pr_number" =~ ^[1-9][0-9]*$ ]]
+          pr_record="$(gh api "repos/$REPOSITORY/pulls/$pr_number" --jq '[.state,.head.repo.full_name,.head.sha]|@tsv')"
+          IFS=$'\t' read -r pr_state pr_head_repository pr_head_sha <<<"$pr_record"
+          [ "$pr_state" = open ]
+          [ "$pr_head_repository" = "$ADMITTED_HEAD_REPOSITORY" ]
+          [ "$pr_head_sha" = "$ADMITTED_HEAD_SHA" ]
+      - name: Revalidate protected pull-request identity
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && (inputs.protected-type-surface-declaration-path != '' || inputs.secretless-compatibility-ranges != '')
         env:
           ADMITTED_EVENT: ${{ inputs.event-name }}
           ADMITTED_HEAD_REPOSITORY: ${{ inputs.head-repository }}
@@ -6305,32 +6557,6 @@ jobs:
           rm -rf -- "$CANDIDATE_CACHE_ROOT"
           [ ! -e "$CANDIDATE_CACHE_ROOT" ] && [ ! -L "$CANDIDATE_CACHE_ROOT" ]
 
-      - name: Revalidate protected pull-request identity
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-        env:
-          ADMITTED_EVENT: ${{ inputs.event-name }}
-          ADMITTED_HEAD_REPOSITORY: ${{ inputs.head-repository }}
-          ADMITTED_HEAD_SHA: ${{ inputs.head-sha }}
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          [ "$ADMITTED_EVENT" = pull_request ]
-          [ -n "$ADMITTED_HEAD_REPOSITORY" ]
-          [[ "$ADMITTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
-          run_record="$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID" --jq '[.event,.head_sha,(.pull_requests|length),(.pull_requests[0].number//"")]|@tsv')"
-          IFS=$'\t' read -r run_event run_head binding_count pr_number <<<"$run_record"
-          [ "$run_event" = "$ADMITTED_EVENT" ]
-          [ "$run_head" = "$ADMITTED_HEAD_SHA" ]
-          [ "$binding_count" = 1 ]
-          [[ "$pr_number" =~ ^[1-9][0-9]*$ ]]
-          pr_record="$(gh api "repos/$REPOSITORY/pulls/$pr_number" --jq '[.state,.head.repo.full_name,.head.sha]|@tsv')"
-          IFS=$'\t' read -r pr_state pr_head_repository pr_head_sha <<<"$pr_record"
-          [ "$pr_state" = open ]
-          [ "$pr_head_repository" = "$ADMITTED_HEAD_REPOSITORY" ]
-          [ "$pr_head_sha" = "$ADMITTED_HEAD_SHA" ]
       - name: Run default build, typecheck, test, and lint plan
         if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
         run: |
@@ -6339,32 +6565,6 @@ jobs:
           npm run typecheck --if-present
           npm test
           npm run lint --if-present
-      - name: Revalidate protected pull-request identity
-        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && (inputs.protected-type-surface-declaration-path != '' || inputs.secretless-compatibility-ranges != '')
-        env:
-          ADMITTED_EVENT: ${{ inputs.event-name }}
-          ADMITTED_HEAD_REPOSITORY: ${{ inputs.head-repository }}
-          ADMITTED_HEAD_SHA: ${{ inputs.head-sha }}
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          [ "$ADMITTED_EVENT" = pull_request ]
-          [ -n "$ADMITTED_HEAD_REPOSITORY" ]
-          [[ "$ADMITTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
-          run_record="$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID" --jq '[.event,.head_sha,(.pull_requests|length),(.pull_requests[0].number//"")]|@tsv')"
-          IFS=$'\t' read -r run_event run_head binding_count pr_number <<<"$run_record"
-          [ "$run_event" = "$ADMITTED_EVENT" ]
-          [ "$run_head" = "$ADMITTED_HEAD_SHA" ]
-          [ "$binding_count" = 1 ]
-          [[ "$pr_number" =~ ^[1-9][0-9]*$ ]]
-          pr_record="$(gh api "repos/$REPOSITORY/pulls/$pr_number" --jq '[.state,.head.repo.full_name,.head.sha]|@tsv')"
-          IFS=$'\t' read -r pr_state pr_head_repository pr_head_sha <<<"$pr_record"
-          [ "$pr_state" = open ]
-          [ "$pr_head_repository" = "$ADMITTED_HEAD_REPOSITORY" ]
-          [ "$pr_head_sha" = "$ADMITTED_HEAD_SHA" ]
       - name: Run runtime-resolved compatibility lanes without credentials
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && (inputs.protected-type-surface-declaration-path != '' || inputs.secretless-compatibility-ranges != '')
         env:

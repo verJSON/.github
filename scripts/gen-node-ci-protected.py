@@ -1794,7 +1794,7 @@ def render() -> str:
           npm test
           npm run lint --if-present
 """
-    document = replace_once(document, default_commands, verifier_step(default_if) + grouped_default)
+    document = replace_once(document, default_commands, grouped_default)
     compatibility_if = (
         "needs.eligibility.outputs.should-run != 'false' && "
         "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
@@ -1806,18 +1806,26 @@ def render() -> str:
         "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
         "inputs.secretless-compatibility-ranges != ''"
     )
-    if document.count(legacy_compatibility_if) != 2:
+    if document.count(legacy_compatibility_if) != 1:
         raise SystemExit("protected node-ci compatibility runtime gate drifted")
     document = document.replace(legacy_compatibility_if, compatibility_if)
-    # The protected script plan requires the bubblewrap namespace boundary
-    # whenever it runs (a script plan or nested manifests are set), so on
-    # GitHub-hosted runners the sandbox must be provisioned for every lane that
-    # will execute it, not only for lanes that declare a type surface or
-    # compatibility ranges. verjson-cli-projects' lanes pass a script plan and
-    # neither of those, and failed closed with "verified bubblewrap namespace
-    # boundary is unavailable" the moment their required workflow was
-    # activated (#1423).
-    hosted_provisioning_if = compatibility_if + " && runner.environment == 'github-hosted'"
+    document = replace_once(
+        document,
+        "      - name: Run exact credentialless consumer script plan\n",
+        verifier_step(default_if)
+        + verifier_step(compatibility_if)
+        + "      - name: Run exact credentialless consumer script plan\n",
+    )
+    # Protected consumer scripts and approved lifecycle rebuilds use the
+    # verified bubblewrap boundary. Provision it before either executes on a
+    # GitHub-hosted runner, including lanes that only request rebuild packages.
+    hosted_provisioning_if = (
+        "needs.eligibility.outputs.should-run != 'false' && "
+        "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
+        "(inputs.secretless-compatibility-ranges != '' || "
+        "inputs.secretless-rebuild-packages != '') && "
+        "runner.environment == 'github-hosted'"
+    )
     if document.count(hosted_provisioning_if) != 1:
         raise SystemExit("protected node-ci hosted sandbox provisioning gate drifted")
     document = document.replace(
@@ -1827,10 +1835,10 @@ def render() -> str:
         "(inputs.protected-type-surface-declaration-path != '' || "
         "inputs.secretless-compatibility-ranges != '' || "
         "inputs.secretless-ci-script-plan != '' || "
-        "inputs.secretless-nested-manifests != '') && "
+        "inputs.secretless-nested-manifests != '' || "
+        "inputs.secretless-rebuild-packages != '') && "
         "runner.environment == 'github-hosted'",
     )
-    document = replace_once(document, "      - name: Run runtime-resolved compatibility lanes without credentials\n", verifier_step(compatibility_if) + "      - name: Run runtime-resolved compatibility lanes without credentials\n")
     document = remove_step(document, "Install schema submodule deps")
     document = document.replace(
         "          ref: ${{ inputs.head-sha }}\n          persist-credentials: false\n",
@@ -1854,7 +1862,7 @@ def render() -> str:
     document = move_step_before_guard(
         document,
         "Provision trusted compatibility sandbox",
-        "Run exact credentialless consumer script plan",
+        "Rebuild exact approved lifecycle packages without credentials",
         "Revalidate protected pull-request identity",
     )
     return document

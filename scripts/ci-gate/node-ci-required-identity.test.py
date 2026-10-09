@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LEGACY = ROOT / ".github/workflows/node-ci.yml"
 PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 HEAD = "a" * 40
-LEGACY_SHA256 = "6f732d27673ce2377a5ee5232af975229d73c181ff70a45786931f3d7b738f4a"
+LEGACY_SHA256 = "8ac190b40342fc8c21e9919de0fb930e1f76de426d02d1f0206f82f03ceabd04"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
@@ -410,34 +410,51 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         verifier_indexes = [i for i, step in enumerate(build)
                             if step.get("name") == "Revalidate protected pull-request identity"]
         self.assertEqual(4, len(verifier_indexes))
-        self.assertIn("inputs.secretless-rebuild-packages != ''",
-                      build[verifier_indexes[0]]["if"])
-        self.assertIn("inputs.secretless-ci-script-plan != ''",
-                      build[verifier_indexes[1]]["if"])
-        self.assertIn("inputs.secretless-ci-script-plan == ''",
-                      build[verifier_indexes[2]]["if"])
-        for verifier_index in verifier_indexes:
-            self.assertEqual(build[verifier_index]["if"],
-                             build[verifier_index + 1]["if"])
         compatibility_condition = (
             "needs.eligibility.outputs.should-run != 'false' && "
             "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
             "(inputs.protected-type-surface-declaration-path != '' || "
             "inputs.secretless-compatibility-ranges != '')"
         )
-        self.assertEqual(compatibility_condition, build[verifier_indexes[3]]["if"])
-        self.assertEqual(guarded_routes[0], build[verifier_indexes[0] + 1]["name"])
-        self.assertEqual(guarded_routes[1], build[verifier_indexes[1] + 1]["name"])
-        grouped = build[verifier_indexes[2] + 1]
+        verifier_by_condition = {build[index]["if"]: index for index in verifier_indexes}
+        rebuild_condition = next(
+            build[index]["if"] for index in verifier_indexes
+            if "inputs.secretless-rebuild-packages != ''" in build[index]["if"]
+        )
+        plan_condition = next(
+            build[index]["if"] for index in verifier_indexes
+            if "inputs.secretless-ci-script-plan != ''" in build[index]["if"]
+        )
+        default_condition = next(
+            build[index]["if"] for index in verifier_indexes
+            if "inputs.secretless-ci-script-plan == ''" in build[index]["if"]
+        )
+        self.assertIn(rebuild_condition, verifier_by_condition)
+        self.assertIn(plan_condition, verifier_by_condition)
+        self.assertIn(default_condition, verifier_by_condition)
+        self.assertIn(compatibility_condition, verifier_by_condition)
+        self.assertEqual(guarded_routes[0], build[verifier_by_condition[rebuild_condition] + 1]["name"])
+        plan_step = next(i for i, step in enumerate(build)
+                         if step.get("name") == "Run exact credentialless consumer script plan")
+        default_step = next(i for i, step in enumerate(build)
+                            if step.get("name") == "Run default build, typecheck, test, and lint plan")
+        compatibility_verifier = verifier_by_condition[compatibility_condition]
+        self.assertLess(verifier_by_condition[plan_condition], plan_step)
+        self.assertLess(compatibility_verifier, plan_step)
+        self.assertLess(verifier_by_condition[default_condition], default_step)
+        self.assertLess(verifier_by_condition[default_condition], plan_step)
+        self.assertLess(max(verifier_indexes), min(plan_step, default_step))
+        grouped = build[default_step]
         self.assertEqual("Run default build, typecheck, test, and lint plan", grouped["name"])
-        self.assertEqual(build[verifier_indexes[2]]["if"], grouped["if"])
+        self.assertEqual(build[verifier_by_condition[default_condition]]["if"], grouped["if"])
         self.assertEqual(
             ["npm run build", "npm run typecheck --if-present", "npm test",
              "npm run lint --if-present"], grouped["run"].splitlines()[1:])
-        self.assertEqual("Run runtime-resolved compatibility lanes without credentials",
-                         build[verifier_indexes[3] + 1]["name"])
-        self.assertEqual(build[verifier_indexes[3]]["if"],
-                         build[verifier_indexes[3] + 1]["if"])
+        compatibility_step = next(
+            i for i, step in enumerate(build)
+            if step.get("name") == "Run runtime-resolved compatibility lanes without credentials"
+        )
+        self.assertGreater(compatibility_step, max(plan_step, default_step))
         for steps in (acquisition, build):
             checkout = next(step for step in steps
                             if str(step.get("uses", "")).startswith("actions/checkout@"))
