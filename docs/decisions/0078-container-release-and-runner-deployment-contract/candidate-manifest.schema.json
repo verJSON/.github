@@ -15,7 +15,8 @@
     "schemaVersion": {
       "enum": [
         2,
-        3
+        3,
+        4
       ]
     },
     "kind": {
@@ -196,12 +197,23 @@
                   "type": "array",
                   "minItems": 1,
                   "items": {
+                    "$ref": "#/$defs/evidenceReferrer"
+                  }
+                },
+                "platformEvidenceReferrers": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["artifactType", "digest"],
+                    "required": ["subjectDigest", "evidenceReferrers"],
                     "properties": {
-                      "artifactType": { "type": "string", "minLength": 1 },
-                      "digest": { "$ref": "#/$defs/digest" }
+                      "subjectDigest": { "$ref": "#/$defs/digest" },
+                      "evidenceReferrers": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "$ref": "#/$defs/evidenceReferrer" }
+                      }
                     }
                   }
                 }
@@ -251,6 +263,15 @@
     "digest": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "evidenceReferrer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactType", "digest"],
+      "properties": {
+        "artifactType": { "type": "string", "minLength": 1 },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
     },
     "provenance": {
       "type": "object",
@@ -400,6 +421,64 @@
         "properties": {
           "promotionEligible": {
             "const": false
+          },
+          "images": {
+            "items": {
+              "properties": {
+                "destinations": {
+                  "items": {
+                    "not": {
+                      "required": ["platformEvidenceReferrers"]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schemaVersion": {
+            "const": 4
+          }
+        }
+      },
+      "then": {
+        "required": ["promotionEligible"],
+        "properties": {
+          "promotionEligible": {
+            "const": false
+          },
+          "source": {
+            "required": ["candidatePublishedAt"]
+          },
+          "images": {
+            "items": {
+              "required": ["destinations"],
+              "properties": {
+                "destinations": {
+                  "items": {
+                    "allOf": [
+                      {
+                        "if": {
+                          "properties": {
+                            "provider": {
+                              "const": "gar"
+                            }
+                          }
+                        },
+                        "then": {
+                          "required": ["platformEvidenceReferrers"]
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
           }
         }
       }

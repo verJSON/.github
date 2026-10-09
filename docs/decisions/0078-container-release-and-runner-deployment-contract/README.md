@@ -67,12 +67,17 @@ divergent digest fails the release without partial promotion. Registry aliases n
 constitute promotion: the signed, complete manifest is the sole authoritative stable
 release record.
 
-The candidate and release schemas validate both historical schema-v2 records and current
-schema-v3 records so immutable releases remain readable. Schema v3 requires a candidate
-publication timestamp and verified destination receipts on every image. Validation of a
-historical v2 candidate does not make it eligible for promotion; the release validator
-requires v3 and directs callers to rebuild candidates without the recorded evidence. The
-candidate schema also rejects v3-only fields when `schemaVersion` is 2.
+The candidate schema validates historical schema-v2 and v3 records and current v4
+candidates; the release schema validates historical v2 and current v3 release manifests.
+Candidate v4 requires a publication timestamp and verified destination receipts on every
+image. GAR receipts also bind the index provenance referrer and each platform SBOM
+referrer to the recorded attestation digests. Historical v2 and v3 candidates remain
+readable, but the release validator requires v4 and directs callers to rebuild older
+candidates before promotion. The candidate schema rejects v3-only fields when
+`schemaVersion` is 2. Promotion keeps the validated candidate digest in the release
+manifest and projects destination receipts to their stable provider, repository,
+digest, expiry, and verification fields. GAR evidence-referrer records remain bound by
+that candidate digest instead of being copied into the unchanged release schema.
 
 Convenience tags such as `candidate`, `stable`, a major line, or `latest` may remain for
 humans and development tools. They are mutable aliases, are excluded from manifests,
@@ -218,6 +223,10 @@ deployment and rollback receipts record the environment, approver-visible workfl
 selected manifest, per-runner before/after digest, probe result, and timestamps. Retention
 must cover the currently deployed release and its previous verified release, so rollback
 does not depend on an expired workflow artifact.
+
+### Amendment — 2026-10-09 (#1726): retain candidate evidence with stable releases
+
+Stable promotion uploads the exact signed candidate artifact ZIP as `candidate-manifest.zip` on the GitHub Release and verifies the asset when resuming an existing release. The ZIP digest remains `candidateManifestDigest`, preserving the complete candidate receipt, including GAR referrer inventories, beyond the Actions artifact retention window. The pre-credential reconciliation hook must leave all pre-existing untracked and ignored release inputs byte- and mode-identical. This does not extend registry retention or allow promotion after a candidate destination expires.
 
 ## Threat model
 

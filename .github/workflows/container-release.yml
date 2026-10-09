@@ -43,6 +43,8 @@ jobs:
     needs: app-key-policy
     if: ${{ needs.app-key-policy.result == 'success' && (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.event.repository.default_branch == 'main') }}
     runs-on: ubuntu-24.04
+    env:
+      GIT_NO_REPLACE_OBJECTS: "1"
     permissions:
       actions: read
       contents: read
@@ -85,6 +87,46 @@ jobs:
             scripts/container_cosign_provenance.py
             scripts/container_candidate_retry.py
           sparse-checkout-cone-mode: false
+      - name: Prepare the release reconciliation sandbox
+        if: ${{ inputs.reconcile-allowlist != '' }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes apparmor apparmor-profiles bubblewrap
+
+          verify_package_floor() {
+            local package_name="$1"
+            local package_floor="$2"
+            local package_record package_status package_version
+            package_record="$(dpkg-query -W -f='${db:Status-Abbrev} ${Version}\n' "$package_name")"
+            read -r package_status package_version <<<"$package_record"
+            if [ "$package_status" != "ii" ] \
+              || ! dpkg --compare-versions "$package_version" ge "$package_floor"; then
+              echo "::error::release reconciliation sandbox package is below its verified floor: $package_name"
+              exit 1
+            fi
+          }
+          verify_package_floor bubblewrap '0.9.0-1build1'
+          verify_package_floor apparmor '4.0.1really4.0.1-0ubuntu0.24.04.3'
+          verify_package_floor apparmor-profiles '4.0.1really4.0.1-0ubuntu0.24.04.3'
+
+          profile='/usr/share/apparmor/extra-profiles/bwrap-userns-restrict'
+          parser='/usr/sbin/apparmor_parser'
+          [ "$(dpkg-query -S /usr/bin/bwrap)" = 'bubblewrap: /usr/bin/bwrap' ]
+          [ "$(dpkg-query -S "$parser")" = "apparmor: $parser" ]
+          [ "$(dpkg-query -S "$profile")" = "apparmor-profiles: $profile" ]
+          [ -f "$profile" ] && [ ! -L "$profile" ]
+          sudo "$parser" --replace "$profile"
+
+          /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent /usr/bin/bwrap \
+            --unshare-user --unshare-pid --unshare-net --unshare-ipc --unshare-uts \
+            --die-with-parent --new-session --disable-userns --cap-drop ALL \
+            --ro-bind /usr /usr --ro-bind-try /bin /bin \
+            --ro-bind-try /lib /lib --ro-bind-try /lib64 /lib64 \
+            --ro-bind-try /etc /etc --proc /proc --dev /dev \
+            --tmpfs /run --tmpfs /tmp --dir /workspace \
+            --bind "$GITHUB_WORKSPACE" /workspace --chdir /workspace \
+            --clearenv --setenv PATH /usr/bin:/bin -- /usr/bin/true
       - uses: sigstore/cosign-installer@af595e623eec1ede52d6322f53b635d5def0a95a # v4.1.2
         with:
           cosign-release: v3.1.3
@@ -115,6 +157,7 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" > candidate.zip
           [ "sha256:$(sha256sum candidate.zip | cut -d' ' -f1)" = "$expected_digest" ]
           python3 scripts/container_artifact_extract.py candidate.zip candidate.json candidate-manifest.sigstore.json
+          mv candidate.zip candidate-manifest.zip
           run_id="$(jq -r .source.runId candidate.json)"; source_sha="$(jq -r .source.commit candidate.json)"
           [ "$(jq -r .workflow_run.id <<<"$metadata")" = "$run_id" ]
           [ "$(jq -r .workflow_run.head_branch <<<"$metadata")" = main ]
@@ -223,6 +266,8 @@ jobs:
             tmp="$(mktemp -d)"
             gh release download "v$VERSION" --pattern release-manifest.json --dir "$tmp"
             cmp -s "$tmp/release-manifest.json" release-manifest.json || { echo "::error::existing GitHub Release manifest diverges"; exit 1; }
+            gh release download "v$VERSION" --pattern candidate-manifest.zip --dir "$tmp"
+            cmp -s "$tmp/candidate-manifest.zip" candidate-manifest.zip || { echo "::error::existing GitHub Release candidate evidence diverges"; exit 1; }
             gh release download "v$VERSION" --pattern release-manifest.sigstore.json --dir "$tmp"
             cmp -s "$tmp/release-manifest.sigstore.json" release-manifest.sigstore.json \
               || { echo "::error::existing GitHub Release signature diverges"; exit 1; }
@@ -322,6 +367,10 @@ jobs:
             || { echo "::error::pinned changelog engine is not at the bound contract ref"; exit 1; }
           [ -z "$(git -C .container-release-contract status --porcelain -- scripts/changelog.py)" ] \
             || { echo "::error::pinned changelog engine was modified after checkout"; exit 1; }
+          GIT_NO_REPLACE_OBJECTS=1 git -C .container-release-contract show \
+            "$CONTRACT_REF:scripts/changelog.py" \
+            | cmp -s .container-release-contract/scripts/changelog.py - \
+            || { echo "::error::changelog engine does not match the pinned contract commit"; exit 1; }
           gh auth setup-git
           if [ "$(cat git-state)" = new ]; then
             mkdir -p RELEASES/containers
@@ -349,7 +398,7 @@ jobs:
             git -c core.hooksPath=/dev/null push --atomic origin HEAD:main "refs/tags/v$VERSION"
           fi
           if [ "$(cat github-state)" = missing ]; then
-            gh release create "v$VERSION" --verify-tag --title "v$VERSION" --notes-file "CHANGELOG/v$VERSION.md" release-manifest.json release-manifest.sigstore.json receipts/*.json
+            gh release create "v$VERSION" --verify-tag --title "v$VERSION" --notes-file "CHANGELOG/v$VERSION.md" release-manifest.json release-manifest.sigstore.json candidate-manifest.zip receipts/*.json
           fi
           jq -c '{version:.releaseVersion,manifestDigest:.candidateManifestDigest,images:[.images[]|{variant,repository,indexDigest}]}' release-manifest.json | tee release-output.json
           targets="$(jq -c --arg owner "$GITHUB_REPOSITORY_OWNER" --arg version "$VERSION" '
