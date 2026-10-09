@@ -85,7 +85,8 @@ for workflow in "$ci" "$release"; do
   if [ "$workflow" = "$release" ]; then
     grep -qF 'cache-dependency-path: |' "$workflow" \
       && grep -qF '            ${{ inputs.cache-dependency-path }}' "$workflow" \
-      && grep -qF '            scripts/node-release-cache-namespace-v2' "$workflow" \
+      && grep -qF '            .verjson-node-release-cache-namespace-v2' "$workflow" \
+      && grep -qF 'name: Create npm cache namespace marker in caller workspace' "$workflow" \
       && pass "$name keys npm caching by the caller lockfile and isolated namespace" \
       || fail "$name can restore pre-policy credentialed npm cache entries"
   else
@@ -175,7 +176,7 @@ require(setup_inputs.get("cache") == "${{ steps.npm-cache-policy.outputs.enabled
         "setup-node cache must stay opt-in, lockfile-gated, and disabled with private credentials")
 require(setup_inputs.get("cache-dependency-path", "").splitlines() == [
             "${{ inputs.cache-dependency-path }}",
-            "scripts/node-release-cache-namespace-v2",
+            ".verjson-node-release-cache-namespace-v2",
         ], "setup-node cache must include the caller dependency lock and new namespace")
 require(setup_inputs.get("package-manager-cache") is False,
         "setup-node automatic package-manager caching must stay disabled")

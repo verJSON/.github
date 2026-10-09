@@ -167,17 +167,39 @@ jobs:
           cache_dir="$RUNNER_TEMP/verjson-npm-cache"
           mkdir -p "$cache_dir"
           printf 'npm_config_cache=%s\n' "$cache_dir" >> "$GITHUB_ENV"
+      - name: Create npm cache namespace marker in caller workspace
+        id: npm-cache-namespace
+        if: steps.npm-cache-policy.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          marker="$GITHUB_WORKSPACE/.verjson-node-release-cache-namespace-v2"
+          if [[ -e "$marker" || -L "$marker" ]]; then
+            echo "::error::reserved npm cache namespace path already exists."
+            exit 1
+          fi
+          cleanup_marker() {
+            local status=$?
+            trap - EXIT
+            rm -f -- "$marker" || status=1
+            exit "$status"
+          }
+          trap cleanup_marker EXIT
+          printf '%s\n' 'verjson-node-release-cache-v2' > "$marker"
+          printf 'created=true\n' >> "$GITHUB_OUTPUT"
+          trap - EXIT
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ inputs.node-version }}
           cache: ${{ steps.npm-cache-policy.outputs.enabled == 'true' && 'npm' || '' }}
-          # Changing this marker invalidates exact npm cache keys from credentialed runs before this policy.
           cache-dependency-path: |
             ${{ inputs.cache-dependency-path }}
-            scripts/node-release-cache-namespace-v2
+            .verjson-node-release-cache-namespace-v2
           package-manager-cache: false
           registry-url: https://npm.pkg.github.com
           scope: ${{ inputs.scope }}
+      - name: Remove npm cache namespace marker
+        if: always() && steps.npm-cache-namespace.outputs.created == 'true'
+        run: rm -f -- "$GITHUB_WORKSPACE/.verjson-node-release-cache-namespace-v2"
       - name: Validate release package directories
         env:
           PACKAGE_DIRS: ${{ inputs.package-dirs }}

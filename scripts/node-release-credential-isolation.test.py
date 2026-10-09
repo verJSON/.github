@@ -125,6 +125,60 @@ def verify_npm_cache_policy(script):
             assert ("private package credentials were supplied" in summary_text) == report_disabled
 
 
+def verify_cache_namespace(prepare_steps):
+    marker_step = next(
+        step for step in prepare_steps if step.get("id") == "npm-cache-namespace"
+    )
+    setup_index = next(
+        index for index, step in enumerate(prepare_steps)
+        if str(step.get("uses", "")).startswith("actions/setup-node@")
+    )
+    marker_index = prepare_steps.index(marker_step)
+    cleanup_step = next(
+        step for step in prepare_steps
+        if step.get("name") == "Remove npm cache namespace marker"
+    )
+    cleanup_index = prepare_steps.index(cleanup_step)
+    marker_path = ".verjson-node-release-cache-namespace-v2"
+    assert marker_step.get("if") == "steps.npm-cache-policy.outputs.enabled == 'true'"
+    assert cleanup_step.get("if") == (
+        "always() && steps.npm-cache-namespace.outputs.created == 'true'"
+    )
+    assert marker_index < setup_index < cleanup_index
+    setup_step = prepare_steps[setup_index]
+    assert setup_step["with"]["cache-dependency-path"].splitlines() == [
+        "${{ inputs.cache-dependency-path }}",
+        marker_path,
+    ]
+
+    with tempfile.TemporaryDirectory(prefix="node-release-cache-namespace-") as temp:
+        workspace = Path(temp)
+        output = workspace / "github-output"
+        env = os.environ.copy()
+        env.update({"GITHUB_WORKSPACE": str(workspace), "GITHUB_OUTPUT": str(output)})
+        marker = workspace / marker_path
+        assert not marker.exists()
+        result = run_workflow_step(marker_step["run"], env)
+        assert result.returncode == 0, result.stderr
+        assert marker.read_text(encoding="utf-8") == "verjson-node-release-cache-v2\n"
+        assert output.read_text(encoding="utf-8").splitlines() == ["created=true"]
+        result = run_workflow_step(cleanup_step["run"], env)
+        assert result.returncode == 0, result.stderr
+        assert not marker.exists()
+
+        marker.write_text("consumer-owned content\n", encoding="utf-8")
+        result = run_workflow_step(marker_step["run"], env)
+        assert result.returncode != 0
+        assert marker.read_text(encoding="utf-8") == "consumer-owned content\n"
+
+        marker.unlink()
+        output.unlink()
+        output.mkdir()
+        result = run_workflow_step(marker_step["run"], env)
+        assert result.returncode != 0
+        assert not marker.exists(), "failed marker creation must clean up its partial file"
+
+
 def main():
     repo_root = Path(__file__).resolve().parent.parent
     workflow = (repo_root / ".github/workflows/node-release.yml").read_text()
@@ -178,17 +232,7 @@ def main():
         "LOCKFILE_MATCHED": "${{ hashFiles(inputs.cache-dependency-path) != '' }}",
     }
     verify_npm_cache_policy(cache_policy_step["run"])
-    setup_node_step = next(
-        step for step in prepare_job["steps"]
-        if str(step.get("uses", "")).startswith("actions/setup-node@")
-    )
-    assert setup_node_step["with"]["cache-dependency-path"].splitlines() == [
-        "${{ inputs.cache-dependency-path }}",
-        "scripts/node-release-cache-namespace-v2",
-    ]
-    assert (repo_root / "scripts/node-release-cache-namespace-v2").read_text(
-        encoding="utf-8"
-    ) == "v2\n"
+    verify_cache_namespace(prepare_job["steps"])
 
     lifecycle_recorder = (
         "const fs = require('node:fs');\n"
