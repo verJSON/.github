@@ -52,7 +52,45 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  change-scope:
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    timeout-minutes: 5
+    outputs:
+      heavy: ${{ steps.scope.outputs.heavy }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+          path: .actions-ci-source-${{ github.run_id }}-${{ github.run_attempt }}-change-scope
+      - name: Classify changed paths
+        id: scope
+        working-directory: .actions-ci-source-${{ github.run_id }}-${{ github.run_attempt }}-change-scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          source_root="$GITHUB_WORKSPACE/.actions-ci-source-${{ github.run_id }}-${{ github.run_attempt }}-change-scope"
+          files="$(mktemp)"
+          # The checkout holds the job token. Remove it on every exit, including
+          # the fail-closed paths, so a persistent runner does not keep it (#675).
+          trap 'rm -rf "$source_root" "$files"' EXIT
+          if [ "$EVENT_NAME" != pull_request ] && [ "$EVENT_NAME" != push ]; then
+            echo "heavy=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "heavy=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          git diff --name-only "$BASE_SHA" "$HEAD_SHA" >"$files"
+          bash scripts/actions-ci-change-scope.sh <"$files" >>"$GITHUB_OUTPUT"
+
   shell-test-groups:
+    needs: change-scope
+    if: needs.change-scope.outputs.heavy == 'true'
     # The changelog-release group completed all 62 commands at 18m47s but the old
     # 18-minute bound cancelled it during job finalization on 2026-09-23. The expanded
     # release-caller security contract took about 20 minutes by itself on 2026-10-07;
@@ -104,7 +142,47 @@ jobs:
           cd "$group_root"
           bash scripts/actions-ci-group.sh "${{ matrix.group }}"
 
+  docs-contracts:
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+          fetch-tags: true
+          path: .actions-ci-source-${{ github.run_id }}-${{ github.run_attempt }}-docs
+      - name: Provision actions CI Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.14'
+      - name: Install actions CI Python dependencies
+        working-directory: .actions-ci-source-${{ github.run_id }}-${{ github.run_attempt }}-docs
+        run: |
+          python3 -m pip install \
+            --disable-pip-version-check \
+            --no-input \
+            --quiet \
+            --no-deps \
+            --only-binary=:all: \
+            --require-hashes \
+            --requirement scripts/actions-ci-python.requirements.txt
+      - name: Clear the runner changelog cache override
+        run: echo "VERJSON_CHANGELOG_TOOL_CACHE=" >> "$GITHUB_ENV"
+      - name: Run documentation shell contracts
+        env:
+          RUNNER_LABELS: ''
+        run: |
+          source_root="$GITHUB_WORKSPACE/.actions-ci-source-${{ github.run_id }}-${{ github.run_attempt }}-docs"
+          group_root="$(mktemp -d "$RUNNER_TEMP/actions-ci-docs.XXXXXX")"
+          trap 'rm -rf "$source_root" "$group_root"' EXIT
+          cp -a "$source_root/." "$group_root/"
+          rm -rf "$source_root"
+          cd "$group_root"
+          bash scripts/actions-ci-group.sh docs
+
   hosted-compatibility-tests:
+    needs: change-scope
+    if: needs.change-scope.outputs.heavy == 'true'
     # The compatibility consumer is intentionally isolated with bubblewrap.
     # Persistent fleet images are not required to carry that host dependency;
     # keep this security contract on the explicit hosted Ubuntu image instead.
@@ -1792,23 +1870,49 @@ jobs:
   # by the repository ruleset (ADR 0058), so it remains unmatrixed and reports
   # the aggregate result after every group reaches a terminal state.
   shell-tests:
-    needs: [shell-test-groups, hosted-compatibility-tests, adr-number-collision]
+    needs: [change-scope, shell-test-groups, docs-contracts, hosted-compatibility-tests, adr-number-collision]
     if: ${{ always() }}
     runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     timeout-minutes: 2
     steps:
       - name: Preserve the required shell-tests context
         env:
+          SCOPE_RESULT: ${{ needs.change-scope.result }}
+          HEAVY: ${{ needs.change-scope.outputs.heavy }}
           GROUP_RESULT: ${{ needs.shell-test-groups.result }}
+          DOCS_RESULT: ${{ needs.docs-contracts.result }}
           COMPATIBILITY_RESULT: ${{ needs.hosted-compatibility-tests.result }}
           COLLISION_RESULT: ${{ needs.adr-number-collision.result }}
         run: |
-          if [ "$GROUP_RESULT" != "success" ]; then
-            echo "::error::one or more shell-test groups failed"
+          if [ "$SCOPE_RESULT" != "success" ]; then
+            echo "::error::changed-path classification failed"
             exit 1
           fi
-          if [ "$COMPATIBILITY_RESULT" != "success" ]; then
-            echo "::error::hosted compatibility contracts failed"
+          if [ "$DOCS_RESULT" != "success" ]; then
+            echo "::error::documentation shell contracts failed"
+            exit 1
+          fi
+          if [ "$HEAVY" = true ]; then
+            if [ "$GROUP_RESULT" != "success" ]; then
+              echo "::error::one or more shell-test groups failed"
+              exit 1
+            fi
+          elif [ "$HEAVY" = false ]; then
+            if [ "$GROUP_RESULT" != "skipped" ]; then
+              echo "::error::documentation diff still ran the heavy shell-test groups"
+              exit 1
+            fi
+          else
+            echo "::error::changed-path classification did not report heavy=true or heavy=false"
+            exit 1
+          fi
+          if [ "$HEAVY" = true ]; then
+            if [ "$COMPATIBILITY_RESULT" != "success" ]; then
+              echo "::error::hosted compatibility contracts failed"
+              exit 1
+            fi
+          elif [ "$COMPATIBILITY_RESULT" != "skipped" ]; then
+            echo "::error::documentation diff still ran hosted compatibility contracts"
             exit 1
           fi
           # adr-number-collision only runs on pull_request (needs live PR

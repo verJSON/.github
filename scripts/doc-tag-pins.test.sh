@@ -109,8 +109,11 @@ rc=$?
 # actions-ci's history to depth 1 (#234) also drops tags unless they are asked
 # for explicitly, which would turn every documented pin into a lookup fault.
 actions_ci="$repo_root/.github/workflows/actions-ci.yml"
+# The pin lookup runs in docs-contracts. An earlier checkout, such as
+# changed-path classification, does not feed it and must not satisfy this.
 checkout_with="$(awk '
-  /uses: actions\/checkout@/ { in_checkout = 1; next }
+  /^  docs-contracts:/ { in_job = 1 }
+  in_job && /uses: actions\/checkout@/ { in_checkout = 1; next }
   in_checkout && /^[[:space:]]*-[[:space:]]/ { exit }
   in_checkout { print }
 ' "$actions_ci")"

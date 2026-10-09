@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0222](0222-documentation-diffs-skip-heavy-actions-ci/README.md) | 2026-10-09 | Documentation diffs skip the heavy actions-ci matrix |
 | [0220](0220-confine-release-credentials-to-dependency-acquisition/README.md) | 2026-10-07 | Confine release credentials to dependency acquisition |
 | [0219](0219-retire-moving-major-tags-for-contract-releases/README.md) | 2026-10-06 | Retire moving major tags for contract releases |
 | [0218](0218-require-explicit-release-dispatch-version/README.md) | 2026-10-06 | Require an explicit version for release dispatch |

@@ -1122,10 +1122,8 @@ negated_branch_dominates() { # $1 = index of the guard's record in GUARD_RECORDS
   [ "$in_then" -eq 0 ]
 }
 
-guard_live_literal() { # $1 = literal proof text, $2 = whole|slice; reads the text on stdin
-  local -a GUARD_RECORDS=()
+guard_live_literal_records() { # $1 = literal proof text; reads GUARD_RECORDS
   local line i
-  mapfile -t GUARD_RECORDS < <(logical_lines "${2:-whole}")
   for ((i = 0; i < ${#GUARD_RECORDS[@]}; i++)); do
     line="${GUARD_RECORDS[i]}"
     case "$line" in *"$1"*) ;; *) continue ;; esac
@@ -1138,10 +1136,14 @@ guard_live_literal() { # $1 = literal proof text, $2 = whole|slice; reads the te
   return 1
 }
 
-guard_live_re() { # $1 = ERE whose match is the proof, $2 = whole|slice; reads the text on stdin
+guard_live_literal() { # $1 = literal proof text, $2 = whole|slice; reads the text on stdin
   local -a GUARD_RECORDS=()
-  local line match i
   mapfile -t GUARD_RECORDS < <(logical_lines "${2:-whole}")
+  guard_live_literal_records "$1"
+}
+
+guard_live_re_records() { # $1 = ERE whose match is the proof; reads GUARD_RECORDS
+  local line match i
   for ((i = 0; i < ${#GUARD_RECORDS[@]}; i++)); do
     line="${GUARD_RECORDS[i]}"
     [[ "$line" =~ $1 ]] || continue
@@ -1152,6 +1154,12 @@ guard_live_re() { # $1 = ERE whose match is the proof, $2 = whole|slice; reads t
     negated_branch_dominates "$i" && return 0
   done
   return 1
+}
+
+guard_live_re() { # $1 = ERE whose match is the proof, $2 = whole|slice; reads the text on stdin
+  local -a GUARD_RECORDS=()
+  mapfile -t GUARD_RECORDS < <(logical_lines "${2:-whole}")
+  guard_live_re_records "$1"
 }
 
 # Python has no single tail shape that means "this raises": every cited Python guard is a
@@ -1199,14 +1207,18 @@ sha_constrained() { # $1 = variable name, $2 = block slice, $3 = the file it cam
     grep -qE "^[[:space:]]*$var=\"\\\$\(jq -er .*\^\[0-9a-f\]\{40\}\\\$" <<<"$2" && return 0
     return 1
   fi
-  guard_live_literal "[[ \"\$$var\" =~ ^[0-9a-f]{40}\$ ]]" slice <<<"$2" && return 0
-  guard_live_re "(^|[[:space:]])${var}[:=][[:space:]]*[\"']?[0-9a-f]{40}[\"']?([[:space:]]|\$)" slice <<<"$2" && return 0
+  # One logical-line pass feeds every spelling. Repeating it per pattern re-lexed
+  # the same multi-thousand-line workflow slice for every site (#1736).
+  local -a GUARD_RECORDS=()
+  mapfile -t GUARD_RECORDS < <(logical_lines slice <<<"$2")
+  guard_live_literal_records "[[ \"\$$var\" =~ ^[0-9a-f]{40}\$ ]]" && return 0
+  guard_live_re_records "(^|[[:space:]])${var}[:=][[:space:]]*[\"']?[0-9a-f]{40}[\"']?([[:space:]]|\$)" && return 0
   # The same 40-hex constraint spelled inside the jq program that produced the value.
   # `jq -er` exits non-zero when `select` drops the value, and `set -euo pipefail` at the
   # top of every one of these blocks turns that into an abort, so the constraint is as
   # load-bearing as the `[[ … =~ ]]` form above -- provided the assignment itself is not
   # the thing that swallows, which is why the match runs to the closing `)"`.
-  guard_live_re "^[[:space:]]*$var=\"[\$][(]jq -er .*\^\[0-9a-f\][{]40[}][\$].*[)]\"" slice <<<"$2" && return 0
+  guard_live_re_records "^[[:space:]]*$var=\"[\$][(]jq -er .*\^\[0-9a-f\][{]40[}][\$].*[)]\"" && return 0
   return 1
 }
 

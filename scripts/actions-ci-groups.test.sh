@@ -21,11 +21,33 @@ with open(sys.argv[1], encoding="utf-8") as stream:
 manifest_text = open(sys.argv[2], encoding="utf-8").read()
 jobs = document["jobs"]
 assert set(jobs) == {
+    "change-scope",
     "shell-test-groups",
+    "docs-contracts",
     "hosted-compatibility-tests",
     "adr-number-collision",
     "shell-tests",
 }
+assert jobs["shell-test-groups"]["needs"] == "change-scope"
+assert jobs["shell-test-groups"]["if"] == "needs.change-scope.outputs.heavy == 'true'"
+assert jobs["hosted-compatibility-tests"]["needs"] == "change-scope"
+assert jobs["hosted-compatibility-tests"]["if"] == "needs.change-scope.outputs.heavy == 'true'"
+assert jobs["docs-contracts"]["timeout-minutes"] == 10
+assert jobs["change-scope"]["outputs"]["heavy"] == "${{ steps.scope.outputs.heavy }}"
+scope_run = next(
+    step["run"]
+    for step in jobs["change-scope"]["steps"]
+    if step.get("id") == "scope"
+)
+assert "rm -rf \"$source_root\"" in scope_run
+assert (
+    ".actions-ci-source-${{ github.run_id }}-"
+    "${{ github.run_attempt }}-change-scope"
+) in scope_run
+assert any(
+    "VERJSON_CHANGELOG_TOOL_CACHE=" in step.get("run", "")
+    for step in jobs["docs-contracts"]["steps"]
+)
 
 groups = jobs["shell-test-groups"]
 assert groups["timeout-minutes"] == 30
@@ -213,7 +235,9 @@ else:
 
 required = jobs["shell-tests"]
 assert required["needs"] == [
+    "change-scope",
     "shell-test-groups",
+    "docs-contracts",
     "hosted-compatibility-tests",
     "adr-number-collision",
 ]
@@ -221,17 +245,43 @@ assert required["if"] == "${{ always() }}"
 assert required["timeout-minutes"] == 2
 assert "strategy" not in required
 assert required["steps"][0]["env"] == {
+    "SCOPE_RESULT": "${{ needs.change-scope.result }}",
+    "HEAVY": "${{ needs.change-scope.outputs.heavy }}",
     "GROUP_RESULT": "${{ needs.shell-test-groups.result }}",
+    "DOCS_RESULT": "${{ needs.docs-contracts.result }}",
     "COMPATIBILITY_RESULT": "${{ needs.hosted-compatibility-tests.result }}",
     "COLLISION_RESULT": "${{ needs.adr-number-collision.result }}",
 }
 assert required["steps"][0]["run"] == (
-    'if [ "$GROUP_RESULT" != "success" ]; then\n'
-    '  echo "::error::one or more shell-test groups failed"\n'
+    'if [ "$SCOPE_RESULT" != "success" ]; then\n'
+    '  echo "::error::changed-path classification failed"\n'
     "  exit 1\n"
     "fi\n"
-    'if [ "$COMPATIBILITY_RESULT" != "success" ]; then\n'
-    '  echo "::error::hosted compatibility contracts failed"\n'
+    'if [ "$DOCS_RESULT" != "success" ]; then\n'
+    '  echo "::error::documentation shell contracts failed"\n'
+    "  exit 1\n"
+    "fi\n"
+    'if [ "$HEAVY" = true ]; then\n'
+    '  if [ "$GROUP_RESULT" != "success" ]; then\n'
+    '    echo "::error::one or more shell-test groups failed"\n'
+    "    exit 1\n"
+    "  fi\n"
+    'elif [ "$HEAVY" = false ]; then\n'
+    '  if [ "$GROUP_RESULT" != "skipped" ]; then\n'
+    '    echo "::error::documentation diff still ran the heavy shell-test groups"\n'
+    "    exit 1\n"
+    "  fi\n"
+    "else\n"
+    '  echo "::error::changed-path classification did not report heavy=true or heavy=false"\n'
+    "  exit 1\n"
+    "fi\n"
+    'if [ "$HEAVY" = true ]; then\n'
+    '  if [ "$COMPATIBILITY_RESULT" != "success" ]; then\n'
+    '    echo "::error::hosted compatibility contracts failed"\n'
+    "    exit 1\n"
+    "  fi\n"
+    'elif [ "$COMPATIBILITY_RESULT" != "skipped" ]; then\n'
+    '  echo "::error::documentation diff still ran hosted compatibility contracts"\n'
     "  exit 1\n"
     "fi\n"
     '# adr-number-collision only runs on pull_request (needs live PR\n'
@@ -344,14 +394,15 @@ validate_manifest() {
     BEGIN { valid = 1 }
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
     NF != 2 { valid = 0; next }
-    $1 !~ /^(platform|merge-gate|changelog-release)$/ { valid = 0; next }
+    $1 !~ /^(platform|merge-gate|changelog-release|docs)$/ { valid = 0; next }
     seen[$2]++ { valid = 0 }
     { groups[$1]++; total++ }
     END {
       if (!(total >= 60 &&
         groups["platform"] > 0 &&
         groups["merge-gate"] > 0 &&
-        groups["changelog-release"] > 0)) {
+        groups["changelog-release"] > 0 &&
+        groups["docs"] > 0)) {
         valid = 0
       }
       exit valid ? 0 : 1
@@ -371,8 +422,8 @@ merge-gate	bash scripts/ci-gate/native-automerge.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-pin.test.sh
 changelog-release	bash scripts/ci-gate/changelog-caller-contract.test.sh
 platform	bash scripts/runner-selector-health.test.sh
-changelog-release	python3 scripts/changelog.py validate --repo-root .
-changelog-release	bash scripts/changelog-fragment-schema.test.sh
+docs	python3 scripts/changelog.py validate --repo-root .
+docs	bash scripts/changelog-fragment-schema.test.sh
 changelog-release	python3 scripts/v1-readiness-contract.test.py
 platform	bash scripts/actions-ci-python-dependencies.test.sh
 platform	bash scripts/shellcheck-tracked.test.sh
@@ -382,7 +433,7 @@ LOAD_BEARING_COMMANDS
 }
 
 if validate_manifest "$manifest"; then
-  pass "manifest assigns every command once across three non-empty cohesive groups"
+  pass "manifest assigns every command once across four non-empty cohesive groups"
 else
   fail "manifest is missing, malformed, duplicated, or incompletely grouped"
 fi
