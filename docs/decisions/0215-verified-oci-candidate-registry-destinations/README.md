@@ -61,3 +61,9 @@ promotion validator requires v4 and directs older candidates to be rebuilt.
 The TTP candidate consumer case is tracked in
 [self-publish-ai-app#1352](https://github.com/terptechpub/self-publish-ai-app/issues/1352);
 its generated caller must pin a merged immutable contract revision before acceptance.
+
+Stable promotion retains the exact signed candidate artifact ZIP as
+`candidate-manifest.zip` on the GitHub Release. The release manifest's
+`candidateManifestDigest` remains the ZIP digest, so the released asset preserves the
+complete GAR referrer inventory after the Actions artifact expires. This does not extend
+candidate registry retention or permit promotion after a destination expires.

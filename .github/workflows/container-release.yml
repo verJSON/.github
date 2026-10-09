@@ -115,6 +115,7 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" > candidate.zip
           [ "sha256:$(sha256sum candidate.zip | cut -d' ' -f1)" = "$expected_digest" ]
           python3 scripts/container_artifact_extract.py candidate.zip candidate.json candidate-manifest.sigstore.json
+          mv candidate.zip candidate-manifest.zip
           run_id="$(jq -r .source.runId candidate.json)"; source_sha="$(jq -r .source.commit candidate.json)"
           [ "$(jq -r .workflow_run.id <<<"$metadata")" = "$run_id" ]
           [ "$(jq -r .workflow_run.head_branch <<<"$metadata")" = main ]
@@ -223,6 +224,8 @@ jobs:
             tmp="$(mktemp -d)"
             gh release download "v$VERSION" --pattern release-manifest.json --dir "$tmp"
             cmp -s "$tmp/release-manifest.json" release-manifest.json || { echo "::error::existing GitHub Release manifest diverges"; exit 1; }
+            gh release download "v$VERSION" --pattern candidate-manifest.zip --dir "$tmp"
+            cmp -s "$tmp/candidate-manifest.zip" candidate-manifest.zip || { echo "::error::existing GitHub Release candidate evidence diverges"; exit 1; }
             gh release download "v$VERSION" --pattern release-manifest.sigstore.json --dir "$tmp"
             cmp -s "$tmp/release-manifest.sigstore.json" release-manifest.sigstore.json \
               || { echo "::error::existing GitHub Release signature diverges"; exit 1; }
@@ -349,7 +352,7 @@ jobs:
             git -c core.hooksPath=/dev/null push --atomic origin HEAD:main "refs/tags/v$VERSION"
           fi
           if [ "$(cat github-state)" = missing ]; then
-            gh release create "v$VERSION" --verify-tag --title "v$VERSION" --notes-file "CHANGELOG/v$VERSION.md" release-manifest.json release-manifest.sigstore.json receipts/*.json
+            gh release create "v$VERSION" --verify-tag --title "v$VERSION" --notes-file "CHANGELOG/v$VERSION.md" release-manifest.json release-manifest.sigstore.json candidate-manifest.zip receipts/*.json
           fi
           jq -c '{version:.releaseVersion,manifestDigest:.candidateManifestDigest,images:[.images[]|{variant,repository,indexDigest}]}' release-manifest.json | tee release-output.json
           targets="$(jq -c --arg owner "$GITHUB_REPOSITORY_OWNER" --arg version "$VERSION" '

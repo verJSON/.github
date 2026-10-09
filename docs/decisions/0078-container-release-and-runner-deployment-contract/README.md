@@ -224,6 +224,10 @@ selected manifest, per-runner before/after digest, probe result, and timestamps.
 must cover the currently deployed release and its previous verified release, so rollback
 does not depend on an expired workflow artifact.
 
+### Amendment — 2026-10-09 (#1726): retain candidate evidence with stable releases
+
+Stable promotion uploads the exact signed candidate artifact ZIP as `candidate-manifest.zip` on the GitHub Release and verifies the asset when resuming an existing release. The ZIP digest remains `candidateManifestDigest`, preserving the complete candidate receipt, including GAR referrer inventories, beyond the Actions artifact retention window. This does not extend registry retention or allow promotion after a candidate destination expires.
+
 ## Threat model
 
 ### Amendment — 2026-08-09: restart-safe stable promotion (#627)
