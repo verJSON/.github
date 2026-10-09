@@ -86,7 +86,19 @@ def release(
         images.append({
             "variant": image["variant"], "repository": repository,
             "indexDigest": digest, "platforms": image["platforms"],
-            "destinations": image["destinations"],
+            "destinations": [
+                {
+                    key: receipt[key]
+                    for key in (
+                        "provider",
+                        "repository",
+                        "digest",
+                        "candidateExpiresAt",
+                        "verifiedAt",
+                    )
+                }
+                for receipt in image["destinations"]
+            ],
             "provenance": {"predicateType": image["provenance"]["predicateType"], "attestationDigest": attestation_digest, "builderIdentity": image["provenance"]["builderIdentity"]},
             "sbom": {"predicateType": image["sbom"]["predicateType"], "attestationDigest": sbom_digest},
         })

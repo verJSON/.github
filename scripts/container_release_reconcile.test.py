@@ -4,9 +4,12 @@
 import json
 import os
 import pathlib
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 
@@ -145,6 +148,47 @@ class ReconcileTest(unittest.TestCase):
         result = self.fixture.run()
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(["deploy/values.yaml"], self.fixture.staged())
+
+    def test_tolerates_an_unchanged_preexisting_untracked_directory(self):
+        directory = self.fixture.repo / "preexisting-input"
+        directory.mkdir()
+        (directory / "payload.txt").write_text("release input\n", encoding="utf-8")
+
+        result = self.fixture.run()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([], self.fixture.staged())
+
+    def test_rejects_modifying_a_preexisting_untracked_release_manifest(self):
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf '{\\\"releaseVersion\\\":\\\"9.9.9\\\"}\\n' > release-manifest.json\n"
+        )
+        result = self.fixture.run()
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("modified pre-existing untracked output: release-manifest.json", result.stderr)
+
+    def test_rejects_modifying_a_preexisting_untracked_candidate_archive(self):
+        candidate_archive = self.fixture.repo / "candidate-manifest.zip"
+        candidate_archive.write_bytes(b"verified candidate archive")
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'altered candidate archive\\n' > candidate-manifest.zip\n"
+        )
+        result = self.fixture.run()
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("modified pre-existing untracked output: candidate-manifest.zip", result.stderr)
+
+    def test_rejects_modifying_a_preexisting_ignored_release_file(self):
+        (self.fixture.repo / ".gitignore").write_text(".release-state.json\n", encoding="utf-8")
+        git(self.fixture.repo, "add", ".gitignore")
+        git(self.fixture.repo, "commit", "-qm", "ignore local release state")
+        ignored_state = self.fixture.repo / ".release-state.json"
+        ignored_state.write_text("original\n", encoding="utf-8")
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'changed\\n' > .release-state.json\n"
+        )
+        result = self.fixture.run()
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("modified pre-existing ignored output: .release-state.json", result.stderr)
 
     def test_rejects_deletion_of_an_allowlisted_path(self):
         self.fixture.write_hook("#!/usr/bin/env bash\nset -euo pipefail\nrm Dockerfile\n")
@@ -359,19 +403,16 @@ class ReconcileTest(unittest.TestCase):
     def test_hides_the_ambient_credential_environment_from_the_hook(self):
         self.fixture.write_hook(
             "#!/usr/bin/env bash\nset -euo pipefail\n"
-            'printf "%s\\n" "${GH_TOKEN-unset} ${GITHUB_TOKEN-unset} '
-            '${ACTIONS_ID_TOKEN_REQUEST_TOKEN-unset} ${AWS_SECRET_ACCESS_KEY-unset}" '
-            '> /tmp/reconcile-env-probe\n'
             'printf "FROM ghcr.io/verjson/base:v%s\\n" "$RELEASE_VERSION" > Dockerfile\n'
+            'printf "%s\\n" "${GH_TOKEN-unset} ${GITHUB_TOKEN-unset} '
+            '${ACTIONS_ID_TOKEN_REQUEST_TOKEN-unset} ${AWS_SECRET_ACCESS_KEY-unset}" >> Dockerfile\n'
         )
+
         environment = dict(os.environ)
         environment.update({
             "GH_TOKEN": "ghs_secret", "GITHUB_TOKEN": "ghs_secret",
             "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "oidc", "AWS_SECRET_ACCESS_KEY": "aws",
         })
-        probe = pathlib.Path("/tmp/reconcile-env-probe")
-        probe.unlink(missing_ok=True)
-        self.addCleanup(probe.unlink, True)
         result = subprocess.run(
             [sys.executable, str(RECONCILER),
              "--repo-root", str(self.fixture.repo),
@@ -382,24 +423,14 @@ class ReconcileTest(unittest.TestCase):
              "--timeout", "60", "--staged-list", "reconciled-paths.txt"],
             capture_output=True, text=True, env=environment,
         )
+
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual("unset unset unset unset\n", probe.read_text(encoding="utf-8"))
-
-
-class GitControlSurfaceTest(unittest.TestCase):
-    """`git status` never reports `.git/` itself, so it is checked directly.
-
-    Everything under `.git/` decides what code later `git` invocations run — and
-    the next steps run `git commit` and the pinned changelog engine *with* the
-    release App token. A hook that writes there has a credential-exfiltration
-    path that no worktree diff can see.
-    """
-
-    def setUp(self):
-        import contextlib
-        self.stack = contextlib.ExitStack()
-        self.addCleanup(self.stack.close)
-        self.fixture = Fixture(self.stack)
+        self.assertTrue(
+            (self.fixture.repo / "Dockerfile").read_text(encoding="utf-8").endswith(
+                "unset unset unset unset\n"
+            ),
+            repr((self.fixture.repo / "Dockerfile").read_text(encoding="utf-8")),
+        )
 
     def test_rejects_a_hook_that_installs_a_git_hook(self):
         self.fixture.write_hook(
@@ -422,6 +453,111 @@ class GitControlSurfaceTest(unittest.TestCase):
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertIn("Git control surface", result.stderr)
 
+    def test_rejects_fsmonitor_config_without_running_its_helper_outside_the_sandbox(self):
+        marker = self.fixture.root / "fsmonitor-executed"
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "cat > .git/fsmonitor-hook <<'HELPER'\n"
+            "#!/bin/sh\n"
+            f"printf called > {shlex.quote(str(marker))}\n"
+            "printf '\\n'\n"
+            "HELPER\n"
+            "chmod +x .git/fsmonitor-hook\n"
+            "git config core.fsmonitor .git/fsmonitor-hook\n"
+        )
+
+        result = self.fixture.run()
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("Git control surface", result.stderr)
+        self.assertIn("config", result.stderr)
+        self.assertFalse(marker.exists(), "post-hook Git verification ran the configured fsmonitor helper")
+
+    def test_failed_hook_config_change_does_not_run_fsmonitor_during_rollback(self):
+        marker = self.fixture.root / "fsmonitor-rollback-executed"
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "cat > .git/fsmonitor-hook <<'HELPER'\n"
+            "#!/bin/sh\n"
+            f"printf called > {shlex.quote(str(marker))}\n"
+            "printf '\\n'\n"
+            "HELPER\n"
+            "chmod +x .git/fsmonitor-hook\n"
+            "git config core.fsmonitor .git/fsmonitor-hook\n"
+            "exit 17\n"
+        )
+
+        result = self.fixture.run()
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("Git control surface", result.stderr)
+        self.assertFalse(marker.exists(), "rollback ran the configured fsmonitor helper")
+
+    def test_rejects_changes_to_git_history_metadata_before_running_git(self):
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "git rev-parse HEAD > .git/shallow\n"
+        )
+
+        result = self.fixture.run()
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("Git control surface", result.stderr)
+        self.assertIn("shallow", result.stderr)
+
+    def test_rejects_merge_state_that_would_add_an_unreviewed_release_parent(self):
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "git rev-parse HEAD^ > .git/MERGE_HEAD\n"
+        )
+
+        result = self.fixture.run()
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("Git control surface", result.stderr)
+        self.assertIn("MERGE_HEAD", result.stderr)
+
+    def test_rejects_pre_existing_merge_state_before_running_the_hook(self):
+        marker = self.fixture.repo / "hook-ran"
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            f"printf ran > {shlex.quote(str(marker))}\n"
+        )
+        (self.fixture.repo / ".git" / "MERGE_HEAD").write_text("a" * 40 + "\n", encoding="ascii")
+
+        result = self.fixture.run()
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("Git operation state is not allowed", result.stderr)
+        self.assertIn("MERGE_HEAD", result.stderr)
+        self.assertFalse(marker.exists(), "reconciliation hook ran with pre-existing merge state")
+
+    def test_rejects_a_hook_that_installs_a_git_replacement_ref(self):
+        git(self.fixture.repo, "commit", "--allow-empty", "-qm", "second commit")
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            'printf "tag\\n" > Dockerfile\n'
+            'git replace HEAD HEAD^\n'
+        )
+
+        result = self.fixture.run()
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("Git replacement refs are not allowed", result.stderr)
+
+    def test_rejects_preexisting_git_replacement_refs(self):
+        git(self.fixture.repo, "commit", "--allow-empty", "-qm", "second commit")
+        git(self.fixture.repo, "replace", "HEAD", "HEAD^")
+
+        result = self.fixture.run()
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("Git replacement refs are not allowed", result.stderr)
+
     def test_rejects_a_hook_that_rewrites_the_repository_exclude_file(self):
         self.fixture.write_hook(
             "#!/usr/bin/env bash\n"
@@ -443,24 +579,114 @@ class GitControlSurfaceTest(unittest.TestCase):
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertIn("Git control surface", result.stderr)
 
+    def test_rejects_a_hook_that_hides_a_changed_contract_engine_in_the_index(self):
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            'printf "tag\\n" > Dockerfile\n'
+            "git -C .container-release-contract update-index --skip-worktree scripts/changelog.py\n"
+            "printf '# changed engine\\n' > .container-release-contract/scripts/changelog.py\n"
+        )
+        result = self.fixture.run()
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("Git control surface", result.stderr)
+        self.assertIn("index-entries", result.stderr)
+
+    def test_kills_a_hook_descendant_that_escapes_its_process_group(self):
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'setsid bash -c "sleep 0.2; printf \'# detached change\\n\' > '
+            '.container-release-contract/scripts/changelog.py" </dev/null >/dev/null 2>&1 &\n'
+        )
+        result = self.fixture.run()
+        self.assertEqual(0, result.returncode, result.stderr)
+
+        time.sleep(0.3)
+
+        self.assertEqual(
+            "# pinned engine\n",
+            (self.fixture.contract / "scripts/changelog.py").read_text(encoding="utf-8"),
+        )
+
+    def test_hook_cannot_gain_runner_privileges_for_a_persistent_service(self):
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "grep -q '^NoNewPrivs:[[:space:]]*1$' /proc/self/status\n"
+            "if command -v sudo >/dev/null 2>&1 && sudo -n -- true >/dev/null 2>&1; then\n"
+            "  exit 42\n"
+            "fi\n"
+        )
+
+        result = self.fixture.run()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    @unittest.skipUnless(shutil.which("systemd-run"), "systemd-run is unavailable")
+    def test_hook_cannot_queue_a_runner_user_service_after_reconciliation(self):
+        marker = self.fixture.root / "persistent-user-service-ran"
+        service_command = f"printf escaped > {shlex.quote(str(marker))}"
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'export XDG_RUNTIME_DIR="/run/user/$(id -u)"\n'
+            'export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"\n'
+            'test ! -S "$XDG_RUNTIME_DIR/bus"\n'
+            'test ! -S /run/dbus/system_bus_socket\n'
+            "/usr/bin/systemd-run --user --no-block /bin/sh -c "
+            f"{shlex.quote(service_command)} >/dev/null 2>&1 || true\n"
+            'printf "tag\\n" > Dockerfile\n'
+        )
+
+        result = self.fixture.run()
+        self.assertEqual(0, result.returncode, result.stderr)
+        time.sleep(0.2)
+
+        self.assertFalse(marker.exists(), "a runner user service outlived reconciliation")
+
     def test_hook_cannot_reach_the_runner_home_directory(self):
         """A writable `$HOME` is a `~/.gitconfig` away from the same escalation."""
         self.fixture.write_hook(
             "#!/usr/bin/env bash\n"
-            'printf "tag\\n" > Dockerfile\n'
-            'printf "%s\\n" "$HOME" > /tmp/reconcile-home-probe\n'
+            'printf "%s\\n" "$HOME"\n'
             'printf "[core]\\n\\thooksPath = /tmp/attacker\\n" > "$HOME/.gitconfig"\n'
+            'printf "tag\\n" > Dockerfile\n'
         )
-        probe = pathlib.Path("/tmp/reconcile-home-probe")
-        probe.unlink(missing_ok=True)
-        self.addCleanup(probe.unlink, True)
         real_home = pathlib.Path(os.environ["HOME"]) / ".gitconfig"
         before = real_home.read_bytes() if real_home.is_file() else None
         result = self.fixture.run()
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertNotEqual(os.environ["HOME"], probe.read_text(encoding="utf-8").strip())
+        sandbox_home = result.stdout.strip()
+        self.assertNotEqual(os.environ["HOME"], sandbox_home)
         self.assertEqual(before, real_home.read_bytes() if real_home.is_file() else None)
-        self.assertFalse(pathlib.Path(probe.read_text(encoding="utf-8").strip()).exists())
+        self.assertFalse(pathlib.Path(sandbox_home).exists())
+
+    def test_hook_cannot_read_runner_temp_files(self):
+        host_secret = self.fixture.root / "runner-temp-secret"
+        host_secret.write_text("host-only credential\n", encoding="utf-8")
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            f"test ! -e {shlex.quote(str(host_secret))}\n"
+            'printf "tag\\n" > Dockerfile\n'
+        )
+
+        result = self.fixture.run()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("host-only credential\n", host_secret.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(shutil.which("unshare"), "unshare is required to test the nested namespace boundary")
+    def test_hook_cannot_create_a_nested_user_namespace(self):
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "if unshare --user true >/dev/null 2>&1; then exit 1; fi\n"
+            'printf "tag\\n" > Dockerfile\n'
+        )
+
+        result = self.fixture.run()
+
+        self.assertEqual(0, result.returncode, result.stderr)
 
     def test_rejects_a_hook_that_hides_output_in_an_ignored_path(self):
         (self.fixture.repo / ".gitignore").write_text("build/\n", encoding="utf-8")
@@ -475,6 +701,20 @@ class GitControlSurfaceTest(unittest.TestCase):
         result = self.fixture.run()
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertIn("ignored output", result.stderr)
+
+    def test_rejects_a_hook_that_changes_a_preexisting_untracked_parent_directory_mode(self):
+        directory = self.fixture.repo / "preexisting-input"
+        directory.mkdir()
+        (directory / "payload.txt").write_text("release input\n", encoding="utf-8")
+        directory.chmod(0o500)
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            'printf "tag\\n" > Dockerfile\n'
+            "chmod 700 preexisting-input\n"
+        )
+        result = self.fixture.run()
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("modified pre-existing untracked output: preexisting-input/", result.stderr)
 
 
 class AllowlistShapeTest(unittest.TestCase):

@@ -97,22 +97,39 @@ variables, and the blast radius here is the release App token. `HOME` is a throw
 directory, not the runner's: a writable home is a `~/.gitconfig` away from `core.hooksPath`,
 and git reads `$HOME/.config/git/config` too.
 
-**The Git control surface is compared directly, not through `git`.** Before the hook, the
-validator fingerprints `config`, `config.worktree`, `info/exclude`, every file under
-`hooks/` (content *and* executable bit), and `HEAD` — for both the release checkout and the
-pinned contract checkout, resolving each `--absolute-git-dir` from the trusted pre-hook
-state. After each hook run that fingerprint must be unchanged, and it is checked *first*,
-before any other validation, because `.git/config` is exactly what would make later `git`
-output lie. Defence in depth in the release step itself: every `git` invocation that runs
-after the hook — the workflow-authored `commit` and `push`, and `scripts/changelog.py`'s own
-internal `commit`/`tag` during `release()` — passes `-c core.hooksPath=/dev/null`, enforced
-once in `changelog.py`'s shared `git()` helper rather than per call site, since `.git/hooks`
-is untracked and therefore was never reviewed by anyone. An initial version of this defence
+**The Git control surface is fingerprinted before and after the hook.** The validator records
+the `.git` pointer, `config`, `config.worktree`, `info/exclude`, `info/grafts`, `shallow`,
+object alternates, merge/cherry-pick/revert state including `MERGE_HEAD`, every file under
+`hooks/` (content *and* executable bit), index entries and flags, `HEAD`, and the complete
+refs listing — for both the release checkout and the pinned contract checkout, resolving
+each `--absolute-git-dir` from the trusted pre-hook state. Any replacement ref, including
+one that existed before the hook, fails closed. Pre-existing merge, cherry-pick, revert,
+and squash operation state is rejected before the hook runs, since `MERGE_HEAD` can add an
+unreviewed parent to the release commit. The
+first post-hook comparison reads these filesystem surfaces directly and rejects any change
+before invoking Git. This ordering matters: if the hook changed `.git/config` to set
+`core.fsmonitor`, a Git probe could otherwise execute that helper outside Bubblewrap before
+the changed config was rejected. The validator's Git subprocesses always set
+`GIT_NO_REPLACE_OBJECTS=1`; the release
+job sets it for every step, so its checks, signature readback, commit and push, and
+`scripts/changelog.py` cannot interpret replacement objects either. Every release-side
+commit, tag, and push also disables repository hooks: the workflow uses
+`-c core.hooksPath=/dev/null`, and the pinned engine's shared `git()` helper does the same,
+since `.git/hooks` is untracked and was never reviewed. An initial version of this defense
 covered only the two workflow-authored commands and missed `changelog.py`'s own commit,
 which still ran with the release token in its environment and no hooks guard — closed before
 merge; `scripts/changelog.test.py`'s
 `test_release_commit_never_executes_a_repository_pre_commit_hook` plants a real
 `.git/hooks/pre-commit` and asserts it never runs during `release()`.
+
+**The opt-in release runner provisions its sandbox.** When a consumer configures a
+reconciliation allowlist, the reusable workflow installs the required Bubblewrap and
+AppArmor packages, verifies their package floors and file ownership, loads the packaged
+`bwrap-userns-restrict` profile, and probes the same namespace flags before running the
+hook. Setup runs before registry login, so package installation does not share runner state
+with stored registry credentials. The hook disables nested user namespaces and drops all
+capabilities inside its namespace. With an empty allowlist, both the hook and its sandbox
+setup are skipped.
 
 **Fail-closed validation.** Before the hook: the allowlist is structurally validated
 (normalized repository-relative paths, no `..`/`.`/`.git*` segments, no `RELEASES/`,
@@ -190,3 +207,7 @@ undeclared `scripts/release-reconcile.sh` — so a hook cannot appear without re
   general class is not disproven). The mitigation is that the hook, its allowlist, and the
   pinned contract SHA are all reviewed in the consumer's own PR before any release can use
   them.
+
+## Amendment — 2026-10-09 (#1726): preserve pre-existing release inputs
+
+The reconciler fingerprints the contents and modes of every pre-existing untracked or ignored path before running the hook, including parent-directory modes, then rejects deletion or any change to those paths. This includes the generated release manifest, candidate artifact ZIP, and verification receipts that are not tracked in the consumer checkout. The pinned contract checkout is separately checked for its exact commit, clean worktree, Git control surfaces, and index entries and flags; its `.git` metadata is excluded from the filesystem snapshot. The hook runs with `no_new_privs` and in a Bubblewrap user, mount, PID, network, IPC, and UTS namespace. Only system binaries, libraries, and configuration are mounted read-only; the runner home and temp directories are absent, while private `/tmp` and `/run` hide host credentials and systemd/D-Bus sockets, so the hook cannot queue a same-user service to race the release-token step. The reconciler also becomes a Linux child subreaper and kills hook descendants before returning, including children that leave the original process group with `setsid`. Immediately before the release engine runs with the release App token, the workflow compares its bytes with the blob at the immutable contract commit with Git replace objects disabled, so index flags cannot make a modified engine appear clean.

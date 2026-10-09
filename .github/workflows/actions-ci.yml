@@ -1751,6 +1751,7 @@ jobs:
           bash scripts/ci-gate/node-ci-secretless-compatibility.test.sh
           scripts/ci-gate/node-ci-secretless-compatibility-absent.test.py
           python3 scripts/ci-gate/node-ci-required-identity.test.py
+          python3 scripts/container_release_reconcile.test.py
 
   # scripts/gen-adr-index.sh --check (run above, in the changelog-release
   # group) only ever sees this PR's own tree, so it cannot catch two open PRs

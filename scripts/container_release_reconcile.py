@@ -2,25 +2,48 @@
 """Fail-closed pre-credential release-tree reconciliation."""
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
-import tempfile
+import time
 from pathlib import Path
 
 
 HOOK = "scripts/release-reconcile.sh"
+BWRAP = "/usr/bin/bwrap"
 MAX_ALLOWLIST = 32
 BLOB_MODES = {"100644", "100755"}
 PATH_PATTERN = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]*$")
 # `.git/` files that decide what later git invocations execute. `git status` never
 # reports them, and the steps after this one run `git commit` and the pinned
 # changelog engine with the release App token, so they are compared byte for byte.
-GIT_CONFIG_SURFACES = ("config", "config.worktree", "info/exclude")
+GIT_FILESYSTEM_SURFACES = (
+    "config",
+    "config.worktree",
+    "info/exclude",
+    "info/grafts",
+    "shallow",
+    "objects/info/alternates",
+    "objects/info/http-alternates",
+    "MERGE_HEAD",
+    "MERGE_MSG",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "SQUASH_MSG",
+)
+GIT_OPERATION_STATE_SURFACES = (
+    "MERGE_HEAD",
+    "MERGE_MSG",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "SQUASH_MSG",
+)
 # Surfaces the release engine itself owns, or that decide what code runs with the
 # release App token. Reconciliation may never be pointed at any of them.
 PROTECTED_ROOTS = frozenset({"RELEASES", "CHANGELOG", "NEXT"})
@@ -40,8 +63,11 @@ class ReconcileError(Exception):
 
 
 def git(root: Path, *args: str) -> str:
+    environment = os.environ.copy()
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     result = subprocess.run(
         ["git", "-C", str(root), *args], capture_output=True, text=True,
+        env=environment,
     )
     if result.returncode != 0:
         raise ReconcileError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
@@ -135,26 +161,66 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def control_surface(root: Path, git_dir: Path) -> dict:
-    """Fingerprint the `.git/` state that decides what later git commands run.
+def filesystem_entry_surface(path: Path) -> tuple | None:
+    """Describe a Git control file without following symlinks or running Git."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    mode = stat.S_IMODE(info.st_mode)
+    if stat.S_ISREG(info.st_mode):
+        return ("file", mode, digest(path))
+    if stat.S_ISLNK(info.st_mode):
+        return ("symlink", os.readlink(path))
+    if stat.S_ISDIR(info.st_mode):
+        return ("directory", mode, info.st_dev, info.st_ino)
+    return ("special", stat.S_IFMT(info.st_mode), mode)
 
-    Covers `core.hooksPath`, `core.fsmonitor`, `credential.helper`, content
-    filters and aliases (all of which live in `config`), directly installed
-    hooks, the exclude file that could hide the hook's own output, and the commit
-    the release will be built on.
-    """
-    surface = {}
-    for name in GIT_CONFIG_SURFACES:
-        entry = git_dir / name
-        surface[name] = digest(entry) if entry.is_file() and not entry.is_symlink() else None
+
+def filesystem_control_surface(root: Path, git_dir: Path) -> dict:
+    """Fingerprint Git control files directly before any post-hook Git command."""
+    surface = {"filesystem/.git": filesystem_entry_surface(root / ".git")}
+    for name in GIT_FILESYSTEM_SURFACES:
+        surface[f"filesystem/{name}"] = filesystem_entry_surface(git_dir / name)
     hooks = git_dir / "hooks"
-    listing = sorted(hooks.iterdir()) if hooks.is_dir() and not hooks.is_symlink() else []
+    surface["filesystem/hooks-directory"] = filesystem_entry_surface(hooks)
+    listing = sorted(hooks.iterdir(), key=lambda entry: entry.name) \
+        if hooks.is_dir() and not hooks.is_symlink() else []
     for entry in listing:
-        surface[f"hooks/{entry.name}"] = (
-            f"{digest(entry)}:{int(os.access(entry, os.X_OK))}"
-            if entry.is_file() and not entry.is_symlink()
-            else "not-a-regular-file"
+        surface[f"filesystem/hooks/{entry.name}"] = filesystem_entry_surface(entry)
+    return surface
+
+
+def reject_pre_existing_git_operation_state(checkouts: dict) -> None:
+    for label, (_, git_dir) in checkouts.items():
+        present = [
+            name for name in GIT_OPERATION_STATE_SURFACES
+            if filesystem_entry_surface(git_dir / name) is not None
+        ]
+        if present:
+            raise ReconcileError(
+                f"Git operation state is not allowed in the {label}: " + ", ".join(present)
+            )
+
+
+def control_surface(root: Path, git_dir: Path) -> dict:
+    """Fingerprint filesystem and Git state that can affect later release commands.
+
+    Filesystem surfaces are captured without invoking Git so a modified
+    `core.fsmonitor` cannot execute during validation. The index projection
+    excludes refreshable stat-cache data while preserving flags such as
+    `skip-worktree` that can hide a modified file from `git status`.
+    """
+    surface = filesystem_control_surface(root, git_dir)
+    surface["index-entries"] = git(root, "ls-files", "--stage", "-v", "-z")
+    refs = git(root, "for-each-ref", "--format=%(refname) %(objectname)").strip()
+    replacement_refs = [line for line in refs.splitlines() if line.startswith("refs/replace/")]
+    if replacement_refs:
+        raise ReconcileError(
+            "Git replacement refs are not allowed during release reconciliation: "
+            + ", ".join(replacement_refs)
         )
+    surface["refs"] = refs
     surface["HEAD"] = git(root, "rev-parse", "HEAD").strip()
     surface["HEAD-ref"] = git(root, "rev-parse", "--symbolic-full-name", "HEAD").strip()
     return surface
@@ -165,6 +231,26 @@ def control_surfaces(checkouts: dict) -> dict:
 
 
 def require_intact_control_surfaces(checkouts: dict, baseline: dict) -> None:
+    # Compare Git's executable configuration and history controls without Git
+    # first. Otherwise a hook can set core.fsmonitor and execute a helper from
+    # this post-sandbox validation before the changed config is rejected.
+    for label, (root, git_dir) in checkouts.items():
+        filesystem_current = filesystem_control_surface(root, git_dir)
+        filesystem_baseline = {
+            name: value for name, value in baseline[label].items()
+            if name.startswith("filesystem/")
+        }
+        changed = sorted(
+            name.removeprefix("filesystem/")
+            for name in set(filesystem_baseline) | set(filesystem_current)
+            if filesystem_baseline.get(name) != filesystem_current.get(name)
+        )
+        if changed:
+            raise ReconcileError(
+                f"Git control surface of the {label} changed during reconciliation: "
+                + ", ".join(changed)
+            )
+
     current = control_surfaces(checkouts)
     for label, surface in baseline.items():
         changed = sorted(
@@ -190,41 +276,79 @@ def require_clean_tracked_tree(root: Path) -> None:
 
 
 def run_hook(root: Path, version: str, manifest: str, timeout: int) -> None:
-    """Run the reviewed hook with an allowlisted environment in its own process group.
+    """Run the reviewed hook in a filesystem, process, and network namespace.
 
     The environment is built from scratch rather than filtered: a denylist cannot
     keep up with new credential-bearing variables, and this hook runs while the
-    job is one step away from minting the release App token.
-
-    `HOME` is a throwaway directory rather than the runner's, because the runner's
-    home is one `~/.gitconfig` away from `core.hooksPath` — an escalation that
-    would take effect in the `git commit` that runs with the token.
+    job is one step away from minting the release App token. Only system
+    executables/configuration and the checkout are visible; private `/run` and
+    `/tmp` mounts hide runner sockets, home directories, and temporary credentials.
     """
-    with tempfile.TemporaryDirectory(prefix="release-reconcile-home-", ignore_cleanup_errors=True) as home:
-        environment = {
-            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-            "HOME": home,
-            "LANG": os.environ.get("LANG", "C.UTF-8"),
-            "RELEASE_VERSION": version,
-            "RELEASE_MANIFEST": manifest,
-        }
-        with open(os.devnull, "rb") as stdin:
+    if not os.path.isfile(BWRAP) or not os.access(BWRAP, os.X_OK):
+        raise ReconcileError(f"required hook sandbox is unavailable: {BWRAP}")
+
+    become_child_subreaper()
+    workspace = str(root.resolve())
+    sandbox_workspace = "/workspace"
+    command = [
+        BWRAP,
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--die-with-parent",
+        "--new-session",
+        "--disable-userns",
+        "--cap-drop", "ALL",
+        "--ro-bind", "/usr", "/usr",
+        "--ro-bind-try", "/bin", "/bin",
+        "--ro-bind-try", "/lib", "/lib",
+        "--ro-bind-try", "/lib64", "/lib64",
+        "--ro-bind", "/etc", "/etc",
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--tmpfs", "/run",
+        "--tmpfs", "/tmp",
+        "--dir", sandbox_workspace,
+        "--bind", workspace, sandbox_workspace,
+        "--dir", "/tmp/release-reconcile-home",
+        "--chdir", sandbox_workspace,
+        "--clearenv",
+        "--setenv", "PATH", "/usr/bin:/bin",
+        "--setenv", "HOME", "/tmp/release-reconcile-home",
+        "--setenv", "LANG", "C.UTF-8",
+        "--setenv", "GIT_CONFIG_NOSYSTEM", "1",
+        "--setenv", "RELEASE_VERSION", version,
+        "--setenv", "RELEASE_MANIFEST", manifest,
+        "--",
+        f"./{HOOK}", version, manifest,
+    ]
+    with open(os.devnull, "rb") as stdin:
+        try:
             process = subprocess.Popen(
-                [f"./{HOOK}", version, manifest],
-                cwd=str(root), env=environment, stdin=stdin, start_new_session=True,
+                command,
+                cwd=workspace,
+                env={"PATH": "/usr/bin:/bin"},
+                stdin=stdin,
+                start_new_session=True,
+                preexec_fn=set_no_new_privileges,
             )
-            # Resolve the group while the leader is alive: after `wait()` reaps it the
-            # pid is gone, but the group can still hold processes the hook backgrounded.
-            group = os.getpgid(process.pid)
-            try:
-                returncode = process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                terminate_group(process, group)
-                raise ReconcileError(f"{HOOK} timed out after {timeout}s") from None
-            finally:
-                # Anything the hook backgrounded must not outlive this bounded step and
-                # observe the release App token that is minted immediately afterwards.
-                terminate_group(process, group)
+        except OSError as error:
+            raise ReconcileError(f"cannot start isolated reconciliation hook: {error}") from error
+        # Resolve the group while the leader is alive: after `wait()` reaps it the
+        # pid is gone, but the group can still hold processes the hook backgrounded.
+        group = os.getpgid(process.pid)
+        try:
+            returncode = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            terminate_group(process, group)
+            raise ReconcileError(f"{HOOK} timed out after {timeout}s") from None
+        finally:
+            # Namespace isolation prevents host services from escaping the process
+            # tree; these checks also reap descendants before the release token step.
+            terminate_group(process, group)
+            terminate_descendants()
     if returncode != 0:
         raise ReconcileError(f"{HOOK} exited {returncode}")
 
@@ -235,6 +359,58 @@ def terminate_group(process: subprocess.Popen, group: int) -> None:
     except (ProcessLookupError, PermissionError):
         pass
     process.wait()
+
+
+def become_child_subreaper() -> None:
+    """Adopt orphaned hook descendants so they can be killed before returning."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+        error = ctypes.get_errno()
+        raise ReconcileError(f"cannot contain reconciliation hook descendants: {os.strerror(error)}")
+
+
+def set_no_new_privileges() -> None:
+    """Prevent hook descendants from gaining runner privileges through sudo/setuid."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(38, 1, 0, 0, 0) != 0:  # PR_SET_NO_NEW_PRIVS
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def direct_child_pids() -> list:
+    children = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            record = (entry / "stat").read_text(encoding="ascii")
+            fields = record[record.rfind(")") + 2 :].split()
+            if int(fields[1]) == os.getpid():
+                children.append(int(entry.name))
+        except (FileNotFoundError, ProcessLookupError, ValueError, IndexError):
+            continue
+    return children
+
+
+def terminate_descendants() -> None:
+    deadline = time.monotonic() + 5
+    while True:
+        children = direct_child_pids()
+        if not children:
+            return
+        for child in children:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        for child in children:
+            try:
+                os.waitpid(child, os.WNOHANG)
+            except ChildProcessError:
+                pass
+        if time.monotonic() >= deadline:
+            raise ReconcileError("reconciliation hook descendants did not exit")
+        time.sleep(0.01)
 
 
 def status_entries(root: Path, *extra: str) -> list:
@@ -272,8 +448,100 @@ def ignored_paths(root: Path) -> set:
     }
 
 
-def validate_tree(root: Path, allowlist: list, pre_existing_untracked: set, pre_existing_ignored: set) -> list:
-    for path in sorted(ignored_paths(root) - pre_existing_ignored):
+def path_fingerprint(path: Path, contract_git_dir: Path):
+    """Fingerprint a pre-existing untracked path without following symlinks."""
+    try:
+        info = path.lstat()
+        mode = stat.S_IMODE(info.st_mode)
+        if stat.S_ISREG(info.st_mode):
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return ("file", mode, digest.hexdigest())
+        if stat.S_ISLNK(info.st_mode):
+            return ("symlink", os.readlink(path))
+        if stat.S_ISDIR(info.st_mode):
+            children = []
+            for child in sorted(path.iterdir(), key=lambda item: item.name):
+                if child == contract_git_dir and child.is_dir() and not child.is_symlink():
+                    # The pinned checkout's ref and worktree are independently checked.
+                    continue
+                children.append((child.name, path_fingerprint(child, contract_git_dir)))
+            return ("directory", mode, tuple(children))
+    except OSError as error:
+        raise ReconcileError(f"cannot fingerprint pre-existing path {path}: {error}") from None
+    raise ReconcileError(f"pre-existing path is not a regular file, symlink, or directory: {path}")
+
+
+def path_fingerprints(root: Path, paths: set, contract_root: str) -> dict:
+    contract_git_dir = root / contract_root / ".git"
+    fingerprints = {}
+    for path in paths:
+        fingerprints[("path", path)] = path_fingerprint(root / path.rstrip("/"), contract_git_dir)
+        parent = (root / path.rstrip("/")).parent
+        while parent != root:
+            try:
+                info = parent.lstat()
+            except FileNotFoundError:
+                break
+            if not stat.S_ISDIR(info.st_mode):
+                break
+            relative = parent.relative_to(root).as_posix() + "/"
+            fingerprints.setdefault(
+                ("directory", relative), ("directory", stat.S_IMODE(info.st_mode))
+            )
+            parent = parent.parent
+    return fingerprints
+
+
+def directory_mode_fingerprint(path: Path):
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise ReconcileError(f"cannot fingerprint pre-existing directory {path}: {error}") from None
+    if not stat.S_ISDIR(info.st_mode):
+        raise ReconcileError(f"pre-existing directory changed type: {path}")
+    return ("directory", stat.S_IMODE(info.st_mode))
+
+
+def validate_preserved_paths(
+    root: Path,
+    paths: set,
+    fingerprints: dict,
+    contract_root: str,
+    label: str,
+) -> None:
+    missing = sorted(
+        path for kind, path in fingerprints if kind == "path" and path not in paths
+    )
+    if missing:
+        raise ReconcileError(f"hook removed pre-existing {label}: {missing[0]}")
+    for (kind, path), expected in fingerprints.items():
+        target = root / path.rstrip("/")
+        current = (
+            directory_mode_fingerprint(target)
+            if kind == "directory"
+            else path_fingerprint(target, root / contract_root / ".git")
+        )
+        if current != expected:
+            raise ReconcileError(f"hook modified pre-existing {label}: {path}")
+
+
+def validate_tree(
+    root: Path,
+    allowlist: list,
+    pre_existing_untracked: set,
+    pre_existing_ignored: set,
+    untracked_before: dict,
+    ignored_before: dict,
+    contract_root: str,
+) -> list:
+    current_untracked = untracked_paths(root)
+    current_ignored = ignored_paths(root)
+    validate_preserved_paths(root, current_untracked, untracked_before, contract_root, "untracked output")
+    validate_preserved_paths(root, current_ignored, ignored_before, contract_root, "ignored output")
+    for path in sorted(current_ignored - pre_existing_ignored):
         raise ReconcileError(f"hook produced ignored output: {path}")
     changed = []
     for staged, worktree, path in status_entries(root):
@@ -340,7 +608,6 @@ def reconcile(root: Path, args) -> list:
     require_untracked_staged_list(root, args.staged_list)
     require_pinned_contract(root, args.contract_root, args.contract_ref, "before reconciliation")
     require_reviewed_hook(root)
-    require_clean_tracked_tree(root)
     # Resolve the git directories from the trusted pre-hook state: once the hook has
     # run, the answer to "where is .git" is exactly what an attacker would redirect.
     contract = root / args.contract_root
@@ -350,15 +617,22 @@ def reconcile(root: Path, args) -> list:
             contract, Path(git(contract, "rev-parse", "--absolute-git-dir").strip()),
         ),
     }
+    reject_pre_existing_git_operation_state(checkouts)
+    require_clean_tracked_tree(root)
     baseline = control_surfaces(checkouts)
     pre_existing_untracked = untracked_paths(root)
     pre_existing_ignored = ignored_paths(root)
+    untracked_before = path_fingerprints(root, pre_existing_untracked, args.contract_root)
+    ignored_before = path_fingerprints(root, pre_existing_ignored, args.contract_root)
 
     def validate():
         # Control surfaces first: every later check reads `git` output, which
         # `.git/config` itself can be made to falsify.
         require_intact_control_surfaces(checkouts, baseline)
-        return validate_tree(root, allowlist, pre_existing_untracked, pre_existing_ignored)
+        return validate_tree(
+            root, allowlist, pre_existing_untracked, pre_existing_ignored,
+            untracked_before, ignored_before, args.contract_root,
+        )
 
     try:
         run_hook(root, args.version, args.manifest, args.timeout)
@@ -371,6 +645,11 @@ def reconcile(root: Path, args) -> list:
             raise ReconcileError(f"{HOOK} is not idempotent: a second run changed the release tree")
         require_pinned_contract(root, args.contract_root, args.contract_ref, "after reconciliation")
     except BaseException:
+        # A failed hook can still have changed Git's executable configuration.
+        # Re-validate it before rollback, which itself uses Git; on mismatch the
+        # release job fails and the ephemeral checkout is discarded without
+        # running another command under the hook's config.
+        require_intact_control_surfaces(checkouts, baseline)
         rollback(root, pre_existing_untracked)
         raise
     if changed:
