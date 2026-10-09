@@ -11,12 +11,12 @@ import signal
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 
 HOOK = "scripts/release-reconcile.sh"
+BWRAP = "/usr/bin/bwrap"
 MAX_ALLOWLIST = 32
 BLOB_MODES = {"100644", "100755"}
 PATH_PATTERN = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]*$")
@@ -196,44 +196,77 @@ def require_clean_tracked_tree(root: Path) -> None:
 
 
 def run_hook(root: Path, version: str, manifest: str, timeout: int) -> None:
-    """Run the reviewed hook with an allowlisted environment in its own process group.
+    """Run the reviewed hook in a filesystem, process, and network namespace.
 
     The environment is built from scratch rather than filtered: a denylist cannot
     keep up with new credential-bearing variables, and this hook runs while the
-    job is one step away from minting the release App token.
-
-    `HOME` is a throwaway directory rather than the runner's, because the runner's
-    home is one `~/.gitconfig` away from `core.hooksPath` — an escalation that
-    would take effect in the `git commit` that runs with the token.
+    job is one step away from minting the release App token. Only system
+    executables/configuration and the checkout are visible; private `/run` and
+    `/tmp` mounts hide runner sockets, home directories, and temporary credentials.
     """
+    if not os.path.isfile(BWRAP) or not os.access(BWRAP, os.X_OK):
+        raise ReconcileError(f"required hook sandbox is unavailable: {BWRAP}")
+
     become_child_subreaper()
-    with tempfile.TemporaryDirectory(prefix="release-reconcile-home-", ignore_cleanup_errors=True) as home:
-        environment = {
-            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-            "HOME": home,
-            "LANG": os.environ.get("LANG", "C.UTF-8"),
-            "RELEASE_VERSION": version,
-            "RELEASE_MANIFEST": manifest,
-        }
-        with open(os.devnull, "rb") as stdin:
+    workspace = str(root.resolve())
+    sandbox_workspace = "/workspace"
+    command = [
+        BWRAP,
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--die-with-parent",
+        "--new-session",
+        "--ro-bind", "/usr", "/usr",
+        "--ro-bind-try", "/bin", "/bin",
+        "--ro-bind-try", "/lib", "/lib",
+        "--ro-bind-try", "/lib64", "/lib64",
+        "--ro-bind", "/etc", "/etc",
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--tmpfs", "/run",
+        "--tmpfs", "/tmp",
+        "--dir", sandbox_workspace,
+        "--bind", workspace, sandbox_workspace,
+        "--dir", "/tmp/release-reconcile-home",
+        "--chdir", sandbox_workspace,
+        "--clearenv",
+        "--setenv", "PATH", "/usr/bin:/bin",
+        "--setenv", "HOME", "/tmp/release-reconcile-home",
+        "--setenv", "LANG", "C.UTF-8",
+        "--setenv", "GIT_CONFIG_NOSYSTEM", "1",
+        "--setenv", "RELEASE_VERSION", version,
+        "--setenv", "RELEASE_MANIFEST", manifest,
+        "--",
+        f"./{HOOK}", version, manifest,
+    ]
+    with open(os.devnull, "rb") as stdin:
+        try:
             process = subprocess.Popen(
-                [f"./{HOOK}", version, manifest],
-                cwd=str(root), env=environment, stdin=stdin, start_new_session=True,
+                command,
+                cwd=workspace,
+                env={"PATH": "/usr/bin:/bin"},
+                stdin=stdin,
+                start_new_session=True,
                 preexec_fn=set_no_new_privileges,
             )
-            # Resolve the group while the leader is alive: after `wait()` reaps it the
-            # pid is gone, but the group can still hold processes the hook backgrounded.
-            group = os.getpgid(process.pid)
-            try:
-                returncode = process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                terminate_group(process, group)
-                raise ReconcileError(f"{HOOK} timed out after {timeout}s") from None
-            finally:
-                # A descendant can escape this process group with `setsid`, so reap
-                # every adopted child before a later step receives the release token.
-                terminate_group(process, group)
-                terminate_descendants()
+        except OSError as error:
+            raise ReconcileError(f"cannot start isolated reconciliation hook: {error}") from error
+        # Resolve the group while the leader is alive: after `wait()` reaps it the
+        # pid is gone, but the group can still hold processes the hook backgrounded.
+        group = os.getpgid(process.pid)
+        try:
+            returncode = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            terminate_group(process, group)
+            raise ReconcileError(f"{HOOK} timed out after {timeout}s") from None
+        finally:
+            # Namespace isolation prevents host services from escaping the process
+            # tree; these checks also reap descendants before the release token step.
+            terminate_group(process, group)
+            terminate_descendants()
     if returncode != 0:
         raise ReconcileError(f"{HOOK} exited {returncode}")
 

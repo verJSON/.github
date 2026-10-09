@@ -4,6 +4,8 @@
 import json
 import os
 import pathlib
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -401,19 +403,16 @@ class ReconcileTest(unittest.TestCase):
     def test_hides_the_ambient_credential_environment_from_the_hook(self):
         self.fixture.write_hook(
             "#!/usr/bin/env bash\nset -euo pipefail\n"
-            'printf "%s\\n" "${GH_TOKEN-unset} ${GITHUB_TOKEN-unset} '
-            '${ACTIONS_ID_TOKEN_REQUEST_TOKEN-unset} ${AWS_SECRET_ACCESS_KEY-unset}" '
-            '> /tmp/reconcile-env-probe\n'
             'printf "FROM ghcr.io/verjson/base:v%s\\n" "$RELEASE_VERSION" > Dockerfile\n'
+            'printf "%s\\n" "${GH_TOKEN-unset} ${GITHUB_TOKEN-unset} '
+            '${ACTIONS_ID_TOKEN_REQUEST_TOKEN-unset} ${AWS_SECRET_ACCESS_KEY-unset}" >> Dockerfile\n'
         )
+
         environment = dict(os.environ)
         environment.update({
             "GH_TOKEN": "ghs_secret", "GITHUB_TOKEN": "ghs_secret",
             "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "oidc", "AWS_SECRET_ACCESS_KEY": "aws",
         })
-        probe = pathlib.Path("/tmp/reconcile-env-probe")
-        probe.unlink(missing_ok=True)
-        self.addCleanup(probe.unlink, True)
         result = subprocess.run(
             [sys.executable, str(RECONCILER),
              "--repo-root", str(self.fixture.repo),
@@ -424,24 +423,14 @@ class ReconcileTest(unittest.TestCase):
              "--timeout", "60", "--staged-list", "reconciled-paths.txt"],
             capture_output=True, text=True, env=environment,
         )
+
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual("unset unset unset unset\n", probe.read_text(encoding="utf-8"))
-
-
-class GitControlSurfaceTest(unittest.TestCase):
-    """`git status` never reports `.git/` itself, so it is checked directly.
-
-    Everything under `.git/` decides what code later `git` invocations run — and
-    the next steps run `git commit` and the pinned changelog engine *with* the
-    release App token. A hook that writes there has a credential-exfiltration
-    path that no worktree diff can see.
-    """
-
-    def setUp(self):
-        import contextlib
-        self.stack = contextlib.ExitStack()
-        self.addCleanup(self.stack.close)
-        self.fixture = Fixture(self.stack)
+        self.assertTrue(
+            (self.fixture.repo / "Dockerfile").read_text(encoding="utf-8").endswith(
+                "unset unset unset unset\n"
+            ),
+            repr((self.fixture.repo / "Dockerfile").read_text(encoding="utf-8")),
+        )
 
     def test_rejects_a_hook_that_installs_a_git_hook(self):
         self.fixture.write_hook(
@@ -528,24 +517,58 @@ class GitControlSurfaceTest(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stderr)
 
+    @unittest.skipUnless(shutil.which("systemd-run"), "systemd-run is unavailable")
+    def test_hook_cannot_queue_a_runner_user_service_after_reconciliation(self):
+        marker = self.fixture.root / "persistent-user-service-ran"
+        service_command = f"printf escaped > {shlex.quote(str(marker))}"
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'export XDG_RUNTIME_DIR="/run/user/$(id -u)"\n'
+            'export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"\n'
+            'test ! -S "$XDG_RUNTIME_DIR/bus"\n'
+            'test ! -S /run/dbus/system_bus_socket\n'
+            "/usr/bin/systemd-run --user --no-block /bin/sh -c "
+            f"{shlex.quote(service_command)} >/dev/null 2>&1 || true\n"
+            'printf "tag\\n" > Dockerfile\n'
+        )
+
+        result = self.fixture.run()
+        self.assertEqual(0, result.returncode, result.stderr)
+        time.sleep(0.2)
+
+        self.assertFalse(marker.exists(), "a runner user service outlived reconciliation")
+
     def test_hook_cannot_reach_the_runner_home_directory(self):
         """A writable `$HOME` is a `~/.gitconfig` away from the same escalation."""
         self.fixture.write_hook(
             "#!/usr/bin/env bash\n"
-            'printf "tag\\n" > Dockerfile\n'
-            'printf "%s\\n" "$HOME" > /tmp/reconcile-home-probe\n'
+            'printf "%s\\n" "$HOME"\n'
             'printf "[core]\\n\\thooksPath = /tmp/attacker\\n" > "$HOME/.gitconfig"\n'
+            'printf "tag\\n" > Dockerfile\n'
         )
-        probe = pathlib.Path("/tmp/reconcile-home-probe")
-        probe.unlink(missing_ok=True)
-        self.addCleanup(probe.unlink, True)
         real_home = pathlib.Path(os.environ["HOME"]) / ".gitconfig"
         before = real_home.read_bytes() if real_home.is_file() else None
         result = self.fixture.run()
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertNotEqual(os.environ["HOME"], probe.read_text(encoding="utf-8").strip())
+        sandbox_home = result.stdout.strip()
+        self.assertNotEqual(os.environ["HOME"], sandbox_home)
         self.assertEqual(before, real_home.read_bytes() if real_home.is_file() else None)
-        self.assertFalse(pathlib.Path(probe.read_text(encoding="utf-8").strip()).exists())
+        self.assertFalse(pathlib.Path(sandbox_home).exists())
+
+    def test_hook_cannot_read_runner_temp_files(self):
+        host_secret = self.fixture.root / "runner-temp-secret"
+        host_secret.write_text("host-only credential\n", encoding="utf-8")
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            f"test ! -e {shlex.quote(str(host_secret))}\n"
+            'printf "tag\\n" > Dockerfile\n'
+        )
+
+        result = self.fixture.run()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("host-only credential\n", host_secret.read_text(encoding="utf-8"))
 
     def test_rejects_a_hook_that_hides_output_in_an_ignored_path(self):
         (self.fixture.repo / ".gitignore").write_text("build/\n", encoding="utf-8")
