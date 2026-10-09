@@ -173,9 +173,8 @@ on:
         default: ''
       secretless-rebuild-env:
         description: >-
-          Optional JSON object of non-credential environment values passed only
-          to the approved lifecycle-package rebuild. Credential, npm config,
-          shell, and process-control variables are rejected.
+          Optional JSON object containing only ONNXRUNTIME_NODE_INSTALL: skip
+          for approved lifecycle rebuilds. Other names or values are rejected.
         required: false
         type: string
         default: '{}'
@@ -3019,6 +3018,7 @@ jobs:
           REBUILD_PACKAGES: ${{ inputs.secretless-rebuild-packages }}
           REBUILD_ENV: ${{ inputs.secretless-rebuild-env }}
         run: |
+          unset -v GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN NPM_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GOOGLE_APPLICATION_CREDENTIALS AZURE_CREDENTIALS ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
           python3 - <<'PY'
           import json
           import os
@@ -3039,26 +3039,13 @@ jobs:
               rebuild_env = json.loads(raw_rebuild_env)
           except json.JSONDecodeError as error:
               sys.exit(f"secretless-rebuild-env must be valid JSON: {error}")
-          if not isinstance(rebuild_env, dict) or len(rebuild_env) > 16:
-              sys.exit("secretless-rebuild-env must be a JSON object with at most 16 entries")
-          protected_env_pattern = re.compile(
-              r"(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|^NPM_CONFIG_|^GITHUB_|^AWS_|^AZURE_|^GOOGLE_)",
-              re.IGNORECASE,
-          )
-          protected_process_env = {
-              "BASH_ENV", "ENV", "HOME", "LD_PRELOAD", "LD_LIBRARY_PATH", "PATH",
-              "PYTHONPATH", "SHELLOPTS", "NODE_OPTIONS",
-          }
+          if not isinstance(rebuild_env, dict) or len(rebuild_env) > 1:
+              sys.exit("secretless-rebuild-env must be an object with at most one approved entry")
           for name, value in rebuild_env.items():
-              if (
-                  not isinstance(name, str)
-                  or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None
-                  or protected_env_pattern.search(name) is not None
-                  or name.upper() in protected_process_env
-                  or not isinstance(value, str)
-                  or any(ord(char) < 32 for char in value)
-              ):
-                  sys.exit("secretless-rebuild-env contains an invalid or protected environment entry")
+              if name != "ONNXRUNTIME_NODE_INSTALL" or value != "skip":
+                  sys.exit("secretless-rebuild-env only accepts ONNXRUNTIME_NODE_INSTALL=skip")
+          if rebuild_env and "onnxruntime-node" not in requested:
+              sys.exit("ONNXRUNTIME_NODE_INSTALL=skip requires onnxruntime-node in secretless-rebuild-packages")
           package_manager = os.environ.get("PACKAGE_MANAGER", "npm")
           if package_manager == "npm":
               lock = json.loads(Path("package-lock.json").read_text(encoding="utf-8"))
@@ -3145,7 +3132,11 @@ jobs:
                   "as needing install scripts: " + ", ".join(unnecessary)
               )
           command = ["npm", "rebuild"] if package_manager == "npm" else ["corepack", "pnpm", "rebuild"]
-          subprocess.run([*command, *requested], check=True, env={**os.environ, **rebuild_env})
+          rebuild_process_env = dict(os.environ)
+          rebuild_process_env.pop("REBUILD_ENV", None)
+          rebuild_process_env.pop("ONNXRUNTIME_NODE_INSTALL", None)
+          rebuild_process_env.update(rebuild_env)
+          subprocess.run([*command, *requested], check=True, env=rebuild_process_env)
           PY
       - name: Run exact credentialless consumer script plan
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && (inputs.secretless-ci-script-plan != '' || inputs.secretless-nested-manifests != '')

@@ -111,3 +111,16 @@ GitHub can report different owner or organization-login casing for the same repo
 ## 2026-10-06 amendment — accept registry tarball scope casing (#1694)
 
 GitHub Packages can issue a tarball URL with different ASCII casing from the approved lowercase package name, as reproduced by [issue #1694](https://github.com/Verjson/.github/issues/1694). The acquisition validator compares the URL's ASCII scope and package identity after lowercasing against the exact caller approval and lock identity, including the npm installation path. It still rejects non-ASCII identities, unapproved packages or scopes, mismatched lock names, malformed URLs, and invalid or conflicting integrity. The registry-issued URL and integrity remain unchanged. The conformance regression runs the embedded validator against both accepted and rejected lockfiles.
+
+## 2026-10-09 amendment — constrain lifecycle rebuild environment (#1729)
+
+The credentialless lifecycle rebuild accepts only the exact
+`ONNXRUNTIME_NODE_INSTALL=skip` setting, and only when the same call explicitly
+approves `onnxruntime-node` for rebuild. The value lets ONNX Runtime skip its
+optional CUDA binary download. General environment overrides are not permitted:
+an arbitrary key could carry a credential despite its name, and dynamic-loader
+variables can alter process behavior. The raw JSON input is removed from the
+child environment before npm runs, so lifecycle code receives only the single
+validated setting. The canonical and generated protected workflow tests verify
+the accepted pair, reject other names and values, confirm credentials and raw
+input are absent from npm, and reject use with a different rebuild package.

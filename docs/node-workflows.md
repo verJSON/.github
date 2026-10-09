@@ -210,8 +210,8 @@ job. The mapped package token does not change that caller contract.
 
 For parity with PR validation, pass the same exact
 `approved-internal-scopes`, `approved-internal-packages`,
-`secretless-auxiliary-source`, `secretless-rebuild-packages`, and
-`secretless-ci-script-plan` values to both jobs. That keeps the private cache,
+`secretless-auxiliary-source`, `secretless-rebuild-packages`,
+`secretless-rebuild-env`, and `secretless-ci-script-plan` values to both jobs. That keeps the private cache,
 immutable auxiliary tree, rebuild allowlist, and ordered audit/smoke plan
 identical across the event split.
 

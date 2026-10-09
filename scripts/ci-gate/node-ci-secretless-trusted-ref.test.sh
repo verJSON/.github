@@ -24,6 +24,7 @@ inputs = workflow[True]["workflow_call"]["inputs"]
 jobs = workflow["jobs"]
 assert inputs["secretless-pr"]["default"] is False
 assert inputs["secretless-trusted-ref"]["default"] is False
+assert inputs["secretless-rebuild-env"]["default"] == "{}"
 
 acquire = jobs["acquire-secretless-dependencies"]
 build = jobs["build-test"]
@@ -55,7 +56,9 @@ for name in ("GH_TOKEN", "GITHUB_TOKEN", "NODE_AUTH_TOKEN", "NPM_TOKEN",
 assert "npm ci --ignore-scripts" in install["run"]
 assert "printf '%s=\\n' \"$name\"" in install["run"]
 assert 'command = ["npm", "rebuild"] if package_manager == "npm" else ["corepack", "pnpm", "rebuild"]' in rebuild["run"]
-assert 'subprocess.run([*command, *requested], check=True)' in rebuild["run"]
+assert 'unset -v GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN' in rebuild["run"]
+assert 'rebuild_process_env.pop("REBUILD_ENV", None)' in rebuild["run"]
+assert 'subprocess.run([*command, *requested], check=True, env=rebuild_process_env)' in rebuild["run"]
 # Each planned script runs in the manifest that declared it (#1229), so the
 # pinned execution call carries that directory rather than assuming the root.
 assert re.search(r'(?m)^\s*npm_command\s*=\s*\["npm"\]\s*$', plan["run"])

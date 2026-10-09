@@ -386,6 +386,11 @@ def remove_candidate_credentials(document: str, step_name: str) -> str:
     if step.count(run_marker) != 1:
         raise SystemExit(f"protected candidate step {step_name!r} has no unique run block")
     unset = "          unset -v " + " ".join(CREDENTIAL_ENV_KEYS) + "\n"
+    # The canonical source may already scrub this step; keep generation idempotent.
+    if step.count(unset) > 1:
+        raise SystemExit(f"protected candidate step {step_name!r} clears credentials more than once")
+    if step.count(unset) == 1:
+        return document
     protected_step = step.replace(run_marker, run_marker + unset, 1)
     return document[:step_start] + protected_step + document[step_end:]
 
