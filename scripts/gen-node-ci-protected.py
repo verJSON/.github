@@ -386,6 +386,11 @@ def remove_candidate_credentials(document: str, step_name: str) -> str:
     if step.count(run_marker) != 1:
         raise SystemExit(f"protected candidate step {step_name!r} has no unique run block")
     unset = "          unset -v " + " ".join(CREDENTIAL_ENV_KEYS) + "\n"
+    # The canonical source may already scrub this step; keep generation idempotent.
+    if step.count(unset) > 1:
+        raise SystemExit(f"protected candidate step {step_name!r} clears credentials more than once")
+    if step.count(unset) == 1:
+        return document
     protected_step = step.replace(run_marker, run_marker + unset, 1)
     return document[:step_start] + protected_step + document[step_end:]
 
@@ -463,9 +468,7 @@ def configure_changelog_tool_cache(document: str) -> str:
 
     plan_if = (
         "needs.eligibility.outputs.should-run != 'false' && "
-        "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
-        "(inputs.secretless-ci-script-plan != '' || "
-        "inputs.secretless-nested-manifests != '')"
+        "(inputs.secretless-pr || inputs.secretless-trusted-ref)"
     )
     warm_step = f"""      - name: Warm verified changelog contract cache
         id: warm-changelog-contract
@@ -670,9 +673,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
     step_name = "Run exact credentialless consumer script plan"
     plan_if = (
         "needs.eligibility.outputs.should-run != 'false' && "
-        "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
-        "(inputs.secretless-ci-script-plan != '' || "
-        "inputs.secretless-nested-manifests != '')"
+        "(inputs.secretless-pr || inputs.secretless-trusted-ref)"
     )
     step_marker = f"      - name: {step_name}\n"
     step_start = document.index(step_marker)
@@ -706,7 +707,9 @@ def isolate_candidate_runtime_cache(document: str) -> str:
           import shutil
           import subprocess
           import sys
+          import tempfile
           from pathlib import Path
+          from urllib.parse import parse_qsl, unquote, urlsplit
 """
     protected_imports = """          import hashlib
           import json
@@ -719,37 +722,34 @@ def isolate_candidate_runtime_cache(document: str) -> str:
           import sys
           import time
           from pathlib import Path
+          from urllib.parse import parse_qsl, unquote, urlsplit
 """
     if step.count(imports) != 1:
         raise SystemExit("protected candidate script plan imports changed")
     step = step.replace(imports, protected_imports, 1)
-    execution = """          for directory, name, unset_env in normalized:
-              script_env = os.environ.copy()
-              for env_name in unset_env:
-                  script_env.pop(env_name, None)
-              npm_command = ["npm"]
-              npm_path = shutil.which("npm")
-              node_path = shutil.which("node")
-              if npm_path is not None and node_path is not None:
-                  npm_executable = Path(npm_path)
-                  resolved_npm_executable = npm_executable.resolve()
-                  npm_cli_candidates = list(dict.fromkeys(
-                      candidate.resolve()
-                      for candidate in (
-                          npm_executable.parent.parent / "lib/node_modules/npm/bin/npm-cli.js",
-                          npm_executable.parent / "node_modules/npm/bin/npm-cli.js",
-                          resolved_npm_executable.parent.parent / "bin/npm-cli.js",
-                      )
-                      if candidate.is_file()
-                  ))
-                  if len(npm_cli_candidates) > 1:
-                      raise SystemExit("trusted npm CLI is ambiguous")
-                  if npm_cli_candidates:
-                      npm_command = [node_path, str(npm_cli_candidates[0])]
-              subprocess.run([*npm_command, "run", name], check=True, env=script_env, cwd=directory)
-"""
+    source_preflight = (
+        "          # BEGIN source candidate sandbox preflight\n",
+        "          # END source candidate sandbox preflight\n",
+    )
+    if any(step.count(marker) != 1 for marker in source_preflight):
+        raise SystemExit("source candidate sandbox preflight markers changed")
+    preflight_start = step.index(source_preflight[0])
+    preflight_end = step.index(source_preflight[1], preflight_start) + len(source_preflight[1])
+    step = step[:preflight_start] + step[preflight_end:]
+    execution_markers = (
+        "          # BEGIN source candidate script execution\n",
+        "          # END source candidate script execution\n",
+    )
+    candidate_sandbox_entrypoint = (
+        "import os, sys\n"
+        "max_fd = os.sysconf('SC_OPEN_MAX')\n"
+        "if max_fd < 3: raise SystemExit('invalid file descriptor limit')\n"
+        "os.closerange(3, max_fd)\n"
+        "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
+    )
     isolated_execution = f"""          max_cache_files = {CANDIDATE_CACHE_MAX_FILES}
           max_cache_bytes = {CANDIDATE_CACHE_MAX_BYTES}
+          sandbox_entrypoint = {candidate_sandbox_entrypoint!r}
           runner_temp_input = Path(os.environ["RUNNER_TEMP"])
           if (
               not runner_temp_input.is_absolute()
@@ -759,6 +759,42 @@ def isolate_candidate_runtime_cache(document: str) -> str:
           ):
               sys.exit("RUNNER_TEMP is not a canonical directory")
           runner_temp = runner_temp_input
+          corepack_default = Path.home() / ".cache/node/corepack"
+          configured_corepack_home = os.environ.get("COREPACK_HOME")
+          corepack_home_input = (
+              Path(configured_corepack_home) if configured_corepack_home else corepack_default
+          )
+          corepack_home = None
+          if corepack_home_input.exists() or corepack_home_input.is_symlink():
+              if (
+                  not corepack_home_input.is_absolute()
+                  or corepack_home_input.is_symlink()
+                  or not corepack_home_input.is_dir()
+                  or corepack_home_input.resolve() != corepack_home_input
+              ):
+                  sys.exit("Corepack cache is not a canonical directory")
+              expected_corepack_home = corepack_default.resolve()
+              if corepack_home_input != expected_corepack_home:
+                  sys.exit("Corepack cache is outside the runner's canonical cache path")
+              corepack_home = corepack_home_input
+          browser_cache = None
+          browser_cache_value = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+          if browser_cache_value:
+              expected_browser_cache = runner_temp / (
+                  "verjson-playwright-browsers-"
+                  + os.environ.get("GITHUB_RUN_ID", "")
+                  + "-"
+                  + os.environ.get("GITHUB_RUN_ATTEMPT", "")
+              )
+              browser_cache = Path(browser_cache_value)
+              if (
+                  browser_cache != expected_browser_cache
+                  or browser_cache.is_symlink()
+                  or not browser_cache.is_dir()
+                  or browser_cache.resolve() != browser_cache
+                  or browser_cache.parent != runner_temp
+              ):
+                  sys.exit("Playwright browser cache is not the validated job-scoped RUNNER_TEMP directory")
           changelog_ref = os.environ.get("VERJSON_CHANGELOG_CONTRACT_REF", "")
           changelog_sha256 = os.environ.get("VERJSON_CHANGELOG_CONTRACT_SHA256", "")
           if (
@@ -929,15 +965,28 @@ def isolate_candidate_runtime_cache(document: str) -> str:
             or not workspace.is_dir()
           ):
             sys.exit("candidate workspace is not a canonical directory")
+          git_metadata = workspace / ".git"
+          if (
+              git_metadata.is_symlink()
+              or not git_metadata.is_dir()
+              or git_metadata.resolve() != git_metadata
+          ):
+              sys.exit("candidate workspace Git metadata is not a canonical directory")
+          git_metadata_stat = git_metadata.stat(follow_symlinks=False)
+          if not stat.S_ISDIR(git_metadata_stat.st_mode) or git_metadata_stat.st_uid != os.getuid():
+              sys.exit("candidate workspace Git metadata has unexpected type or ownership")
+          git_metadata_identity = (
+              git_metadata_stat.st_dev,
+              git_metadata_stat.st_ino,
+              git_metadata_stat.st_uid,
+              stat.S_IMODE(git_metadata_stat.st_mode),
+          )
           if workspace == runner_temp or workspace in runner_temp.parents or runner_temp in workspace.parents:
               sys.exit("candidate workspace and RUNNER_TEMP overlap")
           if (baseline is not None and baseline.parent != runner_temp) or cache_root.parent != runner_temp:
               sys.exit("candidate cache roots are not exact RUNNER_TEMP children")
           if baseline is not None and (baseline == cache_root or baseline in cache_root.parents or cache_root in baseline.parents):
               sys.exit("candidate cache baseline and isolation root overlap")
-          if any(os.environ.get(name) for name in ("DB_HOST", "DB_PORT", "CACHE_PORT")):
-              sys.exit("protected candidate scripts do not permit shared service networking")
-
           trusted_tool_root_input = Path(os.environ.get("RUNNER_TOOL_CACHE", ""))
           if (
               not trusted_tool_root_input.is_absolute()
@@ -1155,6 +1204,8 @@ def isolate_candidate_runtime_cache(document: str) -> str:
             for executable in tool_executables.values()
             if not executable.is_relative_to("/usr")
           }}
+          if corepack_home is not None:
+            tool_prefix_candidates.add(corepack_home)
           tool_prefixes = []
           tool_prefix_identities = {{}}
 
@@ -1217,6 +1268,14 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                 "trusted tool prefix",
                 require_unwritable=trusted_tool_tree_requires_unwritable,
               )
+            elif tool_prefix == corepack_home:
+              validate_trusted_ancestry(
+                Path.home(),
+                tool_prefix,
+                (os.getuid(),),
+                "trusted Corepack cache",
+                require_unwritable=True,
+              )
             prefix_metadata = tool_prefix.stat(follow_symlinks=False)
             if not stat.S_ISDIR(prefix_metadata.st_mode):
               sys.exit("trusted tool prefix is not a directory")
@@ -1225,9 +1284,14 @@ def isolate_candidate_runtime_cache(document: str) -> str:
             # the admitted hosted tool cache is world-writable throughout by the same
             # image convention; only those prefixes relax the write-bit requirement.
             prefix_in_hosted_tool_cache = tool_prefix.is_relative_to(hosted_tool_cache_root)
+            prefix_in_corepack_cache = tool_prefix == corepack_home
             validate_trusted_tool_tree(
               tool_prefix,
-              allowed_uids=trusted_tool_uids if prefix_in_hosted_tool_cache else (0,),
+              allowed_uids=(
+                (os.getuid(),) if prefix_in_corepack_cache
+                else trusted_tool_uids if prefix_in_hosted_tool_cache
+                else (0,)
+              ),
               require_unwritable=not (
                 tool_prefix.is_relative_to("/opt/microsoft/powershell")
                 or (prefix_in_hosted_tool_cache and not trusted_tool_tree_requires_unwritable)
@@ -1314,7 +1378,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
               previous_handlers[caught_signal] = signal.getsignal(caught_signal)
               signal.signal(caught_signal, handle_signal)
           try:
-              for index, (script_directory, name, unset_env) in enumerate(normalized):
+              for index, (script_directory, name, unset_env, requires_services) in enumerate(normalized):
                   if baseline is not None and inventory(baseline) != baseline_inventory:
                       sys.exit("verified runtime cache changed before candidate script")
                   script_cache = cache_root / str(index)
@@ -1344,13 +1408,36 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                       inventory(script_cache) != baseline_inventory
                   ):
                       sys.exit("isolated candidate cache copy failed integrity verification")
-                  script_env = os.environ.copy()
+                  script_env = {{
+                      "CI": "true",
+                      "GITHUB_ACTIONS": "true",
+                      "GITHUB_WORKSPACE": str(workspace),
+                      "RUNNER_TEMP": str(script_tmp),
+                      "HOME": str(script_home),
+                      "TMPDIR": str(script_tmp),
+                      "COREPACK_HOME": str(corepack_home) if corepack_home is not None else str(
+                          script_home / ".cache/node/corepack"
+                      ),
+                      "COREPACK_ENABLE_NETWORK": "0",
+                      "NPM_CONFIG_CACHE": str(script_cache),
+                      "npm_config_cache": str(script_cache),
+                      "VERJSON_CHANGELOG_TOOL_CACHE": str(changelog_cache_root),
+                      "VERJSON_CHANGELOG_CONTRACT_REF": changelog_ref,
+                      "VERJSON_CHANGELOG_CONTRACT_SHA256": changelog_sha256,
+                  }}
+                  for env_name in (
+                      "GITHUB_REF", "GITHUB_REF_NAME", "GITHUB_SHA", "GITHUB_REPOSITORY",
+                      "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_JOB",
+                      "GITHUB_WORKFLOW", "GITHUB_EVENT_NAME", "RUNNER_OS", "RUNNER_ARCH",
+                  ):
+                      if env_name in os.environ:
+                          script_env[env_name] = os.environ[env_name]
+                  if browser_cache is not None:
+                      script_env["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_cache)
+                  if requires_services:
+                      script_env.update(candidate_service_env)
                   for env_name in unset_env:
                       script_env.pop(env_name, None)
-                  script_env["NPM_CONFIG_CACHE"] = str(script_cache)
-                  script_env["npm_config_cache"] = str(script_cache)
-                  script_env["HOME"] = str(script_home)
-                  script_env["TMPDIR"] = str(script_tmp)
                   tool_path_entries = [
                       *(str(executable.parent) for executable in tool_executables.values()),
                       "/usr/local/bin",
@@ -1369,10 +1456,12 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                       sys.exit("candidate writable mount paths overlap")
                   mount_targets = (
                       workspace,
+                      git_metadata,
                       cache_root,
                       changelog_cache_root,
                       *isolated_paths,
                       *tool_prefixes,
+                      *((browser_cache,) if browser_cache is not None else ()),
                   )
                   namespace_directories = set()
                   for target in mount_targets:
@@ -1389,11 +1478,28 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                   for directory in sorted(protected_parents, key=str):
                       chmod_args.extend(("--chmod", "0555", str(directory)))
               tool_mount_args = []
+              git_mount_args = []
               tool_prefix_fds = []
               readonly_mount_identities = dict(tool_prefix_identities)
               readonly_mount_identities[changelog_cache_root] = changelog_cache_root_identity
+              readonly_mount_identities[git_metadata] = git_metadata_identity
+              if browser_cache is not None:
+                  browser_cache_metadata = browser_cache.stat(follow_symlinks=False)
+                  if not stat.S_ISDIR(browser_cache_metadata.st_mode):
+                      sys.exit("validated Playwright browser cache changed type before namespace bind")
+                  readonly_mount_identities[browser_cache] = (
+                      browser_cache_metadata.st_dev,
+                      browser_cache_metadata.st_ino,
+                      browser_cache_metadata.st_uid,
+                      stat.S_IMODE(browser_cache_metadata.st_mode),
+                  )
               try:
-                for tool_prefix in (*tool_prefixes, changelog_cache_root):
+                for tool_prefix in (
+                    *tool_prefixes,
+                    changelog_cache_root,
+                    git_metadata,
+                    *((browser_cache,) if browser_cache is not None else ()),
+                ):
                   descriptor = os.open(
                     tool_prefix,
                     os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
@@ -1409,9 +1515,12 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                     os.close(descriptor)
                     sys.exit("verified read-only mount changed before namespace bind")
                   tool_prefix_fds.append(descriptor)
-                  tool_mount_args.extend(
-                    ("--ro-bind", f"/proc/self/fd/{{descriptor}}", str(tool_prefix))
-                  )
+                  mount_flag = "--bind" if tool_prefix == browser_cache else "--ro-bind"
+                  mount_args = (mount_flag, f"/proc/self/fd/{{descriptor}}", str(tool_prefix))
+                  if tool_prefix == git_metadata:
+                    git_mount_args.extend(mount_args)
+                  else:
+                    tool_mount_args.extend(mount_args)
               except BaseException:
                 for descriptor in tool_prefix_fds:
                   os.close(descriptor)
@@ -1425,13 +1534,13 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                               "--unshare-ipc",
                               "--unshare-uts",
                               "--unshare-cgroup-try",
-                              "--unshare-net",
                               "--disable-userns",
                               "--die-with-parent",
                               "--new-session",
                               "--cap-drop", "ALL",
                               "--tmpfs", "/",
                               "--tmpfs", "/tmp",
+                              *([] if requires_services else ["--unshare-net"]),
                               *directory_args,
                               *chmod_args,
                               "--ro-bind", "/usr", "/usr",
@@ -1446,6 +1555,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                               "--ro-bind", "/etc/group", "/etc/group",
                               *tool_mount_args,
                               "--bind", str(workspace), str(workspace),
+                              *git_mount_args,
                               "--bind", str(script_cache), str(script_cache),
                               "--bind", str(script_home), str(script_home),
                               "--bind", str(script_tmp), str(script_tmp),
@@ -1453,6 +1563,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                               "--dev", "/dev",
                               "--chdir", str(script_directory),
                               "--",
+                              "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
                               *npm_command, "run", name,
                           ],
                           env=script_env,
@@ -1493,9 +1604,17 @@ def isolate_candidate_runtime_cache(document: str) -> str:
           if cache_root.exists() or (baseline is not None and inventory(baseline) != baseline_inventory):
               sys.exit("candidate cache root cleanup or final baseline integrity check failed")
 """
-    if step.count(execution) != 1:
-        raise SystemExit("protected candidate script execution block changed")
-    step = step.replace(execution, isolated_execution, 1)
+    if any(step.count(marker) != 1 for marker in execution_markers):
+        raise SystemExit("protected candidate script execution markers changed")
+    execution_start = step.index(execution_markers[0])
+    execution_end = step.index(execution_markers[1], execution_start) + len(execution_markers[1])
+    step = (
+        step[:execution_start]
+        + execution_markers[0]
+        + isolated_execution
+        + execution_markers[1]
+        + step[execution_end:]
+    )
     python_start = "          python3 - <<'PY'\n"
     python_end = "          PY"
     if step.count(python_start) != 1 or step.count(python_end) != 1:
@@ -1762,8 +1881,8 @@ def render() -> str:
     checkout = "        with:\n          submodules: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'false' || 'recursive' }}\n"
     document = replace_once(document, checkout, "        with:\n          ref: ${{ inputs.head-sha }}\n          submodules: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'false' || 'recursive' }}\n")
     rebuild_if = "needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && inputs.secretless-rebuild-packages != ''"
-    plan_if = "needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && (inputs.secretless-ci-script-plan != '' || inputs.secretless-nested-manifests != '')"
-    default_if = "needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')"
+    plan_if = "needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)"
+    default_if = "needs.eligibility.outputs.should-run != 'false' && !(inputs.secretless-pr || inputs.secretless-trusted-ref)"
     document = replace_once(document, "      - name: Rebuild exact approved lifecycle packages without credentials\n", verifier_step(rebuild_if) + "      - name: Rebuild exact approved lifecycle packages without credentials\n")
     document = replace_once(
         document,
@@ -1772,24 +1891,21 @@ def render() -> str:
         + verifier_step(plan_if)
         + "      - name: Run exact credentialless consumer script plan\n",
     )
-    default_commands = """      - run: npm run build
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-      - run: npm run typecheck --if-present
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-      - run: npm test
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-      - run: npm run lint --if-present
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
-"""
+    default_step_start = "      - run: npm run build\n"
+    default_step_end = "      - name: Run runtime-resolved compatibility lanes without credentials\n"
     grouped_default = """      - name: Run default build, typecheck, test, and lint plan
-        if: needs.eligibility.outputs.should-run != 'false' && (!(inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.secretless-ci-script-plan == '')
+        if: needs.eligibility.outputs.should-run != 'false' && !(inputs.secretless-pr || inputs.secretless-trusted-ref)
         run: |
           npm run build
           npm run typecheck --if-present
           npm test
           npm run lint --if-present
 """
-    document = replace_once(document, default_commands, verifier_step(default_if) + grouped_default)
+    if document.count(default_step_start) != 1 or document.count(default_step_end) != 1:
+        raise SystemExit("protected node-ci default consumer steps drifted")
+    default_start = document.index(default_step_start)
+    default_end = document.index(default_step_end, default_start)
+    document = document[:default_start] + grouped_default + document[default_end:]
     compatibility_if = (
         "needs.eligibility.outputs.should-run != 'false' && "
         "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
@@ -1801,31 +1917,32 @@ def render() -> str:
         "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
         "inputs.secretless-compatibility-ranges != ''"
     )
-    if document.count(legacy_compatibility_if) != 2:
+    if document.count(legacy_compatibility_if) != 1:
         raise SystemExit("protected node-ci compatibility runtime gate drifted")
     document = document.replace(legacy_compatibility_if, compatibility_if)
-    # The protected script plan requires the bubblewrap namespace boundary
-    # whenever it runs (a script plan or nested manifests are set), so on
-    # GitHub-hosted runners the sandbox must be provisioned for every lane that
-    # will execute it, not only for lanes that declare a type surface or
-    # compatibility ranges. verjson-cli-projects' lanes pass a script plan and
-    # neither of those, and failed closed with "verified bubblewrap namespace
-    # boundary is unavailable" the moment their required workflow was
-    # activated (#1423).
-    hosted_provisioning_if = compatibility_if + " && runner.environment == 'github-hosted'"
+    document = replace_once(
+        document,
+        "      - name: Run exact credentialless consumer script plan\n",
+        verifier_step(default_if)
+        + verifier_step(compatibility_if)
+        + "      - name: Run exact credentialless consumer script plan\n",
+    )
+    # Protected consumer scripts and approved lifecycle rebuilds use the
+    # verified bubblewrap boundary. Provision it before either executes on a
+    # GitHub-hosted runner, including lanes that only request rebuild packages.
+    hosted_provisioning_if = (
+        "needs.eligibility.outputs.should-run != 'false' && "
+        "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
+        "runner.environment == 'github-hosted'"
+    )
     if document.count(hosted_provisioning_if) != 1:
         raise SystemExit("protected node-ci hosted sandbox provisioning gate drifted")
     document = document.replace(
         hosted_provisioning_if,
         "needs.eligibility.outputs.should-run != 'false' && "
         "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
-        "(inputs.protected-type-surface-declaration-path != '' || "
-        "inputs.secretless-compatibility-ranges != '' || "
-        "inputs.secretless-ci-script-plan != '' || "
-        "inputs.secretless-nested-manifests != '') && "
         "runner.environment == 'github-hosted'",
     )
-    document = replace_once(document, "      - name: Run runtime-resolved compatibility lanes without credentials\n", verifier_step(compatibility_if) + "      - name: Run runtime-resolved compatibility lanes without credentials\n")
     document = remove_step(document, "Install schema submodule deps")
     document = document.replace(
         "          ref: ${{ inputs.head-sha }}\n          persist-credentials: false\n",
@@ -1849,7 +1966,7 @@ def render() -> str:
     document = move_step_before_guard(
         document,
         "Provision trusted compatibility sandbox",
-        "Run exact credentialless consumer script plan",
+        "Rebuild exact approved lifecycle packages without credentials",
         "Revalidate protected pull-request identity",
     )
     return document

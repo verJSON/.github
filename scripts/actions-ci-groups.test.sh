@@ -115,6 +115,9 @@ compatibility_commands = (
     "bash scripts/ci-gate/node-ci-secretless-compatibility.test.sh",
     "scripts/ci-gate/node-ci-secretless-compatibility-absent.test.py",
     "python3 scripts/ci-gate/node-ci-required-identity.test.py",
+    "VERJSON_TEST_REAL_BWRAP=1 python3 scripts/ci-gate/node-ci-secretless-rebuild-env.test.py",
+    "bash scripts/ci-gate/node-ci-secretless-consumer.test.sh",
+    "bash scripts/ci-gate/node-ci-secretless-nested-manifests.test.sh",
     "python3 scripts/container_release_reconcile.test.py",
 )
 

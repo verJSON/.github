@@ -174,6 +174,12 @@ fi
 # and never trips pnpm's own registry-shape supply-chain policy.
 cp -- "$original" "$app_dir/pnpm-lock.yaml"
 printf '%s\t%s\n' "$digest" "$tarball" > "$mapping"
+cat > "$app_dir/.pnpmfile.cjs" <<'JS'
+const fs = require('node:fs')
+fs.appendFileSync(process.env.GITHUB_ENV, 'PNPM_HOOK_RAN=1\\n')
+module.exports = {}
+JS
+pnpm_hook_env="$fixture/pnpm-hook.env"
 rm -rf "$mock_dir"; mkdir -p "$mock_dir/tarball"
 port_file="$fixture/live.port"
 (cd "$app_dir" && python3 "$server" "$mock_dir" "$port_file") &
@@ -188,8 +194,10 @@ if [ -n "$port" ] \
     && (cd "$app_dir" && PNPM_IMPORT_MAP="$mapping" MOCK_REGISTRY_DIR="$mock_dir" \
         MOCK_REGISTRY_PORT="$port" MOCK_REGISTRY_NPMRC="$fixture/live.npmrc" \
         APPROVED_INTERNAL_SCOPES=$'@verjson' python3 "$rewrite") \
-    && (cd "$app_dir" && NPM_CONFIG_USERCONFIG="$fixture/live.npmrc" corepack pnpm install \
+    && (cd "$app_dir" && GITHUB_ENV="$pnpm_hook_env" PNPM_CONFIG_IGNORE_PNPMFILE=true \
+        NPM_CONFIG_USERCONFIG="$fixture/live.npmrc" corepack pnpm install \
         --frozen-lockfile --ignore-scripts --prefer-offline --store-dir "$store" >"$fixture/live-install.out" 2>&1) \
+    && [ ! -s "$pnpm_hook_env" ] \
     && [ "$(cd "$app_dir" && node -p "require('./node_modules/@verjson/contracts/package.json').version" 2>/dev/null)" = "1.2.3" ]; then
   pass "a real frozen pnpm install completes against the local mock registry without contacting npm.pkg.github.com"
 else

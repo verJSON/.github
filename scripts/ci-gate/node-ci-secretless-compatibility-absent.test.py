@@ -53,8 +53,28 @@ class SecretlessAbsentCompatibilityTargetTests(unittest.TestCase):
         )
         cls.runner_text = step["run"]
         cls.temp_root = Path(tempfile.mkdtemp(prefix="node-ci-absent-compat-"))
+        cls.runner_home = cls.temp_root / "runner-home"
+        cls.runner_home.mkdir()
+        cls.host_home_sentinel = cls.runner_home / ".host-runner-sentinel"
+        cls.host_home_sentinel.write_text("runner home must stay hidden\n", encoding="utf-8")
         cls.runner = cls.temp_root / "run-lanes.sh"
         cls.runner.write_text(cls.runner_text, encoding="utf-8")
+        cls.tool_cache = cls.temp_root / "tool-cache"
+        cls.tool_bin = cls.tool_cache / "node" / "test" / "x64" / "bin"
+        cls.tool_bin.mkdir(parents=True)
+        node_source = shutil.which("node")
+        if node_source is None:
+            raise RuntimeError("Node is required for the compatibility consumer fixture")
+        shutil.copy2(node_source, cls.tool_bin / "node")
+        npm = cls.tool_bin / "npm"
+        npm.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "[[ ${1:-} == run && ${2:-} == test:compat ]] || exit 64\n"
+            "exec node test-compat.cjs\n",
+            encoding="utf-8",
+        )
+        npm.chmod(0o755)
 
     @classmethod
     def tearDownClass(cls):
@@ -138,6 +158,11 @@ class SecretlessAbsentCompatibilityTargetTests(unittest.TestCase):
         (self.fixture / "test-compat.cjs").write_text(
             """const assert = require('node:assert/strict');
 const fs = require('node:fs');
+if (process.env.TEST_SKIP_HOST_PATH_PROBE !== 'true') {
+  assert.equal(fs.existsSync(process.env.HOST_HOME_SENTINEL), false);
+  assert.equal(fs.existsSync('/run/docker.sock'), false);
+  assert.equal(fs.existsSync('/var/run/docker.sock'), false);
+}
 const target = './node_modules/@verjson/authn';
 function waitFor(path) {
   const deadline = Date.now() + 5000;
@@ -199,6 +224,14 @@ if (process.env.TEST_FAIL === 'true') process.exit(42);
             "COMPATIBILITY_ARTIFACT_DIR": str(self.fixture / "artifacts"),
             "COMPATIBILITY_RANGES": json.dumps(self.request, separators=(",", ":")),
             "EXPECTED_COMPATIBILITY_PROVENANCE_SHA256": self.provenance_sha,
+            "BWRAP_BINARY": "/usr/bin/bwrap",
+            "HOME": str(self.runner_home),
+            "HOST_HOME_SENTINEL": str(self.host_home_sentinel),
+            "PATH": f"{self.tool_bin}{os.pathsep}{env.get('PATH', '')}",
+            "RUNNER_ENVIRONMENT": "github-hosted",
+            "RUNNER_OS": "Linux",
+            "RUNNER_TOOL_CACHE": str(self.tool_cache),
+            "RUNNER_TEMP": str(self.fixture / "runner-temp"),
         })
         env.update(updates)
         return env
@@ -464,7 +497,7 @@ if (process.env.TEST_FAIL === 'true') process.exit(42);
         self.assertIn("parent is not a real directory", result.stderr)
         self.assertFalse((self.fixture / "results/observed-versions").exists())
 
-    def run_swap_load_restore(self, runner=None):
+    def run_swap_load_restore(self, runner=None, *, skip_host_path_probe=False):
         attack_completed = threading.Event()
         attack_errors = []
         verified = self.scope / "authn-verified-outside"
@@ -502,7 +535,11 @@ if (process.env.TEST_FAIL === 'true') process.exit(42);
 
         attacker = threading.Thread(target=swap_load_restore)
         attacker.start()
-        result = self.run_lane(runner=runner, TEST_SWAP_LOAD_RESTORE="true")
+        result = self.run_lane(
+            runner=runner,
+            TEST_SWAP_LOAD_RESTORE="true",
+            TEST_SKIP_HOST_PATH_PROBE=str(skip_host_path_probe).lower(),
+        )
         attacker.join(timeout=10)
         self.assertFalse(attacker.is_alive())
         self.assertEqual([], attack_errors)
@@ -536,7 +573,7 @@ if (process.env.TEST_FAIL === 'true') process.exit(42);
             "                )"
         )
         runner = self.instrument_runner("unbound-consumer.sh", needle, replacement)
-        result = self.run_swap_load_restore(runner)
+        result = self.run_swap_load_restore(runner, skip_host_path_probe=True)
         self.assertNotEqual(0, result.returncode)
         self.assertIn("9.9.9", result.stderr)
         self.assertEqual(

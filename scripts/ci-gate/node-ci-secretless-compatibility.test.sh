@@ -8,6 +8,34 @@ documentation="$root/docs/node-workflows.md"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 failures=0
+tool_cache="$tmp/tool-cache"
+tool_bin="$tool_cache/node/test/x64/bin"
+toolchain_root="${tool_bin%/bin}"
+host_npm="${VERJSON_TEST_HOST_NPM:-$(command -v npm)}"
+export VERJSON_TEST_HOST_NPM="$host_npm"
+mkdir -p "$tool_bin"
+cp -- "$(command -v node)" "$tool_bin/node"
+python3 - "$toolchain_root" <<'PY'
+import os
+import shutil
+import sys
+from pathlib import Path
+
+npm_cli = Path(os.environ["VERJSON_TEST_HOST_NPM"]).resolve(strict=True)
+shutil.copytree(npm_cli.parents[1], Path(sys.argv[1]) / "real-npm", symlinks=True)
+PY
+cat > "$toolchain_root/real-npm-exec" <<'NPM_EXEC'
+#!/usr/bin/env bash
+set -euo pipefail
+exec node "${0%/*}/real-npm/bin/npm-cli.js" "$@"
+NPM_EXEC
+cat > "$tool_bin/npm" <<'NPM'
+#!/usr/bin/env bash
+set -euo pipefail
+exec node "${0%/*}/../real-npm/bin/npm-cli.js" "$@"
+NPM
+chmod +x "$toolchain_root/real-npm-exec" "$tool_bin/node" "$tool_bin/npm"
+export PATH="$tool_bin:$PATH" RUNNER_TOOL_CACHE="$tool_cache" RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; failures=$((failures + 1)); }
 
@@ -711,24 +739,71 @@ PY
 done
 
 mkdir -p "$tmp/e2e/consumer/artifacts" "$tmp/e2e/consumer/compat-results" \
+  "$tmp/e2e/consumer/.git" \
   "$tmp/e2e/consumer/node_modules/@verjson/identity-contracts"
 cp "$tmp/e2e/build/artifacts/"* "$tmp/e2e/consumer/artifacts/"
 printf '%s\n' '{"name":"@verjson/identity-contracts","version":"0.1.0"}' \
   > "$tmp/e2e/consumer/node_modules/@verjson/identity-contracts/package.json"
+printf '%s\n' '# compatibility sandbox mount target' > "$tmp/e2e/consumer/.git/config"
 printf '%s\n' '{"name":"consumer","version":"1.0.0","scripts":{"test:compat":"node test-compat.js"}}' > "$tmp/e2e/consumer/package.json"
-printf '%s\n' "const fs=require('node:fs');const v=require('./node_modules/@verjson/identity-contracts/package.json').version;fs.writeFileSync('compat-results/observed-version',v);if(process.env.REJECT_COMPATIBILITY==='true'){console.error('bounded-consumer-failure');process.exit(42);}" > "$tmp/e2e/consumer/test-compat.js"
+cat > "$tmp/e2e/consumer/test-compat.js" <<'JS'
+const fs = require('node:fs');
+const version = require('./node_modules/@verjson/identity-contracts/package.json').version;
+fs.writeFileSync('compat-results/observed-version', version);
+fs.writeFileSync('compat-results/service-env.json', JSON.stringify({
+  DB_HOST: process.env.DB_HOST ?? null,
+  DB_PORT: process.env.DB_PORT ?? null,
+  CACHE_PORT: process.env.CACHE_PORT ?? null,
+  DATABASE_URL: process.env.DATABASE_URL ?? null,
+  CACHE_URL: process.env.CACHE_URL ?? null,
+  DB_ENV: process.env.DB_ENV ?? null,
+  CACHE_ENV: process.env.CACHE_ENV ?? null,
+  CI_SCRIPT_PLAN: process.env.CI_SCRIPT_PLAN ?? null,
+  VERJSON_CI_TRUSTED_DB_HOST: process.env.VERJSON_CI_TRUSTED_DB_HOST ?? null,
+}));
+try {
+  fs.appendFileSync('.git/config', '\n# consumer write probe\n');
+  fs.writeFileSync('compat-results/git-write-allowed', 'true');
+} catch (error) {
+  if (!['EROFS', 'EACCES'].includes(error.code)) throw error;
+  fs.writeFileSync('compat-results/git-write-denied', error.code);
+}
+if (process.env.REJECT_COMPATIBILITY === 'true') {
+  console.error('bounded-consumer-failure');
+  process.exit(42);
+}
+JS
 consumer_stderr="$tmp/e2e/consumer/run.stderr"
-if (cd "$tmp/e2e/consumer" && COMPATIBILITY_ARTIFACT_DIR="$tmp/e2e/consumer/artifacts" COMPATIBILITY_RANGES="$request" EXPECTED_COMPATIBILITY_PROVENANCE_SHA256="$provenance_sha" REJECT_COMPATIBILITY=false bash "$tmp/run-lanes.sh") >"$tmp/e2e/consumer/run.stdout" 2>"$consumer_stderr"; then
+if (cd "$tmp/e2e/consumer" && CI_SCRIPT_PLAN='[{"script":"test:compat","requiresServices":false}]' DB_ENV='DATABASE_URL=postgres://localhost:5432/app_test' CACHE_ENV='CACHE_URL=redis://localhost:6379/0' DB_HOST=127.0.0.1 DB_PORT=5432 CACHE_PORT=6379 DATABASE_URL=postgres://localhost:5432/app_test CACHE_URL=redis://localhost:6379/0 VERJSON_CI_TRUSTED_DB_HOST=127.0.0.1 COMPATIBILITY_ARTIFACT_DIR="$tmp/e2e/consumer/artifacts" COMPATIBILITY_RANGES="$request" EXPECTED_COMPATIBILITY_PROVENANCE_SHA256="$provenance_sha" REJECT_COMPATIBILITY=false bash "$tmp/run-lanes.sh") >"$tmp/e2e/consumer/run.stdout" 2>"$consumer_stderr"; then
   consumer_status=0
 else
   consumer_status=$?
 fi
 if [ "$consumer_status" -eq 0 ] \
-  && grep -qFx 0.2.2 "$tmp/e2e/consumer/compat-results/observed-version"; then
+  && grep -qFx 0.2.2 "$tmp/e2e/consumer/compat-results/observed-version" \
+  && grep -qFx '{"DB_HOST":null,"DB_PORT":null,"CACHE_PORT":null,"DATABASE_URL":null,"CACHE_URL":null,"DB_ENV":null,"CACHE_ENV":null,"CI_SCRIPT_PLAN":null,"VERJSON_CI_TRUSTED_DB_HOST":null}' "$tmp/e2e/consumer/compat-results/service-env.json"; then
   pass "the resolved in-range artifact reaches the declared consumer test"
 else
   fail "the resolved artifact did not reach the declared consumer test"
   emit_failure_diagnostic "resolved compatibility consumer" "$consumer_status" "$consumer_stderr"
+fi
+if [ "${VERJSON_DIAGNOSTIC_MUTATION_CHILD:-false}" != true ]; then
+  if [ ! -e "$tmp/e2e/consumer/compat-results/git-write-allowed" ] \
+    && grep -qFx 'EROFS' "$tmp/e2e/consumer/compat-results/git-write-denied" \
+    && grep -qFx '# compatibility sandbox mount target' "$tmp/e2e/consumer/.git/config"; then
+    pass "compatibility consumer cannot write the host checkout's .git configuration"
+  else
+    fail "compatibility sandbox exposed a writable host .git configuration"
+  fi
+  if (cd "$tmp/e2e/consumer" && CI_SCRIPT_PLAN='[{"script":"test:compat","requiresServices":true}]' DB_ENV='DATABASE_URL=postgres://localhost:5432/app_test' CACHE_ENV='CACHE_URL=redis://localhost:6379/0' DB_HOST=127.0.0.1 DB_PORT=5432 CACHE_PORT=6379 DATABASE_URL=postgres://localhost:5432/app_test CACHE_URL=redis://localhost:6379/0 VERJSON_CI_TRUSTED_DB_HOST=127.0.0.1 COMPATIBILITY_ARTIFACT_DIR="$tmp/e2e/consumer/artifacts" COMPATIBILITY_RANGES="$request" EXPECTED_COMPATIBILITY_PROVENANCE_SHA256="$provenance_sha" REJECT_COMPATIBILITY=false bash "$tmp/run-lanes.sh") >"$tmp/e2e/authorized-services.log" 2>&1; then
+    if grep -qFx '{"DB_HOST":"127.0.0.1","DB_PORT":"5432","CACHE_PORT":"6379","DATABASE_URL":"postgres://localhost:5432/app_test","CACHE_URL":"redis://localhost:6379/0","DB_ENV":null,"CACHE_ENV":null,"CI_SCRIPT_PLAN":null,"VERJSON_CI_TRUSTED_DB_HOST":null}' "$tmp/e2e/consumer/compat-results/service-env.json"; then
+      pass "only the declared service-enabled compatibility script receives service values"
+    else
+      fail "declared service-enabled compatibility script received an incorrect environment"
+    fi
+  else
+    fail "declared service-enabled compatibility script could not run"
+  fi
 fi
 if (cd "$tmp/e2e/consumer" && COMPATIBILITY_ARTIFACT_DIR="$tmp/e2e/consumer/artifacts" COMPATIBILITY_RANGES="$request" EXPECTED_COMPATIBILITY_PROVENANCE_SHA256="$provenance_sha" REJECT_COMPATIBILITY=true bash "$tmp/run-lanes.sh") >"$tmp/e2e/rejected.log" 2>&1; then
   fail "an in-range incompatible artifact did not fail consumer tests"
@@ -741,7 +816,7 @@ else
 fi
 if (cd "$tmp/e2e/consumer" && COMPATIBILITY_ARTIFACT_DIR="$tmp/e2e/consumer/artifacts" COMPATIBILITY_RANGES="$request" EXPECTED_COMPATIBILITY_PROVENANCE_SHA256="$provenance_sha" NODE_AUTH_TOKEN=leaked bash "$tmp/run-lanes.sh") >"$tmp/e2e/token.log" 2>&1; then fail "a package credential reached compatibility consumer execution"; elif grep -qF 'credential reached compatibility consumer execution' "$tmp/e2e/token.log"; then pass "consumer execution fails closed on a credential leak"; else fail "token-leak mutation failed for the wrong reason"; fi
 
-real_npm="$(command -v npm)"
+real_npm="$host_npm"
 mkdir -p "$tmp/archive-cases/bin"
 runtime_cache_run_id=4102
 runtime_cache_run_attempt=1
@@ -764,12 +839,16 @@ cat > "$tmp/archive-cases/bin/npm" <<'SH'
 #!/usr/bin/env bash
 set -eu
 if [ "${1:-}" = run ] || [ "${1:-}" = pack ]; then
-  exec "$REAL_NPM" "$@"
+  if [ -x "$REAL_NPM" ]; then
+    exec "$REAL_NPM" "$@"
+  fi
+  exec node "$REAL_NPM_SANDBOX" "$@"
 fi
 printf 'unexpected graph resolution: %s\n' "$*" > "$NPM_GRAPH_RESOLUTION_MARKER"
 exit 97
 SH
 chmod +x "$tmp/archive-cases/bin/npm"
+cp "$tmp/archive-cases/bin/npm" "$tool_bin/npm"
 
 prepare_archive_case() {
   local mutation="$1"
@@ -987,8 +1066,9 @@ run_archive_case() {
   prepare_archive_case "$mutation"
   (
     cd "$fixture" || exit 1
-    PATH="$tmp/archive-cases/bin:$PATH" \
+    PATH="$tool_bin:$tmp/archive-cases/bin:$PATH" \
     REAL_NPM="$real_npm" \
+    REAL_NPM_SANDBOX=/opt/verjson-node-toolchain/real-npm/bin/npm-cli.js \
     NPM_GRAPH_RESOLUTION_MARKER="$fixture/npm-graph-resolution" \
     HOME="$ambient_root/home" \
     NPM_CONFIG_CACHE="$ambient_root/uppercase-cache" \
@@ -1384,10 +1464,13 @@ import sys
 from pathlib import Path
 
 source = Path(sys.argv[1]).read_text(encoding="utf-8")
+compatibility_start = source.index("def public_cache_bind_targets")
+compatibility = source[compatibility_start:]
 needle = 'bubblewrap = Path("/usr/bin/bwrap")'
-assert source.count(needle) == 1
+assert compatibility.count(needle) == 1
 Path(sys.argv[2]).write_text(
-    source.replace(needle, 'bubblewrap = Path("/definitely-missing/bwrap")'),
+    source[:compatibility_start]
+    + compatibility.replace(needle, 'bubblewrap = Path("/definitely-missing/bwrap")'),
     encoding="utf-8",
 )
 PY
@@ -1426,14 +1509,17 @@ import sys
 from pathlib import Path
 
 source = Path(sys.argv[1]).read_text(encoding="utf-8")
+compatibility_start = source.index("def public_cache_bind_targets")
+prefix = source[:compatibility_start]
+compatibility = source[compatibility_start:]
 for needle in (
     '                  "--dir", "/dev/shm/npm-cache",\n',
     '                      "NPM_CONFIG_CACHE": "/dev/shm/npm-cache",\n',
     '                      "npm_config_cache": "/dev/shm/npm-cache",\n',
 ):
-    assert source.count(needle) == 1
-    source = source.replace(needle, "")
-Path(sys.argv[2]).write_text(source, encoding="utf-8")
+    assert compatibility.count(needle) == 1
+    compatibility = compatibility.replace(needle, "")
+Path(sys.argv[2]).write_text(prefix + compatibility, encoding="utf-8")
 PY
   if VERJSON_DIAGNOSTIC_MUTATION_CHILD=true VERJSON_CACHE_MUTATION_CHILD=true \
     bash "$cache_mutation_root/scripts/ci-gate/node-ci-secretless-compatibility.test.sh" \
@@ -1482,15 +1568,8 @@ PY
   else
     mask_mutation_status=$?
   fi
-  if [ "$mask_mutation_status" -eq 5 ] \
-    && grep -qFx 'not ok - cold-cache caret consumer did not preserve its installed dependency graph' "$mask_mutation_root/run.log" \
-    && grep -qFx 'not ok - verified public cache content did not reach the sandbox, or exposed the job cache' "$mask_mutation_root/run.log" \
-    && grep -qFx 'not ok - a caller without a runtime public cache could not start the compatibility sandbox' "$mask_mutation_root/run.log" \
-    && grep -qFx 'not ok - sealing a staged directory broke the compatibility run instead of leaving residue' "$mask_mutation_root/run.log" \
-    && grep -qFx 'not ok - an ambient mask shadowing the public cache bind failed without naming its reason' "$mask_mutation_root/run.log" \
-    && grep -qFx 'diagnostic - cold-cache compatibility consumer return-code=1 stderr-category=stderr-suppressed' "$mask_mutation_root/run.log" \
-    && grep -qFx 'diagnostic - verified public cache compatibility consumer return-code=1 stderr-category=stderr-suppressed' "$mask_mutation_root/run.log" \
-    && grep -qFx 'diagnostic - absent public cache compatibility consumer return-code=1 stderr-category=stderr-suppressed' "$mask_mutation_root/run.log"; then
+  if [ "$mask_mutation_status" -eq 1 ] \
+    && grep -qFx 'not ok - an ambient mask shadowing the public cache bind reached consumer execution' "$mask_mutation_root/run.log"; then
     pass "removing ambient npm masks exposes the real absolute-path escape probe"
   else
     fail "ambient npm mask mutation did not expose the absolute-path escape probe"
@@ -1522,7 +1601,7 @@ PY
   fi
   if [ "$symlink_mutation_status" -eq 2 ] \
     && grep -qFx 'not ok - relative top-level workspace symlink reached consumer execution' "$symlink_mutation_root/run.log" \
-    && grep -qFx 'not ok - absolute top-level workspace symlink failed without confinement reason' "$symlink_mutation_root/run.log"; then
+    && grep -qFx 'not ok - absolute top-level workspace symlink reached consumer execution' "$symlink_mutation_root/run.log"; then
     pass "removing workspace symlink confinement admits a link and exposes the absolute escape probe"
   else
     fail "workspace symlink confinement mutation did not expose its link escape probes"

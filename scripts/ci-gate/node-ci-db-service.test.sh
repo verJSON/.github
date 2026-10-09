@@ -460,7 +460,7 @@ ALT_PORT_DSN=postgres://app@localhost:54322/app_test
 PREFIX_PORT_URL=redis://localhost:54321/0
 NON_PORT_URL=redis://localhost:5432a/0
 PLAYWRIGHT_ARGS=--port=3000
-NODE_OPTIONS=--inspect-port=9229
+NODE_ARGS=--inspect-port=9229
 VITE_ARGS=--port=5173
 EXTRA_ARGS=--report=1'
 run_db_step job-passthrough "${job_a[@]}" "DB_ENV=$passthrough"
@@ -522,9 +522,66 @@ DATABASE_URL postgres://app@localhost:${DB_PORT}/app_test'
 rc=$?
 { [ "$rc" -ne 0 ] \
     && grep -qF 'DATABASE_URL postgres' "$tmp/job-noneq/out.txt" \
-    && ! grep -q 'DATABASE_URL' "$tmp/job-noneq/github_env"; } \
+    && ! grep -q 'DATABASE_URL' "$tmp/job-noneq/github_env" \
+    && [ ! -s "$tmp/job-noneq/docker.log" ]; } \
   && pass "a db-env line that is not KEY=VALUE fails the step, quoting the line" \
-  || fail "step exited $rc and left \$GITHUB_ENV as: $(tr '\n' ' ' <"$tmp/job-noneq/github_env")"
+  || fail "step exited $rc, wrote \$GITHUB_ENV, or started Docker before rejecting malformed input"
+
+run_db_step job-invalid-key "${job_a[@]}" 'DB_ENV=BAD-KEY=value'
+rc=$?
+{ [ "$rc" -ne 0 ] \
+    && grep -qF "db-env: 'BAD-KEY' is not a valid environment variable name" "$tmp/job-invalid-key/out.txt" \
+    && [ ! -s "$tmp/job-invalid-key/github_env" ] \
+    && [ ! -s "$tmp/job-invalid-key/docker.log" ]; } \
+  && pass "an invalid db-env variable name fails before Docker or GITHUB_ENV" \
+  || fail "db-env accepted an invalid variable name or started Docker before rejecting it"
+
+# Caller data may configure tests, but it cannot change how later runner
+# processes start or redirect the workflow's command files.
+for key in BASH_ENV PATH NODE_OPTIONS LD_PRELOAD GITHUB_ENV GH_TOKEN GH_HOST gh_host \
+  DOCKER_HOST DOCKER_CONTEXT docker_context \
+    GIT_CONFIG_COUNT HTTPS_PROXY https_proxy FTP_PROXY ftp_proxy SSL_CERT_FILE GCONV_PATH PS4 \
+    NPM_CONFIG_USERCONFIG Npm_Config_Userconfig NPM_CONFIG_GLOBALCONFIG \
+    Npm_Config_Globalconfig npm_config_globalconfig NPM_CONFIG_HTTPS_PROXY \
+    NPM_CONFIG_STRICT_SSL NPM_CONFIG_CAFILE; do
+  run_db_step "job-runner-key-$key" "${job_a[@]}" "DB_ENV=$key=unsafe"
+  rc=$?
+  { [ "$rc" -ne 0 ] \
+      && grep -qF "db-env: '$key' cannot override runner execution" "$tmp/job-runner-key-$key/out.txt" \
+      && [ ! -s "$tmp/job-runner-key-$key/github_env" ] \
+      && [ ! -s "$tmp/job-runner-key-$key/docker.log" ]; } \
+    && pass "db-env rejects runner-control key $key before Docker or GITHUB_ENV" \
+    || fail "db-env accepted runner-control key $key or started Docker before rejecting it"
+done
+
+# Prove the BASH_ENV path cannot reach a later token-bearing shell step.
+db_env_hook="$tmp/db-env-hook.sh"
+db_env_hook_marker="$tmp/db-env-hook-marker"
+cat > "$db_env_hook" <<'HOOK'
+printf '%s\n' "${GH_TOKEN:-}" > "$DB_ENV_HOOK_MARKER"
+HOOK
+run_db_step job-bash-env "${job_a[@]}" "DB_ENV=BASH_ENV=$db_env_hook"
+rc=$?
+exported_bash_env="$(sed -n 's/^BASH_ENV=//p' "$tmp/job-bash-env/github_env")"
+if [ -n "$exported_bash_env" ]; then
+  env -u BASH_ENV GH_TOKEN=fixture-token DB_ENV_HOOK_MARKER="$db_env_hook_marker" \
+    BASH_ENV="$exported_bash_env" bash -c ':'
+fi
+{ [ "$rc" -ne 0 ] \
+    && [ -z "$exported_bash_env" ] \
+    && [ ! -e "$db_env_hook_marker" ] \
+    && [ ! -s "$tmp/job-bash-env/docker.log" ]; } \
+  && pass "a caller BASH_ENV script cannot run in a later token-bearing shell" \
+  || fail "db-env exposed BASH_ENV to a later shell (token marker exists: $([ -e "$db_env_hook_marker" ] && echo yes || echo no))"
+
+run_db_step job-cr-smuggle "${job_a[@]}" "DB_ENV=SAFE=ok"$'\r'"BASH_ENV=$db_env_hook"
+rc=$?
+{ [ "$rc" -ne 0 ] \
+    && grep -qF 'db-env: carriage returns are not permitted' "$tmp/job-cr-smuggle/out.txt" \
+    && [ ! -s "$tmp/job-cr-smuggle/github_env" ] \
+    && [ ! -s "$tmp/job-cr-smuggle/docker.log" ]; } \
+  && pass "a carriage return cannot smuggle BASH_ENV into GITHUB_ENV" \
+  || fail "db-env accepted a carriage-return command-file injection"
 
 # Hardening: readiness is probed with pg_isready INSIDE the container, which says
 # nothing about the loopback publish — the thing this change actually introduced.

@@ -12,7 +12,6 @@ fail() { printf 'not ok - %s\n' "$1" >&2; failures=$((failures + 1)); }
 python3 - "$workflow" "$docs" <<'PY' \
   && pass "trusted-ref mode reuses the bounded secretless pipeline" \
   || fail "trusted-ref mode does not preserve the secretless pipeline boundary"
-import re
 import sys
 from pathlib import Path
 
@@ -24,6 +23,7 @@ inputs = workflow[True]["workflow_call"]["inputs"]
 jobs = workflow["jobs"]
 assert inputs["secretless-pr"]["default"] is False
 assert inputs["secretless-trusted-ref"]["default"] is False
+assert inputs["secretless-rebuild-env"]["default"] == "{}"
 
 acquire = jobs["acquire-secretless-dependencies"]
 build = jobs["build-test"]
@@ -44,6 +44,7 @@ assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in checkout["with
 restore = next(step for step in steps if str(step.get("uses", "")).startswith("actions/cache/restore@"))
 install = next(step for step in steps if step.get("name") == "Install from verified secretless npm cache")
 rebuild = next(step for step in steps if step.get("name") == "Rebuild exact approved lifecycle packages without credentials")
+provision = next(step for step in steps if step.get("name") == "Provision trusted compatibility sandbox")
 plan = next(step for step in steps if step.get("name") == "Run exact credentialless consumer script plan")
 for step in (restore, install, rebuild, plan):
     assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in step["if"]
@@ -55,21 +56,35 @@ for name in ("GH_TOKEN", "GITHUB_TOKEN", "NODE_AUTH_TOKEN", "NPM_TOKEN",
 assert "npm ci --ignore-scripts" in install["run"]
 assert "printf '%s=\\n' \"$name\"" in install["run"]
 assert 'command = ["npm", "rebuild"] if package_manager == "npm" else ["corepack", "pnpm", "rebuild"]' in rebuild["run"]
-assert 'subprocess.run([*command, *requested], check=True)' in rebuild["run"]
+assert 'unset -v GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN' in rebuild["run"]
+assert "exec python3 - <<'PY'" in rebuild["run"]
+assert rebuild["env"]["BWRAP_BINARY"] == "/usr/bin/bwrap"
+assert steps.index(provision) < steps.index(rebuild)
+assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in provision["if"]
+assert "runner.environment == 'github-hosted'" in provision["if"]
+assert "bubblewrap_metadata.st_uid not in (0, os.getuid())" in rebuild["run"]
+assert '"--unshare-pid"' in rebuild["run"]
+assert '"--unshare-net"' in rebuild["run"]
+assert '"--tmpfs", "/"' in rebuild["run"]
+assert '"--ro-bind", "/", "/"' not in rebuild["run"]
+assert "bind_source(workspace, sandbox_workspace)" in rebuild["run"]
+assert 'bind_source(node_modules, f"{sandbox_workspace}/node_modules", writable=True)' in rebuild["run"]
+assert '"GITHUB_WORKSPACE": sandbox_workspace' in rebuild["run"]
+assert '"RUNNER_TEMP": "/tmp"' in rebuild["run"]
+assert '"NPM_CONFIG_USERCONFIG": "/dev/null"' in rebuild["run"]
+assert '"GITHUB_ENV"' not in rebuild["run"]
+assert 'rebuild_process_env = {' in rebuild["run"]
+assert 'os.execve(str(bubblewrap), arguments, {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"})' in rebuild["run"]
 # Each planned script runs in the manifest that declared it (#1229), so the
-# pinned execution call carries that directory rather than assuming the root.
-assert re.search(r'(?m)^\s*npm_command\s*=\s*\["npm"\]\s*$', plan["run"])
-assert re.search(
-    r'(?m)^\s*if\s+npm_cli_candidates\s*:\s*\n'
-    r'\s*npm_command\s*=\s*\[\s*node_path\s*,\s*'
-    r'str\(\s*npm_cli_candidates\[0\]\s*\)\s*\]\s*$',
-    plan["run"],
-)
-assert re.search(
-    r'subprocess\.run\(\[\s*\*npm_command\s*,\s*"run"\s*,\s*name\s*\],\s*'
-    r'check=True,\s*env=script_env,\s*cwd=directory\)',
-    plan["run"],
-)
+# the mapped Node toolchain and manifest directory instead of the host paths.
+assert 'node_toolchain_destination = "/opt/verjson-node-toolchain"' in plan["run"]
+assert 'node_command = Path(node_toolchain_destination) / node_path.relative_to(node_toolchain_root)' in plan["run"]
+assert 'npm_command = [str(node_command), npm_cli_command]' in plan["run"]
+assert 'npm_command = [str(resolved_npm_executable)]' in plan["run"]
+assert '"--chdir", str(sandbox_directory), "--",' in plan["run"]
+assert '*npm_command, "run", name,' in plan["run"]
+assert "subprocess.run(" in plan["run"] and "pass_fds=tuple(" in plan["run"]
+assert "global_config_file.fileno()" in plan["run"]
 
 for command in ("npm run build", "npm run typecheck --if-present", "npm test", "npm run lint --if-present"):
     step = next(step for step in steps if step.get("run") == command)

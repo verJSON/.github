@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LEGACY = ROOT / ".github/workflows/node-ci.yml"
 PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 HEAD = "a" * 40
-LEGACY_SHA256 = "e860e62b934a7274fefc2463acf21604486def5356fad36c749f43418c344aaf"
+LEGACY_SHA256 = "678bb145a5c18a531af63a4ba53de15dab9450bd3031cf583ebd248d055a3112"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
@@ -85,6 +85,9 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         )
         self.assertLess(steps.index(cache_setup), steps.index(warm))
         self.assertLess(steps.index(warm), steps.index(plan))
+        self.assertIn("inputs.secretless-pr || inputs.secretless-trusted-ref", warm["if"])
+        self.assertNotIn("RUN_DEFAULTS", plan["env"])
+        self.assertIn("run_defaults = not plan_source", plan["run"])
         self.assertIn('"$RUNNER_TEMP/', cache_setup["run"])
         self.assertNotIn("$GITHUB_WORKSPACE", cache_setup["run"])
         self.assertEqual(plan["if"], warm["if"])
@@ -410,34 +413,59 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         verifier_indexes = [i for i, step in enumerate(build)
                             if step.get("name") == "Revalidate protected pull-request identity"]
         self.assertEqual(4, len(verifier_indexes))
-        self.assertIn("inputs.secretless-rebuild-packages != ''",
-                      build[verifier_indexes[0]]["if"])
-        self.assertIn("inputs.secretless-ci-script-plan != ''",
-                      build[verifier_indexes[1]]["if"])
-        self.assertIn("inputs.secretless-ci-script-plan == ''",
-                      build[verifier_indexes[2]]["if"])
-        for verifier_index in verifier_indexes:
-            self.assertEqual(build[verifier_index]["if"],
-                             build[verifier_index + 1]["if"])
         compatibility_condition = (
             "needs.eligibility.outputs.should-run != 'false' && "
             "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
             "(inputs.protected-type-surface-declaration-path != '' || "
             "inputs.secretless-compatibility-ranges != '')"
         )
-        self.assertEqual(compatibility_condition, build[verifier_indexes[3]]["if"])
-        self.assertEqual(guarded_routes[0], build[verifier_indexes[0] + 1]["name"])
-        self.assertEqual(guarded_routes[1], build[verifier_indexes[1] + 1]["name"])
-        grouped = build[verifier_indexes[2] + 1]
+        verifier_by_condition = {build[index]["if"]: index for index in verifier_indexes}
+        rebuild_condition = next(
+            build[index]["if"] for index in verifier_indexes
+            if "inputs.secretless-rebuild-packages != ''" in build[index]["if"]
+        )
+        plan_condition = (
+            "needs.eligibility.outputs.should-run != 'false' && "
+            "(inputs.secretless-pr || inputs.secretless-trusted-ref)"
+        )
+        default_condition = (
+            "needs.eligibility.outputs.should-run != 'false' && "
+            "!(inputs.secretless-pr || inputs.secretless-trusted-ref)"
+        )
+        self.assertIn(rebuild_condition, verifier_by_condition)
+        self.assertIn(plan_condition, verifier_by_condition)
+        self.assertIn(default_condition, verifier_by_condition)
+        self.assertIn(compatibility_condition, verifier_by_condition)
+        self.assertEqual(guarded_routes[0], build[verifier_by_condition[rebuild_condition] + 1]["name"])
+        plan_step = next(i for i, step in enumerate(build)
+                         if step.get("name") == "Run exact credentialless consumer script plan")
+        default_step = next(i for i, step in enumerate(build)
+                            if step.get("name") == "Run default build, typecheck, test, and lint plan")
+        compatibility_verifier = verifier_by_condition[compatibility_condition]
+        self.assertLess(verifier_by_condition[plan_condition], plan_step)
+        self.assertLess(compatibility_verifier, plan_step)
+        self.assertLess(verifier_by_condition[default_condition], default_step)
+        self.assertLess(verifier_by_condition[default_condition], plan_step)
+        self.assertLess(max(verifier_indexes), min(plan_step, default_step))
+        grouped = build[default_step]
         self.assertEqual("Run default build, typecheck, test, and lint plan", grouped["name"])
-        self.assertEqual(build[verifier_indexes[2]]["if"], grouped["if"])
+        self.assertEqual(build[verifier_by_condition[default_condition]]["if"], grouped["if"])
         self.assertEqual(
             ["npm run build", "npm run typecheck --if-present", "npm test",
-             "npm run lint --if-present"], grouped["run"].splitlines()[1:])
-        self.assertEqual("Run runtime-resolved compatibility lanes without credentials",
-                         build[verifier_indexes[3] + 1]["name"])
-        self.assertEqual(build[verifier_indexes[3]]["if"],
-                         build[verifier_indexes[3] + 1]["if"])
+             "npm run lint --if-present"],
+            [line.strip() for line in grouped["run"].splitlines()
+             if line.strip().startswith("npm ")],
+        )
+        self.assertNotIn("BASH_ENV", grouped.get("env", {}))
+        self.assertLess(
+            grouped["run"].index("unset -v " + " ".join(self.credential_keys)),
+            grouped["run"].index("npm run build"),
+        )
+        compatibility_step = next(
+            i for i, step in enumerate(build)
+            if step.get("name") == "Run runtime-resolved compatibility lanes without credentials"
+        )
+        self.assertGreater(compatibility_step, max(plan_step, default_step))
         for steps in (acquisition, build):
             checkout = next(step for step in steps
                             if str(step.get("uses", "")).startswith("actions/checkout@"))
@@ -529,11 +557,16 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         decoy_npm_cli=False,
         symlink_npm_cli_layout=False,
         extra_npm_cli=False,
+        script_plan=None,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             runner_temp = root / "runner-temp"
             runner_temp.mkdir()
+            command_files_dir = runner_temp / "_runner_file_commands"
+            command_files_dir.mkdir()
+            command_file = command_files_dir / "GITHUB_ENV"
+            command_file.touch()
             baseline = runner_temp / "baseline"
             baseline.mkdir()
             changelog_cache_root, changelog_ref, changelog_bytes = (
@@ -544,9 +577,11 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             if workspace_symlink:
                 workspace_real = workspace_parent / "workspace-real"
                 workspace_real.mkdir()
+                (workspace_real / ".git").mkdir()
                 workspace.symlink_to(workspace_real, target_is_directory=True)
             else:
                 workspace.mkdir()
+                (workspace / ".git").mkdir()
             cache_setup(baseline)
             (workspace / "package.json").write_text(
                 json.dumps({"scripts": {"first": "true", "second": "true"}}),
@@ -692,13 +727,19 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                 **os.environ,
                 "PATH": path,
                 "RUNNER_TEMP": str(runner_temp),
-                "CI_SCRIPT_PLAN": json.dumps(["first", "second"]),
+                "RUNNER_ENVIRONMENT": "github-hosted",
+                "RUNNER_OS": "Linux",
+                "GITHUB_ENV": str(command_file),
+                "CI_SCRIPT_PLAN": json.dumps(
+                    ["first", "second"] if script_plan is None else script_plan
+                ),
                 "CANDIDATE_CACHE_ROOT": str(runner_temp / "verjson-candidate-caches-test"),
                 "npm_config_cache": str(baseline),
                 "RUNNER_TOOL_CACHE": str(tool_bin.parent),
                 "VERJSON_CHANGELOG_TOOL_CACHE": str(changelog_cache_root),
                 "VERJSON_CHANGELOG_CONTRACT_REF": changelog_ref,
                 "VERJSON_CHANGELOG_CONTRACT_SHA256": hashlib.sha256(changelog_bytes).hexdigest(),
+                "COREPACK_HOME": str(root / "corepack-cache-not-present"),
                 "PWD": str(workspace),
             }
             env.update(environment_updates or {})
@@ -798,13 +839,17 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         cases = (
             ("workspace-runner-temp", {}, True),
             ("baseline-root", {"CANDIDATE_CACHE_ROOT": "BASELINE"}, False),
-            ("shared-service-network", {"DB_PORT": "5432"}, False),
+            ("service-variable-hidden", {"DB_PORT": "5432"}, False),
         )
         for name, updates, nested_workspace in cases:
             if updates.get("CANDIDATE_CACHE_ROOT") == "BASELINE":
                 with tempfile.TemporaryDirectory() as directory:
                     runner_temp = Path(directory) / "runner-temp"
                     runner_temp.mkdir()
+                    command_files_dir = runner_temp / "_runner_file_commands"
+                    command_files_dir.mkdir()
+                    command_file = command_files_dir / "GITHUB_ENV"
+                    command_file.touch()
                     baseline = runner_temp / "baseline"
                     baseline.mkdir()
                     changelog_cache_root, changelog_ref, changelog_bytes = (
@@ -813,6 +858,7 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                     (baseline / "blob").write_text("verified", encoding="utf-8")
                     workspace = Path(directory) / "workspace"
                     workspace.mkdir()
+                    (workspace / ".git").mkdir()
                     (workspace / "package.json").write_text(
                         json.dumps({"scripts": {"first": "true"}}), encoding="utf-8"
                     )
@@ -823,12 +869,16 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                         env={
                             **os.environ,
                             "RUNNER_TEMP": str(runner_temp),
+                            "RUNNER_ENVIRONMENT": "github-hosted",
+                            "RUNNER_OS": "Linux",
+                            "GITHUB_ENV": str(command_file),
                             "CI_SCRIPT_PLAN": '["first"]',
                             "CANDIDATE_CACHE_ROOT": str(baseline),
                             "npm_config_cache": str(baseline),
                             "VERJSON_CHANGELOG_TOOL_CACHE": str(changelog_cache_root),
                             "VERJSON_CHANGELOG_CONTRACT_REF": changelog_ref,
                             "VERJSON_CHANGELOG_CONTRACT_SHA256": hashlib.sha256(changelog_bytes).hexdigest(),
+                            "COREPACK_HOME": str(Path(directory) / "corepack-cache-not-present"),
                         },
                         capture_output=True,
                         text=True,
@@ -836,15 +886,62 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                     self.assertNotEqual(0, result.returncode)
                     self.assertIn("candidate cache root exists before script execution", result.stderr)
                 continue
+            npm_body = (
+                'test -z "${DB_PORT+x}"\n'
+                if name == "service-variable-hidden"
+                else "exit 0\n"
+            )
             result, remaining = self.run_candidate_plan(
                 cache_setup,
-                "exit 0\n",
+                npm_body,
                 environment_updates=updates,
                 workspace_in_runner_temp=nested_workspace,
             )
             with self.subTest(case=name):
-                self.assertNotEqual(0, result.returncode)
+                if name == "service-variable-hidden":
+                    self.assertEqual(0, result.returncode, result.stderr)
+                else:
+                    self.assertNotEqual(0, result.returncode)
                 self.assertEqual([], remaining)
+
+    def test_service_enabled_candidate_script_gets_only_validated_service_env_without_network_unshare(self):
+        result, remaining = self.run_candidate_plan(
+            lambda baseline: (baseline / "blob").write_text(
+                "verified", encoding="utf-8"
+            ),
+            'test "$DB_HOST" = "172.18.0.2"\n'
+            'test "$DB_PORT" = "5432"\n'
+            'test "$DATABASE_URL" = "postgres://app:secret@172.18.0.2:5432/app_test"\n'
+            'test "$OPENAI_API_KEY" = "ci-dummy-key"\n'
+            'test -z "${POSTGRES_PASSWORD+x}"\n'
+            'printf "service variables reached candidate npm script\\n"\n',
+            environment_updates={
+                "RUNNER_ENVIRONMENT": "github-hosted",
+                "DB_HOST": "172.18.0.2",
+                "DB_PORT": "5432",
+                "VERJSON_CI_TRUSTED_DB_HOST": "172.18.0.2",
+                "DB_ENV": (
+                    "DATABASE_URL=postgres://app:secret@172.18.0.2:5432/app_test\n"
+                    "OPENAI_API_KEY=ci-dummy-key\n"
+                    "POSTGRES_PASSWORD=postgres"
+                ),
+                "DATABASE_URL": "postgres://app:secret@172.18.0.2:5432/app_test",
+                "OPENAI_API_KEY": "ci-dummy-key",
+                "POSTGRES_PASSWORD": "postgres",
+            },
+            script_plan=[{"script": "first", "requiresServices": True}],
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("service variables reached candidate npm script", result.stdout)
+        plan_run = self.candidate_plan_step()["run"]
+        self.assertIn('*([] if requires_services else ["--unshare-net"])', plan_run)
+        self.assertIn(
+            "if any(requires_services for _directory, _name, _unset_env, requires_services in normalized):",
+            plan_run,
+        )
+        self.assertIn('os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"', plan_run)
+        self.assertEqual([], remaining)
 
     def test_candidate_path_shadow_cannot_replace_setup_node_tools(self):
         result, remaining = self.run_candidate_plan(
@@ -1113,7 +1210,7 @@ second) [ "$(cat "$NPM_CONFIG_CACHE/blob")" = verified ] ;;
 esac
 [ "$NPM_CONFIG_CACHE" = "$npm_config_cache" ]
 [ ! -e "$RUNNER_TEMP/baseline/blob" ]
-if mv "$CANDIDATE_CACHE_ROOT" "$CANDIDATE_CACHE_ROOT-renamed" 2>/dev/null; then exit 92; fi
+[ -z "${CANDIDATE_CACHE_ROOT+x}" ]
 [ ! -e /run/docker.sock ]
 [ ! -e /var/run/docker.sock ]
 [ ! -e /root ]
@@ -1214,6 +1311,10 @@ PY
             root = Path(directory)
             runner_temp = root / "runner-temp"
             runner_temp.mkdir()
+            command_files_dir = runner_temp / "_runner_file_commands"
+            command_files_dir.mkdir()
+            command_file = command_files_dir / "GITHUB_ENV"
+            command_file.touch()
             baseline = runner_temp / "baseline"
             baseline.mkdir()
             changelog_cache_root, changelog_ref, changelog_bytes = (
@@ -1221,6 +1322,7 @@ PY
             )
             workspace = root / "workspace"
             workspace.mkdir()
+            (workspace / ".git").mkdir()
             (baseline / "blob").write_text("verified", encoding="utf-8")
             (workspace / "package.json").write_text(
                 json.dumps({"scripts": {"first": "true"}}), encoding="utf-8"
@@ -1254,6 +1356,9 @@ PY
                     **os.environ,
                     "PATH": f"{tool_bin}:{os.environ['PATH']}",
                     "RUNNER_TEMP": str(runner_temp),
+                    "RUNNER_ENVIRONMENT": "github-hosted",
+                    "RUNNER_OS": "Linux",
+                    "GITHUB_ENV": str(command_file),
                     "CI_SCRIPT_PLAN": '["first"]',
                     "CANDIDATE_CACHE_ROOT": str(runner_temp / "verjson-candidate-caches-test"),
                     "npm_config_cache": str(baseline),
@@ -1261,6 +1366,7 @@ PY
                     "VERJSON_CHANGELOG_TOOL_CACHE": str(changelog_cache_root),
                     "VERJSON_CHANGELOG_CONTRACT_REF": changelog_ref,
                     "VERJSON_CHANGELOG_CONTRACT_SHA256": hashlib.sha256(changelog_bytes).hexdigest(),
+                    "COREPACK_HOME": str(root / "corepack-cache-not-present"),
                 },
             )
             for _ in range(100):

@@ -23,7 +23,6 @@ HOSTED_EXECUTION = "Run namespace-bound compatibility contracts"
 HOSTED_GATE = (
     "needs.eligibility.outputs.should-run != 'false' && "
     "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
-    "inputs.secretless-compatibility-ranges != '' && "
     "runner.environment == 'github-hosted'"
 )
 SECRETLESS_ENV = {

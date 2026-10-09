@@ -70,8 +70,12 @@ step = next(step for step in doc["jobs"]["build-test"]["steps"]
             if step.get("name") == "Rebuild exact approved lifecycle packages without credentials")
 open(sys.argv[2], "w", encoding="utf-8").write(step["run"])
 PY
-rebuild_fixture="$fixture/rebuild"
-mkdir -p "$rebuild_fixture/bin"
+test_root="$fixture/rebuild"
+rebuild_fixture="$test_root/workspace"
+mkdir -p "$rebuild_fixture" "$test_root/bin"
+tool_cache="$fixture/tool-cache"
+tool_bin="$tool_cache/node/test/x64/bin"
+mkdir -p "$tool_bin" "$test_root/runner-temp" "$test_root/home/.cache/node/corepack"
 cat > "$rebuild_fixture/pnpm-lock.yaml" <<'EOF'
 lockfileVersion: '9.0'
 packages:
@@ -82,15 +86,68 @@ snapshots:
   'leftpad@1.0.0': {}
   '@rollup/rollup-linux-x64-gnu@4.0.0': {requiresBuild: true}
 EOF
-cat > "$rebuild_fixture/bin/corepack" <<'EOF'
+cat > "$tool_bin/corepack" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$COREPACK_LOG"
+printf '%s\n' "$*" >> "@LOG_FILE@"
 EOF
-chmod +x "$rebuild_fixture/bin/corepack"
+sed -i "s|@LOG_FILE@|$rebuild_fixture/corepack.log|" "$tool_bin/corepack"
+chmod +x "$tool_bin/corepack"
+cat > "$tool_bin/node" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$tool_bin/node"
+cat > "$test_root/bin/bwrap" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+while (($#)); do
+  if [ "$1" = -- ]; then
+    shift
+    break
+  fi
+  shift
+done
+[ "$#" -gt 0 ] || { echo 'test bubblewrap found no command separator' >&2; exit 1; }
+case "$1" in
+  /usr/bin/python3) ;;
+  *) echo "test bubblewrap received unexpected bootstrap: $1" >&2; exit 1 ;;
+esac
+shift
+[ "${1-}" = "-c" ] || { echo 'test bubblewrap found no trusted bootstrap source' >&2; exit 1; }
+shift
+bootstrap_source="${1-}"
+[[ "$bootstrap_source" == *"os.closerange(3, max_fd)"* ]] || {
+  echo 'test bubblewrap found no inherited-descriptor closure' >&2
+  exit 1
+}
+[[ "$bootstrap_source" == *"os.execvpe(sys.argv[1], sys.argv[1:], os.environ)"* ]] || {
+  echo 'test bubblewrap found no trusted lifecycle handoff' >&2
+  exit 1
+}
+shift
+case "$1" in
+  /opt/verjson-node-toolchain/bin/corepack|corepack) ;;
+  *) echo "test bubblewrap received unexpected lifecycle command: $1" >&2; exit 1 ;;
+esac
+shift
+cd "@WORKSPACE@"
+exec "@COREPACK@" "$@"
+EOF
+sed -i "s|@WORKSPACE@|$rebuild_fixture|; s|@COREPACK@|$tool_bin/corepack|" "$test_root/bin/bwrap"
+chmod 755 "$test_root/bin/bwrap"
+run_rebuild() {
+  export HOME="$test_root/home"
+  export RUNNER_TEMP="$test_root/runner-temp"
+  export RUNNER_TOOL_CACHE="$tool_cache"
+  export COREPACK_HOME="$test_root/home/.cache/node/corepack"
+  export BWRAP_BINARY="$test_root/bin/bwrap"
+  export PATH="$tool_bin:$PATH"
+  bash "$rebuild"
+}
 mkdir -p "$rebuild_fixture/node_modules/@verjson/native" "$rebuild_fixture/node_modules/native-helper"
-if (cd "$rebuild_fixture" && PATH="$rebuild_fixture/bin:$PATH" PACKAGE_MANAGER=pnpm \
+if (cd "$rebuild_fixture" && PATH="$rebuild_fixture/bin:$PATH" PACKAGE_MANAGER=pnpm RUNNER_ENVIRONMENT=github-hosted \
     REBUILD_PACKAGES=$'@verjson/native\nnative-helper' COREPACK_LOG="$rebuild_fixture/corepack.log" \
-    bash "$rebuild") \
+    run_rebuild) \
     && grep -qFx 'pnpm rebuild @verjson/native native-helper' "$rebuild_fixture/corepack.log"; then
   pass "pnpm rebuild accepts exact scoped and unscoped peer-context package identities from packages and snapshots"
 else
@@ -100,17 +157,17 @@ fi
 # #932: secretless-rebuild-packages must exactly match the lock's requiresBuild
 # surface, not merely name packages present in the lock.
 : > "$rebuild_fixture/corepack.log"
-if (cd "$rebuild_fixture" && PATH="$rebuild_fixture/bin:$PATH" PACKAGE_MANAGER=pnpm \
-    REBUILD_PACKAGES='native-helper' COREPACK_LOG="$rebuild_fixture/corepack.log" bash "$rebuild") >/dev/null 2>&1 \
+if (cd "$rebuild_fixture" && PATH="$rebuild_fixture/bin:$PATH" PACKAGE_MANAGER=pnpm RUNNER_ENVIRONMENT=github-hosted \
+    REBUILD_PACKAGES='native-helper' COREPACK_LOG="$rebuild_fixture/corepack.log" run_rebuild) >/dev/null 2>&1 \
     || [ -s "$rebuild_fixture/corepack.log" ]; then
   fail "a lock-declared requiresBuild package absent from the allowlist reached pnpm rebuild (#932)"
 else
   pass "the lock's requiresBuild surface must be fully named in the allowlist (#932)"
 fi
 : > "$rebuild_fixture/corepack.log"
-if (cd "$rebuild_fixture" && PATH="$rebuild_fixture/bin:$PATH" PACKAGE_MANAGER=pnpm \
+if (cd "$rebuild_fixture" && PATH="$rebuild_fixture/bin:$PATH" PACKAGE_MANAGER=pnpm RUNNER_ENVIRONMENT=github-hosted \
     REBUILD_PACKAGES=$'@verjson/native\nnative-helper\nleftpad' COREPACK_LOG="$rebuild_fixture/corepack.log" \
-    bash "$rebuild") >/dev/null 2>&1 \
+    run_rebuild) >/dev/null 2>&1 \
     || [ -s "$rebuild_fixture/corepack.log" ]; then
   fail "an allowlisted package the lock does not mark requiresBuild reached pnpm rebuild (#932)"
 else
@@ -120,9 +177,9 @@ fi
 # #941: a requiresBuild package for a platform other than this runner's (never
 # installed into node_modules/) must not be forced into the allowlist.
 : > "$rebuild_fixture/corepack.log"
-if (cd "$rebuild_fixture" && PATH="$rebuild_fixture/bin:$PATH" PACKAGE_MANAGER=pnpm \
+if (cd "$rebuild_fixture" && PATH="$rebuild_fixture/bin:$PATH" PACKAGE_MANAGER=pnpm RUNNER_ENVIRONMENT=github-hosted \
     REBUILD_PACKAGES=$'@verjson/native\nnative-helper' COREPACK_LOG="$rebuild_fixture/corepack.log" \
-    bash "$rebuild") \
+    run_rebuild) \
     && grep -qFx 'pnpm rebuild @verjson/native native-helper' "$rebuild_fixture/corepack.log"; then
   pass "a requiresBuild package absent from node_modules/ is not forced into the allowlist (#941)"
 else
@@ -131,8 +188,8 @@ fi
 
 sed -i "s|'native-helper@3.4.5(@scope/peer@6.7.8)'|'native-helper@npm:@scope/other@3.4.5'|" "$rebuild_fixture/pnpm-lock.yaml"
 : > "$rebuild_fixture/corepack.log"
-if (cd "$rebuild_fixture" && PATH="$rebuild_fixture/bin:$PATH" PACKAGE_MANAGER=pnpm \
-    REBUILD_PACKAGES='native-helper' COREPACK_LOG="$rebuild_fixture/corepack.log" bash "$rebuild") >/dev/null 2>&1; then
+if (cd "$rebuild_fixture" && PATH="$rebuild_fixture/bin:$PATH" PACKAGE_MANAGER=pnpm RUNNER_ENVIRONMENT=github-hosted \
+    REBUILD_PACKAGES='native-helper' COREPACK_LOG="$rebuild_fixture/corepack.log" run_rebuild) >/dev/null 2>&1; then
   fail "pnpm rebuild admitted an aliased snapshot identity"
 elif [ -s "$rebuild_fixture/corepack.log" ]; then
   fail "pnpm rebuild invoked package code before rejecting an alias"
@@ -164,7 +221,7 @@ assert 'yaml.safe_dump(lock' not in script
 assert 'local_url = f"http://127.0.0.1:{port}/tarball/{digest}.tgz"' in script
 assert 'httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)' in script
 assert 'npmrc_lines = [f"{scope}:registry=http://127.0.0.1:{port}/\\n" for scope in sorted(scopes)]' in script
-assert 'NPM_CONFIG_USERCONFIG="$MOCK_REGISTRY_NPMRC" corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline' in script
+assert 'PNPM_CONFIG_IGNORE_PNPMFILE=true NPM_CONFIG_USERCONFIG="$MOCK_REGISTRY_NPMRC" corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline' in script
 assert 'cp -- "$PNPM_STORE_DIR/pnpm-lock.original.yaml" pnpm-lock.yaml' in script
 assert 'kill "$MOCK_REGISTRY_PID" 2>/dev/null || true' in script
 assert 'rm -rf "$SECRETLESS_CACHE_DIR" "$PNPM_STORE_DIR" "$TRANSFER_DIR"' in script

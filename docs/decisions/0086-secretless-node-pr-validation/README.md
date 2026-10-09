@@ -111,3 +111,59 @@ GitHub can report different owner or organization-login casing for the same repo
 ## 2026-10-06 amendment — accept registry tarball scope casing (#1694)
 
 GitHub Packages can issue a tarball URL with different ASCII casing from the approved lowercase package name, as reproduced by [issue #1694](https://github.com/Verjson/.github/issues/1694). The acquisition validator compares the URL's ASCII scope and package identity after lowercasing against the exact caller approval and lock identity, including the npm installation path. It still rejects non-ASCII identities, unapproved packages or scopes, mismatched lock names, malformed URLs, and invalid or conflicting integrity. The registry-issued URL and integrity remain unchanged. The conformance regression runs the embedded validator against both accepted and rejected lockfiles.
+
+## 2026-10-09 amendment — constrain lifecycle rebuild environment (#1729)
+
+The credentialless lifecycle rebuild accepts only the exact
+`ONNXRUNTIME_NODE_INSTALL=skip` setting, and only when the same call explicitly
+approves `onnxruntime-node` for rebuild. The value lets ONNX Runtime skip its
+optional CUDA binary download. General environment overrides are not permitted:
+an arbitrary key could carry a credential despite its name, and dynamic-loader
+variables can alter process behavior. Before package-manager execution, the
+step replaces Bash with the validator, then executes npm or Corepack inside a
+Bubblewrap user, PID, and network namespace. On GitHub-hosted runners, the workflow first
+provisions and verifies the bubblewrap/AppArmor boundary; rebuilds fail
+closed on other runner types. The sandbox starts from a temporary root and
+mounts only system tools, the selected Node toolchain, required configuration,
+the checkout, and (for pnpm) its Corepack cache. Tool and checkout source mounts
+use already-open directory descriptors so hiding host paths cannot hide their
+sources. The checkout is read-only and only `node_modules` is mounted writable.
+The package manager receives a small environment with no credentials, caller
+JSON, or GitHub command-file paths. Lifecycle code cannot inspect host process
+ancestry, access the host filesystem outside those mounts, or use network
+egress. Secretless pnpm installs disable repository pnpmfile hooks, the sandbox
+accepts only the runner's canonical Corepack cache, and protected identity checks
+run before untrusted scripts can modify workflow command files. GitHub-hosted
+non-Linux runners fail with a clear platform error. Canonical and generated
+protected workflow tests cover npm and pnpm, the accepted pair,
+rejected names and values, absent credentials and command-file paths, a known
+host command-file probe, and rejection when a different package is approved.
+
+Service `db-env` and `cache-env` inputs are also treated as caller-controlled
+data. Their runner exports reject carriage returns, shell startup, interpreter, dynamic-loader,
+path, GitHub CLI host, proxy/TLS trust, Git credential/configuration, and
+workflow command variables before starting a service container. Matching is
+case-insensitive and rejects npm configuration overrides. This prevents a
+caller-provided `BASH_ENV` from running in the later identity check that carries
+`GH_TOKEN`, or `GH_HOST` from redirecting that token. Ordinary test configuration
+and the existing unmasked, non-secret service contract remain. The service tests
+exercise these token-bearing paths in both inputs.
+
+When the database service is enabled, `cache-env` also rejects `DB_HOST` and
+`DB_PORT` so a later cache step cannot overwrite the endpoint published by
+`db-env`. Cache-only callers retain those names as ordinary configuration.
+
+## 2026-10-09 amendment — isolate all secretless consumer scripts (#1729)
+
+The canonical reusable now runs explicit, nested, and default consumer scripts
+inside Bubblewrap for secretless PR and trusted-ref calls. Its writable
+workspace permits build outputs while `.git` stays read-only; `RUNNER_TEMP` is
+replaced by private temporary storage, preventing scripts from finding and
+modifying active GitHub Actions command files. This boundary requires
+GitHub-hosted Linux. The source reusable retains the caller-selected network
+policy; the generated protected workflow applies its existing service-aware
+network isolation. The regression harness verifies that a real Bubblewrap run
+cannot alter a host command-file sentinel. Candidate npm reads no host or
+repository configuration: user configuration resolves to `/dev/null`, global
+configuration is an empty file inside the sandbox, and only the generated
+private cache setting remains.
