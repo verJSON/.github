@@ -199,10 +199,14 @@ on:
       secretless-ci-script-plan:
         description: >-
           Optional JSON array of exact package.json script names or objects with
-          exactly script and unsetEnv. unsetEnv removes up to 16 non-credential
-          environment names for that script only. Entries run in order after the
-          credentialless private-cache install and any approved rebuild. Empty preserves
-          the standard build/typecheck/test/lint sequence.
+          script and optional unsetEnv/requiresServices fields. unsetEnv removes
+          up to 16 non-credential environment names for that script only.
+          requiresServices must be a JSON boolean; true grants that script the
+          configured database/cache variables and network access. Entries named
+          test, test:*, or *:test retain this capability by default; custom test
+          script names must set requiresServices to true. Entries run in order
+          after the credentialless private-cache install and any approved rebuild.
+          Empty preserves the standard build/typecheck/test/lint sequence.
         required: false
         type: string
         default: ''
@@ -1966,7 +1970,7 @@ jobs:
           echo "VERJSON_CHANGELOG_TOOL_CACHE=$cache_root" >> "$GITHUB_ENV"
       - name: Warm verified changelog contract cache
         id: warm-changelog-contract
-        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && (inputs.secretless-ci-script-plan != '' || inputs.secretless-nested-manifests != '')
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -5807,11 +5811,23 @@ jobs:
                   if isinstance(entry, str):
                       script = entry
                       unset_env = []
-                  elif isinstance(entry, dict) and set(entry) == {"script", "unsetEnv"}:
+                      requires_services = None
+                  elif (
+                      isinstance(entry, dict)
+                      and "script" in entry
+                      and set(entry).issubset({"script", "unsetEnv", "requiresServices"})
+                  ):
                       script = entry["script"]
-                      unset_env = entry["unsetEnv"]
+                      unset_env = entry.get("unsetEnv", [])
+                      requires_services = entry.get("requiresServices")
                   else:
-                      sys.exit(f"{label} entries must be script names or exact script/unsetEnv objects")
+                      sys.exit(f"{label} entries must be script names or script objects with supported fields")
+                  if requires_services is None:
+                      requires_services = (
+                          script == "test" or script.startswith("test:") or script.endswith(":test")
+                      )
+                  elif type(requires_services) is not bool:
+                      sys.exit(f"{label} requiresServices must be a JSON boolean")
                   if not isinstance(script, str) or script_pattern.fullmatch(script) is None:
                       sys.exit(f"{label} contains an invalid script name")
                   if (not isinstance(unset_env, list) or len(unset_env) > 16
@@ -5819,8 +5835,8 @@ jobs:
                           or any(not isinstance(name, str) or env_pattern.fullmatch(name) is None
                                  or name in protected_env for name in unset_env)):
                       sys.exit(f"{label} unsetEnv accepts up to 16 unique non-credential environment names")
-                  entries.append((directory, script, unset_env))
-              scripts_in_plan = [script for _, script, _ in entries]
+                  entries.append((directory, script, unset_env, requires_services))
+              scripts_in_plan = [script for _, script, _, _ in entries]
               if len(scripts_in_plan) != len(set(scripts_in_plan)):
                   sys.exit(f"{label} accepts unique script names")
               # Script existence is proved against the manifest that will run the
@@ -5882,7 +5898,12 @@ jobs:
                   sys.exit("package.json scripts must be an object")
               for name in ("build", "typecheck", "test", "lint"):
                   if name in ("build", "test") or name in root_scripts:
-                      normalized.append((checkout_root, name, []))
+                      normalized.append((checkout_root, name, [], name == "test"))
+          if any(requires_services for _directory, _name, _unset_env, requires_services in normalized):
+              if os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
+                  sys.exit(
+                      "candidate scripts requiring services need an isolated GitHub-hosted runner"
+                  )
           max_cache_files = 4096
           max_cache_bytes = 268435456
           sandbox_entrypoint = "import os, sys\nmax_fd = os.sysconf('SC_OPEN_MAX')\nif max_fd < 3: raise SystemExit('invalid file descriptor limit')\nos.closerange(3, max_fd)\nos.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
@@ -6143,18 +6164,34 @@ jobs:
           }
           blocked_service_prefixes = (
               "GITHUB_", "RUNNER_", "ACTIONS_", "GH_", "AWS_", "GOOGLE_",
-              "AZURE_", "GCP_", "NPM_CONFIG_", "GIT_CONFIG_", "LD_", "DYLD_",
+              "AZURE_", "GCP_", "COREPACK_", "NPM_CONFIG_", "GIT_CONFIG_",
+              "LD_", "DYLD_",
               "POSTGRES_",
           )
           service_env_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
           credential_name_pattern = re.compile(
-              r"(?:PASS(?:WORD|WD)?|SECRET|TOKEN|CREDENTIAL|PRIVATE[_-]?KEY|API[_-]?KEY|AUTH)",
+              r"(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|PRIVATE[_-]?KEY|"
+              r"API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|"
+              r"(?<![A-Z0-9])SIG(?![A-Z0-9])|BEARER|COOKIE|SESSION|JWT|AUTH)",
+              re.IGNORECASE,
+          )
+          credential_parameter_pattern = re.compile(
+              r"(?:^|[;?&\s])(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|"
+              r"PRIVATE[_-]?KEY|API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|"
+              r"(?<![A-Z0-9])SIG(?![A-Z0-9])|"
+              r"BEARER|COOKIE|SESSION|JWT|AUTH)\s*=",
               re.IGNORECASE,
           )
 
           def validate_candidate_service_value(name, value):
-              if credential_name_pattern.search(name):
+              # The documented test fixture is a deliberately invalid credential
+              # sentinel; no caller-provided real credential is forwarded.
+              if credential_name_pattern.search(name) and not (
+                  name.upper() == "OPENAI_API_KEY" and value == "ci-dummy-key"
+              ):
                   sys.exit("candidate service environment includes a credential-bearing variable")
+              if credential_parameter_pattern.search(value):
+                  sys.exit("candidate service value contains credential-bearing data")
               if "://" not in value:
                   return
               try:
@@ -6164,10 +6201,16 @@ jobs:
                   )
               except ValueError:
                   sys.exit("candidate service URL is malformed")
-              if parsed.username is not None or parsed.password is not None or any(
-                  credential_name_pattern.search(key) for key in query_names
-              ):
+              if any(credential_name_pattern.search(key) for key in query_names):
                   sys.exit("candidate service URL contains credential-bearing data")
+              if parsed.username is not None or parsed.password is not None:
+                  local_service_hosts = {"localhost", "127.0.0.1", "::1"}
+                  for endpoint_name in ("DB_HOST", "CACHE_HOST"):
+                      endpoint = os.environ.get(endpoint_name, "").strip().strip("[]").lower()
+                      if endpoint:
+                          local_service_hosts.add(endpoint)
+                  if parsed.hostname is None or parsed.hostname.lower() not in local_service_hosts:
+                      sys.exit("credentialed candidate service URLs must target the local service")
 
           for service_name in ("DB_HOST", "DB_PORT", "CACHE_PORT"):
               if service_name in os.environ:
@@ -6586,8 +6629,7 @@ jobs:
               previous_handlers[caught_signal] = signal.getsignal(caught_signal)
               signal.signal(caught_signal, handle_signal)
           try:
-              for index, (script_directory, name, unset_env) in enumerate(normalized):
-                  is_test_script = name == "test" or name.startswith("test:") or name.endswith(":test")
+              for index, (script_directory, name, unset_env, requires_services) in enumerate(normalized):
                   if baseline is not None and inventory(baseline) != baseline_inventory:
                       sys.exit("verified runtime cache changed before candidate script")
                   script_cache = cache_root / str(index)
@@ -6640,7 +6682,8 @@ jobs:
                           script_env[env_name] = os.environ[env_name]
                   if browser_cache is not None:
                       script_env["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_cache)
-                  script_env.update(candidate_service_env)
+                  if requires_services:
+                      script_env.update(candidate_service_env)
                   for env_name in unset_env:
                       script_env.pop(env_name, None)
                   tool_path_entries = [
@@ -6745,7 +6788,7 @@ jobs:
                               "--cap-drop", "ALL",
                               "--tmpfs", "/",
                               "--tmpfs", "/tmp",
-                              *([] if is_test_script else ["--unshare-net"]),
+                              *([] if requires_services else ["--unshare-net"]),
                               *directory_args,
                               *chmod_args,
                               "--ro-bind", "/usr", "/usr",

@@ -38,15 +38,23 @@ uses a minimal environment without runner command-file paths or `BASH_ENV`, and
 keeps `.git` read-only while leaving build outputs writable. A trusted Python
 bootstrap closes all inherited mount descriptors before npm starts. Only the
 validated, job-scoped Playwright cache is writable for browser installation;
-the workflow bounds its files and bytes before saving it. Scripts named `test`,
-`test:*`, or `*:test` share the GitHub-hosted network for configured services;
-all other scripts have network access disabled. Only explicitly configured
-database/cache variables pass through alongside public CI metadata. Credential
-variable names and URLs containing user information or credential query keys
-are rejected, and service values must remain test-only and contain no secrets.
-The canonical Corepack cache is mounted read-only with downloads disabled so
-pnpm scripts use the pinned manager already installed by dependency restoration.
-Lifecycle rebuilds keep their separate network-isolated sandbox. Contract tests
-cover default-plan execution, hostile `BASH_ENV`, a real Bubblewrap inherited-FD
-write probe, service environment filtering, runner gating, and npm/Corepack-pnpm
-rebuild paths.
+the workflow bounds its files and bytes before saving it. Scripts named
+`test`, `test:*`, or `*:test` retain service access by default; custom test
+scripts can request it with the strict JSON boolean `requiresServices: true`.
+Only those scripts receive configured database/cache variables and network
+access, and the workflow rejects service-enabled plans on self-hosted runners.
+Network access on the permitted GitHub-hosted runner is unrestricted egress,
+not a firewall limited to the configured services. Credential-bearing variable
+names, signed-query aliases, and credential key/value DSNs are rejected. A URL
+with user information is accepted only when it targets localhost or the exact
+workflow-selected DB_HOST/CACHE_HOST; remote credentialed URLs are rejected.
+The documented `OPENAI_API_KEY=ci-dummy-key` test sentinel remains available;
+other credential-bearing variables are rejected. Service values must remain
+test-only and must not carry secrets outside that local URL or exact dummy
+sentinel exception. The canonical Corepack cache is mounted read-only with
+downloads disabled so pnpm scripts use the pinned manager already installed by
+dependency restoration. Lifecycle rebuilds keep their separate network-isolated
+sandbox. Contract tests cover default-plan execution, hostile `BASH_ENV`, a real
+Bubblewrap inherited-FD write probe, signed-query and local-URL service
+filtering, self-hosted service-plan rejection, and npm/Corepack-pnpm rebuild
+paths.

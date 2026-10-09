@@ -236,12 +236,21 @@ scripts. GitHub-hosted non-Linux runners fail with an explicit platform error.
 The auxiliary source accepts exactly `repository`, `pinFile`, `checkoutPath`, and
 `sparsePath`; the pin file must name the same repository and a lowercase 40-hex
 commit. Rebuild entries must be exact locked package names. The script plan must
-be a unique JSON array of exact `package.json` script names or exact
-`{"script":"name","unsetEnv":["NAME"]}` objects. `unsetEnv` may remove up to 16
-non-credential environment names for that single script; package, Git, cloud, and
-OIDC credential controls cannot be removed. Both features execute only after
-credential scrub and the offline install. When a script plan is supplied it
-replaces the default build/typecheck/test/lint sequence.
+be a unique JSON array of exact `package.json` script names or objects with a
+required `script` and optional `unsetEnv` and `requiresServices` fields.
+`unsetEnv` may remove up to 16 non-credential environment names for that single
+script; package, Git, cloud, and OIDC credential controls cannot be removed.
+`requiresServices` is a JSON boolean. The standard `test`, `test:*`, and `*:test`
+names keep service access by default; set it to `true` for custom test names.
+Only service-enabled scripts receive configured DB/cache values or network
+access, and they fail closed on self-hosted runners. Their network access on a
+GitHub-hosted runner has unrestricted egress, not a service-only firewall.
+Credential-bearing variables and credential query/DSN fields are rejected;
+the documented `OPENAI_API_KEY=ci-dummy-key` test sentinel is the only variable
+name exception. Credentialed URLs are allowed only for localhost or the exact
+workflow-selected service endpoint. Both features execute only after credential
+scrub and the offline install. When a script plan is supplied it replaces the
+default build/typecheck/test/lint sequence.
 
 A repository whose private dependencies are not all reachable from the root
 lockfile — an example directory with its own `package.json` and

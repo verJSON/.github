@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LEGACY = ROOT / ".github/workflows/node-ci.yml"
 PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 HEAD = "a" * 40
-LEGACY_SHA256 = "a625e3ec4d5ec116bc7f5c04bad488a0da8e64fed3f0632f1f224ab401bd24b3"
+LEGACY_SHA256 = "c91c4eebc6b45d8dd6caa52f282825431678c5117ddc6baba999f75bf5c529e4"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
@@ -85,6 +85,11 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         )
         self.assertLess(steps.index(cache_setup), steps.index(warm))
         self.assertLess(steps.index(warm), steps.index(plan))
+        self.assertIn("inputs.secretless-pr || inputs.secretless-trusted-ref", warm["if"])
+        self.assertEqual(
+            "${{ inputs.secretless-ci-script-plan == '' }}",
+            plan["env"]["RUN_DEFAULTS"],
+        )
         self.assertIn('"$RUNNER_TEMP/', cache_setup["run"])
         self.assertNotIn("$GITHUB_WORKSPACE", cache_setup["run"])
         self.assertEqual(plan["if"], warm["if"])

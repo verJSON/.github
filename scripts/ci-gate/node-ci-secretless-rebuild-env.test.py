@@ -3,11 +3,15 @@ import atexit
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
+from urllib.parse import parse_qsl, urlsplit
+from unittest.mock import patch
 
 import yaml
 
@@ -41,6 +45,54 @@ EXPECTED_SANDBOX_ENTRYPOINT = (
     "os.closerange(3, max_fd)\n"
     "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
 )
+
+
+def candidate_service_env_from_script(script, environment):
+    start = script.index("candidate_service_env = {")
+    end = script.index("trusted_tool_root_input = Path", start)
+    policy_source = textwrap.dedent(script[start:end])
+    namespace = {
+        "os": os,
+        "re": re,
+        "sys": sys,
+        "urlsplit": urlsplit,
+        "parse_qsl": parse_qsl,
+    }
+    with patch.dict(os.environ, environment, clear=True):
+        exec(policy_source, namespace)
+    return namespace["candidate_service_env"]
+
+
+def candidate_plan_normalizer(script):
+    start = script.index("script_pattern = re.compile")
+    end = script.index("checkout_root = Path.cwd().resolve()", start)
+    source = textwrap.dedent(script[start:end])
+    namespace = {"json": json, "os": os, "re": re, "sys": sys, "Path": Path}
+    exec(source, namespace)
+    return namespace["normalize_plan"]
+
+
+def require_service_runner_from_script(script, normalized, runner_environment):
+    start = script.index("if any(requires_services for _directory")
+    end = script.index("max_cache_files =", start)
+    source = textwrap.dedent(script[start:end])
+    namespace = {"os": os, "sys": sys, "normalized": normalized}
+    with patch.dict(os.environ, {"RUNNER_ENVIRONMENT": runner_environment}, clear=True):
+        exec(source, namespace)
+
+
+def candidate_variables_for_script(script, requires_services):
+    environment_start = script.index("script_env = {")
+    start = script.index("if requires_services:\n", environment_start)
+    end = script.index("for env_name in unset_env:", start)
+    source = textwrap.dedent(script[start:end])
+    namespace = {
+        "candidate_service_env": {"DB_HOST": "127.0.0.1", "DATABASE_URL": "postgres://local"},
+        "requires_services": requires_services,
+        "script_env": {"CI": "true"},
+    }
+    exec(source, namespace)
+    return namespace["script_env"]
 
 
 def run_rebuild(
@@ -577,8 +629,10 @@ def main():
                 for candidate in build["steps"]
                 if candidate.get("name") == "Run exact credentialless consumer script plan"
             )
-            assert 'is_test_script = name == "test"' in script_plan["run"]
-            assert '*([] if is_test_script else ["--unshare-net"])' in script_plan["run"]
+            assert "for index, (script_directory, name, unset_env, requires_services) in enumerate(normalized):" in script_plan["run"]
+            assert "if requires_services:" in script_plan["run"]
+            assert "script_env.update(candidate_service_env)" in script_plan["run"]
+            assert '*([] if requires_services else ["--unshare-net"])' in script_plan["run"]
             assert '"--unshare-net"' in script_plan["run"]
             assert '"--ro-bind"' in script_plan["run"]
             assert '"--bind" if tool_prefix == browser_cache else "--ro-bind"' in script_plan["run"]
@@ -588,9 +642,112 @@ def main():
             assert "candidate_service_env" in script_plan["run"]
             assert "credential_name_pattern" in script_plan["run"]
             assert "candidate service URL contains credential-bearing data" in script_plan["run"]
+            assert "candidate service value contains credential-bearing data" in script_plan["run"]
+            assert "credentialed candidate service URLs must target the local service" in script_plan["run"]
+            assert '"COREPACK_"' in script_plan["run"]
             assert '"COREPACK_ENABLE_NETWORK": "0"' in script_plan["run"]
             assert '"COREPACK_HOME": str(corepack_home) if corepack_home is not None' in script_plan["run"]
             assert "RUN_DEFAULTS" in script_plan["env"]
+            assert candidate_variables_for_script(script_plan["run"], False) == {"CI": "true"}
+            assert candidate_variables_for_script(script_plan["run"], True) == {
+                "CI": "true",
+                "DB_HOST": "127.0.0.1",
+                "DATABASE_URL": "postgres://local",
+            }
+            normalizer = candidate_plan_normalizer(script_plan["run"])
+            with tempfile.TemporaryDirectory() as directory:
+                fixture = Path(directory)
+                (fixture / "package.json").write_text(
+                    json.dumps({"scripts": {
+                        "test": "test", "integration": "test", "unit": "test", "build": "build"
+                    }}),
+                    encoding="utf-8",
+                )
+                entries = normalizer(
+                    [
+                        "test",
+                        "integration",
+                        {"script": "unit", "requiresServices": True},
+                        {"script": "build", "requiresServices": False},
+                    ],
+                    fixture,
+                    "contract-test",
+                    "package.json",
+                )
+                assert [entry[3] for entry in entries] == [True, False, True, False]
+                require_service_runner_from_script(script_plan["run"], entries, "github-hosted")
+                try:
+                    require_service_runner_from_script(script_plan["run"], entries, "self-hosted")
+                except SystemExit as error:
+                    assert "isolated GitHub-hosted runner" in str(error)
+                else:
+                    raise AssertionError("service-enabled candidate plan reached a self-hosted runner")
+                require_service_runner_from_script(
+                    script_plan["run"], [entries[1], entries[3]], "self-hosted"
+                )
+                for bad_plan in (
+                    [{"script": "integration", "requiresServices": "true"}],
+                    [{"script": "integration", "unexpected": True}],
+                ):
+                    try:
+                        normalizer(bad_plan, fixture, "contract-test", "package.json")
+                    except SystemExit:
+                        pass
+                    else:
+                        raise AssertionError(f"invalid protected script-plan metadata accepted: {bad_plan!r}")
+
+            accepted_service_env = candidate_service_env_from_script(
+                script_plan["run"],
+                {
+                    "DB_HOST": "127.0.0.1",
+                    "DB_PORT": "5432",
+                    "CACHE_PORT": "6379",
+                    "DB_ENV": "DATABASE_URL=local\nOPENAI_API_KEY=ci-dummy-key",
+                    "DATABASE_URL": "postgres://app:secret@127.0.0.1:5432/app_test",
+                    "OPENAI_API_KEY": "ci-dummy-key",
+                },
+            )
+            assert accepted_service_env["DATABASE_URL"] == (
+                "postgres://app:secret@127.0.0.1:5432/app_test"
+            )
+            assert accepted_service_env["OPENAI_API_KEY"] == "ci-dummy-key"
+            for name, value in (
+                ("DATABASE_URL", "postgres://app:secret@db.example.com/app_test"),
+                ("DATABASE_URL", "host=127.0.0.1 password=secret"),
+                ("REDIS_URL", "redis://localhost:6379/?sig=secret"),
+                ("REDIS_URL", "redis://localhost:6379/?Signature=secret"),
+                ("REDIS_URL", "redis://localhost:6379/?ACCESS_KEY=secret"),
+                ("DB_PWD", "secret"),
+                ("S3_ACCESS_KEY", "value"),
+                ("OPENAI_API_KEY", "sk-secret"),
+            ):
+                try:
+                    candidate_service_env_from_script(
+                        script_plan["run"],
+                        {
+                            "DB_HOST": "127.0.0.1",
+                            "DB_PORT": "5432",
+                            "CACHE_PORT": "6379",
+                            "DB_ENV": f"{name}=configured",
+                            name: value,
+                        },
+                    )
+                except SystemExit:
+                    pass
+                else:
+                    raise AssertionError(f"credential-bearing service value accepted: {name}={value}")
+            try:
+                candidate_service_env_from_script(
+                    script_plan["run"],
+                    {
+                        "CACHE_ENV": "COREPACK_ENABLE_NETWORK=1",
+                        "COREPACK_ENABLE_NETWORK": "1",
+                    },
+                )
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("service environment overrode Corepack's offline mode")
             assert '"--unshare-net"' in step["run"]
             steps = build["steps"]
             script_names = {

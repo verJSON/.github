@@ -468,9 +468,7 @@ def configure_changelog_tool_cache(document: str) -> str:
 
     plan_if = (
         "needs.eligibility.outputs.should-run != 'false' && "
-        "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
-        "(inputs.secretless-ci-script-plan != '' || "
-        "inputs.secretless-nested-manifests != '')"
+        "(inputs.secretless-pr || inputs.secretless-trusted-ref)"
     )
     warm_step = f"""      - name: Warm verified changelog contract cache
         id: warm-changelog-contract
@@ -727,7 +725,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
     if step.count(imports) != 1:
         raise SystemExit("protected candidate script plan imports changed")
     step = step.replace(imports, protected_imports, 1)
-    execution = """          for directory, name, unset_env in normalized:
+    execution = """          for directory, name, unset_env, requires_services in normalized:
               script_env = os.environ.copy()
               for env_name in (
                   "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
@@ -1024,18 +1022,34 @@ def isolate_candidate_runtime_cache(document: str) -> str:
           }}
           blocked_service_prefixes = (
               "GITHUB_", "RUNNER_", "ACTIONS_", "GH_", "AWS_", "GOOGLE_",
-              "AZURE_", "GCP_", "NPM_CONFIG_", "GIT_CONFIG_", "LD_", "DYLD_",
+              "AZURE_", "GCP_", "COREPACK_", "NPM_CONFIG_", "GIT_CONFIG_",
+              "LD_", "DYLD_",
               "POSTGRES_",
           )
           service_env_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
           credential_name_pattern = re.compile(
-              r"(?:PASS(?:WORD|WD)?|SECRET|TOKEN|CREDENTIAL|PRIVATE[_-]?KEY|API[_-]?KEY|AUTH)",
+              r"(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|PRIVATE[_-]?KEY|"
+              r"API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|"
+              r"(?<![A-Z0-9])SIG(?![A-Z0-9])|BEARER|COOKIE|SESSION|JWT|AUTH)",
+              re.IGNORECASE,
+          )
+          credential_parameter_pattern = re.compile(
+              r"(?:^|[;?&\\s])(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|"
+              r"PRIVATE[_-]?KEY|API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|"
+              r"(?<![A-Z0-9])SIG(?![A-Z0-9])|"
+              r"BEARER|COOKIE|SESSION|JWT|AUTH)\\s*=",
               re.IGNORECASE,
           )
 
           def validate_candidate_service_value(name, value):
-              if credential_name_pattern.search(name):
+              # The documented test fixture is a deliberately invalid credential
+              # sentinel; no caller-provided real credential is forwarded.
+              if credential_name_pattern.search(name) and not (
+                  name.upper() == "OPENAI_API_KEY" and value == "ci-dummy-key"
+              ):
                   sys.exit("candidate service environment includes a credential-bearing variable")
+              if credential_parameter_pattern.search(value):
+                  sys.exit("candidate service value contains credential-bearing data")
               if "://" not in value:
                   return
               try:
@@ -1045,10 +1059,16 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                   )
               except ValueError:
                   sys.exit("candidate service URL is malformed")
-              if parsed.username is not None or parsed.password is not None or any(
-                  credential_name_pattern.search(key) for key in query_names
-              ):
+              if any(credential_name_pattern.search(key) for key in query_names):
                   sys.exit("candidate service URL contains credential-bearing data")
+              if parsed.username is not None or parsed.password is not None:
+                  local_service_hosts = {{"localhost", "127.0.0.1", "::1"}}
+                  for endpoint_name in ("DB_HOST", "CACHE_HOST"):
+                      endpoint = os.environ.get(endpoint_name, "").strip().strip("[]").lower()
+                      if endpoint:
+                          local_service_hosts.add(endpoint)
+                  if parsed.hostname is None or parsed.hostname.lower() not in local_service_hosts:
+                      sys.exit("credentialed candidate service URLs must target the local service")
 
           for service_name in ("DB_HOST", "DB_PORT", "CACHE_PORT"):
               if service_name in os.environ:
@@ -1467,8 +1487,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
               previous_handlers[caught_signal] = signal.getsignal(caught_signal)
               signal.signal(caught_signal, handle_signal)
           try:
-              for index, (script_directory, name, unset_env) in enumerate(normalized):
-                  is_test_script = name == "test" or name.startswith("test:") or name.endswith(":test")
+              for index, (script_directory, name, unset_env, requires_services) in enumerate(normalized):
                   if baseline is not None and inventory(baseline) != baseline_inventory:
                       sys.exit("verified runtime cache changed before candidate script")
                   script_cache = cache_root / str(index)
@@ -1521,7 +1540,8 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                           script_env[env_name] = os.environ[env_name]
                   if browser_cache is not None:
                       script_env["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_cache)
-                  script_env.update(candidate_service_env)
+                  if requires_services:
+                      script_env.update(candidate_service_env)
                   for env_name in unset_env:
                       script_env.pop(env_name, None)
                   tool_path_entries = [
@@ -1626,7 +1646,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                               "--cap-drop", "ALL",
                               "--tmpfs", "/",
                               "--tmpfs", "/tmp",
-                              *([] if is_test_script else ["--unshare-net"]),
+                              *([] if requires_services else ["--unshare-net"]),
                               *directory_args,
                               *chmod_args,
                               "--ro-bind", "/usr", "/usr",

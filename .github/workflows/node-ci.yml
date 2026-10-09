@@ -198,10 +198,14 @@ on:
       secretless-ci-script-plan:
         description: >-
           Optional JSON array of exact package.json script names or objects with
-          exactly script and unsetEnv. unsetEnv removes up to 16 non-credential
-          environment names for that script only. Entries run in order after the
-          credentialless private-cache install and any approved rebuild. Empty preserves
-          the standard build/typecheck/test/lint sequence.
+          script and optional unsetEnv/requiresServices fields. unsetEnv removes
+          up to 16 non-credential environment names for that script only.
+          requiresServices must be a JSON boolean; true grants that script the
+          configured database/cache variables and network access. Entries named
+          test, test:*, or *:test retain this capability by default; custom test
+          script names must set requiresServices to true. Entries run in order
+          after the credentialless private-cache install and any approved rebuild.
+          Empty preserves the standard build/typecheck/test/lint sequence.
         required: false
         type: string
         default: ''
@@ -5076,11 +5080,23 @@ jobs:
                   if isinstance(entry, str):
                       script = entry
                       unset_env = []
-                  elif isinstance(entry, dict) and set(entry) == {"script", "unsetEnv"}:
+                      requires_services = None
+                  elif (
+                      isinstance(entry, dict)
+                      and "script" in entry
+                      and set(entry).issubset({"script", "unsetEnv", "requiresServices"})
+                  ):
                       script = entry["script"]
-                      unset_env = entry["unsetEnv"]
+                      unset_env = entry.get("unsetEnv", [])
+                      requires_services = entry.get("requiresServices")
                   else:
-                      sys.exit(f"{label} entries must be script names or exact script/unsetEnv objects")
+                      sys.exit(f"{label} entries must be script names or script objects with supported fields")
+                  if requires_services is None:
+                      requires_services = (
+                          script == "test" or script.startswith("test:") or script.endswith(":test")
+                      )
+                  elif type(requires_services) is not bool:
+                      sys.exit(f"{label} requiresServices must be a JSON boolean")
                   if not isinstance(script, str) or script_pattern.fullmatch(script) is None:
                       sys.exit(f"{label} contains an invalid script name")
                   if (not isinstance(unset_env, list) or len(unset_env) > 16
@@ -5088,8 +5104,8 @@ jobs:
                           or any(not isinstance(name, str) or env_pattern.fullmatch(name) is None
                                  or name in protected_env for name in unset_env)):
                       sys.exit(f"{label} unsetEnv accepts up to 16 unique non-credential environment names")
-                  entries.append((directory, script, unset_env))
-              scripts_in_plan = [script for _, script, _ in entries]
+                  entries.append((directory, script, unset_env, requires_services))
+              scripts_in_plan = [script for _, script, _, _ in entries]
               if len(scripts_in_plan) != len(set(scripts_in_plan)):
                   sys.exit(f"{label} accepts unique script names")
               # Script existence is proved against the manifest that will run the
@@ -5151,8 +5167,13 @@ jobs:
                   sys.exit("package.json scripts must be an object")
               for name in ("build", "typecheck", "test", "lint"):
                   if name in ("build", "test") or name in root_scripts:
-                      normalized.append((checkout_root, name, []))
-          for directory, name, unset_env in normalized:
+                      normalized.append((checkout_root, name, [], name == "test"))
+          if any(requires_services for _directory, _name, _unset_env, requires_services in normalized):
+              if os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
+                  sys.exit(
+                      "candidate scripts requiring services need an isolated GitHub-hosted runner"
+                  )
+          for directory, name, unset_env, requires_services in normalized:
               script_env = os.environ.copy()
               for env_name in (
                   "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
