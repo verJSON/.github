@@ -49,7 +49,8 @@ rebuild = next(step for step in build["steps"] if step.get("name") == "Rebuild e
 plan = next(step for step in build["steps"] if step.get("name") == "Run exact credentialless consumer script plan")
 assert "inputs.secretless-pr" in rebuild["if"] and "secrets." not in str(rebuild.get("env", {}))
 assert "inputs.secretless-pr" in plan["if"] and "secrets." not in str(plan.get("env", {}))
-assert 'subprocess.run([*command, *requested]' in rebuild["run"]
+assert 'arguments.extend(("--", *command, *requested))' in rebuild["run"]
+assert 'os.execve(str(bubblewrap), arguments,' in rebuild["run"]
 assert 'subprocess.run([*npm_command, "run", name]' in plan["run"]
 assert "env=script_env" in plan["run"]
 for command in ("npm run build", "npm run typecheck --if-present", "npm test", "npm run lint --if-present"):
@@ -194,7 +195,7 @@ node26_plan_status=0
     > "$tmp/node26-plan-output.log" 2>&1 || node26_plan_status=$?
 if [ "$node26_plan_status" -eq 0 ] && [ "$(cat "$tmp/node26-plan.log")" = 'run build' ]; then
   pass "the consumer script plan resolves npm from the Node 26 toolcache package layout"
-elif rg -Fq "$node26/bin/node_modules/npm/bin/npm-prefix.js" "$tmp/node26-plan-output.log"; then
+elif grep -Fq "$node26/bin/node_modules/npm/bin/npm-prefix.js" "$tmp/node26-plan-output.log"; then
   fail "the Node 26 npm launcher looked for missing $node26/bin/node_modules/npm/bin/npm-prefix.js"
 else
   fail "the Node 26 npm launcher layout failed: $(tail -1 "$tmp/node26-plan-output.log")"

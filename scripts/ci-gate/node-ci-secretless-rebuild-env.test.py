@@ -86,7 +86,7 @@ def run_rebuild(
             "    hidden_path_writes.append('workspace-root-writable')\n"
         )
     package_manager_stub.write_text(
-        f"#!{sys.executable}\n"
+        "#!/usr/bin/python3\n"
         "import json\n"
         "import os\n"
         "from pathlib import Path\n"

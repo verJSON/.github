@@ -143,6 +143,10 @@ jobs:
           NPM_TOKEN: ''
         run: |
           set -euo pipefail
+          if [ "${RUNNER_OS:-}" != "Linux" ]; then
+            echo '::error::trusted compatibility sandbox requires a Linux GitHub-hosted runner' >&2
+            exit 1
+          fi
           sandbox_acquirer_source() {
             /usr/bin/cat <<'PY'
           import errno
