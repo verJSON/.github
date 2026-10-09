@@ -163,11 +163,55 @@ def assert_provenance_boundary(document):
     assert jobs["promote"]["runs-on"] == "ubuntu-24.04", (
         "release promotion and manifest attestation must use an independently trusted hosted runner"
     )
+    assert jobs["promote"].get("env", {}).get("GIT_NO_REPLACE_OBJECTS") == "1", (
+        "every Git invocation in release promotion must ignore replacement refs"
+    )
     retention = jobs["retention"]
     assert retention["timeout-minutes"] == 30
     assert retention["continue-on-error"] is True
     assert retention["permissions"] == {"contents": "read", "packages": "write"}, (
         "retention must remain the sole non-provenance runner exception"
+    )
+    steps = jobs["promote"]["steps"]
+    sandbox = next(
+        step for step in steps
+        if step.get("name") == "Prepare the release reconciliation sandbox"
+    )
+    reconcile = next(
+        step for step in steps
+        if step.get("name") == "Reconcile derived release inputs before credential minting"
+    )
+    token = next(step for step in steps if step.get("name") == "Mint exact-repository release App token")
+    assert sandbox["if"] == "${{ inputs.reconcile-allowlist != '' }}"
+    credentialed_steps = [
+        index for index, step in enumerate(steps)
+        if "docker/login-action@" in step.get("uses", "")
+        or "google-github-actions/auth@" in step.get("uses", "")
+        or step.get("name") == "Mint exact-repository release App token"
+    ]
+    assert credentialed_steps and all(
+        steps.index(sandbox) < index for index in credentialed_steps
+    ), "sandbox package setup must finish before registry or release credentials are acquired"
+    assert steps.index(sandbox) < steps.index(reconcile) < steps.index(token), (
+        "the pinned hook must run only after sandbox setup and before release credentials are minted"
+    )
+    sandbox_run = sandbox["run"]
+    for required in (
+        "apt-get install --no-install-recommends --yes apparmor apparmor-profiles bubblewrap",
+        "verify_package_floor bubblewrap '0.9.0-1build1'",
+        "verify_package_floor apparmor '4.0.1really4.0.1-0ubuntu0.24.04.3'",
+        "verify_package_floor apparmor-profiles '4.0.1really4.0.1-0ubuntu0.24.04.3'",
+        "/usr/share/apparmor/extra-profiles/bwrap-userns-restrict",
+        "parser='/usr/sbin/apparmor_parser'",
+        '[ "$(dpkg-query -S "$parser")" = "apparmor: $parser" ]',
+        'sudo "$parser" --replace "$profile"',
+        "--unshare-user --unshare-pid --unshare-net --unshare-ipc --unshare-uts",
+        "--disable-userns --cap-drop ALL",
+        "-- /usr/bin/true",
+    ):
+        assert required in sandbox_run, f"sandbox setup is missing {required!r}"
+    assert "dpkg-query -S /sbin/apparmor_parser" not in sandbox_run, (
+        "package ownership must be checked using Ubuntu's canonical /usr/sbin path"
     )
 
 assert_provenance_boundary(workflow)
@@ -233,10 +277,20 @@ grep -q -- '--contract-ref "$CONTRACT_REF"' "$workflow"
 grep -q -- '--cosign-helper ".container-release-contract/scripts/container_cosign_provenance.py"' "$workflow"
 grep -q 'candidate has no reviewed GAR destination' "$workflow"
 grep -q 'release-manifest.sigstore.json' "$workflow"
+grep -Fq 'mv candidate.zip candidate-manifest.zip' "$workflow"
+grep -Fq 'gh release download "v$VERSION" --pattern candidate-manifest.zip --dir "$tmp"' "$workflow"
+grep -Fq 'cmp -s "$tmp/candidate-manifest.zip" candidate-manifest.zip' "$workflow"
+grep -Fq 'release-manifest.sigstore.json candidate-manifest.zip receipts/*.json' "$workflow"
 grep -q 'container_attestation_verify.py' "$workflow"
 grep -q 'repository: Verjson/.github' "$workflow"
 grep -q 'ref: \${{ inputs.contract-ref }}' "$workflow"
 grep -q 'python3 .container-release-contract/scripts/changelog.py release' "$workflow"
+grep -Fq 'GIT_NO_REPLACE_OBJECTS=1 git -C .container-release-contract show \' "$workflow"
+grep -Fq '"$CONTRACT_REF:scripts/changelog.py" \' "$workflow"
+grep -Fq '| cmp -s .container-release-contract/scripts/changelog.py - \' "$workflow"
+engine_guard_line="$(grep -n 'GIT_NO_REPLACE_OBJECTS=1 git -C .container-release-contract show' "$workflow" | cut -d: -f1)"
+engine_run_line="$(grep -n 'python3 .container-release-contract/scripts/changelog.py release' "$workflow" | cut -d: -f1)"
+[ "$engine_guard_line" -lt "$engine_run_line" ]
 ! grep -Eq 'python3? scripts/changelog.py release' "$workflow"
 ! grep -Eq 'gh attestation verify|actions/attest-build-provenance@' "$workflow"
 ! grep -q 'container-release-${{ github.repository }}-${{ inputs.version }}' "$workflow"

@@ -272,7 +272,7 @@ def _platform_subjects(
 def mirror_candidate(
     config: dict[str, Any], owner: str, variant: str, provider: str,
     tag: str, digest: str, authfile: Path, published_at: str | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     if not TAG.fullmatch(tag) or not DIGEST.fullmatch(digest):
         raise DestinationError("candidate tag or digest is malformed")
     if not authfile.is_absolute() or not authfile.is_file():
@@ -316,7 +316,9 @@ def mirror_candidate(
     destination_referrers = _referrer_inventory(destination["repository"], digest, authfile)
     if destination_referrers != source_referrers:
         raise DestinationError("destination index provenance differs from source evidence")
-    for platform, referrers in platform_referrers.items():
+    platform_evidence_referrers = []
+    for platform in sorted(platform_referrers):
+        referrers = platform_referrers[platform]
         observed_referrers = _referrer_inventory(destination["repository"], platform, authfile, "platform")
         indexed_attestation = {
             "artifactType": DOCKER_ATTESTATION_REFERRER,
@@ -327,20 +329,25 @@ def mirror_candidate(
         )
         if observed_referrers != referrers and observed_referrers != with_indexed_attestation:
             raise DestinationError("destination platform SBOM differs from source evidence")
+        platform_evidence_referrers.append({
+            "subjectDigest": platform,
+            "evidenceReferrers": observed_referrers,
+        })
     receipt = {
         "provider": provider,
         "variant": variant,
         "repository": destination["repository"],
         "digest": digest,
         "evidenceReferrers": destination_referrers,
+        "platformEvidenceReferrers": platform_evidence_referrers,
     }
     return _with_candidate_expiry(receipt, config, owner, variant, digest, published_at)
 
 
 def _with_candidate_expiry(
-    receipt: dict[str, str], config: dict[str, Any], owner: str, variant: str,
+    receipt: dict[str, Any], config: dict[str, Any], owner: str, variant: str,
     digest: str, published_at: str | None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     if published_at is None:
         return receipt
     destination = next(
