@@ -98,13 +98,16 @@ directory, not the runner's: a writable home is a `~/.gitconfig` away from `core
 and git reads `$HOME/.config/git/config` too.
 
 **The Git control surface is fingerprinted before and after the hook.** The validator records
-`config`, `config.worktree`, `info/exclude`, every file under `hooks/` (content *and*
-executable bit), index entries and flags, `HEAD`, and the complete `refs/replace` listing —
-for both the release checkout and the pinned contract checkout, resolving each
-`--absolute-git-dir` from the trusted pre-hook state. Any replacement ref, including one
-that existed before the hook, fails closed. The fingerprint is checked *first* after each
-hook run, before any other validation, because `.git/config` could make later `git` output
-lie. The validator's Git subprocesses always set `GIT_NO_REPLACE_OBJECTS=1`; the release
+the `.git` pointer, `config`, `config.worktree`, `info/exclude`, `info/grafts`, `shallow`,
+object alternates, every file under `hooks/` (content *and* executable bit), index entries
+and flags, `HEAD`, and the complete refs listing — for both the release checkout and the
+pinned contract checkout, resolving each `--absolute-git-dir` from the trusted pre-hook
+state. Any replacement ref, including one that existed before the hook, fails closed. The
+first post-hook comparison reads these filesystem surfaces directly and rejects any change
+before invoking Git. This ordering matters: if the hook changed `.git/config` to set
+`core.fsmonitor`, a Git probe could otherwise execute that helper outside Bubblewrap before
+the changed config was rejected. The validator's Git subprocesses always set
+`GIT_NO_REPLACE_OBJECTS=1`; the release
 job sets it for every step, so its checks, signature readback, commit and push, and
 `scripts/changelog.py` cannot interpret replacement objects either. Every release-side
 commit, tag, and push also disables repository hooks: the workflow uses

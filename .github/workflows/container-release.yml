@@ -111,11 +111,12 @@ jobs:
           verify_package_floor apparmor-profiles '4.0.1really4.0.1-0ubuntu0.24.04.3'
 
           profile='/usr/share/apparmor/extra-profiles/bwrap-userns-restrict'
+          parser='/usr/sbin/apparmor_parser'
           [ "$(dpkg-query -S /usr/bin/bwrap)" = 'bubblewrap: /usr/bin/bwrap' ]
-          [ "$(dpkg-query -S /sbin/apparmor_parser)" = 'apparmor: /sbin/apparmor_parser' ]
+          [ "$(dpkg-query -S "$parser")" = "apparmor: $parser" ]
           [ "$(dpkg-query -S "$profile")" = "apparmor-profiles: $profile" ]
           [ -f "$profile" ] && [ ! -L "$profile" ]
-          sudo /sbin/apparmor_parser --replace "$profile"
+          sudo "$parser" --replace "$profile"
 
           /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent /usr/bin/bwrap \
             --unshare-user --unshare-pid --unshare-net --unshare-ipc --unshare-uts \

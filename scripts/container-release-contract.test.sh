@@ -202,12 +202,17 @@ def assert_provenance_boundary(document):
         "verify_package_floor apparmor '4.0.1really4.0.1-0ubuntu0.24.04.3'",
         "verify_package_floor apparmor-profiles '4.0.1really4.0.1-0ubuntu0.24.04.3'",
         "/usr/share/apparmor/extra-profiles/bwrap-userns-restrict",
-        "apparmor_parser --replace",
+        "parser='/usr/sbin/apparmor_parser'",
+        '[ "$(dpkg-query -S "$parser")" = "apparmor: $parser" ]',
+        'sudo "$parser" --replace "$profile"',
         "--unshare-user --unshare-pid --unshare-net --unshare-ipc --unshare-uts",
         "--disable-userns --cap-drop ALL",
         "-- /usr/bin/true",
     ):
         assert required in sandbox_run, f"sandbox setup is missing {required!r}"
+    assert "dpkg-query -S /sbin/apparmor_parser" not in sandbox_run, (
+        "package ownership must be checked using Ubuntu's canonical /usr/sbin path"
+    )
 
 assert_provenance_boundary(workflow)
 

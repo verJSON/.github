@@ -453,6 +453,61 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertIn("Git control surface", result.stderr)
 
+    def test_rejects_fsmonitor_config_without_running_its_helper_outside_the_sandbox(self):
+        marker = self.fixture.root / "fsmonitor-executed"
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "cat > .git/fsmonitor-hook <<'HELPER'\n"
+            "#!/bin/sh\n"
+            f"printf called > {shlex.quote(str(marker))}\n"
+            "printf '\\n'\n"
+            "HELPER\n"
+            "chmod +x .git/fsmonitor-hook\n"
+            "git config core.fsmonitor .git/fsmonitor-hook\n"
+        )
+
+        result = self.fixture.run()
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("Git control surface", result.stderr)
+        self.assertIn("config", result.stderr)
+        self.assertFalse(marker.exists(), "post-hook Git verification ran the configured fsmonitor helper")
+
+    def test_failed_hook_config_change_does_not_run_fsmonitor_during_rollback(self):
+        marker = self.fixture.root / "fsmonitor-rollback-executed"
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "cat > .git/fsmonitor-hook <<'HELPER'\n"
+            "#!/bin/sh\n"
+            f"printf called > {shlex.quote(str(marker))}\n"
+            "printf '\\n'\n"
+            "HELPER\n"
+            "chmod +x .git/fsmonitor-hook\n"
+            "git config core.fsmonitor .git/fsmonitor-hook\n"
+            "exit 17\n"
+        )
+
+        result = self.fixture.run()
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("Git control surface", result.stderr)
+        self.assertFalse(marker.exists(), "rollback ran the configured fsmonitor helper")
+
+    def test_rejects_changes_to_git_history_metadata_before_running_git(self):
+        self.fixture.write_hook(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "git rev-parse HEAD > .git/shallow\n"
+        )
+
+        result = self.fixture.run()
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("Git control surface", result.stderr)
+        self.assertIn("shallow", result.stderr)
+
     def test_rejects_a_hook_that_installs_a_git_replacement_ref(self):
         git(self.fixture.repo, "commit", "--allow-empty", "-qm", "second commit")
         self.fixture.write_hook(

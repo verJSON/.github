@@ -23,7 +23,15 @@ PATH_PATTERN = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]*$")
 # `.git/` files that decide what later git invocations execute. `git status` never
 # reports them, and the steps after this one run `git commit` and the pinned
 # changelog engine with the release App token, so they are compared byte for byte.
-GIT_CONFIG_SURFACES = ("config", "config.worktree", "info/exclude")
+GIT_FILESYSTEM_SURFACES = (
+    "config",
+    "config.worktree",
+    "info/exclude",
+    "info/grafts",
+    "shallow",
+    "objects/info/alternates",
+    "objects/info/http-alternates",
+)
 # Surfaces the release engine itself owns, or that decide what code runs with the
 # release App token. Reconciliation may never be pointed at any of them.
 PROTECTED_ROOTS = frozenset({"RELEASES", "CHANGELOG", "NEXT"})
@@ -141,37 +149,54 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def control_surface(root: Path, git_dir: Path) -> dict:
-    """Fingerprint the `.git/` state that decides what later git commands run.
+def filesystem_entry_surface(path: Path) -> tuple | None:
+    """Describe a Git control file without following symlinks or running Git."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    mode = stat.S_IMODE(info.st_mode)
+    if stat.S_ISREG(info.st_mode):
+        return ("file", mode, digest(path))
+    if stat.S_ISLNK(info.st_mode):
+        return ("symlink", os.readlink(path))
+    if stat.S_ISDIR(info.st_mode):
+        return ("directory", mode, info.st_dev, info.st_ino)
+    return ("special", stat.S_IFMT(info.st_mode), mode)
 
-    Covers `core.hooksPath`, `core.fsmonitor`, `credential.helper`, content
-    filters and aliases (all of which live in `config`), directly installed
-    hooks, the exclude file that could hide the hook's own output, index entries
-    and flags, and the commit the release will be built on. The index projection
+
+def filesystem_control_surface(root: Path, git_dir: Path) -> dict:
+    """Fingerprint Git control files directly before any post-hook Git command."""
+    surface = {"filesystem/.git": filesystem_entry_surface(root / ".git")}
+    for name in GIT_FILESYSTEM_SURFACES:
+        surface[f"filesystem/{name}"] = filesystem_entry_surface(git_dir / name)
+    hooks = git_dir / "hooks"
+    surface["filesystem/hooks-directory"] = filesystem_entry_surface(hooks)
+    listing = sorted(hooks.iterdir(), key=lambda entry: entry.name) \
+        if hooks.is_dir() and not hooks.is_symlink() else []
+    for entry in listing:
+        surface[f"filesystem/hooks/{entry.name}"] = filesystem_entry_surface(entry)
+    return surface
+
+
+def control_surface(root: Path, git_dir: Path) -> dict:
+    """Fingerprint filesystem and Git state that can affect later release commands.
+
+    Filesystem surfaces are captured without invoking Git so a modified
+    `core.fsmonitor` cannot execute during validation. The index projection
     excludes refreshable stat-cache data while preserving flags such as
     `skip-worktree` that can hide a modified file from `git status`.
     """
-    surface = {}
-    for name in GIT_CONFIG_SURFACES:
-        entry = git_dir / name
-        surface[name] = digest(entry) if entry.is_file() and not entry.is_symlink() else None
-    hooks = git_dir / "hooks"
-    listing = sorted(hooks.iterdir()) if hooks.is_dir() and not hooks.is_symlink() else []
-    for entry in listing:
-        surface[f"hooks/{entry.name}"] = (
-            f"{digest(entry)}:{int(os.access(entry, os.X_OK))}"
-            if entry.is_file() and not entry.is_symlink()
-            else "not-a-regular-file"
-        )
+    surface = filesystem_control_surface(root, git_dir)
     surface["index-entries"] = git(root, "ls-files", "--stage", "-v", "-z")
-    surface["replace-refs"] = git(
-        root, "for-each-ref", "--format=%(refname) %(objectname)", "refs/replace",
-    ).strip()
-    if surface["replace-refs"]:
+    refs = git(root, "for-each-ref", "--format=%(refname) %(objectname)").strip()
+    replacement_refs = [line for line in refs.splitlines() if line.startswith("refs/replace/")]
+    if replacement_refs:
         raise ReconcileError(
             "Git replacement refs are not allowed during release reconciliation: "
-            + surface["replace-refs"].replace("\n", ", ")
+            + ", ".join(replacement_refs)
         )
+    surface["refs"] = refs
     surface["HEAD"] = git(root, "rev-parse", "HEAD").strip()
     surface["HEAD-ref"] = git(root, "rev-parse", "--symbolic-full-name", "HEAD").strip()
     return surface
@@ -182,6 +207,26 @@ def control_surfaces(checkouts: dict) -> dict:
 
 
 def require_intact_control_surfaces(checkouts: dict, baseline: dict) -> None:
+    # Compare Git's executable configuration and history controls without Git
+    # first. Otherwise a hook can set core.fsmonitor and execute a helper from
+    # this post-sandbox validation before the changed config is rejected.
+    for label, (root, git_dir) in checkouts.items():
+        filesystem_current = filesystem_control_surface(root, git_dir)
+        filesystem_baseline = {
+            name: value for name, value in baseline[label].items()
+            if name.startswith("filesystem/")
+        }
+        changed = sorted(
+            name.removeprefix("filesystem/")
+            for name in set(filesystem_baseline) | set(filesystem_current)
+            if filesystem_baseline.get(name) != filesystem_current.get(name)
+        )
+        if changed:
+            raise ReconcileError(
+                f"Git control surface of the {label} changed during reconciliation: "
+                + ", ".join(changed)
+            )
+
     current = control_surfaces(checkouts)
     for label, surface in baseline.items():
         changed = sorted(
@@ -575,6 +620,11 @@ def reconcile(root: Path, args) -> list:
             raise ReconcileError(f"{HOOK} is not idempotent: a second run changed the release tree")
         require_pinned_contract(root, args.contract_root, args.contract_ref, "after reconciliation")
     except BaseException:
+        # A failed hook can still have changed Git's executable configuration.
+        # Re-validate it before rollback, which itself uses Git; on mismatch the
+        # release job fails and the ephemeral checkout is discarded without
+        # running another command under the hook's config.
+        require_intact_control_surfaces(checkouts, baseline)
         rollback(root, pre_existing_untracked)
         raise
     if changed:
