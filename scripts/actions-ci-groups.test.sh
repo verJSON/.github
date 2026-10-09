@@ -34,6 +34,20 @@ assert jobs["hosted-compatibility-tests"]["needs"] == "change-scope"
 assert jobs["hosted-compatibility-tests"]["if"] == "needs.change-scope.outputs.heavy == 'true'"
 assert jobs["docs-contracts"]["timeout-minutes"] == 10
 assert jobs["change-scope"]["outputs"]["heavy"] == "${{ steps.scope.outputs.heavy }}"
+scope_run = next(
+    step["run"]
+    for step in jobs["change-scope"]["steps"]
+    if step.get("id") == "scope"
+)
+assert "rm -rf \"$source_root\"" in scope_run
+assert (
+    ".actions-ci-source-${{ github.run_id }}-"
+    "${{ github.run_attempt }}-change-scope"
+) in scope_run
+assert any(
+    "VERJSON_CHANGELOG_TOOL_CACHE=" in step.get("run", "")
+    for step in jobs["docs-contracts"]["steps"]
+)
 
 groups = jobs["shell-test-groups"]
 assert groups["timeout-minutes"] == 30

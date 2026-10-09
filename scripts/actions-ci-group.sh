@@ -28,7 +28,8 @@ commands=0
 # commands, printed after this filter, may reach the annotation channel.
 mask_workflow_commands() {
   sed -u -E \
-    's/^::(error|warning|notice|debug|group|endgroup|add-mask|stop-commands|echo)([^:]*)::/[workflow-command:\1]\2:/'
+    -e 's/^::(add-mask|stop-commands)::.*/[workflow-command:\1]:/' \
+    -e 's/^::(error|warning|notice|debug|group|endgroup|echo)([^:]*)::/[workflow-command:\1]\2:/'
 }
 
 command_budget="${ACTIONS_CI_COMMAND_BUDGET_SECONDS:-}"

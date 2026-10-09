@@ -71,7 +71,11 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          source_root="$GITHUB_WORKSPACE/.actions-ci-source-${{ github.run_id }}-${{ github.run_attempt }}-change-scope"
           files="$(mktemp)"
+          # The checkout holds the job token. Remove it on every exit, including
+          # the fail-closed paths, so a persistent runner does not keep it (#675).
+          trap 'rm -rf "$source_root" "$files"' EXIT
           if [ "$EVENT_NAME" != pull_request ] && [ "$EVENT_NAME" != push ]; then
             echo "heavy=true" >>"$GITHUB_OUTPUT"
             exit 0
@@ -162,6 +166,8 @@ jobs:
             --only-binary=:all: \
             --require-hashes \
             --requirement scripts/actions-ci-python.requirements.txt
+      - name: Clear the runner changelog cache override
+        run: echo "VERJSON_CHANGELOG_TOOL_CACHE=" >> "$GITHUB_ENV"
       - name: Run documentation shell contracts
         env:
           RUNNER_LABELS: ''

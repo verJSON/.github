@@ -13,18 +13,21 @@ pass() { printf 'ok   - %s\n' "$1"; }
 fail() { printf 'FAIL - %s\n' "$1"; fails=$((fails + 1)); }
 
 cat >"$tmp/manifest.tsv" <<'EOF'
-platform	printf '%s\n' '::error::fixture failed' '::warning file=x::fixture warned' '::notice::fixture noted' '::stop-commands::token'
+platform	printf '%s\n' '::error::fixture failed' '::warning file=x::fixture warned' '::notice::fixture noted' '::stop-commands::token' '::add-mask::super-secret-value'
 EOF
 
 if ACTIONS_CI_GROUP_MANIFEST="$tmp/manifest.tsv" bash "$runner" platform >"$tmp/out" 2>"$tmp/err"; then
-  if grep -qE '^::(error|warning|notice|stop-commands)(:| )' "$tmp/out" \
-    || grep -qE '^::(error|warning|notice|stop-commands)(:| )' "$tmp/err"; then
+  if grep -qE '^::(error|warning|notice|stop-commands|add-mask)(:| )' "$tmp/out" \
+    || grep -qE '^::(error|warning|notice|stop-commands|add-mask)(:| )' "$tmp/err"; then
     fail "a passing contract still emitted a workflow command"
+  elif grep -qE 'workflow-command:add-mask.*super-secret-value|workflow-command:stop-commands.*token' "$tmp/out"; then
+    fail "masking an add-mask or stop-commands line published its value"
   elif grep -q 'workflow-command:error' "$tmp/out" \
     && grep -q 'fixture failed' "$tmp/out" \
     && grep -q 'workflow-command:warning' "$tmp/out" \
     && grep -q 'workflow-command:notice' "$tmp/out" \
-    && grep -q 'workflow-command:stop-commands' "$tmp/out"; then
+    && grep -q 'workflow-command:stop-commands' "$tmp/out" \
+    && grep -q 'workflow-command:add-mask' "$tmp/out"; then
     pass "passing contracts keep their text and do not annotate the check"
   else
     fail "masked output dropped the fixture text"

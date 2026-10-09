@@ -7,4 +7,6 @@ title: 'ci: skip the heavy actions-ci matrix for documentation diffs'
 
 Documentation-only diffs run the documentation contracts and skip the release-caller, merge-gate, and hosted compatibility jobs. Any other diff, including an empty file list, still runs the heavy matrix, and the required `shell-tests` check fails if those two disagree.
 
+The classification job deletes its checkout, including the job token, on every exit. Documentation contracts also clear a runner changelog-cache override before they validate the tree.
+
 See #1734 and ADR 0222.
