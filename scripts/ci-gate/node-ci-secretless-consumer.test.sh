@@ -5,6 +5,20 @@ root="$(cd "$(dirname "$0")/../.." && pwd)"
 workflow="$root/.github/workflows/node-ci.yml"
 failures=0
 tmp="$(mktemp -d)"
+runner_temp="$tmp/runner-temp"
+tool_cache="$tmp/tool-cache"
+toolchain="$tool_cache/node/24.19.0"
+mkdir -p "$tmp/home" "$runner_temp" "$toolchain/bin"
+export RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux BWRAP_BINARY="${BWRAP_BINARY:-/usr/bin/bwrap}" HOME="$tmp/home" RUNNER_TEMP="$runner_temp" RUNNER_TOOL_CACHE="$tool_cache"
+cat > "$toolchain/bin/node" <<'NODE'
+#!/usr/bin/env bash
+exit 0
+NODE
+cat > "$toolchain/bin/npm" <<'NPM'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GITHUB_WORKSPACE/node_modules/.npm-stub.log"
+NPM
+chmod +x "$toolchain/bin/node" "$toolchain/bin/npm"
 trap 'rm -rf "$tmp"' EXIT
 
 pass() { printf 'ok - %s\n' "$1"; }
@@ -237,19 +251,19 @@ for bad_plan in '["build","build"]' '["--help"]' '["missing"]' '{"script":"build
   fi
 done
 
-if (cd "$tmp/commands" && PATH="$tmp/bin:$PATH" NPM_STUB_LOG="$tmp/rebuild.log" \
+if (cd "$tmp/commands" && PATH="$toolchain/bin:/usr/bin:/bin" NPM_STUB_LOG="$tmp/rebuild.log" \
     REBUILD_PACKAGES=$'argon2\nesbuild' bash "$tmp/rebuild.sh") \
-    && grep -qFx 'rebuild argon2 esbuild' "$tmp/rebuild.log"; then
+    && grep -qFx 'rebuild argon2 esbuild' "$tmp/commands/node_modules/.npm-stub.log"; then
   pass "only exact locked lifecycle packages reach npm rebuild"
 else
   fail "approved exact lifecycle packages did not rebuild"
 fi
 
 for bad_rebuild in $'argon2\n--foreground-scripts' 'missing-package' $'argon2\nargon2'; do
-  : > "$tmp/bad-rebuild.log"
-  if (cd "$tmp/commands" && PATH="$tmp/bin:$PATH" NPM_STUB_LOG="$tmp/bad-rebuild.log" \
+  : > "$tmp/commands/node_modules/.npm-stub.log"
+  if (cd "$tmp/commands" && PATH="$toolchain/bin:/usr/bin:/bin" NPM_STUB_LOG="$tmp/bad-rebuild.log" \
       REBUILD_PACKAGES="$bad_rebuild" bash "$tmp/rebuild.sh") >/dev/null 2>&1 \
-      || [ -s "$tmp/bad-rebuild.log" ]; then
+      || [ -s "$tmp/commands/node_modules/.npm-stub.log" ]; then
     fail "invalid lifecycle rebuild list reached npm"
   else
     pass "invalid lifecycle rebuild list fails before npm"
@@ -259,18 +273,18 @@ done
 # #932: secretless-rebuild-packages must exactly match the lock's install-script
 # surface, not merely name packages present in the lock.
 : > "$tmp/undeclared-rebuild.log"
-if (cd "$tmp/commands" && PATH="$tmp/bin:$PATH" NPM_STUB_LOG="$tmp/undeclared-rebuild.log" \
+if (cd "$tmp/commands" && PATH="$toolchain/bin:/usr/bin:/bin" NPM_STUB_LOG="$tmp/undeclared-rebuild.log" \
     REBUILD_PACKAGES=argon2 bash "$tmp/rebuild.sh") >/dev/null 2>&1 \
-    || [ -s "$tmp/undeclared-rebuild.log" ]; then
+    || [ -s "$tmp/commands/node_modules/.npm-stub.log" ]; then
   fail "a lock-declared lifecycle package absent from the allowlist reached npm (#932)"
 else
   pass "the lock's install-script surface must be fully named in the allowlist (#932)"
 fi
 
 : > "$tmp/unnecessary-rebuild.log"
-if (cd "$tmp/commands" && PATH="$tmp/bin:$PATH" NPM_STUB_LOG="$tmp/unnecessary-rebuild.log" \
+if (cd "$tmp/commands" && PATH="$toolchain/bin:/usr/bin:/bin" NPM_STUB_LOG="$tmp/unnecessary-rebuild.log" \
     REBUILD_PACKAGES=$'argon2\nesbuild\nleftpad' bash "$tmp/rebuild.sh") >/dev/null 2>&1 \
-    || [ -s "$tmp/unnecessary-rebuild.log" ]; then
+    || [ -s "$tmp/commands/node_modules/.npm-stub.log" ]; then
   fail "an allowlisted package the lock does not mark as needing install scripts reached npm (#932)"
 else
   pass "the allowlist may not name a package the lock does not mark as needing install scripts (#932)"
@@ -280,9 +294,9 @@ fi
 # installed into node_modules/ on this runner) must not be forced into the
 # allowlist, and must not be rebuilt if it somehow were named.
 : > "$tmp/cross-platform-rebuild.log"
-if (cd "$tmp/commands" && PATH="$tmp/bin:$PATH" NPM_STUB_LOG="$tmp/cross-platform-rebuild.log" \
+if (cd "$tmp/commands" && PATH="$toolchain/bin:/usr/bin:/bin" NPM_STUB_LOG="$tmp/cross-platform-rebuild.log" \
     REBUILD_PACKAGES=$'argon2\nesbuild' bash "$tmp/rebuild.sh") \
-    && grep -qFx 'rebuild argon2 esbuild' "$tmp/cross-platform-rebuild.log"; then
+    && grep -qFx 'rebuild argon2 esbuild' "$tmp/commands/node_modules/.npm-stub.log"; then
   pass "a lock-declared install-script package absent from node_modules/ is not forced into the allowlist (#941)"
 else
   fail "a cross-platform lock entry incorrectly demanded allowlisting (#941)"

@@ -149,7 +149,7 @@ def run_rebuild(
     )
     package_manager_stub.chmod(0o755)
     node_stub = tool_bin / "node"
-    node_stub.write_text(f"#!{sys.executable}\nraise SystemExit(0)\n", encoding="utf-8")
+    node_stub.write_text("#!/usr/bin/python3\nraise SystemExit(0)\n", encoding="utf-8")
     node_stub.chmod(0o755)
     if package_manager == "npm":
         lock = {
