@@ -83,6 +83,8 @@ was confirmed, since inspection-only claims go stale silently).
 
 - [#1669](https://github.com/Verjson/.github/issues/1669) — Node 26 places npm’s CLI under the validated tool prefix’s `lib` tree while the launcher looks below `bin`; the registered credentialless consumer script plan regression and protected identity harness pass locally on 2026-10-01, pending canonical CI.
 
+- [#1749](https://github.com/Verjson/.github/issues/1749) — npm 11.19.0 rejects the secretless rebuild’s identical `/dev/null` user/global config paths; the fix provisions distinct empty files inside the credentialless sandbox.
+
 - [#1682](https://github.com/verJSON/.github/issues/1682) — GitHub's `verJSON/.github` casing exposed case-sensitive repository checks in Node CI, hosted-selector policy selection, required-workflow receipts, API-backed run provenance in gate re-arm, post-merge authorization, dependency supersession, zero-provider recovery, private GitHub Packages tarball provenance, and the container deployment-review producer. Reproduced in verjson-ai-gguf#139 CI attempt 2 and the live branch-rules API on 2026-10-02; fixes are in [PR #1683](https://github.com/verJSON/.github/pull/1683).
 
 - [#1665](https://github.com/Verjson/.github/issues/1665) — The generated gate caller requires a typed reusable environment input and directly handles only head transitions; lifecycle and label events remain on their dedicated callers. Verified 2026-10-01 with `bash scripts/ci-gate/gate-rearm-caller-contract.test.sh` and actionlint 1.7.7.

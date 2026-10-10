@@ -5638,11 +5638,7 @@ jobs:
               "GITHUB_WORKSPACE": sandbox_workspace,
               "CI": "true",
               "NPM_CONFIG_CACHE": "/tmp/npm-cache",
-              "NPM_CONFIG_GLOBALCONFIG": "/dev/null",
-              "NPM_CONFIG_USERCONFIG": "/dev/null",
               "npm_config_cache": "/tmp/npm-cache",
-              "npm_config_globalconfig": "/dev/null",
-              "npm_config_userconfig": "/dev/null",
               "COREPACK_HOME": "/tmp/corepack",
               "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
               **rebuild_env,
@@ -5650,10 +5646,19 @@ jobs:
           for name, value in sorted(rebuild_process_env.items()):
               arguments.extend(("--setenv", name, value))
           sandbox_entrypoint = (
-              "import os, sys\n"
+              "import os, sys, tempfile\n"
               "max_fd = os.sysconf('SC_OPEN_MAX')\n"
               "if max_fd < 3: raise SystemExit('invalid file descriptor limit')\n"
               "os.closerange(3, max_fd)\n"
+              "os.umask(0o077)\n"
+              "config_directory = tempfile.mkdtemp(prefix='npm-config-', dir='/tmp')\n"
+              "for config_role in ('user', 'global'):\n"
+              "    config_fd, config_path = tempfile.mkstemp(\n"
+              "        prefix=f'npm-{config_role}-', dir=config_directory\n"
+              "    )\n"
+              "    os.close(config_fd)\n"
+              "    os.environ[f'NPM_CONFIG_{config_role.upper()}CONFIG'] = config_path\n"
+              "    os.environ[f'npm_config_{config_role}config'] = config_path\n"
               "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
           )
           arguments.extend((
