@@ -25,6 +25,8 @@ exclusive_commands = {
     if "\t@exclusive " in line
 }
 assert exclusive_commands == {
+    "platform\t@exclusive bash scripts/actions-ci-groups.test.sh",
+    "platform\t@exclusive python3 scripts/ci-gate/conformance/conformance.test.py",
     "platform\t@exclusive bash scripts/required-checks-audit.test.sh",
     "merge-gate\t@exclusive bash scripts/ci-gate/privileged-merge-conformance.test.sh",
 }
@@ -58,6 +60,17 @@ assert jobs["shell-tests"]["if"] == (
     "|| !github.event.pull_request.draft) }}"
 )
 assert jobs["docs-contracts"]["timeout-minutes"] == 10
+docs_group_step = next(
+    step
+    for step in jobs["docs-contracts"]["steps"]
+    if step.get("name") == "Run documentation shell contracts"
+)
+assert docs_group_step["env"] == {
+    "RUNNER_LABELS": "",
+    "ACTIONS_CI_COMMAND_BUDGET_SECONDS": (
+        "${{ github.event_name == 'pull_request' && '60' || '' }}"
+    ),
+}
 assert jobs["change-scope"]["outputs"]["heavy"] == "${{ steps.scope.outputs.heavy }}"
 scope_run = next(
     step["run"]
@@ -208,22 +221,6 @@ def validate_shellcheck_trigger_scope(candidate):
     for event in ("pull_request", "push"):
         paths = events[event]["paths"]
         assert paths.count("**/*.sh") == 1
-    runner = candidate["jobs"]["shell-test-groups"]
-    execution = next(
-        step for step in runner["steps"]
-        if step.get("name") == "Run ${{ matrix.group }} shell contracts without hiding sibling failures"
-    )
-    assert execution["env"]["ACTIONS_CI_SHELLCHECK_BASE_SHA"] == (
-        "${{ github.event_name == 'pull_request' "
-        "&& github.event.pull_request.base.sha || '' }}"
-    )
-    assert execution["env"]["ACTIONS_CI_SHELLCHECK_HEAD_SHA"] == (
-        "${{ github.event_name == 'pull_request' && github.sha || '' }}"
-    )
-    assert execution["env"]["ACTIONS_CI_COMMAND_BUDGET_SECONDS"] == (
-        "${{ github.event_name == 'pull_request' && '60' || '' }}"
-    )
-
 validate_shellcheck_trigger_scope(document)
 for event in ("pull_request", "push"):
     mutant = copy.deepcopy(document)
@@ -1070,10 +1067,10 @@ else
   fail "invalid group failed without actionable evidence"
 fi
 
-if grep -q $'^platform\tbash scripts/actions-ci-groups.test.sh$' "$manifest"; then
-  pass "grouping contract runs in actions CI"
+if grep -q $'^platform\t@exclusive bash scripts/actions-ci-groups.test.sh$' "$manifest"; then
+  pass "grouping contract runs alone in actions CI"
 else
-  fail "grouping contract is not wired into actions CI"
+  fail "grouping contract is not registered exclusively in actions CI"
 fi
 
 [ "$fails" -eq 0 ] && { echo "All tests passed."; exit 0; }

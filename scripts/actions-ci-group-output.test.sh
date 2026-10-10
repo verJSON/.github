@@ -11,6 +11,16 @@ trap 'rm -rf "$tmp"' EXIT
 fails=0
 pass() { printf 'ok   - %s\n' "$1"; }
 fail() { printf 'FAIL - %s\n' "$1"; fails=$((fails + 1)); }
+process_is_live() {
+  local pid="$1" stat
+  stat="$(ps -o stat= -p "$pid" 2>/dev/null || true)"
+  [ -n "$stat" ] && [[ "$stat" != Z* ]]
+}
+process_group_is_live() {
+  local process_group="$1"
+  [ "$(ps -eo pgid=,stat= | awk -v group="$process_group" \
+    '$1 == group && $2 !~ /^Z/ { live++ } END { print live + 0 }')" -gt 0 ]
+}
 
 cat >"$tmp/manifest.tsv" <<'EOF'
 platform	printf '%s\n' '::error::fixture failed' '::warning file=x::fixture warned' '::notice::fixture noted' '::stop-commands::token' '::add-mask::super-secret-value'
@@ -42,15 +52,66 @@ else
   fail "the group runner did not provide its generated-contract cache"
 fi
 
-printf 'platform\tsleep 5; touch %q\n' "$tmp/finished-after-timeout" >"$tmp/slow.tsv"
+cat >"$tmp/timeout-worker.sh" <<'EOF'
+#!/usr/bin/env bash
+sleep 30 &
+printf '%s\n' "$!" >"$ACTIONS_CI_TIMEOUT_CHILD_PID"
+wait "$!"
+touch "$ACTIONS_CI_TIMEOUT_MARKER"
+EOF
+chmod +x "$tmp/timeout-worker.sh"
+printf 'platform\tbash %q\n' "$tmp/timeout-worker.sh" >"$tmp/slow.tsv"
 
-if ACTIONS_CI_COMMAND_BUDGET_SECONDS=1 ACTIONS_CI_GROUP_MANIFEST="$tmp/slow.tsv" \
-  bash "$runner" platform >"$tmp/slow.out" 2>"$tmp/slow.err"; then
+runner_status=0
+timeout 5s env ACTIONS_CI_COMMAND_BUDGET_SECONDS=1 ACTIONS_CI_GROUP_MANIFEST="$tmp/slow.tsv" \
+  ACTIONS_CI_TIMEOUT_CHILD_PID="$tmp/timeout-child.pid" \
+  ACTIONS_CI_TIMEOUT_MARKER="$tmp/finished-after-timeout" \
+  bash "$runner" platform >"$tmp/slow.out" 2>"$tmp/slow.err" || runner_status=$?
+child_was_live=0
+if [ -s "$tmp/timeout-child.pid" ] \
+  && process_is_live "$(cat "$tmp/timeout-child.pid")"; then
+  child_was_live=1
+  kill "$(cat "$tmp/timeout-child.pid")" 2>/dev/null || true
+fi
+if [ "$runner_status" -eq 0 ]; then
   fail "a command over the budget was accepted"
-elif grep -q 'budget=1' "$tmp/slow.out" && [ ! -e "$tmp/finished-after-timeout" ]; then
-  pass "a command over its budget is terminated and fails the group"
+elif grep -q 'budget=1' "$tmp/slow.out" \
+  && [ -s "$tmp/timeout-child.pid" ] \
+  && [ "$child_was_live" -eq 0 ] \
+  && [ ! -e "$tmp/finished-after-timeout" ]; then
+  pass "a timed-out command terminates descendants that inherit its output"
 else
-  fail "a budget overrun was not terminated and reported"
+  fail "a timed-out command hung or left an output-inheriting descendant alive"
+fi
+
+cat >"$tmp/orphan-worker.sh" <<'EOF'
+#!/usr/bin/env bash
+sleep 30 &
+printf '%s\n' "$!" >"$ACTIONS_CI_ORPHAN_CHILD_PID"
+EOF
+chmod +x "$tmp/orphan-worker.sh"
+printf 'platform\tbash %q\n' "$tmp/orphan-worker.sh" >"$tmp/orphan.tsv"
+runner_status=0
+timeout 5s env ACTIONS_CI_COMMAND_BUDGET_SECONDS=5 \
+  ACTIONS_CI_GROUP_MANIFEST="$tmp/orphan.tsv" \
+  ACTIONS_CI_ORPHAN_CHILD_PID="$tmp/orphan-child.pid" \
+  bash "$runner" platform >"$tmp/orphan.out" 2>"$tmp/orphan.err" || runner_status=$?
+child_was_live=0
+if [ -s "$tmp/orphan-child.pid" ] \
+  && process_is_live "$(cat "$tmp/orphan-child.pid")"; then
+  child_was_live=1
+  kill "$(cat "$tmp/orphan-child.pid")" 2>/dev/null || true
+fi
+if [ "$runner_status" -eq 0 ]; then
+  fail "a command that left a background descendant was accepted"
+elif [ "$runner_status" -ne 124 ] \
+  && grep -q 'left background processes' "$tmp/orphan.out" \
+  && [ -s "$tmp/orphan-child.pid" ] \
+  && [ "$child_was_live" -eq 0 ]; then
+  pass "a timed command stops a fast-exiting descendant that inherits its output"
+else
+  printf '%s\n' "$tmp/orphan.out" "$tmp/orphan.err" >&2
+  fail "a timed command hung or left a fast-exiting command descendant alive"
 fi
 
 cat >"$tmp/fast.tsv" <<'EOF'
@@ -79,19 +140,33 @@ cat >"$tmp/single-bin/nproc" <<'EOF'
 printf '1\n'
 EOF
 chmod +x "$tmp/single-bin/nproc"
-cat >"$tmp/worker-dies.tsv" <<'EOF'
-platform	true
-platform	kill -KILL "$PPID"
+cat >"$tmp/kill-worker.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '::error::worker diagnostic before kill\n'
+sleep 30 >/dev/null 2>&1 &
+printf '%s\n' "$!" >"$ACTIONS_CI_KILLED_WORKER_CHILD_PID"
+kill -KILL "$ACTIONS_CI_WORKER_PID"
 EOF
+chmod +x "$tmp/kill-worker.sh"
+printf 'platform\tbash %q\n' "$tmp/kill-worker.sh" >"$tmp/worker-dies.tsv"
+mkdir -p "$tmp/worker-dies-tmp"
 
 if ACTIONS_CI_COMMAND_BUDGET_SECONDS='' \
   ACTIONS_CI_GROUP_MANIFEST="$tmp/worker-dies.tsv" \
+  ACTIONS_CI_KILLED_WORKER_CHILD_PID="$tmp/killed-worker-child.pid" \
+  TMPDIR="$tmp/worker-dies-tmp" \
   PATH="$tmp/single-bin:$PATH" bash "$runner" platform \
   >"$tmp/worker-dies.out" 2>"$tmp/worker-dies.err"; then
   fail "the group runner accepted a worker that died before writing its result"
 elif grep -q 'worker did not produce complete result files' "$tmp/worker-dies.out" \
-  && grep -q '1 command(s) failed' "$tmp/worker-dies.err"; then
-  pass "a killed worker without complete result files fails the group"
+  && grep -q 'worker diagnostic before kill' "$tmp/worker-dies.out" \
+  && grep -q '\[workflow-command:error\]' "$tmp/worker-dies.out" \
+  && ! grep -q '^::error::worker diagnostic before kill' "$tmp/worker-dies.out" \
+  && grep -q '1 command(s) failed' "$tmp/worker-dies.err" \
+  && [ -s "$tmp/killed-worker-child.pid" ] \
+  && ! process_is_live "$(cat "$tmp/killed-worker-child.pid")" \
+  && [ -z "$(find "$tmp/worker-dies-tmp" -mindepth 1 -print -quit)" ]; then
+  pass "a killed worker is diagnosed, its process group is stopped, and scratch is removed"
 else
   printf '%s\n' "$tmp/worker-dies.out" "$tmp/worker-dies.err" >&2
   fail "a killed worker was not diagnosed as a missing result"
@@ -126,6 +201,69 @@ if ACTIONS_CI_COMMAND_BUDGET_SECONDS=10 \
   fi
 else
   fail "independent manifest commands did not complete concurrently"
+fi
+
+cat >"$tmp/fast-fail.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'fast worker diagnostic\n'
+exit 7
+EOF
+cat >"$tmp/slow-worker.sh" <<'EOF'
+#!/usr/bin/env bash
+touch "$ACTIONS_CI_SLOW_STARTED"
+printf '%s\n' "$BASHPID" >"$ACTIONS_CI_SLOW_PID_FILE"
+printf '%s\n' "$(ps -o pgid= -p "$BASHPID" | tr -d ' ')" \
+  >"$ACTIONS_CI_SLOW_PGID_FILE"
+sleep 30
+EOF
+chmod +x "$tmp/fast-fail.sh" "$tmp/slow-worker.sh"
+mkdir -p "$tmp/runner-tmp"
+printf 'platform\tbash %q\nplatform\tbash %q\n' \
+  "$tmp/fast-fail.sh" "$tmp/slow-worker.sh" >"$tmp/partial-logs.tsv"
+ACTIONS_CI_COMMAND_BUDGET_SECONDS='' \
+ACTIONS_CI_GROUP_MANIFEST="$tmp/partial-logs.tsv" \
+ACTIONS_CI_SLOW_STARTED="$tmp/slow-started" \
+ACTIONS_CI_SLOW_PID_FILE="$tmp/slow-pid" \
+ ACTIONS_CI_SLOW_PGID_FILE="$tmp/slow-pgid" \
+PATH="$tmp/bin:$PATH" \
+TMPDIR="$tmp/runner-tmp" \
+setsid bash "$runner" platform >"$tmp/partial-logs.out" 2>"$tmp/partial-logs.err" &
+stream_pid=$!
+streamed_result=0
+for _ in {1..300}; do
+  slow_pid=''
+  if [ -f "$tmp/slow-pid" ]; then
+    IFS= read -r slow_pid <"$tmp/slow-pid"
+  fi
+  if [ -f "$tmp/slow-started" ] \
+    && grep -q 'fast worker diagnostic' "$tmp/partial-logs.out" \
+    && grep -Eq 'actions-ci command group=platform status=7 elapsed=[0-9]+s command=' \
+      "$tmp/partial-logs.out" \
+    && [ -n "$slow_pid" ] && kill -0 "$slow_pid" 2>/dev/null; then
+    streamed_result=1
+    break
+  fi
+  if ! kill -0 "$stream_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+if kill -0 "$stream_pid" 2>/dev/null; then
+  kill -TERM "$stream_pid" 2>/dev/null || true
+fi
+stream_status=0
+wait "$stream_pid" 2>/dev/null || stream_status=$?
+group_count="$(grep -c '^::group::' "$tmp/partial-logs.out" || true)"
+if [ "$streamed_result" -eq 1 ] && [ -f "$tmp/slow-started" ] \
+  && [ "$group_count" -eq 1 ] \
+  && [ "$stream_status" -eq 143 ] \
+  && [ -s "$tmp/slow-pgid" ] \
+  && ! process_group_is_live "$(cat "$tmp/slow-pgid")" \
+  && [ -z "$(find "$tmp/runner-tmp" -mindepth 1 -print -quit)" ]; then
+  pass "completed commands report early and cancellation reaps siblings before scratch cleanup"
+else
+  printf '%s\n' "$tmp/partial-logs.out" "$tmp/partial-logs.err" >&2
+  fail "a fast worker's output and status were delayed by a hanging sibling"
 fi
 
 cat >"$tmp/normal-check.sh" <<'EOF'

@@ -20,14 +20,6 @@ esac
 
 cd "$root" || exit 2
 
-# Child contracts print workflow annotations as test evidence. Mask those lines
-# before buffering output so only this runner can annotate the parent check.
-mask_workflow_commands() {
-  sed -u -E \
-    -e 's/^::(add-mask|stop-commands)::.*/[workflow-command:\1]:/' \
-    -e 's/^::(error|warning|notice|debug|group|endgroup|echo)([^:]*)::/[workflow-command:\1]\2:/'
-}
-
 command_budget="${ACTIONS_CI_COMMAND_BUDGET_SECONDS:-}"
 if [ -n "$command_budget" ]; then
   if [[ ! "$command_budget" =~ ^[1-9][0-9]*$ ]]; then
@@ -39,6 +31,14 @@ if [ -n "$command_budget" ]; then
     exit 2
   }
 fi
+command -v setsid >/dev/null 2>&1 || {
+  printf 'setsid is required to isolate actions-ci command process groups\n' >&2
+  exit 2
+}
+command -v ps >/dev/null 2>&1 || {
+  printf 'ps is required to supervise actions-ci command process groups\n' >&2
+  exit 2
+}
 
 command_parallelism="$(nproc 2>/dev/null || printf '1')"
 case "$command_parallelism" in
@@ -48,8 +48,11 @@ esac
 declare -a commands=()
 declare -a command_exclusive=()
 declare -A command_index_by_pid=()
+declare -A worker_command_group_by_index=()
 declare -A worker_wait_status_by_index=()
+declare -A worker_reported_by_index=()
 worker_wait_failures=0
+failures=0
 while IFS=$'\t' read -r command_group command; do
   case "$command_group" in
     ''|\#*) continue ;;
@@ -90,27 +93,216 @@ printf 'actions-ci group=%s command_parallelism=%s command_count=%s\n' \
   "$group" "$command_parallelism" "${#commands[@]}"
 
 tmp="$(mktemp -d)"
-trap 'rm -rf -- "$tmp"' EXIT
 CHANGELOG_CALLER_CONTRACT_CACHE="$tmp/changelog-caller-contract-cache"
 mkdir -p "$CHANGELOG_CALLER_CONTRACT_CACHE"
 export CHANGELOG_CALLER_CONTRACT_CACHE
 
+command_group_has_live_processes() {
+  local process_group="$1"
+  [ "$(ps -eo pgid=,stat= | awk -v group="$process_group" \
+    '$1 == group && $2 !~ /^Z/ { live++ } END { print live + 0 }')" -gt 0 ]
+}
+
+terminate_command_group() {
+  local process_group="$1"
+  [[ "$process_group" =~ ^[1-9][0-9]*$ ]] || return 0
+  kill -TERM -- "-$process_group" 2>/dev/null || true
+  for _ in {1..20}; do
+    command_group_has_live_processes "$process_group" || return 0
+    sleep 0.1
+  done
+  kill -KILL -- "-$process_group" 2>/dev/null || true
+}
+
+command_group_for_index() {
+  local index="$1"
+  local process_group=''
+  if [ -r "$tmp/$index.pgid" ] \
+    && IFS= read -r process_group <"$tmp/$index.pgid" \
+    && [[ "$process_group" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s\n' "$process_group"
+  fi
+}
+
+cleanup_command_group_for_index() {
+  local index="$1"
+  local process_group
+  process_group="$(command_group_for_index "$index")"
+  if [ -z "$process_group" ]; then
+    process_group="${worker_command_group_by_index[$index]:-}"
+  fi
+  if [ -n "$process_group" ] \
+    && command_group_has_live_processes "$process_group"; then
+    terminate_command_group "$process_group"
+  fi
+  rm -f -- "$tmp/$index.pgid"
+}
+
+cleanup_group_runner() {
+  trap - EXIT INT TERM
+  local worker_pid index
+  for worker_pid in "${!command_index_by_pid[@]}"; do
+    kill -TERM "$worker_pid" 2>/dev/null || true
+  done
+  for worker_pid in "${!command_index_by_pid[@]}"; do
+    wait "$worker_pid" 2>/dev/null || true
+  done
+  for index in "${!commands[@]}"; do
+    cleanup_command_group_for_index "$index"
+  done
+  rm -rf -- "$tmp"
+}
+
+sanitize_command_output_for_index() {
+  local index="$1"
+  local raw_log="$tmp/$index.raw.log"
+  local log_file="$tmp/$index.log"
+
+  if ! sed -u -E \
+    -e 's/^::(add-mask|stop-commands)::.*/[workflow-command:\1]:/' \
+    -e 's/^::(error|warning|notice|debug|group|endgroup|echo)([^:]*)::/[workflow-command:\1]\2:/' \
+    "$raw_log" >"$log_file"; then
+    printf 'failed to sanitize command output\n' >>"$log_file"
+    return 1
+  fi
+  rm -f -- "$raw_log"
+}
+
+trap cleanup_group_runner EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
 run_command() {
   local index="$1"
   local command="$2"
-  local started status=0 elapsed
+  local started status=0 elapsed supervisor_pid process_group
+  local background_processes=0
+  local command_group_file="$tmp/$index.pgid"
 
   started="$(date +%s)"
-  if [ -n "$command_budget" ]; then
-    timeout --kill-after=2s "${command_budget}s" \
-      bash -o pipefail -c "$command" 2>&1 | mask_workflow_commands >"$tmp/$index.log" \
-      || status=$?
-  else
-    bash -o pipefail -c "$command" 2>&1 | mask_workflow_commands >"$tmp/$index.log" \
-      || status=$?
+  export ACTIONS_CI_WORKER_PID="$BASHPID"
+  export ACTIONS_CI_COMMAND_PGID_FILE="$command_group_file"
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  trap 'cleanup_command_group_for_index "$index"' EXIT
+cat >"$tmp/$index.supervisor.sh" <<'SUPERVISOR'
+#!/usr/bin/env bash
+command_budget="$1"
+command="$2"
+command_raw_log="$3"
+command_group_file="$4"
+printf '%s\n' "$BASHPID" >"$command_group_file"
+status=0
+if [ -n "$command_budget" ]; then
+  timeout --foreground --kill-after=2s "${command_budget}s" \
+    bash -o pipefail -c "$command" >"$command_raw_log" 2>&1 || status=$?
+else
+  bash -o pipefail -c "$command" >"$command_raw_log" 2>&1 || status=$?
+fi
+exit "$status"
+SUPERVISOR
+  setsid bash "$tmp/$index.supervisor.sh" "$command_budget" "$command" \
+    "$tmp/$index.raw.log" "$command_group_file" &
+  supervisor_pid="$!"
+  worker_command_group_by_index["$index"]="$supervisor_pid"
+  wait "$supervisor_pid" || status=$?
+  process_group="$(command_group_for_index "$index")"
+  if [ -n "$process_group" ] \
+    && command_group_has_live_processes "$process_group"; then
+    background_processes=1
+    [ "$status" -ne 0 ] || status=1
+    terminate_command_group "$process_group"
   fi
+  rm -f -- "$command_group_file"
+  if ! sanitize_command_output_for_index "$index"; then
+    [ "$status" -ne 0 ] || status=1
+  fi
+  if [ "$background_processes" -eq 1 ]; then
+    printf 'command left background processes in process group %s; terminating them\n' \
+      "$process_group" >>"$tmp/$index.log"
+  fi
+  trap - EXIT INT TERM
   elapsed="$(( $(date +%s) - started ))"
   printf '%s\t%s\n' "$status" "$elapsed" >"$tmp/$index.status"
+}
+
+report_worker_result() {
+  local index="$1"
+  local worker_status="$2"
+  local status_file="$tmp/$index.status"
+  local log_file="$tmp/$index.log"
+  local status=''
+  local elapsed=''
+
+  printf '::group::%s\n' "${commands[$index]}"
+  if [ -f "$tmp/$index.raw.log" ] \
+    && ! sanitize_command_output_for_index "$index"; then
+    printf '::error::group=%s command=%q raw worker output could not be sanitized\n' \
+      "$group" "${commands[$index]}"
+  fi
+  if [ ! -f "$status_file" ] || [ ! -f "$log_file" ]; then
+    printf '::error::group=%s command=%q worker did not produce complete result files\n' \
+      "$group" "${commands[$index]}"
+    if [ -f "$log_file" ] && ! cat -- "$log_file"; then
+      printf '::error::group=%s command=%q log could not be read\n' \
+        "$group" "${commands[$index]}"
+    fi
+    printf 'actions-ci command group=%s status=missing elapsed=unknown command=%q\n' \
+      "$group" "${commands[$index]}"
+    printf '::endgroup::\n'
+    worker_reported_by_index["$index"]=1
+    failures=$((failures + 1))
+    return
+  fi
+
+  if ! IFS=$'\t' read -r status elapsed <"$status_file" \
+    || [[ ! "$status" =~ ^[0-9]+$ || ! "$elapsed" =~ ^[0-9]+$ ]]; then
+    printf '::error::group=%s command=%q worker result is malformed\n' \
+      "$group" "${commands[$index]}"
+    if ! cat -- "$log_file"; then
+      printf '::error::group=%s command=%q log could not be read\n' \
+        "$group" "${commands[$index]}"
+    fi
+    printf 'actions-ci command group=%s status=invalid elapsed=unknown command=%q\n' \
+      "$group" "${commands[$index]}"
+    printf '::endgroup::\n'
+    worker_reported_by_index["$index"]=1
+    failures=$((failures + 1))
+    return
+  fi
+
+  if ! cat -- "$log_file"; then
+    [ "$status" -ne 0 ] || status=1
+    printf '::error::group=%s command=%q log could not be read\n' \
+      "$group" "${commands[$index]}"
+  fi
+
+  if [ "$worker_status" -ne 0 ]; then
+    printf '::error::group=%s command=%q worker exited with status=%d\n' \
+      "$group" "${commands[$index]}" "$worker_status"
+    [ "$status" -ne 0 ] || status="$worker_status"
+  fi
+
+  if [ "$status" -ne 0 ]; then
+    if [ -n "$command_budget" ] \
+      && { [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; } \
+      && [ "$elapsed" -ge "$command_budget" ]; then
+      printf '::error::group=%s command=%q timed out after %ss (budget=%ss)\n' \
+        "$group" "${commands[$index]}" "$elapsed" "$command_budget"
+    else
+      printf '::error::group=%s command=%q exit=%d elapsed=%ss\n' \
+        "$group" "${commands[$index]}" "$status" "$elapsed"
+    fi
+    failures=$((failures + 1))
+  elif [ -n "$command_budget" ] && [ "$elapsed" -gt "$command_budget" ]; then
+    printf '::error::group=%s command=%q elapsed=%ss budget=%ss\n' \
+      "$group" "${commands[$index]}" "$elapsed" "$command_budget"
+    failures=$((failures + 1))
+  fi
+  printf 'actions-ci command group=%s status=%s elapsed=%ss command=%q\n' \
+    "$group" "$status" "$elapsed" "${commands[$index]}"
+  printf '::endgroup::\n'
+  worker_reported_by_index["$index"]=1
 }
 
 record_worker_wait() {
@@ -118,11 +310,17 @@ record_worker_wait() {
   local index=''
   if [ -n "$finished_pid" ]; then
     index="${command_index_by_pid[$finished_pid]:-}"
+    unset 'command_index_by_pid[$finished_pid]'
   fi
   if [ -z "$finished_pid" ] || [ -z "$index" ]; then
     worker_wait_failures=$((worker_wait_failures + 1))
-  elif [ "$worker_status" -ne 0 ]; then
+  else
+  if [ "$worker_status" -ne 0 ]; then
+    cleanup_command_group_for_index "$index"
     worker_wait_status_by_index["$index"]="$worker_status"
+    fi
+    report_worker_result "$index" \
+      "${worker_wait_status_by_index[$index]:-0}"
   fi
 }
 
@@ -165,73 +363,11 @@ while [ "$active" -gt 0 ]; do
   active=$((active - 1))
 done
 
-failures=0
 for index in "${!commands[@]}"; do
-  status_file="$tmp/$index.status"
-  log_file="$tmp/$index.log"
-  printf '::group::%s\n' "${commands[$index]}"
-  if [ ! -f "$status_file" ] || [ ! -f "$log_file" ]; then
-    printf '::error::group=%s command=%q worker did not produce complete result files\n' \
-      "$group" "${commands[$index]}"
-    if [ -f "$log_file" ] && ! cat -- "$log_file"; then
-      printf '::error::group=%s command=%q log could not be read\n' \
-        "$group" "${commands[$index]}"
-    fi
-    printf 'actions-ci command group=%s status=missing elapsed=unknown command=%q\n' \
-      "$group" "${commands[$index]}"
-    printf '::endgroup::\n'
-    failures=$((failures + 1))
-    continue
+  if [ "${worker_reported_by_index[$index]:-0}" -ne 1 ]; then
+    report_worker_result "$index" \
+      "${worker_wait_status_by_index[$index]:-0}"
   fi
-
-  status=''
-  elapsed=''
-  if ! IFS=$'\t' read -r status elapsed <"$status_file" \
-    || [[ ! "$status" =~ ^[0-9]+$ || ! "$elapsed" =~ ^[0-9]+$ ]]; then
-    printf '::error::group=%s command=%q worker result is malformed\n' \
-      "$group" "${commands[$index]}"
-    if ! cat -- "$log_file"; then
-      printf '::error::group=%s command=%q log could not be read\n' \
-        "$group" "${commands[$index]}"
-    fi
-    printf 'actions-ci command group=%s status=invalid elapsed=unknown command=%q\n' \
-      "$group" "${commands[$index]}"
-    printf '::endgroup::\n'
-    failures=$((failures + 1))
-    continue
-  fi
-
-  if ! cat -- "$log_file"; then
-    printf '::error::group=%s command=%q log could not be read\n' \
-      "$group" "${commands[$index]}"
-    [ "$status" -ne 0 ] || status=1
-  fi
-  worker_status="${worker_wait_status_by_index[$index]:-0}"
-  if [ "$worker_status" -ne 0 ]; then
-    printf '::error::group=%s command=%q worker exited with status=%d\n' \
-      "$group" "${commands[$index]}" "$worker_status"
-    [ "$status" -ne 0 ] || status="$worker_status"
-  fi
-
-  if [ "$status" -ne 0 ]; then
-    if [ -n "$command_budget" ] \
-      && { [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; } \
-      && [ "$elapsed" -ge "$command_budget" ]; then
-      printf '::error::group=%s command=%q timed out after %ss (budget=%ss)\n' \
-        "$group" "${commands[$index]}" "$elapsed" "$command_budget"
-    else
-      printf '::error::group=%s command=%q exit=%d elapsed=%ss\n' \
-        "$group" "${commands[$index]}" "$status" "$elapsed"
-    fi
-    failures=$((failures + 1))
-  elif [ -n "$command_budget" ] && [ "$elapsed" -gt "$command_budget" ]; then
-    printf '::error::group=%s command=%q elapsed=%ss budget=%ss\n' \
-      "$group" "${commands[$index]}" "$elapsed" "$command_budget"
-    failures=$((failures + 1))
-  fi
-  printf 'actions-ci command group=%s status=%s elapsed=%ss command=%q\n' \
-    "$group" "$status" "$elapsed" "${commands[$index]}"
-  printf '::endgroup::\n'
 done
 
 if [ "$worker_wait_failures" -ne 0 ]; then

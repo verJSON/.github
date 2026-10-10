@@ -9,7 +9,7 @@ platform	bash scripts/actionlint-reusable.test.sh
 platform	python3 scripts/action-pin-conformance.test.py
 platform	python3 scripts/workflow-checkout-isolation.test.py
 platform	bash scripts/actions-ci-policy.test.sh
-platform	bash scripts/actions-ci-groups.test.sh
+platform	@exclusive bash scripts/actions-ci-groups.test.sh
 platform	bash scripts/actions-ci-group-output.test.sh
 platform	bash scripts/actions-ci-change-scope.test.sh
 platform	bash scripts/actions-ci-python-dependencies.test.sh
@@ -35,7 +35,7 @@ platform	bash scripts/ci-gate/node-ci-db-service.test.sh
 platform	bash scripts/ci-gate/node-ci-cache-service.test.sh
 platform	bash scripts/ci-gate/ci-eligibility.test.sh
 platform	python3 scripts/ci-gate/deferred-ci-visibility.test.py
-platform	python3 scripts/ci-gate/conformance/conformance.test.py
+platform	@exclusive python3 scripts/ci-gate/conformance/conformance.test.py
 platform	python3 scripts/ci-gate/conformance/gen-regression-fixture.test.py
 platform	python3 scripts/ci-gate/fleet-contract-inventory.test.py
 platform	python3 scripts/ci-gate/contract-version.test.py
