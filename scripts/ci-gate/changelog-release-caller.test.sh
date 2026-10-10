@@ -1028,5 +1028,91 @@ else
   pass "a bare 'release' mode is refused so no stack is chosen implicitly"
 fi
 
+# A called workflow cannot exceed its caller's grant: a callee job asking for a
+# scope the caller withheld ends the dispatch as a zero-job startup_failure with
+# no annotation (#1747). Compare the real callee file, so the next permission
+# change there cannot ship unnoticed.
+cat >"$tmp/check_callee_grants.py" <<'PY'
+import os
+import re
+import sys
+
+import yaml
+
+caller_path, workflows_dir = sys.argv[1:]
+RANK = {"none": 0, "read": 1, "write": 2}
+SCOPES = (
+    "actions", "attestations", "checks", "contents", "deployments", "discussions",
+    "id-token", "issues", "models", "packages", "pages", "pull-requests",
+    "repository-projects", "security-events", "statuses",
+)
+
+
+def effective(job_block, top_block):
+    """Expand a permissions value into a full scope map; a job inherits the top level."""
+    block = job_block if job_block is not None else top_block
+    if block is None:
+        return {scope: "write" for scope in SCOPES}  # default token grant
+    if isinstance(block, str):
+        if block not in ("read-all", "write-all"):
+            raise SystemExit(f"unsupported permissions value: {block!r}")
+        return {scope: block.split("-")[0] for scope in SCOPES}
+    unknown = [k for k, v in block.items() if k not in SCOPES or v not in RANK]
+    if unknown:
+        raise SystemExit(f"unrecognized permission entries: {unknown}")
+    return {scope: block.get(scope, "none") for scope in SCOPES}
+
+
+caller = yaml.safe_load(open(caller_path, encoding="utf-8"))
+caller_top = caller.get("permissions")
+problems = []
+checked = 0
+for name, job in caller["jobs"].items():
+    match = re.search(r"/\.github/workflows/([\w.-]+\.ya?ml)@", str(job.get("uses", "")))
+    if not match:
+        continue
+    checked += 1
+    callee_path = os.path.join(workflows_dir, match.group(1))
+    if not os.path.exists(callee_path):
+        problems.append(f"{name} delegates to {match.group(1)}, which is not in this repository")
+        continue
+    callee = yaml.safe_load(open(callee_path, encoding="utf-8"))
+    callee_top = callee.get("permissions")
+    granted = effective(job.get("permissions"), caller_top)
+    for callee_name, callee_job in callee["jobs"].items():
+        needed = effective(callee_job.get("permissions"), callee_top)
+        for scope, level in needed.items():
+            if RANK[granted[scope]] < RANK[level]:
+                problems.append(
+                    f"{name} grants {scope}: {granted[scope]} but "
+                    f"{match.group(1)} job {callee_name} needs {scope}: {level}"
+                )
+if not checked:
+    problems.append("no job delegates to a reusable workflow")
+print("\n".join(problems))
+sys.exit(1 if problems else 0)
+PY
+
+callee_workflows="$root/.github/workflows"
+if python3 "$tmp/check_callee_grants.py" "$release" "$callee_workflows" >"$tmp/grants.out" 2>&1; then
+  pass "every reusable-workflow job in the release caller grants what its callee declares (#1747)"
+else
+  fail "the release caller under-grants a reusable workflow: $(cat "$tmp/grants.out")"
+fi
+
+withheld="$tmp/release-withheld-actions.yml"
+awk '/^    uses: .*node-release\.yml@/ { in_publish = 1 }
+  in_publish && /^      actions: read$/ { in_publish = 0; next }
+  { print }' "$release" >"$withheld"
+if cmp -s "$release" "$withheld"; then
+  fail "the actions: read mutation changed nothing; the grant comparison is unproven"
+elif python3 "$tmp/check_callee_grants.py" "$withheld" "$callee_workflows" >"$tmp/grants.out" 2>&1; then
+  fail "a caller withholding actions: read from the publish job was accepted"
+elif grep -qF 'publish grants actions: none but node-release.yml job release needs actions: read' "$tmp/grants.out"; then
+  pass "a caller withholding actions: read is rejected by the grant comparison"
+else
+  fail "the grant comparison rejected the mutation for the wrong reason: $(cat "$tmp/grants.out")"
+fi
+
 [ "$fails" -eq 0 ] || { echo "$fails test(s) failed."; exit 1; }
 echo "All tests passed."
