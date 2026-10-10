@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import yaml
+from yaml_documents import load_yaml_document
 
 ADOPTERS = Path(__file__).resolve().parent / 'adopters'
 
@@ -36,8 +36,8 @@ def bind_inputs(contract_path: Path, caller_path: Path,
     for the real contract and must be bound with the real contract's inputs, or
     it silently runs on defaults and tests something other than the adopter.
     """
-    contract = yaml.safe_load(contract_path.read_text(encoding='utf-8'))
-    caller = yaml.safe_load(caller_path.read_text(encoding='utf-8'))
+    contract = load_yaml_document(contract_path)
+    caller = load_yaml_document(caller_path)
     declared = _declared_inputs(contract)
 
     supplied: dict[str, object] = {}
@@ -99,7 +99,7 @@ def callers_for(contract_path: Path) -> list[Path]:
     """
     matched = []
     for caller_path in sorted(ADOPTERS.glob('*.yml')):
-        caller = yaml.safe_load(caller_path.read_text(encoding='utf-8'))
+        caller = load_yaml_document(caller_path)
         for job in caller['jobs'].values():
             if f'/{contract_path.name}@' in (job.get('uses') or ''):
                 matched.append(caller_path)

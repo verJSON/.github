@@ -18,9 +18,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import yaml
-
 from expressions import Evaluator
+from yaml_documents import load_yaml_document
 
 
 @dataclass(frozen=True)
@@ -136,7 +135,7 @@ def model_workflow(path: Path, scenario: Scenario) -> dict[str, JobOutcome]:
     contract declares its jobs in dependency order; a workflow that does not is
     a defect this harness should surface rather than tolerate.
     """
-    workflow = yaml.safe_load(path.read_text(encoding='utf-8'))
+    workflow = load_yaml_document(path)
     bindings = dict(scenario.bindings)
     outcomes: dict[str, JobOutcome] = {}
 

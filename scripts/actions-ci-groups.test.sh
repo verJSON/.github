@@ -19,6 +19,17 @@ import yaml
 with open(sys.argv[1], encoding="utf-8") as stream:
     document = yaml.safe_load(stream)
 manifest_text = open(sys.argv[2], encoding="utf-8").read()
+exclusive_commands = {
+    line
+    for line in manifest_text.splitlines()
+    if "\t@exclusive " in line
+}
+assert exclusive_commands == {
+    "platform\t@exclusive bash scripts/actions-ci-groups.test.sh",
+    "platform\t@exclusive python3 scripts/ci-gate/conformance/conformance.test.py",
+    "platform\t@exclusive bash scripts/required-checks-audit.test.sh",
+    "merge-gate\t@exclusive bash scripts/ci-gate/privileged-merge-conformance.test.sh",
+}
 jobs = document["jobs"]
 assert document[True]["pull_request"]["types"] == [
     "opened", "reopened", "synchronize", "ready_for_review", "converted_to_draft",
@@ -49,6 +60,17 @@ assert jobs["shell-tests"]["if"] == (
     "|| !github.event.pull_request.draft) }}"
 )
 assert jobs["docs-contracts"]["timeout-minutes"] == 10
+docs_group_step = next(
+    step
+    for step in jobs["docs-contracts"]["steps"]
+    if step.get("name") == "Run documentation shell contracts"
+)
+assert docs_group_step["env"] == {
+    "RUNNER_LABELS": "",
+    "ACTIONS_CI_COMMAND_BUDGET_SECONDS": (
+        "${{ github.event_name == 'pull_request' && '60' || '' }}"
+    ),
+}
 assert jobs["change-scope"]["outputs"]["heavy"] == "${{ steps.scope.outputs.heavy }}"
 scope_run = next(
     step["run"]
@@ -121,7 +143,20 @@ group_step = next(
     step for step in groups["steps"]
     if step.get("name") == "Run ${{ matrix.group }} shell contracts without hiding sibling failures"
 )
-assert group_step["env"] == {"RUNNER_LABELS": ""}
+assert group_step["env"] == {
+    "RUNNER_LABELS": "",
+    "ACTIONS_CI_SHELLCHECK_BASE_SHA": (
+        "${{ github.event_name == 'pull_request' "
+        "&& github.event.pull_request.base.sha || '' }}"
+    ),
+    "ACTIONS_CI_SHELLCHECK_HEAD_SHA": (
+        "${{ github.event_name == 'pull_request' "
+        "&& github.sha || '' }}"
+    ),
+    "ACTIONS_CI_COMMAND_BUDGET_SECONDS": (
+        "${{ github.event_name == 'pull_request' && '60' || '' }}"
+    ),
+}
 assert group_step["run"] == (
     'source_root="$GITHUB_WORKSPACE/.actions-ci-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.group }}"\n'
     'group_root="$(mktemp -d "$RUNNER_TEMP/actions-ci-${{ matrix.group }}.XXXXXX")"\n'
@@ -186,7 +221,6 @@ def validate_shellcheck_trigger_scope(candidate):
     for event in ("pull_request", "push"):
         paths = events[event]["paths"]
         assert paths.count("**/*.sh") == 1
-
 validate_shellcheck_trigger_scope(document)
 for event in ("pull_request", "push"):
     mutant = copy.deepcopy(document)
@@ -448,10 +482,11 @@ merge-gate	bash scripts/ci-gate/arm-receipt.test.sh
 merge-gate	bash scripts/ci-gate/gate-hold-disable.test.sh
 merge-gate	bash scripts/ci-gate/native-automerge.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-pin.test.sh
-changelog-release-1	CHANGELOG_CALLER_CONTRACT_SHARD=1 bash scripts/ci-gate/changelog-caller-contract.test.sh
-changelog-release-2	CHANGELOG_CALLER_CONTRACT_SHARD=2 bash scripts/ci-gate/changelog-caller-contract.test.sh
-changelog-release-3	CHANGELOG_CALLER_CONTRACT_SHARD=3 bash scripts/ci-gate/changelog-caller-contract.test.sh
-changelog-release-4	CHANGELOG_CALLER_CONTRACT_SHARD=4 bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-1	ADOPTER_SLOTS=1 CHANGELOG_CALLER_CONTRACT_SHARD=1 bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-2	ADOPTER_SLOTS=1 CHANGELOG_CALLER_CONTRACT_SHARD=2 bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-3	ADOPTER_SLOTS=1 CHANGELOG_CALLER_CONTRACT_SHARD=3 bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-4	ADOPTER_SLOTS=1 CHANGELOG_CALLER_CONTRACT_SHARD=4 bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-1	CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY=1 bash scripts/ci-gate/changelog-caller-contract.test.sh
 platform	bash scripts/runner-selector-health.test.sh
 docs	python3 scripts/changelog.py validate --repo-root .
 docs	bash scripts/changelog-fragment-schema.test.sh
@@ -513,6 +548,7 @@ fi
 # invariant and a separate check.
 if python3 - "$root" "$manifest" "$workflow" <<'PY'
 import ast
+from functools import lru_cache
 import pathlib
 import shlex
 import subprocess
@@ -539,6 +575,9 @@ NON_GATE_MODULES = {
     ),
     "scripts/ci-gate/conformance/model.py": (
         "workflow model imported by the conformance modules"
+    ),
+    "scripts/ci-gate/conformance/yaml_documents.py": (
+        "cached workflow loader imported by the conformance modules"
     ),
 }
 
@@ -646,10 +685,15 @@ def run_blocks(value):
             yield from run_blocks(child)
 
 
+@lru_cache(maxsize=None)
+def parse_workflow(source):
+    return yaml.safe_load(source)
+
+
 def invocation_paths(sources):
     invoked = set(exact_commands)
     for source in sources.values():
-        for run_block in run_blocks(yaml.safe_load(source)):
+        for run_block in run_blocks(parse_workflow(source)):
             invoked.update(referenced(run_block))
     return invoked
 
@@ -1000,14 +1044,15 @@ for command_id in schema readiness; do
 done
 
 cat >"$tmp/manifest.tsv" <<EOF
-platform	printf 'first\n' >>'$tmp/seen'
+platform	printf 'first\n' >'$tmp/first-ran'
 platform	false
-platform	printf 'last\n' >>'$tmp/seen'
+platform	printf 'last\n' >'$tmp/last-ran'
 EOF
 
 if ACTIONS_CI_GROUP_MANIFEST="$tmp/manifest.tsv" bash "$runner" platform >"$tmp/out" 2>&1; then
   fail "group runner reported green after a member failed"
-elif [ "$(cat "$tmp/seen")" = $'first\nlast' ] \
+elif [ "$(cat "$tmp/first-ran")" = first ] \
+  && [ "$(cat "$tmp/last-ran")" = last ] \
   && grep -q '1 command(s) failed' "$tmp/out"; then
   pass "group runner reports failure after executing every independent command"
 else
@@ -1022,10 +1067,10 @@ else
   fail "invalid group failed without actionable evidence"
 fi
 
-if grep -q $'^platform\tbash scripts/actions-ci-groups.test.sh$' "$manifest"; then
-  pass "grouping contract runs in actions CI"
+if grep -q $'^platform\t@exclusive bash scripts/actions-ci-groups.test.sh$' "$manifest"; then
+  pass "grouping contract runs alone in actions CI"
 else
-  fail "grouping contract is not wired into actions CI"
+  fail "grouping contract is not registered exclusively in actions CI"
 fi
 
 [ "$fails" -eq 0 ] && { echo "All tests passed."; exit 0; }

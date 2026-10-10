@@ -116,8 +116,37 @@ cp -R "$SYSTEM_YAML/." "$destination/yaml/"
 SH
 chmod +x "$tmp/bin/curl" "$tmp/bin/tar"
 
-system_yaml="$(python3 -c 'import os, yaml; print(os.path.dirname(yaml.__file__))')"
+system_yaml="$(python3 -c 'import os, yaml; print(os.path.dirname(yaml.__file__))' 2>"$tmp/system-yaml.err")"
+system_yaml_status=$?
+if [ "$system_yaml_status" -ne 0 ] || [ -z "$system_yaml" ] \
+  || [ "$system_yaml" = / ] || [ ! -f "$system_yaml/__init__.py" ]; then
+  printf 'could not resolve a safe PyYAML module directory; refusing to copy it\n' >&2
+  cat "$tmp/system-yaml.err" >&2
+  exit 1
+fi
 base_path="$PATH"
+
+mkdir -p "$tmp/missing-yaml-bin"
+real_python3="$(command -v python3)"
+cat >"$tmp/missing-yaml-bin/python3" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -c ] && [[ "${2:-}" == *'import os, yaml'* ]]; then
+  printf 'PyYAML import intentionally unavailable\n' >&2
+  exit 1
+fi
+exec "$ACTIONS_CI_REAL_PYTHON3" "$@"
+SH
+chmod +x "$tmp/missing-yaml-bin/python3"
+if output="$(PATH="$tmp/missing-yaml-bin:$base_path" \
+  ACTIONS_CI_REAL_PYTHON3="$real_python3" \
+  bash "$root/scripts/ci-gate/actionlint-hosted-selector-policy.test.sh" 2>&1)"; then
+  fail "a missing PyYAML import did not stop the policy fixture"
+elif grep -qF 'could not resolve a safe PyYAML module directory' <<<"$output"; then
+  pass "a missing dependency cannot turn the fixture copy source into the filesystem root"
+else
+  printf '%s\n' "$output" >&2
+  fail "a missing PyYAML import failed without the safe-path diagnostic"
+fi
 
 run_install() {
   local checksum="$1" case_dir

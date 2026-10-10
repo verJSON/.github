@@ -10,6 +10,120 @@
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+# Keep every audit assertion while splitting the subprocess-heavy suite across
+# two isolated test processes; the outer invocation joins their results.
+test_shard="${REQUIRED_CHECKS_AUDIT_TEST_SHARD:-all}"
+case "$test_shard" in
+  all)
+    shard_tmp="$(mktemp -d)"
+    shard_one_pid=''
+    shard_two_pid=''
+    cleanup_test_shards() {
+      local pid
+      for pid in "$shard_one_pid" "$shard_two_pid"; do
+        [ -n "$pid" ] || continue
+        kill -TERM -- "-$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+      done
+      rm -rf -- "$shard_tmp"
+    }
+    run_test_shard() {
+      local shard_id="$1"
+      local cache_dir="$2"
+      setsid bash -o pipefail -c '
+        env \
+          REQUIRED_CHECKS_AUDIT_TEST_SHARD="$1" \
+          CHANGELOG_CALLER_CONTRACT_CACHE="$2" \
+          bash "$3" 2>&1 | sed -u "s/^/[required-checks audit shard $1] /"
+      ' _ "$shard_id" "$cache_dir" "$here/required-checks-audit.test.sh" &
+    }
+    trap cleanup_test_shards EXIT
+    trap 'exit 143' TERM
+    trap 'exit 130' INT
+    if [ "${REQUIRED_CHECKS_AUDIT_SKIP_CANCELLATION_FIXTURE:-0}" != 1 ]; then
+      cancel_root="$(mktemp -d)"
+      mkdir -p "$cancel_root/bin" "$cancel_root/tmp"
+      cat >"$cancel_root/bin/jq" <<'JQ'
+#!/usr/bin/env bash
+printf '%s %s\n' "$$" "$(ps -o pgid= -p "$$" | tr -d ' ')" >>"$JQ_MARKERS"
+while :; do sleep 1; done
+JQ
+      chmod +x "$cancel_root/bin/jq"
+      JQ_MARKERS="$cancel_root/markers" TMPDIR="$cancel_root/tmp" \
+        PATH="$cancel_root/bin:$PATH" \
+        REQUIRED_CHECKS_AUDIT_SKIP_CANCELLATION_FIXTURE=1 \
+        bash "$here/required-checks-audit.test.sh" \
+        >"$cancel_root/output" 2>&1 &
+      cancel_test_pid=$!
+      for _ in $(seq 1 100); do
+        marker_count=0
+        if [ -f "$cancel_root/markers" ]; then
+          marker_count="$(wc -l <"$cancel_root/markers")"
+        fi
+        [ "$marker_count" -ge 2 ] && break
+        kill -0 "$cancel_test_pid" 2>/dev/null || break
+        sleep 0.1
+      done
+      marker_count=0
+      if [ -f "$cancel_root/markers" ]; then
+        marker_count="$(wc -l <"$cancel_root/markers")"
+      fi
+      if [ "$marker_count" -lt 2 ]; then
+        kill -TERM "$cancel_test_pid" 2>/dev/null || true
+        wait "$cancel_test_pid" 2>/dev/null || true
+        cat "$cancel_root/output" >&2
+        printf 'FAIL - cancellation fixture did not start both required-checks audit shards\n' >&2
+        rm -rf -- "$cancel_root"
+        exit 1
+      fi
+      kill -TERM "$cancel_test_pid"
+      cancel_test_status=0
+      wait "$cancel_test_pid" || cancel_test_status=$?
+      live_shard_groups=0
+      while read -r _ shard_group; do
+        if [ "$(ps -eo pgid=,stat= | awk -v group="$shard_group" \
+          '$1 == group && $2 !~ /^Z/ { live++ } END { print live + 0 }')" -gt 0 ]; then
+          live_shard_groups=$((live_shard_groups + 1))
+        fi
+      done <"$cancel_root/markers"
+      if [ "$cancel_test_status" -eq 143 ] \
+        && [ "$live_shard_groups" -eq 0 ] \
+        && [ -z "$(find "$cancel_root/tmp" -mindepth 1 -print -quit)" ]; then
+        printf 'ok - required-checks audit cancellation reaps both shard groups and removes scratch data\n'
+      else
+        printf 'FAIL - required-checks audit cancellation left a shard process or scratch data behind\n' >&2
+        cat "$cancel_root/output" >&2
+        rm -rf -- "$cancel_root"
+        exit 1
+      fi
+      rm -rf -- "$cancel_root"
+    fi
+    mkdir -p "$shard_tmp/cache-one" "$shard_tmp/cache-two"
+    run_test_shard 1 "$shard_tmp/cache-one"
+    shard_one_pid=$!
+    run_test_shard 2 "$shard_tmp/cache-two"
+    shard_two_pid=$!
+    shard_one_status=0
+    shard_two_status=0
+    wait "$shard_one_pid" || shard_one_status=$?
+    shard_one_pid=''
+    wait "$shard_two_pid" || shard_two_status=$?
+    shard_two_pid=''
+    if [ "$shard_one_status" -ne 0 ] || [ "$shard_two_status" -ne 0 ]; then
+      printf 'required-checks audit test shards failed: one=%s two=%s\n' \
+        "$shard_one_status" "$shard_two_status" >&2
+      exit 1
+    fi
+    printf 'All required-checks audit test shards passed.\n'
+    exit 0
+    ;;
+  1|2) ;;
+  *)
+    printf 'invalid required-checks audit test shard: %s\n' "$test_shard" >&2
+    exit 2
+    ;;
+esac
+
 script="$here/required-checks-audit.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -95,6 +209,36 @@ run_generator codeowners "$contract_pin" >"$content_root/.github/CODEOWNERS"
 run_generator release-node "$contract_pin" --only-package-dir packages/cli-schema >"$content_root/.github/workflows/release.yml"
 run_generator release-node "$contract_pin" --only-package-dir compat >"$content_root/.github/workflows/release-extra.yml"
 run_generator pr-gate "$contract_pin" >"$content_root/.github/workflows/changelog-contract.yml"
+generator_cache_dir="$tmp/generated-caller-cache"
+mkdir -p "$generator_cache_dir"
+printf -v generator_source_literal '%q' "$generator_source"
+printf -v generator_cache_literal '%q' "$generator_cache_dir"
+{
+  printf '#!/usr/bin/bash\nset -euo pipefail\n'
+  printf 'real_generator=%s\ncache_dir=%s\n' \
+    "$generator_source_literal" "$generator_cache_literal"
+  cat <<'GENERATOR_CACHE'
+args_file="$(mktemp "$cache_dir/.args.XXXXXX")"
+trap 'rm -f -- "$args_file"' EXIT
+{
+  printf '%s\0' "${REPO_ROOT:-}"
+  printf '%s\0' "$@"
+} >"$args_file"
+cache_key="$(sha256sum "$args_file" | cut -d' ' -f1)"
+cached_output="$cache_dir/$cache_key"
+if [ ! -f "$cached_output" ]; then
+  generated_output="$(mktemp "$cache_dir/.output.XXXXXX")"
+  if ! (cd "$REPO_ROOT" && bash -s -- "$@" <"$real_generator") \
+    >"$generated_output"; then
+    rm -f -- "$generated_output"
+    exit 1
+  fi
+  mv -- "$generated_output" "$cached_output"
+fi
+cat "$cached_output"
+GENERATOR_CACHE
+} >"$tmp/cached-gen-changelog-caller.sh"
+chmod +x "$tmp/cached-gen-changelog-caller.sh"
 mkdir -p "$tmp/artifact-baseline/.github/workflows" "$tmp/artifact-baseline/scripts"
 cp "$content_root/.github/workflows/changelog.yml" "$tmp/artifact-baseline/.github/workflows/changelog.yml"
 cp "$content_root/.github/workflows/release.yml" "$tmp/artifact-baseline/.github/workflows/release.yml"
@@ -106,7 +250,7 @@ cp "$content_root/scripts/changelog-contract.test.sh" "$tmp/artifact-baseline/sc
 # would read as "nothing found" — the audit would then report every context
 # missing and the tests would pass for the wrong reason.
 cat >"$tmp/bin/gh" <<'GH'
-#!/usr/bin/env bash
+#!/usr/bin/bash
 filter=""
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
@@ -146,7 +290,12 @@ case "$*" in
     exit 0 ;;
   *"repos/Verjson/.github/contents/scripts/gen-changelog-caller.sh"*)
     printf 'fetch\n' >>"$GENERATOR_FETCHES"
-    git -C "$REPO_ROOT" show "$CONTRACT_PIN:scripts/gen-changelog-caller.sh"; exit 0 ;;
+    if [ "${GENERATOR_USE_REAL:-false}" = true ]; then
+      git -C "$REPO_ROOT" show "$CONTRACT_PIN:scripts/gen-changelog-caller.sh"
+    else
+      cat "$GENERATOR_WRAPPER"
+    fi
+    exit 0 ;;
   *"commits?per_page=1"*)
 printf '[{"sha":"%s"}]\n' "$CONTRACT_PIN" | jq -r "$filter"; exit 0 ;;
  *"repos/Verjson/.github/compare/"*) printf '{"status":"%s"}\n' "${PIN_ANCESTRY_STATUS:-identical}" | { if [ -n "$filter" ]; then jq -r "$filter"; else cat; fi; }; exit 0 ;;
@@ -209,7 +358,7 @@ GH
 chmod +x "$tmp/bin/gh"
 
 cat >"$tmp/bin/curl" <<'CURL'
-#!/usr/bin/env bash
+#!/usr/bin/bash
 url="${*: -1}"
 case "$url" in
   https://raw.githubusercontent.com/[Vv]er[Jj][Ss][Oo][Nn]/.github/*/scripts/changelog.py)
@@ -236,6 +385,8 @@ export WORKFLOW_CONTENT_FILE="$tmp/workflow-content.json"
 export CONTENT_ROOT="$content_root"
 export CONTRACT_PIN="$contract_pin"
 export GENERATOR_FETCHES="$tmp/generator-fetches.log"
+export GENERATOR_WRAPPER="$tmp/cached-gen-changelog-caller.sh"
+export GENERATOR_USE_REAL=false
 export REPO_ROOT="$here/.."
 export STUB_TMP="$tmp"
 export RCA_ORG=Verjson
@@ -293,12 +444,18 @@ head_with() { local sha="$1"; shift; jq -n --args '{check_runs: ($ARGS.positiona
 printf '[{"name":"alpha","archived":false}]\n' >"$REPOS_FILE"
 workflow_for none
 
-run_audit() { ( bash "$script" "$@" >"$tmp/out.txt" 2>&1; echo "rc=$?" ); }
+run_audit() {
+  local status
+  "$BASH" "$script" "$@" >"$tmp/out.txt" 2>&1
+  status=$?
+  printf 'rc=%s\n' "$status"
+}
 out() { cat "$tmp/out.txt"; }
 
 # ADR 0128 removed universal authorization contexts from this deterministic
 # ruleset contract. A substituted declaration must not be able to restore that
 # retired key while the audit silently ignores it.
+if [ "$test_shard" = 1 ]; then
 hostile_contract="$tmp/contract-with-universal-contexts.json"
 jq '.universal_contexts = ["gate"]' "$contract" >"$hostile_contract"
 rc="$(RCA_CONTRACT_FILE="$hostile_contract" run_audit)"
@@ -345,7 +502,9 @@ stack_for beta-node node
 pulls s1 s2
 head_with s1 "ci / build-test" "ci / eligibility" changelog-contract "changelog / validate"
 head_with s2 "ci / build-test" "ci / eligibility" changelog-contract "changelog / validate"
+GENERATOR_USE_REAL=true
 rc="$(RCA_REPOS="none-repo beta-node" run_audit)"
+GENERATOR_USE_REAL=false
 { [ "$rc" = "rc=0" ] \
   && grep -q 'repo=none-repo .*result=skipped' "$tmp/out.txt" \
   && grep -q 'repo=beta-node .*result=conformant' "$tmp/out.txt" \
@@ -866,6 +1025,8 @@ for duplicate_top_level in permissions jobs on true on-true true-on; do
     || { fail "duplicate top-level YAML keys were accepted: $duplicate_top_level ($rc)"; out | sed 's/^/diag - /'; }
 done
 
+fi
+if [ "$test_shard" = 2 ]; then
 # --- a repository with no merged PRs is not conformant by default ------------
 stack node; printf '[]\n' >"$PULLS_FILE"
 rc="$(run_audit)"
@@ -1415,6 +1576,7 @@ rc="$(REPOS_FAIL=true run_audit)"
   || { fail "repository pagination failure produced a partial green audit ($rc)"; out | sed 's/^/diag - /'; }
 export RCA_REPOS=alpha
 printf '[{"name":"alpha","archived":false}]\n' >"$REPOS_FILE"
+fi
 
 echo
 if [ "$fails" -eq 0 ]; then echo "All tests passed."; else echo "$fails test(s) failed."; exit 1; fi
