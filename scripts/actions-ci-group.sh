@@ -98,9 +98,12 @@ mkdir -p "$CHANGELOG_CALLER_CONTRACT_CACHE"
 export CHANGELOG_CALLER_CONTRACT_CACHE
 
 command_group_has_live_processes() {
-  local process_group="$1"
-  [ "$(ps -eo pgid=,stat= | awk -v group="$process_group" \
-    '$1 == group && $2 !~ /^Z/ { live++ } END { print live + 0 }')" -gt 0 ]
+  local process_group="$1" listing
+  # A failed ps must read as live: treating it as dead would delete scratch
+  # data under running descendants.
+  listing="$(ps -eo pgid=,stat=)" || return 0
+  [ "$(awk -v group="$process_group" \
+    '$1 == group && $2 !~ /^Z/ { live++ } END { print live + 0 }' <<<"$listing")" -gt 0 ]
 }
 
 terminate_command_group() {
@@ -112,6 +115,12 @@ terminate_command_group() {
     sleep 0.1
   done
   kill -KILL -- "-$process_group" 2>/dev/null || true
+  for _ in {1..20}; do
+    command_group_has_live_processes "$process_group" || return 0
+    sleep 0.1
+  done
+  echo "command process group $process_group survived SIGKILL" >&2
+  return 1
 }
 
 command_group_for_index() {
