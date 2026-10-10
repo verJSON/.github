@@ -39,10 +39,19 @@ SENSITIVE_ENV = COMMAND_FILE_ENV + (
     "ACTIONS_ID_TOKEN_REQUEST_URL",
 )
 EXPECTED_SANDBOX_ENTRYPOINT = (
-    "import os, sys\n"
+    "import os, sys, tempfile\n"
     "max_fd = os.sysconf('SC_OPEN_MAX')\n"
     "if max_fd < 3: raise SystemExit('invalid file descriptor limit')\n"
     "os.closerange(3, max_fd)\n"
+    "os.umask(0o077)\n"
+    "config_directory = tempfile.mkdtemp(prefix='npm-config-', dir='/tmp')\n"
+    "for config_role in ('user', 'global'):\n"
+    "    config_fd, config_path = tempfile.mkstemp(\n"
+    "        prefix=f'npm-{config_role}-', dir=config_directory\n"
+    "    )\n"
+    "    os.close(config_fd)\n"
+    "    os.environ[f'NPM_CONFIG_{config_role.upper()}CONFIG'] = config_path\n"
+    "    os.environ[f'npm_config_{config_role}config'] = config_path\n"
     "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
 )
 
@@ -329,6 +338,16 @@ def run_rebuild(
         "    'runner_temp': os.environ.get('RUNNER_TEMP'),\n"
         "    'github_workspace': os.environ.get('GITHUB_WORKSPACE'),\n"
         "    'npm_userconfig': os.environ.get('npm_config_userconfig'),\n"
+        "    'npm_globalconfig': os.environ.get('npm_config_globalconfig'),\n"
+        "    'npm_config_directory_mode': Path(os.environ['npm_config_userconfig']).parent.stat().st_mode & 0o777,\n"
+        "    'npm_config_file_metadata': {\n"
+        "        role: {\n"
+        "            'mode': Path(os.environ[f'npm_config_{role}config']).stat().st_mode & 0o777,\n"
+        "            'size': Path(os.environ[f'npm_config_{role}config']).stat().st_size,\n"
+        "            'is_file': Path(os.environ[f'npm_config_{role}config']).is_file(),\n"
+        "        }\n"
+        "        for role in ('user', 'global')\n"
+        "    },\n"
         "    'visible_sensitive_ancestors': sorted(visible),\n"
         "    'readable_processes': readable_processes,\n"
         "    'read_errors': read_errors,\n"
@@ -496,36 +515,71 @@ def assert_no_lifecycle_command_file_access(command_files, marker):
     )
 
 
-def assert_rebuild_capture(capture, package_manager, onnx_value):
+def assert_rebuild_capture(capture, package_manager, onnx_value, *, cleanup_config_directory=True):
     observed = json.loads(capture.read_text(encoding="utf-8"))
-    expected = {
-        "onnxruntime_node_install": onnx_value,
-        "argv": ["npm", "rebuild", "onnxruntime-node"]
-        if package_manager == "npm"
-        else ["corepack", "pnpm", "rebuild", "onnxruntime-node"],
-        "rebuild_env": "<unset>",
-        "visible_command_files": [],
-        "node_auth_token": "<unset>",
-        "gh_token": "<unset>",
-        "github_token": "<unset>",
-        "home": "/tmp/home",
-        "runner_temp": "/tmp",
-        "github_workspace": "/tmp/verjson-secretless-workspace",
-        "npm_userconfig": "/dev/null",
-        "visible_sensitive_ancestors": [],
-        "read_errors": [],
-        "hidden_path_writes": [],
+    npm_config_paths = {
+        "user": observed.get("npm_userconfig"),
+        "global": observed.get("npm_globalconfig"),
     }
-    assert all(observed.get(key) == value for key, value in expected.items() if key != "readable_processes"), (
-        f"unexpected package-manager execution environment: {observed!r}"
-    )
-    invocation_log = capture.with_name(".package-manager-invocations.jsonl")
-    invocations = [
-        json.loads(line) for line in invocation_log.read_text(encoding="utf-8").splitlines()
-    ]
-    assert invocations == [expected["argv"]], f"unexpected package-manager invocations: {invocations!r}"
-    assert observed["readable_processes"], "process ancestry scan inspected no environments"
+    user_path = npm_config_paths["user"]
+    config_directory = Path(user_path).parent if isinstance(user_path, str) else None
 
+    try:
+        expected = {
+            "onnxruntime_node_install": onnx_value,
+            "argv": ["npm", "rebuild", "onnxruntime-node"]
+            if package_manager == "npm"
+            else ["corepack", "pnpm", "rebuild", "onnxruntime-node"],
+            "rebuild_env": "<unset>",
+            "visible_command_files": [],
+            "node_auth_token": "<unset>",
+            "gh_token": "<unset>",
+            "github_token": "<unset>",
+            "home": "/tmp/home",
+            "runner_temp": "/tmp",
+            "github_workspace": "/tmp/verjson-secretless-workspace",
+            "visible_sensitive_ancestors": [],
+            "read_errors": [],
+            "hidden_path_writes": [],
+        }
+        assert all(
+            observed.get(key) == value for key, value in expected.items()
+            if key != "readable_processes"
+        ), f"unexpected package-manager execution environment: {observed!r}"
+        assert all(
+            isinstance(path, str) and path.startswith("/tmp/")
+            for path in npm_config_paths.values()
+        ), f"npm configs must use private files in the credentialless sandbox: {npm_config_paths!r}"
+        assert npm_config_paths["user"] != npm_config_paths["global"], (
+            "npm user and global configs must use distinct empty paths in the credentialless sandbox: "
+            f"{npm_config_paths!r}"
+        )
+        config_directory = Path(npm_config_paths["user"]).parent
+        assert config_directory == Path(npm_config_paths["global"]).parent
+        assert config_directory.name.startswith("npm-config-")
+        assert observed.get("npm_config_directory_mode") == 0o700, (
+            "npm config directory must be private to the sandbox: "
+            f"{observed.get('npm_config_directory_mode')!r}"
+        )
+        assert observed.get("npm_config_file_metadata") == {
+            "user": {"mode": 0o600, "size": 0, "is_file": True},
+            "global": {"mode": 0o600, "size": 0, "is_file": True},
+        }, f"npm configs must be distinct empty private files: {observed.get('npm_config_file_metadata')!r}"
+        invocation_log = capture.with_name(".package-manager-invocations.jsonl")
+        invocations = [
+            json.loads(line) for line in invocation_log.read_text(encoding="utf-8").splitlines()
+        ]
+        assert invocations == [expected["argv"]], f"unexpected package-manager invocations: {invocations!r}"
+        assert observed["readable_processes"], "process ancestry scan inspected no environments"
+    finally:
+        if cleanup_config_directory and config_directory is not None:
+            if (
+                config_directory.parent == Path("/tmp")
+                and config_directory.name.startswith("npm-config-")
+                and not config_directory.is_symlink()
+                and config_directory.is_dir()
+            ):
+                shutil.rmtree(config_directory)
 
 def assert_bubblewrap_arguments(arguments_path, workspace, package_manager):
     receipt = json.loads(arguments_path.read_text(encoding="utf-8"))
@@ -666,7 +720,78 @@ def run_consumer_descriptor_probe():
             os.close(git_descriptor)
 
 
+def assert_npm_config_paths_load_independently():
+    npm = shutil.which("npm")
+    if npm is None:
+        return
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config_root = Path(temporary)
+        home = config_root / "home"
+        home.mkdir()
+        clean_environment = {
+            name: value
+            for name, value in os.environ.items()
+            if name != "BASH_ENV"
+            and not name.lower().startswith("npm_config_")
+            and name.upper() not in {sensitive.upper() for sensitive in SENSITIVE_ENV}
+        }
+        clean_environment.update({"HOME": str(home), "CI": "true"})
+        version = subprocess.run(
+            [npm, "--version"],
+            check=False,
+            capture_output=True,
+            env=clean_environment,
+            text=True,
+        )
+        assert version.returncode == 0, version.stderr
+        major = int(version.stdout.strip().split(".", maxsplit=1)[0])
+        if major < 11:
+            return
+
+        shared_path = "/dev/null"
+        duplicate_environment = {
+            **clean_environment,
+            "NPM_CONFIG_USERCONFIG": shared_path,
+            "NPM_CONFIG_GLOBALCONFIG": shared_path,
+        }
+        duplicate = subprocess.run(
+            [npm, "--version"],
+            check=False,
+            capture_output=True,
+            env=duplicate_environment,
+            text=True,
+        )
+        duplicate_output = duplicate.stdout + duplicate.stderr
+        assert duplicate.returncode != 0 and "double-loading config" in duplicate_output, (
+            "expected npm 11+ to reject one path used for both configs; "
+            f"exit={duplicate.returncode}, output={duplicate_output!r}"
+        )
+
+        user_config = config_root / "npm-userconfig"
+        global_config = config_root / "npm-globalconfig"
+        user_config.write_text("", encoding="utf-8")
+        global_config.write_text("", encoding="utf-8")
+        distinct_environment = {
+            **clean_environment,
+            "NPM_CONFIG_USERCONFIG": str(user_config),
+            "NPM_CONFIG_GLOBALCONFIG": str(global_config),
+        }
+        distinct = subprocess.run(
+            [npm, "--version"],
+            check=False,
+            capture_output=True,
+            env=distinct_environment,
+            text=True,
+        )
+        assert distinct.returncode == 0, (
+            "npm 11+ should accept separate empty config files: "
+            f"{distinct.stdout}{distinct.stderr}"
+        )
+
+
 def main():
+    assert_npm_config_paths_load_independently()
     invalid_values = (
         {"NODE_AUTH_TOKEN": "secret"},
         {"API_KEY": "secret"},
@@ -1340,7 +1465,7 @@ def main():
                         probe_hidden_paths=True,
                     )
                     assert result.returncode == 0, result.stderr
-                    assert_rebuild_capture(capture, package_manager, "skip")
+                    assert_rebuild_capture(capture, package_manager, "skip", cleanup_config_directory=False)
                     assert_no_lifecycle_command_file_access(command_files, marker)
         run_consumer_descriptor_probe()
 
