@@ -211,11 +211,19 @@ fi
 # authorization, and receipt verifier contracts remain green. Point at the
 # registered suites that own each behavior instead of asking the receipt verifier
 # suite to stand in for unrelated arm logic (#733).
+# A row may carry @exclusive or @budget directives before its command.
+manifest_registers() {
+  awk -F '\t' -v want="$1" '
+    { command = $2; while (command ~ /^@[^ ]+ /) sub(/^@[^ ]+ /, "", command) }
+    command == want { found = 1 }
+    END { exit !found }
+  ' "$actions_ci"
+}
 for replacement in \
   'bash scripts/ci-gate/gate-hold-disable.test.sh' \
   'python3 scripts/ci-gate/event-driven-authorization.test.py' \
   'bash scripts/ci-gate/arm-receipt.test.sh'; do
-  grep -q $'\t'"$replacement"'$' "$actions_ci" \
+  manifest_registers "$replacement" \
     && pass "actions-ci registers the canonical replacement: $replacement" \
     || fail "canonical replacement is not registered: $replacement"
 done
