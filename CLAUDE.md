@@ -77,19 +77,9 @@ Each entry states the concrete fact and how/when it was last verified — a live
 not just inspection of prose (#956: an entry asserting external status should say how it
 was confirmed, since inspection-only claims go stale silently).
 
-
-
-- [#1663](https://github.com/Verjson/.github/issues/1663) — The generated label re-arm caller also subscribed to lifecycle events already handled by `gate-rearm.yml`; confirmed 2026-09-30 by comparing both generators and caller contracts.
-
-- [#1669](https://github.com/Verjson/.github/issues/1669) — Node 26 places npm’s CLI under the validated tool prefix’s `lib` tree while the launcher looks below `bin`; the registered credentialless consumer script plan regression and protected identity harness pass locally on 2026-10-01, pending canonical CI.
-
-- [#1682](https://github.com/verJSON/.github/issues/1682) — GitHub's `verJSON/.github` casing exposed case-sensitive repository checks in Node CI, hosted-selector policy selection, required-workflow receipts, API-backed run provenance in gate re-arm, post-merge authorization, dependency supersession, zero-provider recovery, private GitHub Packages tarball provenance, and the container deployment-review producer. Reproduced in verjson-ai-gguf#139 CI attempt 2 and the live branch-rules API on 2026-10-02; fixes are in [PR #1683](https://github.com/verJSON/.github/pull/1683).
-
-- [#1665](https://github.com/Verjson/.github/issues/1665) — The generated gate caller requires a typed reusable environment input and directly handles only head transitions; lifecycle and label events remain on their dedicated callers. Verified 2026-10-01 with `bash scripts/ci-gate/gate-rearm-caller-contract.test.sh` and actionlint 1.7.7.
-- [#1675](https://github.com/Verjson/.github/issues/1675) — The required reusable input does not select a different role environment: ADR 0166 fixes generated callers to `ai-review-app`, and the generated-caller contract test pins that value. Verified 2026-10-01 against the caller contract test and ADR 0166.
+- [#1752](https://github.com/verJSON/.github/issues/1752) — Generalize the isolated inline Python interpreter contract from the Node CI pair to every workflow; blocked by #1749 (PR #1750, which adds the Node CI test). Opened 2026-10-13 after a per-workflow count during #1750 review.
 
 - [#1667](https://github.com/Verjson/.github/issues/1667) — Track configurable generated OCI candidate destinations for GHCR, GAR, and Sonatype Nexus. Opened 2026-10-01 after live issue searches and checking related [.github#1264](https://github.com/Verjson/.github/issues/1264), [.github#1186](https://github.com/Verjson/.github/issues/1186), and [verjson-ci#30](https://github.com/Verjson/verjson-ci/issues/30); those cover adopter rollout and GitLab CE Nexus engine work, not registry-neutral canonical publisher destinations.
-- [#1689](https://github.com/verJSON/.github/issues/1689) — Keyless Cosign candidate evidence needs a private reusable-workflow and same-digest GHCR-to-GAR canary before eligibility. Verified 2026-10-05: the dedicated GCP project is billed and its private GAR canary repository exists; identity and evidence gates remain open in PR #1690.
 
 - [#1692](https://github.com/Verjson/.github/issues/1692) — Target current `main` HEAD in dev via a fast, validated image path and promote one fully verified pinned digest set from nonprod to prod with separate environment controls; opened 2026-10-05 after confirming the candidate and release generators lack a general app deployment caller.
 
@@ -102,7 +92,6 @@ was confirmed, since inspection-only claims go stale silently).
 - [#1363](https://github.com/Verjson/.github/issues/1363) — Separate AI authorization-arm enrollment from deterministic core checks. Live audit on 2026-09-27 reports one armed repository without canonical deterministic CI (`verjson-agents`, verjson-agents#417 filed with the proposed diff); the ADR 0206 transaction applies after verjson-agents#417 (via #1401) closes. Since the organization App keys were withdrawn on 2026-09-27, ruleset 20722935 runs `gate-rearm@b7e7899` and only the 12 repositories holding the key in `ai-review-app` can arm (#1385).
 
 - [#629](https://github.com/Verjson/.github/issues/629) — Protected runner canary rollout. GitHub API verification on 2026-09-04: `verjson-github-runner` has no generated deployment caller; its protected `production` environment has the registration App key but lacks `DIGITALOCEAN_RUNNER_FLEET_TOKEN`. Its environment review policy also needs alignment with ADR 0144. Complete adopter installation and a non-production fleet canary/stop/rollback receipt in the owning repository before closure.
-
 
 - [#1451](https://github.com/Verjson/.github/issues/1451) — Complete consumer capacity validation and live host acceptance. The generated caller now inherits the `production` environment secret context (#1625, ADR 0198 amendment 2026-09-26); the verjson-git-runners PM regenerates its caller at that SHA and re-dispatches the dry-run for the first CI-driven host-export receipt.
 
