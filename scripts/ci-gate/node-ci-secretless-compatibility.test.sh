@@ -247,7 +247,7 @@ assert protected_acquire["outputs"]["transfer-encryption-key"] == (
     "${{ steps.package-secretless-transfer.outputs.encryption-key }}"
 )
 assert "npm-private-cache.tar.enc" in protected_package["run"]
-assert 'TRANSFER_KEY="$encryption_key" python3 "$RUNNER_TEMP/container_dependency_transfer.py" encrypt' in protected_package["run"]
+assert 'TRANSFER_KEY="$encryption_key" python3 -I "$RUNNER_TEMP/container_dependency_transfer.py" encrypt' in protected_package["run"]
 assert '--destination "$TRANSFER_DIR/npm-private-cache.tar.enc"' in protected_package["run"]
 assert 'rm -f "$TRANSFER_DIR/npm-private-cache.tar"' in protected_package["run"]
 assert protected_package["run"].index("npm-private-cache.tar.enc") < protected_package["run"].index(
@@ -1297,7 +1297,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-MARKER = "python3 - <<'PY'\n"
+MARKER = "python3 -I - <<'PY'\n"
 TARGET = "/dev/shm/npm-cache/_cacache/content-v2"
 STAGING = "/runner-temp/verjson-compatibility-public-cache-x/content-v2"
 EXPECTED_MOUNT_OPTIONS = {

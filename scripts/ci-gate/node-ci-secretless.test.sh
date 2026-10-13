@@ -186,7 +186,7 @@ validator="$(mktemp)"
 trap 'rm -f "$validator"' EXIT
 awk '
   /- name: Validate approved internal dependency lock/ { found = 1; next }
-  found && /python3 - <<'"'"'PY'"'"'/ { copying = 1; next }
+  found && /python3 -I - <<'"'"'PY'"'"'/ { copying = 1; next }
   copying && /^          PY$/ { exit }
   copying { sub(/^          /, ""); print }
 ' "$workflow" > "$validator"

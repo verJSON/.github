@@ -26,7 +26,7 @@ install = next(
     if step.get("name") == "Install from verified secretless npm cache"
 )["run"]
 
-rewrite_marker = 'MOCK_REGISTRY_NPMRC="$MOCK_REGISTRY_NPMRC" python3 - <<\'PY\'\n'
+rewrite_marker = 'MOCK_REGISTRY_NPMRC="$MOCK_REGISTRY_NPMRC" python3 -I - <<\'PY\'\n'
 rewrite_source = install.split(rewrite_marker, 1)[1].split("\nPY\n", 1)[0]
 open(sys.argv[2], "w", encoding="utf-8").write(rewrite_source + "\n")
 

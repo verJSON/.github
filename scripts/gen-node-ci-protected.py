@@ -76,7 +76,7 @@ PROTECTED_BASELINE_STEP = """      - name: Resolve protected type-surface baseli
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           import hashlib
           import json
           import os
@@ -215,7 +215,7 @@ PROTECTED_BASELINE_BIND_STEP = """      - name: Bind protected baseline receipt 
           PROTECTED_BASELINE_RECEIPT: ${{ steps.resolve-protected-type-surface.outputs.receipt-path }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           import json
           import os
           from pathlib import Path
@@ -475,7 +475,7 @@ def configure_changelog_tool_cache(document: str) -> str:
         if: {plan_if}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           import hashlib
           import os
           import re
@@ -1615,7 +1615,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
         + execution_markers[1]
         + step[execution_end:]
     )
-    python_start = "          python3 - <<'PY'\n"
+    python_start = "          python3 -I - <<'PY'\n"
     python_end = "          PY"
     if step.count(python_start) != 1 or step.count(python_end) != 1:
         raise SystemExit("protected candidate script Python boundary changed")
@@ -1630,7 +1630,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
           }
           trap 'forward_candidate_signal INT 130' INT
           trap 'forward_candidate_signal TERM 143' TERM
-          python3 - <<'PY' &
+          python3 -I - <<'PY' &
 """
     supervised_end = '''          PY
           candidate_cache_supervisor_pid=$!
