@@ -21,7 +21,8 @@ fixture checkout carrying same-named modules.
 
 Documented limitations: an interpreter path computed inside Python (for
 example from ``shutil.which`` or a variable passed to ``subprocess``), or
-reached through shell indirection such as ``eval``, functions, or aliases,
+reached through shell indirection such as ``eval``, command substitution
+(``"$(command -v python3)" -``), functions, or aliases,
 is not detected lexically. Review those forms by hand.
 """
 import base64
@@ -46,8 +47,9 @@ WORKFLOWS = (
 # empty: an interpreter that cannot run isolated must be fixed, not listed.
 ALLOWED_NON_ISOLATED = frozenset()
 
-INTERPRETER = r"(?:/usr/(?:local/)?bin/)?python(?:3(?:\.\d+)?)?"
-INTERPRETER_TOKEN = re.compile(r"(?<![\w.$/-])" + INTERPRETER + r"(?![\w.-])")
+# Any directory prefix counts: toolcache and venv interpreters are still Python.
+INTERPRETER = r"(?:[^\s\"'`=;|&()$]*/)?python(?:3(?:\.\d+)?)?"
+INTERPRETER_TOKEN = re.compile(r"(?<![\w.$/-])" + INTERPRETER + r"(?![\w./-])")
 LIST_INVOCATION = re.compile(
     r"""(?:["']""" + INTERPRETER + r"""["']|sys\.executable)\s*,\s*(?P<next>[^,\])\n]*)"""
 )
@@ -190,6 +192,10 @@ def assert_scanner_recognizes_invocation_forms():
         'python3 "$SERVER" "$DIRECTORY" &',
         "python -c 'print(1)'",
         "python3.12 -u - <<'PY'",
+        # Any interpreter directory, not only /usr/bin.
+        "/opt/hostedtoolcache/Python/3.12.7/x64/bin/python3 - <<'PY'",
+        "/bin/python3 -c pass",
+        "./venv/bin/python -c pass",
         '"/usr/bin/python3", "-c", source,',
         "subprocess.run([sys.executable, script])",
         "subprocess.run([\"python3\", \"-c\", source])",
