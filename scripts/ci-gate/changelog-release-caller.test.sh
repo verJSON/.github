@@ -1046,13 +1046,15 @@ SCOPES = (
     "id-token", "issues", "models", "packages", "pages", "pull-requests",
     "repository-projects", "security-events", "statuses",
 )
+CALLER_USES = re.compile(r"/\.github/workflows/([\w.-]+\.ya?ml)@")
+NESTED_USES = re.compile(r"\./\.github/workflows/([\w.-]+\.ya?ml)")
 
 
-def effective(job_block, top_block):
-    """Expand a permissions value into a full scope map; a job inherits the top level."""
-    block = job_block if job_block is not None else top_block
+def declared(job, top):
+    """Expand a job's permissions, inherited from the top level; None when neither declares any."""
+    block = job.get("permissions") if job.get("permissions") is not None else top
     if block is None:
-        return {scope: "write" for scope in SCOPES}  # default token grant
+        return None
     if isinstance(block, str):
         if block not in ("read-all", "write-all"):
             raise SystemExit(f"unsupported permissions value: {block!r}")
@@ -1063,30 +1065,65 @@ def effective(job_block, top_block):
     return {scope: block.get(scope, "none") for scope in SCOPES}
 
 
+def capped(asked, cap):
+    return {scope: min(asked[scope], cap[scope], key=RANK.__getitem__) for scope in SCOPES}
+
+
+def check_callee(label, callee_file, grant, chain=()):
+    """Every job in callee_file must fit inside grant, the calling job's token."""
+    if callee_file in chain:
+        cycle = " -> ".join(chain + (callee_file,))
+        problems.append(f"{label} closes a reusable-workflow cycle: {cycle}")
+        return
+    callee_path = os.path.join(workflows_dir, callee_file)
+    if not os.path.exists(callee_path):
+        problems.append(f"{label} delegates to {callee_file}, which is not in this repository")
+        return
+    callee = yaml.safe_load(open(callee_path, encoding="utf-8"))
+    callee_top = callee.get("permissions")
+    for job_name, job in callee["jobs"].items():
+        # A called job that declares nothing inherits the grant; it cannot ask for more.
+        asked = declared(job, callee_top) or grant
+        for scope, level in asked.items():
+            if RANK[grant[scope]] < RANK[level]:
+                problems.append(
+                    f"{label} grants {scope}: {grant[scope]} but "
+                    f"{callee_file} job {job_name} needs {scope}: {level}"
+                )
+        if "uses" not in job:
+            continue
+        nested = NESTED_USES.fullmatch(str(job["uses"]))
+        if not nested:
+            problems.append(
+                f"{callee_file} job {job_name} calls {job['uses']!r}, "
+                "which is not a local reusable workflow"
+            )
+            continue
+        check_callee(
+            f"{label} via {callee_file} job {job_name}",
+            nested.group(1),
+            capped(asked, grant),
+            chain + (callee_file,),
+        )
+
+
 caller = yaml.safe_load(open(caller_path, encoding="utf-8"))
 caller_top = caller.get("permissions")
 problems = []
 checked = 0
 for name, job in caller["jobs"].items():
-    match = re.search(r"/\.github/workflows/([\w.-]+\.ya?ml)@", str(job.get("uses", "")))
-    if not match:
+    if "uses" not in job:
         continue
     checked += 1
-    callee_path = os.path.join(workflows_dir, match.group(1))
-    if not os.path.exists(callee_path):
-        problems.append(f"{name} delegates to {match.group(1)}, which is not in this repository")
+    match = CALLER_USES.search(str(job["uses"]))
+    if not match:
+        problems.append(f"{name} calls {job['uses']!r}, which is not a reusable workflow in this repository")
         continue
-    callee = yaml.safe_load(open(callee_path, encoding="utf-8"))
-    callee_top = callee.get("permissions")
-    granted = effective(job.get("permissions"), caller_top)
-    for callee_name, callee_job in callee["jobs"].items():
-        needed = effective(callee_job.get("permissions"), callee_top)
-        for scope, level in needed.items():
-            if RANK[granted[scope]] < RANK[level]:
-                problems.append(
-                    f"{name} grants {scope}: {granted[scope]} but "
-                    f"{match.group(1)} job {callee_name} needs {scope}: {level}"
-                )
+    granted = declared(job, caller_top)
+    if granted is None:
+        problems.append(f"caller job {name} declares no permissions")
+        continue
+    check_callee(name, match.group(1), granted)
 if not checked:
     problems.append("no job delegates to a reusable workflow")
 print("\n".join(problems))
@@ -1094,10 +1131,127 @@ sys.exit(1 if problems else 0)
 PY
 
 callee_workflows="$root/.github/workflows"
-if python3 "$tmp/check_callee_grants.py" "$release" "$callee_workflows" >"$tmp/grants.out" 2>&1; then
-  pass "every reusable-workflow job in the release caller grants what its callee declares (#1747)"
+
+# Every generated workflow that calls a reusable workflow is compared, not only
+# release-node: each mode is an independent emitter, so one mode's grant being
+# right says nothing about the next. Modes are classified against the
+# generator's own usage list so a new mode cannot escape the comparison by
+# being left out of this table.
+grant_cases=(
+  "workflow"
+  "generated-artifacts"
+  "generated-artifacts-with-adr-index"
+  "renovate-attribution"
+  "release-node"
+  "release-artifact --build-runner ubuntu-24.04"
+  "release-snapshot"
+  "release-propose --autonomy propose"
+  "release-propose --autonomy dispatch"
+)
+no_reusable_call_modes=(pr-gate)
+non_workflow_modes=(adr-index-generator adr-index-test codeowners renderer contract-test)
+
+generator_modes="$(sed -n 's/.*usage: $(basename "$0") {\([^}]*\)}.*/\1/p' "$gen" | tr '|' '\n')"
+if [ -z "$generator_modes" ]; then
+  fail "could not read the generator's mode list from its usage line"
+fi
+classified_modes=" ${no_reusable_call_modes[*]} ${non_workflow_modes[*]} "
+for case_args in "${grant_cases[@]}"; do
+  classified_modes+="${case_args%% *} "
+done
+while IFS= read -r generator_mode; do
+  [ -n "$generator_mode" ] || continue
+  case "$classified_modes" in
+    *" $generator_mode "*) ;;
+    *) fail "generator mode $generator_mode is not classified for the callee grant comparison" ;;
+  esac
+done <<<"$generator_modes"
+
+for case_args in "${grant_cases[@]}"; do
+  read -r -a gen_args <<<"$case_args"
+  caller="$tmp/grants-${case_args// /_}.yml"
+  if ! bash "$gen" "${gen_args[0]}" "$sha" "${gen_args[@]:1}" >"$caller" 2>"$tmp/gen.err"; then
+    fail "$case_args failed to generate: $(cat "$tmp/gen.err")"
+  elif python3 "$tmp/check_callee_grants.py" "$caller" "$callee_workflows" >"$tmp/grants.out" 2>&1; then
+    pass "$case_args grants every reusable-workflow job what its callee declares (#1747)"
+  else
+    fail "$case_args under-grants a reusable workflow: $(cat "$tmp/grants.out")"
+  fi
+done
+
+# pr-gate runs its job inline; assert that rather than leaving it out silently.
+for excluded_mode in "${no_reusable_call_modes[@]}"; do
+  caller="$tmp/grants-$excluded_mode.yml"
+  if ! bash "$gen" "$excluded_mode" "$sha" >"$caller" 2>"$tmp/gen.err"; then
+    fail "$excluded_mode failed to generate: $(cat "$tmp/gen.err")"
+  elif python3 "$tmp/check_callee_grants.py" "$caller" "$callee_workflows" >"$tmp/grants.out" 2>&1; then
+    fail "$excluded_mode is excluded from the grant comparison but the checker accepted it as a caller"
+  elif [ "$(cat "$tmp/grants.out")" = "no job delegates to a reusable workflow" ]; then
+    pass "$excluded_mode calls no reusable workflow, so it has no callee grant to compare"
+  else
+    fail "$excluded_mode is excluded from the grant comparison but: $(cat "$tmp/grants.out")"
+  fi
+done
+
+# A calling job with no permissions anywhere gets the repository's default token,
+# which this test cannot see; guessing write-all would accept any callee.
+ungranted="$tmp/renovate-no-permissions.yml"
+awk '/^permissions:$/ { skipping = 1; next }
+  skipping && /^  / { next }
+  { skipping = 0; print }' "$tmp/grants-renovate-attribution.yml" >"$ungranted"
+if cmp -s "$tmp/grants-renovate-attribution.yml" "$ungranted"; then
+  fail "the permissions-removal mutation changed nothing; the undeclared-grant check is unproven"
+elif python3 "$tmp/check_callee_grants.py" "$ungranted" "$callee_workflows" >"$tmp/grants.out" 2>&1; then
+  fail "a calling job that declares no permissions was accepted"
+elif grep -qxF 'caller job renovate-changelog declares no permissions' "$tmp/grants.out"; then
+  pass "a calling job that declares no permissions is rejected rather than assumed write-all"
 else
-  fail "the release caller under-grants a reusable workflow: $(cat "$tmp/grants.out")"
+  fail "the undeclared-grant mutation was rejected for the wrong reason: $(cat "$tmp/grants.out")"
+fi
+
+# A callee that itself calls a reusable workflow caps the nested callee at the
+# calling job's grant, not the outer caller's: renovate-attribution grants
+# pull-requests: read, but renovate-changelog.yml's app-key-policy job does not
+# pass it on, so app-key-environment.yml asking for it must be rejected.
+nested_workflows="$tmp/nested-workflows"
+cp -R "$callee_workflows" "$nested_workflows"
+awk '/^  validate-ai-review-key:$/ { in_job = 1 }
+  { print }
+  in_job && /^      contents: read$/ { print "      pull-requests: read"; in_job = 0 }' \
+  "$callee_workflows/app-key-environment.yml" >"$nested_workflows/app-key-environment.yml"
+if cmp -s "$callee_workflows/app-key-environment.yml" "$nested_workflows/app-key-environment.yml"; then
+  fail "the nested over-ask mutation changed nothing; the nested grant comparison is unproven"
+elif python3 "$tmp/check_callee_grants.py" "$tmp/grants-renovate-attribution.yml" "$nested_workflows" >"$tmp/grants.out" 2>&1; then
+  fail "a nested callee asking for more than its calling job grants was accepted"
+elif grep -qxF 'renovate-changelog via renovate-changelog.yml job app-key-policy grants pull-requests: none but app-key-environment.yml job validate-ai-review-key needs pull-requests: read' "$tmp/grants.out"; then
+  pass "a nested callee is capped at its calling job's grant, not the outer caller's"
+else
+  fail "the nested over-ask mutation was rejected for the wrong reason: $(cat "$tmp/grants.out")"
+fi
+
+# GitHub rejects a reusable-workflow cycle; the recursion must report one rather
+# than overflow the stack.
+cyclic_workflows="$tmp/cyclic-workflows"
+cp -R "$callee_workflows" "$cyclic_workflows"
+python3 - "$cyclic_workflows/app-key-environment.yml" <<'PY'
+import sys
+
+import yaml
+
+path = sys.argv[1]
+doc = yaml.safe_load(open(path, encoding="utf-8"))
+doc["jobs"]["loop"] = {
+    "uses": "./.github/workflows/renovate-changelog.yml",
+    "permissions": {"actions": "read", "contents": "read"},
+}
+open(path, "w", encoding="utf-8").write(yaml.safe_dump(doc, sort_keys=False))
+PY
+if python3 "$tmp/check_callee_grants.py" "$tmp/grants-renovate-attribution.yml" "$cyclic_workflows" >"$tmp/grants.out" 2>&1; then
+  fail "a reusable-workflow cycle was accepted"
+elif grep -qF 'closes a reusable-workflow cycle: renovate-changelog.yml -> app-key-environment.yml -> renovate-changelog.yml' "$tmp/grants.out"; then
+  pass "a reusable-workflow cycle is reported instead of recursing forever"
+else
+  fail "the reusable-workflow cycle was rejected for the wrong reason: $(tail -n 3 "$tmp/grants.out")"
 fi
 
 withheld="$tmp/release-withheld-actions.yml"
