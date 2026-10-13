@@ -47,6 +47,7 @@ esac
 
 declare -a commands=()
 declare -a command_exclusive=()
+declare -a command_budgets=()
 declare -A command_index_by_pid=()
 declare -A worker_command_group_by_index=()
 declare -A worker_wait_status_by_index=()
@@ -62,23 +63,52 @@ while IFS=$'\t' read -r command_group command; do
     printf 'empty command in actions-ci group %s\n' "$group" >&2
     exit 2
   }
+  # Leading @directives configure the row and are not part of the command:
+  # `@exclusive` reserves the runner, `@budget=<seconds>` replaces the group
+  # default budget for a row whose measured cost needs more (#1736).
   exclusive=0
-  case "$command" in
-    '@exclusive '*)
-      exclusive=1
-      command="${command#@exclusive }"
-      ;;
-    @exclusive*)
-      printf 'invalid exclusive command in actions-ci group %s\n' "$group" >&2
+  row_budget=''
+  while [[ "$command" == @* ]]; do
+    directive="${command%% *}"
+    [ "$directive" != "$command" ] || {
+      printf 'empty command in actions-ci group %s\n' "$group" >&2
       exit 2
-      ;;
-  esac
+    }
+    command="${command#"$directive" }"
+    case "$directive" in
+      @exclusive)
+        [ "$exclusive" -eq 0 ] || {
+          printf 'duplicate manifest directive in actions-ci group %s: %s\n' "$group" "$directive" >&2
+          exit 2
+        }
+        exclusive=1
+        ;;
+      @budget=*)
+        [ -z "$row_budget" ] || {
+          printf 'duplicate manifest directive in actions-ci group %s: %s\n' "$group" "$directive" >&2
+          exit 2
+        }
+        row_budget="${directive#@budget=}"
+        [[ "$row_budget" =~ ^[1-9][0-9]*$ ]] || {
+          printf 'invalid command budget in actions-ci group %s: %s\n' "$group" "$directive" >&2
+          exit 2
+        }
+        ;;
+      *)
+        printf 'unknown manifest directive in actions-ci group %s: %s\n' "$group" "$directive" >&2
+        exit 2
+        ;;
+    esac
+  done
   [ -n "$command" ] || {
     printf 'empty command in actions-ci group %s\n' "$group" >&2
     exit 2
   }
+  # Row budgets are a pull-request tripwire: without a group budget no row is capped.
+  [ -n "$command_budget" ] || row_budget=''
   commands+=("$command")
   command_exclusive+=("$exclusive")
+  command_budgets+=("${row_budget:-$command_budget}")
 done <"$manifest"
 
 if [ "${#commands[@]}" -eq 0 ]; then
@@ -210,7 +240,7 @@ else
 fi
 exit "$status"
 SUPERVISOR
-  setsid bash "$tmp/$index.supervisor.sh" "$command_budget" "$command" \
+  setsid bash "$tmp/$index.supervisor.sh" "${command_budgets[$index]}" "$command" \
     "$tmp/$index.raw.log" "$command_group_file" &
   supervisor_pid="$!"
   worker_command_group_by_index["$index"]="$supervisor_pid"
@@ -242,6 +272,9 @@ report_worker_result() {
   local log_file="$tmp/$index.log"
   local status=''
   local elapsed=''
+  local budget="${command_budgets[$index]}"
+  local budget_report=''
+  [ -z "$budget" ] || budget_report=" budget=${budget}s"
 
   printf '::group::%s\n' "${commands[$index]}"
   if [ -f "$tmp/$index.raw.log" ] \
@@ -293,23 +326,23 @@ report_worker_result() {
   fi
 
   if [ "$status" -ne 0 ]; then
-    if [ -n "$command_budget" ] \
+    if [ -n "$budget" ] \
       && { [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; } \
-      && [ "$elapsed" -ge "$command_budget" ]; then
+      && [ "$elapsed" -ge "$budget" ]; then
       printf '::error::group=%s command=%q timed out after %ss (budget=%ss)\n' \
-        "$group" "${commands[$index]}" "$elapsed" "$command_budget"
+        "$group" "${commands[$index]}" "$elapsed" "$budget"
     else
       printf '::error::group=%s command=%q exit=%d elapsed=%ss\n' \
         "$group" "${commands[$index]}" "$status" "$elapsed"
     fi
     failures=$((failures + 1))
-  elif [ -n "$command_budget" ] && [ "$elapsed" -gt "$command_budget" ]; then
+  elif [ -n "$budget" ] && [ "$elapsed" -gt "$budget" ]; then
     printf '::error::group=%s command=%q elapsed=%ss budget=%ss\n' \
-      "$group" "${commands[$index]}" "$elapsed" "$command_budget"
+      "$group" "${commands[$index]}" "$elapsed" "$budget"
     failures=$((failures + 1))
   fi
-  printf 'actions-ci command group=%s status=%s elapsed=%ss command=%q\n' \
-    "$group" "$status" "$elapsed" "${commands[$index]}"
+  printf 'actions-ci command group=%s status=%s elapsed=%ss%s command=%q\n' \
+    "$group" "$status" "$elapsed" "$budget_report" "${commands[$index]}"
   printf '::endgroup::\n'
   worker_reported_by_index["$index"]=1
 }

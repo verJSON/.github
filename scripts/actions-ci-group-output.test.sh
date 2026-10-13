@@ -120,7 +120,7 @@ EOF
 
 if ACTIONS_CI_COMMAND_BUDGET_SECONDS=60 ACTIONS_CI_GROUP_MANIFEST="$tmp/fast.tsv" \
   bash "$runner" platform >"$tmp/fast.out" 2>"$tmp/fast.err"; then
-  if grep -Eq 'actions-ci command group=platform status=0 elapsed=[0-9]+s command=' "$tmp/fast.out"; then
+  if grep -Eq 'actions-ci command group=platform status=0 elapsed=[0-9]+s budget=60s command=' "$tmp/fast.out"; then
     pass "a command inside its budget passes and reports its elapsed time"
   else
     fail "a passing command did not report its elapsed time"
@@ -132,6 +132,50 @@ if ACTIONS_CI_COMMAND_BUDGET_SECONDS=60 ACTIONS_CI_GROUP_MANIFEST="$tmp/fast.tsv
   fi
 else
   fail "a command inside its budget failed the group"
+fi
+
+# A row that declares its own budget is held to that number, in both
+# directions, instead of the group default (#1736).
+printf 'platform\t@budget=5 sleep 2\nplatform\t@exclusive @budget=1 sleep 4\n' \
+  >"$tmp/declared-budget.tsv"
+runner_status=0
+timeout 20s env ACTIONS_CI_COMMAND_BUDGET_SECONDS=1 \
+  ACTIONS_CI_GROUP_MANIFEST="$tmp/declared-budget.tsv" \
+  bash "$runner" platform >"$tmp/declared-budget.out" 2>"$tmp/declared-budget.err" \
+  || runner_status=$?
+if [ "$runner_status" -eq 1 ] \
+  && grep -Eq 'status=0 elapsed=[0-9]+s budget=5s command=sleep\\? 2$' "$tmp/declared-budget.out" \
+  && grep -q 'command=sleep\\ 4 timed out after [0-9]*s (budget=1s)' "$tmp/declared-budget.out" \
+  && grep -q '1 command(s) failed' "$tmp/declared-budget.err"; then
+  pass "manifest rows run under their declared budget instead of the group default"
+else
+  cat "$tmp/declared-budget.out" "$tmp/declared-budget.err" >&2
+  fail "a declared row budget was ignored or misreported (runner status $runner_status)"
+fi
+# Budgets are a pull-request tripwire; a push run leaves every row uncapped.
+printf 'platform\t@budget=1 sleep 2\n' >"$tmp/uncapped.tsv"
+if ACTIONS_CI_COMMAND_BUDGET_SECONDS='' ACTIONS_CI_GROUP_MANIFEST="$tmp/uncapped.tsv" \
+  bash "$runner" platform >"$tmp/uncapped.out" 2>&1 \
+  && grep -Eq 'status=0 elapsed=[0-9]+s command=sleep\\? 2$' "$tmp/uncapped.out"; then
+  pass "declared row budgets apply only when the group budget is enabled"
+else
+  cat "$tmp/uncapped.out" >&2
+  fail "a declared row budget capped a run without a group budget"
+fi
+printf 'platform\t@budget=0 true\n' >"$tmp/zero-budget.tsv"
+printf 'platform\t@budgt=5 true\n' >"$tmp/unknown-directive.tsv"
+if ACTIONS_CI_GROUP_MANIFEST="$tmp/zero-budget.tsv" bash "$runner" platform \
+  >"$tmp/zero-budget.out" 2>&1; then
+  fail "a zero row budget was accepted"
+elif ACTIONS_CI_GROUP_MANIFEST="$tmp/unknown-directive.tsv" bash "$runner" platform \
+  >"$tmp/unknown-directive.out" 2>&1; then
+  fail "an unknown manifest directive was accepted"
+elif grep -q 'invalid command budget' "$tmp/zero-budget.out" \
+  && grep -q 'unknown manifest directive' "$tmp/unknown-directive.out"; then
+  pass "malformed row budgets and unknown directives fail before any command runs"
+else
+  cat "$tmp/zero-budget.out" "$tmp/unknown-directive.out" >&2
+  fail "malformed manifest directives failed without naming the defect"
 fi
 
 mkdir -p "$tmp/single-bin"
