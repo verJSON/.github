@@ -1158,12 +1158,28 @@ non_workflow_modes=(adr-index-generator adr-index-test codeowners renderer contr
 mode_coverage_problems() {
   local generator="$1" usage_modes arm_modes classified_modes case_args generator_mode
   usage_modes="$(sed -n 's/.*usage: $(basename "$0") {\([^}]*\)}.*/\1/p' "$generator" | tr '|' '\n' | sort -u)"
-  # Arms of the last top-level `case "$mode" in`, at its two-space indent.
-  arm_modes="$(awk '/^case "\$mode" in$/ { arms = ""; in_case = 1; next }
+  local dispatch_arms unrecognized_arm
+  # Every column-2 line of the last top-level `case "$mode" in` is an arm. Labels
+  # may be quoted or alternated; anything else is reported as "!<line>" rather
+  # than skipped, so an arm the parser cannot read fails the guard.
+  dispatch_arms="$(awk '/^case "\$mode" in$/ { arms = ""; in_case = 1; next }
     in_case && /^esac$/ { in_case = 0; dispatch = arms; next }
-    in_case && /^  [a-z][a-z0-9|-]*\)/ { label = $0; sub(/^  /, "", label); sub(/\).*/, "", label)
-      gsub(/\|/, "\n", label); arms = arms label "\n" }
-    END { printf "%s", dispatch }' "$generator" | sort -u)"
+    in_case && /^  [^ ]/ && !/^  (#|;;)/ {
+      line = $0; pattern = substr(line, 3); close_at = index(pattern, ")")
+      if (!close_at) { arms = arms "!" line "\n"; next }
+      count = split(substr(pattern, 1, close_at - 1), labels, "|")
+      for (i = 1; i <= count; i++) {
+        label = labels[i]; gsub(/^ +| +$/, "", label)
+        if (label ~ /^".*"$/ || label ~ /^\047.*\047$/) label = substr(label, 2, length(label) - 2)
+        if (label == "*") continue
+        arms = arms (label ~ /^[a-z][a-z0-9-]*$/ ? label : "!" line) "\n"
+      }
+    }
+    END { printf "%s", dispatch }' "$generator")"
+  arm_modes="$(grep -v '^!' <<<"$dispatch_arms" | sort -u)"
+  while IFS= read -r unrecognized_arm; do
+    echo "generator dispatch arm '$unrecognized_arm' is not a recognized mode label"
+  done < <(grep '^!' <<<"$dispatch_arms" | sed 's/^!//' | sort -u)
   if [ -z "$usage_modes" ]; then
     echo "could not read the generator's mode list from its usage line"
   fi
@@ -1195,21 +1211,38 @@ else
 fi
 
 # The usage line is documentation; the dispatch arms are what runs. A mode added
-# as an arm alone must still be caught.
-unlisted_gen="$tmp/gen-unlisted-mode.sh"
-sed '/^case "\$mode" in$/a\
-  release-foo)\
-    echo "uses: verJSON/.github/.github/workflows/node-release.yml@$ref"\
-    ;;' "$gen" >"$unlisted_gen"
-mode_coverage_problems "$unlisted_gen" >"$tmp/modes.out"
-if cmp -s "$gen" "$unlisted_gen"; then
-  fail "the unlisted-arm mutation changed nothing; the mode guard is unproven"
-elif grep -qxF 'generator mode release-foo is dispatched but missing from its usage line' "$tmp/modes.out" \
-  && grep -qxF 'generator mode release-foo is not classified for the callee grant comparison' "$tmp/modes.out"; then
-  pass "a dispatch arm missing from the usage line is caught and left unclassified"
-else
-  fail "a dispatch arm missing from the usage line was not caught: $(cat "$tmp/modes.out")"
-fi
+# as an arm alone must still be caught, however its label is written: $1
+# describes the arm, $2 is its column-2 line, the rest are lines the guard must
+# report.
+expect_arm_caught() {
+  local description="$1" arm="$2" unlisted_gen="$tmp/gen-unlisted-mode.sh" expected missing=""
+  shift 2
+  awk -v arm="$arm" '{ print } /^case "\$mode" in$/ { print arm; print "    exit 0"; print "    ;;" }' \
+    "$gen" >"$unlisted_gen"
+  mode_coverage_problems "$unlisted_gen" >"$tmp/modes.out"
+  for expected in "$@"; do
+    grep -qxF "$expected" "$tmp/modes.out" || missing+=" [$expected]"
+  done
+  if cmp -s "$gen" "$unlisted_gen"; then
+    fail "the $description mutation changed nothing; the mode guard is unproven"
+  elif [ -z "$missing" ]; then
+    pass "a dispatch-only $description is caught"
+  else
+    fail "a dispatch-only $description was not caught; missing$missing in: $(cat "$tmp/modes.out")"
+  fi
+}
+
+expect_arm_caught "arm" '  release-foo)' \
+  'generator mode release-foo is dispatched but missing from its usage line' \
+  'generator mode release-foo is not classified for the callee grant comparison'
+expect_arm_caught "quoted arm" '  "release-foo")' \
+  'generator mode release-foo is dispatched but missing from its usage line' \
+  'generator mode release-foo is not classified for the callee grant comparison'
+expect_arm_caught "alternation arm" "  release-foo | 'release-bar')" \
+  'generator mode release-foo is dispatched but missing from its usage line' \
+  'generator mode release-bar is dispatched but missing from its usage line'
+expect_arm_caught "unparseable arm" '  release-+([a-z]))' \
+  "generator dispatch arm '  release-+([a-z]))' is not a recognized mode label"
 
 for case_args in "${grant_cases[@]}"; do
   read -r -a gen_args <<<"$case_args"
@@ -1240,16 +1273,30 @@ done
 # A mode listed as non-workflow must not emit a reusable-workflow call; otherwise
 # moving a caller mode into that list would skip the comparison. Match the YAML
 # key, not the substring: contract-test greps for a caller's uses: line.
+reusable_call_pattern='^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]*\.github/workflows/'
+snapshot_calls="$(grep -cE "$reusable_call_pattern" "$tmp/grants-release-snapshot.yml")"
+if [ "$snapshot_calls" = 1 ]; then
+  pass "the reusable-call pattern finds release-snapshot's one changelog-release.yml call"
+else
+  fail "the reusable-call pattern found $snapshot_calls calls in release-snapshot, not 1; the non-workflow check is unproven"
+fi
 for excluded_mode in "${non_workflow_modes[@]}"; do
   if ! bash "$gen" "$excluded_mode" "$sha" >"$tmp/non-workflow.out" 2>"$tmp/gen.err"; then
     fail "$excluded_mode failed to generate: $(cat "$tmp/gen.err")"
-  elif grep -nE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]*\.github/workflows/' \
-    "$tmp/non-workflow.out" >"$tmp/non-workflow.hits"; then
+  elif grep -nE "$reusable_call_pattern" "$tmp/non-workflow.out" >"$tmp/non-workflow.hits"; then
     fail "$excluded_mode is listed as non-workflow but calls a reusable workflow: $(cat "$tmp/non-workflow.hits")"
   else
     pass "$excluded_mode emits no reusable-workflow call"
   fi
 done
+# The negative control: contract-test does name a caller's uses: line, inside a
+# grep, and the pattern must not mistake that for a call.
+if [ "$(bash "$gen" contract-test "$sha" | grep -cF 'uses: verJSON/.github/.github/workflows/')" -ge 1 ] \
+  && [ "$(bash "$gen" contract-test "$sha" | grep -cE "$reusable_call_pattern")" = 0 ]; then
+  pass "the reusable-call pattern ignores contract-test's quoted uses: reference"
+else
+  fail "the reusable-call pattern does not separate contract-test's quoted uses: reference from a call"
+fi
 
 # --- fixtures for each checker branch ------------------------------------------
 
