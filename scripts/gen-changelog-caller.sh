@@ -1289,6 +1289,7 @@ ${release_plan_step}
     if: always() && needs.verify.result == 'success' && needs.verify.outputs.selected == 'true' && (needs.snapshot.result == 'success' || needs.snapshot.result == 'skipped')
     uses: verJSON/.github/.github/workflows/node-release.yml@${ref}
     permissions:
+      actions: read
       contents: write
       packages: write
     with:
