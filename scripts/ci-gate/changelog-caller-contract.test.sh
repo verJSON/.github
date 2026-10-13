@@ -65,11 +65,15 @@ skip() { printf 'skip - %s\n' "$1"; }
 # cause, and keep the emptiness and its explanation in one verdict. Status is
 # taken on the failure branch itself — `if ! bash ...` would invert the very
 # status being read and turn a refusal into a silent empty capture again.
-workflow='' generated_artifacts='' generated_artifacts_with_adr=''
-canonical_codeowners=''
-adr_index_generator='' pr_gate='' release_node_workflow=''
-renovate_attribution='' default_release='' custom_release='' generated_contract=''
-component_release='' custom_contract='' adr_index_test=''
+#
+# Captured fixtures are declared without a value, never as ''. Every mode
+# builds them before any case runs; one a mode skips is then an unbound-variable
+# abort under `set -u`, not an empty contract suite that exits 0 and reads as a
+# pass (#1736).
+declare workflow renderer default_release custom_release component_release
+declare custom_contract generated_artifacts generated_artifacts_with_adr
+declare renovate_attribution adr_index_generator adr_index_test pr_gate
+declare canonical_codeowners release_node_workflow
 mode_capture_failures=0
 capture_mode() {
   local target="$1"
@@ -172,8 +176,8 @@ capture_mode() {
 tmproot="$(mktemp -d)"
 trap 'rm -rf "$tmproot"' EXIT
 : >"$tmproot/run.out"
-if [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ] \
-  || [ "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}" = all ]; then
+# Fixtures every mode needs. Case shards skip the generator-only assertions
+# below, so nothing a case reads may be defined there (#1736).
 capture_mode workflow workflow "$sha"
 capture_mode renderer renderer "$sha"
 capture_mode default_release release-node "$sha"
@@ -187,10 +191,24 @@ capture_mode adr_index_generator adr-index-generator "$sha"
 capture_mode adr_index_test adr-index-test "$sha"
 capture_mode pr_gate pr-gate "$sha"
 capture_mode canonical_codeowners codeowners "$sha"
+capture_mode release_node_workflow release-node "$sha"
 # Every assertion from here on consumes one of those captures, so a mode that
 # refused would otherwise produce a page of unrelated verdicts about empty
 # strings. One named cause is the whole diagnosis; stop rather than bury it.
 [ "$mode_capture_failures" -eq 0 ] || exit 1
+contract_src="$repo_root/scripts/changelog.py"
+[ -f "$contract_src" ] || { echo "FAIL - missing $contract_src"; exit 1; }
+emitted="$tmproot/contract-test.sh"
+if bash "$gen" contract-test "$sha" >"$emitted" 2>"$tmproot/err"; then
+  pass "contract-test mode emits a file"
+else
+  fail "contract-test mode failed: $(cat "$tmproot/err")"
+  echo "$fails failed"
+  exit 1
+fi
+
+if [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ] \
+  || [ "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}" = all ]; then
 grep -qF 'uses: verJSON/.github/.github/workflows/generated-artifacts.yml@' <<<"$workflow" \
   && grep -qF 'raw.githubusercontent.com/verJSON/.github/' <<<"$renderer" \
   && grep -qF '* @verJSON/devs' <<<"$canonical_codeowners" \
@@ -362,8 +380,6 @@ done
 # #971: the release-node exemption above is only as good as the consuming step
 # it names. Tamper with a genuine release-node workflow two ways and confirm
 # the audit re-flags the checkout instead of trusting the step-name match alone.
-capture_mode release_node_workflow release-node "$sha"
-[ "$mode_capture_failures" -eq 0 ] || exit 1
 tampered_renamed="$(WORKFLOW="$release_node_workflow" python3 - <<'PY'
 import os
 
@@ -721,17 +737,6 @@ grep -q 'cannot fetch the changelog contract' "$tmproot/err" \
 # The load-bearing assertion is therefore not "it emits valid bash" but "it
 # exits 0 against an adopter BOTH before and after a real release".
 
-contract_src="$repo_root/scripts/changelog.py"
-[ -f "$contract_src" ] || { echo "FAIL - missing $contract_src"; exit 1; }
-
-emitted="$tmproot/contract-test.sh"
-if bash "$gen" contract-test "$sha" >"$emitted" 2>"$tmproot/err"; then
-  pass "contract-test mode emits a file"
-else
-  fail "contract-test mode failed: $(cat "$tmproot/err")"
-  echo "$fails failed"
-  exit 1
-fi
 
 # 4b. The generator ships the suite that covers it (#1380). Nothing generated
 # the ADR-index test, so ~95 adopters each hand-wrote one, and a hand-written
@@ -1191,6 +1196,7 @@ stray_titles="$(grep -oE "\^## [A-Za-z][^']*" "$emitted" | grep -vxE '\^## (Newe
   && pass "fragment assertions are derived from the tree, not named inline" \
   || fail "emitted test greps for literal fragment titles: $(tr '\n' ' ' <<<"$stray_titles")"
 
+fi
 # Content-addressed by ref, so seeding that cache path with THIS repository's
 # changelog.py makes the run hermetic and exercises the contract as it stands in
 # this pull request. $sha cannot exist upstream, so a seeding bug fails loudly
@@ -1198,17 +1204,6 @@ stray_titles="$(grep -oE "\^## [A-Za-z][^']*" "$emitted" | grep -vxE '\^## (Newe
 export XDG_CACHE_HOME="$tmproot/adopter-cache"
 mkdir -p "$XDG_CACHE_HOME/verjson-changelog/$sha"
 cp "$contract_src" "$XDG_CACHE_HOME/verjson-changelog/$sha/changelog.py"
-else
-  contract_src="$repo_root/scripts/changelog.py"
-  capture_mode generated_contract contract-test "$sha"
-  emitted="$tmproot/contract-test.sh"
-  printf '%s\n' "$generated_contract" >"$emitted"
-  capture_mode custom_release release-node "$sha" --scope @acme --node-version 22.23.1 --package-dir compat --release-asset contract/schema.graphql --release-asset contract/schema.sha256
-  capture_mode release_node_workflow release-node "$sha"
-  export XDG_CACHE_HOME="$tmproot/adopter-cache"
-  mkdir -p "$XDG_CACHE_HOME/verjson-changelog/$sha"
-  cp "$contract_src" "$XDG_CACHE_HOME/verjson-changelog/$sha/changelog.py"
-fi
 if [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ]; then
   [ "$fails" -eq 0 ] || exit 1
   echo "All generator contract assertions passed."

@@ -38,6 +38,96 @@ else
   fail "caller mutations can skip assertions in the generated contract"
 fi
 
+# A case shard skips the generator-only assertions. Anything those assertions
+# assign therefore does not exist in a shard, and a case that reads it builds a
+# different fixture there than in the full run. `custom_contract` did exactly
+# that: shards wrote an empty contract suite, which exits 0, so every positive
+# custom-release case passed vacuously and every rejection case was misreported.
+# Empty initializers do not count as definitions -- one is what hid that leak.
+# Upper-case names are environment prefixes on single commands, not fixtures.
+if python3 - "$caller" <<'PY'
+import re
+import sys
+
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+heredoc_start = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+def top_level_if_blocks():
+    depth = 0
+    heredoc = None
+    start = otherwise = None
+    for index, line in enumerate(lines):
+        if heredoc:
+            if line.strip() == heredoc:
+                heredoc = None
+            continue
+        if re.match(r"if\b", line) and not re.search(r"\bfi\s*(#.*)?$", line):
+            if depth == 0:
+                start, otherwise = index, None
+            depth += 1
+        elif re.match(r"fi\b", line):
+            depth -= 1
+            if depth == 0:
+                yield start, otherwise, index
+        elif re.match(r"else\b", line) and depth == 1:
+            otherwise = index
+        match = heredoc_start.search(line)
+        if match:
+            heredoc = match.group(2)
+
+
+gates = [
+    block
+    for block in top_level_if_blocks()
+    if "CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY" in " ".join(lines[block[0]:block[0] + 3])
+    and block[2] - block[0] > 100
+]
+if len(gates) != 1:
+    raise SystemExit(f"expected one generator-only section, found {len(gates)}")
+start, otherwise, end = gates[0]
+section_end = otherwise if otherwise is not None else end
+variable_patterns = (
+    re.compile(r"^\s*(?:export\s+|local\s+|declare\s+(?:-\w+\s+)?)?([a-z_][a-z0-9_]*)\+?=(?!''|\"\"|\s|$)"),
+    re.compile(r"\bcapture_mode\s+([a-z_][a-z0-9_]*)"),
+    re.compile(r"\bprintf\s+-v\s+([a-z_][a-z0-9_]*)"),
+)
+function_pattern = re.compile(r"^\s*([a-z_][a-z0-9_]*)\s*\(\)\s*\{")
+
+
+def defined(indices, patterns):
+    names = set()
+    for index in indices:
+        for pattern in patterns:
+            names.update(pattern.findall(lines[index]))
+    return names
+
+
+section = range(start + 1, section_end)
+elsewhere = [*range(0, start), *range(section_end, len(lines))]
+references = {
+    name: re.compile(r"\$\{?%s\b" % name)
+    for name in defined(section, variable_patterns) - defined(elsewhere, variable_patterns)
+}
+references.update(
+    (name, re.compile(r"(?:^|[\s;&|(])%s(?:\s|$)" % name))
+    for name in defined(section, (function_pattern,)) - defined(elsewhere, (function_pattern,))
+)
+leaks = []
+for name, reference in sorted(references.items()):
+    for index in range(end + 1, len(lines)):
+        if reference.search(lines[index]):
+            leaks.append(f"{name} (line {index + 1})")
+            break
+if leaks:
+    raise SystemExit("case fixtures defined only by generator-only assertions: " + ", ".join(leaks))
+PY
+then
+  pass "every case fixture is defined outside the generator-only assertions"
+else
+  fail "case shards read fixtures that only the generator-only assertions define"
+fi
+
 python3 - "$caller" "$shard" "$manifest" <<'PY' || fails=$((fails + 1))
 import re
 import subprocess
@@ -171,7 +261,7 @@ cache_file="$tmp/not-a-directory"
 if CHANGELOG_CALLER_CONTRACT_CACHE="$cache_file" CHANGELOG_CALLER_CONTRACT_SHARD=1 \
   bash "$caller" >"$tmp/cache.out" 2>&1; then
   fail "the caller contract accepted a cache path that is a file"
-elif grep -q "capture_mode could not create the cached output directory for generator mode 'contract-test'" "$tmp/cache.out"; then
+elif grep -q "capture_mode could not create the cached output directory for generator mode 'workflow'" "$tmp/cache.out"; then
   pass "cache setup failures name the actual failed operation"
 else
   fail "a cache setup failure was misreported as a generator failure"
