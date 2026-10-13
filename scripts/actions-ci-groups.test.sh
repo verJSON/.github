@@ -25,10 +25,10 @@ exclusive_commands = {
     if "\t@exclusive " in line
 }
 assert exclusive_commands == {
-    "platform\t@exclusive bash scripts/actions-ci-groups.test.sh",
-    "platform\t@exclusive python3 scripts/ci-gate/conformance/conformance.test.py",
-    "platform\t@exclusive bash scripts/required-checks-audit.test.sh",
-    "merge-gate\t@exclusive bash scripts/ci-gate/privileged-merge-conformance.test.sh",
+    "platform\t@exclusive @budget=180 bash scripts/actions-ci-groups.test.sh",
+    "platform\t@exclusive @budget=120 python3 scripts/ci-gate/conformance/conformance.test.py",
+    "platform\t@exclusive @budget=120 bash scripts/required-checks-audit.test.sh",
+    "merge-gate\t@exclusive @budget=120 bash scripts/ci-gate/privileged-merge-conformance.test.sh",
 }
 jobs = document["jobs"]
 assert document[True]["pull_request"]["types"] == [
@@ -478,9 +478,9 @@ validate_manifest() {
     ' "$candidate")" -eq 1 ] || return 1
   done <<'LOAD_BEARING_COMMANDS'
 merge-gate	python3 scripts/ci-gate/event-driven-authorization.test.py
-merge-gate	bash scripts/ci-gate/arm-receipt.test.sh
+merge-gate	@budget=90 bash scripts/ci-gate/arm-receipt.test.sh
 merge-gate	bash scripts/ci-gate/gate-hold-disable.test.sh
-merge-gate	bash scripts/ci-gate/native-automerge.test.sh
+merge-gate	@budget=90 bash scripts/ci-gate/native-automerge.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-pin.test.sh
 changelog-release-1	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=1 bash scripts/ci-gate/changelog-caller-contract.test.sh
 changelog-release-2	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=2 bash scripts/ci-gate/changelog-caller-contract.test.sh
@@ -493,7 +493,7 @@ docs	bash scripts/changelog-fragment-schema.test.sh
 changelog-release-2	python3 scripts/v1-readiness-contract.test.py
 platform	bash scripts/actions-ci-python-dependencies.test.sh
 platform	bash scripts/shellcheck-tracked.test.sh
-platform	bash scripts/shellcheck-tracked.sh
+platform	@budget=210 bash scripts/shellcheck-tracked.sh
 platform	bash scripts/ci-gate/hub-changelog-validate.sh
 LOAD_BEARING_COMMANDS
 }
@@ -1067,10 +1067,73 @@ else
   fail "invalid group failed without actionable evidence"
 fi
 
-if grep -q $'^platform\t@exclusive bash scripts/actions-ci-groups.test.sh$' "$manifest"; then
+if grep -qE $'^platform\t@exclusive (@budget=[0-9]+ )?bash scripts/actions-ci-groups.test.sh$' "$manifest"; then
   pass "grouping contract runs alone in actions CI"
 else
   fail "grouping contract is not registered exclusively in actions CI"
+fi
+
+# Pull requests hold every row to 60 seconds unless the row declares its own
+# budget (ADR 0225). The default leaves at least 2x margin over rows measured at
+# 30s or less on the 2-vCPU general runners; a row measured above that declares
+# twice its slowest CI time, rounded up to 30s. Declarations are pinned so that
+# raising a budget is a reviewed change, and none may approach the job timeout.
+if python3 - "$manifest" <<'PY'
+import re
+import sys
+
+declared = {}
+for line in open(sys.argv[1], encoding="utf-8").read().splitlines():
+    if not line or line.startswith("#"):
+        continue
+    group, command = line.split("\t", 1)
+    directives = []
+    while command.startswith("@"):
+        directive, _, command = command.partition(" ")
+        directives.append(directive)
+    budgets = [d for d in directives if d.startswith("@budget=")]
+    if directives not in ([], ["@exclusive"], budgets, ["@exclusive", *budgets]) or len(budgets) > 1:
+        raise SystemExit(f"directives must be [@exclusive] [@budget=N] in that order: {line}")
+    if budgets:
+        match = re.fullmatch(r"@budget=([1-9][0-9]*)", budgets[0])
+        if not match or not 60 < int(match.group(1)) <= 600 or int(match.group(1)) % 30:
+            raise SystemExit(f"declared budget must be a multiple of 30 in 90..600 seconds: {line}")
+        declared[f"{group}\t{command}"] = int(match.group(1))
+
+shards = {
+    f"changelog-release-{shard}\tCHANGELOG_CALLER_CONTRACT_SHARD={shard} "
+    "bash scripts/ci-gate/changelog-caller-contract.test.sh": 600
+    for shard in range(1, 5)
+}
+expected = shards | {
+    "changelog-release-1\tCHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY=1 "
+    "bash scripts/ci-gate/changelog-caller-contract.test.sh": 120,
+    "changelog-release-3\tbash scripts/component-changelog-contract.test.sh": 90,
+    "platform\tbash scripts/actions-ci-groups.test.sh": 180,
+    "platform\tbash scripts/ci-gate/runner-admission-reconcile.test.sh": 120,
+    "platform\tpython3 scripts/ci-gate/app-key-environment.test.py": 120,
+    "platform\tbash scripts/required-checks-audit.test.sh": 120,
+    "platform\tpython3 scripts/ci-gate/conformance/conformance.test.py": 120,
+    "platform\tpython3 scripts/ci-gate/compatibility-sandbox-provisioning.test.py": 90,
+    "platform\tbash scripts/shellcheck-tracked.sh": 210,
+    "merge-gate\tbash scripts/ci-gate/privileged-merge-conformance.test.sh": 120,
+    "merge-gate\tbash scripts/ci-gate/default-branch-uri-encoding.test.sh": 90,
+    "merge-gate\tbash scripts/ci-gate/native-automerge.test.sh": 90,
+    "merge-gate\tbash scripts/ci-gate/arm-receipt.test.sh": 90,
+    "merge-gate\tbash scripts/ci-gate/zero-provider-recovery.test.sh": 90,
+}
+if declared != expected:
+    drift = sorted(
+        f"{row} declared={declared.get(row)} expected={expected.get(row)}"
+        for row in declared.keys() | expected.keys()
+        if declared.get(row) != expected.get(row)
+    )
+    raise SystemExit("declared row budgets drifted:\n  " + "\n  ".join(drift))
+PY
+then
+  pass "declared row budgets are pinned, ordered after @exclusive, and stay within 600s"
+else
+  fail "declared row budgets are malformed or drifted from their measured basis"
 fi
 
 [ "$fails" -eq 0 ] && { echo "All tests passed."; exit 0; }
