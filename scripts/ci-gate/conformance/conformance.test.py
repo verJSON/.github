@@ -307,6 +307,17 @@ class EveryExecutingLaneShowsPositiveEvidence(unittest.TestCase):
                         'contract nobody could merge against')
 
 
+class CachedFixtureDocumentsAreIsolated(unittest.TestCase):
+    def test_a_mutated_document_does_not_reach_the_next_caller(self):
+        """The parse is cached; the document each caller receives must not be.
+
+        One test editing a shared parse would hand every later test a different
+        contract than the file on disk, which can turn a rejection into a pass.
+        """
+        load_yaml_document(CONTRACT)['jobs'].clear()
+        self.assertIn('build-test', load_yaml_document(CONTRACT)['jobs'])
+
+
 class TheEvidenceRegistryMatchesTheContract(unittest.TestCase):
     def test_every_registered_work_step_still_exists(self):
         steps = load_yaml_document(CONTRACT)['jobs']['build-test']['steps']

@@ -1,5 +1,6 @@
 """Cache workflow fixture YAML parsed by the conformance matrix."""
 
+from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
 
@@ -7,10 +8,15 @@ import yaml
 
 
 @lru_cache(maxsize=None)
+def _parsed_yaml_document(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding='utf-8'))
+
+
 def load_yaml_document(path: Path) -> dict:
     """Parse a checked-in fixture once per test process.
 
-    Callers must treat returned documents as read-only. Mutation cases parse
-    fresh documents and write them to unique temporary paths.
+    Each caller receives its own copy: copying a parsed document is far cheaper
+    than parsing it again, and a caller that edits its copy cannot change what
+    the next test reads.
     """
-    return yaml.safe_load(path.read_text(encoding='utf-8'))
+    return deepcopy(_parsed_yaml_document(path))
