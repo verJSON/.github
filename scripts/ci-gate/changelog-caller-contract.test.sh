@@ -74,8 +74,7 @@ mode_capture_failures=0
 capture_mode() {
   local target="$1"
   shift
-  local mode="$1" out err status=0 cache_dir cache_file cache_tmp cache_key failure_reason=''
-  local cache_lock_fd cache_locked=0
+  local mode="$1" out err status=0
   # `printf -v` writes into the nearest scope holding the name, so a target naming one of
   # these locals would assign here and leave the caller reading an empty global -- the
   # #1427 misdiagnosis again, arriving through this function rather than through the
@@ -93,76 +92,11 @@ capture_mode() {
     mode_capture_failures=$((mode_capture_failures + 1))
     return
   }
-  if [ -n "${CHANGELOG_CALLER_CONTRACT_CACHE:-}" ]; then
-    if ! command -v flock >/dev/null 2>&1; then
-      fail "capture_mode requires flock when a shared output cache is enabled"
-      mode_capture_failures=$((mode_capture_failures + 1))
-      rm -f "$err"
-      return
-    fi
-    cache_key="$(printf '%s\0' "$@" | sha256sum | cut -d' ' -f1)" || {
-      status=$?
-      failure_reason="could not calculate the cached output key"
-    }
-    cache_dir="$CHANGELOG_CALLER_CONTRACT_CACHE/$sha"
-    if [ "$status" -eq 0 ]; then
-      mkdir -p "$cache_dir" || {
-        status=$?
-        failure_reason="could not create the cached output directory"
-      }
-    fi
-    cache_file="$cache_dir/$cache_key"
-    if [ "$status" -eq 0 ]; then
-      exec {cache_lock_fd}>"$cache_file.lock" || {
-        status=$?
-        failure_reason="could not open the cached output lock"
-      }
-      if [ "$status" -eq 0 ]; then
-        cache_locked=1
-        flock "$cache_lock_fd" || {
-          status=$?
-          failure_reason="could not lock the cached output"
-        }
-      fi
-    fi
-    if [ "$status" -eq 0 ] && [ -f "$cache_file" ]; then
-      out="$(cat -- "$cache_file")" || {
-        status=$?
-        failure_reason="could not read the cached output"
-      }
-    elif [ "$status" -eq 0 ]; then
-      out="$(bash "$gen" "$@" 2>"$err")" || status=$?
-      if [ "$status" -eq 0 ]; then
-        cache_tmp="$(mktemp "$cache_dir/.${cache_key}.XXXXXX")" || {
-          status=$?
-          failure_reason="could not create a temporary cached output file"
-        }
-        if [ "$status" -eq 0 ]; then
-          if printf '%s' "$out" >"$cache_tmp" \
-            && mv -f -- "$cache_tmp" "$cache_file"; then
-            :
-          else
-            status=$?
-            failure_reason="could not store the cached output"
-            rm -f "$cache_tmp"
-          fi
-        fi
-      fi
-    fi
-    if [ "$cache_locked" -eq 1 ]; then
-      exec {cache_lock_fd}>&-
-    fi
-  else
-    out="$(bash "$gen" "$@" 2>"$err")" || status=$?
-  fi
+  out="$(bash "$gen" "$@" 2>"$err")" || status=$?
   if [ "$status" -ne 0 ]; then
     # Bounded: a verbose mode's stderr is unbounded, and one verdict line that scrolls the
     # named cause off the top defeats the point of naming it.
-    if [ -n "$failure_reason" ]; then
-      fail "capture_mode $failure_reason for generator mode '$mode' (exit $status)"
-    else
-      fail "generator mode '$mode' exited $status: $(tr '\n' ' ' <"$err" | sed 's/  */ /g; s/ *$//' | cut -c1-500)"
-    fi
+    fail "generator mode '$mode' exited $status: $(tr '\n' ' ' <"$err" | sed 's/  */ /g; s/ *$//' | cut -c1-500)"
     mode_capture_failures=$((mode_capture_failures + 1))
   fi
   rm -f "$err"

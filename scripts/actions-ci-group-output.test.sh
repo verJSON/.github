@@ -27,7 +27,6 @@ process_group_is_live() {
 
 cat >"$tmp/manifest.tsv" <<'EOF'
 platform	printf '%s\n' '::error::fixture failed' '::warning file=x::fixture warned' '::notice::fixture noted' '::stop-commands::token' '::add-mask::super-secret-value'
-platform	test -n "$CHANGELOG_CALLER_CONTRACT_CACHE" && test -d "$CHANGELOG_CALLER_CONTRACT_CACHE" && printf 'shared caller-contract cache is available\n'
 EOF
 
 if ACTIONS_CI_GROUP_MANIFEST="$tmp/manifest.tsv" bash "$runner" platform >"$tmp/out" 2>"$tmp/err"; then
@@ -48,11 +47,6 @@ if ACTIONS_CI_GROUP_MANIFEST="$tmp/manifest.tsv" bash "$runner" platform >"$tmp/
   fi
 else
   fail "the group runner rejected a passing contract that prints workflow commands"
-fi
-if grep -q 'shared caller-contract cache is available' "$tmp/out"; then
-  pass "manifest commands share a temporary generated-contract cache"
-else
-  fail "the group runner did not provide its generated-contract cache"
 fi
 
 cat >"$tmp/timeout-worker.sh" <<'EOF'

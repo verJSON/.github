@@ -149,9 +149,6 @@ printf 'actions-ci group=%s command_parallelism=%s command_count=%s\n' \
   "$group" "$command_parallelism" "${#commands[@]}"
 
 tmp="$(mktemp -d)"
-CHANGELOG_CALLER_CONTRACT_CACHE="$tmp/changelog-caller-contract-cache"
-mkdir -p "$CHANGELOG_CALLER_CONTRACT_CACHE"
-export CHANGELOG_CALLER_CONTRACT_CACHE
 
 command_group_has_live_processes() {
   local process_group="$1" listing

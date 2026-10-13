@@ -233,16 +233,6 @@ else
   fail "the caller contract rejected shard 5 without the shard diagnostic"
 fi
 
-cache_file="$tmp/not-a-directory"
-: >"$cache_file"
-if CHANGELOG_CALLER_CONTRACT_CACHE="$cache_file" CHANGELOG_CALLER_CONTRACT_SHARD=1 \
-  bash "$caller" >"$tmp/cache.out" 2>&1; then
-  fail "the caller contract accepted a cache path that is a file"
-elif grep -q "capture_mode could not create the cached output directory for generator mode 'workflow'" "$tmp/cache.out"; then
-  pass "cache setup failures name the actual failed operation"
-else
-  fail "a cache setup failure was misreported as a generator failure"
-fi
 
 [ "$fails" -eq 0 ] || exit 1
 echo "All tests passed."

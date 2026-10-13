@@ -15,7 +15,6 @@ here="$(cd "$(dirname "$0")" && pwd)"
 test_shard="${REQUIRED_CHECKS_AUDIT_TEST_SHARD:-all}"
 case "$test_shard" in
   all)
-    shard_tmp="$(mktemp -d)"
     shard_one_pid=''
     shard_two_pid=''
     cleanup_test_shards() {
@@ -25,17 +24,14 @@ case "$test_shard" in
         kill -TERM -- "-$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
       done
-      rm -rf -- "$shard_tmp"
     }
     run_test_shard() {
       local shard_id="$1"
-      local cache_dir="$2"
       setsid bash -o pipefail -c '
         env \
           REQUIRED_CHECKS_AUDIT_TEST_SHARD="$1" \
-          CHANGELOG_CALLER_CONTRACT_CACHE="$2" \
-          bash "$3" 2>&1 | sed -u "s/^/[required-checks audit shard $1] /"
-      ' _ "$shard_id" "$cache_dir" "$here/required-checks-audit.test.sh" &
+          bash "$2" 2>&1 | sed -u "s/^/[required-checks audit shard $1] /"
+      ' _ "$shard_id" "$here/required-checks-audit.test.sh" &
     }
     trap cleanup_test_shards EXIT
     trap 'exit 143' TERM
@@ -98,10 +94,9 @@ JQ
       fi
       rm -rf -- "$cancel_root"
     fi
-    mkdir -p "$shard_tmp/cache-one" "$shard_tmp/cache-two"
-    run_test_shard 1 "$shard_tmp/cache-one"
+    run_test_shard 1
     shard_one_pid=$!
-    run_test_shard 2 "$shard_tmp/cache-two"
+    run_test_shard 2
     shard_two_pid=$!
     shard_one_status=0
     shard_two_status=0
