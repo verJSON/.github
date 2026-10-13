@@ -12,7 +12,7 @@ repo_root="$(cd "$here/../.." && pwd)"
 # shellcheck source=scripts/changelog-caller-contract-shard.sh
 source "$repo_root/scripts/changelog-caller-contract-shard.sh"
 if ! changelog_caller_shard_name_ok "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}"; then
-  printf 'FAIL - CHANGELOG_CALLER_CONTRACT_SHARD must be all or 1..233\n' >&2
+  printf 'FAIL - CHANGELOG_CALLER_CONTRACT_SHARD must be all or 1..4\n' >&2
   exit 1
 fi
 case "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" in
@@ -21,10 +21,6 @@ case "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" in
 esac
 caller_case_count=0
 caller_case_ran=0
-# shellcheck disable=SC2034 # Updated by the sourced shard helper.
-caller_case_reserved_count=0
-# shellcheck disable=SC2034 # Updated by the sourced shard helper.
-caller_adopter_cases_seen=0
 caller_assertions_suspended=0
 gen="$repo_root/scripts/gen-changelog-caller.sh"
 # A ref that actually resolves. The generator pins the SHA-256 of the engine at
@@ -1348,7 +1344,9 @@ run_adopter() {
 
 # Independent adopter mutations share no directory. Run several at once on this
 # job's CPUs instead of occupying the runner for one suite at a time (#1733).
-ADOPTER_SLOTS="${ADOPTER_SLOTS:-$(nproc 2>/dev/null || echo 2)}"
+# Under actions-ci the group runner states the CPUs this job may use (its CFS
+# quota, not just nproc); a standalone run falls back to nproc.
+ADOPTER_SLOTS="${ADOPTER_SLOTS:-${ACTIONS_CI_AVAILABLE_CPUS:-$(nproc 2>/dev/null || echo 2)}}"
 [ "$ADOPTER_SLOTS" -gt 16 ] && ADOPTER_SLOTS=16
 [ "$ADOPTER_SLOTS" -ge 1 ] || ADOPTER_SLOTS=1
 adopter_job_pids=()
@@ -5965,9 +5963,8 @@ drain_adopter_jobs
 if [ "$caller_case_count" -lt 1 ]; then
   fail "changelog caller contract recorded no cases"
 fi
-if [ "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}" != all ] \
-  && [ "$caller_case_ran" -ne 1 ]; then
-  fail "caller-contract shard ${CHANGELOG_CALLER_CONTRACT_SHARD} ran $caller_case_ran cases; expected exactly one"
+if [ "$caller_case_ran" -lt 1 ]; then
+  fail "changelog caller contract ran no cases"
 fi
 [ "$fails" -eq 0 ] || exit 1
 echo "All tests passed."

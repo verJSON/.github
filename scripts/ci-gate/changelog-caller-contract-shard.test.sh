@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# The caller contract is partitioned by case. The generated suite has no
-# section switch: a shard that owns a mutation runs every assertion.
+# The caller contract is partitioned by case across the four changelog-release
+# cells. The generated suite has no section switch: a shard that owns a mutation
+# runs every assertion (ADR 0224, ADR 0225).
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -20,12 +21,12 @@ source "$repo_root/scripts/changelog-caller-contract-shard.sh"
 
 if changelog_caller_shard_name_ok all \
   && changelog_caller_shard_name_ok 1 \
-  && changelog_caller_shard_name_ok 233 \
+  && changelog_caller_shard_name_ok 4 \
   && ! changelog_caller_shard_name_ok 0 \
-  && ! changelog_caller_shard_name_ok 234 \
-  && ! changelog_caller_shard_name_ok 001 \
+  && ! changelog_caller_shard_name_ok 5 \
+  && ! changelog_caller_shard_name_ok 01 \
   && ! changelog_caller_shard_name_ok changelog; then
-  pass "caller-contract shard names are all and 1..233"
+  pass "caller-contract shard names are all and 1..4"
 else
   fail "caller-contract shard names accepted an unknown value or rejected a valid one"
 fi
@@ -154,9 +155,8 @@ if calls != expected_calls:
         "review and update the case inventory when cases change"
     )
 
-width = 233
-# Some declarations expand into multiple executions. Pin the runtime inventory
-# too; the caller suite requires exactly one selected case in every shard.
+width = 4
+# Some declarations expand into multiple executions; pin the runtime inventory too.
 expanded_cases = 233
 owners = {index: [] for index in range(1, expanded_cases + 1)}
 for shard_id in range(1, width + 1):
@@ -164,17 +164,10 @@ for shard_id in range(1, width + 1):
 source "$SHARD"
 caller_case_count=0
 caller_case_ran=0
-caller_case_reserved_count=0
-caller_adopter_cases_seen=0
 CHANGELOG_CALLER_CONTRACT_SHARD={shard_id}
 selected=""
 for index in $(seq 1 {expanded_cases}); do
-  case_id=ignored
-  case "$index" in
-    1|2) case_id=adopter ;;
-    3) case_id=snapshot-capture-path-override ;;
-  esac
-  if changelog_caller_case_selected "$case_id"; then
+  if changelog_caller_case_selected "case-$index"; then
     selected="$selected $caller_case_count"
   fi
 done
@@ -191,52 +184,36 @@ printf '%s\\n' "$selected"
         raise SystemExit(probe.stderr)
     for token in probe.stdout.split():
         owners[int(token)].append(shard_id)
-def expected_owner(index):
-    if index == 1:
-        return width - 2
-    if index == 2:
-        return width - 1
-    if index == 3:
-        return width
-    return ((index - 4) % (width - 3)) + 1
-
-bad = [str(index) for index, found in owners.items() if found != [expected_owner(index)]]
+bad = [str(index) for index, found in owners.items() if len(found) != 1]
 if bad:
     raise SystemExit("shard map is not a partition: " + ", ".join(bad[:8]))
-empty_shards = [
-    shard_id
-    for shard_id in range(1, width + 1)
-    if not any(found == [shard_id] for found in owners.values())
-]
-if empty_shards:
-    raise SystemExit("caller-contract shards own no case: " + ", ".join(map(str, empty_shards)))
+loads = [sum(found == [shard_id] for found in owners.values()) for shard_id in range(1, width + 1)]
+if max(loads) - min(loads) > 1:
+    raise SystemExit(f"caller-contract shards are unbalanced: {loads}")
 
+# One shard per cell. A shard schedules its cases across the runner's CPUs, so
+# fewer, heavier rows pay the fixture walk four times instead of once per case;
+# 233 single-case rows multiplied it 233 times and ran the cells into their
+# 30-minute timeout (run 38014446043). The declared budget is twice the slowest
+# measured shard (5m00s on run 37973049643, #1743).
 manifest_text = open(manifest, encoding="utf-8").read().splitlines()
+caller_rows = [line for line in manifest_text if "scripts/ci-gate/changelog-caller-contract.test.sh" in line]
 expected = {
-    f"changelog-release-{(shard_id - 1) % 4 + 1}\tADOPTER_SLOTS=1 CHANGELOG_CALLER_CONTRACT_SHARD={shard_id} bash scripts/ci-gate/changelog-caller-contract.test.sh"
+    f"changelog-release-{shard_id}\t@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD={shard_id} "
+    "bash scripts/ci-gate/changelog-caller-contract.test.sh"
     for shard_id in range(1, width + 1)
+} | {
+    "changelog-release-1\t@budget=120 CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY=1 "
+    "bash scripts/ci-gate/changelog-caller-contract.test.sh"
 }
-actual_shards = [
-    line
-    for line in manifest_text
-    if "\tADOPTER_SLOTS=1 CHANGELOG_CALLER_CONTRACT_SHARD=" in line
-]
-if len(actual_shards) != width or set(actual_shards) != expected:
-    raise SystemExit("manifest caller-contract shard commands are not an exact one-to-one inventory")
-generator_commands = {
-    "changelog-release-1\tCHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY=1 bash scripts/ci-gate/changelog-caller-contract.test.sh"
-}
-if not generator_commands.issubset(manifest_text):
-    raise SystemExit("manifest is missing the per-cell generator contract command")
-if any(
-    line.endswith("\tbash scripts/ci-gate/changelog-caller-contract.test.sh")
-    and "CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY=1" not in line
-    for line in manifest_text
-):
-    raise SystemExit("manifest still runs the caller contract without a shard or generator-only mode")
+if len(caller_rows) != len(expected) or set(caller_rows) != expected:
+    raise SystemExit(
+        "manifest caller-contract rows are not exactly one shard per cell plus the "
+        "generator-only row: " + "; ".join(sorted(set(caller_rows) ^ expected))
+    )
 print(
     f"ok   - {calls} caller-contract declarations expand to {expanded_cases} "
-    f"single-case executions across {width} shards"
+    f"executions partitioned across {width} shards {loads}"
 )
 PY
 
@@ -248,12 +225,12 @@ else
   pass "the generated contract suite has no section selector"
 fi
 
-if CHANGELOG_CALLER_CONTRACT_SHARD=234 bash "$caller" >"$tmp/shard.out" 2>&1; then
-  fail "the caller contract accepted shard 234"
-elif grep -q 'CHANGELOG_CALLER_CONTRACT_SHARD must be all or 1..233' "$tmp/shard.out"; then
+if CHANGELOG_CALLER_CONTRACT_SHARD=5 bash "$caller" >"$tmp/shard.out" 2>&1; then
+  fail "the caller contract accepted shard 5"
+elif grep -q 'CHANGELOG_CALLER_CONTRACT_SHARD must be all or 1..4' "$tmp/shard.out"; then
   pass "the caller contract rejects an unknown shard before it runs cases"
 else
-  fail "the caller contract rejected shard 234 without the shard diagnostic"
+  fail "the caller contract rejected shard 5 without the shard diagnostic"
 fi
 
 cache_file="$tmp/not-a-directory"

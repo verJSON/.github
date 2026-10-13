@@ -482,11 +482,11 @@ merge-gate	bash scripts/ci-gate/arm-receipt.test.sh
 merge-gate	bash scripts/ci-gate/gate-hold-disable.test.sh
 merge-gate	bash scripts/ci-gate/native-automerge.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-pin.test.sh
-changelog-release-1	ADOPTER_SLOTS=1 CHANGELOG_CALLER_CONTRACT_SHARD=1 bash scripts/ci-gate/changelog-caller-contract.test.sh
-changelog-release-2	ADOPTER_SLOTS=1 CHANGELOG_CALLER_CONTRACT_SHARD=2 bash scripts/ci-gate/changelog-caller-contract.test.sh
-changelog-release-3	ADOPTER_SLOTS=1 CHANGELOG_CALLER_CONTRACT_SHARD=3 bash scripts/ci-gate/changelog-caller-contract.test.sh
-changelog-release-4	ADOPTER_SLOTS=1 CHANGELOG_CALLER_CONTRACT_SHARD=4 bash scripts/ci-gate/changelog-caller-contract.test.sh
-changelog-release-1	CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY=1 bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-1	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=1 bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-2	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=2 bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-3	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=3 bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-4	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=4 bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-1	@budget=120 CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY=1 bash scripts/ci-gate/changelog-caller-contract.test.sh
 platform	bash scripts/runner-selector-health.test.sh
 docs	python3 scripts/changelog.py validate --repo-root .
 docs	bash scripts/changelog-fragment-schema.test.sh
