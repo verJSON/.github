@@ -1046,7 +1046,9 @@ SCOPES = (
     "id-token", "issues", "models", "packages", "pages", "pull-requests",
     "repository-projects", "security-events", "statuses",
 )
-CALLER_USES = re.compile(r"/\.github/workflows/([\w.-]+\.ya?ml)@")
+# GitHub resolves owner/repo case-insensitively (#1682); the path and ref are exact.
+CALLER_USES = re.compile(r"([^/]+/[^/]+)/\.github/workflows/([\w.-]+\.ya?ml)@\S+")
+THIS_REPOSITORY = "verjson/.github"
 NESTED_USES = re.compile(r"\./\.github/workflows/([\w.-]+\.ya?ml)")
 
 
@@ -1115,15 +1117,15 @@ for name, job in caller["jobs"].items():
     if "uses" not in job:
         continue
     checked += 1
-    match = CALLER_USES.search(str(job["uses"]))
-    if not match:
+    match = CALLER_USES.fullmatch(str(job["uses"]))
+    if not match or match.group(1).lower() != THIS_REPOSITORY:
         problems.append(f"{name} calls {job['uses']!r}, which is not a reusable workflow in this repository")
         continue
     granted = declared(job, caller_top)
     if granted is None:
         problems.append(f"caller job {name} declares no permissions")
         continue
-    check_callee(name, match.group(1), granted)
+    check_callee(name, match.group(2), granted)
 if not checked:
     problems.append("no job delegates to a reusable workflow")
 print("\n".join(problems))
@@ -1135,8 +1137,8 @@ callee_workflows="$root/.github/workflows"
 # Every generated workflow that calls a reusable workflow is compared, not only
 # release-node: each mode is an independent emitter, so one mode's grant being
 # right says nothing about the next. Modes are classified against the
-# generator's own usage list so a new mode cannot escape the comparison by
-# being left out of this table.
+# generator's dispatch arms, which must match its usage list, so a new mode
+# cannot escape the comparison by being left out of this table.
 grant_cases=(
   "workflow"
   "generated-artifacts"
@@ -1151,21 +1153,63 @@ grant_cases=(
 no_reusable_call_modes=(pr-gate)
 non_workflow_modes=(adr-index-generator adr-index-test codeowners renderer contract-test)
 
-generator_modes="$(sed -n 's/.*usage: $(basename "$0") {\([^}]*\)}.*/\1/p' "$gen" | tr '|' '\n')"
-if [ -z "$generator_modes" ]; then
-  fail "could not read the generator's mode list from its usage line"
+# Prints one line per coverage gap in the generator at $1, nothing when every
+# mode it dispatches is classified.
+mode_coverage_problems() {
+  local generator="$1" usage_modes arm_modes classified_modes case_args generator_mode
+  usage_modes="$(sed -n 's/.*usage: $(basename "$0") {\([^}]*\)}.*/\1/p' "$generator" | tr '|' '\n' | sort -u)"
+  # Arms of the last top-level `case "$mode" in`, at its two-space indent.
+  arm_modes="$(awk '/^case "\$mode" in$/ { arms = ""; in_case = 1; next }
+    in_case && /^esac$/ { in_case = 0; dispatch = arms; next }
+    in_case && /^  [a-z][a-z0-9|-]*\)/ { label = $0; sub(/^  /, "", label); sub(/\).*/, "", label)
+      gsub(/\|/, "\n", label); arms = arms label "\n" }
+    END { printf "%s", dispatch }' "$generator" | sort -u)"
+  if [ -z "$usage_modes" ]; then
+    echo "could not read the generator's mode list from its usage line"
+  fi
+  if [ -z "$arm_modes" ]; then
+    echo "could not read the generator's mode dispatch arms"
+    return
+  fi
+  comm -23 <(printf '%s\n' "$arm_modes") <(printf '%s\n' "$usage_modes") \
+    | sed 's/.*/generator mode & is dispatched but missing from its usage line/'
+  comm -13 <(printf '%s\n' "$arm_modes") <(printf '%s\n' "$usage_modes") \
+    | sed 's/.*/generator usage lists mode & but no dispatch arm handles it/'
+  classified_modes=" ${no_reusable_call_modes[*]} ${non_workflow_modes[*]} "
+  for case_args in "${grant_cases[@]}"; do
+    classified_modes+="${case_args%% *} "
+  done
+  while IFS= read -r generator_mode; do
+    case "$classified_modes" in
+      *" $generator_mode "*) ;;
+      *) echo "generator mode $generator_mode is not classified for the callee grant comparison" ;;
+    esac
+  done <<<"$arm_modes"
+}
+
+mode_coverage_problems "$gen" >"$tmp/modes.out"
+if [ -s "$tmp/modes.out" ]; then
+  fail "the generator's modes are not all classified: $(cat "$tmp/modes.out")"
+else
+  pass "every mode the generator dispatches is classified for the callee grant comparison"
 fi
-classified_modes=" ${no_reusable_call_modes[*]} ${non_workflow_modes[*]} "
-for case_args in "${grant_cases[@]}"; do
-  classified_modes+="${case_args%% *} "
-done
-while IFS= read -r generator_mode; do
-  [ -n "$generator_mode" ] || continue
-  case "$classified_modes" in
-    *" $generator_mode "*) ;;
-    *) fail "generator mode $generator_mode is not classified for the callee grant comparison" ;;
-  esac
-done <<<"$generator_modes"
+
+# The usage line is documentation; the dispatch arms are what runs. A mode added
+# as an arm alone must still be caught.
+unlisted_gen="$tmp/gen-unlisted-mode.sh"
+sed '/^case "\$mode" in$/a\
+  release-foo)\
+    echo "uses: verJSON/.github/.github/workflows/node-release.yml@$ref"\
+    ;;' "$gen" >"$unlisted_gen"
+mode_coverage_problems "$unlisted_gen" >"$tmp/modes.out"
+if cmp -s "$gen" "$unlisted_gen"; then
+  fail "the unlisted-arm mutation changed nothing; the mode guard is unproven"
+elif grep -qxF 'generator mode release-foo is dispatched but missing from its usage line' "$tmp/modes.out" \
+  && grep -qxF 'generator mode release-foo is not classified for the callee grant comparison' "$tmp/modes.out"; then
+  pass "a dispatch arm missing from the usage line is caught and left unclassified"
+else
+  fail "a dispatch arm missing from the usage line was not caught: $(cat "$tmp/modes.out")"
+fi
 
 for case_args in "${grant_cases[@]}"; do
   read -r -a gen_args <<<"$case_args"
@@ -1193,13 +1237,84 @@ for excluded_mode in "${no_reusable_call_modes[@]}"; do
   fi
 done
 
+# A mode listed as non-workflow must not emit a reusable-workflow call; otherwise
+# moving a caller mode into that list would skip the comparison. Match the YAML
+# key, not the substring: contract-test greps for a caller's uses: line.
+for excluded_mode in "${non_workflow_modes[@]}"; do
+  if ! bash "$gen" "$excluded_mode" "$sha" >"$tmp/non-workflow.out" 2>"$tmp/gen.err"; then
+    fail "$excluded_mode failed to generate: $(cat "$tmp/gen.err")"
+  elif grep -nE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]*\.github/workflows/' \
+    "$tmp/non-workflow.out" >"$tmp/non-workflow.hits"; then
+    fail "$excluded_mode is listed as non-workflow but calls a reusable workflow: $(cat "$tmp/non-workflow.hits")"
+  else
+    pass "$excluded_mode emits no reusable-workflow call"
+  fi
+done
+
+# --- fixtures for each checker branch ------------------------------------------
+
+# Asserts the checker rejects $2 against the workflows in $3 with exactly $4 as
+# its whole report, so an extra or missing finding fails too.
+expect_grant_report() {
+  local description="$1" caller="$2" workflows="$3" expected="$4"
+  if python3 "$tmp/check_callee_grants.py" "$caller" "$workflows" >"$tmp/grants.out" 2>&1; then
+    fail "$description was accepted"
+  elif [ "$(cat "$tmp/grants.out")" = "$expected" ]; then
+    pass "$description is rejected"
+  else
+    fail "$description was rejected for the wrong reason: $(cat "$tmp/grants.out")"
+  fi
+}
+
+# Copies this repository's workflows to a fixture directory named $1 and applies
+# each JSON edit in $2.. to the workflow it names: ["file", "set"|"del",
+# "dotted.key", value]. A missing key fails loudly, so a fixture cannot go stale
+# into a no-op.
+cat >"$tmp/edit_workflows.py" <<'PY'
+import json
+import os
+import sys
+
+import yaml
+
+workflows_dir, *edits = sys.argv[1:]
+for edit in edits:
+    name, op, dotted, *value = json.loads(edit)
+    path = os.path.join(workflows_dir, name)
+    doc = yaml.safe_load(open(path, encoding="utf-8"))
+    *parents, leaf = dotted.split(".")
+    node = doc
+    for key in parents:
+        node = node[key]
+    if op == "del":
+        del node[leaf]
+    elif op == "set":
+        node[leaf] = value[0]
+    else:
+        raise SystemExit(f"unknown fixture edit: {op!r}")
+    open(path, "w", encoding="utf-8").write(yaml.safe_dump(doc, sort_keys=False))
+PY
+fixture_workflows() {
+  local fixture="$tmp/fixture-$1"
+  shift
+  rm -rf "$fixture"
+  cp -R "$callee_workflows" "$fixture"
+  # Runs inside $(...), where fail would not count: report on stderr and print no
+  # path, so the caller's exact-report assertion fails instead.
+  python3 "$tmp/edit_workflows.py" "$fixture" "$@" || { echo "fixture edit failed: $*" >&2; return 1; }
+  printf '%s\n' "$fixture"
+}
+
+renovate_caller="$tmp/grants-renovate-attribution.yml"
+renovate_uses="verJSON/.github/.github/workflows/renovate-changelog.yml@$sha"
+
 # A calling job with no permissions anywhere gets the repository's default token,
 # which this test cannot see; guessing write-all would accept any callee.
 ungranted="$tmp/renovate-no-permissions.yml"
 awk '/^permissions:$/ { skipping = 1; next }
   skipping && /^  / { next }
-  { skipping = 0; print }' "$tmp/grants-renovate-attribution.yml" >"$ungranted"
-if cmp -s "$tmp/grants-renovate-attribution.yml" "$ungranted"; then
+  { skipping = 0; print }' "$renovate_caller" >"$ungranted"
+if cmp -s "$renovate_caller" "$ungranted"; then
   fail "the permissions-removal mutation changed nothing; the undeclared-grant check is unproven"
 elif python3 "$tmp/check_callee_grants.py" "$ungranted" "$callee_workflows" >"$tmp/grants.out" 2>&1; then
   fail "a calling job that declares no permissions was accepted"
@@ -1213,45 +1328,73 @@ fi
 # calling job's grant, not the outer caller's: renovate-attribution grants
 # pull-requests: read, but renovate-changelog.yml's app-key-policy job does not
 # pass it on, so app-key-environment.yml asking for it must be rejected.
-nested_workflows="$tmp/nested-workflows"
-cp -R "$callee_workflows" "$nested_workflows"
-awk '/^  validate-ai-review-key:$/ { in_job = 1 }
-  { print }
-  in_job && /^      contents: read$/ { print "      pull-requests: read"; in_job = 0 }' \
-  "$callee_workflows/app-key-environment.yml" >"$nested_workflows/app-key-environment.yml"
-if cmp -s "$callee_workflows/app-key-environment.yml" "$nested_workflows/app-key-environment.yml"; then
-  fail "the nested over-ask mutation changed nothing; the nested grant comparison is unproven"
-elif python3 "$tmp/check_callee_grants.py" "$tmp/grants-renovate-attribution.yml" "$nested_workflows" >"$tmp/grants.out" 2>&1; then
-  fail "a nested callee asking for more than its calling job grants was accepted"
-elif grep -qxF 'renovate-changelog via renovate-changelog.yml job app-key-policy grants pull-requests: none but app-key-environment.yml job validate-ai-review-key needs pull-requests: read' "$tmp/grants.out"; then
-  pass "a nested callee is capped at its calling job's grant, not the outer caller's"
-else
-  fail "the nested over-ask mutation was rejected for the wrong reason: $(cat "$tmp/grants.out")"
-fi
+expect_grant_report "a nested callee asking for more than its calling job grants" \
+  "$renovate_caller" \
+  "$(fixture_workflows nested-over-ask \
+    '["app-key-environment.yml", "set", "jobs.validate-ai-review-key.permissions.pull-requests", "read"]')" \
+  "renovate-changelog via renovate-changelog.yml job app-key-policy grants pull-requests: none but app-key-environment.yml job validate-ai-review-key needs pull-requests: read"
 
 # GitHub rejects a reusable-workflow cycle; the recursion must report one rather
 # than overflow the stack.
-cyclic_workflows="$tmp/cyclic-workflows"
-cp -R "$callee_workflows" "$cyclic_workflows"
-python3 - "$cyclic_workflows/app-key-environment.yml" <<'PY'
-import sys
+expect_grant_report "a reusable-workflow cycle" \
+  "$renovate_caller" \
+  "$(fixture_workflows cycle \
+    '["app-key-environment.yml", "set", "jobs.loop", {"uses": "./.github/workflows/renovate-changelog.yml", "permissions": {"actions": "read", "contents": "read"}}]')" \
+  "renovate-changelog via renovate-changelog.yml job app-key-policy via app-key-environment.yml job loop closes a reusable-workflow cycle: renovate-changelog.yml -> app-key-environment.yml -> renovate-changelog.yml"
 
-import yaml
+# Only this repository's reusable workflows are on disk here; a foreign
+# owner/repo with the same file name is a different workflow (#1682 casing aside).
+foreign_caller="$tmp/renovate-foreign-owner.yml"
+sed "s#uses: verJSON/\.github/#uses: someone-else/.github/#" "$renovate_caller" >"$foreign_caller"
+expect_grant_report "a caller delegating to another repository's workflow of the same name" \
+  "$foreign_caller" "$callee_workflows" \
+  "renovate-changelog calls 'someone-else/.github/.github/workflows/renovate-changelog.yml@$sha', which is not a reusable workflow in this repository"
 
-path = sys.argv[1]
-doc = yaml.safe_load(open(path, encoding="utf-8"))
-doc["jobs"]["loop"] = {
-    "uses": "./.github/workflows/renovate-changelog.yml",
-    "permissions": {"actions": "read", "contents": "read"},
-}
-open(path, "w", encoding="utf-8").write(yaml.safe_dump(doc, sort_keys=False))
-PY
-if python3 "$tmp/check_callee_grants.py" "$tmp/grants-renovate-attribution.yml" "$cyclic_workflows" >"$tmp/grants.out" 2>&1; then
-  fail "a reusable-workflow cycle was accepted"
-elif grep -qF 'closes a reusable-workflow cycle: renovate-changelog.yml -> app-key-environment.yml -> renovate-changelog.yml' "$tmp/grants.out"; then
-  pass "a reusable-workflow cycle is reported instead of recursing forever"
+local_caller="$tmp/renovate-local-uses.yml"
+sed "s#uses: $renovate_uses#uses: ./.github/workflows/renovate-changelog.yml#" "$renovate_caller" >"$local_caller"
+expect_grant_report "a caller job whose uses: is not a reusable workflow in this repository" \
+  "$local_caller" "$callee_workflows" \
+  "renovate-changelog calls './.github/workflows/renovate-changelog.yml', which is not a reusable workflow in this repository"
+
+missing_caller="$tmp/renovate-missing-callee.yml"
+sed "s#/renovate-changelog\.yml@#/missing-callee.yml@#" "$renovate_caller" >"$missing_caller"
+expect_grant_report "a caller delegating to a workflow absent from this repository" \
+  "$missing_caller" "$callee_workflows" \
+  "renovate-changelog delegates to missing-callee.yml, which is not in this repository"
+
+remote_nested="verJSON/.github/.github/workflows/app-key-environment.yml@$sha"
+expect_grant_report "a nested uses: that is not a local reusable workflow" \
+  "$renovate_caller" \
+  "$(fixture_workflows remote-nested "[\"renovate-changelog.yml\", \"set\", \"jobs.app-key-policy.uses\", \"$remote_nested\"]")" \
+  "renovate-changelog.yml job app-key-policy calls '$remote_nested', which is not a local reusable workflow"
+
+# A called job declaring nothing, under a callee declaring nothing, inherits its
+# caller's grant; its nested callee is capped there and cannot exceed it.
+expect_grant_report "a nested callee over-asking beneath a job that inherits its grant" \
+  "$renovate_caller" \
+  "$(fixture_workflows inherited-grant \
+    '["renovate-changelog.yml", "del", "permissions"]' \
+    '["renovate-changelog.yml", "del", "jobs.app-key-policy.permissions"]' \
+    '["app-key-environment.yml", "set", "jobs.validate-ai-review-key.permissions.issues", "write"]')" \
+  "renovate-changelog via renovate-changelog.yml job app-key-policy grants issues: none but app-key-environment.yml job validate-ai-review-key needs issues: write"
+
+# A callee's top level is the default for jobs that declare nothing, and only
+# for them: app-key-policy declares less and passes, attribute inherits and fails.
+expect_grant_report "a callee top level over-asking for a job that inherits it" \
+  "$renovate_caller" \
+  "$(fixture_workflows callee-top-level \
+    '["renovate-changelog.yml", "set", "permissions.issues", "write"]' \
+    '["renovate-changelog.yml", "del", "jobs.attribute.permissions"]')" \
+  "renovate-changelog grants issues: none but renovate-changelog.yml job attribute needs issues: write"
+
+recased_caller="$tmp/renovate-recased-owner.yml"
+sed "s#uses: verJSON/\.github/#uses: Verjson/.GitHub/#" "$renovate_caller" >"$recased_caller"
+if cmp -s "$renovate_caller" "$recased_caller"; then
+  fail "the owner-casing mutation changed nothing; case-insensitive matching is unproven"
+elif python3 "$tmp/check_callee_grants.py" "$recased_caller" "$callee_workflows" >"$tmp/grants.out" 2>&1; then
+  pass "this repository's owner/repo is matched case-insensitively"
 else
-  fail "the reusable-workflow cycle was rejected for the wrong reason: $(tail -n 3 "$tmp/grants.out")"
+  fail "a re-cased verJSON/.github reference was not compared: $(cat "$tmp/grants.out")"
 fi
 
 withheld="$tmp/release-withheld-actions.yml"
