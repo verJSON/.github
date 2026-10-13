@@ -40,10 +40,36 @@ command -v ps >/dev/null 2>&1 || {
   exit 2
 }
 
-command_parallelism="$(nproc 2>/dev/null || printf '1')"
-case "$command_parallelism" in
-  ''|*[!0-9]*|0) command_parallelism=1 ;;
-esac
+# nproc honors CPU affinity but not a CFS quota, so a container limited to 1.5
+# CPUs on a large host would start one row per host CPU and stretch every row's
+# wall clock past its budget. Use the quota, rounded up, when it is lower.
+available_cpus() {
+  local cpus quota period cgroup_root="${ACTIONS_CI_CGROUP_ROOT:-/sys/fs/cgroup}"
+  local own_cgroup='' cpu_max
+  cpus="$(nproc 2>/dev/null || printf '1')"
+  [[ "$cpus" =~ ^[1-9][0-9]*$ ]] || cpus=1
+  if [ -r /proc/self/cgroup ]; then
+    own_cgroup="$(sed -n 's/^0::\(.*\)$/\1/p' /proc/self/cgroup 2>/dev/null)" || own_cgroup=''
+  fi
+  for cpu_max in "$cgroup_root$own_cgroup/cpu.max" "$cgroup_root/cpu.max"; do
+    [ -r "$cpu_max" ] || continue
+    read -r quota period <"$cpu_max" || continue
+    if [[ "$quota" =~ ^[1-9][0-9]*$ && "$period" =~ ^[1-9][0-9]*$ ]]; then
+      quota=$(( (quota + period - 1) / period ))
+      [ "$quota" -ge "$cpus" ] || cpus="$quota"
+    fi
+    break
+  done
+  printf '%s\n' "$cpus"
+}
+
+ACTIONS_CI_AVAILABLE_CPUS="$(available_cpus)"
+export ACTIONS_CI_AVAILABLE_CPUS
+command_parallelism="${ACTIONS_CI_COMMAND_PARALLELISM:-$ACTIONS_CI_AVAILABLE_CPUS}"
+[[ "$command_parallelism" =~ ^[1-9][0-9]*$ ]] || {
+  printf 'invalid actions-ci command parallelism: %s\n' "$command_parallelism" >&2
+  exit 2
+}
 
 declare -a commands=()
 declare -a command_exclusive=()

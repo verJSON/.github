@@ -9,6 +9,9 @@ runner="$root/scripts/actions-ci-group.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 fails=0
+# Parallelism follows the host's CPU quota. Fixtures stub nproc, so keep the
+# real cgroup out of them unless a case supplies its own.
+export ACTIONS_CI_CGROUP_ROOT="$tmp/no-cgroup-limit"
 pass() { printf 'ok   - %s\n' "$1"; }
 fail() { printf 'FAIL - %s\n' "$1"; fails=$((fails + 1)); }
 process_is_live() {
@@ -222,6 +225,44 @@ cat >"$tmp/bin/nproc" <<'EOF'
 printf '2\n'
 EOF
 chmod +x "$tmp/bin/nproc"
+
+# nproc counts schedulable CPUs, not a CFS quota: a container limited to 1.5
+# CPUs on a 4-CPU host reports 4. Rows run up to the quota, rounded up, and the
+# count is exported so a row's own workers can use the same figure.
+mkdir -p "$tmp/four-bin" "$tmp/quota/limited" "$tmp/quota/unlimited"
+cat >"$tmp/four-bin/nproc" <<'EOF'
+#!/usr/bin/env bash
+printf '4\n'
+EOF
+chmod +x "$tmp/four-bin/nproc"
+printf '150000 100000\n' >"$tmp/quota/limited/cpu.max"
+printf 'max 100000\n' >"$tmp/quota/unlimited/cpu.max"
+printf 'platform\tprintf "cpus=%%s\\n" "$ACTIONS_CI_AVAILABLE_CPUS"\n%.0s' 1 2 3 4 \
+  >"$tmp/quota.tsv"
+quota_parallelism() { # <cgroup-root> [parallelism-override]
+  ACTIONS_CI_CGROUP_ROOT="$1" ACTIONS_CI_COMMAND_PARALLELISM="${2:-}" \
+    ACTIONS_CI_GROUP_MANIFEST="$tmp/quota.tsv" PATH="$tmp/four-bin:$PATH" \
+    bash "$runner" platform 2>&1
+}
+limited="$(quota_parallelism "$tmp/quota/limited")"
+unlimited="$(quota_parallelism "$tmp/quota/unlimited")"
+forced="$(quota_parallelism "$tmp/quota/limited" 3)"
+invalid_status=0
+quota_parallelism "$tmp/quota/limited" 0 >"$tmp/invalid-parallelism.out" || invalid_status=$?
+if grep -q 'command_parallelism=2 command_count=4' <<<"$limited" \
+  && grep -q '^cpus=2$' <<<"$limited" \
+  && grep -q 'command_parallelism=4 command_count=4' <<<"$unlimited" \
+  && grep -q '^cpus=4$' <<<"$unlimited" \
+  && grep -q 'command_parallelism=3 command_count=4' <<<"$forced" \
+  && grep -q '^cpus=2$' <<<"$forced" \
+  && [ "$invalid_status" -eq 2 ] \
+  && grep -q 'invalid actions-ci command parallelism: 0' "$tmp/invalid-parallelism.out"; then
+  pass "row parallelism follows the CPU quota, not nproc, and an explicit override wins"
+else
+  printf '%s\n---\n' "$limited" "$unlimited" "$forced" >&2
+  cat "$tmp/invalid-parallelism.out" >&2
+  fail "row parallelism ignored the CPU quota or mishandled the override"
+fi
 cat >"$tmp/wait-for-peer.sh" <<'EOF'
 #!/usr/bin/env bash
 printf x >>"$ACTIONS_CI_PARALLEL_STARTS"
