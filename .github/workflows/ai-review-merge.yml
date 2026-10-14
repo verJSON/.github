@@ -633,7 +633,7 @@ jobs:
             local default_model="$1" default_budget="$2" selected_model selected_budget selected_provider selected_pricing selected_authority fallback_model fallback_budget policy policy_explicit input_explicit
             policy_envelope="${REVIEW_POLICY:-}"
             [ -n "$policy_envelope" ] || policy_envelope='eyJhY3RvciI6InJldXNhYmxlLWNhbGxlciIsImFjdG9yX3Blcm1pc3Npb24iOiJtYWludGFpbiIsImF1dGhvcml0eSI6Imh1bWFuIiwiYnVkZ2V0X3VzZCI6ImF1dG8iLCJleHBsaWNpdF9yZXJldmlldyI6ZmFsc2UsImZhbGxiYWNrX2J1ZGdldF91c2QiOiIiLCJmYWxsYmFja19tb2RlbCI6IiIsIm1vZGVsIjoiYXV0byIsInByaWNpbmdfdmVyc2lvbiI6ImFudGhyb3BpYy1uYXRpdmUtdjEiLCJwcm92aWRlciI6ImFudGhyb3BpYyJ9'
-            policy="$(python3 "${POLICY_DECODER:-scripts/ci-gate/review-policy-envelope.py}" decode "$policy_envelope")" || {
+            policy="$(python3 -I "${POLICY_DECODER:-scripts/ci-gate/review-policy-envelope.py}" decode "$policy_envelope")" || {
               echo "::error::receipt-bound review policy is malformed"; return 1;
             }
             selected_provider="$(jq -r .provider <<<"$policy")"; selected_model="$(jq -r .model <<<"$policy")"
@@ -801,7 +801,7 @@ jobs:
             [ "$major" = true ] && out dependency_major true
           fi
 
-          classification="$(python3 "$REVIEW_CLASSIFIER" <<<"$files")" || {
+          classification="$(python3 -I "$REVIEW_CLASSIFIER" <<<"$files")" || {
             echo "::error::review policy classifier failed; refusing to skip AI review"
             exit 1
           }
@@ -1125,7 +1125,7 @@ jobs:
               explicit_receipt_consumed=true
             fi
           done < <(jq -r --arg login "$app_login" '.[] | select(.state == "COMMENTED" and .user.login == $login) | [.commit_id, .body] | @tsv' <<<"$reviews")
-          consumed="$(python3 "$RUNNER_TEMP/review-attempt-count.py" --app-login "$app_login" --pr-number "$PR_NUMBER" --head-sha "$EXPECTED_HEAD_SHA" <<<"$reviews")"
+          consumed="$(python3 -I "$RUNNER_TEMP/review-attempt-count.py" --app-login "$app_login" --pr-number "$PR_NUMBER" --head-sha "$EXPECTED_HEAD_SHA" <<<"$reviews")"
           [[ "$consumed" =~ ^[0-9]+$ ]] || exit 1
           # One rollout attempt predates App-authored reservation reviews. Count
           # it only after independently revalidating its immutable workflow run,
@@ -1457,7 +1457,7 @@ jobs:
         run: |
           umask 077
           printf '%s' "$REVIEW_PROMPT" >"$PROMPT_FILE"
-          python3 "$RUNNER_TEMP/openai-review.py"
+          python3 -I "$RUNNER_TEMP/openai-review.py"
 
       - name: DeepSeek review pass 1
         id: deepseek_primary
@@ -1487,7 +1487,7 @@ jobs:
           fi
           umask 077
           printf '%s' "$REVIEW_PROMPT" >"$PROMPT_FILE"
-          env -u GH_TOKEN python3 "$RUNNER_TEMP/deepseek-review.py"
+          env -u GH_TOKEN python3 -I "$RUNNER_TEMP/deepseek-review.py"
 
       - name: Validate pass 1 verdict semantics
         id: verdict_1
@@ -1499,7 +1499,7 @@ jobs:
           REVIEW_REPOSITORY: ${{ github.workspace }}
           REVIEWED_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
         run: |
-          python3 "$RUNNER_TEMP/review-verdict.py"
+          python3 -I "$RUNNER_TEMP/review-verdict.py"
 
       - name: Reserve cumulative AI review pass 2
         id: reserve_2
@@ -1585,7 +1585,7 @@ jobs:
           fi
           umask 077
           printf '%s' "$REVIEW_PROMPT" >"$PROMPT_FILE"
-          env -u GH_TOKEN python3 "$RUNNER_TEMP/deepseek-review.py"
+          env -u GH_TOKEN python3 -I "$RUNNER_TEMP/deepseek-review.py"
 
       - name: Validate pass 2 verdict semantics
         id: verdict_2
@@ -1597,7 +1597,7 @@ jobs:
           REVIEW_REPOSITORY: ${{ github.workspace }}
           REVIEWED_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
         run: |
-          python3 "$RUNNER_TEMP/review-verdict.py"
+          python3 -I "$RUNNER_TEMP/review-verdict.py"
 
       - name: Record bounded model outcome
         id: retry_outcome
@@ -1855,7 +1855,7 @@ jobs:
         run: |
           diagnostic=${DIAGNOSTIC:-}
           [ -n "$diagnostic" ] || diagnostic='{}'
-          python3 "$RUNNER_TEMP/prepare-deepseek-replay.py" \
+          python3 -I "$RUNNER_TEMP/prepare-deepseek-replay.py" \
             --source "$RUNNER_TEMP/deepseek-replay-pass-1.json" \
             --output "$RUNNER_TEMP/deepseek-replay-upload/pass-1.json" \
             --transport "$TRANSPORT" --usable "$USABLE" --publication "$PUBLICATION" \
@@ -1892,7 +1892,7 @@ jobs:
         run: |
           diagnostic=${DIAGNOSTIC:-}
           [ -n "$diagnostic" ] || diagnostic='{}'
-          python3 "$RUNNER_TEMP/prepare-deepseek-replay.py" \
+          python3 -I "$RUNNER_TEMP/prepare-deepseek-replay.py" \
             --source "$RUNNER_TEMP/deepseek-replay-pass-2.json" \
             --output "$RUNNER_TEMP/deepseek-replay-upload/pass-2.json" \
             --transport "$TRANSPORT" --usable "$USABLE" --publication "$PUBLICATION" \

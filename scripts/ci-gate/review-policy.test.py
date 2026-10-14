@@ -33,7 +33,7 @@ checks = {
         "DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}",
         "anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}",
     )),
-    "OpenAI is one explicit tool-free client": 'python3 "$RUNNER_TEMP/openai-review.py"' in gate and "needs.preflight.outputs.provider == 'openai'" in gate,
+    "OpenAI is one explicit tool-free client": 'python3 -I "$RUNNER_TEMP/openai-review.py"' in gate and "needs.preflight.outputs.provider == 'openai'" in gate,
     "Anthropic retains native budget": "--max-budget-usd ${{ needs.preflight.outputs.budget_usd }}" in gate,
     "models use strict allowlists": all(model in gate for model in (
         "claude-haiku-4-5|claude-sonnet-5|claude-opus-5", "gpt-5.6-luna",

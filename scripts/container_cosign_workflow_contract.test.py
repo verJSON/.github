@@ -94,7 +94,7 @@ class CosignWorkflowContractTests(unittest.TestCase):
         )
 
         self.assertIn("setup-oras", "\n".join(step.get("uses", "") for step in mirror_job["steps"]))
-        self.assertRegex(run_scripts, r'python3 "\$provenance_helper" verify-image')
+        self.assertRegex(run_scripts, r'python3 -I "\$provenance_helper" verify-image')
         self.assertIn("--image-repository", run_scripts)
         self.assertIn("--registry-repository", run_scripts)
         self.assertIn("--expected-bundle-digest", run_scripts)
@@ -113,10 +113,10 @@ class CosignWorkflowContractTests(unittest.TestCase):
                 self.assertEqual(sign["env"]["CONTRACT_REF"], "${{ inputs.contract-ref }}")
                 self.assertLess(
                     script.index('docker buildx imagetools inspect "$REPOSITORY@$DIGEST" --raw'),
-                    script.index('python3 "$oci" index --index "$raw" --reviewed-platforms "$reviewed"'),
+                    script.index('python3 -I "$oci" index --index "$raw" --reviewed-platforms "$reviewed"'),
                 )
                 self.assertLess(
-                    script.index('python3 "$oci" index --index "$raw" --reviewed-platforms "$reviewed"'),
+                    script.index('python3 -I "$oci" index --index "$raw" --reviewed-platforms "$reviewed"'),
                     script.index("request-oidc-token"),
                 )
 
@@ -128,7 +128,7 @@ class CosignWorkflowContractTests(unittest.TestCase):
         script = subject["run"]
 
         self.assertIn(
-            'python3 "$helper" index --index "$raw_index" '
+            'python3 -I "$helper" index --index "$raw_index" '
             '--reviewed-platforms "$reviewed_platforms" > "$inventory"',
             script,
         )

@@ -53,7 +53,7 @@ jobs:
           GH_TOKEN: ${{ steps.observer-token.outputs.token }}
           TARGET_REPOSITORY: ${{ steps.target.outputs.repository }}
         run: |
-          python3 scripts/dependency-supersession.py observe \
+          python3 -I scripts/dependency-supersession.py observe \
             --repository "$TARGET_REPOSITORY" \
             --output dependency-supersession-proposal.json
           jq -e '.schema == "canonical-dependency-supersession/v1" and .mode == "observe-only" and .repository == env.TARGET_REPOSITORY' \

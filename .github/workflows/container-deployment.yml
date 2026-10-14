@@ -71,7 +71,7 @@ jobs:
           CONTRACT_REF: ${{ inputs.contract-ref }}
           WORKFLOW_REF: ${{ github.workflow_ref }}
         run: |
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           import os
           import re
           from pathlib import Path
@@ -110,7 +110,7 @@ jobs:
           mkdir "$RUNNER_TEMP/deployment-contract"
           tar -xzf "$RUNNER_TEMP/deployment-contract.tar.gz" \
             --strip-components=1 -C "$RUNNER_TEMP/deployment-contract"
-          python3 "$RUNNER_TEMP/deployment-contract/scripts/validate-container-deployment-cli-lock.py" \
+          python3 -I "$RUNNER_TEMP/deployment-contract/scripts/validate-container-deployment-cli-lock.py" \
             "$RUNNER_TEMP/deployment-contract/contracts/container-deployment-cli/package-lock.json"
           NODE_AUTH_TOKEN="$GH_TOKEN" npm ci --ignore-scripts --no-audit --no-fund \
             --prefix "$RUNNER_TEMP/deployment-contract/contracts/container-deployment-cli"
@@ -139,7 +139,7 @@ jobs:
           set -euo pipefail
           [[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ ]]
           [[ "$MANIFEST_IDENTITY" =~ ^sha256:[0-9a-f]{64}$ ]]
-          python3 scripts/container_deployment_controller.py collect-evidence \
+          python3 -I scripts/container_deployment_controller.py collect-evidence \
             --preview \
             --config "$CONFIG_PATH" --manifest-identity "$MANIFEST_IDENTITY" \
             --fleet "$FLEET_SELECTOR" --rollback-receipt "$ROLLBACK_RECEIPT" \
@@ -147,7 +147,7 @@ jobs:
           args=(plan --preview --config "$CONFIG_PATH" --evidence deployment-evidence.json \
             --fleet "$FLEET_SELECTOR" --action "$ACTION" --contract-ref "$CONTRACT_REF" \
             --output deployment-plan.json)
-          python3 scripts/container_deployment_controller.py "${args[@]}"
+          python3 -I scripts/container_deployment_controller.py "${args[@]}"
           jq -e '.rolloutMode == "sequential" and (.steps[0].phase == "canary")' deployment-plan.json
       - name: Retain exact redacted mutation-free plan
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -187,7 +187,7 @@ jobs:
           CONTRACT_REF: ${{ inputs.contract-ref }}
           WORKFLOW_REF: ${{ github.workflow_ref }}
         run: |
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           import os
           import re
           from pathlib import Path
@@ -226,7 +226,7 @@ jobs:
           mkdir "$RUNNER_TEMP/deployment-contract"
           tar -xzf "$RUNNER_TEMP/deployment-contract.tar.gz" \
             --strip-components=1 -C "$RUNNER_TEMP/deployment-contract"
-          python3 "$RUNNER_TEMP/deployment-contract/scripts/validate-container-deployment-cli-lock.py" \
+          python3 -I "$RUNNER_TEMP/deployment-contract/scripts/validate-container-deployment-cli-lock.py" \
             "$RUNNER_TEMP/deployment-contract/contracts/container-deployment-cli/package-lock.json"
           NODE_AUTH_TOKEN="$GH_TOKEN" npm ci --ignore-scripts --no-audit --no-fund \
             --prefix "$RUNNER_TEMP/deployment-contract/contracts/container-deployment-cli"
@@ -255,7 +255,7 @@ jobs:
           set -euo pipefail
           GITHUB_HEAD_TREE="$(git rev-parse 'HEAD^{tree}')"
           export GITHUB_HEAD_TREE
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           import hashlib, io, json, os, re, subprocess, sys, zipfile
           from datetime import datetime, timezone
           sys.path.insert(0, "scripts")
@@ -483,12 +483,12 @@ jobs:
           with open("github-authorization.json", "x", encoding="utf-8") as stream:
               json.dump(authorization, stream, sort_keys=True, separators=(",", ":"))
           PY
-          python3 scripts/container_deployment_controller.py collect-evidence \
+          python3 -I scripts/container_deployment_controller.py collect-evidence \
             --config "$CONFIG_PATH" --manifest-identity "$MANIFEST_IDENTITY" \
             --fleet "$FLEET_SELECTOR" --rollback-receipt "$ROLLBACK_RECEIPT" \
             --authorization github-authorization.json \
             --output deployment-evidence.json
-          python3 scripts/container_deployment_preflight.py --evidence deployment-evidence.json
+          python3 -I scripts/container_deployment_preflight.py --evidence deployment-evidence.json
       - name: Admit immutable sequential plan
         env:
           ACTION: ${{ inputs.action }}
@@ -500,14 +500,14 @@ jobs:
           args=(plan --config "$CONFIG_PATH" --evidence deployment-evidence.json \
             --fleet "$FLEET_SELECTOR" --action "$ACTION" --contract-ref "$CONTRACT_REF" \
             --output deployment-plan.json)
-          python3 scripts/container_deployment_controller.py "${args[@]}"
+          python3 -I scripts/container_deployment_controller.py "${args[@]}"
           mkdir -p deployment-receipts
-              python3 scripts/container_deployment_controller.py admit \
+              python3 -I scripts/container_deployment_controller.py admit \
                 --plan deployment-plan.json --config "$CONFIG_PATH" \
                 --evidence deployment-evidence.json --receipt-dir deployment-receipts \
                 --fleet "$FLEET_SELECTOR" --action "$ACTION" \
                 --contract-ref "$CONTRACT_REF"
-          python3 scripts/container_deployment_controller.py reconcile \
+          python3 -I scripts/container_deployment_controller.py reconcile \
             --plan deployment-plan.json --config "$CONFIG_PATH" \
             --evidence deployment-evidence.json --receipt-dir deployment-receipts
       - name: Retain admitted or reconciled authority
@@ -546,7 +546,7 @@ jobs:
           RUNNER_HOST_EVIDENCE_KNOWN_HOSTS: ${{ secrets.RUNNER_HOST_EVIDENCE_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-          python3 scripts/container_deployment_controller.py execute \
+          python3 -I scripts/container_deployment_controller.py execute \
             --plan deployment-plan.json --config "$CONFIG_PATH" \
             --evidence deployment-evidence.json --receipt-dir deployment-receipts
       - name: Retain append-only progress after transition 1
@@ -572,12 +572,12 @@ jobs:
           RUNNER_HOST_EVIDENCE_KNOWN_HOSTS: ${{ secrets.RUNNER_HOST_EVIDENCE_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-          python3 scripts/container_deployment_controller.py collect-evidence \
+          python3 -I scripts/container_deployment_controller.py collect-evidence \
             --config "$CONFIG_PATH" --manifest-identity "$MANIFEST_IDENTITY" \
             --fleet "$FLEET_SELECTOR" --rollback-receipt "$ROLLBACK_RECEIPT" \
             --authorization github-authorization.json \
             --output deployment-evidence.json
-          python3 scripts/container_deployment_preflight.py --evidence deployment-evidence.json
+          python3 -I scripts/container_deployment_preflight.py --evidence deployment-evidence.json
       - name: Revalidate refreshed live release before transition 2
         if: ${{ steps.refresh_1.outcome == 'success' }}
         id: revalidate_1
@@ -585,7 +585,7 @@ jobs:
           CONFIG_PATH: ${{ inputs.config-path }}
         run: |
           set -euo pipefail
-          python3 scripts/container_deployment_controller.py validate-refresh \
+          python3 -I scripts/container_deployment_controller.py validate-refresh \
             --plan deployment-plan.json --config "$CONFIG_PATH" \
             --evidence deployment-evidence.json --receipt-dir deployment-receipts
       - name: Advance second bounded runner transition
@@ -601,7 +601,7 @@ jobs:
           RUNNER_HOST_EVIDENCE_KNOWN_HOSTS: ${{ secrets.RUNNER_HOST_EVIDENCE_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-          python3 scripts/container_deployment_controller.py execute \
+          python3 -I scripts/container_deployment_controller.py execute \
             --plan deployment-plan.json --config "$CONFIG_PATH" \
             --evidence deployment-evidence.json --receipt-dir deployment-receipts
       - name: Retain append-only progress after transition 2
@@ -627,12 +627,12 @@ jobs:
           RUNNER_HOST_EVIDENCE_KNOWN_HOSTS: ${{ secrets.RUNNER_HOST_EVIDENCE_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-          python3 scripts/container_deployment_controller.py collect-evidence \
+          python3 -I scripts/container_deployment_controller.py collect-evidence \
             --config "$CONFIG_PATH" --manifest-identity "$MANIFEST_IDENTITY" \
             --fleet "$FLEET_SELECTOR" --rollback-receipt "$ROLLBACK_RECEIPT" \
             --authorization github-authorization.json \
             --output deployment-evidence.json
-          python3 scripts/container_deployment_preflight.py --evidence deployment-evidence.json
+          python3 -I scripts/container_deployment_preflight.py --evidence deployment-evidence.json
       - name: Revalidate refreshed live release before transition 3
         if: ${{ steps.refresh_2.outcome == 'success' }}
         id: revalidate_2
@@ -640,7 +640,7 @@ jobs:
           CONFIG_PATH: ${{ inputs.config-path }}
         run: |
           set -euo pipefail
-          python3 scripts/container_deployment_controller.py validate-refresh \
+          python3 -I scripts/container_deployment_controller.py validate-refresh \
             --plan deployment-plan.json --config "$CONFIG_PATH" \
             --evidence deployment-evidence.json --receipt-dir deployment-receipts
       - name: Advance third bounded runner transition
@@ -656,7 +656,7 @@ jobs:
           RUNNER_HOST_EVIDENCE_KNOWN_HOSTS: ${{ secrets.RUNNER_HOST_EVIDENCE_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-          python3 scripts/container_deployment_controller.py execute \
+          python3 -I scripts/container_deployment_controller.py execute \
             --plan deployment-plan.json --config "$CONFIG_PATH" \
             --evidence deployment-evidence.json --receipt-dir deployment-receipts
       - name: Retain append-only progress after transition 3

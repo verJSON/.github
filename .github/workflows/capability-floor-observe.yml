@@ -37,7 +37,7 @@ jobs:
         id: scope
         run: |
           set -euo pipefail
-          repositories="$(python3 scripts/capability-floor-discovery.py --print-repositories)"
+          repositories="$(python3 -I scripts/capability-floor-discovery.py --print-repositories)"
           if [[ -z "$repositories" || "$repositories" == *$'\n'* ]]; then
             echo "::error::reviewed capability-floor repository scope is empty or multiline"
             exit 1
@@ -57,13 +57,13 @@ jobs:
           GH_TOKEN: ${{ steps.observer-app-token.outputs.token }}
         run: |
           set -euo pipefail
-          python3 scripts/capability-floor-discovery.py \
+          python3 -I scripts/capability-floor-discovery.py \
             --pins-output capability-floor-pins.json \
             --receipts-output capability-floor-discovery-receipts.json
       - name: Classify pins against reviewed capability floors
         run: |
           set -euo pipefail
-          python3 scripts/capability-floor-audit.py \
+          python3 -I scripts/capability-floor-audit.py \
             --pins capability-floor-pins.json \
             > capability-floor-report.json
           {

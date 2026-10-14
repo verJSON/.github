@@ -15,7 +15,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from changelog import ChangelogError, load_canonical_text
+# Workflows start this script with `python3 -I`, which leaves its own directory
+# off the module path; the sibling it imports lives there.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from changelog import ChangelogError, load_canonical_text  # noqa: E402
 
 
 API_ROOT = "https://api.github.com"

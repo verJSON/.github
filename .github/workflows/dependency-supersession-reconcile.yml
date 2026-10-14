@@ -123,7 +123,7 @@ jobs:
         run: |
           args=()
           if [[ "$ENFORCE" == 'true' ]]; then args+=(--enforce); fi
-          python3 scripts/dependency-supersession.py reconcile \
+          python3 -I scripts/dependency-supersession.py reconcile \
             --proposal proposal/dependency-supersession-proposal.json \
             --receipt "$RECEIPT" --output dependency-supersession-receipt.json "${args[@]}"
           jq . dependency-supersession-receipt.json >> "$GITHUB_STEP_SUMMARY"

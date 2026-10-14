@@ -47,10 +47,11 @@ for step in (install, enforce, cleanup):
 assert "policy_mode=(--consumer-policy)" in enforce["run"]
 assert "GITHUB_REPOSITORY" in enforce["run"]
 assert "policy_mode=(--visibility public)" in enforce["run"]
-assert "python3 -S" in enforce["run"]
+assert "python3 -I -S" in enforce["run"]
 assert 'mktemp -d "$runner_temp/verjson-hosted-selector-policy.XXXXXX"' in install["run"]
 assert '>>"$GITHUB_ENV"' in install["run"]
-assert 'PYTHONPATH="$policy_dir/python"' in enforce["run"]
+assert '--dependency-path "$policy_dir/python"' in enforce["run"]
+assert "PYTHONPATH" not in enforce["run"]
 assert 'rm -rf -- "$policy_dir"' in cleanup["run"]
 
 environment = job["env"]

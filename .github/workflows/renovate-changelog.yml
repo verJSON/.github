@@ -75,7 +75,7 @@ jobs:
           PLAN_PATH: ${{ runner.temp }}/renovate-changelog-plan-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: |
           set -euo pipefail
-          python3 "$CONTRACT_PATH/scripts/renovate-changelog.py" plan \
+          python3 -I "$CONTRACT_PATH/scripts/renovate-changelog.py" plan \
             --repository "$TARGET_REPOSITORY" \
             --pr-number "$PR_NUMBER" \
             --expected-head "$EXPECTED_HEAD" \
@@ -113,7 +113,7 @@ jobs:
           PLAN_PATH: ${{ runner.temp }}/renovate-changelog-plan-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: |
           set -euo pipefail
-          python3 "$CONTRACT_PATH/scripts/renovate-changelog.py" apply \
+          python3 -I "$CONTRACT_PATH/scripts/renovate-changelog.py" apply \
             --plan "$PLAN_PATH"
 
       - name: Remove the isolated trusted contract checkout

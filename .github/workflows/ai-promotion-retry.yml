@@ -151,7 +151,7 @@ jobs:
           [ -f "$receipt_dir/receipt.json" ] || exit 1
           review_policy="$(jq -er '.review_policy | select(type == "string")' "$receipt_dir/receipt.json")"
           [[ "$review_policy" =~ ^[A-Za-z0-9_-]{1,2048}$ ]] || exit 1
-          policy_json="$(python3 .promotion-trust/scripts/ci-gate/review-policy-envelope.py decode "$review_policy")" || exit 1
+          policy_json="$(python3 -I .promotion-trust/scripts/ci-gate/review-policy-envelope.py decode "$review_policy")" || exit 1
           if [ "$(jq -r '.authority // "human"' <<<"$policy_json")" != ai-merge ]; then
             echo 'ready=false' >>"$GITHUB_OUTPUT"
             exit 0

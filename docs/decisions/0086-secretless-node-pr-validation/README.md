@@ -190,9 +190,10 @@ create `/tmp/npm-config` (mode 0700) on the sandbox's fresh `/tmp` tmpfs, with
 the upper- and lowercase npm configuration variables and leaves the umask lifecycle
 scripts inherit unchanged.
 
-`scripts/ci-gate/node-ci-isolated-python.test.py` enforces the invariant on both
+`scripts/ci-gate/workflow-isolated-python.test.py` enforces the invariant on both
 workflows with an empty exception list and runs a representative validator against a
-checkout carrying same-named modules. The rebuild regression applies the same check to
+checkout carrying same-named modules. [ADR 0228](../0228-workflow-python-starts-isolated/README.md)
+extends the invariant and that test to every workflow and generator. The rebuild regression applies the same check to
 the outer validator and the sandbox bootstrap under the stub and real Bubblewrap, and
 also requires exact, distinct private configuration paths under both spellings and an
 unchanged lifecycle output mode.

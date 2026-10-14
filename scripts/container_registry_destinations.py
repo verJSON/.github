@@ -13,6 +13,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Workflows start this script with `python3 -I`, which leaves its own directory
+# off the module path; the sibling it imports on demand lives there.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 
 class DestinationError(ValueError):
     pass

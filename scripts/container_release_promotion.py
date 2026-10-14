@@ -7,7 +7,10 @@ import re
 import sys
 from pathlib import Path
 
-from container_release_manifest import ManifestError, validate_manifest
+# Workflows start this script with `python3 -I`, which leaves its own directory
+# off the module path; the sibling it imports lives there.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from container_release_manifest import ManifestError, validate_manifest  # noqa: E402
 
 
 SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")

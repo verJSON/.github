@@ -8,7 +8,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from container_registry_destinations import DestinationError, manifest_destinations
+# Workflows start this script with `python3 -I`, which leaves its own directory
+# off the module path; the sibling it imports lives there.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from container_registry_destinations import DestinationError, manifest_destinations  # noqa: E402
 
 
 class ManifestError(ValueError):

@@ -156,7 +156,7 @@ jobs:
           [ "$(jq -r .workflow_run.repository_id <<<"$metadata")" = "$GITHUB_REPOSITORY_ID" ]
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" > candidate.zip
           [ "sha256:$(sha256sum candidate.zip | cut -d' ' -f1)" = "$expected_digest" ]
-          python3 scripts/container_artifact_extract.py candidate.zip candidate.json candidate-manifest.sigstore.json
+          python3 -I scripts/container_artifact_extract.py candidate.zip candidate.json candidate-manifest.sigstore.json
           mv candidate.zip candidate-manifest.zip
           run_id="$(jq -r .source.runId candidate.json)"; source_sha="$(jq -r .source.commit candidate.json)"
           [ "$(jq -r .workflow_run.id <<<"$metadata")" = "$run_id" ]
@@ -241,7 +241,7 @@ jobs:
             fi
           done < <(jq -r '.images | sort_by(.variant)[] | .repository' candidate-config.json)
           mkdir receipts
-          python3 scripts/container_attestation_verify.py --candidate candidate.json \
+          python3 -I scripts/container_attestation_verify.py --candidate candidate.json \
             --config candidate-config.json --state state.json --receipts receipts \
             --expected-repository "$GITHUB_REPOSITORY" \
             --repository-id "$GITHUB_REPOSITORY_ID" \
@@ -249,7 +249,7 @@ jobs:
             --expected-source-commit "$(jq -er .head_sha candidate-run.json)" \
             --contract-ref "$CONTRACT_REF" \
             --cosign-helper ".container-release-contract/scripts/container_cosign_provenance.py"
-          python3 scripts/container_release_promotion.py --candidate candidate.json \
+          python3 -I scripts/container_release_promotion.py --candidate candidate.json \
             --config candidate-config.json --state state.json --version "$VERSION" --output release-manifest.json
           release_path="RELEASES/containers/v$VERSION.json"
           if git show-ref --verify --quiet "refs/tags/v$VERSION"; then
@@ -288,7 +288,7 @@ jobs:
           RECONCILE_ALLOWLIST: ${{ inputs.reconcile-allowlist }}
         run: |
           set -euo pipefail
-          python3 .container-release-contract/scripts/container_release_reconcile.py \
+          python3 -I .container-release-contract/scripts/container_release_reconcile.py \
             --repo-root . --allowlist "$RECONCILE_ALLOWLIST" --version "$VERSION" \
             --manifest release-manifest.json \
             --contract-root .container-release-contract --contract-ref "$CONTRACT_REF" \
@@ -342,7 +342,7 @@ jobs:
           else
             token="$RUNNER_TEMP/release-manifest-oidc-token"
             trap 'rm -f "$token"' EXIT
-            python3 "$helper" request-oidc-token \
+            python3 -I "$helper" request-oidc-token \
               --request-url "$ACTIONS_ID_TOKEN_REQUEST_URL" --output "$token"
             cosign sign-blob --yes --bundle release-manifest.sigstore.json \
               --identity-token "$token" release-manifest.json
@@ -394,7 +394,7 @@ jobs:
             # Repository hooks never run with the release App token: `.git/hooks` is
             # not tracked, so nothing here could have reviewed what it contains.
             git -c core.hooksPath=/dev/null commit -m "chore(containers): record release v$VERSION"
-            python3 .container-release-contract/scripts/changelog.py release --version "v$VERSION"
+            python3 -I .container-release-contract/scripts/changelog.py release --version "v$VERSION"
             git -c core.hooksPath=/dev/null push --atomic origin HEAD:main "refs/tags/v$VERSION"
           fi
           if [ "$(cat github-state)" = missing ]; then
@@ -449,5 +449,5 @@ jobs:
             echo "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer, got '$RETENTION_KEEP'."
             exit 1
           fi
-          python3 .package-retention-contract/scripts/package_retention.py \
+          python3 -I .package-retention-contract/scripts/package_retention.py \
             --owner "$GITHUB_REPOSITORY_OWNER" --targets "$TARGETS" --keep "$RETENTION_KEEP" --apply

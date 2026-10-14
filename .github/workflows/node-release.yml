@@ -488,7 +488,7 @@ jobs:
           mkdir -p "$ASSET_STATE_ROOT"
           paths="$ASSET_STATE_ROOT/paths"
           rows="$ASSET_STATE_ROOT/rows"
-          python3 - "$RELEASE_ASSETS" "$paths" <<'PY'
+          python3 -I - "$RELEASE_ASSETS" "$paths" <<'PY'
           import json
           import pathlib
           import re
@@ -545,7 +545,7 @@ jobs:
             digest="$(git cat-file blob "HEAD:$asset" | sha256sum | awk '{print $1}')"
             printf '%s\t%s\t%s\t%s\n' "$asset" "${asset##*/}" "$size" "$digest" >>"$rows"
           done <"$paths"
-          python3 - "$rows" "$GITHUB_OUTPUT" <<'PY'
+          python3 -I - "$rows" "$GITHUB_OUTPUT" <<'PY'
           import json
           import pathlib
           import sys
@@ -641,7 +641,7 @@ jobs:
           CONTRACT_ROOT: ${{ github.workspace }}/.node-release-contract
           VALIDATED_MANIFEST: ${{ runner.temp }}/verjson-release-validated-packages.json
         run: |
-          python3 "$CONTRACT_ROOT/scripts/node_release_artifact_manifest.py" \
+          python3 -I "$CONTRACT_ROOT/scripts/node_release_artifact_manifest.py" \
             --artifact-dir "$ARTIFACT_DIR" \
             --expected-manifest "$EXPECTED_MANIFEST" \
             --output "$VALIDATED_MANIFEST"
@@ -719,7 +719,7 @@ jobs:
           rm -rf -- "$ASSET_ROOT" "$state_root"
           mkdir -p "$ASSET_ROOT" "$state_root"
           expected="$state_root/expected"
-          python3 - "$RELEASE_ASSET_MANIFEST" "$expected" <<'PY'
+          python3 -I - "$RELEASE_ASSET_MANIFEST" "$expected" <<'PY'
           import json
           import pathlib
           import re
@@ -789,7 +789,7 @@ jobs:
             remote="$state_root/remote"
             gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" >"$remote"
             remote_receipts="$state_root/remote-receipts"
-            python3 - "$remote" "$expected" "$remote_receipts" <<'PY'
+            python3 -I - "$remote" "$expected" "$remote_receipts" <<'PY'
           import json
           import pathlib
           import re
@@ -948,5 +948,5 @@ jobs:
             echo "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer, got '$RETENTION_KEEP'."
             exit 1
           fi
-          python3 .package-retention-contract/scripts/package_retention.py \
+          python3 -I .package-retention-contract/scripts/package_retention.py \
             --owner "$GITHUB_REPOSITORY_OWNER" --targets "$TARGETS" --keep "$RETENTION_KEEP" --apply

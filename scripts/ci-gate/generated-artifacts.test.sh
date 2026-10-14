@@ -492,7 +492,7 @@ grep -q '::error title=Generated artifact out of date: Changelog::' <<<"$out" \
 # The remedy names the subcommand that failed. Sending someone to `validate`
 # for a policy failure sends them to a command that passes, which reads as a
 # flaky check rather than a verdict about their pull request.
-grep -qF "python3 .changelog-contract/scripts/changelog.py check-pr --repo-root . --base $base_sha --head $head_sha" \
+grep -qF "python3 -I .changelog-contract/scripts/changelog.py check-pr --repo-root . --base $base_sha --head $head_sha" \
   "$ws/summary.md" \
   && pass "a policy-check failure names check-pr, with the SHAs it was given" \
   || fail "the policy-check remedy is not the command that failed: $(cat "$ws/summary.md")"

@@ -148,7 +148,7 @@ jobs:
           while IFS= read -r fragment; do
             [ -z "$fragment" ] || args+=(--fragment "$fragment")
           done <<<"$FRAGMENTS"
-          actual="$(python3 .changelog-contract/scripts/changelog.py "${args[@]}")"
+          actual="$(python3 -I .changelog-contract/scripts/changelog.py "${args[@]}")"
           if [ "$actual" != "$EXPECTED_SELECTOR_DIGEST" ]; then
             echo "::error::Selected fragments resolve to $actual, not canonical receipt $EXPECTED_SELECTOR_DIGEST."
             exit 1
@@ -167,7 +167,7 @@ jobs:
           while IFS= read -r fragment; do
             [ -z "$fragment" ] || args+=(--fragment "$fragment")
           done <<<"$FRAGMENTS"
-          python3 .changelog-contract/scripts/changelog.py "${args[@]}"
+          python3 -I .changelog-contract/scripts/changelog.py "${args[@]}"
           release_commit="$(git rev-parse HEAD)"
           test "$(git rev-list -n 1 "$VERSION")" = "$release_commit"
           git push --atomic origin \
