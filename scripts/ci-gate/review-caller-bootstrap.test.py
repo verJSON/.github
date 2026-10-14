@@ -78,6 +78,22 @@ def mirror(sha: str) -> bytes:
             f"const reviewCallerDigest = '{digest(sha)}';\n").encode()
 
 
+CI_CALLER = ".github/workflows/ci.yml"
+CI_STALE = "ab93610d0b393005aed186f4aa17c75a549cea17"
+
+
+def ci_caller(sha: str, workflow: str = "node-ci.yml", owner: str = "Verjson/.github", ref_suffix: str = "",
+              node: str = "24.19.0") -> bytes:
+    """A hand-written consumer CI caller of a canonical reusable workflow (no generator exists)."""
+    return (
+        "name: CI\n\non:\n  pull_request:\n\npermissions:\n  contents: read\n\njobs:\n"
+        "  # Keep this job id stable.\n  ci:\n"
+        f"    uses: {owner}/.github/workflows/{workflow}@{sha}{ref_suffix}\n"
+        "    secrets:\n      NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}\n"
+        f"    with:\n      node-version: '{node}'\n"
+    ).encode()
+
+
 def fragment(date: str, identity: str, stale: str = STALE, contract: str = CONTRACT) -> tuple[str, bytes]:
     content = subprocess.run(["bash", str(FRAGMENT_GENERATOR), date, identity, stale, contract],
                              check=True, capture_output=True).stdout
@@ -127,6 +143,7 @@ class Consumer:
             f"{MINIMUM_SAFE}...{CONTRACT}": "ahead",
             f"{STALE}...{CONTRACT}": "ahead",
             f"{CONTRACT}...main": "ahead",
+            f"{CI_STALE}...{CONTRACT}": "ahead",
         }
         self.overrides: dict[str, object] = {}
         self.missing: set[str] = set()
@@ -644,6 +661,8 @@ def main() -> int:
     report(harness.eligible(runner_bootstrap), "the runner fleet's stale 2d1ea177 caller can bootstrap", harness.last)
     report(harness.eligible(with_files(**{"tests/pins.test.ts": (mirror(STALE), mirror(CONTRACT))})),
            "a pin mirror that only swaps the stale pin and caller digest is accepted", harness.last)
+    report(harness.eligible(with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT))})),
+           "a reusable node-ci caller that only moves its pin to the contract revision is a companion", harness.last)
     for identity in ("20261013T120000Z", "1696", "a49c6d20f3"):
         path, content = fragment("2026-10-13", identity)
         report(harness.eligible(with_files(**{path: (None, content)})),
