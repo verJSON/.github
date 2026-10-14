@@ -35,6 +35,13 @@ command -v setsid >/dev/null 2>&1 || {
   printf 'setsid is required to isolate actions-ci command process groups\n' >&2
   exit 2
 }
+# Rows start asynchronously, so a non-interactive bash hands them SIGINT and
+# SIGQUIT ignored, and a row cannot trap a signal ignored on entry. Each row is
+# exec'd through `env --default-signal` (coreutils 8.31+); refuse to run without it.
+env --default-signal=INT,QUIT true >/dev/null 2>&1 || {
+  printf 'env --default-signal (GNU coreutils 8.31 or later) is required to restore row signal dispositions\n' >&2
+  exit 2
+}
 command -v ps >/dev/null 2>&1 || {
   printf 'ps is required to supervise actions-ci command process groups\n' >&2
   exit 2
@@ -313,9 +320,11 @@ exec </dev/null
 status=0
 if [ -n "$command_budget" ]; then
   timeout --foreground --kill-after=2s "${command_budget}s" \
-    bash -o pipefail -c "$command" >"$command_raw_log" 2>&1 || status=$?
+    env --default-signal=INT,QUIT bash -o pipefail -c "$command" >"$command_raw_log" 2>&1 \
+    || status=$?
 else
-  bash -o pipefail -c "$command" >"$command_raw_log" 2>&1 || status=$?
+  env --default-signal=INT,QUIT bash -o pipefail -c "$command" >"$command_raw_log" 2>&1 \
+    || status=$?
 fi
 exit "$status"
 SUPERVISOR

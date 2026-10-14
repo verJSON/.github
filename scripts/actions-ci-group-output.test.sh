@@ -389,6 +389,38 @@ else
   fail "a row inherited the supervisor handshake or a non-null stdin"
 fi
 
+# A non-interactive bash starts asynchronous commands with SIGINT and SIGQUIT
+# ignored, and bash cannot trap a signal ignored on entry. The runner starts
+# every supervisor asynchronously, so each row must get the default
+# dispositions back. `timeout` happened to restore them, so only unbudgeted
+# push runs lost them. Start the runner from a parent that ignores both, as
+# CI did, and check both modes.
+# The SigIgn row reads the mask from a child: bash reports its own /proc entry
+# with dispositions it manages internally, while a child shows what it inherits.
+printf '%s\n' \
+  'platform	bash -c '"'"'trap "exit 130" INT; kill -INT $$; exit 0'"'"'' \
+  'platform	bash -c '"'"'trap "exit 131" QUIT; kill -QUIT $$; exit 0'"'"'' \
+  'platform	bash -c '"'"'[[ "$(grep "^SigIgn:" /proc/self/status)" =~ ([0-9a-f]+)$ ]] && (( (16#${BASH_REMATCH[1]} & 6) == 0 ))'"'"'' \
+  >"$tmp/signals.tsv"
+signals_ok=1
+for signal_budget in 60 ''; do
+  ACTIONS_CI_COMMAND_BUDGET_SECONDS="$signal_budget" ACTIONS_CI_GROUP_MANIFEST="$tmp/signals.tsv" \
+    bash -c 'trap "" INT QUIT; exec bash "$1" platform' _ "$runner" \
+    >"$tmp/signals.out" 2>&1
+  if ! grep -q 'actions-ci command group=platform status=130 .*INT' "$tmp/signals.out" \
+    || ! grep -q 'actions-ci command group=platform status=131 .*QUIT' "$tmp/signals.out" \
+    || ! grep -q 'actions-ci command group=platform status=0 .*SigIgn' "$tmp/signals.out"; then
+    printf 'budget=%s:\n' "${signal_budget:-none}" >&2
+    cat "$tmp/signals.out" >&2
+    signals_ok=0
+  fi
+done
+if [ "$signals_ok" -eq 1 ]; then
+  pass "rows get default SIGINT and SIGQUIT even when the runner inherits them ignored"
+else
+  fail "a row inherited ignored SIGINT or SIGQUIT and could not trap them"
+fi
+
 # Malformed rows fail in the runner itself, not only in the manifest contract.
 printf 'platform\ttrue\textra\n' >"$tmp/three-fields.tsv"
 printf 'platform\t@budget=601 true\n' >"$tmp/over-cap.tsv"
