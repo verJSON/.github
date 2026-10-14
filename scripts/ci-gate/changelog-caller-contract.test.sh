@@ -142,8 +142,10 @@ else
   exit 1
 fi
 
-# BEGIN generator-only assertions -- case shards skip everything up to the END
-# marker, so no case may read anything defined between them (#1736).
+# Case shards skip everything between the BEGIN and END markers, so no case may
+# read anything defined there (#1736). The shard test requires BEGIN directly
+# above the gate's `if` and END directly below the `fi` that closes it.
+# BEGIN generator-only assertions
 if [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ] \
   || [ "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}" = all ]; then
 grep -qF 'uses: verJSON/.github/.github/workflows/generated-artifacts.yml@' <<<"$workflow" \

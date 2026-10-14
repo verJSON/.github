@@ -50,6 +50,7 @@ fi
 # Upper-case names are environment prefixes on single commands, not fixtures.
 cat >"$tmp/fixture-leaks.py" <<'LEAKS'
 import re
+import subprocess
 import sys
 
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
@@ -60,6 +61,27 @@ if len(begins) != 1 or len(ends) != 1 or begins[0] >= ends[0]:
         f"expected one generator-only section, found {len(begins)} BEGIN and {len(ends)} END markers"
     )
 start, end = begins[0], ends[0]
+gate = lines[start + 1] if start + 1 < len(lines) else ""
+if not (gate.startswith("if ") and "CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY" in gate):
+    raise SystemExit("BEGIN marker must directly precede the generator-only gate's `if` line")
+if lines[end - 1] != "fi":
+    raise SystemExit("END marker must directly follow the generator-only gate's closing `fi`")
+# Bash decides which `fi` closes the gate: the first column-0 `fi` at which the
+# span from the gate parses as complete must be the one directly above END.
+for index in range(start + 1, end):
+    if lines[index] != "fi":
+        continue
+    span = "\n".join(lines[start + 1:index + 1]) + "\n"
+    parsed = subprocess.run(["bash", "-n"], input=span, text=True, capture_output=True)
+    if parsed.returncode == 0:
+        if index != end - 1:
+            raise SystemExit(
+                f"END marker must directly follow the gate's closing `fi` (line {index + 1}), "
+                f"not line {end}"
+            )
+        break
+else:
+    raise SystemExit("END marker does not close the generator-only gate")
 name = r"([a-z_][a-z0-9_]*)"
 variable_patterns = (
     re.compile(r"^\s*(?:export\s+|local\s+|declare\s+(?:-\w+\s+)?)?" + name + r"\+?=(?!''|\"\"|\s|$)"),
@@ -114,11 +136,12 @@ fi
 
 # The checker must see every way bash binds a name, and a quoted heredoc token
 # inside the section must not hide the section from it.
+gate_line='if [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ]; then'
 leak_fixture() { # <name> <definition line>
   {
     printf '#!/usr/bin/env bash\n'
     printf '# BEGIN generator-only assertions\n'
-    printf '%s\n' "grep -qF \"python3 -I - <<'PY'\" <<<\"\$x\"" "$2"
+    printf '%s\n' "$gate_line" "grep -qF \"python3 -I - <<'PY'\" <<<\"\$x\"" "$2" 'fi'
     printf '# END generator-only assertions\n'
     printf 'printf %%s "${%s}"\n' "$1"
   } >"$tmp/leak-$1.sh"
@@ -140,10 +163,31 @@ for fixture in assigned captured printed read_line read_pair read_array mapped a
   fi
 done
 printf '#!/usr/bin/env bash\nx=1\n' >"$tmp/leak-unmarked.sh"
-if [ "${#fixture_misses[@]}" -eq 0 ] \
+# Markers bind to the gate: BEGIN directly precedes the gate's `if`, and END
+# directly follows the `fi` that closes it. Otherwise a capture moved back into
+# the gate can sit outside the marked span and pass unseen.
+{
+  printf '#!/usr/bin/env bash\n# BEGIN generator-only assertions\n%s\n' "$gate_line"
+  printf 'if true; then\n  :\nfi\n# END generator-only assertions\n'
+  printf 'capture_mode leaked workflow "$sha"\nfi\nprintf %%s "$leaked"\n'
+} >"$tmp/leak-end-early.sh"
+{
+  printf '#!/usr/bin/env bash\n%s\ncapture_mode leaked workflow "$sha"\n' "$gate_line"
+  printf '# BEGIN generator-only assertions\n:\nfi\n# END generator-only assertions\n'
+  printf 'printf %%s "$leaked"\n'
+} >"$tmp/leak-begin-late.sh"
+misplaced_ok=1
+for misplaced in end-early begin-late; do
+  if python3 "$tmp/fixture-leaks.py" "$tmp/leak-$misplaced.sh" >/dev/null 2>"$tmp/leak.err" \
+    || ! grep -q 'marker' "$tmp/leak.err"; then
+    misplaced_ok=0
+    fixture_misses+=("$misplaced")
+  fi
+done
+if [ "${#fixture_misses[@]}" -eq 0 ] && [ "$misplaced_ok" -eq 1 ] \
   && ! python3 "$tmp/fixture-leaks.py" "$tmp/leak-unmarked.sh" 2>"$tmp/leak.err" \
   && grep -q 'expected one generator-only section' "$tmp/leak.err"; then
-  pass "the fixture-leak check sees assignment, capture, printf -v, read, mapfile, readarray, and for bindings"
+  pass "the fixture-leak check sees every binding form and rejects markers not bound to the gate"
 else
   fail "the fixture-leak check missed a binding or an unmarked section: ${fixture_misses[*]:-unmarked}"
 fi
