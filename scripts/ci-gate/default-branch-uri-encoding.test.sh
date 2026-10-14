@@ -262,6 +262,12 @@ root="$(cd "$(dirname "$0")/../.." && pwd)"
 workflow="$root/.github/workflows/gate-rearm.yml"
 fixture="$root/scripts/ci-gate/fixtures/ai-review-caller-a6b3ccc.yml"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+declare -A logical_lines_cache=()
+logical_lines_cache_index=0
+declare -A slice_logical_lines_cache=()
+declare -A slice_shell_structure_cache=()
+declare -A slice_shell_data_open_cache=()
+slice_logical_lines_cache_index=0
 
 HOSTILE_BRANCH='release#1&2'
 HOSTILE_ENCODED='release%231%262'
@@ -463,6 +469,7 @@ py_quote_unshadowed() { # $1 = file (relative to $root) -> 0 when module scope k
 # back before any shell-shaped proof is matched against it.
 block_slice() {
   local file="$1" line="$2" start re="$FUNC_HEADER"
+
   [ "${file##*.}" != py ] || re="$PY_FUNC_HEADER"
   start="$(awk -v end="$line" -v re="$re" \
     'NR <= end && $0 ~ re { s = NR } END { print (s ? s : 1) }' "$root/$file")"
@@ -472,7 +479,6 @@ block_slice() {
     sed -n "${start},${line}p" "$root/$file"
   fi
 }
-
 unique_line_number() {
   local needle="$1" file="$2" count
   count="$(grep -oF -- "$needle" "$file" | wc -l || true)"
@@ -591,6 +597,10 @@ HEREDOC_INTRODUCER='(^|[^<])<<(-|[^<]|$)'
 # slice legitimately cuts a file mid-branch and that is not a defect in the file.
 logical_lines() { # $1 = whole|slice; reads text on stdin, emits one logical line per command
   awk -v mode="${1:-whole}" "$SHELL_STRUCTURE_AWK"'
+    function emit_logical_record(value) {
+      print value
+      buf = ""
+    }
     { line = $0; sub(/[[:space:]]+$/, "", line); st = shell_structure(line) }
     brace {
       # Inside a brace body a newline IS a statement separator, unless the previous line
@@ -600,19 +610,19 @@ logical_lines() { # $1 = whole|slice; reads text on stdin, emits one logical lin
       else buf = buf "; " line
       prevst = st
       bdepth += brace_delta(st)
-      if (bdepth <= 0) { print buf; buf = ""; brace = 0 }
+      if (bdepth <= 0) { emit_logical_record(buf); brace = 0 }
       next
     }
     # A YAML block-scalar introducer (`run: |`) ends in "|" without continuing a command.
-    st ~ /:[[:space:]]*\|[-+0-9]*$/ { print buf line; buf = ""; next }
+    st ~ /:[[:space:]]*\|[-+0-9]*$/ { emit_logical_record(buf line); next }
     st ~ /(\|\||&&)[[:space:]]*\{$/ {
       buf = buf line; prevst = st; brace = 1; bdepth = brace_delta(st); next
     }
     st ~ /\\$/ { sub(/\\$/, "", line); buf = buf line; next }
     st ~ /(&&|\|\|)$/ || st ~ /(^|[^|])\|$/ { buf = buf line " "; next }
-    { print buf line; buf = "" }
+    { emit_logical_record(buf line) }
     END {
-      if (buf != "" && !brace) print buf
+      if (buf != "" && !brace) emit_logical_record(buf)
       if (brace) {
         if (mode != "slice") {
           print "logical_lines: unterminated `|| {` branch; the rest of the input was not judged" > "/dev/stderr"
@@ -621,6 +631,36 @@ logical_lines() { # $1 = whole|slice; reads text on stdin, emits one logical lin
       }
     }
   '
+}
+
+cache_slice_logical_lines_for_file() {
+  local file="$1"
+  local cache_file="${slice_logical_lines_cache[$file]:-}"
+
+  case "$file" in
+    "$root"/*) ;;
+    *) return 1 ;;
+  esac
+
+  if [ -z "$cache_file" ]; then
+    cache_file="$tmp/slice-logical-lines-$slice_logical_lines_cache_index"
+    slice_logical_lines_cache_index=$((slice_logical_lines_cache_index + 1))
+    logical_lines slice <"$file" >"$cache_file" 2>/dev/null || true
+    slice_logical_lines_cache["$file"]="$cache_file"
+  fi
+  if [ -z "${slice_shell_structure_cache[$file]:-}" ]; then
+    local structure_file="$cache_file.structure"
+    local data_open_file="$cache_file.data-open"
+    awk -v data_open_file="$data_open_file" "$SHELL_STRUCTURE_AWK"'
+      {
+        structural = shell_structure($0)
+        print structural
+        print (SHELL_DATA_OPEN != "" ? 1 : 0) > data_open_file
+      }' "$cache_file" >"$structure_file"
+    slice_shell_structure_cache["$file"]="$structure_file"
+    slice_shell_data_open_cache["$file"]="$data_open_file"
+  fi
+  return 0
 }
 
 # An ALLOW-LIST of what may follow a guard on its own command without disarming it. The
@@ -1032,9 +1072,11 @@ CASE_ARM_ENDS=";;[[:space:]]*\$"
 # is deleted rather than repaired, because nothing needs it: an inert record contributes no
 # statement and no event, so what relative depth it is read at grants it nothing either way.
 arm_record_is_case_label() { # $1 = structural text, $2 = 1 when an arm label is expected
+  local events
   [ "${2:-0}" -eq 1 ] || return 1
   [[ "$1" =~ $CASE_ARM_LABEL ]] || return 1
-  [ -z "$(branch_events "$1")" ]
+  if [ "$#" -ge 3 ]; then events="$3"; else events="$(branch_events "$1")"; fi
+  [ -z "$events" ]
 }
 
 arm_record_is_modelled() { # $1 = raw record, $2 = structural text, $3 = 1 when in arm position
@@ -1042,7 +1084,11 @@ arm_record_is_modelled() { # $1 = raw record, $2 = structural text, $3 = 1 when 
   # body, and a quote, backtick or expansion left open at the end of a record, all read as
   # ordinary commands on the records that follow (#1464 re-review rounds 5 and 6).
   [[ "$1" =~ $HEREDOC_INTRODUCER ]] && return 1
-  shell_data_unclosed "$1" && return 1
+  if [ "$#" -ge 5 ]; then
+    [ "$5" = 0 ] || return 1
+  else
+    shell_data_unclosed "$1" && return 1
+  fi
   local st="$2" amp opens closes
   # Any grouping the depth counter does not pair: a `(…)` subshell, a `((…))` command, a
   # function definition header `name() {`, and a `case` pattern's bare `)`. `$(…)` and
@@ -1050,7 +1096,11 @@ arm_record_is_modelled() { # $1 = raw record, $2 = structural text, $3 = 1 when 
   # A subshell is the round-6 vector twice over -- `( exit 1 ) || echo …` exits the subshell,
   # and `cleanup() { exit 1; }` only DEFINES an exit -- and both read as fatal at depth 0.
   if [[ "$st" == *'('* || "$st" == *')'* ]]; then
-    arm_record_is_case_label "$st" "${3:-0}" || return 1
+    if [ "$#" -ge 4 ]; then
+      arm_record_is_case_label "$st" "${3:-0}" "$4" || return 1
+    else
+      arm_record_is_case_label "$st" "${3:-0}" || return 1
+    fi
   fi
   # A `&` that is not `&&`. A backgrounded `{ …; exit 1; } &` exits a subshell, not this
   # shell, and reads as fatal at depth 0. `>&`, `<&` and `&>` are descriptor-duplicating
@@ -1187,6 +1237,23 @@ guard_is_live() { # $1 = file, $2 = literal guard text
     py_guard_is_live "$1" "$2"
     return
   fi
+  case "$1" in
+    "$root"/*)
+      local cache_file="${logical_lines_cache[$1]:-}"
+      if [ -z "$cache_file" ]; then
+        cache_file="$tmp/logical-lines-$logical_lines_cache_index"
+        logical_lines_cache_index=$((logical_lines_cache_index + 1))
+        # Repository files stay fixed for the scan. Synthetic files under $tmp
+        # bypass this cache because mutation tests intentionally rewrite them.
+        logical_lines whole <"$1" >"$cache_file" || true
+        logical_lines_cache["$1"]="$cache_file"
+      fi
+      local -a GUARD_RECORDS=()
+      mapfile -t GUARD_RECORDS <"$cache_file"
+      guard_live_literal_records "$2"
+      return
+      ;;
+  esac
   guard_live_literal "$2" <"$1"
 }
 
@@ -1199,7 +1266,7 @@ guard_is_live() { # $1 = file, $2 = literal guard text
 # command (`scripts/cli-projects-package-surface-ruleset.py:169` is one), whose tail is
 # Python list punctuation and never a `||` continuation. Those get the comment check only,
 # the same weaker anchor `py_guard_is_live` applies, and the header ceiling says so.
-sha_constrained() { # $1 = variable name, $2 = block slice, $3 = the file it came from
+sha_constrained() { # $1 = var, $2 = block slice, $3 = file
   local var="$1"
   if [ "${3##*.}" = py ]; then
     grep -qF "[[ \"\$$var\" =~ ^[0-9a-f]{40}\$ ]]" <<<"$2" && return 0
@@ -1207,22 +1274,14 @@ sha_constrained() { # $1 = variable name, $2 = block slice, $3 = the file it cam
     grep -qE "^[[:space:]]*$var=\"\\\$\(jq -er .*\^\[0-9a-f\]\{40\}\\\$" <<<"$2" && return 0
     return 1
   fi
-  # One logical-line pass feeds every spelling. Repeating it per pattern re-lexed
-  # the same multi-thousand-line workflow slice for every site (#1736).
   local -a GUARD_RECORDS=()
   mapfile -t GUARD_RECORDS < <(logical_lines slice <<<"$2")
   guard_live_literal_records "[[ \"\$$var\" =~ ^[0-9a-f]{40}\$ ]]" && return 0
   guard_live_re_records "(^|[[:space:]])${var}[:=][[:space:]]*[\"']?[0-9a-f]{40}[\"']?([[:space:]]|\$)" && return 0
   # The same 40-hex constraint spelled inside the jq program that produced the value.
-  # `jq -er` exits non-zero when `select` drops the value, and `set -euo pipefail` at the
-  # top of every one of these blocks turns that into an abort, so the constraint is as
-  # load-bearing as the `[[ … =~ ]]` form above -- provided the assignment itself is not
-  # the thing that swallows, which is why the match runs to the closing `)"`.
   guard_live_re_records "^[[:space:]]*$var=\"[\$][(]jq -er .*\^\[0-9a-f\][{]40[}][\$].*[)]\"" && return 0
   return 1
 }
-
-
 # --------------------------------------------------------------------------------------
 # 0. The recognizer's own coverage, measured rather than described. Each case below is a
 #    shape that reached a ref-bearing URL position while this scan reported green (#1464).
@@ -1327,72 +1386,60 @@ PYFX
 # `arm_record_is_case_label` with `true` makes it exit 1 with 5 errors on real repository
 # content. The assertion that the corpus can still supply such content is the separate
 # `inert_witnesses` floor below; this function is what turns that content into a failure.
-arm_label_is_inert_violations() { # $1 = file; prints every record that breaks the invariant
-  local rec struct
-  while IFS= read -r rec; do
-    # Sound prefilter: `CASE_ARM_LABEL` needs a `)`, and blanking only ever replaces a
-    # character with a space, so a record with no `)` cannot acquire one.
-    case "$rec" in *')'*) ;; *) continue ;; esac
-    struct="$(shell_structure "$rec")"
-    # Arm position is the most PERMISSIVE state the walk can be in, so asking with it set
-    # covers every state the walk could reach at this record.
-    arm_record_is_case_label "$struct" 1 || continue
-    [ -n "$(branch_events "$struct")" ] && printf '%s\n' "$rec"
-  done < <(logical_lines slice <"$1" 2>/dev/null)
-  return 0
-}
-
-# THE MEASURED COST OF THE INVERSION, kept measured. Declining what the walk cannot
-# classify is only affordable while the corpus does not actually write those constructs, and
-# "it was free when we shipped it" is a claim that rots silently. This reports, per record,
-# whether the STREAM declines a record that `arm_record_is_modelled` would otherwise have
-# ACCEPTED -- i.e. a refusal the anchor did not already make one layer up, and therefore real
-# lost reach rather than a second refusal of the same record.
-# Sound prefilter, derived from the buckets rather than hand-listed: a decline is emitted
-# only for a doubled `((`/`))` or for a member of `BRANCH_DECLINE_WORDS`, and blanking only
-# ever replaces a character with a space, so a record containing none of those substrings
-# cannot acquire one. Deriving it from the bucket means adding a decline word cannot leave
-# the filter behind.
 branch_record_may_decline() { # $1 = raw record
   local w
-  case "$1" in *'(('*) return 0 ;; *'))'*) return 0 ;; esac
+  case "$1" in *'(('*|*'))'*) return 0 ;; esac
   for w in "${BRANCH_DECLINE_WORDS[@]}"; do
     case "$1" in *"$w"*) return 0 ;; esac
   done
   return 1
 }
 
-stream_only_declines() { # $1 = file; counts records the stream declines that the record model accepts
-  local rec struct n=0
-  while IFS= read -r rec; do
-    branch_record_may_decline "$rec" || continue
-    struct="$(shell_structure "$rec")"
-    case "$(branch_events "$struct")" in *decline:*) ;; *) continue ;; esac
-    arm_record_is_modelled "$rec" "$struct" 1 && n=$((n + 1))
-  done < <(logical_lines slice <"$1" 2>/dev/null)
-  printf '%s\n' "$n"
-}
+# One scan shares each record's structural form and branch events across the four
+# corpus assertions. Repository files are immutable during this test, so their
+# logical-line records and their shell structures are cached once per file.
+scan_shell_file_invariants() {
+  local file="$1" display_file="${2:-$1}" rec struct events label_shaped may_decline data_open
+  local records_file structure_file data_open_file
+  cache_slice_logical_lines_for_file "$file"
+  records_file="${slice_logical_lines_cache[$file]}"
+  structure_file="${slice_shell_structure_cache[$file]}"
+  data_open_file="${slice_shell_data_open_cache[$file]}"
+  scan_file_inert_violations=0
+  scan_file_inert_witnesses=0
+  scan_file_declines=0
+  scan_file_costly_declines=0
 
-# Every record the stream declines, whatever the record model says. The floor below uses it
-# so the zero above cannot be zero merely because nothing in the corpus declines at all.
-stream_declines() { # $1 = file; counts records whose event stream carries a decline
-  local rec n=0
-  while IFS= read -r rec; do
-    branch_record_may_decline "$rec" || continue
-    case "$(branch_events "$(shell_structure "$rec")")" in *decline:*) n=$((n + 1)) ;; esac
-  done < <(logical_lines slice <"$1" 2>/dev/null)
-  printf '%s\n' "$n"
-}
+  while IFS= read -r rec && IFS= read -r struct <&3 && IFS= read -r data_open <&4; do
+    label_shaped=0
+    may_decline=0
+    [[ "$struct" =~ $CASE_ARM_LABEL ]] && label_shaped=1
+    branch_record_may_decline "$rec" && may_decline=1
+    [ "$label_shaped" -eq 1 ] || [ "$may_decline" -eq 1 ] || continue
+    events="$(branch_events "$struct")"
 
-arm_label_shaped_emitters() { # $1 = file; counts records that are label-SHAPED and do emit
-  local rec struct n=0
-  while IFS= read -r rec; do
-    case "$rec" in *')'*) ;; *) continue ;; esac
-    struct="$(shell_structure "$rec")"
-    [[ "$struct" =~ $CASE_ARM_LABEL ]] || continue
-    [ -n "$(branch_events "$struct")" ] && n=$((n + 1))
-  done < <(logical_lines slice <"$1" 2>/dev/null)
-  printf '%s\n' "$n"
+    if [ "$label_shaped" -eq 1 ]; then
+      if [ -n "$events" ]; then
+        scan_file_inert_witnesses=$((scan_file_inert_witnesses + 1))
+      fi
+      if arm_record_is_case_label "$struct" 1 "$events" && [ -n "$events" ]; then
+        scan_file_inert_violations=$((scan_file_inert_violations + 1))
+        printf '::error::an inert arm label emitted a branch event: %s :: %s\n' \
+          "$display_file" "$rec"
+      fi
+    fi
+
+    if [ "$may_decline" -eq 1 ]; then
+      case "$events" in
+        *decline:*)
+          scan_file_declines=$((scan_file_declines + 1))
+          if arm_record_is_modelled "$rec" "$struct" 1 "$events" "$data_open"; then
+            scan_file_costly_declines=$((scan_file_costly_declines + 1))
+          fi
+          ;;
+      esac
+    fi
+  done <"$records_file" 3<"$structure_file" 4<"$data_open_file"
 }
 
 inert_violations=0
@@ -1401,14 +1448,11 @@ declines=0
 costly_declines=0
 for scan_file in "${scanned[@]}"; do
   case "$scan_file" in *.py) continue ;; esac
-  while IFS= read -r offender; do
-    [ -n "$offender" ] || continue
-    inert_violations=$((inert_violations + 1))
-    echo "::error::an inert arm label emitted a branch event: $scan_file :: $offender"
-  done < <(arm_label_is_inert_violations "$root/$scan_file")
-  inert_witnesses=$((inert_witnesses + "$(arm_label_shaped_emitters "$root/$scan_file")"))
-  declines=$((declines + "$(stream_declines "$root/$scan_file")"))
-  costly_declines=$((costly_declines + "$(stream_only_declines "$root/$scan_file")"))
+  scan_shell_file_invariants "$root/$scan_file" "$scan_file"
+  inert_violations=$((inert_violations + scan_file_inert_violations))
+  inert_witnesses=$((inert_witnesses + scan_file_inert_witnesses))
+  declines=$((declines + scan_file_declines))
+  costly_declines=$((costly_declines + scan_file_costly_declines))
 done
 [ "$inert_violations" -eq 0 ] \
   || fail "$inert_violations record(s) in the scanned files were treated as inert while emitting a branch event"

@@ -2,9 +2,10 @@
 date: 2026-10-09
 issue: 1736
 impact: patch
-title: 'ci: shorten the remaining long actions-ci commands'
+title: Bound actions-ci command runtimes
 ---
+Actions CI runs independent manifest commands concurrently, up to the runner's CPU quota rather than its raw `nproc`, with a 60-second default pull-request budget on every group-runner invocation, including documentation contracts. Rows measured above 30 seconds on the general runners declare a pinned `@budget` of twice their slowest CI time, capped at 600 seconds, and each row's log line names its budget. Parsed workflows, generated callers, and per-file scans are reused so release-contract work can finish without dropping assertions. The required-checks audit, conformance suite, actions-ci manifest contract, and privileged-merge conformance rows run alone to avoid CPU contention at the command cap. The audit contract assertions run in two isolated partitions concurrently within their row; logs report effective parallelism and each command's elapsed time.
 
-Shellcheck runs one process per core, and the ref-encoding gate lexes each workflow slice once instead of once per pattern. A group command that exceeds `ACTIONS_CI_COMMAND_BUDGET_SECONDS` fails that group.
+The caller contract keeps one shard per changelog-release cell, each scheduling its cases across the available CPUs under a 600-second budget, with generator-wide assertions run once in their own row. Every selected mutation runs the complete generated contract. Every case fixture is built before the generator-only section, so a shard can no longer substitute an empty contract suite that accepts the mutations the full run rejects. Each worker's output, status, and elapsed time are emitted as soon as it is reaped so a slow sibling cannot hide completed diagnostics; missing or malformed worker results fail the group. Commands read stdin from `/dev/null`, and a group fails unless it ran and reported every row the manifest selects for it. Commands run in isolated process groups, and surviving descendants are stopped on normal exit, timeout, worker failure, or cancellation before shared scratch data is removed.
 
-See #1736.
+Budgeted commands keep descendants in the tracked process group, and output is captured and sanitized after each process exits, so a child cannot escape cleanup or hold up timeout handling by inheriting stdout. If a worker dies before sanitizing output, the parent preserves its diagnostics. Pull requests ShellCheck only changed tracked shell scripts; pushes to `main` keep the full-tree audit. The workflow retains the 30-minute job timeout and six-job matrix concurrency. See #1736 and ADR 0225.

@@ -15,6 +15,20 @@ if ! changelog_caller_shard_name_ok "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}"; t
   printf 'FAIL - CHANGELOG_CALLER_CONTRACT_SHARD must be all or 1..4\n' >&2
   exit 1
 fi
+case "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" in
+  0|1) ;;
+  *) printf 'FAIL - CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY must be 0 or 1\n' >&2; exit 1 ;;
+esac
+# The only tests of the mode. Generator-wide assertions run in the full suite
+# and in the generator-only row, never in a case shard; the generator-only row
+# stops after them. The shard test pins these bodies and their single call
+# sites, so no other condition can gate assertions (#1736).
+generator_only_row() {
+  [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ]
+}
+generator_only_assertions() {
+  generator_only_row || [ "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}" = all ]
+}
 caller_case_count=0
 caller_case_ran=0
 caller_assertions_suspended=0
@@ -57,11 +71,15 @@ skip() { printf 'skip - %s\n' "$1"; }
 # cause, and keep the emptiness and its explanation in one verdict. Status is
 # taken on the failure branch itself — `if ! bash ...` would invert the very
 # status being read and turn a refusal into a silent empty capture again.
-workflow='' generated_artifacts='' generated_artifacts_with_adr=''
-canonical_codeowners=''
-adr_index_generator='' pr_gate='' release_node_workflow=''
-renovate_attribution='' default_release='' custom_release=''
-component_release='' custom_contract='' adr_index_test=''
+#
+# Captured fixtures are declared without a value, never as ''. Every mode
+# builds them before any case runs; one a mode skips is then an unbound-variable
+# abort under `set -u`, not an empty contract suite that exits 0 and reads as a
+# pass (#1736).
+declare workflow renderer default_release custom_release component_release
+declare custom_contract generated_artifacts generated_artifacts_with_adr
+declare renovate_attribution adr_index_generator adr_index_test pr_gate
+declare canonical_codeowners release_node_workflow
 mode_capture_failures=0
 capture_mode() {
   local target="$1"
@@ -90,11 +108,21 @@ capture_mode() {
     # named cause off the top defeats the point of naming it.
     fail "generator mode '$mode' exited $status: $(tr '\n' ' ' <"$err" | sed 's/  */ /g; s/ *$//' | cut -c1-500)"
     mode_capture_failures=$((mode_capture_failures + 1))
+  elif [ -z "$out" ]; then
+    # An empty capture is never a fixture: an empty contract suite exits 0 and
+    # turns every positive case into a pass (#1736).
+    fail "generator mode '$mode' exited 0 but emitted nothing"
+    mode_capture_failures=$((mode_capture_failures + 1))
   fi
   rm -f "$err"
   printf -v "$target" '%s' "$out"
 }
 
+tmproot="$(mktemp -d)"
+trap 'rm -rf "$tmproot"' EXIT
+: >"$tmproot/run.out"
+# Fixtures every mode needs. Case shards skip the generator-only assertions
+# below, so nothing a case reads may be defined there (#1736).
 capture_mode workflow workflow "$sha"
 capture_mode renderer renderer "$sha"
 capture_mode default_release release-node "$sha"
@@ -108,10 +136,27 @@ capture_mode adr_index_generator adr-index-generator "$sha"
 capture_mode adr_index_test adr-index-test "$sha"
 capture_mode pr_gate pr-gate "$sha"
 capture_mode canonical_codeowners codeowners "$sha"
+capture_mode release_node_workflow release-node "$sha"
 # Every assertion from here on consumes one of those captures, so a mode that
 # refused would otherwise produce a page of unrelated verdicts about empty
 # strings. One named cause is the whole diagnosis; stop rather than bury it.
 [ "$mode_capture_failures" -eq 0 ] || exit 1
+contract_src="$repo_root/scripts/changelog.py"
+[ -f "$contract_src" ] || { echo "FAIL - missing $contract_src"; exit 1; }
+emitted="$tmproot/contract-test.sh"
+if bash "$gen" contract-test "$sha" >"$emitted" 2>"$tmproot/err"; then
+  pass "contract-test mode emits a file"
+else
+  fail "contract-test mode failed: $(cat "$tmproot/err")"
+  echo "$fails failed"
+  exit 1
+fi
+
+# Case shards skip everything between the BEGIN and END markers, so no case may
+# read anything defined there (#1736). The shard test requires BEGIN directly
+# above the gate's `if` and END directly below the `fi` that closes it.
+# BEGIN generator-only assertions
+if generator_only_assertions; then
 grep -qF 'uses: verJSON/.github/.github/workflows/generated-artifacts.yml@' <<<"$workflow" \
   && grep -qF 'raw.githubusercontent.com/verJSON/.github/' <<<"$renderer" \
   && grep -qF '* @verJSON/devs' <<<"$canonical_codeowners" \
@@ -283,8 +328,6 @@ done
 # #971: the release-node exemption above is only as good as the consuming step
 # it names. Tamper with a genuine release-node workflow two ways and confirm
 # the audit re-flags the checkout instead of trusting the step-name match alone.
-capture_mode release_node_workflow release-node "$sha"
-[ "$mode_capture_failures" -eq 0 ] || exit 1
 tampered_renamed="$(WORKFLOW="$release_node_workflow" python3 - <<'PY'
 import os
 
@@ -599,7 +642,6 @@ bash "$gen" workflow "$sha" --scope @acme >/dev/null 2>&1 \
 # 7. The emitted renderer fails closed when the contract cannot be fetched, and
 # leaves no partial file behind for the next run to exec as if it were the
 # contract. Exercised with a stubbed curl so no network is required.
-tmproot="$(mktemp -d)"
 # Redefined once the adopter scheduler exists. Early exits only remove the scratch tree.
 drain_adopter_jobs() { :; }
 trap 'drain_adopter_jobs; rm -rf "$tmproot"' EXIT
@@ -644,17 +686,6 @@ grep -q 'cannot fetch the changelog contract' "$tmproot/err" \
 # The load-bearing assertion is therefore not "it emits valid bash" but "it
 # exits 0 against an adopter BOTH before and after a real release".
 
-contract_src="$repo_root/scripts/changelog.py"
-[ -f "$contract_src" ] || { echo "FAIL - missing $contract_src"; exit 1; }
-
-emitted="$tmproot/contract-test.sh"
-if bash "$gen" contract-test "$sha" >"$emitted" 2>"$tmproot/err"; then
-  pass "contract-test mode emits a file"
-else
-  fail "contract-test mode failed: $(cat "$tmproot/err")"
-  echo "$fails failed"
-  exit 1
-fi
 
 # 4b. The generator ships the suite that covers it (#1380). Nothing generated
 # the ADR-index test, so ~95 adopters each hand-wrote one, and a hand-written
@@ -1114,6 +1145,13 @@ stray_titles="$(grep -oE "\^## [A-Za-z][^']*" "$emitted" | grep -vxE '\^## (Newe
   && pass "fragment assertions are derived from the tree, not named inline" \
   || fail "emitted test greps for literal fragment titles: $(tr '\n' ' ' <<<"$stray_titles")"
 
+if generator_only_row; then
+  [ "$fails" -eq 0 ] || exit 1
+  echo "All generator contract assertions passed."
+  exit 0
+fi
+fi
+# END generator-only assertions
 # Content-addressed by ref, so seeding that cache path with THIS repository's
 # changelog.py makes the run hermetic and exercises the contract as it stands in
 # this pull request. $sha cannot exist upstream, so a seeding bug fails loudly
@@ -1230,13 +1268,15 @@ build_split_adopter() {
 }
 
 run_adopter() {
-  local status=0 adopter_log cache_env=()
+  local status=0 adopter_log cache_env=() case_id
+  case_id="$(basename "$1")"
   if [ "${caller_case_nested:-}" != 1 ]; then
-    if ! changelog_caller_case_selected "$(basename "$1")"; then
+    if ! changelog_caller_case_selected "$case_id"; then
       caller_assertions_suspended=1
       return 0
     fi
     caller_assertions_suspended=0
+    printf 'running caller contract case: %s\n' "$case_id" >&2
   fi
   # A synchronous suite keeps running beside scheduled snapshots. It does not
   # wait for them: isolation already keeps their logs off this run.out (#1733).
@@ -1258,7 +1298,9 @@ run_adopter() {
 
 # Independent adopter mutations share no directory. Run several at once on this
 # job's CPUs instead of occupying the runner for one suite at a time (#1733).
-ADOPTER_SLOTS="${ADOPTER_SLOTS:-$(nproc 2>/dev/null || echo 2)}"
+# Under actions-ci the group runner states the CPUs this job may use (its CFS
+# quota, not just nproc); a standalone run falls back to nproc.
+ADOPTER_SLOTS="${ADOPTER_SLOTS:-${ACTIONS_CI_AVAILABLE_CPUS:-$(nproc 2>/dev/null || echo 2)}}"
 [ "$ADOPTER_SLOTS" -gt 16 ] && ADOPTER_SLOTS=16
 [ "$ADOPTER_SLOTS" -ge 1 ] || ADOPTER_SLOTS=1
 adopter_job_pids=()
@@ -1364,6 +1406,7 @@ schedule_adopter_script() {
     return 0
   fi
   caller_assertions_suspended=0
+  printf 'running caller contract case: %s\n' "$case_id" >&2
   reject_seq=$((reject_seq + 1))
   seq="$reject_seq"
   result="$tmproot/sched-result-$seq"
@@ -3239,10 +3282,15 @@ assert_mutable_verification_path_rejected() {
   source="$1"
   label="$2"
   slug="$3"
+  if ! changelog_caller_case_selected "$slug"; then
+    caller_assertions_suspended=1
+    return 0
+  fi
+  caller_assertions_suspended=0
   dir="$tmproot/$slug"
   cp -a "$source" "$dir"
   use_mutable_path_for_release_verification "$dir"
-  if run_adopter "$dir"; then
+  if caller_case_nested=1 run_adopter "$dir"; then
     fail "emitted suite accepted a mutable verification PATH in $label mode"
   elif grep -qF 'does not match the approved release verification script (#1717)' "$tmproot/run.out"; then
     pass "the generated suite rejects mutable verification PATH in $label mode"
@@ -3257,11 +3305,16 @@ assert_release_path_mutation_rejected() {
   slug="$3"
   mutator="$4"
   expected="$5"
+  if ! changelog_caller_case_selected "$slug"; then
+    caller_assertions_suspended=1
+    return 0
+  fi
+  caller_assertions_suspended=0
   dir="$tmproot/$slug"
   cp -a "$source" "$dir"
   if ! "$mutator" "$dir"; then
     fail "$label path mutation fixture did not apply"
-  elif run_adopter "$dir"; then
+  elif caller_case_nested=1 run_adopter "$dir"; then
     fail "the generated suite accepted $label path mutation"
   elif grep -qF "$expected" "$tmproot/run.out"; then
     pass "the generated suite rejects $label path mutation"
@@ -5861,8 +5914,11 @@ SCHED_SCRIPT
   || fail "a command named in an adopter-controlled header was executed by the checker"
 
 drain_adopter_jobs
-if [ "$caller_case_count" -lt 1 ]; then
-  fail "changelog caller contract recorded no cases"
+# The last case may belong to another shard, which leaves assertions suspended;
+# these inventory checks hold in every shard (#1736).
+caller_assertions_suspended=0
+if [ "$caller_case_count" -ne "$CHANGELOG_CALLER_CONTRACT_CASES" ]; then
+  fail "changelog caller contract recorded $caller_case_count cases; the shard map pins $CHANGELOG_CALLER_CONTRACT_CASES"
 fi
 if [ "$caller_case_ran" -lt 1 ]; then
   fail "changelog caller contract ran no cases"

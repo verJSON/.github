@@ -16,6 +16,7 @@ Reverse-chronological index of org-level decisions.
 | [0228](0228-workflow-python-starts-isolated/README.md) | 2026-10-13 | Every workflow starts its inline Python interpreters isolated |
 | [0227](0227-arm-bootstraps-stale-review-callers/README.md) | 2026-10-13 | The authorization arm bootstraps stale default-branch review callers |
 | [0226](0226-superseded-cancelled-check-runs-do-not-block-admission/README.md) | 2026-10-13 | A cancelled check run superseded by a later successful run of its own workflow does not block admission |
+| [0225](0225-bound-actions-ci-command-runtimes/README.md) | 2026-10-09 | Bound actions-ci command runtimes |
 | [0224](0224-shard-changelog-release-actions-ci/README.md) | 2026-10-09 | Shard the changelog-release actions-ci group |
 | [0223](0223-draft-pull-requests-defer-heavy-ci/README.md) | 2026-10-09 | Draft pull requests defer heavy CI and keep fast checks |
 | [0222](0222-documentation-diffs-skip-heavy-actions-ci/README.md) | 2026-10-09 | Documentation diffs skip the heavy actions-ci matrix |

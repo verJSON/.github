@@ -32,6 +32,7 @@ from contract_steps import (ContractStep, MissingContractStep,  # noqa: E402
                             StepEnvironmentMismatch, StepExecutionFault,
                             execute_step, locate_step)
 from model import Scenario, model_workflow  # noqa: E402
+from yaml_documents import load_yaml_document  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[3]
 CONTRACT = ROOT / '.github/workflows/node-ci.yml'
@@ -207,7 +208,7 @@ class DeferredLaneIsDistinguishableFromSuccess(unittest.TestCase):
         `deferred-ci` provably the only difference, and keeps an unrelated
         upstream edit from quietly turning the regression test into a tautology.
         """
-        contract = yaml.safe_load(CONTRACT.read_text(encoding='utf-8'))
+        contract = load_yaml_document(CONTRACT)
         counter_example = yaml.safe_load(PRE_ADR_0178.read_text(encoding='utf-8'))
         differences = document_differences(contract, counter_example)
         self.assertEqual(
@@ -306,9 +307,20 @@ class EveryExecutingLaneShowsPositiveEvidence(unittest.TestCase):
                         'contract nobody could merge against')
 
 
+class CachedFixtureDocumentsAreIsolated(unittest.TestCase):
+    def test_a_mutated_document_does_not_reach_the_next_caller(self):
+        """The parse is cached; the document each caller receives must not be.
+
+        One test editing a shared parse would hand every later test a different
+        contract than the file on disk, which can turn a rejection into a pass.
+        """
+        load_yaml_document(CONTRACT)['jobs'].clear()
+        self.assertIn('build-test', load_yaml_document(CONTRACT)['jobs'])
+
+
 class TheEvidenceRegistryMatchesTheContract(unittest.TestCase):
     def test_every_registered_work_step_still_exists(self):
-        steps = yaml.safe_load(CONTRACT.read_text(encoding='utf-8'))['jobs']['build-test']['steps']
+        steps = load_yaml_document(CONTRACT)['jobs']['build-test']['steps']
         names = {step.get('name') or str(step.get('run', '')).strip() for step in steps}
         missing = sorted(WORK_STEPS - names)
         self.assertEqual(

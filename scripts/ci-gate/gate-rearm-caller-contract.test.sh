@@ -211,23 +211,24 @@ fi
 # authorization, and receipt verifier contracts remain green. Point at the
 # registered suites that own each behavior instead of asking the receipt verifier
 # suite to stand in for unrelated arm logic (#733).
+# A row may carry @exclusive or @budget directives before its command.
+manifest_registers() {
+  awk -F '\t' -v want="$1" '
+    { command = $2; while (command ~ /^@[^ ]+ /) sub(/^@[^ ]+ /, "", command) }
+    command == want { found = 1 }
+    END { exit !found }
+  ' "$actions_ci"
+}
 for replacement in \
   'bash scripts/ci-gate/gate-hold-disable.test.sh' \
   'python3 scripts/ci-gate/event-driven-authorization.test.py' \
   'bash scripts/ci-gate/arm-receipt.test.sh'; do
-  grep -q $'\t'"$replacement"'$' "$actions_ci" \
+  manifest_registers "$replacement" \
     && pass "actions-ci registers the canonical replacement: $replacement" \
     || fail "canonical replacement is not registered: $replacement"
 done
-bash "$here/gate-hold-disable.test.sh" >"$tmp/arm.out" 2>&1 \
-  && pass "canonical arm retains live hold, event-rearm and fail-closed metadata behavior" \
-  || fail "canonical arm behavior failed: $(tail -n 1 "$tmp/arm.out")"
-python3 "$here/event-driven-authorization.test.py" >"$tmp/event.out" 2>&1 \
-  && pass "canonical arm retains caller, App-permission and head-event authorization boundaries" \
-  || fail "canonical event authorization failed: $(tail -n 1 "$tmp/event.out")"
-bash "$here/arm-receipt.test.sh" >"$tmp/receipt.out" 2>&1 \
-  && pass "canonical arm receipt verifier retains exact-run, artifact, App and head binding" \
-  || fail "canonical arm receipt verifier failed: $(tail -n 1 "$tmp/receipt.out")"
+# The behavior suites above are separate manifest rows. Their independent runs
+# preserve the coverage without replaying them inside this caller-contract test.
 grep -q $'\tbash scripts/ci-gate/gate-rearm-caller-contract.test.sh$' "$actions_ci" \
   && pass "actions-ci executes the generated caller contract" \
   || fail "generated caller contract is not wired into actions-ci"

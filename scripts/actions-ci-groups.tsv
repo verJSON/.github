@@ -1,15 +1,15 @@
 # group<TAB>repository-controlled command
-platform	python3 scripts/ci-gate/app-key-environment.test.py
+platform	@budget=120 python3 scripts/ci-gate/app-key-environment.test.py
 platform	python3 scripts/ci-gate/pr-ci-tiers.test.py
 platform	bash scripts/actionlint-trigger.test.sh
 platform	bash scripts/actionlint-install.test.sh
 platform	bash scripts/shellcheck-tracked.test.sh
-platform	bash scripts/shellcheck-tracked.sh
+platform	@budget=210 bash scripts/shellcheck-tracked.sh
 platform	bash scripts/actionlint-reusable.test.sh
 platform	python3 scripts/action-pin-conformance.test.py
 platform	python3 scripts/workflow-checkout-isolation.test.py
 platform	bash scripts/actions-ci-policy.test.sh
-platform	bash scripts/actions-ci-groups.test.sh
+platform	@exclusive @budget=180 bash scripts/actions-ci-groups.test.sh
 platform	bash scripts/actions-ci-group-output.test.sh
 platform	bash scripts/actions-ci-change-scope.test.sh
 platform	bash scripts/actions-ci-python-dependencies.test.sh
@@ -23,7 +23,7 @@ platform	bash scripts/ci-gate/node-ci-secretless.test.sh
 platform	python3 scripts/ci-gate/protected-type-surface-baseline.test.py
 platform	python3 scripts/gen-node-ci-protected-move-step.test.py
 platform	python3 scripts/ci-gate/node-ci-secretless-range-resolution.test.py
-platform	python3 scripts/ci-gate/compatibility-sandbox-provisioning.test.py
+platform	@budget=90 python3 scripts/ci-gate/compatibility-sandbox-provisioning.test.py
 platform	python3 scripts/ci-gate/compatibility-sandbox-acquirer.test.py
 platform	bash scripts/ci-gate/node-ci-secretless-pnpm.test.sh
 platform	bash scripts/ci-gate/node-ci-secretless-pnpm-install.test.sh
@@ -36,7 +36,7 @@ platform	bash scripts/ci-gate/node-ci-db-service.test.sh
 platform	bash scripts/ci-gate/node-ci-cache-service.test.sh
 platform	bash scripts/ci-gate/ci-eligibility.test.sh
 platform	python3 scripts/ci-gate/deferred-ci-visibility.test.py
-platform	python3 scripts/ci-gate/conformance/conformance.test.py
+platform	@exclusive @budget=120 python3 scripts/ci-gate/conformance/conformance.test.py
 platform	python3 scripts/ci-gate/conformance/gen-regression-fixture.test.py
 platform	python3 scripts/ci-gate/fleet-contract-inventory.test.py
 platform	python3 scripts/ci-gate/contract-version.test.py
@@ -55,15 +55,15 @@ platform	bash scripts/ci-gate/pulumi-comment-pipefail.test.sh
 platform	bash scripts/ci-gate/generated-artifacts.test.sh
 platform	bash scripts/ci-gate/runner-routing-policy.test.sh
 platform	bash scripts/ci-gate/runner-routing-policy-cwd.test.sh
-platform	python3 scripts/ci-gate/hosted-selector-policy.test.py
+platform	@budget=90 python3 scripts/ci-gate/hosted-selector-policy.test.py
 platform	python3 scripts/ci-gate/generated-changelog-selector-policy.test.py
 platform	bash scripts/ci-gate/actionlint-hosted-selector-policy.test.sh
-platform	bash scripts/ci-gate/runner-admission-reconcile.test.sh
+platform	@budget=120 bash scripts/ci-gate/runner-admission-reconcile.test.sh
 platform	python3 scripts/ci-gate/untrusted-runner-cutover-doc.test.py
 platform	bash scripts/fleet-watchdog.test.sh
 platform	bash scripts/fleet-watchdog-cadence.test.sh
 platform	bash scripts/runner-selector-health.test.sh
-platform	bash scripts/required-checks-audit.test.sh
+platform	@exclusive @budget=120 bash scripts/required-checks-audit.test.sh
 platform	bash scripts/required-checks-rollout.test.sh
 platform	bash scripts/required-checks-rollback.test.sh
 platform	python3 scripts/gate_coverage_audit_test.py
@@ -108,21 +108,21 @@ merge-gate	python3 scripts/ci-gate/review-provider-conformance.test.py
 merge-gate	python3 scripts/ci-gate/review-policy.test.py
 merge-gate	python3 scripts/ci-gate/review-policy-envelope.test.py
 merge-gate	bash scripts/ci-gate/review-policy-bootstrap.test.sh
-merge-gate	python3 scripts/ci-gate/review-caller-bootstrap.test.py
+merge-gate	@budget=360 python3 scripts/ci-gate/review-caller-bootstrap.test.py
 merge-gate	python3 scripts/ci-gate/review-authority.test.py
 merge-gate	python3 scripts/ci-gate/promotion-policy.test.py
 merge-gate	bash scripts/ci-gate/promotion-retry-eligibility.test.sh
-merge-gate	bash scripts/ci-gate/arm-receipt.test.sh
+merge-gate	@budget=90 bash scripts/ci-gate/arm-receipt.test.sh
 merge-gate	bash scripts/ci-gate/arm-receipt-artifact-deletion-redaction.test.sh
 merge-gate	bash scripts/ci-gate/arm-authorization-terminal-state.test.sh
 merge-gate	bash scripts/ci-gate/complete-authorization.test.sh
-merge-gate	bash scripts/ci-gate/zero-provider-recovery.test.sh
-merge-gate	bash scripts/ci-gate/native-automerge.test.sh
+merge-gate	@budget=90 bash scripts/ci-gate/zero-provider-recovery.test.sh
+merge-gate	@budget=90 bash scripts/ci-gate/native-automerge.test.sh
 merge-gate	bash scripts/ci-gate/post-merge-reconcile.test.sh
 merge-gate	bash scripts/ci-gate/gate-dispatch.test.sh
 merge-gate	bash scripts/ci-gate/gate-hold-disable.test.sh
 merge-gate	bash scripts/ci-gate/gate-rearm-caller-contract.test.sh
-merge-gate	bash scripts/ci-gate/default-branch-uri-encoding.test.sh
+merge-gate	@budget=90 bash scripts/ci-gate/default-branch-uri-encoding.test.sh
 merge-gate	python3 scripts/ci-gate/label-delivery-bridge.test.py
 merge-gate	bash scripts/ci-gate/ai-review-caller-contract.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-caller-contract.test.sh
@@ -137,7 +137,7 @@ merge-gate	bash scripts/ci-gate/elide-lockfiles.test.sh
 merge-gate	bash scripts/ci-gate/rereview-skip.test.sh
 merge-gate	bash scripts/ci-gate/dispatch-target-guard.test.sh
 merge-gate	bash scripts/ci-gate/target-visibility.test.sh
-merge-gate	bash scripts/ci-gate/privileged-merge-conformance.test.sh
+merge-gate	@exclusive @budget=120 bash scripts/ci-gate/privileged-merge-conformance.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-pin-extractor-differential.test.sh
 merge-gate	bash scripts/ci-gate/require-secrets.test.sh
 merge-gate	bash scripts/ci-gate/dispatch-permission.test.sh
@@ -148,6 +148,11 @@ merge-gate	bash scripts/ci-gate/terminal-live-base.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-pin.test.sh
 merge-gate	bash scripts/ci-gate/budget-exceeded.test.sh
 docs	bash scripts/gen-adr-index.sh --check
+changelog-release-1	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=1 bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-2	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=2 bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-3	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=3 bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-4	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=4 bash scripts/ci-gate/changelog-caller-contract.test.sh
+changelog-release-1	@budget=120 CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY=1 bash scripts/ci-gate/changelog-caller-contract.test.sh
 changelog-release-1	bash scripts/ci-gate/changelog-caller-contract-shard.test.sh
 changelog-release-1	bash scripts/ci-gate/gen-adr-index.test.sh
 changelog-release-2	python3 scripts/ci-gate/adr-live-coverage-claims.test.py
@@ -202,7 +207,7 @@ changelog-release-3	bash scripts/ci-gate/changelog-validate-preview.test.sh
 changelog-release-4	bash scripts/ci-gate/changelog-validate-pin.test.sh
 changelog-release-1	bash scripts/contract-pin.test.sh
 changelog-release-2	python3 scripts/render_changelog_adoption_issue_test.py
-changelog-release-3	bash scripts/component-changelog-contract.test.sh
+changelog-release-3	@budget=90 bash scripts/component-changelog-contract.test.sh
 changelog-release-4	bash scripts/changelog-pr-gate-generator.test.sh
 changelog-release-1	bash scripts/changelog-migration.test.sh
 docs	python3 scripts/changelog.py validate --repo-root .
@@ -220,10 +225,6 @@ merge-gate	bash scripts/ci-gate/orphaned-authorization-recovery.test.sh
 merge-gate	bash scripts/assert-no-deferred-checks.test.sh
 merge-gate	bash scripts/assert-mergeable-head.test.sh
 changelog-release-4	python3 scripts/ci-gate/exact-release-packages.test.py
-changelog-release-1	CHANGELOG_CALLER_CONTRACT_SHARD=1 bash scripts/ci-gate/changelog-caller-contract.test.sh
-changelog-release-2	CHANGELOG_CALLER_CONTRACT_SHARD=2 bash scripts/ci-gate/changelog-caller-contract.test.sh
-changelog-release-3	CHANGELOG_CALLER_CONTRACT_SHARD=3 bash scripts/ci-gate/changelog-caller-contract.test.sh
-changelog-release-4	CHANGELOG_CALLER_CONTRACT_SHARD=4 bash scripts/ci-gate/changelog-caller-contract.test.sh
 platform	python3 scripts/node_floor_ruleset_test.py
 platform	python3 scripts/required_check_bindings_test.py
 
