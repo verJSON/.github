@@ -273,6 +273,12 @@ cat >"$tmp/$index.supervisor.sh" <<'SUPERVISOR'
 command_budget="$1"
 command="$2"
 command_raw_log="$3"
+identity_file="$4"
+# Record this process and its process group before running anything, so the
+# worker can confirm the PID it holds really is the group it will supervise.
+stat="$(</proc/$BASHPID/stat)"
+read -r _ _ process_group _ <<<"${stat##*) }"
+printf '%s %s\n' "$BASHPID" "$process_group" >"$identity_file"
 status=0
 if [ -n "$command_budget" ]; then
   timeout --foreground --kill-after=2s "${command_budget}s" \
@@ -283,7 +289,7 @@ fi
 exit "$status"
 SUPERVISOR
   setsid bash "$tmp/$index.supervisor.sh" "${command_budgets[$index]}" "$command" \
-    "$tmp/$index.raw.log" </dev/null &
+    "$tmp/$index.raw.log" "$tmp/$index.identity" </dev/null &
   # setsid execs in place from this non-leader job, so the supervisor's PID is
   # its session and process-group ID. The worker keeps it; the file only lets
   # the parent clean up if this worker dies, and no row is told where it is.
@@ -291,6 +297,15 @@ SUPERVISOR
   process_group="$supervisor_pid"
   printf '%s\n' "$process_group" >"$command_group_file"
   wait "$supervisor_pid" || status=$?
+  # setsid forks instead when its caller leads a process group, and then $! is
+  # not the supervisor. Confirm before trusting it; fail closed otherwise.
+  supervisor_identity=''
+  [ ! -r "$tmp/$index.identity" ] || supervisor_identity="$(<"$tmp/$index.identity")"
+  if [ "$supervisor_identity" != "$supervisor_pid $supervisor_pid" ]; then
+    printf 'supervisor process group could not be confirmed: launched pid %s, supervisor reported "%s"\n' \
+      "$supervisor_pid" "$supervisor_identity" >>"$tmp/$index.raw.log"
+    [ "$status" -ne 0 ] || status=1
+  fi
   if command_group_has_live_processes "$process_group"; then
     background_processes=1
     [ "$status" -ne 0 ] || status=1

@@ -313,6 +313,27 @@ else
   fail "a row hid its background descendant from the runner"
 fi
 
+# The runner treats the supervisor's PID as its process group, which holds only
+# while setsid execs in place. setsid forks when its caller leads a process
+# group (job control); a stub that forks and waits reproduces that, and the row
+# must fail closed instead of supervising the wrong group.
+mkdir -p "$tmp/forking-setsid-bin"
+real_setsid="$(command -v setsid)"
+printf '#!/usr/bin/env bash\n%q "$@" &\nwait "$!"\n' "$real_setsid" \
+  >"$tmp/forking-setsid-bin/setsid"
+chmod +x "$tmp/forking-setsid-bin/setsid"
+printf 'platform\ttrue\n' >"$tmp/forking-setsid.tsv"
+forking_status=0
+PATH="$tmp/forking-setsid-bin:$PATH" ACTIONS_CI_GROUP_MANIFEST="$tmp/forking-setsid.tsv" \
+  bash "$runner" platform >"$tmp/forking-setsid.out" 2>&1 || forking_status=$?
+if [ "$forking_status" -ne 0 ] \
+  && grep -q 'supervisor process group could not be confirmed' "$tmp/forking-setsid.out"; then
+  pass "a supervisor whose PID is not its process group fails the row closed"
+else
+  cat "$tmp/forking-setsid.out" >&2
+  fail "the runner supervised a process group it could not confirm"
+fi
+
 # Malformed rows fail in the runner itself, not only in the manifest contract.
 printf 'platform\ttrue\textra\n' >"$tmp/three-fields.tsv"
 printf 'platform\t@budget=601 true\n' >"$tmp/over-cap.tsv"
