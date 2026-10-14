@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0231](0231-bootstrap-moves-reusable-ci-pins/README.md) | 2026-10-14 | A review caller bootstrap may move canonical reusable CI pins to its contract revision |
 | [0230](0230-arm-bounds-runner-acquisition/README.md) | 2026-10-14 | The authorization arm bounds runner acquisition instead of rerouting its key validator |
 | [0229](0229-required-contexts-need-success-and-finished-runs/README.md) | 2026-10-14 | A required context needs a SUCCESS, and an unfinished workflow run on the head is pending |
 | [0228](0228-workflow-python-starts-isolated/README.md) | 2026-10-13 | Every workflow starts its inline Python interpreters isolated |

@@ -4,6 +4,8 @@
 - **Status:** Accepted
 - **Issue:** [verJSON/.github#1696](https://github.com/verJSON/.github/issues/1696)
 - **Extends:** [ADR 0079](../0079-head-bound-ai-authorization-and-native-auto-merge/README.md), [ADR 0145](../0145-recover-zero-provider-review-preflight/README.md), [ADR 0166](../0166-environment-only-app-private-keys/README.md), [ADR 0206](../0206-ai-authorization-property-is-independent/README.md)
+- **Extended by:** [ADR 0231](../0231-bootstrap-moves-reusable-ci-pins/README.md) (2026-10-14) — a bootstrap may
+  also move allowlisted canonical reusable CI pins to its contract revision, widening rule 5's companions
 - **Category:** Merge-gate authorization (sensitive class)
 
 ## Context
