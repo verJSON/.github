@@ -173,3 +173,41 @@ contract SHA is settled, independently of #1401; finish #1401 when verjson-agent
 schema/values/ruleset transaction for this ADR with `APPLY-AI-AUTHORIZATION-PROPERTY-1363`
 and run the audit; then withdraw organization App keys role by role (#1385) on
 environment-custody receipts.
+
+## 2026-10-14 amendment: reviewed cohort identity is case-insensitive
+
+**Status:** Accepted; [#1775](https://github.com/Verjson/.github/issues/1775).
+
+The reviewed migration cohort stopped matching the live legacy cohort on 2026-10-02.
+The last green `ai-review-arm` audit was run 36894003929 on 2026-10-01; the first
+`legacy arm cohort differs` failure was run 37030718836 at 2026-10-02T15:58Z. The
+organization's `updated_at` reads 2026-10-02T13:49Z, and its login now reads `verJSON`.
+Two drifts produced the one finding the audit reported:
+
+1. **Display-case rename.** The API now returns `verJSON/<repository>`, while the
+   reviewed list records `Verjson/<repository>`. Exact string equality therefore treated
+   all 29 reviewed repositories as removed, and all 30 live repositories as unreviewed.
+   No membership had changed.
+2. **One real omission.** `verjson-document-contracts` carries
+   `verjson-core-checks=enforced` and `verjson-stack=node`, so the legacy selector arms
+   it. It is not in the reviewed list.
+
+GitHub owner and repository names are case-insensitive identities, and no two
+repositories can differ only by case. The audit therefore compares reviewed-cohort
+membership by case-folded identity in the legacy and target checks and in the
+`unset-values` cleanup subset check. Case folding is sound only over ASCII (U+212A KELVIN
+SIGN folds to `k`), so each reviewed entry must be `<organization>/` followed by GitHub's
+repository-name charset `[A-Za-z0-9._-]+`. A case-only duplicate is rejected in the
+reviewed list, in the observed cohort, and in the organization property inventory. The reviewed list keeps its `Verjson/` spelling, which matches the
+contract's `organization`; it is a list of identities, not of display strings. A cohort
+mismatch now names the `unreviewed` and `absent` repositories. The previous message
+named neither, and the real omission sat behind it for 12 days.
+
+The reviewed cohort adds `Verjson/verjson-document-contracts` (30 repositories). This
+follows the Consequences rule above: the arm already selected the repository, so this
+records an existing enrollment rather than widening the cohort. The property migration's
+`values` payload will enroll it with the others.
+
+The audit then reaches the deterministic-CI check again. Its only finding is the one
+already accepted under #1401, now spelled `verJSON/verjson-agents`, so
+`config/audit-expected-findings.json` re-records that finding under the new fingerprint.

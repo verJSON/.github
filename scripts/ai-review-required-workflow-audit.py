@@ -152,10 +152,12 @@ def read_contract(path: Path = CONTRACT) -> dict:
         and repositories == sorted(set(repositories))
         and all(
             isinstance(repository, str)
-            and repository.startswith(f"{organization}/")
-            and len(repository.split("/", 1)[1]) > 0
+            # GitHub's repository-name charset. Case-folded identity comparison
+            # is only sound over ASCII: U+212A KELVIN SIGN folds to `k`.
+            and re.fullmatch(rf"{re.escape(organization)}/[A-Za-z0-9._-]+", repository) is not None
             for repository in repositories
-        ),
+        )
+        and len({repository_identity(repository) for repository in repositories}) == len(repositories),
         "arm property migration repositories are invalid",
     )
 
@@ -657,16 +659,18 @@ def read_repository_properties(contract: dict, read) -> dict[str, dict[str, obje
         f"orgs/{contract['organization']}/properties/values?per_page=100",
     )
     properties_by_repository = {}
+    identities = set()
     for row in property_rows:
         require(isinstance(row, dict), "organization property inventory is invalid")
         full_name = row.get("repository_full_name")
         values = row.get("properties")
         require(
             isinstance(full_name, str)
-            and full_name not in properties_by_repository
+            and repository_identity(full_name) not in identities
             and isinstance(values, list),
             "organization property inventory is invalid",
         )
+        identities.add(repository_identity(full_name))
         parsed = {}
         for item in values:
             require(
@@ -693,15 +697,37 @@ def target_arm_cohort(
     )
 
 
+def repository_identity(full_name: str) -> str:
+    # GitHub owner and repository names are case-insensitive; the API reports the
+    # current display case, which an organization rename changes (#1775).
+    return full_name.casefold()
+
+
+def require_reviewed_cohort(contract: dict, cohort: list[str], name: str) -> None:
+    reviewed = contract["arm_property_migration"]["repositories"]
+    reviewed_identities = {repository_identity(repository) for repository in reviewed}
+    cohort_identities = {repository_identity(repository) for repository in cohort}
+    require(len(cohort_identities) == len(cohort), f"{name} lists a repository identity twice")
+    unreviewed = sorted(
+        repository for repository in cohort
+        if repository_identity(repository) not in reviewed_identities
+    )
+    absent = sorted(
+        repository for repository in reviewed
+        if repository_identity(repository) not in cohort_identities
+    )
+    require(
+        not unreviewed and not absent,
+        f"{name} differs from the reviewed migration set: unreviewed={unreviewed} absent={absent}",
+    )
+
+
 def verify_target_arm_cohort(
     contract: dict,
     properties_by_repository: dict[str, dict[str, object]],
 ) -> list[str]:
     cohort = target_arm_cohort(contract, properties_by_repository)
-    require(
-        cohort == contract["arm_property_migration"]["repositories"],
-        "authorization property cohort differs from the reviewed migration set",
-    )
+    require_reviewed_cohort(contract, cohort, "authorization property cohort")
     return cohort
 
 
@@ -753,10 +779,7 @@ def verify_deterministic_ci(
     if selector == "target":
         verify_target_arm_cohort(contract, properties_by_repository)
     else:
-        require(
-            covered == contract["arm_property_migration"]["repositories"],
-            "legacy arm cohort differs from the reviewed migration set",
-        )
+        require_reviewed_cohort(contract, covered, "legacy arm cohort")
     concise_missing("armed default branches without canonical deterministic required CI", sorted(missing))
     return covered
 
@@ -1129,8 +1152,12 @@ def render_property_migration_payload(contract: dict, mode: str, read=gh_pages) 
         require(selector == "legacy", "property cleanup requires the restored legacy selector")
         verify_arm_property_schema(contract, read, required=True)
         cohort = target_arm_cohort(contract, read_repository_properties(contract, read))
+        reviewed = {
+            repository_identity(repository)
+            for repository in contract["arm_property_migration"]["repositories"]
+        }
         require(
-            set(cohort).issubset(contract["arm_property_migration"]["repositories"]),
+            {repository_identity(repository) for repository in cohort}.issubset(reviewed),
             "property cleanup cohort contains a repository outside the reviewed migration set",
         )
         return {

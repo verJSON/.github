@@ -337,6 +337,7 @@
       "Verjson/verjson-compliance",
       "Verjson/verjson-compliance-schema",
       "Verjson/verjson-customer-lifecycle",
+      "Verjson/verjson-document-contracts",
       "Verjson/verjson-email",
       "Verjson/verjson-eslint-config",
       "Verjson/verjson-git-runners",
