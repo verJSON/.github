@@ -157,13 +157,31 @@ LIST_INVOCATION = re.compile(
 )
 SEGMENT_SEPARATOR = re.compile(r"\|\||&&|;|\||\n")
 VARIABLE_COMMAND = re.compile(r"""^["']?\$\{?(?P<name>[A-Za-z_]\w*)\}?["']?$""")
-# Words that leave the next word in command position.
-SHELL_PREFIX_WORDS = frozenset((
-    "exec", "command", "env", "time", "nohup",
-    "if", "then", "elif", "else", "do", "while", "until", "!", "{",
-))
-# env options that consume the following word.
-ENV_OPTIONS_WITH_ARGUMENT = frozenset(("-u", "--unset", "-C", "--chdir", "-S", "--split-string"))
+# Shell keywords that leave the next word in command position.
+SHELL_KEYWORDS = frozenset(("if", "then", "elif", "else", "do", "while", "until", "!", "{"))
+# Wrapper commands that run their operand as a command: the options that take
+# a separate value, and how many positional words precede the command.
+WRAPPER_COMMANDS = {
+    "exec": (frozenset(("-a",)), 0),
+    "command": (frozenset(), 0),
+    "time": (frozenset(("-f", "--format", "-o", "--output")), 0),
+    "nohup": (frozenset(), 0),
+    "env": (frozenset(("-u", "--unset", "-C", "--chdir", "-S", "--split-string")), 0),
+    "sudo": (frozenset((
+        "-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
+        "-C", "--close-from", "-D", "--chdir", "-R", "--chroot", "-T", "--command-timeout",
+        "-U", "--other-user", "-r", "--role", "-t", "--type",
+    )), 0),
+    "timeout": (frozenset(("-s", "--signal", "-k", "--kill-after")), 1),
+    "nice": (frozenset(("-n", "--adjustment")), 0),
+    "stdbuf": (frozenset(("-i", "--input", "-o", "--output", "-e", "--error")), 0),
+    "xargs": (frozenset((
+        "-a", "--arg-file", "-d", "--delimiter", "-E", "-I", "-L", "--max-lines",
+        "-n", "--max-args", "-P", "--max-procs", "-s", "--max-chars",
+    )), 0),
+}
+# Python options whose value is the following word.
+PYTHON_OPTIONS_WITH_VALUE = frozenset(("-W", "-X"))
 ASSIGNMENT = re.compile(r"^[A-Za-z_]\w*=")
 COMMAND_BOUNDARY = re.compile(r"\|\||&&|;|\||\n|\(|`|\{")
 REDIRECTION_OPERATOR = re.compile(r"^(?:\d*|&)(?:>>?|<<?<?|>&|<&)$")
@@ -191,14 +209,47 @@ def flags_are_isolated(tokens):
 
 
 def without_command_prefix(tokens):
-    """Tokens from the command word on, dropping prefix words, env options, and assignments."""
+    """Tokens from the command word on.
+
+    Drops shell keywords, assignments, and wrapper commands together with the
+    wrapper's own options, option values, and positional words (``timeout
+    60``), so a wrapped interpreter is still read in command position.
+    """
     tokens = list(tokens)
-    while tokens and (tokens[0] in SHELL_PREFIX_WORDS or ASSIGNMENT.match(tokens[0])):
-        if tokens.pop(0) == "env":
-            while tokens and tokens[0].startswith("-"):
-                if tokens.pop(0) in ENV_OPTIONS_WITH_ARGUMENT and tokens:
-                    tokens.pop(0)
+    while tokens:
+        word = tokens[0]
+        if word in SHELL_KEYWORDS or ASSIGNMENT.match(word):
+            tokens.pop(0)
+            continue
+        if word not in WRAPPER_COMMANDS:
+            break
+        options_with_value, positional_words = WRAPPER_COMMANDS[tokens.pop(0)]
+        while tokens and tokens[0].startswith("-") and tokens[0] != "-":
+            option = tokens.pop(0)
+            if option == "--":
+                break
+            if option in options_with_value and tokens:
+                tokens.pop(0)
+        del tokens[:positional_words]
     return tokens
+
+
+def python_program(arguments):
+    """What an interpreter runs: ``-``, ``-c``, ``-m``, a script word, or None."""
+    remaining = iter(arguments)
+    for token in remaining:
+        token = token.strip("'\"")
+        if token == "-" or not token.startswith("-") or token.startswith("--"):
+            return token
+        if token in PYTHON_OPTIONS_WITH_VALUE:
+            next(remaining, None)
+            continue
+        for flag in token[1:]:
+            if flag in "cm":
+                return f"-{flag}"
+            if flag in OPTIONS_WITH_ARGUMENT:
+                break
+    return None
 
 
 def in_command_position(before):
@@ -271,15 +322,10 @@ def variable_interpreter_findings(line):
         if variable is None:
             continue
         arguments = without_redirections(tokens[1:])
-        reads_stdin = bool(arguments) and arguments[0] == "-"
+        program = python_program(arguments)
         names_python = re.search(r"py", variable.group("name"), re.IGNORECASE) is not None
-        runs_script = bool(arguments) and is_script_path(arguments[0])
-        if (
-            names_python
-            or reads_stdin
-            or runs_script
-            or (arguments and arguments[0] in ("-c", "-m"))
-        ) and not flags_are_isolated(arguments):
+        runs_python = program in ("-", "-c", "-m") or (program is not None and is_script_path(program))
+        if (names_python or runs_python) and not flags_are_isolated(arguments):
             findings.append(tokens[0])
     return findings
 
@@ -500,6 +546,17 @@ def assert_scanner_recognizes_invocation_forms():
         # A variable command whose first argument is a Python script.
         '"$interpreter" scripts/x.py',
         "$tool \"$RUNNER_TEMP/helper.py\" run",
+        # Wrapper words, and their own arguments, before a quoted interpreter.
+        'timeout 60 "python3" scripts/x.py',
+        'sudo -E "python3" x.py',
+        'sudo -u runner -E "python3" -c pass',
+        'nice -n 10 "python3" -c pass',
+        'stdbuf -oL "python3" scripts/x.py',
+        'xargs -0 -r "python3" scripts/x.py',
+        'env -u GH_TOKEN "python3" scripts/x.py',
+        # A variable command's options before the script it runs.
+        '"$interp" -u scripts/x.py',
+        '"$interp" -X utf8 scripts/x.py',
     )
     isolated = (
         "python3 -I - <<'PY'",
@@ -532,6 +589,10 @@ def assert_scanner_recognizes_invocation_forms():
         "print('python3')",
         '"$interpreter" -I scripts/x.py',
         '"$GITHUB_WORKSPACE"/scripts/x.sh',
+        'timeout 60 "python3" -I scripts/x.py',
+        'sudo -E "python3" -I x.py',
+        '"$interp" -u -I scripts/x.py',
+        'timeout 60 "$tool" --config x.json',
     )
     for sample in non_isolated:
         assert non_isolated_invocations(sample), f"scanner missed a non-isolated invocation: {sample!r}"
