@@ -56,6 +56,9 @@ case "$args" in
     # Logged so a test can prove the workflow-run read happens only when a cancelled
     # check run makes it necessary (#1754): callers without Actions read keep working.
     [ -z "${RUNS_REQUEST_LOG:-}" ] || printf '%s\n' "$args" >>"$RUNS_REQUEST_LOG"
+    # Lists the caller's TMPDIR mid-run, so a test can prove the script's scratch
+    # directory really lived there before asserting it is gone afterwards (#1784).
+    [ -z "${TMPDIR_PROBE_LOG:-}" ] || ls -A "$TMPDIR" >>"$TMPDIR_PROBE_LOG"
     [ "${FAIL_RUNS:-0}" -eq 0 ] || { echo "gh: some transient API error (HTTP 502)" >&2; exit 1; }
     printf '%s\n' "$RUNS_FIXTURE" ;;
   *"/annotations?per_page"*)
@@ -1004,6 +1007,41 @@ reset_env
 PR_JSON_FIXTURE="$(printf '{"headRefOid":"%s","baseRefName":""}' "$HEAD_SHA")"
 run
 expect "a missing base ref is a fault, since it names the governing ruleset" 1 "could not resolve a base ref"
+
+# --- the scratch directory never outlives the run (#1784) ----------------------------
+# Every API response is written to one scratch directory under the caller's TMPDIR. Its
+# single EXIT trap must remove it on every path out -- an admission, a gate refusal,
+# and an evaluation fault alike -- or each gate run strands a copy of the payloads. The
+# stub lists TMPDIR mid-run, so a script that ignored TMPDIR (and so left this one
+# empty) cannot pass for one that cleaned up.
+expect_scratch_removed() { # label expected-rc
+  local mid
+  mid="$(sort -u "$TMPDIR_PROBE_LOG" | wc -l)"
+  if [ "$RC" -eq "$2" ] && [ "$mid" -eq 1 ] && [ -z "$(ls -A "$scratch_root")" ]; then
+    pass "$1"
+  else
+    fail "$1 (rc=$RC, entries seen mid-run=$mid, left behind: $(ls -A "$scratch_root" | tr '\n' ' '))"
+  fi
+}
+scratch_root="$tmp/scratch-root"
+for outcome in admitted gate-a fault; do
+  reset_env
+  rm -rf "$scratch_root"; mkdir -p "$scratch_root"
+  export TMPDIR_PROBE_LOG="$tmp/tmpdir-probe"
+  : >"$TMPDIR_PROBE_LOG"
+  case "$outcome" in
+    admitted) want=0 ;;
+    gate-a)
+      CHECK_RUNS_FIXTURE="$(runs "$(check_run 1 'ci / build-test' completed success "$APP_ID")")"
+      want=3 ;;
+    fault)
+      RUNS_FIXTURE="$(wf_runs "$(wf_run 9002 502 "$WF_CI" '"11"' pull_request completed success)")"
+      want=1 ;;
+  esac
+  TMPDIR="$scratch_root" run
+  expect_scratch_removed "the scratch directory is removed after the run ($outcome, exit $want)" "$want"
+  unset TMPDIR_PROBE_LOG
+done
 
 # --- ref spelling on the rules/branches/ path segment (#1470) --------------------
 reset_env
