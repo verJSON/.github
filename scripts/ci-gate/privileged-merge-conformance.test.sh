@@ -579,6 +579,7 @@ WORKFLOW_EVIDENCE_MODE=empty-stdout run_audit \
   && fail "empty required-check workflow metadata reported green" \
   || {
     grep -q 'Invalid required-check workflow identity::repository=Verjson/alpha' "$tmp/out" \
+      && grep -q 'Unreadable retry workflow identity::repository=Verjson/alpha' "$tmp/out" \
       && pass "empty required-check workflow metadata fails as an invalid workflow identity" \
       || fail "empty required-check workflow metadata was misclassified: $(<"$tmp/out")"
   }
