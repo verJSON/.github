@@ -1265,6 +1265,8 @@ jobs:
                       "default-branch review caller already contains the casing repair")
               require(contains(MINIMUM_SAFE_REVIEW, contract), "proposed revision predates the minimum safe review revision")
               require(contains(stale, contract), "proposed revision does not descend from the stale revision")
+              require(all(contains(revision, contract) for revision in ci_stale),
+                      "proposed revision does not descend from the stale reusable CI revision")
               require(contains(contract, "main"), "proposed revision is not on canonical main")
               return {"contract_sha": contract, "head_sha": head, "main_sha": main,
                       "paths": sorted(changed), "stale_sha": stale}

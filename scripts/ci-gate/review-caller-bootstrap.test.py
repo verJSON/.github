@@ -577,6 +577,10 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
     add("a pin bump of a canonical workflow outside the reusable CI allowlist is not a bootstrap",
         with_files(**{CI_CALLER: (ci_caller(CI_STALE, "actionlint.yml"), ci_caller(CONTRACT, "actionlint.yml"))}),
         allowlist_guard)
+    ci_bump = {CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT))}
+    add("a reusable CI pin that would move backwards is not a bootstrap",
+        compare_override(with_files(**ci_bump), f"{CI_STALE}...{CONTRACT}", "behind"),
+        ('require(all(contains(revision, contract) for revision in ci_stale),', 'require(True,'))
     unavailable = Consumer()
     unavailable.missing.add(f"{CANONICAL}/compare/{CONTRACT}...main")
     add("an unavailable canonical comparison is not a bootstrap", unavailable, None)
@@ -626,6 +630,7 @@ INELIGIBLE_REASONS = {
     "a fragment with an impossible date is not a bootstrap": "has an invalid date",
     "an oversized changed file is not a bootstrap": "blob is too large",
     "a pin bump of a canonical workflow outside the reusable CI allowlist is not a bootstrap": "is not an allowlisted canonical reusable CI workflow",
+    "a reusable CI pin that would move backwards is not a bootstrap": "does not descend from the stale reusable CI revision",
     "an unavailable canonical comparison is not a bootstrap": "GitHub API read failed",
     "a malformed API response is not a bootstrap": "GitHub API returned malformed JSON",
 }
