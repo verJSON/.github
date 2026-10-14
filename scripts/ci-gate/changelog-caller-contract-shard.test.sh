@@ -44,89 +44,108 @@ fi
 # different fixture there than in the full run. `custom_contract` did exactly
 # that: shards wrote an empty contract suite, which exits 0, so every positive
 # custom-release case passed vacuously and every rejection case was misreported.
-# Empty initializers do not count as definitions -- one is what hid that leak.
+# The section is delimited by explicit BEGIN/END marker comments rather than by
+# parsing if/fi, which a quoted `<<'PY'` inside a string once broke. Empty
+# initializers do not count as definitions -- one is what hid that leak.
 # Upper-case names are environment prefixes on single commands, not fixtures.
-if python3 - "$caller" <<'PY'
+cat >"$tmp/fixture-leaks.py" <<'LEAKS'
 import re
 import sys
 
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
-heredoc_start = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
-
-
-def top_level_if_blocks():
-    depth = 0
-    heredoc = None
-    start = otherwise = None
-    for index, line in enumerate(lines):
-        if heredoc:
-            if line.strip() == heredoc:
-                heredoc = None
-            continue
-        if re.match(r"if\b", line) and not re.search(r"\bfi\s*(#.*)?$", line):
-            if depth == 0:
-                start, otherwise = index, None
-            depth += 1
-        elif re.match(r"fi\b", line):
-            depth -= 1
-            if depth == 0:
-                yield start, otherwise, index
-        elif re.match(r"else\b", line) and depth == 1:
-            otherwise = index
-        match = heredoc_start.search(line)
-        if match:
-            heredoc = match.group(2)
-
-
-gates = [
-    block
-    for block in top_level_if_blocks()
-    if "CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY" in " ".join(lines[block[0]:block[0] + 3])
-    and block[2] - block[0] > 100
-]
-if len(gates) != 1:
-    raise SystemExit(f"expected one generator-only section, found {len(gates)}")
-start, otherwise, end = gates[0]
-section_end = otherwise if otherwise is not None else end
+begins = [i for i, line in enumerate(lines) if line.startswith("# BEGIN generator-only assertions")]
+ends = [i for i, line in enumerate(lines) if line.startswith("# END generator-only assertions")]
+if len(begins) != 1 or len(ends) != 1 or begins[0] >= ends[0]:
+    raise SystemExit(
+        f"expected one generator-only section, found {len(begins)} BEGIN and {len(ends)} END markers"
+    )
+start, end = begins[0], ends[0]
+name = r"([a-z_][a-z0-9_]*)"
 variable_patterns = (
-    re.compile(r"^\s*(?:export\s+|local\s+|declare\s+(?:-\w+\s+)?)?([a-z_][a-z0-9_]*)\+?=(?!''|\"\"|\s|$)"),
-    re.compile(r"\bcapture_mode\s+([a-z_][a-z0-9_]*)"),
-    re.compile(r"\bprintf\s+-v\s+([a-z_][a-z0-9_]*)"),
+    re.compile(r"^\s*(?:export\s+|local\s+|declare\s+(?:-\w+\s+)?)?" + name + r"\+?=(?!''|\"\"|\s|$)"),
+    re.compile(r"\bcapture_mode\s+" + name),
+    re.compile(r"\bprintf\s+-v\s+" + name),
+    re.compile(r"\bfor\s+" + name + r"\s+in\b"),
+    re.compile(r"\b(?:mapfile|readarray)\b(?:\s+-\S+(?:\s+(?!-)\S+)?)*?\s+" + name + r"\s*(?:<|$)"),
 )
-function_pattern = re.compile(r"^\s*([a-z_][a-z0-9_]*)\s*\(\)\s*\{")
+read_pattern = re.compile(r"\bread\b((?:\s+-[a-zA-Z]+(?:\s+(?![-$])\S+)?)*)((?:\s+[a-z_][a-z0-9_]*)+)")
+function_pattern = re.compile(r"^\s*" + name + r"\s*\(\)\s*\{")
 
 
-def defined(indices, patterns):
+def defined(indices, functions=False):
     names = set()
     for index in indices:
-        for pattern in patterns:
-            names.update(pattern.findall(lines[index]))
+        line = lines[index]
+        if functions:
+            names.update(function_pattern.findall(line))
+            continue
+        for pattern in variable_patterns:
+            names.update(pattern.findall(line))
+        for options, targets in read_pattern.findall(line):
+            names.update(targets.split())
+            names.update(re.findall(r"-a\s+" + name, options))
     return names
 
 
-section = range(start + 1, section_end)
-elsewhere = [*range(0, start), *range(section_end, len(lines))]
+section = range(start + 1, end)
+elsewhere = [*range(0, start), *range(end, len(lines))]
 references = {
-    name: re.compile(r"\$\{?%s\b" % name)
-    for name in defined(section, variable_patterns) - defined(elsewhere, variable_patterns)
+    variable: re.compile(r"\$\{?%s\b" % variable)
+    for variable in defined(section) - defined(elsewhere)
 }
 references.update(
-    (name, re.compile(r"(?:^|[\s;&|(])%s(?:\s|$)" % name))
-    for name in defined(section, (function_pattern,)) - defined(elsewhere, (function_pattern,))
+    (function, re.compile(r"(?:^|[\s;&|(])%s(?:\s|$)" % function))
+    for function in defined(section, True) - defined(elsewhere, True)
 )
 leaks = []
-for name, reference in sorted(references.items()):
+for variable, reference in sorted(references.items()):
     for index in range(end + 1, len(lines)):
         if reference.search(lines[index]):
-            leaks.append(f"{name} (line {index + 1})")
+            leaks.append(f"{variable} (line {index + 1})")
             break
 if leaks:
     raise SystemExit("case fixtures defined only by generator-only assertions: " + ", ".join(leaks))
-PY
-then
+LEAKS
+if python3 "$tmp/fixture-leaks.py" "$caller"; then
   pass "every case fixture is defined outside the generator-only assertions"
 else
   fail "case shards read fixtures that only the generator-only assertions define"
+fi
+
+# The checker must see every way bash binds a name, and a quoted heredoc token
+# inside the section must not hide the section from it.
+leak_fixture() { # <name> <definition line>
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '# BEGIN generator-only assertions\n'
+    printf '%s\n' "grep -qF \"python3 -I - <<'PY'\" <<<\"\$x\"" "$2"
+    printf '# END generator-only assertions\n'
+    printf 'printf %%s "${%s}"\n' "$1"
+  } >"$tmp/leak-$1.sh"
+}
+leak_fixture assigned 'assigned="value"'
+leak_fixture captured 'capture_mode captured workflow "$sha"'
+leak_fixture printed "printf -v printed '%s' x"
+leak_fixture read_line 'IFS= read -r read_line <"$file"'
+leak_fixture read_pair 'IFS=: read -r -d "" read_first read_pair <"$file"'
+leak_fixture read_array 'read -r -a read_array <<<"$x"'
+leak_fixture mapped 'mapfile -t mapped <"$file"'
+leak_fixture array_read 'readarray -d "" -t array_read < <(printf x)'
+leak_fixture looped 'for looped in a b; do :; done'
+fixture_misses=()
+for fixture in assigned captured printed read_line read_pair read_array mapped array_read looped; do
+  if python3 "$tmp/fixture-leaks.py" "$tmp/leak-$fixture.sh" >/dev/null 2>"$tmp/leak.err" \
+    || ! grep -q "$fixture (line" "$tmp/leak.err"; then
+    fixture_misses+=("$fixture")
+  fi
+done
+printf '#!/usr/bin/env bash\nx=1\n' >"$tmp/leak-unmarked.sh"
+if [ "${#fixture_misses[@]}" -eq 0 ] \
+  && ! python3 "$tmp/fixture-leaks.py" "$tmp/leak-unmarked.sh" 2>"$tmp/leak.err" \
+  && grep -q 'expected one generator-only section' "$tmp/leak.err"; then
+  pass "the fixture-leak check sees assignment, capture, printf -v, read, mapfile, readarray, and for bindings"
+else
+  fail "the fixture-leak check missed a binding or an unmarked section: ${fixture_misses[*]:-unmarked}"
 fi
 
 python3 - "$caller" "$shard" "$manifest" <<'PY' || fails=$((fails + 1))
@@ -156,8 +175,16 @@ if calls != expected_calls:
     )
 
 width = 4
-# Some declarations expand into multiple executions; pin the runtime inventory too.
-expanded_cases = 233
+# Declarations expand into more selections at runtime (loops, nested cases).
+# The caller itself fails unless a run makes exactly the pinned number, so this
+# only checks that the helper's map partitions that many selections evenly.
+pinned = subprocess.run(
+    ["bash", "-c", 'source "$SHARD"; printf "%s" "$CHANGELOG_CALLER_CONTRACT_CASES"'],
+    check=True, capture_output=True, text=True, env={"SHARD": shard, "PATH": "/usr/bin:/bin"},
+).stdout
+if not pinned.isdigit():
+    raise SystemExit("the shard helper does not pin CHANGELOG_CALLER_CONTRACT_CASES")
+expanded_cases = int(pinned)
 owners = {index: [] for index in range(1, expanded_cases + 1)}
 for shard_id in range(1, width + 1):
     script = f'''
@@ -212,8 +239,8 @@ if len(caller_rows) != len(expected) or set(caller_rows) != expected:
         "generator-only row: " + "; ".join(sorted(set(caller_rows) ^ expected))
     )
 print(
-    f"ok   - {calls} caller-contract declarations expand to {expanded_cases} "
-    f"executions partitioned across {width} shards {loads}"
+    f"ok   - {calls} caller-contract declarations; {expanded_cases} pinned case "
+    f"selections partition across {width} shards {loads}"
 )
 PY
 
@@ -223,6 +250,27 @@ if grep -qE 'CHANGELOG_CONTRACT_SECTIONS|contract_section_selected|contract_sect
   fail "the generated contract suite exposes a section selector"
 else
   pass "the generated contract suite has no section selector"
+fi
+
+# A generator mode that exits 0 with no output is a defect, not a fixture: an
+# empty contract suite exits 0 and passes every positive case. Run the caller
+# against a stub generator that prints nothing and require it to say so.
+stub_root="$tmp/empty-generator"
+mkdir -p "$stub_root/scripts/ci-gate"
+cp "$caller" "$stub_root/scripts/ci-gate/changelog-caller-contract.test.sh"
+cp "$shard" "$stub_root/scripts/changelog-caller-contract-shard.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$stub_root/scripts/gen-changelog-caller.sh"
+chmod +x "$stub_root/scripts/gen-changelog-caller.sh"
+git -C "$stub_root" init -q
+git -C "$stub_root" -c user.name=t -c user.email=t@t commit -q --allow-empty -m stub
+if CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY=1 \
+  bash "$stub_root/scripts/ci-gate/changelog-caller-contract.test.sh" >"$tmp/empty-generator.out" 2>&1; then
+  fail "the caller contract accepted a generator mode that emitted nothing"
+elif grep -q "generator mode 'workflow' exited 0 but emitted nothing" "$tmp/empty-generator.out"; then
+  pass "a generator mode that emits nothing fails capture instead of becoming an empty fixture"
+else
+  cat "$tmp/empty-generator.out" >&2
+  fail "an empty generator capture failed without naming the empty mode"
 fi
 
 if CHANGELOG_CALLER_CONTRACT_SHARD=5 bash "$caller" >"$tmp/shard.out" 2>&1; then

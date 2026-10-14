@@ -98,6 +98,11 @@ capture_mode() {
     # named cause off the top defeats the point of naming it.
     fail "generator mode '$mode' exited $status: $(tr '\n' ' ' <"$err" | sed 's/  */ /g; s/ *$//' | cut -c1-500)"
     mode_capture_failures=$((mode_capture_failures + 1))
+  elif [ -z "$out" ]; then
+    # An empty capture is never a fixture: an empty contract suite exits 0 and
+    # turns every positive case into a pass (#1736).
+    fail "generator mode '$mode' exited 0 but emitted nothing"
+    mode_capture_failures=$((mode_capture_failures + 1))
   fi
   rm -f "$err"
   printf -v "$target" '%s' "$out"
@@ -137,6 +142,8 @@ else
   exit 1
 fi
 
+# BEGIN generator-only assertions -- case shards skip everything up to the END
+# marker, so no case may read anything defined between them (#1736).
 if [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ] \
   || [ "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}" = all ]; then
 grep -qF 'uses: verJSON/.github/.github/workflows/generated-artifacts.yml@' <<<"$workflow" \
@@ -1128,6 +1135,7 @@ stray_titles="$(grep -oE "\^## [A-Za-z][^']*" "$emitted" | grep -vxE '\^## (Newe
   || fail "emitted test greps for literal fragment titles: $(tr '\n' ' ' <<<"$stray_titles")"
 
 fi
+# END generator-only assertions
 # Content-addressed by ref, so seeding that cache path with THIS repository's
 # changelog.py makes the run hermetic and exercises the contract as it stands in
 # this pull request. $sha cannot exist upstream, so a seeding bug fails loudly
@@ -5895,8 +5903,11 @@ SCHED_SCRIPT
   || fail "a command named in an adopter-controlled header was executed by the checker"
 
 drain_adopter_jobs
-if [ "$caller_case_count" -lt 1 ]; then
-  fail "changelog caller contract recorded no cases"
+# The last case may belong to another shard, which leaves assertions suspended;
+# these inventory checks hold in every shard (#1736).
+caller_assertions_suspended=0
+if [ "$caller_case_count" -ne "$CHANGELOG_CALLER_CONTRACT_CASES" ]; then
+  fail "changelog caller contract recorded $caller_case_count cases; the shard map pins $CHANGELOG_CALLER_CONTRACT_CASES"
 fi
 if [ "$caller_case_ran" -lt 1 ]; then
   fail "changelog caller contract ran no cases"
