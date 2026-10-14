@@ -646,6 +646,11 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
     add("a checkout ref carrying the old pin is not a comment pin",
         with_files(**{CI_CALLER: (checkout(CI_STALE), checkout(CONTRACT))}),
         ('COMMENT = re.compile(rb"[ \\t]*#")', 'COMMENT = re.compile(rb"[ \\t]*[#r]")'))
+    nested = lambda sha: ci_caller(sha).replace(
+        b"    with:\n", f"    with:\n      uses: Verjson/.github/.github/workflows/node-ci.yml@{sha}\n".encode())
+    add("a pin-shaped line nested below a job key is not a reusable CI pin",
+        with_files(**{CI_CALLER: (nested(CI_STALE), nested(CONTRACT))}),
+        ('REUSABLE_REF = re.compile(rb"(    uses: )', 'REUSABLE_REF = re.compile(rb"( +uses: )'))
     add("a revision continuing into a branch-name suffix is not a reusable CI pin",
         with_files(**{CI_CALLER: (ci_caller(CI_STALE, ref_suffix="-x"), ci_caller(CONTRACT, ref_suffix="-x"))}),
         ('@([0-9a-f]{40})((?:[ \\t]+(?:#.*)?)?\\r?)")', '@([0-9a-f]{40})(.*)")'))
@@ -700,6 +705,7 @@ INELIGIBLE_REASONS = {
     "a pin bump of a canonical workflow outside the reusable CI allowlist is not a bootstrap": "is not an allowlisted canonical reusable CI workflow",
     "a reusable CI pin that would move backwards is not a bootstrap": "does not descend from the stale reusable CI revision",
     "a revision continuing into a branch-name suffix is not a reusable CI pin": "changes more than its reusable CI pin",
+    "a pin-shaped line nested below a job key is not a reusable CI pin": "changes more than its reusable CI pin",
     "a backwards reusable CI pin in the first of two callers is not a bootstrap": "does not descend from the stale reusable CI revision",
     "a run line that ends in a comment is not a comment pin": "changes more than its reusable CI pin",
     "a checkout ref carrying the old pin is not a comment pin": "changes more than its reusable CI pin",
