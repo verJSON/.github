@@ -369,26 +369,24 @@ else
   fail "a row forged its supervisor's process-group identity"
 fi
 
-# The release FIFO is the worker's handshake with its supervisor. A row that
-# inherits a handle on it keeps the FIFO open after the runner dies, so a
-# supervisor could block forever; no row may hold one.
-cat >"$tmp/fifo-handles.sh" <<'FDS'
-#!/usr/bin/env bash
-for fd in /proc/$$/fd/*; do
-  target="$(readlink "$fd" 2>/dev/null)" || continue
-  case "$target" in
-    *.release*) printf 'row holds the release FIFO on %s\n' "$fd"; exit 1 ;;
-  esac
-done
-FDS
-chmod +x "$tmp/fifo-handles.sh"
-printf 'platform\tbash %q\n' "$tmp/fifo-handles.sh" >"$tmp/fifo-handles.tsv"
-if ACTIONS_CI_GROUP_MANIFEST="$tmp/fifo-handles.tsv" bash "$runner" platform \
-  >"$tmp/fifo-handles.out" 2>&1; then
-  pass "rows inherit no handle on the supervisor release FIFO"
+# The worker releases its supervisor through a pipe on the supervisor's stdin.
+# A row holding either end would keep that pipe alive after the runner dies, or
+# could read the handshake; the row's stdin must be /dev/null and it must hold
+# no pipe the runner created. Pipes this test itself inherited pass through.
+# The row lists its descriptors into a file: a command substitution or pipe
+# would add a pipe of its own to the very table being inspected.
+printf 'platform\tls -l /proc/$$/fd >"$ACTIONS_CI_FD_LISTING"\n' >"$tmp/handshake-handles.tsv"
+ls -l "/proc/$$/fd" >"$tmp/test-fds"
+inherited_pipes="$(grep -o 'pipe:\[[0-9]*\]' "$tmp/test-fds" | sort -u)"
+if ACTIONS_CI_FD_LISTING="$tmp/row-fds" \
+  ACTIONS_CI_GROUP_MANIFEST="$tmp/handshake-handles.tsv" bash "$runner" platform \
+  >"$tmp/handshake-handles.out" 2>&1 \
+  && grep -qE ' 0 -> /dev/null$' "$tmp/row-fds" \
+  && [ -z "$(grep -o 'pipe:\[[0-9]*\]' "$tmp/row-fds" | sort -u | comm -23 - <(printf '%s\n' "$inherited_pipes"))" ]; then
+  pass "rows read /dev/null and hold no handle on the supervisor handshake"
 else
-  cat "$tmp/fifo-handles.out" >&2
-  fail "a row inherited a handle on the supervisor release FIFO"
+  cat "$tmp/handshake-handles.out" "$tmp/row-fds" >&2
+  fail "a row inherited the supervisor handshake or a non-null stdin"
 fi
 
 # Malformed rows fail in the runner itself, not only in the manifest contract.

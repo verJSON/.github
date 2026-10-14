@@ -256,8 +256,8 @@ trap cleanup_group_runner EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 
-# The launched child holds before running its command until this check
-# releases it, so it is alive and nothing a row does can affect the answer.
+# The launched child holds on its stdin before running its command until this
+# check releases it, so it is alive and nothing a row does can affect the answer.
 # Wait for it to call setsid(), then report whether its process group is its
 # own PID. A child of its own means setsid forked; any unreadable or
 # unparsable state also fails closed.
@@ -290,7 +290,7 @@ supervisor_leads_its_group() {
 run_command() {
   local index="$1"
   local command="$2"
-  local started status=0 elapsed supervisor_pid process_group release_fd
+  local started status=0 elapsed supervisor_pid process_group release_fd supervisor_output_fd
   local background_processes=0
   local command_group_file="$tmp/$index.pgid"
 
@@ -304,10 +304,12 @@ cat >"$tmp/$index.supervisor.sh" <<'SUPERVISOR'
 command_budget="$1"
 command="$2"
 command_raw_log="$3"
-release="$4"
 # Run nothing until the worker has confirmed this process leads its group.
-IFS= read -r token <"$release" || exit 125
+# stdin is a pipe whose only write end the worker holds, so a dead worker reads
+# as EOF here rather than a hang. The row then gets /dev/null, never that pipe.
+IFS= read -r token || exit 125
 [ "$token" = go ] || exit 125
+exec </dev/null
 status=0
 if [ -n "$command_budget" ]; then
   timeout --foreground --kill-after=2s "${command_budget}s" \
@@ -317,14 +319,16 @@ else
 fi
 exit "$status"
 SUPERVISOR
-  mkfifo "$tmp/$index.release"
-  exec {release_fd}<>"$tmp/$index.release"
-  setsid bash "$tmp/$index.supervisor.sh" "${command_budgets[$index]}" "$command" \
-    "$tmp/$index.raw.log" "$tmp/$index.release" </dev/null {release_fd}>&- &
+  # shellcheck disable=SC2034 # COPROC is set by bash for the coprocess.
+  coproc setsid bash "$tmp/$index.supervisor.sh" "${command_budgets[$index]}" "$command" \
+    "$tmp/$index.raw.log"
   # setsid execs in place from this non-leader job, so the supervisor's PID is
   # its session and process-group ID. The worker keeps it; the file only lets
   # the parent clean up if this worker dies, and no row is told where it is.
-  supervisor_pid="$!"
+  supervisor_pid="$COPROC_PID"
+  release_fd="${COPROC[1]}"
+  supervisor_output_fd="${COPROC[0]}"
+  exec {supervisor_output_fd}<&-
   process_group="$supervisor_pid"
   printf '%s\n' "$process_group" >"$command_group_file"
   # setsid forks instead when its caller leads a process group, and then $! is
