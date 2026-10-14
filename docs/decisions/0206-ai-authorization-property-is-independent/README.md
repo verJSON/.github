@@ -195,8 +195,10 @@ Two drifts produced the one finding the audit reported:
 GitHub owner and repository names are case-insensitive identities, and no two
 repositories can differ only by case. The audit therefore compares reviewed-cohort
 membership by case-folded identity in the legacy and target checks and in the
-`unset-values` cleanup subset check. A case-only duplicate in the reviewed list is
-rejected as invalid. The reviewed list keeps its `Verjson/` spelling, which matches the
+`unset-values` cleanup subset check. Case folding is sound only over ASCII (U+212A KELVIN
+SIGN folds to `k`), so each reviewed entry must be `<organization>/` followed by GitHub's
+repository-name charset `[A-Za-z0-9._-]+`. A case-only duplicate is rejected in the
+reviewed list, in the observed cohort, and in the organization property inventory. The reviewed list keeps its `Verjson/` spelling, which matches the
 contract's `organization`; it is a list of identities, not of display strings. A cohort
 mismatch now names the `unreviewed` and `absent` repositories. The previous message
 named neither, and the real omission sat behind it for 12 days.

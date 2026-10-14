@@ -578,6 +578,16 @@ jobs:
             },
         )
 
+    def test_identity_includes_the_owner_not_only_the_repository_name(self):
+        # Case-folding the identity must not drop the owner: a same-named
+        # repository under another owner is a different repository.
+        self.contract["arm_property_migration"]["repositories"] = ["Verjson/alpha"]
+        with self.assertRaisesRegex(
+            AUDIT.AuditError,
+            r"unreviewed=\['Elsewhere/alpha'\] absent=\['Verjson/alpha'\]",
+        ):
+            AUDIT.require_reviewed_cohort(self.contract, ["Elsewhere/alpha"], "legacy arm cohort")
+
     def test_a_cohort_listing_one_identity_twice_is_not_the_reviewed_set(self):
         # Case-insensitive membership must not collapse a duplicate that the
         # former list equality rejected.
@@ -586,6 +596,14 @@ jobs:
             AUDIT.require_reviewed_cohort(
                 self.contract, ["Verjson/alpha", "verJSON/alpha"], "legacy arm cohort",
             )
+
+    def test_property_cleanup_rejects_one_identity_reported_twice(self):
+        self.enter_legacy_selector_state()
+        rows = self.fixture["orgs/Verjson/properties/values?per_page=100"][0]
+        alpha = next(row for row in rows if row["repository_full_name"] == "Verjson/alpha")
+        rows.append({**copy.deepcopy(alpha), "repository_full_name": "verJSON/alpha"})
+        with self.assertRaisesRegex(AUDIT.AuditError, "organization property inventory is invalid"):
+            AUDIT.render_property_migration_payload(self.contract, "unset-values", self.read)
 
     def test_target_selector_requires_the_reviewed_property_cohort(self):
         rows = self.fixture["orgs/Verjson/properties/values?per_page=100"][0]
@@ -1001,6 +1019,20 @@ jobs:
             contract["arm_property_migration"]["repositories"].sort()
 
         self.assert_contract_rejected(case_duplicate_cohort, "repositories are invalid")
+
+        def homoglyph_cohort(contract):
+            # U+212A KELVIN SIGN casefolds to ASCII `k`, so this entry would
+            # silently review the live repository `Verjson/kappa`.
+            contract["arm_property_migration"]["repositories"].append("Verjson/\u212aappa")
+            contract["arm_property_migration"]["repositories"].sort()
+
+        self.assert_contract_rejected(homoglyph_cohort, "repositories are invalid")
+
+        def nested_path_cohort(contract):
+            contract["arm_property_migration"]["repositories"].append("Verjson/gamma/delta")
+            contract["arm_property_migration"]["repositories"].sort()
+
+        self.assert_contract_rejected(nested_path_cohort, "repositories are invalid")
 
         def unordered_cohort(contract):
             contract["arm_property_migration"]["repositories"].reverse()

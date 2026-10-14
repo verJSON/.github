@@ -152,8 +152,9 @@ def read_contract(path: Path = CONTRACT) -> dict:
         and repositories == sorted(set(repositories))
         and all(
             isinstance(repository, str)
-            and repository.startswith(f"{organization}/")
-            and len(repository.split("/", 1)[1]) > 0
+            # GitHub's repository-name charset. Case-folded identity comparison
+            # is only sound over ASCII: U+212A KELVIN SIGN folds to `k`.
+            and re.fullmatch(rf"{re.escape(organization)}/[A-Za-z0-9._-]+", repository) is not None
             for repository in repositories
         )
         and len({repository_identity(repository) for repository in repositories}) == len(repositories),
@@ -658,16 +659,18 @@ def read_repository_properties(contract: dict, read) -> dict[str, dict[str, obje
         f"orgs/{contract['organization']}/properties/values?per_page=100",
     )
     properties_by_repository = {}
+    identities = set()
     for row in property_rows:
         require(isinstance(row, dict), "organization property inventory is invalid")
         full_name = row.get("repository_full_name")
         values = row.get("properties")
         require(
             isinstance(full_name, str)
-            and full_name not in properties_by_repository
+            and repository_identity(full_name) not in identities
             and isinstance(values, list),
             "organization property inventory is invalid",
         )
+        identities.add(repository_identity(full_name))
         parsed = {}
         for item in values:
             require(
