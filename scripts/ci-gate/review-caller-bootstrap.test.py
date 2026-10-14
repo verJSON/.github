@@ -674,6 +674,9 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
     nel = hidden_header("\u0085")
     add("a next-line character hiding a block scalar header is not a reusable CI pin",
         with_files(**{CI_CALLER: (nel(CI_STALE), nel(CONTRACT))}), ("|\\x85", ""))
+    line_separator = hidden_header("\u2028")
+    add("a line separator hiding a block scalar header is not a reusable CI pin",
+        with_files(**{CI_CALLER: (line_separator(CI_STALE), line_separator(CONTRACT))}), ("|\\u2028", ""))
     add("a revision continuing into a branch-name suffix is not a reusable CI pin",
         with_files(**{CI_CALLER: (ci_caller(CI_STALE, ref_suffix="-x"), ci_caller(CONTRACT, ref_suffix="-x"))}),
         ('@([0-9a-f]{40})((?:[ \\t]+(?:#.*)?)?\\r?)")', '@([0-9a-f]{40})(.*)")'))
@@ -733,6 +736,7 @@ INELIGIBLE_REASONS = {
     "a pin-shaped line under a key outside jobs is not a reusable CI pin": "is not a job's reusable workflow call",
     "a lone carriage return hiding a block scalar header is not a reusable CI pin": "contains a line break other than",
     "a next-line character hiding a block scalar header is not a reusable CI pin": "contains a line break other than",
+    "a line separator hiding a block scalar header is not a reusable CI pin": "contains a line break other than",
     "a backwards reusable CI pin in the first of two callers is not a bootstrap": "does not descend from the stale reusable CI revision",
     "a run line that ends in a comment is not a comment pin": "changes more than its reusable CI pin",
     "a checkout ref carrying the old pin is not a comment pin": "changes more than its reusable CI pin",
