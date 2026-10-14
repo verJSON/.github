@@ -94,6 +94,106 @@ jobs:
       role: ai-review
       environment: ${{ inputs.ai_review_environment || 'ai-review-app' }}
 
+  # ADR 0230: `timeout-minutes` never counts queue time, so a job GitHub never
+  # hands to a runner stays queued indefinitely, and with this workflow's
+  # non-cancelling PR concurrency group it holds every later arm for the PR as
+  # pending (verjson-payments run 37352915856). This job bounds that wait from
+  # the no-secret lane: past the limit it names the stalled job and cancels the
+  # run, so the always() arm job completes the authorization check as failed
+  # and the group is released; it force-cancels only if the stall persists.
+  runner-acquisition-watchdog:
+    needs: event-policy
+    if: ${{ needs.event-policy.outputs.run_control_plane == 'true' }}
+    # A watchdog defect must never become a veto on an otherwise-authorized
+    # merge; the stall path acts through cancellation, not this job's result.
+    continue-on-error: true
+    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
+    # Two sequential acquisitions at the limit, the policy jobs between them,
+    # and the cancellation grace (asserted by the registered watchdog test).
+    timeout-minutes: 40
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TARGET_REPO: ${{ github.repository }}
+      ARM_RUN_ID: ${{ github.run_id }}
+      ARM_RUN_ATTEMPT: ${{ github.run_attempt }}
+      ACQUISITION_LIMIT_SECONDS: '900'
+      POLL_INTERVAL_SECONDS: '15'
+      CANCEL_GRACE_SECONDS: '120'
+      # Classifies one attempt's jobs: `stalled` names the first job still
+      # waiting for a runner past the limit (this job holds one while polling,
+      # and an environment `waiting` state is a human gate, not acquisition);
+      # `acquired` means the final arm job holds a runner, after which its own
+      # timeout bounds it.
+      ACQUISITION_VERDICT: |
+        .jobs as $jobs
+        | [$jobs[] | select(.status == "queued" or .status == "pending" or .status == "requested")
+            | {name, labels, age: ($now - (.created_at | fromdateiso8601))}
+            | select(.age >= $limit)] as $stalled
+        | if ($stalled | length) > 0 then
+            $stalled[0] | {state: "stalled", age,
+              name: (.name | gsub("[^A-Za-z0-9 ._/-]"; "?")),
+              labels: (.labels | map(gsub("[^A-Za-z0-9._-]"; "?")) | join(","))}
+          elif any($jobs[]; (.name | test("(^| / )arm$")) and (.status == "in_progress" or .status == "completed"))
+          then {state: "acquired"}
+          else {state: "waiting"} end
+    steps:
+      - name: Bound runner acquisition for this arm attempt
+        id: detect
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || exit 1
+          [[ "$ARM_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$ARM_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+          jobs_path="repos/$TARGET_REPO/actions/runs/$ARM_RUN_ID/attempts/$ARM_RUN_ATTEMPT/jobs?per_page=100"
+          while :; do
+            now="$(date -u +%s)"
+            # An unreadable or malformed jobs listing is not evidence of a stall:
+            # keep polling, and let this job's timeout end an unobservable run.
+            if listing="$(gh api "$jobs_path")" &&
+              verdict="$(jq -ce --argjson now "$now" --argjson limit "$ACQUISITION_LIMIT_SECONDS" \
+                "$ACQUISITION_VERDICT" <<<"$listing" 2>/dev/null)"; then
+              case "$(jq -r .state <<<"$verdict")" in
+                acquired) echo "Every arm job acquired a runner."; exit 0 ;;
+                stalled)
+                  echo 'stalled=true' >>"$GITHUB_OUTPUT"
+                  jq -r --arg run "$ARM_RUN_ID" '"::error title=Runner acquisition stalled::\(.name) waited \(.age)s for a runner labelled [\(.labels)], past the \(env.ACQUISITION_LIMIT_SECONDS)s limit. Cancelling arm run \($run) to release this pull request'"'"'s arm concurrency group; re-run the arm or push to re-arm."' <<<"$verdict"
+                  gh api --method POST "repos/$TARGET_REPO/actions/runs/$ARM_RUN_ID/cancel" >/dev/null ||
+                    echo "::warning::cancel request for arm run $ARM_RUN_ID was not accepted"
+                  exit 1
+                  ;;
+              esac
+            else
+              echo "::warning::arm jobs listing unavailable; retrying"
+            fi
+            sleep "$POLL_INTERVAL_SECONDS"
+          done
+
+      - name: Force-cancel when the stalled job survives cancellation
+        if: ${{ always() && steps.detect.outputs.stalled == 'true' }}
+        run: |
+          set -euo pipefail
+          sleep "$CANCEL_GRACE_SECONDS"
+          jobs_path="repos/$TARGET_REPO/actions/runs/$ARM_RUN_ID/attempts/$ARM_RUN_ATTEMPT/jobs?per_page=100"
+          # Re-apply the stall verdict, not "anything still queued": the arm job
+          # queued by cancellation is young, and force-cancelling it would orphan
+          # the authorization check it is about to complete.
+          # An unobservable listing is not evidence the stall persists.
+          state=unobservable
+          if listing="$(gh api "$jobs_path")"; then
+            state="$(jq -r --argjson now "$(date -u +%s)" --argjson limit "$ACQUISITION_LIMIT_SECONDS" \
+              "$ACQUISITION_VERDICT | .state" <<<"$listing" 2>/dev/null)" || state=unobservable
+          fi
+          case "$state" in
+            stalled)
+              echo "::error::arm run $ARM_RUN_ID still holds a stalled job after ${CANCEL_GRACE_SECONDS}s; force-cancelling"
+              gh api --method POST "repos/$TARGET_REPO/actions/runs/$ARM_RUN_ID/force-cancel" >/dev/null
+              ;;
+            unobservable) echo "::warning::arm jobs listing unavailable; not escalating to force-cancel" ;;
+            *) echo "Cancellation cleared the stalled job." ;;
+          esac
+
   arm:
     environment: ${{ inputs.ai_review_environment || 'ai-review-app' }}
     needs: [event-policy, app-key-policy]

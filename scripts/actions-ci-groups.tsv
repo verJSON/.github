@@ -122,6 +122,7 @@ merge-gate	bash scripts/ci-gate/post-merge-reconcile.test.sh
 merge-gate	bash scripts/ci-gate/gate-dispatch.test.sh
 merge-gate	bash scripts/ci-gate/gate-hold-disable.test.sh
 merge-gate	bash scripts/ci-gate/gate-rearm-caller-contract.test.sh
+merge-gate	python3 scripts/ci-gate/arm-runner-acquisition-watchdog.test.py
 merge-gate	@budget=90 bash scripts/ci-gate/default-branch-uri-encoding.test.sh
 merge-gate	python3 scripts/ci-gate/label-delivery-bridge.test.py
 merge-gate	bash scripts/ci-gate/ai-review-caller-contract.test.sh
