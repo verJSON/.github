@@ -256,10 +256,41 @@ trap cleanup_group_runner EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 
+# The launched child holds before running its command until this check
+# releases it, so it is alive and nothing a row does can affect the answer.
+# Wait for it to call setsid(), then report whether its process group is its
+# own PID. A child of its own means setsid forked; any unreadable or
+# unparsable state also fails closed.
+supervisor_leads_its_group() {
+  local pid="$1" stat state process_group children
+  supervisor_group_evidence=''
+  for _ in {1..500}; do
+    if ! stat="$(<"/proc/$pid/stat")" 2>/dev/null || [[ "$stat" != *") "* ]]; then
+      supervisor_group_evidence='(its /proc stat is unreadable)'
+      return 1
+    fi
+    read -r state _ process_group _ <<<"${stat##*) }"
+    if [[ ! "$process_group" =~ ^[0-9]+$ ]]; then
+      supervisor_group_evidence='(its /proc stat did not parse)'
+      return 1
+    fi
+    [ "$process_group" != "$pid" ] || return 0
+    children=''
+    [ ! -r "/proc/$pid/task/$pid/children" ] || children="$(<"/proc/$pid/task/$pid/children")"
+    if [ "$state" = Z ] || [ -n "${children// /}" ]; then
+      supervisor_group_evidence="is in process group $process_group and did not become its leader"
+      return 1
+    fi
+    sleep 0.01
+  done
+  supervisor_group_evidence="stayed in process group $process_group"
+  return 1
+}
+
 run_command() {
   local index="$1"
   local command="$2"
-  local started status=0 elapsed supervisor_pid process_group
+  local started status=0 elapsed supervisor_pid process_group release_fd
   local background_processes=0
   local command_group_file="$tmp/$index.pgid"
 
@@ -273,12 +304,10 @@ cat >"$tmp/$index.supervisor.sh" <<'SUPERVISOR'
 command_budget="$1"
 command="$2"
 command_raw_log="$3"
-identity_file="$4"
-# Record this process and its process group before running anything, so the
-# worker can confirm the PID it holds really is the group it will supervise.
-stat="$(</proc/$BASHPID/stat)"
-read -r _ _ process_group _ <<<"${stat##*) }"
-printf '%s %s\n' "$BASHPID" "$process_group" >"$identity_file"
+release="$4"
+# Run nothing until the worker has confirmed this process leads its group.
+IFS= read -r token <"$release" || exit 125
+[ "$token" = go ] || exit 125
 status=0
 if [ -n "$command_budget" ]; then
   timeout --foreground --kill-after=2s "${command_budget}s" \
@@ -288,22 +317,31 @@ else
 fi
 exit "$status"
 SUPERVISOR
+  mkfifo "$tmp/$index.release"
+  exec {release_fd}<>"$tmp/$index.release"
   setsid bash "$tmp/$index.supervisor.sh" "${command_budgets[$index]}" "$command" \
-    "$tmp/$index.raw.log" "$tmp/$index.identity" </dev/null &
+    "$tmp/$index.raw.log" "$tmp/$index.release" </dev/null &
   # setsid execs in place from this non-leader job, so the supervisor's PID is
   # its session and process-group ID. The worker keeps it; the file only lets
   # the parent clean up if this worker dies, and no row is told where it is.
   supervisor_pid="$!"
   process_group="$supervisor_pid"
   printf '%s\n' "$process_group" >"$command_group_file"
-  wait "$supervisor_pid" || status=$?
   # setsid forks instead when its caller leads a process group, and then $! is
-  # not the supervisor. Confirm before trusting it; fail closed otherwise.
-  supervisor_identity=''
-  [ ! -r "$tmp/$index.identity" ] || supervisor_identity="$(<"$tmp/$index.identity")"
-  if [ "$supervisor_identity" != "$supervisor_pid $supervisor_pid" ]; then
-    printf 'supervisor process group could not be confirmed: launched pid %s, supervisor reported "%s"\n' \
-      "$supervisor_pid" "$supervisor_identity" >>"$tmp/$index.raw.log"
+  # not the supervisor. Confirm it from the kernel while the supervisor is held,
+  # before its row starts; release it only if it leads its own group.
+  local group_confirmed=0
+  if supervisor_leads_its_group "$supervisor_pid"; then
+    group_confirmed=1
+    printf 'go\n' >&"$release_fd"
+  else
+    printf 'stop\n' >&"$release_fd"
+  fi
+  exec {release_fd}>&-
+  wait "$supervisor_pid" || status=$?
+  if [ "$group_confirmed" -ne 1 ]; then
+    printf 'supervisor process group could not be confirmed: pid %s %s\n' \
+      "$supervisor_pid" "$supervisor_group_evidence" >>"$tmp/$index.raw.log"
     [ "$status" -ne 0 ] || status=1
   fi
   if command_group_has_live_processes "$process_group"; then

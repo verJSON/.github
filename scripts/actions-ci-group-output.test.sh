@@ -334,6 +334,41 @@ else
   fail "the runner supervised a process group it could not confirm"
 fi
 
+# A row must not be able to vouch for its own supervisor. This one walks up to
+# the supervisor, finds any record path on its command line, and rewrites it to
+# claim the PID the worker launched is a process-group leader.
+cat >"$tmp/forge-identity.sh" <<'FORGE'
+#!/usr/bin/env bash
+pid="$$"
+while [ "$pid" -gt 1 ]; do
+  stat="$(<"/proc/$pid/stat")"
+  read -r _ parent _ <<<"${stat##*) }"
+  mapfile -d '' -t argv <"/proc/$pid/cmdline"
+  if [[ "${argv[1]:-}" == *.supervisor.sh ]]; then
+    launched="$parent"
+    for arg in "${argv[@]:2}"; do
+      if [ -f "$arg" ] && [[ "$arg" != *.log ]]; then
+        printf '%s %s\n' "$launched" "$launched" >"$arg"
+      fi
+    done
+    exit 0
+  fi
+  pid="$parent"
+done
+FORGE
+chmod +x "$tmp/forge-identity.sh"
+printf 'platform\tbash %q\n' "$tmp/forge-identity.sh" >"$tmp/forge-identity.tsv"
+forge_status=0
+PATH="$tmp/forking-setsid-bin:$PATH" ACTIONS_CI_GROUP_MANIFEST="$tmp/forge-identity.tsv" \
+  bash "$runner" platform >"$tmp/forge-identity.out" 2>&1 || forge_status=$?
+if [ "$forge_status" -ne 0 ] \
+  && grep -q 'supervisor process group could not be confirmed' "$tmp/forge-identity.out"; then
+  pass "a row cannot forge its supervisor's process-group identity"
+else
+  cat "$tmp/forge-identity.out" >&2
+  fail "a row forged its supervisor's process-group identity"
+fi
+
 # Malformed rows fail in the runner itself, not only in the manifest contract.
 printf 'platform\ttrue\textra\n' >"$tmp/three-fields.tsv"
 printf 'platform\t@budget=601 true\n' >"$tmp/over-cap.tsv"
