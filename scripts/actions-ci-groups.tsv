@@ -225,6 +225,7 @@ merge-gate	python3 scripts/ci-gate/app-slug-fail-closed.test.py
 merge-gate	bash scripts/ci-gate/orphaned-authorization-recovery.test.sh
 merge-gate	bash scripts/assert-no-deferred-checks.test.sh
 merge-gate	bash scripts/assert-mergeable-head.test.sh
+merge-gate	bash scripts/assert-mergeable-head.large-payload.test.sh
 changelog-release-4	python3 scripts/ci-gate/exact-release-packages.test.py
 platform	python3 scripts/node_floor_ruleset_test.py
 platform	python3 scripts/required_check_bindings_test.py

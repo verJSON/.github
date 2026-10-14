@@ -144,7 +144,7 @@ permission_fault() {
 # OBSERVATION would make the check vacuous exactly when it matters — an empty
 # body, or a shape without `total_count`, would reconcile 0 against 0 and let the
 # gate reason over nothing at all. So the attestation is required, not optional.
-reconcile_pages() {
+reconcile_pages() { # response-file field
   jq -se --arg field "$2" '
     [.[]] as $pages
     | if ($pages | length) == 0 then
@@ -156,8 +156,22 @@ reconcile_pages() {
     | $pages[0].total_count as $claimed
     | if $got == $claimed then true
       else error("\($field): the page walk returned \($got) of \($claimed)") end' \
-    >/dev/null <<<"$1"
+    >/dev/null <"$1"
 }
+
+# API payloads never reach `jq` through argv (#1784). Linux refuses any single argument
+# over 128 KiB (MAX_ARG_STRLEN), so `--argjson x "$payload"` fails the exec -- `jq:
+# Argument list too long` -- on exactly the heads with many re-triggered runs or checks,
+# and the gate faults instead of answering. Every response and every value derived from
+# one is written to this directory and read back by `jq` as a file (`--slurpfile`, which
+# wraps the value in an array, so each program rebinds `$x[0] as $x`) or on stdin. Only
+# script-controlled constants and validated scalars travel as arguments: `$PASSING`, the
+# two deferral patterns, the 40-hex head SHA, a field name, and the base ref -- a ref
+# name, not a payload, whose single-line encoder the URI-encoding scan pins below. The
+# one EXIT trap owns the whole directory.
+scratch="$(mktemp -d)" \
+  || fault 1 "could not allocate a scratch directory for the API responses this assertion reads"
+trap 'rm -rf "$scratch"' EXIT
 
 pr_json="$(gh pr view "$pr" --repo "$repo" --json headRefOid,baseRefName </dev/null)" \
   || permission_fault "failed to fetch pull request metadata for $repo#$pr" "Pull requests" "pull-requests"
@@ -175,38 +189,43 @@ base_ref="$(jq -r '.baseRefName // ""' <<<"$pr_json")"
 # `total_count` is reconciled against what was actually collected: a truncated
 # pagination would otherwise shrink the inventory silently, and a gate that
 # reasons over a short inventory is the failure this script exists to prevent.
-check_runs_raw="$(gh api --paginate "repos/$repo/commits/$head_sha/check-runs?per_page=100" </dev/null)" \
+check_runs_raw="$scratch/check-runs.raw.json"
+gh api --paginate "repos/$repo/commits/$head_sha/check-runs?per_page=100" </dev/null >"$check_runs_raw" \
   || permission_fault "failed to fetch check runs for $repo@$head_sha" "Checks" "checks"
 reconcile_pages "$check_runs_raw" check_runs \
   || fault 1 "the check-run inventory for $repo@$head_sha is incomplete or unattested; it cannot be reasoned over"
-check_runs="$(jq -s '[ .[].check_runs[]? | {
+check_runs="$scratch/check-runs.json"
+jq -s '[ .[].check_runs[]? | {
       name: (.name // ""),
       status: ((.status // "completed") | ascii_upcase),
       conclusion: ((.conclusion // "") | ascii_upcase),
       app_id: (.app.id // null),
       id: .id,
       suite_id: (.check_suite.id // null),
-      kind: "check_run" } ]' <<<"$check_runs_raw")" \
+      kind: "check_run" } ]' <"$check_runs_raw" >"$check_runs" \
   || fault 1 "failed to normalize check runs for $repo@$head_sha"
 
 # Legacy commit statuses are a separate endpoint and carry no app id at all.
 # `--paginate` matters here as much as on check runs: this endpoint returns 30
 # statuses per page by default, and a `failure` stranded on page 2 would be
 # invisible to Gate C, which is the gate that exists to see it.
-statuses_raw="$(gh api --paginate "repos/$repo/commits/$head_sha/status?per_page=100" </dev/null)" \
+statuses_raw="$scratch/statuses.raw.json"
+gh api --paginate "repos/$repo/commits/$head_sha/status?per_page=100" </dev/null >"$statuses_raw" \
   || permission_fault "failed to fetch commit statuses for $repo@$head_sha" "Commit statuses" "statuses"
 reconcile_pages "$statuses_raw" statuses \
   || fault 1 "the commit-status inventory for $repo@$head_sha is incomplete or unattested; it cannot be reasoned over"
-statuses="$(jq -s '[ .[] | .statuses[]? | {
+statuses="$scratch/statuses.json"
+jq -s '[ .[] | .statuses[]? | {
       name: (.context // ""),
       status: (if ((.state // "") | ascii_upcase) == "PENDING" then "IN_PROGRESS" else "COMPLETED" end),
       conclusion: (((.state // "") | ascii_upcase) | if . == "PENDING" then "" elif . == "ERROR" then "FAILURE" else . end),
       app_id: null,
       id: null,
-      kind: "status" } ]' <<<"$statuses_raw")" \
+      kind: "status" } ]' <"$statuses_raw" >"$statuses" \
   || fault 1 "failed to normalize commit statuses for $repo@$head_sha"
 
-checks="$(jq -n --argjson a "$check_runs" --argjson b "$statuses" '$a + $b')" \
+checks="$scratch/checks.json"
+jq -n --slurpfile a "$check_runs" --slurpfile b "$statuses" '$a[0] + $b[0]' >"$checks" \
   || fault 1 "failed to assemble the check inventory for $repo@$head_sha"
 
 # ------------------------------------------------- superseded cancellations ----
@@ -246,14 +265,38 @@ checks="$(jq -n --argjson a "$check_runs" --argjson b "$statuses" '$a + $b')" \
 # ADR 0229 supersedes that clause). Marking a draft ready creates a run BEFORE that run
 # creates any job, so the check inventory alone cannot see the verification that is
 # about to replace the draft-time skips; only the run inventory can.
-runs_raw="$(gh api --paginate "repos/$repo/actions/runs?head_sha=$head_sha&per_page=100" </dev/null)" \
+runs_raw="$scratch/runs.raw.json"
+gh api --paginate "repos/$repo/actions/runs?head_sha=$head_sha&per_page=100" </dev/null >"$runs_raw" \
   || permission_fault "failed to fetch workflow runs for $repo@$head_sha" "Actions" "actions"
 reconcile_pages "$runs_raw" workflow_runs \
   || fault 1 "the workflow-run inventory for $repo@$head_sha is incomplete or unattested; it cannot be reasoned over"
+# A full run object embeds the repository, head repository, actor, and head commit, so the
+# listing grows by kilobytes per run (#1784). Each run is cut down, page by page, to the
+# fields some program below reads -- well_formed: id, check_suite_id, workflow_id,
+# run_number, event, status, conclusion, head_sha; superseder: id, check_suite_id,
+# workflow_id, run_number, event, status, conclusion; the unfinished-run arm of Gate A:
+# id, status, name, created_at, html_url. Add a field here before any program reads it.
+# A field read below and missing here would read as null and fail closed in well_formed
+# or drop out of a display. The projection preserves every shape the readers distinguish:
+# a page or run that is not an object passes through untouched, and a key the response
+# omits becomes null, which every reader already treats exactly as absent (`.x` on a
+# missing key IS null, and no reader tests key presence or serializes a whole run).
+# Counts are untouched, so the page walk reconciles the same either way.
+runs_projected="$scratch/runs.projected.json"
+jq -c '
+  if type == "object" and (.workflow_runs | type) == "array" then
+    .workflow_runs |= map(
+      if type == "object" then
+        { id, check_suite_id, workflow_id, run_number, event, status, conclusion,
+          head_sha, name, created_at, html_url }
+      else . end)
+  else . end' <"$runs_raw" >"$runs_projected" \
+  || fault 1 "failed to project the workflow-run inventory for $repo@$head_sha"
 # Types are checked, never truthiness: jq orders every string above every number,
 # so a string run_number would always read as "later", and two absent workflow ids
 # or events would compare equal (`null == null`) and forge a same-workflow match.
-runs="$(jq -s --arg head "$head_sha" '
+runs="$scratch/runs.json"
+jq -s --arg head "$head_sha" '
   def well_formed:
     type == "object"
     and (.id | type) == "number"
@@ -270,16 +313,20 @@ runs="$(jq -s --arg head "$head_sha" '
   [ .[].workflow_runs[]? ]
   | if all(.[]; well_formed) | not then error("malformed workflow run")
     elif (map(.check_suite_id) | unique | length) != length then error("check suite claimed twice")
-    else . end' <<<"$runs_raw")" \
+    else . end' <"$runs_projected" >"$runs" \
   || fault 1 "the workflow-run inventory for $repo@$head_sha carries a malformed record; it cannot be reasoned over"
 
 gated_checks="$checks"
-superseded_names='[]'
-cancelled_count="$(jq '[ .[] | select(.kind == "check_run" and .conclusion == "CANCELLED") ] | length' <<<"$checks")" \
+superseded_names="$scratch/superseded-names.json"
+printf '[]\n' >"$superseded_names" \
+  || fault 1 "failed to record the empty superseded-name list for $repo@$head_sha"
+cancelled_count="$(jq '[ .[] | select(.kind == "check_run" and .conclusion == "CANCELLED") ] | length' <"$checks")" \
   || fault 1 "failed to count cancelled check runs for $repo@$head_sha"
 if [ "$cancelled_count" -gt 0 ]; then
-  verdict="$(jq -c --argjson runs "$runs" '
-    . as $all
+  verdict="$scratch/superseded-verdict.json"
+  jq -c --slurpfile runs "$runs" '
+    $runs[0] as $runs
+    | . as $all
     # The latest successful later run of the same workflow and event -- provided its
     # own check suite did that check'"'"'s work -- or null.
     | def superseder:
@@ -315,13 +362,14 @@ if [ "$cancelled_count" -gt 0 ]; then
         names: [ .[] | select(.superseded != null) | .name ] | unique,
         dismissed: [ .[] | select(.superseded != null)
                      | "\(.name) (check run \(.id), run \(.superseded.cancelled_run) superseded by run \(.superseded.superseded_by))" ] }
-  ' <<<"$checks")" \
+  ' <"$checks" >"$verdict" \
     || fault 1 "failed to evaluate superseded cancellations for $repo@$head_sha"
-  gated_checks="$(jq -c '.kept' <<<"$verdict")" \
+  gated_checks="$scratch/gated-checks.json"
+  jq -c '.kept' <"$verdict" >"$gated_checks" \
     || fault 1 "failed to assemble the gated check inventory for $repo@$head_sha"
-  superseded_names="$(jq -c '.names' <<<"$verdict")" \
+  jq -c '.names' <"$verdict" >"$superseded_names" \
     || fault 1 "failed to list superseded check names for $repo@$head_sha"
-  dismissed="$(jq -r '.dismissed | join("; ")' <<<"$verdict")" \
+  dismissed="$(jq -r '.dismissed | join("; ")' <"$verdict")" \
     || fault 1 "failed to list superseded cancellations for $repo@$head_sha"
   [ -z "$dismissed" ] \
     || annotate notice "Gates A and C set aside cancelled check runs superseded by a later successful run of the same workflow, event, and head (ADR 0226): $dismissed"
@@ -337,9 +385,7 @@ fi
 # token. Gate A is not merely failed when this read is refused -- it is
 # UNEVALUABLE, which is the fail-open shape this script exists to prevent, so
 # the status is read off stderr and the permission cause is named outright.
-rules_err="$(mktemp)" \
-  || fault 1 "could not allocate a scratch file to capture the ruleset read's diagnostics"
-trap 'rm -f "$rules_err"' EXIT
+rules_err="$scratch/rules.err"
 # LOAD-BEARING: `set -o pipefail` at the top of this file is what makes the failure of
 # `gh` on the LEFT of this pipe reach the assignment at all. `jq -s add` succeeds on empty
 # input, so without pipefail this would take the success path, and -- worse -- a future
@@ -379,17 +425,18 @@ if [ "$rules_rc" -ne 0 ]; then
   fault 1 "failed to read branch rules for $repo@$base_ref; cannot establish the required-check set"
 fi
 
-required="$(jq -c '
+required="$scratch/required.json"
+jq -c '
   [ .[]?
     | select(type == "object" and .type == "required_status_checks")
     | .parameters.required_status_checks[]?
     | select(type == "object" and (.context // "") != "")
     | { context: .context, integration_id: (.integration_id // null) }
   ] | unique
-' <<<"$rules_json")" \
+' <<<"$rules_json" >"$required" \
   || fault 1 "failed to parse branch rules for $repo@$base_ref"
 
-required_count="$(jq 'length' <<<"$required")" \
+required_count="$(jq 'length' <"$required")" \
   || fault 1 "failed to count the required contexts of $repo@$base_ref"
 # A zero required set has more than one cause, and they have OPPOSITE remedies. On a merge
 # gate a wrong attribution is a wrong remedy: the ungoverned-ref sentence tells an operator
@@ -422,8 +469,11 @@ fi
 # itself uses — and, when the ruleset binds it to an app, by that app's id.
 # An earlier draft also matched a synthesized "<workflowName> / <name>", which
 # let any workflow satisfy a required context by naming a job after it.
-gate_a="$(jq -r --argjson pass "$PASSING" --argjson required "$required" '
-  [ $required[]
+gate_a="$(jq -rn --argjson pass "$PASSING" --slurpfile required "$required" \
+  --slurpfile checks "$gated_checks" --slurpfile superseded "$superseded_names" --slurpfile runs "$runs" '
+  $required[0] as $required | $checks[0] as $checks
+  | $superseded[0] as $superseded | $runs[0] as $runs
+  | [ $required[]
     | . as $req
     | ([ $checks[] | select(.name == $req.context) ]) as $named
     | if ($named | length) == 0 then "absent: \($req.context)"
@@ -472,7 +522,7 @@ gate_a="$(jq -r --argjson pass "$PASSING" --argjson required "$required" '
         then . + [ "a workflow run on the head has not finished: cancel the stuck run, or wait for it; never widen the admission gate" ]
         else . end )
   | join("; ")
-' --argjson checks "$gated_checks" --argjson superseded "$superseded_names" --argjson runs "$runs" <<<'null')" \
+')" \
   || fault 1 "failed to evaluate required contexts for $repo#$pr"
 
 [ -z "$gate_a" ] \
@@ -484,8 +534,9 @@ gate_a="$(jq -r --argjson pass "$PASSING" --argjson required "$required" '
 # real and must be visible rather than silent; it is a warning and not a fault
 # because refusing every unbound context would refuse rulesets that are
 # currently correct, including this organization's own hub.
-unbound="$(jq -r --argjson required "$required" -n '
-  [ $required[] | select(.integration_id == null) | .context ] | join(", ")')" \
+unbound="$(jq -rn --slurpfile required "$required" '
+  $required[0] as $required
+  | [ $required[] | select(.integration_id == null) | .context ] | join(", ")')" \
   || fault 1 "failed to evaluate unbound required contexts for $repo#$pr"
 [ -z "$unbound" ] \
   || annotate warning "Gate A matched these required contexts on display name alone, because $base_ref binds them to no app: $unbound"
@@ -495,13 +546,14 @@ unbound="$(jq -r --argjson required "$required" -n '
 # ADR 0178's `deferred-ci` runs only on a defer, so its having RUN at all — any
 # conclusion other than SKIPPED, including one this gate would otherwise call
 # passing — is direct evidence the head was never exercised.
-deferred_checks="$(jq -r --arg pat "$DEFERRED_JOB_PATTERN" '
-  [ $checks[]
+deferred_checks="$(jq -rn --arg pat "$DEFERRED_JOB_PATTERN" --slurpfile checks "$checks" '
+  $checks[0] as $checks
+  | [ $checks[]
     | select(.name | test($pat; "i"))
     | select(.conclusion != "SKIPPED")
     | "\(.name)=\(if .status != "COMPLETED" then .status else .conclusion end)"
   ] | unique | join(", ")
-' --argjson checks "$checks" <<<'null')" \
+')" \
   || fault 1 "failed to evaluate deferral checks for $repo#$pr"
 
 [ -z "$deferred_checks" ] \
@@ -509,8 +561,8 @@ deferred_checks="$(jq -r --arg pat "$DEFERRED_JOB_PATTERN" '
 
 # ADR 0156's annotation still covers consumers of the `ci-eligibility` composite
 # action, which build their own jobs and never emit a `deferred-ci` check.
-check_run_ids="$(jq -r '[ $checks[] | select(.kind == "check_run" and .conclusion != "") | .id ] | unique | .[]' \
-  --argjson checks "$checks" <<<'null')" \
+check_run_ids="$(jq -rn --slurpfile checks "$checks" \
+  '$checks[0] as $checks | [ $checks[] | select(.kind == "check_run" and .conclusion != "") | .id ] | unique | .[]')" \
   || fault 1 "failed to enumerate check runs for $repo@$head_sha"
 
 deferred_annotations=""
@@ -528,12 +580,13 @@ done <<<"$check_run_ids"
   || fault 4 "Gate B: $repo#$pr head $head_sha carries a deferral annotation, so a check reported without executing its work — $deferred_annotations (ADR 0156)"
 
 # ---------------------------------------------------------------- Gate C ----
-gate_c="$(jq -r --argjson pass "$PASSING" '
-  [ $checks[]
+gate_c="$(jq -rn --argjson pass "$PASSING" --slurpfile checks "$gated_checks" '
+  $checks[0] as $checks
+  | [ $checks[]
     | select(.conclusion as $c | (.status != "COMPLETED") or (($pass | index($c)) == null))
     | "\(.name)=\(if .status != "COMPLETED" then .status else .conclusion end)"
   ] | unique | join(", ")
-' --argjson checks "$gated_checks" <<<'null')" \
+')" \
   || fault 1 "failed to evaluate non-required checks for $repo#$pr"
 
 [ -z "$gate_c" ] \
