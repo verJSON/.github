@@ -64,10 +64,10 @@ jobs:
 """
         self.fixture = self.make_fixture()
 
-    def make_fixture(self):
+    def make_fixture(self, owner="Verjson"):
         repositories = [
-            {"full_name": "Verjson/alpha", "private": False, "default_branch": "main"},
-            {"full_name": "Verjson/beta", "private": True, "default_branch": "develop/next"},
+            {"full_name": f"{owner}/alpha", "private": False, "default_branch": "main"},
+            {"full_name": f"{owner}/beta", "private": True, "default_branch": "develop/next"},
         ]
         live_preimage = {"id": self.contract["ruleset_id"], **copy.deepcopy(self.contract["preimage"])}
         node_declaration = next(
@@ -536,6 +536,57 @@ jobs:
         with self.assertRaisesRegex(AUDIT.AuditError, "restored legacy selector"):
             AUDIT.render_property_migration_payload(self.contract, "unset-values", self.read)
 
+    def test_legacy_selector_names_a_core_check_adopter_outside_the_reviewed_cohort(self):
+        # #1775: a repository created after the reviewed list was last updated
+        # carried `verjson-core-checks=enforced`, so the legacy selector armed it.
+        # The audit failed daily for 12 days without naming it.
+        self.contract["arm_property_migration"]["repositories"] = ["Verjson/alpha"]
+        self.enter_legacy_selector_state()
+        self.assert_audit_error(
+            r"legacy arm cohort differs from the reviewed migration set: "
+            r"unreviewed=\['Verjson/beta'\] absent=\[\]"
+        )
+
+    def test_legacy_cohort_ignores_the_organization_display_case(self):
+        # #1775: on 2026-10-02 the organization login became `verJSON`, so the API
+        # returns `verJSON/<repo>` while the reviewed list records `Verjson/<repo>`.
+        # GitHub names are case-insensitive identities; a display rename changes
+        # no membership and must not red the audit.
+        self.fixture = self.make_fixture(owner="verJSON")
+        self.enter_legacy_selector_state()
+        report = AUDIT.audit(self.contract, self.read)
+        self.assertEqual(report["state"], "split-legacy-selector")
+        self.assertEqual(report["armed_repositories"], 2)
+
+    def test_target_cohort_ignores_the_organization_display_case(self):
+        self.fixture = self.make_fixture(owner="verJSON")
+        self.enter_split_state()
+        report = AUDIT.audit(self.contract, self.read)
+        self.assertEqual(report["armed_repositories"], 2)
+
+    def test_property_cleanup_ignores_the_organization_display_case(self):
+        self.fixture = self.make_fixture(owner="verJSON")
+        self.enter_legacy_selector_state()
+        self.assertEqual(
+            AUDIT.render_property_migration_payload(self.contract, "unset-values", self.read),
+            {
+                "repository_names": ["alpha", "beta"],
+                "properties": [{
+                    "property_name": "verjson-ai-authorization",
+                    "value": None,
+                }],
+            },
+        )
+
+    def test_a_cohort_listing_one_identity_twice_is_not_the_reviewed_set(self):
+        # Case-insensitive membership must not collapse a duplicate that the
+        # former list equality rejected.
+        self.contract["arm_property_migration"]["repositories"] = ["Verjson/alpha"]
+        with self.assertRaisesRegex(AUDIT.AuditError, "lists a repository identity twice"):
+            AUDIT.require_reviewed_cohort(
+                self.contract, ["Verjson/alpha", "verJSON/alpha"], "legacy arm cohort",
+            )
+
     def test_target_selector_requires_the_reviewed_property_cohort(self):
         rows = self.fixture["orgs/Verjson/properties/values?per_page=100"][0]
         beta = next(row for row in rows if row["repository_full_name"] == "Verjson/beta")
@@ -545,7 +596,10 @@ jobs:
             if item["property_name"] != self.contract["arm_property"]["name"]
         ]
         self.enter_split_state()
-        self.assert_audit_error("authorization property cohort differs from the reviewed migration set")
+        self.assert_audit_error(
+            r"authorization property cohort differs from the reviewed migration set: "
+            r"unreviewed=\[\] absent=\['Verjson/beta'\]"
+        )
 
     def test_property_inventory_rejects_malformed_and_duplicate_entries(self):
         rows = self.fixture["orgs/Verjson/properties/values?per_page=100"][0]
@@ -939,6 +993,14 @@ jobs:
             contract["arm_property_migration"]["repositories"].append("Verjson/alpha")
 
         self.assert_contract_rejected(duplicate_cohort, "repositories are invalid")
+
+        def case_duplicate_cohort(contract):
+            # Identity is case-insensitive (#1775), so a spelling variant is the
+            # same repository listed twice.
+            contract["arm_property_migration"]["repositories"].append("Verjson/Alpha")
+            contract["arm_property_migration"]["repositories"].sort()
+
+        self.assert_contract_rejected(case_duplicate_cohort, "repositories are invalid")
 
         def unordered_cohort(contract):
             contract["arm_property_migration"]["repositories"].reverse()

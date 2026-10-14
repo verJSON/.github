@@ -3,10 +3,10 @@
         "ai-review-arm": [
             {
                 "expires": "2026-12-31",
-                "finding": "authorization-arm-rollout-not-ready: armed default branches without canonical deterministic required CI: missing=1 sample=['Verjson/verjson-agents']",
-                "fingerprint": "b3047a09a888cdb5268f50458aeef69cdbdf291f93f657954ff698c4a43d1010",
+                "finding": "authorization-arm-rollout-not-ready: armed default branches without canonical deterministic required CI: missing=1 sample=['verJSON/verjson-agents']",
+                "fingerprint": "78ab582d74056d18d5ae1f5abcf898dec93d440fc532ae2a9c39b16f9671958f",
                 "issue": 1401,
-                "reason": "Verjson/verjson-agents remains in the reviewed authorization cohort with verjson-ai-authorization=enforced while verjson-stack=none, so the arm has no deterministic required CI behind it. Enrollment is tracked by #1401 and #1407; removing this entry is what re-arms the audit."
+                "reason": "verJSON/verjson-agents is armed by the legacy verjson-core-checks=enforced selector while verjson-stack=none, so the arm has no deterministic required CI behind it. Enrollment is tracked by #1401; removing this entry is what re-arms the audit. Re-recorded for #1775: the organization login's display case became verJSON on 2026-10-02, which changed this finding's text and fingerprint but not its subject."
             }
         ]
     },
