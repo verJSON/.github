@@ -29,6 +29,7 @@ API_REPO = "verJSON/example"
 PR_NUMBER = "7"
 CALLER = ".github/workflows/ai-review-merge.yml"
 FLOOR = "65529002f4fecf2a5bb634047b07ead3ff0bdeaa"
+MINIMUM_SAFE = "12098a0e495317699131e97f1b2e136c5297ccad"
 STALE = "68b823b133dabc8d8e9f11f9ab5c179e78ae5692"
 CONTRACT = "1111111111111111111111111111111111111111"
 MAIN = "2222222222222222222222222222222222222222"
@@ -97,7 +98,7 @@ class Consumer:
         self.modes: dict[tuple[str, str], str] = {}
         self.canonical = {
             f"{FLOOR}...{STALE}": "behind",
-            f"{FLOOR}...{CONTRACT}": "ahead",
+            f"{MINIMUM_SAFE}...{CONTRACT}": "ahead",
             f"{STALE}...{CONTRACT}": "ahead",
             f"{CONTRACT}...main": "ahead",
         }
@@ -434,9 +435,11 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
     add("a default-branch caller that already contains the casing repair admits no bootstrap",
         compare_override(Consumer(), f"{FLOOR}...{STALE}", "ahead"),
         ('require(floor_to_stale.get("status") in ("behind", "diverged"),', 'require(True,'))
+    min_safe_guard = ('require(contains(MINIMUM_SAFE_REVIEW, contract),', 'require(True,')
     add("a proposed revision before the casing repair is not a bootstrap",
-        compare_override(Consumer(), f"{FLOOR}...{CONTRACT}", "behind"),
-        ('require(contains(FLOOR, contract),', 'require(True,'))
+        compare_override(Consumer(), f"{MINIMUM_SAFE}...{CONTRACT}", "behind"), min_safe_guard)
+    add("a proposed revision between the casing repair and the minimum safe review fix is not a bootstrap",
+        compare_override(Consumer(), f"{MINIMUM_SAFE}...{CONTRACT}", "behind"), min_safe_guard)
     add("a proposed revision that does not descend from the stale pin is not a bootstrap",
         compare_override(Consumer(), f"{STALE}...{CONTRACT}", "diverged"),
         ('require(contains(stale, contract),', 'require(True,'))
@@ -444,7 +447,7 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
         compare_override(Consumer(), f"{CONTRACT}...main", "diverged"),
         ('require(contains(contract, "main"),', 'require(True,'))
     add("an ahead comparison whose merge base is not the older commit proves nothing",
-        compare_override(Consumer(), f"{FLOOR}...{CONTRACT}", "ahead", merge_base="8" * 40),
+        compare_override(Consumer(), f"{MINIMUM_SAFE}...{CONTRACT}", "ahead", merge_base="8" * 40),
         ('or (status == "ahead" and comparison["merge_base_commit"]["sha"] == older))', 'or status == "ahead")'))
     add("a canonical comparison of a different base proves nothing",
         compare_override(Consumer(), f"{FLOOR}...{STALE}", "behind", base_commit="8" * 40),
@@ -513,10 +516,11 @@ INELIGIBLE_REASONS = {
     "a hand-edited default-branch caller is not a bootstrap": "default-branch review caller is not generated",
     "a hand-edited proposed caller is not a bootstrap": "proposed review caller is not generated",
     "a default-branch caller that already contains the casing repair admits no bootstrap": "already contains the casing repair",
-    "a proposed revision before the casing repair is not a bootstrap": "predates the casing repair",
+    "a proposed revision before the casing repair is not a bootstrap": "predates the minimum safe review revision",
+    "a proposed revision between the casing repair and the minimum safe review fix is not a bootstrap": "predates the minimum safe review revision",
     "a proposed revision that does not descend from the stale pin is not a bootstrap": "does not descend from the stale revision",
     "a proposed revision absent from canonical main is not a bootstrap": "is not on canonical main",
-    "an ahead comparison whose merge base is not the older commit proves nothing": "predates the casing repair",
+    "an ahead comparison whose merge base is not the older commit proves nothing": "predates the minimum safe review revision",
     "a canonical comparison of a different base proves nothing": "canonical comparison base is not exact",
     "a pin swap in workflow configuration is not a bootstrap": "is workflow or action configuration",
     "a pin swap in action metadata is not a bootstrap": "is workflow or action configuration",
@@ -543,7 +547,7 @@ def main() -> int:
     runner_bootstrap.base[CALLER] = generate_caller("2d1ea177fdafe361f9369526cbab8bc05f9e476d")
     runner_bootstrap.canonical = {
         f"{FLOOR}...2d1ea177fdafe361f9369526cbab8bc05f9e476d": "behind",
-        f"{FLOOR}...{CONTRACT}": "ahead",
+        f"{MINIMUM_SAFE}...{CONTRACT}": "ahead",
         f"2d1ea177fdafe361f9369526cbab8bc05f9e476d...{CONTRACT}": "ahead",
         f"{CONTRACT}...main": "ahead",
     }

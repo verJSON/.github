@@ -866,8 +866,13 @@ jobs:
           from urllib.parse import quote
 
           CANONICAL = "Verjson/.github"
-          # 65529002 made every review-path repository comparison ASCII-case-insensitive.
-          FLOOR = "65529002f4fecf2a5bb634047b07ead3ff0bdeaa"
+          # 65529002 made every review-path repository comparison ASCII-case-insensitive; a
+          # stale pin is one that predates it. Fixed: it defines which callers are stale.
+          CASING_REPAIR = "65529002f4fecf2a5bb634047b07ead3ff0bdeaa"
+          # The oldest review revision without a known, already-fixed authorization defect
+          # (12098a0e, #1650: the finalizer binds the check to the exact head). It contains
+          # CASING_REPAIR. Raise it whenever a review-path security fix lands on main.
+          MINIMUM_SAFE_REVIEW = "12098a0e495317699131e97f1b2e136c5297ccad"
           CALLER = ".github/workflows/ai-review-merge.yml"
           MAX_PATHS = 32
           MAX_BLOB_BYTES = 262144
@@ -1078,10 +1083,10 @@ jobs:
                   require(after != before and after == swap.sub(lambda match: swaps[match.group(0)], before),
                           f"{path} changes more than the review caller pin and digest")
 
-              floor_to_stale = compare(FLOOR, stale)
+              floor_to_stale = compare(CASING_REPAIR, stale)
               require(floor_to_stale.get("status") in ("behind", "diverged"),
                       "default-branch review caller already contains the casing repair")
-              require(contains(FLOOR, contract), "proposed revision predates the casing repair")
+              require(contains(MINIMUM_SAFE_REVIEW, contract), "proposed revision predates the minimum safe review revision")
               require(contains(stale, contract), "proposed revision does not descend from the stale revision")
               require(contains(contract, "main"), "proposed revision is not on canonical main")
               return {"contract_sha": contract, "head_sha": head, "main_sha": main,
