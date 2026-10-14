@@ -581,6 +581,9 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
     add("a reusable CI pin that would move backwards is not a bootstrap",
         compare_override(with_files(**ci_bump), f"{CI_STALE}...{CONTRACT}", "behind"),
         ('require(all(contains(revision, contract) for revision in ci_stale),', 'require(True,'))
+    add("a revision continuing into a branch-name suffix is not a reusable CI pin",
+        with_files(**{CI_CALLER: (ci_caller(CI_STALE, ref_suffix="-x"), ci_caller(CONTRACT, ref_suffix="-x"))}),
+        ('@([0-9a-f]{40})((?:[ \\t]+(?:#.*)?)?\\r?)")', '@([0-9a-f]{40})(.*)")'))
     unavailable = Consumer()
     unavailable.missing.add(f"{CANONICAL}/compare/{CONTRACT}...main")
     add("an unavailable canonical comparison is not a bootstrap", unavailable, None)
@@ -631,6 +634,7 @@ INELIGIBLE_REASONS = {
     "an oversized changed file is not a bootstrap": "blob is too large",
     "a pin bump of a canonical workflow outside the reusable CI allowlist is not a bootstrap": "is not an allowlisted canonical reusable CI workflow",
     "a reusable CI pin that would move backwards is not a bootstrap": "does not descend from the stale reusable CI revision",
+    "a revision continuing into a branch-name suffix is not a reusable CI pin": "changes more than its reusable CI pin",
     "an unavailable canonical comparison is not a bootstrap": "GitHub API read failed",
     "a malformed API response is not a bootstrap": "GitHub API returned malformed JSON",
 }
