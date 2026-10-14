@@ -302,6 +302,43 @@ else
   pass "a backslash-normalized private package URL is rejected"
 fi
 
+# #1782: a temporary-root sandbox binding /usr must also bind the Debian
+# alternatives farm, or /usr/bin/awk, cc, and similar links dangle. The real
+# Bubblewrap regressions run only on the hosted compatibility lane; this keeps
+# every sandbox step honest on every runner.
+python3 - "$workflow" "${workflow%/*}/node-ci-protected.yml" <<'PY' \
+  && pass "every temporary-root Node CI sandbox binds /etc/alternatives read-only (#1782)" \
+  || fail "a temporary-root Node CI sandbox omits /etc/alternatives (#1782)"
+import sys
+import yaml
+
+expected = {
+    "Rebuild exact approved lifecycle packages without credentials",
+    "Run exact credentialless consumer script plan",
+    "Run runtime-resolved compatibility lanes without credentials",
+}
+for path in sys.argv[1:]:
+    steps = yaml.safe_load(open(path, encoding="utf-8"))["jobs"]["build-test"]["steps"]
+    sandboxed = {
+        step["name"]: step["run"]
+        for step in steps
+        if '"--tmpfs", "/",' in step.get("run", "")
+    }
+    assert expected <= set(sandboxed), (path, sorted(sandboxed))
+    for name, run in sandboxed.items():
+        # A commented-out bind must not satisfy the check.
+        run = "\n".join(
+            line for line in run.splitlines() if not line.lstrip().startswith("#")
+        )
+        assert run.count('"--tmpfs", "/",') == 1, (path, name)
+        assert (
+            '(Path("/etc/alternatives"), "/etc/alternatives"),' in run
+            or '(Path("/etc/alternatives").resolve(strict=True), "/etc/alternatives"),' in run
+            or '"--ro-bind", Path("/etc/alternatives").resolve(strict=True).as_posix(), "/etc/alternatives",' in run
+            or '"--ro-bind-try", "/etc/alternatives", "/etc/alternatives",' in run
+        ), (path, name)
+PY
+
 grep -qF 'ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL' "$workflow" \
   && grep -qF 'printf '\''NPM_CONFIG_USERCONFIG=%s\n'\''' "$workflow" \
   && pass "PR execution persistently scrubs package, Git, cloud, and OIDC credential paths" \
