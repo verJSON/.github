@@ -106,7 +106,12 @@ jobs:
   # and the group is released; it force-cancels only if that job persists.
   runner-acquisition-watchdog:
     needs: event-policy
-    if: ${{ needs.event-policy.outputs.run_control_plane == 'true' }}
+    # The job, and with it the write-scoped token, exists only when the lane
+    # resolves through the same chain as `runs-on` to ADR 0147's exact hosted
+    # value. Any other value, including a rollback to the persistent pool or a
+    # reformatted array, skips the job (dormant, fail-safe), so no token is
+    # issued to a persistent host. The step guards remain as a backstop.
+    if: ${{ needs.event-policy.outputs.run_control_plane == 'true' && (vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') == '["ubuntu-24.04"]' }}
     # A watchdog defect must never become a veto on an otherwise-authorized
     # merge; the stall path acts through cancellation, not this job's result.
     continue-on-error: true

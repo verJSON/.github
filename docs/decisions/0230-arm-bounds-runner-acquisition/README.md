@@ -66,11 +66,17 @@ queue time, and no workflow expression can bound it.
      that also runs PR-authored code.
    - That placement is safe only while the lane is ephemeral and GitHub-hosted, as
      ADR 0147 routes it today. ADR 0147 also allows a rollback to the persistent
-     self-hosted pool. Each watchdog step therefore starts with a guard on
-     `runner.environment`: unless the runner is `github-hosted`, the step writes a
-     notice and exits 0 without listing or cancelling anything. After such a rollback
-     the watchdog is dormant, the arm loses its bound, and the arm's behavior reverts to
-     the pre-ADR state. The watchdog never uses that token on a persistent host.
+     self-hosted pool. The job's `if:` therefore admits it only when
+     `vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]'`, the same chain `runs-on` resolves,
+     equals ADR 0147's exact hosted value `'["ubuntu-24.04"]'`. Any other value skips the
+     job before a runner is assigned, including a self-hosted array, a hosted label
+     beside a self-hosted one, or a whitespace-reformatted array. **No token is issued
+     on a persistent host.** A reformatted hosted value fails safe: it makes the job
+     dormant, never misplaced.
+   - Each step also starts with a backstop guard on `runner.environment`. Unless the
+     runner is `github-hosted`, the step writes a notice and exits 0 without listing or
+     cancelling anything. After a rollback the watchdog is dormant and the arm loses
+     its bound, so the arm's behavior reverts to the pre-ADR state.
    - It polls every 15 s. A job other than itself in `queued`, `pending`, or `requested`
      for at least **900 s** is a stall. `waiting` is excluded because it is an
      environment's human gate, not runner acquisition. The watchdog exits once the
@@ -108,7 +114,10 @@ cancel and force-cancel endpoints. The scenarios cover:
 - a cancel that takes effect versus one that does not, including the full grace period
   before force-cancel;
 - a different job queued at re-check time;
-- dormancy off GitHub-hosted runners.
+- dormancy off GitHub-hosted runners;
+- the job `if:` evaluated against stubbed `vars`: unset, the exact hosted value, a
+  self-hosted array, a mixed array, a whitespace variant, and an unused fallback
+  variable. Each is cross-checked against the lane the `runs-on` chain resolves.
 
 It also pins the watchdog's lane, permissions, and non-veto wiring, and checks that its
 timeout covers the worst case.

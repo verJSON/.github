@@ -105,6 +105,108 @@ ESCALATION_GUARD = "${{ always() && steps.detect.outputs.stalled == 'true' }}"
 RUNNER_GUARD = '[ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] || {'
 
 
+HOSTED_LANE = '["ubuntu-24.04"]'
+EXPRESSION_TOKEN = re.compile(r"\s*(\|\||&&|==|!=|\(|\)|,|'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_.-]*)")
+
+
+def evaluate(expression, context):
+    """Evaluate a GitHub Actions expression over the subset these jobs use.
+
+    Models the documented semantics that matter here: an unset `vars` entry is the empty
+    string, `||`/`&&` return an operand, string `==` ignores case, and `contains` is a
+    case-insensitive substring test. Any other construct is rejected rather than guessed.
+    """
+    body = re.fullmatch(r"\$\{\{ (.+) \}\}", expression.strip(), re.S)
+    text = body[1] if body else expression
+    tokens, position = [], 0
+    while position < len(text):
+        match = EXPRESSION_TOKEN.match(text, position)
+        assert match and match.end() > position, f"unmodelled expression syntax at {text[position:]!r}"
+        tokens.append(match[1])
+        position = match.end()
+        if not text[position:].strip():
+            break
+    cursor = [0]
+
+    def peek():
+        return tokens[cursor[0]] if cursor[0] < len(tokens) else None
+
+    def take(expected=None):
+        token = peek()
+        assert expected is None or token == expected, (expected, token, text)
+        cursor[0] += 1
+        return token
+
+    def truthy(value):
+        return value not in ("", None, False, 0)
+
+    def primary():
+        token = take()
+        if token == "(":
+            value = disjunction()
+            take(")")
+            return value
+        if token.startswith("'"):
+            return token[1:-1].replace("''", "'")
+        if peek() == "(":
+            take("(")
+            arguments = [disjunction()]
+            while peek() == ",":
+                take(",")
+                arguments.append(disjunction())
+            take(")")
+            assert token == "contains", f"unmodelled function {token}"
+            haystack, needle = arguments
+            return str(needle).lower() in str(haystack).lower()
+        if token.startswith("vars."):
+            return context.get(token, "")
+        assert token in context, f"unmodelled context {token}"
+        return context[token]
+
+    def comparison():
+        value = primary()
+        if peek() in ("==", "!="):
+            operator = take()
+            other = primary()
+            equal = (str(value).lower() == str(other).lower()
+                     if isinstance(value, str) and isinstance(other, str) else value == other)
+            return equal if operator == "==" else not equal
+        return value
+
+    def conjunction():
+        value = comparison()
+        while peek() == "&&":
+            take("&&")
+            other = comparison()
+            value = other if truthy(value) else value
+        return value
+
+    def disjunction():
+        value = conjunction()
+        while peek() == "||":
+            take("||")
+            other = conjunction()
+            value = value if truthy(value) else other
+        return value
+
+    result = disjunction()
+    assert cursor[0] == len(tokens), f"trailing expression tokens in {text!r}"
+    return truthy(result)
+
+
+def resolved_lane(runs_on, context):
+    """The label array string a `fromJSON(<chain>)` runs-on selects, before decoding."""
+    chain = re.fullmatch(r"\$\{\{ fromJSON\((.+)\) \}\}", runs_on)
+    assert chain, runs_on
+    # `a || b || 'literal'` selects the first non-empty variable, else the literal.
+    for candidate in (context.get(name, "") for name in re.findall(r"vars\.[A-Z_]+", chain[1])):
+        if candidate:
+            return candidate
+    literal = re.findall(r"'([^']*)'", chain[1])
+    assert len(literal) == 1, runs_on
+    return literal[0]
+
+
 def resolve(value, runner_environment, outputs):
     """Evaluate the step-env expressions the watchdog uses; anything else is unmodelled."""
     expression = re.fullmatch(r"\$\{\{ (.+?) \}\}", str(value))
@@ -302,6 +404,30 @@ def test_watchdog_is_dormant_off_github_hosted_runners():
         assert step["run"].splitlines()[0].startswith(RUNNER_GUARD), step["name"]
 
 
+def test_job_is_issued_a_token_only_when_its_lane_resolves_to_the_hosted_runner():
+    # ADR 0147's hosted value is the only lane on which the job, and so its write-scoped
+    # token, may exist; anything else, including a whitespace variant, skips it.
+    watchdog = watchdog_job()
+    admitted = {"needs.event-policy.outputs.run_control_plane": "true"}
+    lanes = {
+        "unset": ({}, True),
+        "exact hosted value": ({"vars.CI_LANE_UNTRUSTED": HOSTED_LANE}, True),
+        "self-hosted array": ({"vars.CI_LANE_UNTRUSTED": '["self-hosted","general"]'}, False),
+        "whitespace variant": ({"vars.CI_LANE_UNTRUSTED": '[ "ubuntu-24.04" ]'}, False),
+        "hosted label beside a self-hosted one": ({"vars.CI_LANE_UNTRUSTED": '["self-hosted","ubuntu-24.04"]'}, False),
+        "fallback variable set": ({"vars.CI_LANE_FALLBACK": '["self-hosted","general"]'}, True),
+    }
+    for name, (variables, expected) in lanes.items():
+        context = dict(admitted, **variables)
+        runs = evaluate(watchdog["if"], context)
+        assert runs is expected, (name, watchdog["if"])
+        # The admission and the placement read the same chain: the job runs only where the
+        # lane it would be placed on is exactly the hosted value.
+        assert runs is (resolved_lane(watchdog["runs-on"], context) == HOSTED_LANE), name
+        held = dict(context, **{"needs.event-policy.outputs.run_control_plane": "false"})
+        assert evaluate(watchdog["if"], held) is False, name
+
+
 def test_job_without_created_at_is_never_aged_into_a_stall():
     undated = snapshot(job("event-policy", "completed", labels=("ubuntu-24.04",)),
                        job("app-key-policy / validate", "completed", 5, ("ubuntu-24.04",)),
@@ -381,7 +507,10 @@ def test_watchdog_holds_no_secret_and_cannot_veto_a_merge():
     watchdog = arm["jobs"][WATCHDOG]
     rendered = yaml.safe_dump(watchdog)
     assert watchdog["needs"] == "event-policy"
-    assert watchdog["if"] == arm["jobs"]["app-key-policy"]["if"]
+    # Admitted on exactly the deliveries that admit the key policy, and never more.
+    for run_control_plane in ("true", "false"):
+        context = {"needs.event-policy.outputs.run_control_plane": run_control_plane}
+        assert evaluate(watchdog["if"], context) is evaluate(arm["jobs"]["app-key-policy"]["if"], context)
     # Same lane as event-policy (no environment or repository secret), never the trusted lane it watches.
     assert watchdog["runs-on"] == arm["jobs"]["event-policy"]["runs-on"]
     assert watchdog["runs-on"] != arm["jobs"]["arm"]["runs-on"]
