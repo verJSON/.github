@@ -61,17 +61,44 @@ if len(begins) != 1 or len(ends) != 1 or begins[0] >= ends[0]:
         f"expected one generator-only section, found {len(begins)} BEGIN and {len(ends)} END markers"
     )
 start, end = begins[0], ends[0]
-# The gate is pinned by its exact text, so markers cannot be moved onto the
-# other GENERATOR_ONLY `if` (the early exit) while a capture sits in this one.
-gate = [
-    'if [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ] \\',
-    '  || [ "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}" = all ]; then',
+# The gate is a named predicate with a pinned body. Exactly one `if` calls it,
+# directly below BEGIN; the generator-only row's early exit is the one call of
+# its own predicate and sits inside the section. No other line may test the
+# mode, so assertions cannot be gated by a copy of the condition elsewhere.
+predicates = [
+    "generator_only_row() {",
+    '  [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ]',
+    "}",
+    "generator_only_assertions() {",
+    '  generator_only_row || [ "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}" = all ]',
+    "}",
 ]
-gate_starts = [i for i in range(len(lines) - 1) if lines[i:i + 2] == gate]
-if len(gate_starts) != 1:
-    raise SystemExit(f"expected exactly one generator-only gate, found {len(gate_starts)}")
-if gate_starts[0] != start + 1:
-    raise SystemExit("BEGIN marker must directly precede the generator-only gate's `if` line")
+validation = {
+    'case "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" in',
+    "  *) printf 'FAIL - CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY must be 0 or 1\\n' >&2; exit 1 ;;",
+}
+blocks = [i for i in range(len(lines)) if lines[i:i + len(predicates)] == predicates]
+if len(blocks) != 1:
+    raise SystemExit(f"expected the pinned gate predicates exactly once, found {len(blocks)}")
+predicate_lines = set(range(blocks[0], blocks[0] + len(predicates)))
+outside = [i for i in range(len(lines)) if i not in predicate_lines]
+if any(re.match(r"\s*(?:function\s+)?generator_only_(?:row|assertions)\b\s*(?:\(\))?\s*\{?\s*$", lines[i])
+       and "()" in lines[i] for i in outside):
+    raise SystemExit("a gate predicate is redefined outside its pinned definition")
+for i in outside:
+    if "CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY" in lines[i] and lines[i] not in validation:
+        raise SystemExit(f"line {i + 1} tests the generator-only mode outside the gate predicates")
+    if re.search(r"CHANGELOG_CALLER_CONTRACT_SHARD[^\n]*!?=\s*\"?all\b", lines[i]):
+        raise SystemExit(f"line {i + 1} tests for the unsharded run outside the gate predicates")
+gate_calls = [i for i in outside if re.search(r"\bgenerator_only_assertions\b", lines[i])]
+if gate_calls != [start + 1] or lines[start + 1] != "if generator_only_assertions; then":
+    raise SystemExit(
+        "BEGIN marker must directly precede the one `if generator_only_assertions; then` gate "
+        f"(gate calls on lines {[i + 1 for i in gate_calls]})"
+    )
+row_calls = [i for i in outside if re.search(r"\bgenerator_only_row\b", lines[i])]
+if len(row_calls) != 1 or not start < row_calls[0] < end:
+    raise SystemExit("the generator-only row's early exit must be the one gate call inside the section")
 if lines[end - 1] != "fi":
     raise SystemExit("END marker must directly follow the generator-only gate's closing `fi`")
 # Bash decides which `fi` closes the gate: the first column-0 `fi` at which the
@@ -144,14 +171,21 @@ fi
 
 # The checker must see every way bash binds a name, and a quoted heredoc token
 # inside the section must not hide the section from it.
-gate_line='if [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ] \
-  || [ "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}" = all ]; then'
-other_gate_line='if [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ]; then'
+fixture_header() {
+  printf '#!/usr/bin/env bash\n'
+  printf '%s\n' 'case "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" in' '  0|1) ;;' \
+    "  *) printf 'FAIL - CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY must be 0 or 1\\n' >&2; exit 1 ;;" 'esac' \
+    'generator_only_row() {' '  [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ]' '}' \
+    'generator_only_assertions() {' \
+    '  generator_only_row || [ "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}" = all ]' '}'
+}
+early_exit='if generator_only_row; then exit 0; fi'
 leak_fixture() { # <name> <definition line>
   {
-    printf '#!/usr/bin/env bash\n'
+    fixture_header
     printf '# BEGIN generator-only assertions\n'
-    printf '%s\n' "$gate_line" "grep -qF \"python3 -I - <<'PY'\" <<<\"\$x\"" "$2" 'fi'
+    printf '%s\n' 'if generator_only_assertions; then' "grep -qF \"python3 -I - <<'PY'\" <<<\"\$x\"" \
+      "$2" "$early_exit" 'fi'
     printf '# END generator-only assertions\n'
     printf 'printf %%s "${%s}"\n' "$1"
   } >"$tmp/leak-$1.sh"
@@ -177,26 +211,45 @@ printf '#!/usr/bin/env bash\nx=1\n' >"$tmp/leak-unmarked.sh"
 # directly follows the `fi` that closes it. Otherwise a capture moved back into
 # the gate can sit outside the marked span and pass unseen.
 {
-  printf '#!/usr/bin/env bash\n# BEGIN generator-only assertions\n%s\n' "$gate_line"
+  fixture_header
+  printf '# BEGIN generator-only assertions\nif generator_only_assertions; then\n%s\n' "$early_exit"
   printf 'if true; then\n  :\nfi\n# END generator-only assertions\n'
   printf 'capture_mode leaked workflow "$sha"\nfi\nprintf %%s "$leaked"\n'
 } >"$tmp/leak-end-early.sh"
 {
-  printf '#!/usr/bin/env bash\n%s\ncapture_mode leaked workflow "$sha"\n' "$gate_line"
-  printf '# BEGIN generator-only assertions\n:\nfi\n# END generator-only assertions\n'
+  fixture_header
+  printf 'if generator_only_assertions; then\ncapture_mode leaked workflow "$sha"\n'
+  printf '# BEGIN generator-only assertions\n%s\nfi\n# END generator-only assertions\n' "$early_exit"
   printf 'printf %%s "$leaked"\n'
 } >"$tmp/leak-begin-late.sh"
-# Markers around a different GENERATOR_ONLY `if` (the early exit) while the
-# capture sits back inside the real gate.
+# Markers around the early-exit `if` while the capture sits in the real gate.
 {
-  printf '#!/usr/bin/env bash\n%s\ncapture_mode leaked workflow "$sha"\nfi\n' "$gate_line"
-  printf '# BEGIN generator-only assertions\n%s\n  exit 0\nfi\n' "$other_gate_line"
-  printf '# END generator-only assertions\nprintf %%s "$leaked"\n'
+  fixture_header
+  printf 'if generator_only_assertions; then\ncapture_mode leaked workflow "$sha"\nfi\n'
+  printf '# BEGIN generator-only assertions\n%s\n# END generator-only assertions\n' \
+    'if generator_only_row; then exit 0; fi'
+  printf 'printf %%s "$leaked"\n'
 } >"$tmp/leak-wrong-gate.sh"
+# The real gate rewritten onto one line with the condition inline, and the
+# markers around a dummy copy of the gate: text matching alone accepts this.
+{
+  fixture_header
+  printf '%s\n' 'if generator_only_row || [ "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}" = all ]; then'
+  printf 'capture_mode leaked workflow "$sha"\nfi\n'
+  printf '# BEGIN generator-only assertions\nif generator_only_assertions; then\n%s\nfi\n' "$early_exit"
+  printf '# END generator-only assertions\nprintf %%s "$leaked"\n'
+} >"$tmp/leak-dummy-gate.sh"
+# The same with the predicate called twice instead of inlined.
+{
+  fixture_header
+  printf 'if generator_only_assertions; then\ncapture_mode leaked workflow "$sha"\nfi\n'
+  printf '# BEGIN generator-only assertions\nif generator_only_assertions; then\n%s\nfi\n' "$early_exit"
+  printf '# END generator-only assertions\nprintf %%s "$leaked"\n'
+} >"$tmp/leak-second-call.sh"
 misplaced_ok=1
-for misplaced in end-early begin-late wrong-gate; do
+for misplaced in end-early begin-late wrong-gate dummy-gate second-call; do
   if python3 "$tmp/fixture-leaks.py" "$tmp/leak-$misplaced.sh" >/dev/null 2>"$tmp/leak.err" \
-    || ! grep -q 'marker' "$tmp/leak.err"; then
+    || ! grep -qE 'marker|gate' "$tmp/leak.err"; then
     misplaced_ok=0
     fixture_misses+=("$misplaced")
   fi

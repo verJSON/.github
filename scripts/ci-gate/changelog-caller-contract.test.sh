@@ -19,6 +19,16 @@ case "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" in
   0|1) ;;
   *) printf 'FAIL - CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY must be 0 or 1\n' >&2; exit 1 ;;
 esac
+# The only tests of the mode. Generator-wide assertions run in the full suite
+# and in the generator-only row, never in a case shard; the generator-only row
+# stops after them. The shard test pins these bodies and their single call
+# sites, so no other condition can gate assertions (#1736).
+generator_only_row() {
+  [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ]
+}
+generator_only_assertions() {
+  generator_only_row || [ "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}" = all ]
+}
 caller_case_count=0
 caller_case_ran=0
 caller_assertions_suspended=0
@@ -146,8 +156,7 @@ fi
 # read anything defined there (#1736). The shard test requires BEGIN directly
 # above the gate's `if` and END directly below the `fi` that closes it.
 # BEGIN generator-only assertions
-if [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ] \
-  || [ "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}" = all ]; then
+if generator_only_assertions; then
 grep -qF 'uses: verJSON/.github/.github/workflows/generated-artifacts.yml@' <<<"$workflow" \
   && grep -qF 'raw.githubusercontent.com/verJSON/.github/' <<<"$renderer" \
   && grep -qF '* @verJSON/devs' <<<"$canonical_codeowners" \
@@ -1136,6 +1145,11 @@ stray_titles="$(grep -oE "\^## [A-Za-z][^']*" "$emitted" | grep -vxE '\^## (Newe
   && pass "fragment assertions are derived from the tree, not named inline" \
   || fail "emitted test greps for literal fragment titles: $(tr '\n' ' ' <<<"$stray_titles")"
 
+if generator_only_row; then
+  [ "$fails" -eq 0 ] || exit 1
+  echo "All generator contract assertions passed."
+  exit 0
+fi
 fi
 # END generator-only assertions
 # Content-addressed by ref, so seeding that cache path with THIS repository's
@@ -1145,11 +1159,6 @@ fi
 export XDG_CACHE_HOME="$tmproot/adopter-cache"
 mkdir -p "$XDG_CACHE_HOME/verjson-changelog/$sha"
 cp "$contract_src" "$XDG_CACHE_HOME/verjson-changelog/$sha/changelog.py"
-if [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ]; then
-  [ "$fails" -eq 0 ] || exit 1
-  echo "All generator contract assertions passed."
-  exit 0
-fi
 
 build_adopter() {
   # build_adopter <dir> [with-release-workflow: yes|no|legacy] [caller]
