@@ -213,29 +213,39 @@ run_policy_fixture() {
   POLICY_RC=$?
 }
 
+# An exit status alone cannot tell a policy verdict from a crash: an uncaught
+# exception also exits 1. Each case requires the policy's own diagnostic for
+# its fixture and no traceback.
+policy_reported() {
+  local expected_rc="$1" expected_text="$2"
+  [ "$POLICY_RC" -eq "$expected_rc" ] \
+    && grep -qF -- "$expected_text" "$tmp/policy.out" \
+    && ! grep -qF Traceback "$tmp/policy.out"
+}
+
 run_policy_fixture metered-macos
-if [ "$POLICY_RC" -eq 1 ]; then
+if policy_reported 1 '.github/workflows/build.yml:7: R1 metered hosted runner family in job '\''dist'\'' runs-on: macos-latest'; then
   pass "the reusable step rejects a caller's literal macOS selector"
 else
   fail "the reusable step did not reject a literal macOS selector"
 fi
 
 run_policy_fixture metered-windows
-if [ "$POLICY_RC" -eq 1 ]; then
+if policy_reported 1 '.github/workflows/build.yml:5: R1 metered hosted runner family in job '\''build'\'' runs-on: windows-2025'; then
   pass "the reusable step rejects a caller's literal Windows selector"
 else
   fail "the reusable step did not reject a literal Windows selector"
 fi
 
 run_policy_fixture rolling-linux-latest
-if [ "$POLICY_RC" -eq 1 ]; then
+if policy_reported 1 '.github/workflows/ci.yml:5: TierB literal Linux hosted selector in consumer job '\''build'\'' runs-on'; then
   pass "the reusable step rejects a caller's literal Linux selector"
 else
   fail "the reusable step did not reject a literal Linux selector"
 fi
 
 run_policy_fixture linux-hosted-literal
-if [ "$POLICY_RC" -eq 1 ]; then
+if policy_reported 1 '.github/workflows/ci.yml:8: TierB literal Linux hosted selector in consumer job '\''lint'\'' runs-on'; then
   pass "the reusable step rejects a caller's pinned Linux selector"
 else
   fail "the reusable step did not reject a pinned Linux selector"
@@ -259,14 +269,14 @@ else
 fi
 
 run_policy_fixture reusable-input-macos
-if [ "$POLICY_RC" -eq 1 ]; then
+if policy_reported 1 '.github/workflows/caller.yml:7: R1 metered hosted runner family in reusable job '\''delegated'\'' input '\''runner'\'''; then
   pass "the reusable step rejects a metered runner passed into another reusable workflow"
 else
   fail "the reusable step missed a metered reusable-workflow runner input"
 fi
 
 run_policy_fixture reusable-input-dynamic
-if [ "$POLICY_RC" -eq 2 ]; then
+if policy_reported 2 'UNDETERMINED: .github/workflows/caller.yml:7: reusable job '\''delegated'\'' input '\''runner'\'': selector uses unsupported construction function(s): format'; then
   pass "the reusable step fails closed on a dynamic runner pass-through"
 else
   fail "the reusable step accepted an unresolved runner pass-through"
