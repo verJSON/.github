@@ -9,8 +9,8 @@
 ## Context
 
 ADR 0086's 2026-10-13 amendment requires the Node CI workflows to start every inline
-Python interpreter with `-I`, and the contract test PR #1750 added enforced that for
-`node-ci.yml` and `node-ci-protected.yml` only (#1749).
+Python interpreter with `-I`. PR #1750 (#1749) added a contract test that enforced this
+for `node-ci.yml` and `node-ci-protected.yml` only.
 A count during that review found non-isolated starts in most other workflows and in
 the release callers `scripts/gen-changelog-caller.sh` emits for adopters.
 

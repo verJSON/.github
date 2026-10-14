@@ -13,12 +13,16 @@ emits for adopters, and fails on any interpreter invocation without ``-I``
 (combined short flags such as ``-Ic`` count when ``I`` precedes an option that
 takes an argument). After joining line continuations it checks every
 occurrence on a line, so a later call after ``;``, ``&&``, ``||``, or ``|``
-is checked on its own, as is a bare ``| python3``. It also covers calls nested
-in ``bash -c '...'``, interpreters held in a shell variable (any variable whose
-name contains ``py``, and any variable command reading ``-``, ``-c``, or
-``-m``), argument lists embedded in Python (``("/usr/bin/python3", "-I", ...)``
-and ``sys.executable``), a ``.py`` file started through its own shebang, and a
-step, job, or workflow ``shell:`` naming Python. Every repository script a
+is checked on its own, as is a bare ``| python3``. An interpreter in command
+position, quoted or not, is an invocation whatever follows it, and leading
+redirections (``python3 2>&1 -c ...``) are skipped before its options are
+read. It also covers calls nested in ``bash -c '...'``, interpreters held in a
+shell variable (any variable whose name contains ``py``, and any variable
+command reading ``-``, ``-c``, or ``-m`` or running a ``.py`` file), argument
+lists embedded in Python (``("/usr/bin/python3", "-I", ...)`` and
+``sys.executable``), a ``.py`` file started through its own shebang (including
+a path built from quoted variables), and a step, job, or workflow ``shell:``
+naming Python. Every repository script a
 workflow starts isolated must still import from an unrelated directory under
 ``-I`` (a script that imports a sibling adds its own directory explicitly), and
 a behavioral regression runs a representative extracted Node CI validator in a
@@ -27,8 +31,9 @@ fixture checkout carrying same-named modules.
 Documented limitations: an interpreter path computed inside Python (for
 example from ``shutil.which`` or a variable passed to ``subprocess``), or
 reached through shell indirection such as ``eval``, command substitution
-(``"$(command -v python3)" -``), functions, or aliases,
-is not detected lexically. Review those forms by hand.
+(``"$(command -v python3)" -``), functions, or aliases, is not detected
+lexically, nor is an interpreter word outside command position followed by a
+bare word (read as prose). Review those forms by hand.
 """
 import base64
 import hashlib
@@ -152,11 +157,21 @@ LIST_INVOCATION = re.compile(
 )
 SEGMENT_SEPARATOR = re.compile(r"\|\||&&|;|\||\n")
 VARIABLE_COMMAND = re.compile(r"""^["']?\$\{?(?P<name>[A-Za-z_]\w*)\}?["']?$""")
-SHELL_PREFIX_WORDS = frozenset(("exec", "command", "env", "time", "nohup"))
+# Words that leave the next word in command position.
+SHELL_PREFIX_WORDS = frozenset((
+    "exec", "command", "env", "time", "nohup",
+    "if", "then", "elif", "else", "do", "while", "until", "!", "{",
+))
+# env options that consume the following word.
+ENV_OPTIONS_WITH_ARGUMENT = frozenset(("-u", "--unset", "-C", "--chdir", "-S", "--split-string"))
 ASSIGNMENT = re.compile(r"^[A-Za-z_]\w*=")
-# A path, optionally quoted and built from shell variables, naming a .py file;
-# a Python string literal such as f"{ref}/scripts/x.py" is not a command word.
-SCRIPT_COMMAND = re.compile(r"""(["']?)(?:\$\{?\w+\}?|[\w.~/-])(?:[\w.~/-]|\$\{?\w+\}?)*\.py\1""")
+COMMAND_BOUNDARY = re.compile(r"\|\||&&|;|\||\n|\(|`|\{")
+REDIRECTION_OPERATOR = re.compile(r"^(?:\d*|&)(?:>>?|<<?<?|>&|<&)$")
+ATTACHED_REDIRECTION = re.compile(r"^(?:\d*|&)(?:>>?|<<?<?)\S+$")
+# A path built from literal and shell-variable parts, after its quotes are
+# removed, naming a .py file. A Python string literal such as
+# f"{ref}/scripts/x.py" keeps a bare brace and is not a command word.
+SCRIPT_PATH = re.compile(r"""(?:\$\{?\w+\}?|[\w.~/-])(?:[\w.~/-]|\$\{?\w+\}?)*\.py""")
 # Python options that consume the rest of their short-flag cluster as an argument.
 OPTIONS_WITH_ARGUMENT = frozenset("cmWXQ")
 
@@ -175,6 +190,42 @@ def flags_are_isolated(tokens):
     return False
 
 
+def without_command_prefix(tokens):
+    """Tokens from the command word on, dropping prefix words, env options, and assignments."""
+    tokens = list(tokens)
+    while tokens and (tokens[0] in SHELL_PREFIX_WORDS or ASSIGNMENT.match(tokens[0])):
+        if tokens.pop(0) == "env":
+            while tokens and tokens[0].startswith("-"):
+                if tokens.pop(0) in ENV_OPTIONS_WITH_ARGUMENT and tokens:
+                    tokens.pop(0)
+    return tokens
+
+
+def in_command_position(before):
+    """True when the text before a word leaves that word as the command."""
+    boundaries = list(COMMAND_BOUNDARY.finditer(before))
+    preceding = before[boundaries[-1].end():] if boundaries else before
+    return not without_command_prefix(preceding.split())
+
+
+def without_redirections(tokens):
+    """Arguments with shell redirections removed, so they cannot read as the program."""
+    remaining = []
+    skip_target = False
+    for token in tokens:
+        if skip_target:
+            skip_target = False
+        elif REDIRECTION_OPERATOR.match(token):
+            skip_target = True
+        elif not ATTACHED_REDIRECTION.match(token):
+            remaining.append(token)
+    return remaining
+
+
+def is_script_path(token):
+    return SCRIPT_PATH.fullmatch(re.sub(r"[\"']", "", token)) is not None
+
+
 def segment_after(text, position):
     """Arguments that follow an interpreter, up to the next shell command boundary."""
     rest = text[position:]
@@ -187,13 +238,23 @@ def literal_interpreter_findings(line):
     for match in INTERPRETER_TOKEN.finditer(line):
         before = line[:match.start()]
         after = line[match.end():]
+        end = match.end()
         if before.endswith(("'", '"')) and after[:1] == before[-1]:
-            continue  # a quoted string literal; argument lists are checked separately
+            # A quoted interpreter is a command only in command position; in a
+            # list or call (``"python3", ...``) LIST_INVOCATION checks it instead.
+            if after[1:].lstrip()[:1] in (",", "]", ")") or not in_command_position(before[:-1]):
+                continue
+            before, end = before[:-1], end + 1
         if re.search(r"(?:command\s+-v|which|type|install)\s+(?:\S+\s+)*$", before):
             continue
-        tokens = segment_after(line, match.end()).split()
+        tokens = without_redirections(segment_after(line, end).split())
         cleaned = [token.strip("'\")") for token in tokens]
-        if cleaned and cleaned[0] and not re.match(r"""[-"'$/.<>&{]|\S+\.py\b""", tokens[0]):
+        if (
+            not in_command_position(before)
+            and cleaned
+            and cleaned[0]
+            and not re.match(r"""[-"'$/.<>&{]|\S+\.py\b""", tokens[0])
+        ):
             continue  # prose such as "the runner's python3 parser"
         if not flags_are_isolated(cleaned):
             findings.append(match.group(0))
@@ -203,19 +264,22 @@ def literal_interpreter_findings(line):
 def variable_interpreter_findings(line):
     findings = []
     for segment in SEGMENT_SEPARATOR.split(line):
-        tokens = segment.split()
-        while tokens and (tokens[0] in SHELL_PREFIX_WORDS or ASSIGNMENT.match(tokens[0])):
-            tokens.pop(0)
+        tokens = without_command_prefix(segment.split())
         if not tokens:
             continue
         variable = VARIABLE_COMMAND.match(tokens[0])
         if variable is None:
             continue
-        arguments = tokens[1:]
+        arguments = without_redirections(tokens[1:])
         reads_stdin = bool(arguments) and arguments[0] == "-"
         names_python = re.search(r"py", variable.group("name"), re.IGNORECASE) is not None
-        if (names_python or reads_stdin or (arguments and arguments[0] in ("-c", "-m"))) \
-                and not flags_are_isolated(arguments):
+        runs_script = bool(arguments) and is_script_path(arguments[0])
+        if (
+            names_python
+            or reads_stdin
+            or runs_script
+            or (arguments and arguments[0] in ("-c", "-m"))
+        ) and not flags_are_isolated(arguments):
             findings.append(tokens[0])
     return findings
 
@@ -224,10 +288,8 @@ def direct_script_findings(line):
     """A ``.py`` command word runs through its shebang, which never carries -I."""
     findings = []
     for segment in SEGMENT_SEPARATOR.split(line):
-        tokens = segment.split()
-        while tokens and (tokens[0] in SHELL_PREFIX_WORDS or ASSIGNMENT.match(tokens[0])):
-            tokens.pop(0)
-        if tokens and SCRIPT_COMMAND.fullmatch(tokens[0]):
+        tokens = without_command_prefix(segment.split())
+        if tokens and is_script_path(tokens[0]):
             findings.append(tokens[0])
     return findings
 
@@ -423,6 +485,21 @@ def assert_scanner_recognizes_invocation_forms():
         "./scripts/tool.py --flag",
         "VAR=1 \"$RUNNER_TEMP/helper.py\" run",
         "set -e; scripts/tool.py",
+        # A quoted interpreter in command position.
+        '"/usr/bin/python3" scripts/x.py',
+        "'python3' -c pass",
+        'out="$("python3" - <<\'PY\'',
+        # Redirections before the program, and a program without a .py suffix.
+        "python3 2>&1 -c pass",
+        "python3 >/dev/null scripts/tool",
+        "python3 tool",
+        "exec python3 runner",
+        # A script whose path starts with a quoted variable.
+        '"$GITHUB_WORKSPACE"/scripts/x.py',
+        "\"$ROOT\"/scripts/x.py --flag",
+        # A variable command whose first argument is a Python script.
+        '"$interpreter" scripts/x.py',
+        "$tool \"$RUNNER_TEMP/helper.py\" run",
     )
     isolated = (
         "python3 -I - <<'PY'",
@@ -449,6 +526,12 @@ def assert_scanner_recognizes_invocation_forms():
         "sha256sum scripts/tool.py",
         "install -m 0555 scripts/a.py \"$RUNNER_TEMP/a.py\"",
         'f"{contract_ref}/scripts/changelog.py"',
+        # A quoted interpreter inside an argument list or call is a list element.
+        '["python3", "-I", script]',
+        'shutil.which("python3")',
+        "print('python3')",
+        '"$interpreter" -I scripts/x.py',
+        '"$GITHUB_WORKSPACE"/scripts/x.sh',
     )
     for sample in non_isolated:
         assert non_isolated_invocations(sample), f"scanner missed a non-isolated invocation: {sample!r}"
