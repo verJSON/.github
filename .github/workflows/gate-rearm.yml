@@ -1141,7 +1141,8 @@ jobs:
       # Same check, same receipt, same App identity, and the same authority rule as
       # ordinary completion: approval only under ai-approve or ai-merge, otherwise the
       # human path. The stale privileged merge caller cannot verify this receipt, so
-      # no terminal promotion is dispatched; an authorized maintainer merges natively.
+      # the bootstrap never grants terminal promotion: it records the approval-only
+      # ai-approve marker even under ai-merge, and a maintainer merges natively.
       - name: Complete stale review caller bootstrap authorization
         id: bootstrap-complete
         if: steps.bootstrap.outputs.eligible == 'true'
@@ -1201,6 +1202,8 @@ jobs:
               "Stale review caller bootstrap approved this exact head: $transition." \
               "<!-- ai-review-authorization:$CHECK_ID -->" "<!-- ai-review-head:$EXPECTED_HEAD_SHA -->" \
               "<!-- ai-review-run:$GITHUB_RUN_ID -->" "<!-- ai-review-bootstrap:$STALE_SHA:$CONTRACT_SHA -->")"
+            # $head, $login, $check, $stale, and $contract are jq arguments, not shell expansion.
+            # shellcheck disable=SC2016
             approval_filter='select(.state == "APPROVED" and .commit_id == $head and .user.login == $login and
               (.body | contains("ai-review-authorization:" + $check)) and
               (.body | contains("ai-review-bootstrap:" + $stale + ":" + $contract))) | .id | select(type == "number")'
@@ -1215,7 +1218,7 @@ jobs:
               title='Stale caller bootstrap approved for exact head'
               summary="$(printf '%s\n\n%s' \
                 "The dedicated App approved this exact head because $transition and nothing else changes. Ordinary required CI and branch protection remain authoritative." \
-                "<!-- ai-review-authorized:v1:$CHECK_ID:$EXPECTED_HEAD_SHA:$authority -->")"
+                "<!-- ai-review-authorized:v1:$CHECK_ID:$EXPECTED_HEAD_SHA:ai-approve -->")"
             else
               title='Stale caller bootstrap approval unavailable; human path ready'
               summary="The bootstrap proof held, but no exact-head App approval was persisted and verified. Deterministic policy is green and a human approval may still authorize merge."

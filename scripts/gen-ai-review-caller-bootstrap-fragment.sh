@@ -30,5 +30,7 @@ key=id
 
 printf -- '---\ndate: %s\n%s: %s\nimpact: patch\ntitle: Bootstrap the AI review caller to a current canonical revision\n---\n\n' \
   "$date" "$key" "$identity"
+# The backticks are Markdown code spans in the fragment, not command substitution.
+# shellcheck disable=SC2016
 printf 'Regenerate `.github/workflows/ai-review-merge.yml` at canonical Verjson/.github revision `%s`, replacing `%s`, whose receipt verifier cannot authorize its own update. The organization authorization arm verified this byte-exact generated change under Verjson/.github ADR 0225.\n' \
   "$contract" "$stale"
