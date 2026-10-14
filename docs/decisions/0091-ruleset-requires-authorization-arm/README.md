@@ -128,3 +128,16 @@ what is verified, and it fixes the reporting order that let a live outage hide b
 rollout blocker. Two related defects found in the same investigation are tracked
 separately: #743 (every scheduled workflow in this repository fails, so nothing was
 watching) and #744 (all runner lane variables resolve to one pool).
+
+## Amendment — 2026-10-14: AiB enrolled (#1781)
+
+The Context above names AiB as a repository with no ordinary deterministic CI rule. That
+gap persisted: AiB carried `verjson-stack=none` and no `verjson-core-checks` value, so its
+`main` declared no required status checks and the admin-merge assertion refused every
+AiB pull request as an ungoverned ref. AiB already ran the canonical Node CI and changelog
+checks under the exact context names the rulesets require, and held both environment App
+keys. #1781 adds `Verjson/AiB` to the reviewed arm cohort and then sets
+`verjson-stack=node`, `verjson-core-checks=enforced` and `changelog-contract=adopted`
+(it already runs the generated changelog caller), which places it under the
+deterministic rulesets and the authorization arm in the order this decision requires:
+deterministic CI and the arm together, never the arm alone. The decision is unchanged.
