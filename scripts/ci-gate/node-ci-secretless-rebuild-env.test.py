@@ -744,6 +744,139 @@ def assert_bubblewrap_arguments(arguments_path, workspace, package_manager):
         assert "/tmp/corepack" not in receipt["resolved_sources"]
 
 
+NATIVE_ADDON_SOURCE = """\
+#include <node_api.h>
+
+static napi_value Hello(napi_env env, napi_callback_info info) {
+  napi_value greeting;
+  napi_create_string_utf8(env, "built-offline", NAPI_AUTO_LENGTH, &greeting);
+  return greeting;
+}
+
+static napi_value Init(napi_env env, napi_value exports) {
+  napi_value hello;
+  napi_create_function(env, "hello", NAPI_AUTO_LENGTH, Hello, NULL, &hello);
+  napi_set_named_property(env, exports, "hello", hello);
+  return exports;
+}
+
+NAPI_MODULE(NODE_GYP_MODULE_NAME, Init)
+"""
+
+
+def copy_real_node_toolchain(tool_cache):
+    """Copy the host's official Node layout into a runner-shaped tool cache.
+
+    The rebuild step only accepts a toolchain under RUNNER_TOOL_CACHE, so the
+    selected binary, npm, and the headers an official tarball ships under
+    include/node are copied there rather than trusted in place.
+    """
+    node = shutil.which("node")
+    assert node is not None, "the native addon rebuild requires a real Node toolchain"
+    source = Path(node).resolve(strict=True).parent.parent
+    npm_package = source / "lib/node_modules/npm"
+    headers = source / "include/node"
+    assert (npm_package / "bin/npm-cli.js").is_file(), f"{source} has no bundled npm"
+    assert (headers / "common.gypi").is_file(), f"{source} has no Node headers"
+    version = subprocess.run(
+        [node, "--version"], check=True, capture_output=True, text=True,
+    ).stdout.strip().removeprefix("v")
+    toolchain = tool_cache / "node" / version / "x64"
+    (toolchain / "bin").mkdir(parents=True)
+    shutil.copy2(source / "bin/node", toolchain / "bin/node")
+    shutil.copytree(npm_package, toolchain / "lib/node_modules/npm", symlinks=True)
+    shutil.copytree(headers, toolchain / "include/node", symlinks=True)
+    (toolchain / "bin/npm").symlink_to("../lib/node_modules/npm/bin/npm-cli.js")
+    return toolchain
+
+
+def run_native_addon_rebuild(step):
+    """#1798: node-gyp must build from the selected toolchain's own headers.
+
+    The rebuild sandbox denies network egress (ADR 0086), so node-gyp's default
+    download of node-vX-headers.tar.gz from nodejs.org can never succeed there.
+    The install script first proves the sandbox has no route to nodejs.org.
+    """
+    with tempfile.TemporaryDirectory(dir=str(Path.home())) as temporary:
+        fixture = Path(temporary)
+        home = fixture / "runner-home"
+        workspace = fixture / "workspace"
+        runner_temp = fixture / "runner-temp"
+        tool_cache = fixture / "tool-cache"
+        for directory in (home, workspace, runner_temp, tool_cache):
+            directory.mkdir()
+        toolchain = copy_real_node_toolchain(tool_cache)
+        addon = workspace / "node_modules/native-fixture"
+        addon.mkdir(parents=True)
+        (workspace / "package.json").write_text(json.dumps({
+            "name": "native-consumer",
+            "version": "1.0.0",
+            "dependencies": {"native-fixture": "1.0.0"},
+        }), encoding="utf-8")
+        (workspace / "package-lock.json").write_text(json.dumps({
+            "name": "native-consumer",
+            "lockfileVersion": 3,
+            "packages": {
+                "": {"name": "native-consumer", "dependencies": {"native-fixture": "1.0.0"}},
+                "node_modules/native-fixture": {
+                    "name": "native-fixture",
+                    "version": "1.0.0",
+                    "hasInstallScript": True,
+                },
+            },
+        }), encoding="utf-8")
+        offline_probe = (
+            "require('node:dns').lookup('nodejs.org', (error) => "
+            "process.exit(error ? 0 : 97))"
+        )
+        (addon / "package.json").write_text(json.dumps({
+            "name": "native-fixture",
+            "version": "1.0.0",
+            "gypfile": True,
+            "scripts": {"install": f"node -e {shlex.quote(offline_probe)} && node-gyp rebuild"},
+        }), encoding="utf-8")
+        (addon / "binding.gyp").write_text(json.dumps({
+            "targets": [{"target_name": "native_fixture", "sources": ["addon.c"]}],
+        }), encoding="utf-8")
+        (addon / "addon.c").write_text(NATIVE_ADDON_SOURCE, encoding="utf-8")
+        env = {
+            **{name: value for name, value in os.environ.items() if name not in SENSITIVE_ENV + ("BASH_ENV",)},
+            "PATH": f"{toolchain / 'bin'}:/usr/bin:/bin",
+            "HOME": str(home),
+            "RUNNER_TEMP": str(runner_temp),
+            "RUNNER_TOOL_CACHE": str(tool_cache),
+            "RUNNER_ENVIRONMENT": "github-hosted",
+            "PACKAGE_MANAGER": "npm",
+            "REBUILD_PACKAGES": "native-fixture",
+            "REBUILD_ENV": "{}",
+            "BWRAP_BINARY": "/usr/bin/bwrap",
+        }
+        result = subprocess.run(
+            ["bash", "-e", "-c", step["run"]],
+            cwd=workspace,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            "native addon did not build offline in the rebuild sandbox:\n"
+            + result.stdout[-4000:] + result.stderr[-4000:]
+        )
+        assert "nodejs.org/download" not in result.stdout + result.stderr, (
+            "node-gyp tried to download headers instead of using the toolchain's own"
+        )
+        built = addon / "build/Release/native_fixture.node"
+        assert built.is_file(), f"node-gyp produced no addon at {built}"
+        loaded = subprocess.run(
+            [str(toolchain / "bin/node"), "-p", f"require({str(built)!r}).hello()"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert loaded == "built-offline", loaded
+
+
 def run_consumer_descriptor_probe():
     bubblewrap = Path("/usr/bin/bwrap")
     assert bubblewrap.is_file(), "real Bubblewrap is required for the consumer descriptor probe"
@@ -1563,6 +1696,7 @@ def main():
                     assert result.returncode == 0, result.stderr
                     assert_rebuild_capture(capture, package_manager, "skip", config_directory="/tmp/npm-config")
                     assert_no_lifecycle_command_file_access(command_files, marker)
+            run_native_addon_rebuild(step)
         run_consumer_descriptor_probe()
 
     print("secretless rebuild environment contract passed")

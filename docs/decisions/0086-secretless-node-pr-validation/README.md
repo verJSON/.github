@@ -231,3 +231,22 @@ All earlier isolation properties are unchanged: `-I` interpreters, separate priv
 configurations, credential-free environments, read-only `.git`, and hidden command files.
 Real-Bubblewrap regressions in the consumer, rebuild, compatibility, and protected
 candidate tests execute `awk` inside each sandbox and fail on the pre-fix workflows.
+
+## 2026-10-14 amendment — offline native rebuilds and the consumer runtime cache (#1798)
+
+Repinning past #1729 broke two adopter paths that the decision above already promises.
+
+**Native addons in the lifecycle rebuild.** The rebuild sandbox denies network egress, so
+an addon that falls back from a prebuilt download to `node-gyp rebuild` could not fetch
+`node-vX-headers.tar.gz` from nodejs.org (verJSON/AiB#334, run 38653934062:
+`better-sqlite3-multiple-ciphers`). The official Node distribution that the sandbox
+already mounts ships those headers under `include/node`. The sandbox now sets
+`npm_config_nodedir` to the mounted toolchain root (`/opt/verjson-node-toolchain`, or
+the `/usr` prefix that owns the selected `node`). Every node-gyp release reads that
+variable and then compiles against the running runtime's headers with no download. npm
+11 warns that `nodedir` is not one of its own settings. That warning is cosmetic: npm
+passes its environment to lifecycle scripts unchanged, and node-gyp reads the value from
+there. node-gyp 11.4 added `npm_package_config_node_gyp_*`, but a consumer lock can pin an
+older node-gyp, so the npm form is the one that reaches every version. Egress stays
+denied; the prebuilt download still fails and the source build takes over. No mount,
+credential, or writable path is added.

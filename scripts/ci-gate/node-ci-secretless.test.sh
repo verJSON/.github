@@ -339,6 +339,29 @@ for path in sys.argv[1:]:
         ), (path, name)
 PY
 
+# #1798: the lifecycle rebuild sandbox has no network, so node-gyp must compile
+# against the selected toolchain's own headers rather than download them. The
+# real-Bubblewrap addon build runs only on the hosted compatibility lane; this
+# keeps both workflows honest on every runner.
+python3 - "$workflow" "${workflow%/*}/node-ci-protected.yml" <<'PY' \
+  && pass "the offline lifecycle rebuild points node-gyp at the selected toolchain headers (#1798)" \
+  || fail "the offline lifecycle rebuild leaves node-gyp to download headers (#1798)"
+import sys
+import yaml
+
+for path in sys.argv[1:]:
+    steps = yaml.safe_load(open(path, encoding="utf-8"))["jobs"]["build-test"]["steps"]
+    run = next(
+        step["run"] for step in steps
+        if step.get("name") == "Rebuild exact approved lifecycle packages without credentials"
+    )
+    lines = [line.strip() for line in run.splitlines() if not line.lstrip().startswith("#")]
+    assert '"--unshare-net",' in lines, path
+    environment = lines[lines.index("rebuild_process_env = {"):lines.index("**rebuild_env,")]
+    assert environment.count('"npm_config_nodedir": toolchain_destination,') == 1, path
+    assert sum("nodedir" in line.lower() for line in lines) == 1, path
+PY
+
 grep -qF 'ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL' "$workflow" \
   && grep -qF 'printf '\''NPM_CONFIG_USERCONFIG=%s\n'\''' "$workflow" \
   && pass "PR execution persistently scrubs package, Git, cloud, and OIDC credential paths" \
