@@ -188,8 +188,10 @@ validate_required_check_policy() { # validate_required_check_policy <repository>
 }
 # A "Not Found" for the secret is withdrawal evidence only when the same token reads a
 # complete, well-formed organization secret inventory that also omits the name: GitHub
-# answers 404 for a resource the caller may not see, and an empty or truncated listing
-# would otherwise prove absence by omission.
+# answers 404 for a resource the caller may not see, and a missing, zero-page or
+# truncated listing would otherwise prove absence by omission. A complete listing with
+# total_count 0 is genuine evidence and is accepted. The non-blank guards before each
+# `jq -e` below are load-bearing: jq 1.6 exits 0 on empty or whitespace-only input.
 # shellcheck disable=SC2016 # jq program text, expanded by jq rather than the shell
 readonly ORGANIZATION_SECRET_ABSENT='. as $pages
   | ($pages | type == "array" and length > 0)
@@ -213,6 +215,7 @@ else
   cat "$tmp/organization-secret.err" >&2
   if grep -Eq '\(HTTP 404\)$' "$tmp/organization-secret.err" &&
     organization_secrets="$(gh api --paginate --slurp "orgs/$ORG/actions/secrets?per_page=100")" &&
+    [[ "$organization_secrets" =~ [^[:space:]] ]] &&
     jq -e --arg name "$SECRET_NAME" "$ORGANIZATION_SECRET_ABSENT" <<<"$organization_secrets" >/dev/null; then
     visibility=withdrawn
   else
@@ -557,7 +560,8 @@ while IFS= read -r repository; do
       # Metadata only: the environment-secret endpoint never returns the key value.
       if environment_key_response="$(gh api "repos/$repository/environments/$MERGE_ENVIRONMENT/secrets/$SECRET_NAME" \
         2>"$tmp/environment-key.err")"; then
-        if jq -e --arg name "$SECRET_NAME" '.name == $name' <<<"$environment_key_response" >/dev/null 2>&1; then
+        if [[ "$environment_key_response" =~ [^[:space:]] ]] &&
+          jq -e --arg name "$SECRET_NAME" '.name == $name' <<<"$environment_key_response" >/dev/null 2>&1; then
           has_secret=true
         else
           echo "::error title=Unreadable merge-app environment key::repository=$repository environment=$MERGE_ENVIRONMENT secret=$SECRET_NAME reason='response does not identify the key'"

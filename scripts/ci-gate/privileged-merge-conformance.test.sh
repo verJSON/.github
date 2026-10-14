@@ -54,6 +54,13 @@ case "$*" in
       contains-key) printf '%s\n' '[{"total_count":1,"secrets":[{"name":"MERGE_APP_PRIVATE_KEY","visibility":"all"}]}]' ;;
       incomplete) printf '%s\n' '[{"total_count":3,"secrets":[{"name":"ANTHROPIC_API_KEY","visibility":"all"}]}]' ;;
       empty-pages) printf '%s\n' '[]' ;;
+      nameless) printf '%s\n' '[{"total_count":1,"secrets":[{}]}]' ;;
+      duplicate-names) printf '%s\n' '[{"total_count":2,"secrets":[{"name":"ANTHROPIC_API_KEY","visibility":"all"},{"name":"ANTHROPIC_API_KEY","visibility":"all"}]}]' ;;
+      conflicting-pages) printf '%s\n' '[{"total_count":2,"secrets":[{"name":"ANTHROPIC_API_KEY","visibility":"all"}]},{"total_count":3,"secrets":[{"name":"ORG_ADMIN_TOKEN","visibility":"all"}]}]' ;;
+      paginated) printf '%s\n' '[{"total_count":2,"secrets":[{"name":"ANTHROPIC_API_KEY","visibility":"all"}]},{"total_count":2,"secrets":[{"name":"ORG_ADMIN_TOKEN","visibility":"all"}]}]' ;;
+      zero-secrets) printf '%s\n' '[{"total_count":0,"secrets":[]}]' ;;
+      empty-stdout) ;;
+      blank-stdout) printf ' \t\n' ;;
       malformed) printf '%s\n' '<html>not json</html>' ;;
       unreadable)
         printf '%s' '{"message":"Not Found","status":"404"}'
@@ -71,6 +78,8 @@ case "$*" in
         echo 'gh: Server Error (HTTP 500)' >&2
         exit 1 ;;
       malformed) printf '%s\n' '<html>not json</html>' ;;
+      empty-stdout) ;;
+      blank-stdout) printf ' \t\n' ;;
       renamed) printf '%s\n' '{"name":"OTHER_APP_PRIVATE_KEY","created_at":"2026-09-27T00:00:00Z"}' ;;
       valid)
         if grep -qxF "$repository" <<<"${ENVIRONMENT_KEY_REPOSITORIES-Verjson/alpha}"; then
@@ -590,7 +599,8 @@ done
 
 # A 404 is withdrawal evidence only when the same token can read the organization's
 # secret inventory; GitHub also answers 404 for a resource the caller may not see.
-for mode in unreadable contains-key empty-pages incomplete malformed; do
+for mode in unreadable contains-key empty-pages incomplete malformed empty-stdout blank-stdout \
+  nameless duplicate-names conflicting-pages; do
   ORG_SECRET_MODE=absent SECRET_REPOSITORIES='' ORG_LISTING_MODE="$mode" run_audit \
     && fail "uncorroborated organization secret 404 ($mode) reported green" \
     || {
@@ -599,6 +609,15 @@ for mode in unreadable contains-key empty-pages incomplete malformed; do
         && pass "uncorroborated organization secret 404 ($mode) fails closed" \
         || fail "uncorroborated organization secret 404 ($mode) was misclassified: $(<"$tmp/out")"
     }
+done
+
+# The listing checks must not reject genuine evidence: a consistent multi-page inventory
+# and a complete inventory with no secrets at all both prove the name is absent.
+for mode in paginated zero-secrets; do
+  ORG_SECRET_MODE=absent SECRET_REPOSITORIES='' ORG_LISTING_MODE="$mode" run_audit \
+    && grep -q 'result=conformant repositories_scanned=1 consumers=1' "$tmp/out" \
+    && pass "a complete organization inventory ($mode) corroborates withdrawal" \
+    || fail "a complete organization inventory ($mode) was rejected: $(<"$tmp/out")"
 done
 
 # Withdrawal must not turn key access into a presumption: the consumer's own merge-app
@@ -619,7 +638,7 @@ ACTIVE_REPOSITORIES=$'Verjson/alpha\nVerjson/beta' \
 
 # A 200 is not custody evidence unless it names the exact key.
 # Only "Not Found" means the environment lacks the key; any other failure is unknown custody.
-for mode in malformed renamed unavailable; do
+for mode in malformed renamed unavailable empty-stdout blank-stdout; do
   ORG_SECRET_MODE=absent SECRET_REPOSITORIES='' ENVIRONMENT_KEY_MODE="$mode" run_audit \
     && fail "merge-app environment response ($mode) reported green" \
     || {
