@@ -45,7 +45,12 @@ The bootstrap classifier also admits modified workflow files at
 when a line-by-line proof shows that the file only moves allowlisted canonical reusable CI
 pins to the bootstrap's contract revision:
 
-1. **Same shape.** Base and head split on `\n` into the same number of lines. Lines are
+1. **Same shape.** Both sides must decode as UTF-8 and contain no line break other than
+   `\n` and `\r\n`. A lone `\r`, U+0085, U+2028, or U+2029 refuses the caller. YAML
+   breaks lines at a lone `\r`, and YAML 1.1 parsers at the other three, while the proof
+   splits on `\n` only. Without this guard, `# c<CR>run-name: |` reads to the proof as one
+   comment line, but YAML sees a block scalar header, whose text the proof would then take
+   for a job. Base and head then split on `\n` into the same number of lines. Lines are
    compared pairwise, so nothing can be appended, removed, or reordered.
 2. **Reference lines.** Every changed line that is not a comment line (rule 3) must, on
    the base side, be exactly
@@ -53,8 +58,9 @@ pins to the bootstrap's contract revision:
    may be followed only by whitespace, an optional YAML comment, and an optional `\r`, so
    a revision that runs on into a branch name is not a pin. Structurally, the nearest
    earlier non-blank, non-comment line indented fewer than four spaces must be a bare
-   two-space job key (`  <id>:`, optionally followed by a comment). The nearest earlier
-   such line at column zero must be `jobs:`. This approximates "a job's reusable workflow
+   two-space job key (`  <id>:`), and the nearest earlier such line at column zero must be
+   `jobs:`. Either may be followed by whitespace and a comment. A `#` directly after the
+   colon (`jobs:#x`) is refused, because YAML reads that as a plain scalar, not a key. This approximates "a job's reusable workflow
    call" without a YAML parser, and it matches every known caller (verjson-cli `ci.yml`
    and `actionlint.yml`, verjson-payments and verjson-cli-cloud `ci.yml`). A caller written
    with other indentation is refused, which fails closed. The head line must equal the base line with
@@ -124,7 +130,9 @@ the gate.
 | Moving a credential-bearing or release workflow without review | Closed allowlist: only `node-ci.yml` and `actionlint.yml`. |
 | Lookalike paths | Exact-case `.github/workflows/<file>` only. `.GitHub/…`, subdirectories, and `action.yml` fall through to the existing refusal. |
 | A non-bootstrap pull request uses the lane | The ADR 0227 caller and stale-revision proof still gates eligibility. |
-| A pin-shaped or `#`-led line inside a block scalar, or a pin inside a non-test file outside `.github/`, has an older canonical revision swapped to the contract | Accepted residual. The swap only replaces a canonical revision that the contract descends from with a canonical `main` revision. Job-level structure (rule 2) and the start-of-line comment anchor (rule 3) keep `with:` values, `run:` commands, and `ref:` inputs out. This is the same class of change ADR 0227 already accepts for the review pin in companion files. |
+| A line break the proof does not split on hides YAML structure inside an apparent comment | Rule 1 refuses any caller containing a lone `\r`, U+0085, U+2028, or U+2029, or any caller that is not UTF-8. |
+| A pin-shaped or `#`-led line inside a block scalar, or a pin inside a non-test file outside `.github/`, has an older canonical revision swapped to the contract | Accepted residual. The swap only replaces a canonical revision that the contract descends from with a canonical `main` revision. The rule 2 structure checks and the rule 3 start-of-line anchor refuse the single-line shapes tested: `with:` values, `run:` commands ending in a comment, checkout `ref:` inputs, and block scalar text under a two-space key. They are lexical, not a YAML parse, so the next row remains. This is the same class of change ADR 0227 already accepts for the review pin in companion files. |
+| A multi-line quoted or flow scalar opened at four or more spaces (for example `PIN: "a` or `env: {`) continues across a four-space `uses: …@<pin>` line, which the proof reads as a job's reusable workflow call | Accepted residual. The swapped token becomes part of that scalar's value. The swap is bounded the same way as the previous row, to an ancestor canonical revision becoming canonical `main`. It can only occur if the protected default branch already contains such a construct, because every unchanged byte must equal the base. |
 
 ## Alternatives rejected
 
@@ -155,13 +163,18 @@ the gate.
 ## Verification
 
 `python3 scripts/ci-gate/review-caller-bootstrap.test.py` runs the real classification
-step against stubbed GitHub data. It covers six admitted companion shapes and 22
+step against stubbed GitHub data. It covers seven admitted companion shapes and 30
 refusals. Each refusal except the layered "no review caller update" case has a mutation
 proof that drops or loosens exactly its guard and shows the case is then wrongly
-admitted. Independent review found three mutants the first version of the suite did not
+admitted. A further proof shows that refusing every `\r` would wrongly refuse a CRLF
+caller. Independent review found three mutants the first version of the suite did not
 kill: overwriting rather than accumulating the moved CI revisions, `COMMENT.match`
 becoming `.search`, and a widened comment marker. Each now has a refusal case that kills
-it, and the job-level structure checks came out of the same review. While
+it, and the job-level structure checks came out of the same review. A second review
+showed that a lone `\r` (and NEL, LS, PS) could hide a block scalar header, or a `run:`
+step, behind an apparent comment. That finding produced the rule 1 line-break guard and
+the whitespace-before-`#` requirement on `jobs:` and job keys, each with a refusal case
+and a killed mutant. While
 the line-count guard's proof was being written, it first passed vacuously, because a base
 with a final newline exposes appended lines to the per-line rule. The case now uses a
 base without a final newline, the one shape where only that guard can refuse. The real
