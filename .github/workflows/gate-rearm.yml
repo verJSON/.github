@@ -1250,7 +1250,7 @@ jobs:
       # it cannot grant authorization, and it never touches a check-run that a
       # dispatched review or an earlier failure path already owns.
       - name: Complete the authorization when no review was dispatched
-        if: always() && steps.arm.outputs.check_id != '' && steps.dispatch.outcome != 'success'
+        if: always() && steps.arm.outputs.check_id != '' && steps.dispatch.outcome != 'success' && steps.bootstrap-complete.outcome != 'success'
         env:
           ACTIONS_TOKEN: ${{ github.token }}
           CHECK_ID: ${{ steps.arm.outputs.check_id }}
@@ -1258,6 +1258,7 @@ jobs:
           EXPECTED_EXTERNAL_ID: ${{ steps.arm.outputs.external_id }}
           ARM_FAILURE_REASON: ${{ steps.arm.outputs.failure_reason }}
           AI_REVIEW_ENVIRONMENT: ${{ inputs.ai_review_environment || 'ai-review-app' }}
+          BOOTSTRAP_ELIGIBLE: ${{ steps.bootstrap.outputs.eligible || 'false' }}
         run: |
           set -euo pipefail
           [[ "$CHECK_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
@@ -1270,7 +1271,9 @@ jobs:
               echo "::error::refusing to terminalize an authorization check with unexpected identity"; exit 1;
             }
           [ "$(jq -r '.status // ""' <<<"$check")" = in_progress ] || exit 0
-          if [ "$ARM_FAILURE_REASON" = invalid_ai_review_app_private_key ]; then
+          if [ "${BOOTSTRAP_ELIGIBLE:-false}" = true ]; then
+            summary='The stale review caller bootstrap did not complete, so no authorization was granted and the stale review was not dispatched. Push a new head to retry the bootstrap proof.'
+          elif [ "$ARM_FAILURE_REASON" = invalid_ai_review_app_private_key ]; then
             summary="$(jq -nr --arg environment "$AI_REVIEW_ENVIRONMENT" '"AI_REVIEW_APP_PRIVATE_KEY is empty or invalid in environment \($environment); no App token was minted and no review was dispatched."')"
           elif [ "$ARM_FAILURE_REASON" = ai_review_environment_policy ]; then
             summary="$(jq -nr --arg environment "$AI_REVIEW_ENVIRONMENT" '"AI review environment policy failed for \($environment); no review was dispatched."')"

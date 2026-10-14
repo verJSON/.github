@@ -311,6 +311,25 @@ def main() -> int:
         "ai-merge authority persists an exact-head App approval and completes the check as success",
     )
 
+    terminalizer = steps.get("Complete the authorization when no review was dispatched", {})
+    report(
+        "steps.bootstrap-complete.outcome != 'success'" in terminalizer.get("if", ""),
+        "a completed bootstrap owns its check and is never terminalized again",
+    )
+    harness.reset_state()
+    result, _ = harness.run_step(
+        "Complete the authorization when no review was dispatched", Consumer(),
+        {"EXPECTED_EXTERNAL_ID": EXTERNAL_ID, "ARM_FAILURE_REASON": "", "AI_REVIEW_ENVIRONMENT": "ai-review-app",
+         "BOOTSTRAP_ELIGIBLE": "true"},
+    )
+    patches = [c for c in harness.recorded() if c["args"][:3] == ["api", "--method", "PATCH"]]
+    report(
+        result.returncode == 0 and len(patches) == 1 and "conclusion=failure" in patches[0]["args"]
+        and any(arg.startswith("output[summary]=The stale review caller bootstrap did not complete")
+                for arg in patches[0]["args"]),
+        "a failed bootstrap terminalizes its check as a bootstrap failure, never as success",
+    )
+
     if failures:
         print(f"{failures} review caller bootstrap check(s) failed")
         return 1
