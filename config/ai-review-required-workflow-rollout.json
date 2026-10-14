@@ -323,6 +323,7 @@
   "arm_property_migration": {
     "repositories": [
       "Verjson/.github",
+      "Verjson/AiB",
       "Verjson/verjson-agent-observer",
       "Verjson/verjson-agents",
       "Verjson/verjson-ai",
