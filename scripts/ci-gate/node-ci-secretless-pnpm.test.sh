@@ -8,7 +8,7 @@ fail() { printf 'not ok - %s\n' "$1" >&2; failures=$((failures + 1)); }
 validator="$(mktemp)"
 trap 'rm -f "$validator"; rm -rf "$fixture"' EXIT
 awk '/- name: Validate approved internal dependency lock/ { found = 1; next }
-  found && /python3 - <<'"'"'PY'"'"'/ { copying = 1; next }
+  found && /python3 -I - <<'"'"'PY'"'"'/ { copying = 1; next }
   copying && /^          PY$/ { exit }
   copying { sub(/^          /, ""); print }' "$workflow" > "$validator"
 fixture="$(mktemp -d)"
@@ -113,6 +113,8 @@ case "$1" in
   *) echo "test bubblewrap received unexpected bootstrap: $1" >&2; exit 1 ;;
 esac
 shift
+[ "${1-}" = "-I" ] || { echo 'test bubblewrap found no isolated trusted interpreter' >&2; exit 1; }
+shift
 [ "${1-}" = "-c" ] || { echo 'test bubblewrap found no trusted bootstrap source' >&2; exit 1; }
 shift
 bootstrap_source="${1-}"
@@ -199,7 +201,7 @@ fi
 python3 - "$workflow" "$valid/pnpm-lock.yaml" <<'PY' \
   && pass "registry-addressed private pnpm packages resolve locally in a credentialless, frozen, bounded, and cleaned install" \
   || fail "pnpm execution weakened the secretless handoff"
-import ast, sys, textwrap, yaml
+import ast, re, sys, textwrap, yaml
 doc = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 inputs = doc[True]["workflow_call"]["inputs"]
 assert inputs["package-manager"]["default"] == "npm"
@@ -232,7 +234,7 @@ validator = next(step for step in doc["jobs"]["acquire-secretless-dependencies"]
 rebuild = next(step for step in steps
                if step.get("name") == "Rebuild exact approved lifecycle packages without credentials")["run"]
 def parser_ast(script):
-    source = script.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    source = re.split(r"python3 (?:-I )?- <<'PY'\n", script, maxsplit=1)[1].rsplit("\nPY", 1)[0]
     tree = ast.parse(textwrap.dedent(source))
     function = next(node for node in ast.walk(tree)
                     if isinstance(node, ast.FunctionDef) and node.name == "pnpm_package_name")

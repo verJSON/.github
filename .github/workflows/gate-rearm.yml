@@ -838,9 +838,433 @@ jobs:
           # long-lived holds without paying for another same-head model review.
           retention-days: 90
 
+      # A stale protected review caller cannot authorize its own update: GitHub runs
+      # the default-branch caller, whose immutable verifier predates the canonical
+      # organization casing (#1696, ADR 0227). This arm runs the organization ruleset's
+      # current revision, so it alone can prove that a pull request is nothing but the
+      # byte-exact generated caller update to a newer canonical main commit. The proof
+      # is inline because a required workflow cannot rely on checking out its own
+      # revision. Any failed or unavailable proof leaves the ordinary dispatch in place.
+      - name: Classify stale review caller bootstrap
+        id: bootstrap
+        if: steps.arm.outputs.check_id != '' && steps.arm.outputs.explicit_rereview != 'true' && steps.arm.outputs.explicit_ai_review != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_HEAD_SHA: ${{ steps.arm.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          program="$RUNNER_TEMP/review-caller-bootstrap.py"
+          cat >"$program" <<'PY'
+          import base64
+          import hashlib
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          from datetime import date
+          from urllib.parse import quote
+
+          CANONICAL = "Verjson/.github"
+          # 65529002 made every review-path repository comparison ASCII-case-insensitive; a
+          # stale pin is one that predates it. Fixed: it defines which callers are stale.
+          CASING_REPAIR = "65529002f4fecf2a5bb634047b07ead3ff0bdeaa"
+          # The oldest review revision without a known, already-fixed authorization defect
+          # (12098a0e, #1650: the finalizer binds the check to the exact head). It contains
+          # CASING_REPAIR. Raise it whenever a review-path security fix lands on main.
+          MINIMUM_SAFE_REVIEW = "12098a0e495317699131e97f1b2e136c5297ccad"
+          CALLER = ".github/workflows/ai-review-merge.yml"
+          MAX_PATHS = 32
+          MAX_BLOB_BYTES = 262144
+          SHA = re.compile(r"[0-9a-f]{40}")
+          PIN = re.compile(rb"^    uses: Verjson/\.github/\.github/workflows/ai-review-merge\.yml@([0-9a-f]{40})$", re.M)
+          FRAGMENT = re.compile(r"NEXT/([0-9]{4}-[0-9]{2}-[0-9]{2})-issue-([1-9][0-9]{0,8}|[0-9]{8}T[0-9]{6}Z|[0-9a-f]{6,12})"
+                                r"-ai-review-caller-bootstrap\.md")
+          INPUTS = (
+              ("pr_number", True), ("expected_head_sha", True), ("authorization_check_id", True),
+              ("arm_run_id", True), ("arm_run_attempt", True), ("explicit_rereview", False),
+              ("review_policy", True),
+          )
+
+
+          class Ineligible(Exception):
+              pass
+
+
+          def require(condition, reason):
+              if condition is not True:
+                  raise Ineligible(reason)
+
+
+          def expression(name):
+              # Built in pieces so the Actions runner never evaluates the template.
+              return "$" + "{{ inputs." + name + " }}"
+
+
+          def render_caller(sha):
+              lines = [
+                  "# GENERATED FILE — do not edit by hand.",
+                  "# Regenerate with:",
+                  f"#   scripts/gen-ai-review-caller.sh {sha} > .github/workflows/ai-review-merge.yml",
+                  "name: AI review",
+                  "run-name: AI review authorization " + expression("authorization_check_id")
+                  + " from arm " + expression("arm_run_id") + "." + expression("arm_run_attempt"),
+                  "",
+                  "on:",
+                  "  workflow_dispatch:",
+                  "    inputs:",
+              ]
+              for name, required in INPUTS:
+                  lines += [f"      {name}:", f"        required: {'true' if required else 'false'}"]
+                  lines += ["        type: string"] if name != "explicit_rereview" else [
+                      "        type: boolean", "        default: false"]
+              lines += [
+                  "", "permissions:", "  actions: write", "  checks: write", "  contents: read",
+                  "  issues: write", "  pull-requests: write", "  statuses: read", "",
+                  "jobs:", "  review:",
+                  f"    uses: Verjson/.github/.github/workflows/ai-review-merge.yml@{sha}",
+                  "    secrets: inherit", "    with:", "      ai_review_environment: ai-review-app",
+                  f"      contract_ref: {sha}",
+              ]
+              lines += [f"      {name}: " + expression(name) for name, _ in INPUTS]
+              return ("\n".join(lines) + "\n").encode()
+
+
+          def render_fragment(date, identity, stale, contract):
+              # Byte-identical to scripts/gen-ai-review-caller-bootstrap-fragment.sh.
+              key = "issue" if re.fullmatch(r"[1-9][0-9]*", identity) else "id"
+              return (
+                  f"---\ndate: {date}\n{key}: {identity}\nimpact: patch\n"
+                  "title: Bootstrap the AI review caller to a current canonical revision\n---\n\n"
+                  f"Regenerate `.github/workflows/ai-review-merge.yml` at canonical Verjson/.github revision `{contract}`, "
+                  f"replacing `{stale}`, whose receipt verifier cannot authorize its own update. The organization "
+                  "authorization arm verified this byte-exact generated change under Verjson/.github ADR 0227.\n"
+              ).encode()
+
+
+          def api(path):
+              completed = subprocess.run(["gh", "api", path], capture_output=True, check=False)
+              require(completed.returncode == 0, f"GitHub API read failed: {shown(path)}")
+              try:
+                  return json.loads(completed.stdout)
+              except ValueError as error:
+                  raise Ineligible(f"GitHub API returned malformed JSON: {shown(path)}") from error
+
+
+          def shown(text):
+              # Paths and API routes are untrusted text; git permits newlines in paths, so a
+              # raw path could forge a workflow command in this privileged job's log.
+              return json.dumps(text)
+
+
+          def same_repository(left, right):
+              return isinstance(left, str) and left.casefold() == right.casefold()
+
+
+          def git_blob_sha(content):
+              return hashlib.sha1(b"blob %d\0" % len(content) + content).hexdigest()
+
+
+          def tree(repo, commit):
+              commit_object = api(f"repos/{repo}/git/commits/{commit}")
+              require(commit_object.get("sha") == commit, "commit object does not match its ID")
+              tree_sha = commit_object["tree"]["sha"]
+              require(SHA.fullmatch(tree_sha) is not None, "commit tree ID is malformed")
+              listing = api(f"repos/{repo}/git/trees/{tree_sha}?recursive=1")
+              require(listing.get("sha") == tree_sha, "tree listing does not match its ID")
+              require(listing.get("truncated") is False, "tree listing is truncated")
+              entries = {}
+              for entry in listing["tree"]:
+                  if entry["type"] == "tree":
+                      continue
+                  require(entry["path"] not in entries, "tree listing repeats a path")
+                  entries[entry["path"]] = (entry["mode"], entry["type"], entry["sha"])
+              return entries
+
+
+          def blob(repo, entry):
+              mode, kind, sha = entry
+              require(kind == "blob", "submodules and other non-blob entries may not change")
+              require(mode == "100644", "only regular non-executable files may change")
+              payload = api(f"repos/{repo}/git/blobs/{sha}")
+              require(payload.get("sha") == sha and payload.get("encoding") == "base64", "blob payload is malformed")
+              size = payload.get("size")
+              require(type(size) is int and 0 <= size <= MAX_BLOB_BYTES, "blob is too large")
+              content = base64.b64decode(payload["content"])
+              require(len(content) == size and git_blob_sha(content) == sha, "blob content does not match its ID")
+              return content
+
+
+          def pinned(content):
+              pins = PIN.findall(content)
+              require(len(pins) == 1, "review caller does not name exactly one canonical revision")
+              return pins[0].decode()
+
+
+          def compare(base, head):
+              comparison = api(f"repos/{CANONICAL}/compare/{base}...{head}")
+              require(comparison["base_commit"]["sha"] == base, "canonical comparison base is not exact")
+              return comparison
+
+
+          def contains(older, newer):
+              comparison = compare(older, newer)
+              status = comparison.get("status")
+              return comparison.get("behind_by") == 0 and (
+                  status == "identical"
+                  or (status == "ahead" and comparison["merge_base_commit"]["sha"] == older))
+
+
+          def verify(environment):
+              repo = environment["TARGET_REPO"]
+              pr_number = environment["PR_NUMBER"]
+              head = environment["EXPECTED_HEAD_SHA"]
+              branch = environment["DEFAULT_BRANCH"]
+              require(re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repo) is not None, "repository is malformed")
+              require(re.fullmatch(r"[1-9][0-9]*", pr_number) is not None, "pull request number is malformed")
+              require(SHA.fullmatch(head) is not None, "head is malformed")
+              require(re.fullmatch(r"[A-Za-z0-9._/-]+", branch) is not None and ".." not in branch,
+                      "default branch is malformed")
+
+              pull = api(f"repos/{repo}/pulls/{pr_number}")
+              require(pull.get("state") == "open", "pull request is not open")
+              require(pull["head"]["sha"] == head, "pull request head moved")
+              require(pull["base"]["ref"] == branch, "pull request does not target the default branch")
+              require(same_repository(pull["head"]["repo"]["full_name"], repo)
+                      and same_repository(pull["base"]["repo"]["full_name"], repo),
+                      "pull request crosses repositories")
+              changed_files = pull.get("changed_files")
+              require(type(changed_files) is int and 0 < changed_files <= MAX_PATHS, "pull request is too large")
+              listed = api(f"repos/{repo}/pulls/{pr_number}/files?per_page=100")
+              require(isinstance(listed, list) and len(listed) == changed_files, "pull request file list is incomplete")
+              names = {item["filename"] for item in listed}
+              require(len(names) == len(listed), "pull request file list repeats a path")
+              require(CALLER in names, "the pull request does not change the generated review caller")
+
+              protected = api(f"repos/{repo}/branches/{quote(branch, safe='')}")
+              require(protected.get("protected") is True, "default branch is not protected")
+              main = protected["commit"]["sha"]
+              require(SHA.fullmatch(main) is not None, "default branch tip is malformed")
+              comparison = api(f"repos/{repo}/compare/{main}...{head}")
+              require(comparison.get("status") == "ahead" and comparison.get("behind_by") == 0
+                      and comparison["base_commit"]["sha"] == main
+                      and comparison["merge_base_commit"]["sha"] == main,
+                      "head does not descend from the protected default branch tip")
+
+              base_tree = tree(repo, main)
+              head_tree = tree(repo, head)
+              changed = {path for path in base_tree.keys() | head_tree.keys()
+                         if base_tree.get(path) != head_tree.get(path)}
+              require(changed == names, "pull request file list disagrees with the exact trees")
+              require(CALLER in base_tree and CALLER in head_tree, "review caller is not modified in place")
+              base_caller = blob(repo, base_tree[CALLER])
+              head_caller = blob(repo, head_tree[CALLER])
+              stale = pinned(base_caller)
+              contract = pinned(head_caller)
+              require(stale != contract, "review caller revision is unchanged")
+              require(base_caller == render_caller(stale), "default-branch review caller is not generated")
+              require(head_caller == render_caller(contract), "proposed review caller is not generated")
+              # Consumer contract tests mirror the caller pin and digest. A mirror may change only by
+              # swapping exactly those tokens; workflow and action configuration may not change at all.
+              swaps = {stale.encode(): contract.encode(),
+                       hashlib.sha256(base_caller).hexdigest().encode(): hashlib.sha256(head_caller).hexdigest().encode()}
+              swap = re.compile(b"|".join(re.escape(token) for token in sorted(swaps, key=len, reverse=True)))
+              added = sorted(path for path in changed if path not in base_tree)
+              require(len(added) <= 1, "the pull request adds more than one file")
+              for path in added:
+                  match = FRAGMENT.fullmatch(path)
+                  require(match is not None, f"{shown(path)} is not the generated bootstrap changelog fragment")
+                  try:
+                      require(date.fromisoformat(match[1]).isoformat() == match[1], f"{shown(path)} has an invalid date")
+                  except ValueError as error:
+                      raise Ineligible(f"{shown(path)} has an invalid date") from error
+                  require(blob(repo, head_tree[path]) == render_fragment(match[1], match[2], stale, contract),
+                          f"{shown(path)} is not the generated bootstrap changelog fragment")
+              for path in sorted(changed - {CALLER} - set(added)):
+                  base_entry, head_entry = base_tree.get(path), head_tree.get(path)
+                  require(base_entry is not None and head_entry is not None, f"{shown(path)} is not modified in place")
+                  # GitHub matches these names case-insensitively on case-insensitive checkouts.
+                  folded = path.casefold()
+                  require(not folded.startswith(".github/") and folded.rsplit("/", 1)[-1] not in ("action.yml", "action.yaml"),
+                          f"{shown(path)} is workflow or action configuration")
+                  before = blob(repo, base_entry)
+                  after = blob(repo, head_entry)
+                  require(after != before and after == swap.sub(lambda match: swaps[match.group(0)], before),
+                          f"{shown(path)} changes more than the review caller pin and digest")
+
+              floor_to_stale = compare(CASING_REPAIR, stale)
+              require(floor_to_stale.get("status") in ("behind", "diverged"),
+                      "default-branch review caller already contains the casing repair")
+              require(contains(MINIMUM_SAFE_REVIEW, contract), "proposed revision predates the minimum safe review revision")
+              require(contains(stale, contract), "proposed revision does not descend from the stale revision")
+              require(contains(contract, "main"), "proposed revision is not on canonical main")
+              return {"contract_sha": contract, "head_sha": head, "main_sha": main,
+                      "paths": sorted(changed), "stale_sha": stale}
+
+
+          def main(arguments):
+              try:
+                  if not arguments:
+                      print(json.dumps(verify(os.environ), sort_keys=True))
+                      return 0
+                  if len(arguments) == 2 and arguments[0] == "render-caller" and SHA.fullmatch(arguments[1]):
+                      sys.stdout.buffer.write(render_caller(arguments[1]))
+                      return 0
+              except Ineligible as error:
+                  print(f"not a stale review caller bootstrap: {error}", file=sys.stderr)
+                  return 1
+              except Exception as error:  # noqa: BLE001 - any unexpected shape is ineligible
+                  print(f"stale review caller bootstrap proof failed: {type(error).__name__}", file=sys.stderr)
+                  return 1
+              print("usage: review-caller-bootstrap.py [render-caller <sha>]", file=sys.stderr)
+              return 2
+
+
+          sys.exit(main(sys.argv[1:]))
+          PY
+          eligible=false
+          stale_sha=''
+          contract_sha=''
+          if proof="$(python3 -I "$program" 2>"$RUNNER_TEMP/review-caller-bootstrap.stderr")"; then
+            stale_sha="$(jq -r '.stale_sha // ""' <<<"$proof" 2>/dev/null || true)"
+            contract_sha="$(jq -r '.contract_sha // ""' <<<"$proof" 2>/dev/null || true)"
+            if [[ "$stale_sha" =~ ^[0-9a-f]{40}$ ]] && [[ "$contract_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              eligible=true
+            fi
+          else
+            # The reason can quote untrusted paths: print it with workflow commands disabled.
+            token="$(openssl rand -hex 16 2>/dev/null || true)"
+            if [[ "$token" =~ ^[0-9a-f]{32}$ ]]; then
+              echo "::stop-commands::$token"
+              head -c 400 "$RUNNER_TEMP/review-caller-bootstrap.stderr" || true
+              echo
+              echo "::$token::"
+            fi
+          fi
+          if [ "$eligible" != true ]; then
+            stale_sha=''
+            contract_sha=''
+          fi
+          printf 'eligible=%s\nstale_sha=%s\ncontract_sha=%s\n' "$eligible" "$stale_sha" "$contract_sha" >>"$GITHUB_OUTPUT"
+
+      - name: Mint stale review caller bootstrap App token
+        id: bootstrap-app-token
+        if: steps.bootstrap.outputs.eligible == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ vars.AI_REVIEW_CLIENT_ID }}
+          private-key: ${{ secrets.AI_REVIEW_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: read
+          permission-pull-requests: write
+
+      # Same check, same receipt, same App identity, and the same authority rule as
+      # ordinary completion: approval only under ai-approve or ai-merge, otherwise the
+      # human path. The stale privileged merge caller cannot verify this receipt, so
+      # the bootstrap never grants terminal promotion: it records the approval-only
+      # ai-approve marker even under ai-merge. Under either approving authority the App
+      # approval has ADR 0079's native-merge effect (auto-merge or a writer's merge).
+      - name: Complete stale review caller bootstrap authorization
+        id: bootstrap-complete
+        if: steps.bootstrap.outputs.eligible == 'true'
+        env:
+          ACTIONS_TOKEN: ${{ github.token }}
+          APP_TOKEN: ${{ steps.bootstrap-app-token.outputs.token }}
+          MINTED_APP_SLUG: ${{ steps.bootstrap-app-token.outputs.app-slug }}
+          INSTALLATION_ID: ${{ steps.bootstrap-app-token.outputs.installation-id }}
+          BOOTSTRAP_ELIGIBLE: ${{ steps.bootstrap.outputs.eligible }}
+          STALE_SHA: ${{ steps.bootstrap.outputs.stale_sha }}
+          CONTRACT_SHA: ${{ steps.bootstrap.outputs.contract_sha }}
+          CHECK_ID: ${{ steps.arm.outputs.check_id }}
+          EXPECTED_HEAD_SHA: ${{ steps.arm.outputs.head_sha }}
+          EXPECTED_EXTERNAL_ID: ${{ steps.arm.outputs.external_id }}
+          REVIEW_POLICY: ${{ steps.arm.outputs.review_policy }}
+        run: |
+          set -euo pipefail
+          [ "$BOOTSTRAP_ELIGIBLE" = true ] || { echo "::error::stale review caller bootstrap was not proven"; exit 1; }
+          [[ "$CHECK_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$STALE_SHA" =~ ^[0-9a-f]{40}$ ]] && [[ "$CONTRACT_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$INSTALLATION_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::bootstrap App installation identity is unavailable"; exit 1;
+          }
+          [ -n "$APP_TOKEN" ] && [ "$MINTED_APP_SLUG" = "$APP_SLUG" ] || {
+            echo "::error::minted App does not match the authorization App"; exit 1;
+          }
+          # Re-prove immediately before granting: the head, trees, or canonical main may have moved.
+          recheck_errors="$RUNNER_TEMP/review-caller-bootstrap-recheck.stderr"
+          proof="$(GH_TOKEN="$ACTIONS_TOKEN" python3 -I "$RUNNER_TEMP/review-caller-bootstrap.py" 2>"$recheck_errors")" || {
+            token="$(openssl rand -hex 16 2>/dev/null || true)"
+            if [[ "$token" =~ ^[0-9a-f]{32}$ ]]; then
+              echo "::stop-commands::$token"
+              head -c 400 "$recheck_errors" || true
+              echo
+              echo "::$token::"
+            fi
+            echo "::error::stale review caller bootstrap proof no longer holds"; exit 1;
+          }
+          jq -e --arg stale "$STALE_SHA" --arg contract "$CONTRACT_SHA" --arg head "$EXPECTED_HEAD_SHA" \
+            '.stale_sha == $stale and .contract_sha == $contract and .head_sha == $head' <<<"$proof" >/dev/null || {
+              echo "::error::stale review caller bootstrap proof changed"; exit 1;
+            }
+          check="$(GH_TOKEN="$ACTIONS_TOKEN" gh api "repos/$TARGET_REPO/check-runs/$CHECK_ID")"
+          jq -e --argjson id "$CHECK_ID" --arg head "$EXPECTED_HEAD_SHA" --arg external "$EXPECTED_EXTERNAL_ID" '
+            .id == $id and .name == "AI review authorization" and .head_sha == $head and
+            .external_id == $external and .app.id == 15368 and .app.slug == "github-actions" and
+            .status == "in_progress" and .conclusion == null
+          ' <<<"$check" >/dev/null || {
+            echo "::error::authorization check is not this arm's in-progress exact-head check"; exit 1;
+          }
+          [[ "$REVIEW_POLICY" =~ ^[A-Za-z0-9_-]{1,2048}$ ]] || { echo "::error::review policy envelope is invalid"; exit 1; }
+          padded="$(printf '%s' "$REVIEW_POLICY" | tr -- '-_' '+/')"
+          while [ $(( ${#padded} % 4 )) -ne 0 ]; do padded="$padded="; done
+          policy_json="$(printf '%s' "$padded" | base64 -d)"
+          authority="$(jq -er '(.authority // "human") | select(. == "human" or . == "ai-approve" or . == "ai-merge")' <<<"$policy_json")" || {
+            echo "::error::receipt authority is invalid"; exit 1;
+          }
+          transition="the generated review caller moves from stale canonical revision $STALE_SHA to $CONTRACT_SHA"
+          conclusion=neutral
+          title='Stale caller bootstrap verified; human path ready'
+          summary="The trusted arm verified that this exact head only makes the byte-exact generated update where $transition. Receipt authority is $authority, so no App approval was requested; GitHub branch protection remains authoritative."
+          if [ "$authority" = ai-approve ] || [ "$authority" = ai-merge ]; then
+            approval_body="$(printf '%s\n\n%s\n%s\n%s\n%s' \
+              "Stale review caller bootstrap approved this exact head: $transition." \
+              "<!-- ai-review-authorization:$CHECK_ID -->" "<!-- ai-review-head:$EXPECTED_HEAD_SHA -->" \
+              "<!-- ai-review-run:$GITHUB_RUN_ID -->" "<!-- ai-review-bootstrap:$STALE_SHA:$CONTRACT_SHA -->")"
+            # $head, $login, $check, $stale, and $contract are jq arguments, not shell expansion.
+            # shellcheck disable=SC2016
+            approval_filter='select(.state == "APPROVED" and .commit_id == $head and .user.login == $login and
+              (.body | contains("ai-review-authorization:" + $check)) and
+              (.body | contains("ai-review-bootstrap:" + $stale + ":" + $contract))) | .id | select(type == "number")'
+            if approval="$(GH_TOKEN="$APP_TOKEN" gh api --method POST "repos/$TARGET_REPO/pulls/$PR_NUMBER/reviews" \
+                 -f event=APPROVE -f commit_id="$EXPECTED_HEAD_SHA" -f body="$approval_body")" &&
+               approval_id="$(jq -er --arg head "$EXPECTED_HEAD_SHA" --arg login "${APP_SLUG}[bot]" --arg check "$CHECK_ID" \
+                 --arg stale "$STALE_SHA" --arg contract "$CONTRACT_SHA" "$approval_filter" <<<"$approval")" &&
+               persisted="$(GH_TOKEN="$APP_TOKEN" gh api "repos/$TARGET_REPO/pulls/$PR_NUMBER/reviews/$approval_id")" &&
+               [ "$(jq -er --arg head "$EXPECTED_HEAD_SHA" --arg login "${APP_SLUG}[bot]" --arg check "$CHECK_ID" \
+                 --arg stale "$STALE_SHA" --arg contract "$CONTRACT_SHA" "$approval_filter" <<<"$persisted")" = "$approval_id" ]; then
+              conclusion=success
+              title='Stale caller bootstrap approved for exact head'
+              summary="$(printf '%s\n\n%s' \
+                "The dedicated App approved this exact head because $transition and nothing else changes. Ordinary required CI and branch protection remain authoritative." \
+                "<!-- ai-review-authorized:v1:$CHECK_ID:$EXPECTED_HEAD_SHA:ai-approve -->")"
+            else
+              title='Stale caller bootstrap approval unavailable; human path ready'
+              summary="The bootstrap proof held, but no exact-head App approval was persisted and verified. Deterministic policy is green and a human approval may still authorize merge."
+            fi
+          fi
+          patched="$(GH_TOKEN="$ACTIONS_TOKEN" gh api --method PATCH "repos/$TARGET_REPO/check-runs/$CHECK_ID" \
+            -f status=completed -f conclusion="$conclusion" \
+            -f "output[title]=$title" -f "output[summary]=$summary")"
+          jq -e --argjson id "$CHECK_ID" --arg conclusion "$conclusion" \
+            '.id == $id and .status == "completed" and .conclusion == $conclusion' <<<"$patched" >/dev/null || {
+              echo "::error::authorization check completion was not confirmed"; exit 1;
+            }
+
       - name: Dispatch trusted review after receipt publication
         id: dispatch
-        if: steps.arm.outputs.check_id != ''
+        if: steps.arm.outputs.check_id != '' && steps.bootstrap.outputs.eligible != 'true'
         env:
           ACTIONS_TOKEN: ${{ github.token }}
           CHECK_ID: ${{ steps.arm.outputs.check_id }}
@@ -898,7 +1322,7 @@ jobs:
       # it cannot grant authorization, and it never touches a check-run that a
       # dispatched review or an earlier failure path already owns.
       - name: Complete the authorization when no review was dispatched
-        if: always() && steps.arm.outputs.check_id != '' && steps.dispatch.outcome != 'success'
+        if: always() && steps.arm.outputs.check_id != '' && steps.dispatch.outcome != 'success' && steps.bootstrap-complete.outcome != 'success'
         env:
           ACTIONS_TOKEN: ${{ github.token }}
           CHECK_ID: ${{ steps.arm.outputs.check_id }}
@@ -906,6 +1330,7 @@ jobs:
           EXPECTED_EXTERNAL_ID: ${{ steps.arm.outputs.external_id }}
           ARM_FAILURE_REASON: ${{ steps.arm.outputs.failure_reason }}
           AI_REVIEW_ENVIRONMENT: ${{ inputs.ai_review_environment || 'ai-review-app' }}
+          BOOTSTRAP_ELIGIBLE: ${{ steps.bootstrap.outputs.eligible || 'false' }}
         run: |
           set -euo pipefail
           [[ "$CHECK_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
@@ -918,7 +1343,9 @@ jobs:
               echo "::error::refusing to terminalize an authorization check with unexpected identity"; exit 1;
             }
           [ "$(jq -r '.status // ""' <<<"$check")" = in_progress ] || exit 0
-          if [ "$ARM_FAILURE_REASON" = invalid_ai_review_app_private_key ]; then
+          if [ "${BOOTSTRAP_ELIGIBLE:-false}" = true ]; then
+            summary='The stale review caller bootstrap did not complete, so no authorization was granted and the stale review was not dispatched. Push a new head to retry the bootstrap proof.'
+          elif [ "$ARM_FAILURE_REASON" = invalid_ai_review_app_private_key ]; then
             summary="$(jq -nr --arg environment "$AI_REVIEW_ENVIRONMENT" '"AI_REVIEW_APP_PRIVATE_KEY is empty or invalid in environment \($environment); no App token was minted and no review was dispatched."')"
           elif [ "$ARM_FAILURE_REASON" = ai_review_environment_policy ]; then
             summary="$(jq -nr --arg environment "$AI_REVIEW_ENVIRONMENT" '"AI review environment policy failed for \($environment); no review was dispatched."')"

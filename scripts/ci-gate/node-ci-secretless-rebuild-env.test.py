@@ -38,12 +38,30 @@ SENSITIVE_ENV = COMMAND_FILE_ENV + (
     "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
     "ACTIONS_ID_TOKEN_REQUEST_URL",
 )
+SANDBOX_NPM_CONFIG_DIRECTORY_LINE = "config_directory = '/tmp/npm-config'\n"
 EXPECTED_SANDBOX_ENTRYPOINT = (
     "import os, sys\n"
     "max_fd = os.sysconf('SC_OPEN_MAX')\n"
     "if max_fd < 3: raise SystemExit('invalid file descriptor limit')\n"
     "os.closerange(3, max_fd)\n"
+    + SANDBOX_NPM_CONFIG_DIRECTORY_LINE
+    + "os.mkdir(config_directory, 0o700)\n"
+    "for config_role in ('user', 'global'):\n"
+    "    config_path = f'{config_directory}/{config_role}.npmrc'\n"
+    "    os.close(os.open(\n"
+    "        config_path,\n"
+    "        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,\n"
+    "        0o600,\n"
+    "    ))\n"
+    "    os.environ[f'NPM_CONFIG_{config_role.upper()}CONFIG'] = config_path\n"
+    "    os.environ[f'npm_config_{config_role}config'] = config_path\n"
     "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
+)
+NPM_CONFIG_ENVIRONMENT_NAMES = (
+    "NPM_CONFIG_USERCONFIG",
+    "npm_config_userconfig",
+    "NPM_CONFIG_GLOBALCONFIG",
+    "npm_config_globalconfig",
 )
 
 
@@ -205,6 +223,73 @@ def candidate_variables_for_script(script, requires_services):
     return namespace["script_env"]
 
 
+# Modules the rebuild step's trusted interpreters import, plus the import
+# closure each interpreter actually resolves for them. The trusted interpreters
+# run isolated, so a same-named file in the checkout must never be imported.
+HOSTILE_IMPORT_SEEDS = (
+    "errno",
+    "json",
+    "pathlib",
+    "random",
+    "re",
+    "shutil",
+    "stat",
+    "tempfile",
+    "yaml",
+)
+HOSTILE_IMPORT_MARKER_PREFIX = ".hostile-import-"
+
+
+def trusted_interpreter_import_closure(interpreter):
+    probe = (
+        "import sys\n"
+        "before = set(sys.modules)\n"
+        f"for name in {HOSTILE_IMPORT_SEEDS!r}:\n"
+        "    try:\n"
+        "        __import__(name)\n"
+        "    except ImportError:\n"
+        "        pass\n"
+        "loaded = {name.partition('.')[0] for name in set(sys.modules) - before}\n"
+        "names = (loaded | set(" + repr(HOSTILE_IMPORT_SEEDS) + ")) - set(sys.builtin_module_names)\n"
+        "print('\\n'.join(sorted(name for name in names if name.isidentifier())))\n"
+    )
+    result = subprocess.run(
+        [interpreter, "-I", "-c", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    return set(result.stdout.split())
+
+
+def plant_hostile_modules(workspace):
+    names = set()
+    for interpreter in ("/usr/bin/python3", shutil.which("python3")):
+        if interpreter is not None:
+            names |= trusted_interpreter_import_closure(interpreter)
+    for name in names:
+        (workspace / f"{name}.py").write_text(
+            "with open("
+            f"'node_modules/{HOSTILE_IMPORT_MARKER_PREFIX}{name}', 'a', encoding='utf-8'"
+            ") as hostile_marker:\n"
+            "    hostile_marker.write('executed\\n')\n",
+            encoding="utf-8",
+        )
+    return names
+
+
+def assert_no_hostile_imports(workspace):
+    executed = sorted(
+        path.name.removeprefix(HOSTILE_IMPORT_MARKER_PREFIX)
+        for path in (workspace / "node_modules").glob(f"{HOSTILE_IMPORT_MARKER_PREFIX}*")
+    )
+    assert not executed, (
+        "a trusted rebuild interpreter imported a module from the untrusted checkout: "
+        f"{executed!r}"
+    )
+
+
 def run_rebuild(
     step,
     fixture,
@@ -316,6 +401,9 @@ def run_rebuild(
         "        command_file.write(f\"BASH_ENV={Path.cwd() / 'node_modules/malicious-bash-env'}\\n\")\n"
         + hidden_path_checks
         + "hidden_path_writes = locals().get('hidden_path_writes', [])\n"
+        "lifecycle_output = Path('node_modules/.lifecycle-output')\n"
+        "lifecycle_output.unlink(missing_ok=True)\n"
+        "lifecycle_output.write_text('built\\n', encoding='utf-8')\n"
         "Path('node_modules/.contract-capture.json').write_text(json.dumps({\n"
         "    'onnxruntime_node_install': os.environ.get('ONNXRUNTIME_NODE_INSTALL', '<unset>'),\n"
         "    'argv': invocation,\n"
@@ -328,7 +416,18 @@ def run_rebuild(
         "    'home': os.environ.get('HOME'),\n"
         "    'runner_temp': os.environ.get('RUNNER_TEMP'),\n"
         "    'github_workspace': os.environ.get('GITHUB_WORKSPACE'),\n"
-        "    'npm_userconfig': os.environ.get('npm_config_userconfig'),\n"
+        "    'npm_config_paths': {name: os.environ.get(name) for name in "
+        f"{NPM_CONFIG_ENVIRONMENT_NAMES!r}}},\n"
+        "    'npm_config_directory_mode': Path(os.environ['npm_config_userconfig']).parent.stat().st_mode & 0o777,\n"
+        "    'npm_config_file_metadata': {\n"
+        "        role: {\n"
+        "            'mode': Path(os.environ[f'npm_config_{role}config']).stat().st_mode & 0o777,\n"
+        "            'size': Path(os.environ[f'npm_config_{role}config']).stat().st_size,\n"
+        "            'is_file': Path(os.environ[f'npm_config_{role}config']).is_file(),\n"
+        "        }\n"
+        "        for role in ('user', 'global')\n"
+        "    },\n"
+        "    'lifecycle_output_mode': lifecycle_output.stat().st_mode & 0o777,\n"
         "    'visible_sensitive_ancestors': sorted(visible),\n"
         "    'readable_processes': readable_processes,\n"
         "    'read_errors': read_errors,\n"
@@ -372,8 +471,12 @@ def run_rebuild(
     capture.unlink(missing_ok=True)
     invocation_log.unlink(missing_ok=True)
     marker.unlink(missing_ok=True)
+    for hostile_marker in (workspace / "node_modules").glob(f"{HOSTILE_IMPORT_MARKER_PREFIX}*"):
+        hostile_marker.unlink()
+    plant_hostile_modules(workspace)
 
     bwrap_stub = stub / "bwrap"
+    stub_sandbox_tmp = fixture / "sandbox-tmp"
     if not real_bwrap:
         if package_manager == "npm":
             expected_lifecycle = ["npm", "rebuild"]
@@ -385,6 +488,7 @@ def run_rebuild(
             "import json\n"
             "import os\n"
             "from pathlib import Path\n"
+            "import shutil\n"
             "import sys\n"
             "arguments = sys.argv[1:]\n"
             "separator = arguments.index('--')\n"
@@ -417,16 +521,27 @@ def run_rebuild(
             f"{str(tool_bin)!r})\n"
             "environment['TEST_HARNESS_PID'] = str(os.getppid())\n"
             "command = arguments[separator + 1:]\n"
-            "if len(command) < 4 or command[:2] != ['/usr/bin/python3', '-c']:\n"
-            "    raise SystemExit('trusted Python bootstrap is missing')\n"
+            "if len(command) < 5 or command[:3] != ['/usr/bin/python3', '-I', '-c']:\n"
+            "    raise SystemExit('trusted isolated Python bootstrap is missing')\n"
             f"expected_bootstrap = {EXPECTED_SANDBOX_ENTRYPOINT!r}\n"
-            "if command[2] != expected_bootstrap:\n"
+            "if command[3] != expected_bootstrap:\n"
             "    raise SystemExit('unexpected trusted Python bootstrap')\n"
             f"expected_lifecycle = {expected_lifecycle!r}\n"
-            "if command[3:] != expected_lifecycle:\n"
-            "    raise SystemExit(f'unexpected lifecycle command: {command[3:]!r}')\n"
+            "if command[4:] != expected_lifecycle:\n"
+            "    raise SystemExit(f'unexpected lifecycle command: {command[4:]!r}')\n"
             "arguments_receipt = {'options': options, 'resolved_sources': resolved_sources, 'command': command}\n"
             "Path(__file__).with_name('bwrap-arguments.json').write_text(json.dumps(arguments_receipt))\n"
+            "# Emulate the fresh `--tmpfs /tmp` with a per-run private directory so\n"
+            "# the bootstrap's fixed sandbox paths never touch the host /tmp.\n"
+            f"sandbox_tmp = Path({str(stub_sandbox_tmp)!r})\n"
+            "shutil.rmtree(sandbox_tmp, ignore_errors=True)\n"
+            "sandbox_tmp.mkdir(mode=0o700)\n"
+            f"tmpfs_line = {SANDBOX_NPM_CONFIG_DIRECTORY_LINE!r}\n"
+            "if command[3].count(tmpfs_line) != 1:\n"
+            "    raise SystemExit('sandbox npm config directory is not on the private tmpfs')\n"
+            "command[3] = command[3].replace(\n"
+            "    tmpfs_line, f\"config_directory = {str(sandbox_tmp / 'npm-config')!r}\\n\"\n"
+            ")\n"
             "os.execvpe(command[0], command, environment)\n",
             encoding="utf-8",
         )
@@ -471,6 +586,7 @@ def run_rebuild(
         check=False,
     )
     shutil.rmtree(tool_cache)
+    assert_no_hostile_imports(workspace)
     return result, capture, command_files, marker, bwrap_stub.with_name("bwrap-arguments.json")
 
 
@@ -496,7 +612,7 @@ def assert_no_lifecycle_command_file_access(command_files, marker):
     )
 
 
-def assert_rebuild_capture(capture, package_manager, onnx_value):
+def assert_rebuild_capture(capture, package_manager, onnx_value, *, config_directory):
     observed = json.loads(capture.read_text(encoding="utf-8"))
     expected = {
         "onnxruntime_node_install": onnx_value,
@@ -511,14 +627,40 @@ def assert_rebuild_capture(capture, package_manager, onnx_value):
         "home": "/tmp/home",
         "runner_temp": "/tmp",
         "github_workspace": "/tmp/verjson-secretless-workspace",
-        "npm_userconfig": "/dev/null",
         "visible_sensitive_ancestors": [],
         "read_errors": [],
         "hidden_path_writes": [],
     }
-    assert all(observed.get(key) == value for key, value in expected.items() if key != "readable_processes"), (
-        f"unexpected package-manager execution environment: {observed!r}"
+    assert all(
+        observed.get(key) == value for key, value in expected.items()
+        if key != "readable_processes"
+    ), f"unexpected package-manager execution environment: {observed!r}"
+    user_config = f"{config_directory}/user.npmrc"
+    global_config = f"{config_directory}/global.npmrc"
+    assert user_config != global_config
+    assert observed.get("npm_config_paths") == {
+        "NPM_CONFIG_USERCONFIG": user_config,
+        "npm_config_userconfig": user_config,
+        "NPM_CONFIG_GLOBALCONFIG": global_config,
+        "npm_config_globalconfig": global_config,
+    }, (
+        "npm user and global configs must be distinct private files in the credentialless "
+        f"sandbox under both environment spellings: {observed.get('npm_config_paths')!r}"
     )
+    assert observed.get("npm_config_directory_mode") == 0o700, (
+        "npm config directory must be private to the sandbox: "
+        f"{observed.get('npm_config_directory_mode')!r}"
+    )
+    runner_umask = os.umask(0)
+    os.umask(runner_umask)
+    assert observed.get("lifecycle_output_mode") == 0o666 & ~runner_umask, (
+        "the sandbox bootstrap must not change the umask lifecycle scripts inherit: "
+        f"{observed.get('lifecycle_output_mode')!r}"
+    )
+    assert observed.get("npm_config_file_metadata") == {
+        "user": {"mode": 0o600, "size": 0, "is_file": True},
+        "global": {"mode": 0o600, "size": 0, "is_file": True},
+    }, f"npm configs must be distinct empty private files: {observed.get('npm_config_file_metadata')!r}"
     invocation_log = capture.with_name(".package-manager-invocations.jsonl")
     invocations = [
         json.loads(line) for line in invocation_log.read_text(encoding="utf-8").splitlines()
@@ -534,9 +676,9 @@ def assert_bubblewrap_arguments(arguments_path, workspace, package_manager):
         "corepack", "pnpm", "rebuild", "onnxruntime-node"
     ]
     command = receipt["command"]
-    assert command[:2] == ["/usr/bin/python3", "-c"]
-    assert command[2] == EXPECTED_SANDBOX_ENTRYPOINT
-    assert command[3:] == expected_lifecycle
+    assert command[:3] == ["/usr/bin/python3", "-I", "-c"], "sandbox bootstrap must run isolated"
+    assert command[3] == EXPECTED_SANDBOX_ENTRYPOINT
+    assert command[4:] == expected_lifecycle
     for option in (
         "--unshare-user",
         "--unshare-pid",
@@ -555,6 +697,10 @@ def assert_bubblewrap_arguments(arguments_path, workspace, package_manager):
             arguments[index:index + 2] == ["--tmpfs", target]
             for index in range(len(arguments) - 1)
         ), f"host directory is not masked: {target}"
+    assert not any(
+        value == "/tmp/npm-config" or value.startswith("/tmp/npm-config/")
+        for value in arguments
+    ), "the sandbox npm config directory must be created by the bootstrap on the fresh /tmp tmpfs"
     root_tmpfs_index = arguments.index("--tmpfs")
     assert arguments[root_tmpfs_index + 1] == "/", "host root is not masked"
     readonly_bind_index = next(
@@ -666,7 +812,68 @@ def run_consumer_descriptor_probe():
             os.close(git_descriptor)
 
 
+def assert_npm_config_paths_load_independently():
+    npm = shutil.which("npm")
+    if npm is None:
+        print("npm config probe skipped: npm is not installed on this runner")
+        return
+
+    with tempfile.TemporaryDirectory() as temporary:
+        config_root = Path(temporary)
+        home = config_root / "home"
+        home.mkdir()
+        clean_environment = {
+            name: value
+            for name, value in os.environ.items()
+            if name != "BASH_ENV"
+            and not name.lower().startswith("npm_config_")
+            and name.upper() not in {sensitive.upper() for sensitive in SENSITIVE_ENV}
+        }
+        clean_environment.update({"HOME": str(home), "CI": "true"})
+
+        def run_npm_version(user_config, global_config):
+            return subprocess.run(
+                [npm, "--version"],
+                check=False,
+                capture_output=True,
+                env={
+                    **clean_environment,
+                    "NPM_CONFIG_USERCONFIG": str(user_config),
+                    "NPM_CONFIG_GLOBALCONFIG": str(global_config),
+                },
+                text=True,
+            )
+
+        user_config = config_root / "npm-userconfig"
+        global_config = config_root / "npm-globalconfig"
+        user_config.write_text("", encoding="utf-8")
+        global_config.write_text("", encoding="utf-8")
+        distinct = run_npm_version(user_config, global_config)
+        assert distinct.returncode == 0, (
+            "npm must accept separate empty user and global config files: "
+            f"{distinct.stdout}{distinct.stderr}"
+        )
+
+        # Rejecting one path for both roles is a per-release npm behavior
+        # (#1749), not a version-number property: npm 11.8.0 accepts it while
+        # npm 11.19.0 rejects it. The distinct-path contract above is the
+        # invariant; this only characterizes the failure when npm exhibits it.
+        duplicate = run_npm_version("/dev/null", "/dev/null")
+        duplicate_output = duplicate.stdout + duplicate.stderr
+        if duplicate.returncode == 0:
+            print(
+                f"npm duplicate-config probe skipped: npm {distinct.stdout.strip()} "
+                "accepts one path for both user and global configs"
+            )
+            return
+        assert "double-loading config" in duplicate_output, (
+            "npm rejected one shared user/global config path for an unexpected reason: "
+            f"exit={duplicate.returncode}, output={duplicate_output!r}"
+        )
+
+
 def main():
+    assert_npm_config_paths_load_independently()
     invalid_values = (
         {"NODE_AUTH_TOKEN": "secret"},
         {"API_KEY": "secret"},
@@ -809,7 +1016,7 @@ def main():
             assert 'bind_source(workspace, sandbox_workspace, writable=True)' in service_plan_step["run"]
             assert 'bind_source(git_metadata, f"{sandbox_workspace}/.git")' in service_plan_step["run"]
             assert '"--chdir", str(sandbox_directory), "--",' in service_plan_step["run"]
-            assert '"/usr/bin/python3", "-c", sandbox_entrypoint' in service_plan_step["run"]
+            assert '"/usr/bin/python3", "-I", "-c", sandbox_entrypoint' in service_plan_step["run"]
             assert "pass_fds=tuple(" in service_plan_step["run"]
             assert "global_config_file.fileno()" in service_plan_step["run"]
         if workflow_path == PROTECTED_WORKFLOW:
@@ -1257,7 +1464,9 @@ def main():
                     step, fixture, {}, package_manager=package_manager
                 )
                 assert result.returncode == 0, result.stderr
-                assert_rebuild_capture(capture, package_manager, "<unset>")
+                assert_rebuild_capture(
+                    capture, package_manager, "<unset>", config_directory=fixture / "sandbox-tmp/npm-config"
+                )
                 assert_bubblewrap_arguments(arguments_path, fixture / "runner-home/workspace", package_manager)
                 assert_no_lifecycle_command_file_access(command_files, marker)
 
@@ -1268,7 +1477,9 @@ def main():
                     package_manager=package_manager,
                 )
                 assert result.returncode == 0, result.stderr
-                assert_rebuild_capture(capture, package_manager, "skip")
+                assert_rebuild_capture(
+                    capture, package_manager, "skip", config_directory=fixture / "sandbox-tmp/npm-config"
+                )
                 assert_bubblewrap_arguments(arguments_path, fixture / "runner-home/workspace", package_manager)
                 assert_no_lifecycle_command_file_access(command_files, marker)
 
@@ -1340,7 +1551,7 @@ def main():
                         probe_hidden_paths=True,
                     )
                     assert result.returncode == 0, result.stderr
-                    assert_rebuild_capture(capture, package_manager, "skip")
+                    assert_rebuild_capture(capture, package_manager, "skip", config_directory="/tmp/npm-config")
                     assert_no_lifecycle_command_file_access(command_files, marker)
         run_consumer_descriptor_probe()
 

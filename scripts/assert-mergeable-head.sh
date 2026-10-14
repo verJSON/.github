@@ -25,13 +25,20 @@
 #           fails, and it says so in those words.
 #   Gate C  no other check on the head is pending or non-passing.
 #
+# Gates A and C set aside one shape only: a CANCELLED check run whose workflow run
+# was cancelled and then superseded by a later successful run of the same workflow,
+# event, and head that reports that check as SUCCESS or not at all (ADR 0226, #1754)
+# -- the draft-then-ready concurrency cancel. No conclusion is added to the passing
+# set, and Gate B always reads the raw inventory.
+#
 # Prints "true" and exits 0 only when all three hold. Every other outcome is a
 # fault: a `::error::` naming the gate, and a distinct exit code — never a bare
 # "false", and never a zero exit on an unanswered question.
 #
 # PERMISSIONS. The script reads pull-request metadata, check runs, commit statuses,
 # and `repos/{owner}/{repo}/rules/branches/{base}`; the last is Gate A's ONLY source
-# of the required set. A caller missing any read cannot evaluate the assertion, and
+# of the required set. Workflow runs (`actions/runs`) are read only when the head
+# carries a cancelled check run, to establish whether a later run superseded it. A caller missing any read cannot evaluate the assertion, and
 # this script refuses rather than falling back to partial data. `administration` is
 # NOT required, and an organization-level ruleset is returned through this repository
 # endpoint without organization read, verified against
@@ -102,9 +109,9 @@ fault() { echo "::error::$2" >&2; exit "$1"; }
 # Printed as one line, because `fault` emits one `::error::` annotation.
 permission_help() {
   printf '%s' \
-    "fine-grained token: Repository permissions > Metadata (read), Pull requests (read), Checks (read), Commit statuses (read); " \
+    "fine-grained token: Repository permissions > Metadata (read), Pull requests (read), Checks (read), Commit statuses (read), and Actions (read) when the head carries a cancelled check run; " \
     "classic OAuth token: 'repo' for a private repository, no scope at all for a public one; " \
-    "inside Actions: permissions.contents: read, permissions.pull-requests: read, permissions.checks: read, permissions.statuses: read. " \
+    "inside Actions: permissions.contents: read, permissions.pull-requests: read, permissions.checks: read, permissions.statuses: read, permissions.actions: read. " \
     "The 'administration' scope is NOT required, and an organization-level ruleset is " \
     "returned through this repository endpoint without organization read. " \
     "Note that GitHub masks an unauthorized read of a private repository as 404, so do " \
@@ -164,6 +171,7 @@ check_runs="$(jq -s '[ .[].check_runs[]? | {
       conclusion: ((.conclusion // "") | ascii_upcase),
       app_id: (.app.id // null),
       id: .id,
+      suite_id: (.check_suite.id // null),
       kind: "check_run" } ]' <<<"$check_runs_raw")" \
   || fault 1 "failed to normalize check runs for $repo@$head_sha"
 
@@ -186,6 +194,116 @@ statuses="$(jq -s '[ .[] | .statuses[]? | {
 
 checks="$(jq -n --argjson a "$check_runs" --argjson b "$statuses" '$a + $b')" \
   || fault 1 "failed to assemble the check inventory for $repo@$head_sha"
+
+# ------------------------------------------------- superseded cancellations ----
+# ADR 0226 (#1754). A pull request opened as a draft and then marked ready starts a
+# second run of the same workflow on the same head, and concurrency cancels the
+# first. Both runs are separate check suites, so the check-run endpoint's default
+# `filter=latest` (which collapses re-run attempts WITHIN a suite) keeps both, and
+# the union of conclusions per context reads `SUCCESS,CANCELLED` on a green head.
+#
+# A cancelled check run is set aside for Gates A and C -- and ONLY a cancelled one --
+# when its own workflow run concluded `cancelled` and the NEWEST later run of the
+# SAME workflow (workflow_id), under the SAME event, on THIS head, completed with
+# conclusion `success` AND its own check suite reports that check name only as a
+# completed SUCCESS, or not at all. A run concludes `success` with its guarded jobs
+# SKIPPED, and `event` cannot tell a draft-time run from a ready-time one, so the
+# run-level conclusion alone would let a skip vouch for work never done. Omission
+# is accepted because a matrix parent is reported only as its expanded legs; Gate A
+# then requires a required context set aside this way to carry a SUCCESS of its
+# own. "Later" is `run_number`: GitHub's per-workflow event
+# sequence, an integer assigned at creation and unique within a workflow, so two
+# distinct runs never tie; it is the order concurrency itself supersedes by. Job
+# timestamps are second-granular and a cancelled job can report completed_at before
+# started_at; check-run ids are re-issued by a re-run of an OLDER event. Neither is
+# trusted to order events. App id is no provenance here: every workflow's checks are
+# published by the one GitHub Actions app.
+#
+# Everything else is untouched: failures, pending checks, a cancellation that nothing
+# later superseded, a cancellation in a run that ended any other way, commit
+# statuses, and every check Gate B reads (it keeps the raw inventory). Dismissal
+# removes evidence and never manufactures it: a required context reported only by a
+# superseded cancellation is then ABSENT, which Gate A refuses.
+#
+# The workflow-run read is made only when a cancelled check run exists, so a caller
+# whose token lacks Actions read is affected only on a head that would otherwise
+# block anyway -- and then it faults rather than guessing.
+gated_checks="$checks"
+superseded_names='[]'
+cancelled_count="$(jq '[ .[] | select(.kind == "check_run" and .conclusion == "CANCELLED") ] | length' <<<"$checks")" \
+  || fault 1 "failed to count cancelled check runs for $repo@$head_sha"
+if [ "$cancelled_count" -gt 0 ]; then
+  runs_raw="$(gh api --paginate "repos/$repo/actions/runs?head_sha=$head_sha&per_page=100" </dev/null)" \
+    || permission_fault "failed to fetch workflow runs for $repo@$head_sha" "Actions" "actions"
+  reconcile_pages "$runs_raw" workflow_runs \
+    || fault 1 "the workflow-run inventory for $repo@$head_sha is incomplete or unattested; no cancellation can be shown superseded from it"
+  # Types are checked, never truthiness: jq orders every string above every number,
+  # so a string run_number would always read as "later", and two absent workflow ids
+  # or events would compare equal (`null == null`) and forge a same-workflow match.
+  runs="$(jq -s --arg head "$head_sha" '
+    def well_formed:
+      type == "object"
+      and (.id | type) == "number"
+      and (.check_suite_id | type) == "number"
+      and (.workflow_id | type) == "number"
+      and (.run_number | type) == "number"
+      and (.event | type) == "string" and .event != ""
+      and (.status | type) == "string"
+      and ((.conclusion | type) == "string" or .conclusion == null)
+      and .head_sha == $head;
+    [ .[].workflow_runs[]? ]
+    | if all(.[]; well_formed) | not then error("malformed workflow run")
+      elif (map(.check_suite_id) | unique | length) != length then error("check suite claimed twice")
+      else . end' <<<"$runs_raw")" \
+    || fault 1 "the workflow-run inventory for $repo@$head_sha carries a malformed record; no cancellation can be shown superseded from it"
+  verdict="$(jq -c --argjson runs "$runs" '
+    . as $all
+    # The latest successful later run of the same workflow and event -- provided its
+    # own check suite did that check'"'"'s work -- or null.
+    | def superseder:
+      if .kind == "check_run" and .status == "COMPLETED" and .conclusion == "CANCELLED" then
+        .name as $name
+        | .suite_id as $sid
+        | [ $runs[] | select(.check_suite_id == $sid) ] as $own
+        | if ($own | length) != 1 then null
+          else $own[0] as $o
+          | if $o.status != "completed" or $o.conclusion != "cancelled" then null
+            else [ $runs[]
+                   | select(.status == "completed" and .conclusion == "success"
+                            and .workflow_id == $o.workflow_id and .event == $o.event
+                            and .run_number > $o.run_number) ]
+                 | max_by(.run_number)
+                 | if . == null then null
+                   else .check_suite_id as $ssid
+                   # A run concludes `success` with its guarded jobs SKIPPED, and its
+                   # event cannot say whether it was a draft-time run. So the
+                   # superseder must not report this check as anything but a
+                   # completed SUCCESS; it may omit it (a matrix parent is reported
+                   # only as expanded legs), which Gate A then backs with a SUCCESS.
+                   | if all($all[] | select(.kind == "check_run" and .suite_id == $ssid and .name == $name);
+                            .status == "COMPLETED" and .conclusion == "SUCCESS")
+                     then { cancelled_run: $o.id, superseded_by: .id }
+                     else null end
+                   end
+            end
+          end
+      else null end;
+    map(. + { superseded: superseder })
+    | { kept: [ .[] | select(.superseded == null) | del(.superseded) ],
+        names: [ .[] | select(.superseded != null) | .name ] | unique,
+        dismissed: [ .[] | select(.superseded != null)
+                     | "\(.name) (check run \(.id), run \(.superseded.cancelled_run) superseded by run \(.superseded.superseded_by))" ] }
+  ' <<<"$checks")" \
+    || fault 1 "failed to evaluate superseded cancellations for $repo@$head_sha"
+  gated_checks="$(jq -c '.kept' <<<"$verdict")" \
+    || fault 1 "failed to assemble the gated check inventory for $repo@$head_sha"
+  superseded_names="$(jq -c '.names' <<<"$verdict")" \
+    || fault 1 "failed to list superseded check names for $repo@$head_sha"
+  dismissed="$(jq -r '.dismissed | join("; ")' <<<"$verdict")" \
+    || fault 1 "failed to list superseded cancellations for $repo@$head_sha"
+  [ -z "$dismissed" ] \
+    || echo "::notice::Gates A and C set aside cancelled check runs superseded by a later successful run of the same workflow, event, and head (ADR 0226): $dismissed" >&2
+fi
 
 # ---------------------------------------------------------------- Gate A ----
 # The required set is read from the ruleset that actually governs the pull
@@ -295,10 +413,14 @@ gate_a="$(jq -r --argjson pass "$PASSING" --argjson required "$required" '
           elif ($owned | any(.status != "COMPLETED")) then "pending: \($req.context)"
           elif ($owned | any(.conclusion as $c | ($pass | index($c)) == null)) then
             "not passing: \($req.context) (\($owned | map(.conclusion) | join(",")))"
+          # A set-aside cancellation was backed by nothing in its superseder when that
+          # run omitted the check (ADR 0226), so the context needs a SUCCESS of its own.
+          elif any($superseded[]; . == $req.context) and ($owned | any(.conclusion == "SUCCESS") | not) then
+            "not passing: \($req.context) (\($owned | map(.conclusion) | join(",")); a superseded cancellation needs a SUCCESS)"
           else empty end
       end
   ] | join("; ")
-' --argjson checks "$checks" <<<'null')" \
+' --argjson checks "$gated_checks" --argjson superseded "$superseded_names" <<<'null')" \
   || fault 1 "failed to evaluate required contexts for $repo#$pr"
 
 [ -z "$gate_a" ] \
@@ -359,7 +481,7 @@ gate_c="$(jq -r --argjson pass "$PASSING" '
     | select(.conclusion as $c | (.status != "COMPLETED") or (($pass | index($c)) == null))
     | "\(.name)=\(if .status != "COMPLETED" then .status else .conclusion end)"
   ] | unique | join(", ")
-' --argjson checks "$checks" <<<'null')" \
+' --argjson checks "$gated_checks" <<<'null')" \
   || fault 1 "failed to evaluate non-required checks for $repo#$pr"
 
 [ -z "$gate_c" ] \
