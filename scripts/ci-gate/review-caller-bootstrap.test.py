@@ -62,6 +62,15 @@ def generate_caller(sha: str) -> bytes:
     return subprocess.run(["bash", str(GENERATOR), sha], check=True, capture_output=True).stdout
 
 
+def digest(sha: str) -> str:
+    return hashlib.sha256(generate_caller(sha)).hexdigest()
+
+
+def mirror(sha: str) -> bytes:
+    return (f"const reviewCallerContractSha = '{sha}';\n"
+            f"const reviewCallerDigest = '{digest(sha)}';\n").encode()
+
+
 def git_blob_sha(content: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(content) + content).hexdigest()
 
@@ -289,6 +298,13 @@ def main() -> int:
         and outputs.get("contract_sha") == CONTRACT,
         "a byte-exact generated stale caller update is classified as a bootstrap",
     )
+
+    with_mirror = Consumer()
+    with_mirror.base["tests/pins.test.ts"] = mirror(STALE)
+    with_mirror.head["tests/pins.test.ts"] = mirror(CONTRACT)
+    result, outputs = harness.run_step("bootstrap", with_mirror)
+    report(result.returncode == 0 and outputs.get("eligible") == "true",
+           "a pin mirror that only swaps the stale pin and caller digest is accepted")
 
     steps = harness.steps
     dispatch = steps.get("dispatch", {})

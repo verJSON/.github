@@ -1037,7 +1037,20 @@ jobs:
               require(stale != contract, "review caller revision is unchanged")
               require(base_caller == render_caller(stale), "default-branch review caller is not generated")
               require(head_caller == render_caller(contract), "proposed review caller is not generated")
-              require(changed == {CALLER}, "the pull request changes more than the generated review caller")
+              # Consumer contract tests mirror the caller pin and digest. A mirror may change only by
+              # swapping exactly those tokens; workflow and action configuration may not change at all.
+              swaps = {stale.encode(): contract.encode(),
+                       hashlib.sha256(base_caller).hexdigest().encode(): hashlib.sha256(head_caller).hexdigest().encode()}
+              swap = re.compile(b"|".join(re.escape(token) for token in sorted(swaps, key=len, reverse=True)))
+              for path in sorted(changed - {CALLER}):
+                  base_entry, head_entry = base_tree.get(path), head_tree.get(path)
+                  require(base_entry is not None and head_entry is not None, f"{path} is not modified in place")
+                  require(not path.startswith(".github/") and path.rsplit("/", 1)[-1] not in ("action.yml", "action.yaml"),
+                          f"{path} is workflow or action configuration")
+                  before = blob(repo, base_entry)
+                  after = blob(repo, head_entry)
+                  require(after != before and after == swap.sub(lambda match: swaps[match.group(0)], before),
+                          f"{path} changes more than the review caller pin and digest")
 
               floor_to_stale = compare(FLOOR, stale)
               require(floor_to_stale.get("status") in ("behind", "diverged"),
