@@ -47,25 +47,37 @@ pins to the bootstrap's contract revision:
 
 1. **Same shape.** Base and head split on `\n` into the same number of lines. Lines are
    compared pairwise, so nothing can be appended, removed, or reordered.
-2. **Reference lines.** Every changed line that is not a comment must, on the base side,
-   be a job-level reusable workflow reference
-   `<indent>uses: <owner>/<repo>/.github/workflows/<file>@<40-hex>`. It may be followed
-   only by whitespace, an optional YAML comment, and an optional `\r`, so a revision that
-   runs on into a branch name is not a pin. The head line must equal the base line with
+2. **Reference lines.** Every changed line that is not a comment line (rule 3) must, on
+   the base side, be exactly
+   `    uses: <owner>/<repo>/.github/workflows/<file>@<40-hex>`, indented four spaces. It
+   may be followed only by whitespace, an optional YAML comment, and an optional `\r`, so
+   a revision that runs on into a branch name is not a pin. Structurally, the nearest
+   earlier non-blank, non-comment line indented fewer than four spaces must be a bare
+   two-space job key (`  <id>:`, optionally followed by a comment). The nearest earlier
+   such line at column zero must be `jobs:`. This approximates "a job's reusable workflow
+   call" without a YAML parser, and it matches every known caller (verjson-cli `ci.yml`
+   and `actionlint.yml`, verjson-payments and verjson-cli-cloud `ci.yml`). A caller written
+   with other indentation is refused, which fails closed. The head line must equal the base line with
    only those 40 hex digits replaced by the contract revision. The owner and repository
    must be the canonical `Verjson/.github`, compared case-insensitively as GitHub resolves
    it. The workflow must be in the closed allowlist `REUSABLE_CI`.
-3. **Comment lines.** A changed line whose base side starts with optional whitespace and
-   `#` must equal the base line with each revision moved in step 2 replaced by the
-   contract. Free comment text, or a comment pin that moves without its `uses:` line, is
-   refused.
+3. **Comment lines.** A changed line whose base side *starts* with optional whitespace
+   and `#` must equal the base line with each revision moved in rule 2 replaced by the
+   contract. Free text changes, or a pin that moves without its `uses:` line, are refused.
+   This is a lexical test, not a YAML one. It covers YAML comments, and also `#`-led lines
+   inside block scalars such as `run: |`, where they are usually shell comments. A line
+   with `#` anywhere later, such as `run: curl …/<pin>/x.sh | bash # pinned`, is not a
+   comment line.
 4. **Contract revision.** The new revision is the review caller's contract revision, so
    it carries every ADR 0227 check: it contains `MINIMUM_SAFE_REVIEW`, descends from the
    stale review pin, and is on canonical `main`. It must also descend from every reusable
    CI revision it replaces, so the lane never downgrades CI.
-5. **Pin mirrors.** Each moved reusable CI revision joins ADR 0227's token swap. A
-   consumer contract test outside `.github/` may replace that revision with the contract
-   revision, with no other change, exactly as it mirrors the review caller pin and digest.
+5. **Pin mirrors.** Each moved reusable CI revision joins ADR 0227's token swap. Any
+   modified regular file outside `.github/` that is not action metadata may replace that
+   revision with the contract revision, with no other change. The same rule already lets
+   it swap the review caller pin and digest. In practice these files are consumer
+   contract tests, but the proof does not know that. Any such file qualifies, including a
+   script that embeds the pin in a URL.
 
 Each workflow file is proven on its own. Two callers that both satisfy the rule are
 admitted, and the pull request is refused if any one caller changes anything else. All
@@ -112,6 +124,7 @@ the gate.
 | Moving a credential-bearing or release workflow without review | Closed allowlist: only `node-ci.yml` and `actionlint.yml`. |
 | Lookalike paths | Exact-case `.github/workflows/<file>` only. `.GitHub/…`, subdirectories, and `action.yml` fall through to the existing refusal. |
 | A non-bootstrap pull request uses the lane | The ADR 0227 caller and stale-revision proof still gates eligibility. |
+| A pin-shaped or `#`-led line inside a block scalar, or a pin inside a non-test file outside `.github/`, has an older canonical revision swapped to the contract | Accepted residual. The swap only replaces a canonical revision that the contract descends from with a canonical `main` revision. Job-level structure (rule 2) and the start-of-line comment anchor (rule 3) keep `with:` values, `run:` commands, and `ref:` inputs out. This is the same class of change ADR 0227 already accepts for the review pin in companion files. |
 
 ## Alternatives rejected
 
@@ -142,12 +155,18 @@ the gate.
 ## Verification
 
 `python3 scripts/ci-gate/review-caller-bootstrap.test.py` runs the real classification
-step against stubbed GitHub data. It covers six admitted companion shapes and sixteen
+step against stubbed GitHub data. It covers six admitted companion shapes and 22
 refusals. Each refusal except the layered "no review caller update" case has a mutation
-proof that drops exactly its guard and shows the case is then wrongly admitted. While
+proof that drops or loosens exactly its guard and shows the case is then wrongly
+admitted. Independent review found three mutants the first version of the suite did not
+kill: overwriting rather than accumulating the moved CI revisions, `COMMENT.match`
+becoming `.search`, and a widened comment marker. Each now has a refusal case that kills
+it, and the job-level structure checks came out of the same review. While
 the line-count guard's proof was being written, it first passed vacuously, because a base
 with a final newline exposes appended lines to the per-line rule. The case now uses a
 base without a final newline, the one shape where only that guard can refuse. The real
 verjson-cli trees (`2d818377` and #318's `d9657189`, plus the three pin moves) were run
 through the same step, with canonical ancestry taken from local git. It reports
-`eligible=true`, stale `68b823b1`, and contract `ff21f300`.
+`eligible=true`, stale `68b823b1`, and contract `ff21f300`. The live default-branch callers of
+verjson-cli (`ci.yml`, `actionlint.yml`), verjson-payments, and verjson-cli-cloud, each
+moved to the contract, are all admitted by the narrowed rule.
