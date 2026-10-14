@@ -168,6 +168,7 @@ case "$*" in
     page=""
     for arg in "$@"; do [[ "$arg" == *'&page='* ]] && page="${arg##*&page=}"; done
     case "${RUN_SEARCH_MODE:-valid}" in
+      empty-stdout) ;;
       valid) printf '%s\n' '{"workflow_runs":[{"id":7002,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","status":"completed","conclusion":"success"}]}' ;;
       missing) printf '%s\n' '{"workflow_runs":[]}' ;;
       queued-then-completed)
@@ -182,6 +183,7 @@ case "$*" in
     ;;
   api*"repos/"*"/actions/workflows/"*)
     [ "${WORKFLOW_EVIDENCE_MODE:-valid}" != deleted ] || { echo 'HTTP 404: Not Found' >&2; exit 1; }
+    [ "${WORKFLOW_EVIDENCE_MODE:-valid}" != empty-stdout ] || exit 0
     printf '{"id":%s,"name":"%s","path":"%s","state":"%s"}\n' \
       "${WORKFLOW_ID:-315894159}" "${WORKFLOW_NAME:-actions-ci}" "${WORKFLOW_PATH:-.github/workflows/actions-ci.yml}" "${WORKFLOW_STATE:-active}"
     ;;
@@ -196,6 +198,13 @@ case "$*" in
     fi
     ;;
   api*"https://api.github.com/repos/"*"/check-runs/9002"*)
+    case "${CHECK_RUN_MODE:-valid}" in
+      empty-stdout) exit 0 ;;
+      blank-stdout) printf ' \t\n'; exit 0 ;;
+      right-then-wrong) printf '%s\n' '{"name":"shell-tests","app":{"id":15368}}' '{"name":"shell-tests","app":{"id":999}}'; exit 0 ;;
+      wrong-then-right) printf '%s\n' '{"name":"shell-tests","app":{"id":999}}' '{"name":"shell-tests","app":{"id":15368}}'; exit 0 ;;
+      trailing-garbage) printf '%s\n' '{"name":"shell-tests","app":{"id":15368}} <html>'; exit 0 ;;
+    esac
     printf '{"name":"shell-tests","app":{"id":%s}}\n' "${CHECK_APP_ID:-15368}"
     ;;
   *)
@@ -271,6 +280,7 @@ run_audit() {
     WORKFLOW_PATH="${WORKFLOW_PATH-.github/workflows/actions-ci.yml}" \
     WORKFLOW_STATE="${WORKFLOW_STATE-active}" \
     CHECK_APP_ID="${CHECK_APP_ID-15368}" \
+    CHECK_RUN_MODE="${CHECK_RUN_MODE-valid}" \
     PRIVILEGED_MERGE_AUDIT_SHA="${PRIVILEGED_MERGE_AUDIT_SHA-$audit_sha}" \
     bash "$audit" >"$tmp/out" 2>&1
 }
@@ -562,6 +572,36 @@ SECRET_VISIBILITY=all SECRET_REPOSITORIES='' ENVIRONMENT_KEY_REPOSITORIES='' run
   && ! grep -q 'actions/secrets?per_page' "$tmp/gh-calls" \
   && pass "a present organization copy keeps its visibility-based verdict" \
   || fail "present organization copy consulted withdrawal-only evidence: $(<"$tmp/out")"
+
+# jq 1.6 exits 0 for `jq -e <pred>` on empty input, so an empty body with exit 0 must not
+# satisfy any identity predicate. Each read below has its own reviewed diagnostic.
+WORKFLOW_EVIDENCE_MODE=empty-stdout run_audit \
+  && fail "empty required-check workflow metadata reported green" \
+  || {
+    grep -q 'Invalid required-check workflow identity::repository=Verjson/alpha' "$tmp/out" \
+      && pass "empty required-check workflow metadata fails as an invalid workflow identity" \
+      || fail "empty required-check workflow metadata was misclassified: $(<"$tmp/out")"
+  }
+
+# The App binding is judged on exactly one check-run document: not on an empty or blank
+# body, not on the first or last of several, and not on a prefix followed by garbage.
+for mode in empty-stdout blank-stdout right-then-wrong wrong-then-right trailing-garbage; do
+  CHECK_RUN_MODE="$mode" run_audit \
+    && fail "check-run read ($mode) reported green" \
+    || {
+      grep -q 'Wrong required-check App identity::repository=Verjson/alpha' "$tmp/out" \
+        && pass "check-run read ($mode) cannot satisfy the required-check App binding" \
+        || fail "check-run read ($mode) was misclassified: $(<"$tmp/out")"
+    }
+done
+
+RUN_SEARCH_MODE=empty-stdout run_audit \
+  && fail "empty workflow-run evidence page reported green" \
+  || {
+    grep -q 'Unreadable required-check workflow evidence::repository=Verjson/alpha' "$tmp/out" \
+      && pass "empty workflow-run evidence page fails as unreadable" \
+      || fail "empty workflow-run evidence page was misclassified: $(<"$tmp/out")"
+  }
 
 # #1776: ADR 0166 withdrew the organization copy (2026-09-27). A 404 for it is the
 # conforming custody state, and each consumer must then hold the key in its own
