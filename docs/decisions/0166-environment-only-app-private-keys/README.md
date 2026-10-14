@@ -127,6 +127,12 @@ unreadable one. While an organization copy exists, the earlier visibility-based 
 is unchanged; flagging such a copy as residue remains the job of
 `scripts/org-secret-scope-audit.py`.
 
+The same change records the review and merge organization copies as `withdrawn` in
+`config/org-actions-secret-policy.json` and marks both roles' custody as achieved in
+`config/app-role-custody-inventory.json`, matching the release role. A read-only fleet
+scan on 2026-10-14 found no repository-level copy of any `*_APP_PRIVATE_KEY` across 99
+active repositories, so no surviving broad copy remains for either role.
+
 This audit checks key presence only. Main-only branch admission remains the job of
 `app-key-environment.yml`, and a consumer pinned to a contract older than the
 `merge_environment` input would still not bind the environment at run time.

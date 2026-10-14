@@ -12,20 +12,10 @@
       "portableName": "ai-review-authorization",
       "custodyDecision": "environment-only",
       "migrationStatus": {
-        "achievedCustody": "environment-only-pending-broad-copy-withdrawal",
-        "broadCopiesPending": true,
-        "survivingBroadCopies": [
-          {
-            "kind": "organization-secret",
-            "secret": "AI_REVIEW_APP_PRIVATE_KEY",
-            "visibility": "selected",
-            "selectedRepositories": [
-              "Verjson/.github"
-            ],
-            "policy": "config/org-actions-secret-policy.json"
-          }
-        ],
-        "trackingIssue": "https://github.com/Verjson/.github/issues/1285"
+        "achievedCustody": "environment-only",
+        "broadCopiesPending": false,
+        "survivingBroadCopies": [],
+        "trackingIssue": null
       },
       "custodyRecord": "docs/decisions/0166-environment-only-app-private-keys/README.md",
       "storage": {
@@ -72,18 +62,10 @@
       "portableName": "merge-authorization",
       "custodyDecision": "environment-only",
       "migrationStatus": {
-        "achievedCustody": "environment-only-pending-broad-copy-withdrawal",
-        "broadCopiesPending": true,
-        "survivingBroadCopies": [
-          {
-            "kind": "organization-secret",
-            "secret": "MERGE_APP_PRIVATE_KEY",
-            "visibility": "all",
-            "selectedRepositories": [],
-            "policy": "config/org-actions-secret-policy.json"
-          }
-        ],
-        "trackingIssue": "https://github.com/Verjson/.github/issues/1285"
+        "achievedCustody": "environment-only",
+        "broadCopiesPending": false,
+        "survivingBroadCopies": [],
+        "trackingIssue": null
       },
       "custodyRecord": "docs/decisions/0166-environment-only-app-private-keys/README.md",
       "storage": {
