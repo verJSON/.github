@@ -575,7 +575,7 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
     allowlist_guard = ('require(same_repository(ref[2].decode(), CANONICAL) and ref[3].decode() in REUSABLE_CI,',
                        'require(True,')
     add("a pin bump of a canonical workflow outside the reusable CI allowlist is not a bootstrap",
-        with_files(**{CI_CALLER: (ci_caller(CI_STALE, "actionlint.yml"), ci_caller(CONTRACT, "actionlint.yml"))}),
+        with_files(**{CI_CALLER: (ci_caller(CI_STALE, "node-release.yml"), ci_caller(CONTRACT, "node-release.yml"))}),
         allowlist_guard)
     ci_bump = {CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT))}
     add("a reusable CI pin that would move backwards is not a bootstrap",
@@ -682,6 +682,12 @@ def main() -> int:
     report(harness.eligible(with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT)),
                                           "tests/ci-contract.test.ts": (ci_mirror(CI_STALE, STALE), ci_mirror(CONTRACT, CONTRACT))})),
            "a contract test mirroring the reusable CI pin may swap it with the caller", harness.last)
+    # verjson-cli's contract test binds both callers to one pin, so neither can move alone (ADR 0231).
+    report(harness.eligible(with_files(**{
+        CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT)),
+        ".github/workflows/actionlint.yml": (ci_caller(CI_STALE, "actionlint.yml"), ci_caller(CONTRACT, "actionlint.yml")),
+        "tests/ci-contract.test.ts": (ci_mirror(CI_STALE, STALE), ci_mirror(CONTRACT, CONTRACT))})),
+        "node-ci and actionlint callers bound to one pin move together", harness.last)
     commented = lambda sha: f"# Canonical node-ci revision: {sha}\n".encode() + ci_caller(sha)
     report(harness.eligible(with_files(**{CI_CALLER: (commented(CI_STALE), commented(CONTRACT))})),
            "a comment pin that moves with the reusable CI pin is a companion", harness.last)
