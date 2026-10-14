@@ -695,6 +695,10 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
     add("a jobs line glued to a comment marker is not the jobs map",
         with_files(**{CI_CALLER: (glued_root(CI_STALE), glued_root(CONTRACT))}),
         ('JOBS_ROOT = re.compile(rb"jobs:(?:[ \\t]+(?:#.*)?)?\\r?")', 'JOBS_ROOT = re.compile(rb"jobs:[ \\t]*(?:#.*)?\\r?")'))
+    glued_key = lambda sha: ci_caller(sha).replace(b"  ci:\n", b"  ci:#x\n")
+    add("a job key glued to a comment marker is not a job key",
+        with_files(**{CI_CALLER: (glued_key(CI_STALE), glued_key(CONTRACT))}),
+        ('[A-Za-z0-9_-]*:(?:[ \\t]+(?:#.*)?)?\\r?")', '[A-Za-z0-9_-]*:[ \\t]*(?:#.*)?\\r?")'))
     add("a revision continuing into a branch-name suffix is not a reusable CI pin",
         with_files(**{CI_CALLER: (ci_caller(CI_STALE, ref_suffix="-x"), ci_caller(CONTRACT, ref_suffix="-x"))}),
         ('@([0-9a-f]{40})((?:[ \\t]+(?:#.*)?)?\\r?)")', '@([0-9a-f]{40})(.*)")'))
@@ -759,6 +763,7 @@ INELIGIBLE_REASONS = {
     "a lone carriage return hiding a run step behind a comment is not a comment pin": "contains a line break other than",
     "a reusable CI caller that is not UTF-8 is not a reusable CI pin": "is not UTF-8",
     "a jobs line glued to a comment marker is not the jobs map": "is not a job's reusable workflow call",
+    "a job key glued to a comment marker is not a job key": "is not a job's reusable workflow call",
     "a backwards reusable CI pin in the first of two callers is not a bootstrap": "does not descend from the stale reusable CI revision",
     "a run line that ends in a comment is not a comment pin": "changes more than its reusable CI pin",
     "a checkout ref carrying the old pin is not a comment pin": "changes more than its reusable CI pin",
