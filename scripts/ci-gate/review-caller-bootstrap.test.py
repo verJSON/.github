@@ -22,6 +22,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/gate-rearm.yml"
 GENERATOR = ROOT / "scripts/gen-ai-review-caller.sh"
+FRAGMENT_GENERATOR = ROOT / "scripts/gen-ai-review-caller-bootstrap-fragment.sh"
 
 TARGET_REPO = "Verjson/example"
 API_REPO = "verJSON/example"
@@ -69,6 +70,12 @@ def digest(sha: str) -> str:
 def mirror(sha: str) -> bytes:
     return (f"const reviewCallerContractSha = '{sha}';\n"
             f"const reviewCallerDigest = '{digest(sha)}';\n").encode()
+
+
+def fragment(date: str, identity: str, stale: str = STALE, contract: str = CONTRACT) -> tuple[str, bytes]:
+    content = subprocess.run(["bash", str(FRAGMENT_GENERATOR), date, identity, stale, contract],
+                             check=True, capture_output=True).stdout
+    return f"NEXT/{date}-issue-{identity}-ai-review-caller-bootstrap.md", content
 
 
 def git_blob_sha(content: bytes) -> str:
@@ -305,6 +312,13 @@ def main() -> int:
     result, outputs = harness.run_step("bootstrap", with_mirror)
     report(result.returncode == 0 and outputs.get("eligible") == "true",
            "a pin mirror that only swaps the stale pin and caller digest is accepted")
+
+    with_fragment = Consumer()
+    path, content = fragment("2026-10-13", "20261013T120000Z")
+    with_fragment.head[path] = content
+    result, outputs = harness.run_step("bootstrap", with_fragment)
+    report(result.returncode == 0 and outputs.get("eligible") == "true",
+           "the one generated bootstrap changelog fragment is accepted")
 
     steps = harness.steps
     dispatch = steps.get("dispatch", {})
