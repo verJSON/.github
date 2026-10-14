@@ -690,6 +690,11 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
     add("a reusable CI caller that is not UTF-8 is not a reusable CI pin",
         with_files(**{CI_CALLER: (undecodable(CI_STALE), undecodable(CONTRACT))}),
         ('content.decode("utf-8")', 'content.decode("utf-8", "replace")'))
+    # `jobs:#x` is a plain scalar to YAML, not the jobs key: a comment needs whitespace before `#`.
+    glued_root = lambda sha: ci_caller(sha).replace(b"jobs:\n", b"jobs:#x\n")
+    add("a jobs line glued to a comment marker is not the jobs map",
+        with_files(**{CI_CALLER: (glued_root(CI_STALE), glued_root(CONTRACT))}),
+        ('JOBS_ROOT = re.compile(rb"jobs:(?:[ \\t]+(?:#.*)?)?\\r?")', 'JOBS_ROOT = re.compile(rb"jobs:[ \\t]*(?:#.*)?\\r?")'))
     add("a revision continuing into a branch-name suffix is not a reusable CI pin",
         with_files(**{CI_CALLER: (ci_caller(CI_STALE, ref_suffix="-x"), ci_caller(CONTRACT, ref_suffix="-x"))}),
         ('@([0-9a-f]{40})((?:[ \\t]+(?:#.*)?)?\\r?)")', '@([0-9a-f]{40})(.*)")'))
@@ -753,6 +758,7 @@ INELIGIBLE_REASONS = {
     "a paragraph separator hiding a block scalar header is not a reusable CI pin": "contains a line break other than",
     "a lone carriage return hiding a run step behind a comment is not a comment pin": "contains a line break other than",
     "a reusable CI caller that is not UTF-8 is not a reusable CI pin": "is not UTF-8",
+    "a jobs line glued to a comment marker is not the jobs map": "is not a job's reusable workflow call",
     "a backwards reusable CI pin in the first of two callers is not a bootstrap": "does not descend from the stale reusable CI revision",
     "a run line that ends in a comment is not a comment pin": "changes more than its reusable CI pin",
     "a checkout ref carrying the old pin is not a comment pin": "changes more than its reusable CI pin",
