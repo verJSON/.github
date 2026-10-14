@@ -237,3 +237,15 @@ mutations fails the suite:
 - dropping `-e`;
 - checking `any` page, or only the first page;
 - accepting a non-object page.
+
+The annotations Gate B reads for ADR 0156 had the same weakness in a different form. That
+endpoint states no `total_count`, so nothing reconciles its walk. A success with an
+empty or blank body, or with an object, null, or string page, produced no titles and was
+read as "no deferral annotation". Six such bodies were admitted with `true` on
+`origin/main`. Each annotations response must now be one or more pages, every one a
+JSON array, under `jq -e`. Anything else fails closed with exit `1` and a message saying
+the response is no evidence that the check carries no deferral annotation. A walk of
+`[]` pages still means none, and a deferral on a later page still blocks with exit `4`.
+These mutations each fail the suite: removing the check, dropping the non-empty
+requirement, using truthiness instead of the type, dropping `-e`, and checking `any`
+page.

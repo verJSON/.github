@@ -63,6 +63,8 @@ case "$args" in
     printf '%s\n' "$RUNS_FIXTURE" ;;
   *"/annotations?per_page"*)
     [ "${FAIL_ANNOTATIONS:-0}" -eq 0 ] || { echo "gh: some transient API error (HTTP 502)" >&2; exit 1; }
+    # A success with no body at all: not even the newline every other reply ends with.
+    [ "${ANNOTATIONS_EMPTY_BODY:-0}" -eq 0 ] || exit 0
     printf '%s\n' "$ANNOTATIONS_FIXTURE" ;;
   *)
     echo "gh: unstubbed call: $args" >&2; exit 1 ;;
@@ -130,7 +132,7 @@ expect_true_unbound() { # label
 
 reset_env() {
   unset FAIL_PR_VIEW FAIL_RULES FAIL_RULES_HTTP RULES_STDERR_NOTE \
-    FAIL_CHECK_RUNS FAIL_STATUS FAIL_ANNOTATIONS FAIL_RUNS
+    FAIL_CHECK_RUNS FAIL_STATUS FAIL_ANNOTATIONS FAIL_RUNS ANNOTATIONS_EMPTY_BODY
   export RULES_FIXTURE="$rules_bound"
   export RUNS_REQUEST_LOG="$tmp/runs-requests"
   : >"$RUNS_REQUEST_LOG"
@@ -769,6 +771,36 @@ reset_env
 ANNOTATIONS_FIXTURE='[{"title":"CI deferred","message":"nothing ran"}]'
 run
 expect "an ADR 0156 deferral annotation still blocks the composite-action path" 4 "carries a deferral annotation"
+
+# The annotations endpoint states no total_count, so nothing reconciles its walk. A
+# success whose body is empty, blank, or not a JSON array per page carries no evidence
+# either way, and reading it as "no deferral annotation" admits the very head ADR 0156
+# exists to stop (#1786). Each such body is a fault; a genuine `[]` stays "none".
+for body in empty blank object null string array-then-object; do
+  reset_env
+  case "$body" in
+    empty) export ANNOTATIONS_EMPTY_BODY=1 ;;
+    blank) ANNOTATIONS_FIXTURE='   ' ;;
+    object) ANNOTATIONS_FIXTURE='{}' ;;
+    null) ANNOTATIONS_FIXTURE='null' ;;
+    string) ANNOTATIONS_FIXTURE='"CI deferred"' ;;
+    array-then-object) ANNOTATIONS_FIXTURE='[]{}' ;;
+  esac
+  run
+  expect "an annotations response that is $body is a fault, not 'no deferral' (#1786)" \
+    1 "the annotations response for check-run 1 on Verjson/verjson-ci is empty or not a JSON array on every page"
+done
+
+reset_env
+ANNOTATIONS_FIXTURE='[][]'
+run
+expect_true "an annotations walk of empty arrays still reads as no deferral (#1786)"
+
+reset_env
+ANNOTATIONS_FIXTURE='[]
+[{"title":"CI deferred","message":"nothing ran"}]'
+run
+expect "a deferral annotation on a later annotations page still blocks (#1786)" 4 "carries a deferral annotation"
 
 # --- Gate C -----------------------------------------------------------------
 reset_env

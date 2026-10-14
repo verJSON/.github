@@ -565,13 +565,22 @@ check_run_ids="$(jq -rn --slurpfile checks "$checks" \
   '$checks[0] as $checks | [ $checks[] | select(.kind == "check_run" and .conclusion != "") | .id ] | unique | .[]')" \
   || fault 1 "failed to enumerate check runs for $repo@$head_sha"
 
+# The annotations endpoint states no total_count, so its walk cannot be reconciled, and
+# an empty walk would read as "no deferral annotation". So a success must at least be
+# what the endpoint sends: one or more pages, each a JSON array (#1786). An empty or
+# blank body, an object, a null, or a string page is a fault, never "none"; `[]` is the
+# genuine none. `-e` exits 0 only on a literal `true`, so a jq error fails closed too.
+annotations="$scratch/annotations.json"
 deferred_annotations=""
 while IFS= read -r id; do
   [ -n "$id" ] || continue
-  titles="$(gh api --paginate "repos/$repo/check-runs/$id/annotations?per_page=100" </dev/null \
-    | jq -s -r --arg pat "$DEFERRED_ANNOTATION_PATTERN" '
-        [.[][]? | select(.title != null and (.title | test($pat))) | .title] | join(", ")
-      ')" \
+  gh api --paginate "repos/$repo/check-runs/$id/annotations?per_page=100" </dev/null >"$annotations" \
+    || permission_fault "failed to fetch annotations for check-run $id on $repo" "Checks" "checks"
+  jq -se 'length > 0 and all(.[]; type == "array")' >/dev/null <"$annotations" \
+    || fault 1 "the annotations response for check-run $id on $repo is empty or not a JSON array on every page, so it is no evidence that the check carries no deferral annotation; it cannot be reasoned over"
+  titles="$(jq -s -r --arg pat "$DEFERRED_ANNOTATION_PATTERN" '
+      [.[][]? | select(.title != null and (.title | test($pat))) | .title] | join(", ")
+    ' <"$annotations")" \
     || permission_fault "failed to fetch annotations for check-run $id on $repo" "Checks" "checks"
   [ -n "$titles" ] && deferred_annotations="${deferred_annotations:+$deferred_annotations; }check-run $id: $titles"
 done <<<"$check_run_ids"
