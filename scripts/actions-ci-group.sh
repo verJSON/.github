@@ -75,7 +75,6 @@ declare -a commands=()
 declare -a command_exclusive=()
 declare -a command_budgets=()
 declare -A command_index_by_pid=()
-declare -A worker_command_group_by_index=()
 declare -A worker_wait_status_by_index=()
 declare -A worker_reported_by_index=()
 worker_wait_failures=0
@@ -97,6 +96,10 @@ while IFS=$'\t' read -r -u "$manifest_fd" command_group command; do
     ''|\#*) continue ;;
   esac
   [ "$command_group" = "$group" ] || continue
+  [[ "$command" != *$'\t'* ]] || {
+    printf 'malformed manifest row in actions-ci group %s: expected exactly two tab-separated fields\n' "$group" >&2
+    exit 2
+  }
   [ -n "$command" ] || {
     printf 'empty command in actions-ci group %s\n' "$group" >&2
     exit 2
@@ -127,7 +130,7 @@ while IFS=$'\t' read -r -u "$manifest_fd" command_group command; do
           exit 2
         }
         row_budget="${directive#@budget=}"
-        [[ "$row_budget" =~ ^[1-9][0-9]*$ ]] || {
+        [[ "$row_budget" =~ ^[1-9][0-9]*$ ]] && [ "$row_budget" -le 600 ] || {
           printf 'invalid command budget in actions-ci group %s: %s\n' "$group" "$directive" >&2
           exit 2
         }
@@ -186,6 +189,8 @@ terminate_command_group() {
     sleep 0.1
   done
   echo "command process group $process_group survived SIGKILL" >&2
+  # Scratch data may still be in use by the survivor; never remove it.
+  : >"$tmp/survivors"
   return 1
 }
 
@@ -203,14 +208,13 @@ cleanup_command_group_for_index() {
   local index="$1"
   local process_group
   process_group="$(command_group_for_index "$index")"
-  if [ -z "$process_group" ]; then
-    process_group="${worker_command_group_by_index[$index]:-}"
-  fi
+  local survived=0
   if [ -n "$process_group" ] \
     && command_group_has_live_processes "$process_group"; then
-    terminate_command_group "$process_group"
+    terminate_command_group "$process_group" || survived=1
   fi
   rm -f -- "$tmp/$index.pgid"
+  return "$survived"
 }
 
 cleanup_group_runner() {
@@ -223,8 +227,13 @@ cleanup_group_runner() {
     wait "$worker_pid" 2>/dev/null || true
   done
   for index in "${!commands[@]}"; do
-    cleanup_command_group_for_index "$index"
+    cleanup_command_group_for_index "$index" || true
   done
+  if [ -e "$tmp/survivors" ]; then
+    printf '::error::actions-ci group=%s has command processes that survived SIGKILL; preserving scratch data in %s\n' \
+      "$group" "$tmp"
+    exit 1
+  fi
   rm -rf -- "$tmp"
 }
 
@@ -256,7 +265,6 @@ run_command() {
 
   started="$(date +%s)"
   export ACTIONS_CI_WORKER_PID="$BASHPID"
-  export ACTIONS_CI_COMMAND_PGID_FILE="$command_group_file"
   trap 'exit 143' TERM
   trap 'exit 130' INT
   trap 'cleanup_command_group_for_index "$index"' EXIT
@@ -265,8 +273,6 @@ cat >"$tmp/$index.supervisor.sh" <<'SUPERVISOR'
 command_budget="$1"
 command="$2"
 command_raw_log="$3"
-command_group_file="$4"
-printf '%s\n' "$BASHPID" >"$command_group_file"
 status=0
 if [ -n "$command_budget" ]; then
   timeout --foreground --kill-after=2s "${command_budget}s" \
@@ -277,16 +283,20 @@ fi
 exit "$status"
 SUPERVISOR
   setsid bash "$tmp/$index.supervisor.sh" "${command_budgets[$index]}" "$command" \
-    "$tmp/$index.raw.log" "$command_group_file" </dev/null &
+    "$tmp/$index.raw.log" </dev/null &
+  # setsid execs in place from this non-leader job, so the supervisor's PID is
+  # its session and process-group ID. The worker keeps it; the file only lets
+  # the parent clean up if this worker dies, and no row is told where it is.
   supervisor_pid="$!"
-  worker_command_group_by_index["$index"]="$supervisor_pid"
+  process_group="$supervisor_pid"
+  printf '%s\n' "$process_group" >"$command_group_file"
   wait "$supervisor_pid" || status=$?
-  process_group="$(command_group_for_index "$index")"
-  if [ -n "$process_group" ] \
-    && command_group_has_live_processes "$process_group"; then
+  if command_group_has_live_processes "$process_group"; then
     background_processes=1
     [ "$status" -ne 0 ] || status=1
-    terminate_command_group "$process_group"
+    if ! terminate_command_group "$process_group"; then
+      printf 'command process group %s survived SIGKILL\n' "$process_group" >>"$tmp/$index.raw.log"
+    fi
   fi
   rm -f -- "$command_group_file"
   if ! sanitize_command_output_for_index "$index"; then
@@ -393,9 +403,9 @@ record_worker_wait() {
   if [ -z "$finished_pid" ] || [ -z "$index" ]; then
     worker_wait_failures=$((worker_wait_failures + 1))
   else
-  if [ "$worker_status" -ne 0 ]; then
-    cleanup_command_group_for_index "$index"
-    worker_wait_status_by_index["$index"]="$worker_status"
+    if [ "$worker_status" -ne 0 ]; then
+      cleanup_command_group_for_index "$index" || true
+      worker_wait_status_by_index["$index"]="$worker_status"
     fi
     report_worker_result "$index" \
       "${worker_wait_status_by_index[$index]:-0}"

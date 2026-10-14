@@ -178,15 +178,15 @@ fi
 # A row that reads stdin must see an empty file, never the manifest or the
 # runner's own input, and must not stop later rows from running (#1736). A
 # Windows binary under WSL interop, `cat`, `read`, or `ssh` all read it.
-# Bash gives background jobs /dev/null only while job control is off. `-m`
-# turns it on for the runner (as SHELLOPTS=monitor would), so the case does not
-# depend on how the runner itself was started.
+# Rows start as background jobs in a worker subshell, where bash already
+# substitutes /dev/null, so this guards the behavior rather than the runner's
+# explicit redirect; no launch path exists today where only the redirect holds.
 printf 'platform\tcat >"$ACTIONS_CI_STDIN_SEEN"\nplatform\ttouch "$ACTIONS_CI_LATER_RAN"\n' \
   >"$tmp/stdin.tsv"
 if printf 'runner-stdin-sentinel\n' \
   | ACTIONS_CI_GROUP_MANIFEST="$tmp/stdin.tsv" \
     ACTIONS_CI_STDIN_SEEN="$tmp/stdin-seen" ACTIONS_CI_LATER_RAN="$tmp/later-ran" \
-    bash -m "$runner" platform >"$tmp/stdin.out" 2>&1 \
+    bash "$runner" platform >"$tmp/stdin.out" 2>&1 \
   && [ -f "$tmp/stdin-seen" ] && [ ! -s "$tmp/stdin-seen" ] \
   && [ -e "$tmp/later-ran" ] \
   && grep -q 'passed 2 command(s)' "$tmp/stdin.out"; then
@@ -211,6 +211,121 @@ elif grep -q 'manifest selects 2 command(s) for platform; ran 1 and reported 1' 
 else
   cat "$tmp/unterminated.out" >&2
   fail "a dropped manifest row failed without the executed-count diagnostic"
+fi
+
+# A worker's result file is the only record of its row. A row cannot write it
+# after it exits, so these fixtures pre-create it read-only: the worker's own
+# write then fails and leaves the planted bytes for the parent to judge.
+cat >"$tmp/plant-result.sh" <<'EOF'
+#!/usr/bin/env bash
+scratch="$(find "$TMPDIR" -mindepth 1 -maxdepth 1 -type d -name 'tmp.*' -print -quit)"
+printf "$ACTIONS_CI_PLANTED_RESULT" >"$scratch/0.status"
+chmod 444 "$scratch/0.status"
+EOF
+chmod +x "$tmp/plant-result.sh"
+printf 'platform\tbash %q\n' "$tmp/plant-result.sh" >"$tmp/plant.tsv"
+planted_result() { # <printf-format> -> runner output in $tmp/planted.out, status echoed
+  local planted_status=0
+  rm -rf "$tmp/plant-tmp"
+  mkdir -p "$tmp/plant-tmp"
+  TMPDIR="$tmp/plant-tmp" ACTIONS_CI_PLANTED_RESULT="$1" \
+    ACTIONS_CI_GROUP_MANIFEST="$tmp/plant.tsv" \
+    bash "$runner" platform >"$tmp/planted.out" 2>&1 || planted_status=$?
+  printf '%s\n' "$planted_status"
+}
+malformed_ok=1
+for planted in '' 'garbage\n' '0\t5' '0\t\n' '-1\t5\n'; do
+  if [ "$(planted_result "$planted")" -ne 1 ] \
+    || ! grep -q 'worker result is malformed' "$tmp/planted.out" \
+    || ! grep -q 'actions-ci command group=platform status=invalid' "$tmp/planted.out"; then
+    printf 'planted result %q was not rejected:\n' "$planted" >&2
+    cat "$tmp/planted.out" >&2
+    malformed_ok=0
+  fi
+done
+if [ "$malformed_ok" -eq 1 ]; then
+  pass "empty, garbage, unterminated, and incomplete worker results fail the group"
+else
+  fail "a malformed worker result was accepted"
+fi
+if [ "$(planted_result '0\t1\n')" -eq 1 ] \
+  && grep -q 'worker exited with status=1' "$tmp/planted.out" \
+  && grep -q 'actions-ci command group=platform status=1 ' "$tmp/planted.out"; then
+  pass "a worker that exits nonzero fails its row even when its result reads 0"
+else
+  cat "$tmp/planted.out" >&2
+  fail "a nonzero worker exit was hidden by a passing result"
+fi
+
+# A failed ps must read as live (#1736): treating it as dead would delete
+# scratch data under running descendants. With ps failing, the group cannot
+# prove its command groups ended, so it fails and keeps its scratch data.
+mkdir -p "$tmp/ps-fail-bin" "$tmp/ps-fail-tmp"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$tmp/ps-fail-bin/ps"
+chmod +x "$tmp/ps-fail-bin/ps"
+printf 'platform\ttrue\n' >"$tmp/ps-fail.tsv"
+ps_fail_status=0
+TMPDIR="$tmp/ps-fail-tmp" PATH="$tmp/ps-fail-bin:$PATH" \
+  ACTIONS_CI_GROUP_MANIFEST="$tmp/ps-fail.tsv" \
+  bash "$runner" platform >"$tmp/ps-fail.out" 2>&1 || ps_fail_status=$?
+if [ "$ps_fail_status" -ne 0 ] \
+  && grep -q 'left background processes' "$tmp/ps-fail.out"; then
+  pass "a failed ps counts as live processes and fails the row"
+else
+  cat "$tmp/ps-fail.out" >&2
+  fail "a failed ps was read as a finished command group"
+fi
+if grep -q 'survived SIGKILL' "$tmp/ps-fail.out" \
+  && grep -q 'preserving scratch data' "$tmp/ps-fail.out" \
+  && [ -n "$(find "$tmp/ps-fail-tmp" -mindepth 1 -print -quit)" ]; then
+  pass "a command group that survives SIGKILL fails the group and keeps its scratch data"
+else
+  cat "$tmp/ps-fail.out" >&2
+  fail "a SIGKILL survivor was ignored or its scratch data was removed"
+fi
+
+# A row must not be able to switch off the background-process check by
+# removing or rewriting the runner's record of its process group.
+cat >"$tmp/pgid-tamper.sh" <<'EOF'
+#!/usr/bin/env bash
+if [ -n "${ACTIONS_CI_COMMAND_PGID_FILE:-}" ]; then
+  rm -f "$ACTIONS_CI_COMMAND_PGID_FILE"
+fi
+sleep 30 &
+printf '%s\n' "$!" >"$ACTIONS_CI_TAMPER_CHILD_PID"
+EOF
+chmod +x "$tmp/pgid-tamper.sh"
+printf 'platform\tbash %q\n' "$tmp/pgid-tamper.sh" >"$tmp/pgid-tamper.tsv"
+tamper_status=0
+ACTIONS_CI_GROUP_MANIFEST="$tmp/pgid-tamper.tsv" \
+  ACTIONS_CI_TAMPER_CHILD_PID="$tmp/tamper-child.pid" \
+  bash "$runner" platform >"$tmp/pgid-tamper.out" 2>&1 || tamper_status=$?
+tamper_child_live=0
+if [ -s "$tmp/tamper-child.pid" ] && process_is_live "$(cat "$tmp/tamper-child.pid")"; then
+  tamper_child_live=1
+  kill "$(cat "$tmp/tamper-child.pid")" 2>/dev/null || true
+fi
+if [ "$tamper_status" -ne 0 ] && [ "$tamper_child_live" -eq 0 ] \
+  && grep -q 'left background processes' "$tmp/pgid-tamper.out"; then
+  pass "a row cannot hide a background descendant by removing the process-group record"
+else
+  cat "$tmp/pgid-tamper.out" >&2
+  fail "a row hid its background descendant from the runner"
+fi
+
+# Malformed rows fail in the runner itself, not only in the manifest contract.
+printf 'platform\ttrue\textra\n' >"$tmp/three-fields.tsv"
+printf 'platform\t@budget=601 true\n' >"$tmp/over-cap.tsv"
+if ! ACTIONS_CI_GROUP_MANIFEST="$tmp/three-fields.tsv" bash "$runner" platform \
+    >"$tmp/three-fields.out" 2>&1 \
+  && grep -q 'malformed manifest row' "$tmp/three-fields.out" \
+  && ! ACTIONS_CI_GROUP_MANIFEST="$tmp/over-cap.tsv" bash "$runner" platform \
+    >"$tmp/over-cap.out" 2>&1 \
+  && grep -q 'invalid command budget' "$tmp/over-cap.out"; then
+  pass "rows without exactly two fields and budgets above 600s fail before any command runs"
+else
+  cat "$tmp/three-fields.out" "$tmp/over-cap.out" >&2
+  fail "the runner accepted a malformed row or a budget above the 600s cap"
 fi
 
 mkdir -p "$tmp/single-bin"
