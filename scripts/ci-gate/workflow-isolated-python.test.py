@@ -183,7 +183,8 @@ WRAPPER_COMMANDS = {
 # Python options whose value is the following word.
 PYTHON_OPTIONS_WITH_VALUE = frozenset(("-W", "-X"))
 ASSIGNMENT = re.compile(r"^[A-Za-z_]\w*=")
-COMMAND_BOUNDARY = re.compile(r"\|\||&&|;|\||\n|\(|`|\{")
+# A brace opens a group only as its own word, so xargs -I {} is not a boundary.
+COMMAND_BOUNDARY = re.compile(r"\|\||&&|;|\||\n|\(|`|(?:^|(?<=\s))\{(?=\s)")
 REDIRECTION_OPERATOR = re.compile(r"^(?:\d*|&)(?:>>?|<<?<?|>&|<&)$")
 ATTACHED_REDIRECTION = re.compile(r"^(?:\d*|&)(?:>>?|<<?<?)\S+$")
 # A path built from literal and shell-variable parts, after its quotes are
@@ -549,6 +550,10 @@ def assert_scanner_recognizes_invocation_forms():
         # Wrapper words, and their own arguments, before a quoted interpreter.
         'timeout 60 "python3" scripts/x.py',
         'sudo -E "python3" x.py',
+        # A replacement-string argument is not a brace group.
+        'xargs -I {} "python3" scripts/x.py',
+        'xargs -I {} python3 tool',
+        'xargs -I{} python3 tool',
         'sudo -u runner -E "python3" -c pass',
         'nice -n 10 "python3" -c pass',
         'stdbuf -oL "python3" scripts/x.py',
