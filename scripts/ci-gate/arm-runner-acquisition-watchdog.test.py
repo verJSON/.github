@@ -9,8 +9,10 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
+import zlib
 
 import yaml
 
@@ -22,11 +24,21 @@ START = int(datetime(2026, 10, 5, 18, 2, 30, tzinfo=timezone.utc).timestamp())
 REPOSITORY = "Verjson/verjson-payments"
 RUN_ID = "37352915856"
 
+# Every call is logged with the stubbed clock. Any request outside this run's own attempt
+# listing and its two cancellation endpoints is recorded as a violation that fails the scenario.
 GH_STUB = r"""#!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "$*" >>"$STUB_DIR/calls"
+printf '%s %s\n' "$(cat "$STUB_DIR/clock")" "$*" >>"$STUB_DIR/calls"
+own_run="repos/$STUB_REPOSITORY/actions/runs/$STUB_RUN_ID"
 if [ "$1 $2" = "api --method" ]; then
+  case "$#:$3 $4" in
+    "4:POST $own_run/cancel"|"4:POST $own_run/force-cancel") ;;
+    *) printf '%s\n' "$*" >>"$STUB_DIR/violations" ;;
+  esac
   exit 0
+fi
+if [ "$#" -ne 2 ] || [ "$1" != api ] || [ "$2" != "$own_run/attempts/$STUB_RUN_ATTEMPT/jobs?per_page=100" ]; then
+  printf '%s\n' "$*" >>"$STUB_DIR/violations"
 fi
 index=$(cat "$STUB_DIR/polls")
 printf '%s\n' $((index + 1)) >"$STUB_DIR/polls"
@@ -62,9 +74,16 @@ def iso(seconds_after_start):
     return datetime.fromtimestamp(START + seconds_after_start, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+MISSING = object()
+
+
 def job(name, status, created_offset=0, labels=("self-hosted", "general")):
-    return {"name": name, "status": status, "created_at": iso(created_offset), "labels": list(labels),
-            "runner_name": None if status == "queued" else "gha-general-1"}
+    listed = {"id": zlib.crc32(name.encode()) + 1, "name": name, "status": status,
+              "labels": None if labels is None else list(labels),
+              "runner_name": None if status == "queued" else "gha-general-1"}
+    if created_offset is not MISSING:
+        listed["created_at"] = iso(created_offset)
+    return listed
 
 
 def snapshot(*jobs):
@@ -83,6 +102,19 @@ def watchdog_job():
 
 
 ESCALATION_GUARD = "${{ always() && steps.detect.outputs.stalled == 'true' }}"
+RUNNER_GUARD = '[ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] || {'
+
+
+def resolve(value, runner_environment, outputs):
+    """Evaluate the step-env expressions the watchdog uses; anything else is unmodelled."""
+    expression = re.fullmatch(r"\$\{\{ (.+?) \}\}", str(value))
+    if not expression:
+        return str(value)
+    if expression[1] == "runner.environment":
+        return runner_environment
+    output = re.fullmatch(r"steps\.([a-z-]+)\.outputs\.([a-z_]+)", expression[1])
+    assert output, f"unmodelled step expression {value}"
+    return outputs.get(output[1], {}).get(output[2], "")
 
 
 class JobResult:
@@ -92,8 +124,12 @@ class JobResult:
         self.stderr = stderr
 
 
-def run_watchdog(snapshots):
-    """Run the job's steps in order, honoring each step's `if` the way the runner would."""
+def run_watchdog(snapshots, runner_environment="github-hosted", preset_outputs=None):
+    """Run the job's steps in order, honoring each step's `if` the way the runner would.
+
+    `preset_outputs` runs every step unconditionally with those step outputs, to exercise a
+    step's own guard in isolation.
+    """
     job_definition = watchdog_job()
     with tempfile.TemporaryDirectory() as directory:
         stub_dir = Path(directory)
@@ -108,7 +144,8 @@ def run_watchdog(snapshots):
         (stub_dir / "polls").write_text("0\n", encoding="utf-8")
         (stub_dir / "clock").write_text(f"{START}\n", encoding="utf-8")
         (stub_dir / "calls").write_text("", encoding="utf-8")
-        env = {key: value for key, value in os.environ.items() if not key.startswith("GITHUB_")}
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("GITHUB_", "RUNNER_"))}
         env.update({key: str(value) for key, value in job_definition["env"].items()})
         env.update({
             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
@@ -116,13 +153,18 @@ def run_watchdog(snapshots):
             "TARGET_REPO": REPOSITORY,
             "ARM_RUN_ID": RUN_ID,
             "ARM_RUN_ATTEMPT": "1",
+            "STUB_REPOSITORY": REPOSITORY,
+            "STUB_RUN_ID": RUN_ID,
+            "STUB_RUN_ATTEMPT": "1",
         })
         failed = False
         stdout = stderr = ""
-        outputs = {}
+        outputs = dict(preset_outputs or {})
         for step in job_definition["steps"]:
             condition = step.get("if")
-            if condition is not None:
+            if preset_outputs is not None:
+                pass
+            elif condition is not None:
                 assert condition == ESCALATION_GUARD, condition
                 if outputs.get("detect", {}).get("stalled") != "true":
                     continue
@@ -131,7 +173,8 @@ def run_watchdog(snapshots):
             output_path = stub_dir / f"output-{step.get('id', 'step')}"
             output_path.write_text("", encoding="utf-8")
             step_env = dict(env, GITHUB_OUTPUT=str(output_path))
-            step_env.update({key: str(value) for key, value in (step.get("env") or {}).items()})
+            step_env.update({key: resolve(value, runner_environment, outputs)
+                             for key, value in (step.get("env") or {}).items()})
             completed = subprocess.run(["bash", "-c", step["run"]], env=step_env, check=False,
                                        capture_output=True, text=True, timeout=120)
             stdout += completed.stdout
@@ -142,11 +185,22 @@ def run_watchdog(snapshots):
                                            output_path.read_text(encoding="utf-8").splitlines() if "=" in line)
         calls = (stub_dir / "calls").read_text(encoding="utf-8").splitlines()
         elapsed = int((stub_dir / "clock").read_text(encoding="utf-8")) - START
+        violations = stub_dir / "violations"
+        assert not violations.exists(), f"requests outside this run: {violations.read_text()}"
     return JobResult(failed, stdout, stderr), calls, elapsed
 
 
+def posts(calls):
+    """(stubbed clock, full API path) for each POST, in order."""
+    return [(int(call.split()[0]), call.split()[-1]) for call in calls if " api --method POST " in call]
+
+
 def cancellations(calls):
-    return [call.split()[-1].rsplit("/", 1)[-1] for call in calls if call.startswith("api --method POST")]
+    return [path.rsplit("/", 1)[-1] for _, path in posts(calls)]
+
+
+def env_seconds(name):
+    return int(watchdog_job()["env"][name])
 
 
 def limit_seconds():
@@ -190,8 +244,10 @@ def test_reusable_caller_prefixed_job_names_are_recognized():
 def test_unreachable_lane_cancels_then_force_cancels_and_names_the_stalled_job():
     completed, calls, elapsed = run_watchdog(ghost_key_validation())
     assert completed.returncode != 0
-    assert cancellations(calls) == ["cancel", "force-cancel"], calls
-    assert f"api --method POST repos/{REPOSITORY}/actions/runs/{RUN_ID}/cancel" in calls, calls
+    (cancelled_at, cancel), (forced_at, force) = posts(calls)
+    assert cancel == f"repos/{REPOSITORY}/actions/runs/{RUN_ID}/cancel", calls
+    assert force == f"repos/{REPOSITORY}/actions/runs/{RUN_ID}/force-cancel", calls
+    assert forced_at - cancelled_at >= env_seconds("CANCEL_GRACE_SECONDS"), calls
     assert "::error title=Runner acquisition stalled::" in completed.stdout, completed.stdout
     assert "app-key-policy / validate-ai-review-key" in completed.stdout, completed.stdout
     assert "self-hosted,general" in completed.stdout, completed.stdout
@@ -217,6 +273,60 @@ def test_an_unobservable_listing_after_cancel_is_not_escalated():
     completed, calls, _ = run_watchdog(ghost_key_validation() * polls_to_detect + ["error"])
     assert completed.returncode != 0
     assert cancellations(calls) == ["cancel"], calls
+
+
+def test_force_cancel_targets_only_the_job_detected_as_stalled():
+    polls_to_detect = limit_seconds() // env_seconds("POLL_INTERVAL_SECONDS") + 1
+    # The detected job cleared; an unrelated job is queued at re-check time and is old enough to
+    # look stalled on its own. Escalation is bound to the detected job, so it does not fire.
+    other_queued = snapshot(job("event-policy", "completed", labels=("ubuntu-24.04",)),
+                            job("app-key-policy / validate", "completed", 5, ("ubuntu-24.04",)),
+                            job("app-key-policy / validate-ai-review-key", "completed", 0),
+                            job("arm", "queued", 0))
+    completed, calls, _ = run_watchdog(ghost_key_validation() * polls_to_detect + [other_queued])
+    assert completed.returncode != 0
+    assert cancellations(calls) == ["cancel"], calls
+
+
+def test_watchdog_is_dormant_off_github_hosted_runners():
+    # ADR 0147 lets the untrusted lane roll back to the persistent pool; the write-scoped token
+    # must then never be used there. Both steps are checked, each in isolation.
+    for runner_environment in ("self-hosted", ""):
+        for preset in (None, {"detect": {"stalled": "true", "stalled_job_id": "7"}}):
+            completed, calls, _ = run_watchdog(ghost_key_validation(), runner_environment, preset)
+            assert completed.returncode == 0, (runner_environment, preset, completed.stderr)
+            assert calls == [], (runner_environment, preset, calls)
+            assert "::notice::" in completed.stdout, completed.stdout
+    for step in watchdog_job()["steps"]:
+        assert step["env"]["RUNNER_ENVIRONMENT"] == "${{ runner.environment }}", step["name"]
+        assert step["run"].splitlines()[0].startswith(RUNNER_GUARD), step["name"]
+
+
+def test_job_without_created_at_is_never_aged_into_a_stall():
+    undated = snapshot(job("event-policy", "completed", labels=("ubuntu-24.04",)),
+                       job("app-key-policy / validate", "completed", 5, ("ubuntu-24.04",)),
+                       job("app-key-policy / validate-ai-review-key", "queued", MISSING))
+    polls = (limit_seconds() + 120) // env_seconds("POLL_INTERVAL_SECONDS")
+    completed, calls, _ = run_watchdog([undated] * polls + [healthy_runs()[-1]])
+    assert completed.returncode == 0, completed.stderr
+    assert cancellations(calls) == [], calls
+
+
+def test_null_labels_do_not_disturb_a_healthy_run():
+    unlabelled = healthy_runs()[-1]
+    unlabelled["jobs"][0]["labels"] = None
+    completed, calls, _ = run_watchdog(healthy_runs()[:-1] + [unlabelled])
+    assert completed.returncode == 0, completed.stderr
+    assert cancellations(calls) == [], calls
+
+
+def test_a_stalled_job_with_null_labels_is_still_cancelled():
+    stalled = ghost_key_validation()[0]
+    stalled["jobs"][2]["labels"] = None
+    completed, calls, _ = run_watchdog([stalled])
+    assert completed.returncode != 0
+    assert cancellations(calls) == ["cancel", "force-cancel"], calls
+    assert "app-key-policy / validate-ai-review-key" in completed.stdout, completed.stdout
 
 
 def test_stalled_job_in_a_reusable_caller_run_is_cancelled():
@@ -272,7 +382,7 @@ def test_watchdog_holds_no_secret_and_cannot_veto_a_merge():
     rendered = yaml.safe_dump(watchdog)
     assert watchdog["needs"] == "event-policy"
     assert watchdog["if"] == arm["jobs"]["app-key-policy"]["if"]
-    # Same no-secret lane as event-policy, never the trusted lane whose acquisition it watches.
+    # Same lane as event-policy (no environment or repository secret), never the trusted lane it watches.
     assert watchdog["runs-on"] == arm["jobs"]["event-policy"]["runs-on"]
     assert watchdog["runs-on"] != arm["jobs"]["arm"]["runs-on"]
     assert watchdog["permissions"] == {"actions": "write"}

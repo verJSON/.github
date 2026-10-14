@@ -4,6 +4,8 @@
 - **Status:** Accepted
 - **Issue:** [verJSON/.github#1763](https://github.com/verJSON/.github/issues/1763)
 - **Refines:** [ADR 0040](../0040-runner-lanes-and-admission-axes/README.md) (lanes),
+  [ADR 0147](../0147-route-untrusted-ci-to-ephemeral-hosted-runners/README.md) (untrusted lane on
+  ephemeral hosted runners, with rollback to the persistent pool),
   [ADR 0090](../0090-human-first-opt-in-ai-review/README.md) (the arm never vetoes a human merge),
   [ADR 0164](../0164-bridge-review-lifecycle-deliveries/README.md) (PR-scoped,
   non-cancelling arm concurrency)
@@ -57,9 +59,18 @@ queue time, and no workflow expression can bound it.
 2. **The arm bounds acquisition in-band.** `gate-rearm.yml` gains a
    `runner-acquisition-watchdog` job that runs beside `app-key-policy` once
    `event-policy` admits the delivery:
-   - It runs on the no-secret lane `event-policy` uses (`CI_LANE_UNTRUSTED`), with
-     `permissions: {actions: write}` only. It has no environment, secret, or checkout,
-     and it reads only its own run's jobs listing for the current attempt.
+   - It runs on the lane `event-policy` uses (`CI_LANE_UNTRUSTED`), with
+     `permissions: {actions: write}` only. It has no environment, repository secret, or
+     checkout, and it reads only its own run's jobs listing for the current attempt. It
+     does hold a write-scoped `GITHUB_TOKEN`, and it is the first job to do so on the lane
+     that also runs PR-authored code.
+   - That placement is safe only while the lane is ephemeral and GitHub-hosted, as
+     ADR 0147 routes it today. ADR 0147 also allows a rollback to the persistent
+     self-hosted pool. Each watchdog step therefore starts with a guard on
+     `runner.environment`: unless the runner is `github-hosted`, the step writes a
+     notice and exits 0 without listing or cancelling anything. After such a rollback
+     the watchdog is dormant, the arm loses its bound, and the arm's behavior reverts to
+     the pre-ADR state. The watchdog never uses that token on a persistent host.
    - It polls every 15 s. A job other than itself in `queued`, `pending`, or `requested`
      for at least **900 s** is a stall. `waiting` is excluded because it is an
      environment's human gate, not runner acquisition. The watchdog exits once the
@@ -69,11 +80,12 @@ queue time, and no workflow expression can bound it.
      **cancel** of its own run. The `always()` `arm` job can then complete the
      authorization check as failed, as it already does for any non-successful
      `app-key-policy`, and the PR's concurrency group is released for the next arm.
-   - An `always()` escalation step waits 120 s, re-evaluates the same stall verdict, and
-     **force-cancels** only if the original stall survives. The young `arm` job queued
-     by the cancellation is not a stall, so the check it is about to complete is never
-     orphaned. An unreadable or malformed listing is never treated as a stall, either
-     before or after cancellation.
+   - Detection passes the stalled job's id through `$GITHUB_OUTPUT`. An `always()`
+     escalation step waits 120 s, then **force-cancels** only if that same job is still
+     unassigned. Any other queued job, such as the `arm` job the cancellation queued to
+     complete the authorization check, never triggers escalation, so that check is never
+     orphaned. An unreadable or malformed listing, a job without a queue time, or a
+     missing job id is never treated as a stall, either before or after cancellation.
    - The job is `continue-on-error: true`. Neither `arm` nor `app-key-policy` needs it,
      so a watchdog defect cannot turn the required workflow into a merge veto
      (ADR 0090). In a stall, the effect comes from cancellation, not from this job's
@@ -85,12 +97,21 @@ queue time, and no workflow expression can bound it.
    an indefinite hold into a named, re-runnable failure within about 17 minutes.
 
 `scripts/ci-gate/arm-runner-acquisition-watchdog.test.py` (registered in `merge-gate`)
-executes both real steps against stubbed `gh`, `date`, and `sleep`. It covers jobs that
-acquire runners, both with and without the reusable caller's job-name prefix, plus a
-stalled validator, a stalled `arm`, a stall shorter than the limit, environment waiting,
-unreadable and malformed listings, and a cancel that takes effect versus one that does
-not. It also pins the watchdog's lane, permissions, and non-veto wiring, and checks that
-its timeout covers the worst case.
+executes both real steps against stubbed `gh`, `date`, and `sleep`. The `gh` stub fails
+any scenario that requests a path other than this run's own attempt listing and its
+cancel and force-cancel endpoints. The scenarios cover:
+
+- jobs that acquire runners, with and without the reusable caller's job-name prefix;
+- a stalled validator, a stalled `arm`, and a stall shorter than the limit;
+- environment waiting, unreadable and malformed listings, and jobs without `created_at`
+  or with null labels;
+- a cancel that takes effect versus one that does not, including the full grace period
+  before force-cancel;
+- a different job queued at re-check time;
+- dormancy off GitHub-hosted runners.
+
+It also pins the watchdog's lane, permissions, and non-veto wiring, and checks that its
+timeout covers the worst case.
 
 ## Consequences
 
@@ -111,6 +132,14 @@ its timeout covers the worst case.
   be re-run. Before this change, the arm would eventually have succeeded. Bounded
   liveness for a required check is worth that trade, and the annotation names the
   saturated lane.
+- **Accepted residual risk: the watchdog cannot watch itself.** Its own dispatch can be
+  lost just like any other job's. That leaves the run exactly as unbounded as it was
+  before this decision, and nothing else in the run observes the loss.
+- **Accepted residual risk: an unreadable listing holds the group.** If the jobs listing
+  stays unreadable, the watchdog keeps polling until its 40-minute `timeout-minutes`
+  expires. Until then the run, and with it the PR's arm concurrency group, stays open,
+  even after `arm` has finished. The bound then degrades to 40 minutes rather than
+  failing open into a cancellation without evidence.
 - `gate-rearm.yml` is the workflow that organization ruleset 20722935 runs at a stored
   SHA. This change takes effect only after the owner rotates that ruleset to the merge
   SHA, and the generated callers pick it up on their next repin.

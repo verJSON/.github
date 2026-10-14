@@ -98,9 +98,12 @@ jobs:
   # hands to a runner stays queued indefinitely, and with this workflow's
   # non-cancelling PR concurrency group it holds every later arm for the PR as
   # pending (verjson-payments run 37352915856). This job bounds that wait from
-  # the no-secret lane: past the limit it names the stalled job and cancels the
+  # the untrusted lane with no environment or repository secret, only a
+  # write-scoped GITHUB_TOKEN, which each step uses solely on an ephemeral
+  # GitHub-hosted runner (ADR 0147 allows that lane to roll back to the
+  # persistent pool). Past the limit it names the stalled job and cancels the
   # run, so the always() arm job completes the authorization check as failed
-  # and the group is released; it force-cancels only if the stall persists.
+  # and the group is released; it force-cancels only if that job persists.
   runner-acquisition-watchdog:
     needs: event-policy
     if: ${{ needs.event-policy.outputs.run_control_plane == 'true' }}
@@ -123,25 +126,29 @@ jobs:
       CANCEL_GRACE_SECONDS: '120'
       # Classifies one attempt's jobs: `stalled` names the first job still
       # waiting for a runner past the limit (this job holds one while polling,
-      # and an environment `waiting` state is a human gate, not acquisition);
-      # `acquired` means the final arm job holds a runner, after which its own
-      # timeout bounds it.
+      # an environment `waiting` state is a human gate, not acquisition, and a
+      # job without a queue time cannot be aged); `acquired` means the final
+      # arm job holds a runner, after which its own timeout bounds it.
       ACQUISITION_VERDICT: |
         .jobs as $jobs
         | [$jobs[] | select(.status == "queued" or .status == "pending" or .status == "requested")
-            | {name, labels, age: ($now - (.created_at | fromdateiso8601))}
+            | select(.created_at | type == "string")
+            | {id, name, labels, age: ($now - (.created_at | fromdateiso8601))}
             | select(.age >= $limit)] as $stalled
         | if ($stalled | length) > 0 then
-            $stalled[0] | {state: "stalled", age,
-              name: (.name | gsub("[^A-Za-z0-9 ._/-]"; "?")),
-              labels: (.labels | map(gsub("[^A-Za-z0-9._-]"; "?")) | join(","))}
+            $stalled[0] | {state: "stalled", age, id,
+              name: (.name | tostring | gsub("[^A-Za-z0-9 ._/-]"; "?")),
+              labels: ([.labels // [] | .[] | tostring | gsub("[^A-Za-z0-9._-]"; "?")] | join(","))}
           elif any($jobs[]; (.name | test("(^| / )arm$")) and (.status == "in_progress" or .status == "completed"))
           then {state: "acquired"}
           else {state: "waiting"} end
     steps:
       - name: Bound runner acquisition for this arm attempt
         id: detect
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
+          [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] || { echo "::notice::runner-acquisition watchdog is dormant on a ${RUNNER_ENVIRONMENT:-unidentified} runner; its write-scoped token is used only on ephemeral GitHub-hosted runners"; exit 0; }
           set -euo pipefail
           [[ "$TARGET_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || exit 1
           [[ "$ARM_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
@@ -157,7 +164,12 @@ jobs:
               case "$(jq -r .state <<<"$verdict")" in
                 acquired) echo "Every arm job acquired a runner."; exit 0 ;;
                 stalled)
-                  echo 'stalled=true' >>"$GITHUB_OUTPUT"
+                  stalled_job_id="$(jq -r .id <<<"$verdict")"
+                  [[ "$stalled_job_id" =~ ^[1-9][0-9]*$ ]] || stalled_job_id=''
+                  {
+                    echo "stalled_job_id=$stalled_job_id"
+                    echo 'stalled=true'
+                  } >>"$GITHUB_OUTPUT"
                   jq -r --arg run "$ARM_RUN_ID" '"::error title=Runner acquisition stalled::\(.name) waited \(.age)s for a runner labelled [\(.labels)], past the \(env.ACQUISITION_LIMIT_SECONDS)s limit. Cancelling arm run \($run) to release this pull request'"'"'s arm concurrency group; re-run the arm or push to re-arm."' <<<"$verdict"
                   gh api --method POST "repos/$TARGET_REPO/actions/runs/$ARM_RUN_ID/cancel" >/dev/null ||
                     echo "::warning::cancel request for arm run $ARM_RUN_ID was not accepted"
@@ -172,22 +184,29 @@ jobs:
 
       - name: Force-cancel when the stalled job survives cancellation
         if: ${{ always() && steps.detect.outputs.stalled == 'true' }}
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          STALLED_JOB_ID: ${{ steps.detect.outputs.stalled_job_id }}
         run: |
+          [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] || { echo "::notice::runner-acquisition watchdog is dormant on a ${RUNNER_ENVIRONMENT:-unidentified} runner; its write-scoped token is used only on ephemeral GitHub-hosted runners"; exit 0; }
           set -euo pipefail
           sleep "$CANCEL_GRACE_SECONDS"
           jobs_path="repos/$TARGET_REPO/actions/runs/$ARM_RUN_ID/attempts/$ARM_RUN_ATTEMPT/jobs?per_page=100"
-          # Re-apply the stall verdict, not "anything still queued": the arm job
-          # queued by cancellation is young, and force-cancelling it would orphan
-          # the authorization check it is about to complete.
-          # An unobservable listing is not evidence the stall persists.
+          # Escalate only for the very job detection named, still unassigned: any
+          # other queued job, such as the arm job the cancellation queued, may be
+          # about to complete the authorization check, and force-cancelling it
+          # would orphan that check. An unobservable listing or an unidentified
+          # job is not evidence the stall persists.
           state=unobservable
-          if listing="$(gh api "$jobs_path")"; then
-            state="$(jq -r --argjson now "$(date -u +%s)" --argjson limit "$ACQUISITION_LIMIT_SECONDS" \
-              "$ACQUISITION_VERDICT | .state" <<<"$listing" 2>/dev/null)" || state=unobservable
+          if [[ "$STALLED_JOB_ID" =~ ^[1-9][0-9]*$ ]] && listing="$(gh api "$jobs_path")"; then
+            state="$(jq -r --argjson id "$STALLED_JOB_ID" '
+              [.jobs[] | select(.id == $id)] as $same
+              | if ($same | length) == 1 and ($same[0].status | IN("queued", "pending", "requested"))
+                then "stalled" else "cleared" end' <<<"$listing" 2>/dev/null)" || state=unobservable
           fi
           case "$state" in
             stalled)
-              echo "::error::arm run $ARM_RUN_ID still holds a stalled job after ${CANCEL_GRACE_SECONDS}s; force-cancelling"
+              echo "::error::arm run $ARM_RUN_ID still holds stalled job $STALLED_JOB_ID after ${CANCEL_GRACE_SECONDS}s; force-cancelling"
               gh api --method POST "repos/$TARGET_REPO/actions/runs/$ARM_RUN_ID/force-cancel" >/dev/null
               ;;
             unobservable) echo "::warning::arm jobs listing unavailable; not escalating to force-cancel" ;;
