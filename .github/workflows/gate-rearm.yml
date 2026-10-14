@@ -1163,7 +1163,8 @@ jobs:
       # ordinary completion: approval only under ai-approve or ai-merge, otherwise the
       # human path. The stale privileged merge caller cannot verify this receipt, so
       # the bootstrap never grants terminal promotion: it records the approval-only
-      # ai-approve marker even under ai-merge, and a maintainer merges natively.
+      # ai-approve marker even under ai-merge. Under either approving authority the App
+      # approval has ADR 0079's native-merge effect (auto-merge or a writer's merge).
       - name: Complete stale review caller bootstrap authorization
         id: bootstrap-complete
         if: steps.bootstrap.outputs.eligible == 'true'

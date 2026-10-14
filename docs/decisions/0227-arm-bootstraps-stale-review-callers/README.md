@@ -96,8 +96,15 @@ the always-run terminalizer, which records a bootstrap-specific failure.
 The App token is minted only after the proof holds, with `contents: read` and
 `pull-requests: write`, the same narrowed grant ordinary completion uses. The arm does not
 dispatch terminal promotion: the consumer's privileged merge caller is just as stale and
-would reject the receipt. A maintainer merges natively once required CI is green. The
-receipt is retained, not consumed, so a later current privileged merge can still verify it.
+would reject the receipt. The persisted App approval still has ADR 0079's native-merge
+effect. Under `ai-approve` or `ai-merge`, the approval satisfies the review requirement on
+its own, so GitHub native auto-merge, if the pull request author or any writer enables it,
+merges the pull request once every required check is green. Any writer can also merge it
+directly. No human approval is involved in either case. That is acceptable only because
+every merged byte is generated: the proof leaves nothing for a human reviewer to judge.
+Under `human` authority, no approval is persisted, and a human approval is still required.
+The receipt is retained, not consumed, so a later current privileged merge can still
+verify it.
 
 The proof is embedded in the workflow rather than checked out. Commit `ebe23faf` removed a
 checkout at the executing workflow SHA after that SHA turned out not to name a revision of
@@ -114,7 +121,7 @@ copy, so the behavioral test compares it byte for byte with
 | Downgrade or side-branch revision | The new revision must contain the casing repair, descend from the stale pin, and be reachable from canonical `main`. |
 | Pinning a revision with a known, already-fixed review-path defect | The new revision must contain `MINIMUM_SAFE_REVIEW`, which is raised with every review-path security fix. |
 | A post-repair consumer uses the lane to skip model review | A stale revision that already contains the repair is refused. |
-| Head moves, or the base moves under the approval | The proof binds the receipt head and the protected tip, runs again before approval, and approves an explicit `commit_id`. `dismiss_stale_reviews_on_push` remains in force. |
+| Head moves, or the base moves under the approval | The proof binds the receipt head and the protected tip, runs again before approval, and approves an explicit `commit_id`. A push after the approval is covered only where the consumer's branch rules set `dismiss_stale_reviews_on_push` and `require_last_push_approval`; checking both is a recipe prerequisite. |
 | Forged or replayed check | The arm only completes the check it created in the same run, matching ID, `external_id`, head, App, and in-progress state. |
 | Lying or partial API responses | Tree truncation, repeated paths, a file-list or count disagreement, blob bytes that do not match their object ID, a comparison of the wrong base, and malformed JSON are all refused. |
 | Authority escalation | Receipt authority can only lower the outcome: no approval under `human`, and an approval-only `ai-approve` marker under `ai-approve` or `ai-merge`. No new App permission, no admin bypass, and no terminal promotion. |
@@ -159,6 +166,14 @@ copy, so the behavioral test compares it byte for byte with
 
 ## Consumer recipe
 
+Prerequisite: read the consumer's default-branch rules
+(`gh api repos/<owner>/<repo>/rules/branches/<default-branch>`) and confirm that the
+`pull_request` rule sets both `dismiss_stale_reviews_on_push` and
+`require_last_push_approval` to `true`. Without them, a push after the App approval could
+merge under that approval. Fix the rules first if either is missing; the bootstrap does not
+check them. On 2026-10-13, a read-only check found both set on verjson-cli,
+verjson-git-runners, and verjson-cli-cloud.
+
 From a clean branch at the consumer's protected tip:
 
 1. `scripts/gen-ai-review-caller.sh <new-sha> > .github/workflows/ai-review-merge.yml`,
@@ -175,8 +190,8 @@ From a clean branch at the consumer's protected tip:
 ## Verification
 
 `python3 scripts/ci-gate/review-caller-bootstrap.test.py` runs the real classification,
-completion, and terminalizer steps against a stubbed GitHub API. It covers 33 refusal
-reasons, completion refusals, and authority outcomes. In 39 mutation proofs, each removes
+completion, and terminalizer steps against a stubbed GitHub API. It covers 40 refusal
+reasons, completion refusals, and authority outcomes. In 48 mutation proofs, each removes
 one guard from the workflow and shows that the same case is then wrongly admitted. The test
 also compares the embedded template with the generator, and checks that every generated
 fragment satisfies `scripts/changelog.py validate`. A read-only run of the extracted proof
