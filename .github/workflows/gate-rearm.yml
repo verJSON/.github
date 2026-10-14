@@ -1011,6 +1011,7 @@ jobs:
           WORKFLOW_FILE = re.compile(r"\.github/workflows/[A-Za-z0-9._-]+\.ya?ml")
           COMMENT = re.compile(rb"[ \t]*#")
           JOB_KEY = re.compile(rb"  [A-Za-z_][A-Za-z0-9_-]*:[ \t]*(?:#.*)?\r?")
+          JOBS_ROOT = re.compile(rb"jobs:[ \t]*(?:#.*)?\r?")
           REUSABLE_REF = re.compile(rb"(    uses: )([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/(\.github/workflows/[A-Za-z0-9._-]+\.ya?ml)@([0-9a-f]{40})((?:[ \t]+(?:#.*)?)?\r?)")
           INPUTS = (
               ("pr_number", True), ("expected_head_sha", True), ("authorization_check_id", True),
@@ -1143,9 +1144,10 @@ jobs:
 
 
           def job_call(lines, index):
-              # A reference is a job's reusable workflow call only directly under a bare job key; under
-              # `note: >-` the same bytes are block scalar text.
-              return JOB_KEY.fullmatch(enclosing(lines, index, 4)) is not None
+              # A reference is a job's reusable workflow call only directly under a bare job key inside the
+              # top-level `jobs:` map; under `note: >-` or a trigger key the same bytes mean something else.
+              return (JOB_KEY.fullmatch(enclosing(lines, index, 4)) is not None
+                      and JOBS_ROOT.fullmatch(enclosing(lines, index, 1)) is not None)
 
 
           def reusable_ci_pins(path, before, after, contract):
