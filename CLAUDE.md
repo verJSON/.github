@@ -93,7 +93,7 @@ was confirmed, since inspection-only claims go stale silently).
 
 - [#1692](https://github.com/Verjson/.github/issues/1692) — Target current `main` HEAD in dev via a fast, validated image path and promote one fully verified pinned digest set from nonprod to prod with separate environment controls; opened 2026-10-05 after confirming the candidate and release generators lack a general app deployment caller.
 
-- [#1696](https://github.com/Verjson/.github/issues/1696) — Provide a fail-closed bootstrap when a stale default-branch AI review caller cannot authorize its own canonical pin update.
+- [#1696](https://github.com/Verjson/.github/issues/1696) — The authorization arm bootstraps a stale default-branch AI review caller ([ADR 0225](docs/decisions/0225-arm-bootstraps-stale-review-callers/README.md)). Closing the issue still requires rotating ruleset 20722935 to the merge SHA and proving a focused verjson-cli bootstrap pull request. Verified 2026-10-13 with `python3 scripts/ci-gate/review-caller-bootstrap.test.py` and a read-only live classifier run against verjson-cli#302.
 
 - [#1655](https://github.com/Verjson/.github/issues/1655) — Signed merge-gate provenance rollout, opened 2026-09-28 after #1339 met its evidence gate; ADR 0211 still requires a real `pull_request_target` capture before rollout.
 
