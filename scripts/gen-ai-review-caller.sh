@@ -50,7 +50,7 @@ permissions:
 
 jobs:
   review:
-    uses: Verjson/.github/.github/workflows/ai-review-merge.yml@$contract_sha
+    uses: verjson.github/.github/workflows/ai-review-merge.yml@$contract_sha
     secrets: inherit
     with:
       ai_review_environment: ai-review-app

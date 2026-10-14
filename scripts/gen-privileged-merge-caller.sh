@@ -28,8 +28,8 @@ contract_sha="${1-}"
   echo "contract_sha must be an immutable lowercase 40-hex commit SHA" >&2
   exit 2
 }
-readonly TARGET="Verjson/.github/.github/workflows/ai-privileged-merge.yml@$contract_sha"
-readonly RETRY_TARGET="Verjson/.github/.github/workflows/ai-promotion-retry.yml@$contract_sha"
+readonly TARGET="verjson.github/.github/workflows/ai-privileged-merge.yml@$contract_sha"
+readonly RETRY_TARGET="verjson.github/.github/workflows/ai-promotion-retry.yml@$contract_sha"
 
 if [ "${2-}" = --retry ]; then
   [ "$#" -eq 4 ] || { echo "--retry requires workflow-names and required-checks JSON arguments" >&2; exit 2; }
@@ -150,7 +150,7 @@ emit() {
 # Regenerate with:
 #   scripts/gen-privileged-merge-caller.sh $contract_sha $required_checks_shell$regen_arg > .github/workflows/ai-privileged-merge.yml
 #
-# Thin caller for the canonical privileged merge (Verjson/.github). All trust
+# Thin caller for the canonical privileged merge (verjson.github). All trust
 # logic lives there; nothing here may re-implement it.
 name: AI privileged merge
 
