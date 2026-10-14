@@ -621,9 +621,13 @@ def poison_outer_environment() -> Path:
 def main() -> int:
     poison_outer_environment()
     harness = Harness()
+    # Classification calls gh from Python, so only the completion step's bash
+    # invocations of gh can observe a shadowing function.
     result, _ = harness.run_step("bootstrap", Consumer())
-    report("hostile-gh" not in result.stdout + result.stderr,
-           "an outer BASH_ENV, ENV, or exported gh function never reaches a step", result)
+    completed, _, _ = harness.complete(Consumer())
+    report("hostile-gh" not in result.stdout + result.stderr + completed.stdout + completed.stderr
+           and completed.returncode == 0,
+           "an outer BASH_ENV, ENV, or exported gh function never reaches a step", completed)
 
     result, outputs = harness.run_step("bootstrap", Consumer())
     report(result.returncode == 0 and outputs.get("eligible") == "true" and outputs.get("stale_sha") == STALE
