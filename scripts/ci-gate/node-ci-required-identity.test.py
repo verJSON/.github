@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LEGACY = ROOT / ".github/workflows/node-ci.yml"
 PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 HEAD = "a" * 40
-LEGACY_SHA256 = "438a62b21be632295785342aa1f8baa3ea8425869287c6be36f0afa3e691a1c9"
+LEGACY_SHA256 = "a36d4533b340b3ca8c9a2d6dba5b12bab51ddfee5c212a2313996f33cff71529"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
@@ -941,6 +941,19 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             plan_run,
         )
         self.assertIn('os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"', plan_run)
+        self.assertEqual([], remaining)
+
+    def test_candidate_script_can_execute_alternatives_managed_tools(self):
+        # #1782: /usr/bin/awk is a link into /etc/alternatives on Debian and Ubuntu.
+        result, remaining = self.run_candidate_plan(
+            lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+            "test \"$(awk 'BEGIN { print \"awk-ok\" }')\" = awk-ok\n"
+            'printf "alternatives-managed awk ran in the candidate sandbox\\n"\n',
+            script_plan=["first"],
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("alternatives-managed awk ran in the candidate sandbox", result.stdout)
         self.assertEqual([], remaining)
 
     def test_candidate_path_shadow_cannot_replace_setup_node_tools(self):

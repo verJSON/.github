@@ -290,6 +290,29 @@ class OrgSecretScopeAuditTest(unittest.TestCase):
         self.assertIn("residue=MERGE_APP_PRIVATE_KEY", result.stdout)
         self.assertNotIn("conformant", result.stdout)
 
+    def test_shipped_policy_conforms_once_environment_only_organization_copies_are_withdrawn(self):
+        # #1776 / #1385: the review, merge and release organization copies were withdrawn
+        # on 2026-09-27 and the owner confirmed they stay withdrawn. Model the live
+        # organization as every other reviewed secret at its target visibility.
+        module = audit_module()
+        secrets = json.loads(POLICY.read_text(encoding="utf-8"))["secrets"]
+        listing = {"secrets": [
+            {"name": name, "visibility": rule["target_visibility"]}
+            for name, rule in sorted(secrets.items())
+            if rule["target_visibility"] != "withdrawn" and name not in module.ENVIRONMENT_ONLY_APP_KEYS
+        ]}
+        granted = {
+            tuple(rule["selected_repositories"])
+            for rule in secrets.values()
+            if rule["target_visibility"] == "selected"
+        }
+        self.assertEqual(len(granted), 1, "one selected-grant stub cannot model differing grants")
+        selected = {"repositories": [{"full_name": repository} for repository in granted.pop()]}
+        result = self.run_audit(None, listing, selected, raw_policy=POLICY.read_text(encoding="utf-8"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("absent_live", result.stderr)
+        self.assertIn("secret-scope-policy=withdrawal-pending", result.stdout)
+
     def test_shipped_policy_declares_custody_for_every_app_private_key(self):
         module = audit_module()
         policy = json.loads(POLICY.read_text(encoding="utf-8"))

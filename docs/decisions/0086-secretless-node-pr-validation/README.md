@@ -197,3 +197,37 @@ extends the invariant and that test to every workflow and generator. The rebuild
 the outer validator and the sandbox bootstrap under the stub and real Bubblewrap, and
 also requires exact, distinct private configuration paths under both spellings and an
 unchanged lifecycle output mode.
+
+## 2026-10-14 amendment — sandboxes resolve alternatives-managed system tools (#1782)
+
+The #1729 amendments promise that each credentialless sandbox exposes the runner's
+system tools. On Debian and Ubuntu many of those tools are not files under `/usr` but
+symlinks into `/etc/alternatives`: `/usr/bin/awk` resolves through
+`/etc/alternatives/awk` to `mawk`, and `cc`, `c++`, `which`, `editor`, `pager`, and the
+BLAS/LAPACK shared objects follow the same pattern. The sandboxes start from an empty
+root and bound `/usr` without that directory, so every such name dangled. A consumer
+script calling `awk` failed with `command not found` (verjson-payments#246, run
+38616464738), although it passed when the consumer plan ran on the host and the
+compatibility lane bound `/` read-only.
+
+Decision: every temporary-root sandbox in `node-ci.yml` and the generated
+`node-ci-protected.yml` — the lifecycle rebuild, the consumer script plan, the
+runtime-resolved compatibility lanes, and the protected candidate script runner — binds
+`/etc/alternatives` read-only. The directory contains only symlinks maintained by
+`update-alternatives`; the change adds no credential, writable path, socket, or
+configuration file. Link targets outside the bound trees still dangle, as before.
+The protected candidate runner never had the bind either; it is included so the
+generated workflow exposes the same system tool set in every sandbox. That runner is
+the only one of the four that may run on self-hosted capacity, so it uses
+`--ro-bind-try`: dpkg creates the directory on every Debian and Ubuntu host, and a host
+without it has no links pointing into it. The three hosted-only sandboxes require the
+directory, like the other system mounts they already require.
+
+Rejected: changing `PATH`. `/usr/bin` is already on every sandbox `PATH`; the entry is
+present but its target is missing. Binding all of `/etc` was also rejected, because it
+would expose runner configuration that the #1729 boundary deliberately withholds.
+
+All earlier isolation properties are unchanged: `-I` interpreters, separate private npm
+configurations, credential-free environments, read-only `.git`, and hidden command files.
+Real-Bubblewrap regressions in the consumer, rebuild, compatibility, and protected
+candidate tests execute `awk` inside each sandbox and fail on the pre-fix workflows.

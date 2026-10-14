@@ -4990,6 +4990,8 @@ jobs:
               (Path("/bin").resolve(strict=True), "/bin"),
               (Path("/lib").resolve(strict=True), "/lib"),
               (Path("/lib64").resolve(strict=True), "/lib64"),
+              # Alternatives-managed /usr names (awk, cc, c++) resolve here (#1782).
+              (Path("/etc/alternatives"), "/etc/alternatives"),
               (Path("/etc/ssl"), "/etc/ssl"),
               (Path("/etc/hosts"), "/etc/hosts"),
               (Path("/etc/nsswitch.conf"), "/etc/nsswitch.conf"),
@@ -5567,6 +5569,9 @@ jobs:
               (Path("/bin").resolve(strict=True), "/bin"),
               (Path("/lib").resolve(strict=True), "/lib"),
               (Path("/lib64").resolve(strict=True), "/lib64"),
+              # /usr/bin/awk, cc, which, and similar names are symlinks into the
+              # Debian alternatives farm, which carries only links (#1782).
+              (Path("/etc/alternatives").resolve(strict=True), "/etc/alternatives"),
               (Path("/etc/ssl").resolve(strict=True), "/etc/ssl"),
               (Path("/etc/hosts").resolve(strict=True), "/etc/hosts"),
               (Path("/etc/resolv.conf").resolve(strict=True), "/etc/resolv.conf"),
@@ -6958,6 +6963,8 @@ jobs:
                   "--ro-bind", Path("/bin").resolve(strict=True).as_posix(), "/bin",
                   "--ro-bind", Path("/lib").resolve(strict=True).as_posix(), "/lib",
                   "--ro-bind", Path("/lib64").resolve(strict=True).as_posix(), "/lib64",
+                  # Alternatives-managed /usr names (awk, cc, c++) resolve here (#1782).
+                  "--ro-bind", Path("/etc/alternatives").resolve(strict=True).as_posix(), "/etc/alternatives",
                   "--ro-bind", Path("/etc/ssl").resolve(strict=True).as_posix(), "/etc/ssl",
                   "--ro-bind", Path("/etc/hosts").resolve(strict=True).as_posix(), "/etc/hosts",
                   "--ro-bind", Path("/etc/resolv.conf").resolve(strict=True).as_posix(), "/etc/resolv.conf",

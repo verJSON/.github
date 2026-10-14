@@ -24,7 +24,72 @@ cat >"$tmp/bin/gh" <<'GH'
 printf '%s\n' "$*" >>"$GH_CALLS"
 case "$*" in
   "api orgs/Verjson/actions/secrets/MERGE_APP_PRIVATE_KEY --jq .visibility")
-    printf '%s\n' "${SECRET_VISIBILITY:-selected}"
+    # Real `gh api` failure shape: the error body on stdout, the status on stderr, exit 1.
+    case "${ORG_SECRET_MODE:-present}" in
+      present) printf '%s\n' "${SECRET_VISIBILITY-selected}" ;;
+      absent)
+        printf '%s' '{"message":"Not Found","status":"404"}'
+        echo 'gh: Not Found (HTTP 404)' >&2
+        exit 1 ;;
+      forbidden)
+        printf '%s' '{"message":"Must have admin rights to Repository.","status":"403"}'
+        echo 'gh: Must have admin rights to Repository. (HTTP 403)' >&2
+        exit 1 ;;
+      unauthenticated)
+        printf '%s' '{"message":"Bad credentials","status":"401"}'
+        echo 'gh: Bad credentials (HTTP 401)' >&2
+        exit 1 ;;
+      unavailable)
+        printf '%s' '{"message":"Server Error","status":"502"}'
+        echo 'gh: Server Error (HTTP 502)' >&2
+        exit 1 ;;
+      malformed)
+        echo 'failed to parse jq expression: invalid character < looking for beginning of value' >&2
+        exit 1 ;;
+    esac
+    ;;
+  "api --paginate --slurp orgs/Verjson/actions/secrets?per_page=100")
+    case "${ORG_LISTING_MODE:-valid}" in
+      valid) printf '%s\n' '[{"total_count":2,"secrets":[{"name":"ANTHROPIC_API_KEY","visibility":"all"},{"name":"ORG_ADMIN_TOKEN","visibility":"all"}]}]' ;;
+      contains-key) printf '%s\n' '[{"total_count":1,"secrets":[{"name":"MERGE_APP_PRIVATE_KEY","visibility":"all"}]}]' ;;
+      incomplete) printf '%s\n' '[{"total_count":3,"secrets":[{"name":"ANTHROPIC_API_KEY","visibility":"all"}]}]' ;;
+      empty-pages) printf '%s\n' '[]' ;;
+      nameless) printf '%s\n' '[{"total_count":1,"secrets":[{}]}]' ;;
+      duplicate-names) printf '%s\n' '[{"total_count":2,"secrets":[{"name":"ANTHROPIC_API_KEY","visibility":"all"},{"name":"ANTHROPIC_API_KEY","visibility":"all"}]}]' ;;
+      conflicting-pages) printf '%s\n' '[{"total_count":2,"secrets":[{"name":"ANTHROPIC_API_KEY","visibility":"all"}]},{"total_count":3,"secrets":[{"name":"ORG_ADMIN_TOKEN","visibility":"all"}]}]' ;;
+      paginated) printf '%s\n' '[{"total_count":2,"secrets":[{"name":"ANTHROPIC_API_KEY","visibility":"all"}]},{"total_count":2,"secrets":[{"name":"ORG_ADMIN_TOKEN","visibility":"all"}]}]' ;;
+      zero-secrets) printf '%s\n' '[{"total_count":0,"secrets":[]}]' ;;
+      empty-stdout) ;;
+      blank-stdout) printf ' \t\n' ;;
+      malformed) printf '%s\n' '<html>not json</html>' ;;
+      unreadable)
+        printf '%s' '{"message":"Not Found","status":"404"}'
+        echo 'gh: Not Found (HTTP 404)' >&2
+        exit 1 ;;
+    esac
+    ;;
+  api*"repos/Verjson/"*"/environments/merge-app/secrets/MERGE_APP_PRIVATE_KEY"*)
+    endpoint=""
+    for arg in "$@"; do [[ "$arg" == repos/* ]] && endpoint="$arg"; done
+    repository="$(sed -E 's#^repos/([^/]+/[^/]+)/.*#\1#' <<<"$endpoint")"
+    case "${ENVIRONMENT_KEY_MODE:-valid}" in
+      unavailable)
+        printf '%s' '{"message":"Server Error","status":"500"}'
+        echo 'gh: Server Error (HTTP 500)' >&2
+        exit 1 ;;
+      malformed) printf '%s\n' '<html>not json</html>' ;;
+      empty-stdout) ;;
+      blank-stdout) printf ' \t\n' ;;
+      renamed) printf '%s\n' '{"name":"OTHER_APP_PRIVATE_KEY","created_at":"2026-09-27T00:00:00Z"}' ;;
+      valid)
+        if grep -qxF "$repository" <<<"${ENVIRONMENT_KEY_REPOSITORIES-Verjson/alpha}"; then
+          printf '%s\n' '{"name":"MERGE_APP_PRIVATE_KEY","created_at":"2026-09-27T00:00:00Z","updated_at":"2026-09-27T00:00:00Z"}'
+        else
+          printf '%s' '{"message":"Not Found","status":"404"}'
+          echo 'gh: Not Found (HTTP 404)' >&2
+          exit 1
+        fi ;;
+    esac
     ;;
   "api --paginate orgs/Verjson/actions/secrets/MERGE_APP_PRIVATE_KEY/repositories --jq .repositories[].full_name")
     printf '%s\n' "${SECRET_REPOSITORIES:-Verjson/alpha}"
@@ -103,6 +168,7 @@ case "$*" in
     page=""
     for arg in "$@"; do [[ "$arg" == *'&page='* ]] && page="${arg##*&page=}"; done
     case "${RUN_SEARCH_MODE:-valid}" in
+      empty-stdout) ;;
       valid) printf '%s\n' '{"workflow_runs":[{"id":7002,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","status":"completed","conclusion":"success"}]}' ;;
       missing) printf '%s\n' '{"workflow_runs":[]}' ;;
       queued-then-completed)
@@ -117,6 +183,7 @@ case "$*" in
     ;;
   api*"repos/"*"/actions/workflows/"*)
     [ "${WORKFLOW_EVIDENCE_MODE:-valid}" != deleted ] || { echo 'HTTP 404: Not Found' >&2; exit 1; }
+    [ "${WORKFLOW_EVIDENCE_MODE:-valid}" != empty-stdout ] || exit 0
     printf '{"id":%s,"name":"%s","path":"%s","state":"%s"}\n' \
       "${WORKFLOW_ID:-315894159}" "${WORKFLOW_NAME:-actions-ci}" "${WORKFLOW_PATH:-.github/workflows/actions-ci.yml}" "${WORKFLOW_STATE:-active}"
     ;;
@@ -131,6 +198,13 @@ case "$*" in
     fi
     ;;
   api*"https://api.github.com/repos/"*"/check-runs/9002"*)
+    case "${CHECK_RUN_MODE:-valid}" in
+      empty-stdout) exit 0 ;;
+      blank-stdout) printf ' \t\n'; exit 0 ;;
+      right-then-wrong) printf '%s\n' '{"name":"shell-tests","app":{"id":15368}}' '{"name":"shell-tests","app":{"id":999}}'; exit 0 ;;
+      wrong-then-right) printf '%s\n' '{"name":"shell-tests","app":{"id":999}}' '{"name":"shell-tests","app":{"id":15368}}'; exit 0 ;;
+      trailing-garbage) printf '%s\n' '{"name":"shell-tests","app":{"id":15368}} <html>'; exit 0 ;;
+    esac
     printf '{"name":"shell-tests","app":{"id":%s}}\n' "${CHECK_APP_ID:-15368}"
     ;;
   *)
@@ -176,6 +250,10 @@ run_audit() {
     ACTIVE_REPOSITORIES="${ACTIVE_REPOSITORIES-Verjson/alpha}" \
     SECRET_VISIBILITY="${SECRET_VISIBILITY-selected}" \
     SECRET_REPOSITORIES="${SECRET_REPOSITORIES-Verjson/alpha}" \
+    ORG_SECRET_MODE="${ORG_SECRET_MODE-present}" \
+    ORG_LISTING_MODE="${ORG_LISTING_MODE-valid}" \
+    ENVIRONMENT_KEY_MODE="${ENVIRONMENT_KEY_MODE-valid}" \
+    ENVIRONMENT_KEY_REPOSITORIES="${ENVIRONMENT_KEY_REPOSITORIES-Verjson/alpha}" \
     ALPHA_CALLER="${ALPHA_CALLER-present}" \
     BETA_CALLER="${BETA_CALLER-present}" \
     CANONICAL_CALLER="${CANONICAL_CALLER-present}" \
@@ -202,6 +280,7 @@ run_audit() {
     WORKFLOW_PATH="${WORKFLOW_PATH-.github/workflows/actions-ci.yml}" \
     WORKFLOW_STATE="${WORKFLOW_STATE-active}" \
     CHECK_APP_ID="${CHECK_APP_ID-15368}" \
+    CHECK_RUN_MODE="${CHECK_RUN_MODE-valid}" \
     PRIVILEGED_MERGE_AUDIT_SHA="${PRIVILEGED_MERGE_AUDIT_SHA-$audit_sha}" \
     bash "$audit" >"$tmp/out" 2>&1
 }
@@ -473,6 +552,143 @@ ACTIVE_REPOSITORIES=$'Verjson/alpha\nVerjson/beta' \
   && grep -q 'result=conformant repositories_scanned=2 consumers=2' "$tmp/out" \
   && pass "organization-wide secret visibility admits every active repository" \
   || fail "all-repository secret visibility was not honored"
+
+ACTIVE_REPOSITORIES=$'Verjson/alpha\nVerjson/beta' \
+  SECRET_VISIBILITY=private SECRET_REPOSITORIES='' run_audit \
+  && fail "private secret visibility admitted a public repository" \
+  || {
+    grep -q 'Missing privileged merge App key access::repository=Verjson/alpha' "$tmp/out" \
+      && ! grep -q 'Missing privileged merge App key access::repository=Verjson/beta' "$tmp/out" \
+      && grep -q 'failures=1$' "$tmp/out" \
+      && pass "private secret visibility admits only private repositories" \
+      || fail "private secret visibility was not honored: $(<"$tmp/out")"
+  }
+
+# While an organization copy exists, its visibility alone decides access: neither the
+# inventory corroboration nor the environment probe belongs to that path.
+SECRET_VISIBILITY=all SECRET_REPOSITORIES='' ENVIRONMENT_KEY_REPOSITORIES='' run_audit \
+  && grep -q 'result=conformant' "$tmp/out" \
+  && ! grep -q 'environments/merge-app' "$tmp/gh-calls" \
+  && ! grep -q 'actions/secrets?per_page' "$tmp/gh-calls" \
+  && pass "a present organization copy keeps its visibility-based verdict" \
+  || fail "present organization copy consulted withdrawal-only evidence: $(<"$tmp/out")"
+
+# jq 1.6 exits 0 for `jq -e <pred>` on empty input, so an empty body with exit 0 must not
+# satisfy any identity predicate. Each read below has its own reviewed diagnostic.
+WORKFLOW_EVIDENCE_MODE=empty-stdout run_audit \
+  && fail "empty required-check workflow metadata reported green" \
+  || {
+    grep -q 'Invalid required-check workflow identity::repository=Verjson/alpha' "$tmp/out" \
+      && grep -q 'Unreadable retry workflow identity::repository=Verjson/alpha' "$tmp/out" \
+      && pass "empty required-check workflow metadata fails as an invalid workflow identity" \
+      || fail "empty required-check workflow metadata was misclassified: $(<"$tmp/out")"
+  }
+
+# The App binding is judged on exactly one check-run document: not on an empty or blank
+# body, not on the first or last of several, and not on a prefix followed by garbage.
+for mode in empty-stdout blank-stdout right-then-wrong wrong-then-right trailing-garbage; do
+  CHECK_RUN_MODE="$mode" run_audit \
+    && fail "check-run read ($mode) reported green" \
+    || {
+      grep -q 'Wrong required-check App identity::repository=Verjson/alpha' "$tmp/out" \
+        && pass "check-run read ($mode) cannot satisfy the required-check App binding" \
+        || fail "check-run read ($mode) was misclassified: $(<"$tmp/out")"
+    }
+done
+
+RUN_SEARCH_MODE=empty-stdout run_audit \
+  && fail "empty workflow-run evidence page reported green" \
+  || {
+    grep -q 'Unreadable required-check workflow evidence::repository=Verjson/alpha' "$tmp/out" \
+      && pass "empty workflow-run evidence page fails as unreadable" \
+      || fail "empty workflow-run evidence page was misclassified: $(<"$tmp/out")"
+  }
+
+# #1776: ADR 0166 withdrew the organization copy (2026-09-27). A 404 for it is the
+# conforming custody state, and each consumer must then hold the key in its own
+# main-only merge-app environment.
+ACTIVE_REPOSITORIES=$'Verjson/alpha\nVerjson/beta' \
+  ORG_SECRET_MODE=absent SECRET_REPOSITORIES='' \
+  ENVIRONMENT_KEY_REPOSITORIES=$'Verjson/alpha\nVerjson/beta' run_audit \
+  && grep -q 'result=conformant repositories_scanned=2 consumers=2' "$tmp/out" \
+  && pass "a withdrawn organization copy conforms when every consumer's merge-app environment holds the key" \
+  || fail "withdrawn organization copy was not accepted as the conforming custody state: $(<"$tmp/out")"
+
+# Only "Not Found" proves withdrawal. Every other failure leaves custody unknown and must
+# stop the audit before any repository is judged.
+for mode in forbidden unauthenticated unavailable malformed; do
+  ORG_SECRET_MODE="$mode" run_audit \
+    && fail "organization secret read failure ($mode) reported green" \
+    || {
+      grep -q 'Unreadable organization secret' "$tmp/out" \
+        && ! grep -q '^result=' "$tmp/out" \
+        && pass "organization secret read failure ($mode) fails closed before the fleet is judged" \
+        || fail "organization secret read failure ($mode) was misclassified: $(<"$tmp/out")"
+    }
+done
+
+# The withdrawn state is derived from the 404, never accepted as a value the API returns.
+for value in withdrawn absent ''; do
+  ORG_SECRET_MODE=present SECRET_VISIBILITY="$value" run_audit \
+    && fail "organization secret visibility '$value' reported green" \
+    || {
+      grep -q 'Invalid organization secret visibility' "$tmp/out" \
+        && pass "organization secret visibility '$value' is not a value the API may assert" \
+        || fail "organization secret visibility '$value' was misclassified: $(<"$tmp/out")"
+    }
+done
+
+# A 404 is withdrawal evidence only when the same token can read the organization's
+# secret inventory; GitHub also answers 404 for a resource the caller may not see.
+for mode in unreadable contains-key empty-pages incomplete malformed empty-stdout blank-stdout \
+  nameless duplicate-names conflicting-pages; do
+  ORG_SECRET_MODE=absent SECRET_REPOSITORIES='' ORG_LISTING_MODE="$mode" run_audit \
+    && fail "uncorroborated organization secret 404 ($mode) reported green" \
+    || {
+      grep -q 'Unreadable organization secret' "$tmp/out" \
+        && ! grep -q '^result=' "$tmp/out" \
+        && pass "uncorroborated organization secret 404 ($mode) fails closed" \
+        || fail "uncorroborated organization secret 404 ($mode) was misclassified: $(<"$tmp/out")"
+    }
+done
+
+# The listing checks must not reject genuine evidence: a consistent multi-page inventory
+# and a complete inventory with no secrets at all both prove the name is absent.
+for mode in paginated zero-secrets; do
+  ORG_SECRET_MODE=absent SECRET_REPOSITORIES='' ORG_LISTING_MODE="$mode" run_audit \
+    && grep -q 'result=conformant repositories_scanned=1 consumers=1' "$tmp/out" \
+    && pass "a complete organization inventory ($mode) corroborates withdrawal" \
+    || fail "a complete organization inventory ($mode) was rejected: $(<"$tmp/out")"
+done
+
+# Withdrawal must not turn key access into a presumption: the consumer's own merge-app
+# environment is now the only custody, and the remediation must not ask for the
+# organization copy ADR 0166 removed.
+ACTIVE_REPOSITORIES=$'Verjson/alpha\nVerjson/beta' \
+  ORG_SECRET_MODE=absent SECRET_REPOSITORIES='' ENVIRONMENT_KEY_REPOSITORIES=Verjson/alpha run_audit \
+  && fail "consumer without a merge-app environment key reported green after withdrawal" \
+  || {
+    grep -q 'Missing privileged merge App key access::repository=Verjson/beta' "$tmp/out" \
+      && grep -q 'environment=merge-app' "$tmp/out" \
+      && ! grep -q 'repository=Verjson/alpha secret=' "$tmp/out" \
+      && ! grep -q 'grant repository access to the organization secret' "$tmp/out" \
+      && grep -q 'failures=1$' "$tmp/out" \
+      && pass "withdrawn organization copy requires each consumer's merge-app environment key" \
+      || fail "missing merge-app environment key lacks environment-scoped evidence: $(<"$tmp/out")"
+  }
+
+# A 200 is not custody evidence unless it names the exact key.
+# Only "Not Found" means the environment lacks the key; any other failure is unknown custody.
+for mode in malformed renamed unavailable empty-stdout blank-stdout; do
+  ORG_SECRET_MODE=absent SECRET_REPOSITORIES='' ENVIRONMENT_KEY_MODE="$mode" run_audit \
+    && fail "merge-app environment response ($mode) reported green" \
+    || {
+      grep -q 'title=Unreadable merge-app environment key::repository=Verjson/alpha' "$tmp/out" \
+        && ! grep -q 'Missing privileged merge App key access' "$tmp/out" \
+        && pass "merge-app environment response ($mode) fails closed as unreadable" \
+        || fail "merge-app environment response ($mode) was misclassified: $(<"$tmp/out")"
+    }
+done
 
 ALPHA_CONTENT="$(bash "$generator" "$alternate_contract_sha" "$required_checks" | base64 | tr -d '\n')" \
   ALPHA_RETRY_CONTENT="$(bash "$generator" "$alternate_contract_sha" --retry "$retry_workflow_names" "$required_checks" | base64 | tr -d '\n')" run_audit \
@@ -1292,7 +1508,7 @@ operations.append(current)
 
 lines = open(source, encoding="utf-8").read().splitlines()
 RESET_HEAD = "  unset metadata default_branch visibility_type has_secret \\"
-RESET_TAIL = "    historical_retry_workflow retry_workflow_response"
+RESET_TAIL = "    historical_retry_workflow retry_workflow_response environment_key_response"
 LOOP_END = 'done <<<"$repositories"'
 
 

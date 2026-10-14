@@ -928,6 +928,8 @@ if (process.env.PUBLIC_CACHE_SENTINEL) {
 const mountRemoval = childProcess.spawnSync('rmdir', ['.cjs-build'], {encoding: 'utf8'});
 assert.notEqual(mountRemoval.status, 0);
 assert.match(mountRemoval.stderr, /busy/i);
+const awk = childProcess.spawnSync('awk', ['BEGIN { print "awk-ok" }'], {encoding: 'utf8'});
+fs.writeFileSync('compat-results/awk', awk.error ? `${awk.error.code}\n` : awk.stdout);
 fs.writeFileSync('compat-results/consumer-ran', 'yes');
 JS
   python3 - "$fixture" "$mutation" "$request" <<'PY'
@@ -1419,6 +1421,19 @@ if run_archive_case protected-good "$tmp/protected-run-lanes.sh" \
   pass "protected compatibility workflow masks ambient npm cache and config paths"
 else
   fail "protected compatibility workflow exposed an ambient npm cache or config path"
+fi
+
+# #1782: /usr/bin/awk is a link into /etc/alternatives on Debian and Ubuntu, so
+# a temporary-root lane that binds /usr without that farm cannot run it. Mutation
+# children assert exact failure sets in which the consumer never starts.
+if [ "${VERJSON_DIAGNOSTIC_MUTATION_CHILD:-false}" != true ]; then
+  for awk_case in good protected-good; do
+    if grep -qFx 'awk-ok' "$tmp/archive-cases/$awk_case/compat-results/awk" 2>/dev/null; then
+      pass "$awk_case compatibility lane can execute the alternatives-managed awk (#1782)"
+    else
+      fail "$awk_case compatibility lane cannot execute awk (#1782): $(cat "$tmp/archive-cases/$awk_case/compat-results/awk" 2>/dev/null || printf 'consumer never ran')"
+    fi
+  done
 fi
 
 for link_kind in relative absolute; do

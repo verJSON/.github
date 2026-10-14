@@ -372,8 +372,34 @@ class ProvisioningDelegationValidateTest(unittest.TestCase):
             with self.subTest(role_id=role_id):
                 self.assertEqual(roles[role_id]["storage"]["environment"], f"{role_id}-app")
 
-    def test_a_role_cannot_claim_achieved_custody_while_broad_copies_are_pending(self):
+    @staticmethod
+    def pending_merge_inventory():
+        """The shipped inventory with the merge role's organization copy still surviving.
+
+        No shipped role is pending since the 2026-09-27 withdrawal (#1776), so the
+        pending-state checks build the shape the inventory held before it.
+        """
         inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+        inventory["roles"]["merge"]["migrationStatus"] = {
+            "achievedCustody": "environment-only-pending-broad-copy-withdrawal",
+            "broadCopiesPending": True,
+            "survivingBroadCopies": [{
+                "kind": "organization-secret",
+                "secret": "MERGE_APP_PRIVATE_KEY",
+                "visibility": "all",
+                "selectedRepositories": [],
+                "policy": "config/org-actions-secret-policy.json",
+            }],
+            "trackingIssue": "https://github.com/Verjson/.github/issues/1285",
+        }
+        return inventory
+
+    def test_a_pending_role_that_names_its_copies_is_accepted(self):
+        result = self.run_validator(grant(), inventory=self.pending_merge_inventory())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_role_cannot_claim_achieved_custody_while_broad_copies_are_pending(self):
+        inventory = self.pending_merge_inventory()
         role = inventory["roles"]["merge"]
         self.assertTrue(role["migrationStatus"]["broadCopiesPending"])
         role["migrationStatus"]["achievedCustody"] = role["custodyDecision"]
@@ -407,7 +433,7 @@ class ProvisioningDelegationValidateTest(unittest.TestCase):
         }
         for label, (field, value) in cases.items():
             with self.subTest(case=label):
-                inventory = json.loads(INVENTORY.read_text(encoding="utf-8"))
+                inventory = self.pending_merge_inventory()
                 inventory["roles"]["merge"]["migrationStatus"][field] = value
                 result = self.run_validator(grant(), inventory=inventory)
                 self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
@@ -436,8 +462,10 @@ class ProvisioningDelegationValidateTest(unittest.TestCase):
             role_id for role_id, role in roles.items()
             if role["migrationStatus"]["broadCopiesPending"]
         }
-        self.assertEqual(pending, {"merge", "ai-review"})
-        self.assertEqual(roles["release"]["migrationStatus"]["achievedCustody"], "environment-only")
+        # The review, merge and release organization copies were withdrawn on 2026-09-27.
+        self.assertEqual(pending, set())
+        for role_id in ("ai-review", "merge", "release"):
+            self.assertEqual(roles[role_id]["migrationStatus"]["achievedCustody"], "environment-only")
 
         for role_id in sorted(pending):
             with self.subTest(role_id=role_id):
@@ -459,6 +487,11 @@ class ProvisioningDelegationValidateTest(unittest.TestCase):
                     continue
                 self.assertEqual(role["migrationStatus"]["achievedCustody"], role["custodyDecision"])
                 self.assertEqual(role["migrationStatus"]["survivingBroadCopies"], [])
+                # An inventory with no surviving copy and a policy approving one would
+                # disagree about the same organization secret.
+                secret = declared.get(role.get("storage", {}).get("secret"))
+                if secret is not None and role["custodyDecision"] == "environment-only":
+                    self.assertEqual(secret["target_visibility"], "withdrawn")
 
     def test_no_role_restates_the_contracts_gated_effect_set(self):
         contract = json.loads(CONTRACT.read_text(encoding="utf-8"))

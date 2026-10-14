@@ -401,6 +401,13 @@ def run_rebuild(
         "        command_file.write(f\"BASH_ENV={Path.cwd() / 'node_modules/malicious-bash-env'}\\n\")\n"
         + hidden_path_checks
         + "hidden_path_writes = locals().get('hidden_path_writes', [])\n"
+        "import subprocess\n"
+        "try:\n"
+        "    awk_output = subprocess.run(\n"
+        "        ['awk', 'BEGIN { print \"awk-ok\" }'], capture_output=True, text=True, check=False,\n"
+        "    ).stdout\n"
+        "except OSError as error:\n"
+        "    awk_output = f'{type(error).__name__}: {error}'\n"
         "lifecycle_output = Path('node_modules/.lifecycle-output')\n"
         "lifecycle_output.unlink(missing_ok=True)\n"
         "lifecycle_output.write_text('built\\n', encoding='utf-8')\n"
@@ -428,6 +435,7 @@ def run_rebuild(
         "        for role in ('user', 'global')\n"
         "    },\n"
         "    'lifecycle_output_mode': lifecycle_output.stat().st_mode & 0o777,\n"
+        "    'awk_output': awk_output,\n"
         "    'visible_sensitive_ancestors': sorted(visible),\n"
         "    'readable_processes': readable_processes,\n"
         "    'read_errors': read_errors,\n"
@@ -630,6 +638,8 @@ def assert_rebuild_capture(capture, package_manager, onnx_value, *, config_direc
         "visible_sensitive_ancestors": [],
         "read_errors": [],
         "hidden_path_writes": [],
+        # #1782: alternatives-managed tools such as awk resolve inside the sandbox.
+        "awk_output": "awk-ok\n",
     }
     assert all(
         observed.get(key) == value for key, value in expected.items()

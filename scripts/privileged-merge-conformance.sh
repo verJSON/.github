@@ -3,6 +3,7 @@ set -euo pipefail
 
 readonly ORG="${PRIVILEGED_MERGE_ORG:-Verjson}"
 readonly SECRET_NAME="${PRIVILEGED_MERGE_SECRET_NAME:-MERGE_APP_PRIVATE_KEY}"
+readonly MERGE_ENVIRONMENT="merge-app"
 readonly CALLER_PATH=".github/workflows/ai-privileged-merge.yml"
 readonly RETRY_PATH=".github/workflows/ai-promotion-retry.yml"
 readonly GENERATOR="scripts/gen-privileged-merge-caller.sh"
@@ -72,13 +73,24 @@ extract_canonical_pins() { # extract_canonical_pins <canonical-workflow-basename
   sed -nE "s%^[[:space:]]+uses: Verjson/\.github/\.github/workflows/$wf\.yml@([^[:space:]]+)([[:space:]]+#.*)?[[:space:]]*\$%\1%p"
 }
 
+json_satisfies() { # json_satisfies <jq-predicate> [jq-options...]  (one JSON document on stdin)
+  # Every decision this audit takes on a JSON body goes through here. `jq -e <pred>` is
+  # not a safe gate: jq 1.6 exits 0 on empty or whitespace-only input, so an empty body
+  # with a successful status satisfied any predicate. `input | <pred>` closes that but
+  # judges only the first of several documents and ignores trailing garbage. Requiring
+  # exactly one well-formed document is stricter than both.
+  local predicate="${1:?json_satisfies requires a jq predicate}"
+  shift
+  jq -en "$@" "[inputs] | length == 1 and (.[0] | $predicate)" >/dev/null
+}
+
 find_latest_completed_run() { # find_latest_completed_run <repository> <workflow-id>
   local repository="$1" workflow_id="$2" page response page_count exhausted=true
   local candidates='[]'
   COMPLETED_RUN_IDENTITY=""
   for ((page = 1; page <= EVIDENCE_MAX_PAGES; page++)); do
     if ! response="$(gh api "repos/$repository/actions/workflows/$workflow_id/runs?event=pull_request&per_page=$EVIDENCE_PAGE_SIZE&page=$page")" ||
-      ! jq -e '.workflow_runs | type == "array"' <<<"$response" >/dev/null; then
+      ! json_satisfies '.workflow_runs | type == "array"' <<<"$response"; then
       echo "::error title=Unreadable required-check workflow evidence::repository=$repository workflow_id=$workflow_id page=$page" >&2
       return 1
     fi
@@ -102,7 +114,8 @@ validate_retry_workflow_names() { # validate_retry_workflow_names <repository> <
   local expected_names='[]'
   while IFS= read -r workflow_id; do
     if ! metadata="$(gh api "repos/$repository/actions/workflows/$workflow_id")" ||
-      ! workflow_name="$(jq -er '.name | select(type == "string" and length > 0)' <<<"$metadata")"; then
+      ! json_satisfies '.name | type == "string" and length > 0' <<<"$metadata" ||
+      ! workflow_name="$(jq -r '.name' <<<"$metadata")"; then
       echo "::error title=Unreadable retry workflow identity::repository=$repository workflow_id=$workflow_id"
       return 1
     fi
@@ -131,12 +144,12 @@ validate_required_check_policy() { # validate_required_check_policy <repository>
     select(.context | test("^(AI review authorization|AI terminal merge promotion|AI terminal promotion retry)$") | not) |
     {name: .context, app_id: .integration_id}
   ]' <<<"$rules")" || return 1
-  if ! jq -e 'all(.[]; (.name | type == "string" and length > 0) and
-      (.app_id | type == "number" and . > 0 and floor == .))' <<<"$rule_checks" >/dev/null; then
+  if ! json_satisfies 'all(.[]; (.name | type == "string" and length > 0) and
+      (.app_id | type == "number" and . > 0 and floor == .))' <<<"$rule_checks"; then
     echo "::error title=Required-check rule lacks an exact App binding::repository=$repository branch=$default_branch required=$rule_checks"
     return 1
   fi
-  if jq -e 'sort_by(.name) | group_by(.name) | any(.[]; length > 1)' <<<"$rule_checks" >/dev/null; then
+  if ! json_satisfies 'sort_by(.name) | group_by(.name) | all(.[]; length == 1)' <<<"$rule_checks"; then
     echo "::error title=Ambiguous required-check rule identity::repository=$repository branch=$default_branch required=$rule_checks reason='same-name required contexts cannot be selected unambiguously at runtime'"
     return 1
   fi
@@ -152,9 +165,10 @@ validate_required_check_policy() { # validate_required_check_policy <repository>
     workflow_path="$(jq -r .workflow_path <<<"$required")"
     check_name="$(jq -r .name <<<"$required")"
     app_id="$(jq -r .app_id <<<"$required")"
+    # shellcheck disable=SC2016 # jq program text, expanded by jq rather than the shell
     if ! metadata="$(gh api "repos/$repository/actions/workflows/$workflow_id")" ||
-      ! jq -e --arg path "$workflow_path" --argjson id "$workflow_id" \
-        '.id == $id and .path == $path and .state == "active"' <<<"$metadata" >/dev/null; then
+      ! json_satisfies '.id == $id and .path == $path and .state == "active"' \
+        --arg path "$workflow_path" --argjson id "$workflow_id" <<<"$metadata"; then
       echo "::error title=Invalid required-check workflow identity::repository=$repository check=$check_name workflow_id=$workflow_id path=$workflow_path reason='workflow is missing, renamed, inactive, or mismatched'"
       return 1
     fi
@@ -177,27 +191,52 @@ validate_required_check_policy() { # validate_required_check_policy <repository>
       echo "::error title=Missing or renamed required check::repository=$repository check=$check_name workflow_id=$workflow_id reason='latest completed pull-request workflow did not publish the reviewed check name'"
       return 1
     fi
+    # shellcheck disable=SC2016 # jq program text, expanded by jq rather than the shell
     if ! check_run="$(gh api "$check_run_url")" ||
-      ! jq -e --arg name "$check_name" --argjson app_id "$app_id" \
-        '.name == $name and .app.id == $app_id' <<<"$check_run" >/dev/null; then
+      ! json_satisfies '.name == $name and .app.id == $app_id' \
+        --arg name "$check_name" --argjson app_id "$app_id" <<<"$check_run"; then
       echo "::error title=Wrong required-check App identity::repository=$repository check=$check_name app_id=$app_id workflow_id=$workflow_id"
       return 1
     fi
   done < <(jq -c '.[]' <<<"$policy")
 }
-visibility="$(
-  gh api "orgs/$ORG/actions/secrets/$SECRET_NAME" --jq .visibility
-)" || {
-  echo "::error title=Unreadable organization secret::Cannot verify $SECRET_NAME visibility for $ORG."
-  exit 1
-}
-case "$visibility" in
-  all|private|selected) ;;
-  *)
-    echo "::error title=Invalid organization secret visibility::$SECRET_NAME returned unsupported visibility '$visibility'."
+# A "Not Found" for the secret is withdrawal evidence only when the same token reads a
+# complete, well-formed organization secret inventory that also omits the name: GitHub
+# answers 404 for a resource the caller may not see, and a missing, zero-page or
+# truncated listing would otherwise prove absence by omission. A complete listing with
+# total_count 0 is genuine evidence and is accepted. An empty or whitespace-only body is
+# not a listing at all; json_satisfies rejects it, as it does any body that is not
+# exactly one JSON document.
+# shellcheck disable=SC2016 # jq program text, expanded by jq rather than the shell
+readonly ORGANIZATION_SECRET_ABSENT='. as $pages
+  | ($pages | type == "array" and length > 0)
+  and all($pages[]; type == "object" and (.secrets | type == "array") and (.total_count | type == "number"))
+  and ([$pages[].secrets[]] as $secrets
+    | all($secrets[]; type == "object" and (.name | type == "string" and length > 0))
+    and all($pages[]; .total_count == ($secrets | length))
+    and ([$secrets[].name] | length == (unique | length))
+    and (any($secrets[]; .name == $name) | not))'
+if visibility="$(
+  gh api "orgs/$ORG/actions/secrets/$SECRET_NAME" --jq .visibility 2>"$tmp/organization-secret.err"
+)"; then
+  case "$visibility" in
+    all|private|selected) ;;
+    *)
+      echo "::error title=Invalid organization secret visibility::$SECRET_NAME returned unsupported visibility '$visibility'."
+      exit 1
+      ;;
+  esac
+else
+  cat "$tmp/organization-secret.err" >&2
+  if grep -Eq '\(HTTP 404\)$' "$tmp/organization-secret.err" &&
+    organization_secrets="$(gh api --paginate --slurp "orgs/$ORG/actions/secrets?per_page=100")" &&
+    json_satisfies "$ORGANIZATION_SECRET_ABSENT" --arg name "$SECRET_NAME" <<<"$organization_secrets"; then
+    visibility=withdrawn
+  else
+    echo "::error title=Unreadable organization secret::Cannot verify $SECRET_NAME visibility for $ORG."
     exit 1
-    ;;
-esac
+  fi
+fi
 
 if [ -n "${VERJSON_MANAGED_REPOSITORIES:-}" ]; then
   repositories="$VERJSON_MANAGED_REPOSITORIES"
@@ -241,7 +280,7 @@ while IFS= read -r repository; do
     caller_required_checks caller_required_checks_shell canonical_policy_lines canonical_required_checks \
     retry_response retry_file retry_available retry_content retry_pins retry_policy_lines retry_workflow_lines \
     retry_required_checks retry_workflow_names retry_workflow_names_shell canonical_retry \
-    historical_retry_workflow retry_workflow_response
+    historical_retry_workflow retry_workflow_response environment_key_response
   metadata="$(gh api "repos/$repository" --jq '[.default_branch,.visibility] | @tsv')" || {
     echo "::error title=Unreadable repository metadata::repository=$repository"
     failures=$((failures + 1))
@@ -436,7 +475,7 @@ while IFS= read -r repository; do
         else
           caller_required_checks="${required_check_lines[0]//\'\'/\'}"
         fi
-        if [ -n "$caller_required_checks" ] && ! jq -e '
+        if [ -n "$caller_required_checks" ] && ! json_satisfies '
           type == "array" and length > 0 and
           ([.[].name] | unique | length) == length and all(.[];
             type == "object" and
@@ -445,7 +484,7 @@ while IFS= read -r repository; do
             (.app_id | type == "number" and . > 0 and floor == .) and
             (.workflow_id | type == "number" and . > 0 and floor == .) and
             (.workflow_path | type == "string" and test("^\\.github/workflows/[A-Za-z0-9._-]+\\.ya?ml$"))
-          )' <<<"$caller_required_checks" >/dev/null; then
+          )' <<<"$caller_required_checks"; then
           echo "::error title=Invalid reviewed required-check policy::repository=$repository path=$CALLER_PATH reason='required_checks must name exact check, App, workflow ID, and workflow path identities'"
           failures=$((failures + 1))
           caller_required_checks=""
@@ -494,9 +533,9 @@ while IFS= read -r repository; do
             retry_workflow_names="${retry_workflow_lines[0]}"
           fi
           if [ -z "$caller_required_checks" ] || [ -z "$retry_required_checks" ] ||
-            ! jq -e 'type == "array" and length > 0 and (unique | length) == length and
-              all(.[]; type == "string" and length > 0)' <<<"$retry_workflow_names" >/dev/null 2>&1 ||
-            ! jq -e . <<<"$retry_required_checks" >/dev/null 2>&1; then
+            ! json_satisfies 'type == "array" and length > 0 and (unique | length) == length and
+              all(.[]; type == "string" and length > 0)' <<<"$retry_workflow_names" 2>/dev/null ||
+            ! json_satisfies '.' <<<"$retry_required_checks" 2>/dev/null; then
             echo "::error title=Invalid reviewed promotion retry policy::repository=$repository path=$RETRY_PATH reason='retry must declare unique workflow names and one required_checks input'"
             failures=$((failures + 1))
           elif [ "$(jq -cS . <<<"$retry_required_checks")" != "$(jq -cS . <<<"$caller_required_checks")" ]; then
@@ -531,9 +570,32 @@ while IFS= read -r repository; do
     selected)
       [ "${selected_repositories[$repository]:-}" = 1 ] && has_secret=true
       ;;
+    withdrawn)
+      # Metadata only: the environment-secret endpoint never returns the key value.
+      if environment_key_response="$(gh api "repos/$repository/environments/$MERGE_ENVIRONMENT/secrets/$SECRET_NAME" \
+        2>"$tmp/environment-key.err")"; then
+        # shellcheck disable=SC2016 # jq program text, expanded by jq rather than the shell
+        if json_satisfies '.name == $name' --arg name "$SECRET_NAME" <<<"$environment_key_response" 2>/dev/null; then
+          has_secret=true
+        else
+          echo "::error title=Unreadable merge-app environment key::repository=$repository environment=$MERGE_ENVIRONMENT secret=$SECRET_NAME reason='response does not identify the key'"
+          failures=$((failures + 1))
+          continue
+        fi
+      elif ! grep -Eq '\(HTTP 404\)$' "$tmp/environment-key.err"; then
+        cat "$tmp/environment-key.err" >&2
+        echo "::error title=Unreadable merge-app environment key::repository=$repository environment=$MERGE_ENVIRONMENT secret=$SECRET_NAME"
+        failures=$((failures + 1))
+        continue
+      fi
+      ;;
   esac
   if [ "$has_secret" != true ]; then
-    echo "::error title=Missing privileged merge App key access::repository=$repository secret=$SECRET_NAME remediation='grant repository access to the organization secret'"
+    if [ "$visibility" = withdrawn ]; then
+      echo "::error title=Missing privileged merge App key access::repository=$repository secret=$SECRET_NAME environment=$MERGE_ENVIRONMENT remediation='provision the key in the main-only $MERGE_ENVIRONMENT environment (ADR 0166)'"
+    else
+      echo "::error title=Missing privileged merge App key access::repository=$repository secret=$SECRET_NAME remediation='grant repository access to the organization secret'"
+    fi
     failures=$((failures + 1))
   fi
 done <<<"$repositories"

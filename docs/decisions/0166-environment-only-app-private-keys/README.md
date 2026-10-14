@@ -105,3 +105,34 @@ The [#1291 provisioning/proof receipt](https://github.com/Verjson/.github/issues
 This completes neither the wider cohort migration nor #1285 exposure removal. Broad copies remain for unprepared consumers and the inherited frozen workflow; advancement of that pin and broad-copy removal require the separately prepared cohort and receipts.
 
 The [native environment-denial receipt](https://github.com/Verjson/.github/issues/1285#issuecomment-5611832146) records run `34430152626` at keyless non-main proof commit `49779d3`. GitHub denied all three explicitly requested role environments before any runner or step started (`runner_id: 0`, empty steps). The proof branch was removed after checking its SHA. Together with main proof `34429989792`, this demonstrates the three native environment boundaries; it does not prove absence of broader secret copies, which remain pending cohort migration.
+
+## 2026-10-14 — Fleet conformance accepts the withdrawn organization copy
+
+The organization copies of `AI_REVIEW_APP_PRIVATE_KEY`, `MERGE_APP_PRIVATE_KEY` and
+`RELEASE_APP_PRIVATE_KEY` were withdrawn between 23:10 and 02:36 UTC on 2026-09-27
+([#1385](https://github.com/Verjson/.github/issues/1385)); the owner confirmed on
+2026-09-28 that they stay withdrawn. That is the custody this decision requires, but
+`scripts/privileged-merge-conformance.sh` read the organization secret's 404 as
+"cannot verify" and failed every scheduled run from 2026-09-27 onward
+([#1776](https://github.com/Verjson/.github/issues/1776)). Its per-consumer remediation
+also asked operators to grant access to the organization copy this decision removed.
+
+The audit now treats that 404 as withdrawal only when the same token reads a complete,
+well-formed organization secret inventory omitting the name. GitHub also returns 404 for
+a resource the caller cannot see, so an uncorroborated 404 is unknown custody and fails
+closed with every other read failure. With the copy withdrawn, each privileged merge
+consumer must hold the key in its own `merge-app` environment; the audit reads that
+secret's metadata, never its value, and distinguishes a missing key (404) from an
+unreadable one. While an organization copy exists, the earlier visibility-based verdict
+is unchanged; flagging such a copy as residue remains the job of
+`scripts/org-secret-scope-audit.py`.
+
+The same change records the review and merge organization copies as `withdrawn` in
+`config/org-actions-secret-policy.json` and marks both roles' custody as achieved in
+`config/app-role-custody-inventory.json`, matching the release role. A read-only fleet
+scan on 2026-10-14 found no repository-level copy of any `*_APP_PRIVATE_KEY` across 99
+active repositories, so no surviving broad copy remains for either role.
+
+This audit checks key presence only. Main-only branch admission remains the job of
+`app-key-environment.yml`, and a consumer pinned to a contract older than the
+`merge_environment` input would still not bind the environment at run time.
