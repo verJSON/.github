@@ -1082,7 +1082,9 @@ jobs:
               for path in sorted(changed - {CALLER} - set(added)):
                   base_entry, head_entry = base_tree.get(path), head_tree.get(path)
                   require(base_entry is not None and head_entry is not None, f"{shown(path)} is not modified in place")
-                  require(not path.startswith(".github/") and path.rsplit("/", 1)[-1] not in ("action.yml", "action.yaml"),
+                  # GitHub matches these names case-insensitively on case-insensitive checkouts.
+                  folded = path.casefold()
+                  require(not folded.startswith(".github/") and folded.rsplit("/", 1)[-1] not in ("action.yml", "action.yaml"),
                           f"{shown(path)} is workflow or action configuration")
                   before = blob(repo, base_entry)
                   after = blob(repo, head_entry)

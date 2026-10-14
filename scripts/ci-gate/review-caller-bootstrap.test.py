@@ -473,12 +473,17 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
     add("a canonical comparison of a different base proves nothing",
         compare_override(Consumer(), f"{FLOOR}...{STALE}", "behind", base_commit="8" * 40),
         ('require(comparison["base_commit"]["sha"] == base,', 'require(True,'))
-    path_rule = ('require(not path.startswith(".github/") and path.rsplit("/", 1)[-1] not in ("action.yml", "action.yaml"),',
+    path_rule = ('require(not folded.startswith(".github/") and folded.rsplit("/", 1)[-1] not in ("action.yml", "action.yaml"),',
                  'require(True,')
     add("a pin swap in workflow configuration is not a bootstrap",
         with_files(**{".github/pins.json": (mirror(STALE), mirror(CONTRACT))}), path_rule)
     add("a pin swap in action metadata is not a bootstrap",
         with_files(**{"tools/check/action.yml": (mirror(STALE), mirror(CONTRACT))}), path_rule)
+    folded_rule = ('path.casefold()', 'path')
+    add("a pin swap under a mixed-case .GitHub directory is not a bootstrap",
+        with_files(**{".GitHub/pins.json": (mirror(STALE), mirror(CONTRACT))}), folded_rule)
+    add("a pin swap in mixed-case Action.yml metadata is not a bootstrap",
+        with_files(**{"tools/check/Action.yml": (mirror(STALE), mirror(CONTRACT))}), folded_rule)
     add("a mirror that changes more than the pin and digest is not a bootstrap",
         with_files(**{"tests/pins.test.ts": (mirror(STALE), mirror(CONTRACT) + b"export const extra = 1;\n")}),
         ("require(after != before and after == swap.sub(lambda match: swaps[match.group(0)], before),",
@@ -545,6 +550,8 @@ INELIGIBLE_REASONS = {
     "a canonical comparison of a different base proves nothing": "canonical comparison base is not exact",
     "a pin swap in workflow configuration is not a bootstrap": "is workflow or action configuration",
     "a pin swap in action metadata is not a bootstrap": "is workflow or action configuration",
+    "a pin swap under a mixed-case .GitHub directory is not a bootstrap": "is workflow or action configuration",
+    "a pin swap in mixed-case Action.yml metadata is not a bootstrap": "is workflow or action configuration",
     "a mirror that changes more than the pin and digest is not a bootstrap": "changes more than the review caller pin and digest",
     "a mirror that becomes executable is not a bootstrap": "only regular non-executable files may change",
     "a deletion is not a bootstrap": "is not modified in place",
