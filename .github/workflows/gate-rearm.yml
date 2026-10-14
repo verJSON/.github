@@ -1225,7 +1225,6 @@ jobs:
               # swapping exactly those tokens; workflow and action configuration may not change at all.
               swaps = {stale.encode(): contract.encode(),
                        hashlib.sha256(base_caller).hexdigest().encode(): hashlib.sha256(head_caller).hexdigest().encode()}
-              swap = re.compile(b"|".join(re.escape(token) for token in sorted(swaps, key=len, reverse=True)))
               added = sorted(path for path in changed if path not in base_tree)
               require(len(added) <= 1, "the pull request adds more than one file")
               for path in added:
@@ -1237,12 +1236,21 @@ jobs:
                       raise Ineligible(f"{shown(path)} has an invalid date") from error
                   require(blob(repo, head_tree[path]) == render_fragment(match[1], match[2], stale, contract),
                           f"{shown(path)} is not the generated bootstrap changelog fragment")
-              for path in sorted(changed - {CALLER} - set(added)):
-                  base_entry, head_entry = base_tree.get(path), head_tree.get(path)
-                  require(base_entry is not None and head_entry is not None, f"{shown(path)} is not modified in place")
-                  if WORKFLOW_FILE.fullmatch(path) is not None:
-                      reusable_ci_pins(path, blob(repo, base_entry), blob(repo, head_entry), contract)
+              modified = sorted(changed - {CALLER} - set(added))
+              for path in modified:
+                  require(path in base_tree and path in head_tree, f"{shown(path)} is not modified in place")
+              # Exact-case only: GitHub runs workflows from `.github/workflows/` itself, never a subdirectory.
+              reusable_ci = [path for path in modified if WORKFLOW_FILE.fullmatch(path) is not None]
+              ci_stale = set()
+              for path in reusable_ci:
+                  ci_stale |= reusable_ci_pins(path, blob(repo, base_tree[path]), blob(repo, head_tree[path]), contract)
+              # A contract test may mirror a moved reusable CI pin as well; it moves to the same contract.
+              swaps.update({revision.encode(): contract.encode() for revision in ci_stale})
+              swap = re.compile(b"|".join(re.escape(token) for token in sorted(swaps, key=len, reverse=True)))
+              for path in modified:
+                  if path in reusable_ci:
                       continue
+                  base_entry, head_entry = base_tree[path], head_tree[path]
                   # GitHub matches these names case-insensitively on case-insensitive checkouts.
                   folded = path.casefold()
                   require(not folded.startswith(".github/") and folded.rsplit("/", 1)[-1] not in ("action.yml", "action.yaml"),

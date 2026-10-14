@@ -669,6 +669,10 @@ def main() -> int:
            "a pin mirror that only swaps the stale pin and caller digest is accepted", harness.last)
     report(harness.eligible(with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT))})),
            "a reusable node-ci caller that only moves its pin to the contract revision is a companion", harness.last)
+    ci_mirror = lambda node, review: f"const canonicalNodeCiPin = '{node}';\n".encode() + mirror(review)
+    report(harness.eligible(with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT)),
+                                          "tests/ci-contract.test.ts": (ci_mirror(CI_STALE, STALE), ci_mirror(CONTRACT, CONTRACT))})),
+           "a contract test mirroring the reusable CI pin may swap it with the caller", harness.last)
     commented = lambda sha: f"# Canonical node-ci revision: {sha}\n".encode() + ci_caller(sha)
     report(harness.eligible(with_files(**{CI_CALLER: (commented(CI_STALE), commented(CONTRACT))})),
            "a comment pin that moves with the reusable CI pin is a companion", harness.last)
