@@ -177,7 +177,7 @@ each `mergedAt` exits `0`, the same as `main`. Live, all three exit the same as
 `main`: `0` for #1759, and `5` for #1753 and #1762 on the post-merge `reconcile`
 check. Open #1746 exits `3` on its failing `shell-tests` under both scripts.
 
-## Amendment (2026-10-14, #1784) — the run inventory reaches `jq` by file, projected
+## Amendment (2026-10-14, #1784) — the run inventory reaches `jq` by file
 
 Decision 2 reads the run inventory for every head, and a full run object embeds its
 repository, head repository, actor, and head commit. On verJSON/AiB#347 eleven runs made
@@ -190,19 +190,22 @@ evaluated.
 `scripts/assert-mergeable-head.sh` now writes each response, and each value derived from
 one, to a scratch directory owned by the script's single EXIT trap. `jq` reads those
 values with `--slurpfile` or on stdin. Only script constants and validated scalars still
-travel as arguments. The run listing is projected page by page to the eleven fields some
-program reads (`id`, `check_suite_id`, `workflow_id`, `run_number`, `event`, `status`,
-`conclusion`, `head_sha`, `name`, `created_at`, `html_url`). On AiB#347 that projection
-is 3,791 bytes. A page or run that is not an object passes through unchanged, so
-validation refuses it as before. No gate rule, conclusion set, or exit code changes.
+travel as arguments. No gate rule, conclusion set, or exit code changes.
+
+The run listing is deliberately NOT cut down to the fields the gate reads today. Once
+every payload travels by file, size no longer matters to correctness, and a field
+allowlist would be a latent fail-open: a later reader of an unlisted field
+(`run_attempt`, `head_branch`, `pull_requests`) would see `null` for every run. An
+exclusion such as `select(.x != …)` in `superseder` or Gate A's unfinished-run arm
+would then match every run. The validated inventory keeps each run as GitHub reported
+it.
 
 Verification: the 131 runs of `scripts/assert-mergeable-head.test.sh` give byte-identical
 output and exit codes before and after the change. `scripts/assert-mergeable-head.large-payload.test.sh`
 drives oversized inputs to the same verdicts that equivalent small inputs reach:
 admission, a pending last-page run under Gate A, and a failing check under Gate C. Before
 the change those inputs failed with the real kernel `E2BIG` error. Reintroducing argv
-transport at any of the nine sites fails that test. Dropping any projected field, or
-either shape guard, fails one of the two suites. Live, AiB#347 now prints `true` and
+transport at any of the nine sites fails that test. Live, AiB#347 now prints `true` and
 exits `0`.
 
 ## Amendment (2026-10-14, #1786) — every inventory page must carry an array
@@ -222,9 +225,7 @@ requires every page to be an object whose collection has type `array`. Under
 `jq -e`, a `false` result, a jq error, and unparseable input all exit `1`. Each refusal
 names the endpoint and says the inventory "carries a malformed page". Empty array pages
 are unaffected, and an empty response is still refused by reconciliation. The 131
-existing fixtures give byte-identical output. A non-object page can no longer reach the
-#1784 run projection, so that projection's page-level pass-through, described in the
-amendment above, has been removed. Its run-level pass-through is unchanged.
+existing fixtures give byte-identical output.
 
 Verification: `scripts/assert-mergeable-head.test.sh` covers string, object, null, and
 number collections, on a sole page and on the last page, for each endpoint. All 24 cases

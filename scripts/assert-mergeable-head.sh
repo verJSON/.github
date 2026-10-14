@@ -292,27 +292,6 @@ require_array_pages "$runs_raw" workflow_runs \
   || fault 1 "the workflow-run inventory for $repo@$head_sha carries a malformed page: every page must carry a workflow_runs array; it cannot be reasoned over"
 reconcile_pages "$runs_raw" workflow_runs \
   || fault 1 "the workflow-run inventory for $repo@$head_sha is incomplete or unattested; it cannot be reasoned over"
-# A full run object embeds the repository, head repository, actor, and head commit, so the
-# listing grows by kilobytes per run (#1784). Each run is cut down, page by page, to the
-# fields some program below reads -- well_formed: id, check_suite_id, workflow_id,
-# run_number, event, status, conclusion, head_sha; superseder: id, check_suite_id,
-# workflow_id, run_number, event, status, conclusion; the unfinished-run arm of Gate A:
-# id, status, name, created_at, html_url. Add a field here before any program reads it.
-# A field read below and missing here would read as null and fail closed in well_formed
-# or drop out of a display. `require_array_pages` has already proven every page an object
-# carrying a workflow_runs array. The projection preserves every shape the readers
-# distinguish: a run that is not an object passes through untouched, so well_formed
-# refuses it, and a key the response omits becomes null, which every reader already
-# treats exactly as absent (`.x` on a missing key IS null, and no reader tests key
-# presence or serializes a whole run).
-runs_projected="$scratch/runs.projected.json"
-jq -c '
-  .workflow_runs |= map(
-    if type == "object" then
-      { id, check_suite_id, workflow_id, run_number, event, status, conclusion,
-        head_sha, name, created_at, html_url }
-    else . end)' <"$runs_raw" >"$runs_projected" \
-  || fault 1 "failed to project the workflow-run inventory for $repo@$head_sha"
 # Types are checked, never truthiness: jq orders every string above every number,
 # so a string run_number would always read as "later", and two absent workflow ids
 # or events would compare equal (`null == null`) and forge a same-workflow match.
@@ -334,7 +313,7 @@ jq -s --arg head "$head_sha" '
   [ .[].workflow_runs[]? ]
   | if all(.[]; well_formed) | not then error("malformed workflow run")
     elif (map(.check_suite_id) | unique | length) != length then error("check suite claimed twice")
-    else . end' <"$runs_projected" >"$runs" \
+    else . end' <"$runs_raw" >"$runs" \
   || fault 1 "the workflow-run inventory for $repo@$head_sha carries a malformed record; it cannot be reasoned over"
 
 gated_checks="$checks"

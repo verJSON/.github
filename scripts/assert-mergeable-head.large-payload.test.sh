@@ -6,10 +6,11 @@
 # the exec, so the gate exited 1 "failed to evaluate" on exactly the heads that had
 # been re-triggered.
 #
-# Every gate input is oversized here AFTER the script's own normalization and
-# projection, not merely in the raw response: the long strings sit in fields the gate
-# reads (check, context, and workflow names), so a projection cannot shrink a value
-# back under the limit and let a reintroduced `--argjson` pass unnoticed. Each case
+# Every gate input is oversized here AFTER the script's own normalization, not merely
+# in the raw response: the long strings sit in fields the gate reads (check, context,
+# and workflow names), so neither the normalization nor any future cut-down of a
+# response can shrink a value back under the limit and let a reintroduced `--argjson`
+# pass unnoticed. Each case
 # asserts a verdict reached only after the oversized value has been evaluated -- a
 # superseded cancellation set aside, a pending run on the LAST page, a failing check
 # in Gate C -- so a run that exits early cannot satisfy it.
@@ -197,11 +198,10 @@ run_gate "$tmp/large-gate-c"
 expect_fault "oversized payload: a failing advisory check fails Gate C, not the evaluation (#1784)" 5 \
   "Gate C: verJSON/AiB#347 head $HEAD_SHA has pending or non-passing checks"
 
-# --- the run projection preserves every malformed shape -----------------------
-# The listing is cut down to the fields the gate reads before validation. A projection
-# that reshaped what it does not understand would turn a malformed record into a
-# projection fault with a different message -- or, worse, into a well-formed one -- so
-# a non-object page or run passes through untouched and is refused where it always was.
+# --- a malformed listing is refused by name, whatever its size ----------------
+# Moving the listing through a file must not change where a malformed shape is
+# refused: a run that is not an object fails run validation, and a page that is not an
+# object fails the page check (#1786) before anything reads its runs.
 malformed_listing() { # label runs-body expected-refusal
   build_fixtures "$tmp/shape" 2 8 0 8 completed ''
   printf '%s' "$2" >"$tmp/shape/runs.json"
@@ -209,11 +209,9 @@ malformed_listing() { # label runs-body expected-refusal
   expect_fault "$1" 1 "the workflow-run inventory for verJSON/AiB@$HEAD_SHA carries a malformed $3"
 }
 ok_run="$(jq -c '.workflow_runs[0]' <<<"$(head -n1 "$tmp/small-pass/runs.json")")"
-malformed_listing "a run that is not an object is refused as malformed, not reshaped by the projection" \
+malformed_listing "a run that is not an object is refused as a malformed record" \
   "{\"total_count\":2,\"workflow_runs\":[$ok_run,\"bogus\"]}" record
-# A page that is not an object never reaches the projection: the page check refuses it
-# first (#1786), so the projection need not, and does not, guard pages.
-malformed_listing "a page that is not an object is refused as a malformed page before the projection" \
+malformed_listing "a page that is not an object is refused as a malformed page (#1786)" \
   "{\"total_count\":1,\"workflow_runs\":[$ok_run]}[]" page
 
 if [ "$fails" -ne 0 ]; then
