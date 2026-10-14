@@ -468,6 +468,64 @@ RUNS_FIXTURE="$(wf_runs "$(wf_run 9101 601 "$WF_OTHER" 73 pull_request_target co
 run
 expect "a later run of the same workflow that did not SUCCEED supersedes nothing" 5 "rearm / event-policy=CANCELLED"
 
+# Review attack A1. `event` cannot tell a draft-time run from a ready-time one: both
+# are `pull_request`, and a run whose guarded jobs were all SKIPPED still concludes
+# `success` (ready -> converted_to_draft -> ready, ADR 0223; or an adopter guarding
+# heavy jobs off `labeled`). A later run that reports the SAME check as anything but
+# SUCCESS did not do that check's work, so the earlier cancellation keeps blocking.
+for conclusion in skipped neutral; do
+  reset_env
+  CHECK_RUNS_FIXTURE="$(runs "$(check_run 11 'ci / build-test' completed cancelled "$APP_ID" 501),$(check_run 12 'changelog / validate' completed cancelled "$APP_ID" 501),$(check_run 21 'ci / build-test' completed "$conclusion" "$APP_ID" 502),$(check_run 22 'changelog / validate' completed "$conclusion" "$APP_ID" 502)")"
+  RUNS_FIXTURE="$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed cancelled),$(wf_run 9002 502 "$WF_CI" 11 pull_request completed success)")"
+  run
+  upper="$(tr '[:lower:]' '[:upper:]' <<<"$conclusion")"
+  expect "A1: a later successful run that reports the required check as $upper does not supersede its cancellation" 3 "not passing: ci / build-test (CANCELLED,$upper)"
+
+  reset_env
+  CHECK_RUNS_FIXTURE="$(runs "$green_runs,$(check_run 31 'heavy-suite' completed cancelled "$APP_ID" 601),$(check_run 32 'heavy-suite' completed "$conclusion" "$APP_ID" 602)")"
+  RUNS_FIXTURE="$(wf_runs "$(wf_run 9101 601 "$WF_OTHER" 73 pull_request completed cancelled),$(wf_run 9102 602 "$WF_OTHER" 74 pull_request completed success)")"
+  run
+  expect "A1 under Gate C: a later successful run that reports the advisory check as $upper does not supersede its cancellation" 5 "heavy-suite=CANCELLED"
+done
+
+# The superseder may OMIT the check -- #1750's cancelled matrix parent
+# `shell-test-groups` has no same-named successor -- but then nothing in that run
+# vouches for the context. A required context whose cancellation was set aside must
+# still be backed by a SUCCESS of its own; a SKIPPED from another suite does not do.
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$(check_run 11 'ci / build-test' completed cancelled "$APP_ID" 501),$(check_run 22 'changelog / validate' completed success "$APP_ID" 502),$(check_run 31 'ci / build-test' completed skipped "$APP_ID" 503)")"
+RUNS_FIXTURE="$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed cancelled),$(wf_run 9002 502 "$WF_CI" 11 pull_request completed success)")"
+run
+expect "a required context whose cancellation was set aside must still have a SUCCESS, not only a SKIPPED" 3 "not passing: ci / build-test (SKIPPED; a superseded cancellation needs a SUCCESS)"
+
+# Every other same-named report in the superseder keeps the cancellation too. These
+# already block on their own; the guard keeps them from being reasoned away later.
+for shape in 'cancelled:completed' 'failure:completed' ':completed' ':in_progress' 'success:in_progress'; do
+  conclusion="${shape%%:*}"; status="${shape#*:}"
+  reset_env
+  CHECK_RUNS_FIXTURE="$(runs "$green_runs,$(check_run 31 'heavy-suite' completed cancelled "$APP_ID" 601),$(check_run 32 'heavy-suite' "$status" "$conclusion" "$APP_ID" 602)")"
+  RUNS_FIXTURE="$(wf_runs "$(wf_run 9101 601 "$WF_OTHER" 73 pull_request completed cancelled),$(wf_run 9102 602 "$WF_OTHER" 74 pull_request completed success)")"
+  run
+  expect "a superseder reporting the same check as '${conclusion:-no conclusion}' ($status) supersedes nothing" 5 "heavy-suite=CANCELLED"
+done
+
+# The NEWEST successful later run decides. An older full run cannot be cherry-picked
+# over a newer run that skipped the work (ready, draft again: the head is back in the
+# reduced tier, and the next ready run is what has to vouch for it).
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$green_runs,$(check_run 31 'heavy-suite' completed cancelled "$APP_ID" 601),$(check_run 32 'heavy-suite' completed success "$APP_ID" 602),$(check_run 33 'heavy-suite' completed skipped "$APP_ID" 603)")"
+RUNS_FIXTURE="$(wf_runs "$(wf_run 9101 601 "$WF_OTHER" 73 pull_request completed cancelled),$(wf_run 9102 602 "$WF_OTHER" 74 pull_request completed success),$(wf_run 9103 603 "$WF_OTHER" 75 pull_request completed success)")"
+run
+expect "only the newest successful later run may supersede; an older full run is not cherry-picked over a newer skip" 5 "heavy-suite=CANCELLED"
+
+# "Later" is strict. Two distinct runs of one workflow never share a run number, so
+# a record that does is not later -- and must not supersede.
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$superseded_runs")"
+RUNS_FIXTURE="$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed cancelled),$(wf_run 9002 502 "$WF_CI" 10 pull_request completed success)")"
+run
+expect "a run with the SAME run number is not later and supersedes nothing" 3 "not passing: ci / build-test (CANCELLED,SUCCESS)"
+
 # Gate B reads the raw inventory. Supersession is a rule for the pass/fail gates; a
 # deferral that ran -- cancelled or not -- stays execution evidence it never touches.
 reset_env

@@ -27,8 +27,9 @@
 #
 # Gates A and C set aside one shape only: a CANCELLED check run whose workflow run
 # was cancelled and then superseded by a later successful run of the same workflow,
-# event, and head (ADR 0226, #1754) -- the draft-then-ready concurrency cancel. No
-# conclusion is added to the passing set, and Gate B always reads the raw inventory.
+# event, and head that reports that check as SUCCESS or not at all (ADR 0226, #1754)
+# -- the draft-then-ready concurrency cancel. No conclusion is added to the passing
+# set, and Gate B always reads the raw inventory.
 #
 # Prints "true" and exits 0 only when all three hold. Every other outcome is a
 # fault: a `::error::` naming the gate, and a distinct exit code — never a bare
@@ -202,9 +203,15 @@ checks="$(jq -n --argjson a "$check_runs" --argjson b "$statuses" '$a + $b')" \
 # the union of conclusions per context reads `SUCCESS,CANCELLED` on a green head.
 #
 # A cancelled check run is set aside for Gates A and C -- and ONLY a cancelled one --
-# when its own workflow run concluded `cancelled` and a LATER run of the SAME
-# workflow (workflow_id), under the SAME event, on THIS head, completed with
-# conclusion `success`. "Later" is `run_number`: GitHub's per-workflow event
+# when its own workflow run concluded `cancelled` and the NEWEST later run of the
+# SAME workflow (workflow_id), under the SAME event, on THIS head, completed with
+# conclusion `success` AND its own check suite reports that check name only as a
+# completed SUCCESS, or not at all. A run concludes `success` with its guarded jobs
+# SKIPPED, and `event` cannot tell a draft-time run from a ready-time one, so the
+# run-level conclusion alone would let a skip vouch for work never done. Omission
+# is accepted because a matrix parent is reported only as its expanded legs; Gate A
+# then requires a required context set aside this way to carry a SUCCESS of its
+# own. "Later" is `run_number`: GitHub's per-workflow event
 # sequence, an integer assigned at creation and unique within a workflow, so two
 # distinct runs never tie; it is the order concurrency itself supersedes by. Job
 # timestamps are second-granular and a cancelled job can report completed_at before
@@ -222,6 +229,7 @@ checks="$(jq -n --argjson a "$check_runs" --argjson b "$statuses" '$a + $b')" \
 # whose token lacks Actions read is affected only on a head that would otherwise
 # block anyway -- and then it faults rather than guessing.
 gated_checks="$checks"
+superseded_names='[]'
 cancelled_count="$(jq '[ .[] | select(.kind == "check_run" and .conclusion == "CANCELLED") ] | length' <<<"$checks")" \
   || fault 1 "failed to count cancelled check runs for $repo@$head_sha"
 if [ "$cancelled_count" -gt 0 ]; then
@@ -249,10 +257,13 @@ if [ "$cancelled_count" -gt 0 ]; then
       else . end' <<<"$runs_raw")" \
     || fault 1 "the workflow-run inventory for $repo@$head_sha carries a malformed record; no cancellation can be shown superseded from it"
   verdict="$(jq -c --argjson runs "$runs" '
-    # The latest successful later run of the same workflow and event, or null.
-    def superseder:
+    . as $all
+    # The latest successful later run of the same workflow and event -- provided its
+    # own check suite did that check'"'"'s work -- or null.
+    | def superseder:
       if .kind == "check_run" and .status == "COMPLETED" and .conclusion == "CANCELLED" then
-        .suite_id as $sid
+        .name as $name
+        | .suite_id as $sid
         | [ $runs[] | select(.check_suite_id == $sid) ] as $own
         | if ($own | length) != 1 then null
           else $own[0] as $o
@@ -262,18 +273,32 @@ if [ "$cancelled_count" -gt 0 ]; then
                             and .workflow_id == $o.workflow_id and .event == $o.event
                             and .run_number > $o.run_number) ]
                  | max_by(.run_number)
-                 | if . == null then null else { cancelled_run: $o.id, superseded_by: .id } end
+                 | if . == null then null
+                   else .check_suite_id as $ssid
+                   # A run concludes `success` with its guarded jobs SKIPPED, and its
+                   # event cannot say whether it was a draft-time run. So the
+                   # superseder must not report this check as anything but a
+                   # completed SUCCESS; it may omit it (a matrix parent is reported
+                   # only as expanded legs), which Gate A then backs with a SUCCESS.
+                   | if all($all[] | select(.kind == "check_run" and .suite_id == $ssid and .name == $name);
+                            .status == "COMPLETED" and .conclusion == "SUCCESS")
+                     then { cancelled_run: $o.id, superseded_by: .id }
+                     else null end
+                   end
             end
           end
       else null end;
     map(. + { superseded: superseder })
     | { kept: [ .[] | select(.superseded == null) | del(.superseded) ],
+        names: [ .[] | select(.superseded != null) | .name ] | unique,
         dismissed: [ .[] | select(.superseded != null)
                      | "\(.name) (check run \(.id), run \(.superseded.cancelled_run) superseded by run \(.superseded.superseded_by))" ] }
   ' <<<"$checks")" \
     || fault 1 "failed to evaluate superseded cancellations for $repo@$head_sha"
   gated_checks="$(jq -c '.kept' <<<"$verdict")" \
     || fault 1 "failed to assemble the gated check inventory for $repo@$head_sha"
+  superseded_names="$(jq -c '.names' <<<"$verdict")" \
+    || fault 1 "failed to list superseded check names for $repo@$head_sha"
   dismissed="$(jq -r '.dismissed | join("; ")' <<<"$verdict")" \
     || fault 1 "failed to list superseded cancellations for $repo@$head_sha"
   [ -z "$dismissed" ] \
@@ -388,10 +413,14 @@ gate_a="$(jq -r --argjson pass "$PASSING" --argjson required "$required" '
           elif ($owned | any(.status != "COMPLETED")) then "pending: \($req.context)"
           elif ($owned | any(.conclusion as $c | ($pass | index($c)) == null)) then
             "not passing: \($req.context) (\($owned | map(.conclusion) | join(",")))"
+          # A set-aside cancellation was backed by nothing in its superseder when that
+          # run omitted the check (ADR 0226), so the context needs a SUCCESS of its own.
+          elif any($superseded[]; . == $req.context) and ($owned | any(.conclusion == "SUCCESS") | not) then
+            "not passing: \($req.context) (\($owned | map(.conclusion) | join(",")); a superseded cancellation needs a SUCCESS)"
           else empty end
       end
   ] | join("; ")
-' --argjson checks "$gated_checks" <<<'null')" \
+' --argjson checks "$gated_checks" --argjson superseded "$superseded_names" <<<'null')" \
   || fault 1 "failed to evaluate required contexts for $repo#$pr"
 
 [ -z "$gate_a" ] \
