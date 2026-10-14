@@ -9,7 +9,7 @@
 # <identity> is an issue number, a UTC timestamp (YYYYMMDDTHHMMSSZ), or a 6-12
 # character lowercase hexadecimal ID. The organization authorization arm renders
 # these exact bytes from the fragment's filename and admits no other text in a
-# bootstrap pull request (ADR 0225), so never edit the output.
+# bootstrap pull request (ADR 0227), so never edit the output.
 set -euo pipefail
 
 usage() {
@@ -32,5 +32,5 @@ printf -- '---\ndate: %s\n%s: %s\nimpact: patch\ntitle: Bootstrap the AI review 
   "$date" "$key" "$identity"
 # The backticks are Markdown code spans in the fragment, not command substitution.
 # shellcheck disable=SC2016
-printf 'Regenerate `.github/workflows/ai-review-merge.yml` at canonical Verjson/.github revision `%s`, replacing `%s`, whose receipt verifier cannot authorize its own update. The organization authorization arm verified this byte-exact generated change under Verjson/.github ADR 0225.\n' \
+printf 'Regenerate `.github/workflows/ai-review-merge.yml` at canonical Verjson/.github revision `%s`, replacing `%s`, whose receipt verifier cannot authorize its own update. The organization authorization arm verified this byte-exact generated change under Verjson/.github ADR 0227.\n' \
   "$contract" "$stale"

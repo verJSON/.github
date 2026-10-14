@@ -840,7 +840,7 @@ jobs:
 
       # A stale protected review caller cannot authorize its own update: GitHub runs
       # the default-branch caller, whose immutable verifier predates the canonical
-      # organization casing (#1696, ADR 0225). This arm runs the organization ruleset's
+      # organization casing (#1696, ADR 0227). This arm runs the organization ruleset's
       # current revision, so it alone can prove that a pull request is nothing but the
       # byte-exact generated caller update to a newer canonical main commit. The proof
       # is inline because a required workflow cannot rely on checking out its own
@@ -933,7 +933,7 @@ jobs:
                   "title: Bootstrap the AI review caller to a current canonical revision\n---\n\n"
                   f"Regenerate `.github/workflows/ai-review-merge.yml` at canonical Verjson/.github revision `{contract}`, "
                   f"replacing `{stale}`, whose receipt verifier cannot authorize its own update. The organization "
-                  "authorization arm verified this byte-exact generated change under Verjson/.github ADR 0225.\n"
+                  "authorization arm verified this byte-exact generated change under Verjson/.github ADR 0227.\n"
               ).encode()
 
 

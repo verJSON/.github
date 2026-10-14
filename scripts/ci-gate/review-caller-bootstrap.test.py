@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Execute gate-rearm.yml's stale review caller bootstrap steps against stubs.
 
-The bootstrap (ADR 0225, #1696) lets the trusted arm authorize the one pull
+The bootstrap (ADR 0227, #1696) lets the trusted arm authorize the one pull
 request a stale default-branch review caller cannot authorize: the byte-exact
 generated update of that caller to a current canonical revision. Every case runs
 the real named workflow steps; the stub `gh` serves fixture API responses.

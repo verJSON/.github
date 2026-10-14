@@ -1,4 +1,4 @@
-# 0225 — The authorization arm bootstraps stale default-branch review callers
+# 0227 — The authorization arm bootstraps stale default-branch review callers
 
 - **Date:** 2026-10-13
 - **Status:** Accepted
