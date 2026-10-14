@@ -494,6 +494,59 @@ else
   fail "the Node 24 npm CLI symlink layout failed: $(tail -1 "$tmp/node24-plan-output.log")"
 fi
 
+# #1782: Debian and Ubuntu route /usr/bin/awk (and cc, c++, which, editor, ...)
+# through /etc/alternatives. A temporary-root sandbox that binds /usr but not
+# that directory leaves every such name dangling, so consumer scripts calling
+# awk failed with "command not found" once #1729 sandboxed them.
+alternatives_toolchain="$tool_cache/node/22.1.0/x64"
+mkdir -p "$alternatives_toolchain/bin"
+cat > "$alternatives_toolchain/bin/node" <<'NODE'
+#!/usr/bin/env bash
+exit 0
+NODE
+cat > "$alternatives_toolchain/bin/npm" <<'NPM'
+#!/usr/bin/env bash
+set -u
+awk 'BEGIN { print "awk-ok" }' > /workspace/node_modules/.alternatives-awk 2>&1
+while IFS= read -r routed; do
+  [ -e "$routed" ] || printf '%s\n' "$routed"
+done < /workspace/node_modules/.alternatives-expected > /workspace/node_modules/.alternatives-missing
+NPM
+chmod +x "$alternatives_toolchain/bin/node" "$alternatives_toolchain/bin/npm"
+python3 -I - "$tmp/commands/node_modules/.alternatives-expected" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+routed = []
+for directory in ("/usr/bin", "/usr/sbin"):
+    for entry in sorted(Path(directory).iterdir()):
+        if not entry.is_symlink():
+            continue
+        if not os.readlink(entry).startswith("/etc/alternatives/"):
+            continue
+        if os.path.realpath(entry).startswith("/usr/"):
+            routed.append(str(entry))
+Path(sys.argv[1]).write_text("".join(f"{path}\n" for path in routed), encoding="utf-8")
+PY
+rm -f "$tmp/commands/node_modules/.alternatives-awk" "$tmp/commands/node_modules/.alternatives-missing"
+alternatives_status=0
+(cd "$tmp/commands" && PATH="$alternatives_toolchain/bin:/usr/bin:/bin" \
+    CI_SCRIPT_PLAN='["build"]' bash "$tmp/plan.sh") \
+    > "$tmp/alternatives-plan-output.log" 2>&1 || alternatives_status=$?
+if [ "$alternatives_status" -eq 0 ] \
+    && grep -qFx 'awk-ok' "$tmp/commands/node_modules/.alternatives-awk"; then
+  pass "a sandboxed consumer script can execute the alternatives-managed awk (#1782)"
+else
+  fail "a sandboxed consumer script cannot execute awk (#1782): $(cat "$tmp/commands/node_modules/.alternatives-awk" 2>/dev/null) $(tail -1 "$tmp/alternatives-plan-output.log")"
+fi
+if [ "$alternatives_status" -eq 0 ] && [ -f "$tmp/commands/node_modules/.alternatives-missing" ] \
+    && [ ! -s "$tmp/commands/node_modules/.alternatives-missing" ]; then
+  pass "every host /usr tool routed through /etc/alternatives resolves in the consumer sandbox (#1782)"
+else
+  fail "alternatives-routed tools dangle in the consumer sandbox (#1782): $(head -5 "$tmp/commands/node_modules/.alternatives-missing" 2>/dev/null | tr '\n' ' ')"
+fi
+
 for bad_plan in '["build","build"]' '["--help"]' '["missing"]' '{"script":"build"}' \
   '[{"script":"build","unsetEnv":["NODE_AUTH_TOKEN"]}]'; do
   : > "$tmp/commands/bad-plan.log"

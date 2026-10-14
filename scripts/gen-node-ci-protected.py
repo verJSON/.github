@@ -1547,6 +1547,9 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                               "--ro-bind", "/bin", "/bin",
                               "--ro-bind", "/lib", "/lib",
                               "--ro-bind", "/lib64", "/lib64",
+                              # Present on every dpkg host; optional because this runner
+                              # may be self-hosted (#1782).
+                              "--ro-bind-try", "/etc/alternatives", "/etc/alternatives",
                               "--ro-bind", "/etc/ssl", "/etc/ssl",
                               "--ro-bind", "/etc/hosts", "/etc/hosts",
                               "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
