@@ -197,6 +197,36 @@ RUNS_FIXTURE="$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed su
 run
 expect "a workflow run on the head that has not finished blocks as pending, even before it creates a check" 3 "pending: workflow run 9002 (QUEUED)"
 
+# A run can stay unfinished for days -- a `queued` run behind an unreachable runner, or a
+# run held `pending` by a concurrency group behind such a run on an OLDER head (live in
+# verjson-payments on 2026-10-14: run 37352915856 queued since 2026-10-05 held run
+# 38427381694 pending on PR #239). Blocking is right, so the refusal has to say WHICH run,
+# where to find it, and how long it has waited -- and that the remedy is the run, not the gate.
+reset_env
+RUNS_FIXTURE="$(jq -c '.workflow_runs[0] += {name: "actions-ci", html_url: "https://github.com/Verjson/verjson-ci/actions/runs/38427381694", created_at: "2026-10-05T09:00:00Z"}' \
+  <<<"$(wf_runs "$(wf_run 38427381694 502 "$WF_CI" 11 pull_request pending '')")")"
+run
+expect "a pending run is named by its workflow" 3 "pending: workflow run 38427381694 (PENDING) actions-ci"
+expect "a pending run links to itself" 3 "https://github.com/Verjson/verjson-ci/actions/runs/38427381694"
+expect "a pending run states when it was created" 3 "created 2026-10-05T09:00:00Z"
+expect "a pending run states how long it has waited" 3 "h ago), https://"
+expect "a pending-run refusal names the remedy and forbids widening the gate" 3 "cancel the stuck run, or wait for it; never widen the admission gate"
+
+# Those fields are display only. An unreadable one is left out; it never turns the
+# Gate A refusal into an evaluation fault, and never releases the run.
+reset_env
+RUNS_FIXTURE="$(jq -c '.workflow_runs[0] += {name: 7, html_url: null, created_at: "not-a-date"}' \
+  <<<"$(wf_runs "$(wf_run 9002 502 "$WF_CI" 11 pull_request queued '')")")"
+run
+expect "a pending run with unreadable display fields is still refused under Gate A" 3 "pending: workflow run 9002 (QUEUED); a workflow run on the head has not finished"
+
+# Rule 2 keys on `status`, never on `conclusion`: a record still queued that already
+# carries a conclusion (an inconsistent or re-queued record) is unfinished all the same.
+reset_env
+RUNS_FIXTURE="$(wf_runs "$(wf_run 9002 502 "$WF_CI" 11 pull_request queued success)")"
+run
+expect "a queued run that carries a success conclusion is still pending" 3 "pending: workflow run 9002 (QUEUED)"
+
 # A run that says it completed but carries no conclusion is inconsistent. Read as
 # finished it would release the pending guard above on a record that never settled.
 reset_env

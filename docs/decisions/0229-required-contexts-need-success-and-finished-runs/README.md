@@ -95,6 +95,16 @@ collected 2026-10-14 from live check runs started before each pull request's
   `queued` (an unreachable runner label) or `waiting` (an environment review) blocks
   until it is cancelled or approved. That is the fail-closed direction, and its jobs
   already blocked Gate C once they existed.
+- **A run can be pending behind a stuck run on an older head.** A concurrency group
+  holds a new run `pending` while an earlier run in the same group is unfinished,
+  and that earlier run can belong to an older commit. Live on 2026-10-14 in
+  `verjson-payments`, run 37352915856 has been `queued` since 2026-10-05 on an
+  older head, and it holds run 38427381694 `pending` on open PR #239's head.
+  Refusing is correct, because the head's verification has not run. The refusal
+  therefore names each unfinished run with its workflow name, URL, creation time,
+  and age, and it states the remedy: cancel the stuck run, or wait for it; never
+  widen the admission gate. Those display fields are not validated and select
+  nothing. An unreadable field is omitted and never changes the verdict.
 - The script cannot run on the head it judges from inside a workflow run on that same
   head, because its own run is unfinished. No workflow invokes it today. It is the
   operator's and agents' pre-`--admin` assertion. A workflow that needs it would
@@ -110,8 +120,9 @@ collected 2026-10-14 from live check runs started before each pull request's
   This errs in the fail-closed direction.
 - Callers that document their grant set outside this repository must add Actions
   (read). The agent guidance's admin-merge procedure (`rules/workflow.md` in
-  `verjson-agents`) lists Metadata, Pull requests, Checks, and Commit statuses only.
-  That is a follow-up in the owning repository.
+  `verjson-agents`) lists Metadata, Pull requests, Checks, and Commit statuses only;
+  [verJSON/verjson-agents#424](https://github.com/verJSON/verjson-agents/issues/424)
+  tracks adding Actions (read), which after #1755 is required for every head.
 
 ## Verification
 
@@ -122,8 +133,12 @@ collected 2026-10-14 from live check runs started before each pull request's
   with skips only and the ready-time run queued, which both rules refuse; an
   unfinished run under each of seven statuses, including an unknown one and a
   case-variant `Completed`; `NEUTRAL`-only and `SKIPPED`+`NEUTRAL` required contexts;
-  a bound context backed only by another app's `SUCCESS`; and an unbound context
-  reported only as a skipped check run.
+  a bound context backed only by another app's `SUCCESS`; an unbound context
+  reported only as a skipped check run; and a `queued` run that already carries a
+  `success` conclusion, which proves the rule keys on `status`.
+- **Refusal content:** a pending run's message names its workflow, URL, creation
+  time, and age, plus the remedy line. A run whose display fields are unreadable is
+  still refused under Gate A and never becomes an evaluation fault.
 - **Admitted shape:** #1753's documentation-only draft-then-ready shape (draft-time
   `SKIPPED` plus ready-time `SUCCESS`, advisory skips, and a `skipped` sibling
   workflow).
@@ -132,7 +147,7 @@ collected 2026-10-14 from live check runs started before each pull request's
   head; and a run-read failure on such a head, which faults and names the Actions
   grant.
 
-Fourteen mutants were run in a detached worktree, and the suite killed each one:
+Twenty mutants were run in a detached worktree, and the suite killed each one:
 
 - removing either rule, or replacing the denylist with an allowlist;
 - weakening SUCCESS to SUCCESS-or-NEUTRAL, or `any` to `all`, which over-blocks the
@@ -141,7 +156,11 @@ Fourteen mutants were run in a detached worktree, and the suite killed each one:
 - comparing status case-insensitively, or counting only `pull_request` runs;
 - dropping or truthiness-checking the completed-needs-conclusion and status-type
   guards;
-- degrading a read failure to an empty inventory, or restoring the conditional read.
+- degrading a read failure to an empty inventory, or restoring the conditional read;
+- selecting unfinished runs by `conclusion == null` instead of by `status` (review
+  mutant O2);
+- dropping the remedy line, the workflow name, the URL, or the age; and removing the
+  `try` around the creation-time parse, which would turn a refusal into a fault.
 
 A read-only replay with the branch script against #1753, #1759, and #1762 as of
 each `mergedAt` exits `0`, the same as `main`. Live, all three exit the same as

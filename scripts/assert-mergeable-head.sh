@@ -440,8 +440,26 @@ gate_a="$(jq -r --argjson pass "$PASSING" --argjson required "$required" '
   # ADR 0229 (#1755). A run that has not finished may not have created its jobs yet,
   # so it is pending whatever the check inventory says; which contexts it will report
   # is unknowable until it does, so every unfinished run on the head counts.
-  + [ $runs[] | select(.status != "completed")
-      | "pending: workflow run \(.id) (\(.status | ascii_upcase))" ]
+  #
+  # A run can stay unfinished for days (a queued run with no runner, or one a
+  # concurrency group holds behind such a run on an OLDER head), so the refusal names
+  # the run, links it, and states its age. Those fields are display only: they are not
+  # validated, never select anything, and an unreadable one is left out.
+  + ( [ $runs[] | select(.status != "completed")
+        | ( try ((now - (.created_at | fromdateiso8601)) | floor | if . < 0 then 0 else . end)
+            catch null ) as $age
+        | [ (.name | strings),
+            ( if $age == null then empty
+              else "created \(.created_at) (\(
+                if $age >= 86400 then "\($age / 86400 | floor)d \($age % 86400 / 3600 | floor)h"
+                elif $age >= 3600 then "\($age / 3600 | floor)h \($age % 3600 / 60 | floor)m"
+                else "\($age / 60 | floor)m" end) ago)" end ),
+            (.html_url | strings) ] as $detail
+        | "pending: workflow run \(.id) (\(.status | ascii_upcase))"
+          + (if ($detail | length) > 0 then " " + ($detail | join(", ")) else "" end) ]
+      | if length > 0
+        then . + [ "a workflow run on the head has not finished: cancel the stuck run, or wait for it; never widen the admission gate" ]
+        else . end )
   | join("; ")
 ' --argjson checks "$gated_checks" --argjson superseded "$superseded_names" --argjson runs "$runs" <<<'null')" \
   || fault 1 "failed to evaluate required contexts for $repo#$pr"
