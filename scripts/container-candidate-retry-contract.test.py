@@ -81,7 +81,7 @@ class RetryWorkflowContractTests(unittest.TestCase):
                 '--expected-caller-workflow-sha "$CALLER_WORKFLOW_SHA"',
                 '--expected-publisher-workflow-ref "Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF"',
                 '--expected-contract-sha "$CONTRACT_REF"',
-                "python3 \"$oci\" index",
+                "python3 -I \"$oci\" index",
                 '--buildkit-provenance "$buildkit"',
             ):
                 self.assertIn(required, command)

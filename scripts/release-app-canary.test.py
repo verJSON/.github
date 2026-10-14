@@ -88,7 +88,7 @@ def validate(document: dict, raw: str) -> list[str]:
         'release_cli="$RUNNER_TEMP/release-app-canary-changelog-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.py"',
         'git --no-replace-objects -C "$GITHUB_WORKSPACE"',
         'show "$GITHUB_SHA:scripts/changelog.py" > "$release_cli"',
-        'python3 "$release_cli" release',
+        'python3 -I "$release_cli" release',
         'fragment_id="$(date -u +%Y%m%dT%H%M%SZ)"',
         "-issue-${fragment_id}-release-app-canary.md",
         "id: $fragment_id",
@@ -357,7 +357,7 @@ def main() -> int:
     mutant = copy.deepcopy(document)
     mutant["jobs"]["canary"]["steps"][push_index]["run"] = mutant["jobs"]["canary"]["steps"][push_index][
         "run"
-    ].replace('python3 "$release_cli" release', 'python3 "$GITHUB_WORKSPACE/scripts/changelog.py" release')
+    ].replace('python3 -I "$release_cli" release', 'python3 -I "$GITHUB_WORKSPACE/scripts/changelog.py" release')
     mutants.append(("release CLI execution from the persistent workspace", mutant, raw))
     mutant = copy.deepcopy(document)
     mutant["jobs"]["canary"]["steps"][push_index]["run"] = mutant["jobs"]["canary"]["steps"][push_index][

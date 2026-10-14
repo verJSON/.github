@@ -25,14 +25,14 @@ SETUP_PYTHON = re.compile(r"^actions/setup-python@[0-9a-f]{40}$")
 # and its reviewed expectation are repository-controlled paths; neither may be
 # redirected to an inherited or untrusted one.
 ARM_AUDIT_COMMAND = (
-    "python3 scripts/audit-finding-state.py"
+    "python3 -I scripts/audit-finding-state.py"
     " --audit ai-review-arm"
     " --expectations config/audit-expected-findings.json"
     # The audit declares the exit statuses it uses, so any other status is a
     # crash rather than a verdict. Pinned here because widening the declared
     # set is how a crashed privileged audit would start reading as conformance.
     " --expect-status 0 --expect-status 1"
-    " -- python3 scripts/ai-review-required-workflow-audit.py"
+    " -- python3 -I scripts/ai-review-required-workflow-audit.py"
 )
 
 
@@ -157,7 +157,7 @@ def validate_watchdog(document: object) -> None:
     require(cadence_env["GH_TOKEN"] == "${{ github.token }}", "cadence probe must use the job token")
     require(cadence_env["WATCHDOG_MAX_GAP_MINUTES"] == "30", "cadence observation threshold changed")
     require(
-        cadence["run"] == "python3 scripts/fleet-watchdog-cadence.py",
+        cadence["run"] == "python3 -I scripts/fleet-watchdog-cadence.py",
         "watchdog cadence command must remain static",
     )
     validate_cleanup(steps[3], "watchdog cleanup", WATCHDOG_SOURCE)
@@ -292,7 +292,7 @@ def validate_secret_scope(document: object) -> None:
     require(audit["name"] == "Compare live scope with reviewed policy", "secret-scope audit name changed")
     env = require_keys(audit["env"], {"GH_TOKEN"}, "secret-scope audit env")
     require(env["GH_TOKEN"] == "${{ secrets.ORG_ADMIN_TOKEN }}", "secret-scope token binding changed")
-    require(audit["run"] == "python3 scripts/org-secret-scope-audit.py", "secret-scope command changed")
+    require(audit["run"] == "python3 -I scripts/org-secret-scope-audit.py", "secret-scope command changed")
     validate_cleanup(steps[2], "secret-scope cleanup", SECRET_SCOPE_SOURCE)
 
 
@@ -393,7 +393,7 @@ def validate_ruleset_conformance(document: object) -> None:
         "ruleset-conformance token binding changed",
     )
     require(
-        audit["run"] == "python3 scripts/org-ruleset-conformance.py",
+        audit["run"] == "python3 -I scripts/org-ruleset-conformance.py",
         "ruleset-conformance command changed",
     )
     package_audit = require_keys(
@@ -412,7 +412,7 @@ def validate_ruleset_conformance(document: object) -> None:
     )
     require(
         package_audit["run"]
-        == "python3 scripts/package-type-surface-ruleset.py audit",
+        == "python3 -I scripts/package-type-surface-ruleset.py audit",
         "package type-surface audit command changed",
     )
     validate_cleanup(
@@ -571,12 +571,12 @@ def main() -> int:
         ),
         "unadjudicated arm audit": ruleset_conformance_text.replace(
             ARM_AUDIT_COMMAND,
-            "python3 scripts/ai-review-required-workflow-audit.py",
+            "python3 -I scripts/ai-review-required-workflow-audit.py",
             1,
         ),
         "test policy argument": ruleset_conformance_text.replace(
-            "run: python3 scripts/org-ruleset-conformance.py",
-            "run: python3 scripts/org-ruleset-conformance.py --test-policy /tmp/untrusted.json",
+            "run: python3 -I scripts/org-ruleset-conformance.py",
+            "run: python3 -I scripts/org-ruleset-conformance.py --test-policy /tmp/untrusted.json",
             1,
         ),
     }
