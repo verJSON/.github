@@ -1010,6 +1010,7 @@ jobs:
           REUSABLE_CI = (".github/workflows/node-ci.yml", ".github/workflows/actionlint.yml")
           WORKFLOW_FILE = re.compile(r"\.github/workflows/[A-Za-z0-9._-]+\.ya?ml")
           COMMENT = re.compile(rb"[ \t]*#")
+          JOB_KEY = re.compile(rb"  [A-Za-z_][A-Za-z0-9_-]*:[ \t]*(?:#.*)?\r?")
           REUSABLE_REF = re.compile(rb"(    uses: )([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/(\.github/workflows/[A-Za-z0-9._-]+\.ya?ml)@([0-9a-f]{40})((?:[ \t]+(?:#.*)?)?\r?)")
           INPUTS = (
               ("pr_number", True), ("expected_head_sha", True), ("authorization_check_id", True),
@@ -1132,6 +1133,21 @@ jobs:
               return pins[0].decode()
 
 
+          def enclosing(lines, index, width):
+              # The nearest earlier content line indented less than `width`; blanks and comments carry no structure.
+              for line in reversed(lines[:index]):
+                  content = line.lstrip(b" ")
+                  if content.strip() and not content.startswith(b"#") and len(line) - len(content) < width:
+                      return line
+              return b""
+
+
+          def job_call(lines, index):
+              # A reference is a job's reusable workflow call only directly under a bare job key; under
+              # `note: >-` the same bytes are block scalar text.
+              return JOB_KEY.fullmatch(enclosing(lines, index, 4)) is not None
+
+
           def reusable_ci_pins(path, before, after, contract):
               # A reusable CI caller has no generator, so its proof is a line diff. A changed line is either an
               # allowlisted canonical reusable workflow reference whose 40-hex revision alone moves to the
@@ -1139,7 +1155,7 @@ jobs:
               old_lines, new_lines = before.split(b"\n"), after.split(b"\n")
               require(len(old_lines) == len(new_lines), f"{shown(path)} changes more than its reusable CI pin")
               stale, comments = set(), []
-              for old, new in zip(old_lines, new_lines):
+              for index, (old, new) in enumerate(zip(old_lines, new_lines)):
                   if old == new:
                       continue
                   if COMMENT.match(old) is not None:
@@ -1150,6 +1166,7 @@ jobs:
                           f"{shown(path)} changes more than its reusable CI pin")
                   require(same_repository(ref[2].decode(), CANONICAL) and ref[3].decode() in REUSABLE_CI,
                           f"{shown(path)} moves a workflow that is not an allowlisted canonical reusable CI workflow")
+                  require(job_call(old_lines, index), f"{shown(path)} moves a reference that is not a job's reusable workflow call")
                   stale.add(ref[4].decode())
               for old, new in comments:
                   moved = old
