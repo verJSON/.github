@@ -189,6 +189,7 @@ changelog-release-3	python3 scripts/runner-canary-contract.test.py
 changelog-release-4	python3 scripts/ci-gate/release-node-credential-boundary.test.py
 changelog-release-1	node --test scripts/ci-gate/contract-tools-package.test.js
 changelog-release-2	bash scripts/ci-gate/release-node-restart.test.sh
+changelog-release-2	bash scripts/release-verify.test.sh
 changelog-release-3	bash scripts/ci-gate/release-node-assets.test.sh
 changelog-release-4	bash scripts/ci-gate/release-node-local-pack.test.sh
 changelog-release-1	bash scripts/ci-gate/release-node-notes.test.sh
