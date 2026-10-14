@@ -1034,6 +1034,20 @@ jobs:
 
         self.assert_contract_rejected(nested_path_cohort, "repositories are invalid")
 
+        def trailing_newline_cohort(contract):
+            # `re.match(...$)` would accept this, because `$` matches before a
+            # final newline; only a full match rejects it.
+            contract["arm_property_migration"]["repositories"].append("Verjson/alpha\n")
+            contract["arm_property_migration"]["repositories"].sort()
+
+        self.assert_contract_rejected(trailing_newline_cohort, "repositories are invalid")
+
+        def empty_name_cohort(contract):
+            contract["arm_property_migration"]["repositories"].append("Verjson/")
+            contract["arm_property_migration"]["repositories"].sort()
+
+        self.assert_contract_rejected(empty_name_cohort, "repositories are invalid")
+
         def unordered_cohort(contract):
             contract["arm_property_migration"]["repositories"].reverse()
 
