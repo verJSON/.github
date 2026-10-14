@@ -108,7 +108,7 @@ merge-gate	python3 scripts/ci-gate/review-provider-conformance.test.py
 merge-gate	python3 scripts/ci-gate/review-policy.test.py
 merge-gate	python3 scripts/ci-gate/review-policy-envelope.test.py
 merge-gate	bash scripts/ci-gate/review-policy-bootstrap.test.sh
-merge-gate	python3 scripts/ci-gate/review-caller-bootstrap.test.py
+merge-gate	@budget=330 python3 scripts/ci-gate/review-caller-bootstrap.test.py
 merge-gate	python3 scripts/ci-gate/review-authority.test.py
 merge-gate	python3 scripts/ci-gate/promotion-policy.test.py
 merge-gate	bash scripts/ci-gate/promotion-retry-eligibility.test.sh

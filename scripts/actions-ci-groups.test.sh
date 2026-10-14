@@ -1121,6 +1121,8 @@ expected = shards | {
     "merge-gate\tbash scripts/ci-gate/native-automerge.test.sh": 90,
     "merge-gate\tbash scripts/ci-gate/arm-receipt.test.sh": 90,
     "merge-gate\tbash scripts/ci-gate/zero-provider-recovery.test.sh": 90,
+    # 164s serially on main run 38502038500.
+    "merge-gate\tpython3 scripts/ci-gate/review-caller-bootstrap.test.py": 330,
 }
 if declared != expected:
     drift = sorted(
