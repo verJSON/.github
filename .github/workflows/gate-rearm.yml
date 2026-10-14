@@ -1012,7 +1012,7 @@ jobs:
           COMMENT = re.compile(rb"[ \t]*#")
           # Line breaks YAML honors besides `\n` and `\r\n`. The proof splits on `\n` only, so any of them
           # would let YAML structure hide inside what the proof reads as one comment line.
-          FOREIGN_BREAK = re.compile(rb"\r(?!\n)")
+          FOREIGN_BREAK = re.compile("\r(?!\n)|\x85")
           JOB_KEY = re.compile(rb"  [A-Za-z_][A-Za-z0-9_-]*:[ \t]*(?:#.*)?\r?")
           JOBS_ROOT = re.compile(rb"jobs:[ \t]*(?:#.*)?\r?")
           REUSABLE_REF = re.compile(rb"(    uses: )([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/(\.github/workflows/[A-Za-z0-9._-]+\.ya?ml)@([0-9a-f]{40})((?:[ \t]+(?:#.*)?)?\r?)")
@@ -1158,7 +1158,11 @@ jobs:
               # allowlisted canonical reusable workflow reference whose 40-hex revision alone moves to the
               # contract, or a comment whose only change is that same revision swap.
               for content in (before, after):
-                  require(FOREIGN_BREAK.search(content) is None,
+                  try:
+                      text = content.decode("utf-8")
+                  except UnicodeDecodeError as error:
+                      raise Ineligible(f"{shown(path)} is not UTF-8") from error
+                  require(FOREIGN_BREAK.search(text) is None,
                           f"{shown(path)} contains a line break other than \\n or \\r\\n")
               old_lines, new_lines = before.split(b"\n"), after.split(b"\n")
               require(len(old_lines) == len(new_lines), f"{shown(path)} changes more than its reusable CI pin")
