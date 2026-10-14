@@ -117,6 +117,7 @@ class Consumer:
         self.head = dict(self.base)
         self.head[CALLER] = generate_caller(CONTRACT)
         self.modes: dict[tuple[str, str], str] = {}
+        self.types: dict[tuple[str, str], str] = {}
         self.canonical = {
             f"{FLOOR}...{STALE}": "behind",
             f"{MINIMUM_SAFE}...{CONTRACT}": "ahead",
@@ -133,7 +134,7 @@ class Consumer:
             entries.append({
                 "path": path,
                 "mode": self.modes.get((side, path), "100644"),
-                "type": "blob",
+                "type": self.types.get((side, path), "blob"),
                 "sha": git_blob_sha(content),
                 "size": len(content),
             })
@@ -491,7 +492,28 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
     executable = with_files(**{"tests/pins.test.ts": (mirror(STALE), mirror(CONTRACT))})
     executable.modes[("head", "tests/pins.test.ts")] = "100755"
     add("a mirror that becomes executable is not a bootstrap", executable,
-        ('require(mode == "100644" and kind == "blob",', 'require(True,'))
+        ('require(mode == "100644", "only regular non-executable files may change")',
+         'require(True, "only regular non-executable files may change")'))
+    submodule = with_files(**{"vendor/lib": (mirror(STALE), mirror(CONTRACT))})
+    for side in ("base", "head"):
+        submodule.types[(side, "vendor/lib")] = "commit"
+        submodule.modes[(side, "vendor/lib")] = "160000"
+    kind_guard = ('require(kind == "blob", "submodules and other non-blob entries may not change")',
+                  'require(True, "submodules and other non-blob entries may not change")')
+    add("a submodule entry is not a bootstrap", submodule, None)
+    # A real submodule also fails the mode check; isolate the kind guard with a regular mode.
+    disguised = with_files(**{"vendor/lib": (mirror(STALE), mirror(CONTRACT))})
+    for side in ("base", "head"):
+        disguised.types[(side, "vendor/lib")] = "commit"
+    add("a non-blob entry carrying a regular file mode is not a bootstrap", disguised, kind_guard)
+    mismatched_commit = Consumer()
+    mismatched_commit.overrides[f"repos/{TARGET_REPO}/git/commits/{HEAD}"] = {"sha": "e" * 40, "tree": {"sha": HEAD_TREE}}
+    add("a commit object that names another commit is not a bootstrap", mismatched_commit,
+        ('require(commit_object.get("sha") == commit,', 'require(True,'))
+    mismatched_tree = Consumer()
+    mismatched_tree.tree_edits["head"] = lambda listing: listing.update(sha="d" * 40)
+    add("a tree listing that names another tree is not a bootstrap", mismatched_tree,
+        ('require(listing.get("sha") == tree_sha,', 'require(True,'))
     deleted = Consumer()
     deleted.base["src/removed.ts"] = b"export {};\n"
     add("a deletion is not a bootstrap", deleted, None)
@@ -555,6 +577,10 @@ INELIGIBLE_REASONS = {
     "a mirror that changes more than the pin and digest is not a bootstrap": "changes more than the review caller pin and digest",
     "a mirror that becomes executable is not a bootstrap": "only regular non-executable files may change",
     "a deletion is not a bootstrap": "is not modified in place",
+    "a submodule entry is not a bootstrap": "submodules and other non-blob entries may not change",
+    "a non-blob entry carrying a regular file mode is not a bootstrap": "submodules and other non-blob entries may not change",
+    "a commit object that names another commit is not a bootstrap": "commit object does not match its ID",
+    "a tree listing that names another tree is not a bootstrap": "tree listing does not match its ID",
     "a second added fragment is not a bootstrap": "adds more than one file",
     "an added source file is not a bootstrap": "is not the generated bootstrap changelog fragment",
     "an edited bootstrap fragment is not a bootstrap": "is not the generated bootstrap changelog fragment",

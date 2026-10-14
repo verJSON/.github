@@ -984,7 +984,8 @@ jobs:
 
           def blob(repo, entry):
               mode, kind, sha = entry
-              require(mode == "100644" and kind == "blob", "only regular non-executable files may change")
+              require(kind == "blob", "submodules and other non-blob entries may not change")
+              require(mode == "100644", "only regular non-executable files may change")
               payload = api(f"repos/{repo}/git/blobs/{sha}")
               require(payload.get("sha") == sha and payload.get("encoding") == "base64", "blob payload is malformed")
               size = payload.get("size")
