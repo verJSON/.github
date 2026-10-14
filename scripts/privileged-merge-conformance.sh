@@ -3,6 +3,7 @@ set -euo pipefail
 
 readonly ORG="${PRIVILEGED_MERGE_ORG:-Verjson}"
 readonly SECRET_NAME="${PRIVILEGED_MERGE_SECRET_NAME:-MERGE_APP_PRIVATE_KEY}"
+readonly MERGE_ENVIRONMENT="merge-app"
 readonly CALLER_PATH=".github/workflows/ai-privileged-merge.yml"
 readonly RETRY_PATH=".github/workflows/ai-promotion-retry.yml"
 readonly GENERATOR="scripts/gen-privileged-merge-caller.sh"
@@ -185,19 +186,40 @@ validate_required_check_policy() { # validate_required_check_policy <repository>
     fi
   done < <(jq -c '.[]' <<<"$policy")
 }
-visibility="$(
-  gh api "orgs/$ORG/actions/secrets/$SECRET_NAME" --jq .visibility
-)" || {
-  echo "::error title=Unreadable organization secret::Cannot verify $SECRET_NAME visibility for $ORG."
-  exit 1
-}
-case "$visibility" in
-  all|private|selected) ;;
-  *)
-    echo "::error title=Invalid organization secret visibility::$SECRET_NAME returned unsupported visibility '$visibility'."
+# A "Not Found" for the secret is withdrawal evidence only when the same token reads a
+# complete, well-formed organization secret inventory that also omits the name: GitHub
+# answers 404 for a resource the caller may not see, and an empty or truncated listing
+# would otherwise prove absence by omission.
+# shellcheck disable=SC2016 # jq program text, expanded by jq rather than the shell
+readonly ORGANIZATION_SECRET_ABSENT='. as $pages
+  | ($pages | type == "array" and length > 0)
+  and all($pages[]; type == "object" and (.secrets | type == "array") and (.total_count | type == "number"))
+  and ([$pages[].secrets[]] as $secrets
+    | all($secrets[]; type == "object" and (.name | type == "string" and length > 0))
+    and all($pages[]; .total_count == ($secrets | length))
+    and ([$secrets[].name] | length == (unique | length))
+    and (any($secrets[]; .name == $name) | not))'
+if visibility="$(
+  gh api "orgs/$ORG/actions/secrets/$SECRET_NAME" --jq .visibility 2>"$tmp/organization-secret.err"
+)"; then
+  case "$visibility" in
+    all|private|selected) ;;
+    *)
+      echo "::error title=Invalid organization secret visibility::$SECRET_NAME returned unsupported visibility '$visibility'."
+      exit 1
+      ;;
+  esac
+else
+  cat "$tmp/organization-secret.err" >&2
+  if grep -Eq '\(HTTP 404\)$' "$tmp/organization-secret.err" &&
+    organization_secrets="$(gh api --paginate --slurp "orgs/$ORG/actions/secrets?per_page=100")" &&
+    jq -e --arg name "$SECRET_NAME" "$ORGANIZATION_SECRET_ABSENT" <<<"$organization_secrets" >/dev/null; then
+    visibility=withdrawn
+  else
+    echo "::error title=Unreadable organization secret::Cannot verify $SECRET_NAME visibility for $ORG."
     exit 1
-    ;;
-esac
+  fi
+fi
 
 if [ -n "${VERJSON_MANAGED_REPOSITORIES:-}" ]; then
   repositories="$VERJSON_MANAGED_REPOSITORIES"
@@ -241,7 +263,7 @@ while IFS= read -r repository; do
     caller_required_checks caller_required_checks_shell canonical_policy_lines canonical_required_checks \
     retry_response retry_file retry_available retry_content retry_pins retry_policy_lines retry_workflow_lines \
     retry_required_checks retry_workflow_names retry_workflow_names_shell canonical_retry \
-    historical_retry_workflow retry_workflow_response
+    historical_retry_workflow retry_workflow_response environment_key_response
   metadata="$(gh api "repos/$repository" --jq '[.default_branch,.visibility] | @tsv')" || {
     echo "::error title=Unreadable repository metadata::repository=$repository"
     failures=$((failures + 1))
@@ -531,9 +553,31 @@ while IFS= read -r repository; do
     selected)
       [ "${selected_repositories[$repository]:-}" = 1 ] && has_secret=true
       ;;
+    withdrawn)
+      # Metadata only: the environment-secret endpoint never returns the key value.
+      if environment_key_response="$(gh api "repos/$repository/environments/$MERGE_ENVIRONMENT/secrets/$SECRET_NAME" \
+        2>"$tmp/environment-key.err")"; then
+        if jq -e --arg name "$SECRET_NAME" '.name == $name' <<<"$environment_key_response" >/dev/null 2>&1; then
+          has_secret=true
+        else
+          echo "::error title=Unreadable merge-app environment key::repository=$repository environment=$MERGE_ENVIRONMENT secret=$SECRET_NAME reason='response does not identify the key'"
+          failures=$((failures + 1))
+          continue
+        fi
+      elif ! grep -Eq '\(HTTP 404\)$' "$tmp/environment-key.err"; then
+        cat "$tmp/environment-key.err" >&2
+        echo "::error title=Unreadable merge-app environment key::repository=$repository environment=$MERGE_ENVIRONMENT secret=$SECRET_NAME"
+        failures=$((failures + 1))
+        continue
+      fi
+      ;;
   esac
   if [ "$has_secret" != true ]; then
-    echo "::error title=Missing privileged merge App key access::repository=$repository secret=$SECRET_NAME remediation='grant repository access to the organization secret'"
+    if [ "$visibility" = withdrawn ]; then
+      echo "::error title=Missing privileged merge App key access::repository=$repository secret=$SECRET_NAME environment=$MERGE_ENVIRONMENT remediation='provision the key in the main-only $MERGE_ENVIRONMENT environment (ADR 0166)'"
+    else
+      echo "::error title=Missing privileged merge App key access::repository=$repository secret=$SECRET_NAME remediation='grant repository access to the organization secret'"
+    fi
     failures=$((failures + 1))
   fi
 done <<<"$repositories"
