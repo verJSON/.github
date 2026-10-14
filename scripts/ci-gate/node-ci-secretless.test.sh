@@ -326,6 +326,10 @@ for path in sys.argv[1:]:
     }
     assert expected <= set(sandboxed), (path, sorted(sandboxed))
     for name, run in sandboxed.items():
+        # A commented-out bind must not satisfy the check.
+        run = "\n".join(
+            line for line in run.splitlines() if not line.lstrip().startswith("#")
+        )
         assert run.count('"--tmpfs", "/",') == 1, (path, name)
         assert (
             '(Path("/etc/alternatives"), "/etc/alternatives"),' in run
