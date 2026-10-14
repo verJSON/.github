@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0226](0226-superseded-cancelled-check-runs-do-not-block-admission/README.md) | 2026-10-13 | A cancelled check run superseded by a later successful run of its own workflow does not block admission |
 | [0224](0224-shard-changelog-release-actions-ci/README.md) | 2026-10-09 | Shard the changelog-release actions-ci group |
 | [0223](0223-draft-pull-requests-defer-heavy-ci/README.md) | 2026-10-09 | Draft pull requests defer heavy CI and keep fast checks |
 | [0222](0222-documentation-diffs-skip-heavy-actions-ci/README.md) | 2026-10-09 | Documentation diffs skip the heavy actions-ci matrix |
