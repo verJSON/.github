@@ -273,7 +273,7 @@ if [ "$pr_gate_untrusted_runner_set" = true ] && [ "$mode" != pr-gate ]; then
 fi
 pr_gate_runs_on="ubuntu-24.04"
 if [ "$pr_gate_untrusted_runner_set" = true ]; then
-  [[ "$pr_gate_untrusted_runner" =~ ^[a-z0-9][a-z0-9_-]*(,[a-z0-9][a-z0-9_-]*)*$ ]] || {
+  [[ "$pr_gate_untrusted_runner" =~ ^[a-z0-9][a-z0-9_.-]*(,[a-z0-9][a-z0-9_.-]*)*$ ]] || {
     echo "$(basename "$0"): --untrusted-runner must be a comma-separated list of runner labels" >&2
     exit 2
   }

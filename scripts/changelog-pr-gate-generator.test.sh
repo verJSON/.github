@@ -14,6 +14,11 @@ grep -q '^  changelog-contract:$' "$tmp/changelog-contract.yml"
 # ephemeral hosted runner, never a persistent self-hosted one.
 grep -q 'runs-on: ubuntu-24.04$' "$tmp/changelog-contract.yml"
 ! grep -q 'runs-on:.*self-hosted' "$tmp/changelog-contract.yml"
+for runner in ubuntu-24.04 ubuntu-26.04; do
+  "$generator" pr-gate "$ref" --untrusted-runner "$runner" >"$tmp/versioned-runner.yml"
+  grep -F -q "runs-on: [$runner]" "$tmp/versioned-runner.yml"
+done
+echo "ok - --untrusted-runner accepts versioned Ubuntu labels"
 grep -q 'VERJSON_CHANGELOG_TOOL_CACHE=\$RUNNER_TEMP/verjson-changelog-tools' \
   "$tmp/changelog-contract.yml"
 grep -q 'bash scripts/changelog-contract.test.sh' "$tmp/changelog-contract.yml"
@@ -55,7 +60,7 @@ grep -q 'runs-on: \[self-hosted, untrusted-pr, ephemeral\]' \
   "$tmp/changelog-contract-override.yml"
 echo "ok - --untrusted-runner lets an adopter opt into an isolated self-hosted lane"
 
-for bad in 'self-hosted; rm -rf /' '' 'self-hosted,' ',ephemeral'; do
+for bad in 'self-hosted; rm -rf /' 'ubuntu-26.04/evil' '' 'self-hosted,' ',ephemeral'; do
   if "$generator" pr-gate "$ref" --untrusted-runner "$bad" >/dev/null 2>&1; then
     echo "FAIL - accepted invalid --untrusted-runner value: '$bad'" >&2
     exit 1
