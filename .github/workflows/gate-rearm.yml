@@ -944,11 +944,17 @@ jobs:
 
           def api(path):
               completed = subprocess.run(["gh", "api", path], capture_output=True, check=False)
-              require(completed.returncode == 0, f"GitHub API read failed: {path}")
+              require(completed.returncode == 0, f"GitHub API read failed: {shown(path)}")
               try:
                   return json.loads(completed.stdout)
               except ValueError as error:
-                  raise Ineligible(f"GitHub API returned malformed JSON: {path}") from error
+                  raise Ineligible(f"GitHub API returned malformed JSON: {shown(path)}") from error
+
+
+          def shown(text):
+              # Paths and API routes are untrusted text; git permits newlines in paths, so a
+              # raw path could forge a workflow command in this privileged job's log.
+              return json.dumps(text)
 
 
           def same_repository(left, right):
@@ -1066,22 +1072,22 @@ jobs:
               require(len(added) <= 1, "the pull request adds more than one file")
               for path in added:
                   match = FRAGMENT.fullmatch(path)
-                  require(match is not None, f"{path} is not the generated bootstrap changelog fragment")
+                  require(match is not None, f"{shown(path)} is not the generated bootstrap changelog fragment")
                   try:
-                      require(date.fromisoformat(match[1]).isoformat() == match[1], f"{path} has an invalid date")
+                      require(date.fromisoformat(match[1]).isoformat() == match[1], f"{shown(path)} has an invalid date")
                   except ValueError as error:
-                      raise Ineligible(f"{path} has an invalid date") from error
+                      raise Ineligible(f"{shown(path)} has an invalid date") from error
                   require(blob(repo, head_tree[path]) == render_fragment(match[1], match[2], stale, contract),
-                          f"{path} is not the generated bootstrap changelog fragment")
+                          f"{shown(path)} is not the generated bootstrap changelog fragment")
               for path in sorted(changed - {CALLER} - set(added)):
                   base_entry, head_entry = base_tree.get(path), head_tree.get(path)
-                  require(base_entry is not None and head_entry is not None, f"{path} is not modified in place")
+                  require(base_entry is not None and head_entry is not None, f"{shown(path)} is not modified in place")
                   require(not path.startswith(".github/") and path.rsplit("/", 1)[-1] not in ("action.yml", "action.yaml"),
-                          f"{path} is workflow or action configuration")
+                          f"{shown(path)} is workflow or action configuration")
                   before = blob(repo, base_entry)
                   after = blob(repo, head_entry)
                   require(after != before and after == swap.sub(lambda match: swaps[match.group(0)], before),
-                          f"{path} changes more than the review caller pin and digest")
+                          f"{shown(path)} changes more than the review caller pin and digest")
 
               floor_to_stale = compare(CASING_REPAIR, stale)
               require(floor_to_stale.get("status") in ("behind", "diverged"),
@@ -1123,7 +1129,14 @@ jobs:
               eligible=true
             fi
           else
-            head -c 400 "$RUNNER_TEMP/review-caller-bootstrap.stderr" || true
+            # The reason can quote untrusted paths: print it with workflow commands disabled.
+            token="$(openssl rand -hex 16 2>/dev/null || true)"
+            if [[ "$token" =~ ^[0-9a-f]{32}$ ]]; then
+              echo "::stop-commands::$token"
+              head -c 400 "$RUNNER_TEMP/review-caller-bootstrap.stderr" || true
+              echo
+              echo "::$token::"
+            fi
           fi
           if [ "$eligible" != true ]; then
             stale_sha=''
@@ -1176,7 +1189,15 @@ jobs:
             echo "::error::minted App does not match the authorization App"; exit 1;
           }
           # Re-prove immediately before granting: the head, trees, or canonical main may have moved.
-          proof="$(GH_TOKEN="$ACTIONS_TOKEN" python3 -I "$RUNNER_TEMP/review-caller-bootstrap.py")" || {
+          recheck_errors="$RUNNER_TEMP/review-caller-bootstrap-recheck.stderr"
+          proof="$(GH_TOKEN="$ACTIONS_TOKEN" python3 -I "$RUNNER_TEMP/review-caller-bootstrap.py" 2>"$recheck_errors")" || {
+            token="$(openssl rand -hex 16 2>/dev/null || true)"
+            if [[ "$token" =~ ^[0-9a-f]{32}$ ]]; then
+              echo "::stop-commands::$token"
+              head -c 400 "$recheck_errors" || true
+              echo
+              echo "::$token::"
+            fi
             echo "::error::stale review caller bootstrap proof no longer holds"; exit 1;
           }
           jq -e --arg stale "$STALE_SHA" --arg contract "$CONTRACT_SHA" --arg head "$EXPECTED_HEAD_SHA" \

@@ -12,6 +12,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -77,6 +78,26 @@ def fragment(date: str, identity: str, stale: str = STALE, contract: str = CONTR
     content = subprocess.run(["bash", str(FRAGMENT_GENERATOR), date, identity, stale, contract],
                              check=True, capture_output=True).stdout
     return f"NEXT/{date}-issue-{identity}-ai-review-caller-bootstrap.md", content
+
+
+INJECTED_PATH = "src/x\n::warning title=pwned::owned.ts"
+
+
+def live_commands(text: str) -> list[str]:
+    """Workflow-command lines the runner would execute: outside every stop-commands region."""
+    live, token = [], None
+    for line in text.splitlines():
+        if token is None:
+            match = re.fullmatch(r"::stop-commands::([0-9a-f]{32})", line)
+            if match:
+                token = match[1]
+            elif line.lstrip().startswith("::"):
+                live.append(line)
+        elif line == f"::{token}::":
+            token = None
+    if token is not None:
+        live.append("<unterminated stop-commands region>")
+    return live
 
 
 def git_blob_sha(content: bytes) -> str:
@@ -482,9 +503,9 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
     invalid_date = first.replace(b"2026-10-13", b"2026-02-30")
     add("a fragment with an impossible date is not a bootstrap",
         with_files(**{"NEXT/2026-02-30-issue-20261013T120000Z-ai-review-caller-bootstrap.md": (None, invalid_date)}),
-        ("require(date.fromisoformat(match[1]).isoformat() == match[1], f\"{path} has an invalid date\")\n"
+        ("require(date.fromisoformat(match[1]).isoformat() == match[1], f\"{shown(path)} has an invalid date\")\n"
          "                  except ValueError as error:\n"
-         "                      raise Ineligible(f\"{path} has an invalid date\") from error",
+         "                      raise Ineligible(f\"{shown(path)} has an invalid date\") from error",
          "pass\n                  except ValueError as error:\n                      pass"))
     oversized = b"x" * 262145
     add("an oversized changed file is not a bootstrap",
@@ -706,7 +727,7 @@ def main() -> int:
         **Consumer().routes()[f"repos/{TARGET_REPO}/check-runs/9001"], "app": {"id": 4242, "slug": "verjson-ai-review"}}
     refusal_cases = [
         ("a bootstrap whose proof breaks before granting is refused", {"later": moved},
-         ('proof="$(GH_TOKEN="$ACTIONS_TOKEN" python3 -I "$RUNNER_TEMP/review-caller-bootstrap.py")" || {',
+         ('proof="$(GH_TOKEN="$ACTIONS_TOKEN" python3 -I "$RUNNER_TEMP/review-caller-bootstrap.py" 2>"$recheck_errors")" || {',
           'proof="$(printf \'{"stale_sha":"%s","contract_sha":"%s","head_sha":"%s"}\' "$STALE_SHA" "$CONTRACT_SHA" "$EXPECTED_HEAD_SHA")" || {')),
         ("a completion whose proof names other revisions is refused", {"STALE_SHA": "c" * 40},
          ("'.stale_sha == $stale and .contract_sha == $contract and .head_sha == $head' <<<\"$proof\" >/dev/null || {",
@@ -763,6 +784,49 @@ def main() -> int:
         report(not (result.returncode == 0 and approval_withheld(calls)), f"mutation proof: {name}")
     result, _, calls = harness.complete(Consumer(), GH_FAIL="PATCH repos/")
     report(result.returncode != 0, "an unconfirmed check completion fails the step for the terminalizer")
+
+    injected = with_files(**{INJECTED_PATH: (None, b"export {};\n")})
+    result, outputs = harness.run_step("bootstrap", injected)
+    log = result.stdout + result.stderr
+    report(result.returncode == 0 and outputs.get("eligible") == "false" and json.dumps(INJECTED_PATH) in log
+           and not any(line.startswith("::warning") for line in log.splitlines()),
+           "an untrusted path is reported JSON-escaped, never as a raw workflow command")
+    report(not live_commands(log), "classification output from untrusted paths runs inside stop-commands")
+    result, _ = harness.run_step("bootstrap-complete", injected, {
+        "EXPECTED_EXTERNAL_ID": EXTERNAL_ID, "REVIEW_POLICY": policy("ai-merge"), "BOOTSTRAP_ELIGIBLE": "true",
+        "STALE_SHA": STALE, "CONTRACT_SHA": CONTRACT, "APP_TOKEN": "app-token", "APP_SLUG": "verjson-ai-review",
+        "MINTED_APP_SLUG": "verjson-ai-review", "INSTALLATION_ID": "42", "GITHUB_RUN_ID": "7001"})
+    log = result.stdout + result.stderr
+    report(result.returncode != 0 and json.dumps(INJECTED_PATH) in log and not live_commands(
+               "\n".join(line for line in log.splitlines() if not line.startswith("::error::"))),
+           "a failed re-proof reports untrusted paths only inside stop-commands")
+    unescaped = mutated('require(match is not None, f"{shown(path)} is not the generated bootstrap changelog fragment")',
+                        'require(match is not None, f"{path} is not the generated bootstrap changelog fragment")')
+    if unescaped:
+        result, _ = Harness(unescaped).run_step("bootstrap", injected)
+        log = result.stdout + result.stderr
+        report(any(line.startswith("::warning") for line in log.splitlines()) and not live_commands(log),
+               "mutation proof: without JSON escaping the command appears, still neutralized by stop-commands")
+        unwrapped = unescaped.replace('echo "::stop-commands::$token"', ':', 1)
+        result, _ = Harness(unwrapped).run_step("bootstrap", injected)
+        report(bool(live_commands(result.stdout + result.stderr)),
+               "mutation proof: without either layer the injected command would run")
+        completion_env = {
+            "EXPECTED_EXTERNAL_ID": EXTERNAL_ID, "REVIEW_POLICY": policy("ai-merge"), "BOOTSTRAP_ELIGIBLE": "true",
+            "STALE_SHA": STALE, "CONTRACT_SHA": CONTRACT, "APP_TOKEN": "app-token", "APP_SLUG": "verjson-ai-review",
+            "MINTED_APP_SLUG": "verjson-ai-review", "INSTALLATION_ID": "42", "GITHUB_RUN_ID": "7001"}
+        bare = Harness(unescaped)
+        bare.run_step("bootstrap", injected)
+        wrapped_completion, _ = bare.run_step("bootstrap-complete", injected, completion_env)
+        bare.steps["bootstrap-complete"]["run"] = bare.steps["bootstrap-complete"]["run"].replace(
+            'echo "::stop-commands::$token"', ':', 1)
+        unwrapped_completion, _ = bare.run_step("bootstrap-complete", injected, completion_env)
+        strip = lambda text: "\n".join(line for line in text.splitlines() if not line.startswith("::error::"))
+        report(not live_commands(strip(wrapped_completion.stdout + wrapped_completion.stderr))
+               and bool(live_commands(strip(unwrapped_completion.stdout + unwrapped_completion.stderr))),
+               "mutation proof: the completion step's stop-commands wrapper is load-bearing")
+    else:
+        report(False, "mutation for the path escaping layer no longer applies")
 
     terminalizer = steps.get("Complete the authorization when no review was dispatched", {})
     report(
