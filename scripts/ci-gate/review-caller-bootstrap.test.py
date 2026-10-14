@@ -35,6 +35,18 @@ HEAD = "3333333333333333333333333333333333333333"
 MAIN_TREE = "4444444444444444444444444444444444444444"
 HEAD_TREE = "5555555555555555555555555555555555555555"
 CANONICAL = "repos/Verjson/.github"
+NONCE = "a" * 64
+EXTERNAL_ID = f"ai-review:v1:{TARGET_REPO}:{PR_NUMBER}:{HEAD}:7001:1:{NONCE}"
+
+
+def policy(authority: str | None) -> str:
+    document = {"actor": "trusted-arm", "actor_permission": "automation", "budget_usd": "auto",
+                "explicit_rereview": False, "fallback_budget_usd": "", "fallback_model": "",
+                "model": "auto", "pricing_version": "anthropic-native-v1", "provider": "anthropic"}
+    if authority is not None:
+        document["authority"] = authority
+    encoded = base64.urlsafe_b64encode(json.dumps(document, sort_keys=True).encode()).decode()
+    return encoded.rstrip("=")
 
 failures = 0
 
@@ -127,6 +139,11 @@ class Consumer:
                 "base_commit": {"sha": base},
                 "merge_base_commit": {"sha": base if status in ("ahead", "identical") else "9" * 40},
             }
+        routes[f"repos/{TARGET_REPO}/check-runs/9001"] = {
+            "id": 9001, "name": "AI review authorization", "head_sha": HEAD,
+            "external_id": EXTERNAL_ID, "app": {"id": 15368, "slug": "github-actions"},
+            "status": "in_progress", "conclusion": None,
+        }
         routes.update(self.overrides)
         for path in self.missing:
             routes.pop(path, None)
@@ -137,17 +154,55 @@ GH_STUB = r"""#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
 with open(os.environ["GH_CALLS"], "a", encoding="utf-8") as log:
-    log.write(json.dumps(args) + "\n")
+    log.write(json.dumps({"token": os.environ.get("GH_TOKEN", ""), "args": args}) + "\n")
 routes = json.load(open(os.environ["GH_ROUTES"], encoding="utf-8"))
+state_path = os.environ["GH_STATE"]
+state = json.load(open(state_path, encoding="utf-8")) if os.path.exists(state_path) else {}
 if args[:1] != ["api"]:
     sys.exit(2)
 rest = args[1:]
+method = "GET"
 if rest[:1] == ["--method"]:
-    sys.exit(3)
-path = rest[0]
-if path not in routes:
-    sys.stderr.write("stub: no route for " + path + "\n")
+    method, rest = rest[1], rest[2:]
+path, fields = rest[0], {}
+index = 1
+while index < len(rest):
+    if rest[index] == "-f":
+        key, _, value = rest[index + 1].partition("=")
+        fields[key] = value
+        index += 2
+    else:
+        index += 1
+fail = os.environ.get("GH_FAIL", "")
+if fail and fail in method + " " + path:
     sys.exit(1)
+if method == "POST" and path.endswith("/reviews"):
+    review = {"id": 555, "state": "APPROVED", "commit_id": fields.get("commit_id"),
+              "user": {"login": os.environ.get("REVIEW_LOGIN", "verjson-ai-review[bot]")},
+              "body": fields.get("body", "")}
+    if fields.get("event") != "APPROVE":
+        review["state"] = "COMMENTED"
+    state["review"] = review
+    json.dump(state, open(state_path, "w", encoding="utf-8"))
+    print(json.dumps(review))
+    sys.exit(0)
+if method == "GET" and path.endswith("/reviews/555") and "review" in state:
+    print(json.dumps(state["review"]))
+    sys.exit(0)
+if method == "PATCH" and "/check-runs/" in path:
+    check = dict(state.get("check") or routes.get(path, {}))
+    check.update({"status": fields.get("status"), "conclusion": fields.get("conclusion"),
+                  "output": {"title": fields.get("output[title]"), "summary": fields.get("output[summary]")}})
+    state["check"] = check
+    json.dump(state, open(state_path, "w", encoding="utf-8"))
+    print(json.dumps(check))
+    sys.exit(0)
+if method != "GET" or path not in routes:
+    sys.stderr.write("stub: no route for " + method + " " + path + "\n")
+    sys.exit(1)
+if "/check-runs/" in path and "check" in state:
+    print(json.dumps(state["check"]))
+    sys.exit(0)
 sys.stdout.write(json.dumps(routes[path]))
 """
 
@@ -161,6 +216,31 @@ class Harness:
         stub.chmod(0o755)
         self.steps = arm_steps()
 
+    def reset_state(self) -> None:
+        (self.tmp / "state.json").unlink(missing_ok=True)
+
+    def recorded(self) -> list[dict]:
+        return [json.loads(line) for line in self.calls.read_text(encoding="utf-8").splitlines()]
+
+    def complete(self, consumer: Consumer, authority: str | None = "ai-merge", **overrides: str):
+        self.reset_state()
+        _, outputs = self.run_step("bootstrap", consumer)
+        env = {
+            "EXPECTED_EXTERNAL_ID": EXTERNAL_ID,
+            "REVIEW_POLICY": policy(authority),
+            "BOOTSTRAP_ELIGIBLE": outputs.get("eligible", ""),
+            "STALE_SHA": outputs.get("stale_sha", ""),
+            "CONTRACT_SHA": outputs.get("contract_sha", ""),
+            "APP_TOKEN": "app-token",
+            "APP_SLUG": "verjson-ai-review",
+            "MINTED_APP_SLUG": "verjson-ai-review",
+            "INSTALLATION_ID": "42",
+            "GITHUB_RUN_ID": "7001",
+        }
+        env.update(overrides)
+        result, completion = self.run_step("bootstrap-complete", consumer, env)
+        return result, completion, self.recorded()
+
     def run_step(self, step_id: str, consumer: Consumer, extra_env: dict[str, str] | None = None):
         step = self.steps.get(step_id)
         if step is None:
@@ -173,6 +253,7 @@ class Harness:
         output.write_text("", encoding="utf-8")
         calls = self.tmp / "calls.jsonl"
         calls.write_text("", encoding="utf-8")
+        self.calls = calls
         env = {
             "PATH": f"{self.tmp / 'bin'}:{os.environ['PATH']}",
             "HOME": str(self.tmp),
@@ -180,6 +261,7 @@ class Harness:
             "GITHUB_OUTPUT": str(output),
             "GH_ROUTES": str(routes),
             "GH_CALLS": str(calls),
+            "GH_STATE": str(self.tmp / "state.json"),
             "GH_TOKEN": "actions-token",
             "ACTIONS_TOKEN": "actions-token",
             "TARGET_REPO": TARGET_REPO,
@@ -206,6 +288,27 @@ def main() -> int:
         and outputs.get("stale_sha") == STALE
         and outputs.get("contract_sha") == CONTRACT,
         "a byte-exact generated stale caller update is classified as a bootstrap",
+    )
+
+    steps = harness.steps
+    dispatch = steps.get("dispatch", {})
+    report(
+        "steps.bootstrap.outputs.eligible != 'true'" in dispatch.get("if", ""),
+        "an eligible bootstrap never dispatches the stale default-branch review",
+    )
+
+    result, _, calls = harness.complete(Consumer())
+    approvals = [c for c in calls if c["args"][:4] == ["api", "--method", "POST", f"repos/{TARGET_REPO}/pulls/{PR_NUMBER}/reviews"]]
+    patches = [c for c in calls if c["args"][:4] == ["api", "--method", "PATCH", f"repos/{TARGET_REPO}/check-runs/9001"]]
+    report(
+        result.returncode == 0
+        and len(approvals) == 1 and approvals[0]["token"] == "app-token"
+        and "event=APPROVE" in approvals[0]["args"] and f"commit_id={HEAD}" in approvals[0]["args"]
+        and any(f"ai-review-bootstrap:{STALE}:{CONTRACT}" in arg for arg in approvals[0]["args"])
+        and len(patches) == 1 and patches[0]["token"] == "actions-token"
+        and "conclusion=success" in patches[0]["args"]
+        and any(f"ai-review-authorized:v1:9001:{HEAD}:ai-merge" in arg for arg in patches[0]["args"]),
+        "ai-merge authority persists an exact-head App approval and completes the check as success",
     )
 
     if failures:

@@ -1087,9 +1087,112 @@ jobs:
           fi
           printf 'eligible=%s\nstale_sha=%s\ncontract_sha=%s\n' "$eligible" "$stale_sha" "$contract_sha" >>"$GITHUB_OUTPUT"
 
+      - name: Mint stale review caller bootstrap App token
+        id: bootstrap-app-token
+        if: steps.bootstrap.outputs.eligible == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ vars.AI_REVIEW_CLIENT_ID }}
+          private-key: ${{ secrets.AI_REVIEW_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: read
+          permission-pull-requests: write
+
+      # Same check, same receipt, same App identity, and the same authority rule as
+      # ordinary completion: approval only under ai-approve or ai-merge, otherwise the
+      # human path. The stale privileged merge caller cannot verify this receipt, so
+      # no terminal promotion is dispatched; an authorized maintainer merges natively.
+      - name: Complete stale review caller bootstrap authorization
+        id: bootstrap-complete
+        if: steps.bootstrap.outputs.eligible == 'true'
+        env:
+          ACTIONS_TOKEN: ${{ github.token }}
+          APP_TOKEN: ${{ steps.bootstrap-app-token.outputs.token }}
+          MINTED_APP_SLUG: ${{ steps.bootstrap-app-token.outputs.app-slug }}
+          INSTALLATION_ID: ${{ steps.bootstrap-app-token.outputs.installation-id }}
+          BOOTSTRAP_ELIGIBLE: ${{ steps.bootstrap.outputs.eligible }}
+          STALE_SHA: ${{ steps.bootstrap.outputs.stale_sha }}
+          CONTRACT_SHA: ${{ steps.bootstrap.outputs.contract_sha }}
+          CHECK_ID: ${{ steps.arm.outputs.check_id }}
+          EXPECTED_HEAD_SHA: ${{ steps.arm.outputs.head_sha }}
+          EXPECTED_EXTERNAL_ID: ${{ steps.arm.outputs.external_id }}
+          REVIEW_POLICY: ${{ steps.arm.outputs.review_policy }}
+        run: |
+          set -euo pipefail
+          [ "$BOOTSTRAP_ELIGIBLE" = true ] || { echo "::error::stale review caller bootstrap was not proven"; exit 1; }
+          [[ "$CHECK_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$STALE_SHA" =~ ^[0-9a-f]{40}$ ]] && [[ "$CONTRACT_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$INSTALLATION_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::bootstrap App installation identity is unavailable"; exit 1;
+          }
+          [ -n "$APP_TOKEN" ] && [ "$MINTED_APP_SLUG" = "$APP_SLUG" ] || {
+            echo "::error::minted App does not match the authorization App"; exit 1;
+          }
+          # Re-prove immediately before granting: the head, trees, or canonical main may have moved.
+          proof="$(GH_TOKEN="$ACTIONS_TOKEN" python3 -I "$RUNNER_TEMP/review-caller-bootstrap.py")" || {
+            echo "::error::stale review caller bootstrap proof no longer holds"; exit 1;
+          }
+          jq -e --arg stale "$STALE_SHA" --arg contract "$CONTRACT_SHA" --arg head "$EXPECTED_HEAD_SHA" \
+            '.stale_sha == $stale and .contract_sha == $contract and .head_sha == $head' <<<"$proof" >/dev/null || {
+              echo "::error::stale review caller bootstrap proof changed"; exit 1;
+            }
+          check="$(GH_TOKEN="$ACTIONS_TOKEN" gh api "repos/$TARGET_REPO/check-runs/$CHECK_ID")"
+          jq -e --argjson id "$CHECK_ID" --arg head "$EXPECTED_HEAD_SHA" --arg external "$EXPECTED_EXTERNAL_ID" '
+            .id == $id and .name == "AI review authorization" and .head_sha == $head and
+            .external_id == $external and .app.id == 15368 and .app.slug == "github-actions" and
+            .status == "in_progress" and .conclusion == null
+          ' <<<"$check" >/dev/null || {
+            echo "::error::authorization check is not this arm's in-progress exact-head check"; exit 1;
+          }
+          [[ "$REVIEW_POLICY" =~ ^[A-Za-z0-9_-]{1,2048}$ ]] || { echo "::error::review policy envelope is invalid"; exit 1; }
+          padded="$(printf '%s' "$REVIEW_POLICY" | tr -- '-_' '+/')"
+          while [ $(( ${#padded} % 4 )) -ne 0 ]; do padded="$padded="; done
+          policy_json="$(printf '%s' "$padded" | base64 -d)"
+          authority="$(jq -er '(.authority // "human") | select(. == "human" or . == "ai-approve" or . == "ai-merge")' <<<"$policy_json")" || {
+            echo "::error::receipt authority is invalid"; exit 1;
+          }
+          transition="the generated review caller moves from stale canonical revision $STALE_SHA to $CONTRACT_SHA"
+          conclusion=neutral
+          title='Stale caller bootstrap verified; human path ready'
+          summary="The trusted arm verified that this exact head only makes the byte-exact generated update where $transition. Receipt authority is $authority, so no App approval was requested; GitHub branch protection remains authoritative."
+          if [ "$authority" = ai-approve ] || [ "$authority" = ai-merge ]; then
+            approval_body="$(printf '%s\n\n%s\n%s\n%s\n%s' \
+              "Stale review caller bootstrap approved this exact head: $transition." \
+              "<!-- ai-review-authorization:$CHECK_ID -->" "<!-- ai-review-head:$EXPECTED_HEAD_SHA -->" \
+              "<!-- ai-review-run:$GITHUB_RUN_ID -->" "<!-- ai-review-bootstrap:$STALE_SHA:$CONTRACT_SHA -->")"
+            approval_filter='select(.state == "APPROVED" and .commit_id == $head and .user.login == $login and
+              (.body | contains("ai-review-authorization:" + $check)) and
+              (.body | contains("ai-review-bootstrap:" + $stale + ":" + $contract))) | .id | select(type == "number")'
+            if approval="$(GH_TOKEN="$APP_TOKEN" gh api --method POST "repos/$TARGET_REPO/pulls/$PR_NUMBER/reviews" \
+                 -f event=APPROVE -f commit_id="$EXPECTED_HEAD_SHA" -f body="$approval_body")" &&
+               approval_id="$(jq -er --arg head "$EXPECTED_HEAD_SHA" --arg login "${APP_SLUG}[bot]" --arg check "$CHECK_ID" \
+                 --arg stale "$STALE_SHA" --arg contract "$CONTRACT_SHA" "$approval_filter" <<<"$approval")" &&
+               persisted="$(GH_TOKEN="$APP_TOKEN" gh api "repos/$TARGET_REPO/pulls/$PR_NUMBER/reviews/$approval_id")" &&
+               [ "$(jq -er --arg head "$EXPECTED_HEAD_SHA" --arg login "${APP_SLUG}[bot]" --arg check "$CHECK_ID" \
+                 --arg stale "$STALE_SHA" --arg contract "$CONTRACT_SHA" "$approval_filter" <<<"$persisted")" = "$approval_id" ]; then
+              conclusion=success
+              title='Stale caller bootstrap approved for exact head'
+              summary="$(printf '%s\n\n%s' \
+                "The dedicated App approved this exact head because $transition and nothing else changes. Ordinary required CI and branch protection remain authoritative." \
+                "<!-- ai-review-authorized:v1:$CHECK_ID:$EXPECTED_HEAD_SHA:$authority -->")"
+            else
+              title='Stale caller bootstrap approval unavailable; human path ready'
+              summary="The bootstrap proof held, but no exact-head App approval was persisted and verified. Deterministic policy is green and a human approval may still authorize merge."
+            fi
+          fi
+          patched="$(GH_TOKEN="$ACTIONS_TOKEN" gh api --method PATCH "repos/$TARGET_REPO/check-runs/$CHECK_ID" \
+            -f status=completed -f conclusion="$conclusion" \
+            -f "output[title]=$title" -f "output[summary]=$summary")"
+          jq -e --argjson id "$CHECK_ID" --arg conclusion "$conclusion" \
+            '.id == $id and .status == "completed" and .conclusion == $conclusion' <<<"$patched" >/dev/null || {
+              echo "::error::authorization check completion was not confirmed"; exit 1;
+            }
+
       - name: Dispatch trusted review after receipt publication
         id: dispatch
-        if: steps.arm.outputs.check_id != ''
+        if: steps.arm.outputs.check_id != '' && steps.bootstrap.outputs.eligible != 'true'
         env:
           ACTIONS_TOKEN: ${{ github.token }}
           CHECK_ID: ${{ steps.arm.outputs.check_id }}
