@@ -104,7 +104,18 @@ readonly DEFERRED_JOB_PATTERN='(^|[/ ])deferred-ci([ (/]|$)'
 readonly DEFERRED_ANNOTATION_PATTERN='^CI deferred$'
 readonly PASSING='["SUCCESS","NEUTRAL","SKIPPED"]'
 
-fault() { echo "::error::$2" >&2; exit "$1"; }
+# Every line this script prints that starts with `::` is a workflow command when it runs
+# inside Actions, and messages carry names a pull request's author controls: a workflow's
+# `name:`, a job name, a check-run name, all defined in the head under judgment. A CR or
+# LF in one would start a new line, and `::error::...` there would be EXECUTED as a
+# command (Actions splits on either byte). So the one encoder for annotations replaces
+# every control character with a space at this sink, rather than trusting each
+# interpolation site to remember: a future message cannot forget it. Names are only
+# rewritten for display; every comparison above still sees the exact reported bytes.
+annotate() { # kind message
+  printf '::%s::%s\n' "$1" "${2//[[:cntrl:]]/ }" >&2
+}
+fault() { annotate error "$2"; exit "$1"; }
 
 # The complete caller permission set. Access-related failures append this list after naming
 # the endpoint-specific grant, and the PERMISSIONS header points here to avoid a second list
@@ -313,7 +324,7 @@ if [ "$cancelled_count" -gt 0 ]; then
   dismissed="$(jq -r '.dismissed | join("; ")' <<<"$verdict")" \
     || fault 1 "failed to list superseded cancellations for $repo@$head_sha"
   [ -z "$dismissed" ] \
-    || echo "::notice::Gates A and C set aside cancelled check runs superseded by a later successful run of the same workflow, event, and head (ADR 0226): $dismissed" >&2
+    || annotate notice "Gates A and C set aside cancelled check runs superseded by a later successful run of the same workflow, event, and head (ADR 0226): $dismissed"
 fi
 
 # ---------------------------------------------------------------- Gate A ----
@@ -477,7 +488,7 @@ unbound="$(jq -r --argjson required "$required" -n '
   [ $required[] | select(.integration_id == null) | .context ] | join(", ")')" \
   || fault 1 "failed to evaluate unbound required contexts for $repo#$pr"
 [ -z "$unbound" ] \
-  || echo "::warning::Gate A matched these required contexts on display name alone, because $base_ref binds them to no app: $unbound" >&2
+  || annotate warning "Gate A matched these required contexts on display name alone, because $base_ref binds them to no app: $unbound"
 
 # ---------------------------------------------------------------- Gate B ----
 # A check entry proves a check REPORTED; it does not prove the check did work.

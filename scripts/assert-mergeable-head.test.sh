@@ -220,6 +220,51 @@ RUNS_FIXTURE="$(jq -c '.workflow_runs[0] += {name: 7, html_url: null, created_at
 run
 expect "a pending run with unreadable display fields is still refused under Gate A" 3 "pending: workflow run 9002 (QUEUED); a workflow run on the head has not finished"
 
+# Names reach the output verbatim, and a pull request's author controls them: a
+# workflow's `name:` and a job's name live in the head. A line break in one would put
+# `::error::...` at the start of its own line, which Actions executes as a workflow
+# command. Every annotation is one line, so the only line starting with `::` is the
+# script's own refusal (or notice/warning), and the forged text stays inline.
+# Actions splits its output on CR as well as LF, so a bare CR is a line break too.
+expect_single_annotation() { # label expected-rc [expected-annotation-prefix]
+  local lines
+  lines="$(tr '\r' '\n' <<<"$OUT")"
+  if [ "$RC" -eq "$2" ] \
+    && [ "$(grep -c '^[[:space:]]*::' <<<"$lines")" -eq 1 ] \
+    && grep -q "^${3:-::error::Gate }" <<<"$lines" \
+    && grep -qF -- 'INJECTED' <<<"$lines"
+  then pass "$1"
+  else fail "$1 (rc=$RC, output: $OUT)"; fi
+}
+for injection in $'\n::error::INJECTED' $'\r\n::error::INJECTED' $'\r::error::INJECTED'; do
+  label="$(printf '%q' "$injection")"
+  reset_env
+  RUNS_FIXTURE="$(jq -c --arg n "evil$injection" '.workflow_runs[0].name = $n' \
+    <<<"$(wf_runs "$(wf_run 9002 502 "$WF_CI" 11 pull_request queued '')")")"
+  run
+  expect_single_annotation "a workflow run name carrying a line break ($label) cannot inject a workflow command" 3
+
+  reset_env
+  CHECK_RUNS_FIXTURE="$(jq -c --arg n "advisory$injection" '.check_runs += [{id: 3, name: $n, status: "completed", conclusion: "failure", app: {id: 15368}}] | .total_count += 1' \
+    <<<"$(runs "$green_runs")")"
+  run
+  expect_single_annotation "a check-run name carrying a line break ($label) cannot inject a workflow command through Gate C" 5
+done
+
+reset_env
+CHECK_RUNS_FIXTURE="$(jq -c --arg n $'build-test / deferred-ci (x\n::error::INJECTED)' '.check_runs += [{id: 3, name: $n, status: "completed", conclusion: "failure", app: {id: 15368}}] | .total_count += 1' \
+  <<<"$(runs "$green_runs")")"
+run
+expect_single_annotation "a deferral name carrying a line break cannot inject a workflow command through Gate B" 4
+
+# The supersession notice is an annotation too, and it lists the set-aside check names.
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$green_runs,$(check_run 31 'heavy' completed cancelled "$APP_ID" 601)")"
+CHECK_RUNS_FIXTURE="$(jq -c --arg n $'heavy\r::error::INJECTED' '.check_runs[2].name = $n' <<<"$CHECK_RUNS_FIXTURE")"
+RUNS_FIXTURE="$(wf_runs "$(wf_run 9101 601 "$WF_OTHER" 73 pull_request completed cancelled),$(wf_run 9102 602 "$WF_OTHER" 74 pull_request completed success)")"
+run
+expect_single_annotation "a set-aside check name carrying a line break cannot inject a workflow command through the notice" 0 "::notice::Gates A and C set aside"
+
 # Rule 2 keys on `status`, never on `conclusion`: a record still queued that already
 # carries a conclusion (an inconsistent or re-queued record) is unfinished all the same.
 reset_env

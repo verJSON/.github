@@ -105,6 +105,13 @@ collected 2026-10-14 from live check runs started before each pull request's
   and age, and it states the remedy: cancel the stuck run, or wait for it; never
   widen the admission gate. Those display fields are not validated and select
   nothing. An unreadable field is omitted and never changes the verdict.
+- **Annotation output is encoded at one sink.** The refusal now prints workflow-run
+  names, and like the check-run names the script already printed, a pull request's
+  author controls them from the head. A CR or LF in a name would begin a new line,
+  and Actions executes a line beginning `::error::` as a workflow command. Every
+  `::error::`, `::notice::`, and `::warning::` line therefore goes through one
+  `annotate` function, which replaces control characters with spaces. Matching
+  still uses the exact reported names.
 - The script cannot run on the head it judges from inside a workflow run on that same
   head, because its own run is unfinished. No workflow invokes it today. It is the
   operator's and agents' pre-`--admin` assertion. A workflow that needs it would
@@ -147,7 +154,7 @@ collected 2026-10-14 from live check runs started before each pull request's
   head; and a run-read failure on such a head, which faults and names the Actions
   grant.
 
-Twenty mutants were run in a detached worktree, and the suite killed each one:
+Twenty-four mutants were run in a detached worktree, and the suite killed each one:
 
 - removing either rule, or replacing the denylist with an allowlist;
 - weakening SUCCESS to SUCCESS-or-NEUTRAL, or `any` to `all`, which over-blocks the
@@ -160,7 +167,10 @@ Twenty mutants were run in a detached worktree, and the suite killed each one:
 - selecting unfinished runs by `conclusion == null` instead of by `status` (review
   mutant O2);
 - dropping the remedy line, the workflow name, the URL, or the age; and removing the
-  `try` around the creation-time parse, which would turn a refusal into a fault.
+  `try` around the creation-time parse, which would turn a refusal into a fault;
+- leaving the annotation sink unsanitized, stripping only LF, or letting the fault or
+  notice path bypass the sink. CR, LF, and CRLF injection fixtures cover Gates A, B,
+  and C and the supersession notice.
 
 A read-only replay with the branch script against #1753, #1759, and #1762 as of
 each `mergedAt` exits `0`, the same as `main`. Live, all three exit the same as
