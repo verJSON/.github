@@ -966,7 +966,8 @@ jobs:
       # the default-branch caller, whose immutable verifier predates the canonical
       # organization casing (#1696, ADR 0227). This arm runs the organization ruleset's
       # current revision, so it alone can prove that a pull request is nothing but the
-      # byte-exact generated caller update to a newer canonical main commit. The proof
+      # byte-exact generated caller update to a newer canonical main commit, plus any
+      # allowlisted reusable CI pin moving to that same commit (ADR 0231). The proof
       # is inline because a required workflow cannot rely on checking out its own
       # revision. Any failed or unavailable proof leaves the ordinary dispatch in place.
       - name: Classify stale review caller bootstrap

