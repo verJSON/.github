@@ -167,3 +167,32 @@ cannot alter a host command-file sentinel. Candidate npm reads no host or
 repository configuration: user configuration resolves to `/dev/null`, global
 configuration is an empty file inside the sandbox, and only the generated
 private cache setting remains.
+
+## 2026-10-13 amendment — run every inline Python interpreter isolated (#1749)
+
+npm 11.19.0 rejects one path loaded as both its user and global configuration, so the
+credentialless lifecycle rebuild no longer points both at `/dev/null`. Review of that
+change found that the Node CI workflows' trusted Python helpers run with the pull-request
+checkout, or directories it can write, as their working directory, and that a
+non-isolated interpreter resolves modules from there and from `PYTHON*` variables.
+
+Invariant: every inline Python interpreter in `node-ci.yml` and the generated
+`node-ci-protected.yml` runs with `-I`. This covers stdin and `-c` programs, helper
+scripts, and interpreter argument lists built inside Python, and it applies to the steps
+the protected generator emits itself. The helpers rely only on the standard library and
+the runner's system packages, which `-I` keeps; the user site directory and `PYTHON*`
+variables are not used.
+
+The lifecycle rebuild bootstrap additionally imports nothing beyond the already-loaded
+`os` and `sys` before closing the descriptors Bubblewrap leaves open. Only then does it
+create `/tmp/npm-config` (mode 0700) on the sandbox's fresh `/tmp` tmpfs, with
+`user.npmrc` and `global.npmrc` created `O_EXCL | O_NOFOLLOW` at mode 0600. It sets both
+the upper- and lowercase npm configuration variables and leaves the umask lifecycle
+scripts inherit unchanged.
+
+`scripts/ci-gate/node-ci-isolated-python.test.py` enforces the invariant on both
+workflows with an empty exception list and runs a representative validator against a
+checkout carrying same-named modules. The rebuild regression applies the same check to
+the outer validator and the sandbox bootstrap under the stub and real Bubblewrap, and
+also requires exact, distinct private configuration paths under both spellings and an
+unchanged lifecycle output mode.

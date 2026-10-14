@@ -600,7 +600,7 @@ jobs:
           TRUSTED_PACKAGE_POLICY: ${{ vars.CI_SECRETLESS_PACKAGE_POLICY }}
           PACKAGE_MANAGER: ${{ inputs.package-manager }}
         run: |
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           import base64
           import json
           import os
@@ -1026,7 +1026,7 @@ jobs:
             # shellcheck disable=SC2016
             printf '%s\n' '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}'
           } > "$NPM_CONFIG_USERCONFIG"
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           import base64
           import json
           import os
@@ -1215,7 +1215,7 @@ jobs:
           AUXILIARY_SOURCE: ${{ inputs.secretless-auxiliary-source }}
           TRUSTED_AUXILIARY_POLICY: ${{ vars.CI_SECRETLESS_AUXILIARY_POLICY }}
         run: |
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           import json
           import os
           import re
@@ -1474,7 +1474,7 @@ jobs:
             echo "::error::could not generate a secretless transfer key"
             exit 1
           }
-          TRANSFER_KEY="$encryption_key" python3 "$RUNNER_TEMP/container_dependency_transfer.py" encrypt \
+          TRANSFER_KEY="$encryption_key" python3 -I "$RUNNER_TEMP/container_dependency_transfer.py" encrypt \
             --source "$TRANSFER_DIR/npm-private-cache.tar" \
             --destination "$TRANSFER_DIR/npm-private-cache.tar.enc"
           rm -f "$TRANSFER_DIR/npm-private-cache.tar"
@@ -1488,7 +1488,7 @@ jobs:
           nested_manifests_sha256=''
           if [ -n "$NESTED_MANIFESTS" ]; then
             nested_binding="$(mktemp)"
-            python3 - > "$nested_binding" <<'PY'
+            python3 -I - > "$nested_binding" <<'PY'
           import hashlib
           import json
           import os
@@ -1662,7 +1662,7 @@ jobs:
           TRANSFER_KEY: ${{ needs.acquire-secretless-dependencies.outputs.transfer-encryption-key }}
         run: |
           set -euo pipefail
-          TRANSFER_KEY="$TRANSFER_KEY" python3 "$RUNNER_TEMP/container_dependency_transfer.py" decrypt \
+          TRANSFER_KEY="$TRANSFER_KEY" python3 -I "$RUNNER_TEMP/container_dependency_transfer.py" decrypt \
             --source "$TRANSFER_DIR/npm-private-cache.tar.enc" \
             --destination "$TRANSFER_DIR/npm-private-cache.tar"
           rm -f "$RUNNER_TEMP/container_dependency_transfer.py"
@@ -1797,7 +1797,7 @@ jobs:
           mkdir -p "$(dirname "$NESTED_PATHS_FILE")"
           EXPECTED_NESTED_MANIFESTS_SHA256="$manifest_nested_manifests_sha256" \
           NESTED_MANIFESTS="$NESTED_MANIFESTS" NESTED_PATHS_FILE="$NESTED_PATHS_FILE" \
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           import hashlib
           import json
           import os
@@ -1878,7 +1878,7 @@ jobs:
             echo "::error::secretless cache digest mismatch"
             exit 1
           }
-          PAYLOAD_ALLOWED_AUX="$EXPECTED_AUXILIARY_CONTENT_PATH" python3 - "$payload" <<'PY'
+          PAYLOAD_ALLOWED_AUX="$EXPECTED_AUXILIARY_CONTENT_PATH" python3 -I - "$payload" <<'PY'
           import os
           import sys
           import tarfile
@@ -1911,7 +1911,7 @@ jobs:
           COMPATIBILITY_RANGES="$COMPATIBILITY_RANGES" \
           EXPECTED_COMPATIBILITY_PROVENANCE_SHA256="$EXPECTED_COMPATIBILITY_PROVENANCE_SHA256" \
           NESTED_PATHS_FILE="$NESTED_PATHS_FILE" \
-          SECRETLESS_CACHE_DIR="$SECRETLESS_CACHE_DIR" PACKAGE_MANAGER="$PACKAGE_MANAGER" python3 - <<'PY'
+          SECRETLESS_CACHE_DIR="$SECRETLESS_CACHE_DIR" PACKAGE_MANAGER="$PACKAGE_MANAGER" python3 -I - <<'PY'
           import base64
           import hashlib
           import io
@@ -2057,7 +2057,7 @@ jobs:
           } >> "$GITHUB_ENV"
           if [ "$PACKAGE_MANAGER" = npm ]; then
             if [ "$RESTORE_PERSISTED_PUBLIC_CACHE" = true ] && [ -d "$PERSISTED_PUBLIC_CACHE_DIR" ]; then
-              python3 - <<'PY'
+              python3 -I - <<'PY'
           import base64
           import hashlib
           import json
@@ -2156,7 +2156,7 @@ jobs:
             fi
             npm ci --ignore-scripts --prefer-offline --no-audit --no-fund --cache "$SECRETLESS_CACHE_DIR"
             if [ "$SECRETLESS_RUNTIME_PUBLIC_CACHE" = true ] || [ "$RESTORE_PERSISTED_PUBLIC_CACHE" = true ]; then
-              python3 - <<'PY'
+              python3 -I - <<'PY'
           import base64
           import hashlib
           import json
@@ -2354,7 +2354,7 @@ jobs:
               stream.write(str(httpd.server_address[1]))
           httpd.serve_forever()
           PY
-            python3 "$MOCK_REGISTRY_SERVER" "$MOCK_REGISTRY_DIR" "$MOCK_REGISTRY_PORT_FILE" &
+            python3 -I "$MOCK_REGISTRY_SERVER" "$MOCK_REGISTRY_DIR" "$MOCK_REGISTRY_PORT_FILE" &
             MOCK_REGISTRY_PID=$!
             for _ in $(seq 1 50); do
               [ -s "$MOCK_REGISTRY_PORT_FILE" ] && break
@@ -2366,7 +2366,7 @@ jobs:
             }
             MOCK_REGISTRY_PORT="$(cat "$MOCK_REGISTRY_PORT_FILE")" \
               PNPM_IMPORT_MAP="$PNPM_IMPORT_MAP" MOCK_REGISTRY_DIR="$MOCK_REGISTRY_DIR" \
-              MOCK_REGISTRY_NPMRC="$MOCK_REGISTRY_NPMRC" python3 - <<'PY'
+              MOCK_REGISTRY_NPMRC="$MOCK_REGISTRY_NPMRC" python3 -I - <<'PY'
           import base64
           import hashlib
           import json
@@ -4710,7 +4710,7 @@ jobs:
           BWRAP_BINARY: /usr/bin/bwrap
         run: |
           unset -v GH_TOKEN GITHUB_TOKEN NODE_AUTH_TOKEN NPM_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN GOOGLE_APPLICATION_CREDENTIALS AZURE_CREDENTIALS ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
-          exec python3 - <<'PY'
+          exec python3 -I - <<'PY'
           import json
           import errno
           import os
@@ -5016,27 +5016,39 @@ jobs:
               "GITHUB_WORKSPACE": sandbox_workspace,
               "CI": "true",
               "NPM_CONFIG_CACHE": "/tmp/npm-cache",
-              "NPM_CONFIG_GLOBALCONFIG": "/dev/null",
-              "NPM_CONFIG_USERCONFIG": "/dev/null",
               "npm_config_cache": "/tmp/npm-cache",
-              "npm_config_globalconfig": "/dev/null",
-              "npm_config_userconfig": "/dev/null",
               "COREPACK_HOME": "/tmp/corepack",
               "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
               **rebuild_env,
           }
           for name, value in sorted(rebuild_process_env.items()):
               arguments.extend(("--setenv", name, value))
+          # The bootstrap imports nothing beyond the already-loaded os and sys
+          # before closing Bubblewrap's inherited host descriptors, and runs
+          # isolated (-I) because its working directory is the untrusted checkout.
+          # npm configs are created afterwards on the sandbox's fresh /tmp tmpfs.
           sandbox_entrypoint = (
               "import os, sys\n"
               "max_fd = os.sysconf('SC_OPEN_MAX')\n"
               "if max_fd < 3: raise SystemExit('invalid file descriptor limit')\n"
               "os.closerange(3, max_fd)\n"
+              "config_directory = '/tmp/npm-config'\n"
+              "os.mkdir(config_directory, 0o700)\n"
+              "for config_role in ('user', 'global'):\n"
+              "    config_path = f'{config_directory}/{config_role}.npmrc'\n"
+              "    os.close(os.open(\n"
+              "        config_path,\n"
+              "        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,\n"
+              "        0o600,\n"
+              "    ))\n"
+              "    os.environ[f'NPM_CONFIG_{config_role.upper()}CONFIG'] = config_path\n"
+              "    os.environ[f'npm_config_{config_role}config'] = config_path\n"
               "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
           )
           arguments.extend((
               "--",
               "/usr/bin/python3",
+              "-I",
               "-c",
               sandbox_entrypoint,
               *command,
@@ -5061,7 +5073,7 @@ jobs:
           fi
           export VERJSON_CI_COMMAND_FILES_DIR="${GITHUB_ENV%/*}"
           unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           import json
           import os
           import re
@@ -5710,7 +5722,7 @@ jobs:
                   script_env["PLAYWRIGHT_BROWSERS_PATH"] = "/dev/shm/playwright-browsers"
               arguments.extend((
                   "--chdir", str(sandbox_directory), "--",
-                  "/usr/bin/python3", "-c", sandbox_entrypoint,
+                  "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
                   *npm_command, "run", name,
               ))
               subprocess.run(
@@ -5770,7 +5782,7 @@ jobs:
           VERJSON_CI_TRUSTED_DB_HOST: ${{ steps.db-service.outputs.host }}
         run: |
           unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY
-          exec /usr/bin/python3 - <<'PY'
+          exec /usr/bin/python3 -I - <<'PY'
           import ctypes
           import errno
           import fcntl
