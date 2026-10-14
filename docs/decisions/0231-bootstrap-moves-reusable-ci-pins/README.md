@@ -132,7 +132,7 @@ the gate.
 | A non-bootstrap pull request uses the lane | The ADR 0227 caller and stale-revision proof still gates eligibility. |
 | A line break the proof does not split on hides YAML structure inside an apparent comment | Rule 1 refuses any caller containing a lone `\r`, U+0085, U+2028, or U+2029, or any caller that is not UTF-8. |
 | A pin-shaped or `#`-led line inside a block scalar, or a pin inside a non-test file outside `.github/`, has an older canonical revision swapped to the contract | Accepted residual. The swap only replaces a canonical revision that the contract descends from with a canonical `main` revision. The rule 2 structure checks and the rule 3 start-of-line anchor refuse the single-line shapes tested: `with:` values, `run:` commands ending in a comment, checkout `ref:` inputs, and block scalar text under a two-space key. They are lexical, not a YAML parse, so the next row remains. This is the same class of change ADR 0227 already accepts for the review pin in companion files. |
-| A multi-line quoted or flow scalar opened at four or more spaces (for example `PIN: "a` or `env: {`) continues across a four-space `uses: …@<pin>` line, which the proof reads as a job's reusable workflow call | Accepted residual. The swapped token becomes part of that scalar's value. The swap is bounded the same way as the previous row, to an ancestor canonical revision becoming canonical `main`. It can only occur if the protected default branch already contains such a construct, because every unchanged byte must equal the base. |
+| A multi-line quoted or flow scalar opened anywhere above the line, including a top-level `run-name:` or `env:` at column 0 (for example `run-name: "deploy`, `PIN: "a`, or `env: {`), continues across a four-space `uses: …@<pin>` line, which the proof reads as a job's reusable workflow call | Accepted residual. The swapped token becomes part of that scalar's value. The swap is bounded the same way as the previous row, to an ancestor canonical revision becoming canonical `main`. It can only occur if the protected default branch already contains such a construct, because every unchanged byte must equal the base. |
 
 ## Alternatives rejected
 
@@ -174,7 +174,10 @@ it, and the job-level structure checks came out of the same review. A second rev
 showed that a lone `\r` (and NEL, LS, PS) could hide a block scalar header, or a `run:`
 step, behind an apparent comment. That finding produced the rule 1 line-break guard and
 the whitespace-before-`#` requirement on `jobs:` and job keys, each with a refusal case
-and a killed mutant. While
+and a killed mutant. The guard runs on both base and head, which is intentionally redundant:
+unchanged bytes must equal the base and the only permitted changes are hex swaps, so a
+foreign line break or invalid UTF-8 on one side is present on the other, and no case can
+kill a base-only or head-only mutant. While
 the line-count guard's proof was being written, it first passed vacuously, because a base
 with a final newline exposes appended lines to the per-line rule. The case now uses a
 base without a final newline, the one shape where only that guard can refuse. The real
