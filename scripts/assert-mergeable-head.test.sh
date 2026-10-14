@@ -911,6 +911,78 @@ run
 expect "a commit-status response that states no total_count is unattested, not empty" \
   1 "commit-status inventory for"
 
+# A page's collection must BE an array (#1786). The page walk counted it with `length`,
+# which also measures a string, an object's keys, and a number, and the readers' `[]?`
+# then yield nothing from a string, null, or number and iterate an object's values. So
+# a SOLE page with a wrong-typed collection whose `length` matched `total_count`
+# reconciled and was read as an empty -- or forged -- inventory: the gate answered
+# `true` with no run, status, or check it could see. A null collection reconciled as
+# zero on ANY page. Every shape is placed both ways -- as the sole page, and as the last
+# page after a real one -- with every page stating the total that the old `length`
+# arithmetic produced, so each fixture is one the old count accepted or refused only by
+# accident of arithmetic. The type is what is checked, never truthiness.
+malformed_page() { # placement(sole|last) base-page field malformed-value -> body
+  jq -c --arg at "$1" --arg f "$3" --argjson bad "$4" '
+    if $at == "sole" then {total_count: ($bad | length), ($f): $bad}
+    else ((.[$f] | length) + ($bad | length)) as $total
+      | (. + {total_count: $total}), {total_count: $total, ($f): $bad} end' <<<"$2"
+}
+green_check="$(check_run 1 'ci / build-test' completed success "$APP_ID")"
+green_check_2="$(check_run 2 'changelog / validate' completed success "$APP_ID")"
+ok_status='{"context":"lint","state":"success"}'
+ok_wf_run="$(wf_run 9100 600 "$WF_OTHER" 1 push completed success)"
+for placement in sole last; do
+  for shape in string object null number; do
+    case "$shape" in
+      string) check_bad='"x"' status_bad='"x"' run_bad='"x"' ;;
+      object) check_bad="{\"a\":$green_check,\"b\":$green_check_2}" status_bad="{\"a\":$ok_status}" run_bad="{\"a\":$ok_wf_run}" ;;
+      null) check_bad=null status_bad=null run_bad=null ;;
+      number) check_bad=1 status_bad=1 run_bad=1 ;;
+    esac
+
+    reset_env
+    CHECK_RUNS_FIXTURE="$(malformed_page "$placement" "$(runs "$green_runs")" check_runs "$check_bad")"
+    run
+    expect "a $placement check-run page whose check_runs is a $shape is malformed, not an inventory (#1786)" \
+      1 "the check-run inventory for Verjson/verjson-ci@$HEAD_SHA carries a malformed page"
+
+    reset_env
+    STATUS_FIXTURE="$(malformed_page "$placement" "$(stat_page "$ok_status")" statuses "$status_bad")"
+    run
+    expect "a $placement commit-status page whose statuses is a $shape is malformed, not an inventory (#1786)" \
+      1 "the commit-status inventory for Verjson/verjson-ci@$HEAD_SHA carries a malformed page"
+
+    reset_env
+    RUNS_FIXTURE="$(malformed_page "$placement" "$(wf_runs "$ok_wf_run")" workflow_runs "$run_bad")"
+    run
+    expect "a $placement workflow-run page whose workflow_runs is a $shape is malformed, not an inventory (#1786)" \
+      1 "the workflow-run inventory for Verjson/verjson-ci@$HEAD_SHA carries a malformed page"
+  done
+done
+
+# The type check must not turn a genuinely empty page into a fault: an empty array on a
+# complete listing is an empty collection, and the verdict is the one-page verdict.
+reset_env
+CHECK_RUNS_FIXTURE="$(malformed_page last "$(runs "$green_runs")" check_runs '[]')"
+run
+expect_true "a check-run listing whose last page is an empty array is still admitted (#1786)"
+
+reset_env
+STATUS_FIXTURE="$(malformed_page last "$(stat_page "$ok_status")" statuses '[]')"
+run
+expect_true "a commit-status listing whose last page is an empty array is still admitted (#1786)"
+
+reset_env
+RUNS_FIXTURE="$(malformed_page last "$(wf_runs "$ok_wf_run")" workflow_runs '[]')"
+run
+expect_true "a workflow-run listing whose last page is an empty array is still admitted (#1786)"
+
+reset_env
+CHECK_RUNS_FIXTURE="$(runs '')"
+run
+expect "an empty check-run listing still reports every required context absent (#1786)" \
+  3 "absent: ci / build-test"
+
 reset_env; FAIL_CHECK_RUNS=1 run
 expect "a check-runs failure is a fault, not a pass" 1 "failed to fetch check runs"
 expect "a check-runs failure names its required read grant" 1 "Checks (read) or Actions permissions.checks: read"

@@ -202,17 +202,19 @@ expect_fault "oversized payload: a failing advisory check fails Gate C, not the 
 # that reshaped what it does not understand would turn a malformed record into a
 # projection fault with a different message -- or, worse, into a well-formed one -- so
 # a non-object page or run passes through untouched and is refused where it always was.
-malformed_listing() { # label runs-body
+malformed_listing() { # label runs-body expected-refusal
   build_fixtures "$tmp/shape" 2 8 0 8 completed ''
   printf '%s' "$2" >"$tmp/shape/runs.json"
   run_gate "$tmp/shape"
-  expect_fault "$1" 1 "the workflow-run inventory for verJSON/AiB@$HEAD_SHA carries a malformed record"
+  expect_fault "$1" 1 "the workflow-run inventory for verJSON/AiB@$HEAD_SHA carries a malformed $3"
 }
 ok_run="$(jq -c '.workflow_runs[0]' <<<"$(head -n1 "$tmp/small-pass/runs.json")")"
 malformed_listing "a run that is not an object is refused as malformed, not reshaped by the projection" \
-  "{\"total_count\":2,\"workflow_runs\":[$ok_run,\"bogus\"]}"
-malformed_listing "a page that is not an object is refused as malformed, not reshaped by the projection" \
-  "{\"total_count\":1,\"workflow_runs\":[$ok_run]}[]"
+  "{\"total_count\":2,\"workflow_runs\":[$ok_run,\"bogus\"]}" record
+# A page that is not an object never reaches the projection: the page check refuses it
+# first (#1786), so the projection need not, and does not, guard pages.
+malformed_listing "a page that is not an object is refused as a malformed page before the projection" \
+  "{\"total_count\":1,\"workflow_runs\":[$ok_run]}[]" page
 
 if [ "$fails" -ne 0 ]; then
   printf '\n%d assertion(s) failed\n' "$fails" >&2

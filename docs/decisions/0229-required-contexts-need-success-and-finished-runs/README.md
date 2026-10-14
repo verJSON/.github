@@ -204,3 +204,35 @@ the change those inputs failed with the real kernel `E2BIG` error. Reintroducing
 transport at any of the nine sites fails that test. Dropping any projected field, or
 either shape guard, fails one of the two suites. Live, AiB#347 now prints `true` and
 exits `0`.
+
+## Amendment (2026-10-14, #1786) — every inventory page must carry an array
+
+Decision 3 validates the run inventory by type, never by truthiness, but that check
+applied only to each run and not to the page that holds the runs. `reconcile_pages`
+counted each page's collection with `length`, which also measures a string, an object's
+keys, and a number. The readers iterate with `[]?`, which yields nothing from a string,
+null, or number, and iterates the values of an object. So a single page whose wrongly
+typed collection had a `length` equal to `total_count` reconciled, and so did a null
+collection on any page. The gate then reasoned over an empty or forged inventory and
+printed `true`. On `origin/main`, 12 of the 24 new fixtures were admitted this way. They
+cover all three endpoints (check runs, commit statuses, and workflow runs).
+
+`require_array_pages` now runs on each endpoint's response before reconciliation. It
+requires every page to be an object whose collection has type `array`. Under
+`jq -e`, a `false` result, a jq error, and unparseable input all exit `1`. Each refusal
+names the endpoint and says the inventory "carries a malformed page". Empty array pages
+are unaffected, and an empty response is still refused by reconciliation. The 131
+existing fixtures give byte-identical output. A non-object page can no longer reach the
+#1784 run projection, so that projection's page-level pass-through, described in the
+amendment above, has been removed. Its run-level pass-through is unchanged.
+
+Verification: `scripts/assert-mergeable-head.test.sh` covers string, object, null, and
+number collections, on a sole page and on the last page, for each endpoint. All 24 cases
+must exit `1`. Four cases with empty arrays keep their current verdicts. Each of these
+mutations fails the suite:
+
+- removing the guard for any one endpoint;
+- replacing the type check with truthiness (`!= null`, or the bare value);
+- dropping `-e`;
+- checking `any` page, or only the first page;
+- accepting a non-object page.

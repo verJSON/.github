@@ -159,6 +159,22 @@ reconcile_pages() { # response-file field
     >/dev/null <"$1"
 }
 
+# Every page's collection must BE an array, checked by type, never by truthiness, and
+# before the walk is reconciled (#1786). `reconcile_pages` counts with `length`, which also
+# measures a string, an object's keys, and a number, and the readers below iterate with
+# `[]?`, which yields nothing from a string, null, or number and iterates an object's
+# values. So a sole page whose wrong-typed collection happened to match `total_count`, or
+# a null collection on any page, reconciled and was read as an empty or forged inventory,
+# and the gate answered `true` over checks, statuses, or runs it never saw. A page that is
+# not an object fails here too. `-e` exits 0 only on a literal `true`; a `false`, a jq
+# error, and unparseable input all exit non-zero, so every one of them fails closed. An
+# empty response passes (no page is malformed) and `reconcile_pages` refuses it.
+require_array_pages() { # response-file field
+  jq -se --arg field "$2" '
+    all(.[]; if type == "object" then (.[$field] | type) == "array" else false end)' \
+    >/dev/null <"$1"
+}
+
 # API payloads never reach `jq` through argv (#1784). Linux refuses any single argument
 # over 128 KiB (MAX_ARG_STRLEN), so `--argjson x "$payload"` fails the exec -- `jq:
 # Argument list too long` -- on exactly the heads with many re-triggered runs or checks,
@@ -192,6 +208,8 @@ base_ref="$(jq -r '.baseRefName // ""' <<<"$pr_json")"
 check_runs_raw="$scratch/check-runs.raw.json"
 gh api --paginate "repos/$repo/commits/$head_sha/check-runs?per_page=100" </dev/null >"$check_runs_raw" \
   || permission_fault "failed to fetch check runs for $repo@$head_sha" "Checks" "checks"
+require_array_pages "$check_runs_raw" check_runs \
+  || fault 1 "the check-run inventory for $repo@$head_sha carries a malformed page: every page must carry a check_runs array; it cannot be reasoned over"
 reconcile_pages "$check_runs_raw" check_runs \
   || fault 1 "the check-run inventory for $repo@$head_sha is incomplete or unattested; it cannot be reasoned over"
 check_runs="$scratch/check-runs.json"
@@ -212,6 +230,8 @@ jq -s '[ .[].check_runs[]? | {
 statuses_raw="$scratch/statuses.raw.json"
 gh api --paginate "repos/$repo/commits/$head_sha/status?per_page=100" </dev/null >"$statuses_raw" \
   || permission_fault "failed to fetch commit statuses for $repo@$head_sha" "Commit statuses" "statuses"
+require_array_pages "$statuses_raw" statuses \
+  || fault 1 "the commit-status inventory for $repo@$head_sha carries a malformed page: every page must carry a statuses array; it cannot be reasoned over"
 reconcile_pages "$statuses_raw" statuses \
   || fault 1 "the commit-status inventory for $repo@$head_sha is incomplete or unattested; it cannot be reasoned over"
 statuses="$scratch/statuses.json"
@@ -268,6 +288,8 @@ jq -n --slurpfile a "$check_runs" --slurpfile b "$statuses" '$a[0] + $b[0]' >"$c
 runs_raw="$scratch/runs.raw.json"
 gh api --paginate "repos/$repo/actions/runs?head_sha=$head_sha&per_page=100" </dev/null >"$runs_raw" \
   || permission_fault "failed to fetch workflow runs for $repo@$head_sha" "Actions" "actions"
+require_array_pages "$runs_raw" workflow_runs \
+  || fault 1 "the workflow-run inventory for $repo@$head_sha carries a malformed page: every page must carry a workflow_runs array; it cannot be reasoned over"
 reconcile_pages "$runs_raw" workflow_runs \
   || fault 1 "the workflow-run inventory for $repo@$head_sha is incomplete or unattested; it cannot be reasoned over"
 # A full run object embeds the repository, head repository, actor, and head commit, so the
@@ -277,20 +299,19 @@ reconcile_pages "$runs_raw" workflow_runs \
 # workflow_id, run_number, event, status, conclusion; the unfinished-run arm of Gate A:
 # id, status, name, created_at, html_url. Add a field here before any program reads it.
 # A field read below and missing here would read as null and fail closed in well_formed
-# or drop out of a display. The projection preserves every shape the readers distinguish:
-# a page or run that is not an object passes through untouched, and a key the response
-# omits becomes null, which every reader already treats exactly as absent (`.x` on a
-# missing key IS null, and no reader tests key presence or serializes a whole run).
-# Counts are untouched, so the page walk reconciles the same either way.
+# or drop out of a display. `require_array_pages` has already proven every page an object
+# carrying a workflow_runs array. The projection preserves every shape the readers
+# distinguish: a run that is not an object passes through untouched, so well_formed
+# refuses it, and a key the response omits becomes null, which every reader already
+# treats exactly as absent (`.x` on a missing key IS null, and no reader tests key
+# presence or serializes a whole run).
 runs_projected="$scratch/runs.projected.json"
 jq -c '
-  if type == "object" and (.workflow_runs | type) == "array" then
-    .workflow_runs |= map(
-      if type == "object" then
-        { id, check_suite_id, workflow_id, run_number, event, status, conclusion,
-          head_sha, name, created_at, html_url }
-      else . end)
-  else . end' <"$runs_raw" >"$runs_projected" \
+  .workflow_runs |= map(
+    if type == "object" then
+      { id, check_suite_id, workflow_id, run_number, event, status, conclusion,
+        head_sha, name, created_at, html_url }
+    else . end)' <"$runs_raw" >"$runs_projected" \
   || fault 1 "failed to project the workflow-run inventory for $repo@$head_sha"
 # Types are checked, never truthiness: jq orders every string above every number,
 # so a string run_number would always read as "later", and two absent workflow ids
