@@ -320,7 +320,7 @@ SUPERVISOR
   mkfifo "$tmp/$index.release"
   exec {release_fd}<>"$tmp/$index.release"
   setsid bash "$tmp/$index.supervisor.sh" "${command_budgets[$index]}" "$command" \
-    "$tmp/$index.raw.log" "$tmp/$index.release" </dev/null &
+    "$tmp/$index.raw.log" "$tmp/$index.release" </dev/null {release_fd}>&- &
   # setsid execs in place from this non-leader job, so the supervisor's PID is
   # its session and process-group ID. The worker keeps it; the file only lets
   # the parent clean up if this worker dies, and no row is told where it is.

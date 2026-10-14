@@ -369,6 +369,28 @@ else
   fail "a row forged its supervisor's process-group identity"
 fi
 
+# The release FIFO is the worker's handshake with its supervisor. A row that
+# inherits a handle on it keeps the FIFO open after the runner dies, so a
+# supervisor could block forever; no row may hold one.
+cat >"$tmp/fifo-handles.sh" <<'FDS'
+#!/usr/bin/env bash
+for fd in /proc/$$/fd/*; do
+  target="$(readlink "$fd" 2>/dev/null)" || continue
+  case "$target" in
+    *.release*) printf 'row holds the release FIFO on %s\n' "$fd"; exit 1 ;;
+  esac
+done
+FDS
+chmod +x "$tmp/fifo-handles.sh"
+printf 'platform\tbash %q\n' "$tmp/fifo-handles.sh" >"$tmp/fifo-handles.tsv"
+if ACTIONS_CI_GROUP_MANIFEST="$tmp/fifo-handles.tsv" bash "$runner" platform \
+  >"$tmp/fifo-handles.out" 2>&1; then
+  pass "rows inherit no handle on the supervisor release FIFO"
+else
+  cat "$tmp/fifo-handles.out" >&2
+  fail "a row inherited a handle on the supervisor release FIFO"
+fi
+
 # Malformed rows fail in the runner itself, not only in the manifest contract.
 printf 'platform\ttrue\textra\n' >"$tmp/three-fields.tsv"
 printf 'platform\t@budget=601 true\n' >"$tmp/over-cap.tsv"
