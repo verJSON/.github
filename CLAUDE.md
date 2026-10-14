@@ -78,7 +78,6 @@ not just inspection of prose (#956: an entry asserting external status should sa
 was confirmed, since inspection-only claims go stale silently).
 
 - [#1754](https://github.com/verJSON/.github/issues/1754) — Draft-then-ready PRs keep a concurrency-cancelled run on the same head, so `assert-mergeable-head.sh` exited 3/5 on green heads (#1750 `d762771c`, #1753 `c10425e6`; reproduced 2026-10-13 against live check runs with `filter=all`); ADR 0226 sets aside only cancellations superseded by a later successful run of the same workflow and event.
-- [#1752](https://github.com/verJSON/.github/issues/1752) — Generalize the isolated inline Python interpreter contract from the Node CI pair to every workflow; its blocker #1749 closed on 2026-10-13 via PR #1750, which added the Node CI test (verified live with `gh issue view 1749 --json state`). Opened 2026-10-13 after a per-workflow count during #1750 review.
 
 - [#1667](https://github.com/Verjson/.github/issues/1667) — Track configurable generated OCI candidate destinations for GHCR, GAR, and Sonatype Nexus. Opened 2026-10-01 after live issue searches and checking related [.github#1264](https://github.com/Verjson/.github/issues/1264), [.github#1186](https://github.com/Verjson/.github/issues/1186), and [verjson-ci#30](https://github.com/Verjson/verjson-ci/issues/30); those cover adopter rollout and GitLab CE Nexus engine work, not registry-neutral canonical publisher destinations.
 

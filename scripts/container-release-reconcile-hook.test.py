@@ -2,6 +2,7 @@
 """The reconciliation hook's position and bounds inside the reusable release workflow."""
 
 import copy
+import re
 import pathlib
 import shutil
 import subprocess
@@ -61,9 +62,9 @@ def validate(workflow):
     if reconcile.get("env") != expected_env:
         errors.append("reconciliation step receives more than bounded non-secret release metadata")
     run = reconcile.get("run", "")
-    if f"python3 {RECONCILER}" not in run:
+    if f"python3 -I {RECONCILER}" not in run:
         errors.append("reconciliation does not execute the pinned contract enforcer")
-    if "python3 scripts/container_release_reconcile.py" in run:
+    if re.search(r"python3?(?:\s+-\w+)*\s+scripts/container_release_reconcile\.py", run):
         errors.append("reconciliation executes a consumer-local enforcer")
 
     release_run = output.get("run", "")

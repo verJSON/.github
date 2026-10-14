@@ -5,7 +5,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 workflow="$root/.github/workflows/ai-review-merge.yml"
 validator="$root/scripts/ci-gate/review-verdict.py"
-validator_invocation="python3 \"\$RUNNER_TEMP/review-verdict.py\""
+validator_invocation="python3 -I \"\$RUNNER_TEMP/review-verdict.py\""
 legacy_normalizer="normalized=\"\$(jq -c"
 
 grep -qF 'scripts/ci-gate/review-verdict.py' "$workflow"

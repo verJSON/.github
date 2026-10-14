@@ -93,14 +93,14 @@ jobs:
             }
           done <<<"$FRAGMENTS"
           exec 3>>"$GITHUB_OUTPUT"
-          selector_digest="$(python3 .changelog-contract/scripts/changelog.py "${selection_args[@]}")"
+          selector_digest="$(python3 -I .changelog-contract/scripts/changelog.py "${selection_args[@]}")"
           if [ -z "$selector_digest" ]; then
             echo "selected=false" >&3
             echo "No unreleased fragments are selected; there is no release to propose."
             exit 0
           fi
-          version="$(python3 .changelog-contract/scripts/changelog.py "${version_args[@]}")"
-          python3 .changelog-contract/scripts/changelog.py "${preview_args[@]}" \
+          version="$(python3 -I .changelog-contract/scripts/changelog.py "${version_args[@]}")"
+          python3 -I .changelog-contract/scripts/changelog.py "${preview_args[@]}" \
             >"$RUNNER_TEMP/release-preview.md"
           echo "selected=true" >&3
           printf 'selector-digest=%s\n' "$selector_digest" >&3
@@ -116,7 +116,7 @@ jobs:
           PREFIX: ${{ inputs.prefix }}
           SELECTOR_DIGEST: ${{ steps.release.outputs.selector-digest }}
         run: |
-          python3 .changelog-contract/scripts/release-propose.py \
+          python3 -I .changelog-contract/scripts/release-propose.py \
             --mode propose \
             --repository "$GITHUB_REPOSITORY" \
             --workflow release.yml \

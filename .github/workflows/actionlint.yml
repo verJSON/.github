@@ -181,10 +181,9 @@ jobs:
             # security boundaries. Consumers have no such exception.
             policy_mode=(--visibility public)
           fi
-          PYTHONPATH="$policy_dir/python" \
-            PYTHONNOUSERSITE=1 \
-            python3 -S \
+          python3 -I -S \
             .verjson-actionlint-policy/scripts/ci-gate/hosted-selector-policy.py \
+            --dependency-path "$policy_dir/python" \
             "${policy_mode[@]}" .github/workflows
       - name: Remove hosted-selector policy dependency
         if: ${{ always() && github.repository_owner == 'Verjson' }}

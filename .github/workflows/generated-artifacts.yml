@@ -174,17 +174,17 @@ jobs:
               # naming that path would send every consumer to "No such file or
               # directory" — the opposite of the one-command promise. --repo-root
               # is shown as `.` because $GITHUB_WORKSPACE exists only on a runner.
-              engine_cmd='python3 .changelog-contract/scripts/changelog.py'
+              engine_cmd='python3 -I .changelog-contract/scripts/changelog.py'
               remedy="$engine_cmd validate ${shown[*]}"
 
               changelog_ok=true
-              python3 "$engine" validate "${args[@]}" || changelog_ok=false
+              python3 -I "$engine" validate "${args[@]}" || changelog_ok=false
               if [ "$changelog_ok" = true ] && [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
                 # Name the subcommand that actually failed: a pull-request policy
                 # failure sent to `validate` sends the consumer to a command that
                 # passes, which reads as a flaky check rather than a real verdict.
                 remedy="$engine_cmd check-pr --repo-root . --base $BASE_SHA --head $HEAD_SHA"
-                python3 "$engine" check-pr \
+                python3 -I "$engine" check-pr \
                   --repo-root "$GITHUB_WORKSPACE" --base "$BASE_SHA" --head "$HEAD_SHA" \
                   || changelog_ok=false
               fi

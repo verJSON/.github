@@ -706,10 +706,9 @@ release_version_guard_step=$(cat <<'EOF'
       - name: Require an explicit release version
         env:
           INPUT_VERSION: ${{ inputs.version }}
-          PYTHONUTF8: '1'
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+          python3 -I -X utf8 - <<'PY'
           import os
           import sys
 
@@ -737,8 +736,8 @@ release_plan_step=$(cat <<'EOF'
             [ -z "$fragment" ] || args+=(--fragment "$fragment")
           done <<<"$FRAGMENTS"
           plan_file="$RUNNER_TEMP/verjson-release-plan.json"
-          python3 .changelog-contract/scripts/changelog.py "${args[@]}" >"$plan_file"
-          actual_selector_digest="$(python3 - "$plan_file" <<'PY'
+          python3 -I .changelog-contract/scripts/changelog.py "${args[@]}" >"$plan_file"
+          actual_selector_digest="$(python3 -I - "$plan_file" <<'PY'
           import json
           import sys
 
@@ -751,7 +750,7 @@ release_plan_step=$(cat <<'EOF'
             echo "::error::Selected fragments resolve to $actual_selector_digest, not proposer receipt $EXPECTED_SELECTOR_DIGEST."
             exit 1
           fi
-          python3 - "$plan_file" "$GITHUB_OUTPUT" "$GITHUB_STEP_SUMMARY" "$GITHUB_SHA" <<'PY'
+          python3 -I - "$plan_file" "$GITHUB_OUTPUT" "$GITHUB_STEP_SUMMARY" "$GITHUB_SHA" <<'PY'
           import json
           import sys
           from pathlib import Path
@@ -1079,7 +1078,7 @@ ${release_plan_step}
         if: steps.release-version.outputs.selected == 'true'
         shell: /bin/bash --noprofile --norc -e -o pipefail {0}
         run: |
-          /usr/bin/python3 - <<'PY'
+          /usr/bin/python3 -I - <<'PY'
           import os
 
           path = os.environ["PATH"]
@@ -1731,7 +1730,7 @@ ${required_lane_validation_step}
         if: steps.release-version.outputs.selected == 'true'
         shell: /bin/bash --noprofile --norc -e -o pipefail {0}
         run: |
-          /usr/bin/python3 - <<'PY'
+          /usr/bin/python3 -I - <<'PY'
           import os
 
           path = os.environ["PATH"]
@@ -2316,7 +2315,7 @@ ${release_plan_step}
         if: steps.release-version.outputs.selected == 'true'
         shell: /bin/bash --noprofile --norc -e -o pipefail {0}
         run: |
-          /usr/bin/python3 - <<'PY'
+          /usr/bin/python3 -I - <<'PY'
           import os
 
           path = os.environ["PATH"]
@@ -4118,14 +4117,14 @@ APPROVED_RELEASE_VERIFICATION_SCRIPT_SHA256 = {
     "release-snapshot": "5de64b89d651333b1a2a2fc11d13a114fd23b2393147ffd68e2e0d81956c5edc",
 }
 APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
-    "release-node": "65c9bdf63f9032dd4ecdf2d1123586f3deca3a5f9b11dc7b2a29106b7d238502",
-    "release-artifact": "65c9bdf63f9032dd4ecdf2d1123586f3deca3a5f9b11dc7b2a29106b7d238502",
-    "release-snapshot": "65c9bdf63f9032dd4ecdf2d1123586f3deca3a5f9b11dc7b2a29106b7d238502",
+    "release-node": "0caf167486937a2def16a5223fcb64b1a4a737447d424c83a891c2aac4e3b3a2",
+    "release-artifact": "0caf167486937a2def16a5223fcb64b1a4a737447d424c83a891c2aac4e3b3a2",
+    "release-snapshot": "0caf167486937a2def16a5223fcb64b1a4a737447d424c83a891c2aac4e3b3a2",
 }
 APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256 = {
-    "release-node": "897b9aa99ddd22187414228b463d8bdeab8609b8e15acad66708b86654d5e407",
-    "release-artifact": "57a4aafc159687ccb3879c7ad5aff6ea940c753380233b7cbf18ba0606bd2ab1",
-    "release-snapshot": "c7531cc0f0f4e67fe00ff6c41c37d8a487091706bd5cbf688290cf891347dd57",
+    "release-node": "eedf6b26589d5ed771d6b969830e9aee73f3db3f4eac3981dc9d378d7aba613c",
+    "release-artifact": "0bbae664b45e4d062c96a2013dfb5956704db5af610a192c4e919a0bad1cbdf7",
+    "release-snapshot": "4586c168d5ceb313ae882ae0e7c3b666de0c0e544f5c9f0e5c61dbbe6c54f9d5",
 }
 EXPECTED_RELEASE_STATE_ENV = {
     "VERSION": "${{ steps.release-version.outputs.version }}",
@@ -5538,7 +5537,8 @@ PY
   first_two_verify_steps="$(awk '/^[[:space:]]+- name:/ { sub(/^[[:space:]]*/, ""); print; if (++count == 2) exit }' <<<"$verify_job")"
   [ "$first_two_verify_steps" = $'- name: Require an explicit release version\n- name: Prepare job-scoped changelog tool cache' ] \
     && grep -qF 'INPUT_VERSION: ${{ inputs.version }}' <<<"$verify_job" \
-    && grep -qF "PYTHONUTF8: '1'" <<<"$verify_job" \
+    && grep -qF "python3 -I -X utf8 - <<'PY'" <<<"$verify_job" \
+    && ! grep -qF "PYTHONUTF8" <<<"$verify_job" \
     && grep -qF "if not os.environ['INPUT_VERSION'].strip():" <<<"$verify_job" \
     || fail "$release_workflow does not reject blank versions before repository verification"
   grep -qF "if: steps.release-version.outputs.selected == 'true' && steps.release-state.outputs.snapshot-exists == 'true'" <<<"$verify_job" \

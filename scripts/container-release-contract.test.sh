@@ -33,7 +33,7 @@ git -C "$tmp/consumer" add .
 git -C "$tmp/consumer" commit -qm fixture
 mkdir -p "$tmp/consumer/.container-release-contract/scripts"
 git -C "$tmp/contract" show "$ref:scripts/changelog.py" >"$tmp/consumer/.container-release-contract/scripts/changelog.py"
-(cd "$tmp/consumer" && python3 .container-release-contract/scripts/changelog.py release --version v1.0.0)
+(cd "$tmp/consumer" && python3 -I .container-release-contract/scripts/changelog.py release --version v1.0.0)
 test -f "$tmp/consumer/CHANGELOG/v1.0.0.md"
 test "$(git -C "$tmp/consumer" tag --list)" = v1.0.0
 test ! -e "$tmp/consumer/scripts/changelog.py"
@@ -240,12 +240,12 @@ PY
 grep -A8 '^  retention:$' "$workflow" | grep -x '    timeout-minutes: 30' >/dev/null
 assert_python3_extractor() {
   local candidate=$1
-  [ "$(grep -cE '^          python3 scripts/container_artifact_extract\.py candidate\.zip candidate\.json candidate-manifest\.sigstore\.json$' "$candidate")" -eq 1 ] &&
+  [ "$(grep -cE '^          python3 -I scripts/container_artifact_extract\.py candidate\.zip candidate\.json candidate-manifest\.sigstore\.json$' "$candidate")" -eq 1 ] &&
     ! grep -Eq '^ +python scripts/container_artifact_extract\.py candidate\.zip candidate\.json candidate-manifest\.sigstore\.json$' "$candidate"
 }
 assert_python3_extractor "$workflow"
 cp "$workflow" "$tmp/container-release-python-mutation.yml"
-sed -i 's/^          python3 scripts\/container_artifact_extract\.py candidate\.zip candidate\.json candidate-manifest\.sigstore\.json$/          python scripts\/container_artifact_extract.py candidate.zip candidate.json/' \
+sed -i 's/^          python3 -I scripts\/container_artifact_extract\.py candidate\.zip candidate\.json candidate-manifest\.sigstore\.json$/          python scripts\/container_artifact_extract.py candidate.zip candidate.json/' \
   "$tmp/container-release-python-mutation.yml"
 if assert_python3_extractor "$tmp/container-release-python-mutation.yml"; then
   echo "container release contract accepted a python extractor mutation" >&2
@@ -284,12 +284,12 @@ grep -Fq 'release-manifest.sigstore.json candidate-manifest.zip receipts/*.json'
 grep -q 'container_attestation_verify.py' "$workflow"
 grep -q 'repository: Verjson/.github' "$workflow"
 grep -q 'ref: \${{ inputs.contract-ref }}' "$workflow"
-grep -q 'python3 .container-release-contract/scripts/changelog.py release' "$workflow"
+grep -q 'python3 -I .container-release-contract/scripts/changelog.py release' "$workflow"
 grep -Fq 'GIT_NO_REPLACE_OBJECTS=1 git -C .container-release-contract show \' "$workflow"
 grep -Fq '"$CONTRACT_REF:scripts/changelog.py" \' "$workflow"
 grep -Fq '| cmp -s .container-release-contract/scripts/changelog.py - \' "$workflow"
 engine_guard_line="$(grep -n 'GIT_NO_REPLACE_OBJECTS=1 git -C .container-release-contract show' "$workflow" | cut -d: -f1)"
-engine_run_line="$(grep -n 'python3 .container-release-contract/scripts/changelog.py release' "$workflow" | cut -d: -f1)"
+engine_run_line="$(grep -n 'python3 -I .container-release-contract/scripts/changelog.py release' "$workflow" | cut -d: -f1)"
 [ "$engine_guard_line" -lt "$engine_run_line" ]
 ! grep -Eq 'python3? scripts/changelog.py release' "$workflow"
 ! grep -Eq 'gh attestation verify|actions/attest-build-provenance@' "$workflow"
@@ -306,9 +306,9 @@ grep -q '\^\[0-9a-f\]{40}\$' "$workflow"
 guard_line="$(grep -n 'Validate the immutable retention contract ref' "$workflow" | tail -1 | cut -d: -f1)"
 checkout_line="$(grep -n 'path: .package-retention-contract' "$workflow" | cut -d: -f1)"
 [ "$guard_line" -lt "$checkout_line" ]
-grep -qx '          python3 scripts/container_artifact_extract.py candidate.zip candidate.json candidate-manifest.sigstore.json' "$workflow"
-grep -qx '          python3 scripts/container_attestation_verify.py --candidate candidate.json \\' "$workflow"
-grep -qx '          python3 scripts/container_release_promotion.py --candidate candidate.json \\' "$workflow"
+grep -qx '          python3 -I scripts/container_artifact_extract.py candidate.zip candidate.json candidate-manifest.sigstore.json' "$workflow"
+grep -qx '          python3 -I scripts/container_attestation_verify.py --candidate candidate.json \\' "$workflow"
+grep -qx '          python3 -I scripts/container_release_promotion.py --candidate candidate.json \\' "$workflow"
 ! grep -Eq '^[[:space:]]+python scripts/container_(artifact_extract|attestation_verify|release_promotion)\.py' "$workflow"
 grep -Fq 'candidate_artifact_digest="${BASH_REMATCH[2]}"' "$workflow"
 ! grep -Fq 'candidate_artifact_digest="${BASH_REMATCH[1]}"' "$workflow"

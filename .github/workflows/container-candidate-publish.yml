@@ -98,7 +98,7 @@ jobs:
           CONFIG_PATH="$config_path"
           destination_helper="$RUNNER_TEMP/container_registry_destinations.py"
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_registry_destinations.py" -o "$destination_helper"
-          destination_contract="$(python3 "$destination_helper" --config "$CONFIG_PATH" --owner "$GITHUB_REPOSITORY_OWNER")"
+          destination_contract="$(python3 -I "$destination_helper" --config "$CONFIG_PATH" --owner "$GITHUB_REPOSITORY_OWNER")"
           expected_namespace="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
           jq -e --arg repository "$GITHUB_REPOSITORY" --arg namespace "$expected_namespace" \
             --argjson cleanup_unused_docker_images "$CLEANUP_UNUSED_DOCKER_IMAGES" '
@@ -270,7 +270,7 @@ jobs:
           validator_args=(--package-manager "$PACKAGE_MANAGER" --lock "$lock_file" --approved "$APPROVED_PRIVATE_PACKAGES")
           [ "$PACKAGE_MANAGER" = npm ] || validator_args+=(--manifest package.json --project-root .)
           [ -z "$base_manifest" ] || validator_args+=(--reviewed-manifest "$base_manifest")
-          python3 "$acquisition" "${validator_args[@]}"
+          python3 -I "$acquisition" "${validator_args[@]}"
           user_config="$RUNNER_TEMP/container-user.npmrc"
           global_config="$RUNNER_TEMP/container-global.npmrc"
           npm_cache="$RUNNER_TEMP/container-npm-cache"
@@ -309,7 +309,7 @@ jobs:
             echo "::error::could not generate a private dependency transfer key"
             exit 1
           }
-          TRANSFER_KEY="$encryption_key" python3 "$RUNNER_TEMP/container_dependency_transfer.py" encrypt \
+          TRANSFER_KEY="$encryption_key" python3 -I "$RUNNER_TEMP/container_dependency_transfer.py" encrypt \
             --source "$TRANSFER_DIR/container-node-modules.tgz" \
             --destination "$TRANSFER_DIR/container-node-modules.tgz.enc"
           rm -f "$TRANSFER_DIR/container-node-modules.tgz"
@@ -489,7 +489,7 @@ jobs:
           set -euo pipefail
           context="$RUNNER_TEMP/container-node-modules-context"
           trap 'status=$?; if [ "$status" -ne 0 ]; then rm -rf -- "$context" || true; fi; exit "$status"' EXIT
-          TRANSFER_KEY="$TRANSFER_KEY" python3 "$RUNNER_TEMP/container_dependency_transfer.py" restore-tar \
+          TRANSFER_KEY="$TRANSFER_KEY" python3 -I "$RUNNER_TEMP/container_dependency_transfer.py" restore-tar \
             --source "$TRANSFER_DIR/container-node-modules.tgz.enc" \
             --destination "$context"
           case "$LOCK_FILE" in package-lock.json|pnpm-lock.yaml) ;; *) echo "::error::invalid lock-file output"; exit 1 ;; esac
@@ -549,12 +549,12 @@ jobs:
           docker buildx imagetools inspect "$REPOSITORY@$digest" --raw > "$raw"
           docker buildx imagetools inspect "$REPOSITORY@$digest" --format '{{json .Provenance}}' > "$buildkit"
           jq -ce --arg variant "$VARIANT" '.images[] | select(.variant == $variant) | .platforms' "$CONFIG_PATH" > "$reviewed"
-          python3 "$oci" index --index "$raw" --reviewed-platforms "$reviewed" >/dev/null
+          python3 -I "$oci" index --index "$raw" --reviewed-platforms "$reviewed" >/dev/null
           token="$RUNNER_TEMP/retry-cosign-oidc-token"
           trap 'rm -f "$token"' EXIT
-          python3 "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
+          python3 -I "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
             --request-url "$ACTIONS_ID_TOKEN_REQUEST_URL" --output "$token"
-          receipt="$(python3 "$RUNNER_TEMP/container_cosign_provenance.py" verify-image \
+          receipt="$(python3 -I "$RUNNER_TEMP/container_cosign_provenance.py" verify-image \
             --identity-token "$token" --buildkit-provenance "$buildkit" \
             --reviewed-platforms "$reviewed" --image-repository "$REPOSITORY" \
             --image-digest "$digest" \
@@ -656,10 +656,10 @@ jobs:
           raw="$RUNNER_TEMP/container-image-index.json"
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_oci_index.py" -o "$oci"
           docker buildx imagetools inspect "$REPOSITORY@$DIGEST" --raw > "$raw"
-          python3 "$oci" index --index "$raw" --reviewed-platforms "$reviewed" >/dev/null
-          python3 "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
+          python3 -I "$oci" index --index "$raw" --reviewed-platforms "$reviewed" >/dev/null
+          python3 -I "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
             --request-url "$ACTIONS_ID_TOKEN_REQUEST_URL" --output "$token"
-          receipt="$(python3 "$RUNNER_TEMP/container_cosign_provenance.py" attest-image \
+          receipt="$(python3 -I "$RUNNER_TEMP/container_cosign_provenance.py" attest-image \
             --identity-token "$token" --buildkit-provenance "$buildkit" \
             --reviewed-platforms "$reviewed" --image-repository "$REPOSITORY" \
             --image-digest "$DIGEST" --bundle "$RUNNER_TEMP/provenance.sigstore.json" \
@@ -872,7 +872,7 @@ jobs:
           set -euo pipefail
           context="$RUNNER_TEMP/container-node-modules-context"
           trap 'status=$?; if [ "$status" -ne 0 ]; then rm -rf -- "$context" || true; fi; exit "$status"' EXIT
-          TRANSFER_KEY="$TRANSFER_KEY" python3 "$RUNNER_TEMP/container_dependency_transfer.py" restore-tar \
+          TRANSFER_KEY="$TRANSFER_KEY" python3 -I "$RUNNER_TEMP/container_dependency_transfer.py" restore-tar \
             --source "$TRANSFER_DIR/container-node-modules.tgz.enc" \
             --destination "$context"
           case "$LOCK_FILE" in package-lock.json|pnpm-lock.yaml) ;; *) echo "::error::invalid lock-file output"; exit 1 ;; esac
@@ -937,12 +937,12 @@ jobs:
           docker buildx imagetools inspect "$REPOSITORY@$digest" --raw > "$raw"
           docker buildx imagetools inspect "$REPOSITORY@$digest" --format '{{json .Provenance}}' > "$buildkit"
           jq -ce --arg variant "$VARIANT" '.images[] | select(.variant == $variant) | .platforms' "$CONFIG_PATH" > "$reviewed"
-          python3 "$oci" index --index "$raw" --reviewed-platforms "$reviewed" >/dev/null
+          python3 -I "$oci" index --index "$raw" --reviewed-platforms "$reviewed" >/dev/null
           token="$RUNNER_TEMP/retry-cosign-oidc-token"
           trap 'rm -f "$token"' EXIT
-          python3 "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
+          python3 -I "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
             --request-url "$ACTIONS_ID_TOKEN_REQUEST_URL" --output "$token"
-          receipt="$(python3 "$RUNNER_TEMP/container_cosign_provenance.py" verify-image \
+          receipt="$(python3 -I "$RUNNER_TEMP/container_cosign_provenance.py" verify-image \
             --identity-token "$token" --buildkit-provenance "$buildkit" \
             --reviewed-platforms "$reviewed" --image-repository "$REPOSITORY" \
             --image-digest "$digest" --base-repository "$base_repository" \
@@ -1061,10 +1061,10 @@ jobs:
           raw="$RUNNER_TEMP/container-image-index.json"
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_oci_index.py" -o "$oci"
           docker buildx imagetools inspect "$REPOSITORY@$DIGEST" --raw > "$raw"
-          python3 "$oci" index --index "$raw" --reviewed-platforms "$reviewed" >/dev/null
-          python3 "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
+          python3 -I "$oci" index --index "$raw" --reviewed-platforms "$reviewed" >/dev/null
+          python3 -I "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
             --request-url "$ACTIONS_ID_TOKEN_REQUEST_URL" --output "$token"
-          receipt="$(python3 "$RUNNER_TEMP/container_cosign_provenance.py" attest-image \
+          receipt="$(python3 -I "$RUNNER_TEMP/container_cosign_provenance.py" attest-image \
             --identity-token "$token" --buildkit-provenance "$buildkit" \
             --reviewed-platforms "$reviewed" --image-repository "$REPOSITORY" \
             --image-digest "$DIGEST" --base-repository "$BASE_REPOSITORY" \
@@ -1206,7 +1206,7 @@ jobs:
           docker buildx imagetools inspect "$REPOSITORY@$index_digest" --raw > "$raw_index"
           jq -ce --arg variant "$IMAGE_VARIANT" '.images[] | select(.variant == $variant) | .platforms' \
             "$CONFIG_PATH" > "$reviewed_platforms"
-          python3 "$helper" index --index "$raw_index" --reviewed-platforms "$reviewed_platforms" > "$inventory"
+          python3 -I "$helper" index --index "$raw_index" --reviewed-platforms "$reviewed_platforms" > "$inventory"
           binding="$(jq -ce --arg os "$OS" --arg architecture "$ARCHITECTURE" --arg variant "$PLATFORM_VARIANT" \
             '[.evidence[] | select(.os == $os and .architecture == $architecture and (.variant // "") == $variant)]
              | if length == 1 then .[0] else error("platform evidence is missing or ambiguous") end' "$inventory")"
@@ -1216,11 +1216,11 @@ jobs:
           [[ "$evidence_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
           evidence_manifest="$RUNNER_TEMP/evidence-manifest.json"
           docker buildx imagetools inspect "$REPOSITORY@$evidence_digest" --raw > "$evidence_manifest"
-          python3 "$helper" spdx-evidence --manifest "$evidence_manifest" >/dev/null
+          python3 -I "$helper" spdx-evidence --manifest "$evidence_manifest" >/dev/null
           platform_key="$OS/$ARCHITECTURE${PLATFORM_VARIANT:+/$PLATFORM_VARIANT}"
           docker buildx imagetools inspect "$REPOSITORY@$index_digest" --format '{{json .SBOM}}' \
             > "$RUNNER_TEMP/sbom-index.json"
-          python3 "$helper" spdx-document --sbom-index "$RUNNER_TEMP/sbom-index.json" \
+          python3 -I "$helper" spdx-document --sbom-index "$RUNNER_TEMP/sbom-index.json" \
             --platform "$platform_key" --inventory "$inventory" > sbom.spdx.json
           echo "digest=$platform_digest" >> "$GITHUB_OUTPUT"
       - id: sbom-attestation
@@ -1233,9 +1233,9 @@ jobs:
           token="$RUNNER_TEMP/container-sbom-oidc-token"
           bundle="$RUNNER_TEMP/sbom.sigstore.json"
           referrer="$RUNNER_TEMP/sbom-referrer.json"
-          python3 "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
+          python3 -I "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
             --request-url "$ACTIONS_ID_TOKEN_REQUEST_URL" --output "$token"
-          receipt="$(python3 "$RUNNER_TEMP/container_cosign_provenance.py" sign-sbom \
+          receipt="$(python3 -I "$RUNNER_TEMP/container_cosign_provenance.py" sign-sbom \
             --identity-token "$token" --sbom sbom.spdx.json --bundle "$bundle" \
             --referrer-manifest "$referrer" --image-repository "$REPOSITORY" \
             --image-digest "$DIGEST")"
@@ -1353,7 +1353,7 @@ jobs:
           [ "$(jq -er '.run_attempt | tostring' <<<"$run_metadata")" = "$GITHUB_RUN_ATTEMPT" ] || { echo "::error::candidate run attempt changed"; exit 1; }
           candidate_published_at="$(jq -er '.run_started_at' <<<"$run_metadata")"
           digest="$(jq -er '.indexDigest | select(test("^sha256:[0-9a-f]{64}$"))' candidate-image/image.json)"
-          python3 "$helper" \
+          python3 -I "$helper" \
             --config "$CONFIG_PATH" \
             --owner "$GITHUB_REPOSITORY_OWNER" \
             --mirror-provider gar \
@@ -1372,7 +1372,7 @@ jobs:
           jq -ce --arg variant "$VARIANT" '.images[] | select(.variant == $variant) | .platforms' "$CONFIG_PATH" > "$reviewed"
           token="$RUNNER_TEMP/container-gar-cosign-oidc-token"
           trap 'rm -f "$token"' EXIT
-          python3 "$provenance_helper" request-oidc-token \
+          python3 -I "$provenance_helper" request-oidc-token \
             --request-url "$ACTIONS_ID_TOKEN_REQUEST_URL" --output "$token"
           base_args=()
           base_variant="$(jq -r '.base.variant // empty' candidate-image/image.json)"
@@ -1381,7 +1381,7 @@ jobs:
             base_digest="$(jq -er '.base.digest | select(test("^sha256:[0-9a-f]{64}$"))' candidate-image/image.json)"
             base_args=(--base-repository "$base_repository" --base-digest "$base_digest")
           fi
-          python3 "$provenance_helper" verify-image \
+          python3 -I "$provenance_helper" verify-image \
             --identity-token "$token" --buildkit-provenance "$buildkit" \
             --reviewed-platforms "$reviewed" --image-repository "$source_repository" \
             --registry-repository "$gar_repository" --image-digest "$digest" \
@@ -1494,8 +1494,8 @@ jobs:
             repository="$(jq -r '.repository' "$image")"
             variant="$(jq -r '.variant' "$image")"
             index_digest="$(jq -r '.indexDigest' "$image")"
-            expected_destinations="$(python3 "$destination_helper" --config "$CONFIG_PATH" --owner "$GITHUB_REPOSITORY_OWNER" --variant "$variant" --digest "$index_digest" --published-at "$candidate_published_at")"
-            ghcr_receipt="$(python3 "$destination_helper" --config "$CONFIG_PATH" --owner "$GITHUB_REPOSITORY_OWNER" --verify-provider ghcr --variant "$variant" --tag "$CANDIDATE" --digest "$index_digest" --authfile "$HOME/.docker/config.json" --published-at "$candidate_published_at")"
+            expected_destinations="$(python3 -I "$destination_helper" --config "$CONFIG_PATH" --owner "$GITHUB_REPOSITORY_OWNER" --variant "$variant" --digest "$index_digest" --published-at "$candidate_published_at")"
+            ghcr_receipt="$(python3 -I "$destination_helper" --config "$CONFIG_PATH" --owner "$GITHUB_REPOSITORY_OWNER" --verify-provider ghcr --variant "$variant" --tag "$CANDIDATE" --digest "$index_digest" --authfile "$HOME/.docker/config.json" --published-at "$candidate_published_at")"
             if [ "$HAS_GAR" = true ]; then
               gar_receipt="$(jq -cs --arg variant "$variant" '[.[] | select(.variant == $variant)] | if length == 1 then (.[0] | del(.variant)) else error("expected one verified GAR receipt for image variant") end' "${registry_artifacts[@]}")"
               receipts="$(jq -cn --argjson ghcr "$ghcr_receipt" --argjson gar "$gar_receipt" '[$ghcr,$gar]')"
@@ -1517,7 +1517,7 @@ jobs:
             inventory="$RUNNER_TEMP/oci-inventory-$variant.json"
             printf '%s\n' "$raw" > "$raw_index"
             jq -c '.platforms' <<<"$reviewed" > "$reviewed_platforms"
-            python3 "$helper" index --index "$raw_index" --reviewed-platforms "$reviewed_platforms" > "$inventory"
+            python3 -I "$helper" index --index "$raw_index" --reviewed-platforms "$reviewed_platforms" > "$inventory"
             platforms="$(jq -c .platforms "$inventory")"
             base="$(jq -c '.base // null' "$image")"
             provenance_bundle_digest="$(jq -er '.provenance.bundleDigest | select(test("^sha256:[0-9a-f]{64}$"))' "$image")"
@@ -1547,16 +1547,16 @@ jobs:
               promotionEligible:false,
               source:{repository:$repository,commit:$commit,ref:$ref,workflow:$workflow,runId:$run,runAttempt:$attempt,candidatePublishedAt:$publishedAt},images:.}' \
             image-*.json > candidate-manifest.json
-          python3 scripts/container_release_manifest.py --manifest candidate-manifest.json --config "$CONFIG_PATH"
+          python3 -I scripts/container_release_manifest.py --manifest candidate-manifest.json --config "$CONFIG_PATH"
       - name: Mint OIDC token and sign candidate manifest with Cosign
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           token="$RUNNER_TEMP/container-manifest-oidc-token"
-          python3 "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
+          python3 -I "$RUNNER_TEMP/container_cosign_provenance.py" request-oidc-token \
             --request-url "$ACTIONS_ID_TOKEN_REQUEST_URL" --output "$token"
-          python3 "$RUNNER_TEMP/container_cosign_provenance.py" sign-manifest \
+          python3 -I "$RUNNER_TEMP/container_cosign_provenance.py" sign-manifest \
             --identity-token "$token" --manifest candidate-manifest.json \
             --bundle candidate-manifest.sigstore.json
           rm -f "$token"

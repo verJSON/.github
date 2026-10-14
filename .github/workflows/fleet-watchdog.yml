@@ -138,7 +138,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           WATCHDOG_MAX_GAP_MINUTES: '30'
-        run: python3 scripts/fleet-watchdog-cadence.py
+        run: python3 -I scripts/fleet-watchdog-cadence.py
 
       - name: Remove the isolated watchdog checkout
         if: ${{ always() }}

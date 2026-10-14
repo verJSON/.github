@@ -307,7 +307,7 @@ def validate_workflow(path=WORKFLOW):
         "path": "policy",
     }, "protected verifier checkout boundary drifted")
     require(steps[2].get("run") ==
-            "python3 policy/scripts/cli-projects-package-surface.py verify consumer",
+            "python3 -I policy/scripts/cli-projects-package-surface.py verify consumer",
             "protected verifier invocation drifted")
     serialized_surface = json.dumps(job)
     require("secrets." not in serialized_surface and "github.token" not in serialized_surface,

@@ -747,6 +747,60 @@ with tempfile.TemporaryDirectory() as oversized_dir:
                         "--visibility", "public", oversized_dir)
 
 # ---------------------------------------------------------------------------
+# --dependency-path: the reusable workflow starts the script with `python3 -I -S`,
+# which ignores PYTHONPATH and site-packages, so PyYAML arrives only through an
+# explicit, absolute, non-symlink directory.
+# ---------------------------------------------------------------------------
+def run_isolated_policy(dependency_path: str, *arguments: str) -> tuple[int, str]:
+    environment = os.environ.copy()
+    environment["VERJSON_HOSTED_SELECTOR_POLICY_SHA"] = FIXTURE_CONTRACT_SHA
+    completed = subprocess.run(
+        [sys.executable, "-I", "-S", SCRIPT, "--dependency-path", dependency_path, *arguments],
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+    return completed.returncode, completed.stdout + completed.stderr
+
+
+import yaml  # noqa: E402 - located only to seed the isolated dependency directory
+
+with tempfile.TemporaryDirectory() as dependency_root:
+    dependency_root = os.path.realpath(dependency_root)
+    dependency_dir = os.path.join(dependency_root, "python")
+    shutil.copytree(os.path.dirname(yaml.__file__), os.path.join(dependency_dir, "yaml"))
+    linked_dir = os.path.join(dependency_root, "linked")
+    os.symlink(dependency_dir, linked_dir)
+    cases = (
+        ("an isolated start imports PyYAML from the explicit dependency path",
+         dependency_dir, 0),
+        ("a relative dependency path is undetermined",
+         os.path.relpath(dependency_dir), 2),
+        ("a symlinked dependency path is undetermined", linked_dir, 2),
+        ("a missing dependency directory is undetermined",
+         os.path.join(dependency_root, "absent"), 2),
+    )
+    for label, path, expected in cases:
+        code, output = run_isolated_policy(path, "--visibility", "public", CANONICAL_WORKFLOWS)
+        if code == expected:
+            ok(label)
+        else:
+            fail(f"{label} (expected exit {expected}, got {code}: {output.strip()})")
+    code, output = run_isolated_policy(dependency_root)
+    if code == 2 and "UNDETERMINED" in output:
+        ok("a dependency path without PyYAML cannot fall back to an ambient installation")
+    else:
+        fail(f"an isolated start without PyYAML did not fail closed (exit {code}: {output.strip()})")
+    completed = subprocess.run(
+        [sys.executable, "-I", "-S", SCRIPT, "--dependency-path"],
+        capture_output=True, text=True,
+    )
+    if completed.returncode == 2:
+        ok("--dependency-path without a directory is undetermined")
+    else:
+        fail(f"--dependency-path without a directory exited {completed.returncode}")
+
+# ---------------------------------------------------------------------------
 # The real tree this check gates, exercised through the same entry point CI uses.
 # ---------------------------------------------------------------------------
 code, output = run_policy("--visibility", "public",

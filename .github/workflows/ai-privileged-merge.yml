@@ -258,7 +258,7 @@ jobs:
           }
           export ARM_RECEIPT_ARTIFACT_ID_FILE="$RUNNER_TEMP/arm-receipt-artifact-id"
           bash .gate-trust/scripts/ci-gate/verify-arm-receipt.sh
-          policy_json="$(python3 .gate-trust/scripts/ci-gate/review-policy-envelope.py decode "$REVIEW_POLICY")" || {
+          policy_json="$(python3 -I .gate-trust/scripts/ci-gate/review-policy-envelope.py decode "$REVIEW_POLICY")" || {
             echo "::error::receipt-bound review policy is malformed"; exit 1;
           }
           [ "$(jq -r '.authority // "human"' <<<"$policy_json")" = ai-merge ] || {
@@ -550,7 +550,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          python3 .gate-trust/scripts/ci-gate/closing-issue-visibility.py capture \
+          python3 -I .gate-trust/scripts/ci-gate/closing-issue-visibility.py capture \
             --output "$RUNNER_TEMP/closing-issues.json"
 
       - name: Mint exact-repository terminal merge App token
@@ -609,7 +609,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          python3 .gate-trust/scripts/ci-gate/closing-issue-visibility.py report \
+          python3 -I .gate-trust/scripts/ci-gate/closing-issue-visibility.py report \
             --input "$RUNNER_TEMP/closing-issues.json"
 
   cleanup_arm_receipt:

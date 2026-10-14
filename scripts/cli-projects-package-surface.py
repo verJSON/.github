@@ -10,7 +10,10 @@ import tempfile
 
 import yaml
 
-from cli_projects_required_node_config import load_required_node_config
+# Workflows start this script with `python3 -I`, which leaves its own directory
+# off the module path; the sibling it imports lives there.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from cli_projects_required_node_config import load_required_node_config  # noqa: E402
 
 
 SHA = re.compile(r"[0-9a-f]{40}")

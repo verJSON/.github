@@ -15,7 +15,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from container_deployment_preflight import (
+# Workflows start this script with `python3 -I`, which leaves its own directory
+# off the module path; the sibling it imports lives there.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from container_deployment_preflight import (  # noqa: E402
     PreflightError,
     receipt_digest,
     validate_attempt_revision,

@@ -113,7 +113,7 @@ jobs:
           release_cli="$RUNNER_TEMP/release-app-canary-changelog-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.py"
           git --no-replace-objects -C "$GITHUB_WORKSPACE" \
             show "$GITHUB_SHA:scripts/changelog.py" > "$release_cli"
-          python3 "$release_cli" release \
+          python3 -I "$release_cli" release \
             --repo-root "$canary_root" \
             --version "$CANARY_VERSION" \
             --fragment "$fragment"

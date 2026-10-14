@@ -37,7 +37,46 @@ import stat
 import subprocess
 import sys
 
-import yaml
+
+def _prepend_dependency_path(argv: list[str]) -> None:
+    """Honor a leading ``--dependency-path DIR`` before PyYAML is imported.
+
+    The reusable actionlint workflow starts this script with ``python3 -I -S``,
+    which ignores ``PYTHONPATH``, so it names the directory holding its pinned,
+    checksum-verified PyYAML explicitly instead. Only a leading occurrence is
+    honored, because the import below runs before argument parsing.
+    """
+    if argv[1:2] != ["--dependency-path"]:
+        return
+    if len(argv) < 3:
+        print("UNDETERMINED: --dependency-path requires a directory", file=sys.stderr)
+        raise SystemExit(2)
+    directory = argv[2]
+    if (
+        not os.path.isabs(directory)
+        or os.path.realpath(directory) != directory
+        or not os.path.isdir(directory)
+    ):
+        print(
+            f"UNDETERMINED: {directory}: dependency path must be an absolute, "
+            "non-symlink directory",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    sys.path.insert(0, directory)
+    del argv[1:3]
+
+
+if __name__ == "__main__":
+    _prepend_dependency_path(sys.argv)
+
+try:
+    import yaml  # noqa: E402 - the dependency path must be in place first
+except ImportError as error:
+    # Exit 1 means "policy violation"; a sweep that never loaded its parser
+    # decided nothing.
+    print(f"UNDETERMINED: cannot import PyYAML: {error}", file=sys.stderr)
+    raise SystemExit(2) from error
 
 # ---------------------------------------------------------------------------
 # Policy constants

@@ -338,7 +338,7 @@ grep -q '::error title=Generated artifact out of date: Changelog::' <<<"$out" \
 # in Verjson/.github and consumers never commit scripts/changelog.py, so naming
 # that path sends every consumer to "No such file or directory" — the opposite
 # of the one-command promise. The engine path is the pinned contract checkout.
-grep -qE '^ +python3 \.changelog-contract/scripts/changelog\.py validate --repo-root \.$' "$ws/summary.md" \
+grep -qE '^ +python3 -I \.changelog-contract/scripts/changelog\.py validate --repo-root \.$' "$ws/summary.md" \
   && pass "the changelog remedy names the pinned contract engine, not a path consumers lack" \
   || fail "the changelog remedy is not runnable by a consumer: $(cat "$ws/summary.md")"
 
@@ -492,7 +492,7 @@ grep -q '::error title=Generated artifact out of date: Changelog::' <<<"$out" \
 # The remedy names the subcommand that failed. Sending someone to `validate`
 # for a policy failure sends them to a command that passes, which reads as a
 # flaky check rather than a verdict about their pull request.
-grep -qF "python3 .changelog-contract/scripts/changelog.py check-pr --repo-root . --base $base_sha --head $head_sha" \
+grep -qF "python3 -I .changelog-contract/scripts/changelog.py check-pr --repo-root . --base $base_sha --head $head_sha" \
   "$ws/summary.md" \
   && pass "a policy-check failure names check-pr, with the SHAs it was given" \
   || fail "the policy-check remedy is not the command that failed: $(cat "$ws/summary.md")"
@@ -548,7 +548,7 @@ rc=$?
   && pass "legacy_dir reaches the contract engine, so its fragments are validated too" \
   || fail "legacy_dir was dropped — fragments there are never checked: $out"
 
-grep -qE '^ +python3 \.changelog-contract/scripts/changelog\.py validate --repo-root \. --legacy-dir legacy-next$' \
+grep -qE '^ +python3 -I \.changelog-contract/scripts/changelog\.py validate --repo-root \. --legacy-dir legacy-next$' \
   "$ws/summary.md" \
   && pass "the remedy carries legacy_dir, so re-running it reproduces the verdict" \
   || fail "the remedy drops legacy_dir and would pass locally: $(cat "$ws/summary.md")"

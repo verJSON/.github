@@ -91,9 +91,9 @@ jobs:
             # pull request adds must state major, minor, or patch explicitly.
             args+=(--allow-missing-impact-through 2026-08-29)
           fi
-          python3 .changelog-contract/scripts/changelog.py validate "${args[@]}"
+          python3 -I .changelog-contract/scripts/changelog.py validate "${args[@]}"
           if [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
-            python3 .changelog-contract/scripts/changelog.py check-pr \
+            python3 -I .changelog-contract/scripts/changelog.py check-pr \
               --repo-root "$GITHUB_WORKSPACE" --base "$BASE_SHA" --head "$HEAD_SHA"
           fi
       - name: Preview the release notes this would publish

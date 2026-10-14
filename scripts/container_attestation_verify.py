@@ -9,7 +9,10 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from container_release_manifest import validate_manifest
+# Workflows start this script with `python3 -I`, which leaves its own directory
+# off the module path; the sibling it imports lives there.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from container_release_manifest import validate_manifest  # noqa: E402
 
 
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]

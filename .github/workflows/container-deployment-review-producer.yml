@@ -90,7 +90,7 @@ jobs:
           else
             args+=(--review-id '${{ inputs.review-id }}')
           fi
-          python3 scripts/container_deployment_review_producer.py "${args[@]}"
+          python3 -I scripts/container_deployment_review_producer.py "${args[@]}"
       - id: artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: {name: 'runner-deploy-${{ inputs.kind }}-review-${{ github.run_id }}-${{ github.run_attempt }}', path: review-receipt.json, if-no-files-found: error, retention-days: 90}
@@ -127,7 +127,7 @@ jobs:
           permission-checks: write
       - env: {GH_TOKEN: '${{ steps.publisher.outputs.token }}'}
         run: |
-          python3 scripts/container_deployment_review_producer.py publish --repository "$GITHUB_REPOSITORY" --check-name runner-deploy-code-review \
+          python3 -I scripts/container_deployment_review_producer.py publish --repository "$GITHUB_REPOSITORY" --check-name runner-deploy-code-review \
             --receipt review-receipt.json --artifact-id '${{ needs.analyze.outputs.artifact-id }}' \
             --artifact-digest '${{ needs.analyze.outputs.artifact-digest }}' --installation-id '${{ steps.publisher.outputs.installation-id }}' \
             --expected-installation-id '${{ needs.analyze.outputs.expected-installation-id }}'
@@ -164,7 +164,7 @@ jobs:
           permission-checks: write
       - env: {GH_TOKEN: '${{ steps.publisher.outputs.token }}'}
         run: |
-          python3 scripts/container_deployment_review_producer.py publish --repository "$GITHUB_REPOSITORY" --check-name runner-deploy-security-review \
+          python3 -I scripts/container_deployment_review_producer.py publish --repository "$GITHUB_REPOSITORY" --check-name runner-deploy-security-review \
             --receipt review-receipt.json --artifact-id '${{ needs.analyze.outputs.artifact-id }}' \
             --artifact-digest '${{ needs.analyze.outputs.artifact-digest }}' --installation-id '${{ steps.publisher.outputs.installation-id }}' \
             --expected-installation-id '${{ needs.analyze.outputs.expected-installation-id }}'
@@ -201,7 +201,7 @@ jobs:
           permission-checks: write
       - env: {GH_TOKEN: '${{ steps.publisher.outputs.token }}'}
         run: |
-          python3 scripts/container_deployment_review_producer.py publish --repository "$GITHUB_REPOSITORY" --check-name runner-deploy-ai-review \
+          python3 -I scripts/container_deployment_review_producer.py publish --repository "$GITHUB_REPOSITORY" --check-name runner-deploy-ai-review \
             --receipt review-receipt.json --artifact-id '${{ needs.analyze.outputs.artifact-id }}' \
             --artifact-digest '${{ needs.analyze.outputs.artifact-digest }}' --installation-id '${{ steps.publisher.outputs.installation-id }}' \
             --expected-installation-id '${{ needs.analyze.outputs.expected-installation-id }}'

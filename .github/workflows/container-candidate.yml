@@ -77,7 +77,7 @@ jobs:
           CONFIG_PATH="$config_path"
           destination_helper="$RUNNER_TEMP/container_registry_destinations.py"
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_registry_destinations.py" -o "$destination_helper"
-          destination_contract="$(python3 "$destination_helper" --config "$CONFIG_PATH" --owner "$GITHUB_REPOSITORY_OWNER")"
+          destination_contract="$(python3 -I "$destination_helper" --config "$CONFIG_PATH" --owner "$GITHUB_REPOSITORY_OWNER")"
           expected_namespace="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
           jq -e --arg repository "$GITHUB_REPOSITORY" --arg namespace "$expected_namespace" \
             --argjson cleanup_unused_docker_images "$CLEANUP_UNUSED_DOCKER_IMAGES" '

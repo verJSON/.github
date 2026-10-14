@@ -157,7 +157,7 @@ jobs:
         env:
           HOME: ${{{{ runner.temp }}}}/credentialless-home
           NPM_CONFIG_USERCONFIG: ${{{{ runner.temp }}}}/credentialless-npmrc
-        run: python3 policy/scripts/cli-projects-package-surface.py verify consumer
+        run: python3 -I policy/scripts/cli-projects-package-surface.py verify consumer
 """
 
 
