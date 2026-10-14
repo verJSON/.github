@@ -54,11 +54,15 @@ def policy(authority: str | None) -> str:
 failures = 0
 
 
-def report(ok: bool, name: str) -> None:
+def report(ok: bool, name: str, result: subprocess.CompletedProcess | None = None) -> None:
     global failures
     print(("ok   - " if ok else "FAIL - ") + name)
     if not ok:
         failures += 1
+        if result is not None:
+            # JSON-escaped so step output (which quotes untrusted paths) cannot emit commands.
+            tail = (result.stdout + result.stderr)[-600:]
+            print(f"       exit={result.returncode} output-tail={json.dumps(tail)}")
 
 
 def generate_caller(sha: str) -> bytes:
@@ -271,6 +275,7 @@ class Harness:
 
     def eligible(self, consumer: Consumer) -> bool:
         result, outputs = self.run_step("bootstrap", consumer)
+        self.last = result
         if result.returncode != 0:
             raise AssertionError(f"classification step failed: {result.stderr}")
         return outputs.get("eligible") == "true"
@@ -309,7 +314,12 @@ class Harness:
         calls = self.tmp / "calls.jsonl"
         calls.write_text("", encoding="utf-8")
         self.calls = calls
-        env = {
+        # A real step inherits the job environment. setup-python's shared-libpython build
+        # needs its LD_LIBRARY_PATH (actions-ci run 38495189807), so only GitHub credentials
+        # and stub controls are removed before the fixture's own values apply.
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("GH_", "GITHUB_", "REVIEW_LOGIN"))}
+        env |= {
             "PATH": f"{self.path_prefix}{self.tmp / 'bin'}:{os.environ['PATH']}",
             "HOME": str(self.tmp),
             "RUNNER_TEMP": str(self.tmp),
@@ -324,6 +334,7 @@ class Harness:
             "DEFAULT_BRANCH": "main",
             "EXPECTED_HEAD_SHA": HEAD,
             "CHECK_ID": "9001",
+            "GITHUB_SERVER_URL": "https://github.com",
         }
         env.update(extra_env or {})
         result = subprocess.run(["bash", "-e", str(script)], env=env, capture_output=True, text=True)
@@ -594,9 +605,10 @@ INELIGIBLE_REASONS = {
 def main() -> int:
     harness = Harness()
 
-    report(harness.eligible(Consumer()) and harness.run_step("bootstrap", Consumer())[1].get("stale_sha") == STALE
-           and harness.run_step("bootstrap", Consumer())[1].get("contract_sha") == CONTRACT,
-           "a byte-exact generated stale caller update is classified as a bootstrap")
+    result, outputs = harness.run_step("bootstrap", Consumer())
+    report(result.returncode == 0 and outputs.get("eligible") == "true" and outputs.get("stale_sha") == STALE
+           and outputs.get("contract_sha") == CONTRACT,
+           "a byte-exact generated stale caller update is classified as a bootstrap", result)
     runner_bootstrap = Consumer()
     runner_bootstrap.base[CALLER] = generate_caller("2d1ea177fdafe361f9369526cbab8bc05f9e476d")
     runner_bootstrap.canonical = {
@@ -605,13 +617,13 @@ def main() -> int:
         f"2d1ea177fdafe361f9369526cbab8bc05f9e476d...{CONTRACT}": "ahead",
         f"{CONTRACT}...main": "ahead",
     }
-    report(harness.eligible(runner_bootstrap), "the runner fleet's stale 2d1ea177 caller can bootstrap")
+    report(harness.eligible(runner_bootstrap), "the runner fleet's stale 2d1ea177 caller can bootstrap", harness.last)
     report(harness.eligible(with_files(**{"tests/pins.test.ts": (mirror(STALE), mirror(CONTRACT))})),
-           "a pin mirror that only swaps the stale pin and caller digest is accepted")
+           "a pin mirror that only swaps the stale pin and caller digest is accepted", harness.last)
     for identity in ("20261013T120000Z", "1696", "a49c6d20f3"):
         path, content = fragment("2026-10-13", identity)
         report(harness.eligible(with_files(**{path: (None, content)})),
-               f"the generated bootstrap changelog fragment is accepted ({identity})")
+               f"the generated bootstrap changelog fragment is accepted ({identity})", harness.last)
 
     ordinary = with_files(**{CALLER: (generate_caller(STALE), generate_caller(STALE)),
                              "src/feature.ts": (None, b"export const feature = true;\n")})
@@ -641,14 +653,15 @@ def main() -> int:
         result, outputs = harness.run_step("bootstrap", consumer)
         reason = INELIGIBLE_REASONS[name]
         report(result.returncode == 0 and outputs.get("eligible") == "false" and reason in result.stdout,
-               f"{name} ({reason})")
+               f"{name} ({reason})", result)
         if mutation is None:
             continue
         text = mutated(*mutation)
         if text is None:
             report(False, f"mutation for '{name}' no longer applies exactly once")
             continue
-        report(Harness(text).eligible(consumer), f"mutation proof: removing the guard admits '{name}'")
+        mutant = Harness(text)
+        report(mutant.eligible(consumer), f"mutation proof: removing the guard admits '{name}'", mutant.last)
 
     rendered = subprocess.run(["bash", "-c", harness.steps["bootstrap"]["run"].split("eligible=false", 1)[0]],
                               env={**os.environ, "RUNNER_TEMP": str(harness.tmp)}, capture_output=True)
@@ -824,7 +837,8 @@ def main() -> int:
     report(result.returncode == 0 and outputs.get("eligible") == "false" and json.dumps(INJECTED_PATH) in log
            and not any(line.startswith("::warning") for line in log.splitlines()),
            "an untrusted path is reported JSON-escaped, never as a raw workflow command")
-    report(not live_commands(log), "classification output from untrusted paths runs inside stop-commands")
+    report(json.dumps(INJECTED_PATH) in log and not live_commands(log),
+           "classification output from untrusted paths runs inside stop-commands", result)
     result, _ = harness.run_step("bootstrap-complete", injected, {
         "EXPECTED_EXTERNAL_ID": EXTERNAL_ID, "REVIEW_POLICY": policy("ai-merge"), "BOOTSTRAP_ELIGIBLE": "true",
         "STALE_SHA": STALE, "CONTRACT_SHA": CONTRACT, "APP_TOKEN": "app-token", "APP_SLUG": "verjson-ai-review",
@@ -842,8 +856,8 @@ def main() -> int:
                "mutation proof: without JSON escaping the command appears, still neutralized by stop-commands")
         unwrapped = unescaped.replace('echo "::stop-commands::$token"', ':', 1)
         result, _ = Harness(unwrapped).run_step("bootstrap", injected)
-        report(bool(live_commands(result.stdout + result.stderr)),
-               "mutation proof: without either layer the injected command would run")
+        report(any(line.startswith("::warning") for line in live_commands(result.stdout + result.stderr)),
+               "mutation proof: without either layer the injected command would run", result)
         completion_env = {
             "EXPECTED_EXTERNAL_ID": EXTERNAL_ID, "REVIEW_POLICY": policy("ai-merge"), "BOOTSTRAP_ELIGIBLE": "true",
             "STALE_SHA": STALE, "CONTRACT_SHA": CONTRACT, "APP_TOKEN": "app-token", "APP_SLUG": "verjson-ai-review",
@@ -856,8 +870,9 @@ def main() -> int:
         unwrapped_completion, _ = bare.run_step("bootstrap-complete", injected, completion_env)
         strip = lambda text: "\n".join(line for line in text.splitlines() if not line.startswith("::error::"))
         report(not live_commands(strip(wrapped_completion.stdout + wrapped_completion.stderr))
-               and bool(live_commands(strip(unwrapped_completion.stdout + unwrapped_completion.stderr))),
-               "mutation proof: the completion step's stop-commands wrapper is load-bearing")
+               and any(line.startswith("::warning")
+                       for line in live_commands(strip(unwrapped_completion.stdout + unwrapped_completion.stderr))),
+               "mutation proof: the completion step's stop-commands wrapper is load-bearing", unwrapped_completion)
     else:
         report(False, "mutation for the path escaping layer no longer applies")
 
