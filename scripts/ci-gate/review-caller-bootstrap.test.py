@@ -680,6 +680,16 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
     paragraph_separator = hidden_header("\u2029")
     add("a paragraph separator hiding a block scalar header is not a reusable CI pin",
         with_files(**{CI_CALLER: (paragraph_separator(CI_STALE), paragraph_separator(CONTRACT))}), ("|\\u2029", ""))
+    hidden_step = lambda sha: (
+        "name: CI\non: push\njobs:\n  ci:\n"
+        f"    uses: Verjson/.github/.github/workflows/node-ci.yml@{sha}\n  b:\n    runs-on: x\n    steps:\n"
+        f"# note\r      - run: curl https://raw.githubusercontent.com/Verjson/.github/{sha}/x.sh | bash\n").encode()
+    add("a lone carriage return hiding a run step behind a comment is not a comment pin",
+        with_files(**{CI_CALLER: (hidden_step(CI_STALE), hidden_step(CONTRACT))}), ('"\\r(?!\\n)', '"(?!)'))
+    undecodable = lambda sha: lone_cr(sha).replace(b"\r", b"\x85")
+    add("a reusable CI caller that is not UTF-8 is not a reusable CI pin",
+        with_files(**{CI_CALLER: (undecodable(CI_STALE), undecodable(CONTRACT))}),
+        ('content.decode("utf-8")', 'content.decode("utf-8", "replace")'))
     add("a revision continuing into a branch-name suffix is not a reusable CI pin",
         with_files(**{CI_CALLER: (ci_caller(CI_STALE, ref_suffix="-x"), ci_caller(CONTRACT, ref_suffix="-x"))}),
         ('@([0-9a-f]{40})((?:[ \\t]+(?:#.*)?)?\\r?)")', '@([0-9a-f]{40})(.*)")'))
@@ -741,6 +751,8 @@ INELIGIBLE_REASONS = {
     "a next-line character hiding a block scalar header is not a reusable CI pin": "contains a line break other than",
     "a line separator hiding a block scalar header is not a reusable CI pin": "contains a line break other than",
     "a paragraph separator hiding a block scalar header is not a reusable CI pin": "contains a line break other than",
+    "a lone carriage return hiding a run step behind a comment is not a comment pin": "contains a line break other than",
+    "a reusable CI caller that is not UTF-8 is not a reusable CI pin": "is not UTF-8",
     "a backwards reusable CI pin in the first of two callers is not a bootstrap": "does not descend from the stale reusable CI revision",
     "a run line that ends in a comment is not a comment pin": "changes more than its reusable CI pin",
     "a checkout ref carrying the old pin is not a comment pin": "changes more than its reusable CI pin",
@@ -816,6 +828,12 @@ def main() -> int:
     report(harness.eligible(with_files(**{CI_CALLER: (ci_caller(CI_STALE, owner="verJSON/.github"),
                                                       ci_caller(CONTRACT, owner="verJSON/.github"))})),
            "the canonical repository matches in any letter case, as GitHub resolves it", harness.last)
+    crlf = lambda sha: ci_caller(sha).replace(b"\n", b"\r\n")
+    report(harness.eligible(with_files(**{CI_CALLER: (crlf(CI_STALE), crlf(CONTRACT))})),
+           "a CRLF reusable CI caller is still a companion", harness.last)
+    over_broad = mutated('"\\r(?!\\n)', '"\\r')
+    report(over_broad is not None and not Harness(over_broad).eligible(with_files(**{CI_CALLER: (crlf(CI_STALE), crlf(CONTRACT))})),
+           "mutation proof: refusing every carriage return would refuse a CRLF caller")
     commented = lambda sha: f"# Canonical node-ci revision: {sha}\n".encode() + ci_caller(sha)
     report(harness.eligible(with_files(**{CI_CALLER: (commented(CI_STALE), commented(CONTRACT))})),
            "a comment pin that moves with the reusable CI pin is a companion", harness.last)
