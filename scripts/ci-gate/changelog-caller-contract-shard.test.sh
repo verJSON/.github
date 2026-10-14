@@ -77,6 +77,10 @@ validation = {
     'case "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" in',
     "  *) printf 'FAIL - CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY must be 0 or 1\\n' >&2; exit 1 ;;",
 }
+shard_validation = {
+    'if ! changelog_caller_shard_name_ok "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}"; then',
+    "  printf 'FAIL - CHANGELOG_CALLER_CONTRACT_SHARD must be all or 1..4\\n' >&2",
+}
 blocks = [i for i in range(len(lines)) if lines[i:i + len(predicates)] == predicates]
 if len(blocks) != 1:
     raise SystemExit(f"expected the pinned gate predicates exactly once, found {len(blocks)}")
@@ -88,7 +92,9 @@ if any(re.match(r"\s*(?:function\s+)?generator_only_(?:row|assertions)\b\s*(?:\(
 for i in outside:
     if "CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY" in lines[i] and lines[i] not in validation:
         raise SystemExit(f"line {i + 1} tests the generator-only mode outside the gate predicates")
-    if re.search(r"CHANGELOG_CALLER_CONTRACT_SHARD[^\n]*!?=\s*\"?all\b", lines[i]):
+    # Any other read of the shard selector could reselect the unsharded run,
+    # by comparison or by case pattern; only its validation may name it.
+    if "CHANGELOG_CALLER_CONTRACT_SHARD" in lines[i] and lines[i] not in shard_validation:
         raise SystemExit(f"line {i + 1} tests for the unsharded run outside the gate predicates")
 gate_calls = [i for i in outside if re.search(r"\bgenerator_only_assertions\b", lines[i])]
 if gate_calls != [start + 1] or lines[start + 1] != "if generator_only_assertions; then":
@@ -246,8 +252,15 @@ printf '#!/usr/bin/env bash\nx=1\n' >"$tmp/leak-unmarked.sh"
   printf '# BEGIN generator-only assertions\nif generator_only_assertions; then\n%s\nfi\n' "$early_exit"
   printf '# END generator-only assertions\nprintf %%s "$leaked"\n'
 } >"$tmp/leak-second-call.sh"
+# The unsharded run selected by a case pattern instead of a comparison.
+{
+  fixture_header
+  printf '%s\n' 'case "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}" in' '  all) capture_mode leaked workflow "$sha" ;;' 'esac'
+  printf '# BEGIN generator-only assertions\nif generator_only_assertions; then\n%s\nfi\n' "$early_exit"
+  printf '# END generator-only assertions\nprintf %%s "$leaked"\n'
+} >"$tmp/leak-shard-case.sh"
 misplaced_ok=1
-for misplaced in end-early begin-late wrong-gate dummy-gate second-call; do
+for misplaced in end-early begin-late wrong-gate dummy-gate second-call shard-case; do
   if python3 "$tmp/fixture-leaks.py" "$tmp/leak-$misplaced.sh" >/dev/null 2>"$tmp/leak.err" \
     || ! grep -qE 'marker|gate' "$tmp/leak.err"; then
     misplaced_ok=0
