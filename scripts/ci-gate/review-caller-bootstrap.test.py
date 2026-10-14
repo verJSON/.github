@@ -669,6 +669,9 @@ def main() -> int:
            "a pin mirror that only swaps the stale pin and caller digest is accepted", harness.last)
     report(harness.eligible(with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT))})),
            "a reusable node-ci caller that only moves its pin to the contract revision is a companion", harness.last)
+    commented = lambda sha: f"# Canonical node-ci revision: {sha}\n".encode() + ci_caller(sha)
+    report(harness.eligible(with_files(**{CI_CALLER: (commented(CI_STALE), commented(CONTRACT))})),
+           "a comment pin that moves with the reusable CI pin is a companion", harness.last)
     for identity in ("20261013T120000Z", "1696", "a49c6d20f3"):
         path, content = fragment("2026-10-13", identity)
         report(harness.eligible(with_files(**{path: (None, content)})),

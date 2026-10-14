@@ -1008,6 +1008,7 @@ jobs:
           # add a workflow only with evidence that its stale pin alone blocks a bootstrap.
           REUSABLE_CI = (".github/workflows/node-ci.yml",)
           WORKFLOW_FILE = re.compile(r"\.github/workflows/[A-Za-z0-9._-]+\.ya?ml")
+          COMMENT = re.compile(rb"[ \t]*#")
           REUSABLE_REF = re.compile(rb"( +uses: )([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/(\.github/workflows/[A-Za-z0-9._-]+\.ya?ml)@([0-9a-f]{40})(.*)")
           INPUTS = (
               ("pr_number", True), ("expected_head_sha", True), ("authorization_check_id", True),
@@ -1131,13 +1132,17 @@ jobs:
 
 
           def reusable_ci_pins(path, before, after, contract):
-              # A reusable CI caller has no generator, so its proof is a line diff: every changed
-              # line is a reusable workflow reference whose 40-hex revision alone moves to the contract.
+              # A reusable CI caller has no generator, so its proof is a line diff. A changed line is either an
+              # allowlisted canonical reusable workflow reference whose 40-hex revision alone moves to the
+              # contract, or a comment whose only change is that same revision swap.
               old_lines, new_lines = before.split(b"\n"), after.split(b"\n")
               require(len(old_lines) == len(new_lines), f"{shown(path)} changes more than its reusable CI pin")
-              stale = set()
+              stale, comments = set(), []
               for old, new in zip(old_lines, new_lines):
                   if old == new:
+                      continue
+                  if COMMENT.match(old) is not None:
+                      comments.append((old, new))
                       continue
                   ref = REUSABLE_REF.fullmatch(old)
                   require(ref is not None and new == old[:ref.start(4)] + contract.encode() + old[ref.end(4):],
@@ -1145,6 +1150,11 @@ jobs:
                   require(same_repository(ref[2].decode(), CANONICAL) and ref[3].decode() in REUSABLE_CI,
                           f"{shown(path)} moves a workflow that is not an allowlisted canonical reusable CI workflow")
                   stale.add(ref[4].decode())
+              for old, new in comments:
+                  moved = old
+                  for revision in stale:
+                      moved = moved.replace(revision.encode(), contract.encode())
+                  require(new == moved, f"{shown(path)} changes more than its reusable CI pin")
               return stale
 
 
