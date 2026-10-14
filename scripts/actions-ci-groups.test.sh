@@ -126,7 +126,7 @@ assert install_python_dependencies == {
         "${{ github.run_attempt }}-${{ matrix.group }}"
     ),
     "run": (
-        "python3 -m pip install \\\n"
+        "python3 -I -m pip install \\\n"
         "  --disable-pip-version-check \\\n"
         "  --no-input \\\n"
         "  --quiet \\\n"
@@ -169,12 +169,12 @@ assert group_step["run"] == (
 
 compatibility_commands = (
     "bash scripts/ci-gate/node-ci-secretless-compatibility.test.sh",
-    "scripts/ci-gate/node-ci-secretless-compatibility-absent.test.py",
-    "python3 scripts/ci-gate/node-ci-required-identity.test.py",
-    "VERJSON_TEST_REAL_BWRAP=1 python3 scripts/ci-gate/node-ci-secretless-rebuild-env.test.py",
+    "python3 -I scripts/ci-gate/node-ci-secretless-compatibility-absent.test.py",
+    "python3 -I scripts/ci-gate/node-ci-required-identity.test.py",
+    "VERJSON_TEST_REAL_BWRAP=1 python3 -I scripts/ci-gate/node-ci-secretless-rebuild-env.test.py",
     "bash scripts/ci-gate/node-ci-secretless-consumer.test.sh",
     "bash scripts/ci-gate/node-ci-secretless-nested-manifests.test.sh",
-    "python3 scripts/container_release_reconcile.test.py",
+    "python3 -I scripts/container_release_reconcile.test.py",
 )
 
 def validate_hosted_compatibility(candidate, candidate_manifest):
@@ -1121,8 +1121,10 @@ expected = shards | {
     "merge-gate\tbash scripts/ci-gate/native-automerge.test.sh": 90,
     "merge-gate\tbash scripts/ci-gate/arm-receipt.test.sh": 90,
     "merge-gate\tbash scripts/ci-gate/zero-provider-recovery.test.sh": 90,
-    # 164s serially on main run 38502038500.
-    "merge-gate\tpython3 scripts/ci-gate/review-caller-bootstrap.test.py": 330,
+    # 173s serially on main run 38513400637.
+    "merge-gate\tpython3 scripts/ci-gate/review-caller-bootstrap.test.py": 360,
+    # 31s serially on main run 38513400637.
+    "platform\tpython3 scripts/ci-gate/hosted-selector-policy.test.py": 90,
 }
 if declared != expected:
     drift = sorted(
