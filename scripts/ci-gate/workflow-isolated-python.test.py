@@ -124,30 +124,7 @@ NON_WORKFLOW_GENERATORS = {
 # Reviewed exceptions: (source, step name, invocation text) -> written reason.
 # Keep it rare: an interpreter that cannot run isolated must be fixed, not
 # listed. An entry that no longer matches a finding fails, so it cannot linger.
-SELF_RELEASE_CALLER_PIN = (
-    "this repository's own release caller is gen-changelog-caller.sh output pinned to "
-    "contract d1bf04c7f73c04f37cc942d8b0a7a03e173579f8 and is never hand-edited; the "
-    "generator emits these steps isolated, so the next canonical repin regenerates "
-    "them isolated and this entry then fails as stale"
-)
-ALLOWED_NON_ISOLATED = {
-    (".github/workflows/release.yml", step, invocation): SELF_RELEASE_CALLER_PIN
-    for step, invocation in (
-        ("Require an explicit release version", "python3 - <<'PY'"),
-        (
-            "Resolve the release selection and version",
-            'python3 .changelog-contract/scripts/changelog.py "${args[@]}" >"$plan_file"',
-        ),
-        (
-            "Resolve the release selection and version",
-            'actual_selector_digest="$(python3 - "$plan_file" <<\'PY\'',
-        ),
-        (
-            "Resolve the release selection and version",
-            'python3 - "$plan_file" "$GITHUB_OUTPUT" "$GITHUB_STEP_SUMMARY" "$GITHUB_SHA" <<\'PY\'',
-        ),
-    )
-}
+ALLOWED_NON_ISOLATED: dict[tuple[str, str, str], str] = {}
 
 # Any directory prefix counts: toolcache and venv interpreters are still Python.
 INTERPRETER = r"(?:[^\s\"'`=;|&()$]*/)?python(?:3(?:\.\d+)?)?"
@@ -387,7 +364,7 @@ def step_shell_findings(step, job, document):
     return [] if flags_are_isolated(tokens[1:]) else [f"shell: {shell}"]
 
 
-def workflow_findings(source, text, allowed_used):
+def workflow_findings(source, text, allowed_used, allowed=ALLOWED_NON_ISOLATED):
     """Non-isolated invocations in one workflow document, minus reviewed exceptions."""
     document = yaml.safe_load(text)
     assert isinstance(document, dict), f"{source}: workflow is not a mapping"
@@ -401,7 +378,7 @@ def workflow_findings(source, text, allowed_used):
             invocations = non_isolated_invocations(script) + step_shell_findings(step, job, document)
             for invocation in invocations:
                 key = (source, step_name, invocation)
-                if key in ALLOWED_NON_ISOLATED:
+                if key in allowed:
                     allowed_used.add(key)
                 else:
                     findings.append(f"{source}: {job_name} / {step_name}: {invocation}")
@@ -477,17 +454,22 @@ def workflow_sources():
     return sources
 
 
-def all_findings(sources):
+def exception_findings(sources, allowed):
+    """Findings across workflow sources, failing any exception that matched none."""
     allowed_used = set()
-    findings = generator_classification_findings()
+    findings = []
     for source, text in sources:
-        findings += workflow_findings(source, text, allowed_used)
+        findings += workflow_findings(source, text, allowed_used, allowed)
     findings += [
         f"{source}: {step} / {invocation}: stale exception; remove it ({reason})"
-        for (source, step, invocation), reason in ALLOWED_NON_ISOLATED.items()
+        for (source, step, invocation), reason in allowed.items()
         if (source, step, invocation) not in allowed_used
     ]
     return findings
+
+
+def all_findings(sources):
+    return generator_classification_findings() + exception_findings(sources, ALLOWED_NON_ISOLATED)
 
 
 def assert_scanner_recognizes_invocation_forms():
@@ -777,8 +759,32 @@ def assert_dependency_lock_validator_ignores_checkout_modules(workflow):
         )
 
 
+def assert_reviewed_exceptions_suppress_and_go_stale():
+    """The allowlist is empty, so prove its suppression and stale guard on a fixture."""
+    source = "fixture.yml"
+    step = "Run inline Python"
+    invocation = "python3 - <<'PY'"
+    workflow = (
+        "jobs:\n  check:\n    steps:\n"
+        f"      - name: {step}\n        run: |\n          {invocation}\n          pass\n          PY\n"
+    )
+    exception = {(source, step, invocation): "reviewed fixture exception"}
+    assert workflow_findings(source, workflow, set(), {}), (
+        "the fixture must carry a non-isolated invocation for the exception to suppress"
+    )
+    assert not workflow_findings(source, workflow, set(), exception), (
+        "a reviewed exception must suppress the matching finding"
+    )
+    isolated = workflow.replace(invocation, "python3 -I - <<'PY'")
+    stale = exception_findings([(source, isolated)], exception)
+    assert any("stale exception; remove it" in finding for finding in stale), (
+        f"an exception that no longer matches a finding must fail as stale, got {stale!r}"
+    )
+
+
 def main():
     assert_scanner_recognizes_invocation_forms()
+    assert_reviewed_exceptions_suppress_and_go_stale()
     sources = workflow_sources()
     findings = all_findings(sources)
     assert not findings, (
