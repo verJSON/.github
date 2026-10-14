@@ -265,7 +265,7 @@ supervisor_leads_its_group() {
   local pid="$1" stat state process_group children
   supervisor_group_evidence=''
   for _ in {1..500}; do
-    if ! stat="$(<"/proc/$pid/stat")" 2>/dev/null || [[ "$stat" != *") "* ]]; then
+    if ! { stat="$(<"/proc/$pid/stat")"; } 2>/dev/null || [[ "$stat" != *") "* ]]; then
       supervisor_group_evidence='(its /proc stat is unreadable)'
       return 1
     fi
@@ -290,7 +290,7 @@ supervisor_leads_its_group() {
 run_command() {
   local index="$1"
   local command="$2"
-  local started status=0 elapsed supervisor_pid process_group release_fd supervisor_output_fd
+  local started status=0 elapsed supervisor_pid process_group release_fd release_token
   local background_processes=0
   local command_group_file="$tmp/$index.pgid"
 
@@ -319,16 +319,15 @@ else
 fi
 exit "$status"
 SUPERVISOR
-  # shellcheck disable=SC2034 # COPROC is set by bash for the coprocess.
-  coproc setsid bash "$tmp/$index.supervisor.sh" "${command_budgets[$index]}" "$command" \
-    "$tmp/$index.raw.log"
+  # The supervisor's stdin is a pipe whose only write end the worker holds; a
+  # process substitution gives that without `coproc`, which the ref-encoding
+  # scan declines to model.
+  exec {release_fd}> >(setsid bash "$tmp/$index.supervisor.sh" "${command_budgets[$index]}" \
+    "$command" "$tmp/$index.raw.log" >/dev/null)
   # setsid execs in place from this non-leader job, so the supervisor's PID is
   # its session and process-group ID. The worker keeps it; the file only lets
   # the parent clean up if this worker dies, and no row is told where it is.
-  supervisor_pid="$COPROC_PID"
-  release_fd="${COPROC[1]}"
-  supervisor_output_fd="${COPROC[0]}"
-  exec {supervisor_output_fd}<&-
+  supervisor_pid="$!"
   process_group="$supervisor_pid"
   printf '%s\n' "$process_group" >"$command_group_file"
   # setsid forks instead when its caller leads a process group, and then $! is
@@ -337,10 +336,13 @@ SUPERVISOR
   local group_confirmed=0
   if supervisor_leads_its_group "$supervisor_pid"; then
     group_confirmed=1
-    printf 'go\n' >&"$release_fd"
+    release_token=go
   else
-    printf 'stop\n' >&"$release_fd"
+    release_token=stop
   fi
+  # A supervisor that already exited closed the pipe; write from a subshell so
+  # SIGPIPE ends that subshell, not this worker and its result.
+  ( printf '%s\n' "$release_token" >&"$release_fd" ) 2>/dev/null || true
   exec {release_fd}>&-
   wait "$supervisor_pid" || status=$?
   if [ "$group_confirmed" -ne 1 ]; then
