@@ -61,8 +61,16 @@ if len(begins) != 1 or len(ends) != 1 or begins[0] >= ends[0]:
         f"expected one generator-only section, found {len(begins)} BEGIN and {len(ends)} END markers"
     )
 start, end = begins[0], ends[0]
-gate = lines[start + 1] if start + 1 < len(lines) else ""
-if not (gate.startswith("if ") and "CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY" in gate):
+# The gate is pinned by its exact text, so markers cannot be moved onto the
+# other GENERATOR_ONLY `if` (the early exit) while a capture sits in this one.
+gate = [
+    'if [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ] \\',
+    '  || [ "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}" = all ]; then',
+]
+gate_starts = [i for i in range(len(lines) - 1) if lines[i:i + 2] == gate]
+if len(gate_starts) != 1:
+    raise SystemExit(f"expected exactly one generator-only gate, found {len(gate_starts)}")
+if gate_starts[0] != start + 1:
     raise SystemExit("BEGIN marker must directly precede the generator-only gate's `if` line")
 if lines[end - 1] != "fi":
     raise SystemExit("END marker must directly follow the generator-only gate's closing `fi`")
@@ -136,7 +144,9 @@ fi
 
 # The checker must see every way bash binds a name, and a quoted heredoc token
 # inside the section must not hide the section from it.
-gate_line='if [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ]; then'
+gate_line='if [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ] \
+  || [ "${CHANGELOG_CALLER_CONTRACT_SHARD:-all}" = all ]; then'
+other_gate_line='if [ "${CHANGELOG_CALLER_CONTRACT_GENERATOR_ONLY:-0}" = 1 ]; then'
 leak_fixture() { # <name> <definition line>
   {
     printf '#!/usr/bin/env bash\n'
@@ -176,8 +186,15 @@ printf '#!/usr/bin/env bash\nx=1\n' >"$tmp/leak-unmarked.sh"
   printf '# BEGIN generator-only assertions\n:\nfi\n# END generator-only assertions\n'
   printf 'printf %%s "$leaked"\n'
 } >"$tmp/leak-begin-late.sh"
+# Markers around a different GENERATOR_ONLY `if` (the early exit) while the
+# capture sits back inside the real gate.
+{
+  printf '#!/usr/bin/env bash\n%s\ncapture_mode leaked workflow "$sha"\nfi\n' "$gate_line"
+  printf '# BEGIN generator-only assertions\n%s\n  exit 0\nfi\n' "$other_gate_line"
+  printf '# END generator-only assertions\nprintf %%s "$leaked"\n'
+} >"$tmp/leak-wrong-gate.sh"
 misplaced_ok=1
-for misplaced in end-early begin-late; do
+for misplaced in end-early begin-late wrong-gate; do
   if python3 "$tmp/fixture-leaks.py" "$tmp/leak-$misplaced.sh" >/dev/null 2>"$tmp/leak.err" \
     || ! grep -q 'marker' "$tmp/leak.err"; then
     misplaced_ok=0
