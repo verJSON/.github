@@ -5,6 +5,7 @@
 - **Issue:** [verJSON/.github#1754](https://github.com/verJSON/.github/issues/1754)
 - **Extends:** [ADR 0184](../0184-merge-gates-assert-execution-not-absence-of-red/README.md)
 - **Related:** [ADR 0223](../0223-draft-pull-requests-defer-heavy-ci/README.md), [ADR 0024](../0024-absent-checks-fail-closed/README.md)
+- **Superseded in part by:** [ADR 0229](../0229-required-contexts-need-success-and-finished-runs/README.md) — the workflow-run read is unconditional, so Actions (read) is required for every head
 - **Category:** merge-gate admission (sensitive class)
 
 ## Context

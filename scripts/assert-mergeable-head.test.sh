@@ -83,6 +83,8 @@ wf_run() { # id check-suite-id workflow-id run-number event status conclusion [h
   printf '{"id":%s,"check_suite_id":%s,"workflow_id":%s,"run_number":%s,"event":"%s","status":"%s","conclusion":%s,"head_sha":"%s"}' \
     "$1" "$2" "$3" "$4" "$5" "$6" "$(if [ -z "$7" ]; then echo null; else echo "\"$7\""; fi)" "${8:-$HEAD_SHA}"
 }
+WF_CI=315894159
+WF_OTHER=371658702
 wf_runs() { printf '{"total_count":%s,"workflow_runs":[%s]}' "$(entry_count "$1")" "$1"; }
 # Both fixture builders stamp `total_count`, because both real endpoints always
 # do -- verified against a live commit, including the empty-status case, which
@@ -177,6 +179,106 @@ STATUS_FIXTURE="$(stat_page '{"context":"ci / build-test","state":"success"}')"
 run
 expect "an app-bound required context cannot be satisfied by a provenance-less commit status" 3 "wrong producer: ci / build-test"
 
+# --- the draft->ready window (#1755) ----------------------------------------------
+# A draft-time run skips the heavy jobs (ADR 0223), so until the ready-time run creates
+# its jobs the ONLY report for a required context can be a SKIPPED one. A skip is not
+# evidence the context's work ran on this head, so it never satisfies a required context
+# on its own (ADR 0229); a SUCCESS of its own is required.
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$(check_run 1 'ci / build-test' completed skipped "$APP_ID" 501),$(check_run 2 'changelog / validate' completed success "$APP_ID" 501)")"
+run
+expect "a required context reported only as SKIPPED (the draft-time run) is not satisfied" 3 "not passing: ci / build-test (SKIPPED; a required context needs a SUCCESS"
+
+# Marking the PR ready creates a new workflow run before that run creates any job, so
+# the head can carry a full set of completed checks while the run that will re-verify
+# it has not reported anything yet. An unfinished run on the head is pending (ADR 0229).
+reset_env
+RUNS_FIXTURE="$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed success),$(wf_run 9002 502 "$WF_CI" 11 pull_request queued '')")"
+run
+expect "a workflow run on the head that has not finished blocks as pending, even before it creates a check" 3 "pending: workflow run 9002 (QUEUED)"
+
+# A run that says it completed but carries no conclusion is inconsistent. Read as
+# finished it would release the pending guard above on a record that never settled.
+reset_env
+RUNS_FIXTURE="$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed success),$(wf_run 9002 502 "$WF_CI" 11 pull_request completed '')")"
+run
+expect "a completed workflow run with no conclusion is a malformed record, not a finished one" 1 "workflow-run inventory for"
+
+# The real green shape this must keep admitting: #1753 (documentation-only, ADR 0222)
+# and #1762 were opened as drafts, so the draft-time run left SKIPPED reports for the
+# required context and the heavy jobs, and the ready-time run reported SUCCESS. Both
+# runs concluded `success` (neither was cancelled), and a sibling workflow concluded
+# `skipped`. Advisory SKIPPED checks stay passing for Gate C.
+docs_only_runs="$(check_run 1 'ci / build-test' completed skipped "$APP_ID" 501),$(check_run 2 'changelog / validate' completed skipped "$APP_ID" 501),$(check_run 3 'hosted-compatibility-tests' completed skipped "$APP_ID" 501),$(check_run 4 'shell-test-groups' completed skipped "$APP_ID" 501),$(check_run 11 'ci / build-test' completed success "$APP_ID" 502),$(check_run 12 'changelog / validate' completed success "$APP_ID" 502),$(check_run 13 'hosted-compatibility-tests' completed skipped "$APP_ID" 502),$(check_run 14 'shell-test-groups' completed skipped "$APP_ID" 502),$(check_run 21 'package-surface' completed skipped "$APP_ID" 503)"
+docs_only_wf="$(wf_run 9001 501 "$WF_CI" 10 pull_request completed success),$(wf_run 9002 502 "$WF_CI" 11 pull_request completed success),$(wf_run 9003 503 "$WF_OTHER" 20 pull_request completed skipped)"
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$docs_only_runs")"
+RUNS_FIXTURE="$(wf_runs "$docs_only_wf")"
+run
+expect_true "a draft-time SKIPPED plus a ready-time SUCCESS for each required context passes (#1753 documentation-only shape)"
+
+# The same head one moment earlier: the ready-time run exists but has not created its
+# jobs, so the inventory holds only the draft-time skips. Both new rules refuse it.
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$(check_run 1 'ci / build-test' completed skipped "$APP_ID" 501),$(check_run 2 'changelog / validate' completed skipped "$APP_ID" 501),$(check_run 3 'hosted-compatibility-tests' completed skipped "$APP_ID" 501)")"
+RUNS_FIXTURE="$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed success),$(wf_run 9002 502 "$WF_CI" 11 pull_request queued '')")"
+run
+expect "the ready-transition window (skips only, ready-time run queued) is refused" 3 "pending: workflow run 9002 (QUEUED)"
+expect "the ready-transition window names each skipped-only required context" 3 "not passing: changelog / validate (SKIPPED; a required context needs a SUCCESS"
+
+# Every status other than `completed` is unfinished: the documented queue states and
+# any status this script has never seen, which is read as pending rather than done.
+for status in in_progress waiting requested pending action_required Completed unknown; do
+  reset_env
+  RUNS_FIXTURE="$(wf_runs "$(wf_run 9002 502 "$WF_OTHER" 11 pull_request_target "$status" '')")"
+  run
+  upper="$(tr '[:lower:]' '[:upper:]' <<<"$status")"
+  expect "a workflow run in status '$status' is pending" 3 "pending: workflow run 9002 ($upper)"
+done
+
+# NEUTRAL stays a passing conclusion, but it is not a SUCCESS either: a required
+# context reported only as NEUTRAL is not satisfied, and SKIPPED+NEUTRAL is not either.
+for reports in neutral 'skipped neutral'; do
+  reset_env
+  entries=""; id=1
+  for c in $reports; do entries="${entries:+$entries,}$(check_run "$id" 'ci / build-test' completed "$c" "$APP_ID" "50$id")"; id=$((id + 1)); done
+  CHECK_RUNS_FIXTURE="$(runs "$entries,$(check_run 9 'changelog / validate' completed success "$APP_ID" 509)")"
+  run
+  expect "a required context reported only as '$reports' has no SUCCESS and is not satisfied" 3 "not passing: ci / build-test ("
+done
+
+# The SUCCESS must come from the bound producer. A SUCCESS from another app does not
+# turn the bound app's skip into evidence (its owned reports are SKIPPED only).
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$(check_run 1 'ci / build-test' completed skipped "$APP_ID" 501),$(check_run 2 'ci / build-test' completed success "$OTHER_APP_ID" 777),$(check_run 3 'changelog / validate' completed success "$APP_ID" 501)")"
+run
+expect "a SUCCESS from an unbound app does not back a bound context's skip" 3 "not passing: ci / build-test (SKIPPED; a required context needs a SUCCESS"
+
+# A commit status SUCCESS satisfies an unbound context; a lone skipped check run does not.
+reset_env
+RULES_FIXTURE="$rules_unbound"
+CHECK_RUNS_FIXTURE="$(runs "$(check_run 1 'changelog / validate' completed skipped "$APP_ID" 501)")"
+STATUS_FIXTURE="$(stat_page '{"context":"ci / build-test","state":"success"}')"
+run
+expect "an unbound context reported only as a skipped check run is not satisfied" 3 "not passing: changelog / validate (SKIPPED; a required context needs a SUCCESS"
+
+# Validation of the run inventory is no longer conditional on a cancelled check run:
+# a green head with a malformed run record faults instead of reading past it.
+for mutation in '.workflow_runs[0].status = null' '.workflow_runs[0].status = 1' \
+  '.workflow_runs[0].conclusion = 1' '.workflow_runs[0].head_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' \
+  '.workflow_runs[0].id = "9001"' '.workflow_runs[0] = null' '.workflow_runs[0].conclusion = ""'; do
+  reset_env
+  RUNS_FIXTURE="$(jq -c "$mutation" <<<"$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed success)")")"
+  run
+  expect "a green head whose run inventory is malformed ($mutation) is a fault, not a pass" 1 "workflow-run inventory for"
+done
+
+# The inventory reconciliation holds on every head too.
+reset_env
+RUNS_FIXTURE="$(jq -c '. + {total_count: 3}' <<<"$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed success)")")"
+run
+expect "a truncated workflow-run walk on a green head is a fault" 1 "workflow-run inventory for"
+
 reset_env
 RULES_FIXTURE="$rules_unbound"
 CHECK_RUNS_FIXTURE="$(runs '')"
@@ -242,8 +344,6 @@ expect "a populated list of non-objects still names a type rather than trailing 
 # the ready_for_review run that passed. The cancelled `shell-test-groups` is the
 # unexpanded matrix name, which the passing run reports only as expanded legs -- the
 # shape #1750 actually carried, and why supersession is decided per RUN, not per name.
-WF_CI=315894159
-WF_OTHER=371658702
 superseded_runs="$(check_run 11 'ci / build-test' completed cancelled "$APP_ID" 501),$(check_run 12 'changelog / validate' completed cancelled "$APP_ID" 501),$(check_run 13 'shell-test-groups' completed cancelled "$APP_ID" 501),$(check_run 21 'ci / build-test' completed success "$APP_ID" 502),$(check_run 22 'changelog / validate' completed success "$APP_ID" 502),$(check_run 23 'shell-test-groups (merge-gate)' completed success "$APP_ID" 502)"
 
 reset_env
@@ -398,11 +498,18 @@ CHECK_RUNS_FIXTURE="$(runs "$(check_run 11 'ci / build-test' completed success "
 RUNS_FIXTURE="$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed success),$(wf_run 9002 502 "$WF_CI" 11 pull_request completed failure)")"
 run
 expect "a success followed by a later failure of the same workflow blocks" 3 "not passing: ci / build-test (SUCCESS,FAILURE)"
-if [ ! -s "$RUNS_REQUEST_LOG" ]; then
-  pass "a head carrying no cancelled check run never reads workflow runs, so callers without Actions read are unaffected"
+# ADR 0229 supersedes ADR 0226's conditional read: a head with no cancelled check run
+# is exactly the draft->ready window, so the workflow-run inventory is read for every head.
+if grep -qF -- "actions/runs?head_sha=$HEAD_SHA&" "$RUNS_REQUEST_LOG"; then
+  pass "a head carrying no cancelled check run still reads its workflow runs (ADR 0229)"
 else
-  fail "a head carrying no cancelled check run never reads workflow runs (requests: $(cat "$RUNS_REQUEST_LOG"))"
+  fail "a head carrying no cancelled check run still reads its workflow runs (requests: $(cat "$RUNS_REQUEST_LOG"))"
 fi
+
+# ...so a token without Actions read now faults on EVERY head, and it must still say why.
+reset_env; FAIL_RUNS=1 run
+expect "a workflow-run read failure on a head with no cancelled check run is a fault, not a pass" 1 "failed to fetch workflow runs"
+expect "that fault names the Actions read grant" 1 "Actions (read) or Actions permissions.actions: read"
 
 reset_env
 CHECK_RUNS_FIXTURE="$(runs "$(check_run 11 'ci / build-test' completed failure "$APP_ID" 501),$(check_run 12 'changelog / validate' completed cancelled "$APP_ID" 501),$(check_run 21 'ci / build-test' completed success "$APP_ID" 502),$(check_run 22 'changelog / validate' completed success "$APP_ID" 502)")"
@@ -625,8 +732,8 @@ for code in 401 403; do
     1 "Commit statuses (read)"
   expect "an HTTP $code on the ruleset read states Actions grants" \
     1 "permissions.pull-requests: read, permissions.checks: read, permissions.statuses: read"
-  expect "an HTTP $code on the ruleset read states the conditional Actions read grant" \
-    1 "Actions (read) when the head carries a cancelled check run"
+  expect "an HTTP $code on the ruleset read states the unconditional Actions read grant (ADR 0229)" \
+    1 "Commit statuses (read), and Actions (read); "
   expect "an HTTP $code on the ruleset read states the Actions workflow permission" \
     1 "permissions.statuses: read, permissions.actions: read."
 done

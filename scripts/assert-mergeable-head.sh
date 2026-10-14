@@ -18,7 +18,9 @@
 #   Gate A  every REQUIRED context for the base ref exists on the head, was
 #           produced by the app the ruleset binds it to, has completed, and
 #           passed. An absent required check fails closed (ADR 0024) instead of
-#           being silently satisfied by its own absence.
+#           being silently satisfied by its own absence. Every required context
+#           needs a SUCCESS of its own (a skip is not evidence its work ran), and
+#           any workflow run on the head that has not finished is pending (ADR 0229).
 #   Gate B  positive evidence that verification actually executed: the head
 #           carries no ADR 0178 `deferred-ci` check that ran, and no ADR 0156
 #           deferral annotation. This is the gate a deferred Renovate head
@@ -37,8 +39,9 @@
 #
 # PERMISSIONS. The script reads pull-request metadata, check runs, commit statuses,
 # and `repos/{owner}/{repo}/rules/branches/{base}`; the last is Gate A's ONLY source
-# of the required set. Workflow runs (`actions/runs`) are read only when the head
-# carries a cancelled check run, to establish whether a later run superseded it. A caller missing any read cannot evaluate the assertion, and
+# of the required set. Workflow runs (`actions/runs`) are read for every head (ADR 0229):
+# an unfinished run is pending, and ADR 0226 places cancelled check runs in their runs.
+# A caller missing any read cannot evaluate the assertion, and
 # this script refuses rather than falling back to partial data. `administration` is
 # NOT required, and an organization-level ruleset is returned through this repository
 # endpoint without organization read, verified against
@@ -109,7 +112,7 @@ fault() { echo "::error::$2" >&2; exit "$1"; }
 # Printed as one line, because `fault` emits one `::error::` annotation.
 permission_help() {
   printf '%s' \
-    "fine-grained token: Repository permissions > Metadata (read), Pull requests (read), Checks (read), Commit statuses (read), and Actions (read) when the head carries a cancelled check run; " \
+    "fine-grained token: Repository permissions > Metadata (read), Pull requests (read), Checks (read), Commit statuses (read), and Actions (read); " \
     "classic OAuth token: 'repo' for a private repository, no scope at all for a public one; " \
     "inside Actions: permissions.contents: read, permissions.pull-requests: read, permissions.checks: read, permissions.statuses: read, permissions.actions: read. " \
     "The 'administration' scope is NOT required, and an organization-level ruleset is " \
@@ -225,37 +228,45 @@ checks="$(jq -n --argjson a "$check_runs" --argjson b "$statuses" '$a + $b')" \
 # removes evidence and never manufactures it: a required context reported only by a
 # superseded cancellation is then ABSENT, which Gate A refuses.
 #
-# The workflow-run read is made only when a cancelled check run exists, so a caller
-# whose token lacks Actions read is affected only on a head that would otherwise
-# block anyway -- and then it faults rather than guessing.
+# The workflow-run inventory this reasons over is read for every head (below, ADR 0229).
+# ------------------------------------------------------------ workflow runs ----
+# ADR 0229 (#1755). Every workflow run on the head is read, not only when a cancelled
+# check run makes supersession worth asking about (ADR 0226 made the read conditional;
+# ADR 0229 supersedes that clause). Marking a draft ready creates a run BEFORE that run
+# creates any job, so the check inventory alone cannot see the verification that is
+# about to replace the draft-time skips; only the run inventory can.
+runs_raw="$(gh api --paginate "repos/$repo/actions/runs?head_sha=$head_sha&per_page=100" </dev/null)" \
+  || permission_fault "failed to fetch workflow runs for $repo@$head_sha" "Actions" "actions"
+reconcile_pages "$runs_raw" workflow_runs \
+  || fault 1 "the workflow-run inventory for $repo@$head_sha is incomplete or unattested; it cannot be reasoned over"
+# Types are checked, never truthiness: jq orders every string above every number,
+# so a string run_number would always read as "later", and two absent workflow ids
+# or events would compare equal (`null == null`) and forge a same-workflow match.
+runs="$(jq -s --arg head "$head_sha" '
+  def well_formed:
+    type == "object"
+    and (.id | type) == "number"
+    and (.check_suite_id | type) == "number"
+    and (.workflow_id | type) == "number"
+    and (.run_number | type) == "number"
+    and (.event | type) == "string" and .event != ""
+    and (.status | type) == "string"
+    and ((.conclusion | type) == "string" or .conclusion == null)
+    # A completed run without a conclusion never settled; reading it as finished
+    # would release the unfinished-run guard in Gate A (ADR 0229).
+    and (.status != "completed" or ((.conclusion | type) == "string" and .conclusion != ""))
+    and .head_sha == $head;
+  [ .[].workflow_runs[]? ]
+  | if all(.[]; well_formed) | not then error("malformed workflow run")
+    elif (map(.check_suite_id) | unique | length) != length then error("check suite claimed twice")
+    else . end' <<<"$runs_raw")" \
+  || fault 1 "the workflow-run inventory for $repo@$head_sha carries a malformed record; it cannot be reasoned over"
+
 gated_checks="$checks"
 superseded_names='[]'
 cancelled_count="$(jq '[ .[] | select(.kind == "check_run" and .conclusion == "CANCELLED") ] | length' <<<"$checks")" \
   || fault 1 "failed to count cancelled check runs for $repo@$head_sha"
 if [ "$cancelled_count" -gt 0 ]; then
-  runs_raw="$(gh api --paginate "repos/$repo/actions/runs?head_sha=$head_sha&per_page=100" </dev/null)" \
-    || permission_fault "failed to fetch workflow runs for $repo@$head_sha" "Actions" "actions"
-  reconcile_pages "$runs_raw" workflow_runs \
-    || fault 1 "the workflow-run inventory for $repo@$head_sha is incomplete or unattested; no cancellation can be shown superseded from it"
-  # Types are checked, never truthiness: jq orders every string above every number,
-  # so a string run_number would always read as "later", and two absent workflow ids
-  # or events would compare equal (`null == null`) and forge a same-workflow match.
-  runs="$(jq -s --arg head "$head_sha" '
-    def well_formed:
-      type == "object"
-      and (.id | type) == "number"
-      and (.check_suite_id | type) == "number"
-      and (.workflow_id | type) == "number"
-      and (.run_number | type) == "number"
-      and (.event | type) == "string" and .event != ""
-      and (.status | type) == "string"
-      and ((.conclusion | type) == "string" or .conclusion == null)
-      and .head_sha == $head;
-    [ .[].workflow_runs[]? ]
-    | if all(.[]; well_formed) | not then error("malformed workflow run")
-      elif (map(.check_suite_id) | unique | length) != length then error("check suite claimed twice")
-      else . end' <<<"$runs_raw")" \
-    || fault 1 "the workflow-run inventory for $repo@$head_sha carries a malformed record; no cancellation can be shown superseded from it"
   verdict="$(jq -c --argjson runs "$runs" '
     . as $all
     # The latest successful later run of the same workflow and event -- provided its
@@ -417,10 +428,22 @@ gate_a="$(jq -r --argjson pass "$PASSING" --argjson required "$required" '
           # run omitted the check (ADR 0226), so the context needs a SUCCESS of its own.
           elif any($superseded[]; . == $req.context) and ($owned | any(.conclusion == "SUCCESS") | not) then
             "not passing: \($req.context) (\($owned | map(.conclusion) | join(",")); a superseded cancellation needs a SUCCESS)"
+          # ADR 0229 (#1755). SKIPPED and NEUTRAL stay passing conclusions, but neither
+          # is evidence that the work of the context ran on this head: a draft-time run skips
+          # the heavy jobs (ADR 0223), and until the ready-time run creates its jobs that
+          # skip is the only report the context has. So a required context needs a SUCCESS.
+          elif ($owned | any(.conclusion == "SUCCESS") | not) then
+            "not passing: \($req.context) (\($owned | map(.conclusion) | join(",")); a required context needs a SUCCESS report, and a skip is not evidence its work ran)"
           else empty end
       end
-  ] | join("; ")
-' --argjson checks "$gated_checks" --argjson superseded "$superseded_names" <<<'null')" \
+  ]
+  # ADR 0229 (#1755). A run that has not finished may not have created its jobs yet,
+  # so it is pending whatever the check inventory says; which contexts it will report
+  # is unknowable until it does, so every unfinished run on the head counts.
+  + [ $runs[] | select(.status != "completed")
+      | "pending: workflow run \(.id) (\(.status | ascii_upcase))" ]
+  | join("; ")
+' --argjson checks "$gated_checks" --argjson superseded "$superseded_names" --argjson runs "$runs" <<<'null')" \
   || fault 1 "failed to evaluate required contexts for $repo#$pr"
 
 [ -z "$gate_a" ] \

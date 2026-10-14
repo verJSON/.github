@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0229](0229-required-contexts-need-success-and-finished-runs/README.md) | 2026-10-14 | A required context needs a SUCCESS, and an unfinished workflow run on the head is pending |
 | [0228](0228-workflow-python-starts-isolated/README.md) | 2026-10-13 | Every workflow starts its inline Python interpreters isolated |
 | [0227](0227-arm-bootstraps-stale-review-callers/README.md) | 2026-10-13 | The authorization arm bootstraps stale default-branch review callers |
 | [0226](0226-superseded-cancelled-check-runs-do-not-block-admission/README.md) | 2026-10-13 | A cancelled check run superseded by a later successful run of its own workflow does not block admission |

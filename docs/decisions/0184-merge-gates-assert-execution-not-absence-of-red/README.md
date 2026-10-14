@@ -4,6 +4,7 @@
 - **Status:** Accepted
 - **Extends:** [ADR 0156](../0156-deferred-ci-legible-to-merge-gate/README.md), [ADR 0178](../0178-publish-deferred-ci-as-its-own-check/README.md)
 - **Related:** [ADR 0024](../0024-absent-checks-fail-closed/README.md)
+- **Superseded in part by:** [ADR 0229](../0229-required-contexts-need-success-and-finished-runs/README.md) — a required context now needs a `SUCCESS`, and an unfinished workflow run on the head is pending
 
 ## Context
 
