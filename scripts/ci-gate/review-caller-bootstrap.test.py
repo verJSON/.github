@@ -572,6 +572,11 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
     add("an oversized changed file is not a bootstrap",
         with_files(**{"tests/big.txt": (STALE.encode() + oversized, CONTRACT.encode() + oversized)}),
         ("0 <= size <= MAX_BLOB_BYTES,", "0 <= size,"))
+    allowlist_guard = ('require(same_repository(ref[2].decode(), CANONICAL) and ref[3].decode() in REUSABLE_CI,',
+                       'require(True,')
+    add("a pin bump of a canonical workflow outside the reusable CI allowlist is not a bootstrap",
+        with_files(**{CI_CALLER: (ci_caller(CI_STALE, "actionlint.yml"), ci_caller(CONTRACT, "actionlint.yml"))}),
+        allowlist_guard)
     unavailable = Consumer()
     unavailable.missing.add(f"{CANONICAL}/compare/{CONTRACT}...main")
     add("an unavailable canonical comparison is not a bootstrap", unavailable, None)
@@ -620,6 +625,7 @@ INELIGIBLE_REASONS = {
     "an edited bootstrap fragment is not a bootstrap": "is not the generated bootstrap changelog fragment",
     "a fragment with an impossible date is not a bootstrap": "has an invalid date",
     "an oversized changed file is not a bootstrap": "blob is too large",
+    "a pin bump of a canonical workflow outside the reusable CI allowlist is not a bootstrap": "is not an allowlisted canonical reusable CI workflow",
     "an unavailable canonical comparison is not a bootstrap": "GitHub API read failed",
     "a malformed API response is not a bootstrap": "GitHub API returned malformed JSON",
 }
