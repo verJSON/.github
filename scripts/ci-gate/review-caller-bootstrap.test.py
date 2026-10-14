@@ -257,6 +257,9 @@ sys.stdout.write(json.dumps(routes[path]))
 """
 
 
+STEP_ENVIRONMENT_ALLOWLIST = frozenset({"PATH", "LD_LIBRARY_PATH", "LANG", "TMPDIR", "pythonLocation"})
+
+
 class Harness:
     def __init__(self, workflow_text: str | None = None) -> None:
         self.tmp = Path(tempfile.mkdtemp())
@@ -314,11 +317,14 @@ class Harness:
         calls = self.tmp / "calls.jsonl"
         calls.write_text("", encoding="utf-8")
         self.calls = calls
-        # A real step inherits the job environment. setup-python's shared-libpython build
-        # needs its LD_LIBRARY_PATH (actions-ci run 38495189807), so only GitHub credentials
-        # and stub controls are removed before the fixture's own values apply.
+        # Allowlist, never a denylist: BASH_ENV, ENV, or an exported BASH_FUNC_gh%% would
+        # shadow the stubs. PATH locates the tools the step runs (bash, jq, openssl, python3).
+        # LD_LIBRARY_PATH and pythonLocation keep setup-python's shared-libpython build
+        # loadable (actions-ci run 38495189807). LANG/LC_* keep text handling identical to
+        # the job. TMPDIR keeps mktemp on the runner's temporary filesystem. The harness
+        # sets its own HOME, RUNNER_TEMP, and fake tokens below.
         env = {key: value for key, value in os.environ.items()
-               if not key.startswith(("GH_", "GITHUB_", "REVIEW_LOGIN"))}
+               if key in STEP_ENVIRONMENT_ALLOWLIST or key.startswith("LC_")}
         env |= {
             "PATH": f"{self.path_prefix}{self.tmp / 'bin'}:{os.environ['PATH']}",
             "HOME": str(self.tmp),
@@ -602,8 +608,22 @@ INELIGIBLE_REASONS = {
 }
 
 
+def poison_outer_environment() -> Path:
+    """Simulate a hostile or merely noisy job environment that could shadow the stubs."""
+    hostile = Path(tempfile.mkdtemp()) / "hostile-bash-env.sh"
+    hostile.write_text("gh() { echo hostile-gh >&2; return 97; }\n", encoding="utf-8")
+    os.environ["BASH_ENV"] = str(hostile)
+    os.environ["ENV"] = str(hostile)
+    os.environ["BASH_FUNC_gh%%"] = "() { echo hostile-gh >&2; return 97; }"
+    return hostile
+
+
 def main() -> int:
+    poison_outer_environment()
     harness = Harness()
+    result, _ = harness.run_step("bootstrap", Consumer())
+    report("hostile-gh" not in result.stdout + result.stderr,
+           "an outer BASH_ENV, ENV, or exported gh function never reaches a step", result)
 
     result, outputs = harness.run_step("bootstrap", Consumer())
     report(result.returncode == 0 and outputs.get("eligible") == "true" and outputs.get("stale_sha") == STALE
