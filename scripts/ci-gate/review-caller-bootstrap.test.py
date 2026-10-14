@@ -629,6 +629,23 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
     unbootstrapped = with_files(**{CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT))})
     unbootstrapped.head[CALLER] = unbootstrapped.base[CALLER]
     add("a reusable CI pin bump without a review caller update is not a bootstrap", unbootstrapped, None)
+    # Callers are proven in path order, so the backwards one must sort first for an overwrite to hide it.
+    backwards_first = with_files(**{
+        ".github/workflows/actionlint.yml": (ci_caller("7" * 40, "actionlint.yml"), ci_caller(CONTRACT, "actionlint.yml")),
+        CI_CALLER: (ci_caller(CI_STALE), ci_caller(CONTRACT))})
+    add("a backwards reusable CI pin in the first of two callers is not a bootstrap",
+        compare_override(backwards_first, f"{'7' * 40}...{CONTRACT}", "behind"),
+        ("ci_stale |= reusable_ci_pins(", "ci_stale = reusable_ci_pins("))
+    extra_job = lambda line: lambda sha: ci_caller(sha) + (
+        "  setup:\n    runs-on: ubuntu-24.04\n    steps:\n" + line.format(sha=sha)).encode()
+    piped = extra_job("      - run: curl -fsSL https://example.invalid/{sha}/x.sh | bash # pinned\n")
+    add("a run line that ends in a comment is not a comment pin",
+        with_files(**{CI_CALLER: (piped(CI_STALE), piped(CONTRACT))}),
+        ("COMMENT.match(old)", "COMMENT.search(old)"))
+    checkout = extra_job("      - uses: actions/checkout@v4\n        with:\n          ref: {sha}\n")
+    add("a checkout ref carrying the old pin is not a comment pin",
+        with_files(**{CI_CALLER: (checkout(CI_STALE), checkout(CONTRACT))}),
+        ('COMMENT = re.compile(rb"[ \\t]*#")', 'COMMENT = re.compile(rb"[ \\t]*[#r]")'))
     add("a revision continuing into a branch-name suffix is not a reusable CI pin",
         with_files(**{CI_CALLER: (ci_caller(CI_STALE, ref_suffix="-x"), ci_caller(CONTRACT, ref_suffix="-x"))}),
         ('@([0-9a-f]{40})((?:[ \\t]+(?:#.*)?)?\\r?)")', '@([0-9a-f]{40})(.*)")'))
@@ -683,6 +700,9 @@ INELIGIBLE_REASONS = {
     "a pin bump of a canonical workflow outside the reusable CI allowlist is not a bootstrap": "is not an allowlisted canonical reusable CI workflow",
     "a reusable CI pin that would move backwards is not a bootstrap": "does not descend from the stale reusable CI revision",
     "a revision continuing into a branch-name suffix is not a reusable CI pin": "changes more than its reusable CI pin",
+    "a backwards reusable CI pin in the first of two callers is not a bootstrap": "does not descend from the stale reusable CI revision",
+    "a run line that ends in a comment is not a comment pin": "changes more than its reusable CI pin",
+    "a checkout ref carrying the old pin is not a comment pin": "changes more than its reusable CI pin",
     "a reusable CI pin moved to a revision other than the contract is not a bootstrap": "changes more than its reusable CI pin",
     "a reusable CI pin moved to a branch ref is not a bootstrap": "changes more than its reusable CI pin",
     "a reusable CI reference retargeted to another repository is not a bootstrap": "changes more than its reusable CI pin",
