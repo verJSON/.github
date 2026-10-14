@@ -175,6 +175,44 @@ else
   fail "malformed manifest directives failed without naming the defect"
 fi
 
+# A row that reads stdin must see an empty file, never the manifest or the
+# runner's own input, and must not stop later rows from running (#1736). A
+# Windows binary under WSL interop, `cat`, `read`, or `ssh` all read it.
+# Bash gives background jobs /dev/null only while job control is off. `-m`
+# turns it on for the runner (as SHELLOPTS=monitor would), so the case does not
+# depend on how the runner itself was started.
+printf 'platform\tcat >"$ACTIONS_CI_STDIN_SEEN"\nplatform\ttouch "$ACTIONS_CI_LATER_RAN"\n' \
+  >"$tmp/stdin.tsv"
+if printf 'runner-stdin-sentinel\n' \
+  | ACTIONS_CI_GROUP_MANIFEST="$tmp/stdin.tsv" \
+    ACTIONS_CI_STDIN_SEEN="$tmp/stdin-seen" ACTIONS_CI_LATER_RAN="$tmp/later-ran" \
+    bash -m "$runner" platform >"$tmp/stdin.out" 2>&1 \
+  && [ -f "$tmp/stdin-seen" ] && [ ! -s "$tmp/stdin-seen" ] \
+  && [ -e "$tmp/later-ran" ] \
+  && grep -q 'passed 2 command(s)' "$tmp/stdin.out"; then
+  pass "a row that reads stdin sees /dev/null and later rows still run"
+else
+  cat "$tmp/stdin.out" >&2
+  fail "a row read the runner's stdin or later rows were skipped"
+fi
+
+# The group fails unless it ran and reported every row the manifest selects.
+# `read` drops a final row without a newline, so that row is a real early-exit
+# path; the count invariant has to name it instead of passing with it unrun.
+printf 'platform\ttrue\nmerge-gate\ttrue\nplatform\ttouch "$ACTIONS_CI_LATER_RAN"' \
+  >"$tmp/unterminated.tsv"
+rm -f "$tmp/later-ran"
+if ACTIONS_CI_GROUP_MANIFEST="$tmp/unterminated.tsv" ACTIONS_CI_LATER_RAN="$tmp/later-ran" \
+  bash "$runner" platform >"$tmp/unterminated.out" 2>&1; then
+  fail "the group passed without running every manifest row it selects"
+elif grep -q 'manifest selects 2 command(s) for platform; ran 1 and reported 1' \
+  "$tmp/unterminated.out"; then
+  pass "the group fails when it runs fewer rows than the manifest selects"
+else
+  cat "$tmp/unterminated.out" >&2
+  fail "a dropped manifest row failed without the executed-count diagnostic"
+fi
+
 mkdir -p "$tmp/single-bin"
 cat >"$tmp/single-bin/nproc" <<'EOF'
 #!/usr/bin/env bash

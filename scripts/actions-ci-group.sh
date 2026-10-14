@@ -80,7 +80,19 @@ declare -A worker_wait_status_by_index=()
 declare -A worker_reported_by_index=()
 worker_wait_failures=0
 failures=0
-while IFS=$'\t' read -r command_group command; do
+commands_started=0
+# Count the selected rows independently of the parser below, so any path that
+# drops a row (a final line without a newline, a command eating the manifest)
+# fails the group instead of passing with that row unrun (#1736).
+selected_rows="$(awk -F '\t' -v group="$group" '
+  $1 == group && $1 !~ /^#/ { count++ }
+  END { print count + 0 }
+' "$manifest")" || {
+  printf 'could not count actions-ci group %s rows in %s\n' "$group" "$manifest" >&2
+  exit 2
+}
+exec {manifest_fd}<"$manifest"
+while IFS=$'\t' read -r -u "$manifest_fd" command_group command; do
   case "$command_group" in
     ''|\#*) continue ;;
   esac
@@ -135,7 +147,8 @@ while IFS=$'\t' read -r command_group command; do
   commands+=("$command")
   command_exclusive+=("$exclusive")
   command_budgets+=("${row_budget:-$command_budget}")
-done <"$manifest"
+done
+exec {manifest_fd}<&-
 
 if [ "${#commands[@]}" -eq 0 ]; then
   printf 'actions-ci group has no commands: %s\n' "$group" >&2
@@ -264,7 +277,7 @@ fi
 exit "$status"
 SUPERVISOR
   setsid bash "$tmp/$index.supervisor.sh" "${command_budgets[$index]}" "$command" \
-    "$tmp/$index.raw.log" "$command_group_file" &
+    "$tmp/$index.raw.log" "$command_group_file" </dev/null &
   supervisor_pid="$!"
   worker_command_group_by_index["$index"]="$supervisor_pid"
   wait "$supervisor_pid" || status=$?
@@ -414,8 +427,9 @@ for index in "${!commands[@]}"; do
   fi
   printf 'running actions-ci command %s/%s in %s: %s\n' \
     "$((index + 1))" "${#commands[@]}" "$group" "${commands[$index]}"
-  run_command "$index" "${commands[$index]}" &
+  run_command "$index" "${commands[$index]}" </dev/null &
   command_index_by_pid["$!"]="$index"
+  commands_started=$((commands_started + 1))
   active=$((active + 1))
   if [ "${command_exclusive[$index]}" -eq 1 ]; then
     wait_for_worker
@@ -434,6 +448,14 @@ for index in "${!commands[@]}"; do
       "${worker_wait_status_by_index[$index]:-0}"
   fi
 done
+
+commands_reported="${#worker_reported_by_index[@]}"
+if [ "$commands_started" -ne "$selected_rows" ] \
+  || [ "$commands_reported" -ne "$selected_rows" ]; then
+  printf '::error::actions-ci manifest selects %d command(s) for %s; ran %d and reported %d\n' \
+    "$selected_rows" "$group" "$commands_started" "$commands_reported"
+  failures=$((failures + 1))
+fi
 
 if [ "$worker_wait_failures" -ne 0 ]; then
   printf '::error::actions-ci group=%s could not identify %d completed worker(s)\n' \
