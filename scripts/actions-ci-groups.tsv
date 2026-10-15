@@ -226,7 +226,7 @@ docs	bash scripts/trigger-scope.test.sh
 merge-gate	python3 scripts/ci-gate/app-slug-fail-closed.test.py
 merge-gate	bash scripts/ci-gate/orphaned-authorization-recovery.test.sh
 merge-gate	bash scripts/assert-no-deferred-checks.test.sh
-merge-gate	bash scripts/assert-mergeable-head.test.sh
+merge-gate	@budget=120 bash scripts/assert-mergeable-head.test.sh
 merge-gate	bash scripts/assert-mergeable-head.large-payload.test.sh
 merge-gate	bash scripts/assert-mergeable-head.concurrency-family.test.sh
 merge-gate	python3 scripts/ci-gate/concurrency-family-map.test.py
