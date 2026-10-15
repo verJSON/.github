@@ -103,6 +103,13 @@ pr="$2"
 readonly DEFERRED_JOB_PATTERN='(^|[/ ])deferred-ci([ (/]|$)'
 readonly DEFERRED_ANNOTATION_PATTERN='^CI deferred$'
 readonly PASSING='["SUCCESS","NEUTRAL","SKIPPED"]'
+# Declared concurrency families (ADR 0226, amendment 2026-10-15). A family is one
+# workflow-level concurrency group that a reusable workflow declares and every caller
+# inherits, so runs of DIFFERENT workflows displace each other from it. Membership is
+# this list and nothing else -- never a name resemblance -- and
+# scripts/ci-gate/concurrency-family-map.test.py derives it from the workflows and
+# generators that declare and inherit the group, failing when the two disagree.
+readonly CONCURRENCY_FAMILIES='[{"group_prefix":"ai-review-arm-","group_key":"github.event.pull_request.number","event":"pull_request_target","declared_by":{"repository":"verjson/.github","path":".github/workflows/gate-rearm.yml"},"callers":[{"name":"gate re-arm","path":".github/workflows/gate-rearm.yml"},{"name":"AI review lifecycle re-arm","path":".github/workflows/ai-review-lifecycle-rearm.yml"}]}]'
 
 # Every line this script prints that starts with `::` is a workflow command when it runs
 # inside Actions, and messages carry names a pull request's author controls: a workflow's
@@ -324,12 +331,44 @@ cancelled_count="$(jq '[ .[] | select(.kind == "check_run" and .conclusion == "C
   || fault 1 "failed to count cancelled check runs for $repo@$head_sha"
 if [ "$cancelled_count" -gt 0 ]; then
   verdict="$scratch/superseded-verdict.json"
-  jq -c --slurpfile runs "$runs" '
+  jq -c --slurpfile runs "$runs" --argjson families "$CONCURRENCY_FAMILIES" --arg pr "$pr" '
     $runs[0] as $runs
     | . as $all
+    # "Owner/Repo/path@ref" -> "owner/repo/path"; owner and repository are
+    # case-insensitive on GitHub, the path within the repository is not.
+    | def reference_target:
+        if type == "string" then
+          [ capture("^(?<o>[^/@]+)/(?<r>[^/@]+)/(?<p>[^@]+)@") ][0]
+          | if . == null then null else "\(.o | ascii_downcase)/\(.r | ascii_downcase)/\(.p)" end
+        else null end;
+    # The index of the declared family this run belongs to, or null.
+    def family_index:
+      . as $run
+      | [ $families | to_entries[]
+          | .value as $f
+          | select($run.event == $f.event
+                   and any($f.callers[]; .name == $run.name and .path == $run.path)
+                   and any($run.referenced_workflows[]? | select(type == "object") | .path | reference_target;
+                           . == "\($f.declared_by.repository)/\($f.declared_by.path)"))
+          | .key ][0];
+    # The newest later-created successful run of the cancelled run'"'"'s declared
+    # concurrency family on this head, or null.
+    def displacer($o):
+      ($o | family_index) as $fam
+      | if $fam == null then null
+        else ($o.run_started_at | fromdateiso8601) as $start
+        | [ $runs[]
+            | select(.status == "completed" and .conclusion == "success"
+                     and (family_index) == $fam
+                     and (.created_at | fromdateiso8601) > $start) ]
+        | max_by(.created_at | fromdateiso8601)
+        | if . == null then null
+          else { cancelled_run: $o.id, superseded_by: .id,
+                 group: "\($families[$fam].group_prefix)\($pr)" } end
+        end;
     # The latest successful later run of the same workflow and event -- provided its
     # own check suite did that check'"'"'s work -- or null.
-    | def superseder:
+    def superseder:
       if .kind == "check_run" and .status == "COMPLETED" and .conclusion == "CANCELLED" then
         .name as $name
         | .suite_id as $sid
@@ -337,7 +376,7 @@ if [ "$cancelled_count" -gt 0 ]; then
         | if ($own | length) != 1 then null
           else $own[0] as $o
           | if $o.status != "completed" or $o.conclusion != "cancelled" then null
-            else [ $runs[]
+            else ([ $runs[]
                    | select(.status == "completed" and .conclusion == "success"
                             and .workflow_id == $o.workflow_id and .event == $o.event
                             and .run_number > $o.run_number) ]
@@ -353,7 +392,10 @@ if [ "$cancelled_count" -gt 0 ]; then
                             .status == "COMPLETED" and .conclusion == "SUCCESS")
                      then { cancelled_run: $o.id, superseded_by: .id }
                      else null end
-                   end
+                   end)
+                 # ADR 0226 amendment 2026-10-15: a run displaced from its declared
+                 # concurrency family by a later-created successful run of the family.
+                 // displacer($o)
             end
           end
       else null end;
@@ -361,7 +403,9 @@ if [ "$cancelled_count" -gt 0 ]; then
     | { kept: [ .[] | select(.superseded == null) | del(.superseded) ],
         names: [ .[] | select(.superseded != null) | .name ] | unique,
         dismissed: [ .[] | select(.superseded != null)
-                     | "\(.name) (check run \(.id), run \(.superseded.cancelled_run) superseded by run \(.superseded.superseded_by))" ] }
+                     | if .superseded.group == null
+                       then "\(.name) (check run \(.id), run \(.superseded.cancelled_run) superseded by run \(.superseded.superseded_by))"
+                       else "\(.name) (check run \(.id), run \(.superseded.cancelled_run) displaced from concurrency group \(.superseded.group) by run \(.superseded.superseded_by))" end ] }
   ' <"$checks" >"$verdict" \
     || fault 1 "failed to evaluate superseded cancellations for $repo@$head_sha"
   gated_checks="$scratch/gated-checks.json"
@@ -372,7 +416,7 @@ if [ "$cancelled_count" -gt 0 ]; then
   dismissed="$(jq -r '.dismissed | join("; ")' <"$verdict")" \
     || fault 1 "failed to list superseded cancellations for $repo@$head_sha"
   [ -z "$dismissed" ] \
-    || annotate notice "Gates A and C set aside cancelled check runs superseded by a later successful run of the same workflow, event, and head (ADR 0226): $dismissed"
+    || annotate notice "Gates A and C set aside cancelled check runs superseded by a later successful run of the same workflow, event, and head, or displaced from a declared concurrency group by a later-created successful run of that group on this head (ADR 0226): $dismissed"
 fi
 
 # ---------------------------------------------------------------- Gate A ----
