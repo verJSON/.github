@@ -154,7 +154,7 @@ auth_line="$(printf '%s\n' "$preview_job" | grep -nF 'uses: google-github-action
 # Every third-party action in the changed workflow is pinned to the reviewed
 # immutable commit; both checkouts explicitly disable credential persistence.
 checkout='actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7'
-setup_node='actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7'
+setup_node='actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7'
 auth='google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3'
 pulumi='pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d # v7'
 [ "$(grep -cF "uses: $checkout" "$wf")" -eq 2 ] \

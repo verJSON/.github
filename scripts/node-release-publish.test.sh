@@ -122,7 +122,7 @@ assert all("node -" not in (step.get("run") or "") for step in steps[:setup_node
 assert 'expectedPackages.push({name: packageJson.name, version: packageVersion})' in package_dirs["run"]
 assert 'expected-manifest=${expectedManifest}' in package_dirs["run"]
 download = next(step for step in steps if step.get("uses", "").startswith("actions/download-artifact@"))
-assert download["uses"] == "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+assert download["uses"] == "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"
 assert download["with"]["artifact-ids"] == "${{ needs.prepare.outputs.package-artifact-id }}"
 upload = next(step for step in prepare["steps"] if step.get("uses", "").startswith("actions/upload-artifact@"))
 assert upload["id"] == "upload-packages"
@@ -174,7 +174,7 @@ assert "--allow-same-version" in stamp["run"]
 assert 'scripts/release-prepare-packages.sh "$PACKAGE_VERSION"' in raw
 assert 'npm --prefix "$package_dir" run build --if-present' in selected_build["run"]
 assert 'npm pack "$package_path" --json --ignore-scripts --pack-destination "$archive_dir"' in pack["run"]
-assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in raw
+assert "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9" in raw
 assert "retention-days: 1" in raw
 
 outputs = on["workflow_call"]["outputs"]
