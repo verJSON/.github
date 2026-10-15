@@ -1936,7 +1936,14 @@ jobs:
     # fail-SAFE, not a fallback: unresolved visibility must never put fork code
     # on the persistent pool. Both pools are org variables so a provider move
     # (GCP -> DigitalOcean) is a variable flip, not a PR here.
-    runs-on: ${{ inputs.secretless-pr && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    #
+    # Either secretless mode precedes all of that. Its lifecycle rebuild and
+    # candidate script sandbox exit unless the runner is GitHub-hosted, so the
+    # trusted-ref (push/main) build takes the same ephemeral hosted lane as the
+    # PR build and ignores a caller's self-hosted `runner` input. Only this job
+    # moves: eligibility keeps the caller's route and refuses early when the
+    # lane below is not hosted (ADR 0146, 2026-10-15 amendment).
+    runs-on: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       actions: read
