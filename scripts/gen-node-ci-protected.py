@@ -701,6 +701,22 @@ def isolate_candidate_runtime_cache(document: str) -> str:
         "${{ steps.warm-changelog-contract.outputs.contract_sha256 }}\n"
     )
     step = step.replace(plan_env, isolated_plan_env, 1)
+    # Only the source execution region reads these: it stages the verified
+    # runtime cache into its sandbox (#1798). The protected runner below
+    # copies its baseline from npm_config_cache instead.
+    for source_only_env in (
+        "          RESTORE_PERSISTED_PUBLIC_CACHE: ${{ inputs.cache && inputs.package-manager == 'npm' }}\n",
+        "          RUNTIME_CACHE_DIR: ${{ runner.temp }}/secretless-runtime-cache-"
+        "${{ github.run_id }}-${{ github.run_attempt }}\n",
+        "          RUN_ATTEMPT: ${{ github.run_attempt }}\n",
+        "          RUN_ID: ${{ github.run_id }}\n",
+        "          SECRETLESS_RUNTIME_PUBLIC_CACHE: ${{ inputs.secretless-runtime-public-cache }}\n",
+    ):
+        if step.count(source_only_env) != 1:
+            raise SystemExit(
+                f"source candidate runtime cache environment changed: {source_only_env.strip()}"
+            )
+        step = step.replace(source_only_env, "", 1)
     imports = """          import json
           import os
           import re

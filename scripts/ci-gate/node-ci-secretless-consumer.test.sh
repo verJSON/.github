@@ -547,6 +547,146 @@ else
   fail "alternatives-routed tools dangle in the consumer sandbox (#1782): $(head -5 "$tmp/commands/node_modules/.alternatives-missing" 2>/dev/null | tr '\n' ' ')"
 fi
 
+# #1798: secretless-runtime-public-cache exists for repository-authored offline
+# reinstall rehearsals. Before #1729 the consumer plan ran on the host with
+# npm_config_cache naming the verified runtime cache; the sandbox gave scripts an
+# empty cache instead, so `npm ci --offline` failed with ENOTCACHED
+# (verjson-cli#318). This runs real npm in the real sandbox against a verified
+# public blob, then checks the job's runtime cache survived a tampering script.
+real_node="$(command -v node)"
+real_source="$(dirname "$(dirname "$(readlink -f "$real_node")")")"
+rehearsal_toolchain="$tool_cache/node/24.98.0/x64"
+mkdir -p "$rehearsal_toolchain/bin" "$rehearsal_toolchain/lib/node_modules"
+cp -- "$real_source/bin/node" "$rehearsal_toolchain/bin/node"
+cp -a -- "$real_source/lib/node_modules/npm" "$rehearsal_toolchain/lib/node_modules/npm"
+ln -s ../lib/node_modules/npm/bin/npm-cli.js "$rehearsal_toolchain/bin/npm"
+rehearsal="$tmp/rehearsal"
+runtime_cache="$runner_temp/secretless-runtime-cache-4242-1"
+python3 -I - "$rehearsal" "$runtime_cache" <<'PY'
+import base64
+import hashlib
+import io
+import json
+import sys
+import tarfile
+from pathlib import Path
+
+rehearsal, runtime_cache = Path(sys.argv[1]), Path(sys.argv[2])
+(rehearsal / ".git").mkdir(parents=True)
+(rehearsal / "consumer").mkdir()
+members = {
+    "package/package.json": json.dumps({"name": "fixture-dep", "version": "1.0.0", "main": "index.js"}),
+    "package/index.js": "module.exports = { value: 'from-verified-cache' };\n",
+}
+raw = io.BytesIO()
+with tarfile.open(fileobj=raw, mode="w:gz") as archive:
+    for name, content in members.items():
+        data = content.encode()
+        info = tarfile.TarInfo(name)
+        info.size = len(data)
+        info.mode = 0o644
+        archive.addfile(info, io.BytesIO(data))
+tarball = raw.getvalue()
+digest = hashlib.sha512(tarball).digest()
+blob = runtime_cache / "_cacache/content-v2/sha512" / digest.hex()[:2] / digest.hex()[2:4] / digest.hex()[4:]
+blob.parent.mkdir(parents=True)
+blob.write_bytes(tarball)
+dependencies = {"fixture-dep": "1.0.0"}
+(rehearsal / "consumer/package.json").write_text(json.dumps(
+    {"name": "consumer", "version": "1.0.0", "dependencies": dependencies}), encoding="utf-8")
+(rehearsal / "consumer/package-lock.json").write_text(json.dumps({
+    "name": "consumer", "version": "1.0.0", "lockfileVersion": 3, "requires": True,
+    "packages": {
+        "": {"name": "consumer", "version": "1.0.0", "dependencies": dependencies},
+        "node_modules/fixture-dep": {
+            "version": "1.0.0",
+            "resolved": "https://registry.npmjs.org/fixture-dep/-/fixture-dep-1.0.0.tgz",
+            "integrity": "sha512-" + base64.b64encode(digest).decode(),
+        },
+    },
+}), encoding="utf-8")
+(rehearsal / "package.json").write_text(json.dumps(
+    {"name": "rehearsal", "private": True, "scripts": {"rehearse": "node rehearse.js"}}),
+    encoding="utf-8")
+(rehearsal / "rehearse.js").write_text("""\
+const { execFileSync } = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
+const cache = execFileSync("npm", ["config", "get", "cache"], { encoding: "utf8" }).trim();
+const content = path.join(cache, "_cacache", "content-v2");
+fs.mkdirSync(content, { recursive: true });
+fs.writeFileSync(path.join(content, "tampered-by-consumer"), "x");
+execFileSync("npm", ["ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund"], {
+  cwd: path.join(__dirname, "consumer"),
+  stdio: "inherit",
+});
+const dependency = require(path.join(__dirname, "consumer", "node_modules", "fixture-dep"));
+const leaked = ["RUNTIME_CACHE_DIR", "RESTORE_PERSISTED_PUBLIC_CACHE", "SECRETLESS_RUNTIME_PUBLIC_CACHE", "RUN_ID", "RUN_ATTEMPT"]
+  .filter((name) => name in process.env);
+fs.writeFileSync(path.join(__dirname, "rehearsed"), `${leaked.length ? `leaked ${leaked}` : dependency.value}\\n`);
+""", encoding="utf-8")
+PY
+runtime_inventory() { (cd "$runtime_cache" && find . -print0 | sort -z | xargs -0 sha256sum 2>/dev/null; find . | sort); }
+runtime_before="$(runtime_inventory)"
+rehearsal_status=0
+(cd "$rehearsal" && PATH="$rehearsal_toolchain/bin:/usr/bin:/bin" \
+    RUNTIME_CACHE_DIR="$runtime_cache" RUN_ID=4242 RUN_ATTEMPT=1 \
+    SECRETLESS_RUNTIME_PUBLIC_CACHE=true RESTORE_PERSISTED_PUBLIC_CACHE=false \
+    CI_SCRIPT_PLAN='["rehearse"]' bash "$tmp/plan.sh") \
+    > "$tmp/rehearsal-output.log" 2>&1 || rehearsal_status=$?
+if [ "$rehearsal_status" -eq 0 ] && [ "$(cat "$rehearsal/rehearsed" 2>/dev/null)" = from-verified-cache ]; then
+  pass "a sandboxed consumer script reinstalls offline from the verified runtime cache (#1798)"
+else
+  fail "a sandboxed consumer script cannot reinstall from the verified runtime cache (#1798): $(grep -m1 -E 'ENOTCACHED|Error|error' "$tmp/rehearsal-output.log")"
+fi
+if [ "$(runtime_inventory)" = "$runtime_before" ] \
+    && [ -z "$(find "$runner_temp" -maxdepth 1 -name 'verjson-consumer-runtime-cache-*' -print -quit)" ]; then
+  pass "consumer scripts receive a disposable copy, never the job's runtime cache (#1798)"
+else
+  fail "a consumer script changed the job's verified runtime cache (#1798)"
+fi
+
+# A requested cache that is missing, relocated, or carries a non-regular blob
+# fails before any candidate code runs; an unrequested absent cache is a no-op.
+rehearsal_case() {
+  local label="$1" expected="$2" cache_dir="$3" run_id="$4" requested="$5" status=0
+  rm -f "$rehearsal/rehearsed" "$rehearsal/started"
+  (cd "$rehearsal" && PATH="$rehearsal_toolchain/bin:/usr/bin:/bin" \
+      RUNTIME_CACHE_DIR="$cache_dir" RUN_ID="$run_id" RUN_ATTEMPT=1 \
+      SECRETLESS_RUNTIME_PUBLIC_CACHE="$requested" RESTORE_PERSISTED_PUBLIC_CACHE=false \
+      CI_SCRIPT_PLAN='["probe"]' bash "$tmp/plan.sh") \
+      > "$tmp/rehearsal-case.log" 2>&1 || status=$?
+  if [ -n "$(find "$runner_temp" -maxdepth 1 -name 'verjson-consumer-runtime-cache-*' -print -quit)" ]; then
+    fail "$label left a runtime cache staging directory behind (#1798)"
+  elif [ "$expected" = reject ] && [ "$status" -ne 0 ] && [ ! -e "$rehearsal/started" ] \
+      && grep -q 'consumer runtime cache' "$tmp/rehearsal-case.log"; then
+    pass "$label fails closed before candidate code runs (#1798)"
+  elif [ "$expected" = run ] && [ "$status" -eq 0 ] && [ -e "$rehearsal/started" ]; then
+    pass "$label runs the candidate script without a cache (#1798)"
+  else
+    fail "$label: status $status, $(tail -1 "$tmp/rehearsal-case.log")"
+  fi
+}
+python3 -I - "$rehearsal/package.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = Path(sys.argv[1])
+document = json.loads(manifest.read_text(encoding="utf-8"))
+document["scripts"]["probe"] = "node -e \"require('node:fs').writeFileSync('started', '')\""
+manifest.write_text(json.dumps(document), encoding="utf-8")
+PY
+rehearsal_case "a requested runtime cache that was never populated" reject "$runner_temp/secretless-runtime-cache-4343-1" 4343 true
+rehearsal_case "a requested runtime cache outside the run-scoped path" reject "$runtime_cache" 4343 true
+rehearsal_case "a requested runtime cache without a path" reject "" 4242 true
+rehearsal_case "an unrequested absent runtime cache" run "$runner_temp/secretless-runtime-cache-4343-1" 4343 false
+host_secret="$tmp/host-only-secret"
+printf 'host secret\n' > "$host_secret"
+ln -s "$host_secret" "$runtime_cache/_cacache/content-v2/sha512/linked-blob"
+rehearsal_case "a runtime cache blob that is a symlink" reject "$runtime_cache" 4242 true
+rm -f "$runtime_cache/_cacache/content-v2/sha512/linked-blob"
+
 for bad_plan in '["build","build"]' '["--help"]' '["missing"]' '{"script":"build"}' \
   '[{"script":"build","unsetEnv":["NODE_AUTH_TOKEN"]}]'; do
   : > "$tmp/commands/bad-plan.log"

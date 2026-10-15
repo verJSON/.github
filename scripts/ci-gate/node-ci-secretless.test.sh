@@ -362,6 +362,31 @@ for path in sys.argv[1:]:
     assert sum("nodedir" in line.lower() for line in lines) == 1, path
 PY
 
+# #1798: the source consumer plan keeps the caller-selected network policy (ADR
+# 0086) and receives the verified runtime cache from the same workflow-controlled
+# expressions the compatibility lane uses, so an offline reinstall rehearsal can
+# find the blobs secretless-runtime-public-cache promised it.
+python3 - "$workflow" <<'PY' \
+  && pass "the source consumer plan is wired to the verified runtime cache with caller network policy (#1798)" \
+  || fail "the source consumer plan cannot reach the verified runtime cache or unshares the network (#1798)"
+import sys
+import yaml
+
+steps = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))["jobs"]["build-test"]["steps"]
+by_name = {step.get("name"): step for step in steps}
+plan = by_name["Run exact credentialless consumer script plan"]
+compatibility = by_name["Run runtime-resolved compatibility lanes without credentials"]
+wired = (
+    "RUNTIME_CACHE_DIR", "RUN_ID", "RUN_ATTEMPT",
+    "SECRETLESS_RUNTIME_PUBLIC_CACHE", "RESTORE_PERSISTED_PUBLIC_CACHE",
+)
+for name in wired:
+    assert plan["env"].get(name) == compatibility["env"][name], name
+code = [line.strip() for line in plan["run"].splitlines() if not line.lstrip().startswith("#")]
+assert not any("--unshare-net" in line for line in code)
+assert "runtime_cache_content = verified_runtime_cache_content()" in code
+PY
+
 grep -qF 'ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL' "$workflow" \
   && grep -qF 'printf '\''NPM_CONFIG_USERCONFIG=%s\n'\''' "$workflow" \
   && pass "PR execution persistently scrubs package, Git, cloud, and OIDC credential paths" \

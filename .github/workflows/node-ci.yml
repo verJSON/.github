@@ -5070,6 +5070,11 @@ jobs:
           DB_ENV: ${{ inputs.db-env }}
           CACHE_ENV: ${{ inputs.cache-env }}
           VERJSON_CI_TRUSTED_DB_HOST: ${{ steps.db-service.outputs.host }}
+          RESTORE_PERSISTED_PUBLIC_CACHE: ${{ inputs.cache && inputs.package-manager == 'npm' }}
+          RUNTIME_CACHE_DIR: ${{ runner.temp }}/secretless-runtime-cache-${{ github.run_id }}-${{ github.run_attempt }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+          SECRETLESS_RUNTIME_PUBLIC_CACHE: ${{ inputs.secretless-runtime-public-cache }}
           BASH_ENV: /dev/null
         run: |
           set -euo pipefail
@@ -5620,6 +5625,68 @@ jobs:
                   destination,
               ))
 
+          def verified_runtime_cache_content():
+              # secretless-runtime-public-cache exists for repository-authored
+              # offline reinstall rehearsals. Before the sandbox, scripts reached
+              # the verified runtime cache through npm_config_cache; the sandbox
+              # replaces that cache, so its content-v2 blobs are handed in
+              # deliberately (#1798). The path comes from the workflow-controlled
+              # RUNTIME_CACHE_DIR, never from the ambient npm variables.
+              requested = any(
+                  os.environ.get(flag, "") == "true"
+                  for flag in ("RESTORE_PERSISTED_PUBLIC_CACHE", "SECRETLESS_RUNTIME_PUBLIC_CACHE")
+              )
+              runtime_cache_value = os.environ.get("RUNTIME_CACHE_DIR", "")
+              if not runtime_cache_value:
+                  if requested:
+                      sys.exit("consumer runtime cache is requested without a runtime cache path")
+                  return None
+              runtime_cache = Path(runtime_cache_value)
+              expected_runtime = runner_temp / (
+                  "secretless-runtime-cache-"
+                  f"{os.environ.get('RUN_ID', '')}-{os.environ.get('RUN_ATTEMPT', '')}"
+              )
+              if runtime_cache != expected_runtime:
+                  sys.exit("consumer runtime cache is not the workflow runtime cache")
+              content = runtime_cache / "_cacache" / "content-v2"
+              for candidate in (runtime_cache, content.parent, content):
+                  if not os.path.lexists(candidate):
+                      if requested:
+                          sys.exit("consumer runtime cache is requested but was never populated")
+                      return None
+                  if candidate.is_symlink() or not candidate.is_dir():
+                      sys.exit("consumer runtime cache content is not a directory")
+              return content
+
+          def stage_runtime_cache(content):
+              # npm writes into its cache, so each script gets a disposable copy:
+              # a read-only bind fails npm, and binding the job's cache writable
+              # would let candidate code rewrite content later steps trust. Only
+              # regular files cross; npm verifies each blob's integrity on read.
+              staging = Path(tempfile.mkdtemp(
+                  prefix="verjson-consumer-runtime-cache-", dir=str(runner_temp),
+              ))
+
+              def refuse_unreadable(error):
+                  sys.exit(f"consumer runtime cache is unreadable: {error.filename}")
+
+              try:
+                  for current, subdirectories, names in os.walk(content, onerror=refuse_unreadable):
+                      relative = Path(current).relative_to(content)
+                      (staging / relative).mkdir(exist_ok=True)
+                      if any(Path(current, entry).is_symlink() for entry in subdirectories):
+                          sys.exit("consumer runtime cache content is not a directory")
+                      for entry in names:
+                          blob = Path(current, entry)
+                          if blob.is_symlink() or not blob.is_file():
+                              sys.exit("consumer runtime cache blob is not a regular file")
+                          shutil.copyfile(blob, staging / relative / entry)
+              except BaseException:
+                  shutil.rmtree(staging, ignore_errors=True)
+                  raise
+              return staging
+
+          runtime_cache_content = verified_runtime_cache_content()
           for directory, name, unset_env, requires_services in normalized:
               script_env = os.environ.copy()
               service_env_names = {"DB_HOST", "DB_PORT", "CACHE_PORT"}
@@ -5632,6 +5699,8 @@ jobs:
                   "DB_ENV", "CACHE_ENV", "CI_SCRIPT_PLAN", "NESTED_MANIFESTS",
                   "RUN_DEFAULTS", "VERJSON_CI_TRUSTED_DB_HOST",
                   "VERJSON_CI_COMMAND_FILES_DIR", "RUNNER_TOOL_CACHE",
+                  "RUNTIME_CACHE_DIR", "RESTORE_PERSISTED_PUBLIC_CACHE",
+                  "SECRETLESS_RUNTIME_PUBLIC_CACHE", "RUN_ID", "RUN_ATTEMPT",
               ):
                   script_env.pop(env_name, None)
               for env_name in service_env_names:
@@ -5729,27 +5798,47 @@ jobs:
                       "/dev/shm/playwright-browsers",
                   ))
                   script_env["PLAYWRIGHT_BROWSERS_PATH"] = "/dev/shm/playwright-browsers"
-              arguments.extend((
-                  "--chdir", str(sandbox_directory), "--",
-                  "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
-                  *npm_command, "run", name,
-              ))
-              subprocess.run(
-                  arguments,
-                  check=True,
-                  env=script_env,
-                  cwd="/",
-                  pass_fds=tuple(
-                      mount_fds
-                      + [
-                          fd for fd in (browser_cache_fd, global_config_file.fileno())
-                          if fd is not None
-                      ]
-                  ),
-              )
-              for descriptor in mount_fds:
-                  os.close(descriptor)
-              mount_fds.clear()
+              runtime_cache_staging = None
+              try:
+                  if runtime_cache_content is not None:
+                      runtime_cache_staging = stage_runtime_cache(runtime_cache_content)
+                      bind_source(
+                          runtime_cache_staging,
+                          "/dev/shm/npm-cache/_cacache/content-v2",
+                          writable=True,
+                      )
+                  arguments.extend((
+                      "--chdir", str(sandbox_directory), "--",
+                      "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
+                      *npm_command, "run", name,
+                  ))
+                  subprocess.run(
+                      arguments,
+                      check=True,
+                      env=script_env,
+                      cwd="/",
+                      pass_fds=tuple(
+                          mount_fds
+                          + [
+                              fd for fd in (browser_cache_fd, global_config_file.fileno())
+                              if fd is not None
+                          ]
+                      ),
+                  )
+              finally:
+                  for descriptor in mount_fds:
+                      os.close(descriptor)
+                  mount_fds.clear()
+                  if runtime_cache_staging is not None:
+                      shutil.rmtree(runtime_cache_staging, ignore_errors=True)
+                      if os.path.lexists(runtime_cache_staging):
+                          # Candidate code runs as the runner's uid and can seal
+                          # a staged directory. Name only this step's own path.
+                          print(
+                              "::warning::consumer runtime cache staging was not removed: "
+                              f"{runtime_cache_staging}",
+                              file=sys.stderr,
+                          )
           if browser_cache_fd is not None:
               os.close(browser_cache_fd)
           global_config_file.close()

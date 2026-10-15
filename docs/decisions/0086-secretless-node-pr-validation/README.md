@@ -250,3 +250,44 @@ there. node-gyp 11.4 added `npm_package_config_node_gyp_*`, but a consumer lock 
 older node-gyp, so the npm form is the one that reaches every version. Egress stays
 denied; the prebuilt download still fails and the source build takes over. No mount,
 credential, or writable path is added.
+
+**The verified runtime cache in the consumer plan.** The source reusable workflow's
+consumer sandbox never unshared the network, so the caller-selected network policy
+recorded above was intact. The failure in verjson-cli#318 (`ENOTCACHED … cache mode is
+'only-if-cached'`) came from the consumer script itself: its package smoke test runs
+`npm ci --offline` against `npm config get cache`, which is the rehearsal that
+`secretless-runtime-public-cache: true` exists to support. Before #1729 that cache was the
+job's verified runtime cache, exported as `npm_config_cache`. The sandbox replaced it
+with an empty `/dev/shm/npm-cache`, so the rehearsal lost the blobs the input promises.
+The protected generator was not affected: it already gives each candidate script a
+verified copy of that cache.
+
+Decision: restore the recorded behavior instead of changing network policy. The source
+consumer plan now resolves the runtime cache only from the workflow-controlled
+`RUNTIME_CACHE_DIR`, using the same run-scoped path and request flags as the
+compatibility lane (`secretless-runtime-public-cache`, or `cache` with npm). For each
+script, it copies the regular-file blobs from that cache's `content-v2` into a fresh
+staging directory under `RUNNER_TEMP`. It mounts that directory writable at
+`/dev/shm/npm-cache/_cacache/content-v2`, then removes it afterwards. A requested cache
+that is missing, outside the run-scoped path, or contains a non-regular file fails
+before candidate code runs. A cache that was not requested and is absent is a no-op.
+Candidate code never receives the job's own cache, its index, the ambient npm
+configuration, or the control variables, and npm verifies each blob's integrity when it
+reads it. The protected generator removes those control variables from its own step
+because its runner copies the baseline from `npm_config_cache`.
+
+Rejected: forcing the consumer sandbox offline and asking callers to pre-seed caches.
+That would supersede the caller-selected network policy without a security gain here,
+because consumer scripts already receive no credentials. Binding the job's cache
+read-only was also rejected because npm writes into its cache. Binding it writable would
+let candidate code rewrite blobs that the compatibility lane trusts later.
+
+All earlier isolation properties are unchanged: no credentials, a read-only `.git`,
+hidden command files, `-I` interpreters, separate npm configurations, and
+`/etc/alternatives`. Real-Bubblewrap regressions build and load an N-API addon through
+the rebuild step of both workflows after proving that it cannot resolve nodejs.org. They
+also run real `npm ci --offline` inside the consumer sandbox from a verified blob and
+show that a tampering script leaves the job's cache unchanged. Both fail on the
+pre-fix workflow. Static checks pin `npm_config_nodedir`, the rebuild network unshare,
+the consumer cache wiring, and the absence of a consumer network unshare in the
+`platform` group, ignoring commented-out lines.
