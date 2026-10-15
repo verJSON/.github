@@ -213,6 +213,15 @@ grep -qF 'promotion is not executing from the canonical workflow repository' <<<
   && pass "a workflow executing from another repository is rejected" \
   || fail "a foreign workflow repository was accepted: $out"
 
+# --- the canonical repository in its renamed display case --------------------
+# GitHub names are ASCII-case-insensitive identities (ADR 0213). The 2026-10-02
+# organization rename made a local `./` reusable call report `verJSON/.github`:
+# AiB run 38790031475 refused its promotion retry on exactly this spelling.
+out="$(EXECUTING_WORKFLOW_SHA="$MAIN_SHA" EXECUTING_WORKFLOW_REPOSITORY=verJSON/.github run_case)"
+grep -qF 'REACHED_PAST_PIN_CHECK' <<<"$out" \
+  && pass "the canonical repository in its renamed display case 'verJSON/.github' is accepted" \
+  || fail "the canonical repository 'verJSON/.github' was rejected: $out"
+
 # --- the revision cannot be determined ---------------------------------------
 out="$(run_case)"
 grep -qF 'promotion is not executing from the canonical workflow repository' <<<"$out" \

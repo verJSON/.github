@@ -224,7 +224,11 @@ jobs:
           [ "$CALLER_REF" = "refs/heads/$default_branch" ] || {
             echo "::error::promotion must execute from the target repository default branch"; exit 1;
           }
-          [ "$EXECUTING_WORKFLOW_REPOSITORY" = Verjson/.github ] || {
+          # An ASCII-case-insensitive identity (ADR 0213): a local `./` call reports the
+          # renamed display case `verJSON/.github`. `ascii_downcase` leaves non-ASCII
+          # untouched, so a lookalike never equals the ASCII literal.
+          jq -en --arg repository "$EXECUTING_WORKFLOW_REPOSITORY" \
+            '$repository | ascii_downcase == "verjson/.github"' >/dev/null || {
             echo "::error::promotion is not executing from the canonical workflow repository"; exit 1;
           }
           [[ "$EXECUTING_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
