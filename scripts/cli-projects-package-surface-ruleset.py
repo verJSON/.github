@@ -411,30 +411,12 @@ def list_named_rulesets(contract):
     return [entry for entry in entries if entry.get("name") == contract["ruleset"]["name"]]
 
 
-def canonical_ref(ref):
-    # Restated here because these functions put the value in a URL: a caller's guard
-    # cannot vouch for a read made here.
-    require(ref == "main" or (isinstance(ref, str) and SHA_PATTERN.fullmatch(ref) is not None),
-            "canonical revision is invalid")
-    return ref
-
-
 def canonical_compare(base, head):
-    comparison = gh_json(
-        f"repos/Verjson/.github/compare/{canonical_ref(base)}...{canonical_ref(head)}"
-    )
-    return comparison.get("status") if isinstance(comparison, dict) else None
+    return revision.canonical_compare(base, head, gh_json=gh_json, require=require)
 
 
 def canonical_file(path, ref):
-    result = subprocess.run(
-        ["gh", "api", "--hostname", "github.com",
-         f"repos/Verjson/.github/contents/{path}?ref={canonical_ref(ref)}",
-         "-H", "Accept: application/vnd.github.raw+json"],
-        capture_output=True, check=False,
-    )
-    require(result.returncode == 0, f"canonical file unreadable at {ref}: {path}")
-    return result.stdout
+    return revision.canonical_file(path, ref, require)
 
 
 def verify_canonical_bytes(contract, workflow_sha):

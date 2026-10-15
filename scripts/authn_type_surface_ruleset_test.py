@@ -19,6 +19,7 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 SHA = "a" * 40
 HEAD = "b" * 40
+PREVIOUS = "c" * 40
 
 
 class AuthnTypeSurfaceRulesetTest(unittest.TestCase):
@@ -336,6 +337,147 @@ class AuthnTypeSurfaceRulesetTest(unittest.TestCase):
                 MODULE.main(["apply", "--workflow-sha", SHA])
         api.assert_not_called()
 
+    def live_image(self, sha, **changes):
+        return MODULE.render_payload(self.contract, sha) | changes | {
+            "id": 21750617, "source_type": "Organization", "source": "Verjson",
+        }
+
+    def test_apply_rotates_from_the_admitted_live_predecessor(self):
+        # The predecessor is read from the live ruleset, never from a committed record
+        # that goes stale after each rotation (#1824).
+        previous, rotated = self.live_image(PREVIOUS), self.live_image(SHA)
+        with (
+            mock.patch.object(MODULE, "discover_state", return_value=[{"id": 21750617}]),
+            mock.patch.object(MODULE, "admit_previous_revision") as admit,
+            mock.patch.object(MODULE, "gh_json", side_effect=[previous, previous, rotated]),
+            mock.patch.object(MODULE, "gh_json_input", return_value={}) as mutate,
+            mock.patch("sys.stdout"),
+        ):
+            self.assertEqual(0, MODULE.main([
+                "apply", "--workflow-sha", SHA, "--ack", "APPLY-AUTHN-TYPE-SURFACE-1154",
+            ]))
+        admit.assert_called_once_with(PREVIOUS, SHA)
+        mutate.assert_called_once_with(
+            "PUT", "orgs/Verjson/rulesets/21750617", MODULE.render_payload(self.contract, SHA)
+        )
+
+    def test_dry_run_and_apply_refuse_an_unadmitted_or_unreviewed_predecessor(self):
+        for name, live, admission in (
+            ("not admitted", self.live_image(PREVIOUS),
+             MODULE.ContractError("not an ancestor of the rotation target")),
+            ("changed bypass", self.live_image(PREVIOUS, bypass_actors=[]), None),
+            ("disabled", self.live_image(PREVIOUS, enforcement="disabled"), None),
+        ):
+            for mode in ("dry-run", "apply"):
+                with (
+                    self.subTest(name=name, mode=mode),
+                    mock.patch.object(MODULE, "discover_state", return_value=[{"id": 21750617}]),
+                    mock.patch.object(MODULE, "admit_previous_revision",
+                                      side_effect=admission) as admit,
+                    mock.patch.object(MODULE, "gh_json", return_value=live),
+                    mock.patch.object(MODULE, "gh_json_input") as mutate,
+                    self.assertRaises(MODULE.ContractError),
+                ):
+                    MODULE.main([
+                        mode, "--workflow-sha", SHA, "--ack", "APPLY-AUTHN-TYPE-SURFACE-1154",
+                    ])
+                mutate.assert_not_called()
+                self.assertEqual(admission is not None, admit.called)
+
+    def test_snapshot_and_verify_run_never_accept_a_predecessor(self):
+        with (
+            mock.patch.object(MODULE, "discover_state", return_value=[{"id": 21750617}]),
+            mock.patch.object(MODULE, "admit_previous_revision") as admit,
+            mock.patch.object(MODULE, "gh_json", return_value=self.live_image(PREVIOUS)),
+            self.assertRaisesRegex(MODULE.ContractError, "differs from the reviewed image"),
+        ):
+            MODULE.main(["snapshot", "--workflow-sha", SHA])
+        admit.assert_not_called()
+
+    def test_apply_is_idempotent_on_the_exact_active_target(self):
+        with (
+            mock.patch.object(MODULE, "discover_state", return_value=[{"id": 21750617}]),
+            mock.patch.object(MODULE, "admit_previous_revision") as admit,
+            mock.patch.object(MODULE, "gh_json", return_value=self.live_image(SHA)),
+            mock.patch.object(MODULE, "gh_json_input") as mutate,
+            mock.patch("sys.stdout"),
+        ):
+            self.assertEqual(0, MODULE.main([
+                "apply", "--workflow-sha", SHA, "--ack", "APPLY-AUTHN-TYPE-SURFACE-1154",
+            ]))
+        admit.assert_not_called()
+        mutate.assert_not_called()
+
+    def test_failed_rotation_restores_and_verifies_the_live_predecessor(self):
+        previous = MODULE.render_payload(self.contract, PREVIOUS)
+        expected = MODULE.render_payload(self.contract, SHA)
+        live_previous = self.live_image(PREVIOUS)
+        partial = self.live_image(SHA, bypass_actors=[])
+        for put in ({}, MODULE.ContractError("client lost response")):
+            with (
+                self.subTest(put=put),
+                mock.patch.object(
+                    MODULE, "gh_json", side_effect=[live_previous, partial, live_previous],
+                ),
+                mock.patch.object(MODULE, "gh_json_input", side_effect=[put, {}]) as mutate,
+                self.assertRaisesRegex(MODULE.ContractError, "prior reviewed workflow restored"),
+            ):
+                MODULE.rotate_existing_rule(21750617, previous, expected)
+            self.assertEqual(expected, mutate.call_args_list[0].args[2])
+            self.assertEqual(previous, mutate.call_args_list[1].args[2])
+
+    def test_rotation_refuses_a_preimage_that_moved_before_the_write(self):
+        previous = MODULE.render_payload(self.contract, PREVIOUS)
+        with (
+            mock.patch.object(MODULE, "gh_json", return_value=self.live_image("d" * 40)),
+            mock.patch.object(MODULE, "gh_json_input") as mutate,
+            self.assertRaises(MODULE.ContractError),
+        ):
+            MODULE.rotate_existing_rule(
+                21750617, previous, MODULE.render_payload(self.contract, SHA)
+            )
+        mutate.assert_not_called()
+
+    def test_audit_checks_the_live_revision_read_only(self):
+        with (
+            mock.patch.object(MODULE, "list_named_rulesets", return_value=[{"id": 21750617}]),
+            mock.patch.object(MODULE, "gh_json", return_value=self.live_image(PREVIOUS)),
+            mock.patch.object(MODULE, "audit_live_revision") as audit,
+            mock.patch.object(MODULE, "validate_workflow") as local,
+            mock.patch.object(MODULE, "gh_json_input") as mutate,
+            mock.patch("sys.stdout"),
+        ):
+            self.assertEqual(0, MODULE.main(["audit"]))
+        audit.assert_called_once_with(PREVIOUS)
+        local.assert_not_called()
+        mutate.assert_not_called()
+        for live in (
+            self.live_image(PREVIOUS, enforcement="evaluate"),
+            self.live_image(PREVIOUS, bypass_actors=[]),
+        ):
+            with (
+                self.subTest(live=live["enforcement"]),
+                mock.patch.object(MODULE, "list_named_rulesets", return_value=[{"id": 21750617}]),
+                mock.patch.object(MODULE, "gh_json", return_value=live),
+                mock.patch.object(MODULE, "audit_live_revision") as audit,
+                self.assertRaises(MODULE.ContractError),
+            ):
+                MODULE.main(["audit"])
+            audit.assert_not_called()
+
+    def test_regenerate_at_requires_the_generated_header_of_its_own_revision(self):
+        workflow = MODULE.WORKFLOW.read_bytes()
+        with mock.patch.object(MODULE, "canonical_file",
+                               return_value=(ROOT / MODULE.GENERATOR_PATH).read_bytes()):
+            self.assertEqual(workflow, MODULE.regenerate_at(PREVIOUS, workflow))
+            for forged in (
+                workflow.replace(b"# Generated by", b"# Written by", 1),
+                b"\n" + workflow,
+                workflow.replace(MODULE.NODE_CI_SHA.encode(), b"main", 1),
+            ):
+                with self.subTest(forged=forged[:60]), self.assertRaises(MODULE.ContractError):
+                    MODULE.regenerate_at(PREVIOUS, forged)
+
     def test_apply_creates_then_reads_back_the_exact_rule(self):
         expected = MODULE.render_payload(self.contract, SHA)
         live = expected | {
@@ -456,83 +598,8 @@ class AuthnTypeSurfaceRulesetTest(unittest.TestCase):
                     with self.assertRaises(MODULE.ContractError):
                         MODULE.read_contract(path)
 
-    def staged_images(self):
-        expected = MODULE.render_payload(self.contract, SHA) | {"enforcement": "evaluate"}
-        previous = MODULE.render_payload(self.contract, MODULE.PREVIOUS_WORKFLOW_SHA) | {
-            "enforcement": "evaluate", "bypass_actors": [],
-        }
-        metadata = {"id": 21750617, "source_type": "Organization", "source": "Verjson"}
-        return previous | metadata, expected, expected | metadata
-
-    def test_stage_adds_only_release_bypass_and_repins_without_activating(self):
-        previous, expected, staged = self.staged_images()
-        with (
-            mock.patch.object(MODULE, "discover_state", return_value=[{"id": 21750617}]),
-            mock.patch.object(MODULE, "gh_json", side_effect=[previous, previous, staged]),
-            mock.patch.object(MODULE, "gh_json_input") as mutate,
-        ):
-            self.assertEqual(0, MODULE.main([
-                "stage-release-bypass", "--workflow-sha", SHA,
-                "--ack", "APPLY-AUTHN-TYPE-SURFACE-1154",
-            ]))
-        mutate.assert_called_once_with("PUT", "orgs/Verjson/rulesets/21750617", expected)
-        self.assertEqual("evaluate", expected["enforcement"])
-
-    def test_stage_rejects_unreviewed_preimages_before_mutation(self):
-        previous, expected, _ = self.staged_images()
-        cases = [
-            None,
-            previous | {"id": 1},
-            previous | {"enforcement": "active"},
-            previous | {"bypass_actors": MODULE.RELEASE_BYPASS},
-            previous | {"conditions": {"ref_name": {"include": ["~ALL"]}}},
-            previous | {"source": "another-org"},
-        ]
-        wrong_pin = copy.deepcopy(previous)
-        wrong_pin["rules"][0]["parameters"]["workflows"][0]["sha"] = "c" * 40
-        cases.append(wrong_pin)
-        for live in cases:
-            with self.subTest(live=live), mock.patch.object(MODULE, "gh_json_input") as mutate:
-                with self.assertRaises(MODULE.ContractError):
-                    MODULE.stage_release_bypass(
-                        self.contract, expected, live, "APPLY-AUTHN-TYPE-SURFACE-1154"
-                    )
-                mutate.assert_not_called()
-
-    def test_stage_requires_ack_and_rechecks_for_concurrent_drift(self):
-        previous, expected, _ = self.staged_images()
-        with mock.patch.object(MODULE, "gh_json_input") as mutate:
-            with self.assertRaisesRegex(MODULE.ContractError, "acknowledgement"):
-                MODULE.stage_release_bypass(self.contract, expected, previous, "")
-            mutate.assert_not_called()
-        with (
-            mock.patch.object(MODULE, "gh_json", return_value=previous | {"enforcement": "active"}),
-            mock.patch.object(MODULE, "gh_json_input") as mutate,
-        ):
-            with self.assertRaises(MODULE.ContractError):
-                MODULE.stage_release_bypass(
-                    self.contract, expected, previous, "APPLY-AUTHN-TYPE-SURFACE-1154"
-                )
-            mutate.assert_not_called()
-
-    def test_stage_rejects_postimage_drift_and_is_idempotent_after_success(self):
-        previous, expected, staged = self.staged_images()
-        with (
-            mock.patch.object(MODULE, "gh_json", side_effect=[previous, staged | {"bypass_actors": []}]),
-            mock.patch.object(MODULE, "gh_json_input"),
-        ):
-            with self.assertRaises(MODULE.ContractError):
-                MODULE.stage_release_bypass(
-                    self.contract, expected, previous, "APPLY-AUTHN-TYPE-SURFACE-1154"
-                )
-        with mock.patch.object(MODULE, "gh_json_input") as mutate:
-            self.assertEqual(0, MODULE.stage_release_bypass(
-                self.contract, expected, staged, "APPLY-AUTHN-TYPE-SURFACE-1154"
-            ))
-            mutate.assert_not_called()
-
     def test_evaluate_dry_run_accepts_staged_rule_without_mutation(self):
-        _, _, staged = self.staged_images()
+        staged = self.live_image(SHA, enforcement="evaluate")
         with (
             mock.patch.object(MODULE, "discover_state", return_value=[{"id": 21750617}]),
             mock.patch.object(MODULE, "gh_json", return_value=staged),

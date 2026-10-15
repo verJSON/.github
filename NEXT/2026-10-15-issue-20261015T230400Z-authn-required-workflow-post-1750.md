@@ -10,3 +10,11 @@ Hardening: the generated `authn-type-surface-required.yml` now calls
 instead of `3f8fb4ba`. Organization ruleset 21750617 keeps running the old revision
 until an operator rotates it to this change's merge commit
 ([ADR 0151](../docs/decisions/0151-authn-type-surface-required-workflow/README.md)).
+
+The authn rotation tool can now rotate the existing ruleset. Previously it could only
+create one, so the earlier activation needed a one-off procedure. `dry-run` and `apply`
+read the predecessor from the live ruleset, admit it with the same canonical-revision
+check as the CLI projects tool, and restore and verify it if the write fails. A new
+read-only `audit` mode backs the scheduled `required-workflow-audit` job. The finished
+`stage-release-bypass` transition is retired along with its hard-coded `f2f425e9`
+predecessor.

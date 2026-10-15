@@ -19,6 +19,7 @@ import tempfile
 import yaml
 
 
+CANONICAL_REPOSITORY = "Verjson/.github"
 SHA = re.compile(r"[0-9a-f]{40}")
 FORWARD = frozenset({"ahead", "identical"})
 PROTECTED_LANE = ".github/workflows/node-ci-protected.yml"
@@ -26,6 +27,33 @@ CANONICAL_PROTECTED_LANE = f"Verjson/.github/{PROTECTED_LANE}@"
 # #1759, which contains #1750: the protected lane's inline interpreters start isolated
 # from the candidate checkout. A required workflow must never call an earlier revision.
 NODE_CI_SECURITY_FLOOR = "21eb48e713bd8304951fb7b26a900d08359af900"
+
+
+def canonical_ref(ref, require):
+    # Restated at each read because the value goes into a URL: a caller's guard cannot
+    # vouch for a read made here.
+    require(ref == "main" or (isinstance(ref, str) and SHA.fullmatch(ref) is not None),
+            "canonical revision is invalid")
+    return ref
+
+
+def canonical_compare(base, head, *, gh_json, require):
+    comparison = gh_json(
+        f"repos/{CANONICAL_REPOSITORY}/compare/"
+        f"{canonical_ref(base, require)}...{canonical_ref(head, require)}"
+    )
+    return comparison.get("status") if isinstance(comparison, dict) else None
+
+
+def canonical_file(path, ref, require):
+    result = subprocess.run(
+        ["gh", "api", "--hostname", "github.com",
+         f"repos/{CANONICAL_REPOSITORY}/contents/{path}?ref={canonical_ref(ref, require)}",
+         "-H", "Accept: application/vnd.github.raw+json"],
+        capture_output=True, check=False,
+    )
+    require(result.returncode == 0, f"canonical file unreadable at {ref}: {path}")
+    return result.stdout
 
 
 def bound_workflow_sha(ruleset, require):
