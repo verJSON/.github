@@ -518,6 +518,10 @@ def selected_repositories(read, organization: str, kind: str, name: str) -> set[
 
 def require_scope(read, organization: str, kind: str, name: str, governed: dict[str, bool]) -> dict:
     item = single_object(read, f"orgs/{organization}/actions/{kind}/{name}")
+    return require_reach(read, organization, kind, name, item, governed)
+
+
+def require_reach(read, organization: str, kind: str, name: str, item: dict, governed: dict[str, bool]) -> dict:
     visibility = item.get("visibility")
     if visibility == "all":
         return item
@@ -800,10 +804,87 @@ def verify_no_repository_shadowing(contract: dict, read, repositories: list[dict
     concise_missing("repository-level authorization credential shadowing", shadows)
 
 
-def verify_authorization(contract: dict, read, governed: dict[str, bool]) -> None:
+def is_count(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def require_corroborated_withdrawal(read, organization: str, name: str) -> None:
+    """Accept a 404 for an organization secret as withdrawal only on positive evidence.
+
+    GitHub also answers 404 for a secret the caller cannot see, so the absence is
+    read from the same token's complete organization listing. A listing that is
+    empty of pages, truncated, malformed, or that names the secret is unknown
+    custody, never withdrawal; a complete listing with total_count 0 is genuine
+    evidence (ADR 0166, as `privileged-merge-conformance.sh` decides it).
+    """
+    unknown = f"cannot verify {name} custody: the organization copy answered 404 and"
+    pages = read(f"orgs/{organization}/actions/secrets?per_page=100")
+    require(
+        isinstance(pages, list)
+        and len(pages) > 0
+        and all(
+            isinstance(page, dict)
+            and isinstance(page.get("secrets"), list)
+            and is_count(page.get("total_count"))
+            for page in pages
+        ),
+        f"{unknown} the organization secret listing is malformed",
+    )
+    secrets = [secret for page in pages for secret in page["secrets"]]
+    require(
+        all(isinstance(secret, dict) and isinstance(secret.get("name"), str) and secret["name"] for secret in secrets),
+        f"{unknown} the organization secret listing has an unnamed entry",
+    )
+    names = [secret["name"] for secret in secrets]
+    require(
+        all(page["total_count"] == len(names) for page in pages),
+        f"{unknown} the organization secret listing is incomplete",
+    )
+    require(len(names) == len(set(names)), f"{unknown} the organization secret listing repeats a name")
+    require(name not in names, f"{unknown} the organization secret listing still names it")
+
+
+def environment_key_state(read, full_name: str, environment: str, name: str) -> str | None:
+    """Return None when the environment holds the secret, else `missing` or `unreadable`.
+
+    Metadata only: this endpoint never returns a secret's value. `read` raises for
+    every status but 404, so a 403, a 5xx or invalid JSON is `unreadable`, never
+    `missing`; both fail the audit, but only one is a provisioning gap.
+    """
+    try:
+        pages = read(f"repos/{full_name}/environments/{environment}/secrets/{name}", allow_missing=True)
+    except AuditError:
+        return "unreadable"
+    if not pages:
+        return "missing"
+    if len(pages) == 1 and isinstance(pages[0], dict) and pages[0].get("name") == name:
+        return None
+    return "unreadable"
+
+
+def verify_private_key_custody(read, organization: str, name: str, governed: dict[str, bool]) -> bool:
+    """Verify the organization copy's reach, or that it is withdrawn (ADR 0166).
+
+    Returns True when the copy is withdrawn, so every armed repository must hold
+    the key in its review environment instead.
+    """
+    path = f"orgs/{organization}/actions/secrets/{name}"
+    pages = read(path, allow_missing=True)
+    if pages:
+        require(len(pages) == 1 and isinstance(pages[0], dict), f"unexpected response shape for {path}")
+        require_reach(read, organization, "secrets", name, pages[0], governed)
+        return False
+    require_corroborated_withdrawal(read, organization, name)
+    return True
+
+
+def verify_authorization(contract: dict, read, governed: dict[str, bool]) -> bool:
+    """Verify the authorization App's credentials; True means environment key custody."""
     organization = contract["organization"]
     authorization = contract["authorization"]
-    require_scope(read, organization, "secrets", authorization["private_key_secret"], governed)
+    environment_custody = verify_private_key_custody(
+        read, organization, authorization["private_key_secret"], governed
+    )
     variables = {
         name: require_scope(read, organization, "variables", name, governed)
         for name in authorization["variables"]
@@ -826,9 +907,12 @@ def verify_authorization(contract: dict, read, governed: dict[str, bool]) -> Non
     require(installation.get("repository_selection") == "all", "authorization App installation is not ~ALL")
     require(installation.get("permissions") == authorization["app_permissions"], "authorization App permission map drifted")
     require(installation.get("events") == authorization["app_events"], "authorization App event subscriptions drifted")
+    return environment_custody
 
 
-def verify_adopter_conformance(contract: dict, read, repositories: list[dict], covered: list[str]) -> None:
+def verify_adopter_conformance(
+    contract: dict, read, repositories: list[dict], covered: list[str], environment_custody: bool
+) -> None:
     """Report armed adopters that cannot satisfy the arm they are required to pass.
 
     Enrollment is granted by a repository property and admission requires a
@@ -852,9 +936,11 @@ def verify_adopter_conformance(contract: dict, read, repositories: list[dict], c
         repository["full_name"]: repository.get("default_branch") for repository in repositories
     }
     environment = conformance["environment"]
+    private_key = contract["authorization"]["private_key_secret"]
     blocked = []
     findings = []
     environment_findings = []
+    key_findings = {"missing": [], "unreadable": []}
     for full_name in covered:
         branch = default_branches.get(full_name)
         require(isinstance(branch, str) and branch, f"{full_name} reports no default branch")
@@ -900,6 +986,13 @@ def verify_adopter_conformance(contract: dict, read, repositories: list[dict], c
             len(pages) == 1 and isinstance(pages[0], dict),
             f"unexpected environment response shape for {label}",
         )
+        # With the organization copy withdrawn the key exists only here, so an
+        # environment that conforms in every other respect still cannot mint the
+        # review token without it.
+        if environment_custody:
+            state = environment_key_state(read, full_name, environment, private_key)
+            if state:
+                key_findings[state].append(label)
         live = pages[0]
         mismatches = image_mismatches(
             live.get("deployment_branch_policy"),
@@ -941,6 +1034,8 @@ def verify_adopter_conformance(contract: dict, read, repositories: list[dict], c
             ),
             ("armed adopters with an incomplete generated adopter caller set", sorted(findings)),
             ("armed adopters without a conforming review environment", sorted(environment_findings)),
+            (f"armed {environment} environments that lack {private_key}", sorted(key_findings["missing"])),
+            (f"armed {environment} environments whose {private_key} is unreadable", sorted(key_findings["unreadable"])),
         )
         if items
     ]
@@ -1107,8 +1202,8 @@ def audit(contract: dict, read=gh_pages, allow_unschedulable_selection: bool = F
     # The App credential only has to reach where the arm actually runs. Demanding
     # organization-wide reach for a rule that governs a subset is what made the
     # credential scope look like a blocker rather than a decision.
-    verify_authorization(contract, read, {name: governed[name] for name in covered})
-    verify_adopter_conformance(contract, read, repositories, covered)
+    environment_custody = verify_authorization(contract, read, {name: governed[name] for name in covered})
+    verify_adopter_conformance(contract, read, repositories, covered, environment_custody)
     verify_replacement_workflow(contract, read)
     return {
         "unpinned_live_fields": unpinned_live_fields(

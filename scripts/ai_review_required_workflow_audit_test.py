@@ -27,6 +27,12 @@ ADOPTER_CALLERS = (
     ".github/workflows/ai-privileged-merge.yml",
     ".github/workflows/ai-promotion-retry.yml",
 )
+PRIVATE_KEY = "AI_REVIEW_APP_PRIVATE_KEY"
+ORGANIZATION_SECRETS = "orgs/Verjson/actions/secrets?per_page=100"
+
+
+def environment_key_path(full_name):
+    return f"repos/{full_name}/environments/ai-review-app/secrets/{PRIVATE_KEY}"
 
 
 class AiReviewRequiredWorkflowAuditTest(unittest.TestCase):
@@ -183,6 +189,8 @@ jobs:
             if allow_missing:
                 return []
             raise AssertionError(f"unexpected API read: {path}")
+        if isinstance(self.fixture[path], Exception):
+            raise self.fixture[path]
         return copy.deepcopy(self.fixture[path])
 
     def select_scope(self, kind, name, repositories):
@@ -957,6 +965,136 @@ jobs:
         self.fixture = self.make_fixture()
         self.select_scope("variables", "AI_REVIEW_APP_ID", ["Verjson/beta"])
         self.assert_audit_error("AI_REVIEW_APP_ID.*missing=1.*Verjson/alpha")
+
+    def withdraw_organization_key(self, listed=("DEEPSEEK_API_KEY",)):
+        """Stub the ADR 0166 custody: no organization copy, one key per armed environment."""
+        del self.fixture[f"orgs/Verjson/actions/secrets/{PRIVATE_KEY}"]
+        self.fixture[ORGANIZATION_SECRETS] = [
+            {"total_count": len(listed), "secrets": [{"name": name} for name in listed]},
+        ]
+        for full_name in ("Verjson/alpha", "Verjson/beta"):
+            self.fixture[environment_key_path(full_name)] = [{"name": PRIVATE_KEY}]
+
+    def test_a_corroborated_withdrawal_is_satisfied_by_environment_custody(self):
+        self.withdraw_organization_key()
+        report = AUDIT.audit(self.contract, self.read)
+        self.assertEqual(report["armed_repositories"], 2)
+
+    def test_an_uncorroborated_organization_key_404_fails_closed(self):
+        # GitHub answers 404 for a secret the token cannot see, so absence must be
+        # read from a complete listing; anything less is unknown custody.
+        other = {"name": "DEEPSEEK_API_KEY"}
+        listings = {
+            "the listing names the key": [{"total_count": 1, "secrets": [{"name": PRIVATE_KEY}]}],
+            "no pages": [],
+            "a truncated listing": [{"total_count": 101, "secrets": [other]}],
+            "pages disagree on total_count": [
+                {"total_count": 2, "secrets": [other]},
+                {"total_count": 3, "secrets": [{"name": "OTHER"}]},
+            ],
+            "a nameless entry": [{"total_count": 2, "secrets": [other, {}]}],
+            "an empty name": [{"total_count": 2, "secrets": [other, {"name": ""}]}],
+            "a non-string name": [{"total_count": 2, "secrets": [other, {"name": 7}]}],
+            "a non-object entry": [{"total_count": 2, "secrets": [other, PRIVATE_KEY]}],
+            "a duplicate name": [{"total_count": 2, "secrets": [other, other]}],
+            "a page without secrets": [{"total_count": 0}],
+            "a non-object page": [[other]],
+            "a missing total_count": [{"secrets": [other]}],
+            "a boolean total_count": [{"total_count": True, "secrets": [other]}],
+            "a string total_count": [{"total_count": "1", "secrets": [other]}],
+        }
+        for case, listing in listings.items():
+            with self.subTest(case=case):
+                self.fixture = self.make_fixture()
+                self.withdraw_organization_key()
+                self.fixture[ORGANIZATION_SECRETS] = listing
+                self.assertRegex(self.audit_error_message(), "cannot verify AI_REVIEW_APP_PRIVATE_KEY custody")
+
+    def test_a_complete_empty_organization_listing_corroborates_the_withdrawal(self):
+        self.withdraw_organization_key(listed=())
+        self.assertEqual(self.fixture[ORGANIZATION_SECRETS], [{"total_count": 0, "secrets": []}])
+        self.assertEqual(AUDIT.audit(self.contract, self.read)["armed_repositories"], 2)
+
+    def test_a_multi_page_listing_corroborates_the_withdrawal(self):
+        self.withdraw_organization_key()
+        self.fixture[ORGANIZATION_SECRETS] = [
+            {"total_count": 2, "secrets": [{"name": "DEEPSEEK_API_KEY"}]},
+            {"total_count": 2, "secrets": [{"name": "ORG_ADMIN_TOKEN"}]},
+        ]
+        self.assertEqual(AUDIT.audit(self.contract, self.read)["armed_repositories"], 2)
+
+    def test_an_unreadable_organization_key_or_listing_stops_the_audit(self):
+        # Only a 404 is a question about custody; every other status is an
+        # unreadable API and the audit must not reach any verdict past it.
+        for path in (f"orgs/Verjson/actions/secrets/{PRIVATE_KEY}", ORGANIZATION_SECRETS):
+            with self.subTest(path=path):
+                self.fixture = self.make_fixture()
+                self.withdraw_organization_key()
+                self.fixture[path] = AUDIT.AuditError(f"GitHub API read failed for {path}")
+                self.assertEqual(self.audit_error_message(), f"GitHub API read failed for {path}")
+
+    def test_a_present_organization_copy_keeps_the_visibility_verdict(self):
+        # Environment custody does not excuse an organization copy that cannot
+        # reach an armed repository, and is never read while the copy exists.
+        for full_name in ("Verjson/alpha", "Verjson/beta"):
+            self.fixture[environment_key_path(full_name)] = AssertionError("environment key read")
+        self.assertEqual(AUDIT.audit(self.contract, self.read)["armed_repositories"], 2)
+        self.select_scope("secrets", PRIVATE_KEY, ["Verjson/alpha"])
+        self.assert_audit_error(r"AI_REVIEW_APP_PRIVATE_KEY cannot reach governed repositories.*Verjson/beta")
+        self.fixture[f"orgs/Verjson/actions/secrets/{PRIVATE_KEY}"] = [{"visibility": "internal"}]
+        self.assert_audit_error("unsupported visibility 'internal'")
+        for response in ([{"visibility": "all"}, {"visibility": "all"}], [["all"]]):
+            with self.subTest(response=response):
+                self.fixture[f"orgs/Verjson/actions/secrets/{PRIVATE_KEY}"] = response
+                self.assert_audit_error(f"unexpected response shape for orgs/Verjson/actions/secrets/{PRIVATE_KEY}")
+
+    def test_a_withdrawn_key_absent_from_an_armed_environment_is_missing(self):
+        self.withdraw_organization_key()
+        del self.fixture[environment_key_path("Verjson/beta")]
+        self.assertRegex(
+            self.audit_error_message(),
+            r"lack AI_REVIEW_APP_PRIVATE_KEY.*missing=1 sample=\['Verjson/beta:ai-review-app'\]",
+        )
+
+    def test_a_missing_environment_key_is_reported_with_the_other_adopter_findings(self):
+        # The audit runs daily; a key finding that hid the adopter findings would
+        # take one scheduled day per class to make the fleet visible.
+        self.withdraw_organization_key()
+        del self.fixture[environment_key_path("Verjson/beta")]
+        self.remove_adopter_caller("Verjson/alpha", ".github/workflows/ai-review-merge.yml")
+        self.fixture["repos/Verjson/beta/environments/ai-review-app/deployment-branch-policies"] = [
+            {"branch_policies": [{"name": "main", "type": "branch"}]},
+        ]
+        message = self.audit_error_message()
+        self.assertRegex(message, r"admission caller is absent.*Verjson/alpha:\.github/workflows/ai-review-merge\.yml")
+        self.assertRegex(message, r"conforming review environment.*Verjson/beta:ai-review-app:branch_policies")
+        self.assertRegex(message, r"lack AI_REVIEW_APP_PRIVATE_KEY.*\['Verjson/beta:ai-review-app'\]")
+
+    def test_an_environment_key_read_failure_is_unreadable_not_missing(self):
+        # gh_pages raises for every status but 404 (403, 5xx, invalid JSON).
+        self.withdraw_organization_key()
+        self.fixture[environment_key_path("Verjson/alpha")] = AUDIT.AuditError(
+            f"GitHub API read failed for {environment_key_path('Verjson/alpha')}"
+        )
+        message = self.audit_error_message()
+        self.assertRegex(message, r"AI_REVIEW_APP_PRIVATE_KEY is unreadable.*\['Verjson/alpha:ai-review-app'\]")
+        self.assertNotRegex(message, "lack AI_REVIEW_APP_PRIVATE_KEY")
+
+    def test_an_environment_key_response_that_does_not_name_the_key_is_unreadable(self):
+        for response in (
+            [{"name": "OTHER_KEY"}],
+            [{}],
+            [["AI_REVIEW_APP_PRIVATE_KEY"]],
+            [{"name": PRIVATE_KEY}, {"name": PRIVATE_KEY}],
+        ):
+            with self.subTest(response=response):
+                self.fixture = self.make_fixture()
+                self.withdraw_organization_key()
+                self.fixture[environment_key_path("Verjson/beta")] = response
+                self.assertRegex(
+                    self.audit_error_message(),
+                    r"AI_REVIEW_APP_PRIVATE_KEY is unreadable.*\['Verjson/beta:ai-review-app'\]",
+                )
 
     def test_app_permissions_and_events_are_exact(self):
         self.assertEqual(self.contract["authorization"], {
