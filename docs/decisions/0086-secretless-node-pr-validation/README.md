@@ -301,12 +301,16 @@ that seals its copy with `chmod 000` cannot leave it behind. A sandboxed process
 briefly outlive the Bubblewrap call, so cleanup never resolves a staged name twice. It
 opens each directory relative to its parent's descriptor with
 `O_PATH | O_DIRECTORY | O_NOFOLLOW`, which rejects symlinks, and changes the mode
-through that descriptor's `/proc/self/fd` link. The step turns `SIGTERM` from a
-cancelled job into `SystemExit`, so the sandbox is stopped and the copy is removed.
+through that descriptor's `/proc/self/fd` link. A `SIGTERM` delivered to the step's
+Python interpreter becomes `SystemExit`, so the sandbox is stopped and the copy is
+removed. A runner cancel signals the step's bash rather than that child, so removal on
+cancel is best effort; a copy left behind costs only disk on an ephemeral runner.
 Regressions overwrite every staged blob in place, plant symlinks to a mode-0555 host
 directory, and seal the tree three levels deep. They then require the job's cache and
 the host directory to be unchanged and the copy to be gone, including after a `SIGTERM`
-during a running script.
+to the interpreter during a running script. A further regression swaps a staged
+directory for a symlink to a mode-0555 host directory immediately after cleanup opens
+it, and requires the host directory to keep its mode.
 
 Known limitation: `npm_config_nodedir` names the prefix that owns the selected `node`.
 Official Node distributions (`actions/setup-node`, the hosted runner image) ship

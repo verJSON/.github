@@ -679,7 +679,7 @@ else
   fail "staging cleanup followed a planted symlink and changed a host directory (#1798): $(stat -c %a "$host_sealed_target" 2>&1)"
 fi
 
-# A cancelled job sends SIGTERM to the step; cleanup must still remove the copy.
+# SIGTERM to the step's interpreter during a script must still remove the copy.
 python3 -I - "$rehearsal/package.json" <<'PY'
 import json
 import sys
