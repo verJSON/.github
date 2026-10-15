@@ -3,6 +3,8 @@ import importlib.util
 from pathlib import Path
 import unittest
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -108,6 +110,61 @@ class BoundWorkflowShaTest(unittest.TestCase):
                 ContractError, "live ruleset"
             ):
                 MODULE.bound_workflow_sha(ruleset, require)
+
+
+class SecurityFloorTest(unittest.TestCase):
+    FLOOR = "21eb48e713bd8304951fb7b26a900d08359af900"
+    PROTECTED = "Verjson/.github/.github/workflows/node-ci-protected.yml@"
+
+    def workflow(self, *uses):
+        return yaml.safe_dump({"jobs": {
+            f"lane-{index}": {"uses": value} for index, value in enumerate(uses)
+        } | {"steps-only": {"runs-on": "ubuntu-24.04", "steps": [{"run": "true"}]}}})
+
+    def check(self, text, statuses):
+        compared = []
+
+        def compare(base, head):
+            compared.append((base, head))
+            return statuses[head]
+
+        MODULE.require_security_floor(text, compare=compare, require=require)
+        return compared
+
+    def test_every_protected_lane_pin_must_contain_the_isolation_fixes(self):
+        text = self.workflow(self.PROTECTED + PREVIOUS, self.PROTECTED + TARGET)
+        self.assertEqual(
+            [(self.FLOOR, PREVIOUS), (self.FLOOR, TARGET)],
+            self.check(text, {PREVIOUS: "ahead", TARGET: "identical"}),
+        )
+        for stale in ("behind", "diverged", None):
+            with self.subTest(stale=stale), self.assertRaisesRegex(
+                ContractError, "predates the protected-lane security floor"
+            ):
+                self.check(text, {PREVIOUS: "ahead", TARGET: stale})
+
+    def test_a_workflow_without_an_immutable_protected_lane_pin_fails_closed(self):
+        for text in (
+            "",
+            "[]",
+            "jobs: []",
+            "{jobs: {lane: []}}",
+            "jobs: {lane: {uses: [x]}}",
+            ": not yaml",
+            self.workflow("Verjson/.github/.github/workflows/node-ci.yml@" + PREVIOUS),
+            self.workflow(self.PROTECTED + "main"),
+            self.workflow(self.PROTECTED + "A" * 40),
+            self.workflow(self.PROTECTED + PREVIOUS, self.PROTECTED + "v4"),
+            self.workflow(self.PROTECTED + PREVIOUS, "./.github/workflows/node-ci-protected.yml"),
+            self.workflow(
+                self.PROTECTED + PREVIOUS,
+                "attacker/.github/.github/workflows/node-ci-protected.yml@" + PREVIOUS,
+            ),
+        ):
+            with self.subTest(text=text), self.assertRaisesRegex(
+                ContractError, "node-ci-protected|required workflow"
+            ):
+                self.check(text, {PREVIOUS: "ahead"})
 
 
 if __name__ == "__main__":
