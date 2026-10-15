@@ -26,6 +26,10 @@ MODES = {
     "release-artifact": ["--build-runner", "ubuntu-24.04"],
     "release-snapshot": [],
 }
+RETENTION_STEPS = {
+    ".github/workflows/node-release.yml": "Delete package versions outside canonical retention",
+    ".github/workflows/container-release.yml": "Delete image versions outside canonical retention",
+}
 VARS_EXPRESSION = re.compile(
     r"^\$\{\{\s*vars\.(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\|\|\s*'(?P<default>[^']*)'\s*\}\}$"
 )
@@ -48,6 +52,18 @@ def verify_step(workflow):
     if len(matches) != 1:
         raise AssertionError(f"expected one {VERIFY_STEP!r} step, found {len(matches)}")
     return matches[0]
+
+
+def guard_pattern(script, variable):
+    """Return the one `[[ ! "$VAR" =~ <pattern> ]]` guard a script applies to VAR."""
+    patterns = re.findall(
+        r'^\s*if \[\[ ! "\$' + re.escape(variable) + r'" =~ (\S+) \]\]; then$',
+        script,
+        re.MULTILINE,
+    )
+    if len(patterns) != 1:
+        raise AssertionError(f"expected one {variable} guard, found {len(patterns)}")
+    return patterns[0]
 
 
 def evaluate_step_value(value, variables):
@@ -162,6 +178,21 @@ class ReleaseVerifyRetentionKeepTests(unittest.TestCase):
                         result.stdout + result.stderr,
                     )
                     self.assertIsNone(hook_env, "the hook ran with an invalid retention window")
+
+    def test_retention_jobs_and_the_verify_step_read_one_window_through_one_guard(self):
+        verify_value = self.steps["release-node"]["env"][RETENTION_KEY]
+        verify_guard = guard_pattern(self.steps["release-node"]["run"], RETENTION_KEY)
+        for workflow, step_name in RETENTION_STEPS.items():
+            with self.subTest(workflow=workflow):
+                document = yaml.safe_load((ROOT / workflow).read_text(encoding="utf-8"))
+                matches = [
+                    step for step in document["jobs"]["retention"]["steps"]
+                    if step.get("name") == step_name
+                ]
+                self.assertEqual(len(matches), 1, f"expected one {step_name!r} step")
+                retention = matches[0]
+                self.assertEqual(retention["env"]["RETENTION_KEEP"], verify_value)
+                self.assertEqual(guard_pattern(retention["run"], "RETENTION_KEEP"), verify_guard)
 
 
 if __name__ == "__main__":
