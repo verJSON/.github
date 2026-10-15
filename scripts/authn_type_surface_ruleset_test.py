@@ -31,7 +31,7 @@ class AuthnTypeSurfaceRulesetTest(unittest.TestCase):
         job = workflow["jobs"]["type-surface"]
         self.assertEqual(
             "Verjson/.github/.github/workflows/node-ci-protected.yml@"
-            "3f8fb4bae1bdf0ced0b821e1b4277523f72a93b9",
+            "576707fe0be0dabe43ea57c504575f8cda88b0d2",
             job["uses"],
         )
         self.assertEqual("read", workflow["permissions"]["statuses"])
