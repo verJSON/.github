@@ -27,10 +27,12 @@
 #           fails, and it says so in those words.
 #   Gate C  no other check on the head is pending or non-passing.
 #
-# Gates A and C set aside one shape only: a CANCELLED check run whose workflow run
-# was cancelled and then superseded by a later successful run of the same workflow,
-# event, and head that reports that check as SUCCESS or not at all (ADR 0226, #1754)
-# -- the draft-then-ready concurrency cancel -- or a run that never started because a
+# Gates A and C set aside two shapes only. First, a non-passing check run whose
+# workflow run was cancelled and then superseded by a later successful run of the same
+# workflow, event, and head that reports that check as SUCCESS -- or, for a CANCELLED
+# check only, not at all (ADR 0226, #1754; a non-CANCELLED conclusion such as an
+# `if: always()` aggregator's FAILURE per the 2026-10-15 amendment, #1824) -- the
+# draft-then-ready concurrency cancel. Second, a CANCELLED run that never started because a
 # later run of ANOTHER workflow in its declared concurrency family displaced it from
 # the group's pending slot, when the newest later-created successful family run on
 # the head reports only SUCCESS (ADR 0226 amendment 2026-10-15, verjson-agents#432).
@@ -302,14 +304,18 @@ jq -n --slurpfile a "$check_runs" --slurpfile b "$statuses" '$a[0] + $b[0]' >"$c
 # `filter=latest` (which collapses re-run attempts WITHIN a suite) keeps both, and
 # the union of conclusions per context reads `SUCCESS,CANCELLED` on a green head.
 #
-# A cancelled check run is set aside for Gates A and C -- and ONLY a cancelled one --
-# when its own workflow run concluded `cancelled` and the NEWEST later run of the
+# A non-passing check run is set aside for Gates A and C when its own workflow run
+# concluded `cancelled` -- whatever the check concluded: an `if: always()` aggregator
+# runs on after the cancel and reports FAILURE (amendment 2026-10-15, #1824) -- and
+# the NEWEST later run of the
 # SAME workflow (workflow_id), under the SAME event, on THIS head, completed with
 # conclusion `success` AND its own check suite reports that check name only as a
 # completed SUCCESS, or not at all. A run concludes `success` with its guarded jobs
 # SKIPPED, and `event` cannot tell a draft-time run from a ready-time one, so the
 # run-level conclusion alone would let a skip vouch for work never done. Omission
-# is accepted because a matrix parent is reported only as its expanded legs; Gate A
+# is accepted for a CANCELLED check only, because a matrix parent is reported only as
+# its expanded legs; a check that ran and concluded otherwise needs the superseder to
+# have re-done it to SUCCESS, as a passing re-run attempt would. Gate A
 # then requires a required context set aside this way to carry a SUCCESS of its
 # own. "Later" is `run_number`: GitHub's per-workflow event
 # sequence, an integer assigned at creation and unique within a workflow, so two

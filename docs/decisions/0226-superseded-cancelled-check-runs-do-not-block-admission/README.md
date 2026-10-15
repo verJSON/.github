@@ -265,3 +265,63 @@ grant the workflow-run read already requires; a refused read exits `1` naming it
 `merge-gate` in `scripts/actions-ci-groups.tsv`. Each guard above was mutated out
 and the suites failed. The mutation table and its equivalent mutants are recorded on
 the pull request.
+
+## Amendment (2026-10-15) — a non-CANCELLED check of a superseded cancelled run
+
+### Context
+
+An `if: always()` aggregator job keeps running after concurrency cancels its run. It
+reads its cancelled inputs and concludes `FAILURE`, not `CANCELLED`. The decision
+above sets aside only `CANCELLED` check runs, so a head whose newest later run of the
+same workflow re-did that aggregator to `SUCCESS` was still refused. Its Verification
+section pinned that refusal ("a failure inside a superseded run").
+
+Observed live on Verjson/.github#1824, head `33bb4d6b`, on 2026-10-15:
+
+- `actions-ci` run 38803591718 (#2960, created 20:38:30) concluded `cancelled` on
+  attempt 1. Its other jobs were `cancelled` with zero steps.
+- Its `shell-tests` aggregator ran 3 steps, saw `SCOPE_RESULT=cancelled`, and
+  concluded `FAILURE` ("changed-path classification failed").
+- Run 38803594552 (#2961, created 20:38:32) succeeded. Gate A refused with
+  `shell-tests not passing (SKIPPED,FAILURE)`.
+
+### Decision
+
+A completed check run with **any** non-passing conclusion is now eligible for the
+supersession above, when its own workflow run concluded `cancelled`. All of the
+decision's conditions still apply: the newest later (`run_number`) successful run of
+the same workflow, under the same event, on this head. One rule is stricter for a
+conclusion other than `CANCELLED`: the superseder must report the **same check name**,
+and only as a completed `SUCCESS`. Omission does not vouch for it. The
+matrix-parent rationale above covers only a check that never ran. That is the same
+evidence a passing re-run attempt gives: GitHub's own re-run collapses a failed
+attempt behind a passing one. Evaluation now starts whenever the head carries any
+non-passing check run, not only a `CANCELLED` one. The concurrency-family
+displacement amendment above stays limited to `CANCELLED` checks; its job-shape test
+excludes a job that ran anyway.
+
+### Why a same-name `SKIPPED` does not vouch
+
+The request that prompted this amendment also proposed accepting a same-name
+`SKIPPED` "where the newer run legitimately skips it". That reintroduces this ADR's
+attack A1 for real failures. A full run whose tests genuinely failed, then cancelled
+by a later `converted_to_draft` run (ADR 0223 Tier 2 skipped), would hide the failure
+behind the skip. For a required context, Gate A would still refuse, because ADR 0229
+requires a `SUCCESS` of its own. For an advisory check, nothing would. So a skip
+re-does nothing and keeps the failure blocking.
+
+#1824 itself is that shape. The later run #2961 was a draft-tier run that skipped
+`shell-tests`, `shell-test-groups`, and `hosted-compatibility-tests`, so the heavy
+tier never ran on the head. The head stays refused, correctly, until a run that does
+the work succeeds. This is the known limit recorded above for #1753.
+
+### Verification
+
+`scripts/assert-mergeable-head.test.sh`: the earlier refusal is inverted into an
+admission when the superseder re-did the check to `SUCCESS`. New refusals cover a
+superseder that reports the check `SKIPPED` or `NEUTRAL` (the #1824 shape) or omits
+it, a failure in a run that ended `failure`, `success`, or `timed_out`, a different
+workflow, a different event, an earlier run number, and a later run that did not
+succeed, plus the Gate C equivalents and a failure with no cancelled sibling. Each
+condition was mutated out and the suite failed. The mutation table is on the pull
+request.
