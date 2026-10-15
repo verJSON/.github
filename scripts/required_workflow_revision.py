@@ -42,7 +42,8 @@ def canonical_compare(base, head, *, gh_json, require):
         f"repos/{CANONICAL_REPOSITORY}/compare/"
         f"{canonical_ref(base, require)}...{canonical_ref(head, require)}"
     )
-    return comparison.get("status") if isinstance(comparison, dict) else None
+    status = comparison.get("status") if isinstance(comparison, dict) else None
+    return status if isinstance(status, str) else None
 
 
 def canonical_file(path, ref, require):

@@ -590,6 +590,57 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
             admit.assert_called_once_with(PREVIOUS, SHA)
             mutate.assert_not_called()
 
+    def test_apply_refuses_an_unadmitted_predecessor_before_any_mutation(self):
+        live = MODULE.render_payload(self.contract, PREVIOUS) | {
+            "id": 9, "source_type": "Organization", "source": "Verjson",
+        }
+        for mode in ("dry-run", "apply"):
+            with (
+                self.subTest(mode=mode),
+                mock.patch.object(MODULE, "discover_state", return_value=([{"id": 9}], HEAD)),
+                mock.patch.object(
+                    MODULE, "admit_previous_revision",
+                    side_effect=MODULE.ContractError("not its generator's output"),
+                ),
+                mock.patch.object(MODULE, "gh_json", return_value=live),
+                mock.patch.object(MODULE, "gh_json_input") as mutate,
+                self.assertRaisesRegex(MODULE.ContractError, "generator's output"),
+            ):
+                MODULE.main([
+                    mode, "--workflow-sha", SHA,
+                    "--ack", "ROTATE-CLI-PROJECTS-REQUIRED-WORKFLOW-1187",
+                ])
+            mutate.assert_not_called()
+
+    def test_discovery_refuses_a_target_whose_protected_lanes_predate_the_floor(self):
+        with (
+            mock.patch.object(MODULE, "validate_workflow"),
+            mock.patch.object(MODULE, "verify_canonical_bytes"),
+            mock.patch.object(MODULE, "canonical_compare", return_value="behind") as compare,
+            mock.patch.object(MODULE, "verify_consumer_workflow") as consumer,
+            self.assertRaisesRegex(MODULE.ContractError, "security floor"),
+        ):
+            MODULE.discover_state(self.contract, SHA)
+        compare.assert_called_once_with(
+            "21eb48e713bd8304951fb7b26a900d08359af900",
+            "576707fe0be0dabe43ea57c504575f8cda88b0d2",
+        )
+        consumer.assert_not_called()
+
+    def test_regenerate_at_reproduces_the_generated_workflow_from_revision_bytes(self):
+        reads = []
+
+        def canonical_file(path, ref):
+            reads.append((path, ref))
+            return (ROOT / path).read_bytes()
+
+        with mock.patch.object(MODULE, "canonical_file", side_effect=canonical_file):
+            output = MODULE.regenerate_at(PREVIOUS, b"ignored")
+        self.assertEqual(MODULE.WORKFLOW.read_bytes(), output)
+        self.assertEqual(
+            sorted((path, PREVIOUS) for path in MODULE.GENERATOR_INPUTS), sorted(reads)
+        )
+
     def test_audit_checks_the_live_revision_against_protected_main_read_only(self):
         live = MODULE.render_payload(self.contract, PREVIOUS) | {
             "id": 9, "source_type": "Organization", "source": "Verjson",

@@ -219,6 +219,42 @@ class AuditLiveRevisionTest(unittest.TestCase):
             self.audit(floor="behind")
 
 
+class CanonicalReadTest(unittest.TestCase):
+    def test_only_main_or_an_immutable_sha_reaches_a_github_url(self):
+        calls = []
+
+        def gh_json(path):
+            calls.append(path)
+            return {"status": "ahead"}
+
+        self.assertEqual("ahead", MODULE.canonical_compare(
+            PREVIOUS, "main", gh_json=gh_json, require=require))
+        self.assertEqual(["repos/Verjson/.github/compare/" + PREVIOUS + "...main"], calls)
+        for ref in ("HEAD", "main?x=1", "../main", "A" * 40, PREVIOUS + "\n", None, 7):
+            with self.subTest(ref=ref), mock.patch("subprocess.run") as run:
+                with self.assertRaisesRegex(ContractError, "canonical revision is invalid"):
+                    MODULE.canonical_compare(ref, TARGET, gh_json=gh_json, require=require)
+                with self.assertRaisesRegex(ContractError, "canonical revision is invalid"):
+                    MODULE.canonical_file(WORKFLOW_PATH, ref, require)
+                run.assert_not_called()
+        self.assertEqual(1, len(calls))
+
+    def test_a_malformed_compare_response_is_not_forward(self):
+        for response in ([], None, {"status": ["ahead"]}, {}):
+            with self.subTest(response=response):
+                status = MODULE.canonical_compare(
+                    PREVIOUS, TARGET, gh_json=lambda _path: response, require=require
+                )
+                self.assertNotIn(status, MODULE.FORWARD)
+
+    def test_an_unreadable_canonical_file_fails_closed(self):
+        failed = mock.Mock(returncode=1, stdout=b"partial")
+        with mock.patch("subprocess.run", return_value=failed), self.assertRaisesRegex(
+            ContractError, "canonical file unreadable"
+        ):
+            MODULE.canonical_file(WORKFLOW_PATH, PREVIOUS, require)
+
+
 class RunGeneratorTest(unittest.TestCase):
     def test_historical_generator_runs_from_its_own_bytes_without_inherited_secrets(self):
         files = {
