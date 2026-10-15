@@ -34,6 +34,15 @@ would turn a scope or installation failure into a quiet finding.
   produces a workflow `::warning::` annotation that names the repository as
   non-conforming. Discovery then continues with the remaining callers and
   repositories, and the absent caller contributes no pin.
+- The run's step summary has an **Absent allowlisted callers** section, rendered
+  from the receipts, next to the Stage A report. It contains one line per absent
+  caller naming the repository as non-conforming, with the caller path, generator,
+  and source commit. When nothing is absent it says "None". The summary step fails
+  if `absent_callers` is missing, is not an array, or disagrees with
+  `callers_absent`.
+- The run's exit status does not change because of absences. A run with absent
+  callers stays green, as a run with stale pins does under ADR 0135. A reader finds
+  the absence in the step summary, the annotation, and the receipts artifact.
 - A `404` is never interpreted as absence. Every failed read stays fatal and writes
   no receipt. That covers repository metadata, the default-branch commit, the
   listing (`404`, `403`, `5xx`, malformed JSON, a non-array body, a malformed entry,
@@ -50,9 +59,13 @@ would turn a scope or installation failure into a quiet finding.
 - One consumer's missing caller no longer blinds the observation for the whole
   fleet, and the absence stays visible as an annotation and a receipt.
 - An absent caller is still not a workflow failure. It has the same standing as a
-  stale pin under ADR 0135: a report finding that an owner adjudicates. Coverage
-  loss now shows up as a named finding on each run, rather than as a red run that
-  hides every other repository.
+  stale pin under ADR 0135: a report finding that an owner adjudicates. Making it
+  fail the run after the audit and upload was considered and rejected. Neither
+  report finding fails the run, and a run that is red for a known, adjudicated
+  absence teaches readers to ignore red runs. That would hide the discovery and
+  credential failures that do still fail the run. Coverage loss now shows up as a
+  named summary line on each run, rather than as a red run that hides every other
+  repository.
 - Each repository costs one more contents read per run, which stays inside the
   existing exact-scope, contents-read token.
 - A consumer with 1,000 or more entries under `.github/workflows` fails closed

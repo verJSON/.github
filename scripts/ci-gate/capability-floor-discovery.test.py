@@ -179,6 +179,27 @@ def run_layout(tmp: pathlib.Path, consumers: list[tuple[str, str]], layout: dict
     )
 
 
+ABSENT_SUMMARY_STEP = "Summarize absent allowlisted callers"
+
+
+def run_absent_summary(document: dict, tmp: pathlib.Path, receipts) -> tuple[subprocess.CompletedProcess, str]:
+    """Execute the workflow's own summary step (parsed from YAML, not awk-extracted)."""
+    steps = document["jobs"]["observe"]["steps"]
+    matching = [step for step in steps if step.get("name") == ABSENT_SUMMARY_STEP]
+    assert len(matching) == 1, f"workflow has no single {ABSENT_SUMMARY_STEP!r} step"
+    (tmp / "capability-floor-discovery-receipts.json").write_text(
+        receipts if isinstance(receipts, str) else json.dumps(receipts), encoding="utf-8"
+    )
+    summary = tmp / "summary.md"
+    summary.write_text("", encoding="utf-8")
+    env = os.environ.copy()
+    env["GITHUB_STEP_SUMMARY"] = str(summary)
+    result = subprocess.run(
+        ["bash", "-e", "-c", matching[0]["run"]], cwd=tmp, env=env, capture_output=True, text=True, check=False
+    )
+    return result, summary.read_text(encoding="utf-8")
+
+
 def main() -> None:
     raw = WORKFLOW.read_text(encoding="utf-8")
     document = yaml.safe_load(raw)
@@ -455,6 +476,39 @@ else:
             check=False,
         )
         assert invalid.returncode == 2 and "outside the Verjson allowlist boundary" in invalid.stderr
+
+    # The step summary, not only an annotation, must surface every absent caller.
+    with tempfile.TemporaryDirectory() as directory:
+        tmp = pathlib.Path(directory)
+        absence = {
+            "repository": "Verjson/example",
+            "default_branch": "main",
+            "source_sha": SOURCE_SHA,
+            "path": ".github/workflows/gate-rearm.yml",
+            "generator": "scripts/gen-gate-rearm-caller.sh",
+            "canonical_workflows": ["gate-rearm.yml"],
+            "finding": "allowlisted-caller-absent",
+        }
+        result, summary = run_absent_summary(document, tmp, {"callers_absent": 1, "absent_callers": [absence]})
+        assert result.returncode == 0, result.stderr
+        assert "## Absent allowlisted callers" in summary, summary
+        assert (
+            f"- `Verjson/example` is non-conforming: `.github/workflows/gate-rearm.yml` "
+            f"(`scripts/gen-gate-rearm-caller.sh`) is absent at `{SOURCE_SHA}`"
+        ) in summary, summary
+
+        result, summary = run_absent_summary(document, tmp, {"callers_absent": 0, "absent_callers": []})
+        assert result.returncode == 0, result.stderr
+        assert "## Absent allowlisted callers" in summary and "None" in summary and "non-conforming" not in summary, summary
+
+        for label, receipts in (
+            ("missing absent_callers", {"callers_absent": 0}),
+            ("non-array absent_callers", {"callers_absent": 1, "absent_callers": {"repository": "Verjson/example"}}),
+            ("count disagrees with records", {"callers_absent": 0, "absent_callers": [absence]}),
+            ("malformed receipts", "{"),
+        ):
+            result, _ = run_absent_summary(document, tmp, receipts)
+            assert result.returncode != 0, f"absent summary accepted {label}"
 
     print("OK: capability-floor-discovery.test.py")
 
