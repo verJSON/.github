@@ -36,6 +36,7 @@ def run_checker(workflows: dict[str, str], *arguments: str) -> tuple[int, str]:
         for name, body in workflows.items():
             with open(os.path.join(directory, name), "w", encoding="utf-8") as handle:
                 handle.write(textwrap.dedent(body))
+        arguments = tuple(argument.replace("{dir}", directory) for argument in arguments)
         completed = subprocess.run(
             [sys.executable, SCRIPT, *arguments, directory],
             capture_output=True,
@@ -164,6 +165,46 @@ expect(
     1,
     ("build.yml", "inputs"),
     "a reusable workflow honoring a caller runner input on pull_request is a violation",
+)
+
+TRUSTED_LANE_PR_JOB = """
+    on: pull_request
+    jobs:
+      test:
+        runs-on: ${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+        steps:
+          - run: 'true'
+"""
+
+expect(
+    {
+        "ci.yml": TRUSTED_LANE_PR_JOB,
+        "pending.tsv": "# path<TAB>job<TAB>reason\nci.yml\ttest\tselector pinned elsewhere until a follow-up\n",
+    },
+    0,
+    ("PENDING: ci.yml: job 'test'", "selector pinned elsewhere"),
+    "a reviewed pending entry is reported as pending instead of failing",
+    "--pending",
+    "{dir}/pending.tsv",
+)
+
+expect(
+    {
+        "ci.yml": """
+            on: pull_request
+            jobs:
+              test:
+                runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
+                steps:
+                  - run: 'true'
+        """,
+        "pending.tsv": "ci.yml\ttest\tfixed but still listed\n",
+    },
+    1,
+    ("STALE PENDING: ci.yml: job 'test'",),
+    "a pending entry that no longer violates fails until it is removed",
+    "--pending",
+    "{dir}/pending.tsv",
 )
 
 sys.exit(1 if failures else 0)

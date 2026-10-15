@@ -4,6 +4,12 @@ name: actions-ci
 # persistent-runner credential logic (verjson-cli-cloud#59) regression-covered
 # and makes the "Evidence" for those actions reproducible in CI rather than
 # narrated.
+#
+# Every job here executes repository-controlled code, and this repository is
+# public, so every job selects the ephemeral untrusted lane with a hosted tail
+# and no persistent fallback (ADR 0235). Push validation shares the lane so
+# main is validated on the same image its pull requests were; public
+# repositories pay nothing for standard GitHub-hosted runners.
 
 on:
   pull_request:
@@ -54,7 +60,7 @@ concurrency:
 
 jobs:
   change-scope:
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     timeout-minutes: 5
     outputs:
       heavy: ${{ steps.scope.outputs.heavy }}
@@ -95,7 +101,7 @@ jobs:
     # Thirty minutes still bounds one cell, including runner variance and cleanup.
     # Caller-contract shards run within the four matrix cells so they use
     # command-level parallelism without multiplying runner setup.
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -154,7 +160,7 @@ jobs:
           bash scripts/actions-ci-group.sh "${{ matrix.group }}"
 
   docs-contracts:
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -1859,7 +1865,7 @@ jobs:
   # pull request.
   adr-number-collision:
     if: github.event_name == 'pull_request'
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -1885,7 +1891,7 @@ jobs:
   shell-tests:
     needs: [change-scope, shell-test-groups, docs-contracts, hosted-compatibility-tests, adr-number-collision]
     if: ${{ always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     timeout-minutes: 2
     steps:
       - name: Preserve the required shell-tests context

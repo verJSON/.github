@@ -51,3 +51,17 @@ and
 Keep workflow classifications and their draft/ready conformance assertions in
 `scripts/ci-gate/pr-ci-tiers.test.py`, registered in
 `scripts/actions-ci-groups.tsv`.
+
+## Runner placement for pull-request code
+
+Tiers decide *when* a pull-request job runs; placement decides *where*. This
+repository is public, so every job either tier starts runs code a pull request
+controls and must land on an ephemeral runner: the untrusted lane
+`fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')` or a literal
+GitHub-hosted image, never a selector that can fall through to the persistent
+self-hosted pool ([ADR 0235](decisions/0235-public-pull-request-code-uses-ephemeral-runners/README.md)).
+`scripts/ci-gate/public-pr-runner-isolation.py` enforces that for every job a
+`pull_request` event can reach, including jobs in local reusable workflows,
+by enumerating each organization variable as unset and set.
+`scripts/ci-gate/public-pr-runner-isolation.pending.tsv` holds the exact,
+ratcheted list of canonical reusable workflows still pending that change.

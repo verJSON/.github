@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Prove pull-request code in a public repository never reaches a persistent runner.
 
-    public-pr-runner-isolation.py [--repository OWNER/NAME] <workflow-dir>
+    public-pr-runner-isolation.py [--repository OWNER/NAME] [--pending FILE] <workflow-dir>
 
 Exit 0 is "scanned and clean", 1 is "policy violation", 2 is "undetermined" —
 the same three-way contract as hosted-selector-policy.py, so a sweep that could
@@ -15,7 +15,7 @@ value, every other variable to a persistent self-hosted selector. A chain such a
 `vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]'` is
 therefore a violation: with the untrusted lane unset it lands on the fallback.
 
-Verjson/.github ADR 0231.
+Verjson/.github ADR 0235.
 """
 
 from __future__ import annotations
@@ -26,11 +26,12 @@ import json
 import os
 import re
 import sys
+from typing import NamedTuple
 
 import yaml
 
 # ADR 0147 fixes these six names to the ephemeral `["ubuntu-24.04"]` selector and
-# ADR 0231 withdraws its rollback to the persistent pool. They are the only
+# ADR 0235 withdraws its rollback to the persistent pool. They are the only
 # variables this policy may assume land on ephemeral capacity.
 EPHEMERAL_LANE_VARIABLES = frozenset(
     {
@@ -49,6 +50,15 @@ PERSISTENT_SELECTOR = '["self-hosted","general"]'
 # every value that changes routing.
 ADVERSARIAL_INPUT_VALUES = ("", PERSISTENT_SELECTOR, EPHEMERAL_SELECTOR, True, False)
 HOSTED_LABEL = re.compile(r"^(?:ubuntu|windows|macos)-[A-Za-z0-9._-]+$")
+
+
+class Violation(NamedTuple):
+    path: str
+    job: str
+    detail: str
+
+    def __str__(self) -> str:
+        return f"{self.path}: job '{self.job}': {self.detail}"
 
 
 class Undetermined(Exception):
@@ -528,7 +538,7 @@ def job_needs(job: dict) -> tuple[str, ...]:
     return (needs,) if isinstance(needs, str) else tuple(str(need) for need in needs)
 
 
-def dependency_order(path: str, jobs: dict) -> list[str]:
+def dependency_order(path: str, jobs: dict) -> list[Violation]:
     ordered: list[str] = []
     visiting: set[str] = set()
 
@@ -588,7 +598,7 @@ MAX_CALL_DEPTH = 4
 
 def check_call(
     directory: str, path: str, name: str, job: dict, repository: str, depth: int
-) -> list[str]:
+) -> list[Violation]:
     uses = str(job["uses"])
     local = LOCAL_REUSABLE.match(uses)
     if not local:
@@ -614,11 +624,11 @@ def check_workflow(
     repository: str,
     bindings: dict[str, tuple] | None = None,
     depth: int = 0,
-) -> list[str]:
+) -> list[Violation]:
     bindings = bindings or {}
     jobs = {str(name): job for name, job in (document.get("jobs") or {}).items()}
     unreachable: set[str] = set()
-    violations: list[str] = []
+    violations: list[Violation] = []
     for name in dependency_order(path, jobs):
         job = jobs[name]
         if not is_reachable(job, repository, bindings, frozenset(unreachable)):
@@ -640,7 +650,7 @@ def check_job(
     repository: str,
     bindings: dict[str, tuple],
     unreachable: frozenset[str],
-) -> list[str]:
+) -> list[Violation]:
     runs_on = job.get("runs-on")
     if runs_on is None:
         raise Undetermined(f"{path}: job '{name}' has no runs-on")
@@ -657,16 +667,19 @@ def check_job(
                 raise Undetermined(f"{path}: job '{name}': {error}") from error
             if verdict == "persistent":
                 violations.append(
-                    f"{path}: job '{name}': pull_request in a public repository can resolve "
-                    f"to self-hosted or non-ephemeral runner labels {list(outcome)!r} "
-                    f"({describe(assignment)})"
+                    Violation(
+                        path,
+                        name,
+                        "pull_request in a public repository can resolve to self-hosted "
+                        f"or non-ephemeral runner labels {list(outcome)!r} ({describe(assignment)})",
+                    )
                 )
                 return violations
     return violations
 
 
-def check_tree(directory: str, repository: str) -> list[str]:
-    violations: list[str] = []
+def check_tree(directory: str, repository: str) -> list[Violation]:
+    violations: list[Violation] = []
     names = sorted(
         name for name in os.listdir(directory) if name.endswith((".yml", ".yaml"))
     )
@@ -681,21 +694,57 @@ def check_tree(directory: str, repository: str) -> list[str]:
     return violations
 
 
+def load_pending(path: str | None) -> dict[tuple[str, str], str]:
+    """Reviewed `path<TAB>job<TAB>reason` rows awaiting a recorded follow-up."""
+    if path is None:
+        return {}
+    pending: dict[tuple[str, str], str] = {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            rows = handle.read().splitlines()
+    except OSError as error:
+        raise Undetermined(f"cannot read pending file: {error}") from error
+    for number, row in enumerate(rows, 1):
+        if not row.strip() or row.startswith("#"):
+            continue
+        fields = row.split("\t")
+        if len(fields) != 3 or not all(field.strip() for field in fields):
+            raise Undetermined(f"{path}:{number}: expected path<TAB>job<TAB>reason")
+        pending[(fields[0], fields[1])] = fields[2]
+    return pending
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--repository", default="Verjson/.github")
+    parser.add_argument("--pending", help="reviewed path<TAB>job<TAB>reason exceptions")
     parser.add_argument("workflow_dir")
     arguments = parser.parse_args(argv)
     try:
-        violations = check_tree(arguments.workflow_dir, arguments.repository)
+        pending = load_pending(arguments.pending)
+        found = check_tree(arguments.workflow_dir, arguments.repository)
     except Undetermined as error:
         print(f"UNDETERMINED: {error}", file=sys.stderr)
         return 2
+    violations = []
+    for violation in found:
+        reason = pending.get((violation.path, violation.job))
+        if reason is None:
+            violations.append(violation)
+        else:
+            print(f"PENDING: {violation} [{reason}]")
     for violation in violations:
         print(f"VIOLATION: {violation}")
-    if violations:
+    reported = {(violation.path, violation.job) for violation in found}
+    stale = sorted(set(pending) - reported)
+    for path, job in stale:
+        print(f"STALE PENDING: {path}: job '{job}' no longer violates; remove it from the pending file")
+    if violations or stale:
         return 1
-    print(f"clean: no pull_request job in {arguments.workflow_dir} can reach a persistent runner")
+    print(
+        f"clean: no pull_request job in {arguments.workflow_dir} can reach a persistent runner"
+        + (f" beyond {len(pending)} reviewed pending job(s)" if pending else "")
+    )
     return 0
 
 

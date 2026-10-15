@@ -303,15 +303,24 @@ grep -qF "github.repository_owner != 'Verjson'" "$workflows/actionlint.yml" \
   && pass "actionlint preserves its bounded external hosted compatibility path" \
   || fail "actionlint runner contract drifted"
 
-# ADR 0047 moves this suite off the shared pool. The contract is that it routes
-# through a VARIABLE with a fallback chain, never a hardcoded label: the lane has
-# to be repointable at a self-hosted pool from org settings alone, and an unset
-# variable must degrade to the ADR 0034 general pool rather than to nothing.
-grep -qF 'vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED' "$workflows/actions-ci.yml" \
-  && grep -qF 'vars.CI_LANE_FALLBACK' "$workflows/actions-ci.yml" \
-  && ! grep -qF 'runs-on: [self-hosted, general]' "$workflows/actions-ci.yml" \
-  && pass "repository shell validation routes through the fast-lane variable with a general fallback" \
-  || fail "actions-ci fast-lane routing drifted (ADR 0047)"
+# ADR 0047 moved this suite off the shared pool through the fast-lane variable;
+# ADR 0235 narrows it further. Every actions-ci job runs code a pull request
+# controls in a public repository, so each one selects the ephemeral untrusted
+# lane with the hosted tail and NO persistent fallback: an unset untrusted lane
+# must degrade to hosted, never to CI_LANE_FALLBACK. Pinned per job, inverted, so
+# an appended job on any other selector fails here as well as in
+# public-pr-runner-isolation.test.py. The compatibility job's literal hosted
+# image is bound by the exact inventory at the top of this file.
+off_untrusted="$(
+  grep -E '^    runs-on:' "$workflows/actions-ci.yml" \
+    | grep -vxF "    runs-on: \${{ fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}" \
+    | grep -vxF '    runs-on: ubuntu-24.04' \
+    || true
+)"
+untrusted_jobs="$(grep -cxF "    runs-on: \${{ fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}" "$workflows/actions-ci.yml")"
+[ -z "$off_untrusted" ] && [ "$untrusted_jobs" -ge 5 ] \
+  && pass "repository shell validation routes every job through the untrusted lane with a hosted tail (ADR 0235)" \
+  || fail "actions-ci untrusted-lane routing drifted (ADR 0235): ${off_untrusted:-only $untrusted_jobs routed jobs}"
 
 # These used to be pinned to the literal `[self-hosted, general]`. A literal label
 # is a rename away from an unplaceable job, and GitHub does not fail an

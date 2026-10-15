@@ -1,0 +1,8 @@
+# Reviewed exceptions for public-pr-runner-isolation.py (ADR 0235).
+# path<TAB>job<TAB>reason. An exact ratchet: a listed job that stops violating
+# fails as STALE PENDING until its row is removed, and an unlisted one fails.
+actionlint.yml	actionlint	selector pinned by hosted-selector-policy.py; event-aware branch lands after #1826 (ADR 0235 decision 4)
+actionlint-reusable-contract.yml:actionlint -> actionlint.yml	actionlint	selector pinned by hosted-selector-policy.py; event-aware branch lands after #1826 (ADR 0235 decision 4)
+container-candidate-reusable-contract.yml:validate -> container-candidate.yml	prepare	selector pinned by hosted-selector-policy.py; event-aware branch lands after #1826 (ADR 0235 decision 4)
+container-candidate-reusable-contract.yml:validate -> container-candidate.yml	skip-private-node-build	selector pinned by hosted-selector-policy.py; event-aware branch lands after #1826 (ADR 0235 decision 4)
+container-candidate-reusable-contract.yml:validate -> container-candidate.yml	pull-request-build	selector pinned by hosted-selector-policy.py; event-aware branch lands after #1826 (ADR 0235 decision 4)
