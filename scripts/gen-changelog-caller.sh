@@ -4137,9 +4137,9 @@ APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
     "release-snapshot": "0caf167486937a2def16a5223fcb64b1a4a737447d424c83a891c2aac4e3b3a2",
 }
 APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256 = {
-    "release-node": "eedf6b26589d5ed771d6b969830e9aee73f3db3f4eac3981dc9d378d7aba613c",
-    "release-artifact": "0bbae664b45e4d062c96a2013dfb5956704db5af610a192c4e919a0bad1cbdf7",
-    "release-snapshot": "4586c168d5ceb313ae882ae0e7c3b666de0c0e544f5c9f0e5c61dbbe6c54f9d5",
+    "release-node": "218a4c9a60752c45fb73123703cce4cd6029c8054ba43fb97fc2e26aebed3d4d",
+    "release-artifact": "7a736889f20b3050d02b82d60c21ae0ab1ca673a332d73bf5235af47288813de",
+    "release-snapshot": "1d1585ea8276b3ff08c0af881ab249ecaf1edc5ecee6ec63db6709d0f6b1b11a",
 }
 EXPECTED_RELEASE_STATE_ENV = {
     "VERSION": "${{ steps.release-version.outputs.version }}",
@@ -4703,6 +4703,13 @@ for step in verification_job_steps:
     digest_fields = dict(fields)
     if "uses" in digest_fields:
         digest_fields["uses"] = yaml_scalar_value(digest_fields["uses"])
+        # The step sequence above already binds each action to its declared
+        # pin, so the digest records which pin, not its value: a Renovate bump
+        # of the declaration must not invalidate the approved shape.
+        digest_fields["uses"] = {
+            RELEASE_CHECKOUT: "<declared actions/checkout pin>",
+            RELEASE_SETUP_NODE: "<declared actions/setup-node pin>",
+        }.get(digest_fields["uses"], digest_fields["uses"])
     if step_name == "Check out the canonical selection contract":
         expected_selection_checkout = {
             "repository": "verJSON/.github",

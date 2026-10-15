@@ -14,9 +14,13 @@ halves that must stay complete as the generators grow:
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import subprocess
+import tempfile
 import unittest
 
 
@@ -43,6 +47,43 @@ UNMANAGED_GENERATOR_PINS = {
         "comment changes the admitted bytes fleet-wide and is follow-up work."
     ),
 }
+
+
+RELEASE_MODES = {
+    "release-node": (),
+    "release-snapshot": (),
+    "release-artifact": ("--build-runner", "ubuntu-24.04"),
+}
+
+
+def generate(generator: str, mode: str, ref: str, *arguments: str) -> str:
+    """Run generator text exactly as release-verify.sh runs a pinned one."""
+    # `bash -s` makes $0 "bash", so the generator's `$(dirname "$0")/..` lookups
+    # resolve against this cwd's parent: the repository that holds `ref`.
+    result = subprocess.run(
+        ["bash", "-s", mode, ref, *arguments],
+        input=generator, cwd=ROOT / "scripts",
+        check=False, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"{mode} generation failed: {result.stderr}")
+    return result.stdout
+
+
+def extract_heredoc(text: str, delimiter: str) -> str:
+    match = re.search(
+        rf"<<'{delimiter}'\n(?P<body>.*?)\n{delimiter}\n", text, re.DOTALL
+    )
+    if match is None:
+        raise AssertionError(f"the generated contract test lost its {delimiter} block")
+    return match["body"] + "\n"
+
+
+def contract_test_constant(text: str, name: str) -> str:
+    match = re.search(rf"^{name}='(?P<value>[^']*)'$", text, re.MULTILINE)
+    if match is None:
+        raise AssertionError(f"the generated contract test does not declare {name}")
+    return match["value"]
 
 
 def renovate_pattern(pattern: str) -> re.Pattern[str]:
@@ -125,6 +166,50 @@ class GeneratorPinManager(unittest.TestCase):
                     continue
                 unmanaged.append(f"{relative}:{line}: {match.group(0)}")
         self.assertEqual(unmanaged, [])
+
+    def test_a_renovated_generator_still_passes_its_release_shape_contract(self) -> None:
+        # The PR Renovate opens must be mergeable: the generated contract may
+        # compare action pins only to the declarations Renovate moved, never to
+        # a digest or literal frozen beside them.
+        manager = generator_pin_managers(self.config)[0]
+        renovated = self.generator
+        moved = 0
+        for pattern in (renovate_pattern(value) for value in manager["matchStrings"]):
+            def bump(match: re.Match[str]) -> str:
+                nonlocal moved
+                moved += 1
+                new_digest = hashlib.sha1(f"renovated:{match['depName']}".encode()).hexdigest()
+                return match.group(0).replace(match["currentDigest"], new_digest)
+            renovated = pattern.sub(bump, renovated)
+        self.assertGreaterEqual(moved, 6)
+        self.assertNotEqual(renovated, self.generator)
+
+        ref = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        contract_test = generate(renovated, "contract-test", ref)
+        release_shape = extract_heredoc(contract_test, "RELEASE_SHAPE_PY")
+        environment = {
+            "PATH": os.environ["PATH"],
+            "CONTRACT_REF": ref,
+            "RELEASE_CALLER_PACKAGE_DIRS_JSON": '["."]',
+            **{
+                name: contract_test_constant(contract_test, name)
+                for name in ("EXPECTED_RELEASE_CHECKOUT", "EXPECTED_RELEASE_SETUP_NODE")
+            },
+        }
+        with tempfile.TemporaryDirectory() as scratch:
+            checker = Path(scratch) / "release-shape.py"
+            checker.write_text(release_shape, encoding="utf-8")
+            for mode, arguments in RELEASE_MODES.items():
+                workflow = Path(scratch) / f"{mode}.yml"
+                workflow.write_text(generate(renovated, mode, ref, *arguments), encoding="utf-8")
+                result = subprocess.run(
+                    ["python3", "-I", str(checker), str(workflow)],
+                    env=environment, capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 0, f"{mode}: {result.stderr}")
 
     def test_every_recorded_unmanaged_pin_still_exists(self) -> None:
         for relative, pin in UNMANAGED_GENERATOR_PINS:
