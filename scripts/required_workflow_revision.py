@@ -9,7 +9,12 @@ cannot lag, so the predecessor is read from it and admitted only when it is a
 canonical revision (ADR 0153 2026-10-15 amendment).
 """
 
+import os
+from pathlib import Path, PurePosixPath
 import re
+import subprocess
+import sys
+import tempfile
 
 import yaml
 
@@ -79,3 +84,32 @@ def admit_predecessor(
     workflow = read_file(workflow_path, previous_sha)
     require(regenerate(previous_sha, workflow) == workflow,
             "live required-workflow revision is not its generator's output")
+
+
+def run_generator(files, argv, require):
+    """Run a historical generator from its own bytes, with no inherited environment.
+
+    The bytes come from a revision already proven to be on protected main, but the
+    caller may hold an organization-admin token, so none of its environment, user
+    site, or working tree reaches the generator.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        for relative, content in files.items():
+            parts = PurePosixPath(relative).parts
+            require(bool(parts) and not PurePosixPath(relative).is_absolute()
+                    and ".." not in parts,
+                    f"generator input escapes its sandbox: {relative!r}")
+            path = root.joinpath(*parts)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        try:
+            result = subprocess.run(
+                [sys.executable, "-E", "-s", *argv],
+                cwd=root, env={"PATH": os.defpath},
+                capture_output=True, check=False, timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            result = None
+    require(result is not None and result.returncode == 0, "historical generator failed")
+    return result.stdout

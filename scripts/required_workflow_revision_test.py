@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import importlib.util
+import os
 from pathlib import Path
 import unittest
+from unittest import mock
 
 import yaml
 
@@ -165,6 +167,37 @@ class SecurityFloorTest(unittest.TestCase):
                 ContractError, "node-ci-protected|required workflow"
             ):
                 self.check(text, {PREVIOUS: "ahead"})
+
+
+class RunGeneratorTest(unittest.TestCase):
+    def test_historical_generator_runs_from_its_own_bytes_without_inherited_secrets(self):
+        files = {
+            "scripts/gen.py": (
+                b"import os, sys\n"
+                b"from sibling import VALUE\n"
+                b"print(VALUE, open(sys.argv[1]).read().strip(),"
+                b" sorted(k for k in os.environ if k not in ('PATH', 'LC_CTYPE')))\n"
+            ),
+            "scripts/sibling.py": b"VALUE = 'sibling'\n",
+            "config/input.json": b"config\n",
+        }
+        with mock.patch.dict(os.environ, {"GH_TOKEN": "secret", "PYTHONPATH": "/x"}):
+            output = MODULE.run_generator(
+                files, ["scripts/gen.py", "config/input.json"], require
+            )
+        self.assertEqual(b"sibling config []\n", output)
+
+    def test_a_failing_or_escaping_generator_fails_closed(self):
+        cases = (
+            ({"scripts/gen.py": b"raise SystemExit(2)\n"}, ["scripts/gen.py"]),
+            ({"../escape.py": b"print(1)\n"}, ["../escape.py"]),
+            ({"/abs.py": b"print(1)\n"}, ["/abs.py"]),
+        )
+        for files, argv in cases:
+            with self.subTest(files=list(files)), self.assertRaisesRegex(
+                ContractError, "generator"
+            ):
+                MODULE.run_generator(files, argv, require)
 
 
 if __name__ == "__main__":
