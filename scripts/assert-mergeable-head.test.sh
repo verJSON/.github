@@ -591,11 +591,21 @@ reset_env; FAIL_RUNS=1 run
 expect "a workflow-run read failure on a head with no cancelled check run is a fault, not a pass" 1 "failed to fetch workflow runs"
 expect "that fault names the Actions read grant" 1 "Actions (read) or Actions permissions.actions: read"
 
+# ADR 0226 amendment 2026-10-15 (#1824): an `if: always()` aggregator in a run that
+# concurrency cancelled runs anyway, reads its cancelled inputs, and concludes FAILURE.
+# The run itself concluded `cancelled`, and the newest later successful run of the same
+# workflow, event, and head re-did that exact check and reported it SUCCESS -- the same
+# evidence a passing re-run attempt gives, so the failure is set aside.
 reset_env
 CHECK_RUNS_FIXTURE="$(runs "$(check_run 11 'ci / build-test' completed failure "$APP_ID" 501),$(check_run 12 'changelog / validate' completed cancelled "$APP_ID" 501),$(check_run 21 'ci / build-test' completed success "$APP_ID" 502),$(check_run 22 'changelog / validate' completed success "$APP_ID" 502)")"
 RUNS_FIXTURE="$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed cancelled),$(wf_run 9002 502 "$WF_CI" 11 pull_request completed success)")"
 run
-expect "a failure inside a superseded run is not dismissed with its cancelled siblings" 3 "not passing: ci / build-test (FAILURE,SUCCESS)"
+if [ "$RC" -eq 0 ] && grep -q '^true$' <<<"$OUT" \
+  && grep -qF -- "ci / build-test (check run 11, run 9001 superseded by run 9002)" <<<"$OUT"; then
+  pass "a failure inside a cancelled run is set aside when the newest later successful run re-did that check to SUCCESS"
+else
+  fail "a failure inside a cancelled run is set aside when the newest later successful run re-did that check to SUCCESS (rc=$RC, output: $OUT)"
+fi
 
 # A newer run still in flight supersedes nothing, and its own pending check blocks.
 reset_env

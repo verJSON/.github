@@ -373,9 +373,14 @@ gated_checks="$checks"
 superseded_names="$scratch/superseded-names.json"
 printf '[]\n' >"$superseded_names" \
   || fault 1 "failed to record the empty superseded-name list for $repo@$head_sha"
-cancelled_count="$(jq '[ .[] | select(.kind == "check_run" and .conclusion == "CANCELLED") ] | length' <"$checks")" \
-  || fault 1 "failed to count cancelled check runs for $repo@$head_sha"
-if [ "$cancelled_count" -gt 0 ]; then
+# Any completed check run that did not pass may sit in a superseded cancelled run: the
+# cancellation itself, or an `if: always()` aggregator that concluded FAILURE on its
+# cancelled inputs (amendment 2026-10-15).
+nonpassing_count="$(jq --argjson passing "$PASSING" '
+  [ .[] | select(.kind == "check_run" and .status == "COMPLETED"
+                 and ((.conclusion as $c | $passing | index($c)) == null)) ] | length' <"$checks")" \
+  || fault 1 "failed to count non-passing check runs for $repo@$head_sha"
+if [ "$nonpassing_count" -gt 0 ]; then
   verdict="$scratch/superseded-verdict.json"
   # A run displaced from a concurrency family is told apart from one cancelled after it
   # started only by its jobs, so the job listing of every cancelled family run is read
@@ -422,7 +427,7 @@ if [ "$cancelled_count" -gt 0 ]; then
       || fault 1 "failed to record the job inventory of workflow run $candidate_run for $repo@$head_sha"
   done <"$displacement_candidates"
 
-  jq -c --slurpfile runs "$runs" --slurpfile jobs "$jobs_by_run" --argjson families "$CONCURRENCY_FAMILIES" --arg repo "$repo" --arg pr "$pr" "$FAMILY_JQ_DEFS"'
+  jq -c --slurpfile runs "$runs" --slurpfile jobs "$jobs_by_run" --argjson families "$CONCURRENCY_FAMILIES" --argjson passing "$PASSING" --arg repo "$repo" --arg pr "$pr" "$FAMILY_JQ_DEFS"'
     $runs[0] as $runs
     | . as $all
     # A displaced run never started: its attempt has jobs, every one of them was
@@ -464,9 +469,13 @@ if [ "$cancelled_count" -gt 0 ]; then
         end;
     # The latest successful later run of the same workflow and event -- provided its
     # own check suite did that check'"'"'s work -- or null.
+    # A completed check that did not pass. CANCELLED is the concurrency cancel itself;
+    # any other conclusion (an `if: always()` aggregator reading cancelled inputs and
+    # concluding FAILURE) is set aside only on the stricter same-name SUCCESS rule below.
     def superseder:
-      if .kind == "check_run" and .status == "COMPLETED" and .conclusion == "CANCELLED" then
+      if .kind == "check_run" and .status == "COMPLETED" and ((.conclusion as $c | $passing | index($c)) == null) then
         .name as $name
+        | .conclusion as $conclusion
         | .suite_id as $sid
         | .id as $check_id
         | [ $runs[] | select(.check_suite_id == $sid) ] as $own
@@ -485,14 +494,18 @@ if [ "$cancelled_count" -gt 0 ]; then
                    # superseder must not report this check as anything but a
                    # completed SUCCESS; it may omit it (a matrix parent is reported
                    # only as expanded legs), which Gate A then backs with a SUCCESS.
-                   | if all($all[] | select(.kind == "check_run" and .suite_id == $ssid and .name == $name);
-                            .status == "COMPLETED" and .conclusion == "SUCCESS")
+                   # Omission vouches only for a CANCELLED check (the unexpanded matrix
+                   # parent); a check that ran and concluded any other way is set aside
+                   # only when the superseder re-did that exact check to SUCCESS.
+                   | [ $all[] | select(.kind == "check_run" and .suite_id == $ssid and .name == $name) ] as $redone
+                   | if ($conclusion == "CANCELLED" or ($redone | length) > 0)
+                        and all($redone[]; .status == "COMPLETED" and .conclusion == "SUCCESS")
                      then { cancelled_run: $o.id, superseded_by: .id }
                      else null end
                    end)
                  # ADR 0226 amendment 2026-10-15: a run displaced from its declared
                  # concurrency family by a later-created successful run of the family.
-                 // displacer($o; $check_id)
+                 // (if $conclusion == "CANCELLED" then displacer($o; $check_id) else null end)
             end
           end
       else null end;
@@ -513,7 +526,7 @@ if [ "$cancelled_count" -gt 0 ]; then
   dismissed="$(jq -r '.dismissed | join("; ")' <"$verdict")" \
     || fault 1 "failed to list superseded cancellations for $repo@$head_sha"
   [ -z "$dismissed" ] \
-    || annotate notice "Gates A and C set aside cancelled check runs superseded by a later successful run of the same workflow, event, and head, or displaced from a declared concurrency group by a later-created successful run of that group on this head (ADR 0226): $dismissed"
+    || annotate notice "Gates A and C set aside non-passing check runs of cancelled runs superseded by a later successful run of the same workflow, event, and head, or cancelled check runs displaced from a declared concurrency group by a later-created successful run of that group on this head (ADR 0226): $dismissed"
 fi
 
 # ---------------------------------------------------------------- Gate A ----
