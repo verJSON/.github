@@ -290,6 +290,10 @@ else:
                 "real target plus display-case step-level decoy",
                 valid + f"  decoy:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: VERJSON/.github/.github/workflows/gate-rearm.yml@{PIN}\n",
             ),
+            (
+                "real target plus non-ASCII case-folding step-level decoy",
+                valid + f"  decoy:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: verj\u017fon/.github/.github/workflows/gate-rearm.yml@{PIN}\n",
+            ),
             ("lookalike owner", f"jobs:\n  arm:\n    uses: xverjson/.github/.github/workflows/gate-rearm.yml@{PIN}\n"),
             ("non-ASCII case-folding owner", f"jobs:\n  arm:\n    uses: verj\u017fon/.github/.github/workflows/gate-rearm.yml@{PIN}\n"),
             (

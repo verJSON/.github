@@ -117,5 +117,7 @@ generator now emits that case. As a result, a correctly generated caller
 (`verjson-observability` `changelog.yml`) read as "no canonical workflow reference",
 and a display-case decoy in a step escaped decoy rejection. The owner is now compared
 as a case-insensitive ASCII identity through `scripts/github_identity.py` (#1779).
-Decoy detection uses the same ASCII case-insensitive marker, so lookalike owners and
-non-ASCII folding spellings still fail closed.
+Decoy detection uses the wider Unicode case-insensitive form of the canonical path.
+Any canonical-looking spelling must therefore pass the exact grammar and the owner
+identity check, so display-case decoys, lookalike owners, and non-ASCII folding
+spellings all fail closed.

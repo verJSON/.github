@@ -31,9 +31,11 @@ CANONICAL_REFERENCE_RE = re.compile(
     r"^(?P<owner>[A-Za-z0-9._-]+)/\.github/\.github/workflows/"
     r"(?P<workflow>[A-Za-z0-9._-]+\.ya?ml)@(?P<sha>[0-9a-f]{40})$"
 )
-# The owner is a case-insensitive identity whose display case changed (#1779), so any
-# ASCII-case spelling marks a canonical-looking scalar that must pass the exact grammar.
-CANONICAL_MARKER_RE = re.compile(r"verjson/\.github/\.github/workflows/", re.IGNORECASE | re.ASCII)
+# The owner is a case-insensitive identity whose display case changed (#1779). Decoy
+# detection deliberately uses Unicode case folding, which is wider than the ASCII-only
+# owner identity: any spelling that folds to the canonical path is canonical-looking and
+# must then pass the exact grammar and identity check, or discovery fails closed.
+CANONICAL_MARKER_RE = re.compile(r"verjson/\.github/\.github/workflows/", re.IGNORECASE)
 MAX_CALLER_BYTES = 512 * 1024
 WORKFLOWS_DIRECTORY = ".github/workflows"
 # The contents API returns at most this many directory entries; a listing that
