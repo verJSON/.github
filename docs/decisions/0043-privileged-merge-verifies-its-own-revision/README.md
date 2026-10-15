@@ -108,3 +108,13 @@ Revert the implementing PR. The check is self-contained and additive: nothing el
 `executing_workflow_sha`, and removing it returns the workflow to trusting whatever ref a
 caller pinned. No consumer migration is involved either way, because the caller side is
 unchanged — this is entirely a runtime assertion on the callee.
+
+## 2026-10-15 amendment: repository identity is compared case-insensitively
+
+The runtime repository identity check is now an exact match after ASCII
+lowercasing, not a byte comparison. Since the organization's 2026-10-02
+display-case rename, GitHub reports the same repository as `Verjson/...` or
+`verJSON/...` depending on how the workflow was called. The rationale,
+evidence and tests are in
+[ADR 0213's 2026-10-15 amendment](../0213-package-type-surface-release-authorization/README.md)
+([#1794](https://github.com/Verjson/.github/issues/1794)).

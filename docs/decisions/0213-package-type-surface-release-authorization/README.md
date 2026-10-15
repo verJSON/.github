@@ -88,3 +88,40 @@ guards case-insensitively, so they keep working. The required workflow at
 `verJSON/verjson-authn` run 38612624131 (2026-10-14) evaluated its
 `github.repository == 'Verjson/verjson-authn'` guard as true. Its `eligibility` job then
 ran and succeeded.
+
+## 2026-10-15 amendment: workflow shell steps compare runtime repository identities
+
+**Status:** Accepted; part of [#1794](https://github.com/Verjson/.github/issues/1794).
+
+The amendment above left one class uncovered. Shell steps compared a repository that the
+run reports at runtime with a reviewed literal using byte-exact `[ ... = ... ]`. The
+Actions expression engine does not apply to these comparisons. Two live failures came from
+this class:
+
+- `ai-privileged-merge.yml`'s "Authorize terminal merge from trusted metadata" step
+  compared `job.workflow_repository` to `Verjson/.github`. When the step is reached
+  through `ai-promotion-retry.yml`'s local `./.github/workflows/ai-privileged-merge.yml`
+  call, the job context reports `verJSON/.github`. Verjson/AiB run 38790031475
+  (PR #341, head `51e5add9`, both callers at `9f8d55c5`) failed there with `promotion is
+  not executing from the canonical workflow repository`. The direct privileged merge had
+  deferred on a pending `ci / build-test`, so the retry path could not promote any adopter
+  pull request whose CI outlasted that merge.
+- The generated CLI projects admission step (`scripts/gen-node-required-workflow.py`)
+  compared both `github.repository` and the pull request's `head.repo.full_name` to
+  `Verjson/verjson-cli-projects`. Both report `verJSON/verjson-cli-projects`, so every
+  admission since the rename failed, as in run 38432170170 on 2026-10-13.
+
+Both sites now compare the runtime value as an identity under this ADR's semantics: exact
+equality after ASCII case folding. They use `jq`'s `ascii_downcase`, which leaves
+non-ASCII characters untouched. A spelling that GitHub's name charset cannot express can
+therefore never equal the ASCII literal. Bash's `${value,,}` is not equivalent. Under the
+runner's `C.UTF-8` locale it folds U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE to `i`,
+and Python's `casefold()` folds U+017F to `s`. The tests run under `C.UTF-8` and reject
+both spellings, plus other owners, other repositories, prefix and regex-wildcard
+spellings, and untrimmed values.
+
+The reviewed literals remain byte-exact in the source, and every other comparison stays
+exact. Comparisons where both operands come from the same run's context, such as
+`gate-rearm.yml`'s `github.workflow_ref` against `github.repository`, are unaffected.
+The one-time PR #769 migration record in `ai-review-merge.yml` matches a closed pull
+request and is now unreachable. Neither changes.
