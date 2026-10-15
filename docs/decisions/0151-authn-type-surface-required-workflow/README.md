@@ -82,3 +82,32 @@ It, the organization ruleset `source`, and the required-run `workflow_url` repos
 segment now compare case-insensitively over GitHub's ASCII name charset through
 `scripts/github_identity.py`. A different owner or repository still fails closed. Rationale
 and evidence: ADR 0213's 2026-10-15 amendment ([#1779](https://github.com/Verjson/.github/issues/1779)).
+
+## 2026-10-15 amendment: repin past #1750 and rotate from the admitted live predecessor
+
+The generated required workflow now calls `node-ci-protected.yml` at
+`576707fe0be0dabe43ea57c504575f8cda88b0d2`, the v4.0.0 release commit, which contains
+#1750 and #1759. The rationale matches
+[ADR 0153's 2026-10-15 predecessor amendment](../0153-cli-projects-package-surface-required-workflow/README.md).
+
+The rollout tool previously could only create the organization ruleset. The earlier
+activation therefore used a one-off procedure (ADR 0167), and the only predecessor the tool
+knew was a hard-coded `f2f425e9` for `stage-release-bypass` (ADR 0163). It now uses the
+same model as ADR 0153 through the shared `scripts/required_workflow_revision.py`:
+
+- `dry-run` and `apply` read the bound revision from the live ruleset of 21750617.
+- The tool accepts that revision only when the live image is that revision's reviewed
+  image with the target's enforcement and the sole release-App bypass, when the revision
+  is an ancestor of the target, and when its workflow is exactly the output of its own
+  generator for the pin its header names.
+- It writes the target image and verifies it. If the write fails, it restores the
+  observed image and verifies that instead.
+- `apply` makes no change when the exact target is already active.
+- `snapshot` and `verify-run` still accept only the exact target image.
+- The same `node-ci-protected` floor check runs before any mutation.
+- A read-only `audit` mode backs the scheduled `required-workflow-audit` job.
+
+`stage-release-bypass` is retired. The live ruleset is active with the release-App
+bypass, so the evaluate-only transition it performed is complete and its predecessor can
+never match again. Any later change to that bypass is a reviewed contract change that
+this rotation path applies.
