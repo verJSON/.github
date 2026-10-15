@@ -28,6 +28,21 @@ PIN_DECLARATION = re.compile(
     r"@(?P<sha>[0-9a-f]{40}) # (?P<tag>v[0-9][0-9A-Za-z.+-]*)'$",
     re.MULTILINE,
 )
+THIRD_PARTY_PIN = re.compile(
+    r"(?P<owner>[A-Za-z0-9_.-]+)/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}\b"
+)
+# Pins Renovate cannot read, each with the reason it is not moved here.
+UNMANAGED_GENERATOR_PINS = {
+    (
+        "scripts/gen-node-required-workflow.py",
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    ): (
+        "The CLI Projects admission caller is accepted byte-exactly (ADR 0212), and its "
+        "checkout pins carry no version comment, so the github-actions manager skips "
+        "them as unversioned in every repository that holds the output. Giving them a "
+        "comment changes the admitted bytes fleet-wide and is follow-up work."
+    ),
+}
 
 
 def renovate_pattern(pattern: str) -> re.Pattern[str]:
@@ -82,6 +97,38 @@ class GeneratorPinManager(unittest.TestCase):
             for uses, sha, tag in declared
         ]
         self.assertEqual(sorted(extracted), sorted(expected))
+
+    def test_no_generator_carries_a_pin_the_manager_cannot_move(self) -> None:
+        # A second spelling of a declared pin is the copy Renovate leaves behind:
+        # its PR would then fail this repository's own contract test, and the
+        # generator would stop moving at all.
+        manager = generator_pin_managers(self.config)[0]
+        patterns = [renovate_pattern(pattern) for pattern in manager["matchStrings"]]
+        unmanaged = []
+        for generator in sorted((ROOT / "scripts").glob("gen-*")):
+            relative = generator.relative_to(ROOT).as_posix()
+            if not manager_file_matches(manager, relative):
+                continue
+            text = generator.read_text(encoding="utf-8")
+            spans = [
+                match.span()
+                for pattern in patterns
+                for match in pattern.finditer(text)
+            ]
+            for match in THIRD_PARTY_PIN.finditer(text):
+                if match["owner"].casefold() == "verjson":
+                    continue
+                if any(start <= match.start() and match.end() <= end for start, end in spans):
+                    continue
+                line = text.count("\n", 0, match.start()) + 1
+                if (relative, match.group(0)) in UNMANAGED_GENERATOR_PINS:
+                    continue
+                unmanaged.append(f"{relative}:{line}: {match.group(0)}")
+        self.assertEqual(unmanaged, [])
+
+    def test_every_recorded_unmanaged_pin_still_exists(self) -> None:
+        for relative, pin in UNMANAGED_GENERATOR_PINS:
+            self.assertIn(pin, (ROOT / relative).read_text(encoding="utf-8"), relative)
 
 
 if __name__ == "__main__":

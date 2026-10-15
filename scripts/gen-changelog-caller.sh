@@ -568,7 +568,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out the pull request under validation
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: ${release_checkout%% #*}
         with:
           # The next step runs PR-authored scripts/changelog-contract.test.sh out
           # of this workspace, and nothing here fetches or pushes afterwards — so
@@ -2848,6 +2848,8 @@ EXPECTED_RELEASE_CALLER_PACKAGE_DIRS_JSON='${expected_release_caller_package_dir
 EXPECTED_RELEASE_ASSETS_JSON='${release_assets_json}'
 EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES='${release_approved_packages_csv}'
 EXPECTED_RELEASE_LANE_PREFLIGHT_SHA256='${release_lane_preflight_sha256}'
+EXPECTED_RELEASE_CHECKOUT='${release_checkout}'
+EXPECTED_RELEASE_SETUP_NODE='${release_setup_node}'
 EXPECTED_RELEASE_UPLOAD_ARTIFACT='${release_upload_artifact}'
 EXPECTED_RELEASE_DOWNLOAD_ARTIFACT='${release_download_artifact}'
 EXPECTED_RELEASE_CACHE_SAVE='${release_cache_save}'
@@ -3311,6 +3313,19 @@ import sys
 
 path = sys.argv[1]
 problems = []
+
+
+def pinned_action(variable, action):
+    """The generator's one declaration of an action pin, without its tag comment."""
+    uses = os.environ.get(variable, "").split(" #", 1)[0]
+    if not re.fullmatch(re.escape(action) + r"@[0-9a-f]{40}", uses):
+        sys.stderr.write("FAIL - %s %s does not name a pinned %s\n" % (path, variable, action))
+        raise SystemExit(1)
+    return uses
+
+
+RELEASE_CHECKOUT = pinned_action("EXPECTED_RELEASE_CHECKOUT", "actions/checkout")
+RELEASE_SETUP_NODE = pinned_action("EXPECTED_RELEASE_SETUP_NODE", "actions/setup-node")
 
 with open(path, encoding="utf-8") as handle:
     raw_lines = handle.read().splitlines()
@@ -4588,12 +4603,12 @@ expected_verification_step_identities = [
     ("Prepare job-scoped changelog tool cache", ""),
     ("Release only from the default branch", ""),
     ("Bind a proposer dispatch to its exact derived head", ""),
-    ("Check out the tree that will be released", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"),
-    ("Check out the canonical selection contract", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"),
+    ("Check out the tree that will be released", RELEASE_CHECKOUT),
+    ("Check out the canonical selection contract", RELEASE_CHECKOUT),
     ("Resolve the release selection and version", ""),
     ("Resolve restart-safe release state", ""),
-    ("Check out the existing snapshot for resumed verification", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"),
-    ("", "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"),
+    ("Check out the existing snapshot for resumed verification", RELEASE_CHECKOUT),
+    ("", RELEASE_SETUP_NODE),
     ("Capture trusted release verification runtime", ""),
 ]
 if release_mode == "release-node":
@@ -4631,7 +4646,7 @@ setup_node_steps = [
     step for step in verification_job_steps
     if (fields := step_mapping_entries(step)) is not None
     and yaml_scalar_value(fields.get("uses", ""))
-    == "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+    == RELEASE_SETUP_NODE
 ]
 if (
     len(setup_node_steps) != 1
@@ -5574,6 +5589,8 @@ PY
   # python3 with no third-party dependency, and a "use it if importable"
   # fallback would put every adopter without it on the untested path.
   CONTRACT_REF="$CONTRACT_REF" \
+    EXPECTED_RELEASE_CHECKOUT="$EXPECTED_RELEASE_CHECKOUT" \
+    EXPECTED_RELEASE_SETUP_NODE="$EXPECTED_RELEASE_SETUP_NODE" \
     RELEASE_CALLER_PACKAGE_DIRS_JSON="$workflow_package_dirs_json" \
     python3 "$work/release-shape.py" "$release_workflow" \
     || fail "$release_workflow: see above"
