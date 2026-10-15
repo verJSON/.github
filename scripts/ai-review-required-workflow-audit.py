@@ -12,6 +12,10 @@ from pathlib import Path
 
 import yaml
 
+# `python3 -I` does not put the script directory on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from github_identity import repository_identity  # noqa: E402
+
 
 ROOT = Path(__file__).resolve().parent.parent
 CONTRACT = Path(
@@ -35,6 +39,19 @@ RULESET_METADATA_FIELDS = frozenset({
 
 class AuditError(Exception):
     pass
+
+
+class AuditFindings(AuditError):
+    """Conformance findings, raised together with the report computed beside them.
+
+    A finding fails the audit, but it must not take the rest of the report with
+    it: the scheduled run is the only place the review ADR 0188 asks for reads
+    `unpinned_live_fields`, and adopter findings now fail every live run.
+    """
+
+    def __init__(self, findings: list[str], report: dict):
+        super().__init__(" | ".join(findings))
+        self.report = report
 
 
 def require(condition: bool, message: str) -> None:
@@ -377,6 +394,10 @@ def read_contract(path: Path = CONTRACT) -> dict:
     return contract
 
 
+HTTP_404 = re.compile(r"\(HTTP 404\)$", re.MULTILINE)
+HTTP_STATUS = re.compile(r"\(HTTP \d{3}\)$")
+
+
 def gh_pages(path: str, allow_missing: bool = False) -> list:
     result = subprocess.run(
         ["gh", "api", "--paginate", "--slurp", path],
@@ -390,9 +411,18 @@ def gh_pages(path: str, allow_missing: bool = False) -> list:
         # still an unreadable API and must stop the audit, because reporting
         # "absent" for an expired token would turn the whole fleet green-to-red
         # on a credential problem and vice versa.
-        if allow_missing and "(HTTP 404)" in result.stderr:
+        # gh ends its status line with the code; anchoring there, as
+        # privileged-merge-conformance.sh does, keeps a 404 quoted inside
+        # another status's message from reading as absence.
+        if allow_missing and HTTP_404.search(result.stderr):
             return []
-        raise AuditError(f"GitHub API read failed for {path}")
+        # gh's status line, e.g. "gh: Forbidden (HTTP 403)": API error text only,
+        # never a credential, and the one fact that tells an expired token from an
+        # outage. gh can print a scope hint after it, so prefer the last line that
+        # ends in a status code and fall back to the last non-empty line.
+        lines = [line.strip() for line in result.stderr.splitlines() if line.strip()]
+        status = next((line for line in reversed(lines) if HTTP_STATUS.search(line)), lines[-1] if lines else "")
+        raise AuditError(f"GitHub API read failed for {path}" + (f": {status}" if status else ""))
     try:
         pages = json.loads(result.stdout)
     except json.JSONDecodeError as error:
@@ -518,6 +548,10 @@ def selected_repositories(read, organization: str, kind: str, name: str) -> set[
 
 def require_scope(read, organization: str, kind: str, name: str, governed: dict[str, bool]) -> dict:
     item = single_object(read, f"orgs/{organization}/actions/{kind}/{name}")
+    return require_reach(read, organization, kind, name, item, governed)
+
+
+def require_reach(read, organization: str, kind: str, name: str, item: dict, governed: dict[str, bool]) -> dict:
     visibility = item.get("visibility")
     if visibility == "all":
         return item
@@ -665,7 +699,7 @@ def read_repository_properties(contract: dict, read) -> dict[str, dict[str, obje
         full_name = row.get("repository_full_name")
         values = row.get("properties")
         require(
-            isinstance(full_name, str)
+            repository_identity(full_name) is not None
             and repository_identity(full_name) not in identities
             and isinstance(values, list),
             "organization property inventory is invalid",
@@ -695,12 +729,6 @@ def target_arm_cohort(
         for full_name, values in properties_by_repository.items()
         if values.get(arm_property["name"]) == arm_property["value"]
     )
-
-
-def repository_identity(full_name: str) -> str:
-    # GitHub owner and repository names are case-insensitive; the API reports the
-    # current display case, which an organization rename changes (#1775).
-    return full_name.casefold()
 
 
 def require_reviewed_cohort(contract: dict, cohort: list[str], name: str) -> None:
@@ -800,10 +828,88 @@ def verify_no_repository_shadowing(contract: dict, read, repositories: list[dict
     concise_missing("repository-level authorization credential shadowing", shadows)
 
 
-def verify_authorization(contract: dict, read, governed: dict[str, bool]) -> None:
+def is_count(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def require_corroborated_withdrawal(read, organization: str, name: str) -> None:
+    """Accept a 404 for an organization secret as withdrawal only on positive evidence.
+
+    GitHub also answers 404 for a secret the caller cannot see, so the absence is
+    read from the same token's complete organization listing. A listing that is
+    empty of pages, truncated, malformed, or that names the secret is unknown
+    custody, never withdrawal; a complete listing with total_count 0 is genuine
+    evidence (ADR 0166, as `privileged-merge-conformance.sh` decides it).
+    """
+    unknown = f"cannot verify {name} custody: the organization copy answered 404 and"
+    pages = read(f"orgs/{organization}/actions/secrets?per_page=100")
+    require(
+        isinstance(pages, list)
+        and len(pages) > 0
+        and all(
+            isinstance(page, dict)
+            and isinstance(page.get("secrets"), list)
+            and is_count(page.get("total_count"))
+            for page in pages
+        ),
+        f"{unknown} the organization secret listing is malformed",
+    )
+    secrets = [secret for page in pages for secret in page["secrets"]]
+    require(
+        all(isinstance(secret, dict) and isinstance(secret.get("name"), str) and secret["name"] for secret in secrets),
+        f"{unknown} the organization secret listing has an unnamed entry",
+    )
+    names = [secret["name"] for secret in secrets]
+    require(
+        all(page["total_count"] == len(names) for page in pages),
+        f"{unknown} the organization secret listing is incomplete",
+    )
+    require(len(names) == len(set(names)), f"{unknown} the organization secret listing repeats a name")
+    require(name not in names, f"{unknown} the organization secret listing still names it")
+
+
+def environment_key_state(read, full_name: str, environment: str, name: str) -> tuple[str, str] | None:
+    """Return None when the environment holds the secret, else its finding class and reason.
+
+    Metadata only: this endpoint never returns a secret's value. `read` raises for
+    every status but 404, so a 403, a 5xx or invalid JSON is `unreadable`, never
+    `missing`; both fail the audit, but only one is a provisioning gap, and an
+    unreadable key carries the read's own error so the two can be told apart.
+    """
+    try:
+        pages = read(f"repos/{full_name}/environments/{environment}/secrets/{name}", allow_missing=True)
+    except AuditError as error:
+        return "unreadable", str(error)
+    if not pages:
+        return "missing", ""
+    if len(pages) == 1 and isinstance(pages[0], dict) and pages[0].get("name") == name:
+        return None
+    return "unreadable", "response does not identify the key"
+
+
+def verify_private_key_custody(read, organization: str, name: str, governed: dict[str, bool]) -> bool:
+    """Verify the organization copy's reach, or that it is withdrawn (ADR 0166).
+
+    Returns True when the copy is withdrawn, so every armed repository must hold
+    the key in its review environment instead.
+    """
+    path = f"orgs/{organization}/actions/secrets/{name}"
+    pages = read(path, allow_missing=True)
+    if pages:
+        require(len(pages) == 1 and isinstance(pages[0], dict), f"unexpected response shape for {path}")
+        require_reach(read, organization, "secrets", name, pages[0], governed)
+        return False
+    require_corroborated_withdrawal(read, organization, name)
+    return True
+
+
+def verify_authorization(contract: dict, read, governed: dict[str, bool]) -> bool:
+    """Verify the authorization App's credentials; True means environment key custody."""
     organization = contract["organization"]
     authorization = contract["authorization"]
-    require_scope(read, organization, "secrets", authorization["private_key_secret"], governed)
+    environment_custody = verify_private_key_custody(
+        read, organization, authorization["private_key_secret"], governed
+    )
     variables = {
         name: require_scope(read, organization, "variables", name, governed)
         for name in authorization["variables"]
@@ -826,9 +932,12 @@ def verify_authorization(contract: dict, read, governed: dict[str, bool]) -> Non
     require(installation.get("repository_selection") == "all", "authorization App installation is not ~ALL")
     require(installation.get("permissions") == authorization["app_permissions"], "authorization App permission map drifted")
     require(installation.get("events") == authorization["app_events"], "authorization App event subscriptions drifted")
+    return environment_custody
 
 
-def verify_adopter_conformance(contract: dict, read, repositories: list[dict], covered: list[str]) -> None:
+def adopter_conformance_findings(
+    contract: dict, read, repositories: list[dict], covered: list[str], environment_custody: bool
+) -> list[str]:
     """Report armed adopters that cannot satisfy the arm they are required to pass.
 
     Enrollment is granted by a repository property and admission requires a
@@ -852,9 +961,11 @@ def verify_adopter_conformance(contract: dict, read, repositories: list[dict], c
         repository["full_name"]: repository.get("default_branch") for repository in repositories
     }
     environment = conformance["environment"]
+    private_key = contract["authorization"]["private_key_secret"]
     blocked = []
     findings = []
     environment_findings = []
+    key_findings = {"missing": [], "unreadable": []}
     for full_name in covered:
         branch = default_branches.get(full_name)
         require(isinstance(branch, str) and branch, f"{full_name} reports no default branch")
@@ -900,6 +1011,14 @@ def verify_adopter_conformance(contract: dict, read, repositories: list[dict], c
             len(pages) == 1 and isinstance(pages[0], dict),
             f"unexpected environment response shape for {label}",
         )
+        # With the organization copy withdrawn the key exists only here, so an
+        # environment that conforms in every other respect still cannot mint the
+        # review token without it.
+        if environment_custody:
+            state = environment_key_state(read, full_name, environment, private_key)
+            if state:
+                kind, reason = state
+                key_findings[kind].append(f"{label} ({reason})" if reason else label)
         live = pages[0]
         mismatches = image_mismatches(
             live.get("deployment_branch_policy"),
@@ -932,7 +1051,7 @@ def verify_adopter_conformance(contract: dict, read, repositories: list[dict], c
     # class at a time would make the fleet take as many scheduled days to become
     # visible as there are classes — the same "the control could not tell you"
     # shape this audit exists to remove.
-    reported = [
+    return [
         concise_findings(name, items)
         for name, items in (
             (
@@ -941,10 +1060,11 @@ def verify_adopter_conformance(contract: dict, read, repositories: list[dict], c
             ),
             ("armed adopters with an incomplete generated adopter caller set", sorted(findings)),
             ("armed adopters without a conforming review environment", sorted(environment_findings)),
+            (f"armed {environment} environments that lack {private_key}", sorted(key_findings["missing"])),
+            (f"armed {environment} environments whose {private_key} is unreadable", sorted(key_findings["unreadable"])),
         )
         if items
     ]
-    require(not reported, " | ".join(reported))
 
 
 def read_workflow(read, selected: dict, label: str) -> dict:
@@ -986,18 +1106,25 @@ def verify_selected_workflow_is_schedulable(carrier: dict, read) -> None:
     )
 
 
-def verify_replacement_workflow(contract: dict, read) -> None:
+def replacement_workflow_findings(contract: dict, read) -> list[str]:
+    """Return the replacement's drift; an unreadable or unparsable workflow still raises."""
     selected = selected_workflow(contract["arm_ruleset"])
     workflow = read_workflow(read, selected, "replacement")
     triggers = workflow.get("on")
-    require(isinstance(triggers, dict) and "pull_request_target" in triggers, "replacement lacks pull_request_target")
     arm = workflow.get("jobs", {}).get("arm", {})
-    require(arm.get("continue-on-error") == "true", "replacement can veto ADR 0090 human merges")
     expected_runner = (
         "${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK "
         "|| '[\"ubuntu-24.04\"]') }}"
     )
-    require(arm.get("runs-on") == expected_runner, "required arm is not routed through the trusted lane")
+    return [
+        message
+        for conforms, message in (
+            (isinstance(triggers, dict) and "pull_request_target" in triggers, "replacement lacks pull_request_target"),
+            (arm.get("continue-on-error") == "true", "replacement can veto ADR 0090 human merges"),
+            (arm.get("runs-on") == expected_runner, "required arm is not routed through the trusted lane"),
+        )
+        if not conforms
+    ]
 
 
 def unpinned_ruleset_fields(ruleset: dict, image: dict) -> list[str]:
@@ -1107,10 +1234,13 @@ def audit(contract: dict, read=gh_pages, allow_unschedulable_selection: bool = F
     # The App credential only has to reach where the arm actually runs. Demanding
     # organization-wide reach for a rule that governs a subset is what made the
     # credential scope look like a blocker rather than a decision.
-    verify_authorization(contract, read, {name: governed[name] for name in covered})
-    verify_adopter_conformance(contract, read, repositories, covered)
-    verify_replacement_workflow(contract, read)
-    return {
+    environment_custody = verify_authorization(contract, read, {name: governed[name] for name in covered})
+    # Reported together, for the reason adopter_conformance_findings reports its
+    # classes together: the audit runs daily, and anything checked only after a
+    # standing finding would never reach the report at all.
+    findings = adopter_conformance_findings(contract, read, repositories, covered, environment_custody)
+    findings += replacement_workflow_findings(contract, read)
+    report = {
         "unpinned_live_fields": unpinned_live_fields(
             contract,
             live,
@@ -1126,6 +1256,9 @@ def audit(contract: dict, read=gh_pages, allow_unschedulable_selection: bool = F
         "armed_repositories": len(covered),
         "state": "split-legacy-selector" if state == "split" and selector == "legacy" else state,
     }
+    if findings:
+        raise AuditFindings(findings, report)
+    return report
 
 
 SPLIT_MODES = {"split": "postimage", "arm-ruleset": "arm_ruleset"}
@@ -1231,6 +1364,10 @@ def main() -> int:
         else:
             result = audit(contract)
     except AuditError as error:
+        # Only the plain audit's stdout is a report. A render mode's stdout is a
+        # payload, and a failed render must leave it empty.
+        if isinstance(error, AuditFindings) and not any(vars(args).values()):
+            print(json.dumps(error.report, sort_keys=True, separators=(",", ":")))
         print(f"ERROR: authorization-arm-rollout-not-ready: {error}", file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))

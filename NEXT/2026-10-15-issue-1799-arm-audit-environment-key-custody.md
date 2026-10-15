@@ -1,0 +1,20 @@
+---
+date: 2026-10-15
+issue: 1799
+impact: patch
+title: Accept the withdrawn organization review key in the authorization-arm audit
+---
+
+The authorization-arm audit accepts a withdrawn organization copy of `AI_REVIEW_APP_PRIVATE_KEY` as the conforming custody state and then requires every armed repository to hold the key in its `ai-review-app` environment, reporting a missing key separately from an unreadable one. An organization 404 the same token cannot corroborate from a complete secret listing, and every other read failure, still fails closed (#1799, ADR 0166).
+
+The live audit had stopped at the organization secret's 404 since the 2026-09-27 withdrawal. While an organization copy exists the visibility verdict is unchanged, and the `AI_REVIEW_APP_ID`, `AI_REVIEW_APP_SLUG` and `AI_REVIEW_CLIENT_ID` organization variables keep their reach checks.
+
+`config/audit-expected-findings.json` replaces the #1401 deterministic-CI finding, which stopped reproducing once `verJSON/verjson-agents` moved to `verjson-stack=actions`, with the finding the audit can now see and #1803 tracks: 12 armed `ai-review-app` environments without a main-only policy or the review key, and 21 missing generated adopter callers.
+
+A read is treated as absent only when gh's status line ends in `(HTTP 404)`, as `privileged-merge-conformance.sh` already requires; a 404 quoted inside another status's message is an unreadable API.
+
+An unreadable environment key is reported with the reason it could not be read, and every GitHub API read failure in the audit now carries gh's status line (for example `gh: Forbidden (HTTP 403)`), so an expired token is distinguishable from an outage.
+
+Replacement-workflow drift is now reported together with the armed-adopter findings instead of only after they clear, and a failing plain audit still prints its report, including `unpinned_live_fields`, so a standing finding no longer hides the rest of the daily picture. A failed render mode still writes no payload.
+
+The audit now compares repository identities through the shared `scripts/github_identity.py` (#1779), so an organization property row whose repository name falls outside GitHub's charset is an invalid inventory rather than a case-folded match.

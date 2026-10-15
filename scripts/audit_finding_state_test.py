@@ -80,6 +80,16 @@ class AuditFindingStateTest(unittest.TestCase):
         state = json.loads(completed.stdout)
         self.assertEqual(state["verdict"], "match")
 
+    def test_an_empty_expectation_matches_only_a_clean_audit(self):
+        # The shipped arm expectation is empty once its last waiver is resolved.
+        clean = self.run_state(entries=[], command=emitter(status=0))
+        self.assertEqual(clean.returncode, 0, clean.stderr)
+        self.assertEqual(json.loads(clean.stdout)["verdict"], "match")
+        finding = "armed ai-review-app environments that lack AI_REVIEW_APP_PRIVATE_KEY: missing=1"
+        found = self.run_state(entries=[], command=emitter(findings=[finding]))
+        self.assertEqual(found.returncode, 1, found.stdout)
+        self.assertEqual(json.loads(found.stdout)["new"], [fingerprint(finding)])
+
     def test_a_newly_appearing_finding_is_loud(self):
         recorded = "armed default branches without canonical deterministic required CI: missing=1"
         appeared = "armed default branches without canonical deterministic required CI: missing=2"
@@ -245,8 +255,9 @@ class ShippedExpectationTest(unittest.TestCase):
     """The committed expectation is validated here, not first by a scheduled run."""
 
     def test_the_arm_audit_expectation_file_validates(self):
+        # An empty list is the conforming state: every observed finding is then new.
         entries = STATE.read_expectations(ROOT / "config/audit-expected-findings.json", "ai-review-arm")
-        self.assertTrue(entries, "the recorded arm-audit expectation is empty")
+        self.assertIsInstance(entries, list)
 
     def test_every_recorded_arm_finding_still_has_time_left(self):
         entries = STATE.read_expectations(ROOT / "config/audit-expected-findings.json", "ai-review-arm")
