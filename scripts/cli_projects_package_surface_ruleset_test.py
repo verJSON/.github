@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import hashlib
 import importlib.util
 import json
+import re
 import os
 from pathlib import Path
 import subprocess
@@ -626,6 +627,30 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
             "576707fe0be0dabe43ea57c504575f8cda88b0d2",
         )
         consumer.assert_not_called()
+
+    def test_audit_covers_every_file_the_workflow_executes_from_its_own_revision(self):
+        # The package-surface job checks the verifier out at `github.workflow_sha`, so
+        # the verifier, its sibling imports, and its config are runtime bytes of the
+        # live revision; a change to any of them is a pending rotation.
+        workflow = yaml.safe_load(MODULE.WORKFLOW.read_text(encoding="utf-8"))
+        executed = set()
+        for job in workflow["jobs"].values():
+            for step in job.get("steps", []):
+                for token in str(step.get("run", "")).split():
+                    if token.startswith("policy/"):
+                        executed.add(token.removeprefix("policy/"))
+        self.assertEqual({"scripts/cli-projects-package-surface.py"}, executed)
+        verifier = (ROOT / "scripts/cli-projects-package-surface.py").read_text(encoding="utf-8")
+        siblings = {
+            f"scripts/{name}.py"
+            for name in re.findall(r"^from (\w+) import", verifier, re.MULTILINE)
+            if (ROOT / f"scripts/{name}.py").exists()
+        }
+        configs = set(re.findall(r'"(config/[\w./-]+)"', verifier))
+        self.assertEqual(
+            {MODULE.WORKFLOW_PATH} | executed | siblings | configs,
+            set(MODULE.RUNTIME_PATHS),
+        )
 
     def test_regenerate_at_reproduces_the_generated_workflow_from_revision_bytes(self):
         reads = []
