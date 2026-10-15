@@ -44,7 +44,7 @@
     {
       "repository": "Verjson/verjson-authn",
       "callers": [
-        {"path": ".github/workflows/gate-rearm.yml", "generator": "scripts/gen-gate-rearm-caller.sh", "canonical_workflows": ["gate-rearm.yml"]},
+        {"path": ".github/workflows/ai-review-label-rearm.yml", "generator": "scripts/gen-ai-review-label-rearm-caller.sh", "canonical_workflows": ["gate-rearm.yml"]},
         {"path": ".github/workflows/ai-review-merge.yml", "generator": "scripts/gen-ai-review-caller.sh", "canonical_workflows": ["ai-review-merge.yml"]},
         {"path": ".github/workflows/ai-privileged-merge.yml", "generator": "scripts/gen-privileged-merge-caller.sh", "canonical_workflows": ["ai-privileged-merge.yml"]},
         {"path": ".github/workflows/ai-promotion-retry.yml", "generator": "scripts/gen-privileged-merge-caller.sh", "canonical_workflows": ["ai-promotion-retry.yml"]},

@@ -5,6 +5,7 @@
 - **Issue:** [#933](https://github.com/Verjson/.github/issues/933)
 - **Extends:** [ADR 0114](../0114-generated-caller-capability-floor-audit/README.md)
 - **Extends:** [ADR 0109](../0109-observe-first-renovate-compatibility-control-plane/README.md)
+- **Superseded in part by:** [ADR 0233](../0233-capability-floor-records-provably-absent-callers/README.md) (2026-10-15)
 
 ## Context
 
@@ -101,3 +102,22 @@ consumer repositories remain read-only from this control plane.
 Disable or remove the schedule/workflow and retain the last artifact receipt. No
 consumer state needs reversal because this design performs no consumer mutation. App
 permissions and installation selection are unchanged.
+
+## 2026-10-15 amendment — absent callers and the canonical owner's display case (#1777)
+
+[ADR 0233](../0233-capability-floor-records-provably-absent-callers/README.md)
+supersedes the "missing files" condition above. A caller absent from a successful
+`.github/workflows` listing at the source commit is now recorded as a non-conformance
+finding and discovery continues. Every failed read, including any `404`, still fails
+closed.
+
+The exact-target invariant above also matched the owner `Verjson` byte for byte. The
+organization login changed display case to `verJSON` on 2026-10-02, and the changelog
+generator now emits that case. As a result, a correctly generated caller
+(`verjson-observability` `changelog.yml`) read as "no canonical workflow reference",
+and a display-case decoy in a step escaped decoy rejection. The owner is now compared
+as a case-insensitive ASCII identity through `scripts/github_identity.py` (#1779).
+Decoy detection uses the wider Unicode case-insensitive form of the canonical path.
+Any canonical-looking spelling must therefore pass the exact grammar and the owner
+identity check, so display-case decoys, lookalike owners, and non-ASCII folding
+spellings all fail closed.

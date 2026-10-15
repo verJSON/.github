@@ -115,6 +115,8 @@ def run_discovery(tmp: pathlib.Path, caller: str, *, repository: str = "Verjson/
     env["PATH"] = f"{tmp}{os.pathsep}{env['PATH']}"
     env["CALLER_TEXT_B64"] = base64.b64encode(caller.encode()).decode()
     env["STUB_MODE"] = mode
+    for output in ("pins.json", "receipts.json"):
+        (tmp / output).unlink(missing_ok=True)
     return subprocess.run(
         [
             sys.executable,
@@ -132,6 +134,70 @@ def run_discovery(tmp: pathlib.Path, caller: str, *, repository: str = "Verjson/
         text=True,
         check=False,
     )
+
+
+def run_layout(tmp: pathlib.Path, consumers: list[tuple[str, str]], layout: dict, caller: str):
+    """Run discovery over (repository, caller path) pairs against per-repository stub layouts."""
+    by_repository: dict[str, list[dict]] = {}
+    for repository, path in consumers:
+        by_repository.setdefault(repository, []).append(
+            {"path": path, "generator": "scripts/gen-gate-rearm-caller.sh", "canonical_workflows": ["gate-rearm.yml"]}
+        )
+    config = tmp / "layout-allowlist.json"
+    config.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "consumers": [{"repository": repository, "callers": callers} for repository, callers in by_repository.items()],
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PATH"] = f"{tmp}{os.pathsep}{env['PATH']}"
+    env["CALLER_TEXT_B64"] = base64.b64encode(caller.encode()).decode()
+    env["STUB_MODE"] = "layout"
+    env["STUB_LAYOUT"] = json.dumps(layout)
+    for output in ("pins.json", "receipts.json"):
+        (tmp / output).unlink(missing_ok=True)
+    return subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--allowlist",
+            str(config),
+            "--pins-output",
+            str(tmp / "pins.json"),
+            "--receipts-output",
+            str(tmp / "receipts.json"),
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+ABSENT_SUMMARY_STEP = "Summarize absent allowlisted callers"
+
+
+def run_absent_summary(document: dict, tmp: pathlib.Path, receipts) -> tuple[subprocess.CompletedProcess, str]:
+    """Execute the workflow's own summary step (parsed from YAML, not awk-extracted)."""
+    steps = document["jobs"]["observe"]["steps"]
+    matching = [step for step in steps if step.get("name") == ABSENT_SUMMARY_STEP]
+    assert len(matching) == 1, f"workflow has no single {ABSENT_SUMMARY_STEP!r} step"
+    (tmp / "capability-floor-discovery-receipts.json").write_text(
+        receipts if isinstance(receipts, str) else json.dumps(receipts), encoding="utf-8"
+    )
+    summary = tmp / "summary.md"
+    summary.write_text("", encoding="utf-8")
+    env = os.environ.copy()
+    env["GITHUB_STEP_SUMMARY"] = str(summary)
+    result = subprocess.run(
+        ["bash", "-e", "-c", matching[0]["run"]], cwd=tmp, env=env, capture_output=True, text=True, check=False
+    )
+    return result, summary.read_text(encoding="utf-8")
 
 
 def main() -> None:
@@ -159,19 +225,79 @@ def main() -> None:
         stub.write_text(
             """#!/usr/bin/env python3
 import json, os, sys
-endpoint = sys.argv[sys.argv.index('GET') + 1]
-if os.environ.get('STUB_MODE') == 'api-failure':
-    print('denied', file=sys.stderr)
+arguments = sys.argv[1:]
+endpoint = arguments[arguments.index('GET') + 1]
+fields = dict(arguments[index + 1].split('=', 1) for index, value in enumerate(arguments) if value == '-f')
+mode = os.environ.get('STUB_MODE', 'ok')
+def fail(message):
+    print(message, file=sys.stderr)
     raise SystemExit(1)
+def require_source_ref():
+    if fields.get('ref') != 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb':
+        fail('contents read is not bound to the resolved source commit')
+if mode == 'api-failure':
+    fail('denied')
+if mode == 'layout':
+    # STUB_LAYOUT maps each readable repository to the exact paths present at its source commit.
+    layout = json.loads(os.environ['STUB_LAYOUT'])
+    parts = endpoint.split('/', 3)
+    repository = '/'.join(parts[1:3])
+    rest = parts[3] if len(parts) > 3 else ''
+    if parts[0] != 'repos' or repository not in layout:
+        fail('gh: Not Found (HTTP 404)')
+    present = layout[repository]
+    if rest == '':
+        print(json.dumps({'default_branch': 'main'}))
+    elif rest == 'commits/main':
+        print(json.dumps({'sha': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'}))
+    elif rest == 'contents/.github/workflows':
+        require_source_ref()
+        print(json.dumps([{'name': path.rsplit('/', 1)[1], 'path': path, 'type': 'file'} for path in present]))
+    elif rest.startswith('contents/') and rest[len('contents/'):] in present:
+        require_source_ref()
+        print(json.dumps({'type': 'file', 'encoding': 'base64', 'sha': 'cccccccccccccccccccccccccccccccccccccccc', 'content': os.environ['CALLER_TEXT_B64']}))
+    else:
+        fail('gh: Not Found (HTTP 404)')
+    raise SystemExit(0)
 if endpoint == 'repos/Verjson/example':
+    if mode == 'repo-404':
+        fail('gh: Not Found (HTTP 404)')
     print(json.dumps({'default_branch': 'main'}))
 elif endpoint == 'repos/Verjson/example/commits/main':
     print(json.dumps({'sha': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'}))
+elif endpoint == 'repos/Verjson/example/contents/.github/workflows':
+    require_source_ref()
+    if mode == 'listing-404':
+        fail('gh: Not Found (HTTP 404)')
+    if mode == 'listing-403':
+        fail('gh: Resource not accessible by integration (HTTP 403)')
+    if mode == 'listing-500':
+        fail('gh: Server Error (HTTP 500)')
+    if mode == 'listing-malformed-json':
+        print('[{"name": ')
+        raise SystemExit(0)
+    if mode == 'listing-object':
+        print(json.dumps({'type': 'file', 'path': '.github/workflows'}))
+        raise SystemExit(0)
+    entries = [{'name': 'ci.yml', 'path': '.github/workflows/ci.yml', 'type': 'file'}]
+    if mode == 'listing-at-api-limit':
+        entries = [{'name': f'w{index}.yml', 'path': f'.github/workflows/w{index}.yml', 'type': 'file'} for index in range(1000)]
+    elif mode == 'listing-entry-without-path':
+        entries.append({'name': 'gate-rearm.yml', 'type': 'file'})
+    elif mode != 'caller-absent':
+        entries.append({'name': 'gate-rearm.yml', 'path': '.github/workflows/gate-rearm.yml', 'type': 'file'})
+    print(json.dumps(entries))
 elif endpoint == 'repos/Verjson/example/contents/.github/workflows/gate-rearm.yml':
+    require_source_ref()
+    if mode in ('caller-absent', 'caller-404'):
+        fail('gh: Not Found (HTTP 404)')
+    if mode == 'caller-403':
+        fail('gh: Resource not accessible by integration (HTTP 403)')
+    if mode == 'caller-500':
+        fail('gh: Server Error (HTTP 500)')
     print(json.dumps({'type': 'file', 'encoding': 'base64', 'sha': 'cccccccccccccccccccccccccccccccccccccccc', 'content': os.environ['CALLER_TEXT_B64']}))
 else:
-    print('unexpected endpoint: ' + endpoint, file=sys.stderr)
-    raise SystemExit(1)
+    fail('unexpected endpoint: ' + endpoint)
 """,
             encoding="utf-8",
         )
@@ -186,6 +312,11 @@ else:
         assert receipts["mode"] == "observe-only"
         assert receipts["receipts"][0]["source_sha"] == SOURCE_SHA
         assert receipts["receipts"][0]["blob_sha"] == BLOB_SHA
+
+        # GitHub owner names are case-insensitive; current generators emit `verJSON/` (#1779).
+        renamed = run_discovery(tmp, f"jobs:\n  arm:\n    uses: verJSON/.github/.github/workflows/gate-rearm.yml@{PIN}\n")
+        assert renamed.returncode == 0, f"display-case owner was rejected: {renamed.stderr}"
+        assert json.loads((tmp / "pins.json").read_text())[0]["pinned_sha"] == PIN
 
         scope_config = allowlist(tmp / "scope.json")
         scope = subprocess.run(
@@ -237,6 +368,21 @@ else:
                 f"on: pull_request\ntrue: push\njobs:\n  arm:\n    uses: Verjson/.github/.github/workflows/gate-rearm.yml@{PIN}\n",
             ),
             (
+                "real target plus display-case block scalar decoy",
+                valid
+                + f"  decoy:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: |\n          verJSON/.github/.github/workflows/gate-rearm.yml@{PIN}\n",
+            ),
+            (
+                "real target plus display-case step-level decoy",
+                valid + f"  decoy:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: VERJSON/.github/.github/workflows/gate-rearm.yml@{PIN}\n",
+            ),
+            (
+                "real target plus non-ASCII case-folding step-level decoy",
+                valid + f"  decoy:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: verj\u017fon/.github/.github/workflows/gate-rearm.yml@{PIN}\n",
+            ),
+            ("lookalike owner", f"jobs:\n  arm:\n    uses: xverjson/.github/.github/workflows/gate-rearm.yml@{PIN}\n"),
+            ("non-ASCII case-folding owner", f"jobs:\n  arm:\n    uses: verj\u017fon/.github/.github/workflows/gate-rearm.yml@{PIN}\n"),
+            (
                 "malformed YAML",
                 f"jobs:\n  arm: [\n    uses: Verjson/.github/.github/workflows/gate-rearm.yml@{PIN}\n",
             ),
@@ -247,6 +393,80 @@ else:
         api_failure = run_discovery(tmp, valid, mode="api-failure")
         assert api_failure.returncode == 2 and "GitHub API read failed" in api_failure.stderr
 
+        absent = run_discovery(tmp, valid, mode="caller-absent")
+        assert absent.returncode == 0, f"a provably absent caller aborted discovery: {absent.stderr}"
+        assert json.loads((tmp / "pins.json").read_text()) == []
+        absent_receipts = json.loads((tmp / "receipts.json").read_text())
+        assert absent_receipts["receipts"] == []
+        assert absent_receipts["callers_absent"] == 1
+        assert absent_receipts["absent_callers"] == [
+            {
+                "repository": "Verjson/example",
+                "default_branch": "main",
+                "source_sha": SOURCE_SHA,
+                "path": ".github/workflows/gate-rearm.yml",
+                "generator": "scripts/gen-gate-rearm-caller.sh",
+                "canonical_workflows": ["gate-rearm.yml"],
+                "finding": "allowlisted-caller-absent",
+            }
+        ], absent_receipts
+        assert "::warning" in absent.stdout and "Verjson/example" in absent.stdout and "non-conforming" in absent.stdout
+
+        # An absence never ends discovery: later callers in the same repository and
+        # later repositories are still read, pinned, and receipted.
+        gate = ".github/workflows/gate-rearm.yml"
+        label = ".github/workflows/ai-review-label-rearm.yml"
+        mixed = run_layout(
+            tmp,
+            [("Verjson/first", gate), ("Verjson/first", label), ("Verjson/second", gate)],
+            {"Verjson/first": [label], "Verjson/second": [gate]},
+            valid,
+        )
+        assert mixed.returncode == 0, mixed.stderr
+        mixed_receipts = json.loads((tmp / "receipts.json").read_text())
+        assert [(record["repository"], record["path"]) for record in mixed_receipts["absent_callers"]] == [
+            ("Verjson/first", gate)
+        ], mixed_receipts
+        assert [(record["repository"], record["path"]) for record in mixed_receipts["receipts"]] == [
+            ("Verjson/first", label),
+            ("Verjson/second", gate),
+        ], mixed_receipts
+        assert [pin["repo"] for pin in json.loads((tmp / "pins.json").read_text())] == ["Verjson/first", "Verjson/second"]
+        assert mixed_receipts["callers_checked"] == 2 and mixed_receipts["callers_absent"] == 1
+
+        # Git paths are case-sensitive: an allowlisted mixed-case path is read verbatim,
+        # and a listing that differs only by case does not satisfy it.
+        mixed_case = ".github/workflows/Gate-Rearm.yml"
+        exact = run_layout(tmp, [("Verjson/first", mixed_case)], {"Verjson/first": [mixed_case]}, valid)
+        assert exact.returncode == 0, exact.stderr
+        exact_receipts = json.loads((tmp / "receipts.json").read_text())
+        assert [record["path"] for record in exact_receipts["receipts"]] == [mixed_case], exact_receipts
+        assert exact_receipts["absent_callers"] == []
+        folded = run_layout(tmp, [("Verjson/first", mixed_case)], {"Verjson/first": [gate]}, valid)
+        assert folded.returncode == 0, folded.stderr
+        folded_receipts = json.loads((tmp / "receipts.json").read_text())
+        assert [record["path"] for record in folded_receipts["absent_callers"]] == [mixed_case], folded_receipts
+        assert folded_receipts["receipts"] == []
+
+        # Absence is recorded only from a successful listing; every failed read stays fatal.
+        for mode, diagnostic in (
+            ("repo-404", "GitHub API read failed for repos/Verjson/example:"),
+            ("listing-404", "GitHub API read failed for repos/Verjson/example/contents/.github/workflows:"),
+            ("listing-403", "GitHub API read failed for repos/Verjson/example/contents/.github/workflows:"),
+            ("listing-500", "GitHub API read failed for repos/Verjson/example/contents/.github/workflows:"),
+            ("listing-malformed-json", "GitHub API returned malformed JSON for repos/Verjson/example/contents/.github/workflows:"),
+            ("listing-object", "workflows directory listing is malformed for Verjson/example"),
+            ("listing-entry-without-path", "workflows directory listing entry is malformed for Verjson/example"),
+            ("listing-at-api-limit", "workflows directory listing may be truncated for Verjson/example"),
+            ("caller-404", "GitHub API read failed for repos/Verjson/example/contents/.github/workflows/gate-rearm.yml:"),
+            ("caller-403", "GitHub API read failed for repos/Verjson/example/contents/.github/workflows/gate-rearm.yml:"),
+            ("caller-500", "GitHub API read failed for repos/Verjson/example/contents/.github/workflows/gate-rearm.yml:"),
+        ):
+            failed = run_discovery(tmp, valid, mode=mode)
+            assert failed.returncode == 2, f"{mode} did not fail closed: {failed.returncode} {failed.stderr}"
+            assert diagnostic in failed.stderr, f"{mode} failed for the wrong reason: {failed.stderr}"
+            assert not (tmp / "pins.json").exists() and not (tmp / "receipts.json").exists(), f"{mode} wrote a receipt"
+
         invalid_config = allowlist(tmp / "invalid-owner.json", "attacker/example")
         invalid = subprocess.run(
             [sys.executable, str(SCRIPT), "--allowlist", str(invalid_config), "--print-repositories"],
@@ -256,6 +476,39 @@ else:
             check=False,
         )
         assert invalid.returncode == 2 and "outside the Verjson allowlist boundary" in invalid.stderr
+
+    # The step summary, not only an annotation, must surface every absent caller.
+    with tempfile.TemporaryDirectory() as directory:
+        tmp = pathlib.Path(directory)
+        absence = {
+            "repository": "Verjson/example",
+            "default_branch": "main",
+            "source_sha": SOURCE_SHA,
+            "path": ".github/workflows/gate-rearm.yml",
+            "generator": "scripts/gen-gate-rearm-caller.sh",
+            "canonical_workflows": ["gate-rearm.yml"],
+            "finding": "allowlisted-caller-absent",
+        }
+        result, summary = run_absent_summary(document, tmp, {"callers_absent": 1, "absent_callers": [absence]})
+        assert result.returncode == 0, result.stderr
+        assert "## Absent allowlisted callers" in summary, summary
+        assert (
+            f"- `Verjson/example` is non-conforming: `.github/workflows/gate-rearm.yml` "
+            f"(`scripts/gen-gate-rearm-caller.sh`) is absent at `{SOURCE_SHA}`"
+        ) in summary, summary
+
+        result, summary = run_absent_summary(document, tmp, {"callers_absent": 0, "absent_callers": []})
+        assert result.returncode == 0, result.stderr
+        assert "## Absent allowlisted callers" in summary and "None" in summary and "non-conforming" not in summary, summary
+
+        for label, receipts in (
+            ("missing absent_callers", {"callers_absent": 0}),
+            ("non-array absent_callers", {"callers_absent": 1, "absent_callers": {"repository": "Verjson/example"}}),
+            ("count disagrees with records", {"callers_absent": 0, "absent_callers": [absence]}),
+            ("malformed receipts", "{"),
+        ):
+            result, _ = run_absent_summary(document, tmp, receipts)
+            assert result.returncode != 0, f"absent summary accepted {label}"
 
     print("OK: capability-floor-discovery.test.py")
 

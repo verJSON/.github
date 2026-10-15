@@ -14,6 +14,10 @@ from urllib.parse import quote
 
 import yaml
 
+# `python3 -I` does not put the script directory on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from github_identity import same_organization  # noqa: E402
+
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ALLOWLIST = ROOT / "config/capability-floor-consumers.json"
@@ -22,12 +26,21 @@ CALLER_PATH_RE = re.compile(r"^\.github/workflows/[A-Za-z0-9._-]+\.ya?ml$")
 WORKFLOW_RE = re.compile(r"^[A-Za-z0-9._-]+\.ya?ml$")
 GENERATOR_RE = re.compile(r"^scripts/gen-[A-Za-z0-9._-]+-caller\.sh$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+CANONICAL_OWNER = "Verjson"
 CANONICAL_REFERENCE_RE = re.compile(
-    r"^Verjson/\.github/\.github/workflows/"
+    r"^(?P<owner>[A-Za-z0-9._-]+)/\.github/\.github/workflows/"
     r"(?P<workflow>[A-Za-z0-9._-]+\.ya?ml)@(?P<sha>[0-9a-f]{40})$"
 )
-CANONICAL_PREFIX = "Verjson/.github/.github/workflows/"
+# The owner is a case-insensitive identity whose display case changed (#1779). Decoy
+# detection deliberately uses Unicode case folding, which is wider than the ASCII-only
+# owner identity: any spelling that folds to the canonical path is canonical-looking and
+# must then pass the exact grammar and identity check, or discovery fails closed.
+CANONICAL_MARKER_RE = re.compile(r"verjson/\.github/\.github/workflows/", re.IGNORECASE)
 MAX_CALLER_BYTES = 512 * 1024
+WORKFLOWS_DIRECTORY = ".github/workflows"
+# The contents API returns at most this many directory entries; a listing that
+# reaches it may omit the caller, so it cannot prove absence.
+CONTENTS_DIRECTORY_LIMIT = 1000
 
 
 class DiscoveryError(Exception):
@@ -157,6 +170,23 @@ def resolve_default_branch(repository: str) -> tuple[str, str]:
     return default_branch, source_sha
 
 
+def list_workflow_paths(repository: str, source_sha: str) -> set[str]:
+    response = run_gh(f"repos/{repository}/contents/{WORKFLOWS_DIRECTORY}", {"ref": source_sha})
+    require(isinstance(response, list), f"workflows directory listing is malformed for {repository}")
+    require(
+        len(response) < CONTENTS_DIRECTORY_LIMIT,
+        f"workflows directory listing may be truncated for {repository}",
+    )
+    paths = set()
+    for entry in response:
+        require(
+            isinstance(entry, dict) and isinstance(entry.get("path"), str),
+            f"workflows directory listing entry is malformed for {repository}",
+        )
+        paths.add(entry["path"])
+    return paths
+
+
 def read_caller(repository: str, path: str, source_sha: str) -> tuple[str, str]:
     response = run_gh(f"repos/{repository}/contents/{path}", {"ref": source_sha})
     require(isinstance(response, dict), f"contents response is malformed for {repository}:{path}")
@@ -203,13 +233,13 @@ def load_workflow(repository: str, path: str, text: str):
 def canonical_scalars(value, path=()):
     if isinstance(value, dict):
         for key, child in value.items():
-            if isinstance(key, str) and CANONICAL_PREFIX in key:
+            if isinstance(key, str) and CANONICAL_MARKER_RE.search(key):
                 yield path + ("<mapping-key>",), key
             yield from canonical_scalars(child, path + (key,))
     elif isinstance(value, list):
         for index, child in enumerate(value):
             yield from canonical_scalars(child, path + (index,))
-    elif isinstance(value, str) and CANONICAL_PREFIX in value:
+    elif isinstance(value, str) and CANONICAL_MARKER_RE.search(value):
         yield path, value
 
 
@@ -228,7 +258,10 @@ def extract_pin(repository: str, path: str, text: str, expected_workflows: list[
             f"canonical reusable job name is invalid: {repository}:{path}",
         )
         match = CANONICAL_REFERENCE_RE.fullmatch(value)
-        require(match is not None, f"caller has a malformed or mutable canonical reference: {repository}:{path}")
+        require(
+            match is not None and same_organization(match.group("owner"), CANONICAL_OWNER),
+            f"caller has a malformed or mutable canonical reference: {repository}:{path}",
+        )
         matches.append(match)
     workflows = {match.group("workflow") for match in matches}
     pins = {match.group("sha") for match in matches}
@@ -244,14 +277,37 @@ def extract_pin(repository: str, path: str, text: str, expected_workflows: list[
     return next(iter(pins))
 
 
-def discover(consumers: list[dict]) -> tuple[list[dict], list[dict]]:
+def report_absent_caller(absence: dict) -> None:
+    print(
+        f"::warning title=Generated caller absent::{absence['repository']} is non-conforming: "
+        f"allowlisted generated caller {absence['path']} is absent at {absence['source_sha']}; "
+        "regenerate it or correct the reviewed allowlist"
+    )
+
+
+def discover(consumers: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
     pins = []
     receipts = []
+    absent = []
     for consumer in consumers:
         repository = consumer["repository"]
         default_branch, source_sha = resolve_default_branch(repository)
+        workflow_paths = list_workflow_paths(repository, source_sha)
         for caller in consumer["callers"]:
             path = caller["path"]
+            if path not in workflow_paths:
+                absence = {
+                    "repository": repository,
+                    "default_branch": default_branch,
+                    "source_sha": source_sha,
+                    "path": path,
+                    "generator": caller["generator"],
+                    "canonical_workflows": caller["canonical_workflows"],
+                    "finding": "allowlisted-caller-absent",
+                }
+                report_absent_caller(absence)
+                absent.append(absence)
+                continue
             text, blob_sha = read_caller(repository, path, source_sha)
             pinned_sha = extract_pin(repository, path, text, caller["canonical_workflows"])
             pins.append({"repo": repository, "generator": caller["generator"], "pinned_sha": pinned_sha})
@@ -267,7 +323,7 @@ def discover(consumers: list[dict]) -> tuple[list[dict], list[dict]]:
                     "pinned_sha": pinned_sha,
                 }
             )
-    return pins, receipts
+    return pins, receipts, absent
 
 
 def write_json(path: Path, payload) -> None:
@@ -293,7 +349,7 @@ def main() -> int:
             return 0
         require(args.pins_output is not None, "--pins-output is required for discovery")
         require(args.receipts_output is not None, "--receipts-output is required for discovery")
-        pins, receipts = discover(consumers)
+        pins, receipts, absent = discover(consumers)
         write_json(args.pins_output, pins)
         write_json(
             args.receipts_output,
@@ -302,7 +358,9 @@ def main() -> int:
                 "mode": "observe-only",
                 "repositories_checked": len(consumers),
                 "callers_checked": len(receipts),
+                "callers_absent": len(absent),
                 "receipts": receipts,
+                "absent_callers": absent,
             },
         )
         return 0

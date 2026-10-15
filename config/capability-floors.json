@@ -12,6 +12,7 @@
       "issue": 933,
       "generators": [
         "scripts/gen-gate-rearm-caller.sh",
+        "scripts/gen-ai-review-label-rearm-caller.sh",
         "scripts/gen-ai-review-caller.sh",
         "scripts/gen-privileged-merge-caller.sh"
       ],

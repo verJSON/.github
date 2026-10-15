@@ -73,6 +73,15 @@ jobs:
             jq . capability-floor-report.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Summarize absent allowlisted callers
+        run: |
+          set -euo pipefail
+          absent="$(jq -er 'if (.absent_callers | type) != "array" then error("absent_callers is not an array") elif .callers_absent != (.absent_callers | length) then error("callers_absent disagrees with absent_callers") elif (.absent_callers | length) == 0 then "None: every allowlisted caller was present at its source commit." else (.absent_callers[] | "- `\(.repository)` is non-conforming: `\(.path)` (`\(.generator)`) is absent at `\(.source_sha)`") end' capability-floor-discovery-receipts.json)"
+          {
+            echo '## Absent allowlisted callers'
+            echo
+            printf '%s\n' "$absent"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload immutable observation receipts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
