@@ -212,15 +212,19 @@ The audit then reaches the deterministic-CI check again. Its only finding is the
 already accepted under #1401, now spelled `verJSON/verjson-agents`, so
 `config/audit-expected-findings.json` re-records that finding under the new fingerprint.
 
-## 2026-10-15 amendment: the #1401 expectation is retired
+## 2026-10-15 amendment: the #1401 expectation is replaced by #1803
 
 `verJSON/verjson-agents` now carries `verjson-stack=actions`, so the deterministic-CI
 finding accepted under #1401 no longer reproduces and `config/audit-expected-findings.json`
-records no `ai-review-arm` expectation. The same change makes the audit read the review
-key from each armed repository's `ai-review-app` environment once the organization copy
-is withdrawn ([#1799](https://github.com/Verjson/.github/issues/1799); ADR 0166, amendment
-of 2026-10-15). With the expectation empty, any finding the audit reports is new drift.
+drops it. The same change makes the audit read the review key from each armed repository's
+`ai-review-app` environment once the organization copy is withdrawn
+([#1799](https://github.com/Verjson/.github/issues/1799); ADR 0166, amendment of
+2026-10-15), and report replacement-workflow drift with the armed-adopter findings rather
+than after them.
 
-The live audit on 2026-10-15 reports that drift, previously hidden behind the organization
-secret's 404: 21 missing generated adopter callers, 12 `ai-review-app` environments with
-no deployment branch policy, and the same 12 environments without the review key.
+The live audit on 2026-10-15 then reports drift the organization secret's 404 had hidden:
+21 missing generated adopter callers, 12 `ai-review-app` environments with no deployment
+branch policy, and the same 12 environments without the review key. That finding is
+recorded in the expectation under
+[#1803](https://github.com/Verjson/.github/issues/1803), which tracks provisioning;
+resolving it is what removes the entry.

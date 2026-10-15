@@ -9,7 +9,7 @@ The authorization-arm audit accepts a withdrawn organization copy of `AI_REVIEW_
 
 The live audit had stopped at the organization secret's 404 since the 2026-09-27 withdrawal. While an organization copy exists the visibility verdict is unchanged, and the `AI_REVIEW_APP_ID`, `AI_REVIEW_APP_SLUG` and `AI_REVIEW_CLIENT_ID` organization variables keep their reach checks.
 
-`config/audit-expected-findings.json` no longer records the #1401 deterministic-CI finding, which stopped reproducing once `verJSON/verjson-agents` moved to `verjson-stack=actions`; the arm audit's expectation is now empty, so every finding it reports is new drift.
+`config/audit-expected-findings.json` replaces the #1401 deterministic-CI finding, which stopped reproducing once `verJSON/verjson-agents` moved to `verjson-stack=actions`, with the finding the audit can now see and #1803 tracks: 12 armed `ai-review-app` environments without a main-only policy or the review key, and 21 missing generated adopter callers.
 
 A read is treated as absent only when gh's status line ends in `(HTTP 404)`, as `privileged-merge-conformance.sh` already requires; a 404 quoted inside another status's message is an unreadable API.
 
