@@ -136,6 +136,49 @@ def run_discovery(tmp: pathlib.Path, caller: str, *, repository: str = "Verjson/
     )
 
 
+def run_layout(tmp: pathlib.Path, consumers: list[tuple[str, str]], layout: dict, caller: str):
+    """Run discovery over (repository, caller path) pairs against per-repository stub layouts."""
+    by_repository: dict[str, list[dict]] = {}
+    for repository, path in consumers:
+        by_repository.setdefault(repository, []).append(
+            {"path": path, "generator": "scripts/gen-gate-rearm-caller.sh", "canonical_workflows": ["gate-rearm.yml"]}
+        )
+    config = tmp / "layout-allowlist.json"
+    config.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "consumers": [{"repository": repository, "callers": callers} for repository, callers in by_repository.items()],
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PATH"] = f"{tmp}{os.pathsep}{env['PATH']}"
+    env["CALLER_TEXT_B64"] = base64.b64encode(caller.encode()).decode()
+    env["STUB_MODE"] = "layout"
+    env["STUB_LAYOUT"] = json.dumps(layout)
+    for output in ("pins.json", "receipts.json"):
+        (tmp / output).unlink(missing_ok=True)
+    return subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--allowlist",
+            str(config),
+            "--pins-output",
+            str(tmp / "pins.json"),
+            "--receipts-output",
+            str(tmp / "receipts.json"),
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def main() -> None:
     raw = WORKFLOW.read_text(encoding="utf-8")
     document = yaml.safe_load(raw)
@@ -173,6 +216,28 @@ def require_source_ref():
         fail('contents read is not bound to the resolved source commit')
 if mode == 'api-failure':
     fail('denied')
+if mode == 'layout':
+    # STUB_LAYOUT maps each readable repository to the exact paths present at its source commit.
+    layout = json.loads(os.environ['STUB_LAYOUT'])
+    parts = endpoint.split('/', 3)
+    repository = '/'.join(parts[1:3])
+    rest = parts[3] if len(parts) > 3 else ''
+    if parts[0] != 'repos' or repository not in layout:
+        fail('gh: Not Found (HTTP 404)')
+    present = layout[repository]
+    if rest == '':
+        print(json.dumps({'default_branch': 'main'}))
+    elif rest == 'commits/main':
+        print(json.dumps({'sha': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'}))
+    elif rest == 'contents/.github/workflows':
+        require_source_ref()
+        print(json.dumps([{'name': path.rsplit('/', 1)[1], 'path': path, 'type': 'file'} for path in present]))
+    elif rest.startswith('contents/') and rest[len('contents/'):] in present:
+        require_source_ref()
+        print(json.dumps({'type': 'file', 'encoding': 'base64', 'sha': 'cccccccccccccccccccccccccccccccccccccccc', 'content': os.environ['CALLER_TEXT_B64']}))
+    else:
+        fail('gh: Not Found (HTTP 404)')
+    raise SystemExit(0)
 if endpoint == 'repos/Verjson/example':
     if mode == 'repo-404':
         fail('gh: Not Found (HTTP 404)')
@@ -325,6 +390,42 @@ else:
             }
         ], absent_receipts
         assert "::warning" in absent.stdout and "Verjson/example" in absent.stdout and "non-conforming" in absent.stdout
+
+        # An absence never ends discovery: later callers in the same repository and
+        # later repositories are still read, pinned, and receipted.
+        gate = ".github/workflows/gate-rearm.yml"
+        label = ".github/workflows/ai-review-label-rearm.yml"
+        mixed = run_layout(
+            tmp,
+            [("Verjson/first", gate), ("Verjson/first", label), ("Verjson/second", gate)],
+            {"Verjson/first": [label], "Verjson/second": [gate]},
+            valid,
+        )
+        assert mixed.returncode == 0, mixed.stderr
+        mixed_receipts = json.loads((tmp / "receipts.json").read_text())
+        assert [(record["repository"], record["path"]) for record in mixed_receipts["absent_callers"]] == [
+            ("Verjson/first", gate)
+        ], mixed_receipts
+        assert [(record["repository"], record["path"]) for record in mixed_receipts["receipts"]] == [
+            ("Verjson/first", label),
+            ("Verjson/second", gate),
+        ], mixed_receipts
+        assert [pin["repo"] for pin in json.loads((tmp / "pins.json").read_text())] == ["Verjson/first", "Verjson/second"]
+        assert mixed_receipts["callers_checked"] == 2 and mixed_receipts["callers_absent"] == 1
+
+        # Git paths are case-sensitive: an allowlisted mixed-case path is read verbatim,
+        # and a listing that differs only by case does not satisfy it.
+        mixed_case = ".github/workflows/Gate-Rearm.yml"
+        exact = run_layout(tmp, [("Verjson/first", mixed_case)], {"Verjson/first": [mixed_case]}, valid)
+        assert exact.returncode == 0, exact.stderr
+        exact_receipts = json.loads((tmp / "receipts.json").read_text())
+        assert [record["path"] for record in exact_receipts["receipts"]] == [mixed_case], exact_receipts
+        assert exact_receipts["absent_callers"] == []
+        folded = run_layout(tmp, [("Verjson/first", mixed_case)], {"Verjson/first": [gate]}, valid)
+        assert folded.returncode == 0, folded.stderr
+        folded_receipts = json.loads((tmp / "receipts.json").read_text())
+        assert [record["path"] for record in folded_receipts["absent_callers"]] == [mixed_case], folded_receipts
+        assert folded_receipts["receipts"] == []
 
         # Absence is recorded only from a successful listing; every failed read stays fatal.
         for mode, diagnostic in (
