@@ -151,6 +151,18 @@ class ReleaseVerifyRetentionKeepTests(unittest.TestCase):
                 self.assertIsNotNone(hook_env, "the verification hook never ran")
                 self.assertEqual(hook_env.get(RETENTION_KEY), "7")
 
+    def test_an_invalid_org_retention_window_fails_closed_before_the_hook_runs(self):
+        for mode, step in self.steps.items():
+            for value in ("0", "-1", "03", "abc", "1.5", " 3", "3 ", "٣", "1e3"):
+                with self.subTest(mode=mode, value=value):
+                    result, hook_env = run_verify_step(step, variables={RETENTION_KEY: value})
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn(
+                        "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer",
+                        result.stdout + result.stderr,
+                    )
+                    self.assertIsNone(hook_env, "the hook ran with an invalid retention window")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -441,6 +441,8 @@ class ReleaseNodeCredentialBoundaryTests(unittest.TestCase):
                         "PACKAGE_VERSION": PACKAGE_VERSION,
                         "RELEASE_VERIFICATION_PATH": runtime_path,
                         "VERJSON_CHANGELOG_TOOL_CACHE": str(root / "tool-cache"),
+                        # The step env resolves the retention window before the script runs.
+                        "CI_PACKAGE_RETENTION_KEEP": "3",
                         "GITHUB_ACTIONS": "true",
                         "GITHUB_WORKFLOW": "release",
                         "GITHUB_JOB": "verify",
