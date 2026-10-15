@@ -416,7 +416,7 @@ jobs:
         # runner is GitHub-hosted. Refuse here, before dependency acquisition,
         # when the lane is not one standard GitHub-hosted Linux image. The value
         # is never echoed: it is configuration, not a reviewed log line. ADR 0234.
-        if: inputs.secretless-trusted-ref
+        if: inputs.secretless-pr || inputs.secretless-trusted-ref
         shell: bash
         env:
           SECRETLESS_BUILD_LANE: ${{ vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]' }}

@@ -119,6 +119,12 @@ SCENARIOS = (
         "eligibility_runner": "github-hosted", "untrusted_lane": '["self-hosted","general"]',
         "admitted": False,
     },
+    {
+        "label": "secretless-pr is refused before acquisition when the build lane is self-hosted",
+        "mode": "pr",
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["self-hosted","general"]',
+        "admitted": False,
+    },
 )
 
 

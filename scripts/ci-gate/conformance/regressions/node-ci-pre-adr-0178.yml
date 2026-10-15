@@ -191,7 +191,7 @@ jobs:
       should-run: ${{ steps.check.outputs.should-run }}
     steps:
     - name: Require a GitHub-hosted secretless build lane
-      if: inputs.secretless-trusted-ref
+      if: inputs.secretless-pr || inputs.secretless-trusted-ref
       shell: bash
       env:
         SECRETLESS_BUILD_LANE: ${{ vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]' }}
