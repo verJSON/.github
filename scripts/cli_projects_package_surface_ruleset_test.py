@@ -166,12 +166,13 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
     def test_caller_ref_input_and_credential_mutations_are_rejected(self):
         source = MODULE.WORKFLOW.read_text(encoding="utf-8")
         mutations = (
-            source.replace("node-ci-protected.yml@1c7659b", "node-ci-protected.yml@aaaaaaaa"),
+            source.replace("node-ci-protected.yml@", "node-ci-protected.yml@aaaaaaaa", 1),
             source.replace("secretless-pr: true", "secretless-pr: false", 1),
             source.replace("NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}", "NODE_AUTH_TOKEN: mutation", 1),
             source.replace("needs: admission", "needs: []", 1),
         )
         for candidate in mutations:
+            self.assertNotEqual(source, candidate)
             with tempfile.NamedTemporaryFile("w", encoding="utf-8") as stream:
                 stream.write(candidate)
                 stream.flush()
@@ -318,7 +319,8 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
     def test_generator_rejects_mutable_or_injectable_configuration(self):
         config = json.loads(MODULE.GENERATOR_CONFIG.read_text(encoding="utf-8"))
         mutations = (
-            {**config, "node_ci_sha": "main"},
+            {**config, "protected_node_ci_sha": "main"},
+            {**config, "consumer_node_ci_sha": "main"},
             {**config, "repository": "Verjson/other"},
             {**config, "repository": "Verjson/verjson-cli-projects\npermissions: write"},
             {**config, "approved_internal_packages": ["@verjson/eslint-config\nrun: id"]},
