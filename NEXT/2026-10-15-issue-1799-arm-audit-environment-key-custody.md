@@ -14,3 +14,5 @@ The live audit had stopped at the organization secret's 404 since the 2026-09-27
 A read is treated as absent only when gh's status line ends in `(HTTP 404)`, as `privileged-merge-conformance.sh` already requires; a 404 quoted inside another status's message is an unreadable API.
 
 An unreadable environment key is reported with the reason it could not be read, and every GitHub API read failure in the audit now carries gh's status line (for example `gh: Forbidden (HTTP 403)`), so an expired token is distinguishable from an outage.
+
+Replacement-workflow drift is now reported together with the armed-adopter findings instead of only after they clear, and a failing plain audit still prints its report, including `unpinned_live_fields`, so a standing finding no longer hides the rest of the daily picture. A failed render mode still writes no payload.

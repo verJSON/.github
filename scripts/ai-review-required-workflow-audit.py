@@ -37,6 +37,19 @@ class AuditError(Exception):
     pass
 
 
+class AuditFindings(AuditError):
+    """Conformance findings, raised together with the report computed beside them.
+
+    A finding fails the audit, but it must not take the rest of the report with
+    it: the scheduled run is the only place the review ADR 0188 asks for reads
+    `unpinned_live_fields`, and adopter findings now fail every live run.
+    """
+
+    def __init__(self, findings: list[str], report: dict):
+        super().__init__(" | ".join(findings))
+        self.report = report
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AuditError(message)
@@ -921,9 +934,9 @@ def verify_authorization(contract: dict, read, governed: dict[str, bool]) -> boo
     return environment_custody
 
 
-def verify_adopter_conformance(
+def adopter_conformance_findings(
     contract: dict, read, repositories: list[dict], covered: list[str], environment_custody: bool
-) -> None:
+) -> list[str]:
     """Report armed adopters that cannot satisfy the arm they are required to pass.
 
     Enrollment is granted by a repository property and admission requires a
@@ -1037,7 +1050,7 @@ def verify_adopter_conformance(
     # class at a time would make the fleet take as many scheduled days to become
     # visible as there are classes — the same "the control could not tell you"
     # shape this audit exists to remove.
-    reported = [
+    return [
         concise_findings(name, items)
         for name, items in (
             (
@@ -1051,7 +1064,6 @@ def verify_adopter_conformance(
         )
         if items
     ]
-    require(not reported, " | ".join(reported))
 
 
 def read_workflow(read, selected: dict, label: str) -> dict:
@@ -1093,18 +1105,25 @@ def verify_selected_workflow_is_schedulable(carrier: dict, read) -> None:
     )
 
 
-def verify_replacement_workflow(contract: dict, read) -> None:
+def replacement_workflow_findings(contract: dict, read) -> list[str]:
+    """Return the replacement's drift; an unreadable or unparsable workflow still raises."""
     selected = selected_workflow(contract["arm_ruleset"])
     workflow = read_workflow(read, selected, "replacement")
     triggers = workflow.get("on")
-    require(isinstance(triggers, dict) and "pull_request_target" in triggers, "replacement lacks pull_request_target")
     arm = workflow.get("jobs", {}).get("arm", {})
-    require(arm.get("continue-on-error") == "true", "replacement can veto ADR 0090 human merges")
     expected_runner = (
         "${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK "
         "|| '[\"ubuntu-24.04\"]') }}"
     )
-    require(arm.get("runs-on") == expected_runner, "required arm is not routed through the trusted lane")
+    return [
+        message
+        for conforms, message in (
+            (isinstance(triggers, dict) and "pull_request_target" in triggers, "replacement lacks pull_request_target"),
+            (arm.get("continue-on-error") == "true", "replacement can veto ADR 0090 human merges"),
+            (arm.get("runs-on") == expected_runner, "required arm is not routed through the trusted lane"),
+        )
+        if not conforms
+    ]
 
 
 def unpinned_ruleset_fields(ruleset: dict, image: dict) -> list[str]:
@@ -1215,9 +1234,12 @@ def audit(contract: dict, read=gh_pages, allow_unschedulable_selection: bool = F
     # organization-wide reach for a rule that governs a subset is what made the
     # credential scope look like a blocker rather than a decision.
     environment_custody = verify_authorization(contract, read, {name: governed[name] for name in covered})
-    verify_adopter_conformance(contract, read, repositories, covered, environment_custody)
-    verify_replacement_workflow(contract, read)
-    return {
+    # Reported together, for the reason adopter_conformance_findings reports its
+    # classes together: the audit runs daily, and anything checked only after a
+    # standing finding would never reach the report at all.
+    findings = adopter_conformance_findings(contract, read, repositories, covered, environment_custody)
+    findings += replacement_workflow_findings(contract, read)
+    report = {
         "unpinned_live_fields": unpinned_live_fields(
             contract,
             live,
@@ -1233,6 +1255,9 @@ def audit(contract: dict, read=gh_pages, allow_unschedulable_selection: bool = F
         "armed_repositories": len(covered),
         "state": "split-legacy-selector" if state == "split" and selector == "legacy" else state,
     }
+    if findings:
+        raise AuditFindings(findings, report)
+    return report
 
 
 SPLIT_MODES = {"split": "postimage", "arm-ruleset": "arm_ruleset"}
@@ -1338,6 +1363,10 @@ def main() -> int:
         else:
             result = audit(contract)
     except AuditError as error:
+        # Only the plain audit's stdout is a report. A render mode's stdout is a
+        # payload, and a failed render must leave it empty.
+        if isinstance(error, AuditFindings) and not any(vars(args).values()):
+            print(json.dumps(error.report, sort_keys=True, separators=(",", ":")))
         print(f"ERROR: authorization-arm-rollout-not-ready: {error}", file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))

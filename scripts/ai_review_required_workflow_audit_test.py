@@ -1,6 +1,8 @@
 import argparse
 import base64
+import contextlib
 import copy
+import io
 import subprocess
 import importlib.util
 import json
@@ -933,6 +935,66 @@ jobs:
                 ):
                     self.assertEqual(AUDIT.main(), 0)
                 render.assert_called_once_with(self.contract, mode)
+
+    def test_replacement_drift_and_unpinned_fields_are_reported_with_adopter_findings(self):
+        # Adopter findings fail every live run, so anything checked only after
+        # them would never reach the daily report (#1799 review).
+        self.remove_adopter_caller("Verjson/alpha", ".github/workflows/ai-review-merge.yml")
+        self.workflow_source(self.workflow.replace("pull_request_target", "workflow_dispatch"))
+        self.fixture[self.ruleset_path][0]["added_by_github"] = True
+        with self.assertRaises(AUDIT.AuditError) as caught:
+            AUDIT.audit(self.contract, self.read)
+        message = str(caught.exception)
+        self.assertIn("Verjson/alpha:.github/workflows/ai-review-merge.yml", message)
+        self.assertIn("replacement lacks pull_request_target", message)
+        self.assertIn(
+            f"{self.contract['preimage']['name']}.added_by_github",
+            caught.exception.report["unpinned_live_fields"],
+        )
+        audit = AUDIT.audit
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(AUDIT, "parse_args", return_value=argparse.Namespace(**{
+                flag: False for flag in (
+                    "render_split_payload", "render_arm_ruleset_payload", "render_rollback_payload",
+                    "render_arm_property_schema_payload", "render_arm_property_values_payload",
+                    "render_arm_property_ruleset_payload", "render_arm_property_rollback_payload",
+                    "render_arm_property_unset_values_payload",
+                )
+            })),
+            mock.patch.object(AUDIT, "read_contract", return_value=self.contract),
+            mock.patch.object(AUDIT, "audit", side_effect=lambda contract: audit(contract, self.read)),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(AUDIT.main(), 1)
+        self.assertEqual(stderr.getvalue(), f"ERROR: authorization-arm-rollout-not-ready: {message}\n")
+        self.assertEqual(json.loads(stdout.getvalue()), caught.exception.report)
+
+    def test_a_render_that_meets_findings_writes_no_payload(self):
+        self.remove_adopter_caller("Verjson/alpha", ".github/workflows/ai-review-merge.yml")
+        flags = (
+            "render_split_payload", "render_arm_ruleset_payload", "render_rollback_payload",
+            "render_arm_property_schema_payload", "render_arm_property_values_payload",
+            "render_arm_property_ruleset_payload", "render_arm_property_rollback_payload",
+            "render_arm_property_unset_values_payload",
+        )
+        render = AUDIT.render_payload
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(AUDIT, "parse_args", return_value=argparse.Namespace(**{
+                flag: flag == "render_split_payload" for flag in flags
+            })),
+            mock.patch.object(AUDIT, "read_contract", return_value=self.contract),
+            mock.patch.object(
+                AUDIT, "render_payload", side_effect=lambda contract, mode: render(contract, mode, self.read),
+            ),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(AUDIT.main(), 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("Verjson/alpha:.github/workflows/ai-review-merge.yml", stderr.getvalue())
 
     def test_retired_replacement_and_app_status_cannot_coexist(self):
         second = {"id": 99, **copy.deepcopy(self.contract["arm_ruleset"])}
