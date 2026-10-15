@@ -107,6 +107,10 @@ VERSIONED_USES = re.compile(
     r"(?:(?![0-9a-f]{40}\b)[^\s'\"#]+|[0-9a-f]{40}['\"]?\s+#\s*\S+)",
     re.MULTILINE,
 )
+UNVERSIONED_USES = re.compile(
+    r"^\s*(?:-\s+)?uses:\s*['\"]?(?P<owner>[A-Za-z0-9_.-]+)/[A-Za-z0-9_./-]+@[0-9a-f]{40}['\"]?[ \t]*$",
+    re.MULTILINE,
+)
 RUNNER_LABEL = re.compile(
     r"^\s*runs-on:\s*(?!\$\{\{)[\[\"']*\s*[A-Za-z]+-[0-9]", re.MULTILINE
 )
@@ -154,6 +158,72 @@ def fence_rules(preset: dict) -> list[dict]:
         for rule in preset.get("packageRules", [])
         if rule.get("enabled") is False and "matchFileNames" in rule
     ]
+
+
+# The generated contract test checks every workflow that calls
+# changelog-release.yml, whatever its name, and --release-caller-package-dirs
+# names the extra ones, so a release caller's path is the adopter's choice.
+# Adopters name extra callers release-<purpose>.yml; verjson-cli's is the live
+# one (organization survey, ADR 0232 amendment 2026-10-15).
+ADOPTER_RELEASE_CALLER_PATHS = (".github/workflows/release-cli-schema.yml",)
+# Names outside that convention, which a fence must leave to Renovate: a path
+# fence also silences every hand-written workflow it reaches. scv-iac's
+# hand-written release.yaml is live; the rest only bound the glob.
+UNFENCED_NAME_PROBES = (
+    ".github/workflows/ci.yml",
+    ".github/workflows/publish.yml",
+    ".github/workflows/release.yaml",
+    ".github/workflows/release_notes.yml",
+    ".github/workflows/releases.yml",
+)
+
+# Renovate matches matchFileNames with minimatch {dot: true}. Verjson/verjson-agents
+# resolves this preset with a model (unfenced_paths in
+# tests/test_generated_contract_artifacts.py) that reads a regex, a negation, or
+# `**` inside a segment as unknown and then counts the rule as no fence at all,
+# so the preset stays inside the subset both agree on.
+MODELED_FENCE_PATTERN = re.compile(r"(?!/)[A-Za-z0-9._/*?-]+\Z")
+
+
+def fence_pattern_is_modeled(pattern: str) -> bool:
+    return bool(MODELED_FENCE_PATTERN.match(pattern)) and all(
+        segment == "**" or "**" not in segment for segment in pattern.split("/")
+    )
+
+
+def glob_matches(pattern: str, path: str) -> bool:
+    """minimatch for the modeled subset: `*` and `?` stop at `/`, `**/` crosses it."""
+    if not fence_pattern_is_modeled(pattern):
+        raise AssertionError(f"fence pattern {pattern!r} is outside the modeled glob subset")
+    parts = []
+    index = 0
+    while index < len(pattern):
+        if pattern.startswith("**/", index):
+            parts.append("(?:.*/)?")
+            index += 3
+        elif pattern.startswith("**", index):
+            parts.append(".*")
+            index += 2
+        elif pattern[index] == "*":
+            parts.append("[^/]*")
+            index += 1
+        elif pattern[index] == "?":
+            parts.append("[^/]")
+            index += 1
+        else:
+            parts.append(re.escape(pattern[index]))
+            index += 1
+    return re.fullmatch("".join(parts), path) is not None
+
+
+def reopen_rules(config: dict) -> list[dict]:
+    return [rule for rule in config.get("packageRules", []) if rule.get("enabled") is True]
+
+
+def is_fenced(path: str, rules: list[dict]) -> bool:
+    return any(
+        glob_matches(pattern, path) for rule in rules for pattern in rule["matchFileNames"]
+    )
 
 
 RELEASE_MODES = {
@@ -389,18 +459,68 @@ class GeneratorPinManager(unittest.TestCase):
         # scripts/release-verify.sh, so it needs the fence as much as an adopter
         # does, without waiting on the organization preset to extend it.
         self.assertIn(FENCE_PRESET_REFERENCE, self.config.get("extends", []))
-        fenced = {
-            path
-            for rule in fence_rules(json.loads(FENCE_PRESET.read_text(encoding="utf-8")))
-            for path in rule["matchFileNames"]
-        }
+        fence = fence_rules(json.loads(FENCE_PRESET.read_text(encoding="utf-8")))
         generated_here = [
             path.relative_to(ROOT).as_posix()
             for path in workflow_and_action_files()
             if GENERATED_CALLER_HEADER.search(path.read_text(encoding="utf-8"))
         ]
         self.assertIn(".github/workflows/release.yml", generated_here)
-        self.assertEqual(sorted(set(generated_here) - fenced), [])
+        self.assertEqual([path for path in generated_here if not is_fenced(path, fence)], [])
+
+    def test_every_hand_written_workflow_the_fence_reaches_keeps_its_updates(self) -> None:
+        # The fence matches by path, so it also reaches this repository's own
+        # hand-written release-*.yml reusable workflows. One still carrying a
+        # dependency Renovate reads must be reopened here, or the grouped digest
+        # PR stops moving it and the coherence check above fails on that PR.
+        fence = fence_rules(json.loads(FENCE_PRESET.read_text(encoding="utf-8")))
+        reopened = {path for rule in reopen_rules(self.config) for path in rule["matchFileNames"]}
+        stranded = []
+        for path in workflow_and_action_files():
+            relative = path.relative_to(ROOT).as_posix()
+            text = path.read_text(encoding="utf-8")
+            if GENERATED_CALLER_HEADER.search(text) or not is_fenced(relative, fence):
+                continue
+            if renovate_visible(text) and relative not in reopened:
+                stranded.append(relative)
+        self.assertEqual(stranded, [])
+
+    def test_every_reopen_is_narrow_and_reaches_only_a_fenced_hand_written_workflow(self) -> None:
+        fence = fence_rules(json.loads(FENCE_PRESET.read_text(encoding="utf-8")))
+        rules = self.config.get("packageRules", [])
+        reopens = reopen_rules(self.config)
+        self.assertTrue(reopens, "the hand-written release-*.yml workflows lost their reopen")
+        first_disable = min(
+            index for index, rule in enumerate(rules) if rule.get("enabled") is False
+        )
+        for rule in reopens:
+            with self.subTest(rule=rule.get("description", "")[:60]):
+                # A broader reopen would also undo the organization preset's
+                # uses-with and Verjson/.github workflow disables, which
+                # precede it, and any disable here it followed.
+                self.assertEqual(
+                    set(rule) - {"description", "matchManagers", "matchFileNames", "matchDepTypes", "enabled"},
+                    set(),
+                )
+                self.assertEqual(rule.get("matchManagers"), ["github-actions"])
+                self.assertEqual(rule.get("matchDepTypes"), ["action"])
+                self.assertLess(rules.index(rule), first_disable, "a reopen must precede every disable")
+                for relative in rule["matchFileNames"]:
+                    path = ROOT / relative
+                    self.assertTrue(path.is_file(), relative)
+                    text = path.read_text(encoding="utf-8")
+                    self.assertIsNone(GENERATED_CALLER_HEADER.search(text), f"{relative} is generated")
+                    self.assertTrue(is_fenced(relative, fence), f"{relative} is not fenced")
+                    self.assertTrue(renovate_visible(text), f"{relative} has nothing to reopen")
+                    # enabled: true also clears the extractor's
+                    # unversioned-reference skip, which would turn a bare SHA
+                    # into a lookup with no version to follow.
+                    unversioned = [
+                        match.group(0).strip()
+                        for match in UNVERSIONED_USES.finditer(text)
+                        if match["owner"].casefold() != "verjson"
+                    ]
+                    self.assertEqual(unversioned, [], relative)
 
 
 class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
@@ -517,13 +637,48 @@ class GeneratedCallerFence(unittest.TestCase):
         )
         required = sorted(path for path, text in outputs.items() if renovate_visible(text))
         self.assertIn(".github/workflows/release.yml", required)
-        fenced = rule["matchFileNames"]
-        self.assertEqual(fenced, sorted(fenced), "keep the fence sorted")
-        self.assertEqual(sorted(set(required) - set(fenced)), [], "unfenced generated callers")
+        release_caller = outputs[".github/workflows/release.yml"]
+        for path in ADOPTER_RELEASE_CALLER_PATHS:
+            outputs[path] = release_caller
+            required.append(path)
+        patterns = rule["matchFileNames"]
+        self.assertEqual(patterns, sorted(patterns), "keep the fence sorted")
         self.assertEqual(
-            sorted(set(fenced) - set(outputs)), [],
+            [path for path in sorted(required) if not is_fenced(path, [rule])], [],
+            "unfenced generated callers",
+        )
+        self.assertEqual(
+            [
+                pattern for pattern in patterns
+                if not any(glob_matches(pattern, path) for path in outputs)
+            ],
+            [],
             "the fence names a path no generator owns, which only silences hand-written workflows",
         )
+        self.assertEqual(
+            [path for path in UNFENCED_NAME_PROBES if is_fenced(path, [rule])], [],
+            "the fence reaches a name no generated caller uses",
+        )
+
+    def test_fence_patterns_stay_inside_the_subset_every_consumer_models(self) -> None:
+        preset = json.loads(FENCE_PRESET.read_text(encoding="utf-8"))
+        for pattern in fence_rules(preset)[0]["matchFileNames"]:
+            with self.subTest(pattern=pattern):
+                self.assertTrue(fence_pattern_is_modeled(pattern))
+
+    def test_glob_model_follows_minimatch(self) -> None:
+        self.assertTrue(glob_matches(".github/workflows/release-*.yml", ".github/workflows/release-cli-schema.yml"))
+        self.assertFalse(glob_matches(".github/workflows/release-*.yml", ".github/workflows/release.yml"))
+        self.assertFalse(glob_matches(".github/workflows/release-*.yml", ".github/workflows/release-x/y.yml"))
+        self.assertFalse(glob_matches(".github/workflows/release-*.yml", ".github/workflows/release-x.yaml"))
+        self.assertFalse(glob_matches(".github/workflows/release-*.yml", "x/.github/workflows/release-x.yml"))
+        self.assertTrue(glob_matches("**/release.yml", ".github/workflows/release.yml"))
+        self.assertTrue(glob_matches(".github/workflows/release?.yml", ".github/workflows/release2.yml"))
+        for unmodeled in ("!.github/workflows/release.yml", "/release/", ".github/workflows/release**.yml", "{a,b}.yml"):
+            with self.subTest(pattern=unmodeled):
+                self.assertFalse(fence_pattern_is_modeled(unmodeled))
+                with self.assertRaises(AssertionError):
+                    glob_matches(unmodeled, ".github/workflows/release.yml")
 
     def test_every_other_generator_emits_nothing_renovate_reads(self) -> None:
         for generator in sorted((ROOT / "scripts").glob("gen-*")):

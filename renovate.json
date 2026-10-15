@@ -36,6 +36,17 @@
   ],
   "packageRules": [
     {
+      "description": "Reopen the generated-caller fence for this repository's hand-written release-*.yml reusable workflows: the preset matches adopters' release callers by path, and these share the release- prefix. Only their step actions reopen, and first, so every narrower disable below and in the organization preset still applies (ADR 0232).",
+      "matchManagers": ["github-actions"],
+      "matchFileNames": [
+        ".github/workflows/release-app-canary.yml",
+        ".github/workflows/release-dispatch.yml",
+        ".github/workflows/release-propose.yml"
+      ],
+      "matchDepTypes": ["action"],
+      "enabled": true
+    },
+    {
       "description": "Maintain digest pins in Node workflow/setup surfaces",
       "matchManagers": ["github-actions"],
       "matchFileNames": [
