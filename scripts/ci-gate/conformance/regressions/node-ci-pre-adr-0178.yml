@@ -195,7 +195,7 @@ jobs:
       shell: bash
       env:
         SECRETLESS_BUILD_LANE: ${{ vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]' }}
-      run: "set -euo pipefail\nhosted_image='\"ubuntu-(latest|[0-9]{2}\\.[0-9]{2})\"'\nif [[ \"$SECRETLESS_BUILD_LANE\" =~ ^${hosted_image}$ ]] \\\n  || [[ \"$SECRETLESS_BUILD_LANE\" =~ ^\\[${hosted_image}\\]$ ]]; then\n  exit 0\nfi\necho \"::error::secretless build-test requires a GitHub-hosted Linux runner, but CI_LANE_UNTRUSTED does not select a single standard GitHub-hosted Linux image\"\nexit 1\n"
+      run: "set -euo pipefail\n# Bracket ranges follow the locale's collation; under en_US.UTF-8\n# [0-9] also matches fullwidth digits. Match bytes, not collation.\nexport LC_ALL=C\nhosted_image='\"ubuntu-(latest|[0-9]{2}\\.[0-9]{2})\"'\nif [[ \"$SECRETLESS_BUILD_LANE\" =~ ^${hosted_image}$ ]] \\\n  || [[ \"$SECRETLESS_BUILD_LANE\" =~ ^\\[${hosted_image}\\]$ ]]; then\n  exit 0\nfi\necho \"::error::secretless build-test requires a GitHub-hosted Linux runner, but CI_LANE_UNTRUSTED does not select a single standard GitHub-hosted Linux image\"\nexit 1\n"
     - id: check
       shell: bash
       env:

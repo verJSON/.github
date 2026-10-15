@@ -1095,7 +1095,40 @@ for wf_name in node-ci.yml node-ci-protected.yml; do
   assert_secretless_route trusted-ref "$wf" build-test Verjson/verjson-cli \
     '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' \
     '["ubuntu-24.04"]' "$name build-test — secretless trusted-ref overrides a self-hosted runner input with the hosted untrusted lane"
+  assert_secretless_route trusted-ref "$wf" build-test Verjson/verjson-cli \
+    '' true '["self-hosted","general"]' '["ubuntu-24.04"]' \
+    '["ubuntu-24.04"]' "$name build-test — secretless trusted-ref without a runner input skips the self-hosted trusted lane"
+  assert_secretless_route trusted-ref "$wf" build-test Verjson/verjson-cli \
+    '["self-hosted","general"]' true '["self-hosted","general"]' '' \
+    "$UNSET_LANDING" "$name build-test — secretless trusted-ref with no untrusted lane lands on the portable hosted default"
+  assert_secretless_route pr "$wf" build-test Verjson/verjson-cli \
+    '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' \
+    '["ubuntu-24.04"]' "$name build-test — secretless PR keeps the hosted untrusted lane"
+  assert_secretless_route trusted-ref "$wf" build-test Acme/widgets \
+    '["self-hosted","acme"]' true '' '' \
+    "$UNSET_LANDING" "$name build-test — an external secretless trusted-ref caller also gets hosted capacity"
+  assert_secretless_route '' "$wf" build-test Verjson/verjson-cli \
+    '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' \
+    '["self-hosted","general"]' "$name build-test — a credentialed push keeps the caller's runner (no extra hosted spend)"
+  assert_secretless_route trusted-ref "$wf" eligibility Verjson/verjson-cli \
+    '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' \
+    '["self-hosted","general"]' "$name eligibility — secretless trusted-ref keeps the caller's self-hosted runner"
+  assert_secretless_route pr "$wf" eligibility Verjson/verjson-cli \
+    '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' \
+    '["self-hosted","general"]' "$name eligibility — secretless PR keeps the caller's self-hosted runner"
 done
+
+# Mutation probe: the cases above must notice the trusted-ref term going missing.
+mutate_job_expression "$workflows/node-ci.yml" build-test \
+  '(inputs.secretless-pr || inputs.secretless-trusted-ref) &&' 'inputs.secretless-pr &&' \
+  "$mutated_workflow"
+if [ "$(SECRETLESS_MODE=trusted-ref resolve_route "$mutated_workflow" build-test Verjson/verjson-cli \
+    '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' '' '' '')" \
+    = '["self-hosted","general"]' ]; then
+  pass "routing cases detect a build-test that routes only secretless-pr to the hosted lane"
+else
+  fail "dropping the trusted-ref term from build-test was not observable by the routing evaluator"
+fi
 
 for job in publish-base publish-derived candidate-manifest; do
   assert_route "$workflows/container-candidate-publish.yml" "$job" Verjson/.github '' false \

@@ -422,6 +422,9 @@ jobs:
           SECRETLESS_BUILD_LANE: ${{ vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]' }}
         run: |
           set -euo pipefail
+          # Bracket ranges follow the locale's collation; under en_US.UTF-8
+          # [0-9] also matches fullwidth digits. Match bytes, not collation.
+          export LC_ALL=C
           hosted_image='"ubuntu-(latest|[0-9]{2}\.[0-9]{2})"'
           if [[ "$SECRETLESS_BUILD_LANE" =~ ^${hosted_image}$ ]] \
             || [[ "$SECRETLESS_BUILD_LANE" =~ ^\[${hosted_image}\]$ ]]; then
@@ -1596,7 +1599,7 @@ jobs:
     # trusted-ref (push/main) build takes the same ephemeral hosted lane as the
     # PR build and ignores a caller's self-hosted `runner` input. Only this job
     # moves: eligibility keeps the caller's route and refuses early when the
-    # lane below is not hosted (ADR 0146, 2026-10-15 amendment).
+    # lane below is not hosted (ADR 0234).
     runs-on: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
