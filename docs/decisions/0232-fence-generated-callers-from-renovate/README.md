@@ -118,7 +118,7 @@ evaluates the per-dependency upgrade object (`dist/util/package-rules/jsonata.js
 `matchFileNames` sees only `packageFile` and `lockFiles` (`files.js`). The
 `github-actions` extractor returns dependencies with no file content
 (`modules/manager/github-actions/extract.js`), so no matcher can read the generator
-header.
+header. Verjson/renovate-config's fence test pins Renovate 44.65.5, but the hosted Renovate app runs a newer release, so re-check these matcher semantics, and the merge order that test exercises, whenever the pin is bumped.
 
 **Decision.**
 
