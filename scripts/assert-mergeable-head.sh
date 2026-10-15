@@ -31,11 +31,13 @@
 # workflow run was cancelled and then superseded by a later successful run of the same
 # workflow, event, and head that reports that check as SUCCESS -- or, for a CANCELLED
 # check only, not at all (ADR 0226, #1754; a non-CANCELLED conclusion such as an
-# `if: always()` aggregator's FAILURE per the 2026-10-15 amendment, #1824) -- the
+# `if: always()` aggregator's FAILURE only when it completed after the cancel landed,
+# per the 2026-10-15 amendment, #1824) -- the
 # draft-then-ready concurrency cancel. Second, a CANCELLED run that never started because a
 # later run of ANOTHER workflow in its declared concurrency family displaced it from
 # the group's pending slot, when the newest later-created successful family run on
-# the head reports only SUCCESS (ADR 0226 amendment 2026-10-15, verjson-agents#432).
+# the head reports only SUCCESS and both runs carry this pull request's head branch and
+# repository (ADR 0226 amendment 2026-10-15, verjson-agents#432).
 # No conclusion is added to the passing set, and Gate B always reads the raw inventory.
 #
 # Prints "true" and exits 0 only when all three hold. Every other outcome is a

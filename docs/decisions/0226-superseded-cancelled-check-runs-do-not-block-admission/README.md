@@ -217,10 +217,16 @@ cancellation blocking.
    `cancel-in-progress: false`, and from every generator and workflow calling it.
    Each caller must be a pure single-job call on the family event without a
    different group. The test fails when the map disagrees in either direction.
+   **Both runs must also be bound to this pull request**: their `head_branch` must
+   equal its head branch and their `head_repository.full_name` its head repository
+   (case-insensitively). An unknown pull-request head identity binds nothing.
 2. **Displacement-shaped.** The jobs of the attempt the run record reports
    (`actions/runs/{id}/attempts/{run_attempt}/jobs`, paginated, reconciled against
-   `total_count`, every record type-checked and bound to this run, attempt, and
-   head) are non-empty. Every job is `completed`/`cancelled`, ran no step, and never
+   `total_count`, every record type-checked and bound to this run and head) are read.
+   A job may report an earlier `run_attempt` than the one listed: a re-run of failed
+   jobs can carry over jobs that passed. Such a job is well-formed but is not part of
+   this attempt's shape. A later `run_attempt` faults. The jobs of this attempt are
+   non-empty. Every job is `completed`/`cancelled`, ran no step, and never
    acquired a runner (`runner_id` 0 or null), and the cancelled check run is one of
    them (a job id is its check run id). A run whose job started is interrupted, not
    displaced.
@@ -230,14 +236,17 @@ cancellation blocking.
    check in it is a completed `SUCCESS`. A different workflow names its checks
    differently, so the same-name rule above has nothing to consult. A run concludes
    `success` with guarded jobs `SKIPPED`, so the whole suite is required. Only the
-   newest such run is consulted.
+   newest such run is consulted. When any other family run on this head shares that
+   run's creation second, which run is newest cannot be told, and nothing displaces.
 
 `created_at`, not `run_number`, orders here because `run_number` is per workflow and
 does not compare across a family. It is second-granular, so a same-second tie is
 not later and keeps the cancellation blocking. Using the attempt's
 `run_started_at` keeps a family run created before a re-run attempt from displacing
-that attempt. Dismissals are reported in the same `::notice::`, naming the resolved
-group, the cancelled run, and its displacer. Gate B, the passing conclusion set, and
+that attempt. Dismissals are reported in the same `::notice::`, naming the declared
+family, the cancelled run, and its displacer. The notice does not name a resolved
+group, because no API reports one; it states that the runs were bound to the pull
+request by head branch and head repository. Gate B, the passing conclusion set, and
 every commit status are unchanged, and a required context reported only by a
 displaced cancellation is absent, which Gate A refuses.
 
@@ -246,15 +255,25 @@ grant the workflow-run read already requires; a refused read exits `1` naming it
 
 ### Consequences
 
-- The #432 shape is admitted without a re-run.
+- The #432 shape is admitted without a re-run. The displacement path is proven by
+  fixtures that reproduce its shape, plus a hand check of the live attempt-1 job
+  (116603178508: `runner_id` 0, zero steps, conclusion `cancelled`; displacer run
+  38787543084). It has not been proven by a live end-to-end replay of an unmodified
+  head: the live head was re-run before this rule existed. The replay recorded on the
+  pull request restores that attempt from those live payloads.
 - **Known limit, accepted:** the map follows the current tree. A run pinned to an
   older declaring SHA is admitted on the current declaration. `ai-review-arm-<PR>`
   has not changed since the group was introduced, and the displacement shape already
   requires the cancelled run to have done nothing.
-- **Known limit, accepted:** as above, `actions/runs?head_sha=` mixes runs of every
-  pull request sharing the head. A family run of another pull request on the same
-  head can therefore displace on paper. It must still have run the family's whole
-  suite to `SUCCESS` on this head.
+- **Known limit, accepted: the group itself is not observed.** The group key is the
+  pull-request number. A workflow run reports no resolved concurrency group, and its
+  `pull_requests` array is empty for these `pull_request_target` runs. This was
+  verified on verjson-agents#432's runs 38787495945, 38787540131, and 38787543084.
+  Binding by head branch and head repository excludes runs of other branches, other
+  repositories, and forks. It cannot tell apart two open pull requests from the same
+  head branch into different bases, which resolve to different groups. Both runs must
+  still match this head, and the displacer must still have run the family's whole
+  suite to `SUCCESS` on it.
 - A family whose displacer skipped work still needs `gh run rerun`, as #1753's shape
   does.
 
@@ -293,9 +312,31 @@ decision's conditions still apply: the newest later (`run_number`) successful ru
 the same workflow, under the same event, on this head. One rule is stricter for a
 conclusion other than `CANCELLED`: the superseder must report the **same check name**,
 and only as a completed `SUCCESS`. Omission does not vouch for it. The
-matrix-parent rationale above covers only a check that never ran. That is the same
-evidence a passing re-run attempt gives: GitHub's own re-run collapses a failed
-attempt behind a passing one. Evaluation now starts whenever the head carries any
+matrix-parent rationale above covers only a check that never ran.
+
+A same-named `SUCCESS` is necessary but not sufficient. A re-run attempt replays the
+same event payload, so its passing check repeats the failed work. A new run is a
+different event: a `labeled` or `ready_for_review` run whose job gates its steps on
+the event (`gate-rearm.yml`'s event-policy job is one) can report `SUCCESS` having
+done nothing. So a non-`CANCELLED` check is set aside only when it **completed
+strictly after the cancel landed**, which makes it a failure the cancel caused. A
+genuine failure that finished before the cancel stays red. The cancel's time is:
+
+- (a) the earliest `completed_at` of a `CANCELLED` check run in the same suite, when
+  there is one. That is direct evidence of when the cancel reached the run.
+- (b) otherwise, the superseding run's `created_at`. Concurrency cancels a run when
+  its successor is queued, so the cancel landed no later than that.
+
+`completed_at` is now part of the normalized check-run inventory. Timestamps are
+second-granular, so a failure completing in the same second as the cancel stays red.
+An absent or unreadable time on either side also stays red.
+
+The reviewed request phrased (a) as the mere presence of a `CANCELLED` sibling. That
+would admit a genuine failure that finished before the cancel whenever any sibling
+was later cancelled, so (a) supplies the cancel's time instead.
+
+#1824 meets (a): its siblings were cancelled at 20:38:32 and `shell-tests` completed
+at 20:38:38. Evaluation now starts whenever the head carries any
 non-passing check run, not only a `CANCELLED` one. The concurrency-family
 displacement amendment above stays limited to `CANCELLED` checks; its job-shape test
 excludes a job that ran anyway.
@@ -322,6 +363,10 @@ admission when the superseder re-did the check to `SUCCESS`. New refusals cover 
 superseder that reports the check `SKIPPED` or `NEUTRAL` (the #1824 shape) or omits
 it, a failure in a run that ended `failure`, `success`, or `timed_out`, a different
 workflow, a different event, an earlier run number, and a later run that did not
-succeed, plus the Gate C equivalents and a failure with no cancelled sibling. Each
-condition was mutated out and the suite failed. The mutation table is on the pull
+succeed, plus the Gate C equivalents. Timing has its own cases: a failure completed
+after the cancel is admitted under (a) and under (b). A failure completed before the
+cancel, in the same second, or at an unknown time stays red. So does one whose
+cancelled sibling or superseding run carries no time. The earliest of several
+cancelled siblings sets the cancel's time. Each condition was mutated out and the
+suite failed. The mutation table is on the pull
 request.
