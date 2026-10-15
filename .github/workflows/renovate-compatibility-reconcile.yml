@@ -39,7 +39,7 @@ jobs:
           client-id: ${{ vars.RENOVATE_COMPATIBILITY_CLIENT_ID }}
           private-key: ${{ secrets.RENOVATE_COMPATIBILITY_APP_PRIVATE_KEY }}
           owner: Verjson
-          repositories: .github,agents,renovate-config,verjson-agents,verjson-cli,verjson-cli-cloud,verjson-cli-projects,verjson-eslint-config,verjson-github-runner,verjson-infra,verjson-tsconfig
+          repositories: .github,agents,renovate-config,verjson-agents,verjson-cli,verjson-cli-cloud,verjson-cli-projects,verjson-eslint-config,verjson-git-runners,verjson-infra,verjson-tsconfig
           permission-actions: read
           permission-checks: read
           permission-contents: read

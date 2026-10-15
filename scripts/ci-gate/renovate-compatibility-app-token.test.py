@@ -16,7 +16,7 @@ PRIVATE_KEY = "${{ secrets.RENOVATE_COMPATIBILITY_APP_PRIVATE_KEY }}"
 TOKEN = "${{ steps.compatibility-app-token.outputs.token }}"
 MANAGED_REPOSITORIES = (
     ".github,agents,renovate-config,verjson-agents,verjson-cli,verjson-cli-cloud,"
-    "verjson-cli-projects,verjson-eslint-config,verjson-github-runner,verjson-infra,"
+    "verjson-cli-projects,verjson-eslint-config,verjson-git-runners,verjson-infra,"
     "verjson-tsconfig"
 )
 

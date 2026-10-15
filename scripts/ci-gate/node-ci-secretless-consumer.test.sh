@@ -19,7 +19,7 @@ cat > "$toolchain/bin/npm" <<'NPM'
 printf '%s\n' "$*" >> "$GITHUB_WORKSPACE/node_modules/.npm-stub.log"
 NPM
 chmod +x "$toolchain/bin/node" "$toolchain/bin/npm"
-trap 'rm -rf "$tmp"' EXIT
+trap 'chmod -R u+rwx "$tmp" 2>/dev/null; rm -rf "$tmp"' EXIT
 
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; failures=$((failures + 1)); }
@@ -546,6 +546,239 @@ if [ "$alternatives_status" -eq 0 ] && [ -f "$tmp/commands/node_modules/.alterna
 else
   fail "alternatives-routed tools dangle in the consumer sandbox (#1782): $(head -5 "$tmp/commands/node_modules/.alternatives-missing" 2>/dev/null | tr '\n' ' ')"
 fi
+
+# #1798: secretless-runtime-public-cache exists for repository-authored offline
+# reinstall rehearsals. Before #1729 the consumer plan ran on the host with
+# npm_config_cache naming the verified runtime cache; the sandbox gave scripts an
+# empty cache instead, so `npm ci --offline` failed with ENOTCACHED
+# (verjson-cli#318). This runs real npm in the real sandbox against a verified
+# public blob, then checks the job's runtime cache survived a tampering script.
+real_node="$(command -v node)"
+real_source="$(dirname "$(dirname "$(readlink -f "$real_node")")")"
+rehearsal_toolchain="$tool_cache/node/24.98.0/x64"
+mkdir -p "$rehearsal_toolchain/bin" "$rehearsal_toolchain/lib/node_modules"
+cp -- "$real_source/bin/node" "$rehearsal_toolchain/bin/node"
+cp -a -- "$real_source/lib/node_modules/npm" "$rehearsal_toolchain/lib/node_modules/npm"
+ln -s ../lib/node_modules/npm/bin/npm-cli.js "$rehearsal_toolchain/bin/npm"
+rehearsal="$tmp/rehearsal"
+runtime_cache="$runner_temp/secretless-runtime-cache-4242-1"
+python3 -I - "$rehearsal" "$runtime_cache" <<'PY'
+import base64
+import hashlib
+import io
+import json
+import sys
+import tarfile
+from pathlib import Path
+
+rehearsal, runtime_cache = Path(sys.argv[1]), Path(sys.argv[2])
+(rehearsal / ".git").mkdir(parents=True)
+(rehearsal / "consumer").mkdir()
+members = {
+    "package/package.json": json.dumps({"name": "fixture-dep", "version": "1.0.0", "main": "index.js"}),
+    "package/index.js": "module.exports = { value: 'from-verified-cache' };\n",
+}
+raw = io.BytesIO()
+with tarfile.open(fileobj=raw, mode="w:gz") as archive:
+    for name, content in members.items():
+        data = content.encode()
+        info = tarfile.TarInfo(name)
+        info.size = len(data)
+        info.mode = 0o644
+        archive.addfile(info, io.BytesIO(data))
+tarball = raw.getvalue()
+digest = hashlib.sha512(tarball).digest()
+blob = runtime_cache / "_cacache/content-v2/sha512" / digest.hex()[:2] / digest.hex()[2:4] / digest.hex()[4:]
+blob.parent.mkdir(parents=True)
+blob.write_bytes(tarball)
+dependencies = {"fixture-dep": "1.0.0"}
+(rehearsal / "consumer/package.json").write_text(json.dumps(
+    {"name": "consumer", "version": "1.0.0", "dependencies": dependencies}), encoding="utf-8")
+(rehearsal / "consumer/package-lock.json").write_text(json.dumps({
+    "name": "consumer", "version": "1.0.0", "lockfileVersion": 3, "requires": True,
+    "packages": {
+        "": {"name": "consumer", "version": "1.0.0", "dependencies": dependencies},
+        "node_modules/fixture-dep": {
+            "version": "1.0.0",
+            "resolved": "https://registry.npmjs.org/fixture-dep/-/fixture-dep-1.0.0.tgz",
+            "integrity": "sha512-" + base64.b64encode(digest).decode(),
+        },
+    },
+}), encoding="utf-8")
+(rehearsal / "package.json").write_text(json.dumps(
+    {"name": "rehearsal", "private": True, "scripts": {"rehearse": "node rehearse.js"}}),
+    encoding="utf-8")
+(rehearsal / "rehearse.js").write_text("""\
+const { execFileSync } = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
+const cache = execFileSync("npm", ["config", "get", "cache"], { encoding: "utf8" }).trim();
+const content = path.join(cache, "_cacache", "content-v2");
+fs.mkdirSync(content, { recursive: true });
+fs.writeFileSync(path.join(content, "tampered-by-consumer"), "x");
+execFileSync("npm", ["ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund"], {
+  cwd: path.join(__dirname, "consumer"),
+  stdio: "inherit",
+});
+const dependency = require(path.join(__dirname, "consumer", "node_modules", "fixture-dep"));
+const leaked = ["RUNTIME_CACHE_DIR", "RESTORE_PERSISTED_PUBLIC_CACHE", "SECRETLESS_RUNTIME_PUBLIC_CACHE", "RUN_ID", "RUN_ATTEMPT"]
+  .filter((name) => name in process.env);
+fs.writeFileSync(path.join(__dirname, "rehearsed"), `${leaked.length ? `leaked ${leaked}` : dependency.value}\\n`);
+// Overwrite every staged blob in place, then seal the staging tree so the
+// trusted cleanup must restore permissions before it can remove it.
+const blobs = [];
+const collect = (directory) => {
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) collect(entryPath);
+    else if (entry.isFile()) blobs.push(entryPath);
+  }
+};
+collect(path.join(content, "sha512"));
+if (blobs.length === 0) throw new Error("no staged blob to overwrite");
+for (const blob of blobs) fs.writeFileSync(blob, "poisoned by consumer");
+// Cleanup must never follow these into the host directory they name.
+fs.symlinkSync(process.env.HOST_SEALED_TARGET, path.join(content, "sha512", "host-link"));
+fs.symlinkSync(process.env.HOST_SEALED_TARGET, path.join(content, "host-link"));
+fs.chmodSync(path.dirname(blobs[0]), 0o000);
+fs.chmodSync(path.dirname(path.dirname(blobs[0])), 0o000);
+fs.chmodSync(path.join(content, "sha512"), 0o000);
+fs.chmodSync(content, 0o000);
+""", encoding="utf-8")
+PY
+runtime_inventory() { (cd "$runtime_cache" && find . -print0 | sort -z | xargs -0 sha256sum 2>/dev/null; find . | sort); }
+runtime_before="$(runtime_inventory)"
+host_sealed_target="$tmp/host-sealed-target"
+mkdir -p "$host_sealed_target"
+chmod 0555 "$host_sealed_target"
+rehearsal_status=0
+(cd "$rehearsal" && PATH="$rehearsal_toolchain/bin:/usr/bin:/bin" \
+    HOST_SEALED_TARGET="$host_sealed_target" \
+    RUNTIME_CACHE_DIR="$runtime_cache" RUN_ID=4242 RUN_ATTEMPT=1 \
+    SECRETLESS_RUNTIME_PUBLIC_CACHE=true RESTORE_PERSISTED_PUBLIC_CACHE=false \
+    CI_SCRIPT_PLAN='["rehearse"]' bash "$tmp/plan.sh") \
+    > "$tmp/rehearsal-output.log" 2>&1 || rehearsal_status=$?
+if [ "$rehearsal_status" -eq 0 ] && [ "$(cat "$rehearsal/rehearsed" 2>/dev/null)" = from-verified-cache ]; then
+  pass "a sandboxed consumer script reinstalls offline from the verified runtime cache (#1798)"
+else
+  fail "a sandboxed consumer script cannot reinstall from the verified runtime cache (#1798): $(grep -m1 -E 'ENOTCACHED|Error|error' "$tmp/rehearsal-output.log")"
+fi
+if [ "$(runtime_inventory)" = "$runtime_before" ]; then
+  pass "consumer scripts receive a disposable copy, never the job's runtime cache (#1798)"
+else
+  fail "a consumer script changed the job's verified runtime cache (#1798)"
+fi
+if [ -z "$(find "$runner_temp" -maxdepth 1 -name 'verjson-consumer-runtime-cache-*' -print -quit)" ]; then
+  pass "a staging copy the consumer script sealed is still removed (#1798)"
+else
+  fail "a sealed consumer runtime cache staging directory was left behind (#1798)"
+fi
+if [ -d "$host_sealed_target" ] && [ "$(stat -c %a "$host_sealed_target")" = 555 ]; then
+  pass "staging cleanup never follows a planted symlink to a host directory (#1798)"
+else
+  fail "staging cleanup followed a planted symlink and changed a host directory (#1798): $(stat -c %a "$host_sealed_target" 2>&1)"
+fi
+
+# SIGTERM to the step's interpreter during a script must still remove the copy.
+python3 -I - "$rehearsal/package.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = Path(sys.argv[1])
+document = json.loads(manifest.read_text(encoding="utf-8"))
+document["scripts"]["linger"] = (
+    "node -e \"require('node:fs').writeFileSync('started', ''); setTimeout(() => {}, 60000)\""
+)
+manifest.write_text(json.dumps(document), encoding="utf-8")
+PY
+rm -f "$rehearsal/started"
+(cd "$rehearsal" && PATH="$rehearsal_toolchain/bin:/usr/bin:/bin" \
+    RUNTIME_CACHE_DIR="$runtime_cache" RUN_ID=4242 RUN_ATTEMPT=1 \
+    SECRETLESS_RUNTIME_PUBLIC_CACHE=true RESTORE_PERSISTED_PUBLIC_CACHE=false \
+    CI_SCRIPT_PLAN='["linger"]' exec bash "$tmp/plan.sh") > "$tmp/linger-output.log" 2>&1 &
+linger_shell=$!
+for _ in $(seq 1 300); do [ -e "$rehearsal/started" ] && break; sleep 0.1; done
+# The step's interpreter is the plan shell's python3 child.
+linger_step="$(python3 -I - "$linger_shell" <<'PY'
+import sys
+from pathlib import Path
+
+shell = sys.argv[1]
+for entry in Path("/proc").iterdir():
+    if not entry.name.isdigit():
+        continue
+    try:
+        parent = (entry / "stat").read_text().rsplit(")", 1)[1].split()[1]
+        command = (entry / "comm").read_text().strip()
+    except (OSError, IndexError):
+        continue
+    if parent == shell and command.startswith("python3"):
+        print(entry.name)
+PY
+)"
+staged_while_running="$(find "$runner_temp" -maxdepth 1 -name 'verjson-consumer-runtime-cache-*' -print -quit)"
+[ -n "$linger_step" ] && kill -TERM "$linger_step"
+linger_status=0
+wait "$linger_shell" || linger_status=$?
+if [ -n "$linger_step" ] && [ -n "$staged_while_running" ] && [ "$linger_status" -ne 0 ] \
+    && [ -z "$(find "$runner_temp" -maxdepth 1 -name 'verjson-consumer-runtime-cache-*' -print -quit)" ]; then
+  pass "SIGTERM during a consumer script still removes the staging copy (#1798)"
+else
+  fail "SIGTERM left the staging copy behind (#1798): step=${linger_step:-none} staged=${staged_while_running:-none} status=$linger_status"
+  find "$runner_temp" -maxdepth 1 -name 'verjson-consumer-runtime-cache-*' -exec chmod -R u+rwx {} + 2>/dev/null
+  find "$runner_temp" -maxdepth 1 -name 'verjson-consumer-runtime-cache-*' -exec rm -rf {} + 2>/dev/null
+fi
+
+# A requested cache that is missing, relocated, or carries a non-regular blob
+# fails before any candidate code runs; an unrequested absent cache is a no-op.
+rehearsal_case() {
+  local label="$1" expected="$2" cache_dir="$3" run_id="$4" requested="$5" status=0
+  rm -f "$rehearsal/rehearsed" "$rehearsal/started"
+  (cd "$rehearsal" && PATH="$rehearsal_toolchain/bin:/usr/bin:/bin" \
+      RUNTIME_CACHE_DIR="$cache_dir" RUN_ID="$run_id" RUN_ATTEMPT=1 \
+      SECRETLESS_RUNTIME_PUBLIC_CACHE="$requested" RESTORE_PERSISTED_PUBLIC_CACHE=false \
+      CI_SCRIPT_PLAN='["probe"]' bash "$tmp/plan.sh") \
+      > "$tmp/rehearsal-case.log" 2>&1 || status=$?
+  if [ -n "$(find "$runner_temp" -maxdepth 1 -name 'verjson-consumer-runtime-cache-*' -print -quit)" ]; then
+    fail "$label left a runtime cache staging directory behind (#1798)"
+  elif [ "$expected" = reject ] && [ "$status" -ne 0 ] && [ ! -e "$rehearsal/started" ] \
+      && grep -q 'consumer runtime cache' "$tmp/rehearsal-case.log"; then
+    pass "$label fails closed before candidate code runs (#1798)"
+  elif [ "$expected" = run ] && [ "$status" -eq 0 ] && [ -e "$rehearsal/started" ]; then
+    pass "$label runs the candidate script without a cache (#1798)"
+  else
+    fail "$label: status $status, $(tail -1 "$tmp/rehearsal-case.log")"
+  fi
+}
+python3 -I - "$rehearsal/package.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = Path(sys.argv[1])
+document = json.loads(manifest.read_text(encoding="utf-8"))
+document["scripts"]["probe"] = "node -e \"require('node:fs').writeFileSync('started', '')\""
+manifest.write_text(json.dumps(document), encoding="utf-8")
+PY
+rehearsal_case "a requested runtime cache that was never populated" reject "$runner_temp/secretless-runtime-cache-4343-1" 4343 true
+rehearsal_case "a requested runtime cache outside the run-scoped path" reject "$runtime_cache" 4343 true
+rehearsal_case "a requested runtime cache without a path" reject "" 4242 true
+rehearsal_case "an unrequested absent runtime cache" run "$runner_temp/secretless-runtime-cache-4343-1" 4343 false
+host_secret="$tmp/host-only-secret"
+printf 'host secret\n' > "$host_secret"
+ln -s "$host_secret" "$runtime_cache/_cacache/content-v2/sha512/linked-blob"
+rehearsal_case "a runtime cache blob that is a symlink" reject "$runtime_cache" 4242 true
+rm -f "$runtime_cache/_cacache/content-v2/sha512/linked-blob"
+host_directory="$tmp/host-only-directory"
+mkdir -p "$host_directory"
+printf 'host secret\n' > "$host_directory/blob"
+ln -s "$host_directory" "$runtime_cache/_cacache/content-v2/sha512/linked-directory"
+rehearsal_case "a runtime cache directory that is a symlink" reject "$runtime_cache" 4242 true
+rm -f "$runtime_cache/_cacache/content-v2/sha512/linked-directory"
+mkfifo "$runtime_cache/_cacache/content-v2/sha512/fifo-blob"
+rehearsal_case "a runtime cache blob that is a FIFO" reject "$runtime_cache" 4242 true
+rm -f "$runtime_cache/_cacache/content-v2/sha512/fifo-blob"
 
 for bad_plan in '["build","build"]' '["--help"]' '["missing"]' '{"script":"build"}' \
   '[{"script":"build","unsetEnv":["NODE_AUTH_TOKEN"]}]'; do

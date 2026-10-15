@@ -5643,6 +5643,10 @@ jobs:
               "npm_config_cache": "/tmp/npm-cache",
               "COREPACK_HOME": "/tmp/corepack",
               "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+              # Egress is denied, so node-gyp builds against the selected
+              # toolchain's own include/node headers instead of downloading
+              # them (#1798). Every node-gyp version reads npm_config_*.
+              "npm_config_nodedir": toolchain_destination,
               **rebuild_env,
           }
           for name, value in sorted(rebuild_process_env.items()):
