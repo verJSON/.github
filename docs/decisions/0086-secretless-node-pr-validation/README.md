@@ -231,3 +231,89 @@ All earlier isolation properties are unchanged: `-I` interpreters, separate priv
 configurations, credential-free environments, read-only `.git`, and hidden command files.
 Real-Bubblewrap regressions in the consumer, rebuild, compatibility, and protected
 candidate tests execute `awk` inside each sandbox and fail on the pre-fix workflows.
+
+## 2026-10-14 amendment — offline native rebuilds and the consumer runtime cache (#1798)
+
+Repinning past #1729 broke two adopter paths that the decision above already promises.
+
+**Native addons in the lifecycle rebuild.** The rebuild sandbox denies network egress, so
+an addon that falls back from a prebuilt download to `node-gyp rebuild` could not fetch
+`node-vX-headers.tar.gz` from nodejs.org (verJSON/AiB#334, run 38653934062:
+`better-sqlite3-multiple-ciphers`). The official Node distribution that the sandbox
+already mounts ships those headers under `include/node`. The sandbox now sets
+`npm_config_nodedir` to the mounted toolchain root (`/opt/verjson-node-toolchain`, or
+the `/usr` prefix that owns the selected `node`). Every node-gyp release reads that
+variable and then compiles against the running runtime's headers with no download. npm
+11 warns that `nodedir` is not one of its own settings. That warning is cosmetic: npm
+passes its environment to lifecycle scripts unchanged, and node-gyp reads the value from
+there. node-gyp 11.4 added `npm_package_config_node_gyp_*`, but a consumer lock can pin an
+older node-gyp, so the npm form is the one that reaches every version. Egress stays
+denied; the prebuilt download still fails and the source build takes over. No mount,
+credential, or writable path is added.
+
+**The verified runtime cache in the consumer plan.** The source reusable workflow's
+consumer sandbox never unshared the network, so the caller-selected network policy
+recorded above was intact. The failure in verjson-cli#318 (`ENOTCACHED … cache mode is
+'only-if-cached'`) came from the consumer script itself: its package smoke test runs
+`npm ci --offline` against `npm config get cache`, which is the rehearsal that
+`secretless-runtime-public-cache: true` exists to support. Before #1729 that cache was the
+job's verified runtime cache, exported as `npm_config_cache`. The sandbox replaced it
+with an empty `/dev/shm/npm-cache`, so the rehearsal lost the blobs the input promises.
+The protected generator was not affected: it already gives each candidate script a
+verified copy of that cache.
+
+Decision: restore the recorded behavior instead of changing network policy. The source
+consumer plan now resolves the runtime cache only from the workflow-controlled
+`RUNTIME_CACHE_DIR`, using the same run-scoped path and request flags as the
+compatibility lane (`secretless-runtime-public-cache`, or `cache` with npm). For each
+script, it copies the regular-file blobs from that cache's `content-v2` into a fresh
+staging directory under `RUNNER_TEMP`. It mounts that directory writable at
+`/dev/shm/npm-cache/_cacache/content-v2`, then removes it afterwards. A requested cache
+that is missing, outside the run-scoped path, or contains a non-regular file fails
+before candidate code runs. A cache that was not requested and is absent is a no-op.
+Candidate code never receives the job's own cache, its index, the ambient npm
+configuration, or the control variables, and npm verifies each blob's integrity when it
+reads it. The protected generator removes those control variables from its own step
+because its runner copies the baseline from `npm_config_cache`.
+
+Rejected: forcing the consumer sandbox offline and asking callers to pre-seed caches.
+That would supersede the caller-selected network policy without a security gain here,
+because consumer scripts already receive no credentials. Binding the job's cache
+read-only was also rejected because npm writes into its cache. Binding it writable would
+let candidate code rewrite blobs that the compatibility lane trusts later.
+
+All earlier isolation properties are unchanged: no credentials, a read-only `.git`,
+hidden command files, `-I` interpreters, separate npm configurations, and
+`/etc/alternatives`. Real-Bubblewrap regressions build and load an N-API addon through
+the rebuild step of both workflows after proving that it cannot resolve nodejs.org. They
+also run real `npm ci --offline` inside the consumer sandbox from a verified blob and
+show that a tampering script leaves the job's cache unchanged. Both fail on the
+pre-fix workflow. Static checks pin `npm_config_nodedir`, the rebuild network unshare,
+the consumer cache wiring, and the absence of a consumer network unshare in the
+`platform` group, ignoring commented-out lines.
+
+Review hardening (same issue): the consumer staging copy opens each cache entry with
+`O_NOFOLLOW | O_NONBLOCK`, checks the open descriptor with `fstat` for a regular file,
+and copies from that descriptor rather than from the path. A symlink, FIFO, or
+symlinked directory therefore fails before candidate code runs. Before removing a
+staging copy, cleanup restores owner access to every directory, so a candidate script
+that seals its copy with `chmod 000` cannot leave it behind. A sandboxed process can
+briefly outlive the Bubblewrap call, so cleanup never resolves a staged name twice. It
+opens each directory relative to its parent's descriptor with
+`O_PATH | O_DIRECTORY | O_NOFOLLOW`, which rejects symlinks, and changes the mode
+through that descriptor's `/proc/self/fd` link. A `SIGTERM` delivered to the step's
+Python interpreter becomes `SystemExit`, so the sandbox is stopped and the copy is
+removed. A runner cancel signals the step's bash rather than that child, so removal on
+cancel is best effort; a copy left behind costs only disk on an ephemeral runner.
+Regressions overwrite every staged blob in place, plant symlinks to a mode-0555 host
+directory, and seal the tree three levels deep. They then require the job's cache and
+the host directory to be unchanged and the copy to be gone, including after a `SIGTERM`
+to the interpreter during a running script. A further regression swaps a staged
+directory for a symlink to a mode-0555 host directory immediately after cleanup opens
+it, and requires the host directory to keep its mode.
+
+Known limitation: `npm_config_nodedir` names the prefix that owns the selected `node`.
+Official Node distributions (`actions/setup-node`, the hosted runner image) ship
+`include/node` there. A distribution build installed under `/usr` may not, and a native
+rebuild against it still fails offline, because the sandbox cannot download headers in
+any configuration.
