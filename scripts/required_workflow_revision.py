@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from urllib.parse import quote
 
 import yaml
 
@@ -38,18 +39,18 @@ def canonical_ref(ref, require):
 
 
 def canonical_compare(base, head, *, gh_json, require):
-    comparison = gh_json(
-        f"repos/{CANONICAL_REPOSITORY}/compare/"
-        f"{canonical_ref(base, require)}...{canonical_ref(head, require)}"
-    )
+    base = quote(canonical_ref(base, require), safe="")
+    head = quote(canonical_ref(head, require), safe="")
+    comparison = gh_json(f"repos/{CANONICAL_REPOSITORY}/compare/{base}...{head}")
     status = comparison.get("status") if isinstance(comparison, dict) else None
     return status if isinstance(status, str) else None
 
 
 def canonical_file(path, ref, require):
+    encoded_ref = quote(canonical_ref(ref, require), safe="/")
     result = subprocess.run(
         ["gh", "api", "--hostname", "github.com",
-         f"repos/{CANONICAL_REPOSITORY}/contents/{path}?ref={canonical_ref(ref, require)}",
+         f"repos/{CANONICAL_REPOSITORY}/contents/{path}?ref={encoded_ref}",
          "-H", "Accept: application/vnd.github.raw+json"],
         capture_output=True, check=False,
     )
