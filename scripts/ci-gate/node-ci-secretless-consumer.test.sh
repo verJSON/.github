@@ -637,14 +637,23 @@ const collect = (directory) => {
 collect(path.join(content, "sha512"));
 if (blobs.length === 0) throw new Error("no staged blob to overwrite");
 for (const blob of blobs) fs.writeFileSync(blob, "poisoned by consumer");
+// Cleanup must never follow these into the host directory they name.
+fs.symlinkSync(process.env.HOST_SEALED_TARGET, path.join(content, "sha512", "host-link"));
+fs.symlinkSync(process.env.HOST_SEALED_TARGET, path.join(content, "host-link"));
+fs.chmodSync(path.dirname(blobs[0]), 0o000);
+fs.chmodSync(path.dirname(path.dirname(blobs[0])), 0o000);
 fs.chmodSync(path.join(content, "sha512"), 0o000);
 fs.chmodSync(content, 0o000);
 """, encoding="utf-8")
 PY
 runtime_inventory() { (cd "$runtime_cache" && find . -print0 | sort -z | xargs -0 sha256sum 2>/dev/null; find . | sort); }
 runtime_before="$(runtime_inventory)"
+host_sealed_target="$tmp/host-sealed-target"
+mkdir -p "$host_sealed_target"
+chmod 0555 "$host_sealed_target"
 rehearsal_status=0
 (cd "$rehearsal" && PATH="$rehearsal_toolchain/bin:/usr/bin:/bin" \
+    HOST_SEALED_TARGET="$host_sealed_target" \
     RUNTIME_CACHE_DIR="$runtime_cache" RUN_ID=4242 RUN_ATTEMPT=1 \
     SECRETLESS_RUNTIME_PUBLIC_CACHE=true RESTORE_PERSISTED_PUBLIC_CACHE=false \
     CI_SCRIPT_PLAN='["rehearse"]' bash "$tmp/plan.sh") \
@@ -663,6 +672,62 @@ if [ -z "$(find "$runner_temp" -maxdepth 1 -name 'verjson-consumer-runtime-cache
   pass "a staging copy the consumer script sealed is still removed (#1798)"
 else
   fail "a sealed consumer runtime cache staging directory was left behind (#1798)"
+fi
+if [ -d "$host_sealed_target" ] && [ "$(stat -c %a "$host_sealed_target")" = 555 ]; then
+  pass "staging cleanup never follows a planted symlink to a host directory (#1798)"
+else
+  fail "staging cleanup followed a planted symlink and changed a host directory (#1798): $(stat -c %a "$host_sealed_target" 2>&1)"
+fi
+
+# A cancelled job sends SIGTERM to the step; cleanup must still remove the copy.
+python3 -I - "$rehearsal/package.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = Path(sys.argv[1])
+document = json.loads(manifest.read_text(encoding="utf-8"))
+document["scripts"]["linger"] = (
+    "node -e \"require('node:fs').writeFileSync('started', ''); setTimeout(() => {}, 60000)\""
+)
+manifest.write_text(json.dumps(document), encoding="utf-8")
+PY
+rm -f "$rehearsal/started"
+(cd "$rehearsal" && PATH="$rehearsal_toolchain/bin:/usr/bin:/bin" \
+    RUNTIME_CACHE_DIR="$runtime_cache" RUN_ID=4242 RUN_ATTEMPT=1 \
+    SECRETLESS_RUNTIME_PUBLIC_CACHE=true RESTORE_PERSISTED_PUBLIC_CACHE=false \
+    CI_SCRIPT_PLAN='["linger"]' exec bash "$tmp/plan.sh") > "$tmp/linger-output.log" 2>&1 &
+linger_shell=$!
+for _ in $(seq 1 300); do [ -e "$rehearsal/started" ] && break; sleep 0.1; done
+# The step's interpreter is the plan shell's python3 child.
+linger_step="$(python3 -I - "$linger_shell" <<'PY'
+import sys
+from pathlib import Path
+
+shell = sys.argv[1]
+for entry in Path("/proc").iterdir():
+    if not entry.name.isdigit():
+        continue
+    try:
+        parent = (entry / "stat").read_text().rsplit(")", 1)[1].split()[1]
+        command = (entry / "comm").read_text().strip()
+    except (OSError, IndexError):
+        continue
+    if parent == shell and command.startswith("python3"):
+        print(entry.name)
+PY
+)"
+staged_while_running="$(find "$runner_temp" -maxdepth 1 -name 'verjson-consumer-runtime-cache-*' -print -quit)"
+[ -n "$linger_step" ] && kill -TERM "$linger_step"
+linger_status=0
+wait "$linger_shell" || linger_status=$?
+if [ -n "$linger_step" ] && [ -n "$staged_while_running" ] && [ "$linger_status" -ne 0 ] \
+    && [ -z "$(find "$runner_temp" -maxdepth 1 -name 'verjson-consumer-runtime-cache-*' -print -quit)" ]; then
+  pass "SIGTERM during a consumer script still removes the staging copy (#1798)"
+else
+  fail "SIGTERM left the staging copy behind (#1798): step=${linger_step:-none} staged=${staged_while_running:-none} status=$linger_status"
+  find "$runner_temp" -maxdepth 1 -name 'verjson-consumer-runtime-cache-*' -exec chmod -R u+rwx {} + 2>/dev/null
+  find "$runner_temp" -maxdepth 1 -name 'verjson-consumer-runtime-cache-*' -exec rm -rf {} + 2>/dev/null
 fi
 
 # A requested cache that is missing, relocated, or carries a non-regular blob

@@ -296,10 +296,17 @@ Review hardening (same issue): the consumer staging copy opens each cache entry 
 `O_NOFOLLOW | O_NONBLOCK`, checks the open descriptor with `fstat` for a regular file,
 and copies from that descriptor rather than from the path. A symlink, FIFO, or
 symlinked directory therefore fails before candidate code runs. Before removing a
-staging copy, cleanup restores owner access to each real directory (by `lstat`, never
-through a symlink), so a candidate script that seals its copy with `chmod 000` cannot
-leave it behind. Regressions overwrite every staged blob in place and seal the tree, then
-require the job's cache to be unchanged and the copy to be gone.
+staging copy, cleanup restores owner access to every directory, so a candidate script
+that seals its copy with `chmod 000` cannot leave it behind. A sandboxed process can
+briefly outlive the Bubblewrap call, so cleanup never resolves a staged name twice. It
+opens each directory relative to its parent's descriptor with
+`O_PATH | O_DIRECTORY | O_NOFOLLOW`, which rejects symlinks, and changes the mode
+through that descriptor's `/proc/self/fd` link. The step turns `SIGTERM` from a
+cancelled job into `SystemExit`, so the sandbox is stopped and the copy is removed.
+Regressions overwrite every staged blob in place, plant symlinks to a mode-0555 host
+directory, and seal the tree three levels deep. They then require the job's cache and
+the host directory to be unchanged and the copy to be gone, including after a `SIGTERM`
+during a running script.
 
 Known limitation: `npm_config_nodedir` names the prefix that owns the selected `node`.
 Official Node distributions (`actions/setup-node`, the hosted runner image) ship

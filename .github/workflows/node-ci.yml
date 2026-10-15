@@ -5089,6 +5089,7 @@ jobs:
           import os
           import re
           import shutil
+          import signal
           import stat
           import subprocess
           import sys
@@ -5661,23 +5662,64 @@ jobs:
 
           def remove_runtime_cache_staging(staging):
               # Candidate code runs as the runner's uid and can chmod a staged
-              # directory to 000, which would block removal. The sandbox's PID
-              # namespace has exited by now, so restoring owner access to each
-              # real directory (lstat, never through a symlink) cannot race it.
-              pending = [staging]
-              while pending:
-                  current = pending.pop()
+              # directory to 000, which would block removal. A sandboxed process
+              # can briefly outlive the bwrap call and swap a staged directory
+              # for a symlink, so a name is never trusted twice: each directory
+              # is opened relative to its parent's descriptor with O_NOFOLLOW,
+              # which rejects symlinks and non-directories, and owner access is
+              # restored on that descriptor rather than by path.
+              path_flags = (
+                  os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+              )
+
+              def open_unsealed(name, parent_fd):
                   try:
-                      if not stat.S_ISDIR(os.lstat(current).st_mode):
-                          continue
-                      os.chmod(current, 0o700)
-                      with os.scandir(current) as entries:
-                          pending.extend(
-                              entry.path for entry in entries
-                              if entry.is_dir(follow_symlinks=False)
-                          )
+                      directory_fd = os.open(name, path_flags, dir_fd=parent_fd)
                   except OSError:
-                      continue
+                      return None
+                  try:
+                      # An O_PATH descriptor cannot be fchmod-ed; its /proc
+                      # link names exactly the inode that was opened.
+                      os.chmod(f"/proc/self/fd/{directory_fd}", 0o700)
+                  except OSError:
+                      os.close(directory_fd)
+                      return None
+                  return directory_fd
+
+              def child_names(directory_fd):
+                  try:
+                      listing_fd = os.open(
+                          ".",
+                          os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0),
+                          dir_fd=directory_fd,
+                      )
+                  except OSError:
+                      return []
+                  try:
+                      with os.scandir(listing_fd) as entries:
+                          return [entry.name for entry in entries]
+                  except OSError:
+                      return []
+                  finally:
+                      os.close(listing_fd)
+
+              open_directories = []
+              try:
+                  root_fd = open_unsealed(str(staging), None)
+                  if root_fd is not None:
+                      open_directories.append((root_fd, child_names(root_fd)))
+                  while open_directories:
+                      directory_fd, pending = open_directories[-1]
+                      if not pending:
+                          os.close(directory_fd)
+                          open_directories.pop()
+                          continue
+                      child_fd = open_unsealed(pending.pop(), directory_fd)
+                      if child_fd is not None:
+                          open_directories.append((child_fd, child_names(child_fd)))
+              finally:
+                  for directory_fd, _pending in open_directories:
+                      os.close(directory_fd)
               shutil.rmtree(staging, ignore_errors=True)
 
           def stage_runtime_cache(content):
@@ -5722,6 +5764,13 @@ jobs:
               return staging
 
           runtime_cache_content = verified_runtime_cache_content()
+
+          def stop_on_termination(signum, _frame):
+              # A cancelled job sends SIGTERM; raising lets every finally below
+              # stop the sandbox and remove its staging copy.
+              raise SystemExit(128 + signum)
+
+          signal.signal(signal.SIGTERM, stop_on_termination)
           for directory, name, unset_env, requires_services in normalized:
               script_env = os.environ.copy()
               service_env_names = {"DB_HOST", "DB_PORT", "CACHE_PORT"}
