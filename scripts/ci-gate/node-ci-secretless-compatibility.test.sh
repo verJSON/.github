@@ -274,7 +274,7 @@ for name, filename in {
 assert jobs["acquire-secretless-dependencies"]["permissions"] == {"contents": "read", "packages": "read"}
 assert jobs["build-test"]["permissions"] == {"contents": "read"}
 # The hosted-lane eligibility guard is executed against stubbed inputs by
-# scripts/ci-gate/node-ci-secretless-hosted-lane.test.py (ADR 0146 amendment).
+# scripts/ci-gate/node-ci-secretless-hosted-lane.test.py (ADR 0234).
 runner = steps["Run runtime-resolved compatibility lanes without credentials"]
 protected_doc = yaml.safe_load(Path(sys.argv[3]).read_text(encoding="utf-8"))
 protected_steps = {

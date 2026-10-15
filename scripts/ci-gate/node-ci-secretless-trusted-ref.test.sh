@@ -32,7 +32,7 @@ assert acquire["permissions"] == {"contents": "read", "packages": "read"}
 assert acquire["runs-on"] == "${{ fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}"
 assert build["permissions"] == {"contents": "read"}
 # Both secretless builds need a GitHub-hosted runner, so trusted-ref takes the
-# hosted untrusted lane ahead of the caller's runner input (ADR 0146 amendment).
+# hosted untrusted lane ahead of the caller's runner input (ADR 0234).
 assert build["runs-on"].startswith("${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && fromJSON(vars.CI_LANE_UNTRUSTED")
 assert "cleanup-secretless-transfer" not in jobs
 assert docs.count("permissions:\n      contents: read\n      packages: read\n      statuses: read") == 4

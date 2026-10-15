@@ -327,7 +327,7 @@ REVIEWED_SELECTOR_EXPRESSIONS = frozenset(
         "inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || needs.preflight.outputs.target_private == 'false' && fromJSON(vars.CI_RUNNER_FASTLANE || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_PRIVILEGED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')",
         "inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || needs.preflight.outputs.target_private == 'false' && fromJSON(vars.CI_RUNNER_FASTLANE || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_RUNNER_OVERFLOW || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')",
         # node-ci build-test: either secretless mode needs the ephemeral hosted
-        # lane, so it precedes the caller's runner input (ADR 0146 amendment).
+        # lane, so it precedes the caller's runner input (ADR 0234).
         "(inputs.secretless-pr || inputs.secretless-trusted-ref) && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') || inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')",
         # Known negative fixtures stay inside the grammar so R3/R4 can return a
         # definite policy violation instead of hiding behind undetermined.
