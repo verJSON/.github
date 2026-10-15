@@ -3,6 +3,7 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -43,6 +44,38 @@ class PackageTypeSurfaceRulesetTest(unittest.TestCase):
         live = {"id": entry["ruleset_id"], "name": entry["name"], "source_type": "Organization", "source": "Verjson", **entry["desired"]}
         with self.assertRaises(MODULE.ContractError):
             MODULE.validate_live("Verjson", entry, live, entry["desired"])
+
+    def test_validate_live_compares_the_source_as_a_case_insensitive_github_identity(self):
+        # The organization login became `verJSON` on 2026-10-02 and the API reports
+        # that display case; the reviewed policy spells it `Verjson` (#1779).
+        organization, _, entries = MODULE.read_policy()
+        for scope, renamed, foreign in (
+            ("repository", lambda entry: "verJSON/" + entry["repository"].split("/", 1)[1],
+             lambda entry: "Elsewhere/" + entry["repository"].split("/", 1)[1]),
+            ("organization", lambda entry: "verJSON", lambda entry: "Elsewhere"),
+        ):
+            entry = next(entry for entry in entries if entry["scope"] == scope)
+            source_type = "Repository" if scope == "repository" else "Organization"
+            live = {"id": entry["ruleset_id"], "name": entry["name"], "source_type": source_type, **entry["desired"]}
+            with self.subTest(scope=scope, source="renamed display case"):
+                MODULE.validate_live(organization, entry, {**live, "source": renamed(entry)}, entry["desired"])
+            # U+017F LATIN SMALL LETTER LONG S case-folds to `s`: `Verjſon` folds to `verjson`.
+            homoglyph = renamed(entry).replace("verJSON", "Verjſon")
+            for refused in (foreign(entry), homoglyph):
+                with self.subTest(scope=scope, source=refused), self.assertRaisesRegex(MODULE.ContractError, "source drifted"):
+                    MODULE.validate_live(organization, entry, {**live, "source": refused}, entry["desired"])
+
+    def test_apply_selects_a_managed_repository_by_case_insensitive_identity(self):
+        _, _, entries = MODULE.read_policy()
+        entry = entries[0]
+        renamed = "verJSON/" + entry["repository"].split("/", 1)[1]
+        with mock.patch.object(MODULE, "apply_one") as apply_one:
+            self.assertEqual(MODULE.main(["apply", "--repository", renamed, "--ack", MODULE.EXPECTED_ACK]), 0)
+        self.assertEqual(apply_one.call_args.args[2]["repository"], entry["repository"])
+        for refused in ("Elsewhere/" + entry["repository"].split("/", 1)[1], renamed.replace("verJSON", "Verjſon")):
+            with self.subTest(repository=refused), mock.patch.object(MODULE, "apply_one") as apply_one:
+                self.assertEqual(MODULE.main(["apply", "--repository", refused, "--ack", MODULE.EXPECTED_ACK]), 2)
+            apply_one.assert_not_called()
 
     def test_validate_live_rejects_a_ruleset_id_reused_by_another_name(self):
         _, _, entries = MODULE.read_policy()

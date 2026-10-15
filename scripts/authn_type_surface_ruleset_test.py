@@ -203,6 +203,61 @@ class AuthnTypeSurfaceRulesetTest(unittest.TestCase):
                 old_time, self.contract, SHA, HEAD, **arguments
             )
 
+    def test_live_identities_compare_case_insensitively_and_refuse_another_owner(self):
+        # The organization login became `verJSON` on 2026-10-02 and the API reports
+        # that display case; the reviewed contract spells it `Verjson` (#1779).
+        # U+017F LATIN SMALL LETTER LONG S case-folds to `s`: `Verjſon` folds to `verjson`.
+        homoglyph = "Verjſon"
+        expected = MODULE.render_payload(self.contract, SHA)
+        organization_rule = expected | {"source_type": "Organization", "id": 1}
+        MODULE.validate_live_ruleset(organization_rule | {"source": "verJSON"}, expected)
+        retired_expected = self.contract["consumer"]["retired_repository_ruleset"]
+        retired = retired_expected | {"source_type": "Repository"}
+        MODULE.validate_retired_ruleset(retired | {"source": "verJSON/verjson-authn"}, retired_expected)
+        run = {
+            "event": "pull_request", "id": 43, "created_at": "2026-10-14T18:08:32Z",
+            "status": "completed", "conclusion": "success", "head_sha": HEAD,
+            "path": ".github/workflows/authn-type-surface-required.yml",
+            "workflow_url": "https://api.github.com/repos/verJSON/verjson-authn/actions/required_workflows/346741024",
+        }
+        arguments = {"minimum_run_id": 42, "not_before": datetime(2026, 10, 14, tzinfo=timezone.utc)}
+        MODULE.validate_required_run(run, self.contract, SHA, HEAD, **arguments)
+        for owner in ("Elsewhere", homoglyph):
+            with self.subTest(owner=owner):
+                with self.assertRaisesRegex(MODULE.ContractError, "source organization drifted"):
+                    MODULE.validate_live_ruleset(organization_rule | {"source": owner}, expected)
+                with self.assertRaisesRegex(MODULE.ContractError, "repository ruleset source drifted"):
+                    MODULE.validate_retired_ruleset(retired | {"source": f"{owner}/verjson-authn"}, retired_expected)
+                foreign = run | {"workflow_url": run["workflow_url"].replace("verJSON", owner)}
+                with self.assertRaisesRegex(MODULE.ContractError, "was not created"):
+                    MODULE.validate_required_run(foreign, self.contract, SHA, HEAD, **arguments)
+        with self.assertRaisesRegex(MODULE.ContractError, "was not created"):
+            MODULE.validate_required_run(
+                run | {"workflow_url": run["workflow_url"].replace("verjson-authn", "verjson-authz")},
+                self.contract, SHA, HEAD, **arguments,
+            )
+
+    def test_snapshot_counts_required_runs_reported_under_the_renamed_owner(self):
+        live = MODULE.render_payload(self.contract, SHA) | {
+            "source_type": "Organization", "source": "verJSON", "id": 21750617,
+            "updated_at": "2026-10-14T00:00:00Z",
+        }
+        prefix = "https://api.github.com/repos/{}/actions/required_workflows/7"
+        runs = {"workflow_runs": [
+            {"id": 90, "path": ".github/workflows/authn-type-surface-required.yml",
+             "workflow_url": prefix.format("verJSON/verjson-authn")},
+            {"id": 95, "path": ".github/workflows/authn-type-surface-required.yml",
+             "workflow_url": prefix.format("Elsewhere/verjson-authn")},
+        ]}
+        responses = {"orgs/Verjson/rulesets/21750617": live,
+                     "repos/Verjson/verjson-authn/actions/runs?event=pull_request&per_page=100": runs}
+        with mock.patch.object(MODULE, "validate_workflow"), \
+                mock.patch.object(MODULE, "discover_state", return_value=[{"id": 21750617}]), \
+                mock.patch.object(MODULE, "gh_json", side_effect=lambda path: responses[path]), \
+                mock.patch("builtins.print") as printed:
+            self.assertEqual(MODULE.main(["snapshot", "--workflow-sha", SHA]), 0)
+        self.assertEqual(json.loads(printed.call_args.args[0])["pre_trigger_max_run_id"], 90)
+
     def test_live_rule_must_match_every_reviewed_field(self):
         expected = MODULE.render_payload(self.contract, SHA)
         live = expected | {"source_type": "Organization", "source": "Verjson", "id": 1}

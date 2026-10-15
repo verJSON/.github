@@ -10,6 +10,10 @@ import tempfile
 
 import yaml
 
+# `python3 -I` does not put the script directory on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from github_identity import same_organization, same_repository, strip_repository_url_prefix  # noqa: E402
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "config/authn-type-surface-ruleset.json"
@@ -240,14 +244,14 @@ def mutable_ruleset(value):
 
 def validate_live_ruleset(value, expected):
     require(value.get("source_type") == "Organization", "ruleset source is not Organization")
-    require(value.get("source") == "Verjson", "ruleset source organization drifted")
+    require(same_organization(value.get("source"), "Verjson"), "ruleset source organization drifted")
     require(mutable_ruleset(value) == expected, "live ruleset differs from the reviewed image")
 
 
 def validate_retired_ruleset(value, expected):
     require(value.get("source_type") == "Repository",
             "repository ruleset source type drifted")
-    require(value.get("source") == "Verjson/verjson-authn",
+    require(same_repository(value.get("source"), "Verjson/verjson-authn"),
             "repository ruleset source drifted")
     require(isinstance(value.get("id"), int) and value["id"] == expected["id"],
             "repository ruleset identity drifted")
@@ -272,6 +276,14 @@ def parse_timestamp(value, location):
     return parsed.astimezone(timezone.utc)
 
 
+def required_workflow_url_suffix(workflow_url, contract):
+    return strip_repository_url_prefix(
+        workflow_url,
+        contract["rollout"]["required_run"]["workflow_url_prefix"],
+        contract["consumer"]["repository"],
+    )
+
+
 def validate_required_run(
         run, contract, workflow_sha, head_sha, *, minimum_run_id, not_before):
     required = contract["rollout"]["required_run"]
@@ -287,10 +299,9 @@ def validate_required_run(
             "required workflow run predates ruleset activation")
     require(run.get("path") == required["path"],
             "run path is not the protected required workflow")
-    workflow_url = run.get("workflow_url", "")
-    require(workflow_url.startswith(required["workflow_url_prefix"]),
+    suffix = required_workflow_url_suffix(run.get("workflow_url"), contract)
+    require(suffix is not None,
             "run was not created by an organization required-workflow rule")
-    suffix = workflow_url.removeprefix(required["workflow_url_prefix"])
     require(suffix.isdigit() and int(suffix) > 0, "required workflow URL id is invalid")
     require(run.get("workflow_sha") in (None, workflow_sha),
             "reported workflow SHA disagrees with the rule binding")
@@ -456,9 +467,7 @@ def main(arguments=None):
         matching_ids = [
             run.get("id") for run in runs["workflow_runs"]
             if run.get("path") == required["path"]
-            and str(run.get("workflow_url", "")).startswith(
-                required["workflow_url_prefix"]
-            )
+            and required_workflow_url_suffix(run.get("workflow_url"), contract) is not None
         ]
         require(all(isinstance(run_id, int) and run_id > 0 for run_id in matching_ids),
                 "pre-trigger run inventory contains an invalid id")

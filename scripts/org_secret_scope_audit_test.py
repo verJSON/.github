@@ -71,6 +71,36 @@ class OrgSecretScopeAuditTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("selected grants differ", result.stderr)
 
+    def test_selected_grants_compare_as_case_insensitive_github_identities(self):
+        # The organization login became `verJSON` on 2026-10-02 and the API reports
+        # that display case; the reviewed policy spells it `Verjson` (#1779).
+        # U+017F LATIN SMALL LETTER LONG S case-folds to `s`: `Verjſon` folds to `verjson`.
+        homoglyph = "Verjſon/.github"
+
+        def policy(repository):
+            return {"organization": "Verjson", "secrets": {
+                "SCOPED": {"target_visibility": "selected", "selected_repositories": [repository], "consumers": ["policy"], "reason": "only consumer"},
+            }}
+
+        listing = {"secrets": [{"name": "SCOPED", "visibility": "selected"}]}
+        result = self.run_audit(policy("Verjson/.github"), listing, {"repositories": [{"full_name": "verJSON/.github"}]})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for reviewed, granted in (
+            ("Verjson/.github", "Elsewhere/.github"),
+            ("Verjson/.github", homoglyph),
+            (homoglyph, "verJSON/.github"),
+        ):
+            with self.subTest(reviewed=reviewed, granted=granted):
+                result = self.run_audit(policy(reviewed), listing, {"repositories": [{"full_name": granted}]})
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("SCOPED:", result.stderr)
+        result = self.run_audit(
+            policy("Verjson/.github"), listing,
+            {"repositories": [{"full_name": "Verjson/.github"}, {"full_name": "verJSON/.github"}]},
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("duplicate repositories", result.stderr)
+
     def test_api_failure_cannot_report_conformance(self):
         result = self.run_audit({"organization": "Verjson", "secrets": {}}, {}, api_failure=True)
         self.assertEqual(result.returncode, 2)
