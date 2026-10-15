@@ -128,19 +128,21 @@ expect_true() { # label needle
   else fail "$1 (rc=$RC, output: $OUT)"; fi
 }
 
+# The default (#432-shaped) fixtures are built once: each case starts from them, and
+# rebuilding them per case spent a third of the suite's time spawning jq.
+default_check_runs="$(runs "$green_required,$cancelled_gate_check,$superseder_checks")"
+default_runs="$(wf_runs "$(gate_run),$(lifecycle_run)")"
+default_jobs="$(jobs_for 9201 1 "$(job 31 9201 'rearm / event-policy')" && cat "$JOBS_DIR/9201-1.json")"
 reset_env() {
   unset FAIL_JOBS
   rm -f "$JOBS_DIR"/*.json
   export JOBS_REQUEST_LOG="$tmp/jobs-requests"
   : >"$JOBS_REQUEST_LOG"
-  export PR_JSON_FIXTURE
-  PR_JSON_FIXTURE="$(printf '{"headRefOid":"%s","baseRefName":"main"}' "$HEAD_SHA")"
+  export PR_JSON_FIXTURE="{\"headRefOid\":\"$HEAD_SHA\",\"baseRefName\":\"main\"}"
   export RULES_FIXTURE="[{\"type\":\"required_status_checks\",\"parameters\":{\"required_status_checks\":[{\"context\":\"ci / build-test\",\"integration_id\":$APP_ID},{\"context\":\"changelog / validate\",\"integration_id\":$APP_ID}]}}]"
-  export CHECK_RUNS_FIXTURE
-  CHECK_RUNS_FIXTURE="$(runs "$green_required,$cancelled_gate_check,$superseder_checks")"
-  export RUNS_FIXTURE
-  RUNS_FIXTURE="$(wf_runs "$(gate_run),$(lifecycle_run)")"
-  jobs_for 9201 1 "$(job 31 9201 'rearm / event-policy')"
+  export CHECK_RUNS_FIXTURE="$default_check_runs"
+  export RUNS_FIXTURE="$default_runs"
+  printf '%s\n' "$default_jobs" >"$JOBS_DIR/9201-1.json"
 }
 
 # --- the live #432 shape ------------------------------------------------------
