@@ -54,19 +54,13 @@
       "scope": "organization",
       "ruleset_id": 21750617,
       "name": "authn-type-surface-required-workflow",
-      "preimage": {
-        "target": "branch",
-        "enforcement": "active",
-        "bypass_actors": [{"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"}],
-        "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}, "repository_id": {"repository_ids": [1302124584]}},
-        "rules": [{"type": "workflows", "parameters": {"do_not_enforce_on_create": false, "workflows": [{"path": ".github/workflows/authn-type-surface-required.yml", "repository_id": 1269388380, "ref": "refs/heads/main", "sha": "dc6b2942342ac1a01b4e01a17cbe7a303f31e495"}]}}]
-      },
+      "preimage": null,
       "desired": {
         "target": "branch",
         "enforcement": "active",
         "bypass_actors": [{"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"}],
         "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}, "repository_id": {"repository_ids": [1302124584]}},
-        "rules": [{"type": "workflows", "parameters": {"do_not_enforce_on_create": false, "workflows": [{"path": ".github/workflows/authn-type-surface-required.yml", "repository_id": 1269388380, "ref": "refs/heads/main", "sha": "dc6b2942342ac1a01b4e01a17cbe7a303f31e495"}]}}]
+        "rules": [{"type": "workflows", "parameters": {"do_not_enforce_on_create": false, "workflows": [{"path": ".github/workflows/authn-type-surface-required.yml", "repository_id": 1269388380, "ref": "refs/heads/main", "sha": null}]}}]
       }
     },
     {

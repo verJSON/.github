@@ -107,6 +107,15 @@ same model as ADR 0153 through the shared `scripts/required_workflow_revision.py
 - The same `node-ci-protected` floor check runs before any mutation.
 - A read-only `audit` mode backs the scheduled `required-workflow-audit` job.
 
+`config/package-type-surface-rulesets.json` held another pinned copy of this
+ruleset's revision (`dc6b2942`) for the package release-authorization audit. That copy
+would have gone stale at the first rotation, in the same way the CLI projects record did.
+Its `sha` is now `null`, which means the revision is delegated: the package audit still
+governs the ruleset's shape and release-only bypass. It also requires the live binding
+to be an immutable SHA, but it accepts whichever revision the rotation tool installed.
+`package-type-surface-ruleset.py apply` never writes a ruleset with a delegated
+revision. The unused preimage is dropped.
+
 `stage-release-bypass` is retired. The live ruleset is active with the release-App
 bypass, so the evaluate-only transition it performed is complete and its predecessor can
 never match again. Any later change to that bypass is a reviewed contract change that

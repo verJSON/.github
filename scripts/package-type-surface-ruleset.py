@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 POLICY_PATH = ROOT / "config/package-type-surface-rulesets.json"
 MUTABLE_KEYS = ("target", "enforcement", "bypass_actors", "conditions", "rules")
 EXPECTED_ACK = "APPLY-PACKAGE-TYPE-SURFACE-RELEASE-1673"
+SHA = re.compile(r"[0-9a-f]{40}")
 
 
 class ContractError(Exception):
@@ -86,7 +88,42 @@ def validate_image(value, location: str):
     for index, rule_value in enumerate(array(item["rules"], f"{location}.rules")):
         rule = mapping(rule_value, f"{location}.rules[{index}]")
         nonempty_string(rule.get("type"), f"{location}.rules[{index}].type")
+        if rule["type"] == "workflows":
+            parameters = mapping(rule.get("parameters"), f"{location}.rules[{index}].parameters")
+            for position, binding in enumerate(array(parameters.get("workflows"), f"{location}.rules[{index}].workflows")):
+                sha = mapping(binding, f"{location}.rules[{index}].workflows[{position}]").get("sha")
+                require(sha is None or (isinstance(sha, str) and SHA.fullmatch(sha) is not None),
+                        f"{location}.rules[{index}].workflows[{position}].sha must be an immutable SHA or null")
     return item
+
+
+def delegated_revisions(image: dict):
+    """Workflow bindings whose revision a required-workflow rotation tool owns.
+
+    A null `sha` means this policy governs the ruleset's shape and release bypass, while
+    the bound revision is read, admitted, rotated, and audited by that workflow's own
+    tool (ADR 0151). A pinned copy here went stale at every rotation (#1824).
+    """
+    return [
+        (index, position)
+        for index, rule in enumerate(image["rules"]) if rule.get("type") == "workflows"
+        for position, binding in enumerate(rule["parameters"]["workflows"]) if binding.get("sha") is None
+    ]
+
+
+def resolve_delegated(desired: dict, live: dict):
+    resolved = json.loads(json.dumps(desired))
+    for index, position in delegated_revisions(desired):
+        try:
+            sha = live["rules"][index]["parameters"]["workflows"][position]["sha"]
+        except (KeyError, IndexError, TypeError):
+            sha = None
+        # A live binding without an immutable revision never matches a delegated one.
+        immutable = isinstance(sha, str) and SHA.fullmatch(sha) is not None
+        resolved["rules"][index]["parameters"]["workflows"][position]["sha"] = (
+            sha if immutable else "<no immutable live revision>"
+        )
+    return resolved
 
 
 def read_policy(path: Path = POLICY_PATH):
@@ -171,7 +208,7 @@ def validate_live(organization: str, entry: dict, live: dict, desired: dict):
         require(same_repository(live.get("source"), entry["repository"]), f"{entry['name']}: source drifted")
     if entry["ruleset_id"] is not None:
         require(live.get("id") == entry["ruleset_id"], f"{entry['name']}: id drifted")
-    require(mutable_image(live) == desired, f"{entry['name']}: live image drifted")
+    require(mutable_image(live) == resolve_delegated(desired, live), f"{entry['name']}: live image drifted")
 
 
 def payload(entry: dict, image: dict):
@@ -206,6 +243,17 @@ def apply_one(organization: str, acknowledgement: str, entry: dict):
     require(acknowledgement == EXPECTED_ACK, "explicit apply acknowledgement required")
     live = read_live(organization, entry)
     desired = entry["desired"]
+    if delegated_revisions(desired):
+        try:
+            require(live is not None, f"{entry['name']}: ruleset is missing")
+            validate_live(organization, entry, live, desired)
+        except ContractError as error:
+            raise ContractError(
+                f"{error}; its required-workflow revision is owned by its rotation tool, "
+                "so reconcile it there rather than here"
+            ) from None
+        print(f"already conformant {entry['name']} id={live['id']}")
+        return
     if live is None:
         require(entry["preimage"] is None, f"{entry['name']}: missing live ruleset has a preimage")
         require(not [item for item in ruleset_listing(organization, entry) if item.get("name") == entry["name"]], f"{entry['name']}: appeared during apply preflight")
