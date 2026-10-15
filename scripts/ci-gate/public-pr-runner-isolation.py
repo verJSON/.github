@@ -430,22 +430,53 @@ def selector_outcomes(runs_on, context: Context) -> list:
     raise Undetermined(f"unsupported runs-on shape {runs_on!r}")
 
 
-def selector_variables(runs_on) -> set[str]:
-    text = runs_on if isinstance(runs_on, str) else ""
-    match = FULL_EXPRESSION.match(text)
-    if not match:
-        return set()
-    return {path[1] for path in references(Parser(match.group(1)).parse())
-            if len(path) == 2 and path[0].lower() == "vars"}
+def condition_node(condition):
+    """Parse a job `if:`, which may be bare or wrapped in `${{ }}`."""
+    if condition is None:
+        return None
+    if isinstance(condition, bool):
+        return ("literal", condition)
+    if not isinstance(condition, str):
+        raise Undetermined(f"unsupported if: shape {condition!r}")
+    match = FULL_EXPRESSION.match(condition)
+    return Parser(match.group(1) if match else condition).parse()
+
+
+def expression_variables(*nodes) -> set[str]:
+    return {
+        path[1]
+        for node in nodes
+        if node is not None
+        for path in references(node)
+        if len(path) == 2 and path[0].lower() == "vars"
+    }
+
+
+def selector_node(runs_on):
+    match = FULL_EXPRESSION.match(runs_on) if isinstance(runs_on, str) else None
+    return Parser(match.group(1)).parse() if match else None
+
+
+def can_run(condition, context: Context) -> bool:
+    if condition is None:
+        return True
+    return any(
+        truth
+        for value in evaluate(condition, context.resolve)
+        for truth in truthiness(value)
+    )
 
 
 def check_job(path: str, name: str, job: dict, repository: str) -> list[str]:
     runs_on = job.get("runs-on")
     if runs_on is None:
         raise Undetermined(f"{path}: job '{name}' has no runs-on")
+    condition = condition_node(job.get("if"))
     violations = []
-    for assignment in variable_assignments(selector_variables(runs_on)):
+    for assignment in variable_assignments(expression_variables(condition, selector_node(runs_on))):
         context = Context(repository, assignment)
+        if not can_run(condition, context):
+            continue
         for outcome in selector_outcomes(runs_on, context):
             try:
                 verdict = classify_labels(outcome)

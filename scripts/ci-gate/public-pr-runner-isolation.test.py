@@ -75,4 +75,21 @@ expect(
     "a pull_request job on the trusted lane is a violation",
 )
 
+expect(
+    {
+        "ci.yml": """
+            on: [pull_request, push]
+            jobs:
+              publish:
+                if: github.event_name == 'push'
+                runs-on: ${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+                steps:
+                  - run: 'true'
+        """,
+    },
+    0,
+    ("clean",),
+    "a job whose condition cannot hold on pull_request is not reachable",
+)
+
 sys.exit(1 if failures else 0)
