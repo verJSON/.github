@@ -88,8 +88,9 @@ outside the declaration that automation moves.
   `catalog-ui` builds an image on tag push. `AiB` is a dispatched installer release. Their
   pins go stale until each one adopts a generated caller or renames its workflow. No
   `changelog-contract.yml` is hand-written.
-- This repository's own generated `release.yml` is fenced through organization
-  inheritance, which is correct: `scripts/release-verify.sh` rejects any byte the pinned
+- This repository's own generated `release.yml` is fenced by this repository's own
+  `extends`, and also through organization inheritance once Verjson/renovate-config#59
+  lands, which is correct: `scripts/release-verify.sh` rejects any byte the pinned
   generator did not emit.
 - Organization Renovate policy now depends on a file in this repository. The trust domain
   is unchanged, because a change here already governs every merge gate.
