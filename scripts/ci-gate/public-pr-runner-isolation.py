@@ -272,13 +272,15 @@ def _number(value) -> float:
 
 
 def compare(operator: str, left, right) -> bool:
+    """Actions semantics: case-insensitive strings, numeric coercion otherwise."""
+    if isinstance(left, tuple) or isinstance(right, tuple):
+        # Arrays and objects compare by identity, which no selector relies on.
+        identical = left is right
+        return identical if operator == "==" else not identical if operator == "!=" else False
     if isinstance(left, str) and isinstance(right, str):
         left, right = left.lower(), right.lower()
-    elif type(left) is not type(right) or isinstance(left, (tuple, dict)):
-        if isinstance(left, (tuple, dict)) and left is right:
-            pass
-        else:
-            left, right = _number(left), _number(right)
+    elif type(left) is not type(right):
+        left, right = _number(left), _number(right)
     if operator == "==":
         return left == right
     if operator == "!=":

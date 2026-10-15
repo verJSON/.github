@@ -224,4 +224,137 @@ expect(
     "an object filter in a condition is parsed rather than left undetermined",
 )
 
+# ---------------------------------------------------------------------------
+# Hardening: failure modes and the routing shapes the live tree relies on. Each
+# was proven to fail under a targeted mutation of the checker (see #1827).
+# ---------------------------------------------------------------------------
+
+
+def pull_request_job(runs_on: str, extra: str = "") -> dict[str, str]:
+    return {
+        "ci.yml": f"""
+            on: pull_request
+            jobs:
+              test:{extra}
+                runs-on: {runs_on}
+                steps:
+                  - run: 'true'
+        """,
+    }
+
+
+expect(
+    pull_request_job("""${{ fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}"""),
+    1,
+    ("vars.CI_LANE_UNTRUSTED=<unset>", "vars.CI_LANE_FALLBACK="),
+    "an untrusted lane that falls back to CI_LANE_FALLBACK can reach the persistent pool",
+)
+expect(
+    pull_request_job("""${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}"""),
+    0,
+    ("clean",),
+    "the untrusted lane with a hosted tail is ephemeral whether or not it is set",
+)
+expect(
+    pull_request_job("""${{ fromJSON(vars['CI_LANE_TRUSTED'] || '["ubuntu-24.04"]') }}"""),
+    1,
+    ("vars.CI_LANE_TRUSTED=",),
+    "a bracket dereference of a persistent variable is enumerated like a dotted one",
+)
+expect(
+    pull_request_job("[self-hosted, '${{ inputs.label }}']"),
+    1,
+    ("self-hosted",),
+    "a literal self-hosted label in a runs-on list is a violation",
+)
+expect(
+    pull_request_job("{group: DigitalOcean}"),
+    1,
+    ("group",),
+    "a runner-group selector is never treated as ephemeral",
+)
+expect(
+    pull_request_job("ubuntu-24.04"),
+    0,
+    ("clean",),
+    "a literal GitHub-hosted image is ephemeral",
+)
+expect(
+    pull_request_job("runner-${{ github.event_name }}"),
+    2,
+    ("UNDETERMINED", "interpolates"),
+    "a selector built by string interpolation is undetermined, never clean",
+)
+expect(
+    pull_request_job("${{ matrix.os }}"),
+    2,
+    ("UNDETERMINED", "cannot resolve"),
+    "a selector the checker cannot resolve is undetermined, never clean",
+)
+expect(
+    pull_request_job("""${{ fromJSON(vars.CI_LANE_TRUSTED ||| '["ubuntu-24.04"]') }}"""),
+    2,
+    ("UNDETERMINED",),
+    "a malformed expression is undetermined, never clean",
+)
+expect(
+    {
+        "ci.yml": """
+            on: pull_request
+            jobs:
+              remote:
+                uses: Verjson/.github/.github/workflows/node-ci.yml@0123456789abcdef0123456789abcdef01234567
+        """,
+    },
+    2,
+    ("UNDETERMINED", "cannot read"),
+    "a reachable remote reusable workflow is undetermined, never clean",
+)
+expect(
+    {
+        "ci.yml": """
+            on: pull_request
+            jobs:
+              admission:
+                if: github.repository == 'Verjson/elsewhere'
+                runs-on: ubuntu-24.04
+                steps:
+                  - run: 'true'
+              report:
+                needs: admission
+                if: always()
+                runs-on: ${{ fromJSON(vars.CI_LANE_TRUSTED || '["ubuntu-24.04"]') }}
+                steps:
+                  - run: 'true'
+        """,
+    },
+    1,
+    ("report",),
+    "always() keeps a job reachable behind a skipped dependency",
+)
+expect(
+    {
+        "ci.yml": """
+            on: push
+            jobs:
+              test:
+                runs-on: [self-hosted, general]
+                steps:
+                  - run: 'true'
+        """,
+    },
+    0,
+    ("clean",),
+    "a workflow without a pull_request trigger is outside the policy",
+)
+expect({}, 2, ("UNDETERMINED", "no workflow files"), "an empty workflow directory is undetermined")
+expect(
+    {**pull_request_job("ubuntu-24.04"), "pending.tsv": "ci.yml\ttest\n"},
+    2,
+    ("UNDETERMINED", "path<TAB>job<TAB>reason"),
+    "a pending row without a reason is rejected",
+    "--pending",
+    "{dir}/pending.tsv",
+)
+
 sys.exit(1 if failures else 0)
