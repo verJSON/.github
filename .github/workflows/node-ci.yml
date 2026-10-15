@@ -5021,6 +5021,10 @@ jobs:
               "npm_config_cache": "/tmp/npm-cache",
               "COREPACK_HOME": "/tmp/corepack",
               "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+              # Egress is denied, so node-gyp builds against the selected
+              # toolchain's own include/node headers instead of downloading
+              # them (#1798). Every node-gyp version reads npm_config_*.
+              "npm_config_nodedir": toolchain_destination,
               **rebuild_env,
           }
           for name, value in sorted(rebuild_process_env.items()):
@@ -5066,6 +5070,11 @@ jobs:
           DB_ENV: ${{ inputs.db-env }}
           CACHE_ENV: ${{ inputs.cache-env }}
           VERJSON_CI_TRUSTED_DB_HOST: ${{ steps.db-service.outputs.host }}
+          RESTORE_PERSISTED_PUBLIC_CACHE: ${{ inputs.cache && inputs.package-manager == 'npm' }}
+          RUNTIME_CACHE_DIR: ${{ runner.temp }}/secretless-runtime-cache-${{ github.run_id }}-${{ github.run_attempt }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+          SECRETLESS_RUNTIME_PUBLIC_CACHE: ${{ inputs.secretless-runtime-public-cache }}
           BASH_ENV: /dev/null
         run: |
           set -euo pipefail
@@ -5080,6 +5089,8 @@ jobs:
           import os
           import re
           import shutil
+          import signal
+          import stat
           import subprocess
           import sys
           import tempfile
@@ -5616,6 +5627,151 @@ jobs:
                   destination,
               ))
 
+          def verified_runtime_cache_content():
+              # secretless-runtime-public-cache exists for repository-authored
+              # offline reinstall rehearsals. Before the sandbox, scripts reached
+              # the verified runtime cache through npm_config_cache; the sandbox
+              # replaces that cache, so its content-v2 blobs are handed in
+              # deliberately (#1798). The path comes from the workflow-controlled
+              # RUNTIME_CACHE_DIR, never from the ambient npm variables.
+              requested = any(
+                  os.environ.get(flag, "") == "true"
+                  for flag in ("RESTORE_PERSISTED_PUBLIC_CACHE", "SECRETLESS_RUNTIME_PUBLIC_CACHE")
+              )
+              runtime_cache_value = os.environ.get("RUNTIME_CACHE_DIR", "")
+              if not runtime_cache_value:
+                  if requested:
+                      sys.exit("consumer runtime cache is requested without a runtime cache path")
+                  return None
+              runtime_cache = Path(runtime_cache_value)
+              expected_runtime = runner_temp / (
+                  "secretless-runtime-cache-"
+                  f"{os.environ.get('RUN_ID', '')}-{os.environ.get('RUN_ATTEMPT', '')}"
+              )
+              if runtime_cache != expected_runtime:
+                  sys.exit("consumer runtime cache is not the workflow runtime cache")
+              content = runtime_cache / "_cacache" / "content-v2"
+              for candidate in (runtime_cache, content.parent, content):
+                  if not os.path.lexists(candidate):
+                      if requested:
+                          sys.exit("consumer runtime cache is requested but was never populated")
+                      return None
+                  if candidate.is_symlink() or not candidate.is_dir():
+                      sys.exit("consumer runtime cache content is not a directory")
+              return content
+
+          def remove_runtime_cache_staging(staging):
+              # Candidate code runs as the runner's uid and can chmod a staged
+              # directory to 000, which would block removal. A sandboxed process
+              # can briefly outlive the bwrap call and swap a staged directory
+              # for a symlink, so a name is never trusted twice: each directory
+              # is opened relative to its parent's descriptor with O_NOFOLLOW,
+              # which rejects symlinks and non-directories, and owner access is
+              # restored on that descriptor rather than by path.
+              path_flags = (
+                  os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+              )
+
+              def open_unsealed(name, parent_fd):
+                  try:
+                      directory_fd = os.open(name, path_flags, dir_fd=parent_fd)
+                  except OSError:
+                      return None
+                  try:
+                      # An O_PATH descriptor cannot be fchmod-ed; its /proc
+                      # link names exactly the inode that was opened.
+                      os.chmod(f"/proc/self/fd/{directory_fd}", 0o700)
+                  except OSError:
+                      os.close(directory_fd)
+                      return None
+                  return directory_fd
+
+              def child_names(directory_fd):
+                  try:
+                      listing_fd = os.open(
+                          ".",
+                          os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0),
+                          dir_fd=directory_fd,
+                      )
+                  except OSError:
+                      return []
+                  try:
+                      with os.scandir(listing_fd) as entries:
+                          return [entry.name for entry in entries]
+                  except OSError:
+                      return []
+                  finally:
+                      os.close(listing_fd)
+
+              open_directories = []
+              try:
+                  root_fd = open_unsealed(str(staging), None)
+                  if root_fd is not None:
+                      open_directories.append((root_fd, child_names(root_fd)))
+                  while open_directories:
+                      directory_fd, pending = open_directories[-1]
+                      if not pending:
+                          os.close(directory_fd)
+                          open_directories.pop()
+                          continue
+                      child_fd = open_unsealed(pending.pop(), directory_fd)
+                      if child_fd is not None:
+                          open_directories.append((child_fd, child_names(child_fd)))
+              finally:
+                  for directory_fd, _pending in open_directories:
+                      os.close(directory_fd)
+              shutil.rmtree(staging, ignore_errors=True)
+
+          def stage_runtime_cache(content):
+              # npm writes into its cache, so each script gets a disposable copy:
+              # a read-only bind fails npm, and binding the job's cache writable
+              # would let candidate code rewrite content later steps trust. Only
+              # regular files cross; npm verifies each blob's integrity on read.
+              staging = Path(tempfile.mkdtemp(
+                  prefix="verjson-consumer-runtime-cache-", dir=str(runner_temp),
+              ))
+
+              def refuse_unreadable(error):
+                  sys.exit(f"consumer runtime cache is unreadable: {error.filename}")
+
+              try:
+                  for current, subdirectories, names in os.walk(content, onerror=refuse_unreadable):
+                      relative = Path(current).relative_to(content)
+                      (staging / relative).mkdir(exist_ok=True)
+                      if any(Path(current, entry).is_symlink() for entry in subdirectories):
+                          sys.exit("consumer runtime cache content is not a directory")
+                      for entry in names:
+                          # Copy from the descriptor that was type-checked, so a
+                          # path swapped after the check cannot redirect the read.
+                          try:
+                              source = os.open(
+                                  Path(current, entry),
+                                  os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                                  | getattr(os, "O_CLOEXEC", 0),
+                              )
+                          except OSError:
+                              sys.exit("consumer runtime cache blob is not a regular file")
+                          with os.fdopen(source, "rb") as source_stream:
+                              if not stat.S_ISREG(os.fstat(source_stream.fileno()).st_mode):
+                                  sys.exit("consumer runtime cache blob is not a regular file")
+                              with open(staging / relative / entry, "xb") as target_stream:
+                                  shutil.copyfileobj(
+                                      source_stream, target_stream, length=1024 * 1024,
+                                  )
+              except BaseException:
+                  remove_runtime_cache_staging(staging)
+                  raise
+              return staging
+
+          runtime_cache_content = verified_runtime_cache_content()
+
+          def stop_on_termination(signum, _frame):
+              # SIGTERM to the interpreter raises here, so every finally below
+              # stops the sandbox and removes its staging copy. A runner cancel
+              # signals the step's bash, not this child, so this is best effort.
+              raise SystemExit(128 + signum)
+
+          signal.signal(signal.SIGTERM, stop_on_termination)
           for directory, name, unset_env, requires_services in normalized:
               script_env = os.environ.copy()
               service_env_names = {"DB_HOST", "DB_PORT", "CACHE_PORT"}
@@ -5628,6 +5784,8 @@ jobs:
                   "DB_ENV", "CACHE_ENV", "CI_SCRIPT_PLAN", "NESTED_MANIFESTS",
                   "RUN_DEFAULTS", "VERJSON_CI_TRUSTED_DB_HOST",
                   "VERJSON_CI_COMMAND_FILES_DIR", "RUNNER_TOOL_CACHE",
+                  "RUNTIME_CACHE_DIR", "RESTORE_PERSISTED_PUBLIC_CACHE",
+                  "SECRETLESS_RUNTIME_PUBLIC_CACHE", "RUN_ID", "RUN_ATTEMPT",
               ):
                   script_env.pop(env_name, None)
               for env_name in service_env_names:
@@ -5725,27 +5883,46 @@ jobs:
                       "/dev/shm/playwright-browsers",
                   ))
                   script_env["PLAYWRIGHT_BROWSERS_PATH"] = "/dev/shm/playwright-browsers"
-              arguments.extend((
-                  "--chdir", str(sandbox_directory), "--",
-                  "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
-                  *npm_command, "run", name,
-              ))
-              subprocess.run(
-                  arguments,
-                  check=True,
-                  env=script_env,
-                  cwd="/",
-                  pass_fds=tuple(
-                      mount_fds
-                      + [
-                          fd for fd in (browser_cache_fd, global_config_file.fileno())
-                          if fd is not None
-                      ]
-                  ),
-              )
-              for descriptor in mount_fds:
-                  os.close(descriptor)
-              mount_fds.clear()
+              runtime_cache_staging = None
+              try:
+                  if runtime_cache_content is not None:
+                      runtime_cache_staging = stage_runtime_cache(runtime_cache_content)
+                      bind_source(
+                          runtime_cache_staging,
+                          "/dev/shm/npm-cache/_cacache/content-v2",
+                          writable=True,
+                      )
+                  arguments.extend((
+                      "--chdir", str(sandbox_directory), "--",
+                      "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
+                      *npm_command, "run", name,
+                  ))
+                  subprocess.run(
+                      arguments,
+                      check=True,
+                      env=script_env,
+                      cwd="/",
+                      pass_fds=tuple(
+                          mount_fds
+                          + [
+                              fd for fd in (browser_cache_fd, global_config_file.fileno())
+                              if fd is not None
+                          ]
+                      ),
+                  )
+              finally:
+                  for descriptor in mount_fds:
+                      os.close(descriptor)
+                  mount_fds.clear()
+                  if runtime_cache_staging is not None:
+                      remove_runtime_cache_staging(runtime_cache_staging)
+                      if os.path.lexists(runtime_cache_staging):
+                          # Name only this step's own path.
+                          print(
+                              "::warning::consumer runtime cache staging was not removed: "
+                              f"{runtime_cache_staging}",
+                              file=sys.stderr,
+                          )
           if browser_cache_fd is not None:
               os.close(browser_cache_fd)
           global_config_file.close()
