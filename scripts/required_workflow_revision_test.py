@@ -57,6 +57,17 @@ class AdmitPredecessorTest(unittest.TestCase):
                 reads = self.admit(status=status)
             self.assertEqual([], reads)
 
+    def test_a_revision_whose_workflow_is_not_its_generator_output_is_refused(self):
+        with self.assertRaisesRegex(ContractError, "not its generator's output"):
+            self.admit(workflow=b"hand edited\n", regenerated=b"generated\n")
+
+    def test_a_forward_generated_revision_is_admitted_from_its_own_bytes(self):
+        for status in ("ahead", "identical"):
+            with self.subTest(status=status):
+                self.assertEqual(
+                    [(WORKFLOW_PATH, PREVIOUS)], self.admit(status=status)
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

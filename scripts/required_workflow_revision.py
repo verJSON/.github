@@ -16,3 +16,6 @@ def admit_predecessor(
         previous_sha, target_sha, *, compare, read_file, regenerate, workflow_path, require):
     require(compare(previous_sha, target_sha) in FORWARD,
             "live required-workflow revision is not an ancestor of the rotation target")
+    workflow = read_file(workflow_path, previous_sha)
+    require(regenerate(previous_sha, workflow) == workflow,
+            "live required-workflow revision is not its generator's output")
