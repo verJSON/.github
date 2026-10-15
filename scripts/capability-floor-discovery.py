@@ -28,6 +28,7 @@ CANONICAL_REFERENCE_RE = re.compile(
 )
 CANONICAL_PREFIX = "Verjson/.github/.github/workflows/"
 MAX_CALLER_BYTES = 512 * 1024
+WORKFLOWS_DIRECTORY = ".github/workflows"
 
 
 class DiscoveryError(Exception):
@@ -157,6 +158,11 @@ def resolve_default_branch(repository: str) -> tuple[str, str]:
     return default_branch, source_sha
 
 
+def list_workflow_paths(repository: str, source_sha: str) -> set[str]:
+    response = run_gh(f"repos/{repository}/contents/{WORKFLOWS_DIRECTORY}", {"ref": source_sha})
+    return {entry["path"] for entry in response}
+
+
 def read_caller(repository: str, path: str, source_sha: str) -> tuple[str, str]:
     response = run_gh(f"repos/{repository}/contents/{path}", {"ref": source_sha})
     require(isinstance(response, dict), f"contents response is malformed for {repository}:{path}")
@@ -244,14 +250,37 @@ def extract_pin(repository: str, path: str, text: str, expected_workflows: list[
     return next(iter(pins))
 
 
-def discover(consumers: list[dict]) -> tuple[list[dict], list[dict]]:
+def report_absent_caller(absence: dict) -> None:
+    print(
+        f"::warning title=Generated caller absent::{absence['repository']} is non-conforming: "
+        f"allowlisted generated caller {absence['path']} is absent at {absence['source_sha']}; "
+        "regenerate it or correct the reviewed allowlist"
+    )
+
+
+def discover(consumers: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
     pins = []
     receipts = []
+    absent = []
     for consumer in consumers:
         repository = consumer["repository"]
         default_branch, source_sha = resolve_default_branch(repository)
+        workflow_paths = list_workflow_paths(repository, source_sha)
         for caller in consumer["callers"]:
             path = caller["path"]
+            if path not in workflow_paths:
+                absence = {
+                    "repository": repository,
+                    "default_branch": default_branch,
+                    "source_sha": source_sha,
+                    "path": path,
+                    "generator": caller["generator"],
+                    "canonical_workflows": caller["canonical_workflows"],
+                    "finding": "allowlisted-caller-absent",
+                }
+                report_absent_caller(absence)
+                absent.append(absence)
+                continue
             text, blob_sha = read_caller(repository, path, source_sha)
             pinned_sha = extract_pin(repository, path, text, caller["canonical_workflows"])
             pins.append({"repo": repository, "generator": caller["generator"], "pinned_sha": pinned_sha})
@@ -267,7 +296,7 @@ def discover(consumers: list[dict]) -> tuple[list[dict], list[dict]]:
                     "pinned_sha": pinned_sha,
                 }
             )
-    return pins, receipts
+    return pins, receipts, absent
 
 
 def write_json(path: Path, payload) -> None:
@@ -293,7 +322,7 @@ def main() -> int:
             return 0
         require(args.pins_output is not None, "--pins-output is required for discovery")
         require(args.receipts_output is not None, "--receipts-output is required for discovery")
-        pins, receipts = discover(consumers)
+        pins, receipts, absent = discover(consumers)
         write_json(args.pins_output, pins)
         write_json(
             args.receipts_output,
@@ -302,7 +331,9 @@ def main() -> int:
                 "mode": "observe-only",
                 "repositories_checked": len(consumers),
                 "callers_checked": len(receipts),
+                "callers_absent": len(absent),
                 "receipts": receipts,
+                "absent_callers": absent,
             },
         )
         return 0

@@ -115,6 +115,8 @@ def run_discovery(tmp: pathlib.Path, caller: str, *, repository: str = "Verjson/
     env["PATH"] = f"{tmp}{os.pathsep}{env['PATH']}"
     env["CALLER_TEXT_B64"] = base64.b64encode(caller.encode()).decode()
     env["STUB_MODE"] = mode
+    for output in ("pins.json", "receipts.json"):
+        (tmp / output).unlink(missing_ok=True)
     return subprocess.run(
         [
             sys.executable,
@@ -159,19 +161,37 @@ def main() -> None:
         stub.write_text(
             """#!/usr/bin/env python3
 import json, os, sys
-endpoint = sys.argv[sys.argv.index('GET') + 1]
-if os.environ.get('STUB_MODE') == 'api-failure':
-    print('denied', file=sys.stderr)
+arguments = sys.argv[1:]
+endpoint = arguments[arguments.index('GET') + 1]
+fields = dict(arguments[index + 1].split('=', 1) for index, value in enumerate(arguments) if value == '-f')
+mode = os.environ.get('STUB_MODE', 'ok')
+def fail(message):
+    print(message, file=sys.stderr)
     raise SystemExit(1)
+def require_source_ref():
+    if fields.get('ref') != 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb':
+        fail('contents read is not bound to the resolved source commit')
+if mode == 'api-failure':
+    fail('denied')
 if endpoint == 'repos/Verjson/example':
+    if mode == 'repo-404':
+        fail('gh: Not Found (HTTP 404)')
     print(json.dumps({'default_branch': 'main'}))
 elif endpoint == 'repos/Verjson/example/commits/main':
     print(json.dumps({'sha': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'}))
+elif endpoint == 'repos/Verjson/example/contents/.github/workflows':
+    require_source_ref()
+    entries = [{'name': 'ci.yml', 'path': '.github/workflows/ci.yml', 'type': 'file'}]
+    if mode != 'caller-absent':
+        entries.append({'name': 'gate-rearm.yml', 'path': '.github/workflows/gate-rearm.yml', 'type': 'file'})
+    print(json.dumps(entries))
 elif endpoint == 'repos/Verjson/example/contents/.github/workflows/gate-rearm.yml':
+    require_source_ref()
+    if mode == 'caller-absent':
+        fail('gh: Not Found (HTTP 404)')
     print(json.dumps({'type': 'file', 'encoding': 'base64', 'sha': 'cccccccccccccccccccccccccccccccccccccccc', 'content': os.environ['CALLER_TEXT_B64']}))
 else:
-    print('unexpected endpoint: ' + endpoint, file=sys.stderr)
-    raise SystemExit(1)
+    fail('unexpected endpoint: ' + endpoint)
 """,
             encoding="utf-8",
         )
@@ -246,6 +266,25 @@ else:
 
         api_failure = run_discovery(tmp, valid, mode="api-failure")
         assert api_failure.returncode == 2 and "GitHub API read failed" in api_failure.stderr
+
+        absent = run_discovery(tmp, valid, mode="caller-absent")
+        assert absent.returncode == 0, f"a provably absent caller aborted discovery: {absent.stderr}"
+        assert json.loads((tmp / "pins.json").read_text()) == []
+        absent_receipts = json.loads((tmp / "receipts.json").read_text())
+        assert absent_receipts["receipts"] == []
+        assert absent_receipts["callers_absent"] == 1
+        assert absent_receipts["absent_callers"] == [
+            {
+                "repository": "Verjson/example",
+                "default_branch": "main",
+                "source_sha": SOURCE_SHA,
+                "path": ".github/workflows/gate-rearm.yml",
+                "generator": "scripts/gen-gate-rearm-caller.sh",
+                "canonical_workflows": ["gate-rearm.yml"],
+                "finding": "allowlisted-caller-absent",
+            }
+        ], absent_receipts
+        assert "::warning" in absent.stdout and "Verjson/example" in absent.stdout and "non-conforming" in absent.stdout
 
         invalid_config = allowlist(tmp / "invalid-owner.json", "attacker/example")
         invalid = subprocess.run(
