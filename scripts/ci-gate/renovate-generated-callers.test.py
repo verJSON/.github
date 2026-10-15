@@ -80,6 +80,8 @@ def workflow_and_action_files() -> list[Path]:
 
 
 FENCE_PRESET = ROOT / "renovate/generated-callers.json"
+# The one spelling every consumer uses, recorded in ADR 0232.
+FENCE_PRESET_REFERENCE = "github>Verjson/.github//renovate/generated-callers"
 USAGE_LINE = re.compile(
     r"^#   scripts/gen-changelog-caller\.sh (?P<mode>[a-z-]+) <sha>.*> (?P<path>\S+)(?:[ \t]+#.*)?$",
     re.MULTILINE,
@@ -348,6 +350,39 @@ class GeneratorPinManager(unittest.TestCase):
     def test_every_exact_digest_exception_still_names_a_workflow(self) -> None:
         for relative in EXACT_DIGEST_WORKFLOWS:
             self.assertTrue((ROOT / relative).is_file(), relative)
+
+    def test_this_repository_fences_every_exact_digest_workflow(self) -> None:
+        # Excluding a workflow from the coherence check is only safe if the
+        # grouped digest PR cannot edit it either (ADR 0232 decision 5).
+        for relative in EXACT_DIGEST_WORKFLOWS:
+            with self.subTest(workflow=relative):
+                self.assertTrue(
+                    any(
+                        rule.get("matchManagers") == ["github-actions"]
+                        and relative in rule.get("matchFileNames", [])
+                        for rule in fence_rules(self.config)
+                    ),
+                    f"renovate.json does not fence {relative}",
+                )
+
+
+    def test_this_repository_fences_its_own_generated_callers(self) -> None:
+        # Its release.yml is byte-compared with the pinned generator by
+        # scripts/release-verify.sh, so it needs the fence as much as an adopter
+        # does, without waiting on the organization preset to extend it.
+        self.assertIn(FENCE_PRESET_REFERENCE, self.config.get("extends", []))
+        fenced = {
+            path
+            for rule in fence_rules(json.loads(FENCE_PRESET.read_text(encoding="utf-8")))
+            for path in rule["matchFileNames"]
+        }
+        generated_here = [
+            path.relative_to(ROOT).as_posix()
+            for path in workflow_and_action_files()
+            if GENERATED_CALLER_HEADER.search(path.read_text(encoding="utf-8"))
+        ]
+        self.assertIn(".github/workflows/release.yml", generated_here)
+        self.assertEqual(sorted(set(generated_here) - fenced), [])
 
 
 class ReleaseShapeBindsDeclaredPins(unittest.TestCase):

@@ -1,7 +1,8 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
+    "config:recommended",
+    "github>Verjson/.github//renovate/generated-callers"
   ],
   "rebaseWhen": "conflicted",
   "prConcurrentLimit": 3,
@@ -56,6 +57,12 @@
       "matchManagers": ["github-actions", "custom.regex"],
       "matchPackageNames": ["!ubuntu"],
       "groupName": "github actions digests"
+    },
+    {
+      "description": "runner-canary.yml is accepted by exact content digest (scripts/runner-canary-contract.test.py, and verjson-cli-cloud's contracts/workflows/runner-canary.yml with its receipt's uploadArtifactCommit). Its pins move only together with that consumer, never in the grouped digest PR (ADR 0232).",
+      "matchManagers": ["github-actions"],
+      "matchFileNames": [".github/workflows/runner-canary.yml"],
+      "enabled": false
     },
     {
       "description": "pydantic-core is pydantic's compiled backend and the two are version-coupled upstream; a consumer repo bumping pydantic-core alone (verjson-editor#123) risks an incompatible pairing pydantic's own compatibility table would have caught.",

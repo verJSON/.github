@@ -38,7 +38,10 @@ outside the declaration that automation moves.
    `.github/workflows/release.yml` and `.github/workflows/changelog-contract.yml`. The
    organization preset in Verjson/renovate-config extends it as
    `github>Verjson/.github//renovate/generated-callers`. That one change belongs to the
-   owning repository. Until it lands, the preset here has no effect.
+   owning repository (Verjson/renovate-config#59). This repository's own `renovate.json`
+   extends the same reference, because its generated `release.yml` is byte-compared by
+   `scripts/release-verify.sh` and cannot wait for the organization preset. Until
+   renovate-config extends it, the preset protects no adopter.
 2. **The fence is derived, not curated.** `scripts/ci-gate/renovate-generated-callers.test.py`
    generates every mode listed in the changelog generator's `usage()`. Every output path
    that holds a dependency the manager would update must be fenced. Every fenced path must
@@ -66,6 +69,14 @@ outside the declaration that automation moves.
    same-action pin in this repository's workflows. There are two exceptions: generated
    callers here, which follow their own contract pin (`scripts/release-verify.sh`), and
    workflows that another repository accepts by exact content digest (`runner-canary.yml`).
+   Each exception is fenced from the grouped digest PR as well: the generated callers by
+   the preset, and each exact-digest workflow by its own `renovate.json` rule. The test
+   asserts both, so no exclusion from the coherence check is also a path Renovate edits.
+6. **The binding is tested where the digest stopped carrying it.** Registered rejection
+   cases run the generated release-shape check against every release mode, and each one
+   asserts its own diagnostic: a verify checkout moved off its declared commit, a
+   setup-node step moved off its declared commit, and an empty, unpinned, or wrong-owner
+   `EXPECTED_RELEASE_*` value.
 
 ## Consequences
 
