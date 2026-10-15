@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -176,6 +177,27 @@ def generate(generator: str, mode: str, ref: str, *arguments: str) -> str:
     return result.stdout
 
 
+# The runner's own runtime, not contract inputs (scripts/ci-gate/conformance/
+# contract_steps.py): a hosted tool-cache interpreter resolves libpython through
+# LD_LIBRARY_PATH, so a child given only PATH cannot start at all.
+RUNTIME_BASELINE = ("PATH", "LD_LIBRARY_PATH", "LANG", "LC_ALL", "TMPDIR")
+COULD_NOT_RUN = (126, 127)
+
+
+def run_release_shape(checker: Path, workflow: Path, inputs: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run the extracted check on this interpreter with only the runtime and its inputs."""
+    environment = {name: os.environ[name] for name in RUNTIME_BASELINE if name in os.environ}
+    result = subprocess.run(
+        [sys.executable, "-I", str(checker), str(workflow)],
+        env={**environment, **inputs}, capture_output=True, text=True,
+    )
+    # A loader or exec failure is not a verdict: reported as a refusal it would
+    # satisfy a rejection case, and as a failure it hides the real cause.
+    if result.returncode in COULD_NOT_RUN:
+        raise RuntimeError(f"release-shape check could not start: {result.stderr.strip()}")
+    return result
+
+
 def extract_heredoc(text: str, delimiter: str) -> str:
     match = re.search(
         rf"<<'{delimiter}'\n(?P<body>.*?)\n{delimiter}\n", text, re.DOTALL
@@ -296,8 +318,7 @@ class GeneratorPinManager(unittest.TestCase):
         ).stdout.strip()
         contract_test = generate(renovated, "contract-test", ref)
         release_shape = extract_heredoc(contract_test, "RELEASE_SHAPE_PY")
-        environment = {
-            "PATH": os.environ["PATH"],
+        inputs = {
             "CONTRACT_REF": ref,
             "RELEASE_CALLER_PACKAGE_DIRS_JSON": '["."]',
             **{
@@ -311,10 +332,7 @@ class GeneratorPinManager(unittest.TestCase):
             for mode, arguments in RELEASE_MODES.items():
                 workflow = Path(scratch) / f"{mode}.yml"
                 workflow.write_text(generate(renovated, mode, ref, *arguments), encoding="utf-8")
-                result = subprocess.run(
-                    ["python3", "-I", str(checker), str(workflow)],
-                    env=environment, capture_output=True, text=True,
-                )
+                result = run_release_shape(checker, workflow, inputs)
                 self.assertEqual(result.returncode, 0, f"{mode}: {result.stderr}")
 
     def test_generator_pins_match_this_repository_workflow_pins(self) -> None:
@@ -409,17 +427,12 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
             checker.write_text(self.release_shape, encoding="utf-8")
             target = Path(scratch) / "release.yml"
             target.write_text(workflow, encoding="utf-8")
-            return subprocess.run(
-                ["python3", "-I", str(checker), str(target)],
-                env={
-                    "PATH": os.environ["PATH"],
-                    "CONTRACT_REF": self.ref,
-                    "RELEASE_CALLER_PACKAGE_DIRS_JSON": '["."]',
-                    **self.pins,
-                    **pins,
-                },
-                capture_output=True, text=True,
-            )
+            return run_release_shape(checker, target, {
+                "CONTRACT_REF": self.ref,
+                "RELEASE_CALLER_PACKAGE_DIRS_JSON": '["."]',
+                **self.pins,
+                **pins,
+            })
 
     def swap_step_pin(self, workflow: str, step_name: str, variable: str) -> str:
         declared = self.pins[variable].split(" #", 1)[0]
