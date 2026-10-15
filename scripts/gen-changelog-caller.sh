@@ -1166,6 +1166,7 @@ ${release_plan_step}
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           RELEASE_VERIFICATION_PATH: \${{ steps.release-verification-runtime.outputs.path }}
           VERJSON_CHANGELOG_TOOL_CACHE: \${{ steps.release-verification-runtime.outputs.cache }}
+          CI_PACKAGE_RETENTION_KEEP: '3'
           CI: 'true'
           BASH_ENV: ''
           ENV: ''
@@ -1225,6 +1226,7 @@ ${release_plan_step}
               PACKAGE_VERSION="\$PACKAGE_VERSION" \\
               RELEASE_VERIFICATION_PATH="\$RELEASE_VERIFICATION_PATH" \\
               VERJSON_CHANGELOG_TOOL_CACHE="\$VERJSON_CHANGELOG_TOOL_CACHE" \\
+              CI_PACKAGE_RETENTION_KEEP="\$CI_PACKAGE_RETENTION_KEEP" \\
               NODE_AUTH_TOKEN='' \\
               GIT_TERMINAL_PROMPT=0 \\
               npm_config_script_shell=/bin/sh \\
@@ -1797,6 +1799,7 @@ ${required_lane_validation_step}
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           RELEASE_VERIFICATION_PATH: \${{ steps.release-verification-runtime.outputs.path }}
           VERJSON_CHANGELOG_TOOL_CACHE: \${{ steps.release-verification-runtime.outputs.cache }}
+          CI_PACKAGE_RETENTION_KEEP: '3'
           CI: 'true'
           BASH_ENV: ''
           ENV: ''
@@ -1855,6 +1858,7 @@ ${required_lane_validation_step}
               RUNNER_TOOL_CACHE="\$RUNNER_TOOL_CACHE" \\
               PACKAGE_VERSION="\$PACKAGE_VERSION" \\
               VERJSON_CHANGELOG_TOOL_CACHE="\$VERJSON_CHANGELOG_TOOL_CACHE" \\
+              CI_PACKAGE_RETENTION_KEEP="\$CI_PACKAGE_RETENTION_KEEP" \\
               NODE_AUTH_TOKEN='' \\
               GIT_TERMINAL_PROMPT=0 \\
               npm_config_script_shell=/bin/sh \\
@@ -2382,6 +2386,7 @@ ${release_plan_step}
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           RELEASE_VERIFICATION_PATH: \${{ steps.release-verification-runtime.outputs.path }}
           VERJSON_CHANGELOG_TOOL_CACHE: \${{ steps.release-verification-runtime.outputs.cache }}
+          CI_PACKAGE_RETENTION_KEEP: '3'
           CI: 'true'
           BASH_ENV: ''
           ENV: ''
@@ -2440,6 +2445,7 @@ ${release_plan_step}
               RUNNER_TOOL_CACHE="\$RUNNER_TOOL_CACHE" \\
               PACKAGE_VERSION="\$PACKAGE_VERSION" \\
               VERJSON_CHANGELOG_TOOL_CACHE="\$VERJSON_CHANGELOG_TOOL_CACHE" \\
+              CI_PACKAGE_RETENTION_KEEP="\$CI_PACKAGE_RETENTION_KEEP" \\
               NODE_AUTH_TOKEN='' \\
               GIT_TERMINAL_PROMPT=0 \\
               npm_config_script_shell=/bin/sh \\
@@ -4127,9 +4133,9 @@ APPROVED_RELEASE_STATE_SCRIPT_SHA256 = {
     "release-snapshot": "0860f7c804f4e5111e9461230e9e999ac3b1a0761a54ea57488c9772854ce22c",
 }
 APPROVED_RELEASE_VERIFICATION_SCRIPT_SHA256 = {
-    "release-node": "914b18059a48cc42dfbed8b3b8823a6bf77c0e00d628d914cfb2b04252083345",
-    "release-artifact": "1635cf1d6d0ae9d94469c7da1c1d386ec72aac70c599e8a92efaca27c9f911d7",
-    "release-snapshot": "5de64b89d651333b1a2a2fc11d13a114fd23b2393147ffd68e2e0d81956c5edc",
+    "release-node": "fdd5e0bf907d8fa9a1ec99264fcacb7b2a03a2cf1ea93002f2c0faf6c0d22ec3",
+    "release-artifact": "a39c82f0da1b0fec6ca025410c55f53c3c595e80fe02540b431492e7a2d015f5",
+    "release-snapshot": "a02850edfc3e9581f5ddee83ccdb5128537424d97eb9afbb70cb9c9bda7029fb",
 }
 APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
     "release-node": "0caf167486937a2def16a5223fcb64b1a4a737447d424c83a891c2aac4e3b3a2",
@@ -4172,6 +4178,7 @@ EXPECTED_RELEASE_VERIFICATION_ENV = {
     "RELEASE_VERIFICATION_PATH": "${{ steps.release-verification-runtime.outputs.path }}",
     "CI": "'true'",
     "VERJSON_CHANGELOG_TOOL_CACHE": "${{ steps.release-verification-runtime.outputs.cache }}",
+    "CI_PACKAGE_RETENTION_KEEP": "'3'",
     "BASH_ENV": "''",
     "ENV": "''",
     "SHELLOPTS": "''",
