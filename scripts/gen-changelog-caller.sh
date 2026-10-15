@@ -693,6 +693,15 @@ EOF
 # drift; the generated contract test asserts they are still identical.
 release_runner_expr="github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || '[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]'"
 
+# The package retention window, exactly as the post-publish retention jobs in
+# node-release.yml and container-release.yml read it. A release verification
+# hook that holds back a still-consumed version (verjson-ci#298) must protect
+# against the window those jobs will actually delete against, so it reads the
+# same organization variable through the same expression; a reusable workflow's
+# `vars` context is the caller's, so both halves resolve one value.
+# scripts/ci-gate/release-verify-retention-keep.test.py fails if either drifts.
+package_retention_keep_expr="vars.CI_PACKAGE_RETENTION_KEEP || '3'"
+
 # The audited action commits this repository pins everywhere else
 # (scripts/node-workflow-pins.test.sh).
 release_checkout='actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7'
@@ -1166,7 +1175,7 @@ ${release_plan_step}
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           RELEASE_VERIFICATION_PATH: \${{ steps.release-verification-runtime.outputs.path }}
           VERJSON_CHANGELOG_TOOL_CACHE: \${{ steps.release-verification-runtime.outputs.cache }}
-          CI_PACKAGE_RETENTION_KEEP: '3'
+          CI_PACKAGE_RETENTION_KEEP: \${{ ${package_retention_keep_expr} }}
           CI: 'true'
           BASH_ENV: ''
           ENV: ''
@@ -1799,7 +1808,7 @@ ${required_lane_validation_step}
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           RELEASE_VERIFICATION_PATH: \${{ steps.release-verification-runtime.outputs.path }}
           VERJSON_CHANGELOG_TOOL_CACHE: \${{ steps.release-verification-runtime.outputs.cache }}
-          CI_PACKAGE_RETENTION_KEEP: '3'
+          CI_PACKAGE_RETENTION_KEEP: \${{ ${package_retention_keep_expr} }}
           CI: 'true'
           BASH_ENV: ''
           ENV: ''
@@ -2386,7 +2395,7 @@ ${release_plan_step}
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           RELEASE_VERIFICATION_PATH: \${{ steps.release-verification-runtime.outputs.path }}
           VERJSON_CHANGELOG_TOOL_CACHE: \${{ steps.release-verification-runtime.outputs.cache }}
-          CI_PACKAGE_RETENTION_KEEP: '3'
+          CI_PACKAGE_RETENTION_KEEP: \${{ ${package_retention_keep_expr} }}
           CI: 'true'
           BASH_ENV: ''
           ENV: ''
@@ -4178,7 +4187,7 @@ EXPECTED_RELEASE_VERIFICATION_ENV = {
     "RELEASE_VERIFICATION_PATH": "${{ steps.release-verification-runtime.outputs.path }}",
     "CI": "'true'",
     "VERJSON_CHANGELOG_TOOL_CACHE": "${{ steps.release-verification-runtime.outputs.cache }}",
-    "CI_PACKAGE_RETENTION_KEEP": "'3'",
+    "CI_PACKAGE_RETENTION_KEEP": "${{ vars.CI_PACKAGE_RETENTION_KEEP || '3' }}",
     "BASH_ENV": "''",
     "ENV": "''",
     "SHELLOPTS": "''",

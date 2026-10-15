@@ -143,6 +143,14 @@ class ReleaseVerifyRetentionKeepTests(unittest.TestCase):
                 self.assertIsNotNone(hook_env, "the verification hook never ran")
                 self.assertEqual(hook_env.get(RETENTION_KEY), "3")
 
+    def test_hook_receives_the_org_retention_window_when_the_variable_is_set(self):
+        for mode, step in self.steps.items():
+            with self.subTest(mode=mode):
+                result, hook_env = run_verify_step(step, variables={RETENTION_KEY: "7"})
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIsNotNone(hook_env, "the verification hook never ran")
+                self.assertEqual(hook_env.get(RETENTION_KEY), "7")
+
 
 if __name__ == "__main__":
     unittest.main()
