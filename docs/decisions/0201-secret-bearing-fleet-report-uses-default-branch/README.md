@@ -17,3 +17,22 @@ The secret-bearing job uses fixed ephemeral GitHub-hosted capacity rather than a
 Persistent organization runners never receive the App private key. Manual and pull-request-target events cannot reach the token-minting job, and crafted workflow paths remain inert data in the private report.
 
 The report remains actionable to authorized maintainers without publishing private repository names or pin state. A caller update must keep its reusable-workflow reference pinned to a reviewed immutable `.github` commit; the reusable workflow checks out that exact revision as its inventory implementation. Manual branch-selected runs remain unavailable while the caller uses the App private key.
+
+## Amendment (2026-10-15, #1792) — the caller passes a client ID, not an App ID
+
+The report shipped a guard requiring `app_client_id` to be numeric, then passed the value to
+`actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1` (v3.2.0) as
+`client-id`. That input is the App client ID (`Iv23li…`, or legacy `Iv1.…`); the numeric
+value is the deprecated `app-id`. `verjson-agents` passes the organization's real
+`RENOVATE_COMPATIBILITY_CLIENT_ID`, so every scheduled run since 2026-09-28 stopped at the
+guard (verjson-agents run 38294876315). ADR 0119 already requires that credential to be
+present and non-numeric before the token action runs.
+
+The guard now refuses a numeric legacy App ID by name and otherwise accepts only
+`^Iv[A-Za-z0-9.]{8,126}$`, the merge gate's client-ID pattern. The positive pattern refuses
+empty, whitespace, newline, and shell-metacharacter values rather than relying on a
+numeric deny-list. The step pins `LC_ALL: C`, because bash collates bracket ranges by
+locale and under `en_US.UTF-8` `[A-Za-z]` matches accented and fullwidth letters; it runs
+unconditionally under bash with no `continue-on-error`.
+`scripts/ci-gate/fleet-contract-inventory.test.py` executes the workflow's own step against
+each class under a hostile `en_US.UTF-8` ambient locale.

@@ -26,9 +26,15 @@ jobs:
       - name: Validate caller inputs
         env:
           APP_CLIENT_ID: ${{ inputs.app_client_id }}
+          # Bracket ranges are locale-collated; en_US.UTF-8 lets [A-Za-z] match accented letters.
+          LC_ALL: C
         run: |
-          if [[ ! "$APP_CLIENT_ID" =~ ^[0-9]+$ ]]; then
-            echo "::error::app_client_id must be a numeric GitHub App client ID."
+          if [[ "$APP_CLIENT_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::app_client_id is a numeric legacy App ID; pass the App's client ID (Iv23li..., or legacy Iv1.<hex>) instead."
+            exit 1
+          fi
+          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[A-Za-z0-9.]{8,126}$ ]]; then
+            echo "::error::app_client_id must be a GitHub App client ID matching ^Iv[A-Za-z0-9.]{8,126}\$."
             exit 1
           fi
 

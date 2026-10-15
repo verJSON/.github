@@ -10,9 +10,13 @@ import base64
 import importlib.util
 import io
 import json
+import os
 import pathlib
+import subprocess
 import sys
 import unittest
+
+import yaml
 
 _root = pathlib.Path(__file__).resolve().parents[2]
 
@@ -711,6 +715,110 @@ class ContractFleetReport(unittest.TestCase):
         self.assertIn("RENOVATE_COMPATIBILITY_APP_PRIVATE_KEY", workflow)
         self.assertNotIn("permission-contents: write", workflow)
         self.assertNotIn("permission-pull-requests: write", workflow)
+
+
+class ReportCallerClientIdValidation(unittest.TestCase):
+    """Executes the report workflow's own input guard -- Verjson/.github#1792.
+
+    The guard once demanded a numeric value, which is the App ID; every real
+    client ID (`Iv23li...`) was refused, so the scheduled report never ran.
+    """
+
+    WORKFLOW = _root / ".github/workflows/changelog-contract-fleet-report.yml"
+    # A runner whose ambient locale is en_US.UTF-8 makes bash's `[A-Za-z]`
+    # match accented and fullwidth letters. The guard runs under that hostile
+    # default and only the step's own `env` may override it.
+    AMBIENT_LOCALE = "en_US.UTF-8"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.document = yaml.safe_load(cls.WORKFLOW.read_text())
+        cls.job = cls.document["jobs"]["report"]
+        cls.steps = cls.job["steps"]
+        cls.guard = next(s for s in cls.steps if s.get("name") == "Validate caller inputs")
+
+    def run_guard(self, client_id):
+        step_env = dict(self.guard["env"])
+        self.assertEqual(step_env.pop("APP_CLIENT_ID"), "${{ inputs.app_client_id }}")
+        for name, value in step_env.items():
+            self.assertNotIn("${{", str(value), name)
+        return subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", self.guard["run"]],
+            env={
+                "PATH": os.environ["PATH"],
+                "LC_ALL": self.AMBIENT_LOCALE,
+                **{name: str(value) for name, value in step_env.items()},
+                "APP_CLIENT_ID": client_id,
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_the_guard_pins_the_c_locale(self):
+        self.assertEqual(self.guard["env"].get("LC_ALL"), "C")
+        probe = subprocess.run(
+            ["bash", "-c", '[[ "$1" =~ ^[A-Za-z]$ ]]', "_", "\u00c4"],
+            env={"PATH": os.environ["PATH"], "LC_ALL": self.AMBIENT_LOCALE},
+            check=False,
+        )
+        if probe.returncode != 0:
+            self.skipTest(f"{self.AMBIENT_LOCALE} is not installed; the env assertion still holds")
+        for client_id in ("Iv23li\u00c4bCdEfGh12", "Iv23li\u00e9bCdEfGh12", "Iv23li\uff42bCdEfGh12"):
+            with self.subTest(client_id=client_id):
+                self.assertNotEqual(self.run_guard(client_id).returncode, 0)
+
+    def test_the_guard_step_always_runs_under_bash_and_fails_the_job(self):
+        self.assertNotIn("if", self.guard)
+        self.assertNotIn("continue-on-error", self.guard)
+        self.assertNotIn("continue-on-error", self.job)
+        for defaults in (self.document.get("defaults"), self.job.get("defaults")):
+            self.assertIn(((defaults or {}).get("run") or {}).get("shell", "bash"), ("bash",))
+        self.assertIn(self.guard.get("shell", "bash"), ("bash",))
+
+    def test_the_guard_reaches_the_value_minted_with_through_an_env_binding(self):
+        mint = next(s for s in self.steps if s.get("id") == "inventory-token")
+        self.assertEqual(mint["with"].get("client-id"), "${{ inputs.app_client_id }}")
+        self.assertNotIn("app-id", mint["with"])
+        self.assertNotIn("inputs.app_client_id", self.guard["run"])
+        self.assertLess(self.steps.index(self.guard), self.steps.index(mint))
+
+    def test_real_client_ids_are_accepted(self):
+        for client_id in ("Iv23liAbCdEfGh12", "Iv23liZyXwVuTsRq9876", "Iv1.0123456789abcdef"):
+            with self.subTest(client_id=client_id):
+                result = self.run_guard(client_id)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_numeric_legacy_app_id_is_refused_naming_the_client_id_format(self):
+        result = self.run_guard("4717539")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("::error::", result.stdout)
+        self.assertIn("numeric", result.stdout)
+        self.assertIn("Iv", result.stdout)
+
+    def test_empty_whitespace_and_injection_shaped_values_are_refused(self):
+        for client_id in (
+            "",
+            " ",
+            " Iv23liZyXwVuTsRq9876",
+            "Iv23liZyXwVuTsRq9876 ",
+            "Iv23li$(id)",
+            "Iv23li`id`",
+            "Iv23liZyXwVuTsRq9876\n",
+            "Iv23li\nIv23liZyXwVuTsRq9876",
+            "Iv23li;id",
+            "iv23liZyXwVuTsRq9876",
+            "Iv23li-bCdEfGh12",
+            "Iv23li$bCdEfGh12",
+            "Iv23li_bCdEfGh12",
+            "Iv23li\u00c4bCdEfGh12",
+            "Iv",
+            "Iv" + "a" * 127,
+        ):
+            with self.subTest(client_id=client_id):
+                result = self.run_guard(client_id)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("::error::", result.stdout)
 
 
 if __name__ == "__main__":
