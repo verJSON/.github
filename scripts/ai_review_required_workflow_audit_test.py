@@ -1358,11 +1358,20 @@ jobs:
             (1, "gh: Forbidden (HTTP 403)"),
             (1, "gh: Internal Server Error (HTTP 500)"),
             (1, ""),
+            # The status is the trailing marker on its line, as gh prints it; a
+            # 404 quoted inside another status's message is not that status.
+            (1, "gh: Forbidden: upstream answered (HTTP 404) to the proxy (HTTP 403)\n"),
         ):
             with self.subTest(stderr=stderr):
                 self.run_gh_api(returncode, "", stderr)
                 with self.assertRaisesRegex(AUDIT.AuditError, r"GitHub API read failed for repos/x"):
                     AUDIT.gh_pages("repos/x", allow_missing=True)
+
+    def test_a_404_is_read_from_the_end_of_ghs_status_line(self):
+        for stderr in ("gh: Not Found (HTTP 404)", "gh: Not Found (HTTP 404)\n"):
+            with self.subTest(stderr=stderr):
+                self.run_gh_api(1, "", stderr)
+                self.assertEqual(AUDIT.gh_pages("repos/x", allow_missing=True), [])
 
     def test_a_caller_finding_does_not_mask_an_environment_finding(self):
         # The audit runs daily. Reporting one class of adopter finding at a time

@@ -377,6 +377,9 @@ def read_contract(path: Path = CONTRACT) -> dict:
     return contract
 
 
+HTTP_404 = re.compile(r"\(HTTP 404\)$", re.MULTILINE)
+
+
 def gh_pages(path: str, allow_missing: bool = False) -> list:
     result = subprocess.run(
         ["gh", "api", "--paginate", "--slurp", path],
@@ -390,7 +393,10 @@ def gh_pages(path: str, allow_missing: bool = False) -> list:
         # still an unreadable API and must stop the audit, because reporting
         # "absent" for an expired token would turn the whole fleet green-to-red
         # on a credential problem and vice versa.
-        if allow_missing and "(HTTP 404)" in result.stderr:
+        # gh ends its status line with the code; anchoring there, as
+        # privileged-merge-conformance.sh does, keeps a 404 quoted inside
+        # another status's message from reading as absence.
+        if allow_missing and HTTP_404.search(result.stderr):
             return []
         raise AuditError(f"GitHub API read failed for {path}")
     try:
