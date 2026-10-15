@@ -998,6 +998,10 @@ jobs:
             "a non-object entry": [{"total_count": 2, "secrets": [other, PRIVATE_KEY]}],
             "a duplicate name": [{"total_count": 2, "secrets": [other, other]}],
             "a page without secrets": [{"total_count": 0}],
+            # Iterable but not a list: an empty string or object would supply no
+            # entries and a matching total_count of 0, i.e. a forged "complete".
+            "a string secrets field": [{"total_count": 0, "secrets": ""}],
+            "an object secrets field": [{"total_count": 0, "secrets": {}}],
             "a non-object page": [[other]],
             "a missing total_count": [{"secrets": [other]}],
             "a boolean total_count": [{"total_count": True, "secrets": [other]}],
