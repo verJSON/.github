@@ -19,7 +19,7 @@ cat > "$toolchain/bin/npm" <<'NPM'
 printf '%s\n' "$*" >> "$GITHUB_WORKSPACE/node_modules/.npm-stub.log"
 NPM
 chmod +x "$toolchain/bin/node" "$toolchain/bin/npm"
-trap 'rm -rf "$tmp"' EXIT
+trap 'chmod -R u+rwx "$tmp" 2>/dev/null; rm -rf "$tmp"' EXIT
 
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; failures=$((failures + 1)); }
@@ -624,6 +624,21 @@ const dependency = require(path.join(__dirname, "consumer", "node_modules", "fix
 const leaked = ["RUNTIME_CACHE_DIR", "RESTORE_PERSISTED_PUBLIC_CACHE", "SECRETLESS_RUNTIME_PUBLIC_CACHE", "RUN_ID", "RUN_ATTEMPT"]
   .filter((name) => name in process.env);
 fs.writeFileSync(path.join(__dirname, "rehearsed"), `${leaked.length ? `leaked ${leaked}` : dependency.value}\\n`);
+// Overwrite every staged blob in place, then seal the staging tree so the
+// trusted cleanup must restore permissions before it can remove it.
+const blobs = [];
+const collect = (directory) => {
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) collect(entryPath);
+    else if (entry.isFile()) blobs.push(entryPath);
+  }
+};
+collect(path.join(content, "sha512"));
+if (blobs.length === 0) throw new Error("no staged blob to overwrite");
+for (const blob of blobs) fs.writeFileSync(blob, "poisoned by consumer");
+fs.chmodSync(path.join(content, "sha512"), 0o000);
+fs.chmodSync(content, 0o000);
 """, encoding="utf-8")
 PY
 runtime_inventory() { (cd "$runtime_cache" && find . -print0 | sort -z | xargs -0 sha256sum 2>/dev/null; find . | sort); }
@@ -639,11 +654,15 @@ if [ "$rehearsal_status" -eq 0 ] && [ "$(cat "$rehearsal/rehearsed" 2>/dev/null)
 else
   fail "a sandboxed consumer script cannot reinstall from the verified runtime cache (#1798): $(grep -m1 -E 'ENOTCACHED|Error|error' "$tmp/rehearsal-output.log")"
 fi
-if [ "$(runtime_inventory)" = "$runtime_before" ] \
-    && [ -z "$(find "$runner_temp" -maxdepth 1 -name 'verjson-consumer-runtime-cache-*' -print -quit)" ]; then
+if [ "$(runtime_inventory)" = "$runtime_before" ]; then
   pass "consumer scripts receive a disposable copy, never the job's runtime cache (#1798)"
 else
   fail "a consumer script changed the job's verified runtime cache (#1798)"
+fi
+if [ -z "$(find "$runner_temp" -maxdepth 1 -name 'verjson-consumer-runtime-cache-*' -print -quit)" ]; then
+  pass "a staging copy the consumer script sealed is still removed (#1798)"
+else
+  fail "a sealed consumer runtime cache staging directory was left behind (#1798)"
 fi
 
 # A requested cache that is missing, relocated, or carries a non-regular blob
@@ -686,6 +705,15 @@ printf 'host secret\n' > "$host_secret"
 ln -s "$host_secret" "$runtime_cache/_cacache/content-v2/sha512/linked-blob"
 rehearsal_case "a runtime cache blob that is a symlink" reject "$runtime_cache" 4242 true
 rm -f "$runtime_cache/_cacache/content-v2/sha512/linked-blob"
+host_directory="$tmp/host-only-directory"
+mkdir -p "$host_directory"
+printf 'host secret\n' > "$host_directory/blob"
+ln -s "$host_directory" "$runtime_cache/_cacache/content-v2/sha512/linked-directory"
+rehearsal_case "a runtime cache directory that is a symlink" reject "$runtime_cache" 4242 true
+rm -f "$runtime_cache/_cacache/content-v2/sha512/linked-directory"
+mkfifo "$runtime_cache/_cacache/content-v2/sha512/fifo-blob"
+rehearsal_case "a runtime cache blob that is a FIFO" reject "$runtime_cache" 4242 true
+rm -f "$runtime_cache/_cacache/content-v2/sha512/fifo-blob"
 
 for bad_plan in '["build","build"]' '["--help"]' '["missing"]' '{"script":"build"}' \
   '[{"script":"build","unsetEnv":["NODE_AUTH_TOKEN"]}]'; do

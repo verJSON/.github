@@ -5089,6 +5089,7 @@ jobs:
           import os
           import re
           import shutil
+          import stat
           import subprocess
           import sys
           import tempfile
@@ -5658,6 +5659,27 @@ jobs:
                       sys.exit("consumer runtime cache content is not a directory")
               return content
 
+          def remove_runtime_cache_staging(staging):
+              # Candidate code runs as the runner's uid and can chmod a staged
+              # directory to 000, which would block removal. The sandbox's PID
+              # namespace has exited by now, so restoring owner access to each
+              # real directory (lstat, never through a symlink) cannot race it.
+              pending = [staging]
+              while pending:
+                  current = pending.pop()
+                  try:
+                      if not stat.S_ISDIR(os.lstat(current).st_mode):
+                          continue
+                      os.chmod(current, 0o700)
+                      with os.scandir(current) as entries:
+                          pending.extend(
+                              entry.path for entry in entries
+                              if entry.is_dir(follow_symlinks=False)
+                          )
+                  except OSError:
+                      continue
+              shutil.rmtree(staging, ignore_errors=True)
+
           def stage_runtime_cache(content):
               # npm writes into its cache, so each script gets a disposable copy:
               # a read-only bind fails npm, and binding the job's cache writable
@@ -5677,12 +5699,25 @@ jobs:
                       if any(Path(current, entry).is_symlink() for entry in subdirectories):
                           sys.exit("consumer runtime cache content is not a directory")
                       for entry in names:
-                          blob = Path(current, entry)
-                          if blob.is_symlink() or not blob.is_file():
+                          # Copy from the descriptor that was type-checked, so a
+                          # path swapped after the check cannot redirect the read.
+                          try:
+                              source = os.open(
+                                  Path(current, entry),
+                                  os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                                  | getattr(os, "O_CLOEXEC", 0),
+                              )
+                          except OSError:
                               sys.exit("consumer runtime cache blob is not a regular file")
-                          shutil.copyfile(blob, staging / relative / entry)
+                          with os.fdopen(source, "rb") as source_stream:
+                              if not stat.S_ISREG(os.fstat(source_stream.fileno()).st_mode):
+                                  sys.exit("consumer runtime cache blob is not a regular file")
+                              with open(staging / relative / entry, "xb") as target_stream:
+                                  shutil.copyfileobj(
+                                      source_stream, target_stream, length=1024 * 1024,
+                                  )
               except BaseException:
-                  shutil.rmtree(staging, ignore_errors=True)
+                  remove_runtime_cache_staging(staging)
                   raise
               return staging
 
@@ -5830,10 +5865,9 @@ jobs:
                       os.close(descriptor)
                   mount_fds.clear()
                   if runtime_cache_staging is not None:
-                      shutil.rmtree(runtime_cache_staging, ignore_errors=True)
+                      remove_runtime_cache_staging(runtime_cache_staging)
                       if os.path.lexists(runtime_cache_staging):
-                          # Candidate code runs as the runner's uid and can seal
-                          # a staged directory. Name only this step's own path.
+                          # Name only this step's own path.
                           print(
                               "::warning::consumer runtime cache staging was not removed: "
                               f"{runtime_cache_staging}",

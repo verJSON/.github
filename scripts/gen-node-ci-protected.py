@@ -721,6 +721,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
           import os
           import re
           import shutil
+          import stat
           import subprocess
           import sys
           import tempfile

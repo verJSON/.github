@@ -291,3 +291,18 @@ show that a tampering script leaves the job's cache unchanged. Both fail on the
 pre-fix workflow. Static checks pin `npm_config_nodedir`, the rebuild network unshare,
 the consumer cache wiring, and the absence of a consumer network unshare in the
 `platform` group, ignoring commented-out lines.
+
+Review hardening (same issue): the consumer staging copy opens each cache entry with
+`O_NOFOLLOW | O_NONBLOCK`, checks the open descriptor with `fstat` for a regular file,
+and copies from that descriptor rather than from the path. A symlink, FIFO, or
+symlinked directory therefore fails before candidate code runs. Before removing a
+staging copy, cleanup restores owner access to each real directory (by `lstat`, never
+through a symlink), so a candidate script that seals its copy with `chmod 000` cannot
+leave it behind. Regressions overwrite every staged blob in place and seal the tree, then
+require the job's cache to be unchanged and the copy to be gone.
+
+Known limitation: `npm_config_nodedir` names the prefix that owns the selected `node`.
+Official Node distributions (`actions/setup-node`, the hosted runner image) ship
+`include/node` there. A distribution build installed under `/usr` may not, and a native
+rebuild against it still fails offline, because the sandbox cannot download headers in
+any configuration.
