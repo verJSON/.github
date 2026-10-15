@@ -190,14 +190,6 @@ jobs:
     outputs:
       should-run: ${{ steps.check.outputs.should-run }}
     steps:
-    - name: Reject incompatible secretless compatibility runner
-      if: inputs.secretless-trusted-ref && inputs.secretless-compatibility-ranges != '' && runner.environment != 'github-hosted'
-      shell: bash
-      run: 'echo "::error::secretless-compatibility-ranges requires a GitHub-hosted runner for secretless-trusted-ref"
-
-        exit 1
-
-        '
     - id: check
       shell: bash
       env:

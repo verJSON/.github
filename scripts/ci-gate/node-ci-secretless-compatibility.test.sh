@@ -273,23 +273,8 @@ for name, filename in {
     Path(sys.argv[2], filename).write_text(steps[name]["run"], encoding="utf-8")
 assert jobs["acquire-secretless-dependencies"]["permissions"] == {"contents": "read", "packages": "read"}
 assert jobs["build-test"]["permissions"] == {"contents": "read"}
-runner_guard = next(
- step for step in jobs["eligibility"]["steps"]
- if step.get("name") == "Reject incompatible secretless compatibility runner"
-)
-assert runner_guard["if"] == (
- "inputs.secretless-trusted-ref && "
- "inputs.secretless-compatibility-ranges != '' && "
- "runner.environment != 'github-hosted'"
-)
-guard_result = subprocess.run(
- ["/usr/bin/bash", "-c", runner_guard["run"]], capture_output=True, text=True
-)
-assert guard_result.returncode == 1
-assert guard_result.stdout.strip() == (
- "::error::secretless-compatibility-ranges requires a GitHub-hosted runner "
- "for secretless-trusted-ref"
-)
+# The hosted-lane eligibility guard is executed against stubbed inputs by
+# scripts/ci-gate/node-ci-secretless-hosted-lane.test.py (ADR 0146 amendment).
 runner = steps["Run runtime-resolved compatibility lanes without credentials"]
 protected_doc = yaml.safe_load(Path(sys.argv[3]).read_text(encoding="utf-8"))
 protected_steps = {
