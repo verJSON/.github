@@ -194,7 +194,9 @@ elif endpoint == 'repos/Verjson/example/contents/.github/workflows':
         print(json.dumps({'type': 'file', 'path': '.github/workflows'}))
         raise SystemExit(0)
     entries = [{'name': 'ci.yml', 'path': '.github/workflows/ci.yml', 'type': 'file'}]
-    if mode != 'caller-absent':
+    if mode == 'listing-entry-without-path':
+        entries.append({'name': 'gate-rearm.yml', 'type': 'file'})
+    elif mode != 'caller-absent':
         entries.append({'name': 'gate-rearm.yml', 'path': '.github/workflows/gate-rearm.yml', 'type': 'file'})
     print(json.dumps(entries))
 elif endpoint == 'repos/Verjson/example/contents/.github/workflows/gate-rearm.yml':
@@ -310,6 +312,7 @@ else:
             ("listing-500", "GitHub API read failed for repos/Verjson/example/contents/.github/workflows:"),
             ("listing-malformed-json", "GitHub API returned malformed JSON for repos/Verjson/example/contents/.github/workflows:"),
             ("listing-object", "workflows directory listing is malformed for Verjson/example"),
+            ("listing-entry-without-path", "workflows directory listing entry is malformed for Verjson/example"),
             ("caller-404", "GitHub API read failed for repos/Verjson/example/contents/.github/workflows/gate-rearm.yml:"),
             ("caller-403", "GitHub API read failed for repos/Verjson/example/contents/.github/workflows/gate-rearm.yml:"),
             ("caller-500", "GitHub API read failed for repos/Verjson/example/contents/.github/workflows/gate-rearm.yml:"),

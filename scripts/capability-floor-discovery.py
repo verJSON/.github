@@ -161,7 +161,14 @@ def resolve_default_branch(repository: str) -> tuple[str, str]:
 def list_workflow_paths(repository: str, source_sha: str) -> set[str]:
     response = run_gh(f"repos/{repository}/contents/{WORKFLOWS_DIRECTORY}", {"ref": source_sha})
     require(isinstance(response, list), f"workflows directory listing is malformed for {repository}")
-    return {entry["path"] for entry in response}
+    paths = set()
+    for entry in response:
+        require(
+            isinstance(entry, dict) and isinstance(entry.get("path"), str),
+            f"workflows directory listing entry is malformed for {repository}",
+        )
+        paths.add(entry["path"])
+    return paths
 
 
 def read_caller(repository: str, path: str, source_sha: str) -> tuple[str, str]:
