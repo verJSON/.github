@@ -246,6 +246,6 @@ The audit then reaches the adopter checks. Provisioning of every armed `ai-revie
 environment is complete, so the environment-policy and review-key classes no longer
 reproduce. Two classes remain, both consumer drift for repository owners: verjson-editor
 has no admission caller `.github/workflows/ai-review-merge.yml`, so the arm cannot
-authorize its pull requests, and 24 generated adopter callers are missing across 20 armed
-repositories. `config/audit-expected-findings.json` re-records that finding under #1810, which tracks
+authorize its pull requests, and 24 generated adopter callers were missing across 20 armed
+repositories (23 across 19 once verjson-payments#248 added its label re-arm caller). `config/audit-expected-findings.json` re-records that finding under #1810, which tracks
 the per-repository regeneration; regenerating the callers is what removes the entry.
