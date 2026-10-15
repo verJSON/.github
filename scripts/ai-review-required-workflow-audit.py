@@ -398,7 +398,11 @@ def gh_pages(path: str, allow_missing: bool = False) -> list:
         # another status's message from reading as absence.
         if allow_missing and HTTP_404.search(result.stderr):
             return []
-        raise AuditError(f"GitHub API read failed for {path}")
+        # gh's last line is its status, e.g. "gh: Forbidden (HTTP 403)": API
+        # error text only, never a credential, and the one fact that tells an
+        # expired token from an outage.
+        status = next((line.strip() for line in reversed(result.stderr.splitlines()) if line.strip()), "")
+        raise AuditError(f"GitHub API read failed for {path}" + (f": {status}" if status else ""))
     try:
         pages = json.loads(result.stdout)
     except json.JSONDecodeError as error:
@@ -850,22 +854,23 @@ def require_corroborated_withdrawal(read, organization: str, name: str) -> None:
     require(name not in names, f"{unknown} the organization secret listing still names it")
 
 
-def environment_key_state(read, full_name: str, environment: str, name: str) -> str | None:
-    """Return None when the environment holds the secret, else `missing` or `unreadable`.
+def environment_key_state(read, full_name: str, environment: str, name: str) -> tuple[str, str] | None:
+    """Return None when the environment holds the secret, else its finding class and reason.
 
     Metadata only: this endpoint never returns a secret's value. `read` raises for
     every status but 404, so a 403, a 5xx or invalid JSON is `unreadable`, never
-    `missing`; both fail the audit, but only one is a provisioning gap.
+    `missing`; both fail the audit, but only one is a provisioning gap, and an
+    unreadable key carries the read's own error so the two can be told apart.
     """
     try:
         pages = read(f"repos/{full_name}/environments/{environment}/secrets/{name}", allow_missing=True)
-    except AuditError:
-        return "unreadable"
+    except AuditError as error:
+        return "unreadable", str(error)
     if not pages:
-        return "missing"
+        return "missing", ""
     if len(pages) == 1 and isinstance(pages[0], dict) and pages[0].get("name") == name:
         return None
-    return "unreadable"
+    return "unreadable", "response does not identify the key"
 
 
 def verify_private_key_custody(read, organization: str, name: str, governed: dict[str, bool]) -> bool:
@@ -998,7 +1003,8 @@ def verify_adopter_conformance(
         if environment_custody:
             state = environment_key_state(read, full_name, environment, private_key)
             if state:
-                key_findings[state].append(label)
+                kind, reason = state
+                key_findings[kind].append(f"{label} ({reason})" if reason else label)
         live = pages[0]
         mismatches = image_mismatches(
             live.get("deployment_branch_policy"),

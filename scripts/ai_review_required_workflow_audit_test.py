@@ -1078,10 +1078,15 @@ jobs:
         # gh_pages raises for every status but 404 (403, 5xx, invalid JSON).
         self.withdraw_organization_key()
         self.fixture[environment_key_path("Verjson/alpha")] = AUDIT.AuditError(
-            f"GitHub API read failed for {environment_key_path('Verjson/alpha')}"
+            f"GitHub API read failed for {environment_key_path('Verjson/alpha')}: gh: Forbidden (HTTP 403)"
         )
         message = self.audit_error_message()
-        self.assertRegex(message, r"AI_REVIEW_APP_PRIVATE_KEY is unreadable.*\['Verjson/alpha:ai-review-app'\]")
+        # The reason travels with the repository, as the shell audit prints gh's error.
+        self.assertRegex(
+            message,
+            r"AI_REVIEW_APP_PRIVATE_KEY is unreadable.*\['Verjson/alpha:ai-review-app \(GitHub API read failed"
+            r" for [^)]*: gh: Forbidden \(HTTP 403\)\)'\]",
+        )
         self.assertNotRegex(message, "lack AI_REVIEW_APP_PRIVATE_KEY")
 
     def test_an_environment_key_response_that_does_not_name_the_key_is_unreadable(self):
@@ -1097,7 +1102,8 @@ jobs:
                 self.fixture[environment_key_path("Verjson/beta")] = response
                 self.assertRegex(
                     self.audit_error_message(),
-                    r"AI_REVIEW_APP_PRIVATE_KEY is unreadable.*\['Verjson/beta:ai-review-app'\]",
+                    r"AI_REVIEW_APP_PRIVATE_KEY is unreadable.*"
+                    r"\['Verjson/beta:ai-review-app \(response does not identify the key\)'\]",
                 )
 
     def test_app_permissions_and_events_are_exact(self):
@@ -1370,6 +1376,12 @@ jobs:
                 self.run_gh_api(returncode, "", stderr)
                 with self.assertRaisesRegex(AUDIT.AuditError, r"GitHub API read failed for repos/x"):
                     AUDIT.gh_pages("repos/x", allow_missing=True)
+
+    def test_a_read_failure_carries_ghs_status_line(self):
+        self.run_gh_api(1, "", "\ngh: Forbidden (HTTP 403)\n\n")
+        with self.assertRaises(AUDIT.AuditError) as caught:
+            AUDIT.gh_pages("repos/x")
+        self.assertEqual(str(caught.exception), "GitHub API read failed for repos/x: gh: Forbidden (HTTP 403)")
 
     def test_a_404_is_read_from_the_end_of_ghs_status_line(self):
         for stderr in ("gh: Not Found (HTTP 404)", "gh: Not Found (HTTP 404)\n"):
