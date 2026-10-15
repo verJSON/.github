@@ -100,6 +100,13 @@ class OrgSecretScopeAuditTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("duplicate repositories", result.stderr)
+        case_duplicate_policy = policy("Verjson/.github")
+        case_duplicate_policy["secrets"]["SCOPED"]["selected_repositories"].append("verJSON/.github")
+        result = self.run_audit(
+            case_duplicate_policy, listing, {"repositories": [{"full_name": "verJSON/.github"}]},
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("policy contains duplicate repositories", result.stderr)
 
     def test_api_failure_cannot_report_conformance(self):
         result = self.run_audit({"organization": "Verjson", "secrets": {}}, {}, api_failure=True)

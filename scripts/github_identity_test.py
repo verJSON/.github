@@ -46,6 +46,18 @@ class GithubIdentityTest(unittest.TestCase):
                 self.assertFalse(identity.same_repository("Verjson/verjson-authn", configured))
                 self.assertFalse(identity.same_organization("Verjson", configured))
 
+    def test_an_invalid_identity_does_not_match_itself(self):
+        # Both sides equal and invalid: only validation, not comparison, refuses these.
+        for value in (None, "", "Verjson\n", "a/b/c", f"Verj{LONG_S}on"):
+            with self.subTest(value=value):
+                self.assertFalse(identity.same_organization(value, value))
+        for value in (None, "", "Verjson/verjson-authn\n", "a/b/c", f"Verjson/{KELVIN}it"):
+            with self.subTest(value=value):
+                self.assertFalse(identity.same_repository(value, value))
+        for value in ([None], [""], ["a/b/c"]):
+            with self.subTest(value=value):
+                self.assertFalse(identity.same_repositories(value, value))
+
     def test_repository_lists_compare_identities_with_multiplicity(self):
         self.assertTrue(identity.same_repositories(["verJSON/b", "verJSON/a"], ["Verjson/a", "Verjson/b"]))
         self.assertTrue(identity.same_repositories([], []))
