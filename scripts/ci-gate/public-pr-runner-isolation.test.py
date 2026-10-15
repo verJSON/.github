@@ -115,4 +115,26 @@ expect(
     "a job needing a skipped job without a status function is not reachable",
 )
 
+expect(
+    {
+        "caller.yml": """
+            on: pull_request
+            jobs:
+              lint:
+                uses: ./.github/workflows/lint.yml
+        """,
+        "lint.yml": """
+            on: workflow_call
+            jobs:
+              lint:
+                runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
+                steps:
+                  - run: 'true'
+        """,
+    },
+    1,
+    ("caller.yml", "lint.yml", "lint"),
+    "a local reusable workflow called on pull_request is checked through its caller",
+)
+
 sys.exit(1 if failures else 0)

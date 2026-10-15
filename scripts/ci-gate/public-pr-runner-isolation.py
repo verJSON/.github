@@ -536,7 +536,27 @@ def is_reachable(job: dict, repository: str, unreachable: frozenset[str]) -> boo
     )
 
 
-def check_workflow(path: str, document: dict, repository: str) -> list[str]:
+LOCAL_REUSABLE = re.compile(r"^\./\.github/workflows/([A-Za-z0-9._-]+\.ya?ml)$")
+MAX_CALL_DEPTH = 4
+
+
+def check_call(
+    directory: str, path: str, name: str, job: dict, repository: str, depth: int
+) -> list[str]:
+    uses = str(job["uses"])
+    local = LOCAL_REUSABLE.match(uses)
+    if not local:
+        raise Undetermined(f"{path}: job '{name}' calls {uses}, whose placement this checker cannot read")
+    if depth >= MAX_CALL_DEPTH:
+        raise Undetermined(f"{path}: job '{name}' exceeds the reusable-call depth of {MAX_CALL_DEPTH}")
+    callee = local.group(1)
+    document = load_workflow(os.path.join(directory, callee))
+    return check_workflow(directory, f"{path}:{name} -> {callee}", document, repository, depth + 1)
+
+
+def check_workflow(
+    directory: str, path: str, document: dict, repository: str, depth: int = 0
+) -> list[str]:
     jobs = {str(name): job for name, job in (document.get("jobs") or {}).items()}
     unreachable: set[str] = set()
     violations: list[str] = []
@@ -545,7 +565,10 @@ def check_workflow(path: str, document: dict, repository: str) -> list[str]:
         if not is_reachable(job, repository, frozenset(unreachable)):
             unreachable.add(name)
             continue
-        violations.extend(check_job(path, name, job, repository, frozenset(unreachable)))
+        if "uses" in job:
+            violations.extend(check_call(directory, path, name, job, repository, depth))
+        else:
+            violations.extend(check_job(path, name, job, repository, frozenset(unreachable)))
     return violations
 
 
@@ -589,7 +612,7 @@ def check_tree(directory: str, repository: str) -> list[str]:
         document = load_workflow(path)
         if "pull_request" not in triggers(document):
             continue
-        violations.extend(check_workflow(name, document, repository))
+        violations.extend(check_workflow(directory, name, document, repository))
     return violations
 
 
