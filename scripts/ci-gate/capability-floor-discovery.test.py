@@ -227,6 +227,11 @@ else:
         assert receipts["receipts"][0]["source_sha"] == SOURCE_SHA
         assert receipts["receipts"][0]["blob_sha"] == BLOB_SHA
 
+        # GitHub owner names are case-insensitive; current generators emit `verJSON/` (#1779).
+        renamed = run_discovery(tmp, f"jobs:\n  arm:\n    uses: verJSON/.github/.github/workflows/gate-rearm.yml@{PIN}\n")
+        assert renamed.returncode == 0, f"display-case owner was rejected: {renamed.stderr}"
+        assert json.loads((tmp / "pins.json").read_text())[0]["pinned_sha"] == PIN
+
         scope_config = allowlist(tmp / "scope.json")
         scope = subprocess.run(
             [sys.executable, str(SCRIPT), "--allowlist", str(scope_config), "--print-repositories"],
@@ -276,6 +281,17 @@ else:
                 "duplicate YAML-equivalent boolean key",
                 f"on: pull_request\ntrue: push\njobs:\n  arm:\n    uses: Verjson/.github/.github/workflows/gate-rearm.yml@{PIN}\n",
             ),
+            (
+                "real target plus display-case block scalar decoy",
+                valid
+                + f"  decoy:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: |\n          verJSON/.github/.github/workflows/gate-rearm.yml@{PIN}\n",
+            ),
+            (
+                "real target plus display-case step-level decoy",
+                valid + f"  decoy:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: VERJSON/.github/.github/workflows/gate-rearm.yml@{PIN}\n",
+            ),
+            ("lookalike owner", f"jobs:\n  arm:\n    uses: xverjson/.github/.github/workflows/gate-rearm.yml@{PIN}\n"),
+            ("non-ASCII case-folding owner", f"jobs:\n  arm:\n    uses: verj\u017fon/.github/.github/workflows/gate-rearm.yml@{PIN}\n"),
             (
                 "malformed YAML",
                 f"jobs:\n  arm: [\n    uses: Verjson/.github/.github/workflows/gate-rearm.yml@{PIN}\n",

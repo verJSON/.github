@@ -14,6 +14,10 @@ from urllib.parse import quote
 
 import yaml
 
+# `python3 -I` does not put the script directory on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from github_identity import same_organization  # noqa: E402
+
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ALLOWLIST = ROOT / "config/capability-floor-consumers.json"
@@ -22,11 +26,14 @@ CALLER_PATH_RE = re.compile(r"^\.github/workflows/[A-Za-z0-9._-]+\.ya?ml$")
 WORKFLOW_RE = re.compile(r"^[A-Za-z0-9._-]+\.ya?ml$")
 GENERATOR_RE = re.compile(r"^scripts/gen-[A-Za-z0-9._-]+-caller\.sh$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+CANONICAL_OWNER = "Verjson"
 CANONICAL_REFERENCE_RE = re.compile(
-    r"^Verjson/\.github/\.github/workflows/"
+    r"^(?P<owner>[A-Za-z0-9._-]+)/\.github/\.github/workflows/"
     r"(?P<workflow>[A-Za-z0-9._-]+\.ya?ml)@(?P<sha>[0-9a-f]{40})$"
 )
-CANONICAL_PREFIX = "Verjson/.github/.github/workflows/"
+# The owner is a case-insensitive identity whose display case changed (#1779), so any
+# ASCII-case spelling marks a canonical-looking scalar that must pass the exact grammar.
+CANONICAL_MARKER_RE = re.compile(r"verjson/\.github/\.github/workflows/", re.IGNORECASE | re.ASCII)
 MAX_CALLER_BYTES = 512 * 1024
 WORKFLOWS_DIRECTORY = ".github/workflows"
 # The contents API returns at most this many directory entries; a listing that
@@ -224,13 +231,13 @@ def load_workflow(repository: str, path: str, text: str):
 def canonical_scalars(value, path=()):
     if isinstance(value, dict):
         for key, child in value.items():
-            if isinstance(key, str) and CANONICAL_PREFIX in key:
+            if isinstance(key, str) and CANONICAL_MARKER_RE.search(key):
                 yield path + ("<mapping-key>",), key
             yield from canonical_scalars(child, path + (key,))
     elif isinstance(value, list):
         for index, child in enumerate(value):
             yield from canonical_scalars(child, path + (index,))
-    elif isinstance(value, str) and CANONICAL_PREFIX in value:
+    elif isinstance(value, str) and CANONICAL_MARKER_RE.search(value):
         yield path, value
 
 
@@ -249,7 +256,10 @@ def extract_pin(repository: str, path: str, text: str, expected_workflows: list[
             f"canonical reusable job name is invalid: {repository}:{path}",
         )
         match = CANONICAL_REFERENCE_RE.fullmatch(value)
-        require(match is not None, f"caller has a malformed or mutable canonical reference: {repository}:{path}")
+        require(
+            match is not None and same_organization(match.group("owner"), CANONICAL_OWNER),
+            f"caller has a malformed or mutable canonical reference: {repository}:{path}",
+        )
         matches.append(match)
     workflows = {match.group("workflow") for match in matches}
     pins = {match.group("sha") for match in matches}
