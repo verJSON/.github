@@ -46,3 +46,20 @@ reviewed. The API reports `verJSON/<repository>` since the organization's 2026-1
 display-case rename, while the policy records `Verjson/<repository>`. A missing, excess,
 foreign-owner, or non-ASCII grant still fails. Rationale and evidence: ADR 0213's
 2026-10-15 amendment ([#1779](https://github.com/Verjson/.github/issues/1779)).
+
+## 2026-10-15 amendment: provider keys follow the caller-selected provider
+
+`OPENAI_API_KEY` and `DEEPSEEK_API_KEY` target visibility `all`, not
+`selected: Verjson/.github`. `ai-review-merge.yml` declares both as
+`workflow_call` secrets and reads them in the provider steps
+(`.github/workflows/ai-review-merge.yml:188-190`, `:1450`, `:1469`, `:1567`).
+Callers invoke it from their own repository, so the secrets resolve in the
+caller's context, which is the same reason `ANTHROPIC_API_KEY` is `all`. The org
+default provider is `deepseek` (`AI_REVIEW_PRIMARY_PROVIDER`). On 2026-10-15 the
+owner decided that any repository may switch to another provider without a
+per-repository grant. A `selected` target would have left both keys empty in
+every other repository's review, so the live visibility was correct and the
+policy was not. `JEV_API_KEY` is manifested at its live visibility until
+[#1820](https://github.com/Verjson/.github/issues/1820) narrows it to the
+repositories authorized for provider disclosure
+([#1385](https://github.com/Verjson/.github/issues/1385)).
