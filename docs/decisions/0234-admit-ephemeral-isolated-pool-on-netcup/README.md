@@ -87,6 +87,10 @@ cluster already supports user namespaces (k3s v1.33.3, containerd 2.0.5).
      code on the cluster that hosts GitLab, Nexus and MinIO needs a separate
      decision, with the cluster owner's approval.
    - The privileged, app-key, release and `deferred-ci` lanes, and the watchdog.
+6. **This pool is a bridge.** ADR 0161's move of CI to GitLab CE is still the
+   direction. When a repository's CI moves to GitLab CE, it leaves this pool: its
+   repository variables are deleted and it is removed from the runner group. The
+   pool is uninstalled once no repository uses it.
 
 ## Evidence
 
