@@ -56,7 +56,7 @@ runs:
       run: echo "npm_config_cache=$RUNNER_TEMP/verjson-npm-cache" >> "$GITHUB_ENV"
 
     - name: Install Node and authenticate the @verjson registry
-      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
       with:
         node-version: ${{ inputs.node-version }}
         # setup-node caches npm's download cache, never node_modules or build

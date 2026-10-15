@@ -16,7 +16,7 @@ pass() { printf 'ok   - %s\n' "$1"; }
 fail() { printf 'FAIL - %s\n' "$1"; fails=$((fails + 1)); }
 
 checkout='actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7'
-setup_node='actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7'
+setup_node='actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7'
 for wf in "$ci" "$release" "$actions_ci"; do
   name="$(basename "$wf")"
   expected_checkouts=1

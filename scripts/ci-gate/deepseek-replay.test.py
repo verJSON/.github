@@ -242,7 +242,7 @@ class DeepSeekReplayTest(unittest.TestCase):
 
     def test_workflow_upload_is_failure_only_best_effort_and_short_lived(self):
         workflow = (ROOT / ".github/workflows/ai-review-merge.yml").read_text()
-        self.assertEqual(workflow.count("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1"), 3)
+        self.assertEqual(workflow.count("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2"), 3)
         for step_id in ("replay_primary", "replay_fallback"):
             self.assertIn(f"if: always() && steps.{step_id}.outputs.available == 'true'", workflow)
         self.assertEqual(workflow.count("retention-days: 1"), 2)

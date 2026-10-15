@@ -94,7 +94,7 @@ jobs:
           if uses != [contract] or refs != [contract]:
               raise SystemExit("caller workflow does not bind one matching deployment contract")
           PY
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24.19.0
           registry-url: https://npm.pkg.github.com
@@ -150,7 +150,7 @@ jobs:
           python3 -I scripts/container_deployment_controller.py "${args[@]}"
           jq -e '.rolloutMode == "sequential" and (.steps[0].phase == "canary")' deployment-plan.json
       - name: Retain exact redacted mutation-free plan
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runner-deployment-${{ github.run_id }}-${{ github.run_attempt }}-dry-run-plan
           path: deployment-plan.json
@@ -210,7 +210,7 @@ jobs:
           if uses != [contract] or refs != [contract]:
               raise SystemExit("caller workflow does not bind one matching deployment contract")
           PY
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24.19.0
           registry-url: https://npm.pkg.github.com
@@ -511,7 +511,7 @@ jobs:
             --plan deployment-plan.json --config "$CONFIG_PATH" \
             --evidence deployment-evidence.json --receipt-dir deployment-receipts
       - name: Retain admitted or reconciled authority
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runner-deployment-${{ github.run_id }}-${{ github.run_attempt }}-admitted
           path: deployment-receipts/
@@ -551,7 +551,7 @@ jobs:
             --evidence deployment-evidence.json --receipt-dir deployment-receipts
       - name: Retain append-only progress after transition 1
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runner-deployment-${{ github.run_id }}-${{ github.run_attempt }}-progress-1
           path: deployment-receipts/
@@ -606,7 +606,7 @@ jobs:
             --evidence deployment-evidence.json --receipt-dir deployment-receipts
       - name: Retain append-only progress after transition 2
         if: ${{ always() && steps.refresh_1.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runner-deployment-${{ github.run_id }}-${{ github.run_attempt }}-progress-2
           path: deployment-receipts/
@@ -661,7 +661,7 @@ jobs:
             --evidence deployment-evidence.json --receipt-dir deployment-receipts
       - name: Retain append-only progress after transition 3
         if: ${{ always() && steps.refresh_2.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runner-deployment-${{ github.run_id }}-${{ github.run_attempt }}-progress-3
           path: deployment-receipts/

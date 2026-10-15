@@ -245,7 +245,7 @@ jobs:
       run: "set -euo pipefail\n[[ \"$JOB_WORKFLOW_SHA\" =~ ^[0-9a-f]{40}$ ]] || {\n  echo \"::error::reusable Node CI workflow SHA is invalid\"\n  exit 1\n}\ntransfer=\"$RUNNER_TEMP/container_dependency_transfer.py\"\ncurl -fsSL \"https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/container_dependency_transfer.py\" -o \"$transfer\"\n"
     - name: Reject consumer-controlled npm configuration
       run: "project_config=\"$(find . -name .npmrc -print -quit)\"\n[ -z \"$project_config\" ] || {\n  echo \"::error::secretless mode rejects repository-controlled npm config: $project_config\"\n  exit 1\n}\n"
-    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
       with:
         node-version: ${{ inputs.node-version }}
         package-manager-cache: false
@@ -414,7 +414,7 @@ jobs:
     - name: Prepare job-scoped npm cache
       if: needs.eligibility.outputs.should-run != 'false' && inputs.cache && !(inputs.secretless-pr || inputs.secretless-trusted-ref)
       run: echo "npm_config_cache=$RUNNER_TEMP/verjson-npm-cache" >> "$GITHUB_ENV"
-    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
       if: needs.eligibility.outputs.should-run != 'false'
       with:
         node-version: ${{ inputs.node-version }}
