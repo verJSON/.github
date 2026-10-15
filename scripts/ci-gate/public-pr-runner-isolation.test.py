@@ -207,4 +207,21 @@ expect(
     "{dir}/pending.tsv",
 )
 
+expect(
+    {
+        "ci.yml": """
+            on: pull_request
+            jobs:
+              test:
+                if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-ci') }}
+                runs-on: ${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+                steps:
+                  - run: 'true'
+        """,
+    },
+    1,
+    ("ci.yml", "test", "self-hosted"),
+    "an object filter in a condition is parsed rather than left undetermined",
+)
+
 sys.exit(1 if failures else 0)

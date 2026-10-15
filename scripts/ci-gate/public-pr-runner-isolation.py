@@ -91,7 +91,7 @@ TOKEN = re.compile(
     r"\s*(?:"
     r"(?P<string>'(?:''|[^'])*')"
     r"|(?P<number>-?\d+(?:\.\d+)?)"
-    r"|(?P<operator>&&|\|\||==|!=|<=|>=|<|>|!|\(|\)|\[|\]|,|\.)"
+    r"|(?P<operator>&&|\|\||==|!=|<=|>=|<|>|!|\(|\)|\[|\]|,|\.|\*)"
     r"|(?P<name>[A-Za-z_][A-Za-z0-9_-]*)"
     r")"
 )
@@ -204,7 +204,13 @@ class Parser:
         while True:
             if self.at("."):
                 self.index += 1
-                path.append(self.take("name")[1])
+                if self.at("*"):
+                    # An object filter (`labels.*.name`) yields an array this
+                    # checker never needs to know; it resolves as unknown.
+                    self.index += 1
+                    path.append("*")
+                else:
+                    path.append(self.take("name")[1])
             elif self.at("["):
                 self.index += 1
                 key = self.take("literal")[1]
