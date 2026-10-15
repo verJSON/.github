@@ -5766,8 +5766,9 @@ jobs:
           runtime_cache_content = verified_runtime_cache_content()
 
           def stop_on_termination(signum, _frame):
-              # A cancelled job sends SIGTERM; raising lets every finally below
-              # stop the sandbox and remove its staging copy.
+              # SIGTERM to the interpreter raises here, so every finally below
+              # stops the sandbox and removes its staging copy. A runner cancel
+              # signals the step's bash, not this child, so this is best effort.
               raise SystemExit(128 + signum)
 
           signal.signal(signal.SIGTERM, stop_on_termination)

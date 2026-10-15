@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -955,6 +956,90 @@ def run_consumer_descriptor_probe():
             os.close(git_descriptor)
 
 
+class SymlinkSwappingOs:
+    """Delegates to os, but once a staged directory named "victim" passes a
+    check (a successful open or lstat), replaces it with a symlink to a host
+    directory before the caller can use that check. This is the window a
+    sandboxed process that outlives bwrap could race (#1798)."""
+
+    def __init__(self, victim, displaced, host_directory):
+        self.victim = victim
+        self.displaced = displaced
+        self.host_directory = host_directory
+        self.swapped = False
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    def swap_after_check(self, checked_path):
+        if not self.swapped and os.path.basename(os.fspath(checked_path)) == self.victim.name:
+            # The caller swallows OSError, so a failed swap must not pass silently.
+            try:
+                os.rename(self.victim, self.displaced)
+                os.symlink(self.host_directory, self.victim)
+            except OSError as error:
+                raise AssertionError(f"could not swap the staged directory: {error}") from error
+            self.swapped = True
+
+    def open(self, path, flags, mode=0o777, *, dir_fd=None):
+        descriptor = os.open(path, flags, mode, dir_fd=dir_fd)
+        self.swap_after_check(path)
+        return descriptor
+
+    def lstat(self, path, *, dir_fd=None):
+        result = os.lstat(path, dir_fd=dir_fd)
+        self.swap_after_check(path)
+        return result
+
+
+def remove_runtime_cache_staging_from_workflow():
+    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    script = next(
+        step["run"]
+        for step in doc["jobs"]["build-test"]["steps"]
+        if step.get("name") == "Run exact credentialless consumer script plan"
+    )
+    start = script.index("def remove_runtime_cache_staging(staging):")
+    following = re.compile(r"^\S", re.MULTILINE).search(script, start + 1)
+    assert following is not None, "remove_runtime_cache_staging has no following statement"
+    return script[start:following.start()]
+
+
+def assert_runtime_cache_staging_unseal_survives_symlink_swap():
+    source = remove_runtime_cache_staging_from_workflow()
+    with tempfile.TemporaryDirectory() as temporary:
+        fixture = Path(temporary)
+        staging = fixture / "staging"
+        victim = staging / "victim"
+        # A sealed directory can only be renamed within its parent.
+        displaced = staging / "displaced"
+        host_directory = fixture / "host-sealed"
+        (victim / "nested").mkdir(parents=True)
+        (victim / "nested" / "blob").write_bytes(b"cached")
+        host_directory.mkdir()
+        (host_directory / "keep").write_bytes(b"host")
+        host_directory.chmod(0o555)
+        (victim / "nested").chmod(0o000)
+        victim.chmod(0o000)
+        racing_os = SymlinkSwappingOs(victim, displaced, host_directory)
+        namespace = {"os": racing_os, "shutil": shutil, "stat": stat}
+        try:
+            exec(source, namespace)
+            namespace["remove_runtime_cache_staging"](staging)
+
+            assert racing_os.swapped, "the staged directory was never checked, so no swap was raced"
+            assert stat.S_IMODE(os.lstat(host_directory).st_mode) == 0o555, (
+                "staging cleanup restored access on a host directory through a swapped symlink"
+            )
+            assert (host_directory / "keep").read_bytes() == b"host"
+            # The displaced directory is still sealed unless its descriptor was unsealed.
+            assert not os.path.lexists(staging), "staging cleanup left the opened directory sealed"
+        finally:
+            for directory in (host_directory, displaced, displaced / "nested"):
+                if os.path.lexists(directory) and not directory.is_symlink():
+                    directory.chmod(0o700)
+
+
 def assert_npm_config_paths_load_independently():
     npm = shutil.which("npm")
     if npm is None:
@@ -1698,6 +1783,7 @@ def main():
                     assert_no_lifecycle_command_file_access(command_files, marker)
             run_native_addon_rebuild(step)
         run_consumer_descriptor_probe()
+    assert_runtime_cache_staging_unseal_survives_symlink_swap()
 
     print("secretless rebuild environment contract passed")
 
