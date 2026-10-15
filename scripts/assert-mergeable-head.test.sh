@@ -77,17 +77,26 @@ rules_bound="[{\"type\":\"required_status_checks\",\"parameters\":{\"required_st
 rules_unbound='[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci / build-test"},{"context":"changelog / validate"}]}}]'
 rules_none='[{"type":"pull_request","parameters":{}}]'
 
-check_run() { # id name status conclusion app-id [check-suite-id]
-  printf '{"id":%s,"name":"%s","status":"%s","conclusion":%s,"app":{"id":%s}%s}' \
+check_run() { # id name status conclusion app-id [check-suite-id] [completed-at]
+  printf '{"id":%s,"name":"%s","status":"%s","conclusion":%s,"app":{"id":%s}%s%s}' \
     "$1" "$2" "$3" "$(if [ -z "$4" ]; then echo null; else echo "\"$4\""; fi)" "$5" \
-    "$(if [ -n "${6:-}" ]; then printf ',"check_suite":{"id":%s}' "$6"; fi)"
+    "$(if [ -n "${6:-}" ]; then printf ',"check_suite":{"id":%s}' "$6"; fi)" \
+    "$(if [ -n "${7:-}" ]; then printf ',"completed_at":"%s"' "$7"; fi)"
 }
 # One workflow run as `actions/runs?head_sha=` reports it. `run_number` is the
 # per-workflow event sequence, so a higher number is the later event.
-wf_run() { # id check-suite-id workflow-id run-number event status conclusion [head-sha]
-  printf '{"id":%s,"check_suite_id":%s,"workflow_id":%s,"run_number":%s,"event":"%s","status":"%s","conclusion":%s,"head_sha":"%s"}' \
-    "$1" "$2" "$3" "$4" "$5" "$6" "$(if [ -z "$7" ]; then echo null; else echo "\"$7\""; fi)" "${8:-$HEAD_SHA}"
+# `created_at` defaults to T_CANCEL; "-" omits it.
+wf_run() { # id check-suite-id workflow-id run-number event status conclusion [head-sha] [created-at]
+  printf '{"id":%s,"check_suite_id":%s,"workflow_id":%s,"run_number":%s,"event":"%s","status":"%s","conclusion":%s,"head_sha":"%s"%s}' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$(if [ -z "$7" ]; then echo null; else echo "\"$7\""; fi)" "${8:-$HEAD_SHA}" \
+    "$(if [ "${9:-$T_CANCEL}" != - ]; then printf ',"created_at":"%s"' "${9:-$T_CANCEL}"; fi)"
 }
+# The #1824 timeline: the cancel lands (cancelled siblings complete, the superseding
+# run is created) at T_CANCEL; an aggregator that ran on afterwards completes at
+# T_AFTER; a genuine failure that finished first completed at T_BEFORE.
+T_BEFORE=2026-10-15T20:38:03Z
+T_CANCEL=2026-10-15T20:38:05Z
+T_AFTER=2026-10-15T20:38:10Z
 WF_CI=315894159
 WF_OTHER=371658702
 wf_runs() { printf '{"total_count":%s,"workflow_runs":[%s]}' "$(entry_count "$1")" "$1"; }
@@ -593,24 +602,55 @@ expect "that fault names the Actions read grant" 1 "Actions (read) or Actions pe
 
 # ADR 0226 amendment 2026-10-15 (#1824): an `if: always()` aggregator in a run that
 # concurrency cancelled runs anyway, reads its cancelled inputs, and concludes FAILURE.
-# The run itself concluded `cancelled`, and the newest later successful run of the same
-# workflow, event, and head re-did that exact check and reported it SUCCESS -- the same
-# evidence a passing re-run attempt gives, so the failure is set aside.
+# Such a failure is an artifact of the cancel only if it completed AFTER the cancel
+# landed. A same-named SUCCESS in a later run is necessary but not sufficient: a new
+# run is a different event whose event-gated steps may do nothing, unlike a re-run,
+# which replays the same payload. So a failure that finished before the cancel stays.
+#
+# Path (a): the cancelled run's suite carries CANCELLED check runs; the earliest of
+# their completions is when the cancel landed.
 reset_env
-CHECK_RUNS_FIXTURE="$(runs "$(check_run 11 'ci / build-test' completed failure "$APP_ID" 501),$(check_run 12 'changelog / validate' completed cancelled "$APP_ID" 501),$(check_run 21 'ci / build-test' completed success "$APP_ID" 502),$(check_run 22 'changelog / validate' completed success "$APP_ID" 502)")"
-RUNS_FIXTURE="$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed cancelled),$(wf_run 9002 502 "$WF_CI" 11 pull_request completed success)")"
+CHECK_RUNS_FIXTURE="$(runs "$(check_run 11 'ci / build-test' completed failure "$APP_ID" 501 "$T_AFTER"),$(check_run 12 'changelog / validate' completed cancelled "$APP_ID" 501 "$T_CANCEL"),$(check_run 21 'ci / build-test' completed success "$APP_ID" 502),$(check_run 22 'changelog / validate' completed success "$APP_ID" 502)")"
+RUNS_FIXTURE="$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed cancelled),$(wf_run 9002 502 "$WF_CI" 11 pull_request completed success "$HEAD_SHA" 2026-10-15T20:38:01Z)")"
 run
 if [ "$RC" -eq 0 ] && grep -q '^true$' <<<"$OUT" \
   && grep -qF -- "ci / build-test (check run 11, run 9001 superseded by run 9002)" <<<"$OUT"; then
-  pass "a failure inside a cancelled run is set aside when the newest later successful run re-did that check to SUCCESS"
+  pass "a failure that completed after its run's cancelled siblings is set aside when a later run re-did it to SUCCESS"
 else
-  fail "a failure inside a cancelled run is set aside when the newest later successful run re-did that check to SUCCESS (rc=$RC, output: $OUT)"
+  fail "a failure that completed after its run's cancelled siblings is set aside when a later run re-did it to SUCCESS (rc=$RC, output: $OUT)"
 fi
 
-# Each condition of that rule refuses on its own. `fail_in` is the cancelled run's
-# aggregator FAILURE (no cancelled sibling, so the evaluation cannot depend on one);
-# the later run's report of the same name and the two runs' identity vary per case.
-fail_in() { printf '%s' "$(check_run 11 'ci / build-test' completed failure "$APP_ID" 501),$(check_run 12 'changelog / validate' completed success "$APP_ID" 501)"; }
+for shape in "before:$T_BEFORE" "tie:$T_CANCEL" "unknown:"; do
+  reset_env
+  CHECK_RUNS_FIXTURE="$(runs "$(check_run 11 'ci / build-test' completed failure "$APP_ID" 501 "${shape#*:}"),$(check_run 12 'changelog / validate' completed cancelled "$APP_ID" 501 "$T_CANCEL"),$(check_run 21 'ci / build-test' completed success "$APP_ID" 502),$(check_run 22 'changelog / validate' completed success "$APP_ID" 502)")"
+  RUNS_FIXTURE="$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed cancelled),$(wf_run 9002 502 "$WF_CI" 11 pull_request completed success "$HEAD_SHA" 2026-10-15T20:38:01Z)")"
+  run
+  expect "a failure whose completion is ${shape%%:*} relative to the cancel stays red even with a later SUCCESS" 3 "not passing: ci / build-test (FAILURE,SUCCESS)"
+done
+
+# The cancellation time is the EARLIEST cancelled sibling, and a sibling without a
+# completion time leaves it unknown.
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$(check_run 11 'ci / build-test' completed failure "$APP_ID" 501 "$T_AFTER"),$(check_run 12 'changelog / validate' completed cancelled "$APP_ID" 501 "$T_CANCEL"),$(check_run 13 'lint' completed cancelled "$APP_ID" 501 2026-10-15T20:38:20Z),$(check_run 21 'ci / build-test' completed success "$APP_ID" 502),$(check_run 22 'changelog / validate' completed success "$APP_ID" 502),$(check_run 23 'lint' completed success "$APP_ID" 502)")"
+RUNS_FIXTURE="$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed cancelled),$(wf_run 9002 502 "$WF_CI" 11 pull_request completed success)")"
+run
+if [ "$RC" -eq 0 ] && grep -q '^true$' <<<"$OUT"; then
+  pass "the cancellation time is the earliest cancelled sibling's completion"
+else
+  fail "the cancellation time is the earliest cancelled sibling's completion (rc=$RC, output: $OUT)"
+fi
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$(check_run 11 'ci / build-test' completed failure "$APP_ID" 501 "$T_AFTER"),$(check_run 12 'changelog / validate' completed cancelled "$APP_ID" 501),$(check_run 21 'ci / build-test' completed success "$APP_ID" 502),$(check_run 22 'changelog / validate' completed success "$APP_ID" 502)")"
+RUNS_FIXTURE="$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed cancelled),$(wf_run 9002 502 "$WF_CI" 11 pull_request completed success)")"
+run
+expect "a cancelled sibling without a completion time leaves the cancel time unknown, so the failure stays" 3 "not passing: ci / build-test (FAILURE,SUCCESS)"
+
+# Path (b): no CANCELLED check in the suite. The superseding run's creation is the
+# latest moment concurrency cancelled the run.
+# `fail_in` is the cancelled run's aggregator FAILURE (no cancelled sibling) completed
+# after that moment; the later run's report of the same name and the two runs' identity
+# vary per case below.
+fail_in() { printf '%s' "$(check_run 11 'ci / build-test' completed failure "$APP_ID" 501 "${1:-$T_AFTER}"),$(check_run 12 'changelog / validate' completed success "$APP_ID" 501)"; }
 later_ci() { # conclusion-of-the-same-name-check
   printf '%s' "$(check_run 21 'ci / build-test' completed "$1" "$APP_ID" 502),$(check_run 22 'changelog / validate' completed success "$APP_ID" 502)"
 }
@@ -620,10 +660,22 @@ CHECK_RUNS_FIXTURE="$(runs "$(fail_in),$(later_ci success)")"
 RUNS_FIXTURE="$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed cancelled),$(wf_run 9002 502 "$WF_CI" 11 pull_request completed success)")"
 run
 if [ "$RC" -eq 0 ] && grep -q '^true$' <<<"$OUT" && grep -qF -- 'superseded by run' <<<"$OUT"; then
-  pass "an aggregator failure is set aside even when its cancelled run carries no CANCELLED check run"
+  pass "an aggregator failure completed after the superseding run was created is set aside without a CANCELLED sibling"
 else
-  fail "an aggregator failure is set aside even when its cancelled run carries no CANCELLED check run (rc=$RC, output: $OUT)"
+  fail "an aggregator failure completed after the superseding run was created is set aside without a CANCELLED sibling (rc=$RC, output: $OUT)"
 fi
+for shape in "before:$T_BEFORE" "tie:$T_CANCEL"; do
+  reset_env
+  CHECK_RUNS_FIXTURE="$(runs "$(fail_in "${shape#*:}"),$(later_ci success)")"
+  RUNS_FIXTURE="$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed cancelled),$(wf_run 9002 502 "$WF_CI" 11 pull_request completed success)")"
+  run
+  expect "without a cancelled sibling, a failure completed ${shape%%:*} the superseding run's creation stays red" 3 "not passing: ci / build-test (FAILURE,SUCCESS)"
+done
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$(fail_in),$(later_ci success)")"
+RUNS_FIXTURE="$(wf_runs "$(wf_run 9001 501 "$WF_CI" 10 pull_request completed cancelled),$(wf_run 9002 502 "$WF_CI" 11 pull_request completed success "$HEAD_SHA" -)")"
+run
+expect "a superseding run without a creation time leaves the cancel time unknown, so the failure stays" 3 "not passing: ci / build-test (FAILURE,SUCCESS)"
 
 # #1824's real shape: the later run is a draft-tier run that SKIPPED the check. A skip
 # re-did nothing (ADR 0226 attack A1), so the failure stays -- and Gate A would need a
@@ -683,7 +735,7 @@ done
 
 # Gate C equivalent: an advisory aggregator failure in a superseded cancelled run.
 reset_env
-CHECK_RUNS_FIXTURE="$(runs "$green_runs,$(check_run 41 'shell-tests' completed failure "$APP_ID" 601),$(check_run 42 'shell-tests' completed success "$APP_ID" 602)")"
+CHECK_RUNS_FIXTURE="$(runs "$green_runs,$(check_run 41 'shell-tests' completed failure "$APP_ID" 601 "$T_AFTER"),$(check_run 43 'change-scope' completed cancelled "$APP_ID" 601 "$T_CANCEL"),$(check_run 42 'shell-tests' completed success "$APP_ID" 602),$(check_run 44 'change-scope' completed success "$APP_ID" 602)")"
 RUNS_FIXTURE="$(wf_runs "$(wf_run 9101 601 "$WF_OTHER" 2960 pull_request completed cancelled),$(wf_run 9102 602 "$WF_OTHER" 2961 pull_request completed success)")"
 run
 if [ "$RC" -eq 0 ] && grep -q '^true$' <<<"$OUT" && grep -qF -- 'superseded by run' <<<"$OUT"; then
@@ -692,7 +744,7 @@ else
   fail "Gate C admits an advisory aggregator failure whose cancelled run a later run re-did to SUCCESS (rc=$RC, output: $OUT)"
 fi
 reset_env
-CHECK_RUNS_FIXTURE="$(runs "$green_runs,$(check_run 41 'shell-tests' completed failure "$APP_ID" 601),$(check_run 42 'shell-tests' completed skipped "$APP_ID" 602)")"
+CHECK_RUNS_FIXTURE="$(runs "$green_runs,$(check_run 41 'shell-tests' completed failure "$APP_ID" 601 "$T_AFTER"),$(check_run 42 'shell-tests' completed skipped "$APP_ID" 602)")"
 RUNS_FIXTURE="$(wf_runs "$(wf_run 9101 601 "$WF_OTHER" 2960 pull_request completed cancelled),$(wf_run 9102 602 "$WF_OTHER" 2961 pull_request completed success)")"
 run
 expect "Gate C still refuses an advisory failure the later run only skipped (#1824)" 5 "shell-tests=FAILURE"

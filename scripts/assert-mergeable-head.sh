@@ -142,6 +142,17 @@ read -r -d '' FAMILY_JQ_DEFS <<'JQ'
       and (($repo | ascii_downcase) == $f.declared_by.repository
            or ((.workflow_url | type) == "string"
                and (.workflow_url | endswith("/actions/required_workflows/\($id)"))));
+  # A second-granular ISO 8601 time as epoch seconds, or null when absent or unreadable.
+  def epoch: if type == "string" then (try fromdateiso8601 catch null) else null end;
+  # GitHub reports no run's resolved concurrency group, and `pull_requests` is empty on
+  # pull_request_target runs, so the group key (the pull-request number) is unobservable.
+  # The closest binding exposed is the head branch plus head repository, which must
+  # match the pull request's own; an unknown pull-request identity binds nothing.
+  def bound_to_pr:
+    $pr_head_ref != "" and $pr_head_repo != ""
+    and .head_branch == $pr_head_ref
+    and ((.head_repository | if type == "object" then .full_name else null end) | type) == "string"
+    and (.head_repository.full_name | ascii_downcase) == ($pr_head_repo | ascii_downcase);
   # The index of the declared family this run belongs to, or null.
   def family_index:
     . as $run
@@ -238,7 +249,7 @@ scratch="$(mktemp -d)" \
   || fault 1 "could not allocate a scratch directory for the API responses this assertion reads"
 trap 'rm -rf "$scratch"' EXIT
 
-pr_json="$(gh pr view "$pr" --repo "$repo" --json headRefOid,baseRefName </dev/null)" \
+pr_json="$(gh pr view "$pr" --repo "$repo" --json headRefOid,baseRefName,headRefName,headRepository </dev/null)" \
   || permission_fault "failed to fetch pull request metadata for $repo#$pr" "Pull requests" "pull-requests"
 
 head_sha="$(jq -r '.headRefOid // ""' <<<"$pr_json")"
@@ -247,6 +258,13 @@ head_sha="$(jq -r '.headRefOid // ""' <<<"$pr_json")"
 base_ref="$(jq -r '.baseRefName // ""' <<<"$pr_json")"
 [ -n "$base_ref" ] \
   || fault 1 "could not resolve a base ref for $repo#$pr"
+# The pull request's head branch and repository bind a concurrency-family run to THIS
+# pull request (ADR 0226 amendment 2026-10-15). They are optional: an empty value
+# binds no run, so displacement is simply never established.
+pr_head_ref="$(jq -r '.headRefName // "" | strings' <<<"$pr_json")" \
+  || fault 1 "could not read the head branch of $repo#$pr"
+pr_head_repo="$(jq -r '.headRepository.nameWithOwner? // "" | strings' <<<"$pr_json")" \
+  || fault 1 "could not read the head repository of $repo#$pr"
 # The head's checks are read from REST rather than from `gh pr view`'s
 # `statusCheckRollup`, because the rollup projection carries no app identity and
 # Gate A has to know WHO produced a required check, not merely that something
@@ -269,6 +287,7 @@ jq -s '[ .[].check_runs[]? | {
       app_id: (.app.id // null),
       id: .id,
       suite_id: (.check_suite.id // null),
+      completed_at: (.completed_at // null),
       kind: "check_run" } ]' <"$check_runs_raw" >"$check_runs" \
   || fault 1 "failed to normalize check runs for $repo@$head_sha"
 
@@ -393,8 +412,9 @@ if [ "$nonpassing_count" -gt 0 ]; then
   # -- pinned to the attempt the run record reports -- and validated like the other
   # inventories. Only cancelled runs of a declared family are read.
   displacement_candidates="$scratch/displacement-candidates.tsv"
-  jq -r --argjson families "$CONCURRENCY_FAMILIES" --arg repo "$repo" "$FAMILY_JQ_DEFS"'
-    .[] | select(.status == "completed" and .conclusion == "cancelled" and family_index != null)
+  jq -r --argjson families "$CONCURRENCY_FAMILIES" --arg repo "$repo" \
+    --arg pr_head_ref "$pr_head_ref" --arg pr_head_repo "$pr_head_repo" "$FAMILY_JQ_DEFS"'
+    .[] | select(.status == "completed" and .conclusion == "cancelled" and family_index != null and bound_to_pr)
     | if (.run_attempt | type) == "number" and .run_attempt >= 1 and (.run_attempt | floor) == .run_attempt
       then [.id, .run_attempt] | @tsv
       else error("a cancelled family run carries no attempt number") end' <"$runs" >"$displacement_candidates" \
@@ -412,14 +432,17 @@ if [ "$nonpassing_count" -gt 0 ]; then
       || fault 1 "the job inventory of workflow run $candidate_run for $repo@$head_sha is incomplete or unattested; it cannot be reasoned over"
     # Types are checked, never truthiness: a missing `steps` measures as length 0 and a
     # missing runner id compares as null, either of which would read as "never started".
-    # Every job must belong to this run, this attempt, and this head.
+    # Every job must belong to this run and this head, and to this attempt or an earlier one.
     jq -s --slurpfile acc "$jobs_by_run" --arg run "$candidate_run" \
       --argjson attempt "$candidate_attempt" --arg head "$head_sha" '
       def well_formed:
         type == "object"
         and (.id | type) == "number"
         and .run_id == ($run | tonumber)
-        and .run_attempt == $attempt
+        # A re-run-failed-jobs attempt may list jobs it carried over under the
+        # earlier attempt they ran in; a later attempt than the one listed is malformed.
+        and (.run_attempt | type) == "number" and (.run_attempt | floor) == .run_attempt
+        and .run_attempt >= 1 and .run_attempt <= $attempt
         and .head_sha == $head
         and (.status | type) == "string"
         and ((.conclusion | type) == "string" or .conclusion == null)
@@ -433,15 +456,17 @@ if [ "$nonpassing_count" -gt 0 ]; then
       || fault 1 "failed to record the job inventory of workflow run $candidate_run for $repo@$head_sha"
   done <"$displacement_candidates"
 
-  jq -c --slurpfile runs "$runs" --slurpfile jobs "$jobs_by_run" --argjson families "$CONCURRENCY_FAMILIES" --argjson passing "$PASSING" --arg repo "$repo" --arg pr "$pr" "$FAMILY_JQ_DEFS"'
+  jq -c --slurpfile runs "$runs" --slurpfile jobs "$jobs_by_run" --argjson families "$CONCURRENCY_FAMILIES" --argjson passing "$PASSING" --arg repo "$repo" \
+    --arg pr_head_ref "$pr_head_ref" --arg pr_head_repo "$pr_head_repo" "$FAMILY_JQ_DEFS"'
     $runs[0] as $runs
     | . as $all
     # A displaced run never started: its attempt has jobs, every one of them was
     # cancelled, none acquired a runner (GitHub reports runner_id 0 for a job that
     # never left the queue), and none ran a step.
     # The cancelled check run must be one of those jobs (a job id is its check run id).
+    # Only the jobs of THIS attempt are its shape: carried-over jobs ran in another.
     | def displacement_shaped($o; $check_id):
-        ($jobs[0]["\($o.id)"] // []) as $own_jobs
+        [ ($jobs[0]["\($o.id)"] // [])[] | select(.run_attempt == $o.run_attempt) ] as $own_jobs
         | ($own_jobs | length) > 0
           and any($own_jobs[]; .id == $check_id)
           and all($own_jobs[];
@@ -451,14 +476,20 @@ if [ "$nonpassing_count" -gt 0 ]; then
     # concurrency family on this head, or null.
     def displacer($o; $check_id):
       ($o | family_index) as $fam
-      | if $fam == null or (displacement_shaped($o; $check_id) | not) then null
+      | if $fam == null or ($o | bound_to_pr | not) or (displacement_shaped($o; $check_id) | not) then null
         else ($o.run_started_at | fromdateiso8601) as $start
         | [ $runs[]
             | select(.status == "completed" and .conclusion == "success"
-                     and (family_index) == $fam
+                     and (family_index) == $fam and bound_to_pr
                      and (.created_at | fromdateiso8601) > $start) ]
         | max_by(.created_at | fromdateiso8601)
         | if . == null then null
+          # created_at is second-granular: when any other family run on this head shares
+          # the newest displacer'"'"'s second, which is newest cannot be told.
+          elif (.created_at | epoch) as $newest
+               | ([ $runs[] | select((family_index) == $fam and (.created_at | epoch) == $newest) ]
+                  | length) != 1
+            then null
           else .check_suite_id as $ssid
           # A different workflow names its checks differently, so there is no
           # same-named check to consult, and a run concludes `success` with its
@@ -469,7 +500,7 @@ if [ "$nonpassing_count" -gt 0 ]; then
           | if ($done | length) > 0
                and all($done[]; .status == "COMPLETED" and .conclusion == "SUCCESS")
             then { cancelled_run: $o.id, superseded_by: .id,
-                   group: "\($families[$fam].group_prefix)\($pr)" }
+                   group: "\($families[$fam].group_prefix)<pull request>" }
             else null end
           end
         end;
@@ -482,6 +513,7 @@ if [ "$nonpassing_count" -gt 0 ]; then
       if .kind == "check_run" and .status == "COMPLETED" and ((.conclusion as $c | $passing | index($c)) == null) then
         .name as $name
         | .conclusion as $conclusion
+        | (.completed_at | epoch) as $completed
         | .suite_id as $sid
         | .id as $check_id
         | [ $runs[] | select(.check_suite_id == $sid) ] as $own
@@ -504,8 +536,24 @@ if [ "$nonpassing_count" -gt 0 ]; then
                    # parent); a check that ran and concluded any other way is set aside
                    # only when the superseder re-did that exact check to SUCCESS.
                    | [ $all[] | select(.kind == "check_run" and .suite_id == $ssid and .name == $name) ] as $redone
+                   # A same-named SUCCESS is necessary but not sufficient for a check
+                   # that ran: a new run is a different event whose event-gated steps
+                   # may do nothing, unlike a re-run, which replays the same payload. So
+                   # a non-CANCELLED check is set aside only when it completed strictly
+                   # after the cancel landed -- a failure the cancel caused, never one
+                   # that finished before it. The cancel landed at the earliest
+                   # completion of a CANCELLED check in the same suite or, when there is
+                   # none, no later than this superseding run'"'"'s creation. An unknown
+                   # time on either side keeps the check red.
+                   | ([ $all[] | select(.kind == "check_run" and .suite_id == $sid and .conclusion == "CANCELLED")
+                        | .completed_at | epoch ]) as $cancel_times
+                   | (if ($cancel_times | length) == 0 then (.created_at | epoch)
+                      elif any($cancel_times[]; . == null) then null
+                      else ($cancel_times | min) end) as $cancelled_at
                    | if ($conclusion == "CANCELLED" or ($redone | length) > 0)
                         and all($redone[]; .status == "COMPLETED" and .conclusion == "SUCCESS")
+                        and ($conclusion == "CANCELLED"
+                             or ($completed != null and $cancelled_at != null and $completed > $cancelled_at))
                      then { cancelled_run: $o.id, superseded_by: .id }
                      else null end
                    end)
@@ -521,7 +569,7 @@ if [ "$nonpassing_count" -gt 0 ]; then
         dismissed: [ .[] | select(.superseded != null)
                      | if .superseded.group == null
                        then "\(.name) (check run \(.id), run \(.superseded.cancelled_run) superseded by run \(.superseded.superseded_by))"
-                       else "\(.name) (check run \(.id), run \(.superseded.cancelled_run) displaced from concurrency group \(.superseded.group) by run \(.superseded.superseded_by))" end ] }
+                       else "\(.name) (check run \(.id), run \(.superseded.cancelled_run) displaced by run \(.superseded.superseded_by) within declared concurrency family \(.superseded.group))" end ] }
   ' <"$checks" >"$verdict" \
     || fault 1 "failed to evaluate superseded cancellations for $repo@$head_sha"
   gated_checks="$scratch/gated-checks.json"
@@ -532,7 +580,7 @@ if [ "$nonpassing_count" -gt 0 ]; then
   dismissed="$(jq -r '.dismissed | join("; ")' <"$verdict")" \
     || fault 1 "failed to list superseded cancellations for $repo@$head_sha"
   [ -z "$dismissed" ] \
-    || annotate notice "Gates A and C set aside non-passing check runs of cancelled runs superseded by a later successful run of the same workflow, event, and head, or cancelled check runs displaced from a declared concurrency group by a later-created successful run of that group on this head (ADR 0226): $dismissed"
+    || annotate notice "Gates A and C set aside non-passing check runs of cancelled runs superseded by a later successful run of the same workflow, event, and head, or cancelled check runs displaced by a later-created successful run of their declared concurrency family on this head, both bound to this pull request by head branch and head repository because GitHub reports neither a run's resolved concurrency group nor, for these runs, its pull request (ADR 0226): $dismissed"
 fi
 
 # ---------------------------------------------------------------- Gate A ----

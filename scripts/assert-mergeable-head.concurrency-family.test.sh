@@ -78,6 +78,9 @@ wf_run() {
       event: "pull_request_target", status: "completed", conclusion: $conclusion,
       head_sha: $head, name: $name, path: $path, run_attempt: 1,
       created_at: $created, run_started_at: $created,
+      head_branch: "fix/427-regenerate-and-fence",
+      head_repository: { full_name: "verJSON/verjson-agents" },
+      pull_requests: [],
       workflow_url: "https://api.github.com/repos/Verjson/verjson-agents/actions/workflows/\($wf)",
       referenced_workflows: $refs } + $over'
 }
@@ -138,7 +141,7 @@ reset_env() {
   rm -f "$JOBS_DIR"/*.json
   export JOBS_REQUEST_LOG="$tmp/jobs-requests"
   : >"$JOBS_REQUEST_LOG"
-  export PR_JSON_FIXTURE="{\"headRefOid\":\"$HEAD_SHA\",\"baseRefName\":\"main\"}"
+  export PR_JSON_FIXTURE="{\"headRefOid\":\"$HEAD_SHA\",\"baseRefName\":\"main\",\"headRefName\":\"fix/427-regenerate-and-fence\",\"headRepository\":{\"nameWithOwner\":\"Verjson/verjson-agents\"}}"
   export RULES_FIXTURE="[{\"type\":\"required_status_checks\",\"parameters\":{\"required_status_checks\":[{\"context\":\"ci / build-test\",\"integration_id\":$APP_ID},{\"context\":\"changelog / validate\",\"integration_id\":$APP_ID}]}}]"
   export CHECK_RUNS_FIXTURE="$default_check_runs"
   export RUNS_FIXTURE="$default_runs"
@@ -148,7 +151,7 @@ reset_env() {
 # --- the live #432 shape ------------------------------------------------------
 reset_env; run
 expect_true "a gate re-arm run displaced from ai-review-arm-<PR> by a later successful lifecycle re-arm run is set aside (verjson-agents#432)" \
-  "check run 31, run 9201 displaced from concurrency group ai-review-arm-432 by run 9202"
+  "check run 31, run 9201 displaced by run 9202 within declared concurrency family ai-review-arm-<pull request>"
 
 # --- only displacement-shaped cancellations ----------------------------------
 # A run displaced from a concurrency group never started: no step ran. A cancelled
@@ -193,6 +196,80 @@ CHECK_RUNS_FIXTURE="$(runs "$green_required,$(check_run 31 'rearm / event-policy
 run
 expect "a FAILURE check is never set aside as displaced, whatever its job record claims" 5 "rearm / event-policy=FAILURE"
 
+# The notice must not claim GitHub reported the group: runs expose no resolved
+# concurrency group and `pull_requests` is empty for these pull_request_target runs.
+reset_env; run
+if grep -qF -- 'concurrency group ai-review-arm-432' <<<"$OUT"; then
+  fail "the dismissal does not claim an observed concurrency group (output: $OUT)"
+else
+  pass "the dismissal does not claim an observed concurrency group"
+fi
+if grep -qF -- 'bound to this pull request by head branch and head repository' <<<"$OUT"; then
+  pass "the dismissal states how the runs were bound to the pull request"
+else
+  fail "the dismissal states how the runs were bound to the pull request (output: $OUT)"
+fi
+
+# --- both runs are bound to THIS pull request ----------------------------------
+# The group key is the pull-request number, which no run field reports. The head
+# branch and head repository are the closest binding GitHub exposes; both runs must
+# match the pull request's own, or a run of another pull request sharing the head SHA
+# could displace on paper.
+for target in gate lifecycle; do
+  for field in '{"head_branch":"other-branch"}' '{"head_repository":{"full_name":"someone/verjson-agents"}}' \
+               '{"head_branch":null}' '{"head_repository":null}' '{"head_repository":"verJSON/verjson-agents"}'; do
+    reset_env
+    if [ "$target" = gate ]; then
+      RUNS_FIXTURE="$(wf_runs "$(gate_run "$field"),$(lifecycle_run)")"
+    else
+      RUNS_FIXTURE="$(wf_runs "$(gate_run),$(lifecycle_run "$field")")"
+    fi
+    run
+    expect "a $target run carrying $field is not bound to this pull request and displaces nothing" 5 "rearm / event-policy=CANCELLED"
+  done
+done
+for pr_json in "{\"headRefOid\":\"$HEAD_SHA\",\"baseRefName\":\"main\"}" \
+               "{\"headRefOid\":\"$HEAD_SHA\",\"baseRefName\":\"main\",\"headRefName\":\"\",\"headRepository\":{\"nameWithOwner\":\"\"}}"; do
+  reset_env
+  PR_JSON_FIXTURE="$pr_json"
+  RUNS_FIXTURE="$(wf_runs "$(gate_run '{"head_branch":"","head_repository":{"full_name":""}}'),$(lifecycle_run '{"head_branch":"","head_repository":{"full_name":""}}')")"
+  run
+  expect "a pull request whose head identity is unknown binds no run (${pr_json:0:60}...)" 5 "rearm / event-policy=CANCELLED"
+done
+
+# --- the newest displacer must be unambiguous ------------------------------------
+# created_at is second-granular. When another family run shares the newest
+# displacer's second, which of them is newest cannot be told, so nothing displaces.
+tied_checks="$(check_run 71 'rearm / rearm / event-policy' success 605),$(check_run 72 'rearm / rearm / arm' success 605)"
+for tied_conclusion in success failure; do
+  reset_env
+  CHECK_RUNS_FIXTURE="$(runs "$green_required,$cancelled_gate_check,$superseder_checks,$tied_checks")"
+  RUNS_FIXTURE="$(wf_runs "$(gate_run),$(lifecycle_run),$(wf_run 9205 605 "$WF_LIFECYCLE" 22 'AI review lifecycle re-arm' "$LIFECYCLE_PATH" 2026-10-15T18:40:16Z "$tied_conclusion" "$LIFECYCLE_REFS")")"
+  run
+  expect "a newest displacer sharing its second with a $tied_conclusion family run displaces nothing" 5 "rearm / event-policy=CANCELLED"
+done
+
+# --- a re-run-failed-jobs attempt lists carried-over jobs -------------------------
+# Re-running failed jobs keeps the jobs that passed; the attempt's listing can report
+# them under the earlier run_attempt they ran in. They are not evidence about this
+# attempt and must neither fault the read nor count toward its shape.
+reset_env
+RUNS_FIXTURE="$(wf_runs "$(gate_run '{"run_attempt":2}'),$(lifecycle_run)")"
+jobs_for 9201 2 "$(job 31 9201 'rearm / event-policy' '[]' 0 '{"run_attempt":2}')" \
+  "$(job 33 9201 'rearm / app-key-policy / validate' '[{"name":"Set up job"}]' 1000071398 '{"run_attempt":1,"conclusion":"success"}')"
+run
+expect_true "a carried-over job from an earlier attempt neither faults the read nor blocks displacement" \
+  "check run 31, run 9201 displaced by run 9202"
+reset_env
+RUNS_FIXTURE="$(wf_runs "$(gate_run '{"run_attempt":2}'),$(lifecycle_run)")"
+jobs_for 9201 2 "$(job 31 9201 'rearm / event-policy' '[]' 0 '{"run_attempt":1}')"
+run
+expect "a cancelled check that is only a carried-over job of an earlier attempt is not this attempt's displacement" 5 "rearm / event-policy=CANCELLED"
+reset_env
+jobs_for 9201 1 "$(job 31 9201 'rearm / event-policy')" "$(job 34 9201 'rearm / arm' '[]' 0 '{"run_attempt":2}')"
+run
+expect "a job claiming a LATER attempt than the one listed faults" 1 "job inventory of workflow run 9201"
+
 # --- the job inventory is validated like every other inventory -------------------
 # Types are checked, never truthiness: a missing `steps` measures as length 0 and a
 # missing runner id compares as null, so either would read as "never started" and
@@ -226,7 +303,7 @@ CHECK_RUNS_FIXTURE="$(runs "$green_required,$cancelled_gate_check,$(check_run 51
 RUNS_FIXTURE="$(wf_runs "$(gate_run),$(required_run 9203 603 2026-10-15T18:39:58Z success)")"
 run
 expect_true "a later successful required-workflow run of the declaring workflow displaces a cancelled caller run" \
-  "check run 31, run 9201 displaced from concurrency group ai-review-arm-432 by run 9203"
+  "check run 31, run 9201 displaced by run 9203 within declared concurrency family ai-review-arm-<pull request>"
 
 # In the declaring repository the workflow runs directly, not as a required workflow.
 # Owner and repository compare case-insensitively, as GitHub resolves them.
@@ -236,7 +313,7 @@ CHECK_RUNS_FIXTURE="$(runs "$green_required,$cancelled_gate_check,$(check_run 51
 RUNS_FIXTURE="$(wf_runs "$(gate_run),$(direct_run 9203 603 2026-10-15T18:39:58Z success)")"
 REPO=verJSON/.github run
 expect_true "in the declaring repository its own direct run is a family member" \
-  "run 9201 displaced from concurrency group ai-review-arm-432 by run 9203"
+  "run 9201 displaced by run 9203 within declared concurrency family ai-review-arm-<pull request>"
 
 # --- the displacer must have done the family's work --------------------------
 # A run concludes `success` with its guarded jobs SKIPPED (ADR 0226's attack A1), and
