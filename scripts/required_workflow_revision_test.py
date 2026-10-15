@@ -169,6 +169,56 @@ class SecurityFloorTest(unittest.TestCase):
                 self.check(text, {PREVIOUS: "ahead"})
 
 
+class AuditLiveRevisionTest(unittest.TestCase):
+    FLOOR = "21eb48e713bd8304951fb7b26a900d08359af900"
+    VERIFIER = "scripts/verifier.py"
+
+    def audit(self, *, on_main="ahead", live=None, main=None, floor="ahead"):
+        workflow = yaml.safe_dump({"jobs": {"lane": {
+            "uses": "Verjson/.github/.github/workflows/node-ci-protected.yml@" + TARGET,
+        }}}).encode()
+        trees = {
+            PREVIOUS: {WORKFLOW_PATH: workflow, self.VERIFIER: b"v1\n"} | (live or {}),
+            "main": {WORKFLOW_PATH: workflow, self.VERIFIER: b"v1\n"} | (main or {}),
+        }
+
+        def compare(base, head):
+            if (base, head) == (PREVIOUS, "main"):
+                return on_main
+            self.assertEqual((self.FLOOR, TARGET), (base, head))
+            return floor
+
+        MODULE.audit_live_revision(
+            PREVIOUS,
+            compare=compare,
+            read_file=lambda path, ref: trees[ref][path],
+            workflow_path=WORKFLOW_PATH,
+            runtime_paths=(WORKFLOW_PATH, self.VERIFIER),
+            require=require,
+        )
+
+    def test_a_live_revision_running_the_reviewed_main_bytes_passes(self):
+        self.audit()
+
+    def test_a_live_revision_outside_protected_main_fails(self):
+        for status in ("behind", "diverged", None):
+            with self.subTest(status=status), self.assertRaisesRegex(
+                ContractError, "outside protected main"
+            ):
+                self.audit(on_main=status)
+
+    def test_any_runtime_byte_drift_from_main_reports_a_pending_rotation(self):
+        for drift in ({self.VERIFIER: b"v2\n"}, {WORKFLOW_PATH: b"jobs: {}\n"}):
+            with self.subTest(drift=list(drift)), self.assertRaisesRegex(
+                ContractError, "rotation pending"
+            ):
+                self.audit(main=drift)
+
+    def test_a_live_revision_below_the_security_floor_fails(self):
+        with self.assertRaisesRegex(ContractError, "security floor"):
+            self.audit(floor="behind")
+
+
 class RunGeneratorTest(unittest.TestCase):
     def test_historical_generator_runs_from_its_own_bytes_without_inherited_secrets(self):
         files = {

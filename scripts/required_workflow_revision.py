@@ -86,6 +86,27 @@ def admit_predecessor(
             "live required-workflow revision is not its generator's output")
 
 
+def audit_live_revision(
+        live_sha, *, compare, read_file, workflow_path, runtime_paths, require):
+    """Fail unless the live ruleset runs exactly the reviewed bytes on protected main.
+
+    The committed generated workflow (and anything the workflow checks out at its own
+    revision) is the record; a rotation is pending exactly when those bytes differ.
+    """
+    require(compare(live_sha, "main") in FORWARD,
+            f"live ruleset binds {live_sha}, a revision outside protected main")
+    for path in runtime_paths:
+        require(read_file(path, live_sha) == read_file(path, "main"),
+                f"rotation pending: live ruleset runs {live_sha}, whose {path} "
+                "differs from protected main")
+    workflow = read_file(workflow_path, live_sha)
+    try:
+        text = workflow.decode("utf-8")
+    except UnicodeDecodeError:
+        text = ""
+    require_security_floor(text, compare=compare, require=require)
+
+
 def run_generator(files, argv, require):
     """Run a historical generator from its own bytes, with no inherited environment.
 
