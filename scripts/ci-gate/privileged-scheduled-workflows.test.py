@@ -348,9 +348,88 @@ def validate_arm_audit(document: object) -> None:
     validate_cleanup(steps[4], "arm-audit cleanup", RULESET_CONFORMANCE_SOURCE)
 
 
+REQUIRED_WORKFLOW_AUDITS = (
+    (
+        "Audit the CLI projects required-workflow revision",
+        "python3 -I scripts/cli-projects-package-surface-ruleset.py audit",
+    ),
+    (
+        "Audit the authn required-workflow revision",
+        "python3 -I scripts/authn-type-surface-ruleset.py audit",
+    ),
+)
+
+
+def validate_required_workflow_audit(document: object) -> None:
+    """The live required-workflow rulesets are the only record of what they run.
+
+    The rotation tools keep no committed copy of a ruleset's revision, because that
+    copy went stale after every rotation (#1824). This job is the check that replaces
+    it: it fails while a ruleset runs anything but the reviewed required workflow on
+    protected main, and each audit runs even when the other fails so one cannot mask
+    the other. It reports; no pull request gates on it.
+    """
+    job = require_keys(
+        document["jobs"]["required-workflow-audit"],
+        {"runs-on", "defaults", "timeout-minutes", "steps"},
+        "jobs.required-workflow-audit",
+    )
+    validate_isolation(job, RULESET_CONFORMANCE_SOURCE, "jobs.required-workflow-audit")
+    require(
+        job["runs-on"]
+        == "${{ fromJSON(vars.CI_LANE_PRIVILEGED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}",
+        "required-workflow audit runner route changed",
+    )
+    require(job["timeout-minutes"] == 10, "required-workflow audit timeout changed")
+    steps = job["steps"]
+    require(
+        isinstance(steps, list) and len(steps) == 6,
+        "required-workflow audit must have exactly six steps",
+    )
+    require(all(isinstance(step, dict) for step in steps), "every step must be a mapping")
+    require(
+        steps[0].get("name") == "Check out the required-workflow rotation tools",
+        "required-workflow audit checkout name changed",
+    )
+    validate_checkout(steps[0], "required-workflow audit checkout", RULESET_CONFORMANCE_SOURCE)
+    provision = require_keys(steps[1], {"name", "uses", "with"}, "required-workflow python")
+    require(
+        SETUP_PYTHON.fullmatch(provision["uses"]) is not None,
+        "required-workflow audit Python provisioning must be a full-SHA pin",
+    )
+    install = require_keys(steps[2], {"name", "run"}, "required-workflow dependencies")
+    require(
+        "--require-hashes" in install["run"]
+        and "scripts/actions-ci-python.requirements.txt" in install["run"],
+        "required-workflow audit dependencies must come from the hash-pinned requirements",
+    )
+    for index, (name, command) in enumerate(REQUIRED_WORKFLOW_AUDITS, start=3):
+        expected_keys = {"name", "env", "run"} | ({"if"} if index > 3 else set())
+        audit = require_keys(steps[index], expected_keys, f"required-workflow audit {index}")
+        require(audit["name"] == name, f"required-workflow audit {index} name changed")
+        if index > 3:
+            require(
+                audit["if"] == "${{ !cancelled() }}",
+                "a failed required-workflow audit must not mask the next one",
+            )
+        env = require_keys(audit["env"], {"GH_TOKEN"}, f"required-workflow audit {index} env")
+        require(
+            env["GH_TOKEN"] == "${{ secrets.ORG_ADMIN_TOKEN }}",
+            f"required-workflow audit {index} token binding changed",
+        )
+        require(
+            audit["run"] == command,
+            f"required-workflow audit {index} must remain the read-only audit command",
+        )
+    validate_cleanup(steps[5], "required-workflow audit cleanup", RULESET_CONFORMANCE_SOURCE)
+
+
 def validate_ruleset_conformance(document: object) -> None:
-    job, steps = validate_common(document, "audit", {"audit", "arm-audit"})
+    job, steps = validate_common(
+        document, "audit", {"audit", "arm-audit", "required-workflow-audit"}
+    )
     validate_arm_audit(document)
+    validate_required_workflow_audit(document)
     permissions = require_keys(document["permissions"], {"contents"}, "permissions")
     require(permissions["contents"] == "read", "ruleset-conformance contents permission changed")
     require(
@@ -447,6 +526,11 @@ def expect_invalid(label: str, validator, text: str) -> int:
         return 0
     print(f"FAIL - {label}: mutation escaped the semantic contract")
     return 1
+
+
+def replace_last(text: str, old: str, new: str) -> str:
+    index = text.rfind(old)
+    return text if index < 0 else text[:index] + new + text[index + len(old):]
 
 
 def mutations(text: str, next_step: str) -> tuple[str, str]:
@@ -573,6 +657,24 @@ def main() -> int:
             ARM_AUDIT_COMMAND,
             "python3 -I scripts/ai-review-required-workflow-audit.py",
             1,
+        ),
+        "required-workflow audit mutating mode": ruleset_conformance_text.replace(
+            "scripts/cli-projects-package-surface-ruleset.py audit",
+            "scripts/cli-projects-package-surface-ruleset.py apply",
+            1,
+        ),
+        "required-workflow audit masked by its sibling": ruleset_conformance_text.replace(
+            "        if: ${{ !cancelled() }}\n        env:\n",
+            "        env:\n",
+            1,
+        ),
+        "required-workflow audit dropped": ruleset_conformance_text.replace(
+            "run: python3 -I scripts/authn-type-surface-ruleset.py audit",
+            "run: 'true'",
+            1,
+        ),
+        "required-workflow audit unpinned dependencies": replace_last(
+            ruleset_conformance_text, "--require-hashes", "--no-cache-dir"
         ),
         "test policy argument": ruleset_conformance_text.replace(
             "run: python3 -I scripts/org-ruleset-conformance.py",

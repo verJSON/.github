@@ -590,6 +590,53 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
             admit.assert_called_once_with(PREVIOUS, SHA)
             mutate.assert_not_called()
 
+    def test_audit_checks_the_live_revision_against_protected_main_read_only(self):
+        live = MODULE.render_payload(self.contract, PREVIOUS) | {
+            "id": 9, "source_type": "Organization", "source": "Verjson",
+        }
+        with (
+            mock.patch.object(MODULE, "list_named_rulesets", return_value=[{"id": 9}]),
+            mock.patch.object(MODULE, "gh_json", return_value=live),
+            mock.patch.object(MODULE, "audit_live_revision") as audit,
+            mock.patch.object(MODULE, "gh_json_input") as mutate,
+            mock.patch("sys.stdout"),
+        ):
+            self.assertEqual(0, MODULE.main(["audit"]))
+        audit.assert_called_once_with(PREVIOUS)
+        mutate.assert_not_called()
+
+    def test_audit_refuses_a_live_image_that_is_not_the_reviewed_active_one(self):
+        def image(mutate):
+            value = MODULE.render_payload(self.contract, PREVIOUS)
+            mutate(value)
+            return value | {"id": 9, "source_type": "Organization", "source": "Verjson"}
+
+        cases = {
+            "disabled": image(lambda value: value.update(enforcement="disabled")),
+            "no freshness": image(lambda value: value["rules"].pop()),
+            "bypass": image(lambda value: value.update(
+                bypass_actors=[{"actor_type": "OrganizationAdmin"}])),
+            "mutable": image(lambda value: value["rules"][0]["parameters"]["workflows"][0]
+                             .update(sha="main")),
+        }
+        for name, live in cases.items():
+            with (
+                self.subTest(name),
+                mock.patch.object(MODULE, "list_named_rulesets", return_value=[{"id": 9}]),
+                mock.patch.object(MODULE, "gh_json", return_value=live),
+                mock.patch.object(MODULE, "audit_live_revision") as audit,
+                self.assertRaises(MODULE.ContractError),
+            ):
+                MODULE.main(["audit"])
+            audit.assert_not_called()
+        for named in ([], [{"id": 9}, {"id": 10}]):
+            with (
+                self.subTest(named=named),
+                mock.patch.object(MODULE, "list_named_rulesets", return_value=named),
+                self.assertRaisesRegex(MODULE.ContractError, "uniquely present"),
+            ):
+                MODULE.main(["audit"])
+
     def test_dry_run_accepts_the_exact_reviewed_prior_disabled_workflow(self):
         previous_disabled = MODULE.render_payload(
             self.contract, PREVIOUS,

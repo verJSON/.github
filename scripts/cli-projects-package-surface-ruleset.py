@@ -704,19 +704,37 @@ def validate_freshness_check(check_runs, contract, head_sha, workflow_run_id, no
             "strict admission check predates ruleset activation")
 
 
+def audit(contract):
+    named = list_named_rulesets(contract)
+    require(len(named) == 1, "canonical organization ruleset is not uniquely present")
+    ruleset_id = named[0].get("id")
+    require(isinstance(ruleset_id, int) and ruleset_id > 0,
+            "canonical organization ruleset id is invalid")
+    live = gh_json(f"orgs/Verjson/rulesets/{ruleset_id}")
+    live_sha = revision.bound_workflow_sha(live, require)
+    validate_org_ruleset(live, render_payload(contract, live_sha))
+    audit_live_revision(live_sha)
+    print(f"verified: organization ruleset {ruleset_id} runs {live_sha}, "
+          "the reviewed required workflow on protected main")
+    return 0
+
+
 def main(arguments=None):
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "mode",
-        choices=("render", "dry-run", "apply", "snapshot", "verify-run"),
+        choices=("render", "dry-run", "apply", "snapshot", "verify-run", "audit"),
     )
-    parser.add_argument("--workflow-sha", required=True)
+    parser.add_argument("--workflow-sha")
     parser.add_argument("--ack", default="")
     parser.add_argument("--run-id", type=int)
     parser.add_argument("--head-sha")
     parser.add_argument("--pre-trigger-max-run-id", type=int)
     args = parser.parse_args(arguments)
     contract = read_contract()
+    if args.mode == "audit":
+        return audit(contract)
+    require(args.workflow_sha is not None, "--workflow-sha is required")
     expected = render_payload(contract, args.workflow_sha)
     staged = dict(expected)
     staged["enforcement"] = "disabled"
