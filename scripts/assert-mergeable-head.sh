@@ -109,7 +109,7 @@ readonly PASSING='["SUCCESS","NEUTRAL","SKIPPED"]'
 # this list and nothing else -- never a name resemblance -- and
 # scripts/ci-gate/concurrency-family-map.test.py derives it from the workflows and
 # generators that declare and inherit the group, failing when the two disagree.
-readonly CONCURRENCY_FAMILIES='[{"group_prefix":"ai-review-arm-","group_key":"github.event.pull_request.number","event":"pull_request_target","declared_by":{"repository":"verjson/.github","path":".github/workflows/gate-rearm.yml"},"callers":[{"name":"gate re-arm","path":".github/workflows/gate-rearm.yml"},{"name":"AI review lifecycle re-arm","path":".github/workflows/ai-review-lifecycle-rearm.yml"}]}]'
+readonly CONCURRENCY_FAMILIES='[{"group_prefix":"ai-review-arm-","group_key":"github.event.pull_request.number","event":"pull_request_target","declared_by":{"repository":"verjson/.github","path":".github/workflows/gate-rearm.yml","name":"AI review authorization arm"},"callers":[{"name":"gate re-arm","path":".github/workflows/gate-rearm.yml"},{"name":"AI review label re-arm","path":".github/workflows/ai-review-label-rearm.yml"},{"name":"AI review lifecycle re-arm","path":".github/workflows/ai-review-lifecycle-rearm.yml"}]}]'
 # The jq definitions every program reading CONCURRENCY_FAMILIES shares (passed as
 # $families), so the candidate read and the verdict cannot disagree on membership.
 # "Owner/Repo/path@ref" -> "owner/repo/path": owner and repository are
