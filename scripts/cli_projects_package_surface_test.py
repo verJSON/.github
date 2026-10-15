@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -140,6 +142,56 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
         self.assertNotIn("git/ref/heads/main", script)
         self.assertNotIn("LEGACY_CONSUMER_WORKFLOW_SHA256", workflow_text)
         self.assertNotIn("default_main_workflow_sha256", script)
+
+    def run_admission(self, repository, live_repository):
+        """Execute the committed admission step against a stubbed `gh`."""
+        workflow = MODULE.load_yaml(
+            ROOT / ".github/workflows/cli-projects-package-surface-required.yml"
+        )
+        script = workflow["jobs"]["admission"]["steps"][0]["run"]
+        head = "f" * 40
+        candidate = "consumer workflow\n"
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        stub = bin_dir / "gh"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            'case "$*" in\n'
+            '  *"/actions/runs/"*) printf \'pull_request\\t%s\\t1\\t5\\n\' "$HEAD" ;;\n'
+            '  *"/pulls/5 "*) printf \'5\\topen\\t%s\\t%s\\tmain\\n\' "$LIVE_REPOSITORY" "$HEAD" ;;\n'
+            '  *"/contents/.github/workflows/ci.yml?ref="*) printf \'%s\' "$CANDIDATE" ;;\n'
+            '  *) echo "UNSTUBBED gh $*" >&2; exit 1 ;;\n'
+            "esac\n",
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+        output = self.root / "github-output"
+        output.write_text("", encoding="utf-8")
+        environment = {
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "REPOSITORY": repository,
+            "RUN_ID": "123",
+            "CONSUMER_WORKFLOW_SHA256": hashlib.sha256(candidate.encode()).hexdigest(),
+            "GH_TOKEN": "stub-token",
+            "GITHUB_OUTPUT": str(output),
+            "HEAD": head,
+            "LIVE_REPOSITORY": live_repository,
+            "CANDIDATE": candidate,
+        }
+        result = subprocess.run(
+            ["bash", "-e", "-c", script], env=environment,
+            capture_output=True, text=True, check=False,
+        )
+        return result, output.read_text(encoding="utf-8")
+
+    def test_admission_accepts_the_consumer_in_its_renamed_display_case(self):
+        # GitHub reports the renamed organization as `verJSON` in both the run
+        # context and the pull request API since 2026-10-02 (ADR 0213); every
+        # admission since refused verjson-cli-projects run 38432170170 on it.
+        repository = "verJSON/verjson-cli-projects"
+        result, output = self.run_admission(repository, repository)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"head-repository={repository}\n", output)
 
     def test_rollout_legacy_consumer_workflow_digest_accepts_digest_or_null(self):
         config = json.loads(MODULE.REQUIRED_NODE_CONFIG.read_text(encoding="utf-8"))

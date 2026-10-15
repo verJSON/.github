@@ -64,7 +64,10 @@ jobs:
           GH_TOKEN: ${{{{ github.token }}}}
         run: |
           set -euo pipefail
-          [ "$REPOSITORY" = '{repository}' ]
+          # Repository names are ASCII-case-insensitive identities (ADR 0213): the run
+          # context and the API report the renamed display case `verJSON`.
+          jq -en --arg observed "$REPOSITORY" --arg expected '{repository}' \\
+            '($observed | ascii_downcase) == ($expected | ascii_downcase)' >/dev/null
           [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
           run_record="$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID" --jq '[.event,.head_sha,(.pull_requests|length),(.pull_requests[0].number//"")]|@tsv')"
           IFS=$'\\t' read -r event_name run_head_sha pr_count pr_number <<<"$run_record"
@@ -76,7 +79,8 @@ jobs:
           IFS=$'\\t' read -r live_number live_state live_repository live_head_sha live_base_ref <<<"$pr_record"
           [ "$live_number" = "$pr_number" ]
           [ "$live_state" = open ]
-          [ "$live_repository" = '{repository}' ]
+          jq -en --arg observed "$live_repository" --arg expected '{repository}' \\
+            '($observed | ascii_downcase) == ($expected | ascii_downcase)' >/dev/null
           [ "$live_head_sha" = "$run_head_sha" ]
           [[ "$live_head_sha" =~ ^[0-9a-f]{{40}}$ ]]
           [ "$live_base_ref" = main ]
