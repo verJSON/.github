@@ -426,12 +426,11 @@ jobs:
           # [0-9] also matches fullwidth digits. Match bytes, not collation.
           export LC_ALL=C
           hosted_image='"ubuntu-(latest|[0-9]{2}\.[0-9]{2})"'
-          if [[ "$SECRETLESS_BUILD_LANE" =~ ^${hosted_image}$ ]] \
-            || [[ "$SECRETLESS_BUILD_LANE" =~ ^\[${hosted_image}\]$ ]]; then
-            exit 0
+          if [[ ! "$SECRETLESS_BUILD_LANE" =~ ^${hosted_image}$ ]] \
+            && [[ ! "$SECRETLESS_BUILD_LANE" =~ ^\[${hosted_image}\]$ ]]; then
+            echo "::error::secretless build-test requires a GitHub-hosted Linux runner, but CI_LANE_UNTRUSTED does not select a single standard GitHub-hosted Linux image"
+            exit 1
           fi
-          echo "::error::secretless build-test requires a GitHub-hosted Linux runner, but CI_LANE_UNTRUSTED does not select a single standard GitHub-hosted Linux image"
-          exit 1
       - id: check
         # Inline the co-located composite action's run block so an exact-pinned
         # reusable never calls back into this repository through a second ref.
