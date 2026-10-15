@@ -28,6 +28,7 @@ HEAD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 APP_ID=15368
 WF_GATE=381766279
 WF_LIFECYCLE=381766276
+WF_REQUIRED=360793393
 CANONICAL_REF="Verjson/.github/.github/workflows/gate-rearm.yml@ee656fdb181eeb9ec9ae3765497930968cc544b7"
 
 mkdir -p "$tmp/bin" "$tmp/jobs"
@@ -161,6 +162,22 @@ reset_env
 jobs_for 9201 1 "$(job 31 9201 'rearm / event-policy' '[]' 1000071397)"
 run
 expect "a cancelled family run whose job acquired a runner is still refused" 5 "rearm / event-policy=CANCELLED"
+
+# --- the declaring workflow is a member ----------------------------------------
+# The organization ruleset runs gate-rearm.yml itself as a required workflow (`AI
+# review authorization arm`): it declares the group rather than referencing it, and
+# its workflow_url names a required workflow, which a repository cannot forge.
+required_run() { # run-id suite created conclusion [overrides-json]
+  wf_run "$1" "$2" "$WF_REQUIRED" 104 'AI review authorization arm' "$GATE_PATH" "$3" "$4" '[]' \
+    "$(jq -nc --arg url "https://api.github.com/repos/Verjson/verjson-agents/actions/required_workflows/$WF_REQUIRED" \
+         --argjson over "${5:-{\}}" '{workflow_url: $url} + $over')"
+}
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$green_required,$cancelled_gate_check,$(check_run 51 'event-policy' success 603),$(check_run 52 'arm' success 603)")"
+RUNS_FIXTURE="$(wf_runs "$(gate_run),$(required_run 9203 603 2026-10-15T18:39:58Z success)")"
+run
+expect_true "a later successful required-workflow run of the declaring workflow displaces a cancelled caller run" \
+  "check run 31, run 9201 displaced from concurrency group ai-review-arm-432 by run 9203"
 
 # --- the displacer must have done the family's work --------------------------
 # A run concludes `success` with its guarded jobs SKIPPED (ADR 0226's attack A1), and

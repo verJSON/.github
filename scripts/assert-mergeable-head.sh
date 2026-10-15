@@ -121,15 +121,26 @@ read -r -d '' FAMILY_JQ_DEFS <<'JQ'
       [ capture("^(?<o>[^/@]+)/(?<r>[^/@]+)/(?<p>[^@]+)@") ][0]
       | if . == null then null else "\(.o | ascii_downcase)/\(.r | ascii_downcase)/\(.p)" end
     else null end;
+  # A caller of the declaring workflow: a listed (name, path) whose run references it.
+  def family_caller($f):
+    . as $run
+    | any($f.callers[]; .name == $run.name and .path == $run.path)
+      and any($run.referenced_workflows[]? | select(type == "object") | .path | reference_target;
+              . == "\($f.declared_by.repository)/\($f.declared_by.path)");
+  # The declaring workflow itself, run by the organization ruleset as a required
+  # workflow: GitHub names it in workflow_url, which a repository cannot forge.
+  def family_declarer($f):
+    .workflow_id as $id
+    | .name == $f.declared_by.name and .path == $f.declared_by.path
+      and (.workflow_url | type) == "string"
+      and (.workflow_url | endswith("/actions/required_workflows/\($id)"));
   # The index of the declared family this run belongs to, or null.
   def family_index:
     . as $run
     | [ $families | to_entries[]
         | .value as $f
         | select($run.event == $f.event
-                 and any($f.callers[]; .name == $run.name and .path == $run.path)
-                 and any($run.referenced_workflows[]? | select(type == "object") | .path | reference_target;
-                         . == "\($f.declared_by.repository)/\($f.declared_by.path)"))
+                 and (($run | family_caller($f)) or ($run | family_declarer($f))))
         | .key ][0];
 JQ
 readonly FAMILY_JQ_DEFS
