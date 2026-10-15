@@ -5,6 +5,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+# `python3 -I` does not put the script directory on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from github_identity import same_repositories  # noqa: E402
+
 
 ROOT = Path(__file__).resolve().parent.parent
 POLICY = Path(os.environ.get("ORG_SECRET_POLICY", ROOT / "config/org-actions-secret-policy.json"))
@@ -89,7 +93,8 @@ def selected_repositories(org: str, name: str) -> list[str]:
         for repo_index, repo_value in enumerate(repositories):
             repo = require_mapping(repo_value, f"selected repository {repo_index} for {name}")
             names.append(require_nonempty_string(repo.get("full_name"), f"selected repository {repo_index} for {name}.full_name"))
-    duplicates = duplicate_names(names)
+    # Repository names are case-insensitive identities (#1779).
+    duplicates = duplicate_names([name.casefold() for name in names])
     if duplicates:
         raise AuditDataError(f"selected grants for {name} contain duplicate repositories: {duplicates}")
     return sorted(names)
@@ -212,7 +217,7 @@ def main() -> int:
         ):
             failures.append(f"{name}: incomplete policy justification")
             continue
-        duplicate_repositories = duplicate_names(repositories)
+        duplicate_repositories = duplicate_names([repository.casefold() for repository in repositories])
         if duplicate_repositories:
             failures.append(
                 f"{name}: policy contains duplicate repositories: {duplicate_repositories}"
@@ -239,7 +244,7 @@ def main() -> int:
             except (AuditDataError, RuntimeError) as error:
                 failures.append(f"{name}: {error}")
                 continue
-            if granted != sorted(repositories):
+            if not same_repositories(granted, repositories):
                 failures.append(
                     f"{name}: selected grants differ; actual={granted} expected={sorted(repositories)}"
                 )

@@ -11,7 +11,10 @@ import tempfile
 
 import yaml
 
-from cli_projects_required_node_config import load_required_node_config
+# `python3 -I` does not put the script directory on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from cli_projects_required_node_config import load_required_node_config  # noqa: E402
+from github_identity import same_organization, same_repository, strip_repository_url_prefix  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -356,7 +359,7 @@ def mutable_ruleset(value):
 def validate_org_ruleset(value, expected):
     require(isinstance(value, dict), "live organization ruleset must be an object")
     require(value.get("source_type") == "Organization", "ruleset source is not Organization")
-    require(value.get("source") == "Verjson", "ruleset organization drifted")
+    require(same_organization(value.get("source"), "Verjson"), "ruleset organization drifted")
     require(mutable_ruleset(value) == expected, "live organization ruleset differs from reviewed image")
 
 
@@ -367,7 +370,7 @@ def expected_repository_ruleset(contract):
 def validate_repository_ruleset(value, expected):
     require(isinstance(value, dict), "live repository ruleset must be an object")
     require(value.get("source_type") == "Repository", "repository ruleset source type drifted")
-    require(value.get("source") == "Verjson/verjson-cli-projects",
+    require(same_repository(value.get("source"), "Verjson/verjson-cli-projects"),
             "repository ruleset source drifted")
     require(value.get("id") == expected["id"], "repository ruleset id drifted")
     require(mutable_ruleset(value) == {key: expected[key] for key in MUTABLE_FIELDS},
@@ -602,10 +605,12 @@ def validate_required_run(run, contract, workflow_sha, head_sha, minimum_run_id,
     require(parse_timestamp(run.get("created_at")) >= not_before,
             "required workflow run predates ruleset activation")
     require(run.get("path") == required["path"], "run path is not protected workflow")
-    url = run.get("workflow_url", "")
-    require(url.startswith(required["workflow_url_prefix"]),
+    suffix = strip_repository_url_prefix(
+        run.get("workflow_url"), required["workflow_url_prefix"], contract["consumer"]["repository"]
+    )
+    require(suffix is not None,
             "run was not created by organization required-workflow rule")
-    require(url.removeprefix(required["workflow_url_prefix"]).isdigit(),
+    require(suffix.isdigit(),
             "required workflow URL id is invalid")
     require(run.get("workflow_sha") in (None, workflow_sha),
             "reported workflow SHA disagrees with rule binding")
@@ -628,7 +633,9 @@ def validate_freshness_check(check_runs, contract, head_sha, workflow_run_id, no
         and isinstance(check.get("app"), dict)
         and check["app"].get("id") == freshness["integration_id"]
         and isinstance(check.get("details_url"), str)
-        and check["details_url"].startswith(run_path)
+        and strip_repository_url_prefix(
+            check["details_url"], run_path, contract["consumer"]["repository"]
+        ) is not None
     ]
     require(candidates, "strict admission check is absent from fresh required-workflow run")
     latest = max(candidates, key=lambda check: parse_timestamp(check.get("started_at")))

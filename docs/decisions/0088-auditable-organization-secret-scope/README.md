@@ -37,3 +37,12 @@ No automation in this decision writes secret values or visibility. Every live vi
 - New secrets and silent access drift produce a failing audit instead of becoming undocumented policy.
 - This change deliberately performs no live organization mutation and does not close #265; it establishes the prerequisite control for later narrowing.
 - Complete private-fleet and generated-caller inventories remain required before replacing any fleet-wide target with `selected`.
+
+## 2026-10-15 amendment: selected grants compare as repository identities
+
+The exact selected-repository grants compare as case-insensitive repository identities over
+GitHub's ASCII name charset through `scripts/github_identity.py`, each exactly as often as
+reviewed. The API reports `verJSON/<repository>` since the organization's 2026-10-02
+display-case rename, while the policy records `Verjson/<repository>`. A missing, excess,
+foreign-owner, or non-ASCII grant still fails. Rationale and evidence: ADR 0213's
+2026-10-15 amendment ([#1779](https://github.com/Verjson/.github/issues/1779)).
