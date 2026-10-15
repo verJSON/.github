@@ -9,7 +9,30 @@ cannot lag, so the predecessor is read from it and admitted only when it is a
 canonical revision (ADR 0153 2026-10-15 amendment).
 """
 
+import re
+
+
+SHA = re.compile(r"[0-9a-f]{40}")
 FORWARD = frozenset({"ahead", "identical"})
+
+
+def bound_workflow_sha(ruleset, require):
+    rules = ruleset.get("rules") if isinstance(ruleset, dict) else None
+    require(isinstance(rules, list), "live ruleset rules are malformed")
+    bindings = [
+        rule for rule in rules
+        if isinstance(rule, dict) and rule.get("type") == "workflows"
+    ]
+    require(len(bindings) == 1, "live ruleset must have exactly one workflows rule")
+    parameters = bindings[0].get("parameters")
+    workflows = parameters.get("workflows") if isinstance(parameters, dict) else None
+    require(isinstance(workflows, list) and len(workflows) == 1
+            and isinstance(workflows[0], dict),
+            "live ruleset must bind exactly one required workflow")
+    sha = workflows[0].get("sha")
+    require(isinstance(sha, str) and SHA.fullmatch(sha) is not None,
+            "live ruleset binds a mutable required-workflow revision")
+    return sha
 
 
 def admit_predecessor(

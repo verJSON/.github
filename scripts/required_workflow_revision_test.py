@@ -69,5 +69,46 @@ class AdmitPredecessorTest(unittest.TestCase):
                 )
 
 
+def workflows_rule(*shas):
+    return {"type": "workflows", "parameters": {"workflows": [
+        {"path": WORKFLOW_PATH, "repository_id": 1, "ref": "refs/heads/main", "sha": sha}
+        for sha in shas
+    ]}}
+
+
+class BoundWorkflowShaTest(unittest.TestCase):
+    def test_the_single_bound_revision_is_read_from_the_live_ruleset(self):
+        freshness = {"type": "required_status_checks", "parameters": {}}
+        self.assertEqual(PREVIOUS, MODULE.bound_workflow_sha(
+            {"rules": [workflows_rule(PREVIOUS), freshness]}, require
+        ))
+
+    def test_absent_ambiguous_or_mutable_bindings_fail_closed(self):
+        cases = (
+            None,
+            [],
+            {},
+            {"rules": None},
+            {"rules": []},
+            {"rules": ["workflows"]},
+            {"rules": [{"type": "workflows"}]},
+            {"rules": [{"type": "workflows", "parameters": None}]},
+            {"rules": [workflows_rule()]},
+            {"rules": [workflows_rule(PREVIOUS, TARGET)]},
+            {"rules": [workflows_rule(PREVIOUS), workflows_rule(PREVIOUS)]},
+            {"rules": [{"type": "workflows", "parameters": {"workflows": ["x"]}}]},
+            {"rules": [workflows_rule("main")]},
+            {"rules": [workflows_rule("A" * 40)]},
+            {"rules": [workflows_rule("a" * 39)]},
+            {"rules": [workflows_rule("a" * 40 + "\n")]},
+            {"rules": [workflows_rule(None)]},
+        )
+        for ruleset in cases:
+            with self.subTest(ruleset=ruleset), self.assertRaisesRegex(
+                ContractError, "live ruleset"
+            ):
+                MODULE.bound_workflow_sha(ruleset, require)
+
+
 if __name__ == "__main__":
     unittest.main()
