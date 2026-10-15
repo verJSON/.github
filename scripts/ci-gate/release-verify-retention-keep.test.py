@@ -8,6 +8,7 @@ retention job deletes against. The generated step runs the hook under
 `env -i`, so the window reaches it only if the generator forwards it.
 """
 
+from copy import deepcopy
 from pathlib import Path
 import os
 import re
@@ -25,6 +26,26 @@ MODES = {
     "release-node": [],
     "release-artifact": ["--build-runner", "ubuntu-24.04"],
     "release-snapshot": [],
+}
+# The `env -i` allowlist each mode's hook received before this key was admitted.
+# Only release-node also forwards RELEASE_VERIFICATION_PATH by name; the other
+# two modes use it solely as PATH.
+_SHARED_PRIOR_HOOK_ENVIRONMENT = frozenset({
+    "PATH", "HOME", "CI",
+    "GITHUB_ACTIONS", "GITHUB_WORKFLOW", "GITHUB_JOB", "GITHUB_RUN_ID",
+    "GITHUB_RUN_NUMBER", "GITHUB_REPOSITORY", "GITHUB_REPOSITORY_OWNER",
+    "GITHUB_REF", "GITHUB_REF_NAME", "GITHUB_REF_TYPE", "GITHUB_SHA",
+    "GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "GITHUB_WORKSPACE", "GITHUB_STEP_SUMMARY",
+    "RUNNER_OS", "RUNNER_ARCH", "RUNNER_TEMP", "RUNNER_TOOL_CACHE",
+    "PACKAGE_VERSION", "VERJSON_CHANGELOG_TOOL_CACHE",
+    "NODE_AUTH_TOKEN", "GIT_TERMINAL_PROMPT",
+    "npm_config_script_shell", "npm_config_ignore_scripts",
+    "npm_config_userconfig", "npm_config_globalconfig",
+})
+PRIOR_HOOK_ENVIRONMENT = {
+    "release-node": _SHARED_PRIOR_HOOK_ENVIRONMENT | {"RELEASE_VERIFICATION_PATH"},
+    "release-artifact": _SHARED_PRIOR_HOOK_ENVIRONMENT,
+    "release-snapshot": _SHARED_PRIOR_HOOK_ENVIRONMENT,
 }
 RETENTION_STEPS = {
     ".github/workflows/node-release.yml": "Delete package versions outside canonical retention",
@@ -84,8 +105,12 @@ def evaluate_step_value(value, variables):
     return variables.get(match.group("name"), "") or match.group("default")
 
 
-def run_verify_step(step, variables):
-    """Run the step's script with an environment-printing hook; return (result, hook_env)."""
+def run_verify_step(step, variables, ambient=None):
+    """Run the step's script with an environment-printing hook; return (result, hook_env).
+
+    `ambient` adds variables to the step process, the way an earlier step's
+    GITHUB_ENV export or a runner-level variable would; `env -i` must drop them.
+    """
     with tempfile.TemporaryDirectory(prefix="release-verify-retention-") as temporary:
         root = Path(temporary)
         scripts = root / "scripts"
@@ -119,6 +144,7 @@ def run_verify_step(step, variables):
             "RUNNER_ARCH": "X64",
             "RUNNER_TEMP": str(runner_temp),
             "RUNNER_TOOL_CACHE": str(root / "tool-cache"),
+            **(ambient or {}),
         }
         environment.pop(RETENTION_KEY, None)
         retention = evaluate_step_value((step.get("env") or {}).get(RETENTION_KEY), variables)
@@ -178,6 +204,43 @@ class ReleaseVerifyRetentionKeepTests(unittest.TestCase):
                         result.stdout + result.stderr,
                     )
                     self.assertIsNone(hook_env, "the hook ran with an invalid retention window")
+
+    def test_the_smallest_and_a_large_window_reach_the_hook_unchanged(self):
+        for mode, step in self.steps.items():
+            for value in ("1", "120"):
+                with self.subTest(mode=mode, value=value):
+                    result, hook_env = run_verify_step(step, variables={RETENTION_KEY: value})
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual((hook_env or {}).get(RETENTION_KEY), value)
+
+    def test_a_step_without_the_retention_env_fails_closed_instead_of_defaulting(self):
+        for mode, step in self.steps.items():
+            with self.subTest(mode=mode):
+                stripped = deepcopy(step)
+                del stripped["env"][RETENTION_KEY]
+                result, hook_env = run_verify_step(stripped, variables={RETENTION_KEY: "7"})
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(
+                    "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer, got ''.",
+                    result.stdout + result.stderr,
+                )
+                self.assertIsNone(hook_env, "the hook ran without a retention window")
+
+    def test_the_hook_environment_is_the_prior_allowlist_plus_only_the_retention_window(self):
+        ambient = {
+            "LEAK_CANARY": "must-not-leak",
+            "GITHUB_TOKEN": "must-not-leak",
+            "RETENTION_KEEP": "9",
+            "VERJSON_PACKAGE_RETENTION_KEEP": "9",
+            "CI_RUNNER_DEFAULT": "must-not-leak",
+            "NODE_OPTIONS": "--require=/must-not-leak.js",
+        }
+        for mode, step in self.steps.items():
+            with self.subTest(mode=mode):
+                result, hook_env = run_verify_step(step, variables={}, ambient=ambient)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIsNotNone(hook_env, "the verification hook never ran")
+                self.assertEqual(set(hook_env), set(PRIOR_HOOK_ENVIRONMENT[mode] | {RETENTION_KEY}))
 
     def test_retention_jobs_and_the_verify_step_read_one_window_through_one_guard(self):
         verify_value = self.steps["release-node"]["env"][RETENTION_KEY]
