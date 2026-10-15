@@ -100,3 +100,68 @@ outside the declaration that automation moves.
   not a gap in the fence.
 - Versioned contract distribution (ADR 0185) would delete generated artifacts and with
   them this fence; supersede this record then.
+
+## Amendment (2026-10-15, #1812) — the fence covers every release caller name, and goes live
+
+**Context.** On 2026-10-15 `Verjson/renovate-config/default.json` still did not extend the
+preset, so decision 1's fence protected no adopter that inherits the organization
+configuration. Renovate kept opening digest PRs inside generated callers
+(verjson-cli#314, AiB#348, AiB#349), and each one failed `changelog-contract`. The
+preset also listed only `release.yml` and `changelog-contract.yml`. The generated
+contract test accepts a release caller under any name: it checks every workflow that
+calls `changelog-release.yml`, and `--release-caller-package-dirs` declares the extra
+ones. verjson-cli's `release-cli-schema.yml` is `release-node` output and was unfenced.
+
+**Why a path, again.** Fencing by generated-file identity is not available. In Renovate
+44.65.5 (renovate-config's pin) and 44.164.6 (latest on 2026-10-15), `matchJsonata`
+evaluates the per-dependency upgrade object (`dist/util/package-rules/jsonata.js`).
+`matchFileNames` sees only `packageFile` and `lockFiles` (`files.js`). The
+`github-actions` extractor returns dependencies with no file content
+(`modules/manager/github-actions/extract.js`), so no matcher can read the generator
+header.
+
+**Decision.**
+
+1. The preset fences `.github/workflows/release-*.yml` as well as `release.yml` and
+   `changelog-contract.yml`. Adopters name an extra release caller
+   `release-<purpose>.yml`. The pattern stays inside the glob subset that
+   Verjson/verjson-agents' resolution model (`unfenced_paths`) understands: no regex,
+   negation, brace, or in-segment `**`. That model treats any other pattern as no fence
+   at all. `.yaml` is left out because no generator writes it, and the one
+   `release.yaml` in the organization (`scv-iac`) is hand-written.
+2. A hand-written workflow on a fenced path is reopened by its own repository with a
+   rule that matches only `matchManagers: ["github-actions"]`, the file, and
+   `matchDepTypes: ["action"]`. The rule precedes every disable in that repository.
+   Any broader rule would also undo the organization preset's `uses-with` and
+   `Verjson/.github` workflow disables. `enabled: true` also clears the extractor's
+   `unversioned-reference` skip, so a reopened file must not contain a bare-SHA
+   third-party pin. This repository's `release-app-canary.yml`, `release-dispatch.yml`,
+   and `release-propose.yml` are reopened that way. Without that, the grouped digest PR
+   would stop moving them and decision 5's coherence check would fail on that PR.
+3. `scripts/ci-gate/renovate-generated-callers.test.py` treats the preset entries as
+   globs and requires every generated output to be fenced, including a release caller
+   placed at each recorded adopter name. Every pattern must reach a generator output.
+   Every pattern must stay in the modeled subset. Every fenced hand-written workflow
+   here that carries a dependency Renovate reads must be reopened, and each reopen must
+   be narrow, ordered first, live, and free of unversioned pins.
+4. Verjson/renovate-config#59 adds the extend as the last `extends` entry. Every preset
+   in its list resolves before it, and its own `packageRules` follow it. Its test
+   resolves the merged configuration with Renovate's own `resolveConfigPresets` and
+   `applyPackageRules`, and it requires every fenced generated path to stay disabled.
+
+**Consequences.** An organization survey on 2026-10-15 covered 99 non-archived
+repositories. It found 45 `.github/workflows/release*.yml` files. Outside this
+repository, every one that the new pattern newly reaches is generated: verjson-cli's
+`release-cli-schema.yml` (`release-node`) and verjson-cloud-storage's
+`release-propose.yml` (`release-propose`, which has nothing for Renovate to update).
+Two hand-written `release.yml` files remain fenced, as they were before: `catalog-ui` and
+`verjson-platform-template`. AiB's `release.yml` is now generated (`release-artifact`),
+so the first Consequences bullet's list is down to those two. A release caller named
+outside `release*.yml`, such as `publish.yml`, would still be unfenced. None exists
+today. Closing that gap structurally means the generated contract test must reject a
+release caller outside the fenced names. That would change the contract every adopter
+regenerates, so it is left as a recorded option under #1812 rather than done here. A
+Dependabot vulnerability alert still applies `force: vulnerabilityAlerts`
+(`enabled: true`) after every rule, so a vulnerable action in a generated caller can
+appear on the dependency dashboard. That entry stays approval-gated and never
+automerges (renovate-config's `vulnerabilityAlerts`). The fix is still regeneration.

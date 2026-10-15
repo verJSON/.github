@@ -3,10 +3,11 @@
   "description": "Generated caller fence, extended by the organization preset in Verjson/renovate-config (#1812). Adopters' generated callers are byte-exact generator output, so Renovate must not edit them; their action pins and runner labels move in Verjson/.github's generators and reach an adopter only when it regenerates. scripts/ci-gate/renovate-generated-callers.test.py derives this path list from the generators.",
   "packageRules": [
     {
-      "description": "Generator-owned caller paths whose output carries a dependency the github-actions manager would update: release.yml (gen-changelog-caller.sh release-node, release-artifact, release-snapshot) and changelog-contract.yml (pr-gate). Other generated callers reference only Verjson/.github workflows, whose digest updates the organization preset already disables. A hand-written release.yml is fenced too; that is the cost of matching by path, because Renovate cannot match on the generated header.",
+      "description": "Generator-owned caller paths whose output carries a dependency the github-actions manager would update: release.yml (gen-changelog-caller.sh release-node, release-artifact, release-snapshot), any extra release caller an adopter names release-<purpose>.yml (the generated contract test accepts a release caller under any name), and changelog-contract.yml (pr-gate). Other generated callers reference only Verjson/.github workflows, whose digest updates the organization preset already disables. Renovate cannot match a file by its generated header, so the fence matches by path: a hand-written workflow on one of these paths is fenced too and must be reopened by its own repository (ADR 0232).",
       "matchManagers": ["github-actions"],
       "matchFileNames": [
         ".github/workflows/changelog-contract.yml",
+        ".github/workflows/release-*.yml",
         ".github/workflows/release.yml"
       ],
       "enabled": false
