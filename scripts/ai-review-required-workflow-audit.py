@@ -12,6 +12,10 @@ from pathlib import Path
 
 import yaml
 
+# `python3 -I` does not put the script directory on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from github_identity import repository_identity  # noqa: E402
+
 
 ROOT = Path(__file__).resolve().parent.parent
 CONTRACT = Path(
@@ -692,7 +696,7 @@ def read_repository_properties(contract: dict, read) -> dict[str, dict[str, obje
         full_name = row.get("repository_full_name")
         values = row.get("properties")
         require(
-            isinstance(full_name, str)
+            repository_identity(full_name) is not None
             and repository_identity(full_name) not in identities
             and isinstance(values, list),
             "organization property inventory is invalid",
@@ -722,12 +726,6 @@ def target_arm_cohort(
         for full_name, values in properties_by_repository.items()
         if values.get(arm_property["name"]) == arm_property["value"]
     )
-
-
-def repository_identity(full_name: str) -> str:
-    # GitHub owner and repository names are case-insensitive; the API reports the
-    # current display case, which an organization rename changes (#1775).
-    return full_name.casefold()
 
 
 def require_reviewed_cohort(contract: dict, cohort: list[str], name: str) -> None:

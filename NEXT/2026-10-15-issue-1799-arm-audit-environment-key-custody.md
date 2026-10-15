@@ -16,3 +16,5 @@ A read is treated as absent only when gh's status line ends in `(HTTP 404)`, as 
 An unreadable environment key is reported with the reason it could not be read, and every GitHub API read failure in the audit now carries gh's status line (for example `gh: Forbidden (HTTP 403)`), so an expired token is distinguishable from an outage.
 
 Replacement-workflow drift is now reported together with the armed-adopter findings instead of only after they clear, and a failing plain audit still prints its report, including `unpinned_live_fields`, so a standing finding no longer hides the rest of the daily picture. A failed render mode still writes no payload.
+
+The audit now compares repository identities through the shared `scripts/github_identity.py` (#1779), so an organization property row whose repository name falls outside GitHub's charset is an invalid inventory rather than a case-folded match.

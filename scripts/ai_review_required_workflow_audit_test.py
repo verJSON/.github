@@ -615,6 +615,17 @@ jobs:
         with self.assertRaisesRegex(AUDIT.AuditError, "organization property inventory is invalid"):
             AUDIT.render_property_migration_payload(self.contract, "unset-values", self.read)
 
+    def test_an_inventory_name_outside_githubs_charset_is_not_an_identity(self):
+        # U+212A KELVIN SIGN casefolds to `k`, so folding alone would read this
+        # as the reviewed `Verjson/kappa` (github_identity, #1779).
+        self.enter_legacy_selector_state()
+        self.contract["arm_property_migration"]["repositories"] = ["Verjson/alpha", "Verjson/beta", "Verjson/kappa"]
+        rows = self.fixture["orgs/Verjson/properties/values?per_page=100"][0]
+        alpha = next(row for row in rows if row["repository_full_name"] == "Verjson/alpha")
+        rows.append({**copy.deepcopy(alpha), "repository_full_name": "Verjson/\u212aappa"})
+        with self.assertRaisesRegex(AUDIT.AuditError, "organization property inventory is invalid"):
+            AUDIT.render_property_migration_payload(self.contract, "unset-values", self.read)
+
     def test_target_selector_requires_the_reviewed_property_cohort(self):
         rows = self.fixture["orgs/Verjson/properties/values?per_page=100"][0]
         beta = next(row for row in rows if row["repository_full_name"] == "Verjson/beta")
