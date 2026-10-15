@@ -30,8 +30,11 @@
 # Gates A and C set aside one shape only: a CANCELLED check run whose workflow run
 # was cancelled and then superseded by a later successful run of the same workflow,
 # event, and head that reports that check as SUCCESS or not at all (ADR 0226, #1754)
-# -- the draft-then-ready concurrency cancel. No conclusion is added to the passing
-# set, and Gate B always reads the raw inventory.
+# -- the draft-then-ready concurrency cancel -- or a run that never started because a
+# later run of ANOTHER workflow in its declared concurrency family displaced it from
+# the group's pending slot, when the newest later-created successful family run on
+# the head reports only SUCCESS (ADR 0226 amendment 2026-10-15, verjson-agents#432).
+# No conclusion is added to the passing set, and Gate B always reads the raw inventory.
 #
 # Prints "true" and exits 0 only when all three hold. Every other outcome is a
 # fault: a `::error::` naming the gate, and a distinct exit code — never a bare
@@ -41,6 +44,7 @@
 # and `repos/{owner}/{repo}/rules/branches/{base}`; the last is Gate A's ONLY source
 # of the required set. Workflow runs (`actions/runs`) are read for every head (ADR 0229):
 # an unfinished run is pending, and ADR 0226 places cancelled check runs in their runs.
+# The job listing of a cancelled concurrency-family run is read under that same grant.
 # A caller missing any read cannot evaluate the assertion, and
 # this script refuses rather than falling back to partial data. `administration` is
 # NOT required, and an organization-level ruleset is returned through this repository
@@ -320,6 +324,12 @@ jq -n --slurpfile a "$check_runs" --slurpfile b "$statuses" '$a[0] + $b[0]' >"$c
 # statuses, and every check Gate B reads (it keeps the raw inventory). Dismissal
 # removes evidence and never manufactures it: a required context reported only by a
 # superseded cancellation is then ABSENT, which Gate A refuses.
+#
+# Amendment 2026-10-15. GitHub keeps one PENDING run per concurrency group, so a newer
+# run of a DIFFERENT workflow sharing a declared group (CONCURRENCY_FAMILIES) replaces a
+# pending one, which is cancelled before any runner or step. Such a run is also set
+# aside -- see `displacer` below for the exact conditions; every one is pinned by
+# scripts/assert-mergeable-head.concurrency-family.test.sh.
 #
 # The workflow-run inventory this reasons over is read for every head (below, ADR 0229).
 # ------------------------------------------------------------ workflow runs ----

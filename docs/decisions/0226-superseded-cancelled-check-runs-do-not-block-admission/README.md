@@ -175,3 +175,93 @@ equivalent mutants kept as defense in depth: the `type == "object"` record check
 (jq already errors when indexing a non-object, which faults the same way) and the
 exactly-one-run placement check (the suite-uniqueness validation rejects duplicates
 first). The mutation table is recorded on the pull request.
+
+## Amendment (2026-10-15) — a run displaced from a declared concurrency family
+
+### Context
+
+GitHub keeps at most one *pending* run per concurrency group: when a newer run joins
+a group whose pending slot is taken, the older pending run concludes `cancelled`
+without a runner or a step. `gate-rearm.yml` declares the workflow-level group
+`ai-review-arm-${{ github.event.pull_request.number }}` with
+`cancel-in-progress: false`, and every caller of it — the ruleset's required
+`AI review authorization arm` run, `gate re-arm`, `AI review label re-arm`, and
+`AI review lifecycle re-arm` — joins that one group. So a run can be displaced by a
+run of a *different* workflow, which the decision above (same `workflow_id`, same
+event) never sets aside.
+
+Observed live on Verjson/verjson-agents#432, head `ae5f8326`, on 2026-10-15: run
+38787495945 (`gate re-arm`, created 18:39:57) was cancelled with zero steps and
+`runner_id` 0 while `AI review authorization arm` run 38787495335 held the group;
+38787540131 (`AI review lifecycle re-arm`, 18:40:15) took its pending slot and was
+itself replaced by 38787543084 (18:40:16, `success`, every job `success`).
+`scripts/assert-mergeable-head.sh Verjson/verjson-agents 432` exited `5` on
+`rearm / event-policy=CANCELLED` until a manual `gh run rerun`.
+
+### Decision
+
+Gates A and C also set aside a `COMPLETED`/`CANCELLED` check run whose own workflow
+run concluded `cancelled` when all of the following hold. Anything else keeps the
+cancellation blocking.
+
+1. **Declared family.** The run belongs to a family in the checked-in
+   `CONCURRENCY_FAMILIES` map in `scripts/assert-mergeable-head.sh` — never by name
+   resemblance. A member is either a listed caller (exact workflow `name` and `path`)
+   whose `referenced_workflows` names the declaring workflow (owner and repository
+   compared case-insensitively, the path exactly), or the declaring workflow itself:
+   its exact name and path, run directly in the declaring repository or as a
+   required workflow whose `workflow_url` names that run's own
+   `required_workflows/<workflow_id>`. Its `event` must be the family's event.
+   `scripts/ci-gate/concurrency-family-map.test.py` rebuilds the map from every
+   reusable workflow declaring a group keyed only on the pull-request number with
+   `cancel-in-progress: false`, and from every generator and workflow calling it.
+   Each caller must be a pure single-job call on the family event without a
+   different group. The test fails when the map disagrees in either direction.
+2. **Displacement-shaped.** The jobs of the attempt the run record reports
+   (`actions/runs/{id}/attempts/{run_attempt}/jobs`, paginated, reconciled against
+   `total_count`, every record type-checked and bound to this run, attempt, and
+   head) are non-empty. Every job is `completed`/`cancelled`, ran no step, and never
+   acquired a runner (`runner_id` 0 or null), and the cancelled check run is one of
+   them (a job id is its check run id). A run whose job started is interrupted, not
+   displaced.
+3. **A later-created successful family run did the work.** The newest family run on
+   this head whose `created_at` is strictly later than the cancelled attempt's
+   `run_started_at` concluded `success`. Its own check suite is non-empty and every
+   check in it is a completed `SUCCESS`. A different workflow names its checks
+   differently, so the same-name rule above has nothing to consult. A run concludes
+   `success` with guarded jobs `SKIPPED`, so the whole suite is required. Only the
+   newest such run is consulted.
+
+`created_at`, not `run_number`, orders here because `run_number` is per workflow and
+does not compare across a family. It is second-granular, so a same-second tie is
+not later and keeps the cancellation blocking. Using the attempt's
+`run_started_at` keeps a family run created before a re-run attempt from displacing
+that attempt. Dismissals are reported in the same `::notice::`, naming the resolved
+group, the cancelled run, and its displacer. Gate B, the passing conclusion set, and
+every commit status are unchanged, and a required context reported only by a
+displaced cancellation is absent, which Gate A refuses.
+
+The job listing is read only for cancelled family runs, under the Actions (read)
+grant the workflow-run read already requires; a refused read exits `1` naming it.
+
+### Consequences
+
+- The #432 shape is admitted without a re-run.
+- **Known limit, accepted:** the map follows the current tree. A run pinned to an
+  older declaring SHA is admitted on the current declaration. `ai-review-arm-<PR>`
+  has not changed since the group was introduced, and the displacement shape already
+  requires the cancelled run to have done nothing.
+- **Known limit, accepted:** as above, `actions/runs?head_sha=` mixes runs of every
+  pull request sharing the head. A family run of another pull request on the same
+  head can therefore displace on paper. It must still have run the family's whole
+  suite to `SUCCESS` on this head.
+- A family whose displacer skipped work still needs `gh run rerun`, as #1753's shape
+  does.
+
+### Verification
+
+`scripts/assert-mergeable-head.concurrency-family.test.sh` and
+`scripts/ci-gate/concurrency-family-map.test.py`, both registered under
+`merge-gate` in `scripts/actions-ci-groups.tsv`. Each guard above was mutated out
+and the suites failed. The mutation table and its equivalent mutants are recorded on
+the pull request.
