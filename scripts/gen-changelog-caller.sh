@@ -5678,6 +5678,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'exit 23' \
     cd "$verification_fixture"
   RUNNER_TEMP="$verification_fixture/tmp" \
   RELEASE_VERIFICATION_PATH="$PATH" \
+  CI_PACKAGE_RETENTION_KEEP=3 \
   PACKAGE_VERSION=9.8.7 NODE_AUTH_TOKEN=do-not-print-this \
       bash -eo pipefail "$verification_script"
   ) >"$verification_fixture/output" 2>&1 || verification_rc=$?
