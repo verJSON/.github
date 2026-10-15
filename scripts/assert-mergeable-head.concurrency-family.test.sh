@@ -185,6 +185,14 @@ jobs_for 9201 1 "$(job 39 9201 'rearm / event-policy')"
 run
 expect "a cancelled check run absent from its run's job listing is still refused" 5 "rearm / event-policy=CANCELLED"
 
+# Displacement applies to a CANCELLED check only. A check run that reports FAILURE ran;
+# even if its job record disagrees and claims a never-started cancel, the two
+# inventories are inconsistent and the failure is not dismissed.
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$green_required,$(check_run 31 'rearm / event-policy' failure 601),$superseder_checks")"
+run
+expect "a FAILURE check is never set aside as displaced, whatever its job record claims" 5 "rearm / event-policy=FAILURE"
+
 # --- the job inventory is validated like every other inventory -------------------
 # Types are checked, never truthiness: a missing `steps` measures as length 0 and a
 # missing runner id compares as null, so either would read as "never started" and
