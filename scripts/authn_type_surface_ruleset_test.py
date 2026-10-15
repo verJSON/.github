@@ -438,6 +438,19 @@ class AuthnTypeSurfaceRulesetTest(unittest.TestCase):
             )
         mutate.assert_not_called()
 
+    def test_discovery_refuses_a_target_whose_protected_lane_predates_the_floor(self):
+        with (
+            mock.patch.object(MODULE, "verify_canonical_bytes"),
+            mock.patch.object(MODULE, "canonical_compare", return_value="behind") as compare,
+            mock.patch.object(MODULE, "gh_json") as api,
+            self.assertRaisesRegex(MODULE.ContractError, "security floor"),
+        ):
+            MODULE.discover_state(self.contract, SHA)
+        compare.assert_called_once_with(
+            "21eb48e713bd8304951fb7b26a900d08359af900", MODULE.NODE_CI_SHA,
+        )
+        api.assert_not_called()
+
     def test_audit_checks_the_live_revision_read_only(self):
         with (
             mock.patch.object(MODULE, "list_named_rulesets", return_value=[{"id": 21750617}]),
