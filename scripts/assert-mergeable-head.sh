@@ -418,17 +418,19 @@ if [ "$cancelled_count" -gt 0 ]; then
     # A displaced run never started: its attempt has jobs, every one of them was
     # cancelled, none acquired a runner (GitHub reports runner_id 0 for a job that
     # never left the queue), and none ran a step.
-    | def displacement_shaped($o):
+    # The cancelled check run must be one of those jobs (a job id is its check run id).
+    | def displacement_shaped($o; $check_id):
         ($jobs[0]["\($o.id)"] // []) as $own_jobs
         | ($own_jobs | length) > 0
+          and any($own_jobs[]; .id == $check_id)
           and all($own_jobs[];
                   .status == "completed" and .conclusion == "cancelled"
                   and (.steps | length) == 0 and (.runner_id == null or .runner_id == 0));
     # The newest later-created successful run of the cancelled run'"'"'s declared
     # concurrency family on this head, or null.
-    def displacer($o):
+    def displacer($o; $check_id):
       ($o | family_index) as $fam
-      | if $fam == null or (displacement_shaped($o) | not) then null
+      | if $fam == null or (displacement_shaped($o; $check_id) | not) then null
         else ($o.run_started_at | fromdateiso8601) as $start
         | [ $runs[]
             | select(.status == "completed" and .conclusion == "success"
@@ -456,6 +458,7 @@ if [ "$cancelled_count" -gt 0 ]; then
       if .kind == "check_run" and .status == "COMPLETED" and .conclusion == "CANCELLED" then
         .name as $name
         | .suite_id as $sid
+        | .id as $check_id
         | [ $runs[] | select(.check_suite_id == $sid) ] as $own
         | if ($own | length) != 1 then null
           else $own[0] as $o
@@ -479,7 +482,7 @@ if [ "$cancelled_count" -gt 0 ]; then
                    end)
                  # ADR 0226 amendment 2026-10-15: a run displaced from its declared
                  # concurrency family by a later-created successful run of the family.
-                 // displacer($o)
+                 // displacer($o; $check_id)
             end
           end
       else null end;

@@ -174,6 +174,14 @@ for shape in '.conclusion = "success"' '.conclusion = "skipped"' '.status = "que
   expect "a displaced-looking attempt with a job where '$shape' is still refused" 5 "rearm / event-policy=CANCELLED"
 done
 
+# The cancelled check run must BE one of the attempt's jobs (a job id is its check
+# run id). Otherwise the job listing describes some other attempt -- a re-run whose
+# record moved on -- and says nothing about this check.
+reset_env
+jobs_for 9201 1 "$(job 39 9201 'rearm / event-policy')"
+run
+expect "a cancelled check run absent from its run's job listing is still refused" 5 "rearm / event-policy=CANCELLED"
+
 # --- the job inventory is validated like every other inventory -------------------
 # Types are checked, never truthiness: a missing `steps` measures as length 0 and a
 # missing runner id compares as null, so either would read as "never started" and
