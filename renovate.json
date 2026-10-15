@@ -19,6 +19,18 @@
       "depNameTemplate": "anthropics/claude-code-action",
       "datasourceTemplate": "github-tags",
       "versioningTemplate": "semver-coerced"
+    },
+    {
+      "customType": "regex",
+      "description": "Action pins the canonical generators emit into adopters' generated callers (#1812). Adopters fence those callers (renovate/generated-callers.json), so the pins move here, in the same grouped PR as this repository's workflow digests, and reach adopters only through regeneration.",
+      "managerFilePatterns": [
+        "/^scripts\\/gen-[a-z0-9-]+\\.(sh|py)$/"
+      ],
+      "matchStrings": [
+        "='(?<depName>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?:/[A-Za-z0-9_./-]+)?@(?<currentDigest>[0-9a-f]{40}) # (?<currentValue>v[0-9][0-9A-Za-z.+-]*)'"
+      ],
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "github-actions"
     }
   ],
   "packageRules": [
