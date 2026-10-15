@@ -73,3 +73,12 @@ ruleset `21522093`. A failure preserves both enforcement mechanisms and stops ro
   can broaden it implicitly.
 - Rollout is intentionally two-phase: merge protected bytes first, then apply and verify
   the organization rule under a human gate, then hand off consumer-owned retirement.
+
+## 2026-10-15 amendment: repository identity is case-insensitive
+
+The "repository source" this ADR requires to match exactly is a GitHub identity. Since the
+organization's 2026-10-02 display-case rename it is reported as `verJSON/verjson-authn`.
+It, the organization ruleset `source`, and the required-run `workflow_url` repository
+segment now compare case-insensitively over GitHub's ASCII name charset through
+`scripts/github_identity.py`. A different owner or repository still fails closed. Rationale
+and evidence: ADR 0213's 2026-10-15 amendment ([#1779](https://github.com/Verjson/.github/issues/1779)).

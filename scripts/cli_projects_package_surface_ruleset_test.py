@@ -396,6 +396,49 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
                     [stale_check], self.contract, HEAD, 42, not_before
                 )
 
+    def test_live_identities_compare_case_insensitively_and_refuse_another_owner(self):
+        # The organization login became `verJSON` on 2026-10-02 and the API reports
+        # that display case; the reviewed contract spells it `Verjson` (#1779).
+        # U+017F LATIN SMALL LETTER LONG S case-folds to `s`: `Verjſon` folds to `verjson`.
+        homoglyph = "Verjſon"
+        expected = MODULE.render_payload(self.contract, SHA)
+        organization_rule = expected | {"source_type": "Organization", "id": 1}
+        MODULE.validate_org_ruleset(organization_rule | {"source": "verJSON"}, expected)
+        repository_expected = MODULE.expected_repository_ruleset(self.contract)
+        repository_rule = self.contract["consumer"]["repository_ruleset"] | {"source_type": "Repository"}
+        MODULE.validate_repository_ruleset(
+            repository_rule | {"source": "verJSON/verjson-cli-projects"}, repository_expected
+        )
+        not_before = datetime(2026, 10, 14, tzinfo=timezone.utc)
+        run = {
+            "event": "pull_request", "status": "completed", "conclusion": "success",
+            "head_sha": HEAD, "id": 42, "created_at": "2026-10-14T12:01:00Z",
+            "path": ".github/workflows/cli-projects-package-surface-required.yml",
+            "workflow_url": "https://api.github.com/repos/verJSON/verjson-cli-projects/actions/required_workflows/7",
+        }
+        MODULE.validate_required_run(run, self.contract, SHA, HEAD, 41, not_before)
+        check = {
+            "name": "admission", "head_sha": HEAD, "status": "completed", "conclusion": "success",
+            "app": {"id": 15368},
+            "details_url": "https://github.com/verJSON/verjson-cli-projects/actions/runs/42/job/7",
+            "started_at": "2026-10-14T12:01:00Z", "completed_at": "2026-10-14T12:05:00Z",
+        }
+        MODULE.validate_freshness_check([check], self.contract, HEAD, 42, not_before)
+        for owner in ("Elsewhere", homoglyph):
+            with self.subTest(owner=owner):
+                with self.assertRaisesRegex(MODULE.ContractError, "ruleset organization drifted"):
+                    MODULE.validate_org_ruleset(organization_rule | {"source": owner}, expected)
+                with self.assertRaisesRegex(MODULE.ContractError, "repository ruleset source drifted"):
+                    MODULE.validate_repository_ruleset(
+                        repository_rule | {"source": f"{owner}/verjson-cli-projects"}, repository_expected
+                    )
+                foreign_run = run | {"workflow_url": run["workflow_url"].replace("verJSON", owner)}
+                with self.assertRaisesRegex(MODULE.ContractError, "was not created"):
+                    MODULE.validate_required_run(foreign_run, self.contract, SHA, HEAD, 41, not_before)
+                foreign_check = check | {"details_url": check["details_url"].replace("verJSON", owner)}
+                with self.assertRaisesRegex(MODULE.ContractError, "strict admission check is absent"):
+                    MODULE.validate_freshness_check([foreign_check], self.contract, HEAD, 42, not_before)
+
     def test_contract_rejects_consumer_preimage_or_receipt_scope_drift(self):
         for mutation, message in (
             (("consumer", "repository_ruleset", "id", 1), "preimage drifted"),

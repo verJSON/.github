@@ -10,6 +10,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+# `python3 -I` does not put the script directory on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from github_identity import same_organization, same_repository  # noqa: E402
+
 
 ROOT = Path(__file__).resolve().parent.parent
 POLICY_PATH = ROOT / "config/package-type-surface-rulesets.json"
@@ -161,10 +165,10 @@ def validate_live(organization: str, entry: dict, live: dict, desired: dict):
     require(live.get("name") == entry["name"], f"{entry['name']}: name drifted")
     if entry["scope"] == "organization":
         require(live.get("source_type") == "Organization", f"{entry['name']}: source type drifted")
-        require(live.get("source") == organization, f"{entry['name']}: source drifted")
+        require(same_organization(live.get("source"), organization), f"{entry['name']}: source drifted")
     else:
         require(live.get("source_type") == "Repository", f"{entry['name']}: source type drifted")
-        require(live.get("source") == entry["repository"], f"{entry['name']}: source drifted")
+        require(same_repository(live.get("source"), entry["repository"]), f"{entry['name']}: source drifted")
     if entry["ruleset_id"] is not None:
         require(live.get("id") == entry["ruleset_id"], f"{entry['name']}: id drifted")
     require(mutable_image(live) == desired, f"{entry['name']}: live image drifted")
@@ -246,7 +250,7 @@ def main(arguments=None):
             audit(organization, entries)
             return 0
         require(args.repository, "--repository is required for apply")
-        selected = [entry for entry in entries if entry["repository"] == args.repository]
+        selected = [entry for entry in entries if same_repository(args.repository, entry["repository"])]
         require(len(selected) == 1, "--repository is not a managed package")
         apply_one(organization, args.ack, selected[0])
         return 0
