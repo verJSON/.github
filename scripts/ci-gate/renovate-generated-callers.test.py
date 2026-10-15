@@ -350,6 +350,103 @@ class GeneratorPinManager(unittest.TestCase):
             self.assertTrue((ROOT / relative).is_file(), relative)
 
 
+class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
+    """The pin-independent digest is safe only while these rejections hold."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        generator = CHANGELOG_GENERATOR.read_text(encoding="utf-8")
+        cls.ref = head_ref()
+        contract_test = generate(generator, "contract-test", cls.ref)
+        cls.release_shape = extract_heredoc(contract_test, "RELEASE_SHAPE_PY")
+        cls.pins = {
+            name: contract_test_constant(contract_test, name)
+            for name in ("EXPECTED_RELEASE_CHECKOUT", "EXPECTED_RELEASE_SETUP_NODE")
+        }
+        cls.workflows = {
+            mode: generate(generator, mode, cls.ref, *arguments)
+            for mode, arguments in RELEASE_MODES.items()
+        }
+
+    def check(self, workflow: str, **pins: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as scratch:
+            checker = Path(scratch) / "release-shape.py"
+            checker.write_text(self.release_shape, encoding="utf-8")
+            target = Path(scratch) / "release.yml"
+            target.write_text(workflow, encoding="utf-8")
+            return subprocess.run(
+                ["python3", "-I", str(checker), str(target)],
+                env={
+                    "PATH": os.environ["PATH"],
+                    "CONTRACT_REF": self.ref,
+                    "RELEASE_CALLER_PACKAGE_DIRS_JSON": '["."]',
+                    **self.pins,
+                    **pins,
+                },
+                capture_output=True, text=True,
+            )
+
+    def swap_step_pin(self, workflow: str, step_name: str, variable: str) -> str:
+        declared = self.pins[variable].split(" #", 1)[0]
+        action = declared.split("@", 1)[0]
+        start = workflow.index(f"      - name: {step_name}\n") if step_name else 0
+        position = workflow.index(f"uses: {declared}", start)
+        position += len("uses: ")
+        swapped = f"{action}@{'f' * 40}"
+        return workflow[:position] + swapped + workflow[position + len(declared):]
+
+    def assert_rejected(self, result: subprocess.CompletedProcess[str], diagnostic: str) -> None:
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn(diagnostic, result.stderr)
+
+    def test_every_generated_release_mode_passes_unmodified(self) -> None:
+        for mode, workflow in self.workflows.items():
+            with self.subTest(mode=mode):
+                result = self.check(workflow)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_verify_checkout_moved_off_its_declared_commit_is_rejected(self) -> None:
+        for mode, workflow in self.workflows.items():
+            with self.subTest(mode=mode):
+                swapped = self.swap_step_pin(
+                    workflow, "Check out the tree that will be released", "EXPECTED_RELEASE_CHECKOUT"
+                )
+                self.assertNotEqual(swapped, workflow)
+                self.assert_rejected(
+                    self.check(swapped),
+                    "does not use the approved verify-job step sequence (#1717)",
+                )
+
+    def test_a_setup_node_moved_off_its_declared_commit_is_rejected(self) -> None:
+        for mode, workflow in self.workflows.items():
+            with self.subTest(mode=mode):
+                swapped = self.swap_step_pin(workflow, "", "EXPECTED_RELEASE_SETUP_NODE")
+                self.assertNotEqual(swapped, workflow)
+                result = self.check(swapped)
+                self.assert_rejected(result, "does not use the approved verify-job step sequence (#1717)")
+                self.assert_rejected(result, "does not use the approved setup-node inputs (#1717)")
+
+    def test_an_unusable_declared_pin_refuses_to_check(self) -> None:
+        workflow = self.workflows["release-node"]
+        checkout_sha = self.pins["EXPECTED_RELEASE_CHECKOUT"].split("@", 1)[1]
+        setup_sha = self.pins["EXPECTED_RELEASE_SETUP_NODE"].split("@", 1)[1]
+        cases = {
+            "EXPECTED_RELEASE_CHECKOUT": ("", f"evil/checkout@{checkout_sha}", "actions/checkout@v7"),
+            "EXPECTED_RELEASE_SETUP_NODE": ("", f"evil/setup-node@{setup_sha}", "actions/setup-node"),
+        }
+        action = {
+            "EXPECTED_RELEASE_CHECKOUT": "actions/checkout",
+            "EXPECTED_RELEASE_SETUP_NODE": "actions/setup-node",
+        }
+        for variable, values in cases.items():
+            for value in values:
+                with self.subTest(variable=variable, value=value):
+                    self.assert_rejected(
+                        self.check(workflow, **{variable: value}),
+                        f"{variable} does not name a pinned {action[variable]}",
+                    )
+
+
 class GeneratedCallerFence(unittest.TestCase):
     def setUp(self) -> None:
         self.generator = CHANGELOG_GENERATOR.read_text(encoding="utf-8")
