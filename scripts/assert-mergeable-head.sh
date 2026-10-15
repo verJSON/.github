@@ -389,8 +389,24 @@ if [ "$cancelled_count" -gt 0 ]; then
       || fault 1 "the job inventory of workflow run $candidate_run for $repo@$head_sha carries a malformed page: every page must carry a jobs array; it cannot be reasoned over"
     reconcile_pages "$jobs_raw" jobs \
       || fault 1 "the job inventory of workflow run $candidate_run for $repo@$head_sha is incomplete or unattested; it cannot be reasoned over"
-    jq -s --slurpfile acc "$jobs_by_run" --arg run "$candidate_run" '
-      $acc[0] + { ($run): [ .[].jobs[] ] }' <"$jobs_raw" >"$jobs_by_run.next" \
+    # Types are checked, never truthiness: a missing `steps` measures as length 0 and a
+    # missing runner id compares as null, either of which would read as "never started".
+    # Every job must belong to this run, this attempt, and this head.
+    jq -s --slurpfile acc "$jobs_by_run" --arg run "$candidate_run" \
+      --argjson attempt "$candidate_attempt" --arg head "$head_sha" '
+      def well_formed:
+        type == "object"
+        and (.id | type) == "number"
+        and .run_id == ($run | tonumber)
+        and .run_attempt == $attempt
+        and .head_sha == $head
+        and (.status | type) == "string"
+        and ((.conclusion | type) == "string" or .conclusion == null)
+        and (.steps | type) == "array"
+        and has("runner_id") and ((.runner_id | type) == "number" or .runner_id == null);
+      [ .[].jobs[] ]
+      | if all(.[]; well_formed) then $acc[0] + { ($run): . }
+        else error("malformed job") end' <"$jobs_raw" >"$jobs_by_run.next" \
       || fault 1 "the job inventory of workflow run $candidate_run for $repo@$head_sha carries a malformed record; it cannot be reasoned over"
     mv "$jobs_by_run.next" "$jobs_by_run" \
       || fault 1 "failed to record the job inventory of workflow run $candidate_run for $repo@$head_sha"

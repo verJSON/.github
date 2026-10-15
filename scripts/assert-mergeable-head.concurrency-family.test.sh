@@ -25,6 +25,7 @@ pass() { printf 'ok   - %s\n' "$1"; }
 fail() { printf 'FAIL - %s\n' "$1"; fails=$((fails + 1)); }
 
 HEAD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+OTHER_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 APP_ID=15368
 WF_GATE=381766279
 WF_LIFECYCLE=381766276
@@ -162,6 +163,25 @@ reset_env
 jobs_for 9201 1 "$(job 31 9201 'rearm / event-policy' '[]' 1000071397)"
 run
 expect "a cancelled family run whose job acquired a runner is still refused" 5 "rearm / event-policy=CANCELLED"
+
+# --- the job inventory is validated like every other inventory -------------------
+# Types are checked, never truthiness: a missing `steps` measures as length 0 and a
+# missing runner id compares as null, so either would read as "never started" and
+# release the cancellation. A job from another run, attempt, or head is not evidence
+# about this one. Every shape faults rather than answering.
+for mutation in \
+  'del(.steps)' '.steps = "none"' '.steps = null' \
+  'del(.runner_id)' '.runner_id = "0"' \
+  'del(.id)' '.id = "31"' \
+  '.run_id = 9999' '.run_attempt = 2' 'del(.run_attempt)' \
+  ".head_sha = \"$OTHER_SHA\"" 'del(.head_sha)' \
+  'del(.status)' '.status = 1' '.conclusion = 1' \
+  '"a job"'; do
+  reset_env
+  jobs_for 9201 1 "$(job 31 9201 'rearm / event-policy' | jq -c "$mutation")"
+  run
+  expect "a job record mutated by '$mutation' faults instead of answering" 1 "job inventory of workflow run 9201"
+done
 
 # --- the declaring workflow is a member ----------------------------------------
 # The organization ruleset runs gate-rearm.yml itself as a required workflow (`AI
