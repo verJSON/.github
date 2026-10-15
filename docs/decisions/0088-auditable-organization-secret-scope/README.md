@@ -46,3 +46,31 @@ reviewed. The API reports `verJSON/<repository>` since the organization's 2026-1
 display-case rename, while the policy records `Verjson/<repository>`. A missing, excess,
 foreign-owner, or non-ASCII grant still fails. Rationale and evidence: ADR 0213's
 2026-10-15 amendment ([#1779](https://github.com/Verjson/.github/issues/1779)).
+
+## 2026-10-15 amendment: provider keys follow the caller-selected provider
+
+`OPENAI_API_KEY` and `DEEPSEEK_API_KEY` target visibility `all`, not
+`selected: Verjson/.github`.
+
+- `ai-review-merge.yml` declares both as optional `workflow_call` secrets and
+  reads them in its OpenAI and DeepSeek review steps.
+- Generated callers invoke it with `secrets: inherit` from their own
+  repository, so the secrets resolve in the caller's context. That is the same
+  reason `ANTHROPIC_API_KEY` is `all`.
+- The org default provider is `deepseek` (`AI_REVIEW_PRIMARY_PROVIDER`). On
+  2026-10-15 the owner decided that any repository may switch provider without
+  a per-repository grant.
+- A `selected` target would have left both keys empty in every other
+  repository's review. The live visibility was correct; the policy was not.
+
+**Accepted exposure.** Anyone with write access to any organization repository
+can read these provider keys from a same-repository workflow. The owner accepted
+that risk in exchange for per-repository provider choice. Keep each provider
+account's spend limits as the compensating control.
+
+`JEV_API_KEY` has no Actions consumer. Its target is
+`selected: Verjson/.github`, the canary of the advisory quality review in
+[#1820](https://github.com/Verjson/.github/issues/1820), and the selected list
+becomes the set of repositories authorized to send diffs to the provider.
+Narrowing the live secret from `all` is an owner action on
+[#1385](https://github.com/Verjson/.github/issues/1385).
