@@ -110,6 +110,29 @@ readonly PASSING='["SUCCESS","NEUTRAL","SKIPPED"]'
 # scripts/ci-gate/concurrency-family-map.test.py derives it from the workflows and
 # generators that declare and inherit the group, failing when the two disagree.
 readonly CONCURRENCY_FAMILIES='[{"group_prefix":"ai-review-arm-","group_key":"github.event.pull_request.number","event":"pull_request_target","declared_by":{"repository":"verjson/.github","path":".github/workflows/gate-rearm.yml"},"callers":[{"name":"gate re-arm","path":".github/workflows/gate-rearm.yml"},{"name":"AI review lifecycle re-arm","path":".github/workflows/ai-review-lifecycle-rearm.yml"}]}]'
+# The jq definitions every program reading CONCURRENCY_FAMILIES shares (passed as
+# $families), so the candidate read and the verdict cannot disagree on membership.
+# "Owner/Repo/path@ref" -> "owner/repo/path": owner and repository are
+# case-insensitive on GitHub, the path within the repository is not.
+# `read -d ''` returns non-zero at end of input by design; the heredoc cannot fail.
+read -r -d '' FAMILY_JQ_DEFS <<'JQ'
+  def reference_target:
+    if type == "string" then
+      [ capture("^(?<o>[^/@]+)/(?<r>[^/@]+)/(?<p>[^@]+)@") ][0]
+      | if . == null then null else "\(.o | ascii_downcase)/\(.r | ascii_downcase)/\(.p)" end
+    else null end;
+  # The index of the declared family this run belongs to, or null.
+  def family_index:
+    . as $run
+    | [ $families | to_entries[]
+        | .value as $f
+        | select($run.event == $f.event
+                 and any($f.callers[]; .name == $run.name and .path == $run.path)
+                 and any($run.referenced_workflows[]? | select(type == "object") | .path | reference_target;
+                         . == "\($f.declared_by.repository)/\($f.declared_by.path)"))
+        | .key ][0];
+JQ
+readonly FAMILY_JQ_DEFS
 
 # Every line this script prints that starts with `::` is a workflow command when it runs
 # inside Actions, and messages carry names a pull request's author controls: a workflow's
@@ -331,31 +354,48 @@ cancelled_count="$(jq '[ .[] | select(.kind == "check_run" and .conclusion == "C
   || fault 1 "failed to count cancelled check runs for $repo@$head_sha"
 if [ "$cancelled_count" -gt 0 ]; then
   verdict="$scratch/superseded-verdict.json"
-  jq -c --slurpfile runs "$runs" --argjson families "$CONCURRENCY_FAMILIES" --arg pr "$pr" '
+  # A run displaced from a concurrency family is told apart from one cancelled after it
+  # started only by its jobs, so the job listing of every cancelled family run is read
+  # -- pinned to the attempt the run record reports -- and validated like the other
+  # inventories. Only cancelled runs of a declared family are read.
+  displacement_candidates="$scratch/displacement-candidates.tsv"
+  jq -r --argjson families "$CONCURRENCY_FAMILIES" "$FAMILY_JQ_DEFS"'
+    .[] | select(.status == "completed" and .conclusion == "cancelled" and family_index != null)
+    | if (.run_attempt | type) == "number" and .run_attempt >= 1 and (.run_attempt | floor) == .run_attempt
+      then [.id, .run_attempt] | @tsv
+      else error("a cancelled family run carries no attempt number") end' <"$runs" >"$displacement_candidates" \
+    || fault 1 "the workflow-run inventory for $repo@$head_sha carries a cancelled concurrency-family run without a valid attempt; it cannot be reasoned over"
+  jobs_by_run="$scratch/jobs-by-run.json"
+  printf '{}\n' >"$jobs_by_run" \
+    || fault 1 "failed to record the empty job inventory for $repo@$head_sha"
+  while IFS=$'\t' read -r candidate_run candidate_attempt; do
+    jobs_raw="$scratch/jobs-$candidate_run.raw.json"
+    gh api --paginate "repos/$repo/actions/runs/$candidate_run/attempts/$candidate_attempt/jobs?per_page=100" </dev/null >"$jobs_raw" \
+      || permission_fault "failed to fetch the jobs of workflow run $candidate_run attempt $candidate_attempt for $repo@$head_sha" "Actions" "actions"
+    require_array_pages "$jobs_raw" jobs \
+      || fault 1 "the job inventory of workflow run $candidate_run for $repo@$head_sha carries a malformed page: every page must carry a jobs array; it cannot be reasoned over"
+    reconcile_pages "$jobs_raw" jobs \
+      || fault 1 "the job inventory of workflow run $candidate_run for $repo@$head_sha is incomplete or unattested; it cannot be reasoned over"
+    jq -s --slurpfile acc "$jobs_by_run" --arg run "$candidate_run" '
+      $acc[0] + { ($run): [ .[].jobs[] ] }' <"$jobs_raw" >"$jobs_by_run.next" \
+      || fault 1 "the job inventory of workflow run $candidate_run for $repo@$head_sha carries a malformed record; it cannot be reasoned over"
+    mv "$jobs_by_run.next" "$jobs_by_run" \
+      || fault 1 "failed to record the job inventory of workflow run $candidate_run for $repo@$head_sha"
+  done <"$displacement_candidates"
+
+  jq -c --slurpfile runs "$runs" --slurpfile jobs "$jobs_by_run" --argjson families "$CONCURRENCY_FAMILIES" --arg pr "$pr" "$FAMILY_JQ_DEFS"'
     $runs[0] as $runs
     | . as $all
-    # "Owner/Repo/path@ref" -> "owner/repo/path"; owner and repository are
-    # case-insensitive on GitHub, the path within the repository is not.
-    | def reference_target:
-        if type == "string" then
-          [ capture("^(?<o>[^/@]+)/(?<r>[^/@]+)/(?<p>[^@]+)@") ][0]
-          | if . == null then null else "\(.o | ascii_downcase)/\(.r | ascii_downcase)/\(.p)" end
-        else null end;
-    # The index of the declared family this run belongs to, or null.
-    def family_index:
-      . as $run
-      | [ $families | to_entries[]
-          | .value as $f
-          | select($run.event == $f.event
-                   and any($f.callers[]; .name == $run.name and .path == $run.path)
-                   and any($run.referenced_workflows[]? | select(type == "object") | .path | reference_target;
-                           . == "\($f.declared_by.repository)/\($f.declared_by.path)"))
-          | .key ][0];
+    # A displaced run never started: its attempt has jobs, and none ran a step.
+    | def displacement_shaped($o):
+        ($jobs[0]["\($o.id)"] // []) as $own_jobs
+        | ($own_jobs | length) > 0
+          and all($own_jobs[]; (.steps | length) == 0);
     # The newest later-created successful run of the cancelled run'"'"'s declared
     # concurrency family on this head, or null.
     def displacer($o):
       ($o | family_index) as $fam
-      | if $fam == null then null
+      | if $fam == null or (displacement_shaped($o) | not) then null
         else ($o.run_started_at | fromdateiso8601) as $start
         | [ $runs[]
             | select(.status == "completed" and .conclusion == "success"

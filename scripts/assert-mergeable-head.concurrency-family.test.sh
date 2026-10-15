@@ -145,6 +145,16 @@ reset_env; run
 expect_true "a gate re-arm run displaced from ai-review-arm-<PR> by a later successful lifecycle re-arm run is set aside (verjson-agents#432)" \
   "check run 31, run 9201 displaced from concurrency group ai-review-arm-432 by run 9202"
 
+# --- only displacement-shaped cancellations ----------------------------------
+# A run displaced from a concurrency group never started: no step ran. A cancelled
+# run whose job ran a step did work that was interrupted -- a manual cancel, a
+# timeout -- and a later run of another workflow does not vouch for it. The runner
+# id stays 0 here so ONLY the step guard can refuse it.
+reset_env
+jobs_for 9201 1 "$(job 31 9201 'rearm / event-policy' '[{"name":"Set up job","status":"completed","conclusion":"success","number":1}]')"
+run
+expect "a cancelled family run whose job started a step is still refused" 5 "rearm / event-policy=CANCELLED"
+
 if [ "$fails" -ne 0 ]; then
   printf '\n%d assertion(s) failed\n' "$fails" >&2
   exit 1
