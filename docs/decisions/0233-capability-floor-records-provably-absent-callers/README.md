@@ -1,4 +1,4 @@
-# 0232 — Capability-floor discovery records a provably absent caller as a finding
+# 0233 — Capability-floor discovery records a provably absent caller as a finding
 
 - **Date:** 2026-10-15
 - **Status:** Accepted

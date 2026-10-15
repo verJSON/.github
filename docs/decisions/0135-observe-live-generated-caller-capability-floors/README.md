@@ -5,7 +5,7 @@
 - **Issue:** [#933](https://github.com/Verjson/.github/issues/933)
 - **Extends:** [ADR 0114](../0114-generated-caller-capability-floor-audit/README.md)
 - **Extends:** [ADR 0109](../0109-observe-first-renovate-compatibility-control-plane/README.md)
-- **Superseded in part by:** [ADR 0232](../0232-capability-floor-records-provably-absent-callers/README.md) (2026-10-15)
+- **Superseded in part by:** [ADR 0233](../0233-capability-floor-records-provably-absent-callers/README.md) (2026-10-15)
 
 ## Context
 
@@ -105,7 +105,7 @@ permissions and installation selection are unchanged.
 
 ## 2026-10-15 amendment — absent callers and the canonical owner's display case (#1777)
 
-[ADR 0232](../0232-capability-floor-records-provably-absent-callers/README.md)
+[ADR 0233](../0233-capability-floor-records-provably-absent-callers/README.md)
 supersedes the "missing files" condition above. A caller absent from a successful
 `.github/workflows` listing at the source commit is now recorded as a non-conformance
 finding and discovery continues. Every failed read, including any `404`, still fails
