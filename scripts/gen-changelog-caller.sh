@@ -568,7 +568,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out the pull request under validation
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: ${release_checkout%% #*}
         with:
           # The next step runs PR-authored scripts/changelog-contract.test.sh out
           # of this workspace, and nothing here fetches or pushes afterwards — so
@@ -696,9 +696,9 @@ release_runner_expr="github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEF
 # The audited action commits this repository pins everywhere else
 # (scripts/node-workflow-pins.test.sh).
 release_checkout='actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7'
-release_setup_node='actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7'
-release_upload_artifact='actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1'
-release_download_artifact='actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1'
+release_setup_node='actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7'
+release_upload_artifact='actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2'
+release_download_artifact='actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2'
 release_cache_save='actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0'
 release_cache_restore='actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0'
 
@@ -2848,6 +2848,8 @@ EXPECTED_RELEASE_CALLER_PACKAGE_DIRS_JSON='${expected_release_caller_package_dir
 EXPECTED_RELEASE_ASSETS_JSON='${release_assets_json}'
 EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES='${release_approved_packages_csv}'
 EXPECTED_RELEASE_LANE_PREFLIGHT_SHA256='${release_lane_preflight_sha256}'
+EXPECTED_RELEASE_CHECKOUT='${release_checkout}'
+EXPECTED_RELEASE_SETUP_NODE='${release_setup_node}'
 EXPECTED_RELEASE_UPLOAD_ARTIFACT='${release_upload_artifact}'
 EXPECTED_RELEASE_DOWNLOAD_ARTIFACT='${release_download_artifact}'
 EXPECTED_RELEASE_CACHE_SAVE='${release_cache_save}'
@@ -3311,6 +3313,19 @@ import sys
 
 path = sys.argv[1]
 problems = []
+
+
+def pinned_action(variable, action):
+    """The generator's one declaration of an action pin, without its tag comment."""
+    uses = os.environ.get(variable, "").split(" #", 1)[0]
+    if not re.fullmatch(re.escape(action) + r"@[0-9a-f]{40}", uses):
+        sys.stderr.write("FAIL - %s %s does not name a pinned %s\n" % (path, variable, action))
+        raise SystemExit(1)
+    return uses
+
+
+RELEASE_CHECKOUT = pinned_action("EXPECTED_RELEASE_CHECKOUT", "actions/checkout")
+RELEASE_SETUP_NODE = pinned_action("EXPECTED_RELEASE_SETUP_NODE", "actions/setup-node")
 
 with open(path, encoding="utf-8") as handle:
     raw_lines = handle.read().splitlines()
@@ -4122,9 +4137,9 @@ APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
     "release-snapshot": "0caf167486937a2def16a5223fcb64b1a4a737447d424c83a891c2aac4e3b3a2",
 }
 APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256 = {
-    "release-node": "eedf6b26589d5ed771d6b969830e9aee73f3db3f4eac3981dc9d378d7aba613c",
-    "release-artifact": "0bbae664b45e4d062c96a2013dfb5956704db5af610a192c4e919a0bad1cbdf7",
-    "release-snapshot": "4586c168d5ceb313ae882ae0e7c3b666de0c0e544f5c9f0e5c61dbbe6c54f9d5",
+    "release-node": "218a4c9a60752c45fb73123703cce4cd6029c8054ba43fb97fc2e26aebed3d4d",
+    "release-artifact": "7a736889f20b3050d02b82d60c21ae0ab1ca673a332d73bf5235af47288813de",
+    "release-snapshot": "1d1585ea8276b3ff08c0af881ab249ecaf1edc5ecee6ec63db6709d0f6b1b11a",
 }
 EXPECTED_RELEASE_STATE_ENV = {
     "VERSION": "${{ steps.release-version.outputs.version }}",
@@ -4588,12 +4603,12 @@ expected_verification_step_identities = [
     ("Prepare job-scoped changelog tool cache", ""),
     ("Release only from the default branch", ""),
     ("Bind a proposer dispatch to its exact derived head", ""),
-    ("Check out the tree that will be released", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"),
-    ("Check out the canonical selection contract", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"),
+    ("Check out the tree that will be released", RELEASE_CHECKOUT),
+    ("Check out the canonical selection contract", RELEASE_CHECKOUT),
     ("Resolve the release selection and version", ""),
     ("Resolve restart-safe release state", ""),
-    ("Check out the existing snapshot for resumed verification", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"),
-    ("", "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"),
+    ("Check out the existing snapshot for resumed verification", RELEASE_CHECKOUT),
+    ("", RELEASE_SETUP_NODE),
     ("Capture trusted release verification runtime", ""),
 ]
 if release_mode == "release-node":
@@ -4631,7 +4646,7 @@ setup_node_steps = [
     step for step in verification_job_steps
     if (fields := step_mapping_entries(step)) is not None
     and yaml_scalar_value(fields.get("uses", ""))
-    == "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+    == RELEASE_SETUP_NODE
 ]
 if (
     len(setup_node_steps) != 1
@@ -4688,6 +4703,13 @@ for step in verification_job_steps:
     digest_fields = dict(fields)
     if "uses" in digest_fields:
         digest_fields["uses"] = yaml_scalar_value(digest_fields["uses"])
+        # The step sequence above already binds each action to its declared
+        # pin, so the digest records which pin, not its value: a Renovate bump
+        # of the declaration must not invalidate the approved shape.
+        digest_fields["uses"] = {
+            RELEASE_CHECKOUT: "<declared actions/checkout pin>",
+            RELEASE_SETUP_NODE: "<declared actions/setup-node pin>",
+        }.get(digest_fields["uses"], digest_fields["uses"])
     if step_name == "Check out the canonical selection contract":
         expected_selection_checkout = {
             "repository": "verJSON/.github",
@@ -5574,6 +5596,8 @@ PY
   # python3 with no third-party dependency, and a "use it if importable"
   # fallback would put every adopter without it on the untested path.
   CONTRACT_REF="$CONTRACT_REF" \
+    EXPECTED_RELEASE_CHECKOUT="$EXPECTED_RELEASE_CHECKOUT" \
+    EXPECTED_RELEASE_SETUP_NODE="$EXPECTED_RELEASE_SETUP_NODE" \
     RELEASE_CALLER_PACKAGE_DIRS_JSON="$workflow_package_dirs_json" \
     python3 "$work/release-shape.py" "$release_workflow" \
     || fail "$release_workflow: see above"

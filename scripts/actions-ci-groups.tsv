@@ -46,6 +46,7 @@ platform	python3 scripts/package_retention_test.py
 platform	python3 scripts/ci-gate/renovate-compatibility.test.py
 platform	bash scripts/ci-gate/renovate-compatibility-workflow.test.sh
 platform	python3 scripts/ci-gate/renovate-compatibility-app-token.test.py
+platform	python3 scripts/ci-gate/renovate-generated-callers.test.py
 platform	python3 scripts/ci-gate/dependency-supersession.test.py
 platform	python3 scripts/ci-gate/dependency-supersession-workflow.test.py
 platform	bash scripts/retired-release-tooling.test.sh

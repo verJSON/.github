@@ -517,7 +517,7 @@ for job_name in ("dry-run", "deploy"):
     steps = jobs[job_name]["steps"]
     setup = [step for step in steps if step.get("uses", "").startswith("actions/setup-node@")]
     assert len(setup) == 1
-    assert setup[0]["uses"] == "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+    assert setup[0]["uses"] == "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1"
     assert setup[0]["with"]["node-version"] == "24.19.0"
     binding = [step for step in steps if step.get("name") == "Verify caller binds this immutable contract"]
     assert len(binding) == 1
