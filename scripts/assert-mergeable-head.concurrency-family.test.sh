@@ -162,6 +162,17 @@ jobs_for 9201 1 "$(job 31 9201 'rearm / event-policy' '[]' 1000071397)"
 run
 expect "a cancelled family run whose job acquired a runner is still refused" 5 "rearm / event-policy=CANCELLED"
 
+# --- the displacer must have done the family's work --------------------------
+# A run concludes `success` with its guarded jobs SKIPPED (ADR 0226's attack A1), and
+# a different workflow reports no same-named check to consult. So every check in the
+# displacer's own suite must be a completed SUCCESS.
+for shape in skipped neutral; do
+  reset_env
+  CHECK_RUNS_FIXTURE="$(runs "$green_required,$cancelled_gate_check,$(check_run 41 'rearm / rearm / event-policy' success 602),$(check_run 42 'rearm / rearm / arm' "$shape" 602)")"
+  run
+  expect "a successful family run whose own suite reports a ${shape^^} check displaces nothing" 5 "rearm / event-policy=CANCELLED"
+done
+
 if [ "$fails" -ne 0 ]; then
   printf '\n%d assertion(s) failed\n' "$fails" >&2
   exit 1

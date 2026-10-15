@@ -404,8 +404,19 @@ if [ "$cancelled_count" -gt 0 ]; then
                      and (.created_at | fromdateiso8601) > $start) ]
         | max_by(.created_at | fromdateiso8601)
         | if . == null then null
-          else { cancelled_run: $o.id, superseded_by: .id,
-                 group: "\($families[$fam].group_prefix)\($pr)" } end
+          else .check_suite_id as $ssid
+          # A different workflow names its checks differently, so there is no
+          # same-named check to consult, and a run concludes `success` with its
+          # guarded jobs SKIPPED. Only the NEWEST such run is consulted (no older
+          # full run is cherry-picked over a newer skip), and every check in its
+          # own suite must be a completed SUCCESS.
+          | [ $all[] | select(.kind == "check_run" and .suite_id == $ssid) ] as $done
+          | if ($done | length) > 0
+               and all($done[]; .status == "COMPLETED" and .conclusion == "SUCCESS")
+            then { cancelled_run: $o.id, superseded_by: .id,
+                   group: "\($families[$fam].group_prefix)\($pr)" }
+            else null end
+          end
         end;
     # The latest successful later run of the same workflow and event -- provided its
     # own check suite did that check'"'"'s work -- or null.
