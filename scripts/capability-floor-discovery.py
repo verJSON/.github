@@ -29,6 +29,9 @@ CANONICAL_REFERENCE_RE = re.compile(
 CANONICAL_PREFIX = "Verjson/.github/.github/workflows/"
 MAX_CALLER_BYTES = 512 * 1024
 WORKFLOWS_DIRECTORY = ".github/workflows"
+# The contents API returns at most this many directory entries; a listing that
+# reaches it may omit the caller, so it cannot prove absence.
+CONTENTS_DIRECTORY_LIMIT = 1000
 
 
 class DiscoveryError(Exception):
@@ -161,6 +164,10 @@ def resolve_default_branch(repository: str) -> tuple[str, str]:
 def list_workflow_paths(repository: str, source_sha: str) -> set[str]:
     response = run_gh(f"repos/{repository}/contents/{WORKFLOWS_DIRECTORY}", {"ref": source_sha})
     require(isinstance(response, list), f"workflows directory listing is malformed for {repository}")
+    require(
+        len(response) < CONTENTS_DIRECTORY_LIMIT,
+        f"workflows directory listing may be truncated for {repository}",
+    )
     paths = set()
     for entry in response:
         require(
