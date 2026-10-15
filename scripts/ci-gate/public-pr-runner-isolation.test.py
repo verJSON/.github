@@ -137,4 +137,33 @@ expect(
     "a local reusable workflow called on pull_request is checked through its caller",
 )
 
+expect(
+    {
+        "caller.yml": """
+            on: pull_request
+            jobs:
+              build:
+                uses: ./.github/workflows/build.yml
+                with:
+                  runner: ${{ vars.CI_RUNNER_DEFAULT }}
+        """,
+        "build.yml": """
+            on:
+              workflow_call:
+                inputs:
+                  runner:
+                    type: string
+                    default: ''
+            jobs:
+              build:
+                runs-on: ${{ inputs.runner != '' && fromJSON(inputs.runner) || fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
+                steps:
+                  - run: 'true'
+        """,
+    },
+    1,
+    ("build.yml", "inputs"),
+    "a reusable workflow honoring a caller runner input on pull_request is a violation",
+)
+
 sys.exit(1 if failures else 0)

@@ -44,6 +44,10 @@ EPHEMERAL_LANE_VARIABLES = frozenset(
 )
 EPHEMERAL_SELECTOR = '["ubuntu-24.04"]'
 PERSISTENT_SELECTOR = '["self-hosted","general"]'
+# A caller-supplied input set from an expression is attacker-shaped in a public
+# repository: a fork can edit the calling workflow. Each such input is tried as
+# every value that changes routing.
+ADVERSARIAL_INPUT_VALUES = ("", PERSISTENT_SELECTOR, EPHEMERAL_SELECTOR, True, False)
 HOSTED_LABEL = re.compile(r"^(?:ubuntu|windows|macos)-[A-Za-z0-9._-]+$")
 
 
@@ -365,12 +369,12 @@ class Context:
     def __init__(
         self,
         repository: str,
-        variables: dict[str, str],
+        values: dict[tuple[str, str], object],
         needs: tuple[str, ...] = (),
         unreachable: frozenset[str] = frozenset(),
     ) -> None:
         self.repository = repository
-        self.variables = variables
+        self.values = values
         self.needs = needs
         self.unreachable = unreachable
 
@@ -396,18 +400,44 @@ class Context:
         if lowered == ("github", "event", "repository", "visibility"):
             return ["public"]
         if lowered[0] == "vars" and len(path) == 2:
-            return [self.variables.get(path[1], "")]
+            return [self.values.get(("vars", path[1]), "")]
+        if lowered[0] == "inputs" and len(path) == 2:
+            return [self.values.get(("inputs", path[1]))]
         return [UNKNOWN]
 
 
-def variable_assignments(names: set[str]):
-    ordered = sorted(names)
-    choices = [
-        ("", EPHEMERAL_SELECTOR if name in EPHEMERAL_LANE_VARIABLES else PERSISTENT_SELECTOR)
-        for name in ordered
-    ]
+def assignments(nodes, bindings: dict[str, tuple]):
+    """Every combination of the variables and inputs the expressions read.
+
+    Enumerated jointly rather than per reference, so `vars.X != '' &&
+    fromJSON(vars.X)` sees one value of X, as Actions does.
+    """
+    names = sorted(
+        {
+            (path[0].lower(), path[1])
+            for node in nodes
+            if node is not None
+            for path in references(node)
+            if len(path) == 2 and path[0].lower() in ("vars", "inputs")
+        }
+    )
+    choices = []
+    for scope, name in names:
+        if scope == "vars":
+            choices.append(
+                ("", EPHEMERAL_SELECTOR if name in EPHEMERAL_LANE_VARIABLES else PERSISTENT_SELECTOR)
+            )
+        else:
+            choices.append(bindings.get(name, (None,)))
     for values in itertools.product(*choices):
-        yield dict(zip(ordered, values))
+        yield dict(zip(names, values))
+
+
+def describe(assignment: dict[tuple[str, str], object]) -> str:
+    return ", ".join(
+        f"{scope}.{name}={'<unset>' if value in ('', None) else value}"
+        for (scope, name), value in assignment.items()
+    ) or "no variables or inputs"
 
 
 def classify_labels(value) -> str:
@@ -480,16 +510,6 @@ def condition_node(condition):
     return ("and", implicit_success, node)
 
 
-def expression_variables(*nodes) -> set[str]:
-    return {
-        path[1]
-        for node in nodes
-        if node is not None
-        for path in references(node)
-        if len(path) == 2 and path[0].lower() == "vars"
-    }
-
-
 def selector_node(runs_on):
     match = FULL_EXPRESSION.match(runs_on) if isinstance(runs_on, str) else None
     return Parser(match.group(1)).parse() if match else None
@@ -528,12 +548,38 @@ def dependency_order(path: str, jobs: dict) -> list[str]:
     return ordered
 
 
-def is_reachable(job: dict, repository: str, unreachable: frozenset[str]) -> bool:
+def is_reachable(
+    job: dict, repository: str, bindings: dict[str, tuple], unreachable: frozenset[str]
+) -> bool:
     condition = condition_node(job.get("if"))
     return any(
         can_run(condition, Context(repository, assignment, job_needs(job), unreachable))
-        for assignment in variable_assignments(expression_variables(condition))
+        for assignment in assignments((condition,), bindings)
     )
+
+
+def workflow_call_inputs(document: dict) -> dict:
+    trigger = document.get("on", document.get(True))
+    if not isinstance(trigger, dict) or not isinstance(trigger.get("workflow_call"), dict):
+        return {}
+    return trigger["workflow_call"].get("inputs") or {}
+
+
+def callee_bindings(job: dict, callee: dict) -> dict[str, tuple]:
+    supplied = job.get("with") or {}
+    bindings: dict[str, tuple] = {}
+    for name, declaration in workflow_call_inputs(callee).items():
+        if name in supplied:
+            value = supplied[name]
+            if isinstance(value, str) and "${{" in value:
+                bindings[name] = ADVERSARIAL_INPUT_VALUES
+            else:
+                bindings[name] = (value,)
+        elif isinstance(declaration, dict) and "default" in declaration:
+            bindings[name] = (declaration["default"],)
+        else:
+            bindings[name] = (None,)
+    return bindings
 
 
 LOCAL_REUSABLE = re.compile(r"^\./\.github/workflows/([A-Za-z0-9._-]+\.ya?ml)$")
@@ -551,36 +597,56 @@ def check_call(
         raise Undetermined(f"{path}: job '{name}' exceeds the reusable-call depth of {MAX_CALL_DEPTH}")
     callee = local.group(1)
     document = load_workflow(os.path.join(directory, callee))
-    return check_workflow(directory, f"{path}:{name} -> {callee}", document, repository, depth + 1)
+    return check_workflow(
+        directory,
+        f"{path}:{name} -> {callee}",
+        document,
+        repository,
+        callee_bindings(job, document),
+        depth + 1,
+    )
 
 
 def check_workflow(
-    directory: str, path: str, document: dict, repository: str, depth: int = 0
+    directory: str,
+    path: str,
+    document: dict,
+    repository: str,
+    bindings: dict[str, tuple] | None = None,
+    depth: int = 0,
 ) -> list[str]:
+    bindings = bindings or {}
     jobs = {str(name): job for name, job in (document.get("jobs") or {}).items()}
     unreachable: set[str] = set()
     violations: list[str] = []
     for name in dependency_order(path, jobs):
         job = jobs[name]
-        if not is_reachable(job, repository, frozenset(unreachable)):
+        if not is_reachable(job, repository, bindings, frozenset(unreachable)):
             unreachable.add(name)
             continue
         if "uses" in job:
             violations.extend(check_call(directory, path, name, job, repository, depth))
         else:
-            violations.extend(check_job(path, name, job, repository, frozenset(unreachable)))
+            violations.extend(
+                check_job(path, name, job, repository, bindings, frozenset(unreachable))
+            )
     return violations
 
 
 def check_job(
-    path: str, name: str, job: dict, repository: str, unreachable: frozenset[str]
+    path: str,
+    name: str,
+    job: dict,
+    repository: str,
+    bindings: dict[str, tuple],
+    unreachable: frozenset[str],
 ) -> list[str]:
     runs_on = job.get("runs-on")
     if runs_on is None:
         raise Undetermined(f"{path}: job '{name}' has no runs-on")
     condition = condition_node(job.get("if"))
     violations = []
-    for assignment in variable_assignments(expression_variables(condition, selector_node(runs_on))):
+    for assignment in assignments((condition, selector_node(runs_on)), bindings):
         context = Context(repository, assignment, job_needs(job), unreachable)
         if not can_run(condition, context):
             continue
@@ -590,11 +656,10 @@ def check_job(
             except Undetermined as error:
                 raise Undetermined(f"{path}: job '{name}': {error}") from error
             if verdict == "persistent":
-                shown = {key: value or "<unset>" for key, value in assignment.items()}
                 violations.append(
                     f"{path}: job '{name}': pull_request in a public repository can resolve "
                     f"to self-hosted or non-ephemeral runner labels {list(outcome)!r} "
-                    f"(variables {shown})"
+                    f"({describe(assignment)})"
                 )
                 return violations
     return violations
