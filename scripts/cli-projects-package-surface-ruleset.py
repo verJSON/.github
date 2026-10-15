@@ -132,7 +132,7 @@ def read_contract(path=CONTRACT):
             "ROTATE-CLI-PROJECTS-REQUIRED-WORKFLOW-1187",
             "rollout acknowledgement drifted")
     require(rollout["previous_workflow_sha"] ==
-            "ebe574b639ff5ffc1dfb5cf935014c5c7ad5d081",
+            "ae70e4ef0a70fa446fc6583a2473f2b4e68eac36",
             "previous workflow identity drifted")
     require(rollout["previous_disabled_workflow_sha"] ==
             "4525c152a77bd04c006fa2b790f4b64833b1bbbe",
