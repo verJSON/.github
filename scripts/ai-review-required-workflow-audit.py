@@ -395,6 +395,7 @@ def read_contract(path: Path = CONTRACT) -> dict:
 
 
 HTTP_404 = re.compile(r"\(HTTP 404\)$", re.MULTILINE)
+HTTP_STATUS = re.compile(r"\(HTTP \d{3}\)$")
 
 
 def gh_pages(path: str, allow_missing: bool = False) -> list:
@@ -415,10 +416,12 @@ def gh_pages(path: str, allow_missing: bool = False) -> list:
         # another status's message from reading as absence.
         if allow_missing and HTTP_404.search(result.stderr):
             return []
-        # gh's last line is its status, e.g. "gh: Forbidden (HTTP 403)": API
-        # error text only, never a credential, and the one fact that tells an
-        # expired token from an outage.
-        status = next((line.strip() for line in reversed(result.stderr.splitlines()) if line.strip()), "")
+        # gh's status line, e.g. "gh: Forbidden (HTTP 403)": API error text only,
+        # never a credential, and the one fact that tells an expired token from an
+        # outage. gh can print a scope hint after it, so prefer the last line that
+        # ends in a status code and fall back to the last non-empty line.
+        lines = [line.strip() for line in result.stderr.splitlines() if line.strip()]
+        status = next((line for line in reversed(lines) if HTTP_STATUS.search(line)), lines[-1] if lines else "")
         raise AuditError(f"GitHub API read failed for {path}" + (f": {status}" if status else ""))
     try:
         pages = json.loads(result.stdout)

@@ -1456,8 +1456,16 @@ jobs:
             AUDIT.gh_pages("repos/x")
         self.assertEqual(str(caught.exception), "GitHub API read failed for repos/x: gh: Forbidden (HTTP 403)")
 
+    def test_a_read_failure_prefers_the_status_line_over_a_trailing_hint(self):
+        hint = "This API operation needs the \"admin:org\" scope. To request it, run:  gh auth refresh"
+        self.run_gh_api(1, "", f"warning: retrying after a secondary rate limit\ngh: Forbidden (HTTP 403)\n{hint}\n")
+        with self.assertRaises(AUDIT.AuditError) as caught:
+            AUDIT.gh_pages("repos/x")
+        self.assertEqual(str(caught.exception), "GitHub API read failed for repos/x: gh: Forbidden (HTTP 403)")
+
     def test_a_404_is_read_from_the_end_of_ghs_status_line(self):
-        for stderr in ("gh: Not Found (HTTP 404)", "gh: Not Found (HTTP 404)\n"):
+        hint = "This API operation needs the \"admin:org\" scope."
+        for stderr in ("gh: Not Found (HTTP 404)", "gh: Not Found (HTTP 404)\n", f"gh: Not Found (HTTP 404)\n{hint}\n"):
             with self.subTest(stderr=stderr):
                 self.run_gh_api(1, "", stderr)
                 self.assertEqual(AUDIT.gh_pages("repos/x", allow_missing=True), [])
