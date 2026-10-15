@@ -10,9 +10,13 @@ import base64
 import importlib.util
 import io
 import json
+import os
 import pathlib
+import subprocess
 import sys
 import unittest
+
+import yaml
 
 _root = pathlib.Path(__file__).resolve().parents[2]
 
@@ -711,6 +715,75 @@ class ContractFleetReport(unittest.TestCase):
         self.assertIn("RENOVATE_COMPATIBILITY_APP_PRIVATE_KEY", workflow)
         self.assertNotIn("permission-contents: write", workflow)
         self.assertNotIn("permission-pull-requests: write", workflow)
+
+
+class ReportCallerClientIdValidation(unittest.TestCase):
+    """Executes the report workflow's own input guard -- Verjson/.github#1792.
+
+    The guard once demanded a numeric value, which is the App ID; every real
+    client ID (`Iv23li...`) was refused, so the scheduled report never ran.
+    """
+
+    WORKFLOW = _root / ".github/workflows/changelog-contract-fleet-report.yml"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.steps = yaml.safe_load(cls.WORKFLOW.read_text())["jobs"]["report"]["steps"]
+        cls.guard = next(s for s in cls.steps if s.get("name") == "Validate caller inputs")
+
+    def run_guard(self, client_id):
+        env_binding = self.guard["env"]["APP_CLIENT_ID"]
+        self.assertEqual(env_binding, "${{ inputs.app_client_id }}")
+        return subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", self.guard["run"]],
+            # ubuntu-24.04 runs steps under C.UTF-8, where bracket classes see
+            # multibyte letters; the POSIX locale would hide a Unicode-admitting class.
+            env={"PATH": os.environ["PATH"], "LC_ALL": "C.UTF-8", "APP_CLIENT_ID": client_id},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_the_guard_reaches_the_value_minted_with_through_an_env_binding(self):
+        mint = next(s for s in self.steps if s.get("id") == "inventory-token")
+        self.assertEqual(mint["with"].get("client-id"), "${{ inputs.app_client_id }}")
+        self.assertNotIn("app-id", mint["with"])
+        self.assertNotIn("inputs.app_client_id", self.guard["run"])
+        self.assertLess(self.steps.index(self.guard), self.steps.index(mint))
+
+    def test_real_client_ids_are_accepted(self):
+        for client_id in ("Iv23liAbCdEfGh12", "Iv23liZyXwVuTsRq9876", "Iv1.0123456789abcdef"):
+            with self.subTest(client_id=client_id):
+                result = self.run_guard(client_id)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_numeric_legacy_app_id_is_refused_naming_the_client_id_format(self):
+        result = self.run_guard("4717539")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("::error::", result.stdout)
+        self.assertIn("numeric", result.stdout)
+        self.assertIn("Iv", result.stdout)
+
+    def test_empty_whitespace_and_injection_shaped_values_are_refused(self):
+        for client_id in (
+            "",
+            " ",
+            " Iv23liZyXwVuTsRq9876",
+            "Iv23liZyXwVuTsRq9876 ",
+            "Iv23li$(id)",
+            "Iv23li`id`",
+            "Iv23liZyXwVuTsRq9876\n",
+            "Iv23li\nIv23liZyXwVuTsRq9876",
+            "Iv23li;id",
+            "iv23libWsYKPIKv7FeiC",
+            "Iv23li\u00c4bCdEfGh12",
+            "Iv",
+            "Iv" + "a" * 127,
+        ):
+            with self.subTest(client_id=client_id):
+                result = self.run_guard(client_id)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("::error::", result.stdout)
 
 
 if __name__ == "__main__":
