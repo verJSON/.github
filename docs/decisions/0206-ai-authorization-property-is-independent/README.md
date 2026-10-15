@@ -228,3 +228,23 @@ branch policy, and the same 12 environments without the review key. That finding
 recorded in the expectation under
 [#1803](https://github.com/Verjson/.github/issues/1803), which tracks provisioning;
 resolving it is what removes the entry.
+
+## 2026-10-15 amendment: verjson-editor enrolled; the #1803 expectation narrows to callers
+
+**Status:** Accepted; [#1803](https://github.com/Verjson/.github/issues/1803), part of
+[#1401](https://github.com/Verjson/.github/issues/1401).
+
+`verJSON/verjson-editor` gained `verjson-core-checks=enforced` on 2026-10-15, so the legacy
+selector arms it, and the audit stopped at `legacy arm cohort differs from the reviewed
+migration set: unreviewed=['verJSON/verjson-editor']`. As with
+`verjson-document-contracts` above, the reviewed cohort adds `Verjson/verjson-editor`
+(32 repositories): the arm already selects the repository, so this records an existing
+enrollment rather than widening the cohort.
+
+The audit then reaches the adopter checks. Provisioning of every armed `ai-review-app`
+environment is complete, so the environment-policy and review-key classes no longer
+reproduce. Two classes remain, both consumer drift for repository owners: verjson-editor
+has no admission caller `.github/workflows/ai-review-merge.yml`, so the arm cannot
+authorize its pull requests, and 24 generated adopter callers are missing across 20 armed
+repositories. `config/audit-expected-findings.json` re-records that finding under #1803;
+regenerating the callers is what removes the entry.
