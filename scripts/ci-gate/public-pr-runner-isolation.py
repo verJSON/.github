@@ -290,7 +290,10 @@ def from_json(value):
         return EVALUATION_ERROR
 
 
-def evaluate(node, resolve) -> list:
+STATUS_FUNCTIONS = frozenset({"success", "failure", "cancelled", "always"})
+
+
+def evaluate(node, resolve, call=None) -> list:
     """Every value the expression can produce, given a reference resolver."""
     kind = node[0]
     if kind == "literal":
@@ -298,21 +301,21 @@ def evaluate(node, resolve) -> list:
     if kind == "ref":
         return resolve(node[1])
     if kind == "not":
-        return _unique([not truth for value in evaluate(node[1], resolve) for truth in truthiness(value)])
+        return _unique([not truth for value in evaluate(node[1], resolve, call) for truth in truthiness(value)])
     if kind in ("and", "or"):
         results: list = []
-        for value in evaluate(node[1], resolve):
+        for value in evaluate(node[1], resolve, call):
             for truth in truthiness(value):
                 short_circuits = (not truth) if kind == "and" else truth
                 if short_circuits:
                     results.append(value)
                 else:
-                    results.extend(evaluate(node[2], resolve))
+                    results.extend(evaluate(node[2], resolve, call))
         return _unique(results)
     if kind == "compare":
         results = []
-        for left in evaluate(node[2], resolve):
-            for right in evaluate(node[3], resolve):
+        for left in evaluate(node[2], resolve, call):
+            for right in evaluate(node[3], resolve, call):
                 if left is UNKNOWN or right is UNKNOWN:
                     results.extend([True, False])
                 else:
@@ -321,7 +324,9 @@ def evaluate(node, resolve) -> list:
     if kind == "call":
         name, arguments = node[1], node[2]
         if name == "fromjson" and len(arguments) == 1:
-            return _unique([from_json(value) for value in evaluate(arguments[0], resolve)])
+            return _unique([from_json(value) for value in evaluate(arguments[0], resolve, call)])
+        if name in STATUS_FUNCTIONS and call is not None:
+            return call(name)
         return [UNKNOWN]
     raise Undetermined(f"unknown expression node {kind}")
 
@@ -357,12 +362,29 @@ def triggers(document: dict) -> set[str]:
 
 
 class Context:
-    def __init__(self, repository: str, variables: dict[str, str]) -> None:
+    def __init__(
+        self,
+        repository: str,
+        variables: dict[str, str],
+        needs: tuple[str, ...] = (),
+        unreachable: frozenset[str] = frozenset(),
+    ) -> None:
         self.repository = repository
         self.variables = variables
+        self.needs = needs
+        self.unreachable = unreachable
+
+    def status(self, name: str) -> list:
+        if name == "always":
+            return [True]
+        if name == "success" and any(need in self.unreachable for need in self.needs):
+            return [False]
+        return [True, False]
 
     def resolve(self, path: tuple[str, ...]) -> list:
         lowered = tuple(part.lower() for part in path)
+        if lowered[0] == "needs" and len(path) >= 3 and path[1] in self.unreachable:
+            return ["skipped"] if lowered[2] == "result" else [""]
         if lowered == ("github", "event_name"):
             return ["pull_request"]
         if lowered == ("github", "repository"):
@@ -430,16 +452,32 @@ def selector_outcomes(runs_on, context: Context) -> list:
     raise Undetermined(f"unsupported runs-on shape {runs_on!r}")
 
 
+def calls(node) -> set[str]:
+    kind = node[0]
+    if kind == "call":
+        return {node[1]}.union(*(calls(argument) for argument in node[2]))
+    if kind in ("literal", "ref"):
+        return set()
+    if kind == "compare":
+        return calls(node[2]) | calls(node[3])
+    return set().union(*(calls(child) for child in node[1:]))
+
+
 def condition_node(condition):
-    """Parse a job `if:`, which may be bare or wrapped in `${{ }}`."""
+    """Parse a job `if:` and apply Actions' implicit `success() &&`."""
+    implicit_success = ("call", "success", [])
     if condition is None:
-        return None
+        return implicit_success
     if isinstance(condition, bool):
-        return ("literal", condition)
-    if not isinstance(condition, str):
+        node = ("literal", condition)
+    elif isinstance(condition, str):
+        match = FULL_EXPRESSION.match(condition)
+        node = Parser(match.group(1) if match else condition).parse()
+    else:
         raise Undetermined(f"unsupported if: shape {condition!r}")
-    match = FULL_EXPRESSION.match(condition)
-    return Parser(match.group(1) if match else condition).parse()
+    if calls(node) & STATUS_FUNCTIONS:
+        return node
+    return ("and", implicit_success, node)
 
 
 def expression_variables(*nodes) -> set[str]:
@@ -458,23 +496,69 @@ def selector_node(runs_on):
 
 
 def can_run(condition, context: Context) -> bool:
-    if condition is None:
-        return True
     return any(
         truth
-        for value in evaluate(condition, context.resolve)
+        for value in evaluate(condition, context.resolve, context.status)
         for truth in truthiness(value)
     )
 
 
-def check_job(path: str, name: str, job: dict, repository: str) -> list[str]:
+def job_needs(job: dict) -> tuple[str, ...]:
+    needs = job.get("needs") or ()
+    return (needs,) if isinstance(needs, str) else tuple(str(need) for need in needs)
+
+
+def dependency_order(path: str, jobs: dict) -> list[str]:
+    ordered: list[str] = []
+    visiting: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in ordered:
+            return
+        if name in visiting or name not in jobs:
+            raise Undetermined(f"{path}: job graph is cyclic or names a missing job '{name}'")
+        visiting.add(name)
+        for need in job_needs(jobs[name]):
+            visit(need)
+        visiting.discard(name)
+        ordered.append(name)
+
+    for name in jobs:
+        visit(name)
+    return ordered
+
+
+def is_reachable(job: dict, repository: str, unreachable: frozenset[str]) -> bool:
+    condition = condition_node(job.get("if"))
+    return any(
+        can_run(condition, Context(repository, assignment, job_needs(job), unreachable))
+        for assignment in variable_assignments(expression_variables(condition))
+    )
+
+
+def check_workflow(path: str, document: dict, repository: str) -> list[str]:
+    jobs = {str(name): job for name, job in (document.get("jobs") or {}).items()}
+    unreachable: set[str] = set()
+    violations: list[str] = []
+    for name in dependency_order(path, jobs):
+        job = jobs[name]
+        if not is_reachable(job, repository, frozenset(unreachable)):
+            unreachable.add(name)
+            continue
+        violations.extend(check_job(path, name, job, repository, frozenset(unreachable)))
+    return violations
+
+
+def check_job(
+    path: str, name: str, job: dict, repository: str, unreachable: frozenset[str]
+) -> list[str]:
     runs_on = job.get("runs-on")
     if runs_on is None:
         raise Undetermined(f"{path}: job '{name}' has no runs-on")
     condition = condition_node(job.get("if"))
     violations = []
     for assignment in variable_assignments(expression_variables(condition, selector_node(runs_on))):
-        context = Context(repository, assignment)
+        context = Context(repository, assignment, job_needs(job), unreachable)
         if not can_run(condition, context):
             continue
         for outcome in selector_outcomes(runs_on, context):
@@ -505,8 +589,7 @@ def check_tree(directory: str, repository: str) -> list[str]:
         document = load_workflow(path)
         if "pull_request" not in triggers(document):
             continue
-        for job_name, job in (document.get("jobs") or {}).items():
-            violations.extend(check_job(name, str(job_name), job, repository))
+        violations.extend(check_workflow(name, document, repository))
     return violations
 
 

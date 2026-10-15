@@ -92,4 +92,27 @@ expect(
     "a job whose condition cannot hold on pull_request is not reachable",
 )
 
+expect(
+    {
+        "ci.yml": """
+            on: pull_request
+            jobs:
+              admission:
+                if: github.repository == 'Verjson/elsewhere'
+                runs-on: ubuntu-24.04
+                steps:
+                  - run: 'true'
+              build:
+                needs: admission
+                if: ${{ !github.event.pull_request.draft }}
+                runs-on: ${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+                steps:
+                  - run: 'true'
+        """,
+    },
+    0,
+    ("clean",),
+    "a job needing a skipped job without a status function is not reachable",
+)
+
 sys.exit(1 if failures else 0)
