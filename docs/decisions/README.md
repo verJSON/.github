@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0234](0234-admit-ephemeral-isolated-pool-on-netcup/README.md) | 2026-10-15 | Admit an ephemeral isolated runner pool on netcup for untrusted CI |
 | [0233](0233-capability-floor-records-provably-absent-callers/README.md) | 2026-10-15 | Capability-floor discovery records a provably absent caller as a finding |
 | [0232](0232-fence-generated-callers-from-renovate/README.md) | 2026-10-15 | Renovate never edits generated callers; their pins move in the generators |
 | [0231](0231-bootstrap-moves-reusable-ci-pins/README.md) | 2026-10-14 | A review caller bootstrap may move canonical reusable CI pins to its contract revision |
