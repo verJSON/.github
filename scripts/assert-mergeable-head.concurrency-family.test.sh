@@ -164,6 +164,16 @@ jobs_for 9201 1 "$(job 31 9201 'rearm / event-policy' '[]' 1000071397)"
 run
 expect "a cancelled family run whose job acquired a runner is still refused" 5 "rearm / event-policy=CANCELLED"
 
+# Every job of a displaced attempt was itself cancelled: a job that concluded any
+# other way, or never finished, means the attempt was not simply dropped from the
+# queue. Steps and runner stay empty so ONLY the job-conclusion guard can refuse.
+for shape in '.conclusion = "success"' '.conclusion = "skipped"' '.status = "queued" | .conclusion = null'; do
+  reset_env
+  jobs_for 9201 1 "$(job 31 9201 'rearm / event-policy')" "$(job 32 9201 'rearm / arm' | jq -c "$shape")"
+  run
+  expect "a displaced-looking attempt with a job where '$shape' is still refused" 5 "rearm / event-policy=CANCELLED"
+done
+
 # --- the job inventory is validated like every other inventory -------------------
 # Types are checked, never truthiness: a missing `steps` measures as length 0 and a
 # missing runner id compares as null, so either would read as "never started" and
