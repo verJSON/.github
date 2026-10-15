@@ -113,6 +113,12 @@ SCENARIOS = (
         "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-24.04"]',
         "admitted": True,
     },
+    {
+        "label": "trusted-ref is refused before acquisition when the build lane is self-hosted, even from a hosted eligibility runner",
+        "mode": "trusted-ref", "ranges": COMPAT_RANGES,
+        "eligibility_runner": "github-hosted", "untrusted_lane": '["self-hosted","general"]',
+        "admitted": False,
+    },
 )
 
 

@@ -410,6 +410,25 @@ jobs:
     outputs:
       should-run: ${{ steps.check.outputs.should-run }}
     steps:
+      - name: Require a GitHub-hosted secretless build lane
+        # build-test runs a secretless call on this lane, ahead of the caller's
+        # runner, and its lifecycle rebuild and candidate sandbox exit unless the
+        # runner is GitHub-hosted. Refuse here, before dependency acquisition,
+        # when the lane is not one standard GitHub-hosted Linux image. The value
+        # is never echoed: it is configuration, not a reviewed log line. ADR 0234.
+        if: inputs.secretless-trusted-ref
+        shell: bash
+        env:
+          SECRETLESS_BUILD_LANE: ${{ vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]' }}
+        run: |
+          set -euo pipefail
+          hosted_image='"ubuntu-(latest|[0-9]{2}\.[0-9]{2})"'
+          if [[ "$SECRETLESS_BUILD_LANE" =~ ^${hosted_image}$ ]] \
+            || [[ "$SECRETLESS_BUILD_LANE" =~ ^\[${hosted_image}\]$ ]]; then
+            exit 0
+          fi
+          echo "::error::secretless build-test requires a GitHub-hosted Linux runner, but CI_LANE_UNTRUSTED does not select a single standard GitHub-hosted Linux image"
+          exit 1
       - id: check
         # Inline the co-located composite action's run block so an exact-pinned
         # reusable never calls back into this repository through a second ref.
