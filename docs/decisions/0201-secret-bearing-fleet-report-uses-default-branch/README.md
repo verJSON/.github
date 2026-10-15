@@ -31,5 +31,8 @@ present and non-numeric before the token action runs.
 The guard now refuses a numeric legacy App ID by name and otherwise accepts only
 `^Iv[A-Za-z0-9.]{8,126}$`, the merge gate's client-ID pattern. The positive pattern refuses
 empty, whitespace, newline, and shell-metacharacter values rather than relying on a
-numeric deny-list. `scripts/ci-gate/fleet-contract-inventory.test.py` executes the
-workflow's own step against each class.
+numeric deny-list. The step pins `LC_ALL: C`, because bash collates bracket ranges by
+locale and under `en_US.UTF-8` `[A-Za-z]` matches accented and fullwidth letters; it runs
+unconditionally under bash with no `continue-on-error`.
+`scripts/ci-gate/fleet-contract-inventory.test.py` executes the workflow's own step against
+each class under a hostile `en_US.UTF-8` ambient locale.

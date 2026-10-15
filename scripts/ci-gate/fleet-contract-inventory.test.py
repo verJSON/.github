@@ -725,24 +725,56 @@ class ReportCallerClientIdValidation(unittest.TestCase):
     """
 
     WORKFLOW = _root / ".github/workflows/changelog-contract-fleet-report.yml"
+    # A runner whose ambient locale is en_US.UTF-8 makes bash's `[A-Za-z]`
+    # match accented and fullwidth letters. The guard runs under that hostile
+    # default and only the step's own `env` may override it.
+    AMBIENT_LOCALE = "en_US.UTF-8"
 
     @classmethod
     def setUpClass(cls):
-        cls.steps = yaml.safe_load(cls.WORKFLOW.read_text())["jobs"]["report"]["steps"]
+        cls.document = yaml.safe_load(cls.WORKFLOW.read_text())
+        cls.job = cls.document["jobs"]["report"]
+        cls.steps = cls.job["steps"]
         cls.guard = next(s for s in cls.steps if s.get("name") == "Validate caller inputs")
 
     def run_guard(self, client_id):
-        env_binding = self.guard["env"]["APP_CLIENT_ID"]
-        self.assertEqual(env_binding, "${{ inputs.app_client_id }}")
+        step_env = dict(self.guard["env"])
+        self.assertEqual(step_env.pop("APP_CLIENT_ID"), "${{ inputs.app_client_id }}")
+        for name, value in step_env.items():
+            self.assertNotIn("${{", str(value), name)
         return subprocess.run(
             ["bash", "-e", "-o", "pipefail", "-c", self.guard["run"]],
-            # ubuntu-24.04 runs steps under C.UTF-8, where bracket classes see
-            # multibyte letters; the POSIX locale would hide a Unicode-admitting class.
-            env={"PATH": os.environ["PATH"], "LC_ALL": "C.UTF-8", "APP_CLIENT_ID": client_id},
+            env={
+                "PATH": os.environ["PATH"],
+                "LC_ALL": self.AMBIENT_LOCALE,
+                **{name: str(value) for name, value in step_env.items()},
+                "APP_CLIENT_ID": client_id,
+            },
             capture_output=True,
             text=True,
             check=False,
         )
+
+    def test_the_guard_pins_the_c_locale(self):
+        self.assertEqual(self.guard["env"].get("LC_ALL"), "C")
+        probe = subprocess.run(
+            ["bash", "-c", '[[ "$1" =~ ^[A-Za-z]$ ]]', "_", "\u00c4"],
+            env={"PATH": os.environ["PATH"], "LC_ALL": self.AMBIENT_LOCALE},
+            check=False,
+        )
+        if probe.returncode != 0:
+            self.skipTest(f"{self.AMBIENT_LOCALE} is not installed; the env assertion still holds")
+        for client_id in ("Iv23li\u00c4bCdEfGh12", "Iv23li\u00e9bCdEfGh12", "Iv23li\uff42bCdEfGh12"):
+            with self.subTest(client_id=client_id):
+                self.assertNotEqual(self.run_guard(client_id).returncode, 0)
+
+    def test_the_guard_step_always_runs_under_bash_and_fails_the_job(self):
+        self.assertNotIn("if", self.guard)
+        self.assertNotIn("continue-on-error", self.guard)
+        self.assertNotIn("continue-on-error", self.job)
+        for defaults in (self.document.get("defaults"), self.job.get("defaults")):
+            self.assertIn(((defaults or {}).get("run") or {}).get("shell", "bash"), ("bash",))
+        self.assertIn(self.guard.get("shell", "bash"), ("bash",))
 
     def test_the_guard_reaches_the_value_minted_with_through_an_env_binding(self):
         mint = next(s for s in self.steps if s.get("id") == "inventory-token")
@@ -775,7 +807,10 @@ class ReportCallerClientIdValidation(unittest.TestCase):
             "Iv23liZyXwVuTsRq9876\n",
             "Iv23li\nIv23liZyXwVuTsRq9876",
             "Iv23li;id",
-            "iv23libWsYKPIKv7FeiC",
+            "iv23liZyXwVuTsRq9876",
+            "Iv23li-bCdEfGh12",
+            "Iv23li$bCdEfGh12",
+            "Iv23li_bCdEfGh12",
             "Iv23li\u00c4bCdEfGh12",
             "Iv",
             "Iv" + "a" * 127,
