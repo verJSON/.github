@@ -1,6 +1,8 @@
 import argparse
 import base64
+import contextlib
 import copy
+import io
 import subprocess
 import importlib.util
 import json
@@ -27,6 +29,12 @@ ADOPTER_CALLERS = (
     ".github/workflows/ai-privileged-merge.yml",
     ".github/workflows/ai-promotion-retry.yml",
 )
+PRIVATE_KEY = "AI_REVIEW_APP_PRIVATE_KEY"
+ORGANIZATION_SECRETS = "orgs/Verjson/actions/secrets?per_page=100"
+
+
+def environment_key_path(full_name):
+    return f"repos/{full_name}/environments/ai-review-app/secrets/{PRIVATE_KEY}"
 
 
 class AiReviewRequiredWorkflowAuditTest(unittest.TestCase):
@@ -183,6 +191,8 @@ jobs:
             if allow_missing:
                 return []
             raise AssertionError(f"unexpected API read: {path}")
+        if isinstance(self.fixture[path], Exception):
+            raise self.fixture[path]
         return copy.deepcopy(self.fixture[path])
 
     def select_scope(self, kind, name, repositories):
@@ -605,6 +615,17 @@ jobs:
         with self.assertRaisesRegex(AUDIT.AuditError, "organization property inventory is invalid"):
             AUDIT.render_property_migration_payload(self.contract, "unset-values", self.read)
 
+    def test_an_inventory_name_outside_githubs_charset_is_not_an_identity(self):
+        # U+212A KELVIN SIGN casefolds to `k`, so folding alone would read this
+        # as the reviewed `Verjson/kappa` (github_identity, #1779).
+        self.enter_legacy_selector_state()
+        self.contract["arm_property_migration"]["repositories"] = ["Verjson/alpha", "Verjson/beta", "Verjson/kappa"]
+        rows = self.fixture["orgs/Verjson/properties/values?per_page=100"][0]
+        alpha = next(row for row in rows if row["repository_full_name"] == "Verjson/alpha")
+        rows.append({**copy.deepcopy(alpha), "repository_full_name": "Verjson/\u212aappa"})
+        with self.assertRaisesRegex(AUDIT.AuditError, "organization property inventory is invalid"):
+            AUDIT.render_property_migration_payload(self.contract, "unset-values", self.read)
+
     def test_target_selector_requires_the_reviewed_property_cohort(self):
         rows = self.fixture["orgs/Verjson/properties/values?per_page=100"][0]
         beta = next(row for row in rows if row["repository_full_name"] == "Verjson/beta")
@@ -926,6 +947,66 @@ jobs:
                     self.assertEqual(AUDIT.main(), 0)
                 render.assert_called_once_with(self.contract, mode)
 
+    def test_replacement_drift_and_unpinned_fields_are_reported_with_adopter_findings(self):
+        # Adopter findings fail every live run, so anything checked only after
+        # them would never reach the daily report (#1799 review).
+        self.remove_adopter_caller("Verjson/alpha", ".github/workflows/ai-review-merge.yml")
+        self.workflow_source(self.workflow.replace("pull_request_target", "workflow_dispatch"))
+        self.fixture[self.ruleset_path][0]["added_by_github"] = True
+        with self.assertRaises(AUDIT.AuditError) as caught:
+            AUDIT.audit(self.contract, self.read)
+        message = str(caught.exception)
+        self.assertIn("Verjson/alpha:.github/workflows/ai-review-merge.yml", message)
+        self.assertIn("replacement lacks pull_request_target", message)
+        self.assertIn(
+            f"{self.contract['preimage']['name']}.added_by_github",
+            caught.exception.report["unpinned_live_fields"],
+        )
+        audit = AUDIT.audit
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(AUDIT, "parse_args", return_value=argparse.Namespace(**{
+                flag: False for flag in (
+                    "render_split_payload", "render_arm_ruleset_payload", "render_rollback_payload",
+                    "render_arm_property_schema_payload", "render_arm_property_values_payload",
+                    "render_arm_property_ruleset_payload", "render_arm_property_rollback_payload",
+                    "render_arm_property_unset_values_payload",
+                )
+            })),
+            mock.patch.object(AUDIT, "read_contract", return_value=self.contract),
+            mock.patch.object(AUDIT, "audit", side_effect=lambda contract: audit(contract, self.read)),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(AUDIT.main(), 1)
+        self.assertEqual(stderr.getvalue(), f"ERROR: authorization-arm-rollout-not-ready: {message}\n")
+        self.assertEqual(json.loads(stdout.getvalue()), caught.exception.report)
+
+    def test_a_render_that_meets_findings_writes_no_payload(self):
+        self.remove_adopter_caller("Verjson/alpha", ".github/workflows/ai-review-merge.yml")
+        flags = (
+            "render_split_payload", "render_arm_ruleset_payload", "render_rollback_payload",
+            "render_arm_property_schema_payload", "render_arm_property_values_payload",
+            "render_arm_property_ruleset_payload", "render_arm_property_rollback_payload",
+            "render_arm_property_unset_values_payload",
+        )
+        render = AUDIT.render_payload
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(AUDIT, "parse_args", return_value=argparse.Namespace(**{
+                flag: flag == "render_split_payload" for flag in flags
+            })),
+            mock.patch.object(AUDIT, "read_contract", return_value=self.contract),
+            mock.patch.object(
+                AUDIT, "render_payload", side_effect=lambda contract, mode: render(contract, mode, self.read),
+            ),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(AUDIT.main(), 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("Verjson/alpha:.github/workflows/ai-review-merge.yml", stderr.getvalue())
+
     def test_retired_replacement_and_app_status_cannot_coexist(self):
         second = {"id": 99, **copy.deepcopy(self.contract["arm_ruleset"])}
         self.fixture["orgs/Verjson/rulesets"][0].append({"id": 99})
@@ -957,6 +1038,146 @@ jobs:
         self.fixture = self.make_fixture()
         self.select_scope("variables", "AI_REVIEW_APP_ID", ["Verjson/beta"])
         self.assert_audit_error("AI_REVIEW_APP_ID.*missing=1.*Verjson/alpha")
+
+    def withdraw_organization_key(self, listed=("DEEPSEEK_API_KEY",)):
+        """Stub the ADR 0166 custody: no organization copy, one key per armed environment."""
+        del self.fixture[f"orgs/Verjson/actions/secrets/{PRIVATE_KEY}"]
+        self.fixture[ORGANIZATION_SECRETS] = [
+            {"total_count": len(listed), "secrets": [{"name": name} for name in listed]},
+        ]
+        for full_name in ("Verjson/alpha", "Verjson/beta"):
+            self.fixture[environment_key_path(full_name)] = [{"name": PRIVATE_KEY}]
+
+    def test_a_corroborated_withdrawal_is_satisfied_by_environment_custody(self):
+        self.withdraw_organization_key()
+        report = AUDIT.audit(self.contract, self.read)
+        self.assertEqual(report["armed_repositories"], 2)
+
+    def test_an_uncorroborated_organization_key_404_fails_closed(self):
+        # GitHub answers 404 for a secret the token cannot see, so absence must be
+        # read from a complete listing; anything less is unknown custody.
+        other = {"name": "DEEPSEEK_API_KEY"}
+        listings = {
+            "the listing names the key": [{"total_count": 1, "secrets": [{"name": PRIVATE_KEY}]}],
+            "no pages": [],
+            "a truncated listing": [{"total_count": 101, "secrets": [other]}],
+            "pages disagree on total_count": [
+                {"total_count": 2, "secrets": [other]},
+                {"total_count": 3, "secrets": [{"name": "OTHER"}]},
+            ],
+            "a nameless entry": [{"total_count": 2, "secrets": [other, {}]}],
+            "an empty name": [{"total_count": 2, "secrets": [other, {"name": ""}]}],
+            "a non-string name": [{"total_count": 2, "secrets": [other, {"name": 7}]}],
+            "a non-object entry": [{"total_count": 2, "secrets": [other, PRIVATE_KEY]}],
+            "a duplicate name": [{"total_count": 2, "secrets": [other, other]}],
+            "a page without secrets": [{"total_count": 0}],
+            # Iterable but not a list: an empty string or object would supply no
+            # entries and a matching total_count of 0, i.e. a forged "complete".
+            "a string secrets field": [{"total_count": 0, "secrets": ""}],
+            "an object secrets field": [{"total_count": 0, "secrets": {}}],
+            "a non-object page": [[other]],
+            "a missing total_count": [{"secrets": [other]}],
+            "a boolean total_count": [{"total_count": True, "secrets": [other]}],
+            "a string total_count": [{"total_count": "1", "secrets": [other]}],
+        }
+        for case, listing in listings.items():
+            with self.subTest(case=case):
+                self.fixture = self.make_fixture()
+                self.withdraw_organization_key()
+                self.fixture[ORGANIZATION_SECRETS] = listing
+                self.assertRegex(self.audit_error_message(), "cannot verify AI_REVIEW_APP_PRIVATE_KEY custody")
+
+    def test_a_complete_empty_organization_listing_corroborates_the_withdrawal(self):
+        self.withdraw_organization_key(listed=())
+        self.assertEqual(self.fixture[ORGANIZATION_SECRETS], [{"total_count": 0, "secrets": []}])
+        self.assertEqual(AUDIT.audit(self.contract, self.read)["armed_repositories"], 2)
+
+    def test_a_multi_page_listing_corroborates_the_withdrawal(self):
+        self.withdraw_organization_key()
+        self.fixture[ORGANIZATION_SECRETS] = [
+            {"total_count": 2, "secrets": [{"name": "DEEPSEEK_API_KEY"}]},
+            {"total_count": 2, "secrets": [{"name": "ORG_ADMIN_TOKEN"}]},
+        ]
+        self.assertEqual(AUDIT.audit(self.contract, self.read)["armed_repositories"], 2)
+
+    def test_an_unreadable_organization_key_or_listing_stops_the_audit(self):
+        # Only a 404 is a question about custody; every other status is an
+        # unreadable API and the audit must not reach any verdict past it.
+        for path in (f"orgs/Verjson/actions/secrets/{PRIVATE_KEY}", ORGANIZATION_SECRETS):
+            with self.subTest(path=path):
+                self.fixture = self.make_fixture()
+                self.withdraw_organization_key()
+                self.fixture[path] = AUDIT.AuditError(f"GitHub API read failed for {path}")
+                self.assertEqual(self.audit_error_message(), f"GitHub API read failed for {path}")
+
+    def test_a_present_organization_copy_keeps_the_visibility_verdict(self):
+        # Environment custody does not excuse an organization copy that cannot
+        # reach an armed repository, and is never read while the copy exists.
+        for full_name in ("Verjson/alpha", "Verjson/beta"):
+            self.fixture[environment_key_path(full_name)] = AssertionError("environment key read")
+        self.assertEqual(AUDIT.audit(self.contract, self.read)["armed_repositories"], 2)
+        self.select_scope("secrets", PRIVATE_KEY, ["Verjson/alpha"])
+        self.assert_audit_error(r"AI_REVIEW_APP_PRIVATE_KEY cannot reach governed repositories.*Verjson/beta")
+        self.fixture[f"orgs/Verjson/actions/secrets/{PRIVATE_KEY}"] = [{"visibility": "internal"}]
+        self.assert_audit_error("unsupported visibility 'internal'")
+        for response in ([{"visibility": "all"}, {"visibility": "all"}], [["all"]]):
+            with self.subTest(response=response):
+                self.fixture[f"orgs/Verjson/actions/secrets/{PRIVATE_KEY}"] = response
+                self.assert_audit_error(f"unexpected response shape for orgs/Verjson/actions/secrets/{PRIVATE_KEY}")
+
+    def test_a_withdrawn_key_absent_from_an_armed_environment_is_missing(self):
+        self.withdraw_organization_key()
+        del self.fixture[environment_key_path("Verjson/beta")]
+        self.assertRegex(
+            self.audit_error_message(),
+            r"lack AI_REVIEW_APP_PRIVATE_KEY.*missing=1 sample=\['Verjson/beta:ai-review-app'\]",
+        )
+
+    def test_a_missing_environment_key_is_reported_with_the_other_adopter_findings(self):
+        # The audit runs daily; a key finding that hid the adopter findings would
+        # take one scheduled day per class to make the fleet visible.
+        self.withdraw_organization_key()
+        del self.fixture[environment_key_path("Verjson/beta")]
+        self.remove_adopter_caller("Verjson/alpha", ".github/workflows/ai-review-merge.yml")
+        self.fixture["repos/Verjson/beta/environments/ai-review-app/deployment-branch-policies"] = [
+            {"branch_policies": [{"name": "main", "type": "branch"}]},
+        ]
+        message = self.audit_error_message()
+        self.assertRegex(message, r"admission caller is absent.*Verjson/alpha:\.github/workflows/ai-review-merge\.yml")
+        self.assertRegex(message, r"conforming review environment.*Verjson/beta:ai-review-app:branch_policies")
+        self.assertRegex(message, r"lack AI_REVIEW_APP_PRIVATE_KEY.*\['Verjson/beta:ai-review-app'\]")
+
+    def test_an_environment_key_read_failure_is_unreadable_not_missing(self):
+        # gh_pages raises for every status but 404 (403, 5xx, invalid JSON).
+        self.withdraw_organization_key()
+        self.fixture[environment_key_path("Verjson/alpha")] = AUDIT.AuditError(
+            f"GitHub API read failed for {environment_key_path('Verjson/alpha')}: gh: Forbidden (HTTP 403)"
+        )
+        message = self.audit_error_message()
+        # The reason travels with the repository, as the shell audit prints gh's error.
+        self.assertRegex(
+            message,
+            r"AI_REVIEW_APP_PRIVATE_KEY is unreadable.*\['Verjson/alpha:ai-review-app \(GitHub API read failed"
+            r" for [^)]*: gh: Forbidden \(HTTP 403\)\)'\]",
+        )
+        self.assertNotRegex(message, "lack AI_REVIEW_APP_PRIVATE_KEY")
+
+    def test_an_environment_key_response_that_does_not_name_the_key_is_unreadable(self):
+        for response in (
+            [{"name": "OTHER_KEY"}],
+            [{}],
+            [["AI_REVIEW_APP_PRIVATE_KEY"]],
+            [{"name": PRIVATE_KEY}, {"name": PRIVATE_KEY}],
+        ):
+            with self.subTest(response=response):
+                self.fixture = self.make_fixture()
+                self.withdraw_organization_key()
+                self.fixture[environment_key_path("Verjson/beta")] = response
+                self.assertRegex(
+                    self.audit_error_message(),
+                    r"AI_REVIEW_APP_PRIVATE_KEY is unreadable.*"
+                    r"\['Verjson/beta:ai-review-app \(response does not identify the key\)'\]",
+                )
 
     def test_app_permissions_and_events_are_exact(self):
         self.assertEqual(self.contract["authorization"], {
@@ -1220,11 +1441,34 @@ jobs:
             (1, "gh: Forbidden (HTTP 403)"),
             (1, "gh: Internal Server Error (HTTP 500)"),
             (1, ""),
+            # The status is the trailing marker on its line, as gh prints it; a
+            # 404 quoted inside another status's message is not that status.
+            (1, "gh: Forbidden: upstream answered (HTTP 404) to the proxy (HTTP 403)\n"),
         ):
             with self.subTest(stderr=stderr):
                 self.run_gh_api(returncode, "", stderr)
                 with self.assertRaisesRegex(AUDIT.AuditError, r"GitHub API read failed for repos/x"):
                     AUDIT.gh_pages("repos/x", allow_missing=True)
+
+    def test_a_read_failure_carries_ghs_status_line(self):
+        self.run_gh_api(1, "", "\ngh: Forbidden (HTTP 403)\n\n")
+        with self.assertRaises(AUDIT.AuditError) as caught:
+            AUDIT.gh_pages("repos/x")
+        self.assertEqual(str(caught.exception), "GitHub API read failed for repos/x: gh: Forbidden (HTTP 403)")
+
+    def test_a_read_failure_prefers_the_status_line_over_a_trailing_hint(self):
+        hint = "This API operation needs the \"admin:org\" scope. To request it, run:  gh auth refresh"
+        self.run_gh_api(1, "", f"warning: retrying after a secondary rate limit\ngh: Forbidden (HTTP 403)\n{hint}\n")
+        with self.assertRaises(AUDIT.AuditError) as caught:
+            AUDIT.gh_pages("repos/x")
+        self.assertEqual(str(caught.exception), "GitHub API read failed for repos/x: gh: Forbidden (HTTP 403)")
+
+    def test_a_404_is_read_from_the_end_of_ghs_status_line(self):
+        hint = "This API operation needs the \"admin:org\" scope."
+        for stderr in ("gh: Not Found (HTTP 404)", "gh: Not Found (HTTP 404)\n", f"gh: Not Found (HTTP 404)\n{hint}\n"):
+            with self.subTest(stderr=stderr):
+                self.run_gh_api(1, "", stderr)
+                self.assertEqual(AUDIT.gh_pages("repos/x", allow_missing=True), [])
 
     def test_a_caller_finding_does_not_mask_an_environment_finding(self):
         # The audit runs daily. Reporting one class of adopter finding at a time

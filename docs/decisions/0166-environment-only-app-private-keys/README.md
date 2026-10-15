@@ -136,3 +136,28 @@ active repositories, so no surviving broad copy remains for either role.
 This audit checks key presence only. Main-only branch admission remains the job of
 `app-key-environment.yml`, and a consumer pinned to a contract older than the
 `merge_environment` input would still not bind the environment at run time.
+
+## 2026-10-15 — The authorization-arm audit models environment custody
+
+`scripts/ai-review-required-workflow-audit.py` still required the organization copy of
+`AI_REVIEW_APP_PRIVATE_KEY` to reach every armed repository, so after the 2026-09-27
+withdrawal the live audit stopped at the organization secret's 404 before judging the arm
+([#1799](https://github.com/Verjson/.github/issues/1799)). It now applies the semantics
+recorded above for the merge key: the 404 is withdrawal only when the same token reads a
+complete, well-formed organization secret listing (every page an object with a numeric
+`total_count` equal to the listed entries, every entry uniquely and non-emptily named)
+that omits the name. Any other shape, a listing that still names the key, and every
+non-404 failure leave custody unknown and fail closed.
+
+With the copy withdrawn, every armed repository must hold the key in its
+`ai-review-app` environment, the environment `adopter_conformance` already names. The
+audit reads that secret's metadata, never its value, and reports a missing key (404)
+separately from an unreadable one (any other failure, or a response that does not name
+the key); both fail. These findings are reported together with the audit's other
+armed-adopter findings rather than ahead of them, because the audit runs daily and one
+class per run would delay the rest of the fleet's picture by a day each. While an
+organization copy exists, its visibility verdict is
+unchanged and the environments are not read. `AI_REVIEW_APP_ID`, `AI_REVIEW_APP_SLUG` and
+`AI_REVIEW_CLIENT_ID` remain organization variables and keep their reach checks. As
+before, main-only admission is asserted by the audit's deployment-branch-policy check,
+not by the key probe.
