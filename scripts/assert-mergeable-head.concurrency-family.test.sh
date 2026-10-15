@@ -155,6 +155,13 @@ jobs_for 9201 1 "$(job 31 9201 'rearm / event-policy' '[{"name":"Set up job","st
 run
 expect "a cancelled family run whose job started a step is still refused" 5 "rearm / event-policy=CANCELLED"
 
+# A job that acquired a runner left the queue: it was cancelled while starting, not
+# displaced while pending. No step is listed, so ONLY the runner guard can refuse it.
+reset_env
+jobs_for 9201 1 "$(job 31 9201 'rearm / event-policy' '[]' 1000071397)"
+run
+expect "a cancelled family run whose job acquired a runner is still refused" 5 "rearm / event-policy=CANCELLED"
+
 if [ "$fails" -ne 0 ]; then
   printf '\n%d assertion(s) failed\n' "$fails" >&2
   exit 1

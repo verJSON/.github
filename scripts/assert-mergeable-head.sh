@@ -386,11 +386,12 @@ if [ "$cancelled_count" -gt 0 ]; then
   jq -c --slurpfile runs "$runs" --slurpfile jobs "$jobs_by_run" --argjson families "$CONCURRENCY_FAMILIES" --arg pr "$pr" "$FAMILY_JQ_DEFS"'
     $runs[0] as $runs
     | . as $all
-    # A displaced run never started: its attempt has jobs, and none ran a step.
+    # A displaced run never started: its attempt has jobs, none acquired a runner
+    # (GitHub reports runner_id 0 for a job that left no queue), and none ran a step.
     | def displacement_shaped($o):
         ($jobs[0]["\($o.id)"] // []) as $own_jobs
         | ($own_jobs | length) > 0
-          and all($own_jobs[]; (.steps | length) == 0);
+          and all($own_jobs[]; (.steps | length) == 0 and (.runner_id == null or .runner_id == 0));
     # The newest later-created successful run of the cancelled run'"'"'s declared
     # concurrency family on this head, or null.
     def displacer($o):
