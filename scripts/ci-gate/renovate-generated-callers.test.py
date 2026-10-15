@@ -79,6 +79,80 @@ def workflow_and_action_files() -> list[Path]:
     )
 
 
+FENCE_PRESET = ROOT / "renovate/generated-callers.json"
+USAGE_LINE = re.compile(
+    r"^#   scripts/gen-changelog-caller\.sh (?P<mode>[a-z-]+) <sha>.*> (?P<path>\S+)(?:[ \t]+#.*)?$",
+    re.MULTILINE,
+)
+USAGE_MODES = re.compile(r'echo "usage: \$\(basename "\$0"\) \{(?P<modes>[a-z|-]+)\}')
+# Arguments a mode cannot be generated without. A mode missing here is reported,
+# so a new mode cannot escape classification.
+REQUIRED_MODE_ARGUMENTS = {
+    "release-artifact": ("--build-runner", "ubuntu-24.04"),
+    "release-propose": ("--autonomy", "propose"),
+}
+# Generators whose output Renovate would read but which adopters never hold.
+NON_ADOPTER_GENERATORS = {
+    "scripts/gen-node-required-workflow.py": (
+        "Renders this repository's CLI Projects required workflow and a consumer CI "
+        "caller that calls only Verjson/.github. Here renovate.json disables runner "
+        "updates and the checkout pins are unversioned (UNMANAGED_GENERATOR_PINS)."
+    ),
+}
+VERSIONED_USES = re.compile(
+    r"^\s*(?:-\s+)?uses:\s*['\"]?(?P<owner>[A-Za-z0-9_.-]+)/[A-Za-z0-9_./-]+@"
+    r"(?:(?![0-9a-f]{40}\b)[^\s'\"#]+|[0-9a-f]{40}['\"]?\s+#\s*\S+)",
+    re.MULTILINE,
+)
+RUNNER_LABEL = re.compile(
+    r"^\s*runs-on:\s*(?!\$\{\{)[\[\"']*\s*[A-Za-z]+-[0-9]", re.MULTILINE
+)
+# The manager's uses-with extraction: a literal version input of a setup action
+# step, read only within that step.
+VERSION_INPUT = re.compile(
+    r"uses:\s*['\"]?actions/setup-(?P<tool>node|python|go)@[^\n]*\n"
+    r"(?:(?![ \t]*-[ \t])[^\n]*\n)*?"
+    r"[ \t]*(?P=tool)-version:[ \t]*['\"]?[0-9]"
+)
+
+
+def renovate_visible(workflow: str) -> list[str]:
+    """Dependencies the github-actions manager would extract and could update."""
+    found = [
+        match.group(0).strip()
+        for match in VERSIONED_USES.finditer(workflow)
+        if match["owner"].casefold() != "verjson"
+    ]
+    found += [match.group(0).strip() for match in RUNNER_LABEL.finditer(workflow)]
+    found += [match.group(0).strip() for match in VERSION_INPUT.finditer(workflow)]
+    return found
+
+
+def changelog_generator_outputs(generator: str, ref: str) -> dict[str, str]:
+    outputs: dict[str, str] = {}
+    for match in USAGE_LINE.finditer(generator):
+        mode, path = match["mode"], match["path"]
+        arguments = REQUIRED_MODE_ARGUMENTS.get(mode, ())
+        outputs.setdefault(path, "")
+        outputs[path] += generate(generator, mode, ref, *arguments)
+    return outputs
+
+
+def head_ref() -> str:
+    return subprocess.run(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def fence_rules(preset: dict) -> list[dict]:
+    return [
+        rule
+        for rule in preset.get("packageRules", [])
+        if rule.get("enabled") is False and "matchFileNames" in rule
+    ]
+
+
 RELEASE_MODES = {
     "release-node": (),
     "release-snapshot": (),
@@ -274,6 +348,69 @@ class GeneratorPinManager(unittest.TestCase):
     def test_every_exact_digest_exception_still_names_a_workflow(self) -> None:
         for relative in EXACT_DIGEST_WORKFLOWS:
             self.assertTrue((ROOT / relative).is_file(), relative)
+
+
+class GeneratedCallerFence(unittest.TestCase):
+    def setUp(self) -> None:
+        self.generator = CHANGELOG_GENERATOR.read_text(encoding="utf-8")
+
+    def test_fence_covers_every_generated_path_renovate_could_edit(self) -> None:
+        preset = json.loads(FENCE_PRESET.read_text(encoding="utf-8"))
+        rules = fence_rules(preset)
+        self.assertEqual(len(rules), 1, "one rule must own the generated caller fence")
+        rule = rules[0]
+        self.assertEqual(rule.get("matchManagers"), ["github-actions"])
+        self.assertEqual(set(rule) - {"description", "matchManagers", "matchFileNames", "enabled"}, set())
+
+        outputs = changelog_generator_outputs(self.generator, head_ref())
+        documented = {match["mode"] for match in USAGE_LINE.finditer(self.generator)}
+        accepted = USAGE_MODES.search(self.generator)
+        self.assertIsNotNone(accepted, "the generator's usage() no longer lists its modes")
+        self.assertEqual(
+            documented, set(accepted["modes"].split("|")),
+            "every accepted mode needs a usage line naming the path it writes",
+        )
+        required = sorted(path for path, text in outputs.items() if renovate_visible(text))
+        self.assertIn(".github/workflows/release.yml", required)
+        fenced = rule["matchFileNames"]
+        self.assertEqual(fenced, sorted(fenced), "keep the fence sorted")
+        self.assertEqual(sorted(set(required) - set(fenced)), [], "unfenced generated callers")
+        self.assertEqual(
+            sorted(set(fenced) - set(outputs)), [],
+            "the fence names a path no generator owns, which only silences hand-written workflows",
+        )
+
+    def test_every_other_generator_emits_nothing_renovate_reads(self) -> None:
+        for generator in sorted((ROOT / "scripts").glob("gen-*")):
+            relative = generator.relative_to(ROOT).as_posix()
+            if generator == CHANGELOG_GENERATOR or relative in NON_ADOPTER_GENERATORS:
+                continue
+            text = generator.read_text(encoding="utf-8")
+            with self.subTest(generator=relative):
+                self.assertEqual(renovate_visible(text), [])
+                self.assertEqual(
+                    [m.group(0) for m in THIRD_PARTY_PIN.finditer(text) if m["owner"].casefold() != "verjson"],
+                    [],
+                )
+
+    def test_visibility_probe_recognizes_what_renovate_extracts(self) -> None:
+        sha = "a" * 40
+        self.assertTrue(renovate_visible(f"      - uses: actions/setup-node@{sha} # v7\n"))
+        self.assertTrue(renovate_visible("      - uses: actions/checkout@v7\n"))
+        self.assertTrue(renovate_visible("    runs-on: ubuntu-24.04\n"))
+        self.assertTrue(renovate_visible("    runs-on: [windows-2022]\n"))
+        self.assertTrue(renovate_visible(
+            f"      - uses: actions/setup-node@{sha}\n        with:\n          node-version: 24\n"
+        ))
+        self.assertEqual(renovate_visible(
+            f"    uses: Verjson/.github/.github/workflows/x.yml@{sha}\n    with:\n      node-version: '24'\n"
+        ), [])
+        self.assertEqual(renovate_visible(
+            f"      - uses: actions/setup-node@{sha}\n      - name: next\n        with:\n          node-version: 24\n"
+        ), [])
+        self.assertEqual(renovate_visible(f"        uses: actions/checkout@{sha}\n"), [])
+        self.assertEqual(renovate_visible(f"    uses: Verjson/.github/.github/workflows/x.yml@{sha}\n"), [])
+        self.assertEqual(renovate_visible("    runs-on: ${{ fromJSON(vars.X || '[\"ubuntu-24.04\"]') }}\n"), [])
 
 
 if __name__ == "__main__":
