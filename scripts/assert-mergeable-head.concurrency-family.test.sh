@@ -29,6 +29,7 @@ OTHER_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 APP_ID=15368
 WF_GATE=381766279
 WF_LIFECYCLE=381766276
+WF_UNRELATED=315894159
 WF_REQUIRED=360793393
 CANONICAL_REF="Verjson/.github/.github/workflows/gate-rearm.yml@ee656fdb181eeb9ec9ae3765497930968cc544b7"
 
@@ -237,6 +238,151 @@ for shape in skipped neutral; do
   run
   expect "a successful family run whose own suite reports a ${shape^^} check displaces nothing" 5 "rearm / event-policy=CANCELLED"
 done
+
+# --- membership comes from the checked-in map, never from resemblance -----------
+reset_env
+RUNS_FIXTURE="$(wf_runs "$(gate_run),$(lifecycle_run '{"referenced_workflows":[]}')")"
+run
+expect "a listed caller name and path that does not reference the declaring workflow is no member" 5 "rearm / event-policy=CANCELLED"
+
+reset_env
+RUNS_FIXTURE="$(wf_runs "$(gate_run),$(lifecycle_run '{"name":"AI review lifecycle re-arm (copy)"}')")"
+run
+expect "a run referencing the declaring workflow under an unlisted name is no member" 5 "rearm / event-policy=CANCELLED"
+
+reset_env
+RUNS_FIXTURE="$(wf_runs "$(gate_run),$(lifecycle_run '{"path":".github/workflows/lifecycle-copy.yml"}')")"
+run
+expect "a run under a listed name at an unlisted path is no member" 5 "rearm / event-policy=CANCELLED"
+
+reset_env
+RUNS_FIXTURE="$(wf_runs "$(gate_run),$(lifecycle_run '{"referenced_workflows":[{"path":"Verjson/.github/.github/workflows/ai-review-merge.yml@ee656fdb181eeb9ec9ae3765497930968cc544b7"},{"path":"Verjson/other/.github/workflows/gate-rearm.yml@ee656fdb181eeb9ec9ae3765497930968cc544b7"}]}')")"
+run
+expect "a reference to another workflow, or to the same path in another repository, is no membership" 5 "rearm / event-policy=CANCELLED"
+
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$green_required,$cancelled_gate_check,$(check_run 51 'event-policy' success 603)")"
+RUNS_FIXTURE="$(wf_runs "$(gate_run),$(direct_run 9203 603 2026-10-15T18:39:58Z success)")"
+run
+expect "outside the declaring repository a run named like the declaring workflow is no member" 5 "rearm / event-policy=CANCELLED"
+
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$green_required,$cancelled_gate_check,$(check_run 51 'event-policy' success 603)")"
+RUNS_FIXTURE="$(wf_runs "$(gate_run),$(required_run 9203 603 2026-10-15T18:39:58Z success '{"workflow_id":1}')")"
+run
+expect "a required-workflow URL naming a different workflow is no membership" 5 "rearm / event-policy=CANCELLED"
+
+reset_env
+RUNS_FIXTURE="$(wf_runs "$(gate_run),$(lifecycle_run '{"event":"pull_request"}')")"
+run
+expect "a family run under a different event displaces nothing" 5 "rearm / event-policy=CANCELLED"
+
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$green_required,$(check_run 31 'rearm / event-policy' success 601),$(check_run 41 'rearm / rearm / event-policy' cancelled 602)")"
+RUNS_FIXTURE="$(wf_runs "$(gate_run '{"conclusion":"success"}'),$(lifecycle_run '{"conclusion":"cancelled"}')")"
+jobs_for 9202 1 "$(job 41 9202 'rearm / rearm / event-policy')"
+run
+expect "an EARLIER-created successful family run displaces nothing" 5 "rearm / rearm / event-policy=CANCELLED"
+
+reset_env
+RUNS_FIXTURE="$(wf_runs "$(gate_run),$(lifecycle_run '{"created_at":"2026-10-15T18:39:57Z"}')")"
+run
+expect "a family run created in the same second displaces nothing: ties are not later" 5 "rearm / event-policy=CANCELLED"
+
+# A re-run attempt starts later than the run was created. A family run created
+# between the two did not displace the re-run.
+reset_env
+RUNS_FIXTURE="$(wf_runs "$(gate_run '{"run_attempt":2,"run_started_at":"2026-10-15T18:48:35Z"}'),$(lifecycle_run)")"
+jobs_for 9201 2 "$(job 31 9201 'rearm / event-policy' '[]' 0 '{"run_attempt":2}')"
+run
+expect "a family run created before a re-run attempt started does not displace that attempt" 5 "rearm / event-policy=CANCELLED"
+if grep -qF -- "/actions/runs/9201/attempts/2/jobs" "$JOBS_REQUEST_LOG"; then
+  pass "the job read is pinned to the attempt the run record reports"
+else
+  fail "the job read is pinned to the attempt the run record reports (requests: $(cat "$JOBS_REQUEST_LOG"))"
+fi
+
+for conclusion in failure cancelled skipped; do
+  reset_env
+  RUNS_FIXTURE="$(wf_runs "$(gate_run),$(lifecycle_run "{\"conclusion\":\"$conclusion\"}")")"
+  jobs_for 9202 1 "$(job 41 9202 'rearm / rearm / event-policy' '[{"name":"Set up job"}]' 7)"
+  run
+  expect "a later family run that concluded $conclusion displaces nothing" 5 "rearm / event-policy=CANCELLED"
+done
+
+# Only the NEWEST later successful family run is consulted: an older full run is
+# not cherry-picked over a newer one that skipped the work.
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$green_required,$cancelled_gate_check,$superseder_checks,$(check_run 61 'rearm / rearm / event-policy' success 604),$(check_run 62 'rearm / rearm / arm' skipped 604)")"
+RUNS_FIXTURE="$(wf_runs "$(gate_run),$(lifecycle_run),$(wf_run 9204 604 "$WF_LIFECYCLE" 22 'AI review lifecycle re-arm' "$LIFECYCLE_PATH" 2026-10-15T18:41:00Z success "$LIFECYCLE_REFS")")"
+run
+expect "an older full family run is not cherry-picked over a newer one that skipped" 5 "rearm / event-policy=CANCELLED"
+
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$green_required,$cancelled_gate_check")"
+run
+expect "a successful family run that reports no check of its own displaces nothing" 5 "rearm / event-policy=CANCELLED"
+
+# --- the job read ---------------------------------------------------------------
+reset_env
+RUNS_FIXTURE="$(wf_runs "$(gate_run),$(wf_run 9202 602 "$WF_UNRELATED" 21 'CI' .github/workflows/ci.yml 2026-10-15T18:40:16Z success '[]')")"
+run
+expect "a later success of an unrelated workflow displaces nothing" 5 "rearm / event-policy=CANCELLED"
+gate_only="$(wf_runs "$(wf_run 9201 601 "$WF_UNRELATED" 32 'CI' .github/workflows/ci.yml 2026-10-15T18:39:57Z cancelled '[]')")"
+reset_env
+RUNS_FIXTURE="$gate_only"
+run
+if [ "$RC" -eq 5 ] && [ ! -s "$JOBS_REQUEST_LOG" ]; then
+  pass "no job listing is read for a cancelled run outside every family"
+else
+  fail "no job listing is read for a cancelled run outside every family (rc=$RC, requests: $(cat "$JOBS_REQUEST_LOG"))"
+fi
+
+reset_env
+export FAIL_JOBS=1
+run
+expect "a refused job read faults and names the Actions grant" 1 "permissions.actions: read"
+
+reset_env
+printf '{"total_count":2,"jobs":[%s]}\n' "$(job 31 9201 'rearm / event-policy')" >"$JOBS_DIR/9201-1.json"
+run
+expect "a truncated job walk faults" 1 "job inventory of workflow run 9201 for Verjson/verjson-agents@$HEAD_SHA is incomplete or unattested"
+
+reset_env
+printf '{"total_count":1,"jobs":"rearm / event-policy"}\n' >"$JOBS_DIR/9201-1.json"
+run
+expect "a job page whose collection is not an array faults" 1 "carries a malformed page"
+
+reset_env
+jobs_for 9201 1
+run
+expect "an attempt with no jobs at all is not displacement evidence" 5 "rearm / event-policy=CANCELLED"
+
+for attempt in '"1"' 0 1.5 null; do
+  reset_env
+  RUNS_FIXTURE="$(wf_runs "$(gate_run "{\"run_attempt\":$attempt}"),$(lifecycle_run)")"
+  run
+  expect "a cancelled family run whose attempt is $attempt faults" 1 "without a valid attempt"
+done
+
+reset_env
+RUNS_FIXTURE="$(wf_runs "$(gate_run),$(lifecycle_run '{"created_at":"yesterday"}')")"
+run
+expect "a family run with an unreadable creation time faults" 1 "failed to evaluate superseded cancellations"
+
+reset_env
+RUNS_FIXTURE="$(wf_runs "$(gate_run),$(lifecycle_run "{\"head_sha\":\"$OTHER_SHA\"}")")"
+run
+expect "a family run on another head faults rather than displacing" 1 "carries a malformed record"
+
+# --- Gate A -----------------------------------------------------------------------
+# Dismissal removes evidence and never manufactures it: a required context reported
+# only by a displaced cancellation is then absent, and Gate A refuses it.
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$(check_run 1 'ci / build-test' success 500),$(check_run 31 'changelog / validate' cancelled 601),$superseder_checks")"
+jobs_for 9201 1 "$(job 31 9201 'changelog / validate')"
+run
+expect "a required context reported only by a displaced cancellation is absent under Gate A" 3 "absent: changelog / validate"
 
 if [ "$fails" -ne 0 ]; then
   printf '\n%d assertion(s) failed\n' "$fails" >&2
