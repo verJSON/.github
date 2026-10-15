@@ -272,6 +272,15 @@ RUNS_FIXTURE="$(wf_runs "$(gate_run),$(required_run 9203 603 2026-10-15T18:39:58
 run
 expect "a required-workflow URL naming a different workflow is no membership" 5 "rearm / event-policy=CANCELLED"
 
+# The required-workflow URL proves only that SOME required workflow ran at that path;
+# another source repository's required workflow can share the path. The declared
+# name is what identifies the declaring workflow.
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$green_required,$cancelled_gate_check,$(check_run 51 'event-policy' success 603)")"
+RUNS_FIXTURE="$(wf_runs "$(gate_run),$(required_run 9203 603 2026-10-15T18:39:58Z success '{"name":"Another required workflow"}')")"
+run
+expect "a required workflow at the declaring path under another name is no member" 5 "rearm / event-policy=CANCELLED"
+
 reset_env
 RUNS_FIXTURE="$(wf_runs "$(gate_run),$(lifecycle_run '{"event":"pull_request"}')")"
 run
