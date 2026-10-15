@@ -148,7 +148,7 @@ GH
 chmod +x "$tmp/bin/gh" "$tmp/bin/sleep"
 
 run_case() {
-  PATH="$tmp/bin:$PATH" \
+  PATH="$tmp/bin:$PATH" LC_ALL=C.UTF-8 \
   GH_TOKEN=stub-token RUNNER_TEMP="$tmp" \
   TARGET_REPO="${GITHUB_REPOSITORY_OVERRIDE:-Verjson/example}" TARGET_OWNER=Verjson \
   GITHUB_REPOSITORY="${GITHUB_REPOSITORY_OVERRIDE:-Verjson/example}" \
@@ -217,10 +217,27 @@ grep -qF 'promotion is not executing from the canonical workflow repository' <<<
 # GitHub names are ASCII-case-insensitive identities (ADR 0213). The 2026-10-02
 # organization rename made a local `./` reusable call report `verJSON/.github`:
 # AiB run 38790031475 refused its promotion retry on exactly this spelling.
-out="$(EXECUTING_WORKFLOW_SHA="$MAIN_SHA" EXECUTING_WORKFLOW_REPOSITORY=verJSON/.github run_case)"
-grep -qF 'REACHED_PAST_PIN_CHECK' <<<"$out" \
-  && pass "the canonical repository in its renamed display case 'verJSON/.github' is accepted" \
-  || fail "the canonical repository 'verJSON/.github' was rejected: $out"
+for repository in verJSON/.github VERJSON/.GITHUB; do
+  out="$(EXECUTING_WORKFLOW_SHA="$MAIN_SHA" EXECUTING_WORKFLOW_REPOSITORY="$repository" run_case)"
+  grep -qF 'REACHED_PAST_PIN_CHECK' <<<"$out" \
+    && pass "the canonical repository spelled '$repository' is accepted" \
+    || fail "the canonical repository '$repository' was rejected: $out"
+done
+
+# Case folding is an identity only over ASCII. Each rejected spelling defeats a
+# specific weaker comparison: an owner-only match, a prefix or substring match,
+# a regex whose `.` is a wildcard, untrimmed whitespace, and locale-aware
+# lowering — `${x,,}` under the runner's C.UTF-8 folds U+0130 to `i` and
+# casefold() folds U+017F to `s`, while U+0456 is a plain Cyrillic lookalike.
+for repository in verjson/other evil/.github Verjson/.github-x Verjson/xgithub \
+  evil/Verjson/.github ' Verjson/.github' $'Verjson/.github\n' \
+  'Verjson/.gİthub' 'Verjſon/.github' 'Verjson/.gіthub'; do
+  out="$(EXECUTING_WORKFLOW_SHA="$MAIN_SHA" EXECUTING_WORKFLOW_REPOSITORY="$repository" run_case)"
+  grep -qF 'promotion is not executing from the canonical workflow repository' <<<"$out" \
+    && ! grep -qF 'REACHED_PAST_PIN_CHECK' <<<"$out" \
+    && pass "a non-canonical workflow repository $(printf '%q' "$repository") is rejected" \
+    || fail "a non-canonical workflow repository $(printf '%q' "$repository") was accepted: $out"
+done
 
 # --- the revision cannot be determined ---------------------------------------
 out="$(run_case)"

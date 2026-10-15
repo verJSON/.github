@@ -169,6 +169,7 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
         output.write_text("", encoding="utf-8")
         environment = {
             "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "LC_ALL": "C.UTF-8",  # the hosted runner locale
             "REPOSITORY": repository,
             "RUN_ID": "123",
             "CONSUMER_WORKFLOW_SHA256": hashlib.sha256(candidate.encode()).hexdigest(),
@@ -192,6 +193,31 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
         result, output = self.run_admission(repository, repository)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"head-repository={repository}\n", output)
+
+    def test_admission_accepts_the_consumer_in_any_ascii_case(self):
+        for repository in ("Verjson/verjson-cli-projects", "VERJSON/VERJSON-CLI-PROJECTS"):
+            for live_repository in ("verJSON/verjson-cli-projects", repository):
+                with self.subTest(repository=repository, live_repository=live_repository):
+                    result, output = self.run_admission(repository, live_repository)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(f"head-repository={live_repository}\n", output)
+
+    def test_admission_rejects_every_other_repository_identity(self):
+        # Each spelling defeats a weaker comparison: owner-only, prefix, regex
+        # wildcard, untrimmed whitespace, and Unicode case folding (U+0130 and
+        # U+017F fold to ASCII outside the C locale; U+0456 is a lookalike).
+        consumer = "verJSON/verjson-cli-projects"
+        for other in (
+            "verJSON/other", "evil/verjson-cli-projects", "verJSON/verjson-cli-projects-x",
+            "verJSON/verjson.cli-projects", " verJSON/verjson-cli-projects",
+            "verJSON/verjson-clİ-projects", "verJSON/verjſon-cli-projects",
+            "verJSON/verjson-cl\u0456-projects",
+        ):
+            for repository, live_repository in ((other, consumer), (consumer, other)):
+                with self.subTest(repository=repository, live_repository=live_repository):
+                    result, output = self.run_admission(repository, live_repository)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(output, "")
 
     def test_rollout_legacy_consumer_workflow_digest_accepts_digest_or_null(self):
         config = json.loads(MODULE.REQUIRED_NODE_CONFIG.read_text(encoding="utf-8"))
