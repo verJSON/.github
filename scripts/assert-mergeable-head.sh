@@ -127,13 +127,15 @@ read -r -d '' FAMILY_JQ_DEFS <<'JQ'
     | any($f.callers[]; .name == $run.name and .path == $run.path)
       and any($run.referenced_workflows[]? | select(type == "object") | .path | reference_target;
               . == "\($f.declared_by.repository)/\($f.declared_by.path)");
-  # The declaring workflow itself, run by the organization ruleset as a required
-  # workflow: GitHub names it in workflow_url, which a repository cannot forge.
+  # The declaring workflow itself: run directly in the declaring repository, or by
+  # the organization ruleset as a required workflow elsewhere -- which GitHub names
+  # in workflow_url, and a repository cannot forge.
   def family_declarer($f):
     .workflow_id as $id
     | .name == $f.declared_by.name and .path == $f.declared_by.path
-      and (.workflow_url | type) == "string"
-      and (.workflow_url | endswith("/actions/required_workflows/\($id)"));
+      and (($repo | ascii_downcase) == $f.declared_by.repository
+           or ((.workflow_url | type) == "string"
+               and (.workflow_url | endswith("/actions/required_workflows/\($id)"))));
   # The index of the declared family this run belongs to, or null.
   def family_index:
     . as $run
@@ -370,7 +372,7 @@ if [ "$cancelled_count" -gt 0 ]; then
   # -- pinned to the attempt the run record reports -- and validated like the other
   # inventories. Only cancelled runs of a declared family are read.
   displacement_candidates="$scratch/displacement-candidates.tsv"
-  jq -r --argjson families "$CONCURRENCY_FAMILIES" "$FAMILY_JQ_DEFS"'
+  jq -r --argjson families "$CONCURRENCY_FAMILIES" --arg repo "$repo" "$FAMILY_JQ_DEFS"'
     .[] | select(.status == "completed" and .conclusion == "cancelled" and family_index != null)
     | if (.run_attempt | type) == "number" and .run_attempt >= 1 and (.run_attempt | floor) == .run_attempt
       then [.id, .run_attempt] | @tsv
@@ -394,7 +396,7 @@ if [ "$cancelled_count" -gt 0 ]; then
       || fault 1 "failed to record the job inventory of workflow run $candidate_run for $repo@$head_sha"
   done <"$displacement_candidates"
 
-  jq -c --slurpfile runs "$runs" --slurpfile jobs "$jobs_by_run" --argjson families "$CONCURRENCY_FAMILIES" --arg pr "$pr" "$FAMILY_JQ_DEFS"'
+  jq -c --slurpfile runs "$runs" --slurpfile jobs "$jobs_by_run" --argjson families "$CONCURRENCY_FAMILIES" --arg repo "$repo" --arg pr "$pr" "$FAMILY_JQ_DEFS"'
     $runs[0] as $runs
     | . as $all
     # A displaced run never started: its attempt has jobs, none acquired a runner

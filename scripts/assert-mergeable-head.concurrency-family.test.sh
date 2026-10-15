@@ -114,7 +114,7 @@ gate_run() { wf_run 9201 601 "$WF_GATE" 32 'gate re-arm' "$GATE_PATH" 2026-10-15
 lifecycle_run() { wf_run 9202 602 "$WF_LIFECYCLE" 21 'AI review lifecycle re-arm' "$LIFECYCLE_PATH" 2026-10-15T18:40:16Z success "$LIFECYCLE_REFS" "${1:-{\}}"; }
 
 run() {
-  OUT="$("$script" Verjson/verjson-agents 432 2>&1)"
+  OUT="$("$script" "${REPO:-Verjson/verjson-agents}" 432 2>&1)"
   RC=$?
 }
 expect() { # label expected-rc needle
@@ -178,6 +178,16 @@ RUNS_FIXTURE="$(wf_runs "$(gate_run),$(required_run 9203 603 2026-10-15T18:39:58
 run
 expect_true "a later successful required-workflow run of the declaring workflow displaces a cancelled caller run" \
   "check run 31, run 9201 displaced from concurrency group ai-review-arm-432 by run 9203"
+
+# In the declaring repository the workflow runs directly, not as a required workflow.
+# Owner and repository compare case-insensitively, as GitHub resolves them.
+direct_run() { required_run "$@" "{\"workflow_url\":\"https://api.github.com/repos/verJSON/.github/actions/workflows/$WF_REQUIRED\"}"; }
+reset_env
+CHECK_RUNS_FIXTURE="$(runs "$green_required,$cancelled_gate_check,$(check_run 51 'event-policy' success 603)")"
+RUNS_FIXTURE="$(wf_runs "$(gate_run),$(direct_run 9203 603 2026-10-15T18:39:58Z success)")"
+REPO=verJSON/.github run
+expect_true "in the declaring repository its own direct run is a family member" \
+  "run 9201 displaced from concurrency group ai-review-arm-432 by run 9203"
 
 # --- the displacer must have done the family's work --------------------------
 # A run concludes `success` with its guarded jobs SKIPPED (ADR 0226's attack A1), and
