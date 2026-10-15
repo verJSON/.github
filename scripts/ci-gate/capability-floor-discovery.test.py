@@ -181,14 +181,30 @@ elif endpoint == 'repos/Verjson/example/commits/main':
     print(json.dumps({'sha': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'}))
 elif endpoint == 'repos/Verjson/example/contents/.github/workflows':
     require_source_ref()
+    if mode == 'listing-404':
+        fail('gh: Not Found (HTTP 404)')
+    if mode == 'listing-403':
+        fail('gh: Resource not accessible by integration (HTTP 403)')
+    if mode == 'listing-500':
+        fail('gh: Server Error (HTTP 500)')
+    if mode == 'listing-malformed-json':
+        print('[{"name": ')
+        raise SystemExit(0)
+    if mode == 'listing-object':
+        print(json.dumps({'type': 'file', 'path': '.github/workflows'}))
+        raise SystemExit(0)
     entries = [{'name': 'ci.yml', 'path': '.github/workflows/ci.yml', 'type': 'file'}]
     if mode != 'caller-absent':
         entries.append({'name': 'gate-rearm.yml', 'path': '.github/workflows/gate-rearm.yml', 'type': 'file'})
     print(json.dumps(entries))
 elif endpoint == 'repos/Verjson/example/contents/.github/workflows/gate-rearm.yml':
     require_source_ref()
-    if mode == 'caller-absent':
+    if mode in ('caller-absent', 'caller-404'):
         fail('gh: Not Found (HTTP 404)')
+    if mode == 'caller-403':
+        fail('gh: Resource not accessible by integration (HTTP 403)')
+    if mode == 'caller-500':
+        fail('gh: Server Error (HTTP 500)')
     print(json.dumps({'type': 'file', 'encoding': 'base64', 'sha': 'cccccccccccccccccccccccccccccccccccccccc', 'content': os.environ['CALLER_TEXT_B64']}))
 else:
     fail('unexpected endpoint: ' + endpoint)
@@ -285,6 +301,23 @@ else:
             }
         ], absent_receipts
         assert "::warning" in absent.stdout and "Verjson/example" in absent.stdout and "non-conforming" in absent.stdout
+
+        # Absence is recorded only from a successful listing; every failed read stays fatal.
+        for mode, diagnostic in (
+            ("repo-404", "GitHub API read failed for repos/Verjson/example:"),
+            ("listing-404", "GitHub API read failed for repos/Verjson/example/contents/.github/workflows:"),
+            ("listing-403", "GitHub API read failed for repos/Verjson/example/contents/.github/workflows:"),
+            ("listing-500", "GitHub API read failed for repos/Verjson/example/contents/.github/workflows:"),
+            ("listing-malformed-json", "GitHub API returned malformed JSON for repos/Verjson/example/contents/.github/workflows:"),
+            ("listing-object", "workflows directory listing is malformed for Verjson/example"),
+            ("caller-404", "GitHub API read failed for repos/Verjson/example/contents/.github/workflows/gate-rearm.yml:"),
+            ("caller-403", "GitHub API read failed for repos/Verjson/example/contents/.github/workflows/gate-rearm.yml:"),
+            ("caller-500", "GitHub API read failed for repos/Verjson/example/contents/.github/workflows/gate-rearm.yml:"),
+        ):
+            failed = run_discovery(tmp, valid, mode=mode)
+            assert failed.returncode == 2, f"{mode} did not fail closed: {failed.returncode} {failed.stderr}"
+            assert diagnostic in failed.stderr, f"{mode} failed for the wrong reason: {failed.stderr}"
+            assert not (tmp / "pins.json").exists() and not (tmp / "receipts.json").exists(), f"{mode} wrote a receipt"
 
         invalid_config = allowlist(tmp / "invalid-owner.json", "attacker/example")
         invalid = subprocess.run(
