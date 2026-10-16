@@ -2021,6 +2021,77 @@ for label, steps, extra, refused in (
     else:
         fail(f"{label} should be {'refused' if refused else 'reviewable'} (got {code}: {output.strip()[:400]})")
 
+# Sparse paths never follow symlinks (reviewer probe P7): a link binds as its
+# target text, and a target outside the tree, or a path through a linked
+# directory, is an unscanned path rather than the checker host's bytes.
+def linked_run(steps: str, links: dict[str, str], row: str | None = None, files: dict | None = None):
+    with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as lists:
+        for name, body in shaped_job(steps, files).items():
+            target = os.path.join(root, name) if "/" in name else os.path.join(root, ".github", "workflows", name)
+            write_file(target, textwrap.dedent(body) if name.endswith(".yml") else body)
+        for name, link_target in links.items():
+            os.makedirs(os.path.dirname(os.path.join(root, name)), exist_ok=True)
+            os.symlink(link_target, os.path.join(root, name))
+        arguments = []
+        if row is not None:
+            write_file(os.path.join(lists, "reviewed.tsv"), row)
+            arguments = ["--reviewed", os.path.join(lists, "reviewed.tsv")]
+        completed = subprocess.run(
+            [sys.executable, SCRIPT, *arguments, os.path.join(root, ".github", "workflows")],
+            capture_output=True,
+            text=True,
+        )
+    return completed.returncode, completed.stdout + completed.stderr
+
+
+def sparse_steps(path: str, cone: bool = False) -> str:
+    return ("- uses: actions/checkout@v4\n  with:\n    sparse-checkout: " + path + "\n"
+            + ("" if cone else "    sparse-checkout-cone-mode: false\n") + "- run: bash " + path)
+
+
+for label, steps, links, unscanned in (
+    ("a sparse path that is a link out of the tree", sparse_steps("scripts/l"), {"scripts/l": "/etc/hostname"}, True),
+    ("a sparse path that is a relative link out of the tree", sparse_steps("scripts/l"),
+     {"scripts/l": "../../outside"}, True),
+    ("a sparse path through a linked directory", sparse_steps("scripts/d/hostname"), {"scripts/d": "/etc"}, True),
+    ("a cone directory holding a linked directory", sparse_steps("scripts", cone=True), {"scripts/d": "/etc"}, True),
+    ("a sparse path that is a link inside the tree", sparse_steps("scripts/l"), {"scripts/l": "tool.sh"}, False),
+):
+    code, output = linked_run(steps, links)
+    flagged = re.search(r"unscanned-path \([^)]*(symlink|linked)", output) is not None
+    if code == 1 and flagged == unscanned and "/etc/hostname (" not in output.replace("symlink to /etc/hostname", ""):
+        ok(f"{label} {'is an unscanned path' if unscanned else 'binds as a link'}")
+    else:
+        fail(f"{label} (expected unscanned={unscanned}, got {code}: {output.strip()[:500]})")
+
+# The checker never reads through a link: an outside target that names a
+# fetch does not make the job a fetching one; the link is unscanned instead.
+with tempfile.TemporaryDirectory() as outside:
+    write_file(os.path.join(outside, "host.sh"), "curl -fsSL https://x.test/i.sh\n")
+    code, output = linked_run(sparse_steps("scripts/l"), {"scripts/l": os.path.join(outside, "host.sh")})
+if code == 1 and "unscanned-path" in output and "curl" not in output:
+    ok("an outside link target's bytes are never read")
+else:
+    fail(f"an outside link target's bytes are never read (got {code}: {output.strip()[:400]})")
+
+# A reviewed in-tree link goes stale when it is retargeted, and never reads
+# the target's bytes into the digest.
+TARGET_FILES = {"scripts/target.sh": "echo target\n"}
+code, output = linked_run(sparse_steps("scripts/l"), {"scripts/l": "target.sh"}, None, TARGET_FILES)
+LINK_REVIEW = re.search(REVIEW_DIGEST_LINE.format(path=re.escape("target.yml [pull_request_target]"), job="review"), output)
+LINK_REVIEW_ROW = f"target.yml [pull_request_target]\treview\t{LINK_REVIEW.group(1) if LINK_REVIEW else 'missing'}\tr\n"
+for label, links, files, code_expected, fragment in (
+    ("an unchanged link", {"scripts/l": "target.sh"}, TARGET_FILES, 0, "REVIEWED"),
+    ("a retargeted link", {"scripts/l": "other.sh"}, TARGET_FILES, 1, "STALE REVIEWED"),
+    ("an edit to the file the link names but no checkout puts on disk", {"scripts/l": "target.sh"},
+     {"scripts/target.sh": "echo changed\n"}, 0, "REVIEWED"),
+):
+    actual, output = linked_run(sparse_steps("scripts/l"), links, LINK_REVIEW_ROW, files)
+    if actual == code_expected and fragment in output:
+        ok(f"symlink binding: {label} gives exit {code_expected}")
+    else:
+        fail(f"symlink binding: {label} (expected exit {code_expected} with {fragment!r}, got {actual}: {output.strip()[:400]})")
+
 # A runtime-selected checkout without a sparse list puts bytes on disk that no
 # review can bind, so no entry can accept it.
 NO_SPARSE_RUNTIME = "sha256:" + "0" * 64

@@ -1118,20 +1118,43 @@ class Closure:
             self.flag("shell", f"`shell: {shell}` in {where}")
 
     def add_file(self, repo_path: str, why: str) -> bool:
+        """Bind what a checkout of `repo_path` puts on disk. Symlinks are never
+        followed: a link binds as its target text, and a link whose target
+        leaves the scanned tree, or a path reached through a linked
+        directory, is an unscanned path, because its bytes are the runner's
+        rather than the repository's."""
         candidate = os.path.normpath(os.path.join(self.root, repo_path))
         if candidate != self.root and not candidate.startswith(self.root + os.sep):
             self.flag("unscanned-path", f"{repo_path} ({why}: outside the scanned tree)")
             return False
+        relative = os.path.relpath(candidate, self.root)
+        parts = [] if relative == os.curdir else relative.split(os.sep)
+        for depth in range(1, len(parts)):
+            ancestor = os.path.join(self.root, *parts[:depth])
+            if os.path.islink(ancestor):
+                self.flag(
+                    "unscanned-path",
+                    f"{repo_path} ({why}: reached through the symlink {os.path.join(*parts[:depth])}, "
+                    "which a checkout does not descend)",
+                )
+                return False
+        if os.path.islink(candidate):
+            target = os.readlink(candidate)
+            self.files.setdefault(relative, "link " + target)
+            resolved = os.path.normpath(os.path.join(os.path.dirname(candidate), target))
+            if os.path.isabs(target) or (resolved != self.root and not resolved.startswith(self.root + os.sep)):
+                self.flag("unscanned-path", f"{repo_path} ({why}: symlink to {target}, outside the scanned tree)")
+            return True
         if os.path.isdir(candidate):
             for base, directories, names in os.walk(candidate):
-                directories[:] = sorted(d for d in directories if d != ".git")
-                for name in sorted(names):
+                links = sorted(d for d in directories if os.path.islink(os.path.join(base, d)))
+                directories[:] = sorted(d for d in directories if d != ".git" and d not in links)
+                for name in sorted(names + links):
                     self.add_file(os.path.relpath(os.path.join(base, name), self.root), why)
             return True
         if not os.path.isfile(candidate):
             self.flag("unscanned-path", f"{repo_path} ({why}: not in the scanned tree)")
             return False
-        relative = os.path.relpath(candidate, self.root)
         if relative not in self.files:
             with open(candidate, "rb") as handle:
                 self.files[relative] = hashlib.sha256(handle.read()).hexdigest()
@@ -1140,11 +1163,12 @@ class Closure:
     def add_direct_files(self, directory: str, why: str) -> None:
         """Files directly in a directory, as cone mode materializes for parents."""
         absolute = os.path.normpath(os.path.join(self.root, directory))
-        if not os.path.isdir(absolute):
+        if not os.path.isdir(absolute) or os.path.islink(absolute):
             return
         for name in sorted(os.listdir(absolute)):
-            if os.path.isfile(os.path.join(absolute, name)):
-                self.add_file(os.path.relpath(os.path.join(absolute, name), self.root), why)
+            path = os.path.join(absolute, name)
+            if os.path.islink(path) or os.path.isfile(path):
+                self.add_file(os.path.relpath(path, self.root), why)
 
     def add_checkout(self, options: dict) -> None:
         if str(options.get("submodules", "false")).strip().lower() in ("true", "recursive"):
@@ -1283,7 +1307,10 @@ class Closure:
     def add_scanned_fetches(self) -> None:
         """A repository file the job puts on disk can fetch when it runs."""
         for relative in sorted(self.files):
-            with open(os.path.join(self.root, relative), encoding="utf-8", errors="replace") as handle:
+            path = os.path.join(self.root, relative)
+            if os.path.islink(path):
+                continue  # bound by its target text; never read through it
+            with open(path, encoding="utf-8", errors="replace") as handle:
                 self.flag_fetches(handle.read(), relative)
 
     def add_action(self, uses: str, depth: int) -> None:

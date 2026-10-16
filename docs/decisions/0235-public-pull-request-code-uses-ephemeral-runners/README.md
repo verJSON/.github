@@ -236,7 +236,7 @@ or a literal GitHub-hosted image.
    | `full-checkout` | A checkout of the scanned tree with no `sparse-checkout` list. The whole tracked tree is in the digest, as above. |
    | `runtime-checkout` | A checkout whose repository or ref is selected at runtime, not the scanned tree. Only this repository at the default ref or `github.sha` is the scanned tree. `pull_request.base.sha` is the base as of the pull request's last update and is not refreshed when the base branch advances, so a checkout at it can put older bytes on disk than the reviewed tree; it is a runtime checkout. It must carry a `sparse-checkout` list; without one, no review can bind what it puts on disk, so the job is refused and no entry can accept it. |
    | `submodules` | A checkout with `submodules: true` or `recursive`. |
-   | `unscanned-path` | A sparse path, glob, or local-action file that the scanned tree does not contain, or that lies outside it. |
+   | `unscanned-path` | A sparse path, glob, or local-action file that the scanned tree does not contain, or that lies outside it. Symlinks are never followed: a link binds as its target text, so retargeting it changes the digest, and a link whose target leaves the tree, or a path reached through a linked directory, is unscanned, because its bytes would be the runner's rather than the repository's. |
    | `local-action` | A local action that is missing, nested more than four deep, has no `runs` block, or whose manifest does not parse. |
 
    The entry for an unresolved job needs a fifth field,
