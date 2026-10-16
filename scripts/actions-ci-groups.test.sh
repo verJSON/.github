@@ -463,10 +463,17 @@ def locale_importers(sources):
 
 # A fleet row reaches what its script names, not only the script itself: a
 # shell wrapper can exec an importer, and a Python test can run one as a
-# subprocess. Names are followed through shell words and Python string
-# constants, by repository path or by a name beside the naming file, up to
-# this many levels; a chain that is still naming new files there fails.
-SHELL_FOLLOW_DEPTH = 8
+# subprocess. Shell scripts are followed through their words (comments
+# excluded) into every tracked script they name, by repository path or by a
+# name beside them, up to this many levels; a chain still naming new shell
+# scripts there fails. A reached Python file is checked for an importer named
+# in its string constants but not followed further: Python tests name most of
+# the repository as data, and following them would turn the bound into a guess
+# at the diameter of that graph rather than a limit on wrapper nesting.
+# Shell tests name generators that name others, so real chains already run
+# several levels deep; the bound leaves room for that, and termination does
+# not depend on it (each file is visited once).
+SHELL_FOLLOW_DEPTH = 16
 # This contract names the importers as fixtures; it runs none of them.
 LOCALE_REFERENCE_EXEMPT = {"scripts/actions-ci-groups.test.sh"}
 PATH_FRAGMENT = re.compile(r"[A-Za-z0-9_./-]+\.(?:py|sh|bash)\b")
@@ -530,8 +537,12 @@ def fleet_reached_importers(scripts, sources, importers):
             reached.add(path)
             if path in importers or path in LOCALE_REFERENCE_EXEMPT:
                 continue
-            if path.endswith((".py", ".sh", ".bash")):
+            if path.endswith((".sh", ".bash")):
                 following |= named_sources(path, sources[path], runnable_by_name, importers)
+            elif path.endswith(".py"):
+                following |= importers & named_sources(
+                    path, sources[path], runnable_by_name, importers
+                )
         frontier = sorted(following - reached)
         if not frontier:
             return reached & importers
@@ -720,10 +731,15 @@ validate_locale_collation(document, manifest_text)
 print("ok - every manifest group has one runner; en_US.UTF-8 contracts run hosted")
 
 
-def expect_locale_failure(label, candidate, candidate_manifest, sources=script_sources):
+def expect_locale_failure(
+    label, candidate, candidate_manifest, sources=script_sources, reason=None
+):
+    """`reason`, when given, must appear in the error, so an unrelated failure is not credit."""
     try:
         validate_locale_collation(candidate, candidate_manifest, sources)
-    except (AssertionError, KeyError, ValueError):
+    except (AssertionError, KeyError, ValueError) as error:
+        if reason is not None and reason not in str(error):
+            raise AssertionError(f"{label} failed for another reason: {error}") from error
         print(f"ok - {label} fails closed")
     else:
         raise AssertionError(f"{label} passed")
@@ -840,6 +856,7 @@ for spelling, command in {
         f"{spelling} importer path moved to a fleet group",
         document,
         manifest_text.replace(retention_row, f"{LOCALE_GROUP}\tpython3 {retention_script}\nplatform\t{command}\n", 1),
+        reason="runs outside locale-collation",
     )
 for spelling, command in {
     "variable script path": 'python3 "$SCRIPT"',
@@ -849,6 +866,7 @@ for spelling, command in {
     "glob script path": "bash scripts/ci-gate/*.test.sh",
     "cd to a variable": 'cd "$HOME" && bash scripts/actions-ci-group-output.test.sh',
     "no command": "@budget=60",
+    "unknown command beside a script": "make check && bash scripts/actions-ci-group-output.test.sh",
 }.items():
     expect_locale_failure(
         f"fleet row with an unresolvable {spelling}",
@@ -858,21 +876,32 @@ for spelling, command in {
 
 # Importers outside scripts/ are scanned too, and a row may not run a script
 # the scan does not cover.
+# Fixture files enter the sources only where tracked_script_sources would scan them.
+def with_tracked(extra):
+    return {**script_sources, **{path: text for path, text in extra.items() if scanned(path)}}
+
+
 action_probe = ".github/actions/zzprobe/zz.test.py"
-action_importer = dict(script_sources)
-action_importer[action_probe] = (
-    "import pathlib, sys\n"
-    "sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / 'scripts/ci-gate'))\n"
-    "import ascii_digit_locales\n"
-)
+action_importer = with_tracked({
+    action_probe: (
+        "import pathlib, sys\n"
+        "sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / 'scripts/ci-gate'))\n"
+        "import ascii_digit_locales\n"
+    ),
+})
 expect_locale_failure(
     "importer outside scripts/ in a fleet group",
     document,
     manifest_text + f"platform\tpython3 {action_probe}\n",
     action_importer,
+    reason="runs outside locale-collation",
 )
 expect_locale_failure(
-    "unregistered importer outside scripts/", document, manifest_text, action_importer
+    "unregistered importer outside scripts/",
+    document,
+    manifest_text,
+    action_importer,
+    reason="membership drifted",
 )
 
 # A fleet shell row reaches every script its body runs, transitively, so a
@@ -890,6 +919,7 @@ for spelling, body in {
         document,
         manifest_text + f"platform\tbash {wrapper}\n",
         wrapped,
+        reason="runs outside locale-collation",
     )
 nested = dict(script_sources)
 nested[wrapper] = 'exec bash "$(dirname "$0")/zz-inner.sh"\n'
@@ -899,6 +929,7 @@ expect_locale_failure(
     document,
     manifest_text + f"platform\tbash {wrapper}\n",
     nested,
+    reason="runs outside locale-collation",
 )
 subprocess_runner = dict(script_sources)
 subprocess_runner["scripts/ci-gate/zz-sub.test.py"] = (
@@ -909,6 +940,7 @@ expect_locale_failure(
     document,
     manifest_text + "platform\tpython3 scripts/ci-gate/zz-sub.test.py\n",
     subprocess_runner,
+    reason="runs outside locale-collation",
 )
 too_deep = dict(script_sources)
 for level in range(SHELL_FOLLOW_DEPTH + 2):
@@ -921,6 +953,7 @@ expect_locale_failure(
     document,
     manifest_text + "platform\tbash scripts/ci-gate/zz-level0.sh\n",
     too_deep,
+    reason="levels deep",
 )
 # Positive controls: a comment that names an importer, and a wrapper that runs
 # only a non-importer, stay classifiable in a fleet group.
@@ -932,11 +965,16 @@ benign[wrapper] = (
 validate_locale_collation(document, manifest_text + f"platform\tbash {wrapper}\n", benign)
 print("ok - a fleet wrapper naming an importer only in a comment stays classifiable")
 
-for location in ("/tmp/zz.test.py", "scripts/ci-gate/zz-untracked.test.py", "../zz.test.py"):
+for location, reason in {
+    "/tmp/zz.test.py": "lies outside the repository",
+    "../zz.test.py": "lies outside the repository",
+    "scripts/ci-gate/zz-untracked.test.py": "is not a tracked file in the scanned roots",
+}.items():
     expect_locale_failure(
         f"fleet row script {location} outside the scanned roots",
         document,
         manifest_text + f"platform\tpython3 {location}\n",
+        reason=reason,
     )
 
 required = jobs["shell-tests"]
