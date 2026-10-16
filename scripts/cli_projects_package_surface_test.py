@@ -114,9 +114,9 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
         self.assertEqual(MODULE.required_node_engine(), f">={floor_lane}")
 
     def test_required_workflow_uses_current_canonical_node_ci_pin(self):
-        expected_sha = "1c7659b77e1c97743cdcfc0a1603141bfe25320d"
+        expected_sha = "576707fe0be0dabe43ea57c504575f8cda88b0d2"
         config = json.loads(MODULE.REQUIRED_NODE_CONFIG.read_text(encoding="utf-8"))
-        self.assertEqual(config["node_ci_sha"], expected_sha)
+        self.assertEqual(config["protected_node_ci_sha"], expected_sha)
 
         workflow = MODULE.load_yaml(
             ROOT / ".github/workflows/cli-projects-package-surface-required.yml"
@@ -127,6 +127,21 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
         for job in ("ci", "ci-node-floor"):
             with self.subTest(job=job):
                 self.assertEqual(workflow["jobs"][job]["uses"], expected_uses)
+
+    def test_protected_lane_repin_leaves_the_consumer_caller_bytes_unchanged(self):
+        # The push-only consumer caller has its own pin, so hardening the protected
+        # pull-request lane never forces a consumer caller change (ADR 0153).
+        config = json.loads(MODULE.REQUIRED_NODE_CONFIG.read_text(encoding="utf-8"))
+        consumer = GENERATOR.render_consumer(
+            config, "config/cli-projects-required-node-ci.json"
+        )
+        self.assertEqual(
+            config["consumer_node_ci_sha"], "1c7659b77e1c97743cdcfc0a1603141bfe25320d"
+        )
+        self.assertEqual(
+            hashlib.sha256(consumer.encode()).hexdigest(),
+            "9e4ca97c8fd980f37af2ef3cbbb47aea3c00b44f5a5ff336d25d95815aff3886",
+        )
 
     def test_generated_admission_requires_exact_pinned_caller(self):
         config = json.loads(MODULE.REQUIRED_NODE_CONFIG.read_text(encoding="utf-8"))
@@ -248,7 +263,8 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
         mutations = {
             "schema_version": False,
             "repository": "attacker/example",
-            "node_ci_sha": "main",
+            "protected_node_ci_sha": "main",
+            "consumer_node_ci_sha": "v1",
             "node_versions": [{"unhashable": True}, "24.19.0"],
             "approved_internal_packages": [{"unhashable": True}],
             "scripts": [{"unhashable": True}],

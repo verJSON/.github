@@ -181,3 +181,59 @@ display-case rename, GitHub reports the same repository as `Verjson/...` or
 evidence and tests are in
 [ADR 0213's 2026-10-15 amendment](../0213-package-type-surface-release-authorization/README.md)
 ([#1794](https://github.com/Verjson/.github/issues/1794)).
+
+## 2026-10-15 amendment: repin past #1750 and read the rotation predecessor from the live ruleset
+
+**Repin.** Both protected Node lanes now call `node-ci-protected.yml` at
+`576707fe0be0dabe43ea57c504575f8cda88b0d2`. That is the v4.0.0 release commit and the
+`origin/main` HEAD when this change was cut, and it contains #1750 and #1759, which start
+the protected lane's inline interpreters isolated. Releases here are dispatched rather
+than derived from merges, so a released commit is the narrowest immutable revision that
+contains both fixes. It is also the one other required workflows are expected to adopt.
+
+**Separate pins for the protected lanes and the consumer caller.** The 2026-09-26
+amendment drove the protected lanes and the push-only consumer caller from one
+`node_ci_sha`. Every protected-lane repin therefore changed the consumer `ci.yml` digest
+that admission requires. That forced a `verjson-cli-projects` pull request into each
+rollout and failed admission for every open consumer pull request in between.
+`config/cli-projects-required-node-ci.json` now carries `protected_node_ci_sha` and
+`consumer_node_ci_sha` separately, restoring the 2026-08-30 separation in which the push
+caller stayed on its own `node-ci.yml` pin. Admission is unchanged and still requires the
+byte-exact generated caller (ADR 0212); this repin leaves that digest at `9e4ca97c…`.
+The trade-off is that the push lane and the protected pull-request lane can run different
+`node-ci` revisions. The push lane runs only already-merged code, so a protected-lane
+hardening fix no longer waits on a consumer change.
+
+**No committed predecessor record.** The rollout contract recorded the revision being
+replaced (`previous_workflow_sha`, `previous_disabled_workflow_sha`), and the script
+duplicated it as a hard-coded check. A rotation's target is always the merge commit of a
+later change, so that record went stale after every rotation. #1824 repaired it once, and
+it was stale again the same day (live `9998460f`, record `ae70e4ef`). Both keys and their
+constants are removed. `dry-run` and `apply` now read the bound revision from the live
+ruleset and accept it only when all of the following hold:
+
+- The live image equals one of that revision's reviewed images: active or disabled, with
+  or without the strict `admission` check.
+- The revision is an ancestor of, or equal to, the rotation target, which is itself
+  verified on protected `main`. A rotation therefore only moves forward and can never
+  return to a revision below the floor described next.
+- The required workflow at that revision is byte-for-byte the output of that revision's
+  own generator and configuration. The generator runs from its fetched bytes in a temporary
+  directory with no inherited environment.
+
+A failed write restores the exact observed image and verifies it.
+
+**Security floor.** Before any mutation, `dry-run` and `apply` require every
+`node-ci-protected.yml` call in the target workflow to be canonical, immutable, and a
+descendant of `21eb48e7` (#1759). The floor is a constant that moves only on purpose.
+
+**Drift is detected, not avoided.** A new read-only `audit` mode runs daily in the
+`required-workflow-audit` job of `org-ruleset-conformance.yml`. It fails when the live
+ruleset is not the reviewed active image of its own revision, when that revision is not on
+protected `main`, when any byte that revision executes differs from protected `main`
+(the required workflow, plus the verifier, its config module, and its config, all checked
+out at `github.workflow_sha`), or when its protected-lane pin is below the floor. The
+committed generated workflow is the record, so the audit fails exactly while a rotation is
+pending. Behavioral tests cover predecessor images, admission refusal before mutation,
+rollback, the floor, the audit, and the job contract. The operator rotation of ruleset
+21830367 to this change's merge commit remains a separate human-gated step.

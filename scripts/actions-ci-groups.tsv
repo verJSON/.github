@@ -78,6 +78,7 @@ platform	node --test scripts/npm_pack_json_test.mjs
 platform	bash scripts/type-surface-contract-generator.test.sh
 platform	python3 scripts/cli_projects_package_surface_test.py
 platform	python3 scripts/cli_projects_package_surface_ruleset_test.py
+platform	python3 scripts/required_workflow_revision_test.py
 platform	python3 scripts/ai_review_required_workflow_audit_test.py
 platform	python3 scripts/audit_finding_state_test.py
 platform	python3 scripts/capability-floor-audit.test.py

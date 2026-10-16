@@ -81,3 +81,10 @@ with exact pre/postimage checks; it grants no new enforced bypass. Never remove
 the consumer release bypass merely to fit the obsolete migration preimage. After
 activation, a rollback must preserve the release App exception or return the org
 rule to `evaluate`; otherwise it recreates the demonstrated release outage.
+
+## 2026-10-15 amendment: `stage-release-bypass` retired
+
+The staging transition is complete: ruleset 21750617 is active with the release-App
+bypass. The mode and its hard-coded `f2f425e9` predecessor are removed. The bypass
+requirement above is unchanged and is now enforced by the general rotation path in
+[ADR 0151's 2026-10-15 amendment](../0151-authn-type-surface-required-workflow/README.md).
