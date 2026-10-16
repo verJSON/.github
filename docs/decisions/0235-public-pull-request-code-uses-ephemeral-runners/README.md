@@ -152,13 +152,24 @@ or a literal GitHub-hosted image.
    over:
 
    - the job's full normalized content;
-   - the workflow-level `env`, `permissions`, and `defaults` it inherits, plus a
-     callee's `workflow_call` contract;
+   - the workflow-level trigger block (`on:`, including `types`, `branches`,
+     and `paths`), `env`, `permissions`, and `defaults` it inherits;
    - every calling job on the path to it, together with that caller's
-     inherited settings.
+     inherited settings;
+   - the bytes, at the scanned tree, of every repository path the job
+     sparse-checks-out, executes (`bash|sh|python3|node <path>`, `./<path>`),
+     or uses as a local action. The scan recurses into composite action steps,
+     action entry points, and the scripts those scripts run.
 
    Any edit to any of these makes the entry `STALE REVIEWED`, which fails
-   until someone re-reviews it. An entry that no longer matches a job needing
+   until someone re-reviews it. A job may execute a path the scanner cannot
+   resolve statically: a variable path that is not authored inline, `python
+   -m`, or a path inside a checkout whose repository or ref is selected at
+   runtime. Its entry then needs an explicit fifth field, `dynamic:
+   <justification>`. Without that field the job is unclassifiable and fails,
+   and a `dynamic:` field on a fully resolvable job is stale. A remote callee
+   must be pinned to a full 40-hex commit SHA; no entry can accept a branch
+   or tag, because either can change after review. An entry that no longer matches a job needing
    review is also stale. Jobs that resolve only to standard hosted images pass
    without an entry.
 
@@ -182,10 +193,14 @@ or a literal GitHub-hosted image.
       The failing `VIOLATION` or `STALE REVIEWED` line names the path, job, and
       new review digest, and a `DIAGNOSTIC` line gives the head-detection
       result.
-   2. Read the whole job and everything it inherits or calls. Record three
-      things: what it checks out (repository, ref, paths); what it executes
-      (inline code, repository scripts, actions, and any program it writes);
-      and how every PR-derived value and downloaded artifact is used.
+   2. Read the whole job and everything it inherits or calls, including the
+      trigger block and every repository script and local action the digest
+      covers. Record three things: what it checks out (repository, ref,
+      paths); what it executes (inline code, repository scripts, actions, and
+      any program it writes); and how every PR-derived value and downloaded
+      artifact is used. For each path the checker reports as unresolvable,
+      state in the `dynamic:` field where its bytes come from at runtime and
+      why a pull request cannot choose them.
    3. Prefer moving the job to a hosted runner. List it only when it needs the
       trusted pool and no PR-controlled byte can reach execution: anything
       PR-derived is used only as an API identifier or as validated data.
