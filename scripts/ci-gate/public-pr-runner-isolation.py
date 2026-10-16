@@ -1196,11 +1196,12 @@ FETCH = re.compile(
     r"|\b(?:apt|apt-get|yum|dnf|apk|brew)[ \t]+(?:install|add)\b"
     r"|(?i:\b(?:invoke-webrequest|invoke-restmethod|iwr|irm|start-bitstransfer)\b|\bnet\.webclient\b)"
     r"|\burllib\b|\burlopen\b|\brequests\.\w|\bhttpx\b|\bhttp\.client\b|\bfetch\(|\bhttps?\.(?:get|request)\(|\baxios\b"
+    r"""|\brequire\(\s*["'](?:node:)?https?["']\s*\)|\bfrom\s+["'](?:node:)?https?["']"""
 )
-# The same operations as an argv list in a program the job runs.
+# gh and git subcommands as an argv list in a program the job runs (a quoted
+# "curl" or "wget" already matches FETCH).
 ARGV_FETCH = re.compile(
-    r"""["'](?:curl|wget)["']"""
-    r"""|["']gh["']\s*,\s*["'](?:api|release|run|pr|repo|gist)["']"""
+    r"""["']gh["']\s*,\s*["'](?:api|release|run|pr|repo|gist)["']"""
     r"""|["']git["']\s*,\s*(?:["']-[^"']*["']\s*,\s*(?:[^,\]]+,\s*)?)*["'](?:clone|fetch|pull|submodule)["']"""
 )
 FETCH_ACTIONS = ("actions/download-artifact", "actions/cache", "actions/cache/restore", "actions/github-script")

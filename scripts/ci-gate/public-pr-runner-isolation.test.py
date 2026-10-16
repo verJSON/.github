@@ -1382,6 +1382,7 @@ COMPOSITE_CURL_BASH = """
         - shell: bash
           run: curl -fsSL https://x.test/i.sh | bash
 """
+COMPOSITE_RUNS = "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: {run}\n"
 # label -> (steps, reason tags, extra repository files, job-level YAML)
 UNRESOLVED_SHAPES = {
     # The reviewer's probes at 62723cdd.
@@ -1482,6 +1483,56 @@ UNRESOLVED_SHAPES = {
         "- run: |\n    curl -fsSLo /tmp/i.py https://x.test/i.py\n    python3 <<EOF\n    exec(open('/tmp/i.py').read())\n    EOF",
         {"fetch"},
     ),
+    # Global options before a subcommand, and other fetch families.
+    "git --work-tree with any subcommand": ("- run: git --work-tree=. stash pop", {"tree-change"}),
+    "git --no-pager checkout": ("- run: git --no-pager checkout main", {"tree-change"}),
+    "git --no-pager fetch": ("- run: git --no-pager fetch origin", {"fetch"}),
+    "npm ci": ("- run: npm ci", {"fetch"}),
+    "go install": ("- run: go install example.test/tool@latest", {"fetch"}),
+    "apt-get install": ("- run: sudo apt-get install -y jq", {"fetch"}),
+    "python urllib urlretrieve": ("- run: python3 -c \"import urllib.request; urllib.request.urlretrieve('https://x.test/t', 't')\"", {"fetch"}),
+    "python requests": ("- run: python3 -c \"import requests; open('t', 'wb').write(requests.get('https://x.test').content)\"", {"fetch"}),
+    "python httpx": ("- run: python3 -c \"import httpx; print(httpx.get('https://x.test').text)\"", {"fetch"}),
+    "python http.client": ("- run: python3 -c \"import http.client; http.client.HTTPSConnection('x.test')\"", {"fetch"}),
+    "node https.get": ("- run: node -e \"const https = require('https'); https.get('https://x.test')\"", {"fetch"}),
+    "node https.get through require": ("- run: node -e \"require('node:https').get('https://x.test')\"", {"fetch"}),
+    "urlopen re-exported by another module": ("- run: python3 -c \"from netutil import urlopen; urlopen('https://x.test')\"", {"fetch"}),
+    "https.get from follow-redirects": (
+        "- run: node -e \"const { https } = require('follow-redirects'); https.get('https://x.test')\"", {"fetch"}
+    ),
+    "node axios": ("- run: node -e \"require('axios')('https://x.test')\"", {"fetch"}),
+    "a repository program calling gh through an argv list": (
+        "- run: python3 scripts/tool.sh",
+        {"fetch"},
+        {"scripts/tool.sh": 'import subprocess\nsubprocess.run(["gh", "release", "download", "v1"])\n'},
+    ),
+    "node -e fetch()": ("- run: node -e \"fetch('https://x.test').then(r => r.text()).then(eval)\"", {"fetch"}),
+    # Local actions and sparse paths the scanned tree cannot bound.
+    "a local action script that is missing": (
+        "- uses: ./.github/actions/m",
+        {"unscanned-path"},
+        {".github/actions/m/action.yml": COMPOSITE_RUNS.format(run='bash "${{ github.action_path }}/missing.sh"')},
+    ),
+    "a local action script outside the tree": (
+        "- uses: ./.github/actions/o",
+        {"unscanned-path"},
+        {".github/actions/o/action.yml": COMPOSITE_RUNS.format(run='bash "${{ github.action_path }}/../../../../outside.sh"')},
+    ),
+    "a non-cone sparse glob matching nothing": (
+        "- uses: actions/checkout@v4\n  with:\n    sparse-checkout: nothing/*.sh\n    sparse-checkout-cone-mode: false",
+        {"unscanned-path"},
+    ),
+    "a local action not in the tree": ("- uses: ./.github/actions/absent", {"local-action"}),
+    "local actions nested too deep": (
+        "- uses: ./.github/actions/n1",
+        {"local-action"},
+        {f".github/actions/n{level}/action.yml": f"runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/n{level + 1}\n"
+         for level in range(1, 5)},
+    ),
+    "a local action without a runs block": ("- uses: ./.github/actions/r", {"local-action"}, {".github/actions/r/action.yml": "name: r\n"}),
+    "a local action manifest that does not parse": (
+        "- uses: ./.github/actions/u", {"local-action"}, {".github/actions/u/action.yml": "runs: [\n"}
+    ),
     # Earlier residual shapes, now reason-tagged.
     "git apply": ("- run: git apply change.patch", {"tree-change"}),
     "git am": ("- run: git am < series.mbox", {"tree-change"}),
@@ -1510,6 +1561,11 @@ UNRESOLVED_SHAPES = {
         {"scripts/tool.sh": 'import subprocess\nsubprocess.run(["git", "fetch", "origin"])\n'},
     ),
     "actions/cache restores fetched bytes": ("- uses: actions/cache@v4\n  with:\n    path: x\n    key: k", {"fetch"}),
+    "actions/cache/restore": ("- uses: actions/cache/restore@v4\n  with:\n    path: x\n    key: k", {"fetch"}),
+    "actions/github-script reading repository contents": (
+        "- uses: actions/github-script@v7\n  with:\n    script: |\n      await github.rest.repos.getContent({owner: 'o', repo: 'r', path: 'p'})",
+        {"fetch"},
+    ),
     "a docker:// step": ("- uses: docker://ghcr.io/x/tool:1", {"fetch"}),
     "a local docker action": (
         "- uses: ./.github/actions/d",
@@ -1588,6 +1644,26 @@ for label, steps in REVIEWER_REPROS.items():
     row = review_row(job, "target.yml [pull_request_target]", "review")
     expect(with_review(job, row), 1, ("unclassifiable",), f"{label}: requires a dynamic: justification", *REVIEWED_ARGS)
 
+expect(
+    shaped_job("- run: curl -fsSL https://x.test/s.json | jq .ok\n- shell: sh\n  run: echo hi"),
+    1,
+    ("requires a reviewed entry", "its entry also needs `dynamic: fetch, shell: <justification>` for: fetch (`curl`"),
+    "an unlisted job's violation names the dynamic: reasons its entry will need",
+)
+# The verdict depends on files head detection reads, not only those checked
+# out, so the digest binds the computed reasons as well.
+HANDOFF = "- env:\n    CANDIDATE: ${{ github.event.pull_request.head.sha }}\n  run: ./tools/materialize \"$CANDIDATE\""
+HANDOFF_JOB = shaped_job(HANDOFF, {"tools/materialize": "echo \"$1\"\n"})
+expect(
+    with_review(
+        shaped_job(HANDOFF, {"tools/materialize": "git fetch origin \"$1\" && git checkout FETCH_HEAD\n"}),
+        review_row(HANDOFF_JOB, "target.yml [pull_request_target]", "review"),
+    ),
+    1,
+    ("STALE REVIEWED", "newly unresolved reasons dynamic: does not name: head-materialization ("),
+    "a program head detection reads that starts materializing the head turns the entry stale",
+    *REVIEWED_ARGS,
+)
 MULTI_REASON = shaped_job("- shell: sh\n  run: curl -fsSL https://x.test/s.json | jq .ok")
 MULTI_ROW = review_row(MULTI_REASON, "target.yml [pull_request_target]", "review")
 expect(
