@@ -163,8 +163,8 @@ a run that the organization rule did not create.
 
 The first post-rotation authn pull-request run completed the receipt. Required-workflow
 run `38913371130` on `Verjson/verjson-authn` #347 (head
-`be2a6e85b25c0117b40f1a18d2c96271673c0192`, created by the organization rule above
-`38820796032`) concluded `success`. `verify-run --workflow-sha c78fcd4e…` from a clean
+`be2a6e85b25c0117b40f1a18d2c96271673c0192`, created by the organization rule, with a run ID
+above the pre-trigger maximum `38820796032`) concluded `success`. `verify-run --workflow-sha c78fcd4e…` from a clean
 worktree at the rotated revision printed
 `verified: fresh exact-head organization required-workflow run` and exited 0; the
 read-only `audit` exited 0. The rotation to `c78fcd4e` is complete.
