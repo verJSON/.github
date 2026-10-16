@@ -311,6 +311,29 @@ class ReleaseVerifyRetentionKeepTests(unittest.TestCase):
             {site: sites["release-node"] for site in sites},
         )
 
+    def test_an_invalid_window_skips_retention_visibly_in_the_run_summary(self):
+        # container-release retention is continue-on-error, so its failure
+        # leaves the run green; the step summary is where a reader sees it.
+        for workflow, _job, step in self.retention_steps():
+            script = step["run"].split("python3 -I", 1)[0]
+            for value in ("1000", "\u0663", ""):
+                with self.subTest(site=workflow, value=value), \
+                        tempfile.TemporaryDirectory(prefix="retention-summary-") as temporary:
+                    summary = Path(temporary) / "summary.md"
+                    result = subprocess.run(
+                        ["/bin/bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+                        env={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8",
+                             "RETENTION_KEEP": value, "GITHUB_STEP_SUMMARY": str(summary)},
+                        capture_output=True, text=True, check=False, timeout=30,
+                    )
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn("::error::CI_PACKAGE_RETENTION_KEEP must be", result.stdout)
+                    self.assertTrue(summary.exists(), "no run-summary entry for skipped retention")
+                    self.assertIn(
+                        "Package retention skipped: CI_PACKAGE_RETENTION_KEEP",
+                        summary.read_text(encoding="utf-8"),
+                    )
+
     def test_no_job_reading_the_window_declares_an_environment_that_could_rebind_it(self):
         # An environment-scoped variable overrides the repository and
         # organization value for that job alone, which would split one window
