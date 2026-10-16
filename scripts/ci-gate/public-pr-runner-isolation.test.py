@@ -424,4 +424,24 @@ expect(
     "a comparison the checker cannot enumerate exactly is evaluated both ways",
 )
 
+
+# Only standard GitHub-hosted image names are ephemeral. A self-hosted runner
+# can carry any custom label, so a look-alike must not pass as hosted.
+for label in ("ubuntu-gpu-selfhosted", "ubuntu-24.04-large", "macos-14-xlarge",
+              "windows-gpu", "ubuntu-２4.04", "Ubuntu-24.04x", '"ubuntu-24.04\\n"'):
+    expect(
+        pull_request_job(label),
+        1,
+        ("non-ephemeral",),
+        f"look-alike label {label!r} is not treated as a standard hosted image",
+    )
+for label in ("ubuntu-latest", "ubuntu-22.04", "ubuntu-24.04-arm", "windows-latest",
+              "windows-2025", "windows-11-arm", "macos-latest", "macos-15", "macos-15-intel"):
+    expect(
+        pull_request_job(label),
+        0,
+        ("clean",),
+        f"standard hosted image {label!r} is ephemeral",
+    )
+
 sys.exit(1 if failures else 0)

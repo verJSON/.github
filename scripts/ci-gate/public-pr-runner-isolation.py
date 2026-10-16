@@ -49,7 +49,18 @@ PERSISTENT_SELECTOR = '["self-hosted","general"]'
 # repository: a fork can edit the calling workflow. Each such input is tried as
 # every value that changes routing.
 ADVERSARIAL_INPUT_VALUES = ("", PERSISTENT_SELECTOR, EPHEMERAL_SELECTOR, True, False)
-HOSTED_LABEL = re.compile(r"^(?:ubuntu|windows|macos)-[A-Za-z0-9._-]+$")
+# Standard GitHub-hosted images only, versions shaped like #1826's guard. A
+# self-hosted runner may carry any custom label, so a family prefix such as
+# `ubuntu-gpu-selfhosted` proves nothing; larger runners (`-large`, `-xlarge`)
+# are billed and not reviewed here. ASCII digits only: `\d` would accept
+# fullwidth digits.
+HOSTED_LABEL = re.compile(
+    r"^(?:"
+    r"ubuntu-(?:latest|[0-9]{2}\.[0-9]{2})(?:-arm)?"
+    r"|windows-(?:latest|[0-9]{4}|11-arm)"
+    r"|macos-(?:latest|[0-9]{2}(?:-intel)?)"
+    r")$"
+)
 
 
 class Violation(NamedTuple):
@@ -545,7 +556,7 @@ def classify_labels(value) -> str:
         raise Undetermined(f"runner selector resolved to a non-label value {value!r}")
     if any(label is UNKNOWN for label in labels):
         raise Undetermined("runner selector depends on a value this checker cannot resolve")
-    if len(labels) == 1 and isinstance(labels[0], str) and HOSTED_LABEL.match(labels[0]):
+    if len(labels) == 1 and isinstance(labels[0], str) and HOSTED_LABEL.fullmatch(labels[0]):
         return "ephemeral"
     return "persistent"
 
