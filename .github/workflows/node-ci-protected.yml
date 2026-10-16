@@ -443,12 +443,30 @@ jobs:
     outputs:
       should-run: ${{ steps.check.outputs.should-run }}
     steps:
-      - name: Reject incompatible secretless compatibility runner
-        if: inputs.secretless-trusted-ref && inputs.secretless-compatibility-ranges != '' && runner.environment != 'github-hosted'
+      - name: Require a GitHub-hosted secretless build lane
+        # build-test runs a secretless call on this lane, ahead of the caller's
+        # runner, and its lifecycle rebuild and candidate sandbox exit unless the
+        # runner is GitHub-hosted. Refuse here, before dependency acquisition,
+        # when the lane is not one standard GitHub-hosted Linux image. The value
+        # is never echoed: it is configuration, not a reviewed log line. ADR 0234.
+        if: inputs.secretless-pr || inputs.secretless-trusted-ref
         shell: bash
+        env:
+          SECRETLESS_BUILD_LANE: ${{ vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]' }}
         run: |
-          echo "::error::secretless-compatibility-ranges requires a GitHub-hosted runner for secretless-trusted-ref"
-          exit 1
+          set -euo pipefail
+          # Digits are spelled out: a bracket range follows the runner's
+          # collation and under en_US.UTF-8 also admits fullwidth digits, while
+          # pinning a locale here depends on which locales the image ships.
+          # The YY.MM label shape, not a list of released images: a new hosted
+          # image then needs no contract release, and the exact value is already
+          # reconciled by runner-admission-reconcile (ADR 0147). ADR 0234.
+          hosted_image='"ubuntu-(latest|[0123456789]{2}\.[0123456789]{2})"'
+          if [[ ! "$SECRETLESS_BUILD_LANE" =~ ^${hosted_image}$ ]] \
+            && [[ ! "$SECRETLESS_BUILD_LANE" =~ ^\[${hosted_image}\]$ ]]; then
+            echo "::error::secretless build-test requires a GitHub-hosted Linux runner, but CI_LANE_UNTRUSTED does not select a single standard GitHub-hosted Linux image"
+            exit 1
+          fi
       - id: check
         # Inline the co-located composite action's run block so an exact-pinned
         # reusable never calls back into this repository through a second ref.
@@ -1936,7 +1954,14 @@ jobs:
     # fail-SAFE, not a fallback: unresolved visibility must never put fork code
     # on the persistent pool. Both pools are org variables so a provider move
     # (GCP -> DigitalOcean) is a variable flip, not a PR here.
-    runs-on: ${{ inputs.secretless-pr && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    #
+    # Either secretless mode precedes all of that. Its lifecycle rebuild and
+    # candidate script sandbox exit unless the runner is GitHub-hosted, so the
+    # trusted-ref (push/main) build takes the same ephemeral hosted lane as the
+    # PR build and ignores a caller's self-hosted `runner` input. Only this job
+    # moves: eligibility keeps the caller's route and refuses early when the
+    # lane below is not hosted (ADR 0234).
+    runs-on: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       actions: read

@@ -134,3 +134,7 @@ Credential variables remain absent from every candidate process. This prevents o
 ordered script from deleting or poisoning cache evidence consumed by a later script
 while retaining the exact verified acquisition as the sole source for every isolated
 copy.
+
+## 2026-10-15 — build placement superseded by ADR 0234
+
+The trusted-ref build job no longer follows the trusted runner route or a caller runner. [ADR 0234](../0234-route-secretless-trusted-ref-builds-to-the-hosted-lane/README.md) places it on the hosted `CI_LANE_UNTRUSTED` lane with the PR build, because its lifecycle rebuild and candidate sandbox require a GitHub-hosted Linux runner. Event admission, credential scrubbing, and the acquisition boundary in this decision are unchanged.
