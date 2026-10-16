@@ -123,11 +123,13 @@ class SecurityFloorTest(unittest.TestCase):
             f"lane-{index}": {"uses": value} for index, value in enumerate(uses)
         } | {"steps-only": {"runs-on": "ubuntu-24.04", "steps": [{"run": "true"}]}}})
 
-    def check(self, text, statuses):
+    def check(self, text, statuses, on_main=None):
         compared = []
 
         def compare(base, head):
             compared.append((base, head))
+            if head == "main":
+                return (on_main or {}).get(base, "ahead")
             return statuses[head]
 
         MODULE.require_security_floor(text, compare=compare, require=require)
@@ -136,7 +138,7 @@ class SecurityFloorTest(unittest.TestCase):
     def test_every_protected_lane_pin_must_contain_the_isolation_fixes(self):
         text = self.workflow(self.PROTECTED + PREVIOUS, self.PROTECTED + TARGET)
         self.assertEqual(
-            [(self.FLOOR, PREVIOUS), (self.FLOOR, TARGET)],
+            [(self.FLOOR, PREVIOUS), (PREVIOUS, "main"), (self.FLOOR, TARGET), (TARGET, "main")],
             self.check(text, {PREVIOUS: "ahead", TARGET: "identical"}),
         )
         for stale in ("behind", "diverged", None):
@@ -144,6 +146,16 @@ class SecurityFloorTest(unittest.TestCase):
                 ContractError, "predates the protected-lane security floor"
             ):
                 self.check(text, {PREVIOUS: "ahead", TARGET: stale})
+
+    def test_a_fork_commit_descending_from_the_floor_is_not_a_canonical_pin(self):
+        # A commit in the fork network can descend from the floor while never having
+        # been reviewed onto protected main; GitHub resolves it by SHA all the same.
+        text = self.workflow(self.PROTECTED + PREVIOUS)
+        for status in ("diverged", "behind", None):
+            with self.subTest(status=status), self.assertRaisesRegex(
+                ContractError, "not reachable from protected main"
+            ):
+                self.check(text, {PREVIOUS: "ahead"}, on_main={PREVIOUS: status})
 
     def test_a_workflow_without_an_immutable_protected_lane_pin_fails_closed(self):
         for text in (
@@ -173,7 +185,7 @@ class AuditLiveRevisionTest(unittest.TestCase):
     FLOOR = "21eb48e713bd8304951fb7b26a900d08359af900"
     VERIFIER = "scripts/verifier.py"
 
-    def audit(self, *, on_main="ahead", live=None, main=None, floor="ahead"):
+    def audit(self, *, on_main="ahead", live=None, main=None, floor="ahead", pin_on_main="ahead"):
         workflow = yaml.safe_dump({"jobs": {"lane": {
             "uses": "Verjson/.github/.github/workflows/node-ci-protected.yml@" + TARGET,
         }}}).encode()
@@ -185,6 +197,8 @@ class AuditLiveRevisionTest(unittest.TestCase):
         def compare(base, head):
             if (base, head) == (PREVIOUS, "main"):
                 return on_main
+            if (base, head) == (TARGET, "main"):
+                return pin_on_main
             self.assertEqual((self.FLOOR, TARGET), (base, head))
             return floor
 
@@ -217,6 +231,10 @@ class AuditLiveRevisionTest(unittest.TestCase):
     def test_a_live_revision_below_the_security_floor_fails(self):
         with self.assertRaisesRegex(ContractError, "security floor"):
             self.audit(floor="behind")
+
+    def test_a_live_revision_pinning_a_fork_commit_fails(self):
+        with self.assertRaisesRegex(ContractError, "not reachable from protected main"):
+            self.audit(pin_on_main="diverged")
 
 
 class CanonicalReadTest(unittest.TestCase):

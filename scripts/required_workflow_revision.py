@@ -105,6 +105,10 @@ def require_security_floor(workflow_text, *, compare, require):
     for pin in protected_lane_pins(workflow_text, require):
         require(compare(NODE_CI_SECURITY_FLOOR, pin) in FORWARD,
                 f"node-ci-protected pin {pin} predates the protected-lane security floor")
+        # A fork-network commit can descend from the floor without ever being reviewed
+        # onto protected main, and GitHub still resolves it by SHA.
+        require(compare(pin, "main") in FORWARD,
+                f"node-ci-protected pin {pin} is not reachable from protected main")
 
 
 def admit_predecessor(
