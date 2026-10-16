@@ -70,10 +70,11 @@ hosted runner.
    `ubuntu-NN.NN`, as an exact JSON string or one-element array with no whitespace,
    matching the exact-bytes rule `runner-admission-reconcile.sh` applies under ADR
    0147) and fails before dependency acquisition for anything else: a self-hosted,
-   multi-label, non-Linux, empty, multi-line, or malformed selector. It matches under
-   `LC_ALL=C`, because bash bracket ranges follow the runner's collation and under
-   `en_US.UTF-8` `[0-9]` also matches fullwidth digits. It never echoes the variable's
-   value. The runtime
+   multi-label, non-Linux, empty, multi-line, or malformed selector. It spells its digit
+   class out as `[0123456789]` rather than using `[0-9]`. A bracket range follows the
+   runner's collation, and under `en_US.UTF-8` it also matches fullwidth digits. Pinning
+   `LC_ALL` inside the step would instead depend on which locales the image ships. It
+   never echoes the variable's value. The runtime
    `RUNNER_ENVIRONMENT` checks inside `build-test` remain the second, authoritative
    layer.
 

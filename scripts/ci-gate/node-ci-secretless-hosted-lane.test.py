@@ -10,12 +10,22 @@ dependency acquisition, only when that hosted lane is not actually hosted.
 Each scenario evaluates every eligibility guard step's `if:` and `env:` with the
 same expression subset GitHub Actions uses, then runs the step's `run:` script,
 so the verdict is the workflow's own, not a re-implementation of it.
+
+Locale: the guard runs under the locale this host's runtime already has, the way
+a runner executes it, and again under a collating UTF-8 locale when one is
+installed. The harness never requests a locale the host lacks, because bash
+warns at startup (`setlocale: LC_ALL: cannot change locale`) for any missing
+locale, whatever the script does. Hosted runners do not ship en_US.UTF-8, so the
+collating pass runs only where it can. The structural check that the guard
+spells out its character classes holds on every host.
 """
 
 from __future__ import annotations
 
 import copy
+import functools
 import json
+import re
 import os
 import subprocess
 import sys
@@ -45,17 +55,24 @@ process.stdout.write(JSON.stringify(resolved === undefined ? null : resolved));
 
 
 def evaluate(expression: str, context: dict) -> object:
+    # Memoized: scenarios and mutants repeat the same few expressions, and a
+    # node start per evaluation pushed this suite past CI's 60s row budget.
+    return json.loads(_evaluate(expression, json.dumps(context, sort_keys=True)))
+
+
+@functools.lru_cache(maxsize=None)
+def _evaluate(expression: str, context_json: str) -> str:
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
         handle.write(EVALUATOR)
         script = handle.name
     try:
         result = subprocess.run(
-            ["node", script, expression, json.dumps(context)],
+            ["node", script, expression, context_json],
             capture_output=True, text=True, check=True,
         )
     finally:
         os.unlink(script)
-    return json.loads(result.stdout)
+    return result.stdout
 
 
 def interpolate(value: object, context: dict) -> str:
@@ -82,7 +99,38 @@ def eligibility_guards(document: dict) -> list[dict]:
     return guards
 
 
-def run_eligibility_guards(document: dict, scenario: dict) -> tuple[int, str]:
+# The runtime's own locale variables, passed through as a runner would. Nothing
+# here is invented: an unset variable stays unset.
+RUNTIME_LOCALE = ("LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_COLLATE")
+# Locales whose collation folds non-ASCII digits into a [0-9] range.
+COLLATING_LOCALES = ("en_US.UTF-8", "en_US.utf8")
+
+
+def runtime_locale_env() -> dict[str, str]:
+    return {name: os.environ[name] for name in RUNTIME_LOCALE if name in os.environ}
+
+
+def installed_collating_locale() -> dict[str, str] | None:
+    """A collating locale bash can switch to without a startup warning, if any."""
+    for candidate in COLLATING_LOCALES:
+        probe = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c", ":"],
+            env={"PATH": os.environ["PATH"], "LANG": candidate, "LC_ALL": candidate},
+            capture_output=True, text=True,
+        )
+        if probe.returncode == 0 and not probe.stderr:
+            return {"LANG": candidate, "LC_ALL": candidate}
+    return None
+
+
+LOCALES = (("runtime", runtime_locale_env()),) + (
+    (("collating", installed_collating_locale()),)
+    if installed_collating_locale() is not None else ()
+)
+
+
+def run_eligibility_guards(document: dict, scenario: dict,
+                           locale: dict[str, str]) -> tuple[int, str]:
     context = {
         "inputs": {
             "secretless-pr": scenario["mode"] == "pr",
@@ -97,10 +145,7 @@ def run_eligibility_guards(document: dict, scenario: dict) -> tuple[int, str]:
         condition = step.get("if")
         if condition is not None and not evaluate(str(condition), context):
             continue
-        # A runner's locale is not ours to choose, and bash bracket ranges such
-        # as [0-9] follow the locale's collation: under en_US.UTF-8 they match
-        # fullwidth digits. Run the guard under a collating UTF-8 locale.
-        env = {"PATH": os.environ["PATH"], "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8"}
+        env = {"PATH": os.environ["PATH"], **locale}
         for name, value in (step.get("env") or {}).items():
             env[name] = interpolate(value, context)
         result = subprocess.run(
@@ -301,14 +346,27 @@ def binding_violations(document: dict) -> list[str]:
         problems.append(f"guard condition drifted: {guard.get('if')!r}")
     if "inputs.runner" in str(document["jobs"]["build-test"]["runs-on"]).split(" || ")[0]:
         problems.append("the secretless term consults the caller's runner input")
+    # Bracket ranges such as [0-9] follow the locale's collation (under
+    # en_US.UTF-8 they match fullwidth digits), and pinning a locale inside the
+    # step is itself locale-dependent. Classes are spelled out instead.
+    run = str(guard.get("run", ""))
+    ranges = RANGE_EXPRESSION.findall(run)
+    if ranges:
+        problems.append(f"guard uses locale-dependent bracket ranges: {ranges}")
+    if re.search(r"\bLC_[A-Z]+=|\bLANG=", run):
+        problems.append("guard sets a locale instead of spelling out its classes")
     return problems
+
+
+RANGE_EXPRESSION = re.compile(r"\[\^?[^\]\s]*[0-9A-Za-z]-[0-9A-Za-z][^\]\s]*\]")
 
 
 def scenario_failures(document: dict, name: str) -> list[str]:
     failures = []
-    for scenario in SCENARIOS:
-        status, output = run_eligibility_guards(document, scenario)
-        label = f"{name}: {scenario['label']}"
+    for (locale_name, locale), scenario in (
+            (locale, scenario) for locale in LOCALES for scenario in SCENARIOS):
+        status, output = run_eligibility_guards(document, scenario, locale)
+        label = f"{name} [{locale_name} locale]: {scenario['label']}"
         if (status == 0) != scenario["admitted"]:
             failures.append(f"{label} (exit {status}: {output.strip()})")
         elif not scenario["admitted"] and output.strip() != DIAGNOSTIC:
@@ -334,13 +392,13 @@ def mutants(document: dict):
         lambda d: guard_of(d)["env"].update({"SECRETLESS_BUILD_LANE": "${{ vars.CI_LANE_TRUSTED || '[\"ubuntu-24.04\"]' }}"}))
     yield "guard regex drops its anchors", mutate(
         lambda d: guard_of(d).update({"run": guard_of(d)["run"].replace("^${hosted_image}$", "${hosted_image}")}))
-    yield "guard matches under the runner's collating locale", mutate(
-        lambda d: guard_of(d).update({"run": guard_of(d)["run"].replace("export LC_ALL=C\n", "")}))
+    yield "guard reverts to a collating [0-9] range", mutate(
+        lambda d: guard_of(d).update({"run": guard_of(d)["run"].replace("[0123456789]", "[0-9]")}))
     yield "guard accepts any hosted image family", mutate(
         lambda d: guard_of(d).update({"run": guard_of(d)["run"].replace("ubuntu-(latest|", "[a-z]+-(latest|")}))
     yield "guard loosens the image version shape", mutate(
         lambda d: guard_of(d).update({"run": guard_of(d)["run"].replace(
-            "[0-9]{2}\\.[0-9]{2}", "[0-9.]+")}))
+            "[0123456789]{2}\\.[0123456789]{2}", "[0123456789.]+")}))
     yield "guard echoes the configured value", mutate(
         lambda d: guard_of(d).update({"run": guard_of(d)["run"].replace(
             "Linux image\"", "Linux image: ${SECRETLESS_BUILD_LANE}\"")}))
@@ -362,7 +420,8 @@ def main() -> int:
         for problem in problems:
             print(f"not ok - {problem}")
         failures += len(problems)
-        print(f"ok - {workflow.name}: {len(SCENARIOS)} eligibility scenarios and the build-lane binding"
+        print(f"ok - {workflow.name}: {len(SCENARIOS)} eligibility scenarios under "
+              f"{'/'.join(name for name, _ in LOCALES)} locale(s) and the build-lane binding"
               if not problems else f"not ok - {workflow.name}: {len(problems)} problem(s)")
         for label, mutant in mutants(document):
             try:
