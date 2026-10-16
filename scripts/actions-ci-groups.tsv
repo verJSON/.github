@@ -95,7 +95,6 @@ platform	bash scripts/ci-gate/repo-hygiene-ref.test.sh
 platform	bash scripts/ci-gate/repo-hygiene-sandbox.test.sh
 merge-gate	bash scripts/ci-gate/validate-ai-review-app-key.test.sh
 merge-gate	bash scripts/ci-gate/freshness.test.sh
-merge-gate	python3 scripts/ci-gate/settable-value-guards.test.py
 merge-gate	bash scripts/ci-gate/review-comment.test.sh
 merge-gate	bash scripts/ci-gate/review-context.test.sh
 merge-gate	bash scripts/ci-gate/read-pr-files.test.sh
@@ -198,7 +197,6 @@ changelog-release-1	bash scripts/container-deployment-contract.test.sh
 changelog-release-2	bash scripts/container-deployment-review-producer.test.sh
 changelog-release-3	python3 scripts/runner-canary-contract.test.py
 changelog-release-4	python3 scripts/ci-gate/release-node-credential-boundary.test.py
-changelog-release-4	python3 scripts/ci-gate/release-verify-retention-keep.test.py
 changelog-release-1	node --test scripts/ci-gate/contract-tools-package.test.js
 changelog-release-2	bash scripts/ci-gate/release-node-restart.test.sh
 changelog-release-2	bash scripts/release-verify.test.sh
@@ -244,3 +242,7 @@ platform	bash scripts/ci-gate/pipefail-sigpipe.test.sh
 platform	bash scripts/ci-gate/hub-changelog-validate.test.sh
 platform	bash scripts/ci-gate/hub-changelog-validate.sh
 platform	python3 scripts/ci-gate/merge-gate-provenance-claims.test.py
+# locale-collation runs in actions-ci hosted-compatibility-tests on ubuntu-24.04:
+# these contracts import ascii_digit_locales and must reproduce en_US.UTF-8.
+locale-collation	python3 scripts/ci-gate/settable-value-guards.test.py
+locale-collation	python3 scripts/ci-gate/release-verify-retention-keep.test.py

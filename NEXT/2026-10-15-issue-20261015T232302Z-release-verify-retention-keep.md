@@ -14,3 +14,5 @@ The retention guards in `node-release.yml` and `container-release.yml` now accep
 Every shell guard in the workflows, generators, and generated callers now spells out its ASCII character classes. Letter ranges admitted `é` and fullwidth letters under `en_US.UTF-8`, as digit ranges admitted `٣`. A window outside 1-999 now fails `verify` and node-release retention. Container retention stays `continue-on-error`, and both retention jobs now record the skip in the run summary.
 
 Retention is now an explicit policy value. `CI_PACKAGE_RETENTION_KEEP` accepts an integer from 1 to 999, or the exact lowercase word `all`, which disables retention. Every site parses the same language: the generated verify step, both retention jobs, and `package_retention.py --keep`. With `all`, nothing is deleted and the run summary says so. Any other value fails closed with an error that names the accepted forms.
+
+The en_US.UTF-8 checks for these guards fail closed in CI when that locale cannot be reproduced, so actions-ci runs them on the hosted `ubuntu-24.04` image in `hosted-compatibility-tests`. Persistent fleet images lack the locale source data.

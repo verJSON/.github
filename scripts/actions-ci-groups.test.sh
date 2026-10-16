@@ -289,6 +289,153 @@ except (AssertionError, KeyError, StopIteration):
 else:
     raise AssertionError("hosted compatibility aggregate removal passed")
 
+# A manifest group that no job runs is registered coverage that never executes,
+# and an en_US.UTF-8 contract on a fleet image fails closed for want of locale
+# data. So every manifest group must be named by exactly one runner, and every
+# contract that imports the locale helper runs in the hosted locale-collation
+# group, which holds nothing else.
+import pathlib
+import re
+
+LOCALE_GROUP = "locale-collation"
+LOCALE_STEP = "Run locale-collation shell contracts"
+repository_root = pathlib.Path(sys.argv[2]).resolve().parent.parent
+
+
+def manifest_rows(text):
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        group, command = line.split("\t", 1)
+        yield group, command
+
+
+def imports_locale_helper(command):
+    scripts = re.findall(r"scripts/\S+\.py", command)
+    return any(
+        re.search(
+            r"^\s*import ascii_digit_locales\b",
+            (repository_root / script).read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+        for script in scripts
+    )
+
+
+def executed_groups(candidate):
+    runners = []
+    for job_name, job in candidate["jobs"].items():
+        matrix = job.get("strategy", {}).get("matrix", {}).get("group")
+        for step in job.get("steps", []):
+            run = step.get("run", "")
+            if 'bash scripts/actions-ci-group.sh "${{ matrix.group }}"' in run:
+                runners.extend((job_name, group) for group in matrix or [])
+            runners.extend(
+                (job_name, group)
+                for group in re.findall(
+                    r"^\s*bash scripts/actions-ci-group\.sh ([a-z0-9-]+)\s*$",
+                    run,
+                    re.MULTILINE,
+                )
+            )
+    return runners
+
+
+def validate_locale_collation(candidate, candidate_manifest):
+    runners = executed_groups(candidate)
+    named = [group for _job, group in runners]
+    manifest_groups = {group for group, _command in manifest_rows(candidate_manifest)}
+    if sorted(set(named)) != sorted(named):
+        raise AssertionError("a manifest group is run by more than one job")
+    if set(named) != manifest_groups:
+        raise AssertionError(
+            f"manifest groups {sorted(manifest_groups)} differ from executed groups {sorted(named)}"
+        )
+    if (("hosted-compatibility-tests", LOCALE_GROUP)) not in runners:
+        raise AssertionError("locale-collation is not run on the hosted image")
+    hosted = candidate["jobs"]["hosted-compatibility-tests"]
+    if hosted["runs-on"] != "ubuntu-24.04":
+        raise AssertionError("locale-collation host is not the hosted image")
+    steps = [step for step in hosted["steps"] if step.get("name") == LOCALE_STEP]
+    if len(steps) != 1 or steps[0] != {
+        "name": LOCALE_STEP,
+        "if": "${{ !cancelled() }}",
+        "env": {
+            "RUNNER_LABELS": "",
+            "ACTIONS_CI_COMMAND_BUDGET_SECONDS": (
+                "${{ github.event_name == 'pull_request' && '60' || '' }}"
+            ),
+        },
+        "run": f"bash scripts/actions-ci-group.sh {LOCALE_GROUP}",
+    }:
+        raise AssertionError("hosted locale-collation step drifted")
+    locale_rows = [
+        (group, command)
+        for group, command in manifest_rows(candidate_manifest)
+        if imports_locale_helper(command)
+    ]
+    if not locale_rows:
+        raise AssertionError("no manifest command imports ascii_digit_locales")
+    for group, command in manifest_rows(candidate_manifest):
+        if imports_locale_helper(command) != (group == LOCALE_GROUP):
+            raise AssertionError(f"locale-collation membership drifted: {group}\t{command}")
+
+
+validate_locale_collation(document, manifest_text)
+print("ok - every manifest group has one runner; en_US.UTF-8 contracts run hosted")
+
+
+def expect_locale_failure(label, candidate, candidate_manifest):
+    try:
+        validate_locale_collation(candidate, candidate_manifest)
+    except (AssertionError, KeyError, ValueError):
+        print(f"ok - {label} fails closed")
+    else:
+        raise AssertionError(f"{label} passed")
+
+
+removed_step = copy.deepcopy(document)
+removed_step["jobs"]["hosted-compatibility-tests"]["steps"] = [
+    step for step in removed_step["jobs"]["hosted-compatibility-tests"]["steps"]
+    if step.get("name") != LOCALE_STEP
+]
+expect_locale_failure("hosted locale-collation step removal", removed_step, manifest_text)
+fleet_runner = copy.deepcopy(document)
+fleet_runner["jobs"]["hosted-compatibility-tests"]["runs-on"] = (
+    document["jobs"]["shell-test-groups"]["runs-on"]
+)
+expect_locale_failure("locale-collation fleet routing", fleet_runner, manifest_text)
+wrong_group = copy.deepcopy(document)
+next(
+    step for step in wrong_group["jobs"]["hosted-compatibility-tests"]["steps"]
+    if step.get("name") == LOCALE_STEP
+)["run"] = "bash scripts/actions-ci-group.sh docs"
+expect_locale_failure("locale-collation step running another group", wrong_group, manifest_text)
+skippable = copy.deepcopy(document)
+next(
+    step for step in skippable["jobs"]["hosted-compatibility-tests"]["steps"]
+    if step.get("name") == LOCALE_STEP
+)["continue-on-error"] = True
+expect_locale_failure("continue-on-error locale-collation step", skippable, manifest_text)
+expect_locale_failure(
+    "locale contract moved to a fleet group",
+    document,
+    manifest_text.replace(
+        "locale-collation\tpython3 scripts/ci-gate/settable-value-guards.test.py",
+        "merge-gate\tpython3 scripts/ci-gate/settable-value-guards.test.py",
+    ),
+)
+expect_locale_failure(
+    "non-locale contract added to locale-collation",
+    document,
+    manifest_text + "locale-collation\tbash scripts/actions-ci-group-output.test.sh\n",
+)
+expect_locale_failure(
+    "manifest group without a runner",
+    document,
+    manifest_text + "orphan\tbash scripts/actions-ci-group-output.test.sh\n",
+)
+
 required = jobs["shell-tests"]
 assert required["needs"] == [
     "change-scope",
@@ -453,7 +600,7 @@ validate_manifest() {
     BEGIN { valid = 1 }
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
     NF != 2 { valid = 0; next }
-    $1 !~ /^(platform|merge-gate|changelog-release-[1-4]|docs)$/ { valid = 0; next }
+    $1 !~ /^(platform|merge-gate|changelog-release-[1-4]|docs|locale-collation)$/ { valid = 0; next }
     seen[$2]++ { valid = 0 }
     { groups[$1]++; total++ }
     END {
@@ -464,7 +611,8 @@ validate_manifest() {
         groups["changelog-release-2"] > 0 &&
         groups["changelog-release-3"] > 0 &&
         groups["changelog-release-4"] > 0 &&
-        groups["docs"] > 0)) {
+        groups["docs"] > 0 &&
+        groups["locale-collation"] > 0)) {
         valid = 0
       }
       exit valid ? 0 : 1
@@ -499,7 +647,7 @@ LOAD_BEARING_COMMANDS
 }
 
 if validate_manifest "$manifest"; then
-  pass "manifest assigns every command once across the platform, merge-gate, docs, and changelog-release cells"
+  pass "manifest assigns every command once across the platform, merge-gate, docs, changelog-release, and locale-collation cells"
 else
   fail "manifest is missing, malformed, duplicated, or incompletely grouped"
 fi
