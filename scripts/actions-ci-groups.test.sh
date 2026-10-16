@@ -294,12 +294,53 @@ else:
 # data. So every manifest group must be named by exactly one runner, and every
 # contract that imports the locale helper runs in the hosted locale-collation
 # group, which holds nothing else.
+#
+# Membership is derived from the importers, never from the rows: every tracked
+# file under scripts/ that imports ascii_digit_locales -- `import`, `from ...
+# import`, `__import__(...)` or `importlib.import_module(...)` -- must be
+# exactly the set of scripts the locale-collation rows run. Deriving it from the
+# rows instead (asking "does this row's script import the helper?") passes
+# vacuously when a row is deleted or an import is respelled. A file that names
+# the helper in a way this scan cannot classify fails closed.
+import ast
 import pathlib
 import re
+import subprocess
 
 LOCALE_GROUP = "locale-collation"
 LOCALE_STEP = "Run locale-collation shell contracts"
+LOCALE_MODULE = "ascii_digit_locales"
+LOCALE_HELPER = "scripts/ci-gate/ascii_digit_locales.py"
+# Tracked files that name the helper without importing it.
+LOCALE_NON_IMPORTERS = {
+    LOCALE_HELPER,
+    "scripts/actions-ci-groups.tsv",
+    "scripts/actions-ci-groups.test.sh",
+}
 repository_root = pathlib.Path(sys.argv[2]).resolve().parent.parent
+
+
+def tracked_script_sources():
+    listing = subprocess.run(
+        ["git", "-C", str(repository_root), "ls-files", "-z", "--", "scripts"],
+        capture_output=True,
+        text=True,
+    )
+    if listing.returncode != 0:
+        raise SystemExit(
+            "git ls-files failed, so the locale-helper importers could not be read: "
+            + listing.stderr.strip()
+        )
+    paths = sorted(entry for entry in listing.stdout.split("\0") if entry)
+    if LOCALE_HELPER not in paths:
+        raise SystemExit(f"{LOCALE_HELPER} is not tracked; the scan root is wrong")
+    return {
+        path: (repository_root / path).read_bytes().decode("utf-8", "replace")
+        for path in paths
+    }
+
+
+script_sources = tracked_script_sources()
 
 
 def manifest_rows(text):
@@ -310,16 +351,62 @@ def manifest_rows(text):
         yield group, command
 
 
-def imports_locale_helper(command):
-    scripts = re.findall(r"scripts/\S+\.py", command)
-    return any(
-        re.search(
-            r"^\s*import ascii_digit_locales\b",
-            (repository_root / script).read_text(encoding="utf-8"),
-            re.MULTILINE,
-        )
-        for script in scripts
-    )
+def names_locale_module(dotted):
+    return isinstance(dotted, str) and LOCALE_MODULE in dotted.split(".")
+
+
+def imports_locale_module(tree):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(names_locale_module(alias.name) for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if names_locale_module(node.module) or any(
+                alias.name == LOCALE_MODULE for alias in node.names
+            ):
+                return True
+        elif isinstance(node, ast.Call) and node.args:
+            function = node.func
+            name = (
+                function.id if isinstance(function, ast.Name)
+                else function.attr if isinstance(function, ast.Attribute)
+                else None
+            )
+            argument = node.args[0]
+            if (
+                name in ("__import__", "import_module")
+                and isinstance(argument, ast.Constant)
+                and names_locale_module(argument.value)
+            ):
+                return True
+    return False
+
+
+def locale_importers(sources):
+    importers = set()
+    for path, text in sources.items():
+        if LOCALE_MODULE not in text or path in LOCALE_NON_IMPORTERS:
+            continue
+        if not path.endswith(".py"):
+            raise AssertionError(
+                f"{path} names {LOCALE_MODULE} but is not Python, so whether it "
+                "imports the locale helper cannot be classified"
+            )
+        try:
+            tree = ast.parse(text, filename=path)
+        except SyntaxError as error:
+            raise AssertionError(f"{path} could not be parsed: {error}") from error
+        if not imports_locale_module(tree):
+            raise AssertionError(
+                f"{path} names {LOCALE_MODULE} without an import this contract "
+                "recognizes; spell it as an import or list it in LOCALE_NON_IMPORTERS"
+            )
+        importers.add(path)
+    return importers
+
+
+def row_scripts(command):
+    return set(re.findall(r"scripts/\S+?\.(?:py|sh)(?=\s|$)", command))
 
 
 def executed_groups(candidate):
@@ -341,7 +428,7 @@ def executed_groups(candidate):
     return runners
 
 
-def validate_locale_collation(candidate, candidate_manifest):
+def validate_locale_collation(candidate, candidate_manifest, sources=script_sources):
     runners = executed_groups(candidate)
     named = [group for _job, group in runners]
     manifest_groups = {group for group, _command in manifest_rows(candidate_manifest)}
@@ -369,25 +456,35 @@ def validate_locale_collation(candidate, candidate_manifest):
         "run": f"bash scripts/actions-ci-group.sh {LOCALE_GROUP}",
     }:
         raise AssertionError("hosted locale-collation step drifted")
-    locale_rows = [
-        (group, command)
-        for group, command in manifest_rows(candidate_manifest)
-        if imports_locale_helper(command)
-    ]
-    if not locale_rows:
-        raise AssertionError("no manifest command imports ascii_digit_locales")
+    importers = locale_importers(sources)
+    if not importers:
+        raise AssertionError(f"no tracked script imports {LOCALE_MODULE}")
+    locale_scripts = set()
     for group, command in manifest_rows(candidate_manifest):
-        if imports_locale_helper(command) != (group == LOCALE_GROUP):
-            raise AssertionError(f"locale-collation membership drifted: {group}\t{command}")
+        scripts = row_scripts(command)
+        if group == LOCALE_GROUP:
+            if not scripts:
+                raise AssertionError(f"locale-collation row names no script: {command}")
+            locale_scripts |= scripts
+        elif scripts & importers:
+            raise AssertionError(
+                f"locale-helper importer runs outside locale-collation: {group}\t{command}"
+            )
+    if locale_scripts != importers:
+        raise AssertionError(
+            "locale-collation membership drifted: rows run "
+            f"{sorted(locale_scripts)} but {LOCALE_MODULE} importers are "
+            f"{sorted(importers)}"
+        )
 
 
 validate_locale_collation(document, manifest_text)
 print("ok - every manifest group has one runner; en_US.UTF-8 contracts run hosted")
 
 
-def expect_locale_failure(label, candidate, candidate_manifest):
+def expect_locale_failure(label, candidate, candidate_manifest, sources=script_sources):
     try:
-        validate_locale_collation(candidate, candidate_manifest)
+        validate_locale_collation(candidate, candidate_manifest, sources)
     except (AssertionError, KeyError, ValueError):
         print(f"ok - {label} fails closed")
     else:
@@ -435,6 +532,54 @@ expect_locale_failure(
     document,
     manifest_text + "orphan\tbash scripts/actions-ci-group-output.test.sh\n",
 )
+
+retention_script = "scripts/ci-gate/release-verify-retention-keep.test.py"
+retention_row = f"{LOCALE_GROUP}\tpython3 {retention_script}\n"
+retention_import = "import ascii_digit_locales  # noqa: E402\n"
+if retention_row not in manifest_text or retention_import not in script_sources[retention_script]:
+    raise AssertionError("locale membership mutation fixtures no longer match their sources")
+expect_locale_failure(
+    "locale contract row deleted",
+    document,
+    manifest_text.replace(retention_row, "", 1),
+)
+platform_manifest = manifest_text.replace(
+    retention_row, f"platform\tpython3 {retention_script}\n", 1
+)
+respellings = {
+    "from-import": "from ascii_digit_locales import guard_locales  # noqa: E402\n",
+    "dunder-import": 'ascii_digit_locales = __import__("ascii_digit_locales")\n',
+    "importlib": (
+        "import importlib\n"
+        'ascii_digit_locales = importlib.import_module("ascii_digit_locales")\n'
+    ),
+    "package-from-import": "from ci_gate import ascii_digit_locales\n",
+}
+for spelling, replacement in respellings.items():
+    respelled = dict(script_sources)
+    respelled[retention_script] = respelled[retention_script].replace(
+        retention_import, replacement, 1
+    )
+    # Positive control: the respelled import is still recognized when its row
+    # stays in locale-collation, so the failure below is the move, not the spelling.
+    validate_locale_collation(document, manifest_text, respelled)
+    expect_locale_failure(
+        f"{spelling} importer moved to a fleet group", document, platform_manifest, respelled
+    )
+unclassifiable = dict(script_sources)
+unclassifiable[retention_script] = unclassifiable[retention_script].replace(
+    retention_import,
+    'ascii_digit_locales = getattr(importlib, "import_module")("ascii_digit_locales")\n',
+    1,
+)
+expect_locale_failure(
+    "unclassifiable locale-helper reference", document, manifest_text, unclassifiable
+)
+shell_mention = dict(script_sources)
+shell_mention["scripts/ci-gate/locale-probe.test.sh"] = (
+    "python3 - <<'EOF'\nimport ascii_digit_locales\nEOF\n"
+)
+expect_locale_failure("shell-embedded locale-helper import", document, manifest_text, shell_mention)
 
 required = jobs["shell-tests"]
 assert required["needs"] == [
@@ -669,8 +814,10 @@ fi
 #   and must be reachable in Actions, UNLESS it is declared below as a library
 #   module. "Reachable in Actions" means named as a command argument in
 #   `scripts/actions-ci-groups.tsv`, or in the hosted-compatibility job's run
-#   step, or named anywhere in a tracked workflow or composite action under
-#   `.github/` -- each of which is an execution path Actions actually takes.
+#   step, or named in a parsed key or value of a tracked workflow or composite
+#   action under `.github/` -- each of which is an execution path Actions
+#   actually takes. A comment is not one: a mention in a YAML comment, or in a
+#   shell comment inside a `run` block, never counts.
 #
 # Adding a file under `scripts/ci-gate/` therefore has exactly two honest
 # outcomes: register it somewhere Actions runs it, or declare it here as a
@@ -691,7 +838,7 @@ fi
 # named only by a workflow whose triggers never fire, or guarded by an `if:` that
 # is never true, still counts as reachable here -- as does one named only by a
 # `sparse-checkout:` entry or an `env:` value while its invocation is deleted,
-# since the name is matched anywhere in the workflow text and those shapes are
+# since the name is matched anywhere in the parsed workflow values and those shapes are
 # real in this tree. Reachability of workflows themselves is a separate
 # invariant and a separate check.
 if python3 - "$root" "$manifest" "$workflow" <<'PY'
@@ -776,8 +923,9 @@ if not gate_scripts:
     )
 
 
-def referenced(text):
+def referenced(text, candidates=None):
     """Tracked ci-gate paths mentioned by shell tokens on an execution path."""
+    candidates = gate_scripts if candidates is None else candidates
     logical_text = text.replace("\\\r\n", "").replace("\\\n", "")
     lexer = shlex.shlex(logical_text, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
@@ -785,7 +933,7 @@ def referenced(text):
     try:
         tokens = list(lexer)
     except ValueError as error:
-        mentioned = sorted(path for path in gate_scripts if path in logical_text)
+        mentioned = sorted(path for path in candidates if path in logical_text)
         if not mentioned:
             return set()
         evidence = ", ".join(mentioned)
@@ -800,7 +948,7 @@ def referenced(text):
         # unsupported wrapper forms all retain the repository-relative path.
         # Counting every such mention fails closed instead of letting shell
         # spelling turn a declared library into an unregistered gate.
-        seen.update(path for path in gate_scripts if path in token)
+        seen.update(path for path in candidates if path in token)
     return seen
 
 
@@ -820,9 +968,6 @@ workflow_sources = {
     for path in tracked(".github/workflows", ".github/actions")
     if path.endswith((".yml", ".yaml"))
 }
-workflow_text = "\n".join(workflow_sources.values())
-
-
 exact_commands = referenced(manifest_text) | referenced(hosted_run)
 
 
@@ -844,15 +989,47 @@ def parse_workflow(source):
     return yaml.safe_load(source)
 
 
-def invocation_paths(sources):
+def invocation_paths(sources, candidates=None):
     invoked = set(exact_commands)
     for source in sources.values():
         for run_block in run_blocks(parse_workflow(source)):
-            invoked.update(referenced(run_block))
+            invoked.update(referenced(run_block, candidates))
     return invoked
 
 
-invoked_paths = invocation_paths(workflow_sources)
+def yaml_strings(value):
+    """String keys and values a parsed document carries, except shell `run` blocks.
+
+    Parsing drops YAML comments; `run` blocks are read by `referenced`, whose
+    shell lexer drops shell comments, so neither kind of comment is a mention.
+    """
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if isinstance(key, str):
+                yield key
+            if key == "run" and isinstance(child, str):
+                continue
+            yield from yaml_strings(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from yaml_strings(child)
+    elif isinstance(value, str):
+        yield value
+
+
+def reachability(sources, candidates=None):
+    """A comment is not an execution path: a test file named only in a comment
+    beside the step it documents must not count as registered."""
+    invoked = invocation_paths(sources, candidates)
+    mentions = "\n".join(
+        text
+        for source in sources.values()
+        for text in yaml_strings(parse_workflow(source))
+    )
+    return lambda path: path in invoked or path in mentions
+
+
+workflow_reachable = reachability(workflow_sources)
 
 
 CI_GATE_ROOT = pathlib.PurePosixPath("scripts/ci-gate")
@@ -972,18 +1149,15 @@ def importers_of(path, sources=python_sources):
     ]
 
 
-def is_reachable(path):
-    # The manifest and the hosted step are executed verbatim, so match their
-    # command arguments exactly. A workflow may interpolate a path into a longer
-    # expression, so accept it being named anywhere in one.
-    return path in exact_commands or path in workflow_text
-
-
-def unaccounted(candidate_paths):
+def unaccounted(candidate_paths, reachable=workflow_reachable):
+    # The manifest and the hosted step are executed verbatim, so their command
+    # arguments match exactly (`invocation_paths` starts from them), as do the
+    # shell tokens of every `run` block. A workflow may interpolate a path into a
+    # longer expression, so any other parsed key or value may also name it.
     return [
         path
         for path in candidate_paths
-        if path not in NON_GATE_MODULES and not is_reachable(path)
+        if path not in NON_GATE_MODULES and not reachable(path)
     ]
 
 
@@ -1157,6 +1331,35 @@ if unaccounted([*gate_scripts, *probes]) != probes:
         "the detector does not flag every known-unregistered gate script; it must "
         "not depend on the `.test.` suffix"
     )
+
+comment_probe = probes[0]
+comment_forms = {
+    "YAML comment": f"# runs {comment_probe}\njobs:\n  probe:\n    steps:\n      - run: true\n",
+    "trailing YAML comment": (
+        f"jobs:\n  probe:\n    steps:\n      - run: true  # {comment_probe}\n"
+    ),
+    "shell comment in a run block": (
+        "jobs:\n  probe:\n    steps:\n      - run: |\n"
+        f"          # guard proven by {comment_probe}\n          true\n"
+    ),
+}
+for form, source in comment_forms.items():
+    commented = dict(workflow_sources)
+    commented[".github/workflows/comment-probe.yml"] = source
+    if unaccounted([comment_probe], reachability(commented, probes)) != [comment_probe]:
+        raise SystemExit(f"a ci-gate path named only in a {form} counted as reachable")
+named_forms = {
+    "run command": f"jobs:\n  probe:\n    steps:\n      - run: bash {comment_probe}\n",
+    "step input": (
+        "jobs:\n  probe:\n    steps:\n      - uses: ./x\n"
+        f"        with:\n          script: {comment_probe}\n"
+    ),
+}
+for form, source in named_forms.items():
+    named = dict(workflow_sources)
+    named[".github/workflows/value-probe.yml"] = source
+    if unaccounted([comment_probe], reachability(named, probes)):
+        raise SystemExit(f"a ci-gate path named in a workflow {form} did not count as reachable")
 PY
 then
   pass "every ci-gate script runs in the actions-ci manifest, the hosted compatibility job, or a workflow"
