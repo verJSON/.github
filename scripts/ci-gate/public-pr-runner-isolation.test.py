@@ -563,18 +563,43 @@ expect(
     "a pull_request_target head checkout on a hosted image is clean",
 )
 
-expect(
-    {
-        "target.yml": """
+REVIEWED_REMOTE = "Verjson/.github/.github/workflows/app-key-environment.yml@ebe23fafbdb77dd2cca6f1862d932fde881b80d7"
+
+
+def remote_target_call(workflow: str, job: str, uses: str) -> dict[str, str]:
+    return {
+        workflow: f"""
             on: pull_request_target
             jobs:
-              arm:
-                uses: Verjson/.github/.github/workflows/app-key-environment.yml@0123456789abcdef0123456789abcdef01234567
+              {job}:
+                uses: {uses}
         """,
-    },
+    }
+
+
+expect(
+    remote_target_call("target.yml", "arm", REVIEWED_REMOTE.replace("ebe23faf", "0000000f")),
+    2,
+    ("UNDETERMINED", "target.yml [pull_request_target]: job 'arm'", "reviewed"),
+    "an unreviewed remote callee under pull_request_target is undetermined",
+)
+expect(
+    remote_target_call("gate-rearm.yml", "app-key-policy", REVIEWED_REMOTE),
     0,
-    ("NOT FOLLOWED: target.yml [pull_request_target]: job 'arm'",),
-    "a remote callee under pull_request_target is reported as not followed, never silently",
+    ("REVIEWED REMOTE: gate-rearm.yml [pull_request_target]: job 'app-key-policy'",),
+    "the reviewed, SHA-pinned gate-rearm app-key callee is reported and accepted",
+)
+expect(
+    remote_target_call("gate-rearm.yml", "app-key-policy", REVIEWED_REMOTE.replace("ebe23faf", "1be23faf")),
+    2,
+    ("UNDETERMINED",),
+    "the reviewed callee at any other SHA is undetermined",
+)
+expect(
+    remote_target_call("other.yml", "app-key-policy", REVIEWED_REMOTE),
+    2,
+    ("UNDETERMINED",),
+    "the reviewed callee from any other caller workflow is undetermined",
 )
 expect(
     target_job("""

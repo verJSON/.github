@@ -17,7 +17,8 @@ therefore a violation: with the untrusted lane unset it lands on the fallback.
 
 pull_request_target jobs that materialize the head (see materializes_head)
 are held to the same rule. Remote callees under
-pull_request_target are reported as NOT FOLLOWED; workflow_run and
+pull_request_target are undetermined unless listed, pinned by SHA, in
+REVIEWED_TARGET_REMOTES; workflow_run and
 issue_comment are out of scope (ADR 0235).
 
 Verjson/.github ADR 0235.
@@ -929,16 +930,39 @@ class Scan:
         self.notes: list[str] = []
 
 
+# Remote reusable workflows a pull_request_target job may call, reviewed at an
+# exact SHA: (caller workflow file, job, uses) -> why the pinned callee cannot
+# materialize the pull request head. Any other remote callee under
+# pull_request_target, or this one at another SHA or from another caller, is
+# undetermined. (A pull_request job can never call a remote workflow here.)
+REVIEWED_TARGET_REMOTES: dict[tuple[str, str, str], str] = {
+    (
+        "gate-rearm.yml",
+        "app-key-policy",
+        "Verjson/.github/.github/workflows/app-key-environment.yml@ebe23fafbdb77dd2cca6f1862d932fde881b80d7",
+    ): (
+        "app-key-environment.yml at ebe23faf has no uses: or checkout step and no PR-head reference; "
+        "it validates the App key environment inline (reviewed for ADR 0235, #1827)"
+    ),
+}
+
+
+def caller_file(path: str) -> str:
+    return path.split(" -> ")[-1].split(" [")[0]
+
+
 def check_call(scan: Scan, path: str, name: str, job: dict, depth: int) -> list[Violation]:
     uses = str(job["uses"])
     local = LOCAL_REUSABLE.match(uses)
     if not local:
-        if scan.event == "pull_request_target":
-            # The base workflow chose this pin; ADR 0235 scopes remote callees
-            # under pull_request_target out of the checker, visibly.
-            scan.notes.append(f"{path}: job '{name}' calls {uses}; remote callee not followed")
+        reason = REVIEWED_TARGET_REMOTES.get((caller_file(path), name, uses))
+        if scan.event == "pull_request_target" and reason is not None:
+            scan.notes.append(f"{path}: job '{name}' calls {uses} [{reason}]")
             return []
-        raise Undetermined(f"{path}: job '{name}' calls {uses}, whose placement this checker cannot read")
+        raise Undetermined(
+            f"{path}: job '{name}' calls {uses}, whose placement this checker cannot read "
+            "and which is not a reviewed SHA-pinned remote callee"
+        )
     if depth >= MAX_CALL_DEPTH:
         raise Undetermined(f"{path}: job '{name}' exceeds the reusable-call depth of {MAX_CALL_DEPTH}")
     callee = local.group(1)
@@ -1096,7 +1120,7 @@ def main(argv: list[str]) -> int:
         else:
             print(f"PENDING: {violation} [{row[1]}]")
     for note in notes:
-        print(f"NOT FOLLOWED: {note}")
+        print(f"REVIEWED REMOTE: {note}")
     for violation in violations:
         print(f"VIOLATION: {violation}")
     reported = {(violation.path, violation.job) for violation in found}
