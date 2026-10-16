@@ -127,3 +127,32 @@ revision. The unused preimage is dropped.
 bypass, so the evaluate-only transition it performed is complete and its predecessor can
 never match again. Any later change to that bypass is a reviewed contract change that
 this rotation path applies.
+
+### 2026-10-15 — Rotation applied; live receipt pending
+
+Ruleset 21750617 was rotated from `dc6b2942` to
+`c78fcd4ef9ab83b6775ae2ede94ebce475b3943c` (#1828) with
+`ROTATE-AUTHN-TYPE-SURFACE-1154`. The read-only `audit` and the package type-surface
+audit both exit 0. The post-rotation snapshot is
+`{"pre_trigger_max_run_id": 38820796032, "ruleset_updated_at": "2026-10-15T20:38:15.513-05:00"}`.
+
+The exact-head receipt is still outstanding: no authn pull request has run since the
+rotation. When the first `pull_request` run of
+`.github/workflows/authn-type-surface-required.yml` on `Verjson/verjson-authn`, created
+by the organization required-workflow rule, has a run ID above 38820796032, record its
+result here and on #1423. Run it from a clean worktree at the rotated revision. `verify_canonical_bytes` requires the
+local tool bytes to equal those at `--workflow-sha`:
+
+```bash
+M=c78fcd4ef9ab83b6775ae2ede94ebce475b3943c
+git -C /home/pbyousefi/development/verjson/.github fetch --prune origin
+git -C /home/pbyousefi/development/verjson/.github worktree add --detach "/tmp/receipt-$M" "$M"
+cd "/tmp/receipt-$M"
+RUN=<required-workflow run id above 38820796032>
+HEAD_SHA=$(gh api "repos/Verjson/verjson-authn/actions/runs/$RUN" --jq .head_sha)
+python3 -I scripts/authn-type-surface-ruleset.py verify-run --workflow-sha "$M" \
+  --run-id "$RUN" --head-sha "$HEAD_SHA" --pre-trigger-max-run-id 38820796032
+```
+
+`verify-run` rejects a run created before `ruleset_updated_at`, a run on another head, and
+a run that the organization rule did not create.
