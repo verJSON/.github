@@ -1937,4 +1937,93 @@ expect(
 )
 
 
+# Every event that runs pull-request code, or can carry a fork-controlled ref,
+# is either classified or refused; an unclassified one never reads as clean.
+def event_job(trigger: str, runs_on: str = "[self-hosted, general]") -> dict[str, str]:
+    return {
+        "ci.yml": f"""
+            on: {trigger}
+            jobs:
+              test:
+                runs-on: {runs_on}
+                steps:
+                  - uses: actions/checkout@v4
+                  - run: npm ci && npm test
+        """,
+    }
+
+
+for event in ("pull_request_review", "pull_request_review_comment", "merge_group"):
+    expect(
+        event_job(f"[{event}]"),
+        1,
+        (f"VIOLATION: ci.yml [{event}]: job 'test': {event} in a public repository can resolve to self-hosted",),
+        f"{event} runs pull-request code and is held to the pull_request rule",
+    )
+    expect(
+        event_job(f"{{{event}: {{types: [submitted]}}}}", "ubuntu-24.04"),
+        0,
+        ("clean",),
+        f"a hosted-only {event} job is clean",
+    )
+for event in ("pull_request_foo", "pull_request_target_v2", "check_run", "check_suite", "status",
+              "deployment", "deployment_status", "made_up_event"):
+    expect(
+        event_job(f"[push, {event}]"),
+        2,
+        ("UNDETERMINED", f"ci.yml: event '{event}'"),
+        f"an unclassified event {event} is undetermined, not clean",
+    )
+expect(
+    event_job("[push, workflow_dispatch, schedule, release, issues]"),
+    0,
+    ("clean",),
+    "events that carry no fork-controlled ref stay outside the rule",
+)
+
+# A workflow-level defaults.run.shell is a non-default shell for every job.
+WORKFLOW_SHELL = shaped_job("- run: echo hi")
+WORKFLOW_SHELL["target.yml"] = WORKFLOW_SHELL["target.yml"].replace(
+    "jobs:\n", "defaults:\n  run:\n    shell: sh\njobs:\n", 1
+)
+WORKFLOW_SHELL_ROW = review_row(WORKFLOW_SHELL, "target.yml [pull_request_target]", "review")
+expect(
+    with_review(WORKFLOW_SHELL, WORKFLOW_SHELL_ROW),
+    1,
+    ("unclassifiable", "does not name: shell (`shell: sh` in workflow defaults.run)"),
+    "a workflow-level defaults.run.shell needs dynamic: shell",
+    *REVIEWED_ARGS,
+)
+expect(
+    with_review(WORKFLOW_SHELL, dynamic_row(WORKFLOW_SHELL_ROW, {"shell"}, "sh runs only echo")),
+    0,
+    ("REVIEWED",),
+    "a workflow-level defaults.run.shell with dynamic: shell is classified",
+    *REVIEWED_ARGS,
+)
+
+# A repeated (path, job) key is a format error, never a silent override.
+for flag, rows in (
+    ("--reviewed", FETCH_ROW + FETCH_ROW),
+    ("--reviewed", "target.yml [pull_request_target]\treview\t" + NO_SPARSE_RUNTIME + "\tstale first\n" + FETCH_ROW),
+):
+    expect(
+        with_review(FETCH_JOB, rows),
+        2,
+        ("UNDETERMINED", "reviewed.tsv:2: duplicate entry for target.yml [pull_request_target] job 'review'"),
+        "a duplicate reviewed row is rejected wherever the valid row sits",
+        flag,
+        "{dir}/reviewed.tsv",
+    )
+PENDING_ROW = "ci.yml\ttest\t" + NO_SPARSE_RUNTIME + "\tratcheted\n"
+expect(
+    {**pull_request_job("[self-hosted, general]"), "pending.tsv": PENDING_ROW + PENDING_ROW},
+    2,
+    ("UNDETERMINED", "pending.tsv:2: duplicate entry for ci.yml job 'test'"),
+    "a duplicate pending row is rejected",
+    "--pending",
+    "{dir}/pending.tsv",
+)
+
+
 sys.exit(1 if failures else 0)

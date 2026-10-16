@@ -931,7 +931,41 @@ def materializes_head(job: dict, workflow_env, root: str, label: str) -> bool:
 # payload files, GITHUB_ENV/GITHUB_OUTPUT indirection, API clients), so every
 # job that can land on a persistent runner needs a reviewed entry (ADR 0235).
 PRIVILEGED_EVENTS = ("pull_request_target", "workflow_run", "issue_comment")
-CHECKED_EVENTS = ("pull_request",) + PRIVILEGED_EVENTS
+# Events that run the pull request's own code with pull_request semantics: a
+# review, a review comment, and a merge queue all run the head or merge commit.
+PULL_REQUEST_EVENTS = ("pull_request", "pull_request_review", "pull_request_review_comment", "merge_group")
+CHECKED_EVENTS = PULL_REQUEST_EVENTS + PRIVILEGED_EVENTS
+# Documented events whose runs carry no fork-controlled ref or code. Any event
+# outside this set and CHECKED_EVENTS is undetermined: check_run, check_suite,
+# status, deployment, and deployment_status can name a fork head SHA, and an
+# unknown name may be a new pull-request event.
+UNSCANNED_EVENTS = frozenset(
+    {
+        "branch_protection_rule",
+        "create",
+        "delete",
+        "discussion",
+        "discussion_comment",
+        "fork",
+        "gollum",
+        "issues",
+        "label",
+        "milestone",
+        "page_build",
+        "project",
+        "project_card",
+        "project_column",
+        "public",
+        "push",
+        "registry_package",
+        "release",
+        "repository_dispatch",
+        "schedule",
+        "watch",
+        "workflow_call",
+        "workflow_dispatch",
+    }
+)
 INHERITED_KEYS = ("env", "permissions", "defaults")
 
 
@@ -1507,8 +1541,15 @@ def check_tree(
         raise Undetermined(f"{directory}: no workflow files to scan")
     for name in names:
         document = load_workflow(os.path.join(directory, name))
+        events = triggers(document)
+        unclassified = sorted(events - set(CHECKED_EVENTS) - UNSCANNED_EVENTS)
+        if unclassified:
+            raise Undetermined(
+                f"{name}: event '{unclassified[0]}' is not classified by this checker; it may run pull-request code "
+                "or carry a fork-controlled ref, so classify it in ADR 0235 before a workflow uses it"
+            )
         for event in CHECKED_EVENTS:
-            if event not in triggers(document):
+            if event not in events:
                 continue
             scan = Scan(directory, repository, event, lists)
             label = name if event == "pull_request" else f"{name} [{event}]"
@@ -1557,6 +1598,7 @@ def load_pending(path: str | None, row_format: str = PENDING_FORMAT) -> dict[tup
     if path is None:
         return {}
     pending: dict[tuple[str, str], Entry] = {}
+    first_line: dict[tuple[str, str], int] = {}
     try:
         with open(path, encoding="utf-8") as handle:
             rows = handle.read().splitlines()
@@ -1574,7 +1616,14 @@ def load_pending(path: str | None, row_format: str = PENDING_FORMAT) -> dict[tup
         if not DIGEST.fullmatch(fields[2]):
             raise Undetermined(f"{path}:{number}: {row_format.split('<TAB>')[2]} must be sha256:<64 hex>")
         reasons = parse_dynamic(fields[4], f"{path}:{number}", row_format) if optional_dynamic else frozenset()
-        pending[(fields[0], fields[1])] = Entry(
+        key = (fields[0], fields[1])
+        if key in first_line:
+            raise Undetermined(
+                f"{path}:{number}: duplicate entry for {fields[0]} job '{fields[1]}' "
+                f"(first at line {first_line[key]}); a later row must not silently replace an earlier one"
+            )
+        first_line[key] = number
+        pending[key] = Entry(
             fields[2], fields[3], fields[4] if optional_dynamic else "", reasons
         )
     return pending

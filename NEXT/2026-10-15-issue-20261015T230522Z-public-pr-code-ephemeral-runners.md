@@ -12,6 +12,10 @@ jobs. A new contract check, `scripts/ci-gate/public-pr-runner-isolation.py`,
 fails if a job that a `pull_request` event can reach could land on a persistent
 runner through a variable fallback or a caller-supplied input
 ([ADR 0235](../docs/decisions/0235-public-pull-request-code-uses-ephemeral-runners/README.md)).
+`pull_request_review`, `pull_request_review_comment`, and `merge_group` are held
+to the same rule. A trigger the checker does not classify, such as
+`check_suite`, `status`, or an unknown `pull_request_*` name, is undetermined
+rather than clean, and a duplicate list row is a format error.
 
 Under `pull_request_target`, `workflow_run`, and `issue_comment`, a job that can
 reach a persistent runner must appear in

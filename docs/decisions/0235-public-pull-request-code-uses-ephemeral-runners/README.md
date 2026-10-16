@@ -112,6 +112,17 @@ or a literal GitHub-hosted image.
    adversarial value, because a fork can edit the caller. A remote reusable
    call that a pull request can reach, or any selector the checker cannot
    resolve, is undetermined. It never passes as clean.
+   `pull_request_review`, `pull_request_review_comment`, and `merge_group`
+   also run the pull request's own code, so they are held to the same rule as
+   `pull_request`. Every trigger a workflow names must be classified: one of
+   those four, a privileged event in decision 5, or a documented event that
+   carries no fork-controlled ref (such as `push`, `schedule`,
+   `workflow_dispatch`, `workflow_call`, `release`, or `issues`). Any other
+   trigger is undetermined, including `check_run`, `check_suite`, `status`,
+   `deployment`, and `deployment_status`, which can name a fork head SHA, and
+   any unknown name such as a future `pull_request_*` event. A duplicate
+   path-and-job row in the pending or reviewed list is a format error (exit 2)
+   rather than a silent override.
    The `platform` group runs the checker against the live tree, with its
    pending and reviewed lists, and
    `public-pr-runner-isolation.test.py` covers its behavior with fixtures. Both
