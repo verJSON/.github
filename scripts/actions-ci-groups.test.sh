@@ -507,9 +507,14 @@ def named_chunks(path, text):
 
 def named_sources(path, text, runnable_by_name, importers):
     """Tracked sources `path` names: by repository path, beside it, or any importer by name."""
+    return sources_named_by(path, path_fragments(path, text), runnable_by_name, importers)
+
+
+def sources_named_by(path, fragments, runnable_by_name, importers):
+    """Tracked sources that path-like `fragments` written in `path` resolve to."""
     parent = posixpath.dirname(path)
     named = set()
-    for fragment in path_fragments(path, text):
+    for fragment in fragments:
         for candidate in runnable_by_name.get(posixpath.basename(fragment), ()):
             if (
                 candidate in importers
@@ -519,6 +524,19 @@ def named_sources(path, text, runnable_by_name, importers):
             ):
                 named.add(candidate)
     return named
+
+
+def without_whole_line_comments(text):
+    """Text minus lines that are only a comment.
+
+    A line whose first word is `#` is a comment to bash, and to Python or bash
+    reading it as heredoc or string data, whatever quote state the comment
+    stripper believes it is in. Any other `#` the stripper drops is only as
+    sound as its quote tracking, which does not model heredocs or `$'...'`.
+    """
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
 
 
 def fleet_reached_importers(scripts, sources, importers):
@@ -538,7 +556,19 @@ def fleet_reached_importers(scripts, sources, importers):
             if path in importers or path in LOCALE_REFERENCE_EXEMPT:
                 continue
             if path.endswith((".sh", ".bash")):
-                following |= named_sources(path, sources[path], runnable_by_name, importers)
+                named = named_sources(path, sources[path], runnable_by_name, importers)
+                dropped = sources_named_by(
+                    path,
+                    PATH_FRAGMENT.findall(without_whole_line_comments(sources[path])),
+                    runnable_by_name,
+                    importers,
+                ) - named
+                if dropped:
+                    raise AssertionError(
+                        f"{path} names {sorted(dropped)} outside a whole-line comment, "
+                        "but the lexer dropped them, so what it runs cannot be classified"
+                    )
+                following |= named
             elif path.endswith(".py"):
                 following |= importers & named_sources(
                     path, sources[path], runnable_by_name, importers
@@ -931,6 +961,31 @@ expect_locale_failure(
     nested,
     reason="runs outside locale-collation",
 )
+# The comment stripper does not model heredocs or `\'` inside `$'...'`, so a
+# stray quote can shift its quote tracking until a later `#` swallows real code.
+# A runnable name that survives in the raw text (whole-line comments aside) but
+# not in the lexed words makes the wrapper unclassifiable, directly or through
+# a further wrapper whose name was the one dropped.
+for spelling, body in {
+    "heredoc apostrophe": (
+        "cat <<EOF\ndon't\nEOF\n"
+        f"x='a #b'; python3 \"$root/{retention_script}\"\n"
+    ),
+    "ANSI-C escaped quote": f"echo $'it\\'s # x'; python3 \"$root/{retention_script}\"\n",
+    "dropped inner wrapper": (
+        "echo $'it\\'s # x'; exec bash \"$(dirname \"$0\")/zz-inner.sh\"\n"
+    ),
+}.items():
+    misread = dict(script_sources)
+    misread[wrapper] = f"#!/usr/bin/env bash\n{body}"
+    misread["scripts/ci-gate/zz-inner.sh"] = f"exec python3 {retention_script}\n"
+    expect_locale_failure(
+        f"fleet shell wrapper whose {spelling} hides a run from the lexer",
+        document,
+        manifest_text + f"platform\tbash {wrapper}\n",
+        misread,
+        reason="the lexer dropped",
+    )
 subprocess_runner = dict(script_sources)
 subprocess_runner["scripts/ci-gate/zz-sub.test.py"] = (
     f'import subprocess\nsubprocess.run(["python3", "{retention_script}"], check=True)\n'
