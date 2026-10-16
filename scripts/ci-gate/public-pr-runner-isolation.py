@@ -15,6 +15,12 @@ value, every other variable to a persistent self-hosted selector. A chain such a
 `vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]'` is
 therefore a violation: with the untrusted lane unset it lands on the fallback.
 
+pull_request_target jobs that materialize the head (a checkout whose ref or
+repository is not base-only, `gh pr checkout`, or a git command in a job naming
+a head-derived value) are held to the same rule. Remote callees under
+pull_request_target are reported as NOT FOLLOWED; workflow_run and
+issue_comment are out of scope (ADR 0235).
+
 Verjson/.github ADR 0235.
 """
 
@@ -482,8 +488,10 @@ class Context:
         values: dict[tuple[str, str], object],
         needs: tuple[str, ...] = (),
         unreachable: frozenset[str] = frozenset(),
+        event: str = "pull_request",
     ) -> None:
         self.repository = repository
+        self.event = event
         self.values = values
         self.needs = needs
         self.unreachable = unreachable
@@ -500,7 +508,7 @@ class Context:
         if lowered[0] == "needs" and len(path) >= 3 and path[1] in self.unreachable:
             return ["skipped"] if lowered[2] == "result" else [""]
         if lowered == ("github", "event_name"):
-            return ["pull_request"]
+            return [self.event]
         if lowered == ("github", "repository"):
             return [self.repository]
         if lowered == ("github", "repository_owner"):
@@ -666,11 +674,15 @@ def dependency_order(path: str, jobs: dict) -> list[Violation]:
 
 
 def is_reachable(
-    job: dict, repository: str, bindings: dict[str, tuple], unreachable: frozenset[str]
+    job: dict,
+    repository: str,
+    bindings: dict[str, tuple],
+    unreachable: frozenset[str],
+    event: str,
 ) -> bool:
     condition = condition_node(job.get("if"))
     return any(
-        can_run(condition, Context(repository, assignment, job_needs(job), unreachable))
+        can_run(condition, Context(repository, assignment, job_needs(job), unreachable, event))
         for assignment in assignments((condition,), bindings)
     )
 
@@ -703,32 +715,104 @@ LOCAL_REUSABLE = re.compile(r"^\./\.github/workflows/([A-Za-z0-9._-]+\.ya?ml)$")
 MAX_CALL_DEPTH = 4
 
 
-def check_call(
-    directory: str, path: str, name: str, job: dict, repository: str, depth: int
-) -> list[Violation]:
+# Expression references whose value is fixed by the base repository, never by
+# the pull request. A pull_request_target checkout pinned to these runs base
+# code; any other expression is treated as able to name the head.
+BASE_ONLY_REFERENCE = re.compile(
+    r"^(?:github\.(?:sha|ref|ref_name|base_ref|repository|workflow_sha|run_id|run_attempt"
+    r"|event\.pull_request\.base\.[a-z_.]+|event\.repository\.[a-z_.]+)"
+    r"|job\.workflow_(?:sha|repository))$"
+)
+HEAD_TOKEN = re.compile(
+    r"pull_request\.head\.|github\.head_ref|refs/pull/|pull/\$\{\{|merge_commit_sha"
+    r"|\$\{\{\s*inputs\.",
+    re.I,
+)
+GIT_MATERIALIZE = re.compile(
+    r"\bgh\s+pr\s+checkout\b"
+    r"|\bgit\b[^\n]*?\b(?:fetch|checkout|switch|worktree|pull|reset|merge|cherry-pick|clone|am|apply)\b"
+)
+
+
+def is_base_only(value) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, str):
+        return False
+    if "refs/pull/" in value:
+        return False
+    for expression in re.findall(r"\$\{\{(.*?)\}\}", value, re.S):
+        try:
+            node = Parser(expression).parse()
+        except Undetermined:
+            return False
+        for path in references(node):
+            if not BASE_ONLY_REFERENCE.match(".".join(path).lower()):
+                return False
+    return True
+
+
+def materializes_head(job: dict) -> bool:
+    """Whether a pull_request_target job can put head-controlled bytes on disk.
+
+    Over-approximates: a checkout whose ref or repository is anything but a
+    base-only value, `gh pr checkout`, or a git command in a job that names a
+    head-derived value. Head metadata used only for API calls does not count.
+    """
+    job_text = json.dumps(job, sort_keys=True, default=str)
+    names_head = bool(HEAD_TOKEN.search(job_text))
+    for step in job.get("steps") or []:
+        if not isinstance(step, dict):
+            return True
+        uses = str(step.get("uses", ""))
+        if uses.split("@")[0].lower() == "actions/checkout":
+            options = step.get("with") or {}
+            if not is_base_only(options.get("ref")) or not is_base_only(options.get("repository")):
+                return True
+        run = step.get("run")
+        if isinstance(run, str) and GIT_MATERIALIZE.search(run):
+            if "gh pr checkout" in run or names_head:
+                return True
+    return False
+
+
+class Scan:
+    """Traversal state for one triggering event across local reusable calls."""
+
+    def __init__(self, directory: str, repository: str, event: str) -> None:
+        self.directory = directory
+        self.repository = repository
+        self.event = event
+        self.notes: list[str] = []
+
+
+def check_call(scan: Scan, path: str, name: str, job: dict, depth: int) -> list[Violation]:
     uses = str(job["uses"])
     local = LOCAL_REUSABLE.match(uses)
     if not local:
+        if scan.event == "pull_request_target":
+            # The base workflow chose this pin; ADR 0235 scopes remote callees
+            # under pull_request_target out of the checker, visibly.
+            scan.notes.append(f"{path}: job '{name}' calls {uses}; remote callee not followed")
+            return []
         raise Undetermined(f"{path}: job '{name}' calls {uses}, whose placement this checker cannot read")
     if depth >= MAX_CALL_DEPTH:
         raise Undetermined(f"{path}: job '{name}' exceeds the reusable-call depth of {MAX_CALL_DEPTH}")
     callee = local.group(1)
-    document = load_workflow(os.path.join(directory, callee))
+    document = load_workflow(os.path.join(scan.directory, callee))
     return check_workflow(
-        directory,
+        scan,
         f"{path}:{name} -> {callee}",
         document,
-        repository,
         callee_bindings(job, document),
         depth + 1,
     )
 
 
 def check_workflow(
-    directory: str,
+    scan: Scan,
     path: str,
     document: dict,
-    repository: str,
     bindings: dict[str, tuple] | None = None,
     depth: int = 0,
 ) -> list[Violation]:
@@ -738,14 +822,18 @@ def check_workflow(
     violations: list[Violation] = []
     for name in dependency_order(path, jobs):
         job = jobs[name]
-        if not is_reachable(job, repository, bindings, frozenset(unreachable)):
+        if not is_reachable(job, scan.repository, bindings, frozenset(unreachable), scan.event):
             unreachable.add(name)
             continue
         if "uses" in job:
-            violations.extend(check_call(directory, path, name, job, repository, depth))
+            violations.extend(check_call(scan, path, name, job, depth))
+        elif scan.event == "pull_request_target" and not materializes_head(job):
+            continue
         else:
             violations.extend(
-                check_job(path, name, job, repository, bindings, frozenset(unreachable))
+                check_job(
+                    path, name, job, scan.repository, bindings, frozenset(unreachable), scan.event
+                )
             )
     return violations
 
@@ -757,6 +845,7 @@ def check_job(
     repository: str,
     bindings: dict[str, tuple],
     unreachable: frozenset[str],
+    event: str,
 ) -> list[Violation]:
     runs_on = job.get("runs-on")
     if runs_on is None:
@@ -764,7 +853,7 @@ def check_job(
     condition = condition_node(job.get("if"))
     violations = []
     for assignment in assignments((condition, selector_node(runs_on)), bindings):
-        context = Context(repository, assignment, job_needs(job), unreachable)
+        context = Context(repository, assignment, job_needs(job), unreachable, event)
         if not can_run(condition, context):
             continue
         for outcome in selector_outcomes(runs_on, context):
@@ -777,7 +866,7 @@ def check_job(
                     Violation(
                         path,
                         name,
-                        "pull_request in a public repository can resolve to self-hosted "
+                        f"{event} in a public repository can resolve to self-hosted "
                         f"or non-ephemeral runner labels {list(outcome)!r} ({describe(assignment)})",
                         selector_digest(runs_on),
                     )
@@ -786,7 +875,10 @@ def check_job(
     return violations
 
 
-def check_tree(directory: str, repository: str) -> list[Violation]:
+CHECKED_EVENTS = ("pull_request", "pull_request_target")
+
+
+def check_tree(directory: str, repository: str, notes: list[str] | None = None) -> list[Violation]:
     violations: list[Violation] = []
     names = sorted(
         name for name in os.listdir(directory) if name.endswith((".yml", ".yaml"))
@@ -794,11 +886,15 @@ def check_tree(directory: str, repository: str) -> list[Violation]:
     if not names:
         raise Undetermined(f"{directory}: no workflow files to scan")
     for name in names:
-        path = os.path.join(directory, name)
-        document = load_workflow(path)
-        if "pull_request" not in triggers(document):
-            continue
-        violations.extend(check_workflow(directory, name, document, repository))
+        document = load_workflow(os.path.join(directory, name))
+        for event in CHECKED_EVENTS:
+            if event not in triggers(document):
+                continue
+            scan = Scan(directory, repository, event)
+            label = name if event == "pull_request" else f"{name} [{event}]"
+            violations.extend(check_workflow(scan, label, document))
+            if notes is not None:
+                notes.extend(scan.notes)
     return violations
 
 
@@ -835,7 +931,8 @@ def main(argv: list[str]) -> int:
     arguments = parser.parse_args(argv)
     try:
         pending = load_pending(arguments.pending)
-        found = check_tree(arguments.workflow_dir, arguments.repository)
+        notes: list[str] = []
+        found = check_tree(arguments.workflow_dir, arguments.repository, notes)
     except Undetermined as error:
         print(f"UNDETERMINED: {error}", file=sys.stderr)
         return 2
@@ -853,6 +950,8 @@ def main(argv: list[str]) -> int:
             )
         else:
             print(f"PENDING: {violation} [{row[1]}]")
+    for note in notes:
+        print(f"NOT FOLLOWED: {note}")
     for violation in violations:
         print(f"VIOLATION: {violation}")
     reported = {(violation.path, violation.job) for violation in found}
@@ -862,7 +961,8 @@ def main(argv: list[str]) -> int:
     if violations or stale:
         return 1
     print(
-        f"clean: no pull_request job in {arguments.workflow_dir} can reach a persistent runner"
+        f"clean: no pull_request job, and no pull_request_target job that materializes the "
+        f"head, in {arguments.workflow_dir} can reach a persistent runner"
         + (f" beyond {len(pending)} reviewed pending job(s)" if pending else "")
     )
     return 0

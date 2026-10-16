@@ -476,4 +476,113 @@ for label in ("ubuntu-latest", "ubuntu-22.04", "ubuntu-24.04-arm", "windows-late
         f"standard hosted image {label!r} is ephemeral",
     )
 
+
+# ---------------------------------------------------------------------------
+# pull_request_target runs the BASE workflow with a privileged token, so it is
+# dangerous exactly when a job materializes the pull request's head. Those jobs
+# are held to the same placement rule; base-only jobs are not.
+# ---------------------------------------------------------------------------
+
+
+def target_job(steps: str, runs_on: str = TRUSTED_SELECTOR) -> dict[str, str]:
+    return {
+        "target.yml": f"""
+            on: pull_request_target
+            jobs:
+              review:
+                runs-on: {runs_on}
+                steps:
+{textwrap.indent(textwrap.dedent(steps), " " * 18)}
+        """,
+    }
+
+
+expect(
+    target_job("""
+        - uses: actions/checkout@v4
+          with:
+            ref: ${{ github.event.pull_request.head.sha }}
+        - run: make test
+    """),
+    1,
+    ("target.yml [pull_request_target]", "review", "self-hosted"),
+    "a pull_request_target job that checks out the head is held to the placement rule",
+)
+expect(
+    target_job("""
+        - run: gh pr checkout ${{ github.event.pull_request.number }} && make test
+    """),
+    1,
+    ("[pull_request_target]", "review"),
+    "a pull_request_target job running gh pr checkout is held to the placement rule",
+)
+expect(
+    target_job("""
+        - uses: actions/checkout@v4
+          with:
+            ref: ${{ env.CANDIDATE }}
+    """),
+    1,
+    ("[pull_request_target]", "review"),
+    "a pull_request_target checkout through an indirection is treated as head-capable",
+)
+expect(
+    target_job("""
+        - env:
+            HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          run: git fetch --depth=1 origin "$HEAD_SHA" && git checkout FETCH_HEAD
+    """),
+    1,
+    ("[pull_request_target]", "review"),
+    "a pull_request_target git fetch of a head-derived value is held to the placement rule",
+)
+expect(
+    target_job("""
+        - uses: actions/checkout@v4
+          with:
+            ref: ${{ github.event.pull_request.base.sha }}
+        - env:
+            HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          run: gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs"
+    """),
+    0,
+    ("clean",),
+    "a pull_request_target job running only base code with head metadata is outside the rule",
+)
+expect(
+    target_job(
+        """
+        - uses: actions/checkout@v4
+          with:
+            ref: ${{ github.event.pull_request.head.sha }}
+        """,
+        runs_on="ubuntu-24.04",
+    ),
+    0,
+    ("clean",),
+    "a pull_request_target head checkout on a hosted image is clean",
+)
+
+expect(
+    {
+        "target.yml": """
+            on: pull_request_target
+            jobs:
+              arm:
+                uses: Verjson/.github/.github/workflows/app-key-environment.yml@0123456789abcdef0123456789abcdef01234567
+        """,
+    },
+    0,
+    ("NOT FOLLOWED: target.yml [pull_request_target]: job 'arm'",),
+    "a remote callee under pull_request_target is reported as not followed, never silently",
+)
+expect(
+    target_job("""
+        - run: git fetch origin "+refs/pull/1/merge" && git checkout FETCH_HEAD
+    """),
+    1,
+    ("[pull_request_target]",),
+    "a pull_request_target fetch of a refs/pull refspec is held to the placement rule",
+)
+
 sys.exit(1 if failures else 0)
