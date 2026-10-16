@@ -117,3 +117,17 @@ The sites that read the value:
 
 **Consequence for adopters.** A release hook that reads the window (verjson-ci#298) must treat `all` as "never evicts" and pass. Once its caller is regenerated, the variable is always present, so an absent value is an error the hook should fail closed on.
 
+## 2026-10-16 amendment — rollout order for the guard rewrite and for `all`
+
+**Required-workflow rotations.** Two organization rulesets run a workflow this change rewrites from a stored SHA, so their halves of the guard rewrite take effect only once each ruleset is rotated to this change's merge commit:
+- ruleset 20722935 (`ai-authorization-arm-required`) runs `gate-rearm.yml`, which carries the AI review budget and App-slug guards;
+- ruleset 21830367 (`cli-projects-package-surface-required-workflow`) runs `.github/workflows/cli-projects-package-surface-required.yml`. It stores `c78fcd4e` ([ADR 0153](../0153-cli-projects-package-surface-required-workflow/README.md)), so the spelled-out admission guards are inert until rotation.
+
+The PM owns both rotations. Reusable workflows (`ai-review-merge.yml`, `node-release.yml`, `container-release.yml`, `node-ci.yml`) and generated callers take effect when a caller pins this contract or later.
+
+**When `all` may be set.** Set `CI_PACKAGE_RETENTION_KEEP=all` only after every repository that reads it pins this contract or later. A variable set at organization level reaches all of them at once, so the value is safe only when no consumer still runs an older contract. Before that:
+- an older retention guard (`^[1-9][0-9]*$`, or the earlier `{0,2}` cap without `all`) rejects `all` after publication, turning node-release retention red and container-release retention into a skipped cleanup;
+- an older generated verify step does not forward the variable at all, and a release hook that reads it but does not know `all` blocks every release.
+
+verjson-ci#298 is the first consumer that must understand `all`, as "never evicts". Until its hook does and its caller is regenerated, `all` must not be set where verjson-ci can read it. Setting the variable at repository level, on a repository already on this contract, is the safe way to adopt `all` early.
+
