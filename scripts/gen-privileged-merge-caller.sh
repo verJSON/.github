@@ -24,7 +24,7 @@
 set -euo pipefail
 
 contract_sha="${1-}"
-[[ "$contract_sha" =~ ^[0-9a-f]{40}$ ]] || {
+[[ "$contract_sha" =~ ^[0123456789abcdef]{40}$ ]] || {
   echo "contract_sha must be an immutable lowercase 40-hex commit SHA" >&2
   exit 2
 }

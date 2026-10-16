@@ -567,6 +567,9 @@ NON_GATE_MODULES = {
     "scripts/ci-gate/ascii_digit_locales.py": (
         "locale-matrix helper imported by the digit-guard tests"
     ),
+    "scripts/ci-gate/settable_value_guards.py": (
+        "shell guard scanner imported by settable-value-guards.test.py"
+    ),
     "scripts/ci-gate/conformance/adopter.py": (
         "adopter fixture loader imported by conformance.test.py"
     ),

@@ -62,11 +62,11 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$REVIEW_KIND" =~ ^(code|security|ai)$ ]]
-          [[ "$CONFIG_PATH" =~ ^[A-Za-z0-9_./-]+\.json$ && "$CONFIG_PATH" != /* && "$CONFIG_PATH" != *..* ]]
+          [[ "$CONFIG_PATH" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./-]+\.json$ && "$CONFIG_PATH" != /* && "$CONFIG_PATH" != *..* ]]
           head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$TARGET_PULL" --jq .head.sha)"
           # Constrain the ref at its use, not only at its source: 40 hex excludes every
           # character that could change the meaning of the URL it is about to build.
-          [[ "$head" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$head" =~ ^[0123456789abcdef]{40}$ ]]
           gh api "repos/$GITHUB_REPOSITORY/contents/$CONFIG_PATH?ref=$head" --jq .content | tr -d '\n' | base64 -d > "$RUNNER_TEMP/review-config.json"
           value="$(jq -er --arg kind "$REVIEW_KIND" '.reviewAuthority[$kind].installationId | select(type == "number" and . > 0)' "$RUNNER_TEMP/review-config.json")"
           echo "installation-id=$value" >> "$GITHUB_OUTPUT"

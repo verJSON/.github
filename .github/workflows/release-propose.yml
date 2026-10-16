@@ -49,7 +49,7 @@ jobs:
           DISPATCH_REF: ${{ github.ref }}
           CONTRACT_REF: ${{ inputs.contract_ref }}
         run: |
-          if [[ ! "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ ]]; then
+          if [[ ! "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]]; then
             echo "::error::contract_ref must be an immutable 40-character commit"
             exit 1
           fi

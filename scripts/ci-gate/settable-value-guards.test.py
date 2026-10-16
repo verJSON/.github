@@ -39,7 +39,7 @@ NON_ASCII_PROBES = ("\u00e9", "\uff41", "\uff21", "\u0663", "\uff13", "\u00a0")
 
 # The reviewed inventory: every guard the scanner finds, in the repository and
 # in the generator's HEAD output. A change is a review point.
-GUARD_COUNT = None
+GUARD_COUNT = 433
 # Shapes the scanner cannot judge, each with the reason it is safe.
 REVIEWED_UNCLASSIFIABLE = {}
 # Files generated at an older pinned contract. They carry the guards that

@@ -1749,7 +1749,7 @@ jobs:
             )" || supervisor_status=$?
             case "$supervisor_status" in
               0)
-                if [[ "$supervisor_output" =~ ^[0-9a-f]{64}$ ]]; then
+                if [[ "$supervisor_output" =~ ^[0123456789abcdef]{64}$ ]]; then
                   printf '%s\n' "$supervisor_output"
                   return 0
                 fi

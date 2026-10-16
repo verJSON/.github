@@ -461,7 +461,7 @@ jobs:
           # this guard narrowly: it protects THIS request, which nothing earlier does. The
           # three copies of this script are byte-identical by contract, so the guard is in all
           # of them (Verjson/.github#1464).
-          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
+          [[ "$HEAD_SHA" =~ ^[0123456789abcdef]{40}$ ]] \
             || { echo "::error::head-sha is not a 40-hex object name"; exit 1; }
           pending=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/status" \
             --jq '[.statuses[]? | select(.context == "renovate/stability-days" and .state == "pending")] | length' 2>/dev/null || echo 0)
@@ -573,7 +573,7 @@ jobs:
           JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
         run: |
           set -euo pipefail
-          [[ "$JOB_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]] || {
             echo "::error::reusable Node CI workflow SHA is invalid"
             exit 1
           }
@@ -1352,7 +1352,7 @@ jobs:
             } > "$NPM_CONFIG_USERCONFIG"
             while IFS=$'\t' read -r resolved digest_hex extra; do
               [ -z "$extra" ] && [[ "$resolved" == https://npm.pkg.github.com/* ]] \
-                && [[ "$digest_hex" =~ ^[0-9a-f]{128}$ ]] || {
+                && [[ "$digest_hex" =~ ^[0123456789abcdef]{128}$ ]] || {
                   echo "::error::invalid validated private cache entry"
                   exit 1
                 }
@@ -1470,7 +1470,7 @@ jobs:
           fi
           payload_sha256="$(sha256sum "$TRANSFER_DIR/npm-private-cache.tar" | cut -d' ' -f1)"
           encryption_key="$(openssl rand -hex 32)"
-          [[ "$encryption_key" =~ ^[0-9a-f]{64}$ ]] || {
+          [[ "$encryption_key" =~ ^[0123456789abcdef]{64}$ ]] || {
             echo "::error::could not generate a secretless transfer key"
             exit 1
           }
@@ -1530,12 +1530,12 @@ jobs:
           RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ && "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {
+          [[ "$RUN_ID" =~ ^[123456789][0123456789]*$ && "$RUN_ATTEMPT" =~ ^[123456789][0123456789]*$ ]] || {
             echo "::error::invalid secretless cache run identity"
             exit 1
           }
           nonce="$(openssl rand -hex 32)"
-          [[ "$nonce" =~ ^[0-9a-f]{64}$ ]] || {
+          [[ "$nonce" =~ ^[0123456789abcdef]{64}$ ]] || {
             echo "::error::could not generate secretless cache nonce"
             exit 1
           }
@@ -1649,7 +1649,7 @@ jobs:
           JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
         run: |
           set -euo pipefail
-          [[ "$JOB_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]] || {
             echo "::error::reusable Node CI workflow SHA is invalid"
             exit 1
           }
@@ -1762,10 +1762,10 @@ jobs:
           manifest_compatibility_provenance_sha256="$(manifest_value compatibility_provenance_sha256)"
           manifest_payload_sha256="$(manifest_value payload_sha256)"
           manifest_payload_bytes="$(manifest_value payload_bytes)"
-          [[ "$manifest_run_id" =~ ^[0-9]+$ && "$manifest_run_attempt" =~ ^[0-9]+$ ]]
-          [[ "$manifest_lock_sha256" =~ ^[0-9a-f]{64}$ && "$manifest_payload_sha256" =~ ^[0-9a-f]{64}$ ]]
-          [[ "$manifest_payload_bytes" =~ ^[0-9]+$ ]]
-          [[ "$EXPECTED_PAYLOAD_SHA256" =~ ^[0-9a-f]{64}$ && "$EXPECTED_PAYLOAD_BYTES" =~ ^[0-9]+$ ]] \
+          [[ "$manifest_run_id" =~ ^[0123456789]+$ && "$manifest_run_attempt" =~ ^[0123456789]+$ ]]
+          [[ "$manifest_lock_sha256" =~ ^[0123456789abcdef]{64}$ && "$manifest_payload_sha256" =~ ^[0123456789abcdef]{64}$ ]]
+          [[ "$manifest_payload_bytes" =~ ^[0123456789]+$ ]]
+          [[ "$EXPECTED_PAYLOAD_SHA256" =~ ^[0123456789abcdef]{64}$ && "$EXPECTED_PAYLOAD_BYTES" =~ ^[0123456789]+$ ]] \
             && [ "$manifest_payload_sha256" = "$EXPECTED_PAYLOAD_SHA256" ] \
             && [ "$manifest_payload_bytes" = "$EXPECTED_PAYLOAD_BYTES" ] || {
               echo "::error::secretless cache does not match the trusted acquisition output"
@@ -1849,8 +1849,8 @@ jobs:
               exit 1
             }
           if [ -n "$EXPECTED_AUXILIARY_CONTENT_PATH" ]; then
-            [[ "$EXPECTED_AUXILIARY_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
-            [[ "$EXPECTED_AUXILIARY_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$EXPECTED_AUXILIARY_REPOSITORY" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-]+/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-]+$ ]]
+            [[ "$EXPECTED_AUXILIARY_COMMIT" =~ ^[0123456789abcdef]{40}$ ]]
           else
             [ -z "$EXPECTED_AUXILIARY_REPOSITORY" ] && [ -z "$EXPECTED_AUXILIARY_COMMIT" ] || exit 1
           fi
@@ -1859,7 +1859,7 @@ jobs:
             exit 1
           }
           if [ -n "$COMPATIBILITY_RANGES" ]; then
-            [[ "$manifest_compatibility_provenance_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+            [[ "$manifest_compatibility_provenance_sha256" =~ ^[0123456789abcdef]{64}$ ]] || {
               echo "::error::secretless cache is missing compatibility provenance"
               exit 1
             }
@@ -2627,7 +2627,7 @@ jobs:
                 exit 1 ;;
             esac
             key="${line%%=*}"
-            if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            if [[ ! "$key" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*$ ]]; then
               echo "db-env: '$key' is not a valid environment variable name" >&2
               exit 1
             fi
@@ -2683,7 +2683,7 @@ jobs:
             [ -n "$stale_id" ] || continue
             stale_epoch="$(date -d "$stale_date $stale_time $stale_zone" +%s 2>/dev/null || true)"
             case "$stale_epoch" in
-              ''|*[!0-9]*)
+              ''|*[!0123456789]*)
                 echo "warning: not sweeping $stale_id: cannot read its creation" \
                      "time from '$stale_date $stale_time $stale_zone'" >&2
                 continue ;;
@@ -2726,7 +2726,7 @@ jobs:
           DB_PORT="${port_map%%$'\n'*}"
           DB_PORT="${DB_PORT##*:}"
           case "$DB_PORT" in
-            ''|*[!0-9]*)
+            ''|*[!0123456789]*)
               # An image that exits immediately dies here, before the health loop
               # below can dump anything — so dump the container's logs on this
               # branch too, or the operator sees only "could not read the port".
@@ -2769,14 +2769,14 @@ jobs:
               '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
               "$CONTAINER_ID")"
             case "$candidate" in
-              ''|*[!0-9.]*)
+              ''|*[!0123456789.]*)
                 echo "could not read a valid database container bridge IPv4 from '$candidate'" >&2
                 exit 1 ;;
             esac
             IFS=. read -r octet1 octet2 octet3 octet4 extra <<< "$candidate"
             for octet in "$octet1" "$octet2" "$octet3" "$octet4"; do
               case "$octet" in
-                ''|*[!0-9]*|0[0-9]*)
+                ''|*[!0123456789]*|0[0123456789]*)
                   echo "could not read a valid database container bridge IPv4 from '$candidate'" >&2
                   exit 1 ;;
               esac
@@ -2857,8 +2857,8 @@ jobs:
             # this rejection exists to prevent.
             hardcoded=""
             case "$value" in
-              *:5432|*:5432[!0-9A-Za-z]*) hardcoded="a literal :5432 port" ;;
-              *[!0-9A-Za-z]port=5432|port=5432|*[!0-9A-Za-z]port=5432[!0-9]*|port=5432[!0-9]*)
+              *:5432|*:5432[!0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz]*) hardcoded="a literal :5432 port" ;;
+              *[!0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz]port=5432|port=5432|*[!0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz]port=5432[!0123456789]*|port=5432[!0123456789]*)
                 hardcoded="a literal port=5432" ;;
             esac
             case "$key" in
@@ -2961,7 +2961,7 @@ jobs:
               *) echo "cache-env: '$line' is not a KEY=VALUE pair" >&2; exit 1 ;;
             esac
             key="${line%%=*}"
-            if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            if [[ ! "$key" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*$ ]]; then
               echo "cache-env: '$key' is not a valid environment variable name" >&2
               exit 1
             fi
@@ -2999,7 +2999,7 @@ jobs:
             [ -n "$stale_id" ] || continue
             stale_epoch="$(date -d "$stale_date $stale_time $stale_zone" +%s 2>/dev/null || true)"
             case "$stale_epoch" in
-              ''|*[!0-9]*)
+              ''|*[!0123456789]*)
                 echo "warning: not sweeping $stale_id: unreadable creation time" >&2
                 continue ;;
             esac
@@ -3017,7 +3017,7 @@ jobs:
           CACHE_PORT="${port_map%%$'\n'*}"
           CACHE_PORT="${CACHE_PORT##*:}"
           case "$CACHE_PORT" in
-            ''|*[!0-9]*)
+            ''|*[!0123456789]*)
               echo "could not read the mapped cache port from '$port_map'" >&2
               docker logs "$CONTAINER_ID" >&2 || true
               exit 1 ;;
@@ -4612,7 +4612,7 @@ jobs:
             )" || supervisor_status=$?
             case "$supervisor_status" in
               0)
-                if [[ "$supervisor_output" =~ ^[0-9a-f]{64}$ ]]; then
+                if [[ "$supervisor_output" =~ ^[0123456789abcdef]{64}$ ]]; then
                   printf '%s\n' "$supervisor_output"
                   return 0
                 fi

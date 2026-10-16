@@ -46,7 +46,7 @@ jobs:
           EXECUTING_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           set -euo pipefail
-          [[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ ]] || {
+          [[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]] || {
             echo "::error::contract_ref must be a full lower-case commit SHA"
             exit 1
           }
@@ -122,7 +122,7 @@ jobs:
           CONTRACT_PATH: .renovate-changelog-contract-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
         run: |
           set -euo pipefail
-          [[ "$CONTRACT_PATH" =~ ^\.renovate-changelog-contract-[0-9]+-[0-9]+-[A-Za-z0-9_.-]+$ ]]
+          [[ "$CONTRACT_PATH" =~ ^\.renovate-changelog-contract-[0123456789]+-[0123456789]+-[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-]+$ ]]
           checkout_root="$GITHUB_WORKSPACE/${CONTRACT_PATH:?}"
           [[ "$checkout_root" == "$GITHUB_WORKSPACE"/.renovate-changelog-contract-* ]]
           rm -rf -- "${checkout_root:?}"

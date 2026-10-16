@@ -84,10 +84,10 @@ jobs:
           SOURCE_PATH: .container-candidate-source-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          [[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::contract-ref must be a 40-hex commit"; exit 1; }
+          [[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]] || { echo "::error::contract-ref must be a 40-hex commit"; exit 1; }
           [ "$CONTRACT_REF" = "$JOB_WORKFLOW_SHA" ] || { echo "::error::contract-ref must identify the executing reusable workflow"; exit 1; }
-          [[ "$RETRY_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::retry-sha256 must be a lowercase SHA-256 digest"; exit 1; }
-          [[ "$CONFIG_RELATIVE_PATH" =~ ^([A-Za-z0-9][A-Za-z0-9._-]*/)*[A-Za-z0-9][A-Za-z0-9._-]*\.json$ ]] \
+          [[ "$RETRY_SHA256" =~ ^[0123456789abcdef]{64}$ ]] || { echo "::error::retry-sha256 must be a lowercase SHA-256 digest"; exit 1; }
+          [[ "$CONFIG_RELATIVE_PATH" =~ ^([ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*/)*[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*\.json$ ]] \
             || { echo "::error::config-path must be a normalized repository-relative JSON path"; exit 1; }
           source_root="$(realpath -e "$SOURCE_PATH")" \
             || { echo "::error::isolated candidate source is missing"; exit 1; }
@@ -214,7 +214,7 @@ jobs:
           TRANSFER_SHA256: ${{ inputs.transfer-sha256 }}
         run: |
           set -euo pipefail
-          [[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ && "$TRANSFER_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+          [[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ && "$TRANSFER_SHA256" =~ ^[0123456789abcdef]{64}$ ]] || {
             echo "::error::invalid dependency transfer contract identity"
             exit 1
           }
@@ -246,7 +246,7 @@ jobs:
             [ "$HEAD_REPOSITORY" = "$REPOSITORY" ] || {
               [ "$APPROVED_PRIVATE_PACKAGES" = '[]' ] || { echo "::error::fork pull requests cannot acquire private container dependencies"; exit 1; }
             }
-            [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::pull request base SHA is missing"; exit 1; }
+            [[ "$BASE_SHA" =~ ^[0123456789abcdef]{40}$ ]] || { echo "::error::pull request base SHA is missing"; exit 1; }
             base_config="$RUNNER_TEMP/container-candidate-base.json"
             git show "$BASE_SHA:$CONFIG_PATH" > "$base_config" 2>/dev/null || { echo "::error::candidate config must exist at the reviewed base SHA"; exit 1; }
             base_approved="$(jq -ce '.privateNodePackages // []' "$base_config")" || { echo "::error::reviewed base privateNodePackages is invalid"; exit 1; }
@@ -305,7 +305,7 @@ jobs:
           mkdir -p "$TRANSFER_DIR"
           tar -czf "$TRANSFER_DIR/container-node-modules.tgz" -C "$artifact" .
           encryption_key="$(openssl rand -hex 32)"
-          [[ "$encryption_key" =~ ^[0-9a-f]{64}$ ]] || {
+          [[ "$encryption_key" =~ ^[0123456789abcdef]{64}$ ]] || {
             echo "::error::could not generate a private dependency transfer key"
             exit 1
           }
@@ -321,12 +321,12 @@ jobs:
           RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ && "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {
+          [[ "$RUN_ID" =~ ^[123456789][0123456789]*$ && "$RUN_ATTEMPT" =~ ^[123456789][0123456789]*$ ]] || {
             echo "::error::invalid container dependency cache run identity"
             exit 1
           }
           nonce="$(openssl rand -hex 32)"
-          [[ "$nonce" =~ ^[0-9a-f]{64}$ ]] || {
+          [[ "$nonce" =~ ^[0123456789abcdef]{64}$ ]] || {
             echo "::error::could not generate container dependency cache nonce"
             exit 1
           }
@@ -379,7 +379,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
-          [[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ && "$DISK_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          [[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ && "$DISK_SHA256" =~ ^[0123456789abcdef]{64}$ ]] || exit 1
           helper="$RUNNER_TEMP/container_candidate_disk_usage.sh"
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_candidate_disk_usage.sh" -o "$helper"
           printf '%s  %s\n' "$DISK_SHA256" "$helper" | sha256sum --check --strict
@@ -410,7 +410,7 @@ jobs:
           TRANSFER_SHA256: ${{ inputs.transfer-sha256 }}
         run: |
           set -euo pipefail
-          [[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ && "$TRANSFER_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+          [[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ && "$TRANSFER_SHA256" =~ ^[0123456789abcdef]{64}$ ]] || {
             echo "::error::invalid dependency transfer contract identity"
             exit 1
           }
@@ -537,7 +537,7 @@ jobs:
             echo '::error::could not prove immutable commit identity state' >&2
             exit 1
           fi
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo '::error::immutable commit identity returned a malformed digest'; exit 1; }
+          [[ "$digest" =~ ^sha256:[0123456789abcdef]{64}$ ]] || { echo '::error::immutable commit identity returned a malformed digest'; exit 1; }
           retry="$RUNNER_TEMP/container_candidate_retry.py"
           oci="$RUNNER_TEMP/container_oci_index.py"
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_candidate_retry.py" -o "$retry"
@@ -623,7 +623,7 @@ jobs:
           REPOSITORY: ${{ matrix.repository }}
         run: |
           set -euo pipefail
-          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::build returned an invalid image digest"; exit 1; }
+          [[ "$DIGEST" =~ ^sha256:[0123456789abcdef]{64}$ ]] || { echo "::error::build returned an invalid image digest"; exit 1; }
           reference="$REPOSITORY@$DIGEST"
           for attempt in 1 2 3 4 5 6; do
             if observed="$(timeout --kill-after=2s 5s docker buildx imagetools inspect "$reference" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"')" \
@@ -679,9 +679,9 @@ jobs:
           REFERRER_MANIFEST_DIGEST: ${{ steps.provenance.outputs.referrer-manifest-digest }}
         run: |
           set -euo pipefail
-          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
-          [[ "$BUNDLE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Cosign provenance bundle digest is missing"; exit 1; }
-          [[ "$REFERRER_MANIFEST_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Cosign provenance referrer digest is missing"; exit 1; }
+          [[ "$DIGEST" =~ ^sha256:[0123456789abcdef]{64}$ ]] || exit 1
+          [[ "$BUNDLE_DIGEST" =~ ^sha256:[0123456789abcdef]{64}$ ]] || { echo "::error::Cosign provenance bundle digest is missing"; exit 1; }
+          [[ "$REFERRER_MANIFEST_DIGEST" =~ ^sha256:[0123456789abcdef]{64}$ ]] || { echo "::error::Cosign provenance referrer digest is missing"; exit 1; }
           commit_tag="$REPOSITORY:sha-$GITHUB_SHA"
           error_file="$(mktemp)"
           if existing="$(docker buildx imagetools inspect "$commit_tag" --format '{{json .Manifest.Digest}}' 2>"$error_file" | tr -d '"')"; then
@@ -708,8 +708,8 @@ jobs:
           REPOSITORY: ${{ matrix.repository }}
           VARIANT: ${{ matrix.variant }}
         run: |
-          [[ "$BUNDLE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
-          [[ "$REFERRER_MANIFEST_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          [[ "$BUNDLE_DIGEST" =~ ^sha256:[0123456789abcdef]{64}$ ]] || exit 1
+          [[ "$REFERRER_MANIFEST_DIGEST" =~ ^sha256:[0123456789abcdef]{64}$ ]] || exit 1
           jq -n --arg variant "$VARIANT" --arg repository "$REPOSITORY" --arg digest "$DIGEST" \
             --arg bundleDigest "$BUNDLE_DIGEST" --arg referrerManifestDigest "$REFERRER_MANIFEST_DIGEST" \
             '{variant:$variant,repository:$repository,indexDigest:$digest,
@@ -755,7 +755,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
-          [[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ && "$DISK_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          [[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ && "$DISK_SHA256" =~ ^[0123456789abcdef]{64}$ ]] || exit 1
           helper="$RUNNER_TEMP/container_candidate_disk_usage.sh"
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_candidate_disk_usage.sh" -o "$helper"
           printf '%s  %s\n' "$DISK_SHA256" "$helper" | sha256sum --check --strict
@@ -791,7 +791,7 @@ jobs:
           TRANSFER_SHA256: ${{ inputs.transfer-sha256 }}
         run: |
           set -euo pipefail
-          [[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ && "$TRANSFER_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+          [[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ && "$TRANSFER_SHA256" =~ ^[0123456789abcdef]{64}$ ]] || {
             echo "::error::invalid dependency transfer contract identity"
             exit 1
           }
@@ -922,10 +922,10 @@ jobs:
             echo '::error::could not prove immutable commit identity state' >&2
             exit 1
           fi
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo '::error::immutable commit identity returned a malformed digest'; exit 1; }
+          [[ "$digest" =~ ^sha256:[0123456789abcdef]{64}$ ]] || { echo '::error::immutable commit identity returned a malformed digest'; exit 1; }
           base_repository="$(jq -er --arg variant "$BASE_VARIANT" '.images[] | select(.variant == $variant) | .repository' "$CONFIG_PATH")"
           base_digest="$(docker buildx imagetools inspect "$base_repository:sha-$GITHUB_SHA" --format '{{json .Manifest.Digest}}' | tr -d '"')"
-          [[ "$base_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo '::error::immutable base identity is absent or malformed'; exit 1; }
+          [[ "$base_digest" =~ ^sha256:[0123456789abcdef]{64}$ ]] || { echo '::error::immutable base identity is absent or malformed'; exit 1; }
           retry="$RUNNER_TEMP/container_candidate_retry.py"
           oci="$RUNNER_TEMP/container_oci_index.py"
           curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/$CONTRACT_REF/scripts/container_candidate_retry.py" -o "$retry"
@@ -974,7 +974,7 @@ jobs:
         run: |
           base_repository="$(jq -r --arg variant "$BASE_VARIANT" '.images[] | select(.variant == $variant) | .repository' "$CONFIG_PATH")"
           base_digest="$(docker buildx imagetools inspect "$base_repository:${{ needs.prepare.outputs.candidate }}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
-          [[ "$base_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          [[ "$base_digest" =~ ^sha256:[0123456789abcdef]{64}$ ]] || exit 1
           echo "image=$base_repository@$base_digest" >> "$GITHUB_OUTPUT"
           echo "digest=$base_digest" >> "$GITHUB_OUTPUT"
       - name: Measure runner usage before derived image build
@@ -1025,7 +1025,7 @@ jobs:
           REPOSITORY: ${{ matrix.repository }}
         run: |
           set -euo pipefail
-          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::build returned an invalid image digest"; exit 1; }
+          [[ "$DIGEST" =~ ^sha256:[0123456789abcdef]{64}$ ]] || { echo "::error::build returned an invalid image digest"; exit 1; }
           reference="$REPOSITORY@$DIGEST"
           for attempt in 1 2 3 4 5 6; do
             if observed="$(timeout --kill-after=2s 5s docker buildx imagetools inspect "$reference" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"')" \
@@ -1086,8 +1086,8 @@ jobs:
           REPOSITORY: ${{ matrix.repository }}
         run: |
           set -euo pipefail
-          [[ "$BUNDLE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Cosign provenance bundle digest is missing"; exit 1; }
-          [[ "$REFERRER_MANIFEST_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Cosign provenance referrer digest is missing"; exit 1; }
+          [[ "$BUNDLE_DIGEST" =~ ^sha256:[0123456789abcdef]{64}$ ]] || { echo "::error::Cosign provenance bundle digest is missing"; exit 1; }
+          [[ "$REFERRER_MANIFEST_DIGEST" =~ ^sha256:[0123456789abcdef]{64}$ ]] || { echo "::error::Cosign provenance referrer digest is missing"; exit 1; }
           commit_tag="$REPOSITORY:sha-$GITHUB_SHA"
           error_file="$(mktemp)"
           if existing="$(docker buildx imagetools inspect "$commit_tag" --format '{{json .Manifest.Digest}}' 2>"$error_file" | tr -d '"')"; then
@@ -1117,8 +1117,8 @@ jobs:
           IMAGE_VARIANT: ${{ matrix.variant }}
           REPOSITORY: ${{ matrix.repository }}
         run: |
-          [[ "$BUNDLE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
-          [[ "$REFERRER_MANIFEST_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          [[ "$BUNDLE_DIGEST" =~ ^sha256:[0123456789abcdef]{64}$ ]] || exit 1
+          [[ "$REFERRER_MANIFEST_DIGEST" =~ ^sha256:[0123456789abcdef]{64}$ ]] || exit 1
           jq -n --arg variant "$IMAGE_VARIANT" --arg repository "$REPOSITORY" \
             --arg digest "$DIGEST" --arg baseVariant "$BASE_VARIANT" --arg baseDigest "$BASE_DIGEST" \
             --arg bundleDigest "$BUNDLE_DIGEST" --arg referrerManifestDigest "$REFERRER_MANIFEST_DIGEST" \
@@ -1212,8 +1212,8 @@ jobs:
              | if length == 1 then .[0] else error("platform evidence is missing or ambiguous") end' "$inventory")"
           platform_digest="$(jq -er .subjectDigest <<<"$binding")"
           evidence_digest="$(jq -er .digest <<<"$binding")"
-          [[ "$platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
-          [[ "$evidence_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          [[ "$platform_digest" =~ ^sha256:[0123456789abcdef]{64}$ ]] || exit 1
+          [[ "$evidence_digest" =~ ^sha256:[0123456789abcdef]{64}$ ]] || exit 1
           evidence_manifest="$RUNNER_TEMP/evidence-manifest.json"
           docker buildx imagetools inspect "$REPOSITORY@$evidence_digest" --raw > "$evidence_manifest"
           python3 -I "$helper" spdx-evidence --manifest "$evidence_manifest" >/dev/null
@@ -1257,9 +1257,9 @@ jobs:
           SPDX_DIGEST: ${{ steps.sbom-attestation.outputs.spdx-digest }}
         run: |
           set -euo pipefail
-          [[ "$BUNDLE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Cosign SBOM bundle digest is missing"; exit 1; }
-          [[ "$REFERRER_MANIFEST_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Cosign SBOM referrer digest is missing"; exit 1; }
-          [[ "$SPDX_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::SPDX document digest is missing"; exit 1; }
+          [[ "$BUNDLE_DIGEST" =~ ^sha256:[0123456789abcdef]{64}$ ]] || { echo "::error::Cosign SBOM bundle digest is missing"; exit 1; }
+          [[ "$REFERRER_MANIFEST_DIGEST" =~ ^sha256:[0123456789abcdef]{64}$ ]] || { echo "::error::Cosign SBOM referrer digest is missing"; exit 1; }
+          [[ "$SPDX_DIGEST" =~ ^sha256:[0123456789abcdef]{64}$ ]] || { echo "::error::SPDX document digest is missing"; exit 1; }
           jq -n --arg imageVariant "$IMAGE_VARIANT" --arg os "$OS" --arg architecture "$ARCHITECTURE" \
             --arg platformVariant "$PLATFORM_VARIANT" --arg digest "$DIGEST" --arg bundleDigest "$BUNDLE_DIGEST" \
             --arg referrerManifestDigest "$REFERRER_MANIFEST_DIGEST" --arg spdxDigest "$SPDX_DIGEST" \

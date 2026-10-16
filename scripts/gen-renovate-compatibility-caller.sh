@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 4 ] || [[ ! "$1" =~ ^[0-9a-f]{40}$ ]]; then
+if [ "$#" -ne 4 ] || [[ ! "$1" =~ ^[0123456789abcdef]{40}$ ]]; then
   echo "usage: $0 <contract-sha> <package> <candidate> <stack-profile>" >&2
   exit 2
 fi
 
 ref="$1" package="$2" candidate="$3" profile="$4"
-[[ "$package" =~ ^(@[a-z0-9._-]+/)?[a-z0-9._-]+$ ]]
-[[ "$candidate" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]
-[[ "$profile" =~ ^[a-z0-9-]+$ ]]
+[[ "$package" =~ ^(@[abcdefghijklmnopqrstuvwxyz0123456789._-]+/)?[abcdefghijklmnopqrstuvwxyz0123456789._-]+$ ]]
+[[ "$candidate" =~ ^[0123456789]+\.[0123456789]+\.[0123456789]+([+-][0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.-]+)?$ ]]
+[[ "$profile" =~ ^[abcdefghijklmnopqrstuvwxyz0123456789-]+$ ]]
 
 cat <<EOF
 name: Renovate compatibility canary

@@ -119,17 +119,17 @@ jobs:
           SCOPE: ${{ inputs.scope }}
           VERSION: ${{ inputs.version }}
         run: |
-          if [[ ! "$PREFIX" =~ ^([a-z0-9][a-z0-9._-]*-)?v$ ]]; then
+          if [[ ! "$PREFIX" =~ ^([abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789._-]*-)?v$ ]]; then
             echo "::error::'$PREFIX' is not a canonical v or stream-v release namespace."
             exit 1
           fi
           package_version="${VERSION#"$PREFIX"}"
           if [ "$package_version" = "$VERSION" ] ||
-            [[ ! "$package_version" =~ ^(0|[123456789][0123456789]*)\.(0|[123456789][0123456789]*)\.(0|[123456789][0123456789]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            [[ ! "$package_version" =~ ^(0|[123456789][0123456789]*)\.(0|[123456789][0123456789]*)\.(0|[123456789][0123456789]*)(-[0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.-]+)?(\+[0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.-]+)?$ ]]; then
             echo "::error::'$VERSION' is not exact SemVer in namespace '$PREFIX'."
             exit 1
           fi
-          if [[ ! "$SCOPE" =~ ^@[a-z0-9][a-z0-9._~-]*$ || ${#SCOPE} -gt 214 ]]; then
+          if [[ ! "$SCOPE" =~ ^@[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789._~-]*$ || ${#SCOPE} -gt 214 ]]; then
             echo "::error::scope must be a non-empty lowercase npm scope such as @verjson."
             exit 1
           fi
@@ -432,17 +432,17 @@ jobs:
           SCOPE: ${{ inputs.scope }}
           VERSION: ${{ inputs.version }}
         run: |
-          if [[ ! "$PREFIX" =~ ^([a-z0-9][a-z0-9._-]*-)?v$ ]]; then
+          if [[ ! "$PREFIX" =~ ^([abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789._-]*-)?v$ ]]; then
             echo "::error::'$PREFIX' is not a canonical v or stream-v release namespace."
             exit 1
           fi
           package_version="${VERSION#"$PREFIX"}"
           if [ "$package_version" = "$VERSION" ] ||
-            [[ ! "$package_version" =~ ^(0|[123456789][0123456789]*)\.(0|[123456789][0123456789]*)\.(0|[123456789][0123456789]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            [[ ! "$package_version" =~ ^(0|[123456789][0123456789]*)\.(0|[123456789][0123456789]*)\.(0|[123456789][0123456789]*)(-[0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.-]+)?(\+[0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.-]+)?$ ]]; then
             echo "::error::'$VERSION' is not exact SemVer in namespace '$PREFIX'."
             exit 1
           fi
-          if [[ ! "$SCOPE" =~ ^@[a-z0-9][a-z0-9._~-]*$ || ${#SCOPE} -gt 214 ]]; then
+          if [[ ! "$SCOPE" =~ ^@[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789._~-]*$ || ${#SCOPE} -gt 214 ]]; then
             echo "::error::scope must be a non-empty lowercase npm scope such as @verjson."
             exit 1
           fi
@@ -459,7 +459,7 @@ jobs:
       - name: Validate the immutable release-artifact contract ref
         env:
           CONTRACT_REF: ${{ inputs.contract-ref }}
-        run: '[[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ ]]'
+        run: '[[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]]'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: Verjson/.github
@@ -621,10 +621,10 @@ jobs:
           MAX_ARTIFACT_BYTES: '2147483648'
         run: |
           set -euo pipefail
-          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]] \
+          [[ "$ARTIFACT_ID" =~ ^[0123456789]+$ ]] \
             || { echo "::error::prepared package artifact ID is missing or invalid"; exit 1; }
           artifact_size="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" --jq .size_in_bytes)"
-          [[ "$artifact_size" =~ ^[0-9]+$ ]] \
+          [[ "$artifact_size" =~ ^[0123456789]+$ ]] \
             || { echo "::error::prepared package artifact size is missing or invalid"; exit 1; }
           if (( artifact_size > MAX_ARTIFACT_BYTES )); then
             echo "::error::prepared package artifact exceeds the 2 GiB download limit"
@@ -928,7 +928,7 @@ jobs:
       - name: Validate the immutable retention contract ref
         env:
           CONTRACT_REF: ${{ inputs.contract-ref }}
-        run: '[[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ ]]'
+        run: '[[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]]'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: Verjson/.github

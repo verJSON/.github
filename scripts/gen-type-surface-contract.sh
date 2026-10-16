@@ -9,7 +9,7 @@ usage() {
 [ "$#" -eq 2 ] || usage
 mode="$1"
 ref="$2"
-[[ "$ref" =~ ^[0-9a-f]{40}$ ]] || usage
+[[ "$ref" =~ ^[0123456789abcdef]{40}$ ]] || usage
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 helper_path=scripts/npm-pack-json.mjs

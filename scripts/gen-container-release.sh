@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"; kind="${1:?kind}"; ref="${2:?40-hex contract ref}"; shift 2
-[[ "$ref" =~ ^[0-9a-f]{40}$ ]] || exit 1
+[[ "$ref" =~ ^[0123456789abcdef]{40}$ ]] || exit 1
 config=""; reconcile_paths=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -11,7 +11,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 config="${config:-container-candidate.json}"
-[[ "$config" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*\.json$ && "/$config/" != *"/../"* ]] || { echo "config path must be a repository-relative JSON path" >&2; exit 2; }
+[[ "$config" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]*\.json$ && "/$config/" != *"/../"* ]] || { echo "config path must be a repository-relative JSON path" >&2; exit 2; }
 
 # The reconciliation hook runs one step before the release App token is minted, so
 # its file allowlist is declared here at generation time and pinned by the contract
@@ -22,7 +22,7 @@ fi
 [ "${#reconcile_paths[@]}" -le 32 ] || { echo "at most 32 --reconcile-allow paths are accepted" >&2; exit 2; }
 reconcile_json=""; reconcile_seen=()
 for reconcile_path in ${reconcile_paths[@]+"${reconcile_paths[@]}"}; do
-  [[ "$reconcile_path" =~ ^[A-Za-z0-9._][A-Za-z0-9._/-]*$ ]] \
+  [[ "$reconcile_path" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]*$ ]] \
     || { echo "--reconcile-allow must be a normalized repository-relative path" >&2; exit 2; }
   case "/$reconcile_path/" in
     */../*|*/./*|*//*) echo "--reconcile-allow must be a normalized repository-relative path" >&2; exit 2 ;;

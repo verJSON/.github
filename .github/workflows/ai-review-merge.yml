@@ -350,7 +350,7 @@ jobs:
           # diagnostic step (#106; ADR 0017 keeps diagnostics enforcement-neutral).
           assigned_epoch="$(date -u -d "$assigned_at" +%s 2>/dev/null || true)"
           created_epoch="$(date -u -d "$created_at" +%s 2>/dev/null || true)"
-          if [[ -n "$created_at" && "$assigned_epoch" =~ ^[0-9]+$ && "$created_epoch" =~ ^[0-9]+$ ]]; then
+          if [[ -n "$created_at" && "$assigned_epoch" =~ ^[0123456789]+$ && "$created_epoch" =~ ^[0123456789]+$ ]]; then
             queue_seconds=$(( assigned_epoch - created_epoch ))
             echo "::notice::phase=preflight runner_assigned_at=$assigned_at workflow_created_at=$created_at initial_queue_seconds=$queue_seconds"
           else
@@ -386,7 +386,7 @@ jobs:
         run: |
           set -euo pipefail
           trusted_review_sha="${CONTRACT_REF:-$EXECUTING_WORKFLOW_SHA}"
-          if [[ ! "$trusted_review_sha" =~ ^[0-9a-f]{40}$ ]]; then
+          if [[ ! "$trusted_review_sha" =~ ^[0123456789abcdef]{40}$ ]]; then
             echo "::error::canonical workflow revision must be an immutable lowercase 40-hex commit SHA"
             exit 1
           fi
@@ -575,7 +575,7 @@ jobs:
             base_ref_path="$(jq -rn --arg base_ref "$base_ref" '$base_ref|@uri')"
             readonly base_ref_path
             raw="$(gh api "repos/$REPO/compare/$base_ref_path...$head_sha" --jq '.behind_by' 2>/dev/null)" || return 1
-            [[ "$raw" =~ ^[0-9]+$ ]] || return 1
+            [[ "$raw" =~ ^[0123456789]+$ ]] || return 1
             printf '%s' "$raw"
           }
           compare_attempts=3
@@ -766,7 +766,7 @@ jobs:
           # a null here would make the `-ge` test below a syntax error and
           # abort classification.
           changed_lines=$(jq '[.[].changes // 0] | add // 0' <<<"$files")
-          [[ "$changed_lines" =~ ^[0-9]+$ ]] || changed_lines=0
+          [[ "$changed_lines" =~ ^[0123456789]+$ ]] || changed_lines=0
           out changed_lines "$changed_lines"
 
           # Sensitive-path classification remains fail-closed and observable,
@@ -861,7 +861,7 @@ jobs:
           TRUSTED_REVIEW_SHA: ${{ needs.preflight.outputs.trusted_review_sha }}
         run: |
           set -euo pipefail
-          if [[ ! "$TRUSTED_REVIEW_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+          if [[ ! "$TRUSTED_REVIEW_SHA" =~ ^[0123456789abcdef]{40}$ ]]; then
             echo "::error::validated canonical workflow revision is unavailable or malformed"
             exit 1
           fi
@@ -900,7 +900,7 @@ jobs:
           case "${ZERO_PROVIDER_RECOVERY:-false}" in
             true)
               [ "$REVIEW_EVENT" = workflow_dispatch ] &&
-                [[ "$REVIEW_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] &&
+                [[ "$REVIEW_RUN_ATTEMPT" =~ ^[123456789][0123456789]*$ ]] &&
                 [ "$REVIEW_RUN_ATTEMPT" -gt 1 ] || {
                   echo "::error::invalid zero-provider gate recovery context"; exit 1;
                 }
@@ -924,7 +924,7 @@ jobs:
       - name: Validate review-reservation App client ID
         if: needs.preflight.outputs.lane == 'ai'
         run: |
-          [[ "$APP_CLIENT_ID" =~ ^Iv[A-Za-z0-9.]{8,126}$ ]] || {
+          [[ "$APP_CLIENT_ID" =~ ^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$ ]] || {
             echo "::error::AI_REVIEW_CLIENT_ID is unavailable or malformed"; exit 1;
           }
 
@@ -950,7 +950,7 @@ jobs:
           # arithmetic syntax error aborting this required step (#106; ADR 0017).
           assigned_epoch="$(date -u -d "$assigned_at" +%s 2>/dev/null || true)"
           completed_epoch="$(date -u -d "$PREFLIGHT_COMPLETED_AT" +%s 2>/dev/null || true)"
-          if [[ -n "$PREFLIGHT_COMPLETED_AT" && "$assigned_epoch" =~ ^[0-9]+$ && "$completed_epoch" =~ ^[0-9]+$ ]]; then
+          if [[ -n "$PREFLIGHT_COMPLETED_AT" && "$assigned_epoch" =~ ^[0123456789]+$ && "$completed_epoch" =~ ^[0123456789]+$ ]]; then
             queue_seconds=$(( assigned_epoch - completed_epoch ))
             echo "::notice::phase=gate runner_assigned_at=$assigned_at preflight_completed_at=$PREFLIGHT_COMPLETED_AT transition_queue_seconds=$queue_seconds lane=$LANE"
           else
@@ -1097,8 +1097,8 @@ jobs:
             echo "cap_exhausted=false"
           } >>"$GITHUB_OUTPUT"
           reviews="$(gh api --paginate "repos/$TARGET_REPO/pulls/$PR_NUMBER/reviews?per_page=100" | jq -s 'add // []')"
-          pass_marker_re='ai-review-pass:v2:([12])/2 pr:([1-9][0-9]*) check:([1-9][0-9]*) head:([0-9a-f]{40}) run:([1-9][0-9]*) attempt:([1-9][0-9]*) provider:([a-z0-9_-]+) model:([A-Za-z0-9._-]+)'
-          explicit_marker_re='ai-review-explicit:v1 pr:([1-9][0-9]*) check:([1-9][0-9]*) head:([0-9a-f]{40}) run:([1-9][0-9]*) attempt:([1-9][0-9]*) provider:([a-z0-9_-]+) model:([A-Za-z0-9._-]+)'
+          pass_marker_re='ai-review-pass:v2:([12])/2 pr:([123456789][0123456789]*) check:([123456789][0123456789]*) head:([0123456789abcdef]{40}) run:([123456789][0123456789]*) attempt:([123456789][0123456789]*) provider:([abcdefghijklmnopqrstuvwxyz0123456789_-]+) model:([ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+)'
+          explicit_marker_re='ai-review-explicit:v1 pr:([123456789][0123456789]*) check:([123456789][0123456789]*) head:([0123456789abcdef]{40}) run:([123456789][0123456789]*) attempt:([123456789][0123456789]*) provider:([abcdefghijklmnopqrstuvwxyz0123456789_-]+) model:([ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+)'
           explicit_receipt_consumed=false
           while IFS=$'\t' read -r review_head review_body; do
             marker_kind='' marker_pr='' marker_check='' marker_head=''
@@ -1126,7 +1126,7 @@ jobs:
             fi
           done < <(jq -r --arg login "$app_login" '.[] | select(.state == "COMMENTED" and .user.login == $login) | [.commit_id, .body] | @tsv' <<<"$reviews")
           consumed="$(python3 -I "$RUNNER_TEMP/review-attempt-count.py" --app-login "$app_login" --pr-number "$PR_NUMBER" --head-sha "$EXPECTED_HEAD_SHA" <<<"$reviews")"
-          [[ "$consumed" =~ ^[0-9]+$ ]] || exit 1
+          [[ "$consumed" =~ ^[0123456789]+$ ]] || exit 1
           # One rollout attempt predates App-authored reservation reviews. Count
           # it only after independently revalidating its immutable workflow run,
           # exact GitHub Actions-owned arm check, PR, and head. This narrowly bound migration
@@ -1512,7 +1512,7 @@ jobs:
           set -euo pipefail
           app_login="${EXPECTED_APP_SLUG}[bot]"
           consumed="${{ steps.reserve_1.outputs.count }}"
-          [[ "$consumed" =~ ^[0-9]+$ ]] || exit 1
+          [[ "$consumed" =~ ^[0123456789]+$ ]] || exit 1
           current_head="$(gh api "repos/$TARGET_REPO/pulls/$PR_NUMBER" --jq '.head.sha // ""')"
           if [ "$current_head" != "$EXPECTED_HEAD_SHA" ]; then
             {
@@ -1611,7 +1611,7 @@ jobs:
           PASS_COUNT: ${{ steps.reserve_2.outputs.count || steps.reserve_1.outputs.count || '0' }}
         run: |
           elapsed=unknown
-          if [[ "$STARTED_EPOCH" =~ ^[0-9]+$ ]]; then
+          if [[ "$STARTED_EPOCH" =~ ^[0123456789]+$ ]]; then
             elapsed=$(( $(date +%s) - STARTED_EPOCH ))
           fi
           # Did the paid pass stop because it ran out of money? The transcript is an
@@ -1629,7 +1629,7 @@ jobs:
           elif [ -n "${EXEC_FILE:-}" ] && [ -f "$EXEC_FILE" ]; then
             subtype=$(jq -r '(if type == "array" then (map(select(.type == "result")) | last) else . end).subtype // ""' "$EXEC_FILE" 2>/dev/null || echo "")
             permission_denials=$(jq -r '(if type == "array" then (map(select(.type == "result")) | last) else . end).permission_denials_count // 0' "$EXEC_FILE" 2>/dev/null || echo 0)
-            [[ "$permission_denials" =~ ^[0-9]+$ ]] || permission_denials=0
+            [[ "$permission_denials" =~ ^[0123456789]+$ ]] || permission_denials=0
             # A structured_output is not a verdict when the same SDK result says
             # the pass terminated in error. The action can still emit the
             # shortest schema-valid filler while exhausting turns or budget
@@ -1667,7 +1667,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           # Say in words what the red `error_max_budget_usd` annotation means.
           retry_guidance='A maintainer may apply re-review to authorize the remaining paid attempt.'
-          if [[ "${PASS_COUNT:-0}" =~ ^[2-9][0-9]*$ ]]; then
+          if [[ "${PASS_COUNT:-0}" =~ ^[23456789][0123456789]*$ ]]; then
             retry_guidance='This exact head exhausted its two-pass maximum; no further model review is allowed for it.'
           fi
           if [ "$budget_exhausted" = true ]; then
@@ -1779,7 +1779,7 @@ jobs:
               heading="⚠️ **AI review advisory: budget exceeded**"
               detail="The selected review pass ended in \`error_max_budget_usd\` without a usable verdict. The diff (~${CHANGED_LINES:-unknown} changed lines) exceeded its selected budget (\$${BUDGET_USD:-unknown}). Human approval remains available."
             fi
-            if [[ "${PERMISSION_DENIALS:-0}" =~ ^[1-9][0-9]*$ ]]; then
+            if [[ "${PERMISSION_DENIALS:-0}" =~ ^[123456789][0123456789]*$ ]]; then
               heading="⚠️ **AI review advisory: denied tool calls**"
               detail="The review recorded ${PERMISSION_DENIALS} denied tool call(s) and produced no usable verdict. This is tool-boundary non-progress, not evidence that the diff is oversized."
             fi
@@ -2082,7 +2082,7 @@ jobs:
     steps:
       - name: Validate authorization App client ID
         run: |
-          [[ "$APP_CLIENT_ID" =~ ^Iv[A-Za-z0-9.]{8,126}$ ]] || {
+          [[ "$APP_CLIENT_ID" =~ ^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$ ]] || {
             echo "::error::AI_REVIEW_CLIENT_ID is unavailable or malformed"; exit 1;
           }
 
@@ -2092,7 +2092,7 @@ jobs:
           TRUSTED_REVIEW_SHA: ${{ needs.preflight.outputs.trusted_review_sha }}
         run: |
           set -euo pipefail
-          if [[ ! "$TRUSTED_REVIEW_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+          if [[ ! "$TRUSTED_REVIEW_SHA" =~ ^[0123456789abcdef]{40}$ ]]; then
             echo "::error::validated canonical workflow revision is unavailable or malformed"
             exit 1
           fi
@@ -2152,7 +2152,7 @@ jobs:
             echo "::error::minted App slug does not match the authorization App"
             exit 1
           }
-          [[ "$INSTALLATION_ID" =~ ^[1-9][0-9]*$ ]] || {
+          [[ "$INSTALLATION_ID" =~ ^[123456789][0123456789]*$ ]] || {
             echo "::error::authorization App installation identity is unavailable"
             exit 1
           }
@@ -2293,7 +2293,7 @@ jobs:
           # remains best-effort storage cleanup after that terminal boundary.
           if [ -s "$RUNNER_TEMP/arm-receipt-artifact-id" ]; then
             receipt_artifact_id="$(<"$RUNNER_TEMP/arm-receipt-artifact-id")"
-            if [[ "$receipt_artifact_id" =~ ^[1-9][0-9]*$ ]]; then
+            if [[ "$receipt_artifact_id" =~ ^[123456789][0123456789]*$ ]]; then
               if GH_TOKEN="$ACTIONS_TOKEN" gh api --method DELETE "repos/$TARGET_REPO/actions/artifacts/$receipt_artifact_id" \
                   >/dev/null 2>"$RUNNER_TEMP/arm-artifact-delete.stderr"; then
                 echo "Consumed arm receipt artifact $receipt_artifact_id."
@@ -2378,9 +2378,9 @@ jobs:
           set -euo pipefail
           [[ "$PR_NUMBER" =~ ^[123456789][0123456789]{0,14}$ ]] || exit 1
           [[ "$AUTHORIZATION_CHECK_ID" =~ ^[123456789][0123456789]{0,14}$ ]] || exit 1
-          [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$EXPECTED_HEAD_SHA" =~ ^[0123456789abcdef]{40}$ ]] || exit 1
           default_branch="$(gh api "repos/$TARGET_REPO" --jq '.default_branch // ""')"
-          [[ "$default_branch" =~ ^[A-Za-z0-9._/-]+$ ]] || exit 1
+          [[ "$default_branch" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]+$ ]] || exit 1
           gh workflow run ai-privileged-merge.yml --repo "$TARGET_REPO" --ref "$default_branch" \
             -f pr_number="$PR_NUMBER" \
             -f expected_head_sha="$EXPECTED_HEAD_SHA" \

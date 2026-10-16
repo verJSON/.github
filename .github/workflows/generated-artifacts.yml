@@ -61,7 +61,7 @@ jobs:
           # An abbreviated SHA is ambiguous by construction — git resolves it
           # against whatever objects exist at fetch time — so a prefix is not a
           # pin (#312).
-          ref_is_immutable() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
+          ref_is_immutable() { [[ "$1" =~ ^[0123456789abcdef]{40}$ ]]; }
 
           if ! ref_is_immutable "$CONTRACT_REF"; then
             reason="changelog: true requires contract_ref to be a full 40-character lower-case Verjson/.github commit SHA; got '$CONTRACT_REF'. A branch, a tag or refs/pull/<n>/merge can change after review, and an abbreviated SHA is ambiguous, so the contract that runs would not be the contract that was reviewed."

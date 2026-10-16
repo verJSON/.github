@@ -59,7 +59,7 @@ jobs:
           JOB_CONTEXT: ${{ toJSON(job) }}
         run: |
           set -euo pipefail
-          [[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ ]] || {
+          [[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]] || {
             echo "::error::contract-ref must be a 40-character lowercase commit SHA"
             exit 1
           }
@@ -147,7 +147,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ "$CANDIDATE_IDENTITY" =~ ^([0123456789]{1,15})@(sha256:[0-9a-f]{64})$ ]] || { echo "::error::candidate identity must be artifact-id@sha256 digest"; exit 1; }
+          [[ "$CANDIDATE_IDENTITY" =~ ^([0123456789]{1,15})@(sha256:[0123456789abcdef]{64})$ ]] || { echo "::error::candidate identity must be artifact-id@sha256 digest"; exit 1; }
           artifact_id="${BASH_REMATCH[1]}"; expected_digest="${BASH_REMATCH[2]}"
           metadata="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id")"
           [ "$(jq -r .expired <<<"$metadata")" = false ]
@@ -205,10 +205,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ ]] || exit 1
-          [[ "$CANDIDATE_MANIFEST" =~ ^([0123456789]{1,15})@(sha256:[0-9a-f]{64})$ ]] || exit 1
+          [[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]] || exit 1
+          [[ "$CANDIDATE_MANIFEST" =~ ^([0123456789]{1,15})@(sha256:[0123456789abcdef]{64})$ ]] || exit 1
           candidate_artifact_digest="${BASH_REMATCH[2]}"
-          [[ "$CONFIG_PATH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*\.json$ && "/$CONFIG_PATH/" != *"/../"* ]] || { echo "::error::config path must be repository relative"; exit 1; }
+          [[ "$CONFIG_PATH" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]*\.json$ && "/$CONFIG_PATH/" != *"/../"* ]] || { echo "::error::config path must be repository relative"; exit 1; }
           release_run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
           previous=null
           while read -r tag; do
@@ -423,7 +423,7 @@ jobs:
       - name: Validate the immutable retention contract ref
         env:
           CONTRACT_REF: ${{ inputs.contract-ref }}
-        run: '[[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ ]]'
+        run: '[[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]]'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: Verjson/.github

@@ -73,7 +73,7 @@ jobs:
             echo '::error::AI_REVIEW_APP_ID must be a positive decimal App ID'
             exit 1
           }
-          [[ "$EXPECTED_APP_SLUG" =~ ^[a-z0-9][a-z0-9-]*$ ]] || {
+          [[ "$EXPECTED_APP_SLUG" =~ ^[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789-]*$ ]] || {
             echo '::error::AI_REVIEW_APP_SLUG must be a lowercase GitHub App slug'
             exit 1
           }
@@ -112,8 +112,8 @@ jobs:
             echo 'ready=false' >>"$GITHUB_OUTPUT"; exit 0;
           }
           pr_number="$(jq -r '.[0].number // ""' <<<"$PULL_REQUESTS")"
-          [[ "$pr_number" =~ ^[1-9][0-9]*$ ]] || exit 1
-          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$pr_number" =~ ^[123456789][0123456789]*$ ]] || exit 1
+          [[ "$HEAD_SHA" =~ ^[0123456789abcdef]{40}$ ]] || exit 1
           check="$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs" \
             --jq "[.check_runs[] | select(.name == \"AI review authorization\" and .head_sha == \"$HEAD_SHA\" and .app.id == 15368 and .app.slug == \"github-actions\")] | sort_by(.id) | last // {}")"
           check_id="$(jq -r '.id // ""' <<<"$check")"
@@ -124,7 +124,7 @@ jobs:
                    $p[2] == $repo and $p[3] == $pr and $p[4] == $head and
                    ($p[5] | test("^[1-9][0-9]*$")) and
                    ($p[6] | test("^[1-9][0-9]*$")) and ($p[7] | test("^[0-9a-f]{64}$")) then $p[5] else "" end' <<<"$check")"
-          if ! [[ "$check_id" =~ ^[1-9][0-9]*$ ]] || ! [[ "$arm_run_id" =~ ^[1-9][0-9]*$ ]]; then
+          if ! [[ "$check_id" =~ ^[123456789][0123456789]*$ ]] || ! [[ "$arm_run_id" =~ ^[123456789][0123456789]*$ ]]; then
             echo 'ready=false' >>"$GITHUB_OUTPUT"
             exit 0
           fi
@@ -143,14 +143,14 @@ jobs:
             exit 0
           fi
           arm_run_attempt="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$arm_run_id" --jq '.run_attempt // ""')"
-          [[ "$arm_run_attempt" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$arm_run_attempt" =~ ^[123456789][0123456789]*$ ]] || exit 1
           receipt_name="ai-review-arm-$arm_run_id-$arm_run_attempt"
           receipt_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/ai-promotion-retry.XXXXXX")"
           trap 'rm -rf "$receipt_dir"' EXIT
           gh run download "$arm_run_id" --repo "$GITHUB_REPOSITORY" --name "$receipt_name" --dir "$receipt_dir"
           [ -f "$receipt_dir/receipt.json" ] || exit 1
           review_policy="$(jq -er '.review_policy | select(type == "string")' "$receipt_dir/receipt.json")"
-          [[ "$review_policy" =~ ^[A-Za-z0-9_-]{1,2048}$ ]] || exit 1
+          [[ "$review_policy" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-]{1,2048}$ ]] || exit 1
           policy_json="$(python3 -I .promotion-trust/scripts/ci-gate/review-policy-envelope.py decode "$review_policy")" || exit 1
           if [ "$(jq -r '.authority // "human"' <<<"$policy_json")" != ai-merge ]; then
             echo 'ready=false' >>"$GITHUB_OUTPUT"
