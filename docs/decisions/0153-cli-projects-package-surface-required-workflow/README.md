@@ -268,3 +268,17 @@ python3 -I scripts/cli-projects-package-surface-ruleset.py verify-run --workflow
 
 `verify-run` also requires the strict `admission` check from that same run on the exact
 head. A rerun of an older run does not qualify.
+
+### 2026-10-16 — Live receipt recorded
+
+The first post-rotation run, `38918228195` on Renovate PR #155, failed `admission` at
+"Validate the exact pull-request identity": that head carries the pre-generator
+`ci.yml` (sha256 `721856f9…`), not the byte-exact caller (`9e4ca97c…`). That is the
+intended refusal, so it is not a receipt. Required-workflow run `38918542699` on
+`Verjson/verjson-cli-projects` #142 (head `189ea2d8b31417f5e6fb2fccbbc9b0915b7418b9`,
+which carries the generated caller) concluded `success`, with `admission`,
+`package-surface`, and both `build-test` jobs green. `verify-run --workflow-sha
+c78fcd4e…` printed `verified: fresh exact-head required-workflow run and strict
+admission check` and exited 0; the read-only `audit` exited 0. The rotation to
+`c78fcd4e` is complete. Every other cli-projects pull request keeps failing admission
+until #142 lands the generated caller on `main`.
