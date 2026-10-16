@@ -237,3 +237,34 @@ committed generated workflow is the record, so the audit fails exactly while a r
 pending. Behavioral tests cover predecessor images, admission refusal before mutation,
 rollback, the floor, the audit, and the job contract. The operator rotation of ruleset
 21830367 to this change's merge commit remains a separate human-gated step.
+
+### 2026-10-15 — Rotation applied; live receipt pending
+
+Ruleset 21830367 was rotated from `9998460f` to
+`c78fcd4ef9ab83b6775ae2ede94ebce475b3943c` (#1828), the first rotation to read its
+predecessor from the live ruleset. The read-only `audit` exits 0. Live `updated_at` is
+`2026-10-15T20:37:21.391-05:00`. The pre-trigger snapshot is
+`{"pre_trigger_max_run_id": 38432170170}`.
+
+The exact-head receipt is still outstanding: no consumer pull request has run since the
+rotation. When the first `pull_request` run of
+`.github/workflows/cli-projects-package-surface-required.yml` on
+`Verjson/verjson-cli-projects` has a run ID above 38432170170, record its result here and
+on #1423. Run it from a clean worktree at the rotated revision. `verify_canonical_bytes` requires the
+local tool bytes to equal those at `--workflow-sha`:
+
+```bash
+M=c78fcd4ef9ab83b6775ae2ede94ebce475b3943c
+CANONICAL=<canonical-checkout>   # any clone of the organization's .github repository
+RECEIPT=$(mktemp -d)
+git -C "$CANONICAL" fetch --prune origin
+git -C "$CANONICAL" worktree add --detach "$RECEIPT" "$M"
+cd "$RECEIPT"
+RUN=<required-workflow run id above 38432170170>
+HEAD_SHA=$(gh api "repos/Verjson/verjson-cli-projects/actions/runs/$RUN" --jq .head_sha)
+python3 -I scripts/cli-projects-package-surface-ruleset.py verify-run --workflow-sha "$M" \
+  --run-id "$RUN" --head-sha "$HEAD_SHA" --pre-trigger-max-run-id 38432170170
+```
+
+`verify-run` also requires the strict `admission` check from that same run on the exact
+head. A rerun of an older run does not qualify.
