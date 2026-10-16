@@ -142,15 +142,38 @@ or a literal GitHub-hosted image.
 5. **Scope of the checker.** `pull_request` jobs are always checked.
    `pull_request_target` runs the base workflow with a privileged token, so it
    is dangerous exactly when a job puts head-controlled bytes on disk. Such jobs
-   are held to the same rule: a checkout whose `ref` or `repository` is not a
-   base-only value, `gh pr checkout`, or a git fetch/checkout-class command in a
-   job that names a head-derived value. Jobs that only read head metadata for
-   API calls are not. A remote callee under `pull_request_target` is printed as
-   `NOT FOLLOWED` rather than passing silently; today that is `gate-rearm.yml`'s
-   pinned `app-key-environment.yml`. **`workflow_run` and `issue_comment`
-   workflows are out of the checker's scope**, as are artifacts a privileged
-   workflow downloads from an untrusted run. None of them exists in this
-   repository today. Adding one requires extending the checker first.
+   are held to the same rule. A job counts when it has any of:
+
+   - a checkout whose `ref` or `repository` is not a base-only value;
+   - `gh pr checkout` or `gh pr diff`;
+   - a git fetch/checkout/apply-class command or a download (`curl`, `wget`,
+     `gh api … tarball|zipball|archive`) while the workflow env, job env, or
+     steps name a head value (head SHA or ref, `refs/pull/`, the PR number);
+   - a non-checkout action whose `with:` names a head value;
+   - a repository script or a heredoc-authored program that does any of the
+     above.
+
+   A step that hands a head value to a program the checker can read neither
+   from the repository nor from the workflow is undetermined. Jobs that only
+   read head metadata for API calls do not count. A known limit: a program that
+   reads an inherited head-valued env var without its step naming that var is
+   not detected.
+
+   A remote callee under `pull_request_target` is undetermined unless
+   `REVIEWED_TARGET_REMOTES` lists it by caller workflow, job, and full SHA,
+   with a justification. The only entry today is `gate-rearm.yml`'s
+   `app-key-policy` → `app-key-environment.yml@ebe23faf`. That pinned callee
+   has no `uses:` or checkout step and no PR-head reference.
+
+   **`workflow_run` and `issue_comment` workflows are out of the checker's
+   scope**, as are workflow artifacts (`gh run download`) that a privileged
+   workflow fetches from another run. `issue_comment` has no workflow here. One
+   `workflow_run` workflow exists: `ai-promotion-retry.yml` runs on
+   `workflow_run: [actions-ci]`. It checks out only a trusted `Verjson/.github`
+   revision (`repository: Verjson/.github`, `ref` from its trusted-revision
+   step, sparse `review-policy-envelope.py`) and never the triggering run's
+   head. A new workflow of either kind, or a change to that checkout, needs the
+   checker extended first.
 
 ### What this decision cannot do
 
