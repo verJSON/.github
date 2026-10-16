@@ -1058,15 +1058,26 @@ def review_digest(chain: tuple, job: dict, inherited: dict, closure: dict | None
 
 
 FULL_SHA_PIN = re.compile(r"@[0-9a-f]{40}$")
-# Checkout refs that resolve to the tree this scan reads. Anything else (an
-# explicit repository, a step output, a branch name) is selected at runtime.
-TREE_REFS = frozenset(
-    {
-        "",
-        "${{ github.sha }}",
-        "${{ github.event.pull_request.base.sha }}",
-    }
-)
+def _is_reference(value: str, path: tuple[str, ...]) -> bool:
+    """Whether `value` is exactly the expression `${{ <path> }}`, however spaced."""
+    match = FULL_EXPRESSION.match(value)
+    if not match:
+        return False
+    try:
+        node = Parser(match.group(1)).parse()
+    except Undetermined:
+        return False
+    return node[0] == "ref" and tuple(part.lower() for part in node[1]) == path
+
+
+def is_tree_ref(ref: str) -> bool:
+    """Whether a checkout ref resolves to the tree this scan reads: the default
+    ref or `github.sha`, however it is spaced. Anything else (a step output, a
+    branch name, `pull_request.base.sha`, which is not refreshed when the base
+    branch advances) is selected at runtime."""
+    return ref == "" or _is_reference(ref, ("github", "sha"))
+
+
 ACTION_PATH = re.compile(r"\$\{\{\s*github\.action_path\s*\}\}")
 MAX_CLOSURE_DEPTH = 4
 
@@ -1145,7 +1156,8 @@ class Closure:
         ref = " ".join(str(options.get("ref") or "").split())
         sparse = [line.strip() for line in str(options.get("sparse-checkout") or "").splitlines() if line.strip()]
         cone = str(options.get("sparse-checkout-cone-mode", "true")).strip().lower() != "false"
-        if not (repository in ("", "${{ github.repository }}") and ref in TREE_REFS):
+        this_repository = repository == "" or _is_reference(repository, ("github", "repository"))
+        if not (this_repository and is_tree_ref(ref)):
             self.flag(
                 "runtime-checkout",
                 f"checkout of {repository or 'this repository'}@{ref or 'default'} "

@@ -32,8 +32,9 @@ cannot rule out head materialization leaves the job unresolved. Its entry then
 needs `dynamic: <reason>[, <reason>]: <justification>` naming exactly those
 reasons. A full checkout binds the whole tracked tree, so editing, adding, or
 deleting any file, changing a file mode, retargeting a symlink, or moving a
-submodule gitlink to another commit turns its entry stale. A runtime-selected checkout must
-carry a `sparse-checkout` list; without one it is refused, because no review
+submodule gitlink to another commit turns its entry stale. A runtime-selected checkout, which includes one at
+`pull_request.base.sha` because that SHA is not refreshed when the base branch
+advances, must carry a `sparse-checkout` list; without one it is refused, because no review
 can bind what it puts on disk. A job `container:` or `services:` image must be
 pinned by an `@sha256:` digest; a tag or expression is refused. The fetch
 vocabulary is not exhaustive; a fetch outside it still turns a reviewed entry
@@ -63,3 +64,5 @@ inputs take every value their dispatcher can choose. `fork`, `issues`,
 `discussion`, and `discussion_comment` are privileged events. The 44 relayed
 jobs that predate the rule are ratcheted in the pending list as #1831's relay
 backlog, keyed to their selector and unresolved reasons.
+`ai-post-merge.yml` now checks its reconciler out at `github.sha`, the commit
+its own workflow file comes from, instead of `pull_request.base.sha`.

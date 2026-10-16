@@ -225,7 +225,7 @@ or a literal GitHub-hosted image.
    | `tree-change` | A runtime command that changes the checked-out tree: git `sparse-checkout`, `checkout`, `switch`, `restore`, `reset`, `pull`, `merge`, `rebase`, `worktree`, `apply`, `am`, `cherry-pick`, `read-tree`, or `checkout-index` after any global options; any git command given `--git-dir` or `--work-tree`; `gh pr checkout`; or `patch`. |
    | `shell` | A `shell:` other than `bash` on any step, including a local composite action's step, or in a job or workflow `defaults.run`. |
    | `full-checkout` | A checkout of the scanned tree with no `sparse-checkout` list. The whole tracked tree is in the digest, as above. |
-   | `runtime-checkout` | A checkout whose repository or ref is selected at runtime, not the scanned tree. It must carry a `sparse-checkout` list; without one, no review can bind what it puts on disk, so the job is refused and no entry can accept it. |
+   | `runtime-checkout` | A checkout whose repository or ref is selected at runtime, not the scanned tree. Only this repository at the default ref or `github.sha` is the scanned tree. `pull_request.base.sha` is the base as of the pull request's last update and is not refreshed when the base branch advances, so a checkout at it can put older bytes on disk than the reviewed tree; it is a runtime checkout. It must carry a `sparse-checkout` list; without one, no review can bind what it puts on disk, so the job is refused and no entry can accept it. |
    | `submodules` | A checkout with `submodules: true` or `recursive`. |
    | `unscanned-path` | A sparse path, glob, or local-action file that the scanned tree does not contain, or that lies outside it. |
    | `local-action` | A local action that is missing, nested more than four deep, has no `runs` block, or whose manifest does not parse. |
@@ -318,6 +318,11 @@ or a literal GitHub-hosted image.
    jobs reached standalone through `workflow_call` are the same jobs already
    reviewed under `pull_request_target`; their digests are identical, so they
    carry the same justification as reviewed entries.
+
+   `ai-post-merge.yml`'s `reconcile` job checked its reconciler out at
+   `pull_request.base.sha`. It now checks out `github.sha`, the base-branch
+   commit its workflow file is read from, so the script it runs is the one its
+   review digest binds; its entry was re-reviewed with that ref.
 
    `issue_comment` has no workflow in this repository. The one `workflow_run`
    workflow, `ai-promotion-retry.yml`, is a reviewed entry: it checks out only

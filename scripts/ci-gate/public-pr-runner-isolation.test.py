@@ -555,7 +555,7 @@ expect(
     target_job("""
         - uses: actions/checkout@v4
           with:
-            ref: ${{ github.event.pull_request.base.sha }}
+            ref: ${{ github.sha }}
         - env:
             HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           run: gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs"
@@ -820,7 +820,7 @@ REVIEWED_ARGS = ("--reviewed", "{dir}/reviewed.tsv")
 LISTED = target_job("""
     - uses: actions/checkout@v4
       with:
-        ref: ${{ github.event.pull_request.base.sha }}
+        ref: ${{ github.sha }}
         sparse-checkout: .github/workflows/target.yml
         sparse-checkout-cone-mode: false
     - run: make lint
@@ -997,7 +997,7 @@ SCRIPT_JOB = {
             steps:
               - uses: actions/checkout@v4
                 with:
-                  ref: ${{{{ github.event.pull_request.base.sha }}}}
+                  ref: ${{{{ github.sha }}}}
                   path: .source
                   sparse-checkout: scripts/tool.sh
               - working-directory: .source
@@ -1096,7 +1096,7 @@ expect(
 DYNAMIC_JOB = target_job("""
     - uses: actions/checkout@v4
       with:
-        ref: ${{ github.event.pull_request.base.sha }}
+        ref: ${{ github.sha }}
     - run: bash "$TOOL_DIR/run.sh"
 """)
 DYNAMIC_ROW = review_row(DYNAMIC_JOB, "target.yml [pull_request_target]", "review")
@@ -1200,7 +1200,7 @@ def cone_job(sparse: str, run: str) -> str:
             steps:
               - uses: actions/checkout@v4
                 with:
-                  ref: ${{{{ github.event.pull_request.base.sha }}}}
+                  ref: ${{{{ github.sha }}}}
                   sparse-checkout: |
 {textwrap.indent(sparse, " " * 20)}
               - run: {run}
@@ -1249,7 +1249,7 @@ for label, (tree, edited, content) in ON_DISK_SHAPES.items():
 FULL_CHECKOUT = target_job("""
     - uses: actions/checkout@v4
       with:
-        ref: ${{ github.event.pull_request.base.sha }}
+        ref: ${{ github.sha }}
     - run: make test
 """)
 FULL_ROW = review_row(FULL_CHECKOUT, "target.yml [pull_request_target]", "review")
@@ -1287,7 +1287,7 @@ DYNAMIC_ACTION_JOB = {
             steps:
               - uses: actions/checkout@v4
                 with:
-                  ref: ${{{{ github.event.pull_request.base.sha }}}}
+                  ref: ${{{{ github.sha }}}}
               - uses: ./.github/actions/x
     """,
     ".github/actions/x/action.yml": """
@@ -1955,6 +1955,37 @@ for label, target, name, code, fragment in (
         ok(f"tree digest encoding: {label} gives exit {code}")
     else:
         fail(f"tree digest encoding: {label} (expected exit {code} with {fragment!r}, got {actual}: {output.strip()[:400]})")
+
+# pull_request.base.sha is the base as of the pull request's last update. It
+# is not refreshed when main advances, so a checkout at it can put older bytes
+# on disk than the tree under review: it is a runtime checkout, not the tree.
+BASE_SHA_FULL = shaped_job("- uses: actions/checkout@v4\n  with:\n    ref: ${{ github.event.pull_request.base.sha }}\n"
+                           "- run: ./scripts/x.sh", {"scripts/x.sh": "echo\n"})
+expect(
+    BASE_SHA_FULL,
+    1,
+    ("checkout of this repository@${{ github.event.pull_request.base.sha }} is selected at runtime",
+     "has no sparse-checkout list"),
+    "a full checkout at pull_request.base.sha is refused as a runtime checkout",
+)
+BASE_SHA_SPARSE = shaped_job("- uses: actions/checkout@v4\n  with:\n    ref: ${{ github.event.pull_request.base.sha }}\n"
+                             "    sparse-checkout: scripts/x.sh\n    sparse-checkout-cone-mode: false\n"
+                             "- run: bash scripts/x.sh", {"scripts/x.sh": "echo\n"})
+expect(
+    BASE_SHA_SPARSE,
+    1,
+    (REVIEW_REQUIRED, "dynamic: runtime-checkout"),
+    "a sparse checkout at pull_request.base.sha needs dynamic: runtime-checkout",
+)
+for ref in ("${{ github.sha }}", "${{github.sha}}", ""):
+    tree_ref = shaped_job("- uses: actions/checkout@v4\n  with:\n" + (f"    ref: {ref}\n" if ref else "")
+                          + "    sparse-checkout: scripts/x.sh\n    sparse-checkout-cone-mode: false\n"
+                          "- run: bash scripts/x.sh", {"scripts/x.sh": "echo\n"})
+    code, output = run_checker(tree_ref)
+    if code == 1 and REVIEW_REQUIRED in output and "runtime-checkout" not in output:
+        ok(f"a sparse checkout at {ref or 'the default ref'} is the scanned tree")
+    else:
+        fail(f"a sparse checkout at {ref or 'the default ref'} is the scanned tree (got {code}: {output.strip()[:300]})")
 
 # A runtime-selected checkout without a sparse list puts bytes on disk that no
 # review can bind, so no entry can accept it.
