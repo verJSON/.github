@@ -63,7 +63,8 @@ self-hosted pool ([ADR 0235](decisions/0235-public-pull-request-code-uses-epheme
 `scripts/ci-gate/public-pr-runner-isolation.py` enforces that for every job a
 `pull_request` event can reach, including jobs in local reusable workflows,
 by enumerating each organization variable as unset and set.
-It also checks `pull_request_target` jobs that materialize the pull request's
-head. `scripts/ci-gate/public-pr-runner-isolation.pending.tsv` holds the exact,
+Under `pull_request_target`, `workflow_run`, and `issue_comment`, every job
+that can reach a persistent runner must instead be listed, by a digest of its
+reviewed content, in `scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv`. `scripts/ci-gate/public-pr-runner-isolation.pending.tsv` holds the exact,
 digest-ratcheted list of canonical reusable workflows still pending that change
 ([#1831](https://github.com/verJSON/.github/issues/1831)).

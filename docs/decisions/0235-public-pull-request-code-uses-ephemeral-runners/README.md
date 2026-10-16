@@ -112,7 +112,8 @@ or a literal GitHub-hosted image.
    adversarial value, because a fork can edit the caller. A remote reusable
    call that a pull request can reach, or any selector the checker cannot
    resolve, is undetermined. It never passes as clean.
-   The `platform` group runs the checker against the live tree, and
+   The `platform` group runs the checker against the live tree, with its
+   pending and reviewed lists, and
    `public-pr-runner-isolation.test.py` covers its behavior with fixtures. Both
    are registered in `scripts/actions-ci-groups.tsv`.
 4. **Two canonical workflows are pending, ratcheted exactly by
@@ -139,41 +140,58 @@ or a literal GitHub-hosted image.
    worse selector. The checker reports a fixed entry that is still listed as
    `STALE PENDING` and fails. It also fails on any unlisted job that violates
    the rule.
-5. **Scope of the checker.** `pull_request` jobs are always checked.
-   `pull_request_target` runs the base workflow with a privileged token, so it
-   is dangerous exactly when a job puts head-controlled bytes on disk. Such jobs
-   are held to the same rule. A job counts when it has any of:
+5. **Privileged events use a reviewed-job allowlist, not head detection.**
+   `pull_request_target`, `workflow_run`, and `issue_comment` run the base
+   workflow with base privileges, and fork activity can trigger them. Under
+   any of these events, a reachable job that can resolve to a persistent or
+   self-hosted runner fails, including a job reached through a local reusable
+   call or a remote callee whose placement cannot be read. It passes only when
+   `scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv` lists it. Each
+   entry is `path<TAB>job<TAB>review digest<TAB>justification`, keyed by
+   workflow path (including the call chain and event), job id, and a SHA-256
+   over:
 
-   - a checkout whose `ref` or `repository` is not a base-only value;
-   - `gh pr checkout` or `gh pr diff`;
-   - a git fetch/checkout/apply-class command or a download (`curl`, `wget`,
-     `gh api … tarball|zipball|archive`) while the workflow env, job env, or
-     steps name a head value (head SHA or ref, `refs/pull/`, the PR number);
-   - a non-checkout action whose `with:` names a head value;
-   - a repository script or a heredoc-authored program that does any of the
-     above.
+   - the job's full normalized content;
+   - the workflow-level `env`, `permissions`, and `defaults` it inherits, plus a
+     callee's `workflow_call` contract;
+   - every calling job on the path to it, together with that caller's
+     inherited settings.
 
-   A step that hands a head value to a program the checker can read neither
-   from the repository nor from the workflow is undetermined. Jobs that only
-   read head metadata for API calls do not count. A known limit: a program that
-   reads an inherited head-valued env var without its step naming that var is
-   not detected.
+   Any edit to any of these makes the entry `STALE REVIEWED`, which fails
+   until someone re-reviews it. An entry that no longer matches a job needing
+   review is also stale. Jobs that resolve only to standard hosted images pass
+   without an entry.
 
-   A remote callee under `pull_request_target` is undetermined unless
-   `REVIEWED_TARGET_REMOTES` lists it by caller workflow, job, and full SHA,
-   with a justification. The only entry today is `gate-rearm.yml`'s
-   `app-key-policy` → `app-key-environment.yml@ebe23faf`. That pinned callee
-   has no `uses:` or checkout step and no PR-head reference.
+   **Why this replaces pattern detection.** Three review rounds each found
+   head-materializing shapes the pattern detector missed. Examples include
+   reading `$GITHUB_EVENT_PATH` with `jq` into `GITHUB_ENV` or `GITHUB_OUTPUT`,
+   `actions/github-script` calling `downloadTarballArchive`, `git --git-dir`
+   fetching `refs/pull`, and `gh repo clone` of the head repository. The set of
+   ways a job can obtain head bytes is open-ended. An allowlist of reviewed job
+   content is closed: anything new or changed fails until a person reads it.
+   Head detection now only prints a `DIAGNOSTIC` line explaining why a job
+   looks dangerous. It never decides pass or fail.
 
-   **`workflow_run` and `issue_comment` workflows are out of the checker's
-   scope**, as are workflow artifacts (`gh run download`) that a privileged
-   workflow fetches from another run. `issue_comment` has no workflow here. One
-   `workflow_run` workflow exists: `ai-promotion-retry.yml` runs on
-   `workflow_run: [actions-ci]`. It checks out only a trusted `Verjson/.github`
-   revision (`repository: Verjson/.github`, `ref` from its trusted-revision
-   step, sparse `review-policy-envelope.py`) and never the triggering run's
-   head. A new workflow of either kind, or a change to that checkout, needs the
-   checker extended first.
+   `issue_comment` has no workflow in this repository. The one `workflow_run`
+   workflow, `ai-promotion-retry.yml`, is a reviewed entry: it checks out only
+   a trusted `Verjson/.github` revision. Workflow artifacts that a reviewed job
+   downloads are part of what its reviewer must justify.
+
+6. **Review procedure for adding or refreshing an entry.**
+   1. Run `public-pr-runner-isolation.py --pending … --reviewed … .github/workflows`.
+      The failing `VIOLATION` or `STALE REVIEWED` line names the path, job, and
+      new review digest, and a `DIAGNOSTIC` line gives the head-detection
+      result.
+   2. Read the whole job and everything it inherits or calls. Record three
+      things: what it checks out (repository, ref, paths); what it executes
+      (inline code, repository scripts, actions, and any program it writes);
+      and how every PR-derived value and downloaded artifact is used.
+   3. Prefer moving the job to a hosted runner. List it only when it needs the
+      trusted pool and no PR-controlled byte can reach execution: anything
+      PR-derived is used only as an API identifier or as validated data.
+   4. Add or replace the row with that digest and a one-line justification
+      covering checkout, execution, and why PR content cannot reach execution.
+      Never relist a stale row without re-reading the change.
 
 ### What this decision cannot do
 

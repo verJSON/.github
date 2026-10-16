@@ -13,6 +13,10 @@ fails if a job that a `pull_request` event can reach could land on a persistent
 runner through a variable fallback or a caller-supplied input
 ([ADR 0235](../docs/decisions/0235-public-pull-request-code-uses-ephemeral-runners/README.md)).
 
+Under `pull_request_target`, `workflow_run`, and `issue_comment`, a job that can
+reach a persistent runner must appear in
+`scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv`, keyed by a digest of
+its content and inherited settings, with a written justification.
 `scripts/ci-gate/public-pr-runner-isolation.pending.tsv` ratchets
 `actionlint.yml` and `container-candidate.yml` as pending.
 Their selectors are pinned in `hosted-selector-policy.py` and change after #1826;
