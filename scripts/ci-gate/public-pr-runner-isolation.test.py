@@ -357,4 +357,71 @@ expect(
     "{dir}/pending.tsv",
 )
 
+
+# ---------------------------------------------------------------------------
+# Review of #1827 (blocker): a reference compared against a literal must be
+# tried AS that literal, or any gate keyed on a value outside the fixed
+# candidate set reads as unreachable and the job is reported clean.
+# ---------------------------------------------------------------------------
+expect(
+    {
+        "ci.yml": """
+            on: pull_request
+            jobs:
+              heavy:
+                if: vars.ENABLE_HEAVY == 'true'
+                runs-on: [self-hosted, general]
+                steps:
+                  - run: 'true'
+        """,
+    },
+    1,
+    ("heavy", "vars.ENABLE_HEAVY=true"),
+    "a variable compared to a literal in a condition is tried as that literal",
+)
+expect(
+    pull_request_job(
+        """${{ vars.LANE_MODE == 'shared' && fromJSON('["self-hosted","general"]') || 'ubuntu-24.04' }}"""
+    ),
+    1,
+    ("vars.LANE_MODE=shared",),
+    "a variable compared to a literal in a selector is tried as that literal",
+)
+expect(
+    {
+        "caller.yml": """
+            on: pull_request
+            jobs:
+              build:
+                uses: ./.github/workflows/build.yml
+                with:
+                  lane: ${{ github.head_ref }}
+        """,
+        "build.yml": """
+            on:
+              workflow_call:
+                inputs:
+                  lane:
+                    type: string
+                    default: ''
+            jobs:
+              build:
+                runs-on: ${{ inputs.lane == 'shared' && fromJSON('["self-hosted","general"]') || 'ubuntu-24.04' }}
+                steps:
+                  - run: 'true'
+        """,
+    },
+    1,
+    ("build.yml", "inputs.lane=shared"),
+    "an attacker-shaped caller input compared to a literal is tried as that literal",
+)
+expect(
+    pull_request_job(
+        """${{ format('{0}', vars.LANE_MODE) == 'shared' && fromJSON('["self-hosted","general"]') || 'ubuntu-24.04' }}"""
+    ),
+    1,
+    ("self-hosted",),
+    "a comparison the checker cannot enumerate exactly is evaluated both ways",
+)
+
 sys.exit(1 if failures else 0)

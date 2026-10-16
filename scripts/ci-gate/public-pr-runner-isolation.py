@@ -233,6 +233,70 @@ def references(node) -> set[tuple[str, ...]]:
     return set().union(*(references(child) for child in node[1:]))
 
 
+ENUMERATED_SCOPES = ("vars", "inputs")
+
+
+def enumerated_references(node) -> set[tuple[str, str]]:
+    """The free `vars.*` / `inputs.*` names an expression reads."""
+    return {
+        (path[0].lower(), path[1])
+        for path in references(node)
+        if path[0].lower() in ENUMERATED_SCOPES and len(path) == 2
+    } | {
+        (path[0].lower(), ".".join(path[1:]))
+        for path in references(node)
+        if path[0].lower() in ENUMERATED_SCOPES and len(path) != 2
+    }
+
+
+def exact_comparison(node):
+    """`(scope, name, literal)` when a comparison is a bare free reference
+    against a literal under `==` / `!=`, which enumeration decides exactly by
+    trying the reference as that literal; otherwise None."""
+    if node[0] != "compare" or node[1] not in ("==", "!="):
+        return None
+    for reference, other in ((node[2], node[3]), (node[3], node[2])):
+        if (
+            reference[0] == "ref"
+            and len(reference[1]) == 2
+            and reference[1][0].lower() in ENUMERATED_SCOPES
+            and other[0] == "literal"
+        ):
+            return reference[1][0].lower(), reference[1][1], other[1]
+    return None
+
+
+def compared_literals(node) -> dict[tuple[str, str], list]:
+    found: dict[tuple[str, str], list] = {}
+    kind = node[0]
+    if kind == "compare":
+        exact = exact_comparison(node)
+        if exact is not None:
+            found.setdefault(exact[:2], []).append(exact[2])
+        children = [node[2], node[3]]
+    elif kind == "call":
+        children = list(node[2])
+    elif kind in ("literal", "ref"):
+        children = []
+    else:
+        children = list(node[1:])
+    for child in children:
+        for key, values in compared_literals(child).items():
+            found.setdefault(key, []).extend(values)
+    return found
+
+
+def as_variable_text(value) -> str:
+    """Organization variables are strings; render a compared literal as one."""
+    if value is None:
+        return ""
+    if value is True or value is False:
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
 def _unique(values: list) -> list:
     seen: list = []
     for value in values:
@@ -335,6 +399,11 @@ def evaluate(node, resolve, call=None) -> list:
                     results.extend(evaluate(node[2], resolve, call))
         return _unique(results)
     if kind == "compare":
+        if enumerated_references(node) and exact_comparison(node) is None:
+            # The candidates for a free value cannot be chosen to decide this
+            # comparison (another reference, a function result, an ordering),
+            # so both outcomes are possible.
+            return [True, False]
         results = []
         for left in evaluate(node[2], resolve, call):
             for right in evaluate(node[3], resolve, call):
@@ -430,23 +499,30 @@ def assignments(nodes, bindings: dict[str, tuple]):
     Enumerated jointly rather than per reference, so `vars.X != '' &&
     fromJSON(vars.X)` sees one value of X, as Actions does.
     """
+    present = [node for node in nodes if node is not None]
     names = sorted(
-        {
-            (path[0].lower(), path[1])
-            for node in nodes
-            if node is not None
-            for path in references(node)
-            if len(path) == 2 and path[0].lower() in ("vars", "inputs")
-        }
+        (scope, name)
+        for node in present
+        for scope, name in enumerated_references(node)
+        if "." not in name
     )
+    names = sorted(set(names))
+    literals: dict[tuple[str, str], list] = {}
+    for node in present:
+        for key, values in compared_literals(node).items():
+            literals.setdefault(key, []).extend(values)
     choices = []
     for scope, name in names:
         if scope == "vars":
-            choices.append(
-                ("", EPHEMERAL_SELECTOR if name in EPHEMERAL_LANE_VARIABLES else PERSISTENT_SELECTOR)
-            )
+            base = ["", EPHEMERAL_SELECTOR if name in EPHEMERAL_LANE_VARIABLES else PERSISTENT_SELECTOR]
+            extra = [as_variable_text(value) for value in literals.get((scope, name), [])]
         else:
-            choices.append(bindings.get(name, (None,)))
+            base = list(bindings.get(name, (None,)))
+            # A fixed binding is exact; only attacker-shaped inputs take every
+            # literal their consumer compares them against.
+            adversarial = bindings.get(name) is ADVERSARIAL_INPUT_VALUES
+            extra = literals.get((scope, name), []) if adversarial else []
+        choices.append(tuple(_unique(base + extra)))
     for values in itertools.product(*choices):
         yield dict(zip(names, values))
 
