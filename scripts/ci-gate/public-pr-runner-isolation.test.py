@@ -1354,4 +1354,95 @@ expect(
     *REVIEWED_ARGS,
 )
 
+
+# ---------------------------------------------------------------------------
+# Final review residuals: patch application, submodules, and fetched content
+# executed in the same job all put unbound bytes on disk.
+# ---------------------------------------------------------------------------
+BOUNDED_STEPS = """
+    - uses: actions/checkout@v4
+      with:
+        sparse-checkout: scripts/tool.sh
+        sparse-checkout-cone-mode: false
+"""
+RESIDUAL_SHAPES = {
+    "git apply": ("- run: git apply change.patch", "`git apply` changes the checked-out tree"),
+    "git am": ("- run: git am < series.mbox", "`git am` changes the checked-out tree"),
+    "git cherry-pick": ("- run: git cherry-pick abc1234", "`git cherry-pick` changes the checked-out tree"),
+    "patch": ("- run: patch -p1 < change.patch", "`patch` changes the checked-out tree"),
+    "submodules": ("""- uses: actions/checkout@v4
+      with:
+        sparse-checkout: scripts/tool.sh
+        sparse-checkout-cone-mode: false
+        submodules: recursive""", "checkout submodules: recursive materializes repositories"),
+    "fetched script executed": (
+        "- run: curl -sSLo /tmp/tool.sh https://example.test/tool.sh && bash /tmp/tool.sh",
+        "executes paths not bound to the scanned tree (/tmp/tool.sh)",
+    ),
+    "fetched contents sourced": ("""- run: gh api repos/o/r/contents/env.sh --jq .content | base64 -d | tee env.sh
+    - run: source ./env.sh""", "fetches content at runtime (gh)"),
+    "API response redirected and executed": ("""- run: gh api repos/o/r/releases/assets/1 > tool.sh
+    - run: bash tool.sh""", "fetches content at runtime (gh)"),
+    "API tarball executed": ("""- run: gh api repos/o/r/tarball/main | tar xz
+    - run: bash ./o-r/run.sh""", "fetches content at runtime (gh)"),
+    "wget script executed": ("- run: wget -qO tool.sh https://example.test/tool.sh && sh tool.sh",
+                             "fetches content at runtime (wget)"),
+    "release asset executed": ("""- run: gh release download v1 --pattern tool.sh
+    - run: bash tool.sh""", "fetches content at runtime (gh)"),
+    "run artifact executed": ("""- run: gh run download 1 --name tools
+    - run: ./tools/run.sh""", "fetches content at runtime (gh)"),
+    "cloned script executed": ("""- run: git clone https://example.test/tools.git
+    - run: bash tools/run.sh""", "fetches content at runtime (git)"),
+    "downloaded artifact executed": ("""- uses: actions/download-artifact@v4
+      with:
+        name: tools
+    - run: ./tools/run.sh""", "fetches content at runtime (actions/download-artifact)"),
+}
+for label, (steps, reason) in RESIDUAL_SHAPES.items():
+    job = {**target_job(BOUNDED_STEPS + "    " + steps), "scripts/tool.sh": "echo ok\n"}
+    try:
+        row = review_row(job, "target.yml [pull_request_target]", "review")
+    except AssertionError as error:
+        fail(f"{label}: could not review the job ({error})")
+        continue
+    code, output = run_checker(with_review(job, row), *REVIEWED_ARGS)
+    if code == 1 and "unclassifiable" in output and reason in output:
+        ok(f"{label}: unbound on-disk content requires a dynamic: justification")
+    else:
+        fail(f"{label}: not held for `{reason}` without dynamic: (exit {code}: {output.strip()[:300]})")
+    justified = row.rstrip("\n") + "\tdynamic: bytes come from a reviewed trusted source\n"
+    code, output = run_checker(with_review(job, justified), *REVIEWED_ARGS)
+    if code == 0 and "REVIEWED" in output:
+        ok(f"{label}: a dynamic: justification classifies it")
+    else:
+        fail(f"{label}: a dynamic: justification did not classify it (exit {code}: {output.strip()[:300]})")
+
+FETCH_ONLY = {**target_job(BOUNDED_STEPS + """
+    - run: curl -sSL https://example.test/status.json | jq .ok
+    - run: bash scripts/tool.sh
+"""), "scripts/tool.sh": "echo ok\n"}
+expect(
+    with_review(FETCH_ONLY, review_row(FETCH_ONLY, "target.yml [pull_request_target]", "review")),
+    0,
+    ("REVIEWED",),
+    "a fetch in a job that executes only scanned-tree paths stays classifiable",
+    *REVIEWED_ARGS,
+)
+
+
+NEAR_MISSES = {**target_job(BOUNDED_STEPS + """
+    - run: |
+        # git checkout and "/" in a comment run nothing
+        patch="$(gh api repos/o/r/pulls/1)"
+        curl -sSL https://example.test/status.json | jq .ok
+        bash scripts/tool.sh
+"""), "scripts/tool.sh": "echo ok\n"}
+expect(
+    with_review(NEAR_MISSES, review_row(NEAR_MISSES, "target.yml [pull_request_target]", "review")),
+    0,
+    ("REVIEWED",),
+    "a variable named patch and commands named in comments are not tree mutations or executions",
+    *REVIEWED_ARGS,
+)
+
 sys.exit(1 if failures else 0)

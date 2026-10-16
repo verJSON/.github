@@ -168,10 +168,15 @@ or a literal GitHub-hosted image.
    Any edit to any of these makes the entry `STALE REVIEWED`, which fails
    until someone re-reviews it. Some on-disk content cannot be bounded
    statically: a full checkout with no `sparse-checkout` list, a checkout
-   whose repository or ref is selected at runtime, or a runtime git command
-   that changes the tree (`sparse-checkout`, `checkout`, `switch`, `restore`,
-   `reset`, `pull`, `merge`, `worktree`). Its entry then needs an explicit
-   fifth field, `dynamic: <justification>`. Without that field the job is
+   whose repository or ref is selected at runtime, a checkout with
+   `submodules: true` or `recursive`, a runtime command that changes the tree
+   (git `sparse-checkout`, `checkout`, `switch`, `restore`, `reset`, `pull`,
+   `merge`, `worktree`, `apply`, `am`, `cherry-pick`, or `patch`), or a job
+   that fetches content onto disk (`curl`, `wget`, `gh api` for contents,
+   archives, or redirected output, `gh run download`, `gh release download`,
+   `git clone`, `actions/download-artifact`) and executes or sources a path
+   the checker cannot bind to the scanned tree or to an inline heredoc. Its
+   entry then needs an explicit fifth field, `dynamic: <justification>`. Without that field the job is
    unclassifiable and fails, and a `dynamic:` field on a fully bounded job is
    stale.
 
@@ -187,9 +192,10 @@ or a literal GitHub-hosted image.
    **Residual supply-chain risk.** The digest binds the job's text and the
    repository bytes it materializes. It does not bind what SHA-pinned actions
    or tools fetch at runtime. For example, a pinned action can install a
-   mutable npm dependency, or a step can `pip install` or download a release
-   asset. These are outside the scanned tree and are a reviewer's
-   responsibility to justify. Action pins are policed separately by the
+   mutable npm dependency, or a step can `pip install` a package. These are
+   outside the scanned tree and are a reviewer's responsibility to justify.
+   Fetched content that the job itself executes by path is not left to the
+   reviewer alone: it needs a `dynamic:` field, as above. Action pins are policed separately by the
    action-pin conformance test. A remote callee
    must be pinned to a full 40-hex commit SHA; no entry can accept a branch
    or tag, because either can change after review. An entry that no longer matches a job needing
@@ -209,7 +215,8 @@ or a literal GitHub-hosted image.
    `issue_comment` has no workflow in this repository. The one `workflow_run`
    workflow, `ai-promotion-retry.yml`, is a reviewed entry: it checks out only
    a trusted `Verjson/.github` revision. Workflow artifacts that a reviewed job
-   downloads are part of what its reviewer must justify.
+   downloads are part of what its reviewer must justify, and executing one
+   needs a `dynamic:` field.
 
 6. **Review procedure for adding or refreshing an entry.**
    1. Run `public-pr-runner-isolation.py --pending … --reviewed … .github/workflows`.
@@ -222,7 +229,9 @@ or a literal GitHub-hosted image.
       paths); what it executes (inline code, repository scripts, actions, and
       any program it writes); and how every PR-derived value and downloaded
       artifact is used. For each item the checker reports as unresolved (a
-      full checkout, a runtime-selected checkout, or a runtime tree change),
+      full checkout, a runtime-selected checkout, checkout submodules, a
+      runtime tree change or patch application, or fetched content the job
+      executes),
       state in the `dynamic:` field where those bytes come from at runtime and
       why a pull request cannot choose them. Prefer a narrow `sparse-checkout`
       list to a `dynamic:` field.

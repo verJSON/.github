@@ -16,7 +16,11 @@ runner through a variable fallback or a caller-supplied input
 Under `pull_request_target`, `workflow_run`, and `issue_comment`, a job that can
 reach a persistent runner must appear in
 `scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv`, keyed by a digest of
-its content and inherited settings, with a written justification.
+its content and inherited settings, with a written justification. An entry
+needs a further `dynamic:` justification when the job's on-disk bytes cannot be
+bounded: a full or runtime-selected checkout, checkout submodules, a runtime
+tree change or patch application (`git apply`, `git am`, `git cherry-pick`,
+`patch`), or fetched content the job executes from an unscanned path.
 `scripts/ci-gate/public-pr-runner-isolation.pending.tsv` ratchets
 `actionlint.yml` and `container-candidate.yml` as pending.
 Their selectors are pinned in `hosted-selector-policy.py` and change after #1826;

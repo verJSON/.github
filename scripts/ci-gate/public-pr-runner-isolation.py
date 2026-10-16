@@ -739,8 +739,8 @@ GIT_MATERIALIZE = re.compile(
 DOWNLOAD = re.compile(
     r"\bcurl\b|\bwget\b|\bgh\s+api\b[^\n]*\b(?:tarball|zipball|archive)\b"
 )
-# `gh run download` is deliberately absent: workflow artifacts are a separate
-# trust class that ADR 0235 scopes out of this checker.
+# `gh run download` is deliberately absent: workflow artifacts are not head
+# detection; FETCH below holds a job that executes them unbound for `dynamic:`.
 # The same operations written as an argv list or a library call, for program
 # text the workflow authors inline (a heredoc into $RUNNER_TEMP).
 ARGV_PR_MATERIALIZE = re.compile(r"""["']gh["']\s*,\s*["']pr["']\s*,\s*["'](?:checkout|diff)["']""")
@@ -1005,6 +1005,37 @@ class Closure:
         self.job = job
         self.files: dict[str, str] = {}
         self.unresolved: set[str] = set()
+        self.checkout_prefixes: list = []
+        self.working_directory = ""
+        self.fetches: list[str] = []
+        self.executed: list[tuple[str, str]] = []
+
+    def is_bound(self, program: str, working_directory: str) -> bool:
+        """Whether an executed path is scanned-tree bytes or workflow-authored."""
+        if inline_source(self.job, program) is not None:
+            return True
+        if "$" in program or program.startswith("<"):
+            return False
+        candidates = {os.path.normpath(program)}
+        if working_directory:
+            candidates.add(os.path.normpath(os.path.join(working_directory, program)))
+        for candidate in list(candidates):
+            for prefix in self.checkout_prefixes:
+                if prefix.match(candidate):
+                    candidates.add(prefix.sub("", candidate, count=1))
+        return any(candidate in self.files for candidate in candidates)
+
+    def bind_fetched_execution(self) -> None:
+        """Fail closed: a job that fetches content onto disk and executes a
+        path the scanner cannot bind to the scanned tree needs dynamic:."""
+        if not self.fetches:
+            return
+        unbound = sorted({path for path, directory in self.executed if not self.is_bound(path, directory)})
+        if unbound:
+            self.unresolved.add(
+                f"fetches content at runtime ({', '.join(sorted(set(self.fetches)))}) "
+                f"and executes paths not bound to the scanned tree ({', '.join(unbound)})"
+            )
 
     def add_file(self, repo_path: str, why: str) -> bool:
         candidate = os.path.normpath(os.path.join(self.root, repo_path))
@@ -1036,6 +1067,14 @@ class Closure:
                 self.add_file(os.path.relpath(os.path.join(absolute, name), self.root), why)
 
     def add_checkout(self, options: dict) -> None:
+        checkout_path = str(options.get("path") or "").strip().strip("/")
+        if checkout_path:
+            pattern = re.sub(r"\\\$\\\{\\\{.*?\\\}\\\}", r"[^/]*", re.escape(checkout_path))
+            self.checkout_prefixes.append(re.compile(rf"^{pattern}/"))
+        if str(options.get("submodules", "false")).strip().lower() in ("true", "recursive"):
+            self.unresolved.add(
+                f"checkout submodules: {options.get('submodules')} materializes repositories outside the scanned tree"
+            )
         repository = str(options.get("repository") or "").strip()
         ref = " ".join(str(options.get("ref") or "").split())
         sparse = [line.strip() for line in str(options.get("sparse-checkout") or "").splitlines() if line.strip()]
@@ -1080,11 +1119,16 @@ class Closure:
             uses = str(step.get("uses", ""))
             if uses.split("@")[0].lower() == "actions/checkout":
                 self.add_checkout(step.get("with") or {})
+            elif uses.split("@")[0].lower() in FETCH_ACTIONS:
+                self.fetches.append(uses.split("@")[0])
             elif uses.startswith("./"):
                 self.add_action(uses, depth)
             run = step.get("run")
             if isinstance(run, str):
-                for change in RUNTIME_TREE_CHANGE.finditer(run):
+                self.fetches.extend(match.group(0).split()[0] for match in FETCH.finditer(run))
+                directory = str(step.get("working-directory") or self.working_directory or "")
+                self.executed.extend((path, directory) for path in executed_paths(run))
+                for change in RUNTIME_TREE_CHANGE.finditer(without_comments(run)):
                     self.unresolved.add(
                         f"`{change.group(0).strip(' ;&|(')}` changes the checked-out tree at runtime"
                     )
@@ -1130,13 +1174,57 @@ class Closure:
 
 RUNTIME_TREE_CHANGE = re.compile(
     r"(?:^|[\s;&|(])git[ \t]+(?:-[Cc][ \t]+\S+[ \t]+)*"
-    r"(?:sparse-checkout|checkout|switch|restore|reset|pull|merge|worktree)\b"
+    r"(?:sparse-checkout|checkout|switch|restore|reset|pull|merge|worktree|apply|am|cherry-pick)\b"
+    r"|(?:^|[;&|(]|&&|\|\|)[ \t]*(?:sudo[ \t]+)?patch(?=[ \t]|$)",
+    re.M,
 )
+# Content a job fetches onto disk at runtime: network downloads, repository
+# contents through the API, and workflow or release artifacts.
+FETCH = re.compile(
+    r"\bcurl\b|\bwget\b|\bgh[ \t]+api\b[^\n]*(?:/contents\b|\btarball\b|\bzipball\b|\barchive\b|>)"
+    r"|\bgh[ \t]+(?:run|release)[ \t]+download\b|\bgit[ \t]+clone\b"
+)
+FETCH_ACTIONS = ("actions/download-artifact",)
+SOURCE_CALL = re.compile(r"(?:^|[;&|(]|&&|\|\|)[ \t]*(?:source|\.)[ \t]+(\"[^\"\n]+\"|'[^'\n]+'|[^\s;&|)<>]+)", re.M)
+COMMAND_PATH = re.compile(
+    r"(?:^|[;&|(]|&&|\|\|)[ \t]*(?:[A-Za-z_]\w*=\S*[ \t]+)*(\"?(?:\./|\.\./|/|\$\{?\w+\}?/|[\w.-]+/)[^\s;&|)<>(\"]*\"?)(?=[ \t]|$)",
+    re.M,
+)
+
+
+def without_comments(run: str) -> str:
+    """Drop full-line shell comments, which name commands without running them."""
+    return "\n".join(line for line in run.split("\n") if not line.lstrip().startswith("#"))
+
+
+def executed_paths(run: str) -> list[str]:
+    """Paths a run block executes or sources (heredoc bodies excluded)."""
+    lines, body_end = [], None
+    for line in without_comments(run).replace("\\\n", " ").split("\n"):
+        if body_end is not None:
+            if line.strip() == body_end:
+                body_end = None
+            continue
+        heredoc = HEREDOC.search(line)
+        if heredoc:
+            body_end = re.sub(r"^<<-?\s*['\"]?|['\"]?$", "", heredoc.group(0))
+        lines.append(line)
+    text = "\n".join(lines)
+    found = [path for path in programs(text) if path != "<module>"]
+    found += [match.group(1) for match in SOURCE_CALL.finditer(text)]
+    found += [match.group(1) for match in COMMAND_PATH.finditer(text)]
+    if OPAQUE_PIPE.search(text):
+        found.append("<stdin of an interpreter>")
+    return [path.strip("\"'") for path in found]
 
 
 def job_closure(job: dict, root: str) -> Closure:
     closure = Closure(root, job)
+    defaults = job.get("defaults") if isinstance(job.get("defaults"), dict) else {}
+    run_defaults = defaults.get("run") if isinstance(defaults.get("run"), dict) else {}
+    closure.working_directory = str(run_defaults.get("working-directory") or "")
     closure.add_steps(job.get("steps"), 0)
+    closure.bind_fetched_execution()
     return closure
 
 
