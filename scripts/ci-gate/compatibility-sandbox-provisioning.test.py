@@ -1181,7 +1181,7 @@ def validate_source(source):
     )
     require(
         source,
-        '[[ "$supervisor_output" =~ ^[0-9a-f]{64}$ ]]',
+        '[[ "$supervisor_output" =~ ^[0123456789abcdef]{64}$ ]]',
         "sanitized supervisor receipt filter missing",
     )
     require(
@@ -1776,8 +1776,15 @@ mutations = [
     ),
     (
         "sanitized supervisor receipt filter missing",
-        '[[ "$supervisor_output" =~ ^[0-9a-f]{64}$ ]]',
+        '[[ "$supervisor_output" =~ ^[0123456789abcdef]{64}$ ]]',
         '[[ -n "$supervisor_output" ]]',
+    ),
+    # A bracket range collates by locale, so `[0-9a-f]` admits non-ASCII
+    # digits under en_US.UTF-8; only the enumerated set is a receipt filter.
+    (
+        "sanitized supervisor receipt filter missing",
+        '[[ "$supervisor_output" =~ ^[0123456789abcdef]{64}$ ]]',
+        '[[ "$supervisor_output" =~ ^[0-9a-f]{64}$ ]]',
     ),
     (
         "sanitized supervisor diagnostic filter missing",
