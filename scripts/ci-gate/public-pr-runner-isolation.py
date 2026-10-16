@@ -786,8 +786,8 @@ def is_base_only(value) -> bool:
 
 
 INTERPRETER_CALL = re.compile(
-    r"(?:^|[\s;&|(])(?:sudo\s+)?(?:bash|sh|zsh|python3?|node|pwsh|perl|ruby)"
-    r"((?:\s+-[A-Za-z]+)*)\s+(?!-)(\"[^\"\n]+\"|'[^'\n]+'|[^\s;&|)<>]+)",
+    r"(?:^|[\s;&|(])(?:sudo[ \t]+)?(?:bash|sh|zsh|python3?|node|pwsh|perl|ruby)"
+    r"((?:[ \t]+-[A-Za-z]+)*)[ \t]+(?!-)(\"[^\"\n]+\"|'[^'\n]+'|[^\s;&|)<>]+)",
     re.M,
 )
 DIRECT_EXEC = re.compile(r"^\s*(?:[A-Za-z_]\w*=\S*\s+)*(\.\.?/[^\s;&|)<>]+)", re.M)
@@ -937,6 +937,11 @@ class Finding(NamedTuple):
     job: str
     review_digest: str
     diagnostic: str
+    # Executed paths the scanner cannot resolve statically; an entry must
+    # justify them in a `dynamic:` field.
+    unresolved: tuple = ()
+    # A reason no entry can accept this job (an unpinned remote callee).
+    refusal: str = ""
 
 
 def _normalize(value):
@@ -948,25 +953,172 @@ def _normalize(value):
 
 
 def inherited_settings(document: dict) -> dict:
-    """Workflow-level settings a job inherits, plus a callee's input contract."""
+    """Workflow-level settings a job inherits, including the whole trigger block:
+    a job's safety can depend on `types:`, `branches:`, or `paths:`."""
     settings = {key: document.get(key) for key in INHERITED_KEYS}
-    trigger = document.get("on", document.get(True))
-    if isinstance(trigger, dict) and "workflow_call" in trigger:
-        settings["workflow_call"] = trigger["workflow_call"]
+    settings["on"] = document.get("on", document.get(True))
     return settings
 
 
-def review_digest(chain: tuple, job: dict, inherited: dict) -> str:
-    """SHA-256 over the job, its inherited workflow settings, and every caller
-    job (with its own inherited settings) on the path that reaches it."""
+def review_digest(chain: tuple, job: dict, inherited: dict, closure: dict | None = None) -> str:
+    """SHA-256 over the job, its inherited workflow settings, every caller job
+    (with its own inherited settings) on the path that reaches it, and the
+    bytes of every repository file the job checks out, executes, or uses as a
+    local action."""
     canonical = json.dumps(
-        _normalize({"chain": list(chain), "job": job, "inherited": inherited}),
+        _normalize({"chain": list(chain), "job": job, "inherited": inherited, "closure": closure or {}}),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
         default=str,
     )
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+FULL_SHA_PIN = re.compile(r"@[0-9a-f]{40}$")
+# Checkout refs that resolve to the tree this scan reads. Anything else (an
+# explicit repository, a step output, a branch name) is selected at runtime.
+TREE_REFS = frozenset(
+    {
+        "",
+        "${{ github.sha }}",
+        "${{ github.event.pull_request.base.sha }}",
+    }
+)
+ACTION_PATH = re.compile(r"\$\{\{\s*github\.action_path\s*\}\}")
+MAX_CLOSURE_DEPTH = 4
+
+
+class Closure:
+    """Repository bytes a job depends on, and what could not be resolved."""
+
+    def __init__(self, root: str, job: dict) -> None:
+        self.root = os.path.normpath(root)
+        self.job = job
+        self.files: dict[str, str] = {}
+        self.unresolved: set[str] = set()
+        self.checkouts = []
+        for step in job.get("steps") or []:
+            if isinstance(step, dict) and str(step.get("uses", "")).split("@")[0].lower() == "actions/checkout":
+                options = step.get("with") or {}
+                repository = str(options.get("repository") or "").strip()
+                ref = " ".join(str(options.get("ref") or "").split())
+                tree = repository in ("", "${{ github.repository }}") and ref in TREE_REFS
+                checkout_path = str(options.get("path") or "").strip().rstrip("/")
+                pattern = re.escape(checkout_path)
+                pattern = re.sub(r"\\\$\\\{\\\{.*?\\\}\\\}", r"[^/]*", pattern)
+                self.checkouts.append((checkout_path, re.compile(rf"^{pattern}(?:/|$)") if checkout_path else None, tree))
+                for sparse in str(options.get("sparse-checkout") or "").split():
+                    self.add_file(sparse, "sparse-checkout")
+
+    def add_file(self, repo_path: str, why: str, depth: int = 0) -> bool:
+        candidate = os.path.normpath(os.path.join(self.root, repo_path))
+        if not candidate.startswith(self.root + os.sep):
+            self.unresolved.add(f"{repo_path} ({why})")
+            return False
+        relative = os.path.relpath(candidate, self.root)
+        if os.path.isdir(candidate):
+            for base, _, names in sorted(os.walk(candidate)):
+                for name in sorted(names):
+                    self.add_file(os.path.relpath(os.path.join(base, name), self.root), why, depth)
+            return True
+        if not os.path.isfile(candidate):
+            self.unresolved.add(f"{repo_path} ({why}: not in the scanned tree)")
+            return False
+        if relative in self.files:
+            return True
+        with open(candidate, "rb") as handle:
+            content = handle.read()
+        self.files[relative] = hashlib.sha256(content).hexdigest()
+        if depth < MAX_CLOSURE_DEPTH:
+            text = content.decode("utf-8", errors="replace")
+            for program in programs(text):
+                self.add_program(program, "", depth + 1, os.path.dirname(relative))
+        return True
+
+    def map_path(self, program: str, working_directory: str) -> tuple[str | None, bool]:
+        """Repository path for a workspace-relative program, and whether the
+        bytes there are the scanned tree's."""
+        joined = os.path.normpath(os.path.join(working_directory or "", program))
+        for checkout_path, pattern, tree in self.checkouts:
+            if pattern is not None and pattern.match(joined):
+                remainder = pattern.sub("", joined, count=1)
+                return remainder, tree
+        default = [tree for checkout_path, _, tree in self.checkouts if not checkout_path]
+        return joined, (default[0] if default else True)
+
+    def add_program(self, program: str, working_directory: str, depth: int, action_dir: str | None = None) -> None:
+        program = program.strip("\"'")
+        if program == "<module>":
+            self.unresolved.add("python -m <module>")
+            return
+        if action_dir is not None and ACTION_PATH.search(program):
+            program = ACTION_PATH.sub(action_dir, program)
+            repo_path = os.path.normpath(program)
+            self.add_file(repo_path, "executed by a local action", depth)
+            return
+        if "$" in program:
+            if inline_source(self.job, program) is None:
+                self.unresolved.add(program)
+            return
+        if program.startswith("/"):
+            return  # a system binary, not repository code
+        repo_path, tree = self.map_path(program, working_directory)
+        if not tree:
+            self.unresolved.add(f"{program} (checked out from a runtime-selected repository or ref)")
+        self.add_file(repo_path, "executed", depth)
+
+    def add_steps(self, steps, working_directory: str, depth: int, action_dir: str | None = None) -> None:
+        for step in steps or []:
+            if not isinstance(step, dict):
+                continue
+            uses = str(step.get("uses", ""))
+            if uses.startswith("./"):
+                self.add_action(uses, depth)
+            run = step.get("run")
+            if isinstance(run, str):
+                directory = str(step.get("working-directory") or working_directory or "")
+                for program in programs(run):
+                    self.add_program(program, directory, depth, action_dir)
+
+    def add_action(self, uses: str, depth: int) -> None:
+        action_dir = os.path.normpath(uses)
+        if depth >= MAX_CLOSURE_DEPTH:
+            self.unresolved.add(f"{uses} (local action nested beyond {MAX_CLOSURE_DEPTH})")
+            return
+        for name in ("action.yml", "action.yaml"):
+            if os.path.isfile(os.path.join(self.root, action_dir, name)):
+                manifest = os.path.join(action_dir, name)
+                break
+        else:
+            self.unresolved.add(f"{uses} (local action not in the scanned tree)")
+            return
+        self.add_file(manifest, "local action", MAX_CLOSURE_DEPTH)
+        try:
+            with open(os.path.join(self.root, manifest), encoding="utf-8") as handle:
+                action = yaml.safe_load(handle) or {}
+        except (OSError, yaml.YAMLError):
+            self.unresolved.add(f"{uses} (local action manifest unreadable)")
+            return
+        runs = action.get("runs") if isinstance(action, dict) else None
+        if not isinstance(runs, dict):
+            self.unresolved.add(f"{uses} (local action has no runs block)")
+            return
+        if runs.get("using") == "composite":
+            self.add_steps(runs.get("steps"), "", depth + 1, action_dir)
+            return
+        for key in ("main", "pre", "post", "image"):
+            value = runs.get(key)
+            if isinstance(value, str) and not value.startswith(("docker://", "http")):
+                self.add_file(os.path.join(action_dir, value), "local action entry point", MAX_CLOSURE_DEPTH)
+
+
+def job_closure(job: dict, root: str) -> Closure:
+    closure = Closure(root, job)
+    defaults = job.get("defaults") if isinstance(job.get("defaults"), dict) else {}
+    run_defaults = defaults.get("run") if isinstance(defaults.get("run"), dict) else {}
+    closure.add_steps(job.get("steps"), str(run_defaults.get("working-directory") or ""), 0)
+    return closure
 
 
 class Scan:
@@ -1008,6 +1160,10 @@ def check_call(
                     name,
                     review_digest(chain, job, inherited_settings(document)),
                     f"remote callee {uses}: its placement cannot be read",
+                    refusal=""
+                    if FULL_SHA_PIN.search(uses)
+                    else f"remote callee {uses} must be pinned to a full 40-hex commit SHA; "
+                    "a branch or tag can change after review, so no entry can accept it",
                 )
             )
             return []
@@ -1058,12 +1214,19 @@ def check_workflow(
         if not scan.privileged:
             violations.extend(found)
         elif found:
+            closure = job_closure(job, scan.root)
             scan.findings.append(
                 Finding(
                     path,
                     name,
-                    review_digest(chain, job, inherited_settings(document)),
+                    review_digest(
+                        chain,
+                        job,
+                        inherited_settings(document),
+                        {"files": closure.files, "unresolved": sorted(closure.unresolved)},
+                    ),
                     head_diagnostic(job, document, scan.root, f"{path}: job '{name}'"),
+                    tuple(sorted(closure.unresolved)),
                 )
             )
     return violations
@@ -1131,12 +1294,12 @@ def check_tree(
 PENDING_FORMAT = "path<TAB>job<TAB>selector digest<TAB>reason"
 
 
-REVIEWED_FORMAT = "path<TAB>job<TAB>review digest<TAB>justification"
+REVIEWED_FORMAT = "path<TAB>job<TAB>review digest<TAB>justification[<TAB>dynamic: justification]"
 
 
 def load_pending(
     path: str | None, row_format: str = PENDING_FORMAT
-) -> dict[tuple[str, str], tuple[str, str]]:
+) -> dict[tuple[str, str], tuple[str, ...]]:
     """Reviewed `path<TAB>job<TAB>sha256:<hex><TAB>reason` rows, keyed to a digest."""
     if path is None:
         return {}
@@ -1150,11 +1313,14 @@ def load_pending(
         if not row.strip() or row.startswith("#"):
             continue
         fields = row.split("\t")
-        if len(fields) != 4 or not all(field.strip() for field in fields):
+        optional_dynamic = (
+            row_format == REVIEWED_FORMAT and len(fields) == 5 and fields[4].startswith("dynamic: ")
+        )
+        if (len(fields) != 4 and not optional_dynamic) or not all(field.strip() for field in fields):
             raise Undetermined(f"{path}:{number}: expected {row_format}")
         if not DIGEST.fullmatch(fields[2]):
             raise Undetermined(f"{path}:{number}: {row_format.split('<TAB>')[2]} must be sha256:<64 hex>")
-        pending[(fields[0], fields[1])] = (fields[2], fields[3])
+        pending[(fields[0], fields[1])] = (fields[2], fields[3], fields[4] if optional_dynamic else "")
     return pending
 
 
@@ -1195,13 +1361,17 @@ def main(argv: list[str]) -> int:
         label = f"{finding.path}: job '{finding.job}'"
         print(f"DIAGNOSTIC: {label}: {finding.diagnostic}")
         row = reviewed.get((finding.path, finding.job))
-        if row is None:
+        unresolved = "; ".join(finding.unresolved)
+        if finding.refusal:
+            violations.append(Violation(finding.path, finding.job, finding.refusal))
+        elif row is None:
             violations.append(
                 Violation(
                     finding.path,
                     finding.job,
                     "privileged-event job can resolve to a persistent runner and "
-                    f"{REVIEW_REQUIRED} (review digest {finding.review_digest})",
+                    f"{REVIEW_REQUIRED} (review digest {finding.review_digest})"
+                    + (f"; it executes paths the scanner cannot resolve, so the entry also needs a dynamic: justification: {unresolved}" if unresolved else ""),
                 )
             )
         elif row[0] != finding.review_digest:
@@ -1209,8 +1379,22 @@ def main(argv: list[str]) -> int:
                 f"STALE REVIEWED: {label}: content changed since review "
                 f"(reviewed {row[0]}, now {finding.review_digest}); re-review before relisting"
             )
+        elif finding.unresolved and not row[2]:
+            violations.append(
+                Violation(
+                    finding.path,
+                    finding.job,
+                    "unclassifiable: it executes paths the scanner cannot resolve statically "
+                    f"({unresolved}); the reviewed entry needs a dynamic: justification",
+                )
+            )
+        elif row[2] and not finding.unresolved:
+            stale_reviews.append(
+                f"STALE REVIEWED: {label}: the dynamic: justification no longer applies "
+                "(every executed path now resolves statically); remove it"
+            )
         else:
-            print(f"REVIEWED: {label} [{row[1]}]")
+            print(f"REVIEWED: {label} [{row[1]}]" + (f" [{row[2]}]" if row[2] else ""))
     for violation in violations:
         print(f"VIOLATION: {violation}")
     reported = {(violation.path, violation.job) for violation in found}

