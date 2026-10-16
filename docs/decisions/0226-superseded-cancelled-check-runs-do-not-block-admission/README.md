@@ -320,23 +320,61 @@ different event: a `labeled` or `ready_for_review` run whose job gates its steps
 the event (`gate-rearm.yml`'s event-policy job is one) can report `SUCCESS` having
 done nothing. So a non-`CANCELLED` check is set aside only when it **completed
 strictly after the cancel landed**, which makes it a failure the cancel caused. A
-genuine failure that finished before the cancel stays red. The cancel's time is:
+genuine failure that finished before the cancel stays red.
 
-- (a) the earliest `completed_at` of a `CANCELLED` check run in the same suite, when
-  there is one. That is direct evidence of when the cancel reached the run.
-- (b) otherwise, the superseding run's `created_at`. Concurrency cancels a run when
-  its successor is queued, so the cancel landed no later than that.
+The cancel's time is the **latest** `completed_at` of a `CANCELLED` check run in the
+same suite. A run-level cancel cancels every in-flight job at once, so it is the last
+cancellation in the suite. An earlier cancellation, such as a fail-fast matrix leg or
+a job timeout, has nothing to do with it and anchors nothing.
+
+**With no `CANCELLED` check in the suite, a non-`CANCELLED` check stays red.** Nothing
+observable says when that run's cancel landed. A first revision of this amendment
+used the superseding run's `created_at` as a stand-in. The re-review at `1f9d79e6`
+rejected it: a run can outlive its successor's creation. That happens when a
+manual or watcher cancel lands later, or when a workflow without cancel-in-progress
+leaves its successor pending. In that case a genuine failure completing after the
+successor's creation would have been set aside.
 
 `completed_at` is now part of the normalized check-run inventory. Timestamps are
 second-granular, so a failure completing in the same second as the cancel stays red.
 An absent or unreadable time on either side also stays red.
 
-The reviewed request phrased (a) as the mere presence of a `CANCELLED` sibling. That
+The first review proposed the mere presence of a `CANCELLED` sibling as enough. That
 would admit a genuine failure that finished before the cancel whenever any sibling
-was later cancelled, so (a) supplies the cancel's time instead.
+was later cancelled, so the sibling supplies the cancel's time instead.
 
-#1824 meets (a): its siblings were cancelled at 20:38:32 and `shell-tests` completed
-at 20:38:38. Evaluation now starts whenever the head carries any
+**Residual risk, accepted.** The latest `CANCELLED` sibling stands in for "the cancel
+caused this failure". It is evidence of when *a* cancellation landed, not proof of
+causation. A check that completed after it is set aside, and two cases remain:
+
+- **An unrelated cancellation is the latest one in the suite.** For example, a
+  fail-fast leg was cancelled and then the run itself was cancelled while only an
+  `if: always()` job was still running.
+- **A job really fails after the run-level cancel.** This is a job guarded to run
+  anyway, such as `if: always()` or `if: cancelled()`, that fails for its own
+  reasons.
+
+Both are accepted for three reasons:
+
+1. A job that is still running when its run is cancelled is itself cancelled unless
+   it is guarded to run anyway. So a non-`CANCELLED` conclusion that completed after
+   the latest cancellation comes from exactly such a guarded job, which is the
+   aggregator shape this amendment exists for.
+2. The failing check must still be re-done to a completed `SUCCESS` under the same
+   name by the newest later successful run of the same workflow, event, and head. A
+   fail-fast trigger itself finishes before the legs it cancels, so it stays red.
+3. Gate A still requires every required context to carry a `SUCCESS` of its own.
+
+I found no observable signal tighter than this. A run reports no cancellation time or
+cause. Job `started_at`/`completed_at` are second-granular, and a cancelled job can
+report `completed_at` before `started_at` (check run 115595620111). The check-run
+`output` text varies by workflow.
+
+#1824 meets this rule. All five siblings were cancelled at 20:38:32, so both the
+earliest and the latest are 20:38:32, and `shell-tests` completed at 20:38:38. A
+replay of its live payloads, with the successor's skipped checks set to `SUCCESS`,
+exits `0` through this path. The real successor skipped them, so the live head stays
+refused for that reason. Evaluation now starts whenever the head carries any
 non-passing check run, not only a `CANCELLED` one. The concurrency-family
 displacement amendment above stays limited to `CANCELLED` checks; its job-shape test
 excludes a job that ran anyway.
@@ -363,10 +401,20 @@ admission when the superseder re-did the check to `SUCCESS`. New refusals cover 
 superseder that reports the check `SKIPPED` or `NEUTRAL` (the #1824 shape) or omits
 it, a failure in a run that ended `failure`, `success`, or `timed_out`, a different
 workflow, a different event, an earlier run number, and a later run that did not
-succeed, plus the Gate C equivalents. Timing has its own cases: a failure completed
-after the cancel is admitted under (a) and under (b). A failure completed before the
-cancel, in the same second, or at an unknown time stays red. So does one whose
-cancelled sibling or superseding run carries no time. The earliest of several
-cancelled siblings sets the cancel's time. Each condition was mutated out and the
-suite failed. The mutation table is on the pull
+succeed, plus the Gate C equivalents. Timing has its own cases:
+
+- A failure completed after the latest cancelled sibling is admitted.
+- A failure completed before the cancel, in the same second, between an earlier and
+  the latest cancellation, or at an unknown time stays red.
+- A real failure completed after the superseding run's creation, in a run with no
+  `CANCELLED` check, stays red.
+- Any cancelled sibling without a time, alone or among timed ones, leaves the cancel
+  time unknown.
+
+Each condition was mutated out and the suite failed.
+
+The suite's runtime margin is recorded too. `assert-mergeable-head.test.sh` has
+declared `@budget=120` since this amendment, because the PR row default is 60s. It
+took 85s locally on the re-reviewed head, under host load average 15, which leaves
+about 35s of margin. CI ran its predecessor in 51s on `main` run 38799238936. The mutation table is on the pull
 request.
