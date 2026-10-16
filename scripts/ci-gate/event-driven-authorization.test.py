@@ -19,12 +19,12 @@ PROMOTE = ROOT / ".github/workflows/ai-privileged-merge.yml"
 TERMINAL_MERGE = ROOT / "scripts/ci-gate/terminal-merge.sh"
 RETRY = ROOT / ".github/workflows/ai-promotion-retry.yml"
 APP_TOKEN_ACTION = "actions/create-github-app-token"
-IMMUTABLE_ACTION = re.compile(rf"^{re.escape(APP_TOKEN_ACTION)}@[0-9a-f]{{40}}$")
+IMMUTABLE_ACTION = re.compile(rf"^{re.escape(APP_TOKEN_ACTION)}@[0123456789abcdef]{{40}}$")
 MODEL_ACTION_NAME = "anthropics/claude-code-action"
 MODEL_ACTION_SHA = "c81e3bc69d1b18badbb63ba39581218f02421678"
 MODEL_ACTION = f"{MODEL_ACTION_NAME}@{MODEL_ACTION_SHA}"
 IMMUTABLE_MODEL_ACTION = re.compile(
-    rf"^{re.escape(MODEL_ACTION_NAME)}@[0-9a-f]{{40}}$")
+    rf"^{re.escape(MODEL_ACTION_NAME)}@[0123456789abcdef]{{40}}$")
 TRUSTED_BOTS = {"renovate[bot]", "mend[bot]", "github-actions[bot]"}
 
 
@@ -543,7 +543,7 @@ def validate_authorization_app_token_inputs(workflow: dict, job_name: str) -> No
     env = workflow["jobs"][job_name].get("env", {})
     validation_indexes = [index for index, step in enumerate(steps)
                           if step.get("name") == "Validate authorization App client ID" and
-                          '[[ "$APP_CLIENT_ID" =~ ^Iv[A-Za-z0-9.]{8,126}$ ]]' in step.get("run", "") and
+                          '[[ "$APP_CLIENT_ID" =~ ^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$ ]]' in step.get("run", "") and
                           "AI_REVIEW_CLIENT_ID is unavailable or malformed" in step.get("run", "")]
     require(env.get("APP_CLIENT_ID") == "${{ vars.AI_REVIEW_CLIENT_ID }}" and
             len(validation_indexes) == 1 and validation_indexes[0] < token_index,

@@ -12,7 +12,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/runner-canary.yml"
-EXPECTED_SHA256 = "474e1ad9407dcca767060d8d2e462090c4bf77d76a8b98f0aac9d249a6cc7761"
+EXPECTED_SHA256 = "601371372d2a8e70e95e15355540b906981d31d616d1625484394c99fa11ad8b"
 IMMUTABLE_TAG = re.compile(r"^runner-canary-v[0-9]+\.[0-9]+\.[0-9]+$")
 
 

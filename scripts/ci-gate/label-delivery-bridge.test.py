@@ -103,7 +103,7 @@ def main():
         '.head_sha == $head',
         '[ "$head_sha" != "$EVENT_HEAD_SHA" ]',
         '.actor.login == $actor',
-        '[[ "$source_workflow_id" =~ ^[1-9][0-9]*$ ]]',
+        '[[ "$source_workflow_id" =~ ^[123456789][0123456789]*$ ]]',
         '.workflow_id == $workflow_id',
         'source_bound_delivery=true',
         '--arg review_policy "$review_policy" --arg delivery_event "$EVENT_ACTION"',

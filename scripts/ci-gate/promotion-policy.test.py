@@ -47,7 +47,7 @@ def require_contract(review_doc, promote_doc, retry_doc):
     assert retry_checkout["with"]["persist-credentials"] is False
     assert "ai-review-arm-$arm_run_id-$arm_run_attempt" in retry_run
     assert 'review_policy="$(jq -er \'.review_policy | select(type == "string")\' "$receipt_dir/receipt.json")"' in retry_run
-    assert '^[A-Za-z0-9_-]{1,2048}$' in retry_run
+    assert '^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-]{1,2048}$' in retry_run
     assert 'review-policy-envelope.py decode "$review_policy"' in retry_run
     assert '!= ai-merge' in retry_run
     assert 'ai-review-authorized:v1:${check_id}:${HEAD_SHA}:ai-merge' in retry_run
@@ -76,7 +76,7 @@ step["run"] = step["run"].replace(
 mutations.append((review, promote, changed))
 changed = deepcopy(retry)
 step = next(item for item in changed["jobs"]["resolve"]["steps"] if item.get("name") == "Resolve exact-head authorization")
-step["run"] = step["run"].replace('^[A-Za-z0-9_-]{1,2048}$', '.*')
+step["run"] = step["run"].replace('^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-]{1,2048}$', '.*')
 mutations.append((review, promote, changed))
 changed = deepcopy(review)
 step = next(item for item in changed["jobs"]["complete-authorization"]["steps"] if item.get("name") == "Complete exact head authorization")
