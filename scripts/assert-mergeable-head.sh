@@ -31,8 +31,8 @@
 # workflow run was cancelled and then superseded by a later successful run of the same
 # workflow, event, and head that reports that check as SUCCESS -- or, for a CANCELLED
 # check only, not at all (ADR 0226, #1754; a non-CANCELLED conclusion such as an
-# `if: always()` aggregator's FAILURE only when it completed after the cancel landed,
-# per the 2026-10-15 amendment, #1824) -- the
+# `if: always()` aggregator's FAILURE only when it completed after the latest CANCELLED
+# check of its own run, per the 2026-10-15 amendment, #1824) -- the
 # draft-then-ready concurrency cancel. Second, a CANCELLED run that never started because a
 # later run of ANOTHER workflow in its declared concurrency family displaced it from
 # the group's pending slot, when the newest later-created successful family run on
@@ -543,15 +543,18 @@ if [ "$nonpassing_count" -gt 0 ]; then
                    # may do nothing, unlike a re-run, which replays the same payload. So
                    # a non-CANCELLED check is set aside only when it completed strictly
                    # after the cancel landed -- a failure the cancel caused, never one
-                   # that finished before it. The cancel landed at the earliest
-                   # completion of a CANCELLED check in the same suite or, when there is
-                   # none, no later than this superseding run'"'"'s creation. An unknown
-                   # time on either side keeps the check red.
+                   # that finished before it. The run-level cancel cancels every
+                   # in-flight job at once, so it lands at the LATEST completion of a
+                   # CANCELLED check in the same suite; an earlier cancellation (a
+                   # fail-fast leg, a job timeout) anchors nothing. With no CANCELLED
+                   # check there is no observable cancel time -- the superseding run'"'"'s
+                   # creation is not one, since a run can outlive it -- so the check
+                   # stays red, as it does when any time is unknown.
                    | ([ $all[] | select(.kind == "check_run" and .suite_id == $sid and .conclusion == "CANCELLED")
                         | .completed_at | epoch ]) as $cancel_times
-                   | (if ($cancel_times | length) == 0 then (.created_at | epoch)
+                   | (if ($cancel_times | length) == 0 then null
                       elif any($cancel_times[]; . == null) then null
-                      else ($cancel_times | min) end) as $cancelled_at
+                      else ($cancel_times | max) end) as $cancelled_at
                    | if ($conclusion == "CANCELLED" or ($redone | length) > 0)
                         and all($redone[]; .status == "COMPLETED" and .conclusion == "SUCCESS")
                         and ($conclusion == "CANCELLED"
