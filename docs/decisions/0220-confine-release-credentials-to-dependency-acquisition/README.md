@@ -90,32 +90,13 @@ It is also the form the digit guards already used. A spelled-out class admits ex
 
 Both retention jobs now write the skip and its consequence to the step summary before failing, so the green container run still shows it. `continue-on-error` stays, because a cleanup failure after promotion must not mark the promoted release as failed.
 
-## 2026-10-15 amendment — retention is an explicit policy value; `all` keeps every version
+## 2026-10-15 amendment — the verify step forwards the retention policy, including `all`
 
-**Context.** Keeping every package version used to require an arbitrarily large `CI_PACKAGE_RETENTION_KEEP`. The 1-999 cap above turns that workaround into a hard failure. The owner decided that "keep everything" must be a stated policy, not a large number.
+The retention policy itself is decided in [ADR 0115](../0115-configurable-package-retention-with-rename-deprecation/README.md)'s 2026-10-16 amendment, the controlling retention ADR. That amendment records the grammar (unset, `1`–`999`, or `all`, with anything else failing closed), its rationale, the release-availability coupling, and the rollout order for `all`. This ADR records only what the verification credential boundary admits.
 
-**Decision.** `CI_PACKAGE_RETENTION_KEEP` is a policy value with one language, accepted identically by every site that reads it:
+**Decision.** The generated verify step validates `CI_PACKAGE_RETENTION_KEEP` against that grammar with the retention jobs' guard, `^(all|[123456789][0123456789]{0,2})$`. It then forwards the value unchanged, including `all`, as the one admitted member of the hook's `env -i` environment. The 2026-10-15 refinement above admits nothing else; only the accepted grammar widens.
 
-| Value | Meaning |
-| --- | --- |
-| unset | the organization default, `3` (ADR 0108), through `vars.CI_PACKAGE_RETENTION_KEEP \|\| '3'` |
-| `1`-`999`, ASCII digits, no leading zero | keep the newest N stable versions |
-| `all` | retention disabled; nothing is deleted |
-| anything else | fail closed with an error naming the accepted forms |
-
-"Anything else" includes `0`, values above 999, non-ASCII digits, whitespace, and case variants such as `ALL`.
-
-The sites that read the value:
-- the generated release verify step, in all three modes, which forwards `all` to the hook;
-- the `node-release.yml` and `container-release.yml` retention jobs. With `all` they pass the value to `package_retention.py`, which validates its targets, prints `package-retention: disabled by policy (keep=all)`, and returns before any API call. The jobs also write "Package retention disabled by policy" to the run summary.
-
-`package_retention.py` parses `--keep` through the same language (`KEEP_POLICY`, `parse_keep`). Its integer path is unchanged, because its only callers already cap at 999.
-
-**Why exact lowercase `all`.** Every consumer compares the value as a string: five shell guards, `package_retention.py`, and each adopter's release hook. A second accepted spelling would have to be normalized identically in all of them, and one consumer that forgets would read `ALL` as an invalid number or, worse, as a window. One spelling keeps the comparison a plain equality everywhere, and the error message names it.
-
-**Enforcement.** `scripts/ci-gate/release-verify-retention-keep.test.py` runs a shared corpus through all five shell guards and `parse_keep` under C.UTF-8 and en_US.UTF-8, and requires one accept/refuse decision per value. It also runs each retention job with `all` against an unreachable API and requires no deletion plus the summary line. `scripts/package_retention_test.py` covers the parser and the no-op.
-
-**Where the en_US.UTF-8 checks run.** `release-verify-retention-keep.test.py` and `settable-value-guards.test.py` fail closed under `CI=true` when en_US.UTF-8 cannot be reproduced, because a skipped hazard locale would report green for the exact case they exist to catch. The persistent fleet images carry neither the compiled locale nor the glibc locale source data `localedef` needs, so both tests run in the `locale-collation` group of `scripts/actions-ci-groups.tsv`. actions-ci runs that group as its own step in `hosted-compatibility-tests` on `ubuntu-24.04`, whose `locales` package supplies the source data. This is the same reason the bubblewrap contracts run there. Routing these tests instead of installing packages on persistent runners leaves fleet images unchanged and pulls no unpinned archive data into CI. `scripts/actions-ci-groups.test.sh` keeps every contract that imports `ascii_digit_locales` in that group, and nothing else, and requires each manifest group to have exactly one runner. Locally, `bash scripts/actions-ci-group.sh locale-collation` reproduces the run on any host with en_US.UTF-8 or its source data; without either, it skips outside CI and fails under `CI=true`.
+**Where the en_US.UTF-8 checks run.** `release-verify-retention-keep.test.py` and `settable-value-guards.test.py` fail closed under `CI=true` when en_US.UTF-8 cannot be reproduced, because a skipped hazard locale would report green for the exact case they exist to catch. The persistent fleet images carry neither the compiled locale nor the glibc locale source data `localedef` needs, so both tests run in the `locale-collation` group of `scripts/actions-ci-groups.tsv`. actions-ci runs that group as its own step in `hosted-compatibility-tests` on `ubuntu-24.04`, whose `locales` package supplies the source data. This is the same reason the bubblewrap contracts run there. Routing these tests instead of installing packages on persistent runners leaves fleet images unchanged and pulls no unpinned archive data into CI. `scripts/actions-ci-groups.test.sh` requires that group to run exactly the tracked scripts under `scripts/` that import `ascii_digit_locales`, in any spelling, and requires each manifest group to have exactly one runner. Locally, `bash scripts/actions-ci-group.sh locale-collation` reproduces the run on any host with en_US.UTF-8 or its source data; without either, it skips outside CI and fails under `CI=true`.
 
 **Consequence for adopters.** A release hook that reads the window (verjson-ci#298) must treat `all` as "never evicts" and pass. Once its caller is regenerated, the variable is always present, so an absent value is an error the hook should fail closed on.
 
@@ -127,9 +108,4 @@ The sites that read the value:
 
 The PM owns both rotations. Reusable workflows (`ai-review-merge.yml`, `node-release.yml`, `container-release.yml`, `node-ci.yml`) and generated callers take effect when a caller pins this contract or later.
 
-**When `all` may be set.** Set `CI_PACKAGE_RETENTION_KEEP=all` only after every repository that reads it pins this contract or later. A variable set at organization level reaches all of them at once, so the value is safe only when no consumer still runs an older contract. Before that:
-- an older retention guard (`^[1-9][0-9]*$`, or the earlier `{0,2}` cap without `all`) rejects `all` after publication, turning node-release retention red and container-release retention into a skipped cleanup;
-- an older generated verify step does not forward the variable at all, and a release hook that reads it but does not know `all` blocks every release.
-
-verjson-ci#298 is the first consumer that must understand `all`, as "never evicts". Until its hook does and its caller is regenerated, `all` must not be set where verjson-ci can read it. Setting the variable at repository level, on a repository already on this contract, is the safe way to adopt `all` early.
-
+**When `all` may be set.** Not before every repository that reads the variable pins this contract or later. The rollout warning and the safe early path (a repository-level value) are recorded in [ADR 0115](../0115-configurable-package-retention-with-rename-deprecation/README.md)'s 2026-10-16 amendment.
