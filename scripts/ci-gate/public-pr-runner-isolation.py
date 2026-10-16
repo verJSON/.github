@@ -21,6 +21,7 @@ Verjson/.github ADR 0235.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import itertools
 import json
 import os
@@ -67,9 +68,20 @@ class Violation(NamedTuple):
     path: str
     job: str
     detail: str
+    selector_digest: str = ""
 
     def __str__(self) -> str:
         return f"{self.path}: job '{self.job}': {self.detail}"
+
+
+def selector_digest(runs_on) -> str:
+    """SHA-256 of a job's runs-on value as canonical JSON, keying pending rows
+    to the exact reviewed selector rather than to a job name alone."""
+    canonical = json.dumps(runs_on, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 class Undetermined(Exception):
@@ -767,6 +779,7 @@ def check_job(
                         name,
                         "pull_request in a public repository can resolve to self-hosted "
                         f"or non-ephemeral runner labels {list(outcome)!r} ({describe(assignment)})",
+                        selector_digest(runs_on),
                     )
                 )
                 return violations
@@ -789,11 +802,14 @@ def check_tree(directory: str, repository: str) -> list[Violation]:
     return violations
 
 
-def load_pending(path: str | None) -> dict[tuple[str, str], str]:
-    """Reviewed `path<TAB>job<TAB>reason` rows awaiting a recorded follow-up."""
+PENDING_FORMAT = "path<TAB>job<TAB>selector digest<TAB>reason"
+
+
+def load_pending(path: str | None) -> dict[tuple[str, str], tuple[str, str]]:
+    """Reviewed rows awaiting a recorded follow-up, keyed to the exact selector."""
     if path is None:
         return {}
-    pending: dict[tuple[str, str], str] = {}
+    pending: dict[tuple[str, str], tuple[str, str]] = {}
     try:
         with open(path, encoding="utf-8") as handle:
             rows = handle.read().splitlines()
@@ -803,16 +819,18 @@ def load_pending(path: str | None) -> dict[tuple[str, str], str]:
         if not row.strip() or row.startswith("#"):
             continue
         fields = row.split("\t")
-        if len(fields) != 3 or not all(field.strip() for field in fields):
-            raise Undetermined(f"{path}:{number}: expected path<TAB>job<TAB>reason")
-        pending[(fields[0], fields[1])] = fields[2]
+        if len(fields) != 4 or not all(field.strip() for field in fields):
+            raise Undetermined(f"{path}:{number}: expected {PENDING_FORMAT}")
+        if not DIGEST.fullmatch(fields[2]):
+            raise Undetermined(f"{path}:{number}: selector digest must be sha256:<64 hex>")
+        pending[(fields[0], fields[1])] = (fields[2], fields[3])
     return pending
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--repository", default="Verjson/.github")
-    parser.add_argument("--pending", help="reviewed path<TAB>job<TAB>reason exceptions")
+    parser.add_argument("--pending", help=f"reviewed {PENDING_FORMAT} exceptions")
     parser.add_argument("workflow_dir")
     arguments = parser.parse_args(argv)
     try:
@@ -823,11 +841,18 @@ def main(argv: list[str]) -> int:
         return 2
     violations = []
     for violation in found:
-        reason = pending.get((violation.path, violation.job))
-        if reason is None:
+        row = pending.get((violation.path, violation.job))
+        if row is None:
             violations.append(violation)
+        elif row[0] != violation.selector_digest:
+            violations.append(
+                violation._replace(
+                    detail=f"{violation.detail}; pending row no longer applies: selector digest "
+                    f"changed from {row[0]} to {violation.selector_digest}"
+                )
+            )
         else:
-            print(f"PENDING: {violation} [{reason}]")
+            print(f"PENDING: {violation} [{row[1]}]")
     for violation in violations:
         print(f"VIOLATION: {violation}")
     reported = {(violation.path, violation.job) for violation in found}

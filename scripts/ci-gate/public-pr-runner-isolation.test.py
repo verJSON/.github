@@ -9,6 +9,8 @@ message, because one "violation" exit cannot tell which rule tripped.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -167,6 +169,13 @@ expect(
     "a reusable workflow honoring a caller runner input on pull_request is a violation",
 )
 
+def digest(selector) -> str:
+    """The pending-row key: SHA-256 of the job's runs-on value as canonical JSON."""
+    canonical = json.dumps(selector, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+TRUSTED_SELECTOR = """${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}"""
 TRUSTED_LANE_PR_JOB = """
     on: pull_request
     jobs:
@@ -179,11 +188,26 @@ TRUSTED_LANE_PR_JOB = """
 expect(
     {
         "ci.yml": TRUSTED_LANE_PR_JOB,
-        "pending.tsv": "# path<TAB>job<TAB>reason\nci.yml\ttest\tselector pinned elsewhere until a follow-up\n",
+        "pending.tsv": (
+            "# path<TAB>job<TAB>selector digest<TAB>reason\n"
+            f"ci.yml\ttest\t{digest(TRUSTED_SELECTOR)}\tselector pinned elsewhere until a follow-up\n"
+        ),
     },
     0,
     ("PENDING: ci.yml: job 'test'", "selector pinned elsewhere"),
     "a reviewed pending entry is reported as pending instead of failing",
+    "--pending",
+    "{dir}/pending.tsv",
+)
+
+expect(
+    {
+        "ci.yml": TRUSTED_LANE_PR_JOB.replace("vars.CI_LANE_FALLBACK || ", ""),
+        "pending.tsv": f"ci.yml\ttest\t{digest(TRUSTED_SELECTOR)}\tlisted against the reviewed selector\n",
+    },
+    1,
+    ("VIOLATION: ci.yml: job 'test'", "selector digest changed"),
+    "a pending job whose selector changed is a violation, not masked by its row",
     "--pending",
     "{dir}/pending.tsv",
 )
@@ -198,7 +222,7 @@ expect(
                 steps:
                   - run: 'true'
         """,
-        "pending.tsv": "ci.yml\ttest\tfixed but still listed\n",
+        "pending.tsv": f"ci.yml\ttest\t{digest(TRUSTED_SELECTOR)}\tfixed but still listed\n",
     },
     1,
     ("STALE PENDING: ci.yml: job 'test'",),
@@ -349,10 +373,18 @@ expect(
 )
 expect({}, 2, ("UNDETERMINED", "no workflow files"), "an empty workflow directory is undetermined")
 expect(
-    {**pull_request_job("ubuntu-24.04"), "pending.tsv": "ci.yml\ttest\n"},
+    {**pull_request_job("ubuntu-24.04"), "pending.tsv": f"ci.yml\ttest\t{digest('ubuntu-24.04')}\n"},
     2,
-    ("UNDETERMINED", "path<TAB>job<TAB>reason"),
+    ("UNDETERMINED", "path<TAB>job<TAB>selector digest<TAB>reason"),
     "a pending row without a reason is rejected",
+    "--pending",
+    "{dir}/pending.tsv",
+)
+expect(
+    {**pull_request_job("ubuntu-24.04"), "pending.tsv": "ci.yml\ttest\tsha256:abc\treason\n"},
+    2,
+    ("UNDETERMINED", "selector digest"),
+    "a pending row with a malformed selector digest is rejected",
     "--pending",
     "{dir}/pending.tsv",
 )
