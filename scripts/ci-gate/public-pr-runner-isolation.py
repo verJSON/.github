@@ -515,7 +515,9 @@ class Context:
         if lowered[0] == "needs" and len(path) >= 3 and path[1] in self.unreachable:
             return ["skipped"] if lowered[2] == "result" else [""]
         if lowered == ("github", "event_name"):
-            return [self.event]
+            # A called workflow sees its caller's event, which a standalone
+            # workflow_call scan cannot know: try every event a caller can have.
+            return list(CALLER_EVENTS) if self.event == "workflow_call" else [self.event]
         if lowered == ("github", "repository"):
             return [self.repository]
         if lowered == ("github", "repository_owner"):
@@ -927,14 +929,31 @@ def materializes_head(job: dict, workflow_env, root: str, label: str) -> bool:
 
 
 # Events that run the BASE workflow with base privileges while fork activity
-# can trigger them. Head-content detection cannot be complete for these (event
+# can trigger them, or whose payload carries text or a repository an outside
+# account chooses: a fork's own repository (`fork`), an issue or discussion
+# title and body. Head-content detection cannot be complete for these (event
 # payload files, GITHUB_ENV/GITHUB_OUTPUT indirection, API clients), so every
 # job that can land on a persistent runner needs a reviewed entry (ADR 0235).
-PRIVILEGED_EVENTS = ("pull_request_target", "workflow_run", "issue_comment")
+PRIVILEGED_EVENTS = (
+    "pull_request_target",
+    "workflow_run",
+    "issue_comment",
+    "fork",
+    "issues",
+    "discussion",
+    "discussion_comment",
+)
+# Relays: a workflow another workflow or account starts with values it chooses.
+# gate-rearm.yml's pull_request_target run dispatches ai-review-merge.yml with
+# a pull request number and head SHA, and a caller passes any input it likes,
+# so a relayed job can be handed a fork's head. Each is scanned like a
+# privileged event, and a job that materializes the head, or whose head
+# detection cannot decide, may not run on a persistent runner at all.
+RELAY_EVENTS = ("workflow_dispatch", "workflow_call", "repository_dispatch")
 # Events that run the pull request's own code with pull_request semantics: a
 # review, a review comment, and a merge queue all run the head or merge commit.
 PULL_REQUEST_EVENTS = ("pull_request", "pull_request_review", "pull_request_review_comment", "merge_group")
-CHECKED_EVENTS = PULL_REQUEST_EVENTS + PRIVILEGED_EVENTS
+CHECKED_EVENTS = PULL_REQUEST_EVENTS + PRIVILEGED_EVENTS + RELAY_EVENTS
 # Documented events whose runs carry no fork-controlled ref or code. Any event
 # outside this set and CHECKED_EVENTS is undetermined: check_run, check_suite,
 # status, deployment, and deployment_status can name a fork head SHA, and an
@@ -944,11 +963,7 @@ UNSCANNED_EVENTS = frozenset(
         "branch_protection_rule",
         "create",
         "delete",
-        "discussion",
-        "discussion_comment",
-        "fork",
         "gollum",
-        "issues",
         "label",
         "milestone",
         "page_build",
@@ -959,13 +974,13 @@ UNSCANNED_EVENTS = frozenset(
         "push",
         "registry_package",
         "release",
-        "repository_dispatch",
         "schedule",
         "watch",
-        "workflow_call",
-        "workflow_dispatch",
     }
 )
+# What `github.event_name` can be inside a called workflow: any event a caller
+# can be triggered by. workflow_call itself is never an event name.
+CALLER_EVENTS = tuple(sorted((set(CHECKED_EVENTS) | UNSCANNED_EVENTS) - {"workflow_call"}))
 INHERITED_KEYS = ("env", "permissions", "defaults")
 
 
@@ -984,6 +999,31 @@ class Finding(NamedTuple):
     unresolved: tuple = ()
     # A reason no entry can accept this job (an unpinned remote callee).
     refusal: str = ""
+    # Reached through a relay event (workflow_dispatch, workflow_call,
+    # repository_dispatch); only these may be ratcheted by a pending row.
+    relay: bool = False
+    # For a relay finding, SHA-256 over its selector and unresolved reason
+    # names: a pending row keys to it, so a changed selector or a new reason
+    # (such as head-materialization) makes the row stop applying.
+    relay_digest: str = ""
+
+
+def relay_digest(selector, reasons) -> str:
+    canonical = json.dumps(
+        {"selector": selector, "reasons": sorted(set(reasons))},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+RELAY_HEAD_REFUSAL = (
+    "a relayed run can be handed a pull request head, and head detection finds this job "
+    "materializes it or cannot rule that out ({diagnostic}); it must run on an ephemeral "
+    "runner, so no reviewed entry can accept it (ADR 0235)"
+)
 
 
 def _normalize(value):
@@ -1387,8 +1427,12 @@ class Scan:
         self.findings: list[Finding] = []
 
     @property
+    def relay(self) -> bool:
+        return self.event in RELAY_EVENTS
+
+    @property
     def privileged(self) -> bool:
-        return self.event in PRIVILEGED_EVENTS
+        return self.event in PRIVILEGED_EVENTS or self.relay
 
 
 def head_diagnostic(job: dict, document: dict, root: str, label: str) -> tuple[str, bool]:
@@ -1422,6 +1466,8 @@ def check_call(
                     if FULL_SHA_PIN.search(uses)
                     else f"remote callee {uses} must be pinned to a full 40-hex commit SHA; "
                     "a branch or tag can change after review, so no entry can accept it",
+                    relay=scan.relay,
+                    relay_digest=relay_digest(uses, ()),
                 )
             )
             return []
@@ -1476,6 +1522,8 @@ def check_workflow(
             diagnostic, head_unresolved = head_diagnostic(job, document, scan.root, f"{path}: job '{name}'")
             if head_unresolved:
                 closure.flag("head-materialization", diagnostic)
+                if scan.relay:
+                    closure.refusals.add(RELAY_HEAD_REFUSAL.format(diagnostic=diagnostic))
             pairs = closure.pairs()
             bound = {"files": closure.files, "unresolved": [f"{reason}: {detail}" for reason, detail in pairs]}
             if closure.tree is not None:
@@ -1488,6 +1536,8 @@ def check_workflow(
                     diagnostic,
                     pairs,
                     refusal="; ".join(sorted(closure.refusals)),
+                    relay=scan.relay,
+                    relay_digest=relay_digest(job.get("runs-on"), (reason for reason, _ in pairs)),
                 )
             )
     return violations
@@ -1530,6 +1580,28 @@ def check_job(
     return violations
 
 
+def relay_bindings(document: dict, event: str) -> dict[str, tuple]:
+    """The values a relay's own inputs can take: whatever its dispatcher or
+    caller chooses. A `choice` takes only its options and a `boolean` only
+    true or false; every other input is tried as an adversarial value."""
+    if event not in ("workflow_dispatch", "workflow_call"):
+        return {}
+    trigger = document.get("on", document.get(True))
+    declared = trigger.get(event) if isinstance(trigger, dict) else None
+    inputs = declared.get("inputs") if isinstance(declared, dict) else None
+    bindings: dict[str, tuple] = {}
+    for name, declaration in (inputs or {}).items():
+        declaration = declaration if isinstance(declaration, dict) else {}
+        kind = declaration.get("type", "string")
+        if kind == "choice" and isinstance(declaration.get("options"), list) and declaration["options"]:
+            bindings[str(name)] = tuple(declaration["options"])
+        elif kind == "boolean":
+            bindings[str(name)] = (True, False)
+        else:
+            bindings[str(name)] = ADVERSARIAL_INPUT_VALUES
+    return bindings
+
+
 def check_tree(
     directory: str, repository: str, findings: list[Finding] | None = None, lists: tuple[str, ...] = ()
 ) -> list[Violation]:
@@ -1553,7 +1625,7 @@ def check_tree(
                 continue
             scan = Scan(directory, repository, event, lists)
             label = name if event == "pull_request" else f"{name} [{event}]"
-            violations.extend(check_workflow(scan, label, document))
+            violations.extend(check_workflow(scan, label, document, relay_bindings(document, event)))
             if findings is not None:
                 findings.extend(scan.findings)
     return violations
@@ -1673,13 +1745,41 @@ def main(argv: list[str]) -> int:
         else:
             print(f"PENDING: {violation} [{row.justification}]")
     stale_reviews = []
+    ratcheted: set[tuple[str, str]] = set()
     for finding in findings:
         label = f"{finding.path}: job '{finding.job}'"
         print(f"DIAGNOSTIC: {label}: {finding.diagnostic}")
         row = reviewed.get((finding.path, finding.job))
         reasons = {reason for reason, _ in finding.unresolved}
+        pending_row = pending.get((finding.path, finding.job)) if finding.relay else None
+        if pending_row is not None:
+            # The relay backlog (#1831): a known relay job, ratcheted exactly
+            # like a pending pull_request job, never accepted by review.
+            ratcheted.add((finding.path, finding.job))
+            if row is not None:
+                print(f"UNDETERMINED: {label} is in both the pending and the reviewed list; keep one", file=sys.stderr)
+                return 2
+            if pending_row.digest == finding.relay_digest:
+                print(f"PENDING: {label}: relayed job can resolve to a persistent runner [{pending_row.justification}]")
+            else:
+                violations.append(
+                    Violation(
+                        finding.path,
+                        finding.job,
+                        f"relayed job can resolve to a persistent runner; pending row no longer applies: "
+                        f"relay digest changed from {pending_row.digest} to {finding.relay_digest}"
+                        + (f" (unresolved: {describe_reasons(finding.unresolved, reasons)})" if reasons else ""),
+                    )
+                )
+            continue
         if finding.refusal:
-            violations.append(Violation(finding.path, finding.job, finding.refusal))
+            violations.append(
+                Violation(
+                    finding.path,
+                    finding.job,
+                    finding.refusal + (f" (relay digest {finding.relay_digest})" if finding.relay else ""),
+                )
+            )
             continue
         if row is None:
             needed = ", ".join(reason for reason in REASONS if reason in reasons)
@@ -1687,8 +1787,11 @@ def main(argv: list[str]) -> int:
                 Violation(
                     finding.path,
                     finding.job,
-                    "privileged-event job can resolve to a persistent runner and "
-                    f"{REVIEW_REQUIRED} (review digest {finding.review_digest})"
+                    ("relayed" if finding.relay else "privileged-event")
+                    + " job can resolve to a persistent runner and "
+                    f"{REVIEW_REQUIRED} (review digest {finding.review_digest}"
+                    + (f", relay digest {finding.relay_digest}" if finding.relay else "")
+                    + ")"
                     + (
                         f"; its entry also needs `dynamic: {needed}: <justification>` for: "
                         + describe_reasons(finding.unresolved, reasons)
@@ -1732,7 +1835,7 @@ def main(argv: list[str]) -> int:
             print(f"REVIEWED: {label} [{row.justification}]" + (f" [{row.dynamic}]" if row.dynamic else ""))
     for violation in violations:
         print(f"VIOLATION: {violation}")
-    reported = {(violation.path, violation.job) for violation in found}
+    reported = {(violation.path, violation.job) for violation in found} | ratcheted
     stale = sorted(set(pending) - reported)
     for path, job in stale:
         print(f"STALE PENDING: {path}: job '{job}' no longer violates; remove it from the pending file")

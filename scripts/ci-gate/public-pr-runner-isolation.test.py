@@ -1991,11 +1991,19 @@ for event in ("pull_request_foo", "pull_request_target_v2", "check_run", "check_
         f"an unclassified event {event} is undetermined, not clean",
     )
 expect(
-    event_job("[push, workflow_dispatch, schedule, release, issues]"),
+    event_job("[push, schedule, release]"),
     0,
     ("clean",),
     "events that carry no fork-controlled ref stay outside the rule",
 )
+for event in ("workflow_dispatch", "workflow_call", "repository_dispatch", "fork", "issues",
+              "discussion", "discussion_comment"):
+    expect(
+        event_job(f"[push, {event}]"),
+        1,
+        (f"VIOLATION: ci.yml [{event}]: job 'test'",),
+        f"{event} is checked, not left outside the rule",
+    )
 
 # A workflow-level defaults.run.shell is a non-default shell for every job.
 WORKFLOW_SHELL = shaped_job("- run: echo hi")
@@ -2039,6 +2047,298 @@ expect(
     "a duplicate pending row is rejected",
     "--pending",
     "{dir}/pending.tsv",
+)
+
+
+# ---------------------------------------------------------------------------
+# Relays (ADR 0235). workflow_dispatch, workflow_call, and repository_dispatch
+# run with values their dispatcher or caller chooses; gate-rearm.yml's
+# pull_request_target run dispatches ai-review-merge.yml with a fork's head.
+# A relayed job on a persistent-capable selector that materializes the head,
+# or whose head detection cannot decide, is refused outright; any other one
+# needs a reviewed entry. fork, issues, and discussion* get the issue_comment
+# treatment. These are the third-round reviewer's four probes, each on
+# [self-hosted, general], which all exited 0 before.
+# ---------------------------------------------------------------------------
+def relay_job(trigger: str, steps: str, runs_on: str = "[self-hosted, general]", head: str = "") -> dict[str, str]:
+    return {
+        "relay.yml": f"""
+            on: {trigger}
+            jobs:
+              j:
+                runs-on: {runs_on}
+                steps:
+{textwrap.indent(textwrap.dedent(steps), " " * 18)}
+        """,
+    }
+
+
+RELAY_REFUSAL = "a relayed run can be handed a pull request head"
+PROBES = {
+    "workflow_dispatch": ("""
+        - uses: actions/checkout@v4
+          with:
+            ref: refs/pull/${{ inputs.pr }}/head
+        - run: make
+    """, (RELAY_REFUSAL, "must run on an ephemeral runner")),
+    "workflow_call": ("""
+        - uses: actions/checkout@v4
+          with:
+            ref: ${{ github.event.pull_request.head.sha }}
+        - run: make
+    """, (RELAY_REFUSAL, "must run on an ephemeral runner")),
+    "fork": ("""
+        - uses: actions/checkout@v4
+          with:
+            repository: ${{ github.event.forkee.full_name }}
+        - run: make
+    """, ("has no sparse-checkout list",)),
+    "issues": ("""
+        - uses: actions/checkout@v4
+          with:
+            ref: refs/pull/${{ github.event.issue.title }}/head
+        - run: make
+    """, ("has no sparse-checkout list",)),
+}
+for event, (steps, fragments) in PROBES.items():
+    expect(
+        relay_job(event, steps),
+        1,
+        (f"VIOLATION: relay.yml [{event}]: job 'j'", HEAD_DIAG, *fragments),
+        f"reviewer probe: {event} checking out a fork-chosen head on a persistent runner is refused",
+    )
+    expect(
+        relay_job(event, steps, "ubuntu-24.04"),
+        0,
+        ("clean",),
+        f"reviewer probe: the same {event} job on a hosted runner is clean",
+    )
+
+# With a sparse list, the fork and issues probes are ordinary privileged
+# findings: they need a reviewed entry, and its dynamic: must name the head.
+for event in ("fork", "issues"):
+    sparse = PROBES[event][0].replace("        - run: make", "            sparse-checkout: Makefile\n        - run: make")
+    expect(
+        relay_job(event, sparse),
+        1,
+        (f"VIOLATION: relay.yml [{event}]: job 'j'", "privileged-event job", REVIEW_REQUIRED,
+         "dynamic: head-materialization"),
+        f"a sparse {event} checkout of a fork-chosen head needs a reviewed entry naming the head",
+    )
+
+# A relay head refusal survives a reviewed entry that names every reason.
+DISPATCH_HEAD = relay_job("workflow_dispatch", PROBES["workflow_dispatch"][0])
+code, output = run_checker(DISPATCH_HEAD)
+RELAY_REVIEW = re.search(r"review digest (sha256:[0-9a-f]{64})", output)
+expect(
+    with_review(
+        DISPATCH_HEAD,
+        f"relay.yml [workflow_dispatch]\tj\t{RELAY_REVIEW.group(1) if RELAY_REVIEW else 'missing'}\treviewed"
+        "\tdynamic: head-materialization, runtime-checkout: claims the ref is safe\n"
+        if RELAY_REVIEW
+        else "",
+    ),
+    1,
+    (RELAY_REFUSAL,),
+    "no reviewed entry can accept a relayed job that materializes the head",
+    *REVIEWED_ARGS,
+)
+
+# A relayed job with no head pattern needs, and accepts, a reviewed entry.
+DISPATCH_PLAIN = relay_job("workflow_dispatch", "- run: echo maintenance")
+expect(DISPATCH_PLAIN, 1, ("relayed job can resolve to a persistent runner and " + REVIEW_REQUIRED,),
+       "a relayed job without a head pattern needs a reviewed entry")
+DISPATCH_PLAIN_ROW = review_row(DISPATCH_PLAIN, "relay.yml [workflow_dispatch]", "j")
+expect(with_review(DISPATCH_PLAIN, DISPATCH_PLAIN_ROW), 0, ("REVIEWED: relay.yml [workflow_dispatch]: job 'j'",),
+       "a reviewed relayed job without a head pattern is accepted", *REVIEWED_ARGS)
+
+# Dispatch inputs take the values a dispatcher can choose: a `choice` reaches
+# each option, so a job guarded on one is reachable, and an unlisted value is not.
+CHOICE_GATED = {
+    "relay.yml": """
+        on:
+          workflow_dispatch:
+            inputs:
+              environment:
+                type: choice
+                options: [ai-review-app]
+              pr:
+                required: true
+        jobs:
+          j:
+            if: inputs.environment == 'ai-review-app'
+            runs-on: [self-hosted, general]
+            steps:
+              - run: echo "$PR"
+                env:
+                  PR: ${{ inputs.pr }}
+    """,
+}
+expect(CHOICE_GATED, 1, ("VIOLATION: relay.yml [workflow_dispatch]: job 'j'",),
+       "a job guarded on a dispatch choice option is reachable")
+UNREACHABLE_CHOICE = {"relay.yml": CHOICE_GATED["relay.yml"].replace("== 'ai-review-app'", "== 'elsewhere'")}
+expect(UNREACHABLE_CHOICE, 0, ("clean",), "a job guarded on a value no option can take is unreachable")
+BOOLEAN_GATED = {"relay.yml": CHOICE_GATED["relay.yml"]
+                 .replace("type: choice\n                options: [ai-review-app]", "type: boolean")
+                 .replace("inputs.environment == 'ai-review-app'", "inputs.environment")}
+expect(BOOLEAN_GATED, 1, ("VIOLATION: relay.yml [workflow_dispatch]: job 'j'",),
+       "a job guarded on a boolean dispatch input is reachable")
+
+# A called workflow sees its caller's event, so a standalone workflow_call scan
+# tries every caller event rather than the literal name workflow_call.
+expect(
+    relay_job("workflow_call", "- run: echo hi").__class__({
+        "relay.yml": """
+            on: workflow_call
+            jobs:
+              j:
+                if: github.event_name == 'pull_request'
+                runs-on: [self-hosted, general]
+                steps:
+                  - run: echo hi
+        """,
+    }),
+    1,
+    ("VIOLATION: relay.yml [workflow_call]: job 'j'",),
+    "a workflow_call job guarded on the caller's pull_request event is reachable",
+)
+# A caller-supplied runner input is adversarial in a standalone call.
+expect(
+    {
+        "relay.yml": """
+            on:
+              workflow_call:
+                inputs:
+                  runner:
+                    type: string
+                    default: '["ubuntu-24.04"]'
+            jobs:
+              j:
+                runs-on: ${{ fromJSON(inputs.runner) }}
+                steps:
+                  - run: echo hi
+        """,
+    },
+    1,
+    ("VIOLATION: relay.yml [workflow_call]: job 'j'",),
+    "a standalone workflow_call honoring a caller runner input can reach the pool",
+)
+
+# The relay backlog is an exact pending ratchet keyed to the relay digest.
+RELAY_DIGEST_LINE = re.compile(r"relay digest (sha256:[0-9a-f]{64})")
+code, output = run_checker(DISPATCH_HEAD)
+HEAD_RELAY_DIGEST = RELAY_DIGEST_LINE.search(output)
+HEAD_PENDING = (f"relay.yml [workflow_dispatch]\tj\t{HEAD_RELAY_DIGEST.group(1)}\t#1831 backlog\n"
+                if HEAD_RELAY_DIGEST else "missing\n")
+expect({**DISPATCH_HEAD, "pending.tsv": HEAD_PENDING}, 0,
+       ("PENDING: relay.yml [workflow_dispatch]: job 'j'",),
+       "a backlog row ratchets a known relayed job", "--pending", "{dir}/pending.tsv")
+MOVED = relay_job("workflow_dispatch", PROBES["workflow_dispatch"][0], "[self-hosted, other]")
+expect({**MOVED, "pending.tsv": HEAD_PENDING}, 1,
+       ("pending row no longer applies: relay digest changed",),
+       "a backlog row stops applying when the selector changes", "--pending", "{dir}/pending.tsv")
+code, output = run_checker(DISPATCH_PLAIN)
+PLAIN_RELAY_DIGEST = RELAY_DIGEST_LINE.search(output)
+GAINED_HEAD = relay_job("workflow_dispatch", PROBES["workflow_dispatch"][0])
+expect(
+    {**GAINED_HEAD, "pending.tsv": f"relay.yml [workflow_dispatch]\tj\t{PLAIN_RELAY_DIGEST.group(1)}\tbacklog\n"
+     if PLAIN_RELAY_DIGEST else "missing\n"},
+    1,
+    ("pending row no longer applies: relay digest changed", "head-materialization"),
+    "a backlog row stops applying when the job gains a head-materializing checkout",
+    "--pending",
+    "{dir}/pending.tsv",
+)
+expect({**relay_job("workflow_dispatch", PROBES["workflow_dispatch"][0], "ubuntu-24.04"), "pending.tsv": HEAD_PENDING},
+       1, ("STALE PENDING: relay.yml [workflow_dispatch]: job 'j'",),
+       "a backlog row for a job moved to a hosted runner is stale", "--pending", "{dir}/pending.tsv")
+expect({**DISPATCH_PLAIN, "pending.tsv": f"relay.yml [workflow_dispatch]\tj\t{PLAIN_RELAY_DIGEST.group(1)}\tbacklog\n"
+        if PLAIN_RELAY_DIGEST else "missing\n", "reviewed.tsv": DISPATCH_PLAIN_ROW},
+       2, ("UNDETERMINED", "in both the pending and the reviewed list"),
+       "a relayed job listed as both pending and reviewed is undetermined",
+       "--pending", "{dir}/pending.tsv", *REVIEWED_ARGS)
+# A pending row never ratchets a privileged (non-relay) finding.
+FORK_JOB = relay_job("fork", PROBES["fork"][0])
+expect({**FORK_JOB, "pending.tsv": "relay.yml [fork]\tj\t" + NO_SPARSE_RUNTIME + "\tbacklog\n"}, 1,
+       ("has no sparse-checkout list", "STALE PENDING: relay.yml [fork]: job 'j'"),
+       "a pending row cannot stand in for a privileged-event review", "--pending", "{dir}/pending.tsv")
+
+
+# The live `gate` job's shape: gate-rearm.yml's pull_request_target run
+# dispatches ai-review-merge.yml, whose gate checks out the target PR head at
+# the workspace root and runs a review action there. With the ADR 0048 fast-lane
+# selector a public target lands on CI_RUNNER_FASTLANE, the persistent pool; the
+# ADR 0235 selector sends it to the ephemeral untrusted lane.
+GATE_SHAPE = """
+    on:
+      workflow_dispatch:
+        inputs:
+          ai_review_environment:
+            type: choice
+            options: [ai-review-app]
+          pr_number:
+            required: true
+          expected_head_sha:
+            required: true
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+      TARGET_REPO: ${{ github.repository }}
+    jobs:
+      preflight:
+        runs-on: ubuntu-24.04
+        outputs:
+          target_private: ${{ steps.visibility.outputs.target_private }}
+          head_sha: ${{ inputs.expected_head_sha }}
+        steps:
+          - id: visibility
+            run: echo "target_private=$(gh api "repos/$TARGET_REPO" --jq .private)" >>"$GITHUB_OUTPUT"
+      gate:
+        environment: ${{ inputs.ai_review_environment }}
+        needs: preflight
+        runs-on: SELECTOR
+        steps:
+          - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+            with:
+              repository: ${{ env.TARGET_REPO }}
+              ref: ${{ needs.preflight.outputs.head_sha }}
+              fetch-depth: 2
+          - uses: anthropics/claude-code-action@c81e3bc69d1b18badbb63ba39581218f02421678
+"""
+FAST_LANE_SELECTOR = (
+    "${{ inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' "
+    "&& 'ubuntu-24.04' || needs.preflight.outputs.target_private == 'false' && fromJSON(vars.CI_RUNNER_FASTLANE "
+    "|| '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_RUNNER_OVERFLOW || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK "
+    "|| '[\"ubuntu-24.04\"]') }}"
+)
+UNTRUSTED_LANE_SELECTOR = (
+    "${{ (github.repository_owner != 'Verjson' || github.event.repository.private == true) && inputs.runner_labels "
+    "&& fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || "
+    "github.event.repository.private == true && needs.preflight.outputs.target_private != 'false' && "
+    "fromJSON(vars.CI_RUNNER_OVERFLOW || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') "
+    "|| fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}"
+)
+expect(
+    {"ai-review-merge.yml": GATE_SHAPE.replace("SELECTOR", FAST_LANE_SELECTOR)},
+    1,
+    ("VIOLATION: ai-review-merge.yml [workflow_dispatch]: job 'gate'", RELAY_REFUSAL, HEAD_DIAG),
+    "the live gate shape on the ADR 0048 fast lane is refused (before the ADR 0235 fix)",
+)
+expect(
+    {"ai-review-merge.yml": GATE_SHAPE.replace("SELECTOR", UNTRUSTED_LANE_SELECTOR)},
+    0,
+    ("clean",),
+    "the live gate shape on the ADR 0235 selector is clean (after the fix)",
+)
+# Honoring a Verjson caller's runner_labels for a public repository would let
+# a pull request that edits the caller name the pool again.
+expect(
+    {"ai-review-merge.yml": GATE_SHAPE.replace("SELECTOR", UNTRUSTED_LANE_SELECTOR.replace(
+        "(github.repository_owner != 'Verjson' || github.event.repository.private == true) && ", "")
+    ).replace("          expected_head_sha:\n", "          runner_labels:\n            required: false\n"
+              "          expected_head_sha:\n")},
+    1,
+    ("VIOLATION: ai-review-merge.yml [workflow_dispatch]: job 'gate'", RELAY_REFUSAL),
+    "an unguarded runner_labels input reopens the pool for the gate shape",
 )
 
 

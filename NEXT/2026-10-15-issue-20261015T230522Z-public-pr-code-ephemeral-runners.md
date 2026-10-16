@@ -53,3 +53,12 @@ and a Verjson caller's `runner_labels` is honored only for a private repository.
 Private targets keep their lanes. The change applies to this repository at
 merge; an adopter is covered once its generated `ai-review-merge.yml` caller is
 regenerated at or after the merge commit. No ruleset rotation is needed.
+
+The checker now scans relays. `workflow_dispatch`, `workflow_call`, and
+`repository_dispatch` jobs that can reach a persistent runner are refused
+outright when head detection finds, or cannot rule out, that they materialize a
+pull request head, and otherwise need a reviewed entry. Dispatch and caller
+inputs take every value their dispatcher can choose. `fork`, `issues`,
+`discussion`, and `discussion_comment` are privileged events. The 44 relayed
+jobs that predate the rule are ratcheted in the pending list as #1831's relay
+backlog, keyed to their selector and unresolved reasons.

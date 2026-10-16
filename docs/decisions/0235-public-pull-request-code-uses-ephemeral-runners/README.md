@@ -117,9 +117,14 @@ or a literal GitHub-hosted image.
    `pull_request_review`, `pull_request_review_comment`, and `merge_group`
    also run the pull request's own code, so they are held to the same rule as
    `pull_request`. Every trigger a workflow names must be classified: one of
-   those four, a privileged event in decision 5, or a documented event that
-   carries no fork-controlled ref (such as `push`, `schedule`,
-   `workflow_dispatch`, `workflow_call`, `release`, or `issues`). Any other
+   those four, a privileged event or relay in decision 5, or a documented event
+   that carries no fork-controlled ref or text (such as `push`, `schedule`,
+   `release`, `create`, or `label`). `workflow_dispatch`, `workflow_call`, and
+   `repository_dispatch` are relays, not safe events: their dispatcher or
+   caller chooses the inputs and can hand the run a pull request head, as
+   `gate-rearm.yml` does (decision 7). `fork`, `issues`, `discussion`, and
+   `discussion_comment` carry a repository or text an outside account chooses,
+   so they are privileged events. Any other
    trigger is undetermined, including `check_run`, `check_suite`, `status`,
    `deployment`, and `deployment_status`, which can name a fork head SHA, and
    any unknown name such as a future `pull_request_*` event. A duplicate
@@ -155,7 +160,10 @@ or a literal GitHub-hosted image.
    the rule.
 5. **Privileged events use a reviewed-job allowlist, not head detection.**
    `pull_request_target`, `workflow_run`, and `issue_comment` run the base
-   workflow with base privileges, and fork activity can trigger them. Under
+   workflow with base privileges, and fork activity can trigger them. `fork`,
+   `issues`, `discussion`, and `discussion_comment` get the same treatment:
+   their payload names a repository or carries a title and body an outside
+   account writes, which a job can turn into a ref. Under
    any of these events, a reachable job that can resolve to a persistent or
    self-hosted runner fails, including a job reached through a local reusable
    call or a remote callee whose placement cannot be read. It passes only when
@@ -271,6 +279,33 @@ or a literal GitHub-hosted image.
    dangerous. It cannot pass a job: an unlisted job fails whatever it
    concludes. When it finds a materializing pattern or cannot decide, the job
    is also unresolved under `head-materialization`.
+
+   **Relays.** `workflow_dispatch`, `workflow_call`, and `repository_dispatch`
+   are scanned like privileged events, with three differences:
+   - Their own inputs take every value the dispatcher or caller can choose. A
+     `choice` input takes each option, a `boolean` takes both values, and any
+     other input takes the adversarial values decision 3 uses. In a standalone
+     `workflow_call` scan, `github.event_name` is every event a caller can
+     have, because a called workflow sees its caller's event.
+   - Head detection runs on every relayed job that can reach a persistent
+     runner. When it finds a materializing pattern or cannot decide, the job
+     is refused: it must move to an ephemeral runner, and no reviewed entry
+     can accept it. A relayed job carries a head only because something
+     handed it one, so no justification can make running it on the pool safe.
+   - Any other relayed job that can reach a persistent runner needs a reviewed
+     entry, as `workflow_run` does.
+
+   44 relayed jobs predate this rule. Moving them is #1831's work: most are
+   the canonical reusable workflows that adopters call, and some are fleet
+   canaries that must run on the pool. They are ratcheted in the pending list
+   under a "relay backlog" header, keyed by a relay digest: SHA-256 over the
+   job's selector and its unresolved reason names. A changed selector, or a
+   new reason such as `head-materialization`, makes the row stop applying.
+   A row that a reviewed entry also lists is undetermined, and a pending row
+   never stands in for a privileged-event review. The two `gate-rearm.yml`
+   jobs reached standalone through `workflow_call` are the same jobs already
+   reviewed under `pull_request_target`; their digests are identical, so they
+   carry the same justification as reviewed entries.
 
    `issue_comment` has no workflow in this repository. The one `workflow_run`
    workflow, `ai-promotion-retry.yml`, is a reviewed entry: it checks out only
