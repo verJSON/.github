@@ -876,13 +876,14 @@ if python3 - "$root" "$manifest" "$workflow" <<'PY'
 import ast
 from functools import lru_cache
 import pathlib
-import shlex
 import subprocess
 import sys
 
 import yaml
 
 root = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+import shell_words  # noqa: E402
 manifest_text = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 document = yaml.safe_load(pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"))
 
@@ -957,14 +958,10 @@ if not gate_scripts:
 def referenced(text, candidates=None):
     """Tracked ci-gate paths mentioned by shell tokens on an execution path."""
     candidates = gate_scripts if candidates is None else candidates
-    logical_text = text.replace("\\\r\n", "").replace("\\\n", "")
-    lexer = shlex.shlex(logical_text, posix=True, punctuation_chars=True)
-    lexer.whitespace_split = True
-    lexer.commenters = "#"
     try:
-        tokens = list(lexer)
+        tokens = shell_words.words(text)
     except ValueError as error:
-        mentioned = sorted(path for path in candidates if path in logical_text)
+        mentioned = sorted(path for path in candidates if path in text)
         if not mentioned:
             return set()
         evidence = ", ".join(mentioned)
@@ -981,6 +978,24 @@ def referenced(text, candidates=None):
         # spelling turn a declared library into an unregistered gate.
         seen.update(path for path in candidates if path in token)
     return seen
+
+
+# Bash starts a comment only at a word-initial `#`; inside a word (`${#arr[@]}`,
+# a URL fragment) it is data, and dropping the rest of that line would lose a
+# real reference and report a registered gate as unreachable.
+COMMENT_PROBE = "scripts/ci-gate/x.test.sh"
+for source, expected in (
+    (f"n=${{#arr[@]}}; bash {COMMENT_PROBE}", {COMMENT_PROBE}),
+    (f"curl https://h/p#frag && bash {COMMENT_PROBE}", {COMMENT_PROBE}),
+    (f"printf '%s' '# kept' && bash {COMMENT_PROBE}", {COMMENT_PROBE}),
+    (f"echo ok # bash {COMMENT_PROBE}", set()),
+    (f"echo ok;# bash {COMMENT_PROBE}", set()),
+    (f"# bash {COMMENT_PROBE}\necho ok", set()),
+):
+    found = referenced(source, [COMMENT_PROBE])
+    if found != expected:
+        raise AssertionError(f"shell comment handling: {source!r} found {found}")
+print("ok - only a word-initial # starts a shell comment")
 
 
 def workflow_source(path):
