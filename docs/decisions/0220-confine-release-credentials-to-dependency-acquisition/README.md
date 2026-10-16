@@ -76,8 +76,8 @@ The fix spells the characters out rather than setting `LC_ALL=C` in each step. S
 
 It is also the form the digit guards already used. A spelled-out class admits exactly the ASCII characters its range did, and each of the 27 distinct rewrites was checked character by character in the C locale. Generated workflows are regenerated from their generators. The release generator's pre-credential step digests are re-pinned only for its two emitted dispatch guards.
 
-`scripts/ci-gate/settable_value_guards.py` finds these guards subject-agnostically. It does not trace values through shell copies, `GITHUB_OUTPUT`, `GITHUB_ENV`, or job outputs, because once every guard must be canonical a guard on a copied, handed-off, or API-read value is covered without any tracing. A pattern held in a single-assignment single-quoted variable is resolved. Any other unreadable shape fails unless reviewed. `scripts/ci-gate/settable-value-guards.test.py` does the following:
-- pins the 433-guard inventory;
+`scripts/ci-gate/settable_value_guards.py` finds these guards subject-agnostically. It does not trace values through shell copies, `GITHUB_OUTPUT`, `GITHUB_ENV`, or job outputs, because once every guard must be canonical a guard on a copied, handed-off, or API-read value is covered without any tracing. A regex held whole or in part in a single-assignment single-quoted variable is resolved before it is judged. Any other unreadable shape fails unless reviewed. `scripts/ci-gate/settable-value-guards.test.py` does the following:
+- pins the guard inventory (437 after #1826);
 - probes every distinct class with non-ASCII letters, digits, and spaces, requiring the same decision under C.UTF-8 and en_US.UTF-8;
 - runs the named letter-guard sites and the AI review budget `awk` check in both locales.
 

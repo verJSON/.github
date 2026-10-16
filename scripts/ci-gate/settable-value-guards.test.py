@@ -39,7 +39,7 @@ NON_ASCII_PROBES = ("\u00e9", "\uff41", "\uff21", "\u0663", "\uff13", "\u00a0")
 
 # The reviewed inventory: every guard the scanner finds, in the repository and
 # in the generator's HEAD output. A change is a review point.
-GUARD_COUNT = 433
+GUARD_COUNT = 437
 # Shapes the scanner cannot judge, each with the reason it is safe.
 REVIEWED_UNCLASSIFIABLE = {}
 # Files generated at an older pinned contract. They carry the guards that
@@ -217,6 +217,10 @@ class SettableValueGuardTests(unittest.TestCase):
                     "[[ $copy =~ $unknown ]]",
                     "grep -qF '[a-z]' <<<\"$copy\"",
                     "[[ $copy =~ ^[abc][[:space:]]*$ ]]",
+                    "part='x[0123456789]{2}'",
+                    "[[ $copy =~ ^\\[${part}\\]$ ]]",
+                    "loose='x[0-9]{2}'",
+                    "[[ $copy =~ ^${loose}$ ]]",
                 ))},
             ]}},
         })
@@ -231,6 +235,8 @@ class SettableValueGuardTests(unittest.TestCase):
             ("regex", "collation"),
             ("regex", "unclassifiable"),
             ("regex", "canonical"),
+            ("regex", "canonical"),
+            ("regex", "collation"),
             ("case", "collation"),
             ("grep", "collation"),
             ("grep", "collation"),
@@ -260,8 +266,10 @@ class SettableValueGuardTests(unittest.TestCase):
         for guard in self.inventory:
             if guard.verdict != "canonical" or guard.source in GENERATED_AT_PIN:
                 continue
-            pattern = guard.pattern.split("=", 1)[1] if guard.pattern.startswith("$") else guard.pattern
-            literal = settable_value_guards.strip_quoted(pattern) or ""
+            literal = (
+                guard.resolved if guard.resolved is not None
+                else settable_value_guards.strip_quoted(guard.pattern) or ""
+            )
             expressions.update(settable_value_guards.bracket_expressions(literal) or [])
         self.assertTrue(expressions)
         baseline = self.locales["C.UTF-8"]

@@ -38,6 +38,7 @@ class Guard:
     subject: str
     pattern: str
     verdict: str  # canonical | collation | unclassifiable
+    resolved: str = None  # the regex text after held literals are substituted
 
     @property
     def key(self):
@@ -217,14 +218,21 @@ def guards_in_script(source, script):
         if line.lstrip().startswith("#"):
             continue
         for subject, operator, pattern in _test_operands(line):
-            variable = re.fullmatch(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", pattern)
-            if operator == "=~" and variable and variable.group(1) in held:
-                literal = held[variable.group(1)]
-                yield Guard(
-                    source, "regex", subject, f"{pattern}={literal}",
-                    _classify_single_quoted(literal),
-                )
-                continue
+            if operator == "=~" and "$" in pattern:
+                # An unquoted expansion in a regex is regex text, so a fragment
+                # held in a single-assignment literal is judged as written.
+                references = re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", pattern)
+                if references and all(name in held for name in references):
+                    literal = re.sub(
+                        r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?",
+                        lambda match: held[match.group(1)],
+                        pattern,
+                    )
+                    yield Guard(
+                        source, "regex", subject, pattern,
+                        _classify_single_quoted(literal), literal,
+                    )
+                    continue
             if operator != "=~":
                 literal = strip_quoted(pattern)
                 if literal is None or "[" not in literal:
