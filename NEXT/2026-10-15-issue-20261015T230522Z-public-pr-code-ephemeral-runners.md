@@ -31,7 +31,8 @@ runtime-selected checkout, checkout submodules, or head detection that finds or
 cannot rule out head materialization leaves the job unresolved. Its entry then
 needs `dynamic: <reason>[, <reason>]: <justification>` naming exactly those
 reasons. A full checkout binds the whole tracked tree, so editing, adding, or
-deleting any file turns its entry stale. A runtime-selected checkout must
+deleting any file, changing a file mode, retargeting a symlink, or moving a
+submodule gitlink to another commit turns its entry stale. A runtime-selected checkout must
 carry a `sparse-checkout` list; without one it is refused, because no review
 can bind what it puts on disk. A job `container:` or `services:` image must be
 pinned by an `@sha256:` digest; a tag or expression is refused. The fetch

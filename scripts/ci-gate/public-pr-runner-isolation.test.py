@@ -1865,6 +1865,97 @@ for label, mutate, code, fragment in (
     else:
         fail(f"git work tree: {label} (expected exit {code} with {fragment!r}, got {actual}: {output.strip()[:400]})")
 
+# Each tree entry carries its index mode and object, so a moved submodule
+# gitlink, a mode change, and a tracked path missing from disk all bind. A
+# review is taken with `pre` applied and checked with `pre` and `post`.
+def git_stateful_case(files: dict[str, str], pre, post) -> tuple[int, str]:
+    code, output = git_tree_run(files, None, pre)
+    match = re.search(REVIEW_DIGEST_LINE.format(path=re.escape("target.yml [pull_request_target]"), job="review"), output)
+    needed = re.search(r"needs `dynamic: ([a-z, -]+): <justification>`", output)
+    if code != 1 or not match:
+        raise AssertionError(f"no review digest in a git tree: {output}")
+    row = f"target.yml [pull_request_target]\treview\t{match.group(1)}\treviewed for the fixture"
+    row += f"\tdynamic: {needed.group(1)}: the whole tree is the reviewed base revision\n" if needed else "\n"
+    return git_tree_run(files, row, lambda root: (pre(root), post(root)))
+
+
+def gitlink(commit: str):
+    return lambda root: subprocess.run(
+        ["git", "-C", root, "update-index", "--add", "--cacheinfo", f"160000,{commit},sub"], check=True
+    )
+
+
+def nothing(root: str) -> None:
+    return None
+
+
+SUBMODULE_TREE = {
+    **target_job("""
+        - uses: actions/checkout@v4
+          with:
+            submodules: true
+        - run: make -C sub
+    """),
+    "Makefile": "all:\n",
+}
+for label, files, pre, post, code, fragment in (
+    ("an unchanged gitlink", FULL_TREE, gitlink("1" * 40), nothing, 0, "REVIEWED"),
+    ("a gitlink moved to another commit", FULL_TREE, gitlink("1" * 40), gitlink("2" * 40), 1, "STALE REVIEWED"),
+    ("a gitlink moved under submodules: true", SUBMODULE_TREE, gitlink("1" * 40), gitlink("2" * 40), 1,
+     "STALE REVIEWED"),
+    ("a tracked script made executable", FULL_TREE, nothing,
+     lambda root: subprocess.run(["git", "-C", root, "update-index", "--chmod=+x", "scripts/tool.sh"], check=True),
+     1, "STALE REVIEWED"),
+    # A path missing from disk is still in the index, so a checkout puts it
+    # there; untracking it removes it from what a checkout materializes.
+    ("an index-only path that is then untracked", FULL_TREE,
+     lambda root: os.remove(os.path.join(root, "docs", "notes.md")),
+     lambda root: subprocess.run(["git", "-C", root, "rm", "-q", "--cached", "docs/notes.md"], check=True),
+     1, "STALE REVIEWED"),
+):
+    actual, output = git_stateful_case(files, pre, post)
+    if actual == code and fragment in output:
+        ok(f"git work tree: {label} gives exit {code} for a reviewed full checkout")
+    else:
+        fail(f"git work tree: {label} (expected exit {code} with {fragment!r}, got {actual}: {output.strip()[:400]})")
+
+
+# The tree digest's entry encoding is unambiguous. Under the old
+# `path\0content\n` lines, a link `a -> "T\nb"` beside a file `c` hashed the
+# same bytes as a link `a -> "T"` beside a file named "b\nc".
+def link_tree_run(link_target: str, file_name: str, row: str | None) -> tuple[int, str]:
+    with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as lists:
+        directory = os.path.join(root, ".github", "workflows")
+        os.makedirs(directory)
+        write_file(os.path.join(directory, "target.yml"), textwrap.dedent(FULL_TREE["target.yml"]))
+        os.symlink(link_target, os.path.join(root, "a"))
+        write_file(os.path.join(root, file_name), "same bytes\n")
+        arguments = []
+        if row is not None:
+            reviewed = os.path.join(lists, "reviewed.tsv")
+            write_file(reviewed, row)
+            arguments = ["--reviewed", reviewed]
+        completed = subprocess.run([sys.executable, SCRIPT, *arguments, directory], capture_output=True, text=True)
+    return completed.returncode, completed.stdout + completed.stderr
+
+
+code, output = link_tree_run("T\nb", "c", None)
+LINK_DIGEST = re.search(REVIEW_DIGEST_LINE.format(path=re.escape("target.yml [pull_request_target]"), job="review"), output)
+LINK_ROW = (
+    f"target.yml [pull_request_target]\treview\t{LINK_DIGEST.group(1) if LINK_DIGEST else 'missing'}\tr"
+    "\tdynamic: full-checkout: reviewed tree\n"
+)
+for label, target, name, code, fragment in (
+    ("the reviewed link-and-file tree", "T\nb", "c", 0, "REVIEWED"),
+    ("a tree whose old encoding collided with it", "T", "b\nc", 1, "STALE REVIEWED"),
+    ("the same tree with the link retargeted", "U\nb", "c", 1, "STALE REVIEWED"),
+):
+    actual, output = link_tree_run(target, name, LINK_ROW)
+    if actual == code and fragment in output:
+        ok(f"tree digest encoding: {label} gives exit {code}")
+    else:
+        fail(f"tree digest encoding: {label} (expected exit {code} with {fragment!r}, got {actual}: {output.strip()[:400]})")
+
 # A runtime-selected checkout without a sparse list puts bytes on disk that no
 # review can bind, so no entry can accept it.
 NO_SPARSE_RUNTIME = "sha256:" + "0" * 64

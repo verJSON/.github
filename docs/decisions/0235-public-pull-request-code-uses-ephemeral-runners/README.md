@@ -186,17 +186,29 @@ or a literal GitHub-hosted image.
        them;
      - every local action directory (`uses: ./…`), recursively, plus files
        its composite steps reach through `github.action_path`;
-     - a full checkout of the scanned tree: every tracked path and its bytes,
-       in path order. The path list is hashed with the contents, so an edit, an
-       added file, and a deleted file each change the digest. In a git work
-       tree the list is git's index (`git ls-files`), so untracked residue such
-       as `__pycache__` never counts. Outside one it is every file except
-       `.git`. The pending and reviewed lists are left out, because an entry
-       cannot hold a digest of its own bytes and every edit to a list is
-       itself reviewed. Reading the bytes of this repository's 867 tracked
-       files (about 12 MB) costs 13–37 ms per run, once per run, so the
-       checker reads bytes rather than digesting index blob SHAs; this also
-       binds an unstaged edit;
+     - a full checkout of the scanned tree: every tracked entry, in path
+       order, as one JSON array per entry, so no path or link target containing
+       a newline can forge an entry boundary. In a git work tree the entries
+       are git's index (`git ls-files -s -z`), so untracked residue such as
+       `__pycache__` never counts. Each entry carries its index mode and:
+       for a file, the SHA-256 of its bytes on disk, so an unstaged edit
+       counts; for a symlink, its target, never followed; for a submodule
+       gitlink, its commit ID, which is what `submodules: true` or a later
+       `git submodule update` would check out; and for a path the index holds
+       but the disk does not, the index object a checkout would put there. An
+       edit, an added or deleted file, a mode change, a retargeted link, and a
+       moved gitlink each change the digest. Outside a git work tree it is
+       every file except `.git`, without modes. Reading the bytes of this
+       repository's 867 tracked files (about 12 MB) costs 13–37 ms per run,
+       once per run.
+
+       The pending and reviewed lists are left out, because an entry cannot
+       hold a digest of its own bytes. Nothing in the checker binds the lists
+       themselves. A list edit reaches `main` only through a pull request
+       under `main`'s ruleset: one approval from a code owner
+       (`* @verJSON/devs`) on the last push, which the AI review App supplies
+       where the organization grants it merge authority (ADR 0098). A list
+       row gets exactly the scrutiny that pull request's review gives it;
    - the job's unresolved reasons, below, with their details.
 
    Any edit to any of these makes the entry `STALE REVIEWED`, which fails

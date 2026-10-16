@@ -1284,47 +1284,73 @@ class Closure:
 PINNED_IMAGE = re.compile(r"[^\s@${}]+@sha256:[0-9a-f]{64}")
 
 
-def tracked_files(root: str) -> list[str]:
-    """The paths a full checkout of the scanned tree materializes: git's index
-    in a work tree (never untracked residue such as __pycache__), otherwise
-    every file under the root except .git."""
+def tracked_files(root: str) -> list[tuple[str, str | None, str | None]]:
+    """The entries a full checkout of the scanned tree materializes, as
+    (path, index mode, index object ID): git's index in a work tree (never
+    untracked residue such as __pycache__), otherwise every file under the
+    root except .git, with no mode or object ID."""
     if os.path.exists(os.path.join(root, ".git")):
         try:
             listing = subprocess.run(
-                ["git", "-C", root, "ls-files", "-z", "--cached"], capture_output=True, check=True
+                ["git", "-C", root, "ls-files", "-s", "-z"], capture_output=True, check=True
             ).stdout
         except (OSError, subprocess.CalledProcessError) as error:
             raise Undetermined(f"{root}: cannot list the tracked tree a full checkout puts on disk: {error}") from error
-        return sorted(name for name in listing.decode("utf-8", "surrogateescape").split("\0") if name)
+        entries = {}
+        for record in listing.decode("utf-8", "surrogateescape").split("\0"):
+            if not record:
+                continue
+            # `<mode> <object> <stage>\t<path>`; a conflicted path lists each stage.
+            header, _, path = record.partition("\t")
+            mode, oid, stage = header.split(" ")
+            entries.setdefault(path, []).append((stage, mode, oid))
+        return sorted(
+            (
+                path,
+                " ".join(mode for _, mode, _ in sorted(stages)),
+                " ".join(oid for _, _, oid in sorted(stages)),
+            )
+            for path, stages in entries.items()
+        )
     found = []
     for base, directories, names in os.walk(root):
         links = [name for name in directories if os.path.islink(os.path.join(base, name))]
         directories[:] = sorted(name for name in directories if name != ".git" and name not in links)
         found.extend(os.path.relpath(os.path.join(base, name), root) for name in names + links)
-    return sorted(found)
+    return [(path, None, None) for path in sorted(found)]
+
+
+GITLINK_MODE = "160000"
 
 
 @functools.lru_cache(maxsize=None)
 def tree_digest(root: str, excluded: frozenset[str] = frozenset()) -> str:
-    """SHA-256 over every tracked path and its bytes, in path order, so an
-    edit, an added file, and a deleted file all change it. The excluded paths
-    are the pending and reviewed lists themselves: an entry cannot contain a
-    digest over its own bytes, and every edit to a list is itself reviewed."""
+    """SHA-256 over every tracked entry, in path order, so an edit, an added
+    file, a deleted file, a mode change, and a moved submodule all change it.
+
+    A file contributes its index mode and the SHA-256 of its bytes on disk, so
+    an unstaged edit counts; a symlink its target, never followed; a submodule
+    gitlink its mode and commit ID, which is what `submodules: true` would
+    check out; and a tracked path missing from disk the index object a
+    checkout would put there. Each entry is one JSON array per line, which
+    escapes every newline and control character, so no path or link target can
+    forge an entry boundary. The excluded paths are the pending and reviewed
+    lists themselves: an entry cannot contain a digest over its own bytes."""
     digest = hashlib.sha256()
-    for relative in tracked_files(root):
+    for relative, mode, oid in tracked_files(root):
         if relative in excluded:
             continue
         path = os.path.join(root, relative)
-        if os.path.islink(path):
-            content = "link " + os.readlink(path)
+        if mode == GITLINK_MODE:
+            entry = [relative, mode, "gitlink", oid]
+        elif os.path.islink(path):
+            entry = [relative, mode, "link", os.readlink(path)]
         elif os.path.isfile(path):
             with open(path, "rb") as handle:
-                content = "file " + hashlib.sha256(handle.read()).hexdigest()
-        elif os.path.isdir(path):
-            content = "gitlink"
+                entry = [relative, mode, "file", hashlib.sha256(handle.read()).hexdigest()]
         else:
-            content = "missing"
-        digest.update(f"{relative}\0{content}\n".encode("utf-8", "surrogateescape"))
+            entry = [relative, mode, "missing", oid]
+        digest.update(json.dumps(entry, ensure_ascii=True).encode("ascii") + b"\n")
     return "sha256:" + digest.hexdigest()
 
 
