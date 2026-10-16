@@ -1566,7 +1566,7 @@ UNRESOLVED_SHAPES = {
         "- uses: actions/github-script@v7\n  with:\n    script: |\n      await github.rest.repos.getContent({owner: 'o', repo: 'r', path: 'p'})",
         {"fetch"},
     ),
-    "a docker:// step": ("- uses: docker://ghcr.io/x/tool:1", {"fetch"}),
+    "a docker:// step": ("- uses: docker://ghcr.io/x/tool@sha256:" + "b" * 64, {"fetch"}),
     "a local docker action": (
         "- uses: ./.github/actions/d",
         {"fetch"},
@@ -1986,6 +1986,40 @@ for ref in ("${{ github.sha }}", "${{github.sha}}", ""):
         ok(f"a sparse checkout at {ref or 'the default ref'} is the scanned tree")
     else:
         fail(f"a sparse checkout at {ref or 'the default ref'} is the scanned tree (got {code}: {output.strip()[:300]})")
+
+# Step-level images get the container: rule: a `docker://` step and a local
+# Docker action's image, or every `FROM` of the Dockerfile it builds, must be
+# pinned by an @sha256: digest, or no entry can accept the job.
+PIN = "@sha256:" + "c" * 64
+DOCKER_ACTION = ".github/actions/d/action.yml"
+for label, steps, extra, refused in (
+    ("a docker:// step on a tag", "- uses: docker://alpine:latest", {}, True),
+    ("a docker:// step on an expression", "- uses: docker://${{ vars.IMAGE }}" + PIN, {}, True),
+    ("a docker:// step on a digest", "- uses: docker://alpine" + PIN, {}, False),
+    ("a local docker action on a tagged docker:// image", "- uses: ./.github/actions/d",
+     {DOCKER_ACTION: "runs:\n  using: docker\n  image: docker://alpine:3.20\n"}, True),
+    ("a local docker action on a pinned docker:// image", "- uses: ./.github/actions/d",
+     {DOCKER_ACTION: f"runs:\n  using: docker\n  image: docker://alpine{PIN}\n"}, False),
+    ("a local docker action built FROM a tag", "- uses: ./.github/actions/d",
+     {DOCKER_ACTION: "runs:\n  using: docker\n  image: Dockerfile\n",
+      ".github/actions/d/Dockerfile": "FROM alpine:3.20\nRUN true\n"}, True),
+    ("a local docker action with one unpinned stage", "- uses: ./.github/actions/d",
+     {DOCKER_ACTION: "runs:\n  using: docker\n  image: Dockerfile\n",
+      ".github/actions/d/Dockerfile": f"FROM golang{PIN} AS build\nFROM --platform=linux/amd64 debian:12\n"}, True),
+    ("a local docker action built FROM digests, stages, and scratch", "- uses: ./.github/actions/d",
+     {DOCKER_ACTION: "runs:\n  using: docker\n  image: Dockerfile\n",
+      ".github/actions/d/Dockerfile": f"FROM golang{PIN} AS build\nFROM build AS test\nFROM scratch\n"}, False),
+    ("a local docker action whose Dockerfile has no FROM", "- uses: ./.github/actions/d",
+     {DOCKER_ACTION: "runs:\n  using: docker\n  image: Dockerfile\n", ".github/actions/d/Dockerfile": "RUN true\n"}, True),
+    ("a local docker action with no image", "- uses: ./.github/actions/d",
+     {DOCKER_ACTION: "runs:\n  using: docker\n"}, True),
+):
+    code, output = run_checker(shaped_job(steps, extra))
+    is_refused = "must be pinned by an @sha256: digest" in output
+    if code == 1 and is_refused == refused and (refused or REVIEW_REQUIRED in output):
+        ok(f"{label} is {'refused' if refused else 'reviewable'}")
+    else:
+        fail(f"{label} should be {'refused' if refused else 'reviewable'} (got {code}: {output.strip()[:400]})")
 
 # A runtime-selected checkout without a sparse list puts bytes on disk that no
 # review can bind, so no entry can accept it.

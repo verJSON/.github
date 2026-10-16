@@ -35,8 +35,10 @@ deleting any file, changing a file mode, retargeting a symlink, or moving a
 submodule gitlink to another commit turns its entry stale. A runtime-selected checkout, which includes one at
 `pull_request.base.sha` because that SHA is not refreshed when the base branch
 advances, must carry a `sparse-checkout` list; without one it is refused, because no review
-can bind what it puts on disk. A job `container:` or `services:` image must be
-pinned by an `@sha256:` digest; a tag or expression is refused. The fetch
+can bind what it puts on disk. A job `container:` or `services:` image, a
+`docker://` step's image, a local Docker action's image, and every `FROM` of a
+Dockerfile it builds must be pinned by an `@sha256:` digest; a tag or
+expression is refused. The fetch
 vocabulary is not exhaustive; a fetch outside it still turns a reviewed entry
 stale but demands no `dynamic:` field.
 `scripts/ci-gate/public-pr-runner-isolation.pending.tsv` ratchets

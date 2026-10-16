@@ -1211,6 +1211,7 @@ class Closure:
                 self.flag("fetch", f"{uses.split('@')[0]} at {where}")
             elif uses.startswith("docker://"):
                 self.flag("fetch", f"{uses} at {where} pulls an image")
+                self.require_pinned(f"{where} uses:", uses[len("docker://"):])
             elif uses.startswith("./"):
                 self.add_action(uses, depth)
             run = step.get("run")
@@ -1244,11 +1245,40 @@ class Closure:
             images.append(("services", services))
         for where, image in images:
             self.flag("fetch", f"`{where}` image {image} is pulled when the job starts")
-            if not (isinstance(image, str) and PINNED_IMAGE.fullmatch(image.strip())):
-                self.refusals.add(
-                    f"`{where}` image {image!r} must be pinned by an @sha256: digest; "
-                    "a tag or expression can change after review, so no entry can accept it"
-                )
+            self.require_pinned(f"`{where}`", image)
+
+    def require_pinned(self, where: str, image) -> None:
+        """Only a digest pin lets a review bind the image a job runs."""
+        if not (isinstance(image, str) and PINNED_IMAGE.fullmatch(image.strip())):
+            self.refusals.add(
+                f"{where} image {image!r} must be pinned by an @sha256: digest; "
+                "a tag or expression can change after review, so no entry can accept it"
+            )
+
+    def require_pinned_build(self, action_dir: str, dockerfile: str, uses: str) -> None:
+        """A local Docker action built from a Dockerfile pulls every `FROM`
+        base image; each must be digest-pinned or name an earlier stage."""
+        path = os.path.normpath(os.path.join(self.root, action_dir, dockerfile))
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().replace("\\\n", " ").splitlines()
+        except OSError:
+            self.flag("local-action", f"{uses} (Dockerfile {dockerfile} not in the scanned tree)")
+            return
+        stages: set[str] = set()
+        found = False
+        for line in lines:
+            match = DOCKERFILE_FROM.match(line)
+            if not match:
+                continue
+            found = True
+            image, stage = match.group(1), match.group(2)
+            if image.lower() != "scratch" and image.lower() not in stages:
+                self.require_pinned(f"local docker action {uses} `FROM`", image)
+            if stage:
+                stages.add(stage.lower())
+        if not found:
+            self.require_pinned(f"local docker action {uses} `FROM`", None)
 
     def add_scanned_fetches(self) -> None:
         """A repository file the job puts on disk can fetch when it runs."""
@@ -1286,6 +1316,13 @@ class Closure:
             return
         if runs.get("using") == "docker":
             self.flag("fetch", f"local docker action {uses} builds or pulls an image at runtime")
+            image = runs.get("image")
+            if isinstance(image, str) and image.startswith("docker://"):
+                self.require_pinned(f"local docker action {uses}", image[len("docker://"):])
+            elif isinstance(image, str) and image.strip():
+                self.require_pinned_build(action_dir, image.strip(), uses)
+            else:
+                self.require_pinned(f"local docker action {uses}", image)
         for key in ("main", "pre", "post", "image"):
             value = runs.get(key)
             if isinstance(value, str) and not value.startswith(("docker://", "http")):
@@ -1294,6 +1331,8 @@ class Closure:
 
 # A container image reference fixed by content: no expression, no whitespace.
 PINNED_IMAGE = re.compile(r"[^\s@${}]+@sha256:[0-9a-f]{64}")
+# `FROM [--platform=…] <image> [AS <stage>]` in a Dockerfile.
+DOCKERFILE_FROM = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?\s*$", re.I)
 
 
 def tracked_files(root: str) -> list[tuple[str, str | None, str | None]]:
