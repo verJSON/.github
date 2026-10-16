@@ -15,6 +15,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cli_projects_required_node_config import load_required_node_config  # noqa: E402
 from github_identity import same_organization, same_repository, strip_repository_url_prefix  # noqa: E402
+import required_workflow_revision as revision  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +24,21 @@ WORKFLOW = ROOT / ".github/workflows/cli-projects-package-surface-required.yml"
 VERIFIER = ROOT / "scripts/cli-projects-package-surface.py"
 GENERATOR = ROOT / "scripts/gen-node-required-workflow.py"
 GENERATOR_CONFIG = ROOT / "config/cli-projects-required-node-ci.json"
+WORKFLOW_PATH = ".github/workflows/cli-projects-package-surface-required.yml"
+GENERATOR_ARGV = ("scripts/gen-node-required-workflow.py", "config/cli-projects-required-node-ci.json")
+GENERATOR_INPUTS = (
+    "scripts/gen-node-required-workflow.py",
+    "scripts/cli_projects_required_node_config.py",
+    "config/cli-projects-required-node-ci.json",
+)
+# Everything the required workflow executes from its own revision: itself and the
+# package verifier it checks out at `github.workflow_sha`, with that verifier's inputs.
+RUNTIME_PATHS = (
+    WORKFLOW_PATH,
+    "scripts/cli-projects-package-surface.py",
+    "scripts/cli_projects_required_node_config.py",
+    "config/cli-projects-required-node-ci.json",
+)
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 MUTABLE_FIELDS = (
@@ -123,20 +139,14 @@ def read_contract(path=CONTRACT):
     }, "organization ruleset image drifted")
     rollout = contract["rollout"]
     require(set(rollout) == {
-        "issue", "human_gate_required", "apply_acknowledgement", "previous_workflow_sha",
-        "previous_disabled_workflow_sha", "freshness_status_check", "required_run",
+        "issue", "human_gate_required", "apply_acknowledgement",
+        "freshness_status_check", "required_run",
     }, "rollout keys drifted")
     require(rollout["issue"] == 1187, "rollout issue drifted")
     require(rollout["human_gate_required"] is True, "rollout human gate removed")
     require(rollout["apply_acknowledgement"] ==
             "ROTATE-CLI-PROJECTS-REQUIRED-WORKFLOW-1187",
             "rollout acknowledgement drifted")
-    require(rollout["previous_workflow_sha"] ==
-            "ae70e4ef0a70fa446fc6583a2473f2b4e68eac36",
-            "previous workflow identity drifted")
-    require(rollout["previous_disabled_workflow_sha"] ==
-            "4525c152a77bd04c006fa2b790f4b64833b1bbbe",
-            "previous disabled workflow identity drifted")
     require(rollout["freshness_status_check"] == {
         "context": "admission",
         "integration_id": 15368,
@@ -257,7 +267,7 @@ def validate_workflow(path=WORKFLOW):
         }, f"{name} permissions drifted")
         require(job.get("uses") == (
             "Verjson/.github/.github/workflows/node-ci-protected.yml@"
-            "1c7659b77e1c97743cdcfc0a1603141bfe25320d"
+            "576707fe0be0dabe43ea57c504575f8cda88b0d2"
         ), f"{name} reusable workflow identity drifted")
         require(job.get("secrets") == {
             "NODE_AUTH_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
@@ -401,12 +411,16 @@ def list_named_rulesets(contract):
     return [entry for entry in entries if entry.get("name") == contract["ruleset"]["name"]]
 
 
+def canonical_compare(base, head):
+    return revision.canonical_compare(base, head, gh_json=gh_json, require=require)
+
+
+def canonical_file(path, ref):
+    return revision.canonical_file(path, ref, require)
+
+
 def verify_canonical_bytes(contract, workflow_sha):
-    # Restated locally because this function is what puts the value in a URL: a caller's
-    # guard cannot vouch for a read made here.
-    require(SHA_PATTERN.fullmatch(workflow_sha) is not None, "workflow SHA is invalid")
-    comparison = gh_json(f"repos/Verjson/.github/compare/{workflow_sha}...main")
-    require(comparison.get("status") in ("ahead", "identical"),
+    require(canonical_compare(workflow_sha, "main") in revision.FORWARD,
             "workflow SHA is not reachable from protected main")
     paths = (
         contract["canonical_workflow"]["path"],
@@ -416,17 +430,32 @@ def verify_canonical_bytes(contract, workflow_sha):
         "scripts/cli-projects-package-surface-ruleset.py",
         "scripts/cli_projects_required_node_config.py",
         "scripts/gen-node-required-workflow.py",
+        "scripts/required_workflow_revision.py",
     )
     for path in paths:
-        result = subprocess.run(
-            ["gh", "api", "--hostname", "github.com",
-             f"repos/Verjson/.github/contents/{path}?ref={workflow_sha}",
-             "-H", "Accept: application/vnd.github.raw+json"],
-            capture_output=True, check=False,
-        )
-        require(result.returncode == 0, f"canonical file unreadable at workflow SHA: {path}")
-        require(result.stdout == (ROOT / path).read_bytes(),
+        require(canonical_file(path, workflow_sha) == (ROOT / path).read_bytes(),
                 f"local file is not the merged canonical byte sequence: {path}")
+
+
+def regenerate_at(revision_sha, _workflow):
+    files = {path: canonical_file(path, revision_sha) for path in GENERATOR_INPUTS}
+    return revision.run_generator(files, GENERATOR_ARGV, require)
+
+
+def admit_previous_revision(previous_sha, target_sha):
+    revision.admit_predecessor(
+        previous_sha, target_sha,
+        compare=canonical_compare, read_file=canonical_file, regenerate=regenerate_at,
+        workflow_path=WORKFLOW_PATH, require=require,
+    )
+
+
+def audit_live_revision(live_sha):
+    revision.audit_live_revision(
+        live_sha,
+        compare=canonical_compare, read_file=canonical_file,
+        workflow_path=WORKFLOW_PATH, runtime_paths=RUNTIME_PATHS, require=require,
+    )
 
 
 def consumer_branch_sha():
@@ -479,6 +508,9 @@ def verify_consumer_workflow(contract, expected_sha=None):
 def discover_state(contract, workflow_sha):
     validate_workflow()
     verify_canonical_bytes(contract, workflow_sha)
+    revision.require_security_floor(
+        WORKFLOW.read_text(encoding="utf-8"), compare=canonical_compare, require=require,
+    )
     consumer_sha = verify_consumer_workflow(contract)
     repository = gh_json("repos/Verjson/verjson-cli-projects")
     require(repository.get("id") == contract["consumer"]["repository_id"],
@@ -511,36 +543,47 @@ def reconcile_org_disabled(ruleset_id, staged):
     raise ContractError("activation failed; organization rule restored and verified disabled")
 
 
-def resolve_existing_org_rule(
-        named, expected, staged, previous=None, previous_disabled=None):
+def predecessor_images(contract, previous_sha):
+    for include_freshness in (True, False):
+        for enforcement in ("active", "disabled"):
+            image = render_payload(contract, previous_sha, include_freshness=include_freshness)
+            image["enforcement"] = enforcement
+            yield image
+
+
+def live_predecessor(contract, live):
+    previous_sha = revision.bound_workflow_sha(live, require)
+    for image in predecessor_images(contract, previous_sha):
+        try:
+            validate_org_ruleset(live, image)
+        except ContractError:
+            continue
+        return previous_sha, image
+    raise ContractError("live ruleset is not a reviewed image of its own revision")
+
+
+def resolve_existing_org_rule(named, expected, staged, contract, target_sha):
     require(len(named) == 1, "canonical organization ruleset is not uniquely present")
     ruleset_id = named[0].get("id")
     require(isinstance(ruleset_id, int) and ruleset_id > 0,
             "canonical organization ruleset id is invalid")
     live = gh_json(f"orgs/Verjson/rulesets/{ruleset_id}")
-    try:
-        validate_org_ruleset(live, expected)
-        return ruleset_id, "active"
-    except ContractError:
-        if previous is not None:
-            try:
-                validate_org_ruleset(live, previous)
-                return ruleset_id, "previous-active"
-            except ContractError:
-                pass
-        if previous_disabled is not None:
-            try:
-                validate_org_ruleset(live, previous_disabled)
-                return ruleset_id, "previous-disabled"
-            except ContractError:
-                pass
+    for state, image in (("active", expected), ("disabled", staged)):
         try:
-            validate_org_ruleset(live, staged)
-            return ruleset_id, "disabled"
+            validate_org_ruleset(live, image)
         except ContractError:
-            raise ContractError(
-                "canonical organization ruleset differs from reviewed active and disabled images"
-            ) from None
+            continue
+        return ruleset_id, state, None
+    try:
+        previous_sha, previous = live_predecessor(contract, live)
+    except ContractError:
+        raise ContractError(
+            "canonical organization ruleset differs from reviewed active and disabled images"
+        ) from None
+    # The predecessor is restored verbatim if the rotation fails, so it is admitted
+    # only as a canonical revision the target descends from.
+    admit_previous_revision(previous_sha, target_sha)
+    return ruleset_id, "previous", previous
 
 
 def rotate_existing_org_rule(ruleset_id, previous, expected, consumer_sha=None):
@@ -569,13 +612,11 @@ def rotate_existing_org_rule(ruleset_id, previous, expected, consumer_sha=None):
     raise ContractError("rotation failed; prior reviewed workflow restored and verified")
 
 
-def promote_reviewed_org_rule(
-        ruleset_id, state, previous, previous_disabled, expected, consumer_sha):
+def promote_reviewed_org_rule(ruleset_id, state, previous, expected, consumer_sha):
     if state == "active":
         return f"verified existing active organization ruleset {ruleset_id}"
-    if state in ("previous-active", "previous-disabled"):
-        reviewed = previous if state == "previous-active" else previous_disabled
-        rotate_existing_org_rule(ruleset_id, reviewed, expected, consumer_sha)
+    if state == "previous":
+        rotate_existing_org_rule(ruleset_id, previous, expected, consumer_sha)
         return f"rotated and verified active organization ruleset {ruleset_id}"
     return None
 
@@ -645,28 +686,55 @@ def validate_freshness_check(check_runs, contract, head_sha, workflow_run_id, no
             "strict admission check predates ruleset activation")
 
 
+def describe_dry_run(named, expected, staged, contract, target_sha):
+    if not named:
+        return (f"ready: no organization ruleset; apply creates it disabled at {target_sha}, "
+                "then activates it")
+    ruleset_id, state, previous = resolve_existing_org_rule(
+        named, expected, staged, contract, target_sha
+    )
+    if state == "active":
+        return f"ready: organization ruleset {ruleset_id} already runs {target_sha}"
+    if state == "disabled":
+        return (f"ready: organization ruleset {ruleset_id} is staged disabled at {target_sha}; "
+                "apply activates it")
+    previous_sha = revision.bound_workflow_sha(previous, require)
+    return (f"ready: rotate organization ruleset {ruleset_id} from admitted revision "
+            f"{previous_sha} to {target_sha}")
+
+
+def audit(contract):
+    named = list_named_rulesets(contract)
+    require(len(named) == 1, "canonical organization ruleset is not uniquely present")
+    ruleset_id = named[0].get("id")
+    require(isinstance(ruleset_id, int) and ruleset_id > 0,
+            "canonical organization ruleset id is invalid")
+    live = gh_json(f"orgs/Verjson/rulesets/{ruleset_id}")
+    live_sha = revision.bound_workflow_sha(live, require)
+    validate_org_ruleset(live, render_payload(contract, live_sha))
+    audit_live_revision(live_sha)
+    print(f"verified: organization ruleset {ruleset_id} runs {live_sha}, "
+          "the reviewed required workflow on protected main")
+    return 0
+
+
 def main(arguments=None):
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "mode",
-        choices=("render", "dry-run", "apply", "snapshot", "verify-run"),
+        choices=("render", "dry-run", "apply", "snapshot", "verify-run", "audit"),
     )
-    parser.add_argument("--workflow-sha", required=True)
+    parser.add_argument("--workflow-sha")
     parser.add_argument("--ack", default="")
     parser.add_argument("--run-id", type=int)
     parser.add_argument("--head-sha")
     parser.add_argument("--pre-trigger-max-run-id", type=int)
     args = parser.parse_args(arguments)
     contract = read_contract()
+    if args.mode == "audit":
+        return audit(contract)
+    require(args.workflow_sha is not None, "--workflow-sha is required")
     expected = render_payload(contract, args.workflow_sha)
-    previous = render_payload(
-        contract, contract["rollout"]["previous_workflow_sha"], include_freshness=False
-    )
-    previous_disabled = render_payload(
-        contract, contract["rollout"]["previous_disabled_workflow_sha"],
-        include_freshness=False,
-    )
-    previous_disabled["enforcement"] = "disabled"
     staged = dict(expected)
     staged["enforcement"] = "disabled"
     if args.mode == "render":
@@ -674,10 +742,7 @@ def main(arguments=None):
         return 0
     named, consumer_sha = discover_state(contract, args.workflow_sha)
     if args.mode == "dry-run":
-        if named:
-            resolve_existing_org_rule(
-                named, expected, staged, previous, previous_disabled
-            )
+        print(describe_dry_run(named, expected, staged, contract, args.workflow_sha))
         return 0
     if args.mode == "snapshot":
         runs = gh_json(
@@ -721,11 +786,11 @@ def main(arguments=None):
     require(args.ack == contract["rollout"]["apply_acknowledgement"],
             "explicit apply acknowledgement required")
     if named:
-        ruleset_id, state = resolve_existing_org_rule(
-            named, expected, staged, previous, previous_disabled
+        ruleset_id, state, previous = resolve_existing_org_rule(
+            named, expected, staged, contract, args.workflow_sha
         )
         result = promote_reviewed_org_rule(
-            ruleset_id, state, previous, previous_disabled, expected, consumer_sha
+            ruleset_id, state, previous, expected, consumer_sha
         )
         if result is not None:
             print(result)
@@ -735,11 +800,11 @@ def main(arguments=None):
         require(appeared_consumer_sha == consumer_sha,
                 "consumer default branch moved during transaction")
         if appeared:
-            ruleset_id, state = resolve_existing_org_rule(
-                appeared, expected, staged, previous, previous_disabled
+            ruleset_id, state, previous = resolve_existing_org_rule(
+                appeared, expected, staged, contract, args.workflow_sha
             )
             result = promote_reviewed_org_rule(
-                ruleset_id, state, previous, previous_disabled, expected, consumer_sha
+                ruleset_id, state, previous, expected, consumer_sha
             )
             if result is not None:
                 print(result)
@@ -755,11 +820,11 @@ def main(arguments=None):
                 )
             except (ContractError, OSError):
                 recovered = list_named_rulesets(contract)
-                ruleset_id, state = resolve_existing_org_rule(
-                    recovered, expected, staged, previous, previous_disabled
+                ruleset_id, state, previous = resolve_existing_org_rule(
+                    recovered, expected, staged, contract, args.workflow_sha
                 )
                 result = promote_reviewed_org_rule(
-                    ruleset_id, state, previous, previous_disabled, expected, consumer_sha
+                    ruleset_id, state, previous, expected, consumer_sha
                 )
                 if result is not None:
                     print(result)
