@@ -111,7 +111,11 @@ same model as ADR 0153 through the shared `scripts/required_workflow_revision.py
 ruleset's revision (`dc6b2942`) for the package release-authorization audit. That copy
 would have gone stale at the first rotation, in the same way the CLI projects record did.
 Its `sha` is now `null`, which means the revision is delegated: the package audit still
-governs the ruleset's shape and release-only bypass. It also requires the live binding
+governs the ruleset's shape and release-only bypass. Delegation is bounded: an entry must
+name its owner in `delegated_to`, and `null` is accepted only for a ruleset registered in
+`DELEGATED_REVISION_OWNERS` (today only 21750617, owned by
+`scripts/authn-type-surface-ruleset.py`). A test requires every registered owner to
+expose an `audit` mode that `org-ruleset-conformance.yml` runs. It also requires the live binding
 to be an immutable SHA, but it accepts whichever revision the rotation tool installed.
 `package-type-surface-ruleset.py apply` never writes a ruleset with a delegated
 revision. The unused preimage is dropped.

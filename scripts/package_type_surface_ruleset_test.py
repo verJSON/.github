@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import importlib.util
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -143,6 +145,57 @@ class PackageTypeSurfaceRulesetTest(unittest.TestCase):
                     stream.flush()
                     with self.assertRaisesRegex(MODULE.ContractError, "sha"):
                         MODULE.read_policy(Path(stream.name))
+
+    def policy_with(self, mutate):
+        document = json.loads((ROOT / "config/package-type-surface-rulesets.json").read_text())
+        by_id = {item["ruleset_id"]: item for item in document["rulesets"]}
+        mutate(by_id)
+        stream = tempfile.NamedTemporaryFile("w", suffix=".json")
+        self.addCleanup(stream.close)
+        json.dump(document, stream)
+        stream.flush()
+        return Path(stream.name)
+
+    def test_only_the_registered_ruleset_may_delegate_to_its_audited_rotation_tool(self):
+        _, _, entries = MODULE.read_policy()
+        delegated = {entry["ruleset_id"]: entry["delegated_to"] for entry in entries if entry["delegated_to"]}
+        self.assertEqual({21750617: "scripts/authn-type-surface-ruleset.py"}, delegated)
+
+        def other_ruleset_delegates(by_id):
+            item = by_id[21569694]
+            item["delegated_to"] = "scripts/authn-type-surface-ruleset.py"
+            item["desired"]["rules"] = [{"type": "workflows", "parameters": {
+                "do_not_enforce_on_create": False, "workflows": [{
+                    "path": ".github/workflows/authn-type-surface-required.yml",
+                    "repository_id": 1269388380, "ref": "refs/heads/main", "sha": None,
+                }]}}]
+
+        refused = {
+            "another ruleset delegates": other_ruleset_delegates,
+            "null sha without a delegate": lambda by_id: by_id[21750617].update(delegated_to=None),
+            "delegate to an unregistered tool": lambda by_id: by_id[21750617].update(
+                delegated_to="scripts/cli-projects-package-surface-ruleset.py"),
+            "delegate with a pinned copy": lambda by_id: by_id[21750617]["desired"]["rules"][0]
+                ["parameters"]["workflows"][0].update(sha="a" * 40),
+            "delegate keeps a preimage": lambda by_id: by_id[21750617].update(
+                preimage=json.loads(json.dumps(by_id[21750617]["desired"]))),
+            "delegate is not a string": lambda by_id: by_id[21750617].update(delegated_to=["x"]),
+            "missing delegated_to key": lambda by_id: by_id[21569694].pop("delegated_to"),
+        }
+        for name, mutate in refused.items():
+            with self.subTest(name), self.assertRaisesRegex(MODULE.ContractError, "deleg|keys drifted"):
+                MODULE.read_policy(self.policy_with(mutate))
+
+    def test_every_delegate_has_an_audit_mode_that_the_schedule_runs(self):
+        schedule = (ROOT / ".github/workflows/org-ruleset-conformance.yml").read_text(encoding="utf-8")
+        for ruleset_id, tool in MODULE.DELEGATED_REVISION_OWNERS.items():
+            with self.subTest(ruleset_id=ruleset_id):
+                usage = subprocess.run(
+                    [sys.executable, "-I", str(ROOT / tool), "--help"],
+                    capture_output=True, text=True, check=False,
+                ).stdout
+                self.assertRegex(usage, r"\{[^}]*\baudit\b[^}]*\}")
+                self.assertIn(f"run: python3 -I {tool} audit\n", schedule)
 
     def test_validate_live_rejects_a_ruleset_id_reused_by_another_name(self):
         _, _, entries = MODULE.read_policy()

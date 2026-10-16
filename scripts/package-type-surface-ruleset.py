@@ -21,6 +21,11 @@ POLICY_PATH = ROOT / "config/package-type-surface-rulesets.json"
 MUTABLE_KEYS = ("target", "enforcement", "bypass_actors", "conditions", "rules")
 EXPECTED_ACK = "APPLY-PACKAGE-TYPE-SURFACE-RELEASE-1673"
 SHA = re.compile(r"[0-9a-f]{40}")
+# The only rulesets whose required-workflow revision this policy may leave unpinned
+# (`"sha": null`), each bound to the rotation tool that reads, admits, rotates, and
+# audits that revision. A delegate must expose an `audit` mode that the scheduled
+# org-ruleset-conformance workflow runs (ADR 0151).
+DELEGATED_REVISION_OWNERS = {21750617: "scripts/authn-type-surface-ruleset.py"}
 
 
 class ContractError(Exception):
@@ -126,6 +131,20 @@ def resolve_delegated(desired: dict, live: dict):
     return resolved
 
 
+def validate_delegation(item: dict, desired: dict, location: str):
+    delegate = item["delegated_to"]
+    require(delegate is None or isinstance(delegate, str), f"{location}.delegated_to must be null or a tool path")
+    if item["preimage"] is not None:
+        require(not delegated_revisions(item["preimage"]), f"{location}.preimage cannot delegate a revision")
+    if delegate is None:
+        require(not delegated_revisions(desired), f"{location}.desired delegates a revision without delegated_to")
+        return
+    require(DELEGATED_REVISION_OWNERS.get(item["ruleset_id"]) == delegate,
+            f"{location}.delegated_to is not the registered rotation tool for this ruleset")
+    require(delegated_revisions(desired), f"{location} delegates to {delegate} but pins a revision copy")
+    require(item["preimage"] is None, f"{location} delegated ruleset must not keep a preimage")
+
+
 def read_policy(path: Path = POLICY_PATH):
     document = mapping(load_json(path.read_text(encoding="utf-8"), str(path)), "policy")
     require(set(document) == {"schema_version", "organization", "apply_acknowledgement", "release_authorization_bypass", "rulesets"}, "policy keys drifted")
@@ -139,7 +158,7 @@ def read_policy(path: Path = POLICY_PATH):
     for index, raw in enumerate(array(document["rulesets"], "policy.rulesets")):
         location = f"policy.rulesets[{index}]"
         item = mapping(raw, location)
-        require(set(item) == {"repository", "repository_id", "scope", "ruleset_id", "name", "preimage", "desired"}, f"{location} keys drifted")
+        require(set(item) == {"repository", "repository_id", "scope", "ruleset_id", "name", "delegated_to", "preimage", "desired"}, f"{location} keys drifted")
         repository = nonempty_string(item["repository"], f"{location}.repository")
         positive_integer(item["repository_id"], f"{location}.repository_id")
         require(item["scope"] in {"repository", "organization"}, f"{location}.scope invalid")
@@ -151,8 +170,9 @@ def read_policy(path: Path = POLICY_PATH):
         if item["preimage"] is not None:
             validate_image(item["preimage"], f"{location}.preimage")
         desired = validate_image(item["desired"], f"{location}.desired")
+        validate_delegation(item, desired, location)
         require(desired["bypass_actors"] == [expected_actor], f"{location}.desired must have only release-authorization")
-        entries.append({"repository": repository, "repository_id": item["repository_id"], "scope": item["scope"], "ruleset_id": item["ruleset_id"], "name": name, "preimage": item["preimage"], "desired": desired})
+        entries.append({"repository": repository, "repository_id": item["repository_id"], "scope": item["scope"], "ruleset_id": item["ruleset_id"], "name": name, "delegated_to": item["delegated_to"], "preimage": item["preimage"], "desired": desired})
     require(entries, "policy.rulesets must not be empty")
     return organization, acknowledgement, entries
 

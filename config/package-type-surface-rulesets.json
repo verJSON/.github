@@ -14,6 +14,7 @@
       "scope": "repository",
       "ruleset_id": 21541962,
       "name": "identity-contracts-type-surface-required",
+      "delegated_to": null,
       "preimage": {
         "target": "branch",
         "enforcement": "active",
@@ -39,6 +40,7 @@
       "scope": "repository",
       "ruleset_id": 24324236,
       "name": "authz-type-surface-required",
+      "delegated_to": null,
       "preimage": null,
       "desired": {
         "target": "branch",
@@ -54,6 +56,7 @@
       "scope": "organization",
       "ruleset_id": 21750617,
       "name": "authn-type-surface-required-workflow",
+      "delegated_to": "scripts/authn-type-surface-ruleset.py",
       "preimage": null,
       "desired": {
         "target": "branch",
@@ -69,6 +72,7 @@
       "scope": "repository",
       "ruleset_id": 21569694,
       "name": "identity-lifecycle-type-surface-required",
+      "delegated_to": null,
       "preimage": {
         "target": "branch",
         "enforcement": "active",

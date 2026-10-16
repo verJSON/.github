@@ -19,4 +19,6 @@ read-only `audit` mode backs the scheduled `required-workflow-audit` job. The fi
 `stage-release-bypass` transition is retired along with its hard-coded `f2f425e9`
 predecessor.
 The package type-surface policy now delegates this ruleset's required-workflow revision
-(`"sha": null`) instead of pinning `dc6b2942`, so a rotation no longer turns its audit red.
+(`"sha": null`, with `delegated_to` naming the authn tool) instead of pinning
+`dc6b2942`, so a rotation no longer turns its audit red. Only registered rulesets may
+delegate.
