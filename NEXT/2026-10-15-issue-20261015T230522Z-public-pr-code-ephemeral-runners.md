@@ -19,7 +19,8 @@ reach a persistent runner must appear in
 its content and inherited settings, with a written justification. The checker
 over-approximates what such a job puts on disk: any fetch it can name (`curl`,
 `wget`, `gh api`, `gh run`/`release download`, git transport, package managers,
-container images, in-language HTTP clients, and the download, cache, and
+`docker`/`podman` pulls and builds, `docker://` steps, job `container:` and
+`services:` images, in-language HTTP clients, and the download, cache, and
 `github-script` actions), any runtime tree change (including `gh pr checkout`
 and `git --git-dir`/`--work-tree`), any non-default `shell:`, a full or
 runtime-selected checkout, checkout submodules, or head detection that finds or
@@ -28,8 +29,10 @@ needs `dynamic: <reason>[, <reason>]: <justification>` naming exactly those
 reasons. A full checkout binds the whole tracked tree, so editing, adding, or
 deleting any file turns its entry stale. A runtime-selected checkout must
 carry a `sparse-checkout` list; without one it is refused, because no review
-can bind what it puts on disk. The fetch vocabulary is not exhaustive; a fetch
-outside it still turns a reviewed entry stale but demands no `dynamic:` field.
+can bind what it puts on disk. A job `container:` or `services:` image must be
+pinned by an `@sha256:` digest; a tag or expression is refused. The fetch
+vocabulary is not exhaustive; a fetch outside it still turns a reviewed entry
+stale but demands no `dynamic:` field.
 `scripts/ci-gate/public-pr-runner-isolation.pending.tsv` ratchets
 `actionlint.yml` and `container-candidate.yml` as pending.
 Their selectors are pinned in `hosted-selector-policy.py` and change after #1826;

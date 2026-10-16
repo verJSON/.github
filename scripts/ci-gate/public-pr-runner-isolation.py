@@ -1143,6 +1143,27 @@ class Closure:
             for text in step_strings(step):
                 self.flag_fetches(text, where)
 
+    def add_job_images(self, job: dict) -> None:
+        """A job `container:` or `services:` image is pulled when the job
+        starts. It is a fetch, and only a digest pin lets a review bind it."""
+        images = []
+        if "container" in job:
+            container = job["container"]
+            images.append(("container", container.get("image") if isinstance(container, dict) else container))
+        services = job.get("services")
+        if isinstance(services, dict):
+            for name, service in sorted(services.items(), key=lambda item: str(item[0])):
+                images.append((f"services.{name}", service.get("image") if isinstance(service, dict) else service))
+        elif services is not None:
+            images.append(("services", services))
+        for where, image in images:
+            self.flag("fetch", f"`{where}` image {image} is pulled when the job starts")
+            if not (isinstance(image, str) and PINNED_IMAGE.fullmatch(image.strip())):
+                self.refusals.add(
+                    f"`{where}` image {image!r} must be pinned by an @sha256: digest; "
+                    "a tag or expression can change after review, so no entry can accept it"
+                )
+
     def add_scanned_fetches(self) -> None:
         """A repository file the job puts on disk can fetch when it runs."""
         for relative in sorted(self.files):
@@ -1183,6 +1204,10 @@ class Closure:
             value = runs.get(key)
             if isinstance(value, str) and not value.startswith(("docker://", "http")):
                 self.add_file(os.path.join(action_dir, value), f"local action {uses} entry point")
+
+
+# A container image reference fixed by content: no expression, no whitespace.
+PINNED_IMAGE = re.compile(r"[^\s@${}]+@sha256:[0-9a-f]{64}")
 
 
 def tracked_files(root: str) -> list[str]:
@@ -1305,6 +1330,7 @@ def job_closure(job: dict, root: str, workflow_defaults=None, excluded: frozense
         run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
         if isinstance(run_defaults, dict):
             closure.flag_shell(run_defaults.get("shell"), f"{scope} defaults.run")
+    closure.add_job_images(job)
     closure.add_steps(job.get("steps"), 0)
     closure.add_scanned_fetches()
     return closure

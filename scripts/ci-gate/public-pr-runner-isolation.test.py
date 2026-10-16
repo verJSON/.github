@@ -1874,5 +1874,67 @@ for label, checkout in {
             *(REVIEWED_ARGS if listed else ()),
         )
 
+# A job container or service image is pulled at runtime: it is a fetch, and
+# only a digest-pinned image can be bound by a review.
+PINNED_IMAGE = "ghcr.io/x/tool@sha256:" + "a" * 64
+REPINNED_IMAGE = "ghcr.io/x/tool@sha256:" + "b" * 64
+for label, job_yaml in {
+    "a job container tag": "container: ghcr.io/x/evil:latest\n",
+    "a job container mapping image tag": "container:\n  image: ghcr.io/x/evil:latest\n",
+    "a job container with no image": "container:\n  options: --cpus 1\n",
+    "a job container chosen by an expression": "container: ${{ vars.IMAGE }}\n",
+    "a service image tag": "services:\n  db:\n    image: postgres:16\n",
+    "a service string image": "services:\n  db: postgres:16\n",
+    "a tag beside a digest-pinned service": f"services:\n  db:\n    image: {PINNED_IMAGE}\n  cache:\n    image: redis:7\n",
+}.items():
+    job = shaped_job("- run: echo hi", None, job_yaml)
+    row = f"target.yml [pull_request_target]\treview\t{NO_SPARSE_RUNTIME}\tok\tdynamic: fetch: x\n"
+    for listed in (False, True):
+        expect(
+            with_review(job, row) if listed else job,
+            1,
+            ("VIOLATION: target.yml [pull_request_target]: job 'review'", "must be pinned by an @sha256: digest"),
+            f"{label} is refused" + (" even when listed" if listed else ""),
+            *(REVIEWED_ARGS if listed else ()),
+        )
+for label, job_yaml in {
+    "a digest-pinned job container": f"container: {PINNED_IMAGE}\n",
+    "a digest-pinned job container mapping": f"container:\n  image: {PINNED_IMAGE}\n",
+    "a digest-pinned service": f"services:\n  db:\n    image: {PINNED_IMAGE}\n",
+}.items():
+    job = shaped_job("- run: echo hi", None, job_yaml)
+    row = review_row(job, "target.yml [pull_request_target]", "review")
+    code, output = run_checker(with_review(job, row), *REVIEWED_ARGS)
+    computed = named_reasons(output)
+    if code == 1 and computed == {"fetch"} and "image ghcr.io/x/tool@sha256:" in output:
+        ok(f"{label} is a fetch that needs dynamic: fetch")
+    else:
+        fail(f"{label}: expected unresolved fetch, got {sorted(computed)} (exit {code}: {output.strip()[:400]})")
+    fetch_row = dynamic_row(row, {"fetch"}, "the pinned image only runs the reviewed tools")
+    expect(with_review(job, fetch_row), 0, ("REVIEWED",), f"{label} with dynamic: fetch is classified", *REVIEWED_ARGS)
+    expect(
+        with_review(shaped_job("- run: echo hi", None, job_yaml.replace(PINNED_IMAGE, REPINNED_IMAGE)), fetch_row),
+        1,
+        ("STALE REVIEWED",),
+        f"repinning {label} turns its entry stale",
+        *REVIEWED_ARGS,
+    )
+expect(
+    {
+        "target.yml": """
+            on: pull_request_target
+            jobs:
+              review:
+                runs-on: ubuntu-24.04
+                container: ghcr.io/x/tool:latest
+                steps:
+                  - run: echo hi
+        """,
+    },
+    0,
+    ("clean",),
+    "a mutable container on a hosted-only job is outside this policy",
+)
+
 
 sys.exit(1 if failures else 0)
