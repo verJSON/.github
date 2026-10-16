@@ -332,9 +332,11 @@ contract test asserts its provenance and rejects a hand-written one.
 The hook runs under `env -i` with a fixed allowlist, not the job environment.
 Callers generated at or after this contract also pass
 `CI_PACKAGE_RETENTION_KEEP`: the package retention window, read from the
-organization variable through the same expression and guard (an integer
-from 1 to 999) as the post-publish retention jobs in `node-release.yml` and
-`container-release.yml`, defaulting to `3`. An invalid value fails `verify`
+organization variable through the same expression and guard as the
+post-publish retention jobs in `node-release.yml` and `container-release.yml`,
+defaulting to `3`. The accepted forms are an integer from 1 to 999 (keep that
+many newest stable versions) or the exact lowercase word `all` (retention
+disabled; the hook should treat it as "never evicts"). An invalid value fails `verify`
 before the hook runs. A hook that must keep a still-consumed version inside
 that window reads it from there ([ADR 0220](../decisions/0220-confine-release-credentials-to-dependency-acquisition/README.md)).
 

@@ -89,3 +89,31 @@ It is also the form the digit guards already used. A spelled-out class admits ex
 - `container-release.yml`'s retention job is `continue-on-error`. Its failure leaves the run green: the release was promoted and older image versions were simply not deleted.
 
 Both retention jobs now write the skip and its consequence to the step summary before failing, so the green container run still shows it. `continue-on-error` stays, because a cleanup failure after promotion must not mark the promoted release as failed.
+
+## 2026-10-15 amendment — retention is an explicit policy value; `all` keeps every version
+
+**Context.** Keeping every package version used to require an arbitrarily large `CI_PACKAGE_RETENTION_KEEP`. The 1-999 cap above turns that workaround into a hard failure. The owner decided that "keep everything" must be a stated policy, not a large number.
+
+**Decision.** `CI_PACKAGE_RETENTION_KEEP` is a policy value with one language, accepted identically by every site that reads it:
+
+| Value | Meaning |
+| --- | --- |
+| unset | the organization default, `3` (ADR 0108), through `vars.CI_PACKAGE_RETENTION_KEEP \|\| '3'` |
+| `1`-`999`, ASCII digits, no leading zero | keep the newest N stable versions |
+| `all` | retention disabled; nothing is deleted |
+| anything else | fail closed with an error naming the accepted forms |
+
+"Anything else" includes `0`, values above 999, non-ASCII digits, whitespace, and case variants such as `ALL`.
+
+The sites that read the value:
+- the generated release verify step, in all three modes, which forwards `all` to the hook;
+- the `node-release.yml` and `container-release.yml` retention jobs. With `all` they pass the value to `package_retention.py`, which validates its targets, prints `package-retention: disabled by policy (keep=all)`, and returns before any API call. The jobs also write "Package retention disabled by policy" to the run summary.
+
+`package_retention.py` parses `--keep` through the same language (`KEEP_POLICY`, `parse_keep`). Its integer path is unchanged, because its only callers already cap at 999.
+
+**Why exact lowercase `all`.** Every consumer compares the value as a string: five shell guards, `package_retention.py`, and each adopter's release hook. A second accepted spelling would have to be normalized identically in all of them, and one consumer that forgets would read `ALL` as an invalid number or, worse, as a window. One spelling keeps the comparison a plain equality everywhere, and the error message names it.
+
+**Enforcement.** `scripts/ci-gate/release-verify-retention-keep.test.py` runs a shared corpus through all five shell guards and `parse_keep` under C.UTF-8 and en_US.UTF-8, and requires one accept/refuse decision per value. It also runs each retention job with `all` against an unreachable API and requires no deletion plus the summary line. `scripts/package_retention_test.py` covers the parser and the no-op.
+
+**Consequence for adopters.** A release hook that reads the window (verjson-ci#298) must treat `all` as "never evicts" and pass. Once its caller is regenerated, the variable is always present, so an absent value is an error the hook should fail closed on.
+
