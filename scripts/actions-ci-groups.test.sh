@@ -1131,6 +1131,8 @@ expected = shards | {
     "merge-gate\tpython3 scripts/ci-gate/review-caller-bootstrap.test.py": 360,
     # 31s serially on main run 38513400637.
     "platform\tpython3 scripts/ci-gate/hosted-selector-policy.test.py": 90,
+    # 51s on main run 38799238936, before #1822 added 15 assertions to it.
+    "merge-gate\tbash scripts/assert-mergeable-head.test.sh": 120,
 }
 if declared != expected:
     drift = sorted(

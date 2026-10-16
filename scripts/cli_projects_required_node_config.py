@@ -29,7 +29,8 @@ def load_required_node_config(path, require):
         set(config) == {
             "schema_version",
             "repository",
-            "node_ci_sha",
+            "protected_node_ci_sha",
+            "consumer_node_ci_sha",
             "rollout_legacy_consumer_workflow_sha256",
             "node_versions",
             "approved_internal_packages",
@@ -50,11 +51,11 @@ def load_required_node_config(path, require):
         config["repository"] == "Verjson/verjson-cli-projects",
         "this protected verifier is bound to Verjson/verjson-cli-projects",
     )
-    require(
-        isinstance(config["node_ci_sha"], str)
-        and SHA.fullmatch(config["node_ci_sha"]),
-        "node_ci_sha must be immutable",
-    )
+    for key in ("protected_node_ci_sha", "consumer_node_ci_sha"):
+        require(
+            isinstance(config[key], str) and SHA.fullmatch(config[key]),
+            f"{key} must be immutable",
+        )
     require(
         config["rollout_legacy_consumer_workflow_sha256"] is None
         or (

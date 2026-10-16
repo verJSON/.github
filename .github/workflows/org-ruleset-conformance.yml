@@ -84,3 +84,51 @@ jobs:
         if: ${{ always() }}
         working-directory: ${{ github.workspace }}
         run: rm -rf ".org-ruleset-conformance-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}"
+
+  # The two protected required-workflow rulesets are the only record of the revision
+  # they run: their rotation tools keep no committed copy, because that copy went
+  # stale after every rotation (#1824). This job fails while either ruleset runs
+  # anything but the reviewed required workflow on protected main, including a
+  # protected-lane pin below the security floor, so a pending rotation is reported
+  # instead of being discovered at the next one. Each audit runs even when the other
+  # fails. It reports; no pull request gates on it.
+  required-workflow-audit:
+    runs-on: ${{ fromJSON(vars.CI_LANE_PRIVILEGED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    defaults:
+      run:
+        working-directory: .org-ruleset-conformance-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+    timeout-minutes: 10
+    steps:
+      - name: Check out the required-workflow rotation tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .org-ruleset-conformance-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          persist-credentials: false
+      - name: Provision audit Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.14'
+      - name: Install the hash-pinned audit dependencies
+        run: |
+          python3 -I -m pip install \
+            --disable-pip-version-check \
+            --no-input \
+            --quiet \
+            --no-deps \
+            --only-binary=:all: \
+            --require-hashes \
+            --requirement scripts/actions-ci-python.requirements.txt
+      - name: Audit the CLI projects required-workflow revision
+        env:
+          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+        run: python3 -I scripts/cli-projects-package-surface-ruleset.py audit
+      - name: Audit the authn required-workflow revision
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+        run: python3 -I scripts/authn-type-surface-ruleset.py audit
+      - name: Remove the isolated required-workflow audit checkout
+        if: ${{ always() }}
+        working-directory: ${{ github.workspace }}
+        run: rm -rf ".org-ruleset-conformance-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}"

@@ -2,8 +2,10 @@
 import copy
 from datetime import datetime, timezone
 import hashlib
+import io
 import importlib.util
 import json
+import re
 import os
 from pathlib import Path
 import subprocess
@@ -26,6 +28,7 @@ GENERATOR_MODULE = importlib.util.module_from_spec(GENERATOR_SPEC)
 GENERATOR_SPEC.loader.exec_module(GENERATOR_MODULE)
 SHA = "a" * 40
 HEAD = "b" * 40
+PREVIOUS = "c" * 40
 
 
 class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
@@ -166,12 +169,13 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
     def test_caller_ref_input_and_credential_mutations_are_rejected(self):
         source = MODULE.WORKFLOW.read_text(encoding="utf-8")
         mutations = (
-            source.replace("node-ci-protected.yml@1c7659b", "node-ci-protected.yml@aaaaaaaa"),
+            source.replace("node-ci-protected.yml@", "node-ci-protected.yml@aaaaaaaa", 1),
             source.replace("secretless-pr: true", "secretless-pr: false", 1),
             source.replace("NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}", "NODE_AUTH_TOKEN: mutation", 1),
             source.replace("needs: admission", "needs: []", 1),
         )
         for candidate in mutations:
+            self.assertNotEqual(source, candidate)
             with tempfile.NamedTemporaryFile("w", encoding="utf-8") as stream:
                 stream.write(candidate)
                 stream.flush()
@@ -318,7 +322,8 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
     def test_generator_rejects_mutable_or_injectable_configuration(self):
         config = json.loads(MODULE.GENERATOR_CONFIG.read_text(encoding="utf-8"))
         mutations = (
-            {**config, "node_ci_sha": "main"},
+            {**config, "protected_node_ci_sha": "main"},
+            {**config, "consumer_node_ci_sha": "main"},
             {**config, "repository": "Verjson/other"},
             {**config, "repository": "Verjson/verjson-cli-projects\npermissions: write"},
             {**config, "approved_internal_packages": ["@verjson/eslint-config\nrun: id"]},
@@ -541,7 +546,7 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
     def test_apply_rotates_only_the_exact_reviewed_prior_workflow(self):
         expected = MODULE.render_payload(self.contract, SHA)
         previous = MODULE.render_payload(
-            self.contract, self.contract["rollout"]["previous_workflow_sha"],
+            self.contract, PREVIOUS,
             include_freshness=False,
         )
         live_previous = previous | {
@@ -551,6 +556,7 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
             "id": 9, "source_type": "Organization", "source": "Verjson",
         }
         with (
+            mock.patch.object(MODULE, "admit_previous_revision") as admit,
             mock.patch.object(MODULE, "discover_state", return_value=([{"id": 9}], HEAD)),
             mock.patch.object(MODULE, "assert_consumer_branch_sha"),
             mock.patch.object(MODULE, "gh_json", side_effect=[live_previous, live_previous, live_expected]),
@@ -561,10 +567,184 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
                 "--ack", "ROTATE-CLI-PROJECTS-REQUIRED-WORKFLOW-1187",
             ])
         self.assertEqual(expected, mutate.call_args.args[2])
+        admit.assert_called_once_with(PREVIOUS, SHA)
+
+    def test_dry_run_reads_the_predecessor_from_the_live_ruleset_and_admits_it(self):
+        # No committed record names the live revision: it is read from the ruleset
+        # and admitted against the rotation target, so a rotation never needs a
+        # follow-up record update (#1824).
+        for include_freshness, enforcement in (
+            (True, "active"), (False, "active"), (False, "disabled"), (True, "disabled"),
+        ):
+            image = MODULE.render_payload(
+                self.contract, PREVIOUS, include_freshness=include_freshness,
+            )
+            image["enforcement"] = enforcement
+            live = image | {"id": 9, "source_type": "Organization", "source": "Verjson"}
+            with (
+                self.subTest(include_freshness=include_freshness, enforcement=enforcement),
+                mock.patch.object(MODULE, "discover_state", return_value=([{"id": 9}], HEAD)),
+                mock.patch.object(MODULE, "gh_json", return_value=live),
+                mock.patch.object(MODULE, "admit_previous_revision") as admit,
+                mock.patch.object(MODULE, "gh_json_input") as mutate,
+            ):
+                self.assertEqual(0, MODULE.main(["dry-run", "--workflow-sha", SHA]))
+            admit.assert_called_once_with(PREVIOUS, SHA)
+            mutate.assert_not_called()
+
+    def test_dry_run_reports_the_resolved_state_and_predecessor(self):
+        metadata = {"id": 9, "source_type": "Organization", "source": "Verjson"}
+        expected = MODULE.render_payload(self.contract, SHA)
+        staged = expected | {"enforcement": "disabled"}
+        previous = MODULE.render_payload(self.contract, PREVIOUS, include_freshness=False)
+        cases = (
+            ([{"id": 9}], expected | metadata,
+             f"ready: organization ruleset 9 already runs {SHA}"),
+            ([{"id": 9}], staged | metadata,
+             f"ready: organization ruleset 9 is staged disabled at {SHA}; apply activates it"),
+            ([{"id": 9}], previous | metadata,
+             f"ready: rotate organization ruleset 9 from admitted revision {PREVIOUS} to {SHA}"),
+            ([], None,
+             f"ready: no organization ruleset; apply creates it disabled at {SHA}, then activates it"),
+        )
+        for named, live, message in cases:
+            with (
+                self.subTest(message=message),
+                mock.patch.object(MODULE, "discover_state", return_value=(named, HEAD)),
+                mock.patch.object(MODULE, "gh_json", return_value=live),
+                mock.patch.object(MODULE, "admit_previous_revision"),
+                mock.patch.object(MODULE, "gh_json_input") as mutate,
+                mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                self.assertEqual(0, MODULE.main(["dry-run", "--workflow-sha", SHA]))
+            self.assertEqual(message + "\n", stdout.getvalue())
+            mutate.assert_not_called()
+
+    def test_apply_refuses_an_unadmitted_predecessor_before_any_mutation(self):
+        live = MODULE.render_payload(self.contract, PREVIOUS) | {
+            "id": 9, "source_type": "Organization", "source": "Verjson",
+        }
+        for mode in ("dry-run", "apply"):
+            with (
+                self.subTest(mode=mode),
+                mock.patch.object(MODULE, "discover_state", return_value=([{"id": 9}], HEAD)),
+                mock.patch.object(
+                    MODULE, "admit_previous_revision",
+                    side_effect=MODULE.ContractError("not its generator's output"),
+                ),
+                mock.patch.object(MODULE, "gh_json", return_value=live),
+                mock.patch.object(MODULE, "gh_json_input") as mutate,
+                self.assertRaisesRegex(MODULE.ContractError, "generator's output"),
+            ):
+                MODULE.main([
+                    mode, "--workflow-sha", SHA,
+                    "--ack", "ROTATE-CLI-PROJECTS-REQUIRED-WORKFLOW-1187",
+                ])
+            mutate.assert_not_called()
+
+    def test_discovery_refuses_a_target_whose_protected_lanes_predate_the_floor(self):
+        with (
+            mock.patch.object(MODULE, "validate_workflow"),
+            mock.patch.object(MODULE, "verify_canonical_bytes"),
+            mock.patch.object(MODULE, "canonical_compare", return_value="behind") as compare,
+            mock.patch.object(MODULE, "verify_consumer_workflow") as consumer,
+            self.assertRaisesRegex(MODULE.ContractError, "security floor"),
+        ):
+            MODULE.discover_state(self.contract, SHA)
+        compare.assert_called_once_with(
+            "21eb48e713bd8304951fb7b26a900d08359af900",
+            "576707fe0be0dabe43ea57c504575f8cda88b0d2",
+        )
+        consumer.assert_not_called()
+
+    def test_audit_covers_every_file_the_workflow_executes_from_its_own_revision(self):
+        # The package-surface job checks the verifier out at `github.workflow_sha`, so
+        # the verifier, its sibling imports, and its config are runtime bytes of the
+        # live revision; a change to any of them is a pending rotation.
+        workflow = yaml.safe_load(MODULE.WORKFLOW.read_text(encoding="utf-8"))
+        executed = set()
+        for job in workflow["jobs"].values():
+            for step in job.get("steps", []):
+                for token in str(step.get("run", "")).split():
+                    if token.startswith("policy/"):
+                        executed.add(token.removeprefix("policy/"))
+        self.assertEqual({"scripts/cli-projects-package-surface.py"}, executed)
+        verifier = (ROOT / "scripts/cli-projects-package-surface.py").read_text(encoding="utf-8")
+        siblings = {
+            f"scripts/{name}.py"
+            for name in re.findall(r"^from (\w+) import", verifier, re.MULTILINE)
+            if (ROOT / f"scripts/{name}.py").exists()
+        }
+        configs = set(re.findall(r'"(config/[\w./-]+)"', verifier))
+        self.assertEqual(
+            {MODULE.WORKFLOW_PATH} | executed | siblings | configs,
+            set(MODULE.RUNTIME_PATHS),
+        )
+
+    def test_regenerate_at_reproduces_the_generated_workflow_from_revision_bytes(self):
+        reads = []
+
+        def canonical_file(path, ref):
+            reads.append((path, ref))
+            return (ROOT / path).read_bytes()
+
+        with mock.patch.object(MODULE, "canonical_file", side_effect=canonical_file):
+            output = MODULE.regenerate_at(PREVIOUS, b"ignored")
+        self.assertEqual(MODULE.WORKFLOW.read_bytes(), output)
+        self.assertEqual(
+            sorted((path, PREVIOUS) for path in MODULE.GENERATOR_INPUTS), sorted(reads)
+        )
+
+    def test_audit_checks_the_live_revision_against_protected_main_read_only(self):
+        live = MODULE.render_payload(self.contract, PREVIOUS) | {
+            "id": 9, "source_type": "Organization", "source": "Verjson",
+        }
+        with (
+            mock.patch.object(MODULE, "list_named_rulesets", return_value=[{"id": 9}]),
+            mock.patch.object(MODULE, "gh_json", return_value=live),
+            mock.patch.object(MODULE, "audit_live_revision") as audit,
+            mock.patch.object(MODULE, "gh_json_input") as mutate,
+            mock.patch("sys.stdout"),
+        ):
+            self.assertEqual(0, MODULE.main(["audit"]))
+        audit.assert_called_once_with(PREVIOUS)
+        mutate.assert_not_called()
+
+    def test_audit_refuses_a_live_image_that_is_not_the_reviewed_active_one(self):
+        def image(mutate):
+            value = MODULE.render_payload(self.contract, PREVIOUS)
+            mutate(value)
+            return value | {"id": 9, "source_type": "Organization", "source": "Verjson"}
+
+        cases = {
+            "disabled": image(lambda value: value.update(enforcement="disabled")),
+            "no freshness": image(lambda value: value["rules"].pop()),
+            "bypass": image(lambda value: value.update(
+                bypass_actors=[{"actor_type": "OrganizationAdmin"}])),
+            "mutable": image(lambda value: value["rules"][0]["parameters"]["workflows"][0]
+                             .update(sha="main")),
+        }
+        for name, live in cases.items():
+            with (
+                self.subTest(name),
+                mock.patch.object(MODULE, "list_named_rulesets", return_value=[{"id": 9}]),
+                mock.patch.object(MODULE, "gh_json", return_value=live),
+                mock.patch.object(MODULE, "audit_live_revision") as audit,
+                self.assertRaises(MODULE.ContractError),
+            ):
+                MODULE.main(["audit"])
+            audit.assert_not_called()
+        for named in ([], [{"id": 9}, {"id": 10}]):
+            with (
+                self.subTest(named=named),
+                mock.patch.object(MODULE, "list_named_rulesets", return_value=named),
+                self.assertRaisesRegex(MODULE.ContractError, "uniquely present"),
+            ):
+                MODULE.main(["audit"])
 
     def test_dry_run_accepts_the_exact_reviewed_prior_disabled_workflow(self):
         previous_disabled = MODULE.render_payload(
-            self.contract, self.contract["rollout"]["previous_disabled_workflow_sha"],
+            self.contract, PREVIOUS,
             include_freshness=False,
         )
         previous_disabled["enforcement"] = "disabled"
@@ -572,14 +752,16 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
             "id": 9, "source_type": "Organization", "source": "Verjson",
         }
         with (
+            mock.patch.object(MODULE, "admit_previous_revision") as admit,
             mock.patch.object(MODULE, "discover_state", return_value=([{"id": 9}], HEAD)),
             mock.patch.object(MODULE, "gh_json", return_value=live_previous_disabled),
         ):
             self.assertEqual(0, MODULE.main(["dry-run", "--workflow-sha", SHA]))
+        admit.assert_called_once_with(PREVIOUS, SHA)
 
     def test_dry_run_rejects_an_unreviewed_live_organization_image(self):
         previous_disabled = MODULE.render_payload(
-            self.contract, self.contract["rollout"]["previous_disabled_workflow_sha"],
+            self.contract, PREVIOUS,
             include_freshness=False,
         )
         previous_disabled["enforcement"] = "disabled"
@@ -589,24 +771,28 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
         live_unreviewed = copy.deepcopy(live_unreviewed)
         live_unreviewed["bypass_actors"] = [{"actor_type": "OrganizationAdmin"}]
         with (
+            mock.patch.object(MODULE, "admit_previous_revision") as admit,
             mock.patch.object(MODULE, "discover_state", return_value=([{"id": 9}], HEAD)),
             mock.patch.object(MODULE, "gh_json", return_value=live_unreviewed),
             self.assertRaisesRegex(MODULE.ContractError, "reviewed active and disabled images"),
         ):
             MODULE.main(["dry-run", "--workflow-sha", SHA])
+        admit.assert_not_called()
 
     def test_dry_run_rejects_a_non_object_live_organization_image(self):
         with (
+            mock.patch.object(MODULE, "admit_previous_revision") as admit,
             mock.patch.object(MODULE, "discover_state", return_value=([{"id": 9}], HEAD)),
             mock.patch.object(MODULE, "gh_json", return_value=[]),
             self.assertRaisesRegex(MODULE.ContractError, "reviewed active and disabled images"),
         ):
             MODULE.main(["dry-run", "--workflow-sha", SHA])
+        admit.assert_not_called()
 
     def test_apply_rotates_the_exact_reviewed_prior_disabled_workflow(self):
         expected = MODULE.render_payload(self.contract, SHA)
         previous_disabled = MODULE.render_payload(
-            self.contract, self.contract["rollout"]["previous_disabled_workflow_sha"],
+            self.contract, PREVIOUS,
             include_freshness=False,
         )
         previous_disabled["enforcement"] = "disabled"
@@ -617,6 +803,7 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
             "id": 9, "source_type": "Organization", "source": "Verjson",
         }
         with (
+            mock.patch.object(MODULE, "admit_previous_revision") as admit,
             mock.patch.object(MODULE, "discover_state", return_value=([{"id": 9}], HEAD)),
             mock.patch.object(MODULE, "assert_consumer_branch_sha"),
             mock.patch.object(
@@ -630,11 +817,12 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
                 "--ack", "ROTATE-CLI-PROJECTS-REQUIRED-WORKFLOW-1187",
             ])
         self.assertEqual(expected, mutate.call_args.args[2])
+        admit.assert_called_once_with(PREVIOUS, SHA)
 
     def test_apply_rotates_reviewed_prior_workflow_that_appears_during_discovery(self):
         expected = MODULE.render_payload(self.contract, SHA)
         previous = MODULE.render_payload(
-            self.contract, self.contract["rollout"]["previous_workflow_sha"],
+            self.contract, PREVIOUS,
             include_freshness=False,
         )
         live_previous = previous | {
@@ -644,6 +832,7 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
             "id": 9, "source_type": "Organization", "source": "Verjson",
         }
         with (
+            mock.patch.object(MODULE, "admit_previous_revision") as admit,
             mock.patch.object(
                 MODULE, "discover_state",
                 side_effect=[([], HEAD), ([{"id": 9}], HEAD)],
@@ -657,11 +846,12 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
                 "--ack", "ROTATE-CLI-PROJECTS-REQUIRED-WORKFLOW-1187",
             ])
         self.assertEqual(expected, mutate.call_args.args[2])
+        admit.assert_called_once_with(PREVIOUS, SHA)
 
     def test_apply_rotates_prior_disabled_workflow_that_appears_during_discovery(self):
         expected = MODULE.render_payload(self.contract, SHA)
         previous_disabled = MODULE.render_payload(
-            self.contract, self.contract["rollout"]["previous_disabled_workflow_sha"],
+            self.contract, PREVIOUS,
             include_freshness=False,
         )
         previous_disabled["enforcement"] = "disabled"
@@ -672,6 +862,7 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
             "id": 9, "source_type": "Organization", "source": "Verjson",
         }
         with (
+            mock.patch.object(MODULE, "admit_previous_revision") as admit,
             mock.patch.object(
                 MODULE, "discover_state",
                 side_effect=[([], HEAD), ([{"id": 9}], HEAD)],
@@ -688,11 +879,12 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
                 "--ack", "ROTATE-CLI-PROJECTS-REQUIRED-WORKFLOW-1187",
             ])
         self.assertEqual(expected, mutate.call_args.args[2])
+        admit.assert_called_once_with(PREVIOUS, SHA)
 
     def test_apply_rotates_prior_disabled_workflow_recovered_after_create_race(self):
         expected = MODULE.render_payload(self.contract, SHA)
         previous_disabled = MODULE.render_payload(
-            self.contract, self.contract["rollout"]["previous_disabled_workflow_sha"],
+            self.contract, PREVIOUS,
             include_freshness=False,
         )
         previous_disabled["enforcement"] = "disabled"
@@ -703,6 +895,7 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
             "id": 9, "source_type": "Organization", "source": "Verjson",
         }
         with (
+            mock.patch.object(MODULE, "admit_previous_revision") as admit,
             mock.patch.object(MODULE, "discover_state", side_effect=[([], HEAD), ([], HEAD)]),
             mock.patch.object(MODULE, "list_named_rulesets", return_value=[{"id": 9}]),
             mock.patch.object(MODULE, "assert_consumer_branch_sha"),
@@ -721,11 +914,12 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
             ])
         self.assertEqual("POST", mutate.call_args_list[0].args[0])
         self.assertEqual(expected, mutate.call_args_list[1].args[2])
+        admit.assert_called_once_with(PREVIOUS, SHA)
 
     def test_partial_rotation_restores_and_verifies_the_prior_active_workflow(self):
         expected = MODULE.render_payload(self.contract, SHA)
         previous = MODULE.render_payload(
-            self.contract, self.contract["rollout"]["previous_workflow_sha"],
+            self.contract, PREVIOUS,
             include_freshness=False,
         )
         live_previous = previous | {
@@ -747,7 +941,7 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
     def test_org_rotation_branch_drift_restores_prior_after_ambiguous_put(self):
         expected = MODULE.render_payload(self.contract, SHA)
         previous = MODULE.render_payload(
-            self.contract, self.contract["rollout"]["previous_workflow_sha"],
+            self.contract, PREVIOUS,
             include_freshness=False,
         )
         live_previous = previous | {
@@ -775,7 +969,7 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
     def test_partial_rotation_restores_the_exact_prior_disabled_workflow(self):
         expected = MODULE.render_payload(self.contract, SHA)
         previous_disabled = MODULE.render_payload(
-            self.contract, self.contract["rollout"]["previous_disabled_workflow_sha"],
+            self.contract, PREVIOUS,
             include_freshness=False,
         )
         previous_disabled["enforcement"] = "disabled"

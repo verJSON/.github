@@ -50,8 +50,6 @@
     "issue": 1187,
     "human_gate_required": true,
     "apply_acknowledgement": "ROTATE-CLI-PROJECTS-REQUIRED-WORKFLOW-1187",
-    "previous_workflow_sha": "ae70e4ef0a70fa446fc6583a2473f2b4e68eac36",
-    "previous_disabled_workflow_sha": "4525c152a77bd04c006fa2b790f4b64833b1bbbe",
     "freshness_status_check": {
       "context": "admission",
       "integration_id": 15368,

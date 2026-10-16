@@ -66,6 +66,7 @@
     "issue": 1154,
     "human_gate_required": true,
     "apply_acknowledgement": "APPLY-AUTHN-TYPE-SURFACE-1154",
+    "rotate_acknowledgement": "ROTATE-AUTHN-TYPE-SURFACE-1154",
     "required_run": {
       "event": "pull_request",
       "conclusion": "success",

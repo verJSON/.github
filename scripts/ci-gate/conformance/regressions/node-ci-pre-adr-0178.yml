@@ -190,14 +190,12 @@ jobs:
     outputs:
       should-run: ${{ steps.check.outputs.should-run }}
     steps:
-    - name: Reject incompatible secretless compatibility runner
-      if: inputs.secretless-trusted-ref && inputs.secretless-compatibility-ranges != '' && runner.environment != 'github-hosted'
+    - name: Require a GitHub-hosted secretless build lane
+      if: inputs.secretless-pr || inputs.secretless-trusted-ref
       shell: bash
-      run: 'echo "::error::secretless-compatibility-ranges requires a GitHub-hosted runner for secretless-trusted-ref"
-
-        exit 1
-
-        '
+      env:
+        SECRETLESS_BUILD_LANE: ${{ vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]' }}
+      run: "set -euo pipefail\n# Digits are spelled out: a bracket range follows the runner's\n# collation and under en_US.UTF-8 also admits fullwidth digits, while\n# pinning a locale here depends on which locales the image ships.\n# The YY.MM label shape, not a list of released images: a new hosted\n# image then needs no contract release, and the exact value is already\n# reconciled by runner-admission-reconcile (ADR 0147). ADR 0234.\nhosted_image='\"ubuntu-(latest|[0123456789]{2}\\.[0123456789]{2})\"'\nif [[ ! \"$SECRETLESS_BUILD_LANE\" =~ ^${hosted_image}$ ]] \\\n  && [[ ! \"$SECRETLESS_BUILD_LANE\" =~ ^\\[${hosted_image}\\]$ ]]; then\n  echo \"::error::secretless build-test requires a GitHub-hosted Linux runner, but CI_LANE_UNTRUSTED does not select a single standard GitHub-hosted Linux image\"\n  exit 1\nfi\n"
     - id: check
       shell: bash
       env:
@@ -381,7 +379,7 @@ jobs:
     - eligibility
     - acquire-secretless-dependencies
     if: always()
-    runs-on: ${{ inputs.secretless-pr && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
