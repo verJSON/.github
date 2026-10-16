@@ -666,10 +666,10 @@ jobs:
                 ;;
               *) echo "::error::unknown provider or pricing version"; return 1 ;;
             esac
-            if ! [[ "$selected_budget" =~ ^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$ ]] || ! awk -v b="$selected_budget" 'BEGIN { exit !(b > 0) }'; then
+            if ! [[ "$selected_budget" =~ ^(0|[123456789][0123456789]{0,2})(\.[0123456789]{1,2})?$ ]] || ! awk -v b="$selected_budget" 'BEGIN { exit !(b + 0 > 0) }'; then
               echo "::error::budget must be positive with at most two decimal places"; return 1
             fi
-            if [ -n "$fallback_budget" ] && { ! [[ "$fallback_budget" =~ ^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$ ]] || ! awk -v b="$fallback_budget" 'BEGIN { exit !(b > 0) }'; }; then
+            if [ -n "$fallback_budget" ] && { ! [[ "$fallback_budget" =~ ^(0|[123456789][0123456789]{0,2})(\.[0123456789]{1,2})?$ ]] || ! awk -v b="$fallback_budget" 'BEGIN { exit !(b + 0 > 0) }'; }; then
               echo "::error::fallback budget must be positive with at most two decimal places"; return 1
             fi
             out provider "$selected_provider"; out model "$selected_model"; out budget_usd "$selected_budget"; out pricing_version "$selected_pricing"
@@ -2132,7 +2132,7 @@ jobs:
           REVERIFY_ACTOR_PERMISSION: 'false'
         run: |
           set -euo pipefail
-          [[ "$AUTHORIZATION_CHECK_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$AUTHORIZATION_CHECK_ID" =~ ^[123456789][0123456789]{0,14}$ ]] || exit 1
           check_file="$RUNNER_TEMP/authorization-check-before-completion.json"
           GH_TOKEN="$ACTIONS_TOKEN" gh api \
             "repos/$TARGET_REPO/check-runs/$AUTHORIZATION_CHECK_ID" >"$check_file"
@@ -2319,7 +2319,7 @@ jobs:
           AI_REVIEW_ENVIRONMENT: ${{ inputs.ai_review_environment }}
         run: |
           set -euo pipefail
-          [[ "$AUTHORIZATION_CHECK_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$AUTHORIZATION_CHECK_ID" =~ ^[123456789][0123456789]{0,14}$ ]] || exit 1
           check_file="$RUNNER_TEMP/authorization-check-finalizer.json"
           GH_TOKEN="$ACTIONS_TOKEN" gh api \
             "repos/$TARGET_REPO/check-runs/$AUTHORIZATION_CHECK_ID" >"$check_file"
@@ -2376,8 +2376,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || exit 1
-          [[ "$AUTHORIZATION_CHECK_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$PR_NUMBER" =~ ^[123456789][0123456789]{0,14}$ ]] || exit 1
+          [[ "$AUTHORIZATION_CHECK_ID" =~ ^[123456789][0123456789]{0,14}$ ]] || exit 1
           [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
           default_branch="$(gh api "repos/$TARGET_REPO" --jq '.default_branch // ""')"
           [[ "$default_branch" =~ ^[A-Za-z0-9._/-]+$ ]] || exit 1

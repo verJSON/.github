@@ -332,7 +332,7 @@ jobs:
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || exit 1
           [[ "$REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
           [[ "$DEFAULT_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || exit 1
-          [[ "$APP_ID" =~ ^[1-9][0-9]*$ ]] || { echo "::error::AI_REVIEW_APP_ID is unavailable"; exit 1; }
+          [[ "$APP_ID" =~ ^[123456789][0123456789]{0,14}$ ]] || { echo "::error::AI_REVIEW_APP_ID is unavailable"; exit 1; }
           [[ "$APP_SLUG" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "::error::AI_REVIEW_APP_SLUG is unavailable"; exit 1; }
 
           source_bound_delivery=false
@@ -568,10 +568,10 @@ jobs:
               ;;
             *) echo "::error::unsupported review provider"; exit 1 ;;
           esac
-          if [ "$review_budget_usd" != auto ] && { ! [[ "$review_budget_usd" =~ ^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$ ]] || ! awk -v b="$review_budget_usd" 'BEGIN { exit !(b > 0) }'; }; then
+          if [ "$review_budget_usd" != auto ] && { ! [[ "$review_budget_usd" =~ ^(0|[123456789][0123456789]{0,2})(\.[0123456789]{1,2})?$ ]] || ! awk -v b="$review_budget_usd" 'BEGIN { exit !(b + 0 > 0) }'; }; then
             echo "::error::invalid review budget"; exit 1
           fi
-          if [ -n "$fallback_budget_usd" ] && { ! [[ "$fallback_budget_usd" =~ ^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$ ]] || ! awk -v b="$fallback_budget_usd" 'BEGIN { exit !(b > 0) }'; }; then
+          if [ -n "$fallback_budget_usd" ] && { ! [[ "$fallback_budget_usd" =~ ^(0|[123456789][0123456789]{0,2})(\.[0123456789]{1,2})?$ ]] || ! awk -v b="$fallback_budget_usd" 'BEGIN { exit !(b + 0 > 0) }'; }; then
             echo "::error::invalid fallback review budget"; exit 1
           fi
           if [ "$explicit_label_delivery" = true ] && [ "$explicit_rereview" = false ]; then

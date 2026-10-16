@@ -35,7 +35,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$PACKAGE" =~ ^(@[a-z0-9._-]+/)?[a-z0-9._-]+$ ]]
-          [[ "$CANDIDATE" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]
+          [[ "$CANDIDATE" =~ ^[0123456789]+\.[0123456789]+\.[0123456789]+([+-][0-9A-Za-z.-]+)?$ ]]
           npm view --registry=https://registry.npmjs.org/ "$PACKAGE@$CANDIDATE" version >/dev/null
       - name: Install exact candidate without lifecycle scripts or credentials
         env:

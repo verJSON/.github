@@ -147,7 +147,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ "$CANDIDATE_IDENTITY" =~ ^([0-9]+)@(sha256:[0-9a-f]{64})$ ]] || { echo "::error::candidate identity must be artifact-id@sha256 digest"; exit 1; }
+          [[ "$CANDIDATE_IDENTITY" =~ ^([0123456789]{1,15})@(sha256:[0-9a-f]{64})$ ]] || { echo "::error::candidate identity must be artifact-id@sha256 digest"; exit 1; }
           artifact_id="${BASH_REMATCH[1]}"; expected_digest="${BASH_REMATCH[2]}"
           metadata="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id")"
           [ "$(jq -r .expired <<<"$metadata")" = false ]
@@ -206,7 +206,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ ]] || exit 1
-          [[ "$CANDIDATE_MANIFEST" =~ ^([0-9]+)@(sha256:[0-9a-f]{64})$ ]] || exit 1
+          [[ "$CANDIDATE_MANIFEST" =~ ^([0123456789]{1,15})@(sha256:[0-9a-f]{64})$ ]] || exit 1
           candidate_artifact_digest="${BASH_REMATCH[2]}"
           [[ "$CONFIG_PATH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*\.json$ && "/$CONFIG_PATH/" != *"/../"* ]] || { echo "::error::config path must be repository relative"; exit 1; }
           release_run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
@@ -297,7 +297,7 @@ jobs:
         env:
           RELEASE_APP_CLIENT_ID: ${{ inputs.release_app_client_id }}
         run: |
-          if [[ -z "$RELEASE_APP_CLIENT_ID" || "$RELEASE_APP_CLIENT_ID" =~ ^[0-9]+$ ]]; then
+          if [[ -z "$RELEASE_APP_CLIENT_ID" || "$RELEASE_APP_CLIENT_ID" =~ ^[0123456789]+$ ]]; then
             echo "::error::RELEASE_APP_CLIENT_ID must be a GitHub App client ID, not an empty or numeric legacy App ID."
             exit 1
           fi

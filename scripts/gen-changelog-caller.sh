@@ -297,7 +297,7 @@ fi
   echo "$(basename "$0"): scope must be a lowercase npm scope such as @verjson" >&2
   exit 2
 }
-[[ "$release_node_version" =~ ^(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)){0,2}$ ]] || {
+[[ "$release_node_version" =~ ^(0|[123456789][0123456789]*)(\.(0|[123456789][0123456789]*)){0,2}$ ]] || {
   echo "$(basename "$0"): node version must be a numeric major, major.minor, or major.minor.patch" >&2
   exit 2
 }

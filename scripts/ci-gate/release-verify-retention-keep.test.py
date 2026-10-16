@@ -9,7 +9,6 @@ retention job deletes against. The generated step runs the hook under
 """
 
 from copy import deepcopy
-import importlib.util
 from pathlib import Path
 import os
 import re
@@ -22,12 +21,10 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
+# A sibling helper, imported without leaving bytecode a later run could reuse.
 sys.dont_write_bytecode = True
-_LOCALES_SPEC = importlib.util.spec_from_file_location(
-    "ascii_digit_locales", Path(__file__).with_name("ascii_digit_locales.py")
-)
-ascii_digit_locales = importlib.util.module_from_spec(_LOCALES_SPEC)
-_LOCALES_SPEC.loader.exec_module(ascii_digit_locales)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ascii_digit_locales  # noqa: E402
 # The one guard every retention-window site applies. Digits are enumerated
 # because a [1-9] range is collation-ordered outside the C locale, and capped
 # at three so no consumer's integer arithmetic can wrap (2**64 is 0 in bash).

@@ -34,7 +34,7 @@ jobs:
         env:
           APP_CLIENT_ID: ${{ vars.RENOVATE_COMPATIBILITY_CLIENT_ID }}
         run: |
-          [[ -n "$APP_CLIENT_ID" && ! "$APP_CLIENT_ID" =~ ^[0-9]+$ ]] || {
+          [[ -n "$APP_CLIENT_ID" && ! "$APP_CLIENT_ID" =~ ^[0123456789]+$ ]] || {
             echo '::error::RENOVATE_COMPATIBILITY_CLIENT_ID must be a nonnumeric GitHub App client ID'
             exit 1
           }

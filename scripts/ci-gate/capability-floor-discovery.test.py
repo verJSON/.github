@@ -48,7 +48,7 @@ def workflow_problems(document: dict, raw: str) -> list[str]:
         problems.append("App mint is not exact-scope contents-read only")
     if not re.search(
         r'\[\[ -z "\$RENOVATE_COMPATIBILITY_CLIENT_ID" \|\| '
-        r'"\$RENOVATE_COMPATIBILITY_CLIENT_ID" =~ \^\[0-9\]\+\$ \]\]',
+        r'"\$RENOVATE_COMPATIBILITY_CLIENT_ID" =~ \^\[0123456789\]\+\$ \]\]',
         raw,
     ):
         problems.append("missing or numeric App client IDs do not fail closed")

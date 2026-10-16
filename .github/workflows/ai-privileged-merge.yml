@@ -215,8 +215,8 @@ jobs:
           set -euo pipefail
           [ -n "${GH_TOKEN:-}" ] || { echo "::error::read-only repository token is unavailable"; exit 1; }
           [[ "$TARGET_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || exit 1
-          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || exit 1
-          [[ "$AUTHORIZATION_CHECK_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$PR_NUMBER" =~ ^[123456789][0123456789]{0,14}$ ]] || exit 1
+          [[ "$AUTHORIZATION_CHECK_ID" =~ ^[123456789][0123456789]{0,14}$ ]] || exit 1
           [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
 
           default_branch="$(gh api "repos/$TARGET_REPO" --jq '.default_branch // ""')"

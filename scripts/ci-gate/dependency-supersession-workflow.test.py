@@ -30,7 +30,7 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertNotIn("pull_request_target", self.reconcile)
 
     def test_proposal_provenance_and_malformed_ids_fail_closed(self):
-        for text in ("^[1-9][0-9]*$", "^[0-9a-f]{64}$", ".path == \".github/workflows/dependency-supersession-observe.yml\"", ".conclusion == \"success\"", "merge_base_commit.sha == $run_head"):
+        for text in ("^[123456789][0123456789]{0,14}$", "^[0-9a-f]{64}$", ".path == \".github/workflows/dependency-supersession-observe.yml\"", ".conclusion == \"success\"", "merge_base_commit.sha == $run_head"):
             self.assertIn(text, self.reconcile)
         self.assertIn("(.repository.full_name | ascii_downcase) == ($repo | ascii_downcase)", self.reconcile)
         self.assertIn("(.head_repository.full_name | ascii_downcase) == ($repo | ascii_downcase)", self.reconcile)

@@ -532,7 +532,7 @@ jobs:
           EXPECTED_INSTALLATION_ID: ${{ vars.GH_RUNNER_REGISTRATION_APP_INSTALLATION_ID }}
         run: |
           set -euo pipefail
-          [[ "$EXPECTED_INSTALLATION_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_INSTALLATION_ID" =~ ^[123456789][0123456789]{0,14}$ ]]
           test "$ACTUAL_INSTALLATION_ID" = "$EXPECTED_INSTALLATION_ID"
       - name: Advance one bounded runner transition
         id: advance_1

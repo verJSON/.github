@@ -102,7 +102,7 @@ client_id_guard="$(awk '
   found && /^      - name:/ { exit }
   found { print }
 ' "$workflow")"
-grep -qF '[[ -z "$RELEASE_APP_CLIENT_ID" || "$RELEASE_APP_CLIENT_ID" =~ ^[0-9]+$ ]]' <<<"$client_id_guard" \
+grep -qF '[[ -z "$RELEASE_APP_CLIENT_ID" || "$RELEASE_APP_CLIENT_ID" =~ ^[0123456789]+$ ]]' <<<"$client_id_guard" \
   && pass "the release workflow rejects only empty and numeric legacy App IDs locally" \
   || fail "the release workflow does not defer full client-ID validation to the pinned action"
 

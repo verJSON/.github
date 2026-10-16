@@ -20,7 +20,7 @@ jobs:
         env:
           RENOVATE_COMPATIBILITY_CLIENT_ID: ${{ vars.RENOVATE_COMPATIBILITY_CLIENT_ID }}
         run: |
-          if [[ -z "$RENOVATE_COMPATIBILITY_CLIENT_ID" || "$RENOVATE_COMPATIBILITY_CLIENT_ID" =~ ^[0-9]+$ ]]; then
+          if [[ -z "$RENOVATE_COMPATIBILITY_CLIENT_ID" || "$RENOVATE_COMPATIBILITY_CLIENT_ID" =~ ^[0123456789]+$ ]]; then
             echo "::error::RENOVATE_COMPATIBILITY_CLIENT_ID must be the GitHub App client ID, not an empty or numeric legacy App ID."
             exit 1
           fi

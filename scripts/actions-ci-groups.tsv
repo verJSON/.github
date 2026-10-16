@@ -93,6 +93,7 @@ platform	bash scripts/ci-gate/repo-hygiene-ref.test.sh
 platform	bash scripts/ci-gate/repo-hygiene-sandbox.test.sh
 merge-gate	bash scripts/ci-gate/validate-ai-review-app-key.test.sh
 merge-gate	bash scripts/ci-gate/freshness.test.sh
+merge-gate	python3 scripts/ci-gate/settable-numeric-guards.test.py
 merge-gate	bash scripts/ci-gate/review-comment.test.sh
 merge-gate	bash scripts/ci-gate/review-context.test.sh
 merge-gate	bash scripts/ci-gate/read-pr-files.test.sh

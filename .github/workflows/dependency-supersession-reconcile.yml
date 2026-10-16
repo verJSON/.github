@@ -42,7 +42,7 @@ jobs:
           REPOSITORY_NAME: ${{ inputs.repository }}
         run: |
           set -euo pipefail
-          [[ "$OBSERVATION_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo '::error::invalid run ID'; exit 1; }
+          [[ "$OBSERVATION_RUN_ID" =~ ^[123456789][0123456789]{0,14}$ ]] || { echo '::error::invalid run ID'; exit 1; }
           [[ "$RECEIPT" =~ ^[0-9a-f]{64}$ ]] || { echo '::error::invalid receipt'; exit 1; }
           [[ "$REPOSITORY_NAME" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo '::error::invalid repository'; exit 1; }
           run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$OBSERVATION_RUN_ID")"
@@ -89,7 +89,7 @@ jobs:
         env:
           APP_CLIENT_ID: ${{ inputs.enforce && vars.DEPENDENCY_SUPERSESSION_APP_CLIENT_ID || vars.RENOVATE_COMPATIBILITY_CLIENT_ID }}
         run: |
-          [[ -n "$APP_CLIENT_ID" && ! "$APP_CLIENT_ID" =~ ^[0-9]+$ ]] || {
+          [[ -n "$APP_CLIENT_ID" && ! "$APP_CLIENT_ID" =~ ^[0123456789]+$ ]] || {
             echo '::error::the selected GitHub App client ID must be nonempty and nonnumeric'
             exit 1
           }
