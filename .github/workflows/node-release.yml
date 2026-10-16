@@ -908,7 +908,7 @@ jobs:
           echo "new-release-version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
 
   retention:
-    name: Retain three numbered package releases
+    name: Apply the package retention policy
     needs: release
     if: needs.release.outputs.new-release-published == 'true'
     runs-on: ubuntu-24.04

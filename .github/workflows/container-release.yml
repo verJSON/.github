@@ -410,7 +410,7 @@ jobs:
           printf 'retention-targets=%s\n' "$targets" >>"$GITHUB_OUTPUT"
 
   retention:
-    name: Retain three numbered image releases
+    name: Apply the image retention policy
     needs: promote
     if: needs.promote.result == 'success'
     continue-on-error: true
