@@ -15,6 +15,7 @@ contract tests. These jobs run while a pull request is a draft.
 | `Authn required type surface` | Required type-surface build and compatibility check |
 | `actions-ci` | `change-scope`, `docs-contracts`, and `adr-number-collision` |
 | `CLI projects required package surface` | `admission` validates the exact consumer pull-request identity |
+| `runner-isolation` | ADR 0235's runner-isolation contract, on every pull request with no path filter |
 
 ## Tier 2: heavy checks
 
@@ -63,8 +64,15 @@ self-hosted pool ([ADR 0235](decisions/0235-public-pull-request-code-uses-epheme
 `scripts/ci-gate/public-pr-runner-isolation.py` enforces that for every job a
 `pull_request` event can reach, including jobs in local reusable workflows,
 by enumerating each organization variable as unset and set.
-Under `pull_request_target`, `workflow_run`, and `issue_comment`, every job
-that can reach a persistent runner must instead be listed, by a digest of its
-reviewed content, in `scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv`. `scripts/ci-gate/public-pr-runner-isolation.pending.tsv` holds the exact,
-digest-ratcheted list of canonical reusable workflows still pending that change
-([#1831](https://github.com/verJSON/.github/issues/1831)).
+Under `pull_request_target`, `workflow_run`, `issue_comment`, `fork`,
+`issues`, and `discussion*`, and under the relays `workflow_dispatch`,
+`workflow_call`, and `repository_dispatch`, every job that can reach a
+persistent runner must instead be listed, by a digest of its reviewed content,
+in `scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv`. A relayed job
+that materializes, or may materialize, a pull request head cannot be listed at
+all. `scripts/ci-gate/public-pr-runner-isolation.pending.tsv` holds the exact,
+digest-ratcheted list of canonical reusable workflows and relayed jobs still
+pending that change ([#1831](https://github.com/verJSON/.github/issues/1831)).
+The `runner-isolation` workflow runs the check on every pull request and every
+push to `main`, because its digests bind tracked files outside `actions-ci`'s
+path filter.

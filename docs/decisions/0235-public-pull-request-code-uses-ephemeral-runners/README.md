@@ -130,8 +130,17 @@ or a literal GitHub-hosted image.
    any unknown name such as a future `pull_request_*` event. A duplicate
    path-and-job row in the pending or reviewed list is a format error (exit 2)
    rather than a silent override.
-   The `platform` group runs the checker against the live tree, with its
-   pending and reviewed lists, and
+   The `runner-isolation` workflow runs the checker against the live tree, with
+   its pending and reviewed lists, on every pull request (drafts included) and
+   every push to `main`, with no path filter. The review digests bind tracked
+   files that `actions-ci`'s path filter omits (`config/`, `bin/`,
+   `contracts/`, `package*.json`, `profile/`, `index.html`, `.gitignore`), and
+   a documentation-only diff skips `actions-ci`'s heavy groups, so an edit
+   there could otherwise stale a reviewed entry without any run noticing.
+   `actions-ci` stays path-filtered (#233, #234); the check is one short job
+   (about 0.6 s of checker time plus Python setup) on the untrusted lane.
+   `pr-ci-tiers.test.py` pins its trigger as Tier 1 with no path filter. The
+   `platform` group also runs the checker, and
    `public-pr-runner-isolation.test.py` covers its behavior with fixtures. Both
    are registered in `scripts/actions-ci-groups.tsv`.
 4. **Two canonical workflows are pending, ratcheted exactly by

@@ -66,3 +66,6 @@ jobs that predate the rule are ratcheted in the pending list as #1831's relay
 backlog, keyed to their selector and unresolved reasons.
 `ai-post-merge.yml` now checks its reconciler out at `github.sha`, the commit
 its own workflow file comes from, instead of `pull_request.base.sha`.
+A new `runner-isolation` workflow runs the check on every pull request and push
+to `main` with no path filter, because the review digests bind tracked files
+outside `actions-ci`'s path filter.
