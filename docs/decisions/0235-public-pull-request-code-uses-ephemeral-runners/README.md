@@ -147,7 +147,8 @@ or a literal GitHub-hosted image.
    self-hosted runner fails, including a job reached through a local reusable
    call or a remote callee whose placement cannot be read. It passes only when
    `scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv` lists it. Each
-   entry is `path<TAB>job<TAB>review digest<TAB>justification`, keyed by
+   entry is `path<TAB>job<TAB>review digest<TAB>justification`, with an
+   optional fifth `dynamic:` field described below, keyed by
    workflow path (including the call chain and event), job id, and a SHA-256
    over:
 
@@ -163,22 +164,49 @@ or a literal GitHub-hosted image.
        and the files directly in every parent directory, as git materializes
        them;
      - every local action directory (`uses: ./…`), recursively, plus files
-       its composite steps reach through `github.action_path`.
+       its composite steps reach through `github.action_path`;
+   - the job's unresolved reasons, below, with their details.
 
    Any edit to any of these makes the entry `STALE REVIEWED`, which fails
-   until someone re-reviews it. Some on-disk content cannot be bounded
-   statically: a full checkout with no `sparse-checkout` list, a checkout
-   whose repository or ref is selected at runtime, a checkout with
-   `submodules: true` or `recursive`, a runtime command that changes the tree
-   (git `sparse-checkout`, `checkout`, `switch`, `restore`, `reset`, `pull`,
-   `merge`, `worktree`, `apply`, `am`, `cherry-pick`, or `patch`), or a job
-   that fetches content onto disk (`curl`, `wget`, `gh api` for contents,
-   archives, or redirected output, `gh run download`, `gh release download`,
-   `git clone`, `actions/download-artifact`) and executes or sources a path
-   the checker cannot bind to the scanned tree or to an inline heredoc. Its
-   entry then needs an explicit fifth field, `dynamic: <justification>`. Without that field the job is
-   unclassifiable and fails, and a `dynamic:` field on a fully bounded job is
-   stale.
+   until someone re-reviews it.
+
+   **Unresolved reasons and the `dynamic:` field.** Some on-disk content
+   cannot be bounded by the scanned tree. The checker over-approximates it:
+   each of the following leaves the job unresolved under a named reason.
+
+   | Reason | What the checker matches |
+   | --- | --- |
+   | `fetch` | A fetch named anywhere in a step (its `run` without full-line comments, `shell`, `with`, and `env`), in a local composite action's steps, or in any scanned-tree file the job puts on disk. The vocabulary covers `curl`, `wget`, `rsync`, `scp`; git `clone`, `fetch`, `pull`, `submodule`, `ls-remote` after any global options; `gh api`, `gh release download`, `gh run download`, `gh pr checkout`, `gh pr diff`, `gh repo clone`; `npx` and package-manager installs (npm, pnpm, yarn, pip, uv, go, cargo, gem, apt, brew); `docker`/`podman` `run`, `pull`, and `build`; PowerShell `iwr`/`irm`; Python `urllib`, `urlopen`, `requests`, `httpx`, `http.client`, and Node `fetch(`, the `http`/`https` modules, `https.get`, `axios`; and `["gh", "api"]`/`["git", "fetch"]`-style argv lists. It also covers the `actions/download-artifact`, `actions/cache`, and `actions/github-script` actions, `docker://` steps, and local Docker actions. |
+   | `head-materialization` | Head detection concludes that the job materializes the pull request head, or cannot decide. Only "no known head-materializing pattern" leaves this reason unset, and that result is not proof of safety. |
+   | `tree-change` | A runtime command that changes the checked-out tree: git `sparse-checkout`, `checkout`, `switch`, `restore`, `reset`, `pull`, `merge`, `rebase`, `worktree`, `apply`, `am`, `cherry-pick`, `read-tree`, or `checkout-index` after any global options; any git command given `--git-dir` or `--work-tree`; `gh pr checkout`; or `patch`. |
+   | `shell` | A `shell:` other than `bash` on any step, including a local composite action's step, or in a job or workflow `defaults.run`. |
+   | `full-checkout` | A checkout of the scanned tree with no `sparse-checkout` list. |
+   | `runtime-checkout` | A checkout whose repository or ref is selected at runtime, not the scanned tree. |
+   | `submodules` | A checkout with `submodules: true` or `recursive`. |
+   | `unscanned-path` | A sparse path, glob, or local-action file that the scanned tree does not contain, or that lies outside it. |
+   | `local-action` | A local action that is missing, nested more than four deep, has no `runs` block, or whose manifest does not parse. |
+
+   The entry for an unresolved job needs a fifth field,
+   `dynamic: <reason>[, <reason>]: <justification>`, for example
+   `dynamic: fetch, runtime-checkout: <what is fetched and checked out, and why
+   a pull request cannot choose it>`. The field must name exactly the reasons
+   the checker computes. A missing reason fails as unclassifiable and names the
+   reason. A reason the job no longer has makes the entry stale. An unknown or
+   repeated reason, or an empty justification, is a format error (exit 2). When
+   a reviewed job gains a reason, the `STALE REVIEWED` line lists the newly
+   unresolved reasons with their details.
+
+   **Why over-approximate fetches.** An earlier revision exempted a job that
+   fetched content but executed only paths it could bind to the scanned tree.
+   The review at 62723cdd passed 27 of 35 adversarial jobs through that
+   binding: `bash -c "$(curl …)"`, `. <(curl …)`, `sh < f`, interpreter `-c`,
+   `-m`, and heredoc input, shell aliases, `xargs`, a `curl -o` that overwrites
+   a scanned file, `download-artifact` into `.`, and a `working-directory`
+   inside an extracted archive. Deciding which fetched bytes a job executes
+   from command text is the same open-ended problem that the on-disk digest
+   below abandoned. Any fetch now needs `dynamic: fetch`. The cost: every
+   reviewed job that calls `gh api` carries that reason and a justification
+   that the response is read only as data.
 
    **Why on-disk rather than command parsing.** A fourth review round found
    `source`, `.`, bare script paths, Python imports, Node `require`, `make`,
@@ -186,21 +214,27 @@ or a literal GitHub-hosted image.
    command names. Every shell, interpreter, and build tool has its own way to
    reach a file. The set of bytes a checkout puts on disk does not depend on
    any of them, so digesting those bytes closes the class. Command parsing
-   remains only for local actions, which come from the scanned tree without a
-   checkout step of their own; elsewhere it is a diagnostic.
+   remains only for files a local action reaches through
+   `github.action_path` and for head detection.
 
-   **Residual supply-chain risk.** The digest binds the job's text and the
-   repository bytes it materializes. It does not bind what SHA-pinned actions
-   or tools fetch at runtime. For example, a pinned action can install a
-   mutable npm dependency, or a step can `pip install` a package. These are
-   outside the scanned tree and are a reviewer's responsibility to justify.
-   Fetched content that the job itself executes by path is not left to the
-   reviewer alone: it needs a `dynamic:` field, as above. Action pins are policed separately by the
-   action-pin conformance test. A remote callee
-   must be pinned to a full 40-hex commit SHA; no entry can accept a branch
-   or tag, because either can change after review. An entry that no longer matches a job needing
-   review is also stale. Jobs that resolve only to standard hosted images pass
-   without an entry.
+   **What the checker still does not enforce.** The `fetch` reason comes from a
+   vocabulary, so it is incomplete by construction. A fetch spelled outside it
+   is not tagged: for example a raw socket, an interpreter library the list
+   does not name, or a program the job runs that is not in the scanned tree
+   and that head detection does not read. The digest still binds the job's
+   text and the scanned bytes it puts on disk, so adding such a fetch to a
+   reviewed job turns its entry `STALE REVIEWED` until a person re-reads it,
+   but nothing demands a `dynamic:` field for it. The digest does not bind what SHA-pinned remote
+   actions or tools fetch at runtime. A pinned action can install a mutable
+   npm dependency; only the actions in the table above are tagged. Those
+   fetches are outside the scanned tree and are the reviewer's responsibility.
+   Action pins are policed separately by the action-pin conformance test. A
+   remote callee must be pinned to a full 40-hex commit SHA; no entry can
+   accept a branch or tag, because either can change after review. The
+   checker does not read a remote callee's jobs, so its entry carries no
+   reasons. An entry that no longer matches a job needing review is also
+   stale. Jobs that resolve only to standard hosted images pass without an
+   entry.
 
    **Why this replaces pattern detection.** Three review rounds each found
    head-materializing shapes the pattern detector missed. Examples include
@@ -209,14 +243,16 @@ or a literal GitHub-hosted image.
    fetching `refs/pull`, and `gh repo clone` of the head repository. The set of
    ways a job can obtain head bytes is open-ended. An allowlist of reviewed job
    content is closed: anything new or changed fails until a person reads it.
-   Head detection now only prints a `DIAGNOSTIC` line explaining why a job
-   looks dangerous. It never decides pass or fail.
+   Head detection prints a `DIAGNOSTIC` line explaining why a job looks
+   dangerous. It cannot pass a job: an unlisted job fails whatever it
+   concludes. When it finds a materializing pattern or cannot decide, the job
+   is also unresolved under `head-materialization`.
 
    `issue_comment` has no workflow in this repository. The one `workflow_run`
    workflow, `ai-promotion-retry.yml`, is a reviewed entry: it checks out only
-   a trusted `Verjson/.github` revision. Workflow artifacts that a reviewed job
-   downloads are part of what its reviewer must justify, and executing one
-   needs a `dynamic:` field.
+   a trusted `Verjson/.github` revision. Downloading a workflow artifact is a
+   fetch, so a reviewed job that does so needs `dynamic: fetch`, and its
+   justification must say how the artifact is used.
 
 6. **Review procedure for adding or refreshing an entry.**
    1. Run `public-pr-runner-isolation.py --pending … --reviewed … .github/workflows`.
@@ -228,13 +264,13 @@ or a literal GitHub-hosted image.
       covers. Record three things: what it checks out (repository, ref,
       paths); what it executes (inline code, repository scripts, actions, and
       any program it writes); and how every PR-derived value and downloaded
-      artifact is used. For each item the checker reports as unresolved (a
-      full checkout, a runtime-selected checkout, checkout submodules, a
-      runtime tree change or patch application, or fetched content the job
-      executes),
-      state in the `dynamic:` field where those bytes come from at runtime and
-      why a pull request cannot choose them. Prefer a narrow `sparse-checkout`
-      list to a `dynamic:` field.
+      artifact is used. If the checker reports unresolved reasons, name every
+      one of them in the `dynamic:` field. For each, state what the job
+      fetches, changes, or checks out at runtime, how it uses those bytes, and
+      why a pull request cannot choose them or reach execution through them.
+      Write it for this job; a generic sentence is not a review. Prefer
+      removing a reason (a narrow `sparse-checkout` list, `bash`, no
+      download) to justifying it.
    3. Prefer moving the job to a hosted runner. List it only when it needs the
       trusted pool and no PR-controlled byte can reach execution: anything
       PR-derived is used only as an API identifier or as validated data.

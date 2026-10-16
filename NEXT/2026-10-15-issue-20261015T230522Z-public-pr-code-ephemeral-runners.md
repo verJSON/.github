@@ -16,11 +16,17 @@ runner through a variable fallback or a caller-supplied input
 Under `pull_request_target`, `workflow_run`, and `issue_comment`, a job that can
 reach a persistent runner must appear in
 `scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv`, keyed by a digest of
-its content and inherited settings, with a written justification. An entry
-needs a further `dynamic:` justification when the job's on-disk bytes cannot be
-bounded: a full or runtime-selected checkout, checkout submodules, a runtime
-tree change or patch application (`git apply`, `git am`, `git cherry-pick`,
-`patch`), or fetched content the job executes from an unscanned path.
+its content and inherited settings, with a written justification. The checker
+over-approximates what such a job puts on disk: any fetch it can name (`curl`,
+`wget`, `gh api`, `gh run`/`release download`, git transport, package managers,
+container images, in-language HTTP clients, and the download, cache, and
+`github-script` actions), any runtime tree change (including `gh pr checkout`
+and `git --git-dir`/`--work-tree`), any non-default `shell:`, a full or
+runtime-selected checkout, checkout submodules, or head detection that finds or
+cannot rule out head materialization leaves the job unresolved. Its entry then
+needs `dynamic: <reason>[, <reason>]: <justification>` naming exactly those
+reasons. The fetch vocabulary is not exhaustive; a fetch outside it still turns
+a reviewed entry stale but demands no `dynamic:` field.
 `scripts/ci-gate/public-pr-runner-isolation.pending.tsv` ratchets
 `actionlint.yml` and `container-candidate.yml` as pending.
 Their selectors are pinned in `hosted-selector-policy.py` and change after #1826;
