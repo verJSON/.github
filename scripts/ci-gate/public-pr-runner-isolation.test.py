@@ -930,4 +930,47 @@ expect(
     *REVIEWED_ARGS,
 )
 
+
+expect(
+    target_job("- run: make lint", runs_on="${{ matrix.os }}"),
+    1,
+    ("target.yml [pull_request_target]", REVIEW_REQUIRED),
+    "a privileged job whose placement cannot be resolved requires review",
+)
+REMOTE_ROW = review_row(
+    remote_target_call("gate-rearm.yml", "app-key-policy", REVIEWED_REMOTE),
+    "gate-rearm.yml [pull_request_target]",
+    "app-key-policy",
+)
+expect(
+    with_review(remote_target_call("gate-rearm.yml", "app-key-policy", REVIEWED_REMOTE), REMOTE_ROW),
+    0,
+    ("REVIEWED: gate-rearm.yml [pull_request_target]: job 'app-key-policy'",),
+    "a reviewed remote callee at its reviewed SHA passes",
+    *REVIEWED_ARGS,
+)
+expect(
+    with_review(
+        remote_target_call("gate-rearm.yml", "app-key-policy", REVIEWED_REMOTE.replace("ebe23faf", "1be23faf")),
+        REMOTE_ROW,
+    ),
+    1,
+    ("STALE REVIEWED: gate-rearm.yml [pull_request_target]: job 'app-key-policy'",),
+    "a reviewed remote callee repinned to another SHA turns stale",
+    *REVIEWED_ARGS,
+)
+expect(
+    with_review(
+        {
+            **remote_target_call("gate-rearm.yml", "app-key-policy", REVIEWED_REMOTE),
+            **remote_target_call("other.yml", "app-key-policy", REVIEWED_REMOTE),
+        },
+        REMOTE_ROW,
+    ),
+    1,
+    ("VIOLATION: other.yml [pull_request_target]: job 'app-key-policy'", REVIEW_REQUIRED),
+    "an entry never covers identical content in another workflow",
+    *REVIEWED_ARGS,
+)
+
 sys.exit(1 if failures else 0)
