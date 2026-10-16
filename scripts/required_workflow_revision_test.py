@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import importlib.util
+import json
 import os
+import tempfile
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -277,19 +279,30 @@ class RunGeneratorTest(unittest.TestCase):
     def test_historical_generator_runs_from_its_own_bytes_without_inherited_secrets(self):
         files = {
             "scripts/gen.py": (
-                b"import os, sys\n"
+                b"import json, os, sys\n"
                 b"from sibling import VALUE\n"
+                # LC_CTYPE is set by the interpreter itself (PEP 538 locale coercion).
                 b"print(VALUE, open(sys.argv[1]).read().strip(),"
-                b" sorted(k for k in os.environ if k not in ('PATH', 'LC_CTYPE')))\n"
+                b" json.dumps({k: v for k, v in os.environ.items() if k != 'LC_CTYPE'}, sort_keys=True))\n"
             ),
             "scripts/sibling.py": b"VALUE = 'sibling'\n",
             "config/input.json": b"config\n",
         }
-        with mock.patch.dict(os.environ, {"GH_TOKEN": "secret", "PYTHONPATH": "/x"}):
+        inherited = {
+            "GH_TOKEN": "secret", "PYTHONPATH": "/x",
+            "LD_LIBRARY_PATH": "/attacker/lib", "LD_PRELOAD": "/attacker/x.so",
+        }
+        with mock.patch.dict(os.environ, inherited):
             output = MODULE.run_generator(
                 files, ["scripts/gen.py", "config/input.json"], require
             )
-        self.assertEqual(b"sibling config []\n", output)
+        value, config, environment = output.decode().rstrip("\n").split(" ", 2)
+        self.assertEqual(("sibling", "config"), (value, config))
+        observed = json.loads(environment)
+        # Exactly what the interpreter needs to start, and nothing the caller held.
+        self.assertEqual(MODULE.generator_environment(), observed)
+        self.assertFalse(set(observed) & {"GH_TOKEN", "PYTHONPATH", "LD_PRELOAD"})
+        self.assertNotEqual("/attacker/lib", observed.get("LD_LIBRARY_PATH"))
 
     def test_a_failing_or_escaping_generator_fails_closed(self):
         cases = (
@@ -302,6 +315,49 @@ class RunGeneratorTest(unittest.TestCase):
                 ContractError, "generator"
             ):
                 MODULE.run_generator(files, argv, require)
+
+    def test_a_failing_generator_reports_its_own_stderr(self):
+        with self.assertRaisesRegex(ContractError, "historical generator failed: .*boom"):
+            MODULE.run_generator(
+                {"scripts/gen.py": b"import sys\nsys.exit('boom')\n"}, ["scripts/gen.py"], require
+            )
+
+
+class GeneratorEnvironmentTest(unittest.TestCase):
+    """A shared-libpython interpreter (setup-python's builds) cannot start without its
+    library directory; that directory comes from the interpreter, never the caller."""
+
+    def config(self, shared, soname="libpython3.12.so.1.0"):
+        return {"Py_ENABLE_SHARED": shared, "INSTSONAME": soname}.get
+
+    def test_a_shared_interpreter_gets_only_its_own_library_directory(self):
+        with tempfile.TemporaryDirectory() as prefix:
+            (Path(prefix) / "lib").mkdir()
+            (Path(prefix) / "lib/libpython3.12.so.1.0").write_bytes(b"")
+            with mock.patch.dict(os.environ, {
+                "LD_LIBRARY_PATH": "/attacker/lib", "LD_PRELOAD": "/attacker/x.so",
+                "GH_TOKEN": "secret", "PYTHONPATH": "/attacker",
+            }):
+                env = MODULE.generator_environment(prefix, self.config(1))
+        self.assertEqual({"PATH": os.defpath, "LD_LIBRARY_PATH": str(Path(prefix) / "lib")}, env)
+
+    def test_a_static_or_unlocatable_interpreter_gets_no_library_path(self):
+        with tempfile.TemporaryDirectory() as prefix:
+            (Path(prefix) / "lib").mkdir()
+            (Path(prefix) / "lib/libpython3.12.so.1.0").write_bytes(b"")
+            for name, config in (
+                ("static", self.config(0)),
+                ("unknown", self.config(None)),
+                ("library elsewhere", self.config(1, "libpython3.13.so.1.0")),
+                ("no soname", self.config(1, None)),
+                ("soname escapes", self.config(1, "../lib/libpython3.12.so.1.0")),
+            ):
+                with self.subTest(name), mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": "/attacker/lib"}):
+                    self.assertEqual({"PATH": os.defpath}, MODULE.generator_environment(prefix, config))
+
+    def test_the_running_interpreter_can_start_a_generator(self):
+        output = MODULE.run_generator({"gen.py": b"print('started')\n"}, ["gen.py"], require)
+        self.assertEqual(b"started\n", output)
 
 
 if __name__ == "__main__":

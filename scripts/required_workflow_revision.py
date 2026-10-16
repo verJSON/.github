@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
+import sysconfig
 import tempfile
 from urllib.parse import quote
 
@@ -141,6 +142,26 @@ def audit_live_revision(
     require_security_floor(text, compare=compare, require=require)
 
 
+def generator_environment(base_prefix=sys.base_prefix, config=sysconfig.get_config_var):
+    """The whole environment a historical generator gets: nothing inherited.
+
+    A shared-libpython interpreter, such as every actions/setup-python build, cannot start
+    without its library directory. That directory is derived from the running interpreter's
+    own runtime prefix, never copied from the caller's LD_LIBRARY_PATH. The build-time
+    LIBDIR names the build host's prefix, not the install location.
+    """
+    environment = {"PATH": os.defpath}
+    soname = config("INSTSONAME")
+    if config("Py_ENABLE_SHARED") != 1 or not isinstance(soname, str):
+        return environment
+    if PurePosixPath(soname).name != soname:
+        return environment
+    library_directory = Path(base_prefix) / "lib"
+    if (library_directory / soname).is_file():
+        environment["LD_LIBRARY_PATH"] = str(library_directory)
+    return environment
+
+
 def run_generator(files, argv, require):
     """Run a historical generator from its own bytes, with no inherited environment.
 
@@ -161,10 +182,12 @@ def run_generator(files, argv, require):
         try:
             result = subprocess.run(
                 [sys.executable, "-E", "-s", *argv],
-                cwd=root, env={"PATH": os.defpath},
+                cwd=root, env=generator_environment(),
                 capture_output=True, check=False, timeout=60,
             )
         except (OSError, subprocess.TimeoutExpired):
             result = None
-    require(result is not None and result.returncode == 0, "historical generator failed")
+    if result is None or result.returncode != 0:
+        detail = "" if result is None else result.stderr.decode("utf-8", "replace").strip()[-400:]
+        require(False, f"historical generator failed: {detail}")
     return result.stdout
