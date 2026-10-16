@@ -15,9 +15,8 @@ value, every other variable to a persistent self-hosted selector. A chain such a
 `vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]'` is
 therefore a violation: with the untrusted lane unset it lands on the fallback.
 
-pull_request_target jobs that materialize the head (a checkout whose ref or
-repository is not base-only, `gh pr checkout`, or a git command in a job naming
-a head-derived value) are held to the same rule. Remote callees under
+pull_request_target jobs that materialize the head (see materializes_head)
+are held to the same rule. Remote callees under
 pull_request_target are reported as NOT FOLLOWED; workflow_run and
 issue_comment are out of scope (ADR 0235).
 
@@ -725,13 +724,46 @@ BASE_ONLY_REFERENCE = re.compile(
 )
 HEAD_TOKEN = re.compile(
     r"pull_request\.head\.|github\.head_ref|refs/pull/|pull/\$\{\{|merge_commit_sha"
+    r"|github\.event\.number|pull_request\.number|\bgh\s+pr\s+(?:diff|checkout)\b"
     r"|\$\{\{\s*inputs\.",
     re.I,
 )
+# Commands that put head-controlled bytes on disk when given a head value.
+PR_MATERIALIZE = re.compile(r"\bgh\s+pr\s+(?:checkout|diff)\b")
 GIT_MATERIALIZE = re.compile(
-    r"\bgh\s+pr\s+checkout\b"
-    r"|\bgit\b[^\n]*?\b(?:fetch|checkout|switch|worktree|pull|reset|merge|cherry-pick|clone|am|apply)\b"
+    r"(?:^|[\s;&|(])git\s+(?:-[Cc]\s+\S+\s+)*"
+    r"(?:fetch|checkout|switch|worktree|pull|reset|merge|cherry-pick|clone|am|apply)\b"
 )
+DOWNLOAD = re.compile(
+    r"\bcurl\b|\bwget\b|\bgh\s+api\b[^\n]*\b(?:tarball|zipball|archive)\b"
+)
+# `gh run download` is deliberately absent: workflow artifacts are a separate
+# trust class that ADR 0235 scopes out of this checker.
+# The same operations written as an argv list or a library call, for program
+# text the workflow authors inline (a heredoc into $RUNNER_TEMP).
+ARGV_PR_MATERIALIZE = re.compile(r"""["']gh["']\s*,\s*["']pr["']\s*,\s*["'](?:checkout|diff)["']""")
+ARGV_MATERIALIZE = re.compile(
+    r"""["']git["']\s*,\s*(?:["']-[Cc]["']\s*,\s*[^,\]]+,\s*)*"""
+    r"""["'](?:fetch|checkout|switch|worktree|pull|reset|merge|cherry-pick|clone|am|apply)["']"""
+    r"""|\burlopen\s*\(|\brequests\.get\s*\("""
+)
+HEREDOC = re.compile(r"<<-?\s*['\"]?[A-Za-z_][A-Za-z0-9_]*['\"]?")
+
+
+def materializes(text: str, names_head: bool) -> bool:
+    if PR_MATERIALIZE.search(text) or ARGV_PR_MATERIALIZE.search(text):
+        return True
+    return names_head and bool(
+        GIT_MATERIALIZE.search(text) or DOWNLOAD.search(text) or ARGV_MATERIALIZE.search(text)
+    )
+
+
+# Programs whose behavior the checker cannot read from the step text.
+OPAQUE_PIPE = re.compile(
+    r"\|\s*(?:sudo\s+)?(?:sh|bash|zsh|python3?|node|perl|ruby)\b|\beval\b|\bsource\s+<\("
+)
+INTERPRETERS = frozenset({"bash", "sh", "zsh", "python", "python3", "node", "pwsh", "perl", "ruby"})
+COMMAND_SEPARATOR = re.compile(r"\n|;|&&|\|\||\||\$\(")
 
 
 def is_base_only(value) -> bool:
@@ -752,26 +784,135 @@ def is_base_only(value) -> bool:
     return True
 
 
-def materializes_head(job: dict) -> bool:
+INTERPRETER_CALL = re.compile(
+    r"(?:^|[\s;&|(])(?:sudo\s+)?(?:bash|sh|zsh|python3?|node|pwsh|perl|ruby)"
+    r"((?:\s+-[A-Za-z]+)*)\s+(?!-)(\"[^\"\n]+\"|'[^'\n]+'|[^\s;&|)<>]+)",
+    re.M,
+)
+DIRECT_EXEC = re.compile(r"^\s*(?:[A-Za-z_]\w*=\S*\s+)*(\.\.?/[^\s;&|)<>]+)", re.M)
+
+
+def programs(run: str) -> list[str]:
+    """Files a run block executes: `<interpreter> [flags] <path>` or `./path`.
+
+    Deliberately a pattern match rather than a shell parser: it only has to
+    find candidate programs, and an unreadable one matters only when the same
+    step names a head value. `-c`/`-e` inline code is already in the step text;
+    `-m module` is opaque.
+    """
+    joined = run.replace("\\\n", " ")
+    found = []
+    for match in INTERPRETER_CALL.finditer(joined):
+        flags = match.group(1).split()
+        if any(flag in ("-c", "-e") or (flag.startswith("-") and "c" in flag[1:] and len(flag) <= 3) for flag in flags):
+            continue
+        if "-m" in flags:
+            found.append("<module>")
+            continue
+        found.append(match.group(2).strip("\"'"))
+    found.extend(match.group(1) for match in DIRECT_EXEC.finditer(joined))
+    # `program="$RUNNER_TEMP/tool.py"; python3 "$program"`: follow one level of
+    # plain assignment so the program's file name can still be matched.
+    assigned = {
+        match.group(1): match.group(2).strip("\"'")
+        for match in re.finditer(r"^\s*([A-Za-z_]\w*)=(\"[^\"\n]*\"|'[^'\n]*'|\S+)\s*$", joined, re.M)
+    }
+    resolved = []
+    for program in found:
+        variable = re.fullmatch(r"\$\{?([A-Za-z_]\w*)\}?", program)
+        resolved.append(assigned.get(variable.group(1), program) if variable else program)
+    return resolved
+
+
+def inline_source(job: dict, program: str) -> str | None:
+    """The run block that writes `program` from a heredoc, if this job has one.
+
+    A program the workflow authors inline is as readable as the step text; the
+    match is on the program's file name inside a run block that holds a heredoc.
+    """
+    name = os.path.basename(program.strip("\"'"))
+    if not name or "$" in name:
+        return None
+    for step in job.get("steps") or []:
+        run = step.get("run") if isinstance(step, dict) else None
+        if isinstance(run, str) and name in run and HEREDOC.search(run):
+            return run
+    return None
+
+
+def read_program(root: str, program: str) -> str | None:
+    if "$" in program or program.startswith(("/", "<")):
+        return None
+    candidate = os.path.normpath(os.path.join(root, program))
+    if not candidate.startswith(os.path.normpath(root) + os.sep) or not os.path.isfile(candidate):
+        return None
+    with open(candidate, encoding="utf-8", errors="replace") as handle:
+        return handle.read()
+
+
+def materializes_head(job: dict, workflow_env, root: str, label: str) -> bool:
     """Whether a pull_request_target job can put head-controlled bytes on disk.
 
-    Over-approximates: a checkout whose ref or repository is anything but a
-    base-only value, `gh pr checkout`, or a git command in a job that names a
-    head-derived value. Head metadata used only for API calls does not count.
+    Over-approximates. Head-capable: a checkout whose ref or repository is not
+    base-only; `gh pr checkout|diff`; a git fetch/checkout-class command or a
+    download (`curl`, `wget`, `gh api …tarball|zipball|archive`) in a job whose
+    workflow env, job env, or steps name a head value; a non-checkout action
+    whose `with:` names one; or a repository script or inline-authored program
+    (heredoc) doing the same. Undetermined: a step that names a head value,
+    directly or through a head-valued env name, and hands it to a program the
+    checker can read neither from the repository nor from the workflow. Head
+    metadata used only for API calls does not count, and neither does a program
+    that reads an inherited head-valued env var without its step naming it.
     """
-    job_text = json.dumps(job, sort_keys=True, default=str)
+    environments = [workflow_env or {}, job.get("env") or {}]
+    head_names = {
+        str(name)
+        for environment in environments
+        if isinstance(environment, dict)
+        for name, value in environment.items()
+        if HEAD_TOKEN.search(str(value))
+    }
+    job_text = json.dumps([workflow_env, job], sort_keys=True, default=str)
     names_head = bool(HEAD_TOKEN.search(job_text))
+
+    def step_names_head(step: dict) -> bool:
+        text = json.dumps(step, sort_keys=True, default=str)
+        if HEAD_TOKEN.search(text):
+            return True
+        step_env = step.get("env") if isinstance(step.get("env"), dict) else {}
+        local = head_names | {str(n) for n, v in step_env.items() if HEAD_TOKEN.search(str(v))}
+        return any(
+            re.search(rf"\$\{{?{re.escape(name)}\b|env\.{re.escape(name)}\b", text) for name in local
+        )
+
     for step in job.get("steps") or []:
         if not isinstance(step, dict):
-            return True
+            raise Undetermined(f"{label}: unsupported step shape {step!r}")
         uses = str(step.get("uses", ""))
-        if uses.split("@")[0].lower() == "actions/checkout":
+        if uses:
             options = step.get("with") or {}
-            if not is_base_only(options.get("ref")) or not is_base_only(options.get("repository")):
+            if uses.split("@")[0].lower() == "actions/checkout":
+                if not is_base_only(options.get("ref")) or not is_base_only(options.get("repository")):
+                    return True
+            elif step_names_head({"with": options}):
                 return True
         run = step.get("run")
-        if isinstance(run, str) and GIT_MATERIALIZE.search(run):
-            if "gh pr checkout" in run or names_head:
+        if not isinstance(run, str):
+            continue
+        if materializes(run, names_head):
+            return True
+        local_head = step_names_head(step)
+        if local_head and OPAQUE_PIPE.search(run):
+            raise Undetermined(f"{label}: a step pipes a head value into a program the checker cannot read")
+        for program in programs(run):
+            content = read_program(root, program) or inline_source(job, program)
+            if content is None:
+                if local_head:
+                    raise Undetermined(
+                        f"{label}: a step hands a head value to {program}, which the checker cannot read"
+                    )
+                continue
+            if materializes(content, names_head or bool(HEAD_TOKEN.search(content))):
                 return True
     return False
 
@@ -781,6 +922,8 @@ class Scan:
 
     def __init__(self, directory: str, repository: str, event: str) -> None:
         self.directory = directory
+        # Workflows live at <root>/.github/workflows; scripts resolve from <root>.
+        self.root = os.path.dirname(os.path.dirname(os.path.abspath(directory)))
         self.repository = repository
         self.event = event
         self.notes: list[str] = []
@@ -827,7 +970,9 @@ def check_workflow(
             continue
         if "uses" in job:
             violations.extend(check_call(scan, path, name, job, depth))
-        elif scan.event == "pull_request_target" and not materializes_head(job):
+        elif scan.event == "pull_request_target" and not materializes_head(
+            job, document.get("env"), scan.root, f"{path}: job '{name}'"
+        ):
             continue
         else:
             violations.extend(

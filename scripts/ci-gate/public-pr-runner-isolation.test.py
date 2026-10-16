@@ -604,4 +604,85 @@ expect(
     "a pull_request_target checkout of a literal refs/pull ref is head-capable",
 )
 
+
+# Re-review of #1827 at 7299a2f4: four head-materializing shapes passed clean.
+expect(
+    {
+        "target.yml": f"""
+            on: pull_request_target
+            env:
+              HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
+            jobs:
+              review:
+                runs-on: {TRUSTED_SELECTOR}
+                steps:
+                  - run: git fetch origin "$HEAD_SHA" && git checkout "$HEAD_SHA"
+        """,
+    },
+    1,
+    ("[pull_request_target]", "review"),
+    "(a) a workflow-level env head value fetched by git is head-capable",
+)
+expect(
+    target_job("""
+        - run: gh pr diff ${{ github.event.number }} | git apply
+    """),
+    1,
+    ("[pull_request_target]", "review"),
+    "(b) gh pr diff piped into git apply is head-capable",
+)
+expect(
+    target_job("""
+        - run: curl -sSL "https://api.github.com/repos/o/r/tarball/${{ github.event.pull_request.head.sha }}" | tar xz
+    """),
+    1,
+    ("[pull_request_target]", "review"),
+    "(c) a download of a head tarball is head-capable",
+)
+expect(
+    target_job("""
+        - uses: some-org/fetch-source@v1
+          with:
+            revision: ${{ github.event.pull_request.head.sha }}
+    """),
+    1,
+    ("[pull_request_target]", "review"),
+    "(d) a non-checkout action given a head value is head-capable",
+)
+expect(
+    target_job("""
+        - env:
+            CANDIDATE: ${{ github.event.pull_request.head.sha }}
+          run: ./tools/materialize "$CANDIDATE"
+    """),
+    2,
+    ("UNDETERMINED", "review"),
+    "a head value handed to a program the checker cannot read is undetermined",
+)
+
+
+INLINE_PROGRAM = """
+        - env:
+            PR_NUMBER: ${{{{ github.event.pull_request.number }}}}
+          run: |
+            program="$RUNNER_TEMP/inline-tool.py"
+            cat >"$program" <<'PY'
+            import subprocess
+            {body}
+            PY
+            python3 -I "$program" "$PR_NUMBER"
+"""
+expect(
+    target_job(INLINE_PROGRAM.format(body='subprocess.run(["gh", "api", "repos/o/r/pulls/1"], check=True)')),
+    0,
+    ("clean",),
+    "a program authored inline by the workflow is read from the workflow, not left ambiguous",
+)
+expect(
+    target_job(INLINE_PROGRAM.format(body='subprocess.run(["git", "fetch", "origin", "pull/1/head"], check=True)')),
+    1,
+    ("[pull_request_target]", "review"),
+    "an inline-authored program that runs git fetch on a head value is head-capable",
+)
+
 sys.exit(1 if failures else 0)
