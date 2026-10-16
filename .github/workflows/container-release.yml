@@ -445,14 +445,20 @@ jobs:
           # variable — raising it is a storage-cost decision, not a code change.
           RETENTION_KEEP: ${{ vars.CI_PACKAGE_RETENTION_KEEP || '3' }}
         run: |
+          # Policy: an integer from 1 to 999, or exact lowercase `all` to keep every
+          # version (package_retention.py parses the same language).
           # Enumerated, capped digits: a [1-9] range follows locale collation and
           # admits non-ASCII digits, and a 2**64 window wraps to 0 in shell
           # arithmetic. The generated release verify step applies this exact
           # guard to the same window (scripts/ci-gate/release-verify-retention-keep.test.py).
-          if [[ ! "$RETENTION_KEEP" =~ ^[123456789][0123456789]{0,2}$ ]]; then
-            echo "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer no greater than 999, got '$RETENTION_KEEP'."
-            printf '%s\n' "Package retention skipped: CI_PACKAGE_RETENTION_KEEP must be an integer from 1 to 999, got '$RETENTION_KEEP'. The release was promoted; this job is continue-on-error, so the run stays green and older image versions were not deleted." >>"$GITHUB_STEP_SUMMARY"
+          if [[ ! "$RETENTION_KEEP" =~ ^(all|[123456789][0123456789]{0,2})$ ]]; then
+            echo "::error::CI_PACKAGE_RETENTION_KEEP must be an integer from 1 to 999 or 'all', got '$RETENTION_KEEP'."
+            printf '%s\n' "Package retention skipped: CI_PACKAGE_RETENTION_KEEP must be an integer from 1 to 999 or 'all', got '$RETENTION_KEEP'. The release was promoted; this job is continue-on-error, so the run stays green and older image versions were not deleted." >>"$GITHUB_STEP_SUMMARY"
             exit 1
+          fi
+          if [ "$RETENTION_KEEP" = all ]; then
+            # The script validates the targets and deletes nothing; say so where the run is read.
+            printf '%s\n' "Package retention disabled by policy: CI_PACKAGE_RETENTION_KEEP is 'all', so no package versions were deleted." >>"$GITHUB_STEP_SUMMARY"
           fi
           python3 -I .package-retention-contract/scripts/package_retention.py \
             --owner "$GITHUB_REPOSITORY_OWNER" --targets "$TARGETS" --keep "$RETENTION_KEEP" --apply

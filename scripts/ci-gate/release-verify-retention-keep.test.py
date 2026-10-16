@@ -8,6 +8,7 @@ retention job deletes against. The generated step runs the hook under
 `env -i`, so the window reaches it only if the generator forwards it.
 """
 
+import argparse
 from copy import deepcopy
 from pathlib import Path
 import os
@@ -28,7 +29,9 @@ import ascii_digit_locales  # noqa: E402
 # The one guard every retention-window site applies. Digits are enumerated
 # because a [1-9] range is collation-ordered outside the C locale, and capped
 # at three so no consumer's integer arithmetic can wrap (2**64 is 0 in bash).
-RETENTION_GUARD = "^[123456789][0123456789]{0,2}$"
+RETENTION_GUARD = "^(all|[123456789][0123456789]{0,2})$"
+# The accepted forms, named by every refusal.
+POLICY_ERROR = "::error::CI_PACKAGE_RETENTION_KEEP must be an integer from 1 to 999 or 'all'"
 NON_ASCII_DIGITS = ("\u0663", "\uff13", "1\u0663", "\u0661\u0660")
 VERIFY_STEP = "Run the release verification suite"
 RETENTION_KEY = "CI_PACKAGE_RETENTION_KEEP"
@@ -227,7 +230,7 @@ class ReleaseVerifyRetentionKeepTests(unittest.TestCase):
     def test_an_invalid_org_retention_window_fails_closed_before_the_hook_runs(self):
         invalid = (
             "0", "-1", "03", "abc", "1.5", " 3", "3 ", "1e3",
-            "1000", str(2**64), *NON_ASCII_DIGITS,
+            "1000", str(2**64), "ALL", "All", " all", "all ", "none", *NON_ASCII_DIGITS,
         )
         cases = [
             (label, locale, mode, step, value)
@@ -242,7 +245,7 @@ class ReleaseVerifyRetentionKeepTests(unittest.TestCase):
                 )
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn(
-                    "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer",
+                    POLICY_ERROR,
                     result.stdout + result.stderr,
                 )
                 self.assertIsNone(hook_env, "the hook ran with an invalid retention window")
@@ -261,7 +264,7 @@ class ReleaseVerifyRetentionKeepTests(unittest.TestCase):
 
     def test_the_smallest_and_a_large_window_reach_the_hook_unchanged(self):
         for mode, step in self.steps.items():
-            for value in ("1", "120", "999"):
+            for value in ("1", "120", "999", "all"):
                 with self.subTest(mode=mode, value=value):
                     result, hook_env = run_verify_step(step, variables={RETENTION_KEY: value})
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -275,7 +278,7 @@ class ReleaseVerifyRetentionKeepTests(unittest.TestCase):
                 result, hook_env = run_verify_step(stripped, variables={RETENTION_KEY: "7"})
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn(
-                    "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer no greater than 999, got ''.",
+                    POLICY_ERROR + ", got ''.",
                     result.stdout + result.stderr,
                 )
                 self.assertIsNone(hook_env, "the hook ran without a retention window")
@@ -316,7 +319,7 @@ class ReleaseVerifyRetentionKeepTests(unittest.TestCase):
         # leaves the run green; the step summary is where a reader sees it.
         for workflow, _job, step in self.retention_steps():
             script = step["run"].split("python3 -I", 1)[0]
-            for value in ("1000", "\u0663", ""):
+            for value in ("1000", "\u0663", "", "0", "ALL"):
                 with self.subTest(site=workflow, value=value), \
                         tempfile.TemporaryDirectory(prefix="retention-summary-") as temporary:
                     summary = Path(temporary) / "summary.md"
@@ -327,12 +330,78 @@ class ReleaseVerifyRetentionKeepTests(unittest.TestCase):
                         capture_output=True, text=True, check=False, timeout=30,
                     )
                     self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                    self.assertIn("::error::CI_PACKAGE_RETENTION_KEEP must be", result.stdout)
+                    self.assertIn(POLICY_ERROR, result.stdout)
                     self.assertTrue(summary.exists(), "no run-summary entry for skipped retention")
                     self.assertIn(
-                        "Package retention skipped: CI_PACKAGE_RETENTION_KEEP",
+                        "Package retention skipped: CI_PACKAGE_RETENTION_KEEP must be an integer from 1 to 999 or 'all'",
                         summary.read_text(encoding="utf-8"),
                     )
+
+    def test_keep_all_disables_retention_without_deleting_and_says_so(self):
+        targets = '[{"type":"npm","name":"cli","releasedVersion":"1.0.0"}]'
+        for workflow, _job, step in self.retention_steps():
+            with self.subTest(site=workflow), \
+                    tempfile.TemporaryDirectory(prefix="retention-all-") as temporary:
+                root = Path(temporary)
+                contract = root / ".package-retention-contract/scripts"
+                contract.mkdir(parents=True)
+                (contract / "package_retention.py").write_bytes(
+                    (ROOT / "scripts/package_retention.py").read_bytes()
+                )
+                summary = root / "summary.md"
+                result = subprocess.run(
+                    ["/bin/bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", step["run"]],
+                    cwd=root,
+                    env={
+                        "PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8",
+                        "RETENTION_KEEP": "all", "TARGETS": targets,
+                        "GITHUB_REPOSITORY_OWNER": "Verjson", "GH_TOKEN": "unused",
+                        # Any API call fails: `all` must not reach the network.
+                        "GITHUB_API_URL": "http://127.0.0.1:9",
+                        "GITHUB_STEP_SUMMARY": str(summary),
+                    },
+                    capture_output=True, text=True, check=False, timeout=60,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("package-retention: disabled by policy (keep=all)", result.stdout)
+                self.assertNotIn("Deleted ", result.stdout)
+                self.assertIn(
+                    "Package retention disabled by policy",
+                    summary.read_text(encoding="utf-8") if summary.exists() else "",
+                )
+
+    def test_every_site_and_the_retention_script_accept_exactly_one_language(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        try:
+            import package_retention
+        finally:
+            sys.path.pop(0)
+        corpus = (
+            "1", "3", "9", "10", "99", "100", "999", "all",
+            "0", "00", "03", "1000", "-1", "+3", " 3", "3 ", "1e3", "", "ALL", "All",
+            " all", "all ", "alll", "none", *NON_ASCII_DIGITS, "\uff41ll",
+        )
+        sites = {mode: guard_pattern(step["run"], RETENTION_KEY) for mode, step in self.steps.items()}
+        for workflow, _job, step in self.retention_steps():
+            sites[workflow] = guard_pattern(step["run"], "RETENTION_KEEP")
+        for value in corpus:
+            try:
+                package_retention.parse_keep(value)
+                expected = True
+            except argparse.ArgumentTypeError:
+                expected = False
+            for label, locale in self.locales.items():
+                for site, pattern in sites.items():
+                    with self.subTest(site=site, locale=label, value=value):
+                        result = subprocess.run(
+                            ["/bin/bash", "--noprofile", "--norc", "-c",
+                             're=$2; [[ $1 =~ $re ]]', "probe", value, pattern],
+                            env={"PATH": "/usr/bin:/bin", **locale},
+                            capture_output=True, check=False, timeout=10,
+                        )
+                        self.assertEqual(result.returncode == 0, expected)
+        if self.missing_locale:
+            self.skipTest(self.missing_locale)
 
     def test_no_job_reading_the_window_declares_an_environment_that_could_rebind_it(self):
         # An environment-scoped variable overrides the repository and
