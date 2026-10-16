@@ -182,6 +182,16 @@ def validate_hosted_compatibility(candidate, candidate_manifest):
     if "hosted-compatibility-tests" not in candidate_jobs:
         raise AssertionError("missing hosted-compatibility-tests job")
     hosted = candidate_jobs["hosted-compatibility-tests"]
+    # continue-on-error in any spelling (true, an expression) would let the
+    # bubblewrap and locale-collation contracts fail without failing the job.
+    if "continue-on-error" in hosted:
+        raise AssertionError("hosted-compatibility-tests job may continue on error")
+    for step in hosted["steps"]:
+        if "continue-on-error" in step:
+            raise AssertionError(
+                "hosted-compatibility-tests step may continue on error: "
+                f"{step.get('name', step.get('uses'))}"
+            )
     assert hosted["runs-on"] == "ubuntu-24.04"
     assert hosted["timeout-minutes"] == 8
     assert hosted["steps"][0]["uses"] == (
@@ -232,6 +242,27 @@ for event in ("pull_request", "push"):
         print(f"ok - {event} shellcheck path removal fails closed")
     else:
         raise AssertionError(f"{event} shellcheck path removal passed")
+
+skippable_job = copy.deepcopy(document)
+skippable_job["jobs"]["hosted-compatibility-tests"]["continue-on-error"] = True
+try:
+    validate_hosted_compatibility(skippable_job, manifest_text)
+except AssertionError:
+    print("ok - continue-on-error hosted compatibility job fails closed")
+else:
+    raise AssertionError("continue-on-error hosted compatibility job passed")
+for index, step in enumerate(document["jobs"]["hosted-compatibility-tests"]["steps"]):
+    skippable_step = copy.deepcopy(document)
+    skippable_step["jobs"]["hosted-compatibility-tests"]["steps"][index][
+        "continue-on-error"
+    ] = True
+    label = step.get("name", step.get("uses", index))
+    try:
+        validate_hosted_compatibility(skippable_step, manifest_text)
+    except AssertionError:
+        print(f"ok - continue-on-error hosted compatibility step fails closed: {label}")
+    else:
+        raise AssertionError(f"continue-on-error hosted compatibility step passed: {label}")
 
 missing_job_mutant = copy.deepcopy(document)
 del missing_job_mutant["jobs"]["hosted-compatibility-tests"]
