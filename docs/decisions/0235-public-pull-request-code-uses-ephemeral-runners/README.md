@@ -13,8 +13,8 @@
   persistent pool
 - **Supersedes in part:** [ADR 0047](../0047-fast-lane-runner-variable/README.md),
   for `actions-ci.yml` only
-- **Related:** ADR 0234 in [#1826](https://github.com/verJSON/.github/pull/1826)
-  (`docs/decisions/0234-route-secretless-trusted-ref-builds-to-the-hosted-lane/`).
+- **Related:** [ADR 0234](../0234-route-secretless-trusted-ref-builds-to-the-hosted-lane/README.md)
+  ([#1826](https://github.com/verJSON/.github/pull/1826)).
   Its trade-off paragraph cites ADR 0147's rollback of `CI_LANE_UNTRUSTED` to
   `["self-hosted","general"]`. Decision 2 below withdraws that rollback, so
   0234's fail-closed eligibility guard is the expected outcome of an attempted
