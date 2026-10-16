@@ -425,7 +425,8 @@ const [, , raw, repository, runnerInput, priv, varDefault, varUntrusted, varFast
 // grepped, which is how its visibility polarity went untested until ADR 0050.
 const body = raw.trim().replace(/^\$\{\{/, '').replace(/\}\}$/, '')
   .replace(/inputs\.github-hosted-runner/g, "inputs['github-hosted-runner']")
-  .replace(/inputs\.secretless-pr/g, "inputs['secretless-pr']");
+  .replace(/inputs\.secretless-pr/g, "inputs['secretless-pr']")
+  .replace(/inputs\.secretless-trusted-ref/g, "inputs['secretless-trusted-ref']");
 const github = {
   repository,
   repository_owner: repository.split('/')[0],
@@ -455,7 +456,10 @@ const inputs = {
   runner_labels: runnerLabelsInput === undefined ? '' : runnerLabelsInput,
   privileged_lane: varDefault,
   'github-hosted-runner': false,
-  'secretless-pr': false,
+  // node-ci's two mutually exclusive secretless modes (ADR 0086, ADR 0097).
+  // SECRETLESS_MODE selects at most one; unset models a credentialed caller.
+  'secretless-pr': process.env.SECRETLESS_MODE === 'pr',
+  'secretless-trusted-ref': process.env.SECRETLESS_MODE === 'trusted-ref',
 };
 // preflight resolves the TARGET repository's visibility and publishes it as a
 // STRING ('true' | 'false' | '' when unreadable). gate and dispatch-merge route
@@ -1082,6 +1086,58 @@ changelog-release.yml release
 container-candidate.yml prepare
 container-candidate.yml pull-request-build
 TARGETS
+
+# Secretless build-test needs a GitHub-hosted runner in BOTH modes: its
+# lifecycle rebuild and candidate script sandbox exit unless
+# RUNNER_ENVIRONMENT=github-hosted. The trusted-ref (push/main) build must
+# therefore take the same ephemeral hosted lane as the PR build, overriding a
+# caller's self-hosted `runner` input, while eligibility keeps the caller's
+# route so only the job that needs hosted capacity pays for it.
+assert_secretless_route() {
+  local mode="$1"
+  shift
+  SECRETLESS_MODE="$mode" assert_route "$@"
+}
+for wf_name in node-ci.yml node-ci-protected.yml; do
+  wf="$workflows/$wf_name"
+  name="${wf_name%.yml}"
+  assert_secretless_route trusted-ref "$wf" build-test Verjson/verjson-cli \
+    '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' \
+    '["ubuntu-24.04"]' "$name build-test — secretless trusted-ref overrides a self-hosted runner input with the hosted untrusted lane"
+  assert_secretless_route trusted-ref "$wf" build-test Verjson/verjson-cli \
+    '' true '["self-hosted","general"]' '["ubuntu-24.04"]' \
+    '["ubuntu-24.04"]' "$name build-test — secretless trusted-ref without a runner input skips the self-hosted trusted lane"
+  assert_secretless_route trusted-ref "$wf" build-test Verjson/verjson-cli \
+    '["self-hosted","general"]' true '["self-hosted","general"]' '' \
+    "$UNSET_LANDING" "$name build-test — secretless trusted-ref with no untrusted lane lands on the portable hosted default"
+  assert_secretless_route pr "$wf" build-test Verjson/verjson-cli \
+    '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' \
+    '["ubuntu-24.04"]' "$name build-test — secretless PR keeps the hosted untrusted lane"
+  assert_secretless_route trusted-ref "$wf" build-test Acme/widgets \
+    '["self-hosted","acme"]' true '' '' \
+    "$UNSET_LANDING" "$name build-test — an external secretless trusted-ref caller also gets hosted capacity"
+  assert_secretless_route '' "$wf" build-test Verjson/verjson-cli \
+    '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' \
+    '["self-hosted","general"]' "$name build-test — a credentialed push keeps the caller's runner (no extra hosted spend)"
+  assert_secretless_route trusted-ref "$wf" eligibility Verjson/verjson-cli \
+    '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' \
+    '["self-hosted","general"]' "$name eligibility — secretless trusted-ref keeps the caller's self-hosted runner"
+  assert_secretless_route pr "$wf" eligibility Verjson/verjson-cli \
+    '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' \
+    '["self-hosted","general"]' "$name eligibility — secretless PR keeps the caller's self-hosted runner"
+done
+
+# Mutation probe: the cases above must notice the trusted-ref term going missing.
+mutate_job_expression "$workflows/node-ci.yml" build-test \
+  '(inputs.secretless-pr || inputs.secretless-trusted-ref) &&' 'inputs.secretless-pr &&' \
+  "$mutated_workflow"
+if [ "$(SECRETLESS_MODE=trusted-ref resolve_route "$mutated_workflow" build-test Verjson/verjson-cli \
+    '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' '' '' '')" \
+    = '["self-hosted","general"]' ]; then
+  pass "routing cases detect a build-test that routes only secretless-pr to the hosted lane"
+else
+  fail "dropping the trusted-ref term from build-test was not observable by the routing evaluator"
+fi
 
 for job in publish-base publish-derived candidate-manifest; do
   assert_route "$workflows/container-candidate-publish.yml" "$job" Verjson/.github '' false \

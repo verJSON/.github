@@ -28,6 +28,7 @@ platform	python3 scripts/ci-gate/compatibility-sandbox-acquirer.test.py
 platform	bash scripts/ci-gate/node-ci-secretless-pnpm.test.sh
 platform	bash scripts/ci-gate/node-ci-secretless-pnpm-install.test.sh
 platform	bash scripts/ci-gate/node-ci-secretless-trusted-ref.test.sh
+platform	python3 scripts/ci-gate/node-ci-secretless-hosted-lane.test.py
 platform	python3 scripts/ci-gate/workflow-isolated-python.test.py
 platform	bash scripts/ci-gate/node-ci-secretless-transfer.test.sh
 platform	bash scripts/immutable-release-docs.test.sh
@@ -80,6 +81,7 @@ platform	node --test scripts/npm_pack_json_test.mjs
 platform	bash scripts/type-surface-contract-generator.test.sh
 platform	python3 scripts/cli_projects_package_surface_test.py
 platform	python3 scripts/cli_projects_package_surface_ruleset_test.py
+platform	python3 scripts/required_workflow_revision_test.py
 platform	python3 scripts/ai_review_required_workflow_audit_test.py
 platform	python3 scripts/audit_finding_state_test.py
 platform	python3 scripts/capability-floor-audit.test.py
@@ -228,8 +230,10 @@ docs	bash scripts/trigger-scope.test.sh
 merge-gate	python3 scripts/ci-gate/app-slug-fail-closed.test.py
 merge-gate	bash scripts/ci-gate/orphaned-authorization-recovery.test.sh
 merge-gate	bash scripts/assert-no-deferred-checks.test.sh
-merge-gate	bash scripts/assert-mergeable-head.test.sh
+merge-gate	@budget=120 bash scripts/assert-mergeable-head.test.sh
 merge-gate	bash scripts/assert-mergeable-head.large-payload.test.sh
+merge-gate	bash scripts/assert-mergeable-head.concurrency-family.test.sh
+merge-gate	python3 scripts/ci-gate/concurrency-family-map.test.py
 changelog-release-4	python3 scripts/ci-gate/exact-release-packages.test.py
 platform	python3 scripts/node_floor_ruleset_test.py
 platform	python3 scripts/required_check_bindings_test.py

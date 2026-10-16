@@ -14,6 +14,7 @@
       "scope": "repository",
       "ruleset_id": 21541962,
       "name": "identity-contracts-type-surface-required",
+      "delegated_to": null,
       "preimage": {
         "target": "branch",
         "enforcement": "active",
@@ -39,6 +40,7 @@
       "scope": "repository",
       "ruleset_id": 24324236,
       "name": "authz-type-surface-required",
+      "delegated_to": null,
       "preimage": null,
       "desired": {
         "target": "branch",
@@ -54,19 +56,14 @@
       "scope": "organization",
       "ruleset_id": 21750617,
       "name": "authn-type-surface-required-workflow",
-      "preimage": {
-        "target": "branch",
-        "enforcement": "active",
-        "bypass_actors": [{"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"}],
-        "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}, "repository_id": {"repository_ids": [1302124584]}},
-        "rules": [{"type": "workflows", "parameters": {"do_not_enforce_on_create": false, "workflows": [{"path": ".github/workflows/authn-type-surface-required.yml", "repository_id": 1269388380, "ref": "refs/heads/main", "sha": "dc6b2942342ac1a01b4e01a17cbe7a303f31e495"}]}}]
-      },
+      "delegated_to": "scripts/authn-type-surface-ruleset.py",
+      "preimage": null,
       "desired": {
         "target": "branch",
         "enforcement": "active",
         "bypass_actors": [{"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"}],
         "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}, "repository_id": {"repository_ids": [1302124584]}},
-        "rules": [{"type": "workflows", "parameters": {"do_not_enforce_on_create": false, "workflows": [{"path": ".github/workflows/authn-type-surface-required.yml", "repository_id": 1269388380, "ref": "refs/heads/main", "sha": "dc6b2942342ac1a01b4e01a17cbe7a303f31e495"}]}}]
+        "rules": [{"type": "workflows", "parameters": {"do_not_enforce_on_create": false, "workflows": [{"path": ".github/workflows/authn-type-surface-required.yml", "repository_id": 1269388380, "ref": "refs/heads/main", "sha": null}]}}]
       }
     },
     {
@@ -75,6 +72,7 @@
       "scope": "repository",
       "ruleset_id": 21569694,
       "name": "identity-lifecycle-type-surface-required",
+      "delegated_to": null,
       "preimage": {
         "target": "branch",
         "enforcement": "active",

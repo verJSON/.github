@@ -31,7 +31,7 @@ assert "inputs.secretless-pr" in acquire["if"]
 assert acquire["runs-on"] == "${{ fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}"
 assert "acquire-secretless-dependencies" in build["needs"]
 assert build["permissions"] == {"contents": "read"}
-assert build["runs-on"].startswith("${{ inputs.secretless-pr && fromJSON(vars.CI_LANE_UNTRUSTED")
+assert build["runs-on"].startswith("${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && fromJSON(vars.CI_LANE_UNTRUSTED")
 assert build["runs-on"].index("inputs.secretless-pr") < build["runs-on"].index("inputs.runner")
 
 acquire_steps = acquire["steps"]

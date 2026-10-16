@@ -160,9 +160,14 @@ the original single-job install path because the mode defaults off.
 Trusted post-merge or direct-ref validation uses a separate caller job with
 `secretless-trusted-ref: true`. The credentialed acquisition job still runs on
 the isolated lane and still executes no repository lifecycle or consumer script.
-The credentialless build job follows the normal trusted-ref runner route (or an
-explicit caller runner), after checkout credentials and package, Git, cloud, and
-OIDC paths are scrubbed. Admission accepts only `push` and an explicit
+The credentialless build job runs on the same isolated untrusted lane as the PR
+build, ahead of any caller runner input, because its lifecycle rebuild and
+candidate sandbox require a GitHub-hosted Linux runner; it runs after checkout
+credentials and package, Git, cloud, and OIDC paths are scrubbed. Only that job
+moves: `eligibility` keeps the caller's route and, in either secretless mode,
+fails before acquisition unless `CI_LANE_UNTRUSTED` selects a single standard
+GitHub-hosted Linux image
+([ADR 0234](decisions/0234-route-secretless-trusted-ref-builds-to-the-hosted-lane/README.md)). Admission accepts only `push` and an explicit
 `workflow_dispatch`; `pull_request`, `pull_request_target`, schedules, and every
 other event fail before token use. The two booleans are mutually exclusive.
 A trusted push bypasses a stale `renovate/stability-days` status. Existing

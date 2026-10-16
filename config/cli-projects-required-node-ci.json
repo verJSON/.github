@@ -1,7 +1,8 @@
 {
   "schema_version": 1,
   "repository": "Verjson/verjson-cli-projects",
-  "node_ci_sha": "1c7659b77e1c97743cdcfc0a1603141bfe25320d",
+  "protected_node_ci_sha": "576707fe0be0dabe43ea57c504575f8cda88b0d2",
+  "consumer_node_ci_sha": "1c7659b77e1c97743cdcfc0a1603141bfe25320d",
   "rollout_legacy_consumer_workflow_sha256": "721856f97158be3619945eb1c2a265ca49e74788bda2bd9fec732d6d0c0bec4c",
   "node_versions": ["26", "24.19.0"],
   "approved_internal_packages": [
