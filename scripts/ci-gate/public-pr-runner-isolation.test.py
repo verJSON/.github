@@ -585,4 +585,23 @@ expect(
     "a pull_request_target fetch of a refs/pull refspec is held to the placement rule",
 )
 
+expect(
+    pull_request_job(
+        """${{ vars.LANE_LEVEL > 2 && fromJSON('["self-hosted","general"]') || 'ubuntu-24.04' }}"""
+    ),
+    1,
+    ("self-hosted",),
+    "an ordering comparison over a variable is evaluated both ways",
+)
+expect(
+    target_job("""
+        - uses: actions/checkout@v4
+          with:
+            ref: refs/pull/1/merge
+    """),
+    1,
+    ("[pull_request_target]",),
+    "a pull_request_target checkout of a literal refs/pull ref is head-capable",
+)
+
 sys.exit(1 if failures else 0)
