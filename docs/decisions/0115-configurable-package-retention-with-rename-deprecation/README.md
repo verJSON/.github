@@ -40,7 +40,10 @@ here.
    `3`), and `main()` exposes `--keep` on the CLI (default `3`). The only
    validation is that `keep` is a positive integer — the prior "must equal
    3" assertion is gone, because it existed solely to block exactly the
-   configurability this issue asks for.
+   configurability this issue asks for. (Superseded in part by the
+   2026-10-16 amendment below: `--keep` now takes a policy value, an
+   integer from `1` to `999` or the exact word `all`, not any positive
+   integer.)
    `node-release.yml` and `container-release.yml` source `--keep` from the
    org variable `VERJSON_PACKAGE_RETENTION_KEEP`, falling back to `3` when
    unset, with the value validated as a positive integer before use. No org
@@ -48,6 +51,8 @@ here.
    exactly three — is unchanged for every repository. A human can raise
    (or further bound) the window later by setting one org variable; that is
    the "simple config change instead of a code change" this issue asked for.
+   (The 2026-10-16 amendment below replaces "positive integer" here with
+   the same policy grammar.)
 
 2. **A package rename gets a first-class deprecation step.**
    `node-release.yml` gains an optional `deprecates` input — a JSON array of
@@ -146,9 +151,10 @@ The sites are:
 - Verjson's own default stays 3, under ADR 0108's storage bound. Nothing
   changes until someone sets the variable.
 - `all` is an explicit per-organization or per-repository choice, not a
-  default. The any-organization bootstrap needs it: an organization adopting
-  the canonical contract must be able to keep every version without picking
-  an arbitrary number that the 999 cap would reject.
+  default. An adopting organization may need to keep every version without
+  picking an arbitrary number, and the 999 cap would otherwise force one.
+  The reusable workflows serve organizations other than Verjson
+  ([ADR 0030](../0030-portable-reusable-runner-policy/README.md)).
 - Exactly one spelling. Every consumer compares the value as a string: five
   shell guards, `package_retention.py`, and each adopter's release hook. A
   second accepted spelling would have to be normalized identically in all of

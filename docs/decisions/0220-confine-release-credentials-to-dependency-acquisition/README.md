@@ -55,7 +55,7 @@ The token-bearing `npm ci --ignore-scripts` now quarantines the release tag's ro
 
 The generated credentialless verification environment must assign npm's user and global configuration namespaces to distinct, controlled files. npm rejects loading the same `/dev/null` path for both namespaces before it runs the verification commands. Each generated release-node, release-artifact, and release-snapshot verification step now creates separate empty files under its private temporary home, applies a restrictive umask, and removes that home at step exit. A regression executes the generated verification command with real npm and a fixture build script in all three modes; it checks the two files are distinct, empty, private to the temporary home, and cleaned up afterward. These configuration files preserve the existing credential boundary and release authority.
 
-## 2026-10-15 refinement — the verification hook receives the package retention window
+## 2026-10-15 refinement — the verification hook receives the package retention window (superseded for `all`; see ADR 0115)
 
 **Context.** The post-publish `retention` jobs in `node-release.yml` and `container-release.yml` delete every stable version outside the newest `vars.CI_PACKAGE_RETENTION_KEEP || '3'` ([ADR 0108](../0108-bound-package-retention-to-three-stable-releases/README.md), [ADR 0115](../0115-configurable-package-retention-with-rename-deprecation/README.md)). A repository verification hook that must stop a release from pushing a still-consumed version out of that window (verjson-ci#298) could not see it: the generated verification step runs the hook under the `env -i` allowlist this ADR established. No new tracking issue was opened; the change is recorded here, in the PR, and in an issue-less `NEXT/` fragment.
 
@@ -83,7 +83,7 @@ It is also the form the digit guards already used. A spelled-out class admits ex
 
 `.github/workflows/release.yml` is exempt as generated at an older pinned contract; the pin bump regenerates it. Accepting ID guards cap at 15 digits, inside jq's exact integer range. The AI review budget guards are recorded in [ADR 0082](../0082-receipt-bound-provider-budget-policy/README.md). Out of scope are `sed`/`awk` transforms, which normalize text rather than admit it, and non-generator shell scripts under `scripts/`. Those scripts receive values the workflow boundary has already guarded.
 
-**Behavior change for an out-of-range window.** A `CI_PACKAGE_RETENTION_KEEP` above 999 now fails, whether it is set at organization or repository level, because `vars` resolves the repository value first. So do 0, a non-integer, and a non-ASCII value.
+**Behavior change for an out-of-range window.** A `CI_PACKAGE_RETENTION_KEEP` above 999 now fails, whether it is set at organization or repository level, because `vars` resolves the repository value first. So do 0, a non-ASCII value, and any non-integer other than the exact word `all`, which [ADR 0115](../0115-configurable-package-retention-with-rename-deprecation/README.md)'s 2026-10-16 amendment accepts as "retain every version".
 - It fails `verify`, before any snapshot, in every generated release mode.
 - It fails the `node-release.yml` retention job after publication, which turns that run red.
 - `container-release.yml`'s retention job is `continue-on-error`. Its failure leaves the run green: the release was promoted and older image versions were simply not deleted.
