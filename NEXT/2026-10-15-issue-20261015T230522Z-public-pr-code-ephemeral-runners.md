@@ -41,3 +41,15 @@ stale but demands no `dynamic:` field.
 `actionlint.yml` and `container-candidate.yml` as pending.
 Their selectors are pinned in `hosted-selector-policy.py` and change after #1826;
 #1831 tracks them, the adopter reusable workflows, and live lane enforcement.
+
+The merge gate's relay no longer puts a public pull request's head on the
+persistent pool. `gate-rearm.yml` dispatches `ai-review-merge.yml`, whose `gate`
+job checks out and reviews the head; ADR 0048 had sent a public target there on
+`CI_RUNNER_FASTLANE`, which is the `general` pool today. Every job that dispatch
+reaches (`preflight`, `gate`, `complete-authorization`, `dispatch-merge`, and
+`app-key-environment.yml`'s `validate-ai-review-key`) now takes
+`CI_LANE_UNTRUSTED` with a hosted tail unless the event repository is private,
+and a Verjson caller's `runner_labels` is honored only for a private repository.
+Private targets keep their lanes. The change applies to this repository at
+merge; an adopter is covered once its generated `ai-review-merge.yml` caller is
+regenerated at or after the merge commit. No ruleset rotation is needed.

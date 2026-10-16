@@ -12,7 +12,9 @@
   whose "Residual risk" section accepted public pull-request code on the
   persistent pool
 - **Supersedes in part:** [ADR 0047](../0047-fast-lane-runner-variable/README.md),
-  for `actions-ci.yml` only
+  for `actions-ci.yml` only, and
+  [ADR 0048](../0048-merge-gate-fast-lane-by-visibility/README.md), for a public
+  target of the `ai-review-merge.yml` relay (decision 7)
 - **Related:** [ADR 0234](../0234-route-secretless-trusted-ref-builds-to-the-hosted-lane/README.md)
   ([#1826](https://github.com/verJSON/.github/pull/1826)).
   Its trade-off paragraph cites ADR 0147's rollback of `CI_LANE_UNTRUSTED` to
@@ -300,6 +302,66 @@ or a literal GitHub-hosted image.
       covering checkout, execution, and why PR content cannot reach execution.
       Never relist a stale row without re-reading the change.
 
+7. **The merge-gate relay runs a public target on the ephemeral lane.**
+   A third review round found a live exposure the checker did not scan.
+   `gate-rearm.yml` runs on `pull_request_target` and dispatches
+   `ai-review-merge.yml` with the pull request number and head SHA. That run's
+   `gate` job checks the head out at the workspace root and runs the review
+   action on it. Under ADR 0048 a public target sent `gate` to
+   `CI_RUNNER_FASTLANE`, which is `["self-hosted","general"]` today. The
+   authorization label only decides who can start the run; it does not change
+   which bytes reach the runner, so it does not meet decision 5's bar.
+   Every job the dispatch reaches now selects `CI_LANE_UNTRUSTED` with a hosted
+   tail unless the target is private: `preflight`, `gate`,
+   `complete-authorization`, `dispatch-merge`, and the
+   `app-key-environment.yml` job `validate-ai-review-key` that `app-key-policy`
+   calls. The shape is the one `actions-ci.yml` uses, plus the private branch
+   each job already had:
+   - The persistent lane needs `github.event.repository.private == true`.
+     Actions coerces a missing `private` to 0, so a payload without
+     visibility also takes the ephemeral lane. `TARGET_REPO` is the event
+     repository on both entry points since ADR 0036, so the payload describes
+     the target.
+   - `gate` and `dispatch-merge` additionally need preflight's API lookup not
+     to say public (`target_private != 'false'`). An unreadable lookup (`''`)
+     keeps a private target on its lane, so a lookup outage spends no hosted
+     minutes on a private repository. A lookup that says public overrides a
+     private payload.
+   - A Verjson caller's `runner_labels` input is honored only for a private
+     repository. Off Verjson it still names the caller's own fleet. A public
+     Verjson caller that passed it would otherwise reopen the pool through a
+     pull request that edits the caller.
+   - A private target keeps its previous lane: `gate` on
+     `CI_RUNNER_OVERFLOW || CI_LANE_TRUSTED`, `dispatch-merge` on
+     `CI_LANE_PRIVILEGED`, `preflight` on `CI_RUNNER_OVERFLOW ||
+     CI_LANE_UNTRUSTED`, `complete-authorization` on `CI_RUNNER_FASTLANE`, and
+     `validate-ai-review-key` on `CI_LANE_TRUSTED`.
+
+   Nothing these jobs consume exists only on the fleet. They read repository
+   and organization secrets (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
+   `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`) and the `ai-review-app` environment's
+   `AI_REVIEW_APP_PRIVATE_KEY`, which GitHub delivers to hosted and
+   self-hosted runners alike. They use `bash`, `git`, `gh`, `jq`, `python3`,
+   `openssl`, and SHA-pinned actions, all on the `ubuntu-24.04` image, and
+   reach only `api.github.com` and the model providers' public endpoints. No
+   step reads a path, socket, or credential that only a pool host holds. The
+   same jobs already run on `ubuntu-24.04` for every caller outside Verjson,
+   and ADR 0048 chose the fast lane for public targets because it was hosted
+   then; it now names the pool.
+   The four selectors are pinned in `hosted-selector-policy.py`'s
+   `REVIEWED_SELECTOR_EXPRESSIONS`, and `runner-routing-policy.test.sh`
+   evaluates every visibility, lookup, and `runner_labels` polarity.
+
+   **Rollout.** `ai-review-merge.yml` is not a required workflow; organization
+   ruleset 20722935 requires only `gate-rearm.yml`, at a stored SHA. This
+   repository's own gate dispatches its default-branch copy, so the change
+   takes effect here at merge. An adopter's `ai-review-merge.yml` is a
+   generated caller pinned to a canonical commit, so an adopter is covered
+   only after its caller is regenerated at or after the merge commit
+   (`scripts/gen-ai-review-caller.sh <merge-sha>`, ADR 0227's consumer
+   recipe). This change does not edit `gate-rearm.yml`, so ruleset 20722935
+   needs no rotation for it.
+
 ### What this decision cannot do
 
 For a `pull_request` run, GitHub reads the workflow file from the pull
@@ -330,6 +392,12 @@ whether to take this option.
 - The untrusted lane can no longer be rolled back to the persistent pool.
   `runner-admission-reconcile.sh` still accepts a persistent untrusted selector,
   so live enforcement of that rule is a follow-up tracked in #1831.
+- Public targets of the merge-gate relay run on hosted capacity: one more
+  `ubuntu-24.04` slot per review, free for public repositories. The AI lane's
+  `gate` job keeps its 80-minute ceiling, so a slow review now holds a hosted
+  slot rather than a pool runner.
+- Adopters keep the exposure until their generated `ai-review-merge.yml` caller
+  is regenerated at or after the merge commit (decision 7).
 - The same guarantee for public adopters' calls to the canonical reusable
   workflows is a follow-up tracked in #1831. Those include `node-ci`, `ui-ci`,
   `helm-ci`, `pulumi-ci`, `generated-artifacts`, `repo-hygiene`, and
