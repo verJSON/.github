@@ -164,6 +164,48 @@ SCENARIOS = (
         "admitted": True,
     },
     {
+        "label": "ubuntu-22.04 matches the YY.MM image shape and proceeds",
+        "mode": "pr",
+        "eligibility_runner": "github-hosted", "untrusted_lane": '["ubuntu-22.04"]',
+        "admitted": True,
+    },
+    {
+        "label": "a version without the YY.MM dot is refused",
+        "mode": "trusted-ref",
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-2404"]',
+        "admitted": False,
+    },
+    {
+        "label": "a point-release suffix is refused: hosted labels name YY.MM only",
+        "mode": "trusted-ref",
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-24.04.1"]',
+        "admitted": False,
+    },
+    {
+        "label": "a trailing non-digit after YY.MM is refused",
+        "mode": "trusted-ref",
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-99.99x"]',
+        "admitted": False,
+    },
+    {
+        "label": "a one-digit month is refused",
+        "mode": "trusted-ref",
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-24.4"]',
+        "admitted": False,
+    },
+    {
+        "label": "a bare-dot version is refused",
+        "mode": "trusted-ref",
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-."]',
+        "admitted": False,
+    },
+    {
+        "label": "the arm64 image is refused: the sandbox provisioning is proven on the standard x64 image only",
+        "mode": "trusted-ref",
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-24.04-arm"]',
+        "admitted": False,
+    },
+    {
         "label": "a hosted image mixed with a self-hosted label is refused",
         "mode": "trusted-ref",
         "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-24.04","self-hosted"]',
@@ -296,6 +338,9 @@ def mutants(document: dict):
         lambda d: guard_of(d).update({"run": guard_of(d)["run"].replace("export LC_ALL=C\n", "")}))
     yield "guard accepts any hosted image family", mutate(
         lambda d: guard_of(d).update({"run": guard_of(d)["run"].replace("ubuntu-(latest|", "[a-z]+-(latest|")}))
+    yield "guard loosens the image version shape", mutate(
+        lambda d: guard_of(d).update({"run": guard_of(d)["run"].replace(
+            "[0-9]{2}\\.[0-9]{2}", "[0-9.]+")}))
     yield "guard echoes the configured value", mutate(
         lambda d: guard_of(d).update({"run": guard_of(d)["run"].replace(
             "Linux image\"", "Linux image: ${SECRETLESS_BUILD_LANE}\"")}))
