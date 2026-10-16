@@ -133,6 +133,58 @@ def classify(pattern):
 EXPANSION = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 
 
+def EXPANSION_NAMES(word):  # noqa: N802 - mirrors EXPANSION
+    return [match.group(1) or match.group(2) for match in EXPANSION.finditer(word)]
+
+
+LITERAL_DOLLAR = object()
+SPECIAL_PARAMETERS = "@*#?-$!"
+
+
+def parameter_expansion(word, index):
+    """Read the expansion starting at word[index] == '$'.
+
+    Returns (end, name) for every parameter expansion, named, positional
+    (`$1`, `${10}`), or special (`$@`, `$*`, `${@:2}`, `$#`, `$-`, `$?`,
+    `$$`, `$!`); LITERAL_DOLLAR for a `$` that expands nothing (a regex anchor);
+    and None for a command or arithmetic substitution.
+    """
+    following = word[index + 1:index + 2]
+    if following == "{":
+        depth, position = 1, index + 2
+        while position < len(word):
+            if word.startswith("${", position):
+                depth += 1
+                position += 2
+                continue
+            if word[position] == "}":
+                depth -= 1
+                if depth == 0:
+                    return position + 1, word[index + 2:position]
+            position += 1
+        return None
+    if following == "(" or following == "[":
+        return None
+    match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", word[index + 1:])
+    if match:
+        return index + 1 + match.end(), match.group(0)
+    if following.isdigit() or (following and following in SPECIAL_PARAMETERS):
+        return index + 2, following
+    return LITERAL_DOLLAR
+
+
+def is_parameter_reference(name):
+    """True for a positional or special parameter: one whose value a caller sets."""
+    head = name.lstrip("#!")[:1] if name[:1] in "#!" and len(name) > 1 else name[:1]
+    return bool(head) and (head.isdigit() or head in "@*")
+
+
+def parameter_number(name):
+    """The positional number a parameter reference names; 0 for $@, $*, or a slice of them."""
+    match = re.match(r"[#!]?(\d+)", name)
+    return int(match.group(1)) if match else 0
+
+
 def regex_text(word):
     """Return (text, expansion names) a regex consumer receives from one shell word.
 
@@ -174,16 +226,16 @@ def regex_text(word):
                 out.append(word[index:index + 2])
             index += 2
             continue
-        if char == "$" and index + 1 < len(word) and word[index + 1] in "{(`" + "_" + "".join(
-            chr(code) for code in range(65, 91)
-        ) + "".join(chr(code) for code in range(97, 123)):
-            match = EXPANSION.match(word, index)
-            if match is None:
+        if char == "$":
+            expansion = parameter_expansion(word, index)
+            if expansion is None:
                 return None
-            names.append(match.group(1) or match.group(2))
-            out.append("X")
-            index = match.end()
-            continue
+            if expansion is not LITERAL_DOLLAR:
+                end, name = expansion
+                names.append(name)
+                out.append("X")
+                index = end
+                continue
         if char == "`":
             return None
         out.append(char)
@@ -209,6 +261,8 @@ def judge_regex(word, held=None):
     if held and all(name in held for name in names):
         # A fragment held in a single-assignment literal is judged as written.
         resolved = EXPANSION.sub(lambda match: held[match.group(1) or match.group(2)], word)
+        if any(name not in held for name in EXPANSION_NAMES(word)):
+            return "unclassifiable", text
         resolved_parsed = regex_text(resolved)
         if resolved_parsed is not None and not resolved_parsed[1]:
             return _classify_single_quoted(resolved_parsed[0]), resolved_parsed[0]
@@ -436,89 +490,158 @@ def logical_lines(script):
         yield " ".join(part.strip() for part in pending)
 
 
+NAME_PATTERN = r"[A-Za-z_][A-Za-z0-9_-]*"
+FUNCTION_HEAD = re.compile(
+    r"^(\s*)(?:function\s+(" + NAME_PATTERN + r")(?:\s*\(\))?|(" + NAME_PATTERN + r")\s*\(\))\s*"
+)
+ONE_LINE_FUNCTION = re.compile(
+    FUNCTION_HEAD.pattern + r"\{\s+(.*?);\s*\}(?=\s*(?:$|;|&&|\|\||\)))\s*(?:;|&&|\|\|)?\s*(.*)$"
+)
+
+
+def expand_one_line_functions(lines):
+    """Split `f() { body; }; rest` into definition, body, close, and rest lines."""
+    expanded = []
+    for line in lines:
+        while True:
+            match = ONE_LINE_FUNCTION.match(line)
+            if not match:
+                expanded.append(line)
+                break
+            indent = match.group(1)
+            expanded.append(line[:match.start(4)].rstrip().rstrip("{").rstrip() + " {")
+            expanded.append(indent + "  " + match.group(4))
+            expanded.append(indent + "}")
+            line = indent + match.group(5) if match.group(5).strip() else ""
+            if not line:
+                break
+    return expanded
+
+
 def _functions(lines):
-    """Yield (name, first line index, end line index or None) for each shell function."""
+    """Yield (name, definition index, closing index or None) for each shell function.
+
+    Recognizes `f() {`, `function f {`, `function f() {`, with the opening
+    brace or parenthesis on the same or the next line; one-line definitions are
+    split by expand_one_line_functions first.
+    """
     for index, line in enumerate(lines):
-        match = re.match(r"^(\s*)(?:function\s+)?([A-Za-z_][A-Za-z0-9_-]*)\s*\(\)\s*\{?\s*(?:#.*)?$", line)
+        match = FUNCTION_HEAD.match(line)
         if not match:
+            continue
+        rest = re.sub(r"(?:^|\s)#.*$", "", line[match.end():]).strip()
+        if rest not in ("{", "(", ""):
+            continue
+        if rest == "" and not (index + 1 < len(lines) and lines[index + 1].strip() in ("{", "(")):
             continue
         indent = len(match.group(1))
         end = next(
             (
                 position for position in range(index + 1, len(lines))
-                if re.match(r"^\s*\}\s*(?:#.*)?$", lines[position])
+                if re.match(r"^\s*[})]\s*(?:#.*)?$", lines[position])
                 and len(lines[position]) - len(lines[position].lstrip()) <= indent
             ),
             None,
         )
-        yield match.group(2), index, end
+        yield match.group(2) or match.group(3), index, end
 
 
-PARAMETER = re.compile(r"\$(?:\{([1-9])(?::?[-=][^}]*)?\}|([1-9]))")
+# `shift`, `set -- ...`, or `set word ...` replace the positional parameters;
+# `set -e` / `set +o pipefail` only change options.
+POSITIONAL_MUTATION = re.compile(
+    r"(?:^|[;&|({]\s*|\s)(?:shift\b|set\s+(?:[-+][A-Za-z]+\s+)*(?:--|[^-+\s]))"
+)
 
 
-def _parameter_patterns(body):
-    """Return {positional number} whose value a grep or =~ in BODY uses as its pattern."""
-    locals_ = {}
-    for name, word in re.findall(r"(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=(\"[^\"]*\"|\S+)", body):
-        parameter = PARAMETER.fullmatch(word.strip('"'))
-        if parameter:
-            locals_[name] = int(parameter.group(1) or parameter.group(2))
-    numbers = set()
-
-    def positional(word):
-        stripped = word.strip('"')
-        parameter = PARAMETER.fullmatch(stripped)
-        if parameter:
-            return int(parameter.group(1) or parameter.group(2))
-        variable = re.fullmatch(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", stripped)
-        return locals_.get(variable.group(1)) if variable else None
-
-    for line in body.splitlines():
-        for _subject, operator, pattern in _test_operands(line):
-            if operator == "=~" and positional(pattern):
-                numbers.add(positional(pattern))
-        for match in re.finditer(r"(?<![\w-])grep\b", line):
-            for pattern in grep_patterns(line[match.end():]) or []:
-                if positional(pattern):
-                    numbers.add(positional(pattern))
-    return numbers
+def _call_words(line, name):
+    """Yield the argument words of each call to NAME on LINE (None if unreadable)."""
+    for call in re.finditer(
+        r"(?:^\s*|[;&|!({`]\s*|\b(?:if|then|else|elif|do|until|while|time|command)\s+)"
+        + re.escape(name) + r"(?=\s|$|;|\))",
+        line,
+    ):
+        yield _shell_words(line[call.end():])
 
 
-def argument_guards(source, lines):
-    """Check the literal argument every caller passes to a pattern parameter."""
-    functions = list(_functions(lines))
-    for name, start, end in functions:
-        if end is None:
-            continue
-        numbers = _parameter_patterns("\n".join(lines[start + 1:end]))
-        if not numbers:
-            continue
-        for index, line in enumerate(lines):
-            if start <= index <= end or line.lstrip().startswith("#"):
+def _argument_guard(source, name, number, words, line):
+    subject = f"{name} argument {number}"
+    if words is None:
+        return Guard(source, "argument", subject, line.strip(), "unclassifiable")
+    for earlier in words[:number - 1]:
+        parsed = regex_text(earlier)
+        # An expansion that may split, or expand to several words, moves the
+        # argument that lands in the pattern position.
+        if parsed is None or any(n in ("@", "*") or n.startswith(("@", "*")) for n in parsed[1]) \
+                or re.search(r"(?:^|[^\"\\])\$", earlier.split('"')[0]):
+            return Guard(source, "argument", subject, earlier, "unclassifiable")
+    argument = words[number - 1] if len(words) >= number else "''"
+    parsed = regex_text(argument)
+    if parsed is None or parsed[1]:
+        verdict = judge_regex(argument)[0]
+        return Guard(source, "argument", subject, argument,
+                     "collation" if verdict == "collation" else "unclassifiable")
+    verdict, resolved = judge_regex(argument)
+    return Guard(source, "argument", subject, argument, verdict, resolved)
+
+
+def _parameter_sources(lines):
+    """Map each name assigned from a positional parameter to its number (0 for @ or *)."""
+    sources = {}
+    for line in lines:
+        for name, word in re.findall(r"(?:^|[\s;(])([A-Za-z_][A-Za-z0-9_]*)=(\"[^\"]*\"|'[^']*'|\S+)", line):
+            parsed = regex_text(word)
+            if parsed is None:
                 continue
-            for call in re.finditer(
-                r"(?:^|[;&|!({]\s*|\b(?:if|then|else|elif|do|until|while)\s+)" + re.escape(name) + r"(?=\s|$)",
-                line,
-            ):
-                words = _shell_words(line[call.end():])
-                for number in sorted(numbers):
-                    subject = f"{name} argument {number}"
-                    if words is None:
-                        yield Guard(source, "argument", subject, line.strip(), "unclassifiable")
-                        continue
-                    argument = words[number - 1] if len(words) >= number else "''"
-                    verdict, resolved = judge_regex(argument)
-                    if re.search(r"\$[{(A-Za-z_0-9@*#?]", argument.replace("\\$", "")):
-                        verdict = "unclassifiable" if verdict == "canonical" else verdict
-                    yield Guard(source, "argument", subject, argument, verdict, resolved)
+            for reference in parsed[1]:
+                if is_parameter_reference(reference):
+                    sources.setdefault(name, set()).add(parameter_number(reference))
+    return sources
 
 
 def guards_in_script(source, script):
     """Yield every bracket-using guard in one shell script."""
     held = _regex_variables(script)
-    lines = list(logical_lines(script))
-    for line in lines:
+    lines = expand_one_line_functions(list(logical_lines(script)))
+    functions = list(_functions(lines))
+    names_defined = [name for name, _start, _end in functions]
+
+    def enclosing(index):
+        inside = [
+            (name, start, end) for name, start, end in functions
+            if end is not None and start < index < end
+        ]
+        return max(inside, key=lambda function: function[1]) if inside else None
+
+    pattern_parameters = {}
+
+    def attribute(guard, index, names):
+        """Judge a guard whose pattern takes a caller's value; register its callers."""
+        function = enclosing(index)
+        body = lines[function[1] + 1:function[2]] if function else []
+        sources = _parameter_sources(body) if function else _parameter_sources(lines)
+        numbers = set()
+        for name in names:
+            if is_parameter_reference(name):
+                numbers.add(parameter_number(name))
+            elif name in sources:
+                numbers |= sources[name]
+        if not numbers:
+            return guard
+        if (
+            function is None
+            or 0 in numbers
+            or names_defined.count(function[0]) != 1
+            or any(POSITIONAL_MUTATION.search(line) for line in body)
+        ):
+            return Guard(guard.source, guard.kind, guard.subject, guard.pattern,
+                         "unreviewable", guard.resolved)
+        pattern_parameters.setdefault(function, set()).update(numbers)
+        if guard.verdict == "canonical":
+            guard = Guard(guard.source, guard.kind, guard.subject, guard.pattern,
+                          "unclassifiable", guard.resolved)
+        return guard
+
+    for index, line in enumerate(lines):
         if line.lstrip().startswith("#"):
             continue
         for subject, operator, pattern in _test_operands(line):
@@ -526,22 +649,30 @@ def guards_in_script(source, script):
                 if "[" not in pattern and "$" not in pattern and GENERATION_MARK not in pattern:
                     continue
                 verdict, resolved = judge_regex(pattern, held)
-                yield Guard(source, "regex", subject, pattern, verdict, resolved)
+                parsed = regex_text(pattern)
+                guard = Guard(source, "regex", subject, pattern, verdict, resolved)
+                yield attribute(guard, index, parsed[1] if parsed else [])
                 continue
             literal = strip_quoted(pattern)
             if literal is None or "[" not in literal:
                 continue
-            yield Guard(source, "glob", subject, pattern, classify(pattern))
-    for subject, block in _case_blocks(script):
+            parsed = regex_text(pattern)
+            yield attribute(Guard(source, "glob", subject, pattern, classify(pattern)), index,
+                            parsed[1] if parsed else [])
+    for subject, block in _case_blocks("\n".join(lines)):
         if block is None:
             yield Guard(source, "case", subject, "<unterminated>", "unclassifiable")
             continue
         for label in _case_labels(block):
             literal = strip_quoted(label)
-            if literal is not None and "[" not in literal and not re.search(r"\$[{(A-Za-z_]", literal):
+            if literal is not None and "[" not in literal and not re.search(r"\$[{(A-Za-z_0-9@*#?!$-]", literal):
                 continue
-            yield Guard(source, "case", subject, label, classify(label))
-    for line in lines:
+            parsed = regex_text(label)
+            verdict = classify(label)
+            if parsed and any(is_parameter_reference(name) for name in parsed[1]):
+                verdict = "unreviewable"
+            yield Guard(source, "case", subject, label, verdict)
+    for index, line in enumerate(lines):
         if line.lstrip().startswith("#"):
             continue
         for match in re.finditer(r"(?<![\w-])grep\b", line):
@@ -553,8 +684,16 @@ def guards_in_script(source, script):
                 if "[" not in pattern and "$" not in pattern and GENERATION_MARK not in pattern:
                     continue
                 verdict, resolved = judge_regex(pattern)
-                yield Guard(source, "grep", "<grep>", pattern, verdict, resolved)
-    yield from argument_guards(source, lines)
+                parsed = regex_text(pattern)
+                yield attribute(Guard(source, "grep", "<grep>", pattern, verdict, resolved),
+                                index, parsed[1] if parsed else [])
+    for (name, start, end), numbers in pattern_parameters.items():
+        for index, line in enumerate(lines):
+            if index == start or line.lstrip().startswith("#"):
+                continue
+            for words in _call_words(line, name):
+                for number in sorted(numbers):
+                    yield _argument_guard(source, name, number, words, line)
 
 
 def _classify_single_quoted(pattern):

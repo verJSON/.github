@@ -39,7 +39,7 @@ NON_ASCII_PROBES = ("\u00e9", "\uff41", "\uff21", "\u0663", "\uff13", "\u00a0")
 
 # The reviewed inventory: every guard the scanner finds, in the repository and
 # in the generator's HEAD output. A change is a review point.
-GUARD_COUNT = 478
+GUARD_COUNT = 500
 # Shapes the scanner cannot judge, each with the reason it is safe.
 # Each unreadable guard reviewed by its exact text at its site: an edit to the
 # pattern, including a range added around a reviewed expansion, changes the
@@ -407,6 +407,74 @@ class SettableValueGuardTests(unittest.TestCase):
             ("[a-z]*", "collation"),
         ])
 
+    def scan_script(self, *lines):
+        return [
+            (guard.kind, guard.verdict, guard.pattern)
+            for guard in settable_value_guards.guards_in_script("<fixture>", "\n".join(lines))
+        ]
+
+    def test_a_wrapper_forwarding_all_arguments_makes_the_inner_call_unclassifiable(self):
+        found = self.scan_script(
+            "matches() {",
+            '  local value="$1" accepted="${2:-}"',
+            '  printf %s "$value" | grep -qxE "$accepted"',
+            "}",
+            'wrap() { matches "$@"; }',
+            "wrap \"$copy\" '[a-z-]+'",
+        )
+        self.assertIn(("argument", "unclassifiable", '"$@"'), found)
+        self.assertNotIn("canonical", {verdict for kind, verdict, _ in found if kind == "argument"})
+
+    def test_a_one_line_function_with_a_bare_positional_pattern_checks_its_callers(self):
+        found = self.scan_script(
+            "repo_ok() { [[ \"$TARGET_REPO\" =~ $1 ]]; }; repo_ok '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'",
+        )
+        self.assertEqual(found, [
+            ("regex", "unclassifiable", "$1"),
+            ("argument", "collation", "'^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'"),
+        ])
+
+    def test_every_parameter_expansion_is_an_expansion(self):
+        for expansion in ("$1", "${1}", "${10}", "$@", "$*", "${@:2}", "$#", "$-", "$?"):
+            with self.subTest(expansion=expansion):
+                self.assertEqual(
+                    settable_value_guards.judge_regex(f'"^{expansion}$"')[0], "unclassifiable"
+                )
+
+    def test_the_function_keyword_form_is_recognized(self):
+        found = self.scan_script(
+            "function fn_form {",
+            '  [[ "$copy" =~ $1 ]]',
+            "}",
+            "fn_form '^[abc]+$'",
+            "function fn_paren() { [[ \"$copy\" =~ $1 ]]; }",
+            "fn_paren '^[a-z]+$'",
+        )
+        self.assertEqual(found, [
+            ("regex", "unclassifiable", "$1"),
+            ("regex", "unclassifiable", "$1"),
+            ("argument", "canonical", "'^[abc]+$'"),
+            ("argument", "collation", "'^[a-z]+$'"),
+        ])
+
+    def test_shift_or_set_in_a_pattern_function_makes_its_pattern_unreviewable(self):
+        for mutation in ("shift", 'set -- "$copy"', "set -- x y"):
+            with self.subTest(mutation=mutation):
+                found = self.scan_script(
+                    "check() {",
+                    f"  {mutation}",
+                    '  [[ "$copy" =~ $1 ]]',
+                    "}",
+                    "check x '^[abc]$'",
+                )
+                self.assertEqual(found, [("regex", "unreviewable", "$1")])
+
+    def test_a_parameter_pattern_outside_any_recognized_function_is_unreviewable(self):
+        self.assertEqual(
+            self.scan_script('[[ "$copy" =~ $1 ]]'),
+            [("regex", "unreviewable", "$1")],
+        )
+
     def test_a_missing_hazard_locale_fails_under_ci_instead_of_skipping(self):
         never = lambda environment: False  # noqa: E731 - the hazard never reproduces
         with tempfile.TemporaryDirectory(prefix="ci-locale-") as temporary:
@@ -432,6 +500,11 @@ class SettableValueGuardTests(unittest.TestCase):
             if guard.verdict == "collation" and guard.source not in GENERATED_AT_PIN
         ]
         self.assertEqual(offenders, [])
+
+    def test_no_guard_is_unreviewable(self):
+        self.assertEqual(
+            [guard.key for guard in self.inventory if guard.verdict == "unreviewable"], []
+        )
 
     def test_every_unclassifiable_guard_is_reviewed_by_its_exact_text(self):
         unclassifiable = {
