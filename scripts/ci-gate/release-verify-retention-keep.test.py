@@ -9,10 +9,12 @@ retention job deletes against. The generated step runs the hook under
 """
 
 from copy import deepcopy
+import importlib.util
 from pathlib import Path
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -20,6 +22,16 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.dont_write_bytecode = True
+_LOCALES_SPEC = importlib.util.spec_from_file_location(
+    "ascii_digit_locales", Path(__file__).with_name("ascii_digit_locales.py")
+)
+ascii_digit_locales = importlib.util.module_from_spec(_LOCALES_SPEC)
+_LOCALES_SPEC.loader.exec_module(ascii_digit_locales)
+# The one guard every retention-window site applies. Digits are enumerated
+# because a [1-9] range is collation-ordered outside the C locale.
+RETENTION_GUARD = "^[123456789][0123456789]*$"
+NON_ASCII_DIGITS = ("\u0663", "\uff13", "1\u0663", "\u0661\u0660")
 VERIFY_STEP = "Run the release verification suite"
 RETENTION_KEY = "CI_PACKAGE_RETENTION_KEEP"
 MODES = {
@@ -105,11 +117,12 @@ def evaluate_step_value(value, variables):
     return variables.get(match.group("name"), "") or match.group("default")
 
 
-def run_verify_step(step, variables, ambient=None):
+def run_verify_step(step, variables, ambient=None, locale=None):
     """Run the step's script with an environment-printing hook; return (result, hook_env).
 
     `ambient` adds variables to the step process, the way an earlier step's
     GITHUB_ENV export or a runner-level variable would; `env -i` must drop them.
+    `locale` replaces the step's locale settings, so a guard is judged under it.
     """
     with tempfile.TemporaryDirectory(prefix="release-verify-retention-") as temporary:
         root = Path(temporary)
@@ -147,6 +160,10 @@ def run_verify_step(step, variables, ambient=None):
             **(ambient or {}),
         }
         environment.pop(RETENTION_KEY, None)
+        if locale is not None:
+            for key in [key for key in environment if key.startswith("LC_") or key == "LOCPATH"]:
+                del environment[key]
+            environment.update(locale)
         retention = evaluate_step_value((step.get("env") or {}).get(RETENTION_KEY), variables)
         if retention is not None:
             environment[RETENTION_KEY] = retention
@@ -175,7 +192,23 @@ class ReleaseVerifyRetentionKeepTests(unittest.TestCase):
         contract_sha = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
         ).strip()
-        cls.steps = {mode: verify_step(generate(mode, contract_sha)) for mode in MODES}
+        cls.workflows = {mode: generate(mode, contract_sha) for mode in MODES}
+        cls.steps = {mode: verify_step(workflow) for mode, workflow in cls.workflows.items()}
+        cls.locale_build = tempfile.TemporaryDirectory(prefix="retention-guard-locales-")
+        cls.locales, cls.missing_locale = ascii_digit_locales.guard_locales(cls.locale_build.name)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.locale_build.cleanup()
+
+    def retention_steps(self):
+        """Yield (workflow path, retention job, retention step) for each retention site."""
+        for workflow, step_name in RETENTION_STEPS.items():
+            document = yaml.safe_load((ROOT / workflow).read_text(encoding="utf-8"))
+            job = document["jobs"]["retention"]
+            matches = [step for step in job["steps"] if step.get("name") == step_name]
+            self.assertEqual(len(matches), 1, f"expected one {step_name!r} step in {workflow}")
+            yield workflow, job, matches[0]
 
     def test_hook_receives_the_default_retention_window_when_the_org_variable_is_unset(self):
         for mode, step in self.steps.items():
@@ -194,16 +227,36 @@ class ReleaseVerifyRetentionKeepTests(unittest.TestCase):
                 self.assertEqual(hook_env.get(RETENTION_KEY), "7")
 
     def test_an_invalid_org_retention_window_fails_closed_before_the_hook_runs(self):
+        invalid = ("0", "-1", "03", "abc", "1.5", " 3", "3 ", "1e3", *NON_ASCII_DIGITS)
+        cases = [
+            (label, locale, mode, step, value)
+            for label, locale in self.locales.items()
+            for mode, step in self.steps.items()
+            for value in invalid
+        ]
+        for label, locale, mode, step, value in cases:
+            with self.subTest(locale=label, mode=mode, value=value):
+                result, hook_env = run_verify_step(
+                    step, variables={RETENTION_KEY: value}, locale=locale
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(
+                    "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer",
+                    result.stdout + result.stderr,
+                )
+                self.assertIsNone(hook_env, "the hook ran with an invalid retention window")
+        if self.missing_locale:
+            self.skipTest(self.missing_locale)
+
+    def test_every_retention_guard_site_is_the_canonical_ascii_guard(self):
+        # Literal, not behavioral: a reverted [1-9] range passes every value
+        # under C.UTF-8, so only the spelling proves the guard in all locales.
         for mode, step in self.steps.items():
-            for value in ("0", "-1", "03", "abc", "1.5", " 3", "3 ", "٣", "1e3"):
-                with self.subTest(mode=mode, value=value):
-                    result, hook_env = run_verify_step(step, variables={RETENTION_KEY: value})
-                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-                    self.assertIn(
-                        "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer",
-                        result.stdout + result.stderr,
-                    )
-                    self.assertIsNone(hook_env, "the hook ran with an invalid retention window")
+            with self.subTest(site=mode):
+                self.assertEqual(guard_pattern(step["run"], RETENTION_KEY), RETENTION_GUARD)
+        for workflow, _job, step in self.retention_steps():
+            with self.subTest(site=workflow):
+                self.assertEqual(guard_pattern(step["run"], "RETENTION_KEEP"), RETENTION_GUARD)
 
     def test_the_smallest_and_a_large_window_reach_the_hook_unchanged(self):
         for mode, step in self.steps.items():
@@ -243,19 +296,30 @@ class ReleaseVerifyRetentionKeepTests(unittest.TestCase):
                 self.assertEqual(set(hook_env), set(PRIOR_HOOK_ENVIRONMENT[mode] | {RETENTION_KEY}))
 
     def test_retention_jobs_and_the_verify_step_read_one_window_through_one_guard(self):
-        verify_value = self.steps["release-node"]["env"][RETENTION_KEY]
-        verify_guard = guard_pattern(self.steps["release-node"]["run"], RETENTION_KEY)
-        for workflow, step_name in RETENTION_STEPS.items():
-            with self.subTest(workflow=workflow):
-                document = yaml.safe_load((ROOT / workflow).read_text(encoding="utf-8"))
-                matches = [
-                    step for step in document["jobs"]["retention"]["steps"]
-                    if step.get("name") == step_name
-                ]
-                self.assertEqual(len(matches), 1, f"expected one {step_name!r} step")
-                retention = matches[0]
-                self.assertEqual(retention["env"]["RETENTION_KEEP"], verify_value)
-                self.assertEqual(guard_pattern(retention["run"], "RETENTION_KEEP"), verify_guard)
+        sites = {
+            mode: (step["env"][RETENTION_KEY], guard_pattern(step["run"], RETENTION_KEY))
+            for mode, step in self.steps.items()
+        }
+        for workflow, _job, step in self.retention_steps():
+            sites[workflow] = (
+                step["env"]["RETENTION_KEEP"], guard_pattern(step["run"], "RETENTION_KEEP")
+            )
+        self.assertEqual(len(sites), 5)
+        self.assertEqual(
+            {site: value for site, value in sites.items()},
+            {site: sites["release-node"] for site in sites},
+        )
+
+    def test_no_job_reading_the_window_declares_an_environment_that_could_rebind_it(self):
+        # An environment-scoped variable overrides the repository and
+        # organization value for that job alone, which would split one window
+        # into two between the verify hook and the retention job.
+        for mode, workflow in self.workflows.items():
+            with self.subTest(site=mode):
+                self.assertNotIn("environment", workflow["jobs"]["verify"])
+        for workflow, job, _step in self.retention_steps():
+            with self.subTest(site=workflow):
+                self.assertNotIn("environment", job)
 
 
 if __name__ == "__main__":
