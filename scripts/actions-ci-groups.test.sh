@@ -327,14 +327,18 @@ else:
 # group, which holds nothing else.
 #
 # Membership is derived from the importers, never from the rows: every tracked
-# file under scripts/ that imports ascii_digit_locales -- `import`, `from ...
-# import`, `__import__(...)` or `importlib.import_module(...)` -- must be
-# exactly the set of scripts the locale-collation rows run. Deriving it from the
-# rows instead (asking "does this row's script import the helper?") passes
-# vacuously when a row is deleted or an import is respelled. A file that names
-# the helper in a way this scan cannot classify fails closed.
+# Python file a row could run (anywhere in the repository) that imports
+# ascii_digit_locales -- `import`, `from ... import`, `__import__(...)` or
+# `importlib.import_module(...)` -- must be exactly the set of scripts the
+# locale-collation rows run. Deriving it from the rows instead (asking "does
+# this row's script import the helper?") passes vacuously when a row is deleted
+# or an import is respelled. A file that names the helper in a way this scan
+# cannot classify fails closed. Each row's scripts are resolved as bash would
+# run them -- quoted, absolute, or relative after `cd` -- and a row whose
+# executed script cannot be resolved to a scanned, tracked file fails.
 import ast
 import pathlib
+import posixpath
 import re
 import subprocess
 
@@ -349,11 +353,22 @@ LOCALE_NON_IMPORTERS = {
     "scripts/actions-ci-groups.test.sh",
 }
 repository_root = pathlib.Path(sys.argv[2]).resolve().parent.parent
+sys.path.insert(0, str(repository_root / "scripts"))
+import shell_words  # noqa: E402
+
+# A row can run any tracked file, so the scan covers every tracked source a row
+# could execute -- not only scripts/ -- plus every other file under scripts/.
+# A row whose script lies outside these roots fails rather than going unscanned.
+SCANNED_SUFFIXES = (".py", ".sh", ".bash", ".js", ".mjs", ".cjs")
+
+
+def scanned(path):
+    return path.startswith("scripts/") or path.endswith(SCANNED_SUFFIXES)
 
 
 def tracked_script_sources():
     listing = subprocess.run(
-        ["git", "-C", str(repository_root), "ls-files", "-z", "--", "scripts"],
+        ["git", "-C", str(repository_root), "ls-files", "-z"],
         capture_output=True,
         text=True,
     )
@@ -362,7 +377,7 @@ def tracked_script_sources():
             "git ls-files failed, so the locale-helper importers could not be read: "
             + listing.stderr.strip()
         )
-    paths = sorted(entry for entry in listing.stdout.split("\0") if entry)
+    paths = sorted(entry for entry in listing.stdout.split("\0") if entry and scanned(entry))
     if LOCALE_HELPER not in paths:
         raise SystemExit(f"{LOCALE_HELPER} is not tracked; the scan root is wrong")
     return {
@@ -436,8 +451,109 @@ def locale_importers(sources):
     return importers
 
 
-def row_scripts(command):
-    return set(re.findall(r"scripts/\S+?\.(?:py|sh)(?=\s|$)", command))
+CONTROL_OPERATORS = {"&&", "||", ";", "|", "|&", "&", "(", ")"}
+REDIRECTION = re.compile(r"^[0-9]*[<>&]*[<>][<>&|]*$")
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+UNRESOLVABLE_CHARACTERS = set("$`*?[]{}~")
+# Interpreter options a row may pass; anything else (`-c`, `-m`, `-e`) runs code
+# that is not a tracked script, so the row cannot be classified.
+INTERPRETER_OPTIONS = {
+    "bash": set(),
+    "python3": {"-I", "-u", "-B", "-E", "-s", "-S"},
+    "node": {"--test"},
+}
+
+
+def simple_commands(tokens):
+    """Split a row's words at control operators, dropping redirections."""
+    current = []
+    skip_target = False
+    for token in tokens:
+        if skip_target:
+            skip_target = False
+        elif token in CONTROL_OPERATORS:
+            yield current
+            current = []
+        elif REDIRECTION.match(token):
+            skip_target = True
+        else:
+            current.append(token)
+    yield current
+
+
+def resolve_row_path(directory, word, command):
+    """Repository-relative path of `word` as bash would open it from `directory`."""
+    if not word or UNRESOLVABLE_CHARACTERS & set(word):
+        raise AssertionError(f"row path {word!r} cannot be resolved statically: {command}")
+    path = pathlib.PurePosixPath(word)
+    if path.is_absolute():
+        try:
+            path = path.relative_to(repository_root)
+        except ValueError:
+            raise AssertionError(
+                f"row path {word!r} lies outside the repository: {command}"
+            ) from None
+    else:
+        path = directory / path
+    normalized = posixpath.normpath(str(path))
+    if normalized == ".." or normalized.startswith("../"):
+        raise AssertionError(f"row path {word!r} lies outside the repository: {command}")
+    return normalized
+
+
+def row_scripts(command, sources):
+    """Every tracked script a manifest row executes, resolved as bash would.
+
+    Each simple command must be a `cd` or a recognized interpreter running one
+    script, so a row whose executed script cannot be named is unclassifiable
+    and fails rather than passing for want of a match.
+    """
+    body = command
+    while body.startswith("@"):
+        _directive, _separator, body = body.partition(" ")
+    try:
+        tokens = shell_words.words(body)
+    except ValueError as error:
+        raise AssertionError(f"row cannot be parsed: {command}: {error}") from error
+    directory = pathlib.PurePosixPath(".")
+    scripts = set()
+    for words in simple_commands(tokens):
+        while words and ASSIGNMENT.match(words[0]):
+            words = words[1:]
+        if not words:
+            raise AssertionError(f"row has an empty command: {command}")
+        head, arguments = words[0], words[1:]
+        if head == "cd":
+            if len(arguments) != 1:
+                raise AssertionError(f"row cd has no single target: {command}")
+            directory = pathlib.PurePosixPath(
+                resolve_row_path(directory, arguments[0], command)
+            )
+            continue
+        if head in INTERPRETER_OPTIONS:
+            options = INTERPRETER_OPTIONS[head]
+            while arguments and arguments[0] in options:
+                arguments = arguments[1:]
+            if not arguments or arguments[0].startswith("-"):
+                raise AssertionError(
+                    f"row runs {head} without a script this contract can name: {command}"
+                )
+            word = arguments[0]
+        elif "/" in head:
+            word = head
+        else:
+            raise AssertionError(
+                f"row runs {head!r}, which this contract cannot resolve to a script: {command}"
+            )
+        script = resolve_row_path(directory, word, command)
+        if script not in sources:
+            raise AssertionError(
+                f"row script {script} is not a tracked file in the scanned roots: {command}"
+            )
+        scripts.add(script)
+    if not scripts:
+        raise AssertionError(f"row names no script: {command}")
+    return scripts
 
 
 def executed_groups(candidate):
@@ -492,10 +608,8 @@ def validate_locale_collation(candidate, candidate_manifest, sources=script_sour
         raise AssertionError(f"no tracked script imports {LOCALE_MODULE}")
     locale_scripts = set()
     for group, command in manifest_rows(candidate_manifest):
-        scripts = row_scripts(command)
+        scripts = row_scripts(command, sources)
         if group == LOCALE_GROUP:
-            if not scripts:
-                raise AssertionError(f"locale-collation row names no script: {command}")
             locale_scripts |= scripts
         elif scripts & importers:
             raise AssertionError(
@@ -611,6 +725,68 @@ shell_mention["scripts/ci-gate/locale-probe.test.sh"] = (
     "python3 - <<'EOF'\nimport ascii_digit_locales\nEOF\n"
 )
 expect_locale_failure("shell-embedded locale-helper import", document, manifest_text, shell_mention)
+
+# A row runs whatever script bash resolves, however the path is spelled. Each
+# spelling is a positive control in locale-collation and a failure in a fleet
+# group, so the failure is the move, not an unresolvable spelling.
+retention_parent, retention_name = retention_script.rsplit("/", 1)
+for spelling, command in {
+    "quoted": f'python3 "{retention_script}"',
+    "single-quoted": f"python3 '{retention_script}'",
+    "dot-relative": f"python3 ./{retention_script}",
+    "absolute": f"python3 {repository_root}/{retention_script}",
+    "relative after cd": f"cd {retention_parent} && python3 {retention_name}",
+    "relative after quoted cd": f'cd "{retention_parent}"; python3 ./{retention_name}',
+    "flagged interpreter": f"python3 -I {retention_script} >/dev/null 2>&1",
+}.items():
+    validate_locale_collation(
+        document,
+        manifest_text.replace(retention_row, f"{LOCALE_GROUP}\t{command}\n", 1),
+    )
+    expect_locale_failure(
+        f"{spelling} importer path moved to a fleet group",
+        document,
+        manifest_text.replace(retention_row, f"{LOCALE_GROUP}\tpython3 {retention_script}\nplatform\t{command}\n", 1),
+    )
+for spelling, command in {
+    "variable script path": 'python3 "$SCRIPT"',
+    "inline python": "python3 -c 'import sys'",
+    "module invocation": "python3 -m unittest",
+    "unknown command": "make test",
+    "glob script path": "bash scripts/ci-gate/*.test.sh",
+    "cd to a variable": 'cd "$HOME" && bash scripts/actions-ci-group-output.test.sh',
+    "no command": "@budget=60",
+}.items():
+    expect_locale_failure(
+        f"fleet row with an unresolvable {spelling}",
+        document,
+        manifest_text + f"platform\t{command}\n",
+    )
+
+# Importers outside scripts/ are scanned too, and a row may not run a script
+# the scan does not cover.
+action_probe = ".github/actions/zzprobe/zz.test.py"
+action_importer = dict(script_sources)
+action_importer[action_probe] = (
+    "import pathlib, sys\n"
+    "sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / 'scripts/ci-gate'))\n"
+    "import ascii_digit_locales\n"
+)
+expect_locale_failure(
+    "importer outside scripts/ in a fleet group",
+    document,
+    manifest_text + f"platform\tpython3 {action_probe}\n",
+    action_importer,
+)
+expect_locale_failure(
+    "unregistered importer outside scripts/", document, manifest_text, action_importer
+)
+for location in ("/tmp/zz.test.py", "scripts/ci-gate/zz-untracked.test.py", "../zz.test.py"):
+    expect_locale_failure(
+        f"fleet row script {location} outside the scanned roots",
+        document,
+        manifest_text + f"platform\tpython3 {location}\n",
+    )
 
 required = jobs["shell-tests"]
 assert required["needs"] == [
