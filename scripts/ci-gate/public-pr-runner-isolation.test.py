@@ -1274,4 +1274,84 @@ expect(
     *REVIEWED_ARGS,
 )
 
+
+# A local action binds the review even when the checkout itself is only
+# justified as dynamic: its directory, nested local actions, and files it
+# reaches through github.action_path stay in the digest.
+DYNAMIC_ACTION_JOB = {
+    "target.yml": f"""
+        on: pull_request_target
+        jobs:
+          review:
+            runs-on: {TRUSTED_SELECTOR}
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  ref: ${{{{ github.event.pull_request.base.sha }}}}
+              - uses: ./.github/actions/x
+    """,
+    ".github/actions/x/action.yml": """
+        name: x
+        runs:
+          using: composite
+          steps:
+            - uses: ./.github/actions/y
+            - shell: bash
+              run: bash "${{ github.action_path }}/../shared/run.sh"
+    """,
+    ".github/actions/y/action.yml": """
+        name: y
+        runs:
+          using: composite
+          steps:
+            - shell: bash
+              run: echo y
+    """,
+    ".github/actions/shared/run.sh": "echo shared\n",
+}
+DYNAMIC_ACTION_ROW = review_row(DYNAMIC_ACTION_JOB, "target.yml [pull_request_target]", "review").rstrip("\n") + (
+    "\tdynamic: the full base checkout is justified for the fixture\n"
+)
+expect(
+    with_review(DYNAMIC_ACTION_JOB, DYNAMIC_ACTION_ROW),
+    0,
+    ("REVIEWED",),
+    "a dynamic full checkout using unchanged local actions passes",
+    *REVIEWED_ARGS,
+)
+for edited, content, label in (
+    (".github/actions/x/action.yml", DYNAMIC_ACTION_JOB[".github/actions/x/action.yml"] + "# npm test\n", "the local action"),
+    (".github/actions/y/action.yml", DYNAMIC_ACTION_JOB[".github/actions/y/action.yml"].replace("echo y", "npm test"), "a nested local action"),
+    (".github/actions/shared/run.sh", "npm test\n", "a file reached through github.action_path"),
+):
+    expect(
+        with_review({**DYNAMIC_ACTION_JOB, edited: content}, DYNAMIC_ACTION_ROW),
+        1,
+        ("STALE REVIEWED", "content changed"),
+        f"editing {label} turns a dynamic entry stale",
+        *REVIEWED_ARGS,
+    )
+GLOB_JOB = {
+    "target.yml": f"""
+        on: pull_request_target
+        jobs:
+          review:
+            runs-on: {TRUSTED_SELECTOR}
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  sparse-checkout: scripts/*.sh
+                  sparse-checkout-cone-mode: false
+              - run: bash scripts/a.sh
+    """,
+    "scripts/a.sh": "echo a\n",
+}
+expect(
+    with_review({**GLOB_JOB, "scripts/a.sh": "npm test\n"}, review_row(GLOB_JOB, "target.yml [pull_request_target]", "review")),
+    1,
+    ("STALE REVIEWED", "content changed"),
+    "a file matched by a non-cone sparse-checkout glob is digested",
+    *REVIEWED_ARGS,
+)
+
 sys.exit(1 if failures else 0)
