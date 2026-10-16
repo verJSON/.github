@@ -92,3 +92,7 @@ ordinary CI or automation selecting it. Adding a model or changing rates
 requires a code-reviewed pricing-table version rather than optimistic caller
 inputs. The byte bound can underutilize a budget for non-ASCII or token-dense
 input; that conservatism is the cost of a hard ceiling without a tokenizer.
+
+## 2026-10-15 refinement — budgets are ASCII amounts in every locale
+
+This ADR requires malformed budgets to fail closed. The budget guards in `ai-review-merge.yml` and `gate-rearm.yml` used `[1-9]`/`[0-9]` bash ranges, which follow locale collation. Under en_US.UTF-8 they admitted Arabic-Indic and fullwidth digits, and the follow-up `awk 'b > 0'` then compared the value as a string and accepted it. All four guards now spell `^(0|[123456789][0123456789]{0,2})(\.[0123456789]{1,2})?$`, which caps a budget at 999.99, and compare `b + 0 > 0` numerically. `scripts/ci-gate/settable-numeric-guards.test.py` runs each workflow's own guard block under C.UTF-8 and en_US.UTF-8. The same change enumerates the AI review App, installation, check, and pull-request ID guards. `gate-rearm.yml` runs from organization ruleset 20722935's stored SHA, so its half of this fix takes effect only after that ruleset is rotated to the merge commit. Recorded in [ADR 0220](../0220-confine-release-credentials-to-dependency-acquisition/README.md)'s 2026-10-15 refinement with the rest of the defect class.
