@@ -2,6 +2,7 @@
 import copy
 from datetime import datetime, timezone
 import hashlib
+import io
 import importlib.util
 import json
 import re
@@ -589,6 +590,34 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
             ):
                 self.assertEqual(0, MODULE.main(["dry-run", "--workflow-sha", SHA]))
             admit.assert_called_once_with(PREVIOUS, SHA)
+            mutate.assert_not_called()
+
+    def test_dry_run_reports_the_resolved_state_and_predecessor(self):
+        metadata = {"id": 9, "source_type": "Organization", "source": "Verjson"}
+        expected = MODULE.render_payload(self.contract, SHA)
+        staged = expected | {"enforcement": "disabled"}
+        previous = MODULE.render_payload(self.contract, PREVIOUS, include_freshness=False)
+        cases = (
+            ([{"id": 9}], expected | metadata,
+             f"ready: organization ruleset 9 already runs {SHA}"),
+            ([{"id": 9}], staged | metadata,
+             f"ready: organization ruleset 9 is staged disabled at {SHA}; apply activates it"),
+            ([{"id": 9}], previous | metadata,
+             f"ready: rotate organization ruleset 9 from admitted revision {PREVIOUS} to {SHA}"),
+            ([], None,
+             f"ready: no organization ruleset; apply creates it disabled at {SHA}, then activates it"),
+        )
+        for named, live, message in cases:
+            with (
+                self.subTest(message=message),
+                mock.patch.object(MODULE, "discover_state", return_value=(named, HEAD)),
+                mock.patch.object(MODULE, "gh_json", return_value=live),
+                mock.patch.object(MODULE, "admit_previous_revision"),
+                mock.patch.object(MODULE, "gh_json_input") as mutate,
+                mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                self.assertEqual(0, MODULE.main(["dry-run", "--workflow-sha", SHA]))
+            self.assertEqual(message + "\n", stdout.getvalue())
             mutate.assert_not_called()
 
     def test_apply_refuses_an_unadmitted_predecessor_before_any_mutation(self):

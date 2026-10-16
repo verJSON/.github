@@ -686,6 +686,23 @@ def validate_freshness_check(check_runs, contract, head_sha, workflow_run_id, no
             "strict admission check predates ruleset activation")
 
 
+def describe_dry_run(named, expected, staged, contract, target_sha):
+    if not named:
+        return (f"ready: no organization ruleset; apply creates it disabled at {target_sha}, "
+                "then activates it")
+    ruleset_id, state, previous = resolve_existing_org_rule(
+        named, expected, staged, contract, target_sha
+    )
+    if state == "active":
+        return f"ready: organization ruleset {ruleset_id} already runs {target_sha}"
+    if state == "disabled":
+        return (f"ready: organization ruleset {ruleset_id} is staged disabled at {target_sha}; "
+                "apply activates it")
+    previous_sha = revision.bound_workflow_sha(previous, require)
+    return (f"ready: rotate organization ruleset {ruleset_id} from admitted revision "
+            f"{previous_sha} to {target_sha}")
+
+
 def audit(contract):
     named = list_named_rulesets(contract)
     require(len(named) == 1, "canonical organization ruleset is not uniquely present")
@@ -725,10 +742,7 @@ def main(arguments=None):
         return 0
     named, consumer_sha = discover_state(contract, args.workflow_sha)
     if args.mode == "dry-run":
-        if named:
-            resolve_existing_org_rule(
-                named, expected, staged, contract, args.workflow_sha
-            )
+        print(describe_dry_run(named, expected, staged, contract, args.workflow_sha))
         return 0
     if args.mode == "snapshot":
         runs = gh_json(
