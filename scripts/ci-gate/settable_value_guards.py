@@ -399,6 +399,12 @@ def _regex_variables(script):
     }
 
 
+# A generation-time substitution in a generator heredoc: its emitted text is
+# unknown when the generator is scanned.
+GENERATION_MARK = "\u27e6gen:"
+GENERATION_TIME = GENERATION_MARK + "{}\u27e7"
+
+
 def logical_lines(script):
     """Join continuation lines so a test or pipeline split across lines is one line.
 
@@ -433,7 +439,7 @@ def guards_in_script(source, script):
             continue
         for subject, operator, pattern in _test_operands(line):
             if operator == "=~":
-                if "[" not in pattern and "$" not in pattern:
+                if "[" not in pattern and "$" not in pattern and GENERATION_MARK not in pattern:
                     continue
                 verdict, resolved = judge_regex(pattern, held)
                 yield Guard(source, "regex", subject, pattern, verdict, resolved)
@@ -460,7 +466,7 @@ def guards_in_script(source, script):
                 yield Guard(source, "grep", "<grep>", line[match.start():].strip(), "unclassifiable")
                 continue
             for pattern in patterns:
-                if "[" not in pattern and "$" not in pattern:
+                if "[" not in pattern and "$" not in pattern and GENERATION_MARK not in pattern:
                     continue
                 verdict, resolved = judge_regex(pattern)
                 yield Guard(source, "grep", "<grep>", pattern, verdict, resolved)
@@ -534,14 +540,33 @@ def heredoc_bodies(text):
             body.append(candidate)
         emitted = "\n".join(body)
         if not quoted:
+            # An unescaped expansion is substituted when the generator runs, so
+            # its emitted text is unknown here: mark it. An escaped one is
+            # emitted as written and expands when the generated script runs.
+            emitted = re.sub(
+                r"(?<!\\)\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))",
+                lambda match: GENERATION_TIME.format(match.group(1) or match.group(2)),
+                emitted,
+            )
             emitted = re.sub(r"\\([$`\\])", r"\1", emitted)
         yield emitted
 
 
+
+
 def scan_generator_heredocs(source, text):
-    """Scan every heredoc a generator script emits as shell text."""
+    """Scan every heredoc a generator script emits as shell text.
+
+    A guard whose text includes a generation-time substitution cannot be
+    judged from the generator, so it is unclassifiable unless it is already
+    a collation failure on its static text.
+    """
     for body in heredoc_bodies(text):
-        yield from guards_in_script(source, body)
+        for guard in guards_in_script(source, body):
+            if GENERATION_MARK in guard.pattern and guard.verdict == "canonical":
+                guard = Guard(guard.source, guard.kind, guard.subject, guard.pattern,
+                              "unclassifiable", guard.resolved)
+            yield guard
 
 
 # Generators whose emitted text is scanned from their heredocs. The changelog

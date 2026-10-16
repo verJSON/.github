@@ -50,8 +50,35 @@ REASON_P = "consumer_pattern is a literal step-name pattern each caller passes. 
 REASON_W = "reusable_workflow is one of two literal workflow file names assigned just above. "
 REASON_K = "key is a manifest key the same function first requires to match a spelled-out identifier class. "
 REASON_L = "the two legacy token names are fixed literals, split only to keep them out of secret scanners. "
+REASON_GEN_REF = "ref is substituted at generation; the generator first requires it to be 40 lowercase hex. "
+REASON_GEN_SHA = "the value is substituted at generation from sha256sum output: 64 lowercase hex. "
+REASON_GEN_CLEANUP = "the value is substituted at generation from a jq boolean check: true or false. "
 CT = "<gen-changelog-caller contract-test>"
 REVIEWED_UNCLASSIFIABLE = {
+    "scripts/gen-container-candidate.sh <heredoc> grep <grep> '# Contract: ⟦gen:ref⟧'":
+        REASON_GEN_REF,
+    "scripts/gen-container-candidate.sh <heredoc> grep <grep> '# Contract: ⟦gen:ref⟧'":
+        REASON_GEN_REF,
+    "scripts/gen-container-candidate.sh <heredoc> grep <grep> '# Contract: ⟦gen:ref⟧'":
+        REASON_GEN_REF,
+    "scripts/gen-container-candidate.sh <heredoc> grep <grep> 'uses: Verjson/.github/.github/workflows/container-candidate.yml@⟦gen:ref⟧'":
+        REASON_GEN_REF,
+    "scripts/gen-container-candidate.sh <heredoc> grep <grep> 'uses: Verjson/.github/.github/workflows/container-candidate-publish.yml@⟦gen:ref⟧'":
+        REASON_GEN_REF,
+    "scripts/gen-container-candidate.sh <heredoc> grep <grep> 'contract-ref: ⟦gen:ref⟧'":
+        REASON_GEN_REF,
+    "scripts/gen-container-candidate.sh <heredoc> grep <grep> 'cleanup-unused-docker-images: ⟦gen:cleanup_unused_docker_images⟧'":
+        REASON_GEN_CLEANUP,
+    "scripts/gen-container-candidate.sh <heredoc> grep <grep> 'acquisition-sha256: ⟦gen:acquisition_sha256⟧'":
+        REASON_GEN_SHA,
+    "scripts/gen-container-candidate.sh <heredoc> grep <grep> 'transfer-sha256: ⟦gen:transfer_sha256⟧'":
+        REASON_GEN_SHA,
+    "scripts/gen-container-candidate.sh <heredoc> grep <grep> 'disk-sha256: ⟦gen:disk_sha256⟧'":
+        REASON_GEN_SHA,
+    "scripts/gen-container-candidate.sh <heredoc> grep <grep> 'retry-sha256: ⟦gen:retry_sha256⟧'":
+        REASON_GEN_SHA,
+    "scripts/gen-container-candidate.sh <heredoc> grep <grep> 'provenance-sha256: ⟦gen:provenance_sha256⟧'":
+        REASON_GEN_SHA,
     '.github/workflows/node-ci-protected.yml grep <grep> "^${key}="':
         REASON_K,
     '.github/workflows/node-ci.yml grep <grep> "^${key}="':
@@ -347,6 +374,7 @@ class SettableValueGuardTests(unittest.TestCase):
             "      - run: |",
             '          [[ "\\$REF" =~ ^[0-9a-f]{40}\\$ ]]',
             "          [[ \"\\$NAME\" =~ ^[abc]+\\$ ]]",
+            "          [[ \"\\$NAME\" =~ ^${pattern}\\$ ]]",
             "EOF",
             "cat <<'PY'",
             "case \"$x\" in [a-z]*) ;; esac",
@@ -359,6 +387,7 @@ class SettableValueGuardTests(unittest.TestCase):
         self.assertEqual(found, [
             ("^[0-9a-f]{40}$", "collation"),
             ("^[abc]+$", "canonical"),
+            ("^\u27e6gen:pattern\u27e7$", "unclassifiable"),
             ("[a-z]*", "collation"),
         ])
 
