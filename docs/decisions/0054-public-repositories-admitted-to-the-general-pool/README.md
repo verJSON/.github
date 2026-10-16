@@ -151,3 +151,13 @@ Set group `DigitalOcean` back to `visibility: selected` /
 `allows_public_repositories: false`. Every public Verjson repository then queues
 indefinitely again on any `[self-hosted, general]` job, so the rollback is only
 safe together with routing public repositories to the hosted fast lane.
+
+## 2026-10-15 amendment — public pull-request code leaves the pool
+
+[ADR 0235](../0235-public-pull-request-code-uses-ephemeral-runners/README.md)
+narrows the "Residual risk" accepted above. Public repositories keep their
+admission to the general pool for trusted events, but no default path may place
+pull-request code there. `scripts/ci-gate/public-pr-runner-isolation.py` checks
+that for this repository, and
+[#1831](https://github.com/verJSON/.github/issues/1831) tracks the remaining
+workflows and the owner's runner-group admission decision.

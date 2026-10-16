@@ -15,4 +15,5 @@ runner through a variable fallback or a caller-supplied input
 
 `scripts/ci-gate/public-pr-runner-isolation.pending.tsv` ratchets
 `actionlint.yml` and `container-candidate.yml` as pending.
-Their selectors are pinned in `hosted-selector-policy.py` and change after #1826.
+Their selectors are pinned in `hosted-selector-policy.py` and change after #1826;
+#1831 tracks them, the adopter reusable workflows, and live lane enforcement.

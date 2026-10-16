@@ -2,8 +2,9 @@
 
 - **Date:** 2026-10-15
 - **Status:** Accepted
-- **Issue:** none. This is issue-less security work. The finding was verified
-  against the live organization on 2026-10-15 and is tracked in
+- **Issue:** [verJSON/.github#1831](https://github.com/verJSON/.github/issues/1831)
+  tracks the deferred work. The finding was verified against the live
+  organization on 2026-10-15 and fixed for `actions-ci.yml` in
   [verJSON/.github#1827](https://github.com/verJSON/.github/pull/1827).
 - **Extends:** [ADR 0147](../0147-route-untrusted-ci-to-ephemeral-hosted-runners/README.md),
   which made the untrusted lane ephemeral
@@ -12,6 +13,12 @@
   persistent pool
 - **Supersedes in part:** [ADR 0047](../0047-fast-lane-runner-variable/README.md),
   for `actions-ci.yml` only
+- **Related:** ADR 0234 in [#1826](https://github.com/verJSON/.github/pull/1826)
+  (`docs/decisions/0234-route-secretless-trusted-ref-builds-to-the-hosted-lane/`).
+  Its trade-off paragraph cites ADR 0147's rollback of `CI_LANE_UNTRUSTED` to
+  `["self-hosted","general"]`. Decision 2 below withdraws that rollback, so
+  0234's fail-closed eligibility guard is the expected outcome of an attempted
+  persistent rollback, not an available operating state.
 
 ## Context
 
@@ -94,6 +101,13 @@ or a literal GitHub-hosted image.
    The untrusted family takes the hosted value; every other variable takes a
    persistent value. A chain such as `vars.CI_LANE_UNTRUSTED ||
    vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]'` is therefore a violation.
+   A free reference compared to a literal (`vars.MODE == 'shared'`) is also
+   tried as that literal. Any other comparison over a free reference (against
+   another reference, a function result, or an ordering) evaluates both ways.
+   Only standard GitHub-hosted image names count as ephemeral (`ubuntu-latest`,
+   `ubuntu-NN.NN[-arm]`, `windows-latest|YYYY|11-arm`,
+   `macos-latest|NN[-intel]`), because a self-hosted runner can carry any
+   custom label.
    A reusable input that the caller sets from an expression is tried as an
    adversarial value, because a fork can edit the caller. A remote reusable
    call that a pull request can reach, or any selector the checker cannot
@@ -120,8 +134,23 @@ or a literal GitHub-hosted image.
    - `container-candidate.yml`: replace the final term with
      `github.event_name == 'pull_request' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]')`.
 
-   The checker reports a fixed entry that is still listed as `STALE PENDING`
-   and fails. It also fails on any unlisted job that violates the rule.
+   Each pending row carries the SHA-256 of the job's `runs-on` value. A listed
+   job whose selector changes is a violation again, so a row cannot mask a
+   worse selector. The checker reports a fixed entry that is still listed as
+   `STALE PENDING` and fails. It also fails on any unlisted job that violates
+   the rule.
+5. **Scope of the checker.** `pull_request` jobs are always checked.
+   `pull_request_target` runs the base workflow with a privileged token, so it
+   is dangerous exactly when a job puts head-controlled bytes on disk. Such jobs
+   are held to the same rule: a checkout whose `ref` or `repository` is not a
+   base-only value, `gh pr checkout`, or a git fetch/checkout-class command in a
+   job that names a head-derived value. Jobs that only read head metadata for
+   API calls are not. A remote callee under `pull_request_target` is printed as
+   `NOT FOLLOWED` rather than passing silently; today that is `gate-rearm.yml`'s
+   pinned `app-key-environment.yml`. **`workflow_run` and `issue_comment`
+   workflows are out of the checker's scope**, as are artifacts a privileged
+   workflow downloads from an untrusted run. None of them exists in this
+   repository today. Adding one requires extending the checker first.
 
 ### What this decision cannot do
 
@@ -152,9 +181,9 @@ whether to take this option.
   slots.
 - The untrusted lane can no longer be rolled back to the persistent pool.
   `runner-admission-reconcile.sh` still accepts a persistent untrusted selector,
-  so live enforcement of that rule is a follow-up recorded in #1827.
+  so live enforcement of that rule is a follow-up tracked in #1831.
 - The same guarantee for public adopters' calls to the canonical reusable
-  workflows is a follow-up recorded in #1827. Those include `node-ci`, `ui-ci`,
+  workflows is a follow-up tracked in #1831. Those include `node-ci`, `ui-ci`,
   `helm-ci`, `pulumi-ci`, `generated-artifacts`, `repo-hygiene`, and
   `changelog-validate`. It needs the same event-aware branch and
   `hosted-selector-policy.py` allowlist entries.

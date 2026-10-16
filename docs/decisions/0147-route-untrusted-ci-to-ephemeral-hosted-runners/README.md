@@ -142,3 +142,12 @@ the same selector on merge queues, dispatches, non-default pushes, mismatched
 contract pins, unguarded calls, and unrelated reusable workflows because
 expression shape alone does not prove the called workflow and event preserve
 this trust boundary.
+
+## 2026-10-15 amendment — the persistent rollback is withdrawn
+
+[ADR 0235](../0235-public-pull-request-code-uses-ephemeral-runners/README.md)
+withdraws the Rollback section's restoration of the six untrusted variables to
+`["self-hosted","general"]`. Public pull-request code now depends on the
+untrusted lane being ephemeral, so a rollback target must be GitHub-hosted or a
+dedicated ephemeral pool. Live enforcement in `runner-admission-reconcile.sh` is
+tracked in [#1831](https://github.com/verJSON/.github/issues/1831).
