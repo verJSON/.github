@@ -77,6 +77,16 @@ hosted runner.
    `RUNNER_ENVIRONMENT` checks inside `build-test` remain the second, authoritative
    layer.
 
+   The guard pins the label *shape* (`ubuntu-latest` or `ubuntu-` + two digits, a dot,
+   two digits) rather than an allowlist of released images. An allowlist would turn
+   every new GitHub image into a canonical contract release and a fleet-wide repin
+   before any adopter could move its lane. It would also add no assurance: the exact
+   lane value is already reconciled by `runner-admission-reconcile.sh` (ADR 0147), and
+   the runtime check decides placement authoritatively. The shape is still exact.
+   `ubuntu-2404`, `ubuntu-24.04.1`, `ubuntu-99.99x`, `ubuntu-24.4` and
+   `ubuntu-24.04-arm` are refused. The arm64 image is refused because the sandbox
+   provisioning has only been proven on the standard x64 image.
+
 ### Why `CI_LANE_UNTRUSTED` rather than another hosted selector
 
 - `CI_LANE_UNTRUSTED` is the lane ADR 0147 defines as ephemeral GitHub-hosted and that
@@ -92,12 +102,15 @@ hosted runner.
   `runner-routing-policy.test.sh` and would ignore a provider move that ADR 0040 makes a
   variable flip.
 
-The trade-off is that `CI_LANE_UNTRUSTED` is a variable: ADR 0147's rollback path
-restores it to `["self-hosted","general"]`. Under this decision such a rollback makes
-every secretless call fail in eligibility, before acquisition, instead of placing the
-credentialless build on persistent capacity or failing it late. That is the intended
-fail-closed behavior; a rollback now needs a reviewed alternative for secretless
-adopters rather than silently changing their placement.
+The trade-off is that `CI_LANE_UNTRUSTED` is a variable, so this job's placement moves
+with it. ADR 0235 (`0235-public-pull-request-code-uses-ephemeral-runners`, landing in
+[#1827](https://github.com/verJSON/.github/pull/1827)) withdraws ADR 0147's option of
+restoring the untrusted lane to the persistent `["self-hosted","general"]` pool. Under
+ADR 0235 the lane must stay ephemeral: GitHub-hosted, or a dedicated ephemeral pool the
+reconciler classifies as untrusted. That second option is admissible under ADR 0235 but
+still cannot run a secretless build, because the build needs a GitHub-hosted runner.
+Under this decision the guard refuses such a pool in eligibility. Moving secretless
+builds onto it would need a reviewed change to the hosted-only sandbox requirement.
 
 ## Consequences
 
@@ -126,5 +139,14 @@ runner.
 ## Rollback
 
 Revert the routing and guard together. Reverting only the routing restores the
-unsatisfiable state; reverting only the guard leaves a hosted-lane misconfiguration to
+unsatisfiable state. Reverting only the guard leaves a hosted-lane misconfiguration to
 fail after acquisition.
+
+Rolling the *lane* back is not an available rollback of this decision. ADR 0235
+withdraws ADR 0147's persistent-pool rollback for `CI_LANE_UNTRUSTED`. If the lane
+nevertheless pointed at a self-hosted selector, eligibility would refuse every secretless
+call before acquisition. `build-test` would still be scheduled on that lane, because it
+is `if: always()` so that the required `ci / build-test` context always reports. A
+persistent runner would therefore still pick the job up, and it would then fail at
+`Require completed secretless dependency acquisition`, before checkout. That runner would
+spend a job slot but execute no repository code.
