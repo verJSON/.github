@@ -128,6 +128,87 @@ def classify(pattern):
     return "collation" if any(collation_ordered(e) for e in expressions) else "canonical"
 
 
+EXPANSION = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+
+
+def regex_text(word):
+    """Return (text, expansion names) a regex consumer receives from one shell word.
+
+    Quotes are removed, not replaced: a range inside a double- or single-quoted
+    grep pattern is regex text. In `[[ =~ ]]` bash matches quoted text
+    literally, so judging it as regex text there is deliberately conservative.
+    Each expansion becomes a neutral `X`. Returns None for a word this cannot
+    read (an unterminated quote, a command substitution, a parameter operation).
+    """
+    out, names = [], []
+    index = 0
+    quote = None
+    while index < len(word):
+        char = word[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            else:
+                out.append(char)
+            index += 1
+            continue
+        if char == "'" and quote is None:
+            quote = "'"
+            index += 1
+            continue
+        if char == '"':
+            quote = None if quote == '"' else '"'
+            index += 1
+            continue
+        if char == "\\" and index + 1 < len(word):
+            following = word[index + 1]
+            if quote == '"' and following in '$`"\\':
+                out.append(following)
+            else:
+                out.append(word[index:index + 2])
+            index += 2
+            continue
+        if char == "$" and index + 1 < len(word) and word[index + 1] in "{(`" + "_" + "".join(
+            chr(code) for code in range(65, 91)
+        ) + "".join(chr(code) for code in range(97, 123)):
+            match = EXPANSION.match(word, index)
+            if match is None:
+                return None
+            names.append(match.group(1) or match.group(2))
+            out.append("X")
+            index = match.end()
+            continue
+        if char == "`":
+            return None
+        out.append(char)
+        index += 1
+    if quote is not None:
+        return None
+    return "".join(out), names
+
+
+def judge_regex(word, held=None):
+    """Classify one regex word; return (verdict, resolved text or None)."""
+    parsed = regex_text(word)
+    if parsed is None:
+        return "unclassifiable", None
+    text, names = parsed
+    expressions = bracket_expressions(text)
+    if expressions is None:
+        return "unclassifiable", None
+    if any(collation_ordered(expression) for expression in expressions):
+        return "collation", text
+    if not names:
+        return "canonical", text
+    if held and all(name in held for name in names):
+        # A fragment held in a single-assignment literal is judged as written.
+        resolved = EXPANSION.sub(lambda match: held[match.group(1) or match.group(2)], word)
+        resolved_parsed = regex_text(resolved)
+        if resolved_parsed is not None and not resolved_parsed[1]:
+            return _classify_single_quoted(resolved_parsed[0]), resolved_parsed[0]
+    return "unclassifiable", text
+
+
 def _test_operands(line):
     """Yield (subject, operator, pattern) for each `[[ x OP y ]]` comparison.
 
@@ -257,6 +338,8 @@ def grep_patterns(arguments):
             continue
         if word.startswith("--"):
             name, equals, value = word.partition("=")
+            if name == "--file":
+                return None
             if name == "--fixed-strings":
                 fixed = True
             elif name == "--regexp":
@@ -272,6 +355,8 @@ def grep_patterns(arguments):
             continue
         letters = word[1:]
         for position, letter in enumerate(letters):
+            if letter == "f":
+                return None
             if letter == "F":
                 fixed = True
             if letter == "e" or letter in GREP_ARGUMENT_OPTIONS:
@@ -347,29 +432,16 @@ def guards_in_script(source, script):
         if line.lstrip().startswith("#"):
             continue
         for subject, operator, pattern in _test_operands(line):
-            if operator == "=~" and "$" in pattern:
-                # An unquoted expansion in a regex is regex text, so a fragment
-                # held in a single-assignment literal is judged as written.
-                references = re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", pattern)
-                if references and all(name in held for name in references):
-                    literal = re.sub(
-                        r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?",
-                        lambda match: held[match.group(1)],
-                        pattern,
-                    )
-                    yield Guard(
-                        source, "regex", subject, pattern,
-                        _classify_single_quoted(literal), literal,
-                    )
+            if operator == "=~":
+                if "[" not in pattern and "$" not in pattern:
                     continue
-            if operator != "=~":
-                literal = strip_quoted(pattern)
-                if literal is None or "[" not in literal:
-                    continue
-            elif "[" not in pattern and "$" not in pattern:
+                verdict, resolved = judge_regex(pattern, held)
+                yield Guard(source, "regex", subject, pattern, verdict, resolved)
                 continue
-            kind = "regex" if operator == "=~" else "glob"
-            yield Guard(source, kind, subject, pattern, classify(pattern))
+            literal = strip_quoted(pattern)
+            if literal is None or "[" not in literal:
+                continue
+            yield Guard(source, "glob", subject, pattern, classify(pattern))
     for subject, block in _case_blocks(script):
         if block is None:
             yield Guard(source, "case", subject, "<unterminated>", "unclassifiable")
@@ -390,15 +462,8 @@ def guards_in_script(source, script):
             for pattern in patterns:
                 if "[" not in pattern and "$" not in pattern:
                     continue
-                if pattern.startswith("'"):
-                    verdict = _classify_single_quoted(pattern[1:-1])
-                elif re.search(r"\$[{(A-Za-z_]", pattern):
-                    # An expansion inside a grep pattern is regex text whose
-                    # characters this scanner cannot see.
-                    verdict = "unclassifiable"
-                else:
-                    verdict = classify(pattern)
-                yield Guard(source, "grep", "<grep>", pattern, verdict)
+                verdict, resolved = judge_regex(pattern)
+                yield Guard(source, "grep", "<grep>", pattern, verdict, resolved)
 
 
 def _classify_single_quoted(pattern):
@@ -447,6 +512,47 @@ def shell_outside_heredocs(text):
     return "\n".join(kept)
 
 
+def heredoc_bodies(text):
+    """Yield the text each heredoc emits: verbatim when quoted, unescaped otherwise."""
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        if line.lstrip().startswith("#"):
+            continue
+        heredoc = re.search(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2", line)
+        if not heredoc or "<<<" in line[heredoc.start():heredoc.start() + 3]:
+            continue
+        strip_tabs, quoted, terminator = heredoc.group(1) == "-", bool(heredoc.group(2)), heredoc.group(3)
+        body = []
+        while index < len(lines):
+            candidate = lines[index].lstrip("\t") if strip_tabs else lines[index]
+            index += 1
+            if candidate == terminator:
+                break
+            body.append(candidate)
+        emitted = "\n".join(body)
+        if not quoted:
+            emitted = re.sub(r"\\([$`\\])", r"\1", emitted)
+        yield emitted
+
+
+def scan_generator_heredocs(source, text):
+    """Scan every heredoc a generator script emits as shell text."""
+    for body in heredoc_bodies(text):
+        yield from guards_in_script(source, body)
+
+
+# Generators whose emitted text is scanned from their heredocs. The changelog
+# generator's output is scanned by running it, so it is not listed here.
+HEREDOC_GENERATORS = (
+    "scripts/gen-container-candidate.sh",
+    "scripts/gen-container-deployment.sh",
+    "scripts/gen-container-release.sh",
+)
+
+
 def scan_repository(root):
     root = Path(root)
     files = sorted((root / ".github/workflows").glob("*.yml"))
@@ -455,4 +561,7 @@ def scan_repository(root):
         yield from scan_workflow_text(file.relative_to(root).as_posix(), file.read_text(encoding="utf-8"))
     for file in sorted((root / "scripts").glob("gen-*.sh")):
         source = file.relative_to(root).as_posix()
-        yield from guards_in_script(source, shell_outside_heredocs(file.read_text(encoding="utf-8")))
+        text = file.read_text(encoding="utf-8")
+        yield from guards_in_script(source, shell_outside_heredocs(text))
+        if source in HEREDOC_GENERATORS:
+            yield from scan_generator_heredocs(f"{source} <heredoc>", text)
