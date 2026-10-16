@@ -15,11 +15,11 @@ value, every other variable to a persistent self-hosted selector. A chain such a
 `vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]'` is
 therefore a violation: with the untrusted lane unset it lands on the fallback.
 
-pull_request_target jobs that materialize the head (see materializes_head)
-are held to the same rule. Remote callees under
-pull_request_target are undetermined unless listed, pinned by SHA, in
-REVIEWED_TARGET_REMOTES; workflow_run and
-issue_comment are out of scope (ADR 0235).
+Under pull_request_target, workflow_run and issue_comment, which run the base
+workflow with base privileges and can be triggered by fork activity, any job
+that can resolve to a persistent runner fails unless `--reviewed` lists it by
+path, job, and a digest of its full content, inherited workflow settings, and
+calling jobs. Head detection only prints diagnostics (ADR 0235).
 
 Verjson/.github ADR 0235.
 """
@@ -918,6 +918,57 @@ def materializes_head(job: dict, workflow_env, root: str, label: str) -> bool:
     return False
 
 
+# Events that run the BASE workflow with base privileges while fork activity
+# can trigger them. Head-content detection cannot be complete for these (event
+# payload files, GITHUB_ENV/GITHUB_OUTPUT indirection, API clients), so every
+# job that can land on a persistent runner needs a reviewed entry (ADR 0235).
+PRIVILEGED_EVENTS = ("pull_request_target", "workflow_run", "issue_comment")
+CHECKED_EVENTS = ("pull_request",) + PRIVILEGED_EVENTS
+INHERITED_KEYS = ("env", "permissions", "defaults")
+
+
+REVIEW_REQUIRED = "requires a reviewed entry"
+
+
+class Finding(NamedTuple):
+    """A privileged-event job that can resolve to a persistent runner."""
+
+    path: str
+    job: str
+    review_digest: str
+    diagnostic: str
+
+
+def _normalize(value):
+    if isinstance(value, dict):
+        return {str(key): _normalize(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize(item) for item in value]
+    return value
+
+
+def inherited_settings(document: dict) -> dict:
+    """Workflow-level settings a job inherits, plus a callee's input contract."""
+    settings = {key: document.get(key) for key in INHERITED_KEYS}
+    trigger = document.get("on", document.get(True))
+    if isinstance(trigger, dict) and "workflow_call" in trigger:
+        settings["workflow_call"] = trigger["workflow_call"]
+    return settings
+
+
+def review_digest(chain: tuple, job: dict, inherited: dict) -> str:
+    """SHA-256 over the job, its inherited workflow settings, and every caller
+    job (with its own inherited settings) on the path that reaches it."""
+    canonical = json.dumps(
+        _normalize({"chain": list(chain), "job": job, "inherited": inherited}),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class Scan:
     """Traversal state for one triggering event across local reusable calls."""
 
@@ -927,52 +978,51 @@ class Scan:
         self.root = os.path.dirname(os.path.dirname(os.path.abspath(directory)))
         self.repository = repository
         self.event = event
-        self.notes: list[str] = []
+        self.findings: list[Finding] = []
+
+    @property
+    def privileged(self) -> bool:
+        return self.event in PRIVILEGED_EVENTS
 
 
-# Remote reusable workflows a pull_request_target job may call, reviewed at an
-# exact SHA: (caller workflow file, job, uses) -> why the pinned callee cannot
-# materialize the pull request head. Any other remote callee under
-# pull_request_target, or this one at another SHA or from another caller, is
-# undetermined. (A pull_request job can never call a remote workflow here.)
-REVIEWED_TARGET_REMOTES: dict[tuple[str, str, str], str] = {
-    (
-        "gate-rearm.yml",
-        "app-key-policy",
-        "Verjson/.github/.github/workflows/app-key-environment.yml@ebe23fafbdb77dd2cca6f1862d932fde881b80d7",
-    ): (
-        "app-key-environment.yml at ebe23faf has no uses: or checkout step and no PR-head reference; "
-        "it validates the App key environment inline (reviewed for ADR 0235, #1827)"
-    ),
-}
+def head_diagnostic(job: dict, document: dict, root: str, label: str) -> str:
+    """Why a job looks dangerous. Advisory only: it never decides pass/fail."""
+    try:
+        if materializes_head(job, document.get("env"), root, label):
+            return "head detection: materializes the pull request head"
+        return "head detection: no known head-materializing pattern (not proof of safety)"
+    except Undetermined as error:
+        return f"head detection: undetermined ({error})"
 
 
-def caller_file(path: str) -> str:
-    return path.split(" -> ")[-1].split(" [")[0]
-
-
-def check_call(scan: Scan, path: str, name: str, job: dict, depth: int) -> list[Violation]:
+def check_call(
+    scan: Scan, path: str, name: str, job: dict, depth: int, chain: tuple, document: dict
+) -> list[Violation]:
     uses = str(job["uses"])
     local = LOCAL_REUSABLE.match(uses)
     if not local:
-        reason = REVIEWED_TARGET_REMOTES.get((caller_file(path), name, uses))
-        if scan.event == "pull_request_target" and reason is not None:
-            scan.notes.append(f"{path}: job '{name}' calls {uses} [{reason}]")
+        if scan.privileged:
+            scan.findings.append(
+                Finding(
+                    path,
+                    name,
+                    review_digest(chain, job, inherited_settings(document)),
+                    f"remote callee {uses}: its placement cannot be read",
+                )
+            )
             return []
-        raise Undetermined(
-            f"{path}: job '{name}' calls {uses}, whose placement this checker cannot read "
-            "and which is not a reviewed SHA-pinned remote callee"
-        )
+        raise Undetermined(f"{path}: job '{name}' calls {uses}, whose placement this checker cannot read")
     if depth >= MAX_CALL_DEPTH:
         raise Undetermined(f"{path}: job '{name}' exceeds the reusable-call depth of {MAX_CALL_DEPTH}")
     callee = local.group(1)
-    document = load_workflow(os.path.join(scan.directory, callee))
+    callee_document = load_workflow(os.path.join(scan.directory, callee))
     return check_workflow(
         scan,
         f"{path}:{name} -> {callee}",
-        document,
-        callee_bindings(job, document),
+        callee_document,
+        callee_bindings(job, callee_document),
         depth + 1,
+        chain + ({"job": job, "inherited": inherited_settings(document)},),
     )
 
 
@@ -982,6 +1032,7 @@ def check_workflow(
     document: dict,
     bindings: dict[str, tuple] | None = None,
     depth: int = 0,
+    chain: tuple = (),
 ) -> list[Violation]:
     bindings = bindings or {}
     jobs = {str(name): job for name, job in (document.get("jobs") or {}).items()}
@@ -993,15 +1044,26 @@ def check_workflow(
             unreachable.add(name)
             continue
         if "uses" in job:
-            violations.extend(check_call(scan, path, name, job, depth))
-        elif scan.event == "pull_request_target" and not materializes_head(
-            job, document.get("env"), scan.root, f"{path}: job '{name}'"
-        ):
+            violations.extend(check_call(scan, path, name, job, depth, chain, document))
             continue
-        else:
-            violations.extend(
-                check_job(
-                    path, name, job, scan.repository, bindings, frozenset(unreachable), scan.event
+        try:
+            found = check_job(
+                path, name, job, scan.repository, bindings, frozenset(unreachable), scan.event
+            )
+        except Undetermined as error:
+            if not scan.privileged:
+                raise
+            # A privileged job whose placement cannot be proven hosted needs review.
+            found = [Violation(path, name, f"placement undetermined: {error}")]
+        if not scan.privileged:
+            violations.extend(found)
+        elif found:
+            scan.findings.append(
+                Finding(
+                    path,
+                    name,
+                    review_digest(chain, job, inherited_settings(document)),
+                    head_diagnostic(job, document, scan.root, f"{path}: job '{name}'"),
                 )
             )
     return violations
@@ -1044,10 +1106,9 @@ def check_job(
     return violations
 
 
-CHECKED_EVENTS = ("pull_request", "pull_request_target")
-
-
-def check_tree(directory: str, repository: str, notes: list[str] | None = None) -> list[Violation]:
+def check_tree(
+    directory: str, repository: str, findings: list[Finding] | None = None
+) -> list[Violation]:
     violations: list[Violation] = []
     names = sorted(
         name for name in os.listdir(directory) if name.endswith((".yml", ".yaml"))
@@ -1062,16 +1123,21 @@ def check_tree(directory: str, repository: str, notes: list[str] | None = None) 
             scan = Scan(directory, repository, event)
             label = name if event == "pull_request" else f"{name} [{event}]"
             violations.extend(check_workflow(scan, label, document))
-            if notes is not None:
-                notes.extend(scan.notes)
+            if findings is not None:
+                findings.extend(scan.findings)
     return violations
 
 
 PENDING_FORMAT = "path<TAB>job<TAB>selector digest<TAB>reason"
 
 
-def load_pending(path: str | None) -> dict[tuple[str, str], tuple[str, str]]:
-    """Reviewed rows awaiting a recorded follow-up, keyed to the exact selector."""
+REVIEWED_FORMAT = "path<TAB>job<TAB>review digest<TAB>justification"
+
+
+def load_pending(
+    path: str | None, row_format: str = PENDING_FORMAT
+) -> dict[tuple[str, str], tuple[str, str]]:
+    """Reviewed `path<TAB>job<TAB>sha256:<hex><TAB>reason` rows, keyed to a digest."""
     if path is None:
         return {}
     pending: dict[tuple[str, str], tuple[str, str]] = {}
@@ -1085,9 +1151,9 @@ def load_pending(path: str | None) -> dict[tuple[str, str], tuple[str, str]]:
             continue
         fields = row.split("\t")
         if len(fields) != 4 or not all(field.strip() for field in fields):
-            raise Undetermined(f"{path}:{number}: expected {PENDING_FORMAT}")
+            raise Undetermined(f"{path}:{number}: expected {row_format}")
         if not DIGEST.fullmatch(fields[2]):
-            raise Undetermined(f"{path}:{number}: selector digest must be sha256:<64 hex>")
+            raise Undetermined(f"{path}:{number}: {row_format.split('<TAB>')[2]} must be sha256:<64 hex>")
         pending[(fields[0], fields[1])] = (fields[2], fields[3])
     return pending
 
@@ -1096,12 +1162,17 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--repository", default="Verjson/.github")
     parser.add_argument("--pending", help=f"reviewed {PENDING_FORMAT} exceptions")
+    parser.add_argument(
+        "--reviewed",
+        help=f"reviewed {REVIEWED_FORMAT} privileged-event jobs allowed on persistent runners",
+    )
     parser.add_argument("workflow_dir")
     arguments = parser.parse_args(argv)
     try:
         pending = load_pending(arguments.pending)
-        notes: list[str] = []
-        found = check_tree(arguments.workflow_dir, arguments.repository, notes)
+        reviewed = load_pending(arguments.reviewed, REVIEWED_FORMAT)
+        findings: list[Finding] = []
+        found = check_tree(arguments.workflow_dir, arguments.repository, findings)
     except Undetermined as error:
         print(f"UNDETERMINED: {error}", file=sys.stderr)
         return 2
@@ -1119,20 +1190,47 @@ def main(argv: list[str]) -> int:
             )
         else:
             print(f"PENDING: {violation} [{row[1]}]")
-    for note in notes:
-        print(f"REVIEWED REMOTE: {note}")
+    stale_reviews = []
+    for finding in findings:
+        label = f"{finding.path}: job '{finding.job}'"
+        print(f"DIAGNOSTIC: {label}: {finding.diagnostic}")
+        row = reviewed.get((finding.path, finding.job))
+        if row is None:
+            violations.append(
+                Violation(
+                    finding.path,
+                    finding.job,
+                    "privileged-event job can resolve to a persistent runner and "
+                    f"{REVIEW_REQUIRED} (review digest {finding.review_digest})",
+                )
+            )
+        elif row[0] != finding.review_digest:
+            stale_reviews.append(
+                f"STALE REVIEWED: {label}: content changed since review "
+                f"(reviewed {row[0]}, now {finding.review_digest}); re-review before relisting"
+            )
+        else:
+            print(f"REVIEWED: {label} [{row[1]}]")
     for violation in violations:
         print(f"VIOLATION: {violation}")
     reported = {(violation.path, violation.job) for violation in found}
     stale = sorted(set(pending) - reported)
     for path, job in stale:
         print(f"STALE PENDING: {path}: job '{job}' no longer violates; remove it from the pending file")
-    if violations or stale:
+    present = {(finding.path, finding.job) for finding in findings}
+    for path, job in sorted(set(reviewed) - present):
+        stale_reviews.append(
+            f"STALE REVIEWED: {path}: job '{job}' no longer needs review "
+            "(removed, renamed, unreachable, or hosted-only); remove its entry"
+        )
+    for line in stale_reviews:
+        print(line)
+    if violations or stale or stale_reviews:
         return 1
     print(
-        f"clean: no pull_request job, and no pull_request_target job that materializes the "
-        f"head, in {arguments.workflow_dir} can reach a persistent runner"
-        + (f" beyond {len(pending)} reviewed pending job(s)" if pending else "")
+        f"clean: no pull_request job in {arguments.workflow_dir} can reach a persistent runner"
+        + (f" beyond {len(pending)} pending job(s)" if pending else "")
+        + f", and every privileged-event job that can is one of {len(reviewed)} reviewed entries"
     )
     return 0
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -484,6 +485,14 @@ for label in ("ubuntu-latest", "ubuntu-22.04", "ubuntu-24.04-arm", "windows-late
 # ---------------------------------------------------------------------------
 
 
+# Under privileged events head detection is a diagnostic: every persistent job
+# fails unlisted, and these fixtures pin what the diagnostic reports.
+REVIEW_REQUIRED = "requires a reviewed entry"
+HEAD_DIAG = "head detection: materializes the pull request head"
+NO_HEAD_DIAG = "head detection: no known head-materializing pattern"
+UNDETERMINED_DIAG = "head detection: undetermined"
+
+
 def target_job(steps: str, runs_on: str = TRUSTED_SELECTOR) -> dict[str, str]:
     return {
         "target.yml": f"""
@@ -505,7 +514,7 @@ expect(
         - run: make test
     """),
     1,
-    ("target.yml [pull_request_target]", "review", "self-hosted"),
+    ("target.yml [pull_request_target]", "review", HEAD_DIAG, REVIEW_REQUIRED),
     "a pull_request_target job that checks out the head is held to the placement rule",
 )
 expect(
@@ -513,7 +522,7 @@ expect(
         - run: gh pr checkout ${{ github.event.pull_request.number }} && make test
     """),
     1,
-    ("[pull_request_target]", "review"),
+    ("[pull_request_target]", "review", HEAD_DIAG),
     "a pull_request_target job running gh pr checkout is held to the placement rule",
 )
 expect(
@@ -523,7 +532,7 @@ expect(
             ref: ${{ env.CANDIDATE }}
     """),
     1,
-    ("[pull_request_target]", "review"),
+    ("[pull_request_target]", "review", HEAD_DIAG),
     "a pull_request_target checkout through an indirection is treated as head-capable",
 )
 expect(
@@ -533,7 +542,7 @@ expect(
           run: git fetch --depth=1 origin "$HEAD_SHA" && git checkout FETCH_HEAD
     """),
     1,
-    ("[pull_request_target]", "review"),
+    ("[pull_request_target]", "review", HEAD_DIAG),
     "a pull_request_target git fetch of a head-derived value is held to the placement rule",
 )
 expect(
@@ -545,9 +554,9 @@ expect(
             HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           run: gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs"
     """),
-    0,
-    ("clean",),
-    "a pull_request_target job running only base code with head metadata is outside the rule",
+    1,
+    (NO_HEAD_DIAG, REVIEW_REQUIRED),
+    "a base-code pull_request_target job on a persistent runner still requires review",
 )
 expect(
     target_job(
@@ -578,35 +587,17 @@ def remote_target_call(workflow: str, job: str, uses: str) -> dict[str, str]:
 
 
 expect(
-    remote_target_call("target.yml", "arm", REVIEWED_REMOTE.replace("ebe23faf", "0000000f")),
-    2,
-    ("UNDETERMINED", "target.yml [pull_request_target]: job 'arm'", "reviewed"),
-    "an unreviewed remote callee under pull_request_target is undetermined",
-)
-expect(
-    remote_target_call("gate-rearm.yml", "app-key-policy", REVIEWED_REMOTE),
-    0,
-    ("REVIEWED REMOTE: gate-rearm.yml [pull_request_target]: job 'app-key-policy'",),
-    "the reviewed, SHA-pinned gate-rearm app-key callee is reported and accepted",
-)
-expect(
-    remote_target_call("gate-rearm.yml", "app-key-policy", REVIEWED_REMOTE.replace("ebe23faf", "1be23faf")),
-    2,
-    ("UNDETERMINED",),
-    "the reviewed callee at any other SHA is undetermined",
-)
-expect(
-    remote_target_call("other.yml", "app-key-policy", REVIEWED_REMOTE),
-    2,
-    ("UNDETERMINED",),
-    "the reviewed callee from any other caller workflow is undetermined",
+    remote_target_call("target.yml", "arm", REVIEWED_REMOTE),
+    1,
+    ("target.yml [pull_request_target]: job 'arm'", "remote callee", REVIEW_REQUIRED),
+    "an unlisted remote callee under pull_request_target requires review",
 )
 expect(
     target_job("""
         - run: git fetch origin "+refs/pull/1/merge" && git checkout FETCH_HEAD
     """),
     1,
-    ("[pull_request_target]",),
+    ("[pull_request_target]", HEAD_DIAG),
     "a pull_request_target fetch of a refs/pull refspec is held to the placement rule",
 )
 
@@ -625,7 +616,7 @@ expect(
             ref: refs/pull/1/merge
     """),
     1,
-    ("[pull_request_target]",),
+    ("[pull_request_target]", HEAD_DIAG),
     "a pull_request_target checkout of a literal refs/pull ref is head-capable",
 )
 
@@ -645,7 +636,7 @@ expect(
         """,
     },
     1,
-    ("[pull_request_target]", "review"),
+    ("[pull_request_target]", "review", HEAD_DIAG),
     "(a) a workflow-level env head value fetched by git is head-capable",
 )
 expect(
@@ -653,7 +644,7 @@ expect(
         - run: gh pr diff ${{ github.event.number }} | git apply
     """),
     1,
-    ("[pull_request_target]", "review"),
+    ("[pull_request_target]", "review", HEAD_DIAG),
     "(b) gh pr diff piped into git apply is head-capable",
 )
 expect(
@@ -661,7 +652,7 @@ expect(
         - run: curl -sSL "https://api.github.com/repos/o/r/tarball/${{ github.event.pull_request.head.sha }}" | tar xz
     """),
     1,
-    ("[pull_request_target]", "review"),
+    ("[pull_request_target]", "review", HEAD_DIAG),
     "(c) a download of a head tarball is head-capable",
 )
 expect(
@@ -671,7 +662,7 @@ expect(
             revision: ${{ github.event.pull_request.head.sha }}
     """),
     1,
-    ("[pull_request_target]", "review"),
+    ("[pull_request_target]", "review", HEAD_DIAG),
     "(d) a non-checkout action given a head value is head-capable",
 )
 expect(
@@ -680,9 +671,9 @@ expect(
             CANDIDATE: ${{ github.event.pull_request.head.sha }}
           run: ./tools/materialize "$CANDIDATE"
     """),
-    2,
-    ("UNDETERMINED", "review"),
-    "a head value handed to a program the checker cannot read is undetermined",
+    1,
+    (UNDETERMINED_DIAG, REVIEW_REQUIRED),
+    "a head value handed to an unreadable program is reported undetermined and requires review",
 )
 
 
@@ -699,14 +690,14 @@ INLINE_PROGRAM = """
 """
 expect(
     target_job(INLINE_PROGRAM.format(body='subprocess.run(["gh", "api", "repos/o/r/pulls/1"], check=True)')),
-    0,
-    ("clean",),
-    "a program authored inline by the workflow is read from the workflow, not left ambiguous",
+    1,
+    (NO_HEAD_DIAG, REVIEW_REQUIRED),
+    "a program authored inline by the workflow is read for the diagnostic, not left ambiguous",
 )
 expect(
     target_job(INLINE_PROGRAM.format(body='subprocess.run(["git", "fetch", "origin", "pull/1/head"], check=True)')),
     1,
-    ("[pull_request_target]", "review"),
+    ("[pull_request_target]", "review", HEAD_DIAG),
     "an inline-authored program that runs git fetch on a head value is head-capable",
 )
 
@@ -723,17 +714,220 @@ expect(
                   - run: ./tools/materialize "$CANDIDATE"
         """,
     },
-    2,
-    ("UNDETERMINED", "review"),
-    "a workflow-level head value handed by name to an unreadable program is undetermined",
+    1,
+    (UNDETERMINED_DIAG, REVIEW_REQUIRED),
+    "a workflow-level head value handed by name to an unreadable program is reported undetermined",
 )
 expect(
     target_job("""
         - run: gh pr diff 1 > change.patch && patch -p1 < change.patch
     """),
     1,
-    ("[pull_request_target]", "review"),
+    ("[pull_request_target]", "review", HEAD_DIAG),
     "gh pr diff materializes the head even without a git command",
+)
+
+
+# ---------------------------------------------------------------------------
+# Re-review of #1827 at 2f48d335: head detection cannot be made complete, so
+# under pull_request_target, workflow_run and issue_comment any job that can
+# land on a persistent runner fails unless a reviewed entry, keyed to a digest
+# of its full content and inherited workflow settings, lists it. The reviewer's
+# repros (g1-g7) must fail unlisted, whatever the diagnostics conclude.
+# ---------------------------------------------------------------------------
+REVIEWER_REPROS = {
+    "g1 jq event payload into GITHUB_ENV then git fetch": """
+        - run: echo "HEAD=$(jq -r .pull_request.head.sha "$GITHUB_EVENT_PATH")" >> "$GITHUB_ENV"
+        - run: git fetch origin "$HEAD" && git checkout "$HEAD"
+    """,
+    "g2 jq into GITHUB_OUTPUT then git worktree add": """
+        - id: head
+          run: echo "sha=$(jq -r .pull_request.head.sha "$GITHUB_EVENT_PATH")" >> "$GITHUB_OUTPUT"
+        - run: git -C repo worktree add ../pr "${{ steps.head.outputs.sha }}"
+    """,
+    "g3 github-script tarball download": """
+        - uses: actions/github-script@v7
+          with:
+            script: |
+              const pr = context.payload.pull_request;
+              await github.rest.repos.downloadTarballArchive({owner: pr.head.repo.owner.login, repo: pr.head.repo.name, ref: pr.head.sha});
+    """,
+    "g4 git --git-dir fetch of refs/pull": """
+        - env:
+            PR: ${{ github.event.pull_request.number }}
+          run: git --git-dir=.git fetch origin "refs/pull/$PR/head"
+    """,
+    "g5 PR number from the event file": """
+        - run: n=$(jq .number "$GITHUB_EVENT_PATH"); git fetch origin "pull/$n/head"
+    """,
+    "g7 gh repo clone of the head repository": """
+        - run: gh repo clone ${{ github.event.pull_request.head.repo.full_name }}
+    """,
+}
+for label, steps in REVIEWER_REPROS.items():
+    expect(
+        target_job(steps),
+        1,
+        ("target.yml [pull_request_target]", "review", REVIEW_REQUIRED),
+        f"{label}: an unlisted pull_request_target job on a persistent runner fails",
+    )
+
+for event in ("workflow_run", "issue_comment"):
+    expect(
+        {
+            "privileged.yml": f"""
+                on: {event}
+                jobs:
+                  review:
+                    runs-on: {TRUSTED_SELECTOR}
+                    steps:
+                      - run: 'true'
+            """,
+        },
+        1,
+        (f"privileged.yml [{event}]", REVIEW_REQUIRED),
+        f"an unlisted {event} job on a persistent runner fails",
+    )
+
+
+# ---------------------------------------------------------------------------
+# The reviewed list: path<TAB>job<TAB>review digest<TAB>justification. The
+# digest is read from the checker's own VIOLATION line, which is how an
+# operator obtains it after reviewing the job.
+# ---------------------------------------------------------------------------
+REVIEW_DIGEST_LINE = r"VIOLATION: {path}: job '{job}': .*?review digest (sha256:[0-9a-f]{{64}})"
+
+
+def review_row(workflows: dict[str, str], path: str, job: str, why: str = "reviewed for the fixture") -> str:
+    code, output = run_checker(workflows)
+    match = re.search(REVIEW_DIGEST_LINE.format(path=re.escape(path), job=re.escape(job)), output)
+    if code != 1 or not match:
+        raise AssertionError(f"no review digest for {path} {job}: {output}")
+    return f"{path}\t{job}\t{match.group(1)}\t{why}\n"
+
+
+def with_review(workflows: dict[str, str], rows: str) -> dict[str, str]:
+    return {**workflows, "reviewed.tsv": rows}
+
+
+REVIEWED_ARGS = ("--reviewed", "{dir}/reviewed.tsv")
+LISTED = target_job("""
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.pull_request.base.sha }}
+    - run: make lint
+""")
+LISTED_ROW = review_row(LISTED, "target.yml [pull_request_target]", "review")
+
+expect(
+    with_review(LISTED, LISTED_ROW),
+    0,
+    ("REVIEWED: target.yml [pull_request_target]: job 'review' [reviewed for the fixture]", "clean"),
+    "a reviewed privileged job with an unchanged digest passes",
+    *REVIEWED_ARGS,
+)
+expect(
+    with_review({"target.yml": LISTED["target.yml"].replace("make lint", "make lint!")}, LISTED_ROW),
+    1,
+    ("STALE REVIEWED: target.yml [pull_request_target]: job 'review': content changed",),
+    "a one-character edit to a reviewed job turns its entry stale",
+    *REVIEWED_ARGS,
+)
+INHERITED = {
+    "target.yml": LISTED["target.yml"].replace(
+        "on: pull_request_target\n", "on: pull_request_target\n            env:\n              MODE: safe\n", 1
+    )
+}
+INHERITED_ROW = review_row(INHERITED, "target.yml [pull_request_target]", "review")
+expect(
+    with_review({"target.yml": INHERITED["target.yml"].replace("MODE: safe", "MODE: open")}, INHERITED_ROW),
+    1,
+    ("STALE REVIEWED", "content changed"),
+    "an edit to inherited workflow env turns the entry stale",
+    *REVIEWED_ARGS,
+)
+expect(
+    with_review(
+        {"target.yml": INHERITED["target.yml"].replace("MODE: safe", "MODE: safe\n            permissions:\n              contents: write")},
+        INHERITED_ROW,
+    ),
+    1,
+    ("STALE REVIEWED", "content changed"),
+    "an edit to inherited workflow permissions turns the entry stale",
+    *REVIEWED_ARGS,
+)
+TWINS = {
+    "target.yml": f"""
+        on: pull_request_target
+        jobs:
+          first:
+            runs-on: {TRUSTED_SELECTOR}
+            steps:
+              - run: make lint
+          second:
+            runs-on: {TRUSTED_SELECTOR}
+            steps:
+              - run: make lint
+    """,
+}
+expect(
+    with_review(TWINS, review_row(TWINS, "target.yml [pull_request_target]", "first")),
+    1,
+    ("VIOLATION: target.yml [pull_request_target]: job 'second'", REVIEW_REQUIRED),
+    "an entry never covers an identical job with a different id",
+    *REVIEWED_ARGS,
+)
+expect(
+    with_review(target_job("- run: make lint", runs_on="ubuntu-24.04"), ""),
+    0,
+    ("clean",),
+    "a privileged job that resolves only to a hosted image passes unlisted",
+    *REVIEWED_ARGS,
+)
+expect(
+    with_review(target_job("- run: make lint", runs_on="ubuntu-24.04"), LISTED_ROW),
+    1,
+    ("STALE REVIEWED: target.yml [pull_request_target]: job 'review' no longer needs review",),
+    "an entry for a job that no longer needs review is stale",
+    *REVIEWED_ARGS,
+)
+CALLER = {
+    "caller.yml": """
+        on: pull_request_target
+        jobs:
+          call:
+            uses: ./.github/workflows/callee.yml
+            with:
+              mode: lint
+    """,
+    "callee.yml": f"""
+        on:
+          workflow_call:
+            inputs:
+              mode:
+                type: string
+        jobs:
+          work:
+            runs-on: {TRUSTED_SELECTOR}
+            steps:
+              - run: make "${{{{ inputs.mode }}}}"
+    """,
+}
+CALLEE_PATH = "caller.yml [pull_request_target]:call -> callee.yml"
+expect(
+    with_review({**CALLER, "caller.yml": CALLER["caller.yml"].replace("mode: lint", "mode: test")},
+                review_row(CALLER, CALLEE_PATH, "work")),
+    1,
+    ("STALE REVIEWED", CALLEE_PATH),
+    "an edit to the calling job's with: turns the callee entry stale",
+    *REVIEWED_ARGS,
+)
+expect(
+    with_review(LISTED, "target.yml [pull_request_target]\treview\tsha256:abc\twhy\n"),
+    2,
+    ("UNDETERMINED", "review digest must be sha256"),
+    "a reviewed row with a malformed digest is rejected",
+    *REVIEWED_ARGS,
 )
 
 sys.exit(1 if failures else 0)
