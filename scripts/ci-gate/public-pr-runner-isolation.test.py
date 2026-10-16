@@ -710,4 +710,30 @@ expect(
     "an inline-authored program that runs git fetch on a head value is head-capable",
 )
 
+expect(
+    {
+        "target.yml": f"""
+            on: pull_request_target
+            env:
+              CANDIDATE: ${{{{ github.event.pull_request.head.sha }}}}
+            jobs:
+              review:
+                runs-on: {TRUSTED_SELECTOR}
+                steps:
+                  - run: ./tools/materialize "$CANDIDATE"
+        """,
+    },
+    2,
+    ("UNDETERMINED", "review"),
+    "a workflow-level head value handed by name to an unreadable program is undetermined",
+)
+expect(
+    target_job("""
+        - run: gh pr diff 1 > change.patch && patch -p1 < change.patch
+    """),
+    1,
+    ("[pull_request_target]", "review"),
+    "gh pr diff materializes the head even without a git command",
+)
+
 sys.exit(1 if failures else 0)
