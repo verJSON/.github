@@ -27,6 +27,7 @@ Verjson/.github ADR 0235.
 from __future__ import annotations
 
 import argparse
+import glob
 import hashlib
 import itertools
 import json
@@ -990,110 +991,124 @@ MAX_CLOSURE_DEPTH = 4
 
 
 class Closure:
-    """Repository bytes a job depends on, and what could not be resolved."""
+    """The scanned-tree bytes a job puts on disk, and what cannot be bounded.
+
+    Digests what a checkout materializes rather than what commands name:
+    `source`, bare paths, imports, `require`, `make`, `npm run`, and data
+    files read by scripts are all covered because the bytes they reach are on
+    disk. Command parsing remains only for local actions, which come from the
+    scanned tree without their own checkout step.
+    """
 
     def __init__(self, root: str, job: dict) -> None:
         self.root = os.path.normpath(root)
         self.job = job
         self.files: dict[str, str] = {}
         self.unresolved: set[str] = set()
-        self.checkouts = []
-        for step in job.get("steps") or []:
-            if isinstance(step, dict) and str(step.get("uses", "")).split("@")[0].lower() == "actions/checkout":
-                options = step.get("with") or {}
-                repository = str(options.get("repository") or "").strip()
-                ref = " ".join(str(options.get("ref") or "").split())
-                tree = repository in ("", "${{ github.repository }}") and ref in TREE_REFS
-                checkout_path = str(options.get("path") or "").strip().rstrip("/")
-                pattern = re.escape(checkout_path)
-                pattern = re.sub(r"\\\$\\\{\\\{.*?\\\}\\\}", r"[^/]*", pattern)
-                self.checkouts.append((checkout_path, re.compile(rf"^{pattern}(?:/|$)") if checkout_path else None, tree))
-                for sparse in str(options.get("sparse-checkout") or "").split():
-                    self.add_file(sparse, "sparse-checkout")
 
-    def add_file(self, repo_path: str, why: str, depth: int = 0) -> bool:
+    def add_file(self, repo_path: str, why: str) -> bool:
         candidate = os.path.normpath(os.path.join(self.root, repo_path))
-        if not candidate.startswith(self.root + os.sep):
-            self.unresolved.add(f"{repo_path} ({why})")
+        if candidate != self.root and not candidate.startswith(self.root + os.sep):
+            self.unresolved.add(f"{repo_path} ({why}: outside the scanned tree)")
             return False
-        relative = os.path.relpath(candidate, self.root)
         if os.path.isdir(candidate):
-            for base, _, names in sorted(os.walk(candidate)):
+            for base, directories, names in os.walk(candidate):
+                directories[:] = sorted(d for d in directories if d != ".git")
                 for name in sorted(names):
-                    self.add_file(os.path.relpath(os.path.join(base, name), self.root), why, depth)
+                    self.add_file(os.path.relpath(os.path.join(base, name), self.root), why)
             return True
         if not os.path.isfile(candidate):
             self.unresolved.add(f"{repo_path} ({why}: not in the scanned tree)")
             return False
-        if relative in self.files:
-            return True
-        with open(candidate, "rb") as handle:
-            content = handle.read()
-        self.files[relative] = hashlib.sha256(content).hexdigest()
-        if depth < MAX_CLOSURE_DEPTH:
-            text = content.decode("utf-8", errors="replace")
-            for program in programs(text):
-                self.add_program(program, "", depth + 1, os.path.dirname(relative))
+        relative = os.path.relpath(candidate, self.root)
+        if relative not in self.files:
+            with open(candidate, "rb") as handle:
+                self.files[relative] = hashlib.sha256(handle.read()).hexdigest()
         return True
 
-    def map_path(self, program: str, working_directory: str) -> tuple[str | None, bool]:
-        """Repository path for a workspace-relative program, and whether the
-        bytes there are the scanned tree's."""
-        joined = os.path.normpath(os.path.join(working_directory or "", program))
-        for checkout_path, pattern, tree in self.checkouts:
-            if pattern is not None and pattern.match(joined):
-                remainder = pattern.sub("", joined, count=1)
-                return remainder, tree
-        default = [tree for checkout_path, _, tree in self.checkouts if not checkout_path]
-        return joined, (default[0] if default else True)
+    def add_direct_files(self, directory: str, why: str) -> None:
+        """Files directly in a directory, as cone mode materializes for parents."""
+        absolute = os.path.normpath(os.path.join(self.root, directory))
+        if not os.path.isdir(absolute):
+            return
+        for name in sorted(os.listdir(absolute)):
+            if os.path.isfile(os.path.join(absolute, name)):
+                self.add_file(os.path.relpath(os.path.join(absolute, name), self.root), why)
 
-    def add_program(self, program: str, working_directory: str, depth: int, action_dir: str | None = None) -> None:
-        program = program.strip("\"'")
-        if program == "<module>":
-            self.unresolved.add("python -m <module>")
+    def add_checkout(self, options: dict) -> None:
+        repository = str(options.get("repository") or "").strip()
+        ref = " ".join(str(options.get("ref") or "").split())
+        sparse = [line.strip() for line in str(options.get("sparse-checkout") or "").splitlines() if line.strip()]
+        cone = str(options.get("sparse-checkout-cone-mode", "true")).strip().lower() != "false"
+        if not (repository in ("", "${{ github.repository }}") and ref in TREE_REFS):
+            self.unresolved.add(
+                f"checkout of {repository or 'this repository'}@{ref or 'default'} "
+                "selected at runtime, not the scanned tree"
+            )
+            # The scanned bytes of the listed paths still bind the review.
+            for path in sparse:
+                self.add_sparse_path(path, cone, "runtime checkout, scanned bytes")
             return
-        if action_dir is not None and ACTION_PATH.search(program):
-            program = ACTION_PATH.sub(action_dir, program)
-            repo_path = os.path.normpath(program)
-            self.add_file(repo_path, "executed by a local action", depth)
+        if not sparse:
+            self.unresolved.add("full checkout of the scanned tree (no sparse-checkout list bounds it)")
             return
-        if "$" in program:
-            if inline_source(self.job, program) is None:
-                self.unresolved.add(program)
-            return
-        if program.startswith("/"):
-            return  # a system binary, not repository code
-        repo_path, tree = self.map_path(program, working_directory)
-        if not tree:
-            self.unresolved.add(f"{program} (checked out from a runtime-selected repository or ref)")
-        self.add_file(repo_path, "executed", depth)
+        if cone:
+            self.add_direct_files("", "cone-mode root")
+        for path in sparse:
+            self.add_sparse_path(path, cone, "sparse-checkout")
 
-    def add_steps(self, steps, working_directory: str, depth: int, action_dir: str | None = None) -> None:
+    def add_sparse_path(self, path: str, cone: bool, why: str) -> None:
+        path = path.strip("/")
+        if not cone:
+            if path.startswith("!"):
+                return  # an exclusion only removes bytes
+            matches = sorted(glob.glob(os.path.join(self.root, path), recursive=True))
+            if not matches:
+                self.unresolved.add(f"{path} ({why}: matches nothing in the scanned tree)")
+            for match in matches:
+                self.add_file(os.path.relpath(match, self.root), why)
+            return
+        parts = path.split("/")
+        for depth in range(1, len(parts)):
+            self.add_direct_files("/".join(parts[:depth]), f"cone-mode parent of {path}")
+        self.add_file(path, why)
+
+    def add_steps(self, steps, depth: int, action_dir: str | None = None) -> None:
         for step in steps or []:
             if not isinstance(step, dict):
                 continue
             uses = str(step.get("uses", ""))
-            if uses.startswith("./"):
+            if uses.split("@")[0].lower() == "actions/checkout":
+                self.add_checkout(step.get("with") or {})
+            elif uses.startswith("./"):
                 self.add_action(uses, depth)
             run = step.get("run")
             if isinstance(run, str):
-                directory = str(step.get("working-directory") or working_directory or "")
-                for program in programs(run):
-                    self.add_program(program, directory, depth, action_dir)
+                for change in RUNTIME_TREE_CHANGE.finditer(run):
+                    self.unresolved.add(
+                        f"`{change.group(0).strip(' ;&|(')}` changes the checked-out tree at runtime"
+                    )
+                if action_dir is not None:
+                    for program in programs(run):
+                        if ACTION_PATH.search(program):
+                            self.add_file(os.path.normpath(ACTION_PATH.sub(action_dir, program.strip("\"'"))),
+                                          f"run by local action {action_dir}")
 
     def add_action(self, uses: str, depth: int) -> None:
         action_dir = os.path.normpath(uses)
         if depth >= MAX_CLOSURE_DEPTH:
             self.unresolved.add(f"{uses} (local action nested beyond {MAX_CLOSURE_DEPTH})")
             return
-        for name in ("action.yml", "action.yaml"):
-            if os.path.isfile(os.path.join(self.root, action_dir, name)):
-                manifest = os.path.join(action_dir, name)
-                break
-        else:
+        if not any(os.path.isfile(os.path.join(self.root, action_dir, name)) for name in ("action.yml", "action.yaml")):
             self.unresolved.add(f"{uses} (local action not in the scanned tree)")
             return
-        self.add_file(manifest, "local action", MAX_CLOSURE_DEPTH)
+        # Everything the action directory holds is on disk when it runs.
+        self.add_file(action_dir, f"local action {uses}")
+        manifest = next(
+            os.path.join(action_dir, name)
+            for name in ("action.yml", "action.yaml")
+            if os.path.isfile(os.path.join(self.root, action_dir, name))
+        )
         try:
             with open(os.path.join(self.root, manifest), encoding="utf-8") as handle:
                 action = yaml.safe_load(handle) or {}
@@ -1105,19 +1120,23 @@ class Closure:
             self.unresolved.add(f"{uses} (local action has no runs block)")
             return
         if runs.get("using") == "composite":
-            self.add_steps(runs.get("steps"), "", depth + 1, action_dir)
+            self.add_steps(runs.get("steps"), depth + 1, action_dir)
             return
         for key in ("main", "pre", "post", "image"):
             value = runs.get(key)
             if isinstance(value, str) and not value.startswith(("docker://", "http")):
-                self.add_file(os.path.join(action_dir, value), "local action entry point", MAX_CLOSURE_DEPTH)
+                self.add_file(os.path.join(action_dir, value), f"local action {uses} entry point")
+
+
+RUNTIME_TREE_CHANGE = re.compile(
+    r"(?:^|[\s;&|(])git[ \t]+(?:-[Cc][ \t]+\S+[ \t]+)*"
+    r"(?:sparse-checkout|checkout|switch|restore|reset|pull|merge|worktree)\b"
+)
 
 
 def job_closure(job: dict, root: str) -> Closure:
     closure = Closure(root, job)
-    defaults = job.get("defaults") if isinstance(job.get("defaults"), dict) else {}
-    run_defaults = defaults.get("run") if isinstance(defaults.get("run"), dict) else {}
-    closure.add_steps(job.get("steps"), str(run_defaults.get("working-directory") or ""), 0)
+    closure.add_steps(job.get("steps"), 0)
     return closure
 
 

