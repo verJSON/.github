@@ -336,6 +336,15 @@ else:
 # cannot classify fails closed. Each row's scripts are resolved as bash would
 # run them -- quoted, absolute, or relative after `cd` -- and a row whose
 # executed script cannot be resolved to a scanned, tracked file fails.
+#
+# What "fails closed" does not cover: a module name assembled at run time --
+# `importlib.import_module("ascii_digit" + "_locales")`, or a name read from a
+# file or the environment -- never appears in the source, so no static scan can
+# classify it, and flagging name fragments would only move the gap to the next
+# spelling. The backstop is at run time: guard_locales raises under CI=true
+# when en_US.UTF-8 cannot be reproduced (pinned by the missing-hazard-locale
+# test in settable-value-guards.test.py), so such a test on a fleet image fails
+# red, not green.
 import ast
 from functools import lru_cache
 import pathlib
