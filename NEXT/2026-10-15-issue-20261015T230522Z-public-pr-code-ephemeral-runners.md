@@ -25,8 +25,11 @@ and `git --git-dir`/`--work-tree`), any non-default `shell:`, a full or
 runtime-selected checkout, checkout submodules, or head detection that finds or
 cannot rule out head materialization leaves the job unresolved. Its entry then
 needs `dynamic: <reason>[, <reason>]: <justification>` naming exactly those
-reasons. The fetch vocabulary is not exhaustive; a fetch outside it still turns
-a reviewed entry stale but demands no `dynamic:` field.
+reasons. A full checkout binds the whole tracked tree, so editing, adding, or
+deleting any file turns its entry stale. A runtime-selected checkout must
+carry a `sparse-checkout` list; without one it is refused, because no review
+can bind what it puts on disk. The fetch vocabulary is not exhaustive; a fetch
+outside it still turns a reviewed entry stale but demands no `dynamic:` field.
 `scripts/ci-gate/public-pr-runner-isolation.pending.tsv` ratchets
 `actionlint.yml` and `container-candidate.yml` as pending.
 Their selectors are pinned in `hosted-selector-policy.py` and change after #1826;

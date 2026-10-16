@@ -165,6 +165,17 @@ or a literal GitHub-hosted image.
        them;
      - every local action directory (`uses: ./…`), recursively, plus files
        its composite steps reach through `github.action_path`;
+     - a full checkout of the scanned tree: every tracked path and its bytes,
+       in path order. The path list is hashed with the contents, so an edit, an
+       added file, and a deleted file each change the digest. In a git work
+       tree the list is git's index (`git ls-files`), so untracked residue such
+       as `__pycache__` never counts. Outside one it is every file except
+       `.git`. The pending and reviewed lists are left out, because an entry
+       cannot hold a digest of its own bytes and every edit to a list is
+       itself reviewed. Reading the bytes of this repository's 867 tracked
+       files (about 12 MB) costs 13–37 ms per run, once per run, so the
+       checker reads bytes rather than digesting index blob SHAs; this also
+       binds an unstaged edit;
    - the job's unresolved reasons, below, with their details.
 
    Any edit to any of these makes the entry `STALE REVIEWED`, which fails
@@ -180,8 +191,8 @@ or a literal GitHub-hosted image.
    | `head-materialization` | Head detection concludes that the job materializes the pull request head, or cannot decide. Only "no known head-materializing pattern" leaves this reason unset, and that result is not proof of safety. |
    | `tree-change` | A runtime command that changes the checked-out tree: git `sparse-checkout`, `checkout`, `switch`, `restore`, `reset`, `pull`, `merge`, `rebase`, `worktree`, `apply`, `am`, `cherry-pick`, `read-tree`, or `checkout-index` after any global options; any git command given `--git-dir` or `--work-tree`; `gh pr checkout`; or `patch`. |
    | `shell` | A `shell:` other than `bash` on any step, including a local composite action's step, or in a job or workflow `defaults.run`. |
-   | `full-checkout` | A checkout of the scanned tree with no `sparse-checkout` list. |
-   | `runtime-checkout` | A checkout whose repository or ref is selected at runtime, not the scanned tree. |
+   | `full-checkout` | A checkout of the scanned tree with no `sparse-checkout` list. The whole tracked tree is in the digest, as above. |
+   | `runtime-checkout` | A checkout whose repository or ref is selected at runtime, not the scanned tree. It must carry a `sparse-checkout` list; without one, no review can bind what it puts on disk, so the job is refused and no entry can accept it. |
    | `submodules` | A checkout with `submodules: true` or `recursive`. |
    | `unscanned-path` | A sparse path, glob, or local-action file that the scanned tree does not contain, or that lies outside it. |
    | `local-action` | A local action that is missing, nested more than four deep, has no `runs` block, or whose manifest does not parse. |

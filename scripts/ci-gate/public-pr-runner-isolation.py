@@ -31,12 +31,14 @@ Verjson/.github ADR 0235.
 from __future__ import annotations
 
 import argparse
+import functools
 import glob
 import hashlib
 import itertools
 import json
 import os
 import re
+import subprocess
 import sys
 from typing import NamedTuple
 
@@ -1005,10 +1007,15 @@ class Closure:
     scanned tree without their own checkout step.
     """
 
-    def __init__(self, root: str) -> None:
+    def __init__(self, root: str, excluded: frozenset[str] = frozenset()) -> None:
         self.root = os.path.normpath(root)
+        self.excluded = excluded
         self.files: dict[str, str] = {}
         self.unresolved: dict[str, set[str]] = {}
+        # Digest of the whole tracked tree, set when a checkout materializes it.
+        self.tree: str | None = None
+        # Why no reviewed entry can accept this job, if anything.
+        self.refusals: set[str] = set()
 
     def flag(self, reason: str, detail: str) -> None:
         assert reason in REASONS, reason
@@ -1070,12 +1077,19 @@ class Closure:
                 f"checkout of {repository or 'this repository'}@{ref or 'default'} "
                 "selected at runtime, not the scanned tree"
             )
+            if not sparse:
+                self.refusals.add(
+                    f"checkout of {repository or 'this repository'}@{ref or 'default'} is selected at runtime "
+                    "and has no sparse-checkout list, so no review can bind the bytes it puts on disk; "
+                    "add a sparse-checkout list naming only the paths the job needs"
+                )
             # The scanned bytes of the listed paths still bind the review.
             for path in sparse:
                 self.add_sparse_path(path, cone, "runtime checkout, scanned bytes")
             return
         if not sparse:
             self.flag("full-checkout", "full checkout of the scanned tree (no sparse-checkout list bounds it)")
+            self.tree = tree_digest(self.root, self.excluded)
             return
         if cone:
             self.add_direct_files("", "cone-mode root")
@@ -1171,6 +1185,50 @@ class Closure:
                 self.add_file(os.path.join(action_dir, value), f"local action {uses} entry point")
 
 
+def tracked_files(root: str) -> list[str]:
+    """The paths a full checkout of the scanned tree materializes: git's index
+    in a work tree (never untracked residue such as __pycache__), otherwise
+    every file under the root except .git."""
+    if os.path.exists(os.path.join(root, ".git")):
+        try:
+            listing = subprocess.run(
+                ["git", "-C", root, "ls-files", "-z", "--cached"], capture_output=True, check=True
+            ).stdout
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise Undetermined(f"{root}: cannot list the tracked tree a full checkout puts on disk: {error}") from error
+        return sorted(name for name in listing.decode("utf-8", "surrogateescape").split("\0") if name)
+    found = []
+    for base, directories, names in os.walk(root):
+        links = [name for name in directories if os.path.islink(os.path.join(base, name))]
+        directories[:] = sorted(name for name in directories if name != ".git" and name not in links)
+        found.extend(os.path.relpath(os.path.join(base, name), root) for name in names + links)
+    return sorted(found)
+
+
+@functools.lru_cache(maxsize=None)
+def tree_digest(root: str, excluded: frozenset[str] = frozenset()) -> str:
+    """SHA-256 over every tracked path and its bytes, in path order, so an
+    edit, an added file, and a deleted file all change it. The excluded paths
+    are the pending and reviewed lists themselves: an entry cannot contain a
+    digest over its own bytes, and every edit to a list is itself reviewed."""
+    digest = hashlib.sha256()
+    for relative in tracked_files(root):
+        if relative in excluded:
+            continue
+        path = os.path.join(root, relative)
+        if os.path.islink(path):
+            content = "link " + os.readlink(path)
+        elif os.path.isfile(path):
+            with open(path, "rb") as handle:
+                content = "file " + hashlib.sha256(handle.read()).hexdigest()
+        elif os.path.isdir(path):
+            content = "gitlink"
+        else:
+            content = "missing"
+        digest.update(f"{relative}\0{content}\n".encode("utf-8", "surrogateescape"))
+    return "sha256:" + digest.hexdigest()
+
+
 RUNTIME_TREE_CHANGE = re.compile(
     rf"(?:^|[\s;&|(])git[ \t]+{GIT_OPTIONS}"
     r"(?:sparse-checkout|checkout|switch|restore|reset|pull|merge|rebase|worktree|apply|am|cherry-pick"
@@ -1241,8 +1299,8 @@ def without_comments(run: str) -> str:
     return "\n".join(line for line in run.split("\n") if not line.lstrip().startswith("#"))
 
 
-def job_closure(job: dict, root: str, workflow_defaults=None) -> Closure:
-    closure = Closure(root)
+def job_closure(job: dict, root: str, workflow_defaults=None, excluded: frozenset[str] = frozenset()) -> Closure:
+    closure = Closure(root, excluded)
     for scope, defaults in (("workflow", workflow_defaults), ("job", job.get("defaults"))):
         run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
         if isinstance(run_defaults, dict):
@@ -1255,10 +1313,15 @@ def job_closure(job: dict, root: str, workflow_defaults=None) -> Closure:
 class Scan:
     """Traversal state for one triggering event across local reusable calls."""
 
-    def __init__(self, directory: str, repository: str, event: str) -> None:
+    def __init__(self, directory: str, repository: str, event: str, lists: tuple[str, ...] = ()) -> None:
         self.directory = directory
         # Workflows live at <root>/.github/workflows; scripts resolve from <root>.
         self.root = os.path.dirname(os.path.dirname(os.path.abspath(directory)))
+        # The pending and reviewed lists, relative to the root, kept out of
+        # the tree digest.
+        self.excluded = frozenset(
+            os.path.relpath(os.path.abspath(path), self.root) for path in lists if path is not None
+        )
         self.repository = repository
         self.event = event
         self.findings: list[Finding] = []
@@ -1349,23 +1412,22 @@ def check_workflow(
         if not scan.privileged:
             violations.extend(found)
         elif found:
-            closure = job_closure(job, scan.root, document.get("defaults"))
+            closure = job_closure(job, scan.root, document.get("defaults"), scan.excluded)
             diagnostic, head_unresolved = head_diagnostic(job, document, scan.root, f"{path}: job '{name}'")
             if head_unresolved:
                 closure.flag("head-materialization", diagnostic)
             pairs = closure.pairs()
+            bound = {"files": closure.files, "unresolved": [f"{reason}: {detail}" for reason, detail in pairs]}
+            if closure.tree is not None:
+                bound["tree"] = closure.tree
             scan.findings.append(
                 Finding(
                     path,
                     name,
-                    review_digest(
-                        chain,
-                        job,
-                        inherited_settings(document),
-                        {"files": closure.files, "unresolved": [f"{reason}: {detail}" for reason, detail in pairs]},
-                    ),
+                    review_digest(chain, job, inherited_settings(document), bound),
                     diagnostic,
                     pairs,
+                    refusal="; ".join(sorted(closure.refusals)),
                 )
             )
     return violations
@@ -1409,7 +1471,7 @@ def check_job(
 
 
 def check_tree(
-    directory: str, repository: str, findings: list[Finding] | None = None
+    directory: str, repository: str, findings: list[Finding] | None = None, lists: tuple[str, ...] = ()
 ) -> list[Violation]:
     violations: list[Violation] = []
     names = sorted(
@@ -1422,7 +1484,7 @@ def check_tree(
         for event in CHECKED_EVENTS:
             if event not in triggers(document):
                 continue
-            scan = Scan(directory, repository, event)
+            scan = Scan(directory, repository, event, lists)
             label = name if event == "pull_request" else f"{name} [{event}]"
             violations.extend(check_workflow(scan, label, document))
             if findings is not None:
@@ -1515,7 +1577,9 @@ def main(argv: list[str]) -> int:
         pending = load_pending(arguments.pending)
         reviewed = load_pending(arguments.reviewed, REVIEWED_FORMAT)
         findings: list[Finding] = []
-        found = check_tree(arguments.workflow_dir, arguments.repository, findings)
+        found = check_tree(
+            arguments.workflow_dir, arguments.repository, findings, (arguments.pending, arguments.reviewed)
+        )
     except Undetermined as error:
         print(f"UNDETERMINED: {error}", file=sys.stderr)
         return 2
