@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
+import argparse
+import contextlib
 import importlib.util
+import io
 import datetime
 import hashlib
 import json
@@ -57,6 +60,56 @@ class PackageRetentionTest(unittest.TestCase):
         for invalid in (0, -1, True):
             with self.assertRaisesRegex(retention.RetentionError, "positive integer"):
                 retention.plan_target(target, versions, keep=invalid)
+
+    def test_keep_policy_accepts_only_all_or_an_integer_from_1_to_999(self):
+        self.assertEqual(retention.parse_keep("3"), 3)
+        self.assertEqual(retention.parse_keep("1"), 1)
+        self.assertEqual(retention.parse_keep("999"), 999)
+        self.assertIs(retention.parse_keep("all"), retention.KEEP_ALL)
+        for invalid in (
+            "0", "00", "03", "-1", "+3", " 3", "3 ", "1000", str(2**64), "1e3", "3.0",
+            "", "ALL", "All", "aLL", " all", "all ", "none", "\u0663", "\uff13", "\u0661\u0660",
+        ):
+            with self.subTest(value=invalid):
+                with self.assertRaises(argparse.ArgumentTypeError) as raised:
+                    retention.parse_keep(invalid)
+                self.assertIn("an integer from 1 to 999 or 'all'", str(raised.exception))
+
+    def run_main(self, *arguments):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "argv", ["package_retention.py", *arguments]), \
+                mock.patch.dict(retention.os.environ, {"GH_TOKEN": "token"}), \
+                mock.patch.object(retention, "GitHubPackages", side_effect=AssertionError("API used")), \
+                mock.patch.object(retention, "build_plan", side_effect=AssertionError("planned")), \
+                mock.patch.object(retention, "apply_plan", side_effect=AssertionError("deleted")), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            try:
+                status = retention.main()
+            except SystemExit as exit_:
+                status = exit_.code
+        return status, stdout.getvalue(), stderr.getvalue()
+
+    def test_keep_all_disables_retention_without_listing_or_deleting(self):
+        targets = '[{"type":"npm","name":"cli","releasedVersion":"1.0.0"}]'
+        status, stdout, _ = self.run_main(
+            "--owner", "Verjson", "--targets", targets, "--keep", "all", "--apply"
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(stdout, "package-retention: disabled by policy (keep=all)\n")
+
+    def test_keep_all_still_validates_the_targets(self):
+        with self.assertRaisesRegex(retention.RetentionError, "non-empty JSON array"):
+            self.run_main("--owner", "Verjson", "--targets", "[]", "--keep", "all")
+
+    def test_the_cli_refuses_a_keep_outside_the_policy_language(self):
+        targets = '[{"type":"npm","name":"cli","releasedVersion":"1.0.0"}]'
+        for invalid in ("0", "ALL", "1000", "\u0663"):
+            with self.subTest(value=invalid):
+                status, _, stderr = self.run_main(
+                    "--owner", "Verjson", "--targets", targets, "--keep", invalid
+                )
+                self.assertEqual(status, 2)
+                self.assertIn("an integer from 1 to 999 or 'all'", stderr)
 
     def test_container_safety_honors_a_configured_keep(self):
         target = retention.Target("container", "api", "3.0.0")
