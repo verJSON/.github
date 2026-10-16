@@ -1203,8 +1203,8 @@ ${release_plan_step}
           GIT_TRACE2_ENV_VARS: ''
           GIT_TRACE2_CONFIG_PARAMS: ''
         run: |
-          if [[ ! "\$CI_PACKAGE_RETENTION_KEEP" =~ ^[123456789][0123456789]*\$ ]]; then
-            echo "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer, got '\$CI_PACKAGE_RETENTION_KEEP'."
+          if [[ ! "\$CI_PACKAGE_RETENTION_KEEP" =~ ^[123456789][0123456789]{0,2}\$ ]]; then
+            echo "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer no greater than 999, got '\$CI_PACKAGE_RETENTION_KEEP'."
             exit 1
           fi
           verification_home="\$(/usr/bin/mktemp -d "\$RUNNER_TEMP/verjson-release-verification.XXXXXX")"
@@ -1840,8 +1840,8 @@ ${required_lane_validation_step}
           GIT_TRACE2_ENV_VARS: ''
           GIT_TRACE2_CONFIG_PARAMS: ''
         run: |
-          if [[ ! "\$CI_PACKAGE_RETENTION_KEEP" =~ ^[123456789][0123456789]*\$ ]]; then
-            echo "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer, got '\$CI_PACKAGE_RETENTION_KEEP'."
+          if [[ ! "\$CI_PACKAGE_RETENTION_KEEP" =~ ^[123456789][0123456789]{0,2}\$ ]]; then
+            echo "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer no greater than 999, got '\$CI_PACKAGE_RETENTION_KEEP'."
             exit 1
           fi
           verification_home="\$(/usr/bin/mktemp -d "\$RUNNER_TEMP/verjson-release-verification.XXXXXX")"
@@ -2431,8 +2431,8 @@ ${release_plan_step}
           GIT_TRACE2_ENV_VARS: ''
           GIT_TRACE2_CONFIG_PARAMS: ''
         run: |
-          if [[ ! "\$CI_PACKAGE_RETENTION_KEEP" =~ ^[123456789][0123456789]*\$ ]]; then
-            echo "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer, got '\$CI_PACKAGE_RETENTION_KEEP'."
+          if [[ ! "\$CI_PACKAGE_RETENTION_KEEP" =~ ^[123456789][0123456789]{0,2}\$ ]]; then
+            echo "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer no greater than 999, got '\$CI_PACKAGE_RETENTION_KEEP'."
             exit 1
           fi
           verification_home="\$(/usr/bin/mktemp -d "\$RUNNER_TEMP/verjson-release-verification.XXXXXX")"
@@ -4154,9 +4154,9 @@ APPROVED_RELEASE_STATE_SCRIPT_SHA256 = {
     "release-snapshot": "0860f7c804f4e5111e9461230e9e999ac3b1a0761a54ea57488c9772854ce22c",
 }
 APPROVED_RELEASE_VERIFICATION_SCRIPT_SHA256 = {
-    "release-node": "26dc76c41575456af045f28f860882e0b4e58c982b8463f8923a181f33b22e02",
-    "release-artifact": "6d99072ebed714acc070d2dc2fcbb8ad02b2284f9b516869d507da94703c99c3",
-    "release-snapshot": "86195859d694356274886a76d26855da64a4588adb9fdf119e3d99c4a28beead",
+    "release-node": "e62905a616020d709ecab75b40d7368d20a59906b0f0371409332be7dea6eb9f",
+    "release-artifact": "62cd60ac2babb791374ab5a5b35c3e2d07aed8ff61192573b63e37806a419a62",
+    "release-snapshot": "42571b78f1873eab2ae781d516347445038e79e05191ea6375ada44e7fb2d013",
 }
 APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
     "release-node": "0caf167486937a2def16a5223fcb64b1a4a737447d424c83a891c2aac4e3b3a2",

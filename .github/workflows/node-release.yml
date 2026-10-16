@@ -944,11 +944,12 @@ jobs:
           # variable — raising it is a storage-cost decision, not a code change.
           RETENTION_KEEP: ${{ vars.CI_PACKAGE_RETENTION_KEEP || '3' }}
         run: |
-          # Enumerated digits: a [1-9] range follows locale collation and admits
-          # non-ASCII digits. The generated release verify step applies this exact
+          # Enumerated, capped digits: a [1-9] range follows locale collation and
+          # admits non-ASCII digits, and a 2**64 window wraps to 0 in shell
+          # arithmetic. The generated release verify step applies this exact
           # guard to the same window (scripts/ci-gate/release-verify-retention-keep.test.py).
-          if [[ ! "$RETENTION_KEEP" =~ ^[123456789][0123456789]*$ ]]; then
-            echo "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer, got '$RETENTION_KEEP'."
+          if [[ ! "$RETENTION_KEEP" =~ ^[123456789][0123456789]{0,2}$ ]]; then
+            echo "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer no greater than 999, got '$RETENTION_KEEP'."
             exit 1
           fi
           python3 -I .package-retention-contract/scripts/package_retention.py \

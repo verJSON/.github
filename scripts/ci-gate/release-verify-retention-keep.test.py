@@ -29,8 +29,9 @@ _LOCALES_SPEC = importlib.util.spec_from_file_location(
 ascii_digit_locales = importlib.util.module_from_spec(_LOCALES_SPEC)
 _LOCALES_SPEC.loader.exec_module(ascii_digit_locales)
 # The one guard every retention-window site applies. Digits are enumerated
-# because a [1-9] range is collation-ordered outside the C locale.
-RETENTION_GUARD = "^[123456789][0123456789]*$"
+# because a [1-9] range is collation-ordered outside the C locale, and capped
+# at three so no consumer's integer arithmetic can wrap (2**64 is 0 in bash).
+RETENTION_GUARD = "^[123456789][0123456789]{0,2}$"
 NON_ASCII_DIGITS = ("\u0663", "\uff13", "1\u0663", "\u0661\u0660")
 VERIFY_STEP = "Run the release verification suite"
 RETENTION_KEY = "CI_PACKAGE_RETENTION_KEEP"
@@ -227,7 +228,10 @@ class ReleaseVerifyRetentionKeepTests(unittest.TestCase):
                 self.assertEqual(hook_env.get(RETENTION_KEY), "7")
 
     def test_an_invalid_org_retention_window_fails_closed_before_the_hook_runs(self):
-        invalid = ("0", "-1", "03", "abc", "1.5", " 3", "3 ", "1e3", *NON_ASCII_DIGITS)
+        invalid = (
+            "0", "-1", "03", "abc", "1.5", " 3", "3 ", "1e3",
+            "1000", str(2**64), *NON_ASCII_DIGITS,
+        )
         cases = [
             (label, locale, mode, step, value)
             for label, locale in self.locales.items()
@@ -260,7 +264,7 @@ class ReleaseVerifyRetentionKeepTests(unittest.TestCase):
 
     def test_the_smallest_and_a_large_window_reach_the_hook_unchanged(self):
         for mode, step in self.steps.items():
-            for value in ("1", "120"):
+            for value in ("1", "120", "999"):
                 with self.subTest(mode=mode, value=value):
                     result, hook_env = run_verify_step(step, variables={RETENTION_KEY: value})
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -274,7 +278,7 @@ class ReleaseVerifyRetentionKeepTests(unittest.TestCase):
                 result, hook_env = run_verify_step(stripped, variables={RETENTION_KEY: "7"})
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn(
-                    "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer, got ''.",
+                    "::error::CI_PACKAGE_RETENTION_KEEP must be a positive integer no greater than 999, got ''.",
                     result.stdout + result.stderr,
                 )
                 self.assertIsNone(hook_env, "the hook ran without a retention window")
