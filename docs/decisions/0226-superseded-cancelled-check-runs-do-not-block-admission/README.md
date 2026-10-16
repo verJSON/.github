@@ -415,6 +415,6 @@ Each condition was mutated out and the suite failed.
 
 The suite's runtime margin is recorded too. `assert-mergeable-head.test.sh` has
 declared `@budget=120` since this amendment, because the PR row default is 60s. It
-took 85s locally on the re-reviewed head, under host load average 15, which leaves
-about 35s of margin. CI ran its predecessor in 51s on `main` run 38799238936. The mutation table is on the pull
+took 85s locally on the re-reviewed head under host load average 15, and 89-90s on
+the final head under load average 9-10, which leaves about 30s of margin. CI ran its predecessor in 51s on `main` run 38799238936. The mutation table is on the pull
 request.
