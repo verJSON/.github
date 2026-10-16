@@ -255,9 +255,11 @@ local tool bytes to equal those at `--workflow-sha`:
 
 ```bash
 M=c78fcd4ef9ab83b6775ae2ede94ebce475b3943c
-git -C /home/pbyousefi/development/verjson/.github fetch --prune origin
-git -C /home/pbyousefi/development/verjson/.github worktree add --detach "/tmp/receipt-$M" "$M"
-cd "/tmp/receipt-$M"
+CANONICAL=<canonical-checkout>   # any clone of the organization's .github repository
+RECEIPT=$(mktemp -d)
+git -C "$CANONICAL" fetch --prune origin
+git -C "$CANONICAL" worktree add --detach "$RECEIPT" "$M"
+cd "$RECEIPT"
 RUN=<required-workflow run id above 38432170170>
 HEAD_SHA=$(gh api "repos/Verjson/verjson-cli-projects/actions/runs/$RUN" --jq .head_sha)
 python3 -I scripts/cli-projects-package-surface-ruleset.py verify-run --workflow-sha "$M" \

@@ -134,7 +134,7 @@ Ruleset 21750617 was rotated from `dc6b2942` to
 `c78fcd4ef9ab83b6775ae2ede94ebce475b3943c` (#1828) with
 `ROTATE-AUTHN-TYPE-SURFACE-1154`. The read-only `audit` and the package type-surface
 audit both exit 0. The post-rotation snapshot is
-`{"pre_trigger_max_run_id": 38820796032, "ruleset_updated_at": "2026-10-15T20:38:15.513-05:00"}`.
+`{"pre_trigger_max_run_id": 38820796032, "ruleset_id": 21750617, "ruleset_updated_at": "2026-10-15T20:38:15.513-05:00"}`.
 
 The exact-head receipt is still outstanding: no authn pull request has run since the
 rotation. When the first `pull_request` run of
@@ -145,9 +145,11 @@ local tool bytes to equal those at `--workflow-sha`:
 
 ```bash
 M=c78fcd4ef9ab83b6775ae2ede94ebce475b3943c
-git -C /home/pbyousefi/development/verjson/.github fetch --prune origin
-git -C /home/pbyousefi/development/verjson/.github worktree add --detach "/tmp/receipt-$M" "$M"
-cd "/tmp/receipt-$M"
+CANONICAL=<canonical-checkout>   # any clone of the organization's .github repository
+RECEIPT=$(mktemp -d)
+git -C "$CANONICAL" fetch --prune origin
+git -C "$CANONICAL" worktree add --detach "$RECEIPT" "$M"
+cd "$RECEIPT"
 RUN=<required-workflow run id above 38820796032>
 HEAD_SHA=$(gh api "repos/Verjson/verjson-authn/actions/runs/$RUN" --jq .head_sha)
 python3 -I scripts/authn-type-surface-ruleset.py verify-run --workflow-sha "$M" \
