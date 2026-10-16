@@ -19,7 +19,11 @@ Under pull_request_target, workflow_run and issue_comment, which run the base
 workflow with base privileges and can be triggered by fork activity, any job
 that can resolve to a persistent runner fails unless `--reviewed` lists it by
 path, job, and a digest of its full content, inherited workflow settings, and
-calling jobs. Head detection only prints diagnostics (ADR 0235).
+calling jobs. The checker over-approximates what such a job puts on disk: any
+fetch, runtime tree change, non-default shell, unbounded checkout, or head
+detection that finds a materializing or undeterminable pattern leaves the job
+unresolved, and its entry must carry a `dynamic:` field naming every one of
+those reason categories (ADR 0235).
 
 Verjson/.github ADR 0235.
 """
@@ -730,17 +734,20 @@ HEAD_TOKEN = re.compile(
     r"|\$\{\{\s*inputs\.",
     re.I,
 )
+# git global options before the subcommand: `-C dir`, `-c k=v`, `--git-dir=x`,
+# `--work-tree x`, `--no-pager`.
+GIT_OPTIONS = r"(?:-[\w-]+(?:=\S*|[ \t]+(?!-)\S+)?[ \t]+)*"
 # Commands that put head-controlled bytes on disk when given a head value.
 PR_MATERIALIZE = re.compile(r"\bgh\s+pr\s+(?:checkout|diff)\b")
 GIT_MATERIALIZE = re.compile(
-    r"(?:^|[\s;&|(])git\s+(?:-[Cc]\s+\S+\s+)*"
+    rf"(?:^|[\s;&|(])git[ \t]+{GIT_OPTIONS}"
     r"(?:fetch|checkout|switch|worktree|pull|reset|merge|cherry-pick|clone|am|apply)\b"
 )
 DOWNLOAD = re.compile(
     r"\bcurl\b|\bwget\b|\bgh\s+api\b[^\n]*\b(?:tarball|zipball|archive)\b"
 )
 # `gh run download` is deliberately absent: workflow artifacts are not head
-# detection; FETCH below holds a job that executes them unbound for `dynamic:`.
+# detection; FETCH below leaves any job that downloads them unresolved.
 # The same operations written as an argv list or a library call, for program
 # text the workflow authors inline (a heredoc into $RUNNER_TEMP).
 ARGV_PR_MATERIALIZE = re.compile(r"""["']gh["']\s*,\s*["']pr["']\s*,\s*["'](?:checkout|diff)["']""")
@@ -764,8 +771,6 @@ def materializes(text: str, names_head: bool) -> bool:
 OPAQUE_PIPE = re.compile(
     r"\|\s*(?:sudo\s+)?(?:sh|bash|zsh|python3?|node|perl|ruby)\b|\beval\b|\bsource\s+<\("
 )
-INTERPRETERS = frozenset({"bash", "sh", "zsh", "python", "python3", "node", "pwsh", "perl", "ruby"})
-COMMAND_SEPARATOR = re.compile(r"\n|;|&&|\|\||\||\$\(")
 
 
 def is_base_only(value) -> bool:
@@ -938,8 +943,8 @@ class Finding(NamedTuple):
     job: str
     review_digest: str
     diagnostic: str
-    # Executed paths the scanner cannot resolve statically; an entry must
-    # justify them in a `dynamic:` field.
+    # (reason, detail) pairs for what the job puts on disk that the scanned
+    # tree does not bound; an entry's `dynamic:` must name every reason.
     unresolved: tuple = ()
     # A reason no entry can accept this job (an unpinned remote callee).
     refusal: str = ""
@@ -1000,47 +1005,30 @@ class Closure:
     scanned tree without their own checkout step.
     """
 
-    def __init__(self, root: str, job: dict) -> None:
+    def __init__(self, root: str) -> None:
         self.root = os.path.normpath(root)
-        self.job = job
         self.files: dict[str, str] = {}
-        self.unresolved: set[str] = set()
-        self.checkout_prefixes: list = []
-        self.working_directory = ""
-        self.fetches: list[str] = []
-        self.executed: list[tuple[str, str]] = []
+        self.unresolved: dict[str, set[str]] = {}
 
-    def is_bound(self, program: str, working_directory: str) -> bool:
-        """Whether an executed path is scanned-tree bytes or workflow-authored."""
-        if inline_source(self.job, program) is not None:
-            return True
-        if "$" in program or program.startswith("<"):
-            return False
-        candidates = {os.path.normpath(program)}
-        if working_directory:
-            candidates.add(os.path.normpath(os.path.join(working_directory, program)))
-        for candidate in list(candidates):
-            for prefix in self.checkout_prefixes:
-                if prefix.match(candidate):
-                    candidates.add(prefix.sub("", candidate, count=1))
-        return any(candidate in self.files for candidate in candidates)
+    def flag(self, reason: str, detail: str) -> None:
+        assert reason in REASONS, reason
+        self.unresolved.setdefault(reason, set()).add(detail)
 
-    def bind_fetched_execution(self) -> None:
-        """Fail closed: a job that fetches content onto disk and executes a
-        path the scanner cannot bind to the scanned tree needs dynamic:."""
-        if not self.fetches:
-            return
-        unbound = sorted({path for path, directory in self.executed if not self.is_bound(path, directory)})
-        if unbound:
-            self.unresolved.add(
-                f"fetches content at runtime ({', '.join(sorted(set(self.fetches)))}) "
-                f"and executes paths not bound to the scanned tree ({', '.join(unbound)})"
-            )
+    def pairs(self) -> tuple[tuple[str, str], ...]:
+        return tuple(sorted((reason, detail) for reason, details in self.unresolved.items() for detail in details))
+
+    def flag_fetches(self, text: str, where: str) -> None:
+        for match in itertools.chain(FETCH.finditer(text), ARGV_FETCH.finditer(text)):
+            self.flag("fetch", f"`{' '.join(match.group(0).split())}` in {where}")
+
+    def flag_shell(self, shell, where: str) -> None:
+        if shell is not None and str(shell).strip() != DEFAULT_SHELL:
+            self.flag("shell", f"`shell: {shell}` in {where}")
 
     def add_file(self, repo_path: str, why: str) -> bool:
         candidate = os.path.normpath(os.path.join(self.root, repo_path))
         if candidate != self.root and not candidate.startswith(self.root + os.sep):
-            self.unresolved.add(f"{repo_path} ({why}: outside the scanned tree)")
+            self.flag("unscanned-path", f"{repo_path} ({why}: outside the scanned tree)")
             return False
         if os.path.isdir(candidate):
             for base, directories, names in os.walk(candidate):
@@ -1049,7 +1037,7 @@ class Closure:
                     self.add_file(os.path.relpath(os.path.join(base, name), self.root), why)
             return True
         if not os.path.isfile(candidate):
-            self.unresolved.add(f"{repo_path} ({why}: not in the scanned tree)")
+            self.flag("unscanned-path", f"{repo_path} ({why}: not in the scanned tree)")
             return False
         relative = os.path.relpath(candidate, self.root)
         if relative not in self.files:
@@ -1067,12 +1055,9 @@ class Closure:
                 self.add_file(os.path.relpath(os.path.join(absolute, name), self.root), why)
 
     def add_checkout(self, options: dict) -> None:
-        checkout_path = str(options.get("path") or "").strip().strip("/")
-        if checkout_path:
-            pattern = re.sub(r"\\\$\\\{\\\{.*?\\\}\\\}", r"[^/]*", re.escape(checkout_path))
-            self.checkout_prefixes.append(re.compile(rf"^{pattern}/"))
         if str(options.get("submodules", "false")).strip().lower() in ("true", "recursive"):
-            self.unresolved.add(
+            self.flag(
+                "submodules",
                 f"checkout submodules: {options.get('submodules')} materializes repositories outside the scanned tree"
             )
         repository = str(options.get("repository") or "").strip()
@@ -1080,7 +1065,8 @@ class Closure:
         sparse = [line.strip() for line in str(options.get("sparse-checkout") or "").splitlines() if line.strip()]
         cone = str(options.get("sparse-checkout-cone-mode", "true")).strip().lower() != "false"
         if not (repository in ("", "${{ github.repository }}") and ref in TREE_REFS):
-            self.unresolved.add(
+            self.flag(
+                "runtime-checkout",
                 f"checkout of {repository or 'this repository'}@{ref or 'default'} "
                 "selected at runtime, not the scanned tree"
             )
@@ -1089,7 +1075,7 @@ class Closure:
                 self.add_sparse_path(path, cone, "runtime checkout, scanned bytes")
             return
         if not sparse:
-            self.unresolved.add("full checkout of the scanned tree (no sparse-checkout list bounds it)")
+            self.flag("full-checkout", "full checkout of the scanned tree (no sparse-checkout list bounds it)")
             return
         if cone:
             self.add_direct_files("", "cone-mode root")
@@ -1103,7 +1089,7 @@ class Closure:
                 return  # an exclusion only removes bytes
             matches = sorted(glob.glob(os.path.join(self.root, path), recursive=True))
             if not matches:
-                self.unresolved.add(f"{path} ({why}: matches nothing in the scanned tree)")
+                self.flag("unscanned-path", f"{path} ({why}: matches nothing in the scanned tree)")
             for match in matches:
                 self.add_file(os.path.relpath(match, self.root), why)
             return
@@ -1113,38 +1099,49 @@ class Closure:
         self.add_file(path, why)
 
     def add_steps(self, steps, depth: int, action_dir: str | None = None) -> None:
-        for step in steps or []:
+        for number, step in enumerate(steps or [], 1):
             if not isinstance(step, dict):
                 continue
+            where = f"step {number}" + (f" of local action {action_dir}" if action_dir else "")
             uses = str(step.get("uses", ""))
-            if uses.split("@")[0].lower() == "actions/checkout":
+            name = uses.split("@")[0].lower()
+            if name == "actions/checkout":
                 self.add_checkout(step.get("with") or {})
-            elif uses.split("@")[0].lower() in FETCH_ACTIONS:
-                self.fetches.append(uses.split("@")[0])
+            elif name in FETCH_ACTIONS:
+                self.flag("fetch", f"{uses.split('@')[0]} at {where}")
+            elif uses.startswith("docker://"):
+                self.flag("fetch", f"{uses} at {where} pulls an image")
             elif uses.startswith("./"):
                 self.add_action(uses, depth)
             run = step.get("run")
             if isinstance(run, str):
-                self.fetches.extend(match.group(0).split()[0] for match in FETCH.finditer(run))
-                directory = str(step.get("working-directory") or self.working_directory or "")
-                self.executed.extend((path, directory) for path in executed_paths(run))
+                self.flag_shell(step.get("shell"), where)
                 for change in RUNTIME_TREE_CHANGE.finditer(without_comments(run)):
-                    self.unresolved.add(
-                        f"`{change.group(0).strip(' ;&|(')}` changes the checked-out tree at runtime"
+                    self.flag(
+                        "tree-change",
+                        f"`{' '.join(change.group(0).strip(' ;&|(').split())}` changes the checked-out tree at runtime",
                     )
                 if action_dir is not None:
                     for program in programs(run):
                         if ACTION_PATH.search(program):
                             self.add_file(os.path.normpath(ACTION_PATH.sub(action_dir, program.strip("\"'"))),
                                           f"run by local action {action_dir}")
+            for text in step_strings(step):
+                self.flag_fetches(text, where)
+
+    def add_scanned_fetches(self) -> None:
+        """A repository file the job puts on disk can fetch when it runs."""
+        for relative in sorted(self.files):
+            with open(os.path.join(self.root, relative), encoding="utf-8", errors="replace") as handle:
+                self.flag_fetches(handle.read(), relative)
 
     def add_action(self, uses: str, depth: int) -> None:
         action_dir = os.path.normpath(uses)
         if depth >= MAX_CLOSURE_DEPTH:
-            self.unresolved.add(f"{uses} (local action nested beyond {MAX_CLOSURE_DEPTH})")
+            self.flag("local-action", f"{uses} (local action nested beyond {MAX_CLOSURE_DEPTH})")
             return
         if not any(os.path.isfile(os.path.join(self.root, action_dir, name)) for name in ("action.yml", "action.yaml")):
-            self.unresolved.add(f"{uses} (local action not in the scanned tree)")
+            self.flag("local-action", f"{uses} (local action not in the scanned tree)")
             return
         # Everything the action directory holds is on disk when it runs.
         self.add_file(action_dir, f"local action {uses}")
@@ -1157,15 +1154,17 @@ class Closure:
             with open(os.path.join(self.root, manifest), encoding="utf-8") as handle:
                 action = yaml.safe_load(handle) or {}
         except (OSError, yaml.YAMLError):
-            self.unresolved.add(f"{uses} (local action manifest unreadable)")
+            self.flag("local-action", f"{uses} (local action manifest unreadable)")
             return
         runs = action.get("runs") if isinstance(action, dict) else None
         if not isinstance(runs, dict):
-            self.unresolved.add(f"{uses} (local action has no runs block)")
+            self.flag("local-action", f"{uses} (local action has no runs block)")
             return
         if runs.get("using") == "composite":
             self.add_steps(runs.get("steps"), depth + 1, action_dir)
             return
+        if runs.get("using") == "docker":
+            self.flag("fetch", f"local docker action {uses} builds or pulls an image at runtime")
         for key in ("main", "pre", "post", "image"):
             value = runs.get(key)
             if isinstance(value, str) and not value.startswith(("docker://", "http")):
@@ -1173,23 +1172,67 @@ class Closure:
 
 
 RUNTIME_TREE_CHANGE = re.compile(
-    r"(?:^|[\s;&|(])git[ \t]+(?:-[Cc][ \t]+\S+[ \t]+)*"
-    r"(?:sparse-checkout|checkout|switch|restore|reset|pull|merge|worktree|apply|am|cherry-pick)\b"
+    rf"(?:^|[\s;&|(])git[ \t]+{GIT_OPTIONS}"
+    r"(?:sparse-checkout|checkout|switch|restore|reset|pull|merge|rebase|worktree|apply|am|cherry-pick"
+    r"|read-tree|checkout-index)\b"
+    r"|(?:^|[\s;&|(])git[ \t][^\n]*?--(?:git-dir|work-tree)\b"
+    r"|\bgh[ \t]+pr[ \t]+checkout\b"
     r"|(?:^|[;&|(]|&&|\|\|)[ \t]*(?:sudo[ \t]+)?patch(?=[ \t]|$)",
     re.M,
 )
-# Content a job fetches onto disk at runtime: network downloads, repository
-# contents through the API, and workflow or release artifacts.
+# Content a job fetches at runtime, by whatever means the step text or a
+# scanned file names: network clients, the GitHub API and CLI downloads, git
+# transport, package managers and container images, and in-language HTTP
+# clients. A vocabulary, so incomplete by construction (ADR 0235 decision 6).
 FETCH = re.compile(
-    r"\bcurl\b|\bwget\b|\bgh[ \t]+api\b[^\n]*(?:/contents\b|\btarball\b|\bzipball\b|\barchive\b|>)"
-    r"|\bgh[ \t]+(?:run|release)[ \t]+download\b|\bgit[ \t]+clone\b"
+    r"\b(?:curl|wget|aria2c|rsync|scp|sftp)\b"
+    rf"|\bgit[ \t]+{GIT_OPTIONS}(?:clone|fetch|pull|submodule|ls-remote|remote[ \t]+update)\b"
+    r"|\bgh[ \t]+(?:api|release[ \t]+download|run[ \t]+download|pr[ \t]+(?:checkout|diff)"
+    r"|repo[ \t]+clone|gist[ \t]+clone|attestation[ \t]+download)\b"
+    r"|\b(?:npx|pnpx|bunx|uvx|pipx)\b|\b(?:npm|pnpm|yarn|bun)[ \t]+(?:install|i|ci|add|exec|dlx|x|create|update)\b"
+    r"|\bpip3?[ \t]+(?:install|download)\b|\bpython3?[ \t]+-m[ \t]+pip\b|\buv[ \t]+(?:pip|run|tool|sync|add)\b"
+    r"|\b(?:docker|podman)[ \t]+(?:run|pull|create|build|buildx|compose)\b"
+    r"|\bgo[ \t]+(?:install|get|run)\b|\bcargo[ \t]+(?:install|fetch|build)\b|\bgem[ \t]+install\b"
+    r"|\b(?:apt|apt-get|yum|dnf|apk|brew)[ \t]+(?:install|add)\b"
+    r"|(?i:\b(?:invoke-webrequest|invoke-restmethod|iwr|irm|start-bitstransfer)\b|\bnet\.webclient\b)"
+    r"|\burllib\b|\burlopen\b|\brequests\.\w|\bhttpx\b|\bhttp\.client\b|\bfetch\(|\bhttps?\.(?:get|request)\(|\baxios\b"
 )
-FETCH_ACTIONS = ("actions/download-artifact",)
-SOURCE_CALL = re.compile(r"(?:^|[;&|(]|&&|\|\|)[ \t]*(?:source|\.)[ \t]+(\"[^\"\n]+\"|'[^'\n]+'|[^\s;&|)<>]+)", re.M)
-COMMAND_PATH = re.compile(
-    r"(?:^|[;&|(]|&&|\|\|)[ \t]*(?:[A-Za-z_]\w*=\S*[ \t]+)*(\"?(?:\./|\.\./|/|\$\{?\w+\}?/|[\w.-]+/)[^\s;&|)<>(\"]*\"?)(?=[ \t]|$)",
-    re.M,
+# The same operations as an argv list in a program the job runs.
+ARGV_FETCH = re.compile(
+    r"""["'](?:curl|wget)["']"""
+    r"""|["']gh["']\s*,\s*["'](?:api|release|run|pr|repo|gist)["']"""
+    r"""|["']git["']\s*,\s*(?:["']-[^"']*["']\s*,\s*(?:[^,\]]+,\s*)?)*["'](?:clone|fetch|pull|submodule)["']"""
 )
+FETCH_ACTIONS = ("actions/download-artifact", "actions/cache", "actions/cache/restore", "actions/github-script")
+# The runner's default for `run:` on Linux; any other shell is its own program.
+DEFAULT_SHELL = "bash"
+REASONS = (
+    "fetch",
+    "head-materialization",
+    "tree-change",
+    "shell",
+    "full-checkout",
+    "runtime-checkout",
+    "submodules",
+    "unscanned-path",
+    "local-action",
+)
+
+
+def step_strings(step) -> list[str]:
+    """Every string a step carries, with full-line comments dropped from `run`."""
+    found = []
+    stack = [step]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            for key, item in value.items():
+                stack.append(without_comments(item) if key == "run" and isinstance(item, str) else item)
+        elif isinstance(value, list):
+            stack.extend(value)
+        elif isinstance(value, str):
+            found.append(value)
+    return found
 
 
 def without_comments(run: str) -> str:
@@ -1197,34 +1240,14 @@ def without_comments(run: str) -> str:
     return "\n".join(line for line in run.split("\n") if not line.lstrip().startswith("#"))
 
 
-def executed_paths(run: str) -> list[str]:
-    """Paths a run block executes or sources (heredoc bodies excluded)."""
-    lines, body_end = [], None
-    for line in without_comments(run).replace("\\\n", " ").split("\n"):
-        if body_end is not None:
-            if line.strip() == body_end:
-                body_end = None
-            continue
-        heredoc = HEREDOC.search(line)
-        if heredoc:
-            body_end = re.sub(r"^<<-?\s*['\"]?|['\"]?$", "", heredoc.group(0))
-        lines.append(line)
-    text = "\n".join(lines)
-    found = [path for path in programs(text) if path != "<module>"]
-    found += [match.group(1) for match in SOURCE_CALL.finditer(text)]
-    found += [match.group(1) for match in COMMAND_PATH.finditer(text)]
-    if OPAQUE_PIPE.search(text):
-        found.append("<stdin of an interpreter>")
-    return [path.strip("\"'") for path in found]
-
-
-def job_closure(job: dict, root: str) -> Closure:
-    closure = Closure(root, job)
-    defaults = job.get("defaults") if isinstance(job.get("defaults"), dict) else {}
-    run_defaults = defaults.get("run") if isinstance(defaults.get("run"), dict) else {}
-    closure.working_directory = str(run_defaults.get("working-directory") or "")
+def job_closure(job: dict, root: str, workflow_defaults=None) -> Closure:
+    closure = Closure(root)
+    for scope, defaults in (("workflow", workflow_defaults), ("job", job.get("defaults"))):
+        run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
+        if isinstance(run_defaults, dict):
+            closure.flag_shell(run_defaults.get("shell"), f"{scope} defaults.run")
     closure.add_steps(job.get("steps"), 0)
-    closure.bind_fetched_execution()
+    closure.add_scanned_fetches()
     return closure
 
 
@@ -1244,14 +1267,18 @@ class Scan:
         return self.event in PRIVILEGED_EVENTS
 
 
-def head_diagnostic(job: dict, document: dict, root: str, label: str) -> str:
-    """Why a job looks dangerous. Advisory only: it never decides pass/fail."""
+def head_diagnostic(job: dict, document: dict, root: str, label: str) -> tuple[str, bool]:
+    """Head detection's finding, and whether it leaves the job unresolved.
+
+    "No known pattern" is not proof of safety, but anything else (the job
+    materializes the head, or detection cannot decide) needs `dynamic:`.
+    """
     try:
         if materializes_head(job, document.get("env"), root, label):
-            return "head detection: materializes the pull request head"
-        return "head detection: no known head-materializing pattern (not proof of safety)"
+            return "head detection: materializes the pull request head", True
+        return "head detection: no known head-materializing pattern (not proof of safety)", False
     except Undetermined as error:
-        return f"head detection: undetermined ({error})"
+        return f"head detection: undetermined ({error})", True
 
 
 def check_call(
@@ -1321,7 +1348,11 @@ def check_workflow(
         if not scan.privileged:
             violations.extend(found)
         elif found:
-            closure = job_closure(job, scan.root)
+            closure = job_closure(job, scan.root, document.get("defaults"))
+            diagnostic, head_unresolved = head_diagnostic(job, document, scan.root, f"{path}: job '{name}'")
+            if head_unresolved:
+                closure.flag("head-materialization", diagnostic)
+            pairs = closure.pairs()
             scan.findings.append(
                 Finding(
                     path,
@@ -1330,10 +1361,10 @@ def check_workflow(
                         chain,
                         job,
                         inherited_settings(document),
-                        {"files": closure.files, "unresolved": sorted(closure.unresolved)},
+                        {"files": closure.files, "unresolved": [f"{reason}: {detail}" for reason, detail in pairs]},
                     ),
-                    head_diagnostic(job, document, scan.root, f"{path}: job '{name}'"),
-                    tuple(sorted(closure.unresolved)),
+                    diagnostic,
+                    pairs,
                 )
             )
     return violations
@@ -1401,16 +1432,42 @@ def check_tree(
 PENDING_FORMAT = "path<TAB>job<TAB>selector digest<TAB>reason"
 
 
-REVIEWED_FORMAT = "path<TAB>job<TAB>review digest<TAB>justification[<TAB>dynamic: justification]"
+REVIEWED_FORMAT = (
+    "path<TAB>job<TAB>review digest<TAB>justification"
+    "[<TAB>dynamic: <reason>[, <reason>]: <justification>]"
+)
+DYNAMIC_FIELD = re.compile(r"dynamic: ([a-z][a-z-]*(?:, [a-z][a-z-]*)*): (.*)", re.S)
 
 
-def load_pending(
-    path: str | None, row_format: str = PENDING_FORMAT
-) -> dict[tuple[str, str], tuple[str, ...]]:
+class Entry(NamedTuple):
+    digest: str
+    justification: str
+    dynamic: str = ""
+    reasons: frozenset = frozenset()
+
+
+def parse_dynamic(field: str, where: str, row_format: str) -> frozenset:
+    """`dynamic: fetch, shell: <why>` -> {"fetch", "shell"}; every tag must be
+    a reason the checker computes, named once, with a non-empty justification."""
+    match = DYNAMIC_FIELD.fullmatch(field)
+    if not match:
+        raise Undetermined(f"{where}: expected {row_format}")
+    tags = match.group(1).split(", ")
+    for tag in tags:
+        if tag not in REASONS:
+            raise Undetermined(f"{where}: unknown dynamic: reason '{tag}' (known: {', '.join(REASONS)})")
+    if len(set(tags)) != len(tags):
+        raise Undetermined(f"{where}: dynamic: repeats a reason ({match.group(1)})")
+    if not match.group(2).strip():
+        raise Undetermined(f"{where}: dynamic: has an empty justification")
+    return frozenset(tags)
+
+
+def load_pending(path: str | None, row_format: str = PENDING_FORMAT) -> dict[tuple[str, str], Entry]:
     """Reviewed `path<TAB>job<TAB>sha256:<hex><TAB>reason` rows, keyed to a digest."""
     if path is None:
         return {}
-    pending: dict[tuple[str, str], tuple[str, str]] = {}
+    pending: dict[tuple[str, str], Entry] = {}
     try:
         with open(path, encoding="utf-8") as handle:
             rows = handle.read().splitlines()
@@ -1421,14 +1478,26 @@ def load_pending(
             continue
         fields = row.split("\t")
         optional_dynamic = (
-            row_format == REVIEWED_FORMAT and len(fields) == 5 and fields[4].startswith("dynamic: ")
+            row_format == REVIEWED_FORMAT and len(fields) == 5 and fields[4].startswith("dynamic:")
         )
         if (len(fields) != 4 and not optional_dynamic) or not all(field.strip() for field in fields):
             raise Undetermined(f"{path}:{number}: expected {row_format}")
         if not DIGEST.fullmatch(fields[2]):
             raise Undetermined(f"{path}:{number}: {row_format.split('<TAB>')[2]} must be sha256:<64 hex>")
-        pending[(fields[0], fields[1])] = (fields[2], fields[3], fields[4] if optional_dynamic else "")
+        reasons = parse_dynamic(fields[4], f"{path}:{number}", row_format) if optional_dynamic else frozenset()
+        pending[(fields[0], fields[1])] = Entry(
+            fields[2], fields[3], fields[4] if optional_dynamic else "", reasons
+        )
     return pending
+
+
+def describe_reasons(pairs, reasons) -> str:
+    """`fetch (detail; detail), shell (detail)` for the named reasons."""
+    return ", ".join(
+        f"{reason} ({'; '.join(detail for name, detail in pairs if name == reason)})"
+        for reason in REASONS
+        if reason in reasons
+    )
 
 
 def main(argv: list[str]) -> int:
@@ -1454,54 +1523,73 @@ def main(argv: list[str]) -> int:
         row = pending.get((violation.path, violation.job))
         if row is None:
             violations.append(violation)
-        elif row[0] != violation.selector_digest:
+        elif row.digest != violation.selector_digest:
             violations.append(
                 violation._replace(
                     detail=f"{violation.detail}; pending row no longer applies: selector digest "
-                    f"changed from {row[0]} to {violation.selector_digest}"
+                    f"changed from {row.digest} to {violation.selector_digest}"
                 )
             )
         else:
-            print(f"PENDING: {violation} [{row[1]}]")
+            print(f"PENDING: {violation} [{row.justification}]")
     stale_reviews = []
     for finding in findings:
         label = f"{finding.path}: job '{finding.job}'"
         print(f"DIAGNOSTIC: {label}: {finding.diagnostic}")
         row = reviewed.get((finding.path, finding.job))
-        unresolved = "; ".join(finding.unresolved)
+        reasons = {reason for reason, _ in finding.unresolved}
         if finding.refusal:
             violations.append(Violation(finding.path, finding.job, finding.refusal))
-        elif row is None:
+            continue
+        if row is None:
+            needed = ", ".join(reason for reason in REASONS if reason in reasons)
             violations.append(
                 Violation(
                     finding.path,
                     finding.job,
                     "privileged-event job can resolve to a persistent runner and "
                     f"{REVIEW_REQUIRED} (review digest {finding.review_digest})"
-                    + (f"; it executes paths the scanner cannot resolve, so the entry also needs a dynamic: justification: {unresolved}" if unresolved else ""),
+                    + (
+                        f"; its entry also needs `dynamic: {needed}: <justification>` for: "
+                        + describe_reasons(finding.unresolved, reasons)
+                        if reasons
+                        else ""
+                    ),
                 )
             )
-        elif row[0] != finding.review_digest:
+            continue
+        missing = reasons - row.reasons
+        extra = [reason for reason in REASONS if reason in row.reasons - reasons]
+        if row.digest != finding.review_digest:
             stale_reviews.append(
                 f"STALE REVIEWED: {label}: content changed since review "
-                f"(reviewed {row[0]}, now {finding.review_digest}); re-review before relisting"
+                f"(reviewed {row.digest}, now {finding.review_digest})"
+                + (
+                    "; newly unresolved reasons dynamic: does not name: "
+                    + describe_reasons(finding.unresolved, missing)
+                    if missing
+                    else ""
+                )
+                + (f"; dynamic: names reasons the job no longer has: {', '.join(extra)}" if extra else "")
+                + "; re-review before relisting"
             )
-        elif finding.unresolved and not row[2]:
+        elif missing:
             violations.append(
                 Violation(
                     finding.path,
                     finding.job,
-                    "unclassifiable: it executes paths the scanner cannot resolve statically "
-                    f"({unresolved}); the reviewed entry needs a dynamic: justification",
+                    "unclassifiable: unresolved reasons the entry's dynamic: does not name: "
+                    + describe_reasons(finding.unresolved, missing)
+                    + "; the dynamic: field must name each with a justification that covers it",
                 )
             )
-        elif row[2] and not finding.unresolved:
+        elif extra:
             stale_reviews.append(
-                f"STALE REVIEWED: {label}: the dynamic: justification no longer applies "
-                "(every executed path now resolves statically); remove it"
+                f"STALE REVIEWED: {label}: dynamic: names reasons the job no longer has: "
+                f"{', '.join(extra)}; remove them"
             )
         else:
-            print(f"REVIEWED: {label} [{row[1]}]" + (f" [{row[2]}]" if row[2] else ""))
+            print(f"REVIEWED: {label} [{row.justification}]" + (f" [{row.dynamic}]" if row.dynamic else ""))
     for violation in violations:
         print(f"VIOLATION: {violation}")
     reported = {(violation.path, violation.job) for violation in found}
