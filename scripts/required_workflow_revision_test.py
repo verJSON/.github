@@ -341,6 +341,22 @@ class GeneratorEnvironmentTest(unittest.TestCase):
                 env = MODULE.generator_environment(prefix, self.config(1))
         self.assertEqual({"PATH": os.defpath, "LD_LIBRARY_PATH": str(Path(prefix) / "lib")}, env)
 
+    def test_the_build_time_libdir_is_never_trusted_for_the_library_directory(self):
+        # setup-python builds record LIBDIR=/opt/hostedtoolcache/...; a self-hosted runner
+        # installs under _work/_tool. A decoy LIBDIR that also holds the library must lose
+        # to the runtime prefix, and must not be consulted when the prefix lacks it.
+        soname = "libpython3.12.so.1.0"
+        with tempfile.TemporaryDirectory() as prefix, tempfile.TemporaryDirectory() as decoy:
+            (Path(decoy) / soname).write_bytes(b"")
+            config = {"Py_ENABLE_SHARED": 1, "INSTSONAME": soname, "LIBDIR": decoy}.get
+            self.assertEqual({"PATH": os.defpath}, MODULE.generator_environment(prefix, config))
+            (Path(prefix) / "lib").mkdir()
+            (Path(prefix) / "lib" / soname).write_bytes(b"")
+            self.assertEqual(
+                {"PATH": os.defpath, "LD_LIBRARY_PATH": str(Path(prefix) / "lib")},
+                MODULE.generator_environment(prefix, config),
+            )
+
     def test_a_static_or_unlocatable_interpreter_gets_no_library_path(self):
         with tempfile.TemporaryDirectory() as prefix:
             (Path(prefix) / "lib").mkdir()
