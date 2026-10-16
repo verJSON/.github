@@ -156,18 +156,41 @@ or a literal GitHub-hosted image.
      and `paths`), `env`, `permissions`, and `defaults` it inherits;
    - every calling job on the path to it, together with that caller's
      inherited settings;
-   - the bytes, at the scanned tree, of every repository path the job
-     sparse-checks-out, executes (`bash|sh|python3|node <path>`, `./<path>`),
-     or uses as a local action. The scan recurses into composite action steps,
-     action entry points, and the scripts those scripts run.
+   - the scanned-tree bytes the job puts on disk. That means what each
+     checkout materializes, not what commands name:
+     - non-cone `sparse-checkout`: exactly the listed paths, glob-expanded;
+     - cone mode: each listed directory recursively, the root-level files,
+       and the files directly in every parent directory, as git materializes
+       them;
+     - every local action directory (`uses: ./…`), recursively, plus files
+       its composite steps reach through `github.action_path`.
 
    Any edit to any of these makes the entry `STALE REVIEWED`, which fails
-   until someone re-reviews it. A job may execute a path the scanner cannot
-   resolve statically: a variable path that is not authored inline, `python
-   -m`, or a path inside a checkout whose repository or ref is selected at
-   runtime. Its entry then needs an explicit fifth field, `dynamic:
-   <justification>`. Without that field the job is unclassifiable and fails,
-   and a `dynamic:` field on a fully resolvable job is stale. A remote callee
+   until someone re-reviews it. Some on-disk content cannot be bounded
+   statically: a full checkout with no `sparse-checkout` list, a checkout
+   whose repository or ref is selected at runtime, or a runtime git command
+   that changes the tree (`sparse-checkout`, `checkout`, `switch`, `restore`,
+   `reset`, `pull`, `merge`, `worktree`). Its entry then needs an explicit
+   fifth field, `dynamic: <justification>`. Without that field the job is
+   unclassifiable and fails, and a `dynamic:` field on a fully bounded job is
+   stale.
+
+   **Why on-disk rather than command parsing.** A fourth review round found
+   `source`, `.`, bare script paths, Python imports, Node `require`, `make`,
+   `npm run`, and data files read by scripts. Each reaches a file that no
+   command names. Every shell, interpreter, and build tool has its own way to
+   reach a file. The set of bytes a checkout puts on disk does not depend on
+   any of them, so digesting those bytes closes the class. Command parsing
+   remains only for local actions, which come from the scanned tree without a
+   checkout step of their own; elsewhere it is a diagnostic.
+
+   **Residual supply-chain risk.** The digest binds the job's text and the
+   repository bytes it materializes. It does not bind what SHA-pinned actions
+   or tools fetch at runtime. For example, a pinned action can install a
+   mutable npm dependency, or a step can `pip install` or download a release
+   asset. These are outside the scanned tree and are a reviewer's
+   responsibility to justify. Action pins are policed separately by the
+   action-pin conformance test. A remote callee
    must be pinned to a full 40-hex commit SHA; no entry can accept a branch
    or tag, because either can change after review. An entry that no longer matches a job needing
    review is also stale. Jobs that resolve only to standard hosted images pass
@@ -198,9 +221,11 @@ or a literal GitHub-hosted image.
       covers. Record three things: what it checks out (repository, ref,
       paths); what it executes (inline code, repository scripts, actions, and
       any program it writes); and how every PR-derived value and downloaded
-      artifact is used. For each path the checker reports as unresolvable,
-      state in the `dynamic:` field where its bytes come from at runtime and
-      why a pull request cannot choose them.
+      artifact is used. For each item the checker reports as unresolved (a
+      full checkout, a runtime-selected checkout, or a runtime tree change),
+      state in the `dynamic:` field where those bytes come from at runtime and
+      why a pull request cannot choose them. Prefer a narrow `sparse-checkout`
+      list to a `dynamic:` field.
    3. Prefer moving the job to a hosted runner. List it only when it needs the
       trusted pool and no PR-controlled byte can reach execution: anything
       PR-derived is used only as an API identifier or as validated data.
