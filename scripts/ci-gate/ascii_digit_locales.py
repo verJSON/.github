@@ -27,14 +27,20 @@ def _bash_probe(environment):
     return result.returncode == 0
 
 
-def guard_locales(build_directory):
-    """Return ({label: env overrides}, reason en_US.UTF-8 is unavailable or None)."""
+def guard_locales(build_directory, environ=None, probe=None):
+    """Return ({label: env overrides}, reason en_US.UTF-8 is unavailable or None).
+
+    Under CI the hazard locale is required: a skipped en_US.UTF-8 check there
+    would report green for exactly the case these tests exist to catch.
+    """
+    environ = os.environ if environ is None else environ
+    probe = _bash_probe if probe is None else probe
     base = {key: value for key, value in os.environ.items() if not key.startswith("LC_")}
     locales = {"C.UTF-8": {"LC_ALL": "C.UTF-8"}}
-    if _bash_probe({**base, "LC_ALL": "C.UTF-8"}):
+    if probe({**base, "LC_ALL": "C.UTF-8"}):
         raise AssertionError("C.UTF-8 collates U+0663 into [1-9]; the ASCII baseline is not ASCII")
     hazard = {"LC_ALL": "en_US.UTF-8"}
-    if not _bash_probe({**base, **hazard}):
+    if not probe({**base, **hazard}):
         locpath = Path(build_directory) / "locales"
         locpath.mkdir(parents=True, exist_ok=True)
         subprocess.run(
@@ -44,10 +50,14 @@ def guard_locales(build_directory):
             timeout=120,
         )
         hazard = {"LC_ALL": "en_US.UTF-8", "LOCPATH": str(locpath)}
-        if not _bash_probe({**base, **hazard}):
-            return locales, (
+        if not probe({**base, **hazard}):
+            reason = (
                 "en_US.UTF-8 is neither installed nor buildable with localedef here, "
                 "so the collation hazard cannot be reproduced"
             )
+            if environ.get("CI") == "true":
+                raise AssertionError(reason + "; CI must run the en_US.UTF-8 checks")
+            return locales, reason
     locales["en_US.UTF-8"] = hazard
+    print(f"ascii-digit-locales: en_US.UTF-8 hazard reproduced ({hazard})", flush=True)
     return locales, None

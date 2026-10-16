@@ -56,8 +56,10 @@ def strip_quoted(text):
             index += 2
             continue
         if char in "'\"":
-            close = text.find(char, index + 1)
-            if close < 0:
+            close = index + 1
+            while close < len(text) and text[close] != char:
+                close += 2 if char == '"' and text[close] == "\\" else 1
+            if close >= len(text):
                 return None
             segment = text[index + 1:close]
             if char == '"' and re.search(r"\$\(", segment):
@@ -113,8 +115,7 @@ def collation_ordered(expression):
     body = re.sub(r"\[([:=.]).*?\1\]", "", body)
     if any(ord(char) > 127 for char in body):
         return True
-    inner = body[1:-1] if body.startswith("]") else body[1:-1]
-    return "-" in inner
+    return "-" in body[1:-1]
 
 
 def classify(pattern):
@@ -193,28 +194,156 @@ def _case_blocks(script):
             yield match.group(1), None
 
 
-GREP = re.compile(
-    r"(?<![\w-])grep\b((?:\s+-[A-Za-z]+|\s+--[a-z-]+(?:=\S+)?)*)\s+(?:-e\s+)?"
-    r"('[^']*'|\"[^\"]*\"|\S+)"
-)
+# grep options that consume the following word as their argument.
+GREP_ARGUMENT_OPTIONS = frozenset("ABCDfmd")
+GREP_ARGUMENT_LONG = frozenset({
+    "--after-context", "--before-context", "--context", "--max-count", "--file",
+    "--label", "--binary-files", "--devices", "--directories", "--color", "--colour",
+    "--include", "--exclude", "--exclude-dir", "--exclude-from", "--group-separator",
+})
+
+
+def _shell_words(text):
+    """Split raw shell words (quotes kept) up to the end of the simple command."""
+    words = []
+    index = 0
+    while index < len(text):
+        while index < len(text) and text[index] in " \t":
+            index += 1
+        if index >= len(text) or text[index] in "|;&<>)":
+            break
+        start = index
+        while index < len(text) and text[index] not in " \t|;&<>)":
+            char = text[index]
+            if char == "'":
+                close = text.find("'", index + 1)
+                if close < 0:
+                    return None
+                index = close + 1
+                continue
+            if char == '"':
+                index += 1
+                while index < len(text) and text[index] != '"':
+                    index += 2 if text[index] == "\\" else 1
+                if index >= len(text):
+                    return None
+                index += 1
+                continue
+            index += 2 if char == "\\" else 1
+        words.append(text[start:index])
+    return words
+
+
+def grep_patterns(arguments):
+    """Return the patterns a grep invocation matches with, or None if unreadable.
+
+    Handles `-e` (repeatable, attached or separate), `--regexp[=]`, `--`,
+    option arguments such as `-m1`/`-m 1`, and `-F` (literal: no guard).
+    """
+    words = _shell_words(arguments)
+    if words is None:
+        return None
+    explicit, positional, fixed = [], [], False
+    index = 0
+    options_done = False
+    while index < len(words):
+        word = words[index]
+        index += 1
+        if options_done or not word.startswith("-") or word == "-":
+            positional.append(word)
+            continue
+        if word == "--":
+            options_done = True
+            continue
+        if word.startswith("--"):
+            name, equals, value = word.partition("=")
+            if name == "--fixed-strings":
+                fixed = True
+            elif name == "--regexp":
+                if equals:
+                    explicit.append(value)
+                elif index < len(words):
+                    explicit.append(words[index])
+                    index += 1
+                else:
+                    return None
+            elif name in GREP_ARGUMENT_LONG and not equals:
+                index += 1
+            continue
+        letters = word[1:]
+        for position, letter in enumerate(letters):
+            if letter == "F":
+                fixed = True
+            if letter == "e" or letter in GREP_ARGUMENT_OPTIONS:
+                rest = letters[position + 1:]
+                if rest:
+                    argument = rest
+                elif index < len(words):
+                    argument = words[index]
+                    index += 1
+                else:
+                    return None
+                if letter == "e":
+                    explicit.append(argument)
+                break
+    if fixed:
+        return []
+    return explicit or positional[:1]
 
 
 def _regex_variables(script):
-    """Map each name assigned exactly once, from one single-quoted literal."""
-    assignments = {}
-    for name, value in re.findall(
-        r"(?:^|[;\s])(?:local\s+|readonly\s+)?(" + r"[A-Za-z_][A-Za-z0-9_]*" + r")='([^']*)'(?=\s|;|$)",
-        script,
-        re.M,
-    ):
-        assignments.setdefault(name, []).append(value)
-    return {name: values[0] for name, values in assignments.items() if len(values) == 1}
+    """Map each name assigned exactly once, from one single-quoted literal.
+
+    A name that is also appended to (`+=`), or assigned any other way (from an
+    expansion, a double-quoted string, `read`, a loop), is not a literal, so a
+    guard that uses it stays unclassifiable.
+    """
+    name = r"[A-Za-z_][A-Za-z0-9_]*"
+    prefix = r"(?:^|[;&|\s(])(?:local\s+|readonly\s+|export\s+|declare\s+(?:-\w+\s+)*)?"
+    literal = {}
+    for found, value in re.findall(prefix + "(" + name + r")='([^']*)'(?=\s|;|$)", script, re.M):
+        literal.setdefault(found, []).append(value)
+    every = re.findall(prefix + "(" + name + r")\+?=", script, re.M)
+    every += re.findall(r"\b(?:read(?:\s+-\w+)*|for|mapfile|readarray)\s+(" + name + ")", script)
+    counts = {}
+    for found in every:
+        counts[found] = counts.get(found, 0) + 1
+    return {
+        found: values[0] for found, values in literal.items()
+        if len(values) == 1 and counts.get(found) == 1
+    }
+
+
+def logical_lines(script):
+    """Join continuation lines so a test or pipeline split across lines is one line.
+
+    A line continues when it ends in a backslash, `&&`, `||`, or `|`, or while
+    a `[[` it opened has not been closed by `]]`.
+    """
+    pending = []
+    for line in script.splitlines():
+        if not pending and line.lstrip().startswith("#"):
+            yield line
+            continue
+        stripped = line.rstrip()
+        continued = stripped.endswith("\\")
+        pending.append(stripped[:-1] if continued else stripped)
+        text = " ".join(part.strip() for part in pending)
+        opened = len(re.findall(r"(?:^|[\s;(!])\[\[(?=\s)", text))
+        closed = len(re.findall(r"(?<=\s)\]\](?=\s|;|$|\))", text))
+        if continued or re.search(r"(?:&&|\|\||\|)$", stripped) or opened > closed:
+            continue
+        yield text
+        pending = []
+    if pending:
+        yield " ".join(part.strip() for part in pending)
 
 
 def guards_in_script(source, script):
     """Yield every bracket-using guard in one shell script."""
     held = _regex_variables(script)
-    for line in script.splitlines():
+    lines = list(logical_lines(script))
+    for line in lines:
         if line.lstrip().startswith("#"):
             continue
         for subject, operator, pattern in _test_operands(line):
@@ -250,20 +379,26 @@ def guards_in_script(source, script):
             if literal is not None and "[" not in literal and not re.search(r"\$[{(A-Za-z_]", literal):
                 continue
             yield Guard(source, "case", subject, label, classify(label))
-    for line in script.splitlines():
+    for line in lines:
         if line.lstrip().startswith("#"):
             continue
-        for match in GREP.finditer(line):
-            flags, pattern = match.group(1), match.group(2)
-            if re.search(r"(?:^|\s)-[A-Za-z]*F", flags) or "--fixed-strings" in flags:
+        for match in re.finditer(r"(?<![\w-])grep\b", line):
+            patterns = grep_patterns(line[match.end():])
+            if patterns is None:
+                yield Guard(source, "grep", "<grep>", line[match.start():].strip(), "unclassifiable")
                 continue
-            if "[" not in pattern and "$" not in pattern:
-                continue
-            if pattern.startswith("'"):
-                verdict = _classify_single_quoted(pattern[1:-1])
-            else:
-                verdict = classify(pattern)
-            yield Guard(source, "grep", "<grep>", pattern, verdict)
+            for pattern in patterns:
+                if "[" not in pattern and "$" not in pattern:
+                    continue
+                if pattern.startswith("'"):
+                    verdict = _classify_single_quoted(pattern[1:-1])
+                elif re.search(r"\$[{(A-Za-z_]", pattern):
+                    # An expansion inside a grep pattern is regex text whose
+                    # characters this scanner cannot see.
+                    verdict = "unclassifiable"
+                else:
+                    verdict = classify(pattern)
+                yield Guard(source, "grep", "<grep>", pattern, verdict)
 
 
 def _classify_single_quoted(pattern):

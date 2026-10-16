@@ -39,9 +39,37 @@ NON_ASCII_PROBES = ("\u00e9", "\uff41", "\uff21", "\u0663", "\uff13", "\u00a0")
 
 # The reviewed inventory: every guard the scanner finds, in the repository and
 # in the generator's HEAD output. A change is a review point.
-GUARD_COUNT = 437
+GUARD_COUNT = 446
 # Shapes the scanner cannot judge, each with the reason it is safe.
 REVIEWED_UNCLASSIFIABLE = {}
+# Variables a grep pattern may expand. Their values come from the generator or
+# the script itself, never from a settable source, and carry no bracket
+# expression; a pattern that expands only these, around canonical static text,
+# is reviewed. Any other expansion stays unclassifiable and fails.
+CT = "<gen-changelog-caller contract-test>"
+REVIEWED_EXPANSIONS = {
+    (CT, "CONTRACT_REF"): "the contract SHA the generator validated as 40 lowercase hex and embedded",
+    (CT, "accepted"): "a literal mode alternation each generated_set_check call passes",
+    (CT, "reusable_workflow"): "one of two literal workflow file names assigned just above",
+    (CT, "consumer_pattern"): "a literal step-name pattern each caller passes",
+    (".github/workflows/node-ci.yml", "key"): (
+        "a manifest key the same function first requires to match a spelled-out identifier class"
+    ),
+    (".github/workflows/node-ci-protected.yml", "key"): (
+        "a manifest key the same function first requires to match a spelled-out identifier class"
+    ),
+}
+EXPANSION = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+
+
+def reviewed_expansion(guard):
+    """True when every expansion in a grep pattern is reviewed and the rest is canonical."""
+    names = EXPANSION.findall(guard.pattern)
+    if guard.kind != "grep" or not names:
+        return False
+    if any((guard.source, name) not in REVIEWED_EXPANSIONS for name in names):
+        return False
+    return settable_value_guards.classify(EXPANSION.sub("X", guard.pattern)) == "canonical"
 # Files generated at an older pinned contract. They carry the guards that
 # contract emitted, and regenerating them is the pin bump's job, not this one's.
 GENERATED_AT_PIN = {
@@ -221,6 +249,25 @@ class SettableValueGuardTests(unittest.TestCase):
                     "[[ $copy =~ ^\\[${part}\\]$ ]]",
                     "loose='x[0-9]{2}'",
                     "[[ $copy =~ ^${loose}$ ]]",
+                    # Multi-line tests: && / || continuations and backslashes.
+                    '[[ "$copy" =~ ^[a-z0-9-]+$ &&',
+                    '   "$copy" == x ]]',
+                    '[[ "$copy" =~ ^[abc]+$ ||',
+                    '   "$copy" =~ ^[0-9]+$ ]]',
+                    '[[ "$copy" =~ ^[abc]+$ \\',
+                    '   && "$copy" =~ ^[A-Z]+$ ]]',
+                    # A held fragment that is appended to or reassigned is not a literal.
+                    "grown='^[abc]'",
+                    "grown+='[0-9]'",
+                    "[[ $copy =~ $grown ]]",
+                    "moved='^[abc]$'",
+                    'moved="$copy"',
+                    "[[ $copy =~ $moved ]]",
+                    # grep spellings that still take a pattern.
+                    "grep -E -- '^[a-z]+$' <<<\"$copy\"",
+                    "grep -m1 -E '[0-9]' <<<\"$copy\"",
+                    "grep --regexp='[a-z]' <<<\"$copy\"",
+                    "grep -e '[abc]' -e '[0-9]' <<<\"$copy\"",
                 ))},
             ]}},
         })
@@ -237,10 +284,35 @@ class SettableValueGuardTests(unittest.TestCase):
             ("regex", "canonical"),
             ("regex", "canonical"),
             ("regex", "collation"),
+            ("regex", "collation"),
+            ("regex", "canonical"),
+            ("regex", "collation"),
+            ("regex", "canonical"),
+            ("regex", "collation"),
+            ("regex", "unclassifiable"),
+            ("regex", "unclassifiable"),
             ("case", "collation"),
             ("grep", "collation"),
             ("grep", "collation"),
+            ("grep", "collation"),
+            ("grep", "collation"),
+            ("grep", "collation"),
+            ("grep", "canonical"),
+            ("grep", "collation"),
         ])
+
+    def test_a_missing_hazard_locale_fails_under_ci_instead_of_skipping(self):
+        never = lambda environment: False  # noqa: E731 - the hazard never reproduces
+        with tempfile.TemporaryDirectory(prefix="ci-locale-") as temporary:
+            locales, missing = ascii_digit_locales.guard_locales(
+                temporary, environ={}, probe=never
+            )
+            self.assertEqual(set(locales), {"C.UTF-8"})
+            self.assertIsNotNone(missing)
+            with self.assertRaisesRegex(AssertionError, "en_US.UTF-8"):
+                ascii_digit_locales.guard_locales(
+                    temporary, environ={"CI": "true"}, probe=never
+                )
 
     def test_the_guard_inventory_is_the_reviewed_one(self):
         self.assertEqual(
@@ -257,9 +329,17 @@ class SettableValueGuardTests(unittest.TestCase):
 
     def test_every_unclassifiable_guard_is_reviewed(self):
         unclassifiable = {
-            guard.key for guard in self.inventory if guard.verdict == "unclassifiable"
+            guard.key for guard in self.inventory
+            if guard.verdict == "unclassifiable" and not reviewed_expansion(guard)
         }
         self.assertEqual(unclassifiable, set(REVIEWED_UNCLASSIFIABLE))
+
+    def test_every_reviewed_expansion_is_still_used(self):
+        used = {
+            (guard.source, name) for guard in self.inventory if reviewed_expansion(guard)
+            for name in EXPANSION.findall(guard.pattern)
+        }
+        self.assertEqual(used, set(REVIEWED_EXPANSIONS))
 
     def test_every_guard_class_decides_the_same_way_in_every_locale(self):
         expressions = set()

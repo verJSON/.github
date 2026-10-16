@@ -240,10 +240,7 @@ def validate_workflow(path=WORKFLOW):
         'live_state" = open',
         "live_repository",
         'live_head_sha" = "$run_head_sha',
-        # Either spelling: the enumerated form is canonical, and the range form
-        # stays valid until ruleset rotation replaces the stored workflow.
-        ('[[ "$live_head_sha" =~ ^[0123456789abcdef]{40}$ ]]',
-         '[[ "$live_head_sha" =~ ^[0-9a-f]{40}$ ]]'),
+        '[[ "$live_head_sha" =~ ^[0123456789abcdef]{40}$ ]]',
         ".base.ref",
         '[ "$live_base_ref" = main ]',
         "contents/.github/workflows/ci.yml?ref=$live_head_sha",
@@ -251,11 +248,7 @@ def validate_workflow(path=WORKFLOW):
         '"$CONSUMER_WORKFLOW_SHA256"',
         '} >>"$GITHUB_OUTPUT"',
     ):
-        alternatives = assertion if isinstance(assertion, tuple) else (assertion,)
-        require(
-            any(form in admission_run for form in alternatives),
-            f"identity admission omits {alternatives[0]}",
-        )
+        require(assertion in admission_run, f"identity admission omits {assertion}")
     require(
         "LEGACY_CONSUMER_WORKFLOW_SHA256" not in admission_run
         and "default_main_workflow_sha256" not in admission_run,
