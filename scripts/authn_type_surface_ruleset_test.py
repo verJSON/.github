@@ -354,12 +354,42 @@ class AuthnTypeSurfaceRulesetTest(unittest.TestCase):
             mock.patch("sys.stdout"),
         ):
             self.assertEqual(0, MODULE.main([
-                "apply", "--workflow-sha", SHA, "--ack", "APPLY-AUTHN-TYPE-SURFACE-1154",
+                "apply", "--workflow-sha", SHA, "--ack", "ROTATE-AUTHN-TYPE-SURFACE-1154",
             ]))
         admit.assert_called_once_with(PREVIOUS, SHA)
         mutate.assert_called_once_with(
             "PUT", "orgs/Verjson/rulesets/21750617", MODULE.render_payload(self.contract, SHA)
         )
+
+    def test_rotation_and_creation_each_require_their_own_acknowledgement(self):
+        self.assertEqual("ROTATE-AUTHN-TYPE-SURFACE-1154",
+                         self.contract["rollout"]["rotate_acknowledgement"])
+        previous = self.live_image(PREVIOUS)
+        for named, ack in (
+            ([{"id": 21750617}], "APPLY-AUTHN-TYPE-SURFACE-1154"),
+            ([{"id": 21750617}], ""),
+            ([], "ROTATE-AUTHN-TYPE-SURFACE-1154"),
+        ):
+            with (
+                self.subTest(named=bool(named), ack=ack),
+                mock.patch.object(MODULE, "discover_state", return_value=named),
+                mock.patch.object(MODULE, "admit_previous_revision"),
+                mock.patch.object(MODULE, "gh_json", return_value=previous),
+                mock.patch.object(MODULE, "gh_json_input") as mutate,
+                self.assertRaisesRegex(MODULE.ContractError, "acknowledgement"),
+            ):
+                MODULE.main(["apply", "--workflow-sha", SHA, "--ack", ack])
+            mutate.assert_not_called()
+
+    def test_contract_keeps_the_rotation_token_distinct_from_the_create_token(self):
+        for value in ("APPLY-AUTHN-TYPE-SURFACE-1154", "ROTATE-AUTHN-TYPE-SURFACE-1", None):
+            contract = copy.deepcopy(self.contract)
+            contract["rollout"]["rotate_acknowledgement"] = value
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "contract.json"
+                path.write_text(json.dumps(contract), encoding="utf-8")
+                with self.assertRaisesRegex(MODULE.ContractError, "acknowledgement"):
+                    MODULE.read_contract(path)
 
     def test_dry_run_and_apply_refuse_an_unadmitted_or_unreviewed_predecessor(self):
         for name, live, admission in (
@@ -379,7 +409,7 @@ class AuthnTypeSurfaceRulesetTest(unittest.TestCase):
                     self.assertRaises(MODULE.ContractError),
                 ):
                     MODULE.main([
-                        mode, "--workflow-sha", SHA, "--ack", "APPLY-AUTHN-TYPE-SURFACE-1154",
+                        mode, "--workflow-sha", SHA, "--ack", "ROTATE-AUTHN-TYPE-SURFACE-1154",
                     ])
                 mutate.assert_not_called()
                 self.assertEqual(admission is not None, admit.called)
@@ -403,7 +433,7 @@ class AuthnTypeSurfaceRulesetTest(unittest.TestCase):
             mock.patch("sys.stdout"),
         ):
             self.assertEqual(0, MODULE.main([
-                "apply", "--workflow-sha", SHA, "--ack", "APPLY-AUTHN-TYPE-SURFACE-1154",
+                "apply", "--workflow-sha", SHA, "--ack", "ROTATE-AUTHN-TYPE-SURFACE-1154",
             ]))
         admit.assert_not_called()
         mutate.assert_not_called()

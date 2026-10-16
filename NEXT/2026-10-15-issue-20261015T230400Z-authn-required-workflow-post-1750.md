@@ -14,7 +14,9 @@ until an operator rotates it to this change's merge commit
 The authn rotation tool can now rotate the existing ruleset. Previously it could only
 create one, so the earlier activation needed a one-off procedure. `dry-run` and `apply`
 read the predecessor from the live ruleset, admit it with the same canonical-revision
-check as the CLI projects tool, and restore and verify it if the write fails. A new
+check as the CLI projects tool, and restore and verify it if the write fails. A rotation
+requires `ROTATE-AUTHN-TYPE-SURFACE-1154`; `APPLY-AUTHN-TYPE-SURFACE-1154` now
+authorizes only creation. A new
 read-only `audit` mode backs the scheduled `required-workflow-audit` job. The finished
 `stage-release-bypass` transition is retired along with its hard-coded `f2f425e9`
 predecessor.

@@ -103,6 +103,9 @@ same model as ADR 0153 through the shared `scripts/required_workflow_revision.py
 - It writes the target image and verifies it. If the write fails, it restores the
   observed image and verifies that instead.
 - `apply` makes no change when the exact target is already active.
+- Changing an existing ruleset requires its own `rotate_acknowledgement`
+  (`ROTATE-AUTHN-TYPE-SURFACE-1154`). `apply_acknowledgement` authorizes only creating the
+  ruleset, so neither token can authorize the other operation.
 - `snapshot` and `verify-run` still accept only the exact target image.
 - The same `node-ci-protected` floor check runs before any mutation.
 - A read-only `audit` mode backs the scheduled `required-workflow-audit` job.

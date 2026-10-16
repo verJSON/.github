@@ -108,12 +108,17 @@ def read_contract(path=CONTRACT):
     }, "ruleset base image drifted")
     rollout = contract["rollout"]
     require(set(rollout) == {
-        "issue", "human_gate_required", "apply_acknowledgement", "required_run",
+        "issue", "human_gate_required", "apply_acknowledgement",
+        "rotate_acknowledgement", "required_run",
     }, "rollout keys drifted")
     require(rollout["issue"] == 1154, "rollout issue drifted")
     require(rollout["human_gate_required"] is True, "rollout must retain its human gate")
     require(rollout["apply_acknowledgement"] == "APPLY-AUTHN-TYPE-SURFACE-1154",
             "apply acknowledgement drifted")
+    # Rotating a live ruleset is a different act from creating one, so the token that
+    # authorizes creation can never authorize a rotation, and the reverse.
+    require(rollout["rotate_acknowledgement"] == "ROTATE-AUTHN-TYPE-SURFACE-1154",
+            "rotate acknowledgement drifted")
     require(rollout["required_run"] == {
         "event": "pull_request",
         "conclusion": "success",
@@ -560,15 +565,17 @@ def main(arguments=None):
         )
         print("verified: fresh exact-head organization required-workflow run")
         return 0
-    require(args.ack == contract["rollout"]["apply_acknowledgement"],
-            "explicit apply acknowledgement is required")
     if named:
+        require(args.ack == contract["rollout"]["rotate_acknowledgement"],
+                "explicit rotate acknowledgement is required for an existing ruleset")
         if previous is None:
             print(f"verified existing active organization ruleset {ruleset_id}")
             return 0
         rotate_existing_rule(ruleset_id, previous, expected)
         print(f"rotated and verified organization ruleset {ruleset_id}")
         return 0
+    require(args.ack == contract["rollout"]["apply_acknowledgement"],
+            "explicit apply acknowledgement is required")
     require(not discover_state(contract, args.workflow_sha),
             "canonical organization ruleset appeared during apply preflight")
     staged = dict(expected)
