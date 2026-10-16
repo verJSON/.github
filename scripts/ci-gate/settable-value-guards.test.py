@@ -39,14 +39,14 @@ NON_ASCII_PROBES = ("\u00e9", "\uff41", "\uff21", "\u0663", "\uff13", "\u00a0")
 
 # The reviewed inventory: every guard the scanner finds, in the repository and
 # in the generator's HEAD output. A change is a review point.
-GUARD_COUNT = 468
+GUARD_COUNT = 478
 # Shapes the scanner cannot judge, each with the reason it is safe.
 # Each unreadable guard reviewed by its exact text at its site: an edit to the
 # pattern, including a range added around a reviewed expansion, changes the
 # key and fails, and an entry that no longer matches a guard fails too.
 REASON_C = "CONTRACT_REF is the contract SHA the generator validated as 40 lowercase hex and embedded. "
-REASON_A = "accepted is a literal mode alternation each generated_set_check call passes. "
-REASON_P = "consumer_pattern is a literal step-name pattern each caller passes. "
+REASON_A = "accepted is generated_set_check argument 5; every call's literal argument is itself scanned as an argument guard. "
+REASON_P = "consumer_pattern is stamp_before argument 2; every call's literal argument is itself scanned as an argument guard. "
 REASON_W = "reusable_workflow is one of two literal workflow file names assigned just above. "
 REASON_K = "key is a manifest key the same function first requires to match a spelled-out identifier class. "
 REASON_L = "the two legacy token names are fixed literals, split only to keep them out of secret scanners. "
@@ -327,6 +327,17 @@ class SettableValueGuardTests(unittest.TestCase):
                     # grep -f reads its patterns from a file this scanner cannot see.
                     "grep -f patterns.txt <<<\"$copy\"",
                     "grep -qE --file=patterns.txt <<<\"$copy\"",
+                    # ANSI-C quoting hides a bracket behind an escape.
+                    "grep -qE $'^\\x5bA-Za-z0-9._-\\x5d+$' <<<\"$copy\"",
+                    # A helper that greps a pattern its callers pass in.
+                    "matches() {",
+                    '  local value="$1" accepted="${2:-}"',
+                    '  printf %s "$value" | grep -qxE "$accepted"',
+                    "}",
+                    "matches \"$copy\" 'pr-gate|renderer'",
+                    "matches \"$copy\" \\",
+                    "  '[a-z-]+'",
+                    'matches "$copy" "$copy"',
                 ))},
             ]}},
         })
@@ -365,6 +376,11 @@ class SettableValueGuardTests(unittest.TestCase):
             ("grep", "unclassifiable"),
             ("grep", "unclassifiable"),
             ("grep", "unclassifiable"),
+            ("grep", "unclassifiable"),
+            ("grep", "unclassifiable"),
+            ("argument", "canonical"),
+            ("argument", "collation"),
+            ("argument", "unclassifiable"),
         ])
 
     def test_generator_heredocs_are_scanned_as_the_text_they_emit(self):

@@ -47,6 +47,8 @@ class Guard:
 
 def strip_quoted(text):
     """Replace quoted segments with a neutral literal; they match themselves."""
+    if re.search(r"\$['\"]", text):
+        return None
     out = []
     index = 0
     while index < len(text):
@@ -152,6 +154,10 @@ def regex_text(word):
                 out.append(char)
             index += 1
             continue
+        if char == "$" and quote is None and word[index + 1:index + 2] in ("'", '"'):
+            # $'...' decodes escapes such as \x5b into a bracket, and $"..."
+            # is locale-translated: neither is the text written here.
+            return None
         if char == "'" and quote is None:
             quote = "'"
             index += 1
@@ -430,6 +436,84 @@ def logical_lines(script):
         yield " ".join(part.strip() for part in pending)
 
 
+def _functions(lines):
+    """Yield (name, first line index, end line index or None) for each shell function."""
+    for index, line in enumerate(lines):
+        match = re.match(r"^(\s*)(?:function\s+)?([A-Za-z_][A-Za-z0-9_-]*)\s*\(\)\s*\{?\s*(?:#.*)?$", line)
+        if not match:
+            continue
+        indent = len(match.group(1))
+        end = next(
+            (
+                position for position in range(index + 1, len(lines))
+                if re.match(r"^\s*\}\s*(?:#.*)?$", lines[position])
+                and len(lines[position]) - len(lines[position].lstrip()) <= indent
+            ),
+            None,
+        )
+        yield match.group(2), index, end
+
+
+PARAMETER = re.compile(r"\$(?:\{([1-9])(?::?[-=][^}]*)?\}|([1-9]))")
+
+
+def _parameter_patterns(body):
+    """Return {positional number} whose value a grep or =~ in BODY uses as its pattern."""
+    locals_ = {}
+    for name, word in re.findall(r"(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=(\"[^\"]*\"|\S+)", body):
+        parameter = PARAMETER.fullmatch(word.strip('"'))
+        if parameter:
+            locals_[name] = int(parameter.group(1) or parameter.group(2))
+    numbers = set()
+
+    def positional(word):
+        stripped = word.strip('"')
+        parameter = PARAMETER.fullmatch(stripped)
+        if parameter:
+            return int(parameter.group(1) or parameter.group(2))
+        variable = re.fullmatch(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", stripped)
+        return locals_.get(variable.group(1)) if variable else None
+
+    for line in body.splitlines():
+        for _subject, operator, pattern in _test_operands(line):
+            if operator == "=~" and positional(pattern):
+                numbers.add(positional(pattern))
+        for match in re.finditer(r"(?<![\w-])grep\b", line):
+            for pattern in grep_patterns(line[match.end():]) or []:
+                if positional(pattern):
+                    numbers.add(positional(pattern))
+    return numbers
+
+
+def argument_guards(source, lines):
+    """Check the literal argument every caller passes to a pattern parameter."""
+    functions = list(_functions(lines))
+    for name, start, end in functions:
+        if end is None:
+            continue
+        numbers = _parameter_patterns("\n".join(lines[start + 1:end]))
+        if not numbers:
+            continue
+        for index, line in enumerate(lines):
+            if start <= index <= end or line.lstrip().startswith("#"):
+                continue
+            for call in re.finditer(
+                r"(?:^|[;&|!({]\s*|\b(?:if|then|else|elif|do|until|while)\s+)" + re.escape(name) + r"(?=\s|$)",
+                line,
+            ):
+                words = _shell_words(line[call.end():])
+                for number in sorted(numbers):
+                    subject = f"{name} argument {number}"
+                    if words is None:
+                        yield Guard(source, "argument", subject, line.strip(), "unclassifiable")
+                        continue
+                    argument = words[number - 1] if len(words) >= number else "''"
+                    verdict, resolved = judge_regex(argument)
+                    if re.search(r"\$[{(A-Za-z_0-9@*#?]", argument.replace("\\$", "")):
+                        verdict = "unclassifiable" if verdict == "canonical" else verdict
+                    yield Guard(source, "argument", subject, argument, verdict, resolved)
+
+
 def guards_in_script(source, script):
     """Yield every bracket-using guard in one shell script."""
     held = _regex_variables(script)
@@ -470,6 +554,7 @@ def guards_in_script(source, script):
                     continue
                 verdict, resolved = judge_regex(pattern)
                 yield Guard(source, "grep", "<grep>", pattern, verdict, resolved)
+    yield from argument_guards(source, lines)
 
 
 def _classify_single_quoted(pattern):
