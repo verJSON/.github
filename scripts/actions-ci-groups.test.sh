@@ -557,7 +557,7 @@ def fleet_reached_importers(scripts, sources, importers):
             runnable_by_name.setdefault(posixpath.basename(source), []).append(source)
     reached = set()
     frontier = sorted(scripts)
-    for _depth in range(SHELL_FOLLOW_DEPTH + 1):
+    for depth in range(1, SHELL_FOLLOW_DEPTH + 2):
         following = set()
         for path in frontier:
             if path in reached:
@@ -587,8 +587,9 @@ def fleet_reached_importers(scripts, sources, importers):
         if not frontier:
             return reached & importers
     raise AssertionError(
-        f"scripts {sorted(scripts)} name files more than {SHELL_FOLLOW_DEPTH} levels "
-        "deep, so whether they run a locale-helper importer cannot be classified"
+        f"following scripts {sorted(scripts)} stopped after {depth} levels, "
+        f"{frontier} are still unvisited, and the bound is {SHELL_FOLLOW_DEPTH} "
+        "nested wrappers, so whether they run a locale-helper importer cannot be classified"
     )
 
 
@@ -1062,12 +1063,17 @@ for level in range(SHELL_FOLLOW_DEPTH + 2):
         f'exec bash "$(dirname "$0")/zz-level{level + 1}.sh"\n'
     )
 too_deep[f"scripts/ci-gate/zz-level{SHELL_FOLLOW_DEPTH + 2}.sh"] = "true\n"
+# The error names where following stopped -- the depth reached and the files
+# still unvisited there -- not only the bound.
 expect_locale_failure(
     "fleet shell chain deeper than the follow bound",
     document,
     manifest_text + "platform\tbash scripts/ci-gate/zz-level0.sh\n",
     too_deep,
-    reason="levels deep",
+    reason=(
+        f"after {SHELL_FOLLOW_DEPTH + 1} levels, "
+        f"['scripts/ci-gate/zz-level{SHELL_FOLLOW_DEPTH + 1}.sh'] are still unvisited"
+    ),
 )
 # Positive controls: a comment that names an importer, and a wrapper that runs
 # only a non-importer, stay classifiable in a fleet group.
