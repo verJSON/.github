@@ -13,12 +13,14 @@ see no behavior change.
 
 The Cosign producer and the statement verifier now share one strict predicate. A
 publisher pinned at `@<job_workflow_sha>` is accepted as before. A same-repository
-publisher is accepted only when its parsed repository path and ref exactly equal the
-source repository and ref, and `job_workflow_sha == workflow_sha == sha`. The
+publisher is accepted only at the canonical publisher path, when its parsed repository
+path and ref exactly equal the source repository and ref, and when
+`job_workflow_sha == workflow_sha == sha`. The
 publisher's `prepare` job authorizes one `publisher-workflow-ref` that the retry, GAR
-mirror, and candidate-manifest steps all read. The candidate validator accepts the exact
-same-repository signer, and the canary fixture reviews that identity. Promotion and
-release attestation verification still require the pinned contract, so canary
-candidates are never promoted
+mirror, and candidate-manifest steps all read. The candidate validator accepts that signer only
+for the contract repository itself, and the canary fixture reviews that identity.
+Release attestation verification still requires the pinned contract, and promotion now
+also requires a 40-hex contract commit (it previously promoted a
+`Verjson/.github/...@refs/heads/main` candidate), so canary candidates are never promoted
 ([ADR 0216](../docs/decisions/0216-keyless-container-provenance-is-verified-per-registry/README.md)
 amendment of 2026-10-17).
