@@ -33,8 +33,11 @@ unused_hosted_toolchains=(
   /usr/local/share/powershell
 )
 
-# The node_modules context is copied at least twice (BuildKit context transfer and the
-# image layer); the margin covers base layers, install scripts, and image export.
+# A necessary floor, not a sufficiency guarantee: the node_modules context is copied at
+# least twice (BuildKit context transfer and the image layer), and the margin is headroom
+# for base layers, install scripts, and image export. Run 39001337204 hit ENOSPC after the
+# transfer, in npm rebuild install scripts and layer export, whose demand the publisher
+# cannot predict; passing this floor only rules out the known-undersized case.
 build_margin_bytes=4294967296
 
 report() {
