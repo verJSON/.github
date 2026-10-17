@@ -45,10 +45,12 @@ def require_immutable_publisher(
     source_commit: str,
     caller_workflow_sha: str,
 ) -> None:
-    """Require the publisher bytes to be named by an immutable commit.
+    """Require the publisher workflow bytes to be named by an immutable commit.
 
-    A cross-repository publisher must be called at `@<job_workflow_sha>`. A
-    same-repository `uses: ./` publisher is named by the caller's ref instead.
+    A publisher called at `@<job_workflow_sha>` is pinned by its own ref. GitHub
+    names a same-repository `uses: ./` publisher by the caller's ref instead, so
+    that form is accepted only from the exact source repository and ref, and only
+    when job_workflow_sha == workflow_sha == sha binds it to the source commit.
     """
     if not COMMIT.fullmatch(publisher_workflow_sha):
         raise RetryEvidenceError("publisher workflow SHA must be a 40-hex commit")
