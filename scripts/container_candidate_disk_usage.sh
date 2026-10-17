@@ -43,6 +43,10 @@ available_bytes() {
 
 case "$operation" in
   reclaim)
+    [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] || {
+      report "Skipping hosted toolchain reclaim on runner environment '${RUNNER_ENVIRONMENT:-unknown}'"
+      exit 0
+    }
     before="$(available_bytes /)"
     sudo -n rm -rf -- "${unused_hosted_toolchains[@]}"
     after="$(available_bytes /)"

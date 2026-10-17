@@ -111,3 +111,12 @@ RUNNER_ENVIRONMENT=github-hosted "$script" reclaim > "$tmp/reclaim.out"
 grep -Fxq -- '-n rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/powershell' "$SUDO_CALLS"
 grep -Fq 'reclaimed_bytes=20000000000' "$tmp/reclaim.out"
 grep -Fq 'reclaimed_bytes=20000000000' "$RUNNER_TEMP/container-candidate-disk-usage.log"
+
+# Deleting system paths is destructive outside an ephemeral GitHub-hosted runner.
+for environment in self-hosted '' github-hosted-lookalike; do
+  : > "$SUDO_CALLS"
+  printf '%s\n' 10000000000 30000000000 > "$DF_AVAIL_VALUES"
+  RUNNER_ENVIRONMENT="$environment" "$script" reclaim > "$tmp/reclaim-skip.out"
+  [ ! -s "$SUDO_CALLS" ] || { echo "reclaim deleted system paths on runner environment '$environment'" >&2; exit 1; }
+  grep -Fq 'Skipping hosted toolchain reclaim' "$tmp/reclaim-skip.out"
+done
