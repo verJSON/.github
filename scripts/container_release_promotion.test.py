@@ -74,6 +74,13 @@ class PromotionTest(unittest.TestCase):
                 "Verjson/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main",
                 "candidate publisher is not pinned to a contract commit",
             ),
+            *(
+                (
+                    "Verjson/.github/.github/workflows/container-candidate-publish.yml@" + contract,
+                    "candidate publisher is not pinned to a contract commit",
+                )
+                for contract in ("b" * 41, "B" * 40, "b" * 39, "b" * 7)
+            ),
         ):
             with self.subTest(publisher=publisher):
                 candidate, config = copy.deepcopy(self.candidate), copy.deepcopy(self.config)
