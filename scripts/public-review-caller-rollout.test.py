@@ -192,10 +192,11 @@ class PublicReviewCallerRolloutTests(unittest.TestCase):
         )
 
     def test_unreadable_or_unexpected_state_fails_closed(self):
-        # The .yaml spelling is absent, so each case below fails on the fault
-        # it names rather than on an unserved request.
+        # Every request a healthy run makes is served (the .yaml spelling is
+        # absent, the repository exists), so each case fails on the fault it
+        # names rather than on an unserved request.
         good = {**listing(repository("r")), caller_path("r"): contents(caller(CURRENT)), **no_yaml("r"),
-                **dict([compare(CURRENT, "ahead")])}
+                "repos/Verjson/r": {"body": {"name": "r"}}, **dict([compare(CURRENT, "ahead")])}
         cases = {
             "listing API failure": {**good, REPOS_PATH: {"status": 502}},
             "listing not paged arrays": {**good, REPOS_PATH: {"body": {"message": "x"}}},
@@ -228,6 +229,20 @@ class PublicReviewCallerRolloutTests(unittest.TestCase):
         for label, responses in cases.items():
             with self.subTest(label):
                 self.assertOutcome(responses, 2, "UNDETERMINED")
+
+    def test_each_fault_is_reported_by_the_guard_that_owns_it(self):
+        # A later guard (the compare operands, an unserved request) also fails
+        # closed, so these assert the message of the guard under test.
+        base = {**listing(repository("r")), **no_yaml("r"), "repos/Verjson/r": {"body": {"name": "r"}}}
+        for label, responses, message in (
+            ("a 403 on the caller", {**base, caller_path("r"): {"status": 403}}, "GitHub API read failed"),
+            ("a branch pin", {**base, caller_path("r"): contents(caller("main")), **dict([compare("main", "ahead")])},
+             "not a full commit SHA"),
+            ("a short pin", {**base, caller_path("r"): contents(caller(CURRENT[:12])),
+                             **dict([compare(CURRENT[:12], "ahead")])}, "not a full commit SHA"),
+        ):
+            with self.subTest(label):
+                self.assertOutcome(responses, 2, "UNDETERMINED", message)
 
     def test_minimum_must_be_a_full_commit_sha(self):
         for minimum in ("main", MINIMUM[:12], MINIMUM.upper()):
