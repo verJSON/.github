@@ -257,7 +257,7 @@ cleanup_group_runner() {
     cleanup_command_group_for_index "$index" || true
   done
   if [ -e "$tmp/survivors" ]; then
-    printf '::error::actions-ci group=%s has command processes that survived SIGKILL; preserving scratch data in %s\n' \
+    printf '\n::error::actions-ci group=%s has command processes that survived SIGKILL; preserving scratch data in %s\n' \
       "$group" "$tmp"
     exit 1
   fi
@@ -496,17 +496,17 @@ report_worker_result() {
   printf '::group::%s\n' "${commands[$index]}"
   if [ -f "$tmp/$index.raw.log" ] \
     && ! sanitize_command_output_for_index "$index"; then
-    printf '::error::group=%s command=%q raw worker output could not be sanitized\n' \
+    printf '\n::error::group=%s command=%q raw worker output could not be sanitized\n' \
       "$group" "${commands[$index]}"
   fi
   if [ ! -f "$status_file" ] || [ ! -f "$log_file" ]; then
-    printf '::error::group=%s command=%q worker did not produce complete result files\n' \
+    printf '\n::error::group=%s command=%q worker did not produce complete result files\n' \
       "$group" "${commands[$index]}"
     if [ -f "$log_file" ] && ! replay_command_output "$log_file"; then
-      printf '::error::group=%s command=%q log could not be read\n' \
+      printf '\n::error::group=%s command=%q log could not be read\n' \
         "$group" "${commands[$index]}"
     fi
-    printf 'actions-ci command group=%s status=missing elapsed=unknown command=%q\n' \
+    printf '\nactions-ci command group=%s status=missing elapsed=unknown command=%q\n' \
       "$group" "${commands[$index]}"
     printf '::endgroup::\n'
     record_runtime "$index" '"missing"' null null null
@@ -518,13 +518,13 @@ report_worker_result() {
   if ! IFS=$'\t' read -r status elapsed left_background <"$status_file" \
     || [[ ! "$status" =~ ^[0-9]+$ || ! "$elapsed" =~ ^[0-9]+$ \
       || ! "$left_background" =~ ^[01]$ ]]; then
-    printf '::error::group=%s command=%q worker result is malformed\n' \
+    printf '\n::error::group=%s command=%q worker result is malformed\n' \
       "$group" "${commands[$index]}"
     if ! replay_command_output "$log_file"; then
-      printf '::error::group=%s command=%q log could not be read\n' \
+      printf '\n::error::group=%s command=%q log could not be read\n' \
         "$group" "${commands[$index]}"
     fi
-    printf 'actions-ci command group=%s status=invalid elapsed=unknown command=%q\n' \
+    printf '\nactions-ci command group=%s status=invalid elapsed=unknown command=%q\n' \
       "$group" "${commands[$index]}"
     printf '::endgroup::\n'
     record_runtime "$index" '"invalid"' null null null
@@ -535,12 +535,12 @@ report_worker_result() {
 
   if ! replay_command_output "$log_file"; then
     [ "$status" -ne 0 ] || status=1
-    printf '::error::group=%s command=%q log could not be read\n' \
+    printf '\n::error::group=%s command=%q log could not be read\n' \
       "$group" "${commands[$index]}"
   fi
 
   if [ "$worker_status" -ne 0 ]; then
-    printf '::error::group=%s command=%q worker exited with status=%d\n' \
+    printf '\n::error::group=%s command=%q worker exited with status=%d\n' \
       "$group" "${commands[$index]}" "$worker_status"
     [ "$status" -ne 0 ] || status="$worker_status"
   fi
@@ -553,15 +553,15 @@ report_worker_result() {
   fi
   if [ "$status" -ne 0 ]; then
     if [ "$timed_out" = true ]; then
-      printf '::error::group=%s command=%q timed out after %ss (budget=%ss)\n' \
+      printf '\n::error::group=%s command=%q timed out after %ss (budget=%ss)\n' \
         "$group" "${commands[$index]}" "$elapsed" "$budget"
     else
-      printf '::error::group=%s command=%q exit=%d elapsed=%ss\n' \
+      printf '\n::error::group=%s command=%q exit=%d elapsed=%ss\n' \
         "$group" "${commands[$index]}" "$status" "$elapsed"
     fi
     failures=$((failures + 1))
   elif [ -n "$budget" ] && [ "$elapsed" -gt "$budget" ]; then
-    printf '::error::group=%s command=%q elapsed=%ss budget=%ss\n' \
+    printf '\n::error::group=%s command=%q elapsed=%ss budget=%ss\n' \
       "$group" "${commands[$index]}" "$elapsed" "$budget"
     failures=$((failures + 1))
   fi
@@ -643,13 +643,13 @@ done
 commands_reported="${#worker_reported_by_index[@]}"
 if [ "$commands_started" -ne "$selected_rows" ] \
   || [ "$commands_reported" -ne "$selected_rows" ]; then
-  printf '::error::actions-ci manifest selects %d command(s) for %s; ran %d and reported %d\n' \
+  printf '\n::error::actions-ci manifest selects %d command(s) for %s; ran %d and reported %d\n' \
     "$selected_rows" "$group" "$commands_started" "$commands_reported"
   failures=$((failures + 1))
 fi
 
 if [ "$worker_wait_failures" -ne 0 ]; then
-  printf '::error::actions-ci group=%s could not identify %d completed worker(s)\n' \
+  printf '\n::error::actions-ci group=%s could not identify %d completed worker(s)\n' \
     "$group" "$worker_wait_failures"
   failures=$((failures + worker_wait_failures))
 fi

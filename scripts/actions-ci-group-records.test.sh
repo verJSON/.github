@@ -321,6 +321,76 @@ else
   fail "the group passed although its runtime records could not be written"
 fi
 
+# The row line verjson-observability#272 parses is byte-for-byte what the
+# runner printed before this change, for ordinary output.
+status="$(run_recorded plain 60 "platform	printf 'hello\\n'")"
+printf -v expected_row 'actions-ci command group=platform status=0 elapsed=%ss budget=60s command=%q' \
+  "$(row_elapsed plain)" "printf 'hello\\n'"
+if [ "$status" -eq 0 ] && grep -qxF -- "$expected_row" "$tmp/plain.out" \
+  && grep -qxF '| hello' "$tmp/plain.out" \
+  && stream_is_well_formed plain 1; then
+  pass "the row line format is byte-unchanged for ordinary output"
+else
+  printf 'expected row: %s\n' "$expected_row" >&2
+  cat "$tmp/plain.out" >&2
+  fail "the row line format changed for ordinary output"
+fi
+
+# Without a stop-commands token the output is withheld, never replayed bare.
+mkdir -p "$tmp/broken-od"
+printf '#!/usr/bin/env bash\nprintf "zz\\n"\n' >"$tmp/broken-od/od"
+chmod +x "$tmp/broken-od/od"
+printf 'platform\tprintf "secret-free-but-unguarded\\n"\n' >"$tmp/no-token.tsv"
+no_token_status=0
+PATH="$tmp/broken-od:$PATH" ACTIONS_CI_GROUP_MANIFEST="$tmp/no-token.tsv" \
+  bash "$runner" platform >"$tmp/no-token.out" 2>&1 || no_token_status=$?
+if [ "$no_token_status" -eq 1 ] \
+  && grep -q '^::error::.*could not draw a stop-commands token' "$tmp/no-token.out" \
+  && ! grep -q '^| secret-free-but-unguarded' "$tmp/no-token.out" \
+  && grep -q 'actions-ci command group=platform status=1 ' "$tmp/no-token.out"; then
+  pass "output is withheld and the row fails when no stop-commands token can be drawn"
+else
+  cat "$tmp/no-token.out" >&2
+  fail "output was replayed without a stop-commands token or the row passed"
+fi
+
+# Concurrent rows finish in any order; records stay in manifest order.
+status="$(ACTIONS_CI_COMMAND_PARALLELISM=3 run_recorded parallel 60 \
+  'platform	sleep 2' 'platform	sleep 1' 'platform	true')"
+actual="$(python3 -I -c '
+import json, sys
+print(" ".join(json.loads(line)["command"] for line in open(sys.argv[1], encoding="utf-8")))
+' "$tmp/records/parallel.jsonl" 2>&1)"
+if [ "$status" -eq 0 ] && [ "$actual" = 'sleep 2 sleep 1 true' ] \
+  && stream_is_well_formed parallel 3; then
+  pass "concurrent rows each leave one record, in manifest order"
+else
+  printf 'actual: %s\n' "$actual" >&2
+  fail "concurrent rows lost, duplicated, or reordered their records"
+fi
+
+# A cancelled group keeps the records of the rows that already finished, so
+# the always() upload still has them.
+printf 'platform\ttrue\nplatform\tsleep 30\n' >"$tmp/cancelled.tsv"
+ACTIONS_CI_COMMAND_PARALLELISM=2 ACTIONS_CI_GROUP_MANIFEST="$tmp/cancelled.tsv" \
+  ACTIONS_CI_RUNTIME_RECORDS="$tmp/records/cancelled.jsonl" \
+  bash "$runner" platform >"$tmp/cancelled.out" 2>&1 &
+cancelled_pid=$!
+for _ in {1..100}; do
+  [ "$(wc -l <"$tmp/records/cancelled.jsonl" 2>/dev/null || echo 0)" -ge 1 ] && break
+  sleep 0.1
+done
+kill -TERM "$cancelled_pid"
+wait "$cancelled_pid"
+cancelled_status=$?
+actual="$(record_fields cancelled command status 2>&1)"
+if [ "$cancelled_status" -ne 0 ] && [ "$actual" = '"true" 0' ]; then
+  pass "a cancelled group keeps the records of its finished rows"
+else
+  printf 'status %s, actual: %s\n' "$cancelled_status" "$actual" >&2
+  fail "a cancelled group lost the records of its finished rows"
+fi
+
 if [ "$fails" -ne 0 ]; then
   printf '%d test(s) failed\n' "$fails"
   exit 1
