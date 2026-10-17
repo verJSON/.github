@@ -282,47 +282,51 @@ else
   fail "a command was not recorded as exactly its manifest text"
 fi
 
-# A records path the runner cannot honor fails before any row runs: a relative
-# path would land in the checkout copy the workflow step deletes, and an
-# uncreatable one would silently drop every record.
-: >"$tmp/not-a-directory"
+# A relative records path is a configuration bug: it would land in the
+# checkout copy the workflow step deletes, so it fails before any row runs.
 printf 'platform\ttouch %q\n' "$tmp/row-ran" >"$tmp/bad-path.tsv"
-bad_path_ok=1
-for records_path in records.jsonl "$tmp/not-a-directory/records.jsonl"; do
-  bad_status=0
-  rm -f "$tmp/row-ran"
-  (cd "$tmp" && ACTIONS_CI_GROUP_MANIFEST="$tmp/bad-path.tsv" \
-    ACTIONS_CI_RUNTIME_RECORDS="$records_path" \
-    bash "$runner" platform >"$tmp/bad-path.out" 2>&1) || bad_status=$?
-  if [ "$bad_status" -ne 2 ] || [ -e "$tmp/row-ran" ] \
-    || ! grep -q 'actions-ci runtime records' "$tmp/bad-path.out"; then
-    printf 'records path %s: status %s\n' "$records_path" "$bad_status" >&2
-    cat "$tmp/bad-path.out" >&2
-    bad_path_ok=0
-  fi
-done
-if [ "$bad_path_ok" -eq 1 ]; then
-  pass "a relative or uncreatable records path fails before any row runs"
+bad_status=0
+rm -f "$tmp/row-ran"
+(cd "$tmp" && ACTIONS_CI_GROUP_MANIFEST="$tmp/bad-path.tsv" \
+  ACTIONS_CI_RUNTIME_RECORDS=records.jsonl \
+  bash "$runner" platform >"$tmp/bad-path.out" 2>&1) || bad_status=$?
+if [ "$bad_status" -eq 2 ] && [ ! -e "$tmp/row-ran" ] \
+  && grep -q 'actions-ci runtime records path must be absolute' "$tmp/bad-path.out"; then
+  pass "a relative records path fails before any row runs"
 else
-  fail "the runner ran rows without a usable records path"
+  printf 'status %s\n' "$bad_status" >&2
+  cat "$tmp/bad-path.out" >&2
+  fail "the runner ran rows with a relative records path"
 fi
 
-# A records file the runner can no longer write fails the group by name
-# rather than passing with its records silently missing.
+# Records are telemetry: a merge must not depend on their disk I/O. A path
+# that cannot be created, or a file that can no longer be rewritten, is named
+# once in a warning and the rows still decide the group. The collector fails
+# closed when the record count disagrees with the logged command_count.
+: >"$tmp/not-a-directory"
+uncreatable_status=0
+rm -f "$tmp/row-ran"
+ACTIONS_CI_GROUP_MANIFEST="$tmp/bad-path.tsv" \
+  ACTIONS_CI_RUNTIME_RECORDS="$tmp/not-a-directory/records.jsonl" \
+  bash "$runner" platform >"$tmp/uncreatable.out" 2>&1 || uncreatable_status=$?
 mkdir -p "$tmp/records-locked"
-status="$(
-  printf 'platform\tchmod 555 %q\n' "$tmp/records-locked" >"$tmp/locked.tsv"
-  ACTIONS_CI_GROUP_MANIFEST="$tmp/locked.tsv" \
-    ACTIONS_CI_RUNTIME_RECORDS="$tmp/records-locked/locked.jsonl" \
-    bash "$runner" platform >"$tmp/locked.out" 2>"$tmp/locked.err" || printf '%s' "$?"
-)"
+locked_status=0
+printf 'platform\tchmod 555 %q\nplatform\ttrue\n' "$tmp/records-locked" >"$tmp/locked.tsv"
+ACTIONS_CI_COMMAND_PARALLELISM=1 ACTIONS_CI_GROUP_MANIFEST="$tmp/locked.tsv" \
+  ACTIONS_CI_RUNTIME_RECORDS="$tmp/records-locked/locked.jsonl" \
+  bash "$runner" platform >"$tmp/locked.out" 2>"$tmp/locked.err" || locked_status=$?
 chmod 755 "$tmp/records-locked"
-if [ "${status:-0}" -eq 1 ] \
-  && grep -q '^::error::.*runtime records could not be written' "$tmp/locked.out"; then
-  pass "a records file that cannot be written fails the group"
+if [ "$uncreatable_status" -eq 0 ] && [ -e "$tmp/row-ran" ] \
+  && [ "$(grep -c '^::warning::group=platform runtime records could not be written' "$tmp/uncreatable.out")" -eq 1 ] \
+  && [ "$locked_status" -eq 0 ] \
+  && [ "$(grep -c '^::warning::group=platform runtime records could not be written' "$tmp/locked.out")" -eq 1 ] \
+  && grep -q 'passed 2 command(s)' "$tmp/locked.out" \
+  && ! grep -q '^::error::' "$tmp/uncreatable.out" "$tmp/locked.out"; then
+  pass "an unwritable records file warns once and leaves the group result to its rows"
 else
-  cat "$tmp/locked.out" "$tmp/locked.err" >&2
-  fail "the group passed although its runtime records could not be written"
+  printf 'uncreatable status %s, locked status %s\n' "$uncreatable_status" "$locked_status" >&2
+  cat "$tmp/uncreatable.out" "$tmp/locked.out" "$tmp/locked.err" >&2
+  fail "an unwritable records file failed the group or was not warned exactly once"
 fi
 
 # The row line verjson-observability#272 parses is byte-for-byte what the

@@ -33,17 +33,22 @@ if [ -n "$command_budget" ]; then
 fi
 # Runtime records (verjson-observability#271): the runner, never a row, writes
 # one JSON line per row to this file. The variable is removed before any row
-# starts, so rows are not told where it is.
+# starts, so rows are not told where it is. A relative path is a configuration
+# bug and fails here; a path that cannot be written only warns (see
+# write_runtime_records), because merges must not depend on telemetry disk I/O.
 records_file="${ACTIONS_CI_RUNTIME_RECORDS-}"
 unset ACTIONS_CI_RUNTIME_RECORDS
+records_write_failed=0
 if [ -n "$records_file" ]; then
   [[ "$records_file" == /* ]] || {
     printf 'actions-ci runtime records path must be absolute: %s\n' "$records_file" >&2
     exit 2
   }
-  mkdir -p -- "$(dirname -- "$records_file")" && : >"$records_file" || {
-    printf 'cannot create actions-ci runtime records file: %s\n' "$records_file" >&2
-    exit 2
+  mkdir -p -- "$(dirname -- "$records_file")" 2>/dev/null \
+    && : 2>/dev/null >"$records_file" || {
+    records_write_failed=1
+    printf '\n::warning::group=%s runtime records could not be written to %s; rows still decide the result\n' \
+      "$group" "$records_file"
   }
 fi
 runner_name="${RUNNER_NAME-}"
@@ -104,7 +109,6 @@ declare -A worker_reported_by_index=()
 declare -A command_started_at=()
 declare -A runtime_record_by_index=()
 worker_wait_failures=0
-records_write_failed=0
 failures=0
 commands_started=0
 # Count the selected rows independently of the parser below, so any path that
@@ -343,11 +347,12 @@ write_runtime_records() {
     return 0
   fi
   [ -z "$staged" ] || rm -f -- "$staged" 2>/dev/null
-  # Fail once by name; a group whose records are incomplete must not pass.
+  # Warn once by name and leave the group result to its rows; the collector
+  # fails closed when the record count disagrees with command_count.
   if [ "$records_write_failed" -eq 0 ]; then
     records_write_failed=1
-    failures=$((failures + 1))
-    printf '\n::error::group=%s runtime records could not be written\n' "$group"
+    printf '\n::warning::group=%s runtime records could not be written to %s; rows still decide the result\n' \
+      "$group" "$records_file"
   fi
   return 1
 }
