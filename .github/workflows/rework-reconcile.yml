@@ -34,6 +34,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: .rework-reconcile-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          # An exact non-cone list of the files this job reads: ADR 0235's
+          # backlog digest binds every byte a checkout puts on disk, and a
+          # full checkout would put the whole tree there. Keep it in step
+          # with backlog-sparse-closure.test.py, which derives the programs
+          # and their imports and requires each one listed here.
+          sparse-checkout: |
+            scripts/ci-telemetry/rework-reconcile.sh
+            scripts/ci-telemetry/rework-classify.sh
+            scripts/ci-telemetry/rework-aggregate.sh
+            scripts/ci-telemetry/rework-report.sh
+            .telemetry/rework-thresholds.json
+          sparse-checkout-cone-mode: false
 
       - name: Reconcile rework telemetry (observe-and-report only)
         id: reconcile

@@ -72,7 +72,12 @@ refusal kinds it carried when the backlog froze; each row binds the job's full
 content, callers, inherited settings, the bytes its sparse checkouts and local
 actions put on disk, and every scanned-tree program it runs (including bare
 `scripts/x.sh` calls, followed through shell scripts), so any change to what
-the job runs stops the row applying. A non-cone sparse-checkout list is evaluated with git's
+the job runs stops the row applying. A backlog job may no longer check out this
+whole tree or materialize tracked content with `git show`/`archive`/`cat-file`:
+`capability-floor-observe`, both dependency-supersession jobs,
+`release-app-canary`, and `rework-reconcile` now check out exact non-cone
+sparse lists that a test derives from their programs and Python imports, and
+`renovate-compatibility-reconcile` no longer checks out at all. A non-cone sparse-checkout list is evaluated with git's
 gitignore anchoring (a bare name matches at every depth, `*` matches dotfiles),
 and a pattern the checker cannot evaluate exactly is refused. A local Docker
 action's `COPY --from`, `RUN --mount=…,from=`, and `# syntax=` frontend must

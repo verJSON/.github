@@ -871,32 +871,6 @@ def is_shell_script(path: str, content: str) -> bool:
     return path.endswith(".sh") or bool(SHELL_SHEBANG.match(content))
 
 
-def executed_programs(job: dict, root: str, excluded: frozenset[str] = frozenset()) -> dict[str, str]:
-    """SHA-256 of every scanned-tree program a job's steps run, and of every
-    program those run in turn (to MAX_CLOSURE_DEPTH), keyed by path. Binds
-    what a full-checkout job executes without binding the whole tree."""
-    found: dict[str, str] = {}
-    queue = [
-        (without_comments(step["run"]), 0)
-        for step in job.get("steps") or []
-        if isinstance(step, dict) and isinstance(step.get("run"), str)
-    ]
-    while queue:
-        text, depth = queue.pop()
-        for program in programs(text, root):
-            content = read_program(root, program)
-            relative = os.path.relpath(os.path.normpath(os.path.join(root, program)), root)
-            if content is None or relative in found or relative in excluded:
-                continue
-            found[relative] = hashlib.sha256(content.encode("utf-8", "surrogateescape")).hexdigest()
-            # Only a shell script is read with shell grammar; another
-            # interpreter's source would match command positions in its
-            # string literals and bind most of the tree.
-            if depth + 1 < MAX_CLOSURE_DEPTH and is_shell_script(relative, content):
-                queue.append((without_comments(content), depth + 1))
-    return dict(sorted(found.items()))
-
-
 def materializes_head(job: dict, workflow_env, root: str, label: str) -> bool:
     """Whether a pull_request_target job can put head-controlled bytes on disk.
 
@@ -1033,6 +1007,8 @@ class Finding(NamedTuple):
     # (reason, detail) pairs for what the job puts on disk that the scanned
     # tree does not bound; an entry's `dynamic:` must name every reason.
     unresolved: tuple = ()
+    # Why a pending row cannot bind what the job puts on disk (Closure.unbound).
+    unbound: tuple = ()
     # (kind, reason) pairs no entry can accept: an unpinned remote callee
     # or image, an unbounded runtime checkout, a relayed head.
     refusals: tuple = ()
@@ -1046,6 +1022,7 @@ class Finding(NamedTuple):
     backlog_digest: str = ""
 
 
+UNBOUND_BACKLOG = "a backlog row cannot bind what this job puts on disk"
 RELAY_HEAD_REFUSAL = (
     "a relayed run can be handed a pull request head, and head detection finds this job "
     "materializes it or cannot rule that out ({diagnostic}); it must run on an ephemeral "
@@ -1182,9 +1159,15 @@ class Closure:
     scanned tree without their own checkout step.
     """
 
-    def __init__(self, root: str, excluded: frozenset[str] = frozenset()) -> None:
+    def __init__(self, root: str, excluded: frozenset[str] = frozenset(), caller_checkout: bool = False) -> None:
         self.root = os.path.normpath(root)
         self.excluded = excluded
+        # A standalone workflow_call scan: the default checkout is the
+        # caller's repository at the caller's ref, not the scanned tree.
+        self.caller_checkout = caller_checkout
+        # Why a backlog row cannot bind what this job puts on disk. Never
+        # tolerated by a frozen key: a row binds bytes, not a parser's view.
+        self.unbound: set[str] = set()
         self.files: dict[str, str] = {}
         # The subset of `files` a local action contributes: the job's own
         # steps, as opposed to bytes a checkout puts on disk.
@@ -1300,11 +1283,57 @@ class Closure:
         if not sparse:
             self.flag("full-checkout", "full checkout of the scanned tree (no sparse-checkout list bounds it)")
             self.tree = tree_digest(self.root, self.excluded)
+            if not self.caller_checkout:
+                self.unbound.add(
+                    "a full checkout of the scanned tree puts every tracked file on disk, and imports, shell "
+                    "functions, data files, and variables reach bytes no command pattern names; check out an "
+                    "exact non-cone sparse list of the files the job needs"
+                )
             return
         if cone:
             self.add_direct_files("", "cone-mode root")
         for path in sparse:
             self.add_sparse_path(path, cone, "sparse-checkout")
+
+    def check_materializations(self, job: dict) -> None:
+        """`git show|archive|cat-file` puts tracked bytes on disk without a
+        checkout. Only `git show <dispatch commit>:<path>` of a file this
+        job's own sparse checkout binds is bound; anything else is not.
+        Read in every step and every shell script the job puts on disk."""
+        texts = [
+            without_comments(step["run"])
+            for step in job.get("steps") or []
+            if isinstance(step, dict) and isinstance(step.get("run"), str)
+        ]
+        for relative, digest in sorted(self.files.items()):
+            path = os.path.join(self.root, relative)
+            if digest.startswith("link ") or os.path.islink(path):
+                continue
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                content = handle.read()
+            if is_shell_script(relative, content):
+                texts.append(without_comments(content))
+        for text in texts:
+            for match in GIT_MATERIALIZE_TRACKED.finditer(text.replace("\\\n", " ")):
+                verb, arguments = match.group(1), match.group(2)
+                if verb == "show" and self.shown_file_is_bound(arguments):
+                    continue
+                self.unbound.add(
+                    f"`git {verb}{arguments.rstrip()}` materializes tracked content outside any checkout this "
+                    "row binds; check the file out with an exact sparse list and show only that path at the "
+                    "dispatch commit"
+                )
+
+    def shown_file_is_bound(self, arguments: str) -> bool:
+        arguments = re.sub(r"\$\{\{\s*github\.sha\s*\}\}", "$GITHUB_SHA", arguments)
+        objects = [token.strip("\"'") for token in arguments.split() if not token.startswith("-")]
+        if len(objects) != 1 or ":" not in objects[0]:
+            return False
+        revision, path = objects[0].split(":", 1)
+        if revision not in DISPATCH_COMMIT or not path or re.search(r"[$*?\[\]\\]", path):
+            return False
+        path = os.path.normpath(path)
+        return path in self.files and not self.files[path].startswith("link ")
 
     def add_sparse_path(self, path: str, cone: bool, why: str) -> None:
         unprovable = (CONE_UNPROVABLE if cone else PATTERN_UNPROVABLE).search(path) or not path.strip("/")
@@ -1519,6 +1548,12 @@ class Closure:
                 self.add_file(os.path.join(action_dir, value), f"local action {uses} entry point")
 
 
+# `git [options] show|archive|cat-file <args>` up to the end of the command.
+GIT_MATERIALIZE_TRACKED = re.compile(
+    rf"(?:^|[\s;&|(`])git[ \t]+{GIT_OPTIONS}(show|archive|cat-file)\b([^\n;&|>)]*)", re.M
+)
+# The commit a dispatched run's own checkout is: the scanned tree.
+DISPATCH_COMMIT = frozenset({"$GITHUB_SHA", "${GITHUB_SHA}"})
 # Sparse-checkout syntax add_sparse_path does not evaluate exactly: in a
 # non-cone (gitignore) pattern a character class or backslash escape differs
 # from Python's glob, and a cone-mode entry is a directory, never a pattern.
@@ -1675,8 +1710,14 @@ def without_comments(run: str) -> str:
     return "\n".join(line for line in run.split("\n") if not line.lstrip().startswith("#"))
 
 
-def job_closure(job: dict, root: str, workflow_defaults=None, excluded: frozenset[str] = frozenset()) -> Closure:
-    closure = Closure(root, excluded)
+def job_closure(
+    job: dict,
+    root: str,
+    workflow_defaults=None,
+    excluded: frozenset[str] = frozenset(),
+    caller_checkout: bool = False,
+) -> Closure:
+    closure = Closure(root, excluded, caller_checkout)
     for scope, defaults in (("workflow", workflow_defaults), ("job", job.get("defaults"))):
         run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
         if isinstance(run_defaults, dict):
@@ -1798,7 +1839,9 @@ def check_workflow(
         if not scan.privileged:
             violations.extend(found)
         elif found:
-            closure = job_closure(job, scan.root, document.get("defaults"), scan.excluded)
+            closure = job_closure(
+                job, scan.root, document.get("defaults"), scan.excluded, scan.event == "workflow_call" and depth == 0
+            )
             diagnostic, head_unresolved = head_diagnostic(job, document, scan.root, f"{path}: job '{name}'")
             if head_unresolved:
                 closure.flag("head-materialization", diagnostic)
@@ -1806,22 +1849,19 @@ def check_workflow(
                     closure.refusals.add(("relay-head", RELAY_HEAD_REFUSAL.format(diagnostic=diagnostic)))
             pairs = closure.pairs()
             bound = {"files": closure.files, "unresolved": [f"{reason}: {detail}" for reason, detail in pairs]}
-            # The backlog digest binds what the job is and what it runs: the
-            # bytes its sparse checkouts and local actions put on disk (the
+            # The backlog digest binds what the job is and every scanned-tree
+            # byte it puts on disk: its sparse checkouts and local actions (the
             # pending and reviewed lists excluded, or no row could match
-            # itself) and every scanned-tree program its steps execute. A full
-            # checkout's whole-tree digest is left out, because every commit
-            # would restale the row; the programs it runs stand in for it.
+            # itself). A full checkout of this tree cannot be bound without
+            # restaling on every commit, so a pending row refuses it
+            # (Closure.unbound) rather than binding a parser's guess at it.
             backlog_digest = review_digest(
                 chain,
                 job,
                 inherited_settings(document),
-                {
-                    "files": closure.files,
-                    "programs": executed_programs(job, scan.root, scan.excluded),
-                    "reasons": sorted({reason for reason, _ in pairs}),
-                },
+                {"files": closure.files, "reasons": sorted({reason for reason, _ in pairs})},
             )
+            closure.check_materializations(job)
             if closure.tree is not None:
                 bound["tree"] = closure.tree
             scan.findings.append(
@@ -1832,6 +1872,7 @@ def check_workflow(
                     diagnostic,
                     pairs,
                     refusals=tuple(sorted(closure.refusals)),
+                    unbound=tuple(sorted(closure.unbound)),
                     relay=scan.relay,
                     backlog_digest=backlog_digest,
                 )
@@ -2056,6 +2097,8 @@ def main(argv: list[str]) -> int:
         # kinds it carried when the backlog was frozen.
         tolerated = RELAY_BACKLOG.get(key, frozenset()) if pending_row is not None else frozenset()
         refused = [reason for kind, reason in finding.refusals if kind not in tolerated]
+        if pending_row is not None:
+            refused += [f"{UNBOUND_BACKLOG}: {reason}" for reason in finding.unbound]
         if refused:
             violations.append(
                 Violation(

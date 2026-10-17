@@ -2950,7 +2950,12 @@ def live(path: str) -> str:
 
 REWORK = {
     "rework-reconcile.yml": live(".github/workflows/rework-reconcile.yml"),
-    "scripts/ci-telemetry/rework-reconcile.sh": live("scripts/ci-telemetry/rework-reconcile.sh"),
+    **{path: live(path) for path in (
+        "scripts/ci-telemetry/rework-reconcile.sh",
+        "scripts/ci-telemetry/rework-classify.sh",
+        "scripts/ci-telemetry/rework-aggregate.sh",
+        ".telemetry/rework-thresholds.json",
+    )},
 }
 REWORK_LABEL = ("rework-reconcile.yml [workflow_dispatch]", "reconcile")
 REWORK_PENDING = backlog_row(REWORK, *REWORK_LABEL)
@@ -2969,13 +2974,14 @@ expect_no_pending(
     {**REWORK, "pending.tsv": REWORK_PENDING,
      "scripts/ci-telemetry/rework-reconcile.sh": REWORK["scripts/ci-telemetry/rework-reconcile.sh"]
      + 'printf "%s\\n" "${EXTRA:-}" >>"$GITHUB_STEP_SUMMARY"\n'},
-    "a backlog row stops applying when a program a full-checkout job runs changes at all",
+    "a backlog row stops applying when any file the job's sparse checkout holds changes",
     ("VIOLATION: rework-reconcile.yml [workflow_dispatch]: job 'reconcile'", "pending row no longer applies"),
     *PENDING_ARGS,
 )
 
-# A bare relative path in any command position is followed: after `&&`, after
-# `;`, inside `$( )`, and behind an assignment prefix.
+# Head detection follows a bare relative path in any command position: after
+# `&&`, after `;`, inside `$( )`, and behind an assignment prefix.
+SPARSE_TOOLS = "- uses: actions/checkout@v4\n  with:\n    sparse-checkout: tools/*\n    sparse-checkout-cone-mode: false\n"
 BARE_STEPS = {
     "line start": "- run: tools/observe.sh --weekly",
     "after &&": "- run: cd . && tools/observe.sh --weekly",
@@ -2984,7 +2990,7 @@ BARE_STEPS = {
     "after an assignment": "- run: MODE=weekly tools/observe.sh",
 }
 for label, step in BARE_STEPS.items():
-    job = {**backlog_relay("capability-floor-observe.yml", "observe", "- uses: actions/checkout@v4\n" + step),
+    job = {**backlog_relay("capability-floor-observe.yml", "observe", SPARSE_TOOLS + step),
            "tools/observe.sh": "echo observe\n"}
     expect_no_pending(
         {**job, "pending.tsv": backlog_row(job, "capability-floor-observe.yml [workflow_dispatch]", "observe"),
@@ -2993,33 +2999,20 @@ for label, step in BARE_STEPS.items():
         (RELAY_REFUSAL,),
         *PENDING_ARGS,
     )
-# The closure follows a shell script into the scripts it runs, so an edit
-# two calls deep still stops the row applying; another interpreter's source is
-# bound by its bytes but not parsed as shell, so its string literals do not
-# pull the rest of the tree into the digest.
+# Every file the sparse checkout holds binds the row, so a script two calls
+# deep is bound by its bytes, not by following the call.
 NESTED = {
-    **backlog_relay("capability-floor-observe.yml", "observe",
-                    "- uses: actions/checkout@v4\n- run: bash tools/outer.sh"),
-    "tools/outer.sh": "#!/usr/bin/env bash\ntools/inner.sh --weekly\n",
+    **backlog_relay("capability-floor-observe.yml", "observe", SPARSE_TOOLS + "- run: bash tools/outer.sh"),
+    "tools/outer.sh": "#!/usr/bin/env bash\n\"$(dirname \"$0\")/inner.sh\" --weekly\n",
     "tools/inner.sh": "echo inner\n",
 }
 NESTED_ROW = backlog_row(NESTED, "capability-floor-observe.yml [workflow_dispatch]", "observe")
 expect_no_pending(
     {**NESTED, "tools/inner.sh": "echo inner changed\n", "pending.tsv": NESTED_ROW},
-    "a backlog row stops applying when a script its script runs changes",
+    "a backlog row stops applying when a script reached only through a variable changes",
     ("pending row no longer applies",),
     *PENDING_ARGS,
 )
-PY_JOB = {
-    **backlog_relay("capability-floor-observe.yml", "observe",
-                    "- uses: actions/checkout@v4\n- run: python3 tools/report.py"),
-    "tools/report.py": '"""Summarize the weekly data.\n\ntools/data.sh writes the input.\n"""\n',
-    "tools/data.sh": "echo data\n",
-}
-expect({**PY_JOB, "tools/data.sh": "echo other\n",
-        "pending.tsv": backlog_row(PY_JOB, "capability-floor-observe.yml [workflow_dispatch]", "observe")}, 0,
-       ("PENDING: capability-floor-observe.yml [workflow_dispatch]: job 'observe'",),
-       "a path inside a Python program's string literal is not followed as a shell command", *PENDING_ARGS)
 # A command word that is not a tracked file is not a program to follow, so a
 # step naming a head value beside it is not made undetermined by it.
 UNTRACKED_WORD = backlog_relay(
@@ -3069,5 +3062,80 @@ expect_no_pending(
      "a pending row cannot waive a refusal"),
     *PENDING_ARGS,
 )
+
+# ---------------------------------------------------------------------------
+# Round-6 review of #1827: bind what is on disk, not what the parser
+# recognizes. A backlog row cannot bind a full checkout of the scanned tree
+# (imports, shell functions, data files, and variables all reach bytes no
+# command pattern names), so a backlog job that full-checkouts this tree, or
+# materializes tracked content with git show/archive/cat-file, is refused
+# whatever its frozen kinds; an exact non-cone sparse checkout is bound byte
+# for byte instead. A standalone workflow_call job's default checkout is its
+# caller's repository, not this tree, so the rule does not apply there.
+# ---------------------------------------------------------------------------
+UNBOUND = "a backlog row cannot bind"
+
+
+def observe_job(steps: str, files: dict | None = None) -> dict[str, str]:
+    return {**backlog_relay("capability-floor-observe.yml", "observe", steps), **(files or {})}
+
+
+def expect_backlog(job: dict[str, str], refused: bool, label: str) -> None:
+    row = backlog_row(job, "capability-floor-observe.yml [workflow_dispatch]", "observe")
+    if refused:
+        expect_no_pending({**job, "pending.tsv": row}, label,
+                          ("VIOLATION: capability-floor-observe.yml [workflow_dispatch]: job 'observe'", UNBOUND),
+                          *PENDING_ARGS)
+    else:
+        expect({**job, "pending.tsv": row}, 0,
+               ("PENDING: capability-floor-observe.yml [workflow_dispatch]: job 'observe'",), label, *PENDING_ARGS)
+
+
+TOOL = {"scripts/tool.py": "print('tool')\n", "scripts/other.py": "print('other')\n"}
+SPARSE_TOOL = "- uses: actions/checkout@v4\n  with:\n    sparse-checkout: scripts/tool.py\n    sparse-checkout-cone-mode: false\n"
+expect_backlog(observe_job("- uses: actions/checkout@v4\n- run: python3 scripts/tool.py", TOOL), True,
+               "a backlog job that full-checkouts the scanned tree is refused, whatever its frozen kinds")
+expect_backlog(observe_job("- uses: actions/checkout@v4\n  with:\n    ref: ${{ github.sha }}\n"
+                           "- run: python3 scripts/tool.py", TOOL), True,
+               "a backlog job that full-checkouts github.sha is refused")
+expect_backlog(observe_job(SPARSE_TOOL + "- run: python3 scripts/tool.py", TOOL), False,
+               "a backlog job with an exact sparse checkout is ratcheted")
+for label, command in (
+    ("the canary's git show of a sparse-bound file at the dispatch commit",
+     'git --no-replace-objects -C "$GITHUB_WORKSPACE" \\\n  show "$GITHUB_SHA:scripts/tool.py" > "$RUNNER_TEMP/t.py"'),
+    ("a git show of a sparse-bound file at ${{ github.sha }}", "git show ${{ github.sha }}:scripts/tool.py > t.py"),
+):
+    expect_backlog(observe_job(SPARSE_TOOL + "- run: |\n    " + command.replace("\n", "\n    ") + "\n    python3 t.py", TOOL),
+                   False, f"{label} is bound by the sparse checkout")
+for label, command in (
+    ("a git show of a path the sparse checkout does not bind", 'git show "$GITHUB_SHA:scripts/other.py" > t.py'),
+    ("a git show at another revision", 'git show "HEAD~1:scripts/tool.py" > t.py'),
+    ("a git show of a variable path", 'git show "$GITHUB_SHA:$TOOL" > t.py'),
+    ("a git archive", 'git archive "$GITHUB_SHA" scripts | tar -x'),
+    ("a git cat-file", 'git cat-file -p "$GITHUB_SHA:scripts/tool.py" > t.py'),
+):
+    expect_backlog(observe_job(SPARSE_TOOL + "- run: " + command, TOOL), True,
+                   f"{label} materializes tracked content no backlog row binds and is refused")
+expect_backlog(observe_job(SPARSE_TOOL.replace("scripts/tool.py", "scripts/run.sh") + "- run: bash scripts/run.sh",
+                           {**TOOL, "scripts/run.sh": 'git show "$GITHUB_SHA:scripts/other.py" > t.py\n'}),
+               True, "a git show inside a script the job runs is refused too")
+# A standalone workflow_call job checks out its caller's repository, so this
+# rule does not reach it; that exposure is the relay backlog's (#1831).
+CALLER_TREE = {
+    "container-candidate.yml": """
+        on: workflow_call
+        jobs:
+          pull-request-build:
+            runs-on: [self-hosted, general]
+            steps:
+              - uses: actions/checkout@v4
+              - run: docker build .
+    """,
+}
+CALLER_LABEL = ("container-candidate.yml [workflow_call]", "pull-request-build")
+expect({**CALLER_TREE, "pending.tsv": backlog_row(CALLER_TREE, *CALLER_LABEL)}, 0,
+       ("PENDING: container-candidate.yml [workflow_call]: job 'pull-request-build'",),
+       "a standalone workflow_call job's checkout of its caller's repository is not refused as this tree",
+       *PENDING_ARGS)
 
 sys.exit(1 if failures else 0)
