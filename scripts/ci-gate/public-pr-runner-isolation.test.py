@@ -10,6 +10,7 @@ message, because one "violation" exit cannot tell which rule tripped.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -183,10 +184,11 @@ def digest(selector) -> str:
 
 
 TRUSTED_SELECTOR = """${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}"""
+# actionlint.yml's `actionlint` is a frozen pull_request backlog key.
 TRUSTED_LANE_PR_JOB = """
     on: pull_request
     jobs:
-      test:
+      actionlint:
         runs-on: ${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
         steps:
           - run: 'true'
@@ -194,14 +196,14 @@ TRUSTED_LANE_PR_JOB = """
 
 expect(
     {
-        "ci.yml": TRUSTED_LANE_PR_JOB,
+        "actionlint.yml": TRUSTED_LANE_PR_JOB,
         "pending.tsv": (
             "# path<TAB>job<TAB>selector digest<TAB>reason\n"
-            f"ci.yml\ttest\t{digest(TRUSTED_SELECTOR)}\tselector pinned elsewhere until a follow-up\n"
+            f"actionlint.yml\tactionlint\t{digest(TRUSTED_SELECTOR)}\tselector pinned elsewhere until a follow-up\n"
         ),
     },
     0,
-    ("PENDING: ci.yml: job 'test'", "selector pinned elsewhere"),
+    ("PENDING: actionlint.yml: job 'actionlint'", "selector pinned elsewhere"),
     "a reviewed pending entry is reported as pending instead of failing",
     "--pending",
     "{dir}/pending.tsv",
@@ -209,11 +211,11 @@ expect(
 
 expect(
     {
-        "ci.yml": TRUSTED_LANE_PR_JOB.replace("vars.CI_LANE_FALLBACK || ", ""),
-        "pending.tsv": f"ci.yml\ttest\t{digest(TRUSTED_SELECTOR)}\tlisted against the reviewed selector\n",
+        "actionlint.yml": TRUSTED_LANE_PR_JOB.replace("vars.CI_LANE_FALLBACK || ", ""),
+        "pending.tsv": f"actionlint.yml\tactionlint\t{digest(TRUSTED_SELECTOR)}\tlisted against the reviewed selector\n",
     },
     1,
-    ("VIOLATION: ci.yml: job 'test'", "selector digest changed"),
+    ("VIOLATION: actionlint.yml: job 'actionlint'", "selector digest changed"),
     "a pending job whose selector changed is a violation, not masked by its row",
     "--pending",
     "{dir}/pending.tsv",
@@ -221,18 +223,18 @@ expect(
 
 expect(
     {
-        "ci.yml": """
+        "actionlint.yml": """
             on: pull_request
             jobs:
-              test:
+              actionlint:
                 runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
                 steps:
                   - run: 'true'
         """,
-        "pending.tsv": f"ci.yml\ttest\t{digest(TRUSTED_SELECTOR)}\tfixed but still listed\n",
+        "pending.tsv": f"actionlint.yml\tactionlint\t{digest(TRUSTED_SELECTOR)}\tfixed but still listed\n",
     },
     1,
-    ("STALE PENDING: ci.yml: job 'test'",),
+    ("STALE PENDING: actionlint.yml: job 'actionlint'",),
     "a pending entry that no longer violates fails until it is removed",
     "--pending",
     "{dir}/pending.tsv",
@@ -2451,44 +2453,103 @@ expect(
     "a standalone workflow_call honoring a caller runner input can reach the pool",
 )
 
-# The relay backlog is an exact pending ratchet keyed to the relay digest.
-RELAY_DIGEST_LINE = re.compile(r"relay digest (sha256:[0-9a-f]{64})")
-code, output = run_checker(DISPATCH_HEAD)
+BACKLOG_DIGEST_LINE = re.compile(r"backlog digest (sha256:[0-9a-f]{64})")
+
+
+def backlog_fixture(steps: str, extra: str = "") -> dict[str, str]:
+    """capability-floor-observe.yml's `observe`, a backlog job with no refusal."""
+    return {
+        "capability-floor-observe.yml": f"""
+            on: workflow_dispatch
+            jobs:
+              observe:
+                runs-on: [self-hosted, general]
+{textwrap.indent(textwrap.dedent(extra), " " * 16)}
+                steps:
+{textwrap.indent(textwrap.dedent(steps), " " * 18)}
+        """,
+    }
+
+
+def backlog_row(workflows: dict[str, str], path: str, job: str) -> str:
+    """The pending row the checker itself names for a backlog job."""
+    _, output = run_checker(workflows)
+    found = [
+        match.group(1)
+        for line in output.splitlines()
+        if f"{path}: job '{job}'" in line
+        for match in [BACKLOG_DIGEST_LINE.search(line)]
+        if match
+    ]
+    return f"{path}\t{job}\t{found[0] if found else 'sha256:' + 'f' * 64}\t#1831 backlog\n"
+
+
+def expect_no_pending(workflows: dict[str, str], label: str, fragments: tuple[str, ...], *arguments: str) -> None:
+    """Exit 1, the fragments present, and no PENDING line: a row did not waive it."""
+    actual, output = run_checker(workflows, *arguments)
+    missing = [fragment for fragment in fragments if fragment not in output]
+    if actual != 1 or missing or "PENDING:" in output.replace("STALE PENDING:", ""):
+        fail(f"{label} (expected exit 1 with {missing or fragments} and no PENDING line, got {actual}: {output.strip()})")
+    else:
+        ok(label)
+
+
+PENDING_ARGS = ("--pending", "{dir}/pending.tsv")
+
+
+# The relay backlog is an exact pending ratchet keyed to the backlog digest. It
+# is frozen in code, so these fixtures use real backlog keys: runner-canary's
+# `canary` carried a relayed-head refusal when the backlog was frozen, and
+# capability-floor-observe's `observe` carried none.
+def backlog_relay(name: str, job: str, steps: str, runs_on: str = "[self-hosted, general]") -> dict[str, str]:
+    return {name: relay_job("workflow_dispatch", steps, runs_on)["relay.yml"].replace("\n              j:\n", f"\n              {job}:\n")}
+
+
+RELAY_DIGEST_LINE = BACKLOG_DIGEST_LINE
+# Sparse, so its only refusal is the relayed head the backlog froze for it.
+SPARSE_HEAD = PROBES["workflow_dispatch"][0].replace(
+    "        - run: make", "            sparse-checkout: Makefile\n        - run: make"
+)
+CANARY_HEAD = backlog_relay("runner-canary.yml", "canary", SPARSE_HEAD)
+code, output = run_checker(CANARY_HEAD)
 HEAD_RELAY_DIGEST = RELAY_DIGEST_LINE.search(output)
-HEAD_PENDING = (f"relay.yml [workflow_dispatch]\tj\t{HEAD_RELAY_DIGEST.group(1)}\t#1831 backlog\n"
+HEAD_PENDING = (f"runner-canary.yml [workflow_dispatch]\tcanary\t{HEAD_RELAY_DIGEST.group(1)}\t#1831 backlog\n"
                 if HEAD_RELAY_DIGEST else "missing\n")
-expect({**DISPATCH_HEAD, "pending.tsv": HEAD_PENDING}, 0,
-       ("PENDING: relay.yml [workflow_dispatch]: job 'j'",),
+expect({**CANARY_HEAD, "pending.tsv": HEAD_PENDING}, 0,
+       ("PENDING: runner-canary.yml [workflow_dispatch]: job 'canary'",),
        "a backlog row ratchets a known relayed job", "--pending", "{dir}/pending.tsv")
-MOVED = relay_job("workflow_dispatch", PROBES["workflow_dispatch"][0], "[self-hosted, other]")
+MOVED = backlog_relay("runner-canary.yml", "canary", SPARSE_HEAD, "[self-hosted, other]")
 expect({**MOVED, "pending.tsv": HEAD_PENDING}, 1,
-       ("pending row no longer applies: relay digest changed",),
+       ("pending row no longer applies: backlog digest changed",),
        "a backlog row stops applying when the selector changes", "--pending", "{dir}/pending.tsv")
-code, output = run_checker(DISPATCH_PLAIN)
-PLAIN_RELAY_DIGEST = RELAY_DIGEST_LINE.search(output)
-GAINED_HEAD = relay_job("workflow_dispatch", PROBES["workflow_dispatch"][0])
-expect(
-    {**GAINED_HEAD, "pending.tsv": f"relay.yml [workflow_dispatch]\tj\t{PLAIN_RELAY_DIGEST.group(1)}\tbacklog\n"
-     if PLAIN_RELAY_DIGEST else "missing\n"},
-    1,
-    ("pending row no longer applies: relay digest changed", "head-materialization"),
-    "a backlog row stops applying when the job gains a head-materializing checkout",
+OBSERVE_PLAIN = backlog_relay("capability-floor-observe.yml", "observe", "- run: echo maintenance")
+OBSERVE_PLAIN_PENDING = backlog_row(OBSERVE_PLAIN, "capability-floor-observe.yml [workflow_dispatch]", "observe")
+expect({**OBSERVE_PLAIN, "pending.tsv": OBSERVE_PLAIN_PENDING}, 0,
+       ("PENDING: capability-floor-observe.yml [workflow_dispatch]: job 'observe'",),
+       "a backlog row ratchets a known relayed job with no refusal", "--pending", "{dir}/pending.tsv")
+expect_no_pending(
+    {**backlog_relay("capability-floor-observe.yml", "observe", PROBES["workflow_dispatch"][0]),
+     "pending.tsv": OBSERVE_PLAIN_PENDING},
+    "a backlog job that gains a head-materializing checkout is refused, whatever its row says",
+    (RELAY_REFUSAL, "a pending row cannot waive a refusal"),
     "--pending",
     "{dir}/pending.tsv",
 )
-expect({**relay_job("workflow_dispatch", PROBES["workflow_dispatch"][0], "ubuntu-24.04"), "pending.tsv": HEAD_PENDING},
-       1, ("STALE PENDING: relay.yml [workflow_dispatch]: job 'j'",),
+expect({**backlog_relay("runner-canary.yml", "canary", SPARSE_HEAD, "ubuntu-24.04"),
+        "pending.tsv": HEAD_PENDING},
+       1, ("STALE PENDING: runner-canary.yml [workflow_dispatch]: job 'canary'",),
        "a backlog row for a job moved to a hosted runner is stale", "--pending", "{dir}/pending.tsv")
-expect({**DISPATCH_PLAIN, "pending.tsv": f"relay.yml [workflow_dispatch]\tj\t{PLAIN_RELAY_DIGEST.group(1)}\tbacklog\n"
-        if PLAIN_RELAY_DIGEST else "missing\n", "reviewed.tsv": DISPATCH_PLAIN_ROW},
+expect({**OBSERVE_PLAIN, "pending.tsv": OBSERVE_PLAIN_PENDING,
+        "reviewed.tsv": review_row(OBSERVE_PLAIN, "capability-floor-observe.yml [workflow_dispatch]", "observe")},
        2, ("UNDETERMINED", "in both the pending and the reviewed list"),
        "a relayed job listed as both pending and reviewed is undetermined",
        "--pending", "{dir}/pending.tsv", *REVIEWED_ARGS)
 # A pending row never ratchets a privileged (non-relay) finding.
 FORK_JOB = relay_job("fork", PROBES["fork"][0])
-expect({**FORK_JOB, "pending.tsv": "relay.yml [fork]\tj\t" + NO_SPARSE_RUNTIME + "\tbacklog\n"}, 1,
-       ("has no sparse-checkout list", "STALE PENDING: relay.yml [fork]: job 'j'"),
-       "a pending row cannot stand in for a privileged-event review", "--pending", "{dir}/pending.tsv")
+expect({**FORK_JOB, "pending.tsv": "relay.yml [fork]\tj\t" + NO_SPARSE_RUNTIME + "\tbacklog\n"}, 2,
+       ("UNDETERMINED", "relay.yml [fork] job 'j' is not in the frozen backlog"),
+       "a pending row cannot stand in for a privileged-event review: no privileged key is in the frozen backlog",
+       "--pending", "{dir}/pending.tsv")
 
 
 # The live `gate` job's shape: gate-rearm.yml's pull_request_target run
@@ -2568,5 +2629,202 @@ expect(
     "an unguarded runner_labels input reopens the pool for the gate shape",
 )
 
+
+# ---------------------------------------------------------------------------
+# Round-4 review of #1827: the relay backlog waived content. A pending row
+# keyed to selector and reason names let a backlog job change anything else,
+# and it was consulted before refusals, so a matching row waived a refusal no
+# entry may accept. The fixtures below use real backlog keys, because the
+# backlog is frozen in code and a fixture key outside it fails for that reason.
+# ---------------------------------------------------------------------------
+UNPINNED_OBSERVE = backlog_fixture("- run: echo observe", "container: alpine:3")
+expect_no_pending(
+    {**UNPINNED_OBSERVE,
+     "pending.tsv": backlog_row(UNPINNED_OBSERVE, "capability-floor-observe.yml [workflow_dispatch]", "observe")},
+    "a matching backlog row cannot waive a refusal: an unpinned job image still fails",
+    ("VIOLATION: capability-floor-observe.yml [workflow_dispatch]: job 'observe'",
+     "must be pinned by an @sha256: digest"),
+    *PENDING_ARGS,
+)
+
+# The backlog may only shrink: a pending row for any key outside the frozen
+# set is refused before a single job is scanned, even with the exact digest
+# the checker names for it.
+expect(
+    {**DISPATCH_PLAIN, "pending.tsv": backlog_row(DISPATCH_PLAIN, "relay.yml [workflow_dispatch]", "j")},
+    2,
+    ("UNDETERMINED", "relay.yml [workflow_dispatch]", "not in the frozen backlog"),
+    "a pending row for a key outside the frozen backlog is refused: the backlog cannot grow",
+    *PENDING_ARGS,
+)
+
+# A backlog row binds the job's full content, not its selector and reason
+# names: an edit that keeps both (here, a different command) stops the row
+# applying, so the backlog cannot carry a job that changed after it froze.
+expect_no_pending(
+    {**backlog_relay("capability-floor-observe.yml", "observe", "- run: bash -c \"$PAYLOAD\""),
+     "pending.tsv": OBSERVE_PLAIN_PENDING},
+    "a backlog row stops applying when the job's content changes under the same selector and reasons",
+    ("VIOLATION: capability-floor-observe.yml [workflow_dispatch]: job 'observe'", "pending row no longer applies"),
+    *PENDING_ARGS,
+)
+expect_no_pending(
+    {**{name: re.sub(r"(?m)^( *)jobs:$", r"\1env:\n\1  PAYLOAD: ${{ inputs.payload }}\n\1jobs:", body)
+        for name, body in OBSERVE_PLAIN.items()},
+     "pending.tsv": OBSERVE_PLAIN_PENDING},
+    "a backlog row stops applying when the job's inherited workflow settings change",
+    ("VIOLATION: capability-floor-observe.yml [workflow_dispatch]: job 'observe'", "pending row no longer applies"),
+    *PENDING_ARGS,
+)
+
+# A local action is the job's own steps, so its bytes bind the backlog row too.
+ACTION_OBSERVE = {
+    **backlog_relay("capability-floor-observe.yml", "observe", "- uses: ./.github/actions/observe"),
+    ".github/actions/observe/action.yml": """
+        runs:
+          using: composite
+          steps:
+            - run: echo observe
+              shell: bash
+    """,
+}
+expect_no_pending(
+    {**ACTION_OBSERVE,
+     ".github/actions/observe/action.yml": ACTION_OBSERVE[".github/actions/observe/action.yml"].replace(
+         "echo observe", "bash -c \"$PAYLOAD\""),
+     "pending.tsv": backlog_row(ACTION_OBSERVE, "capability-floor-observe.yml [workflow_dispatch]", "observe")},
+    "a backlog row stops applying when a local action the job runs changes",
+    ("VIOLATION: capability-floor-observe.yml [workflow_dispatch]: job 'observe'", "pending row no longer applies"),
+    *PENDING_ARGS,
+)
+
+# The tolerated refusal kinds shrink with the job: a backlog job that no
+# longer carries one fails until RELAY_BACKLOG drops it.
+CANARY_PLAIN = backlog_relay("runner-canary.yml", "canary", "- run: echo canary")
+expect(
+    {**CANARY_PLAIN,
+     "pending.tsv": backlog_row(CANARY_PLAIN, "runner-canary.yml [workflow_dispatch]", "canary")},
+    1,
+    ("STALE BACKLOG: runner-canary.yml [workflow_dispatch]: job 'canary' no longer carries refusal kind relay-head",),
+    "a backlog key that tolerates a refusal kind the job no longer carries is stale",
+    *PENDING_ARGS,
+)
+
+# Tolerance comes only with the job's own pending row: a frozen key that has
+# left the pending list keeps no refusal kind, and no reviewed entry stands in.
+# Refusals are decided before the entry's digest is compared, so any digest
+# serves.
+expect_no_pending(
+    with_review(
+        CANARY_HEAD,
+        f"runner-canary.yml [workflow_dispatch]\tcanary\tsha256:{'e' * 64}"
+        "\treviewed\tdynamic: head-materialization: claims the ref is safe\n",
+    ),
+    "a frozen backlog job without its pending row tolerates no refusal, even with a reviewed entry",
+    ("VIOLATION: runner-canary.yml [workflow_dispatch]: job 'canary'", RELAY_REFUSAL),
+    *REVIEWED_ARGS,
+)
+
+# The frozen backlog as it stood at the round-4 review of #1827. The checker's
+# sets may only shrink against this snapshot: a key, or a refusal kind a key
+# tolerates, that is not here fails. Never add to this snapshot; when a job
+# leaves the backlog, remove it from the checker, the pending list, and here.
+SNAPSHOT_PULL_REQUEST_BACKLOG = frozenset(
+    {
+        ('actionlint-reusable-contract.yml:actionlint -> actionlint.yml', 'actionlint'),
+        ('actionlint.yml', 'actionlint'),
+        ('container-candidate-reusable-contract.yml:validate -> container-candidate.yml', 'prepare'),
+        ('container-candidate-reusable-contract.yml:validate -> container-candidate.yml', 'pull-request-build'),
+        ('container-candidate-reusable-contract.yml:validate -> container-candidate.yml', 'skip-private-node-build'),
+    }
+)
+SNAPSHOT_RELAY_BACKLOG = {
+    ('actionlint.yml [workflow_call]', 'actionlint'): frozenset({'relay-head'}),
+    ('ai-promotion-retry.yml [workflow_call]', 'resolve'): frozenset({'relay-head'}),
+    ('capability-floor-observe.yml [workflow_dispatch]', 'observe'): frozenset(),
+    ('changelog-release.yml [workflow_call]', 'release'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('changelog-validate.yml [workflow_call]', 'validate'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('container-candidate.yml [workflow_call]', 'prepare'): frozenset({'relay-head'}),
+    ('container-candidate.yml [workflow_call]', 'pull-request-build'): frozenset(),
+    ('container-candidate.yml [workflow_call]', 'skip-private-node-build'): frozenset(),
+    ('container-deployment-review-producer.yml [workflow_call]', 'analyze'):
+        frozenset({'relay-head', 'runtime-checkout'}),
+    ('container-deployment-review-producer.yml [workflow_call]', 'environment-preflight'): frozenset(),
+    ('container-deployment-review-producer.yml [workflow_call]', 'publish-ai'):
+        frozenset({'relay-head', 'runtime-checkout'}),
+    ('container-deployment-review-producer.yml [workflow_call]', 'publish-code'):
+        frozenset({'relay-head', 'runtime-checkout'}),
+    ('container-deployment-review-producer.yml [workflow_call]', 'publish-security'):
+        frozenset({'relay-head', 'runtime-checkout'}),
+    ('container-deployment.yml [workflow_call]', 'deploy'): frozenset({'relay-head'}),
+    ('container-deployment.yml [workflow_call]', 'dry-run'): frozenset({'relay-head'}),
+    ('container-release-workflow-ref-canary.yml [workflow_dispatch]:probe -> container-release.yml', 'retention'):
+        frozenset({'relay-head', 'runtime-checkout'}),
+    ('container-release.yml [workflow_call]', 'retention'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('dependency-supersession-observe.yml [workflow_dispatch]', 'observe'): frozenset({'relay-head'}),
+    ('dependency-supersession-reconcile.yml [workflow_dispatch]', 'reconcile'): frozenset(),
+    ('generated-artifacts.yml [workflow_call]', 'validate'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('helm-ci.yml [workflow_call]', 'lint-template'): frozenset({'relay-head'}),
+    ('node-ci-protected.yml [workflow_call]', 'build-test'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('node-ci-protected.yml [workflow_call]', 'eligibility'): frozenset(),
+    ('node-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),
+    ('node-ci.yml [workflow_call]', 'eligibility'): frozenset(),
+    ('notify-umbrella.yml [workflow_call]', 'dispatch'): frozenset(),
+    ('pulumi-ci.yml [workflow_call]', 'preview'): frozenset({'relay-head'}),
+    ('pulumi-ci.yml [workflow_call]', 'preview-admission'): frozenset(),
+    ('pulumi-ci.yml [workflow_call]', 'validate'): frozenset({'relay-head'}),
+    ('release-app-canary.yml [workflow_dispatch]', 'canary'): frozenset(),
+    ('release-dispatch.yml [workflow_call]', 'release-dispatch'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('release-propose.yml [workflow_call]', 'release-propose'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('release.yml [workflow_dispatch]', 'publish'): frozenset(),
+    ('release.yml [workflow_dispatch]', 'snapshot'): frozenset(),
+    ('release.yml [workflow_dispatch]', 'verify'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('renovate-changelog.yml [workflow_call]', 'attribute'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('renovate-compatibility-canary.yml [workflow_call]', 'receipt'): frozenset(),
+    ('renovate-compatibility-reconcile.yml [workflow_dispatch]', 'observe'): frozenset(),
+    ('renovate-grouping-plan.yml [workflow_dispatch]', 'plan'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('repo-hygiene.yml [workflow_call]', 'hygiene'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('rework-reconcile.yml [workflow_dispatch]', 'reconcile'): frozenset(),
+    ('runner-canary.yml [workflow_dispatch]', 'canary'): frozenset({'relay-head'}),
+    ('ui-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),
+    ('verjson-ci.yml [workflow_call]', 'ci'): frozenset(),
+}
+
+
+def load_checker():
+    spec = importlib.util.spec_from_file_location("public_pr_runner_isolation", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+CHECKER = load_checker()
+grown = sorted(set(CHECKER.PULL_REQUEST_BACKLOG) - SNAPSHOT_PULL_REQUEST_BACKLOG) + sorted(
+    set(CHECKER.RELAY_BACKLOG) - set(SNAPSHOT_RELAY_BACKLOG)
+)
+widened = sorted(
+    (key, sorted(kinds - SNAPSHOT_RELAY_BACKLOG[key]))
+    for key, kinds in CHECKER.RELAY_BACKLOG.items()
+    if key in SNAPSHOT_RELAY_BACKLOG and kinds - SNAPSHOT_RELAY_BACKLOG[key]
+)
+if grown or widened:
+    fail(f"the frozen backlog may only shrink (added keys {grown}, added refusal kinds {widened})")
+else:
+    ok("the frozen backlog is a subset of the round-4 snapshot: it may only shrink")
+RELAY_LABEL = re.compile(r"^[^ ]+ \[(?:workflow_dispatch|workflow_call|repository_dispatch)\](?::| |$)")
+misfiled = sorted(key for key in CHECKER.RELAY_BACKLOG if not RELAY_LABEL.match(key[0])) + sorted(
+    key for key in CHECKER.PULL_REQUEST_BACKLOG if "[" in key[0]
+)
+if misfiled:
+    fail(f"a frozen backlog key names an event outside its set: {misfiled}")
+else:
+    ok("every relay backlog key is a relay-event label and every pull_request key names no other event")
+LIVE_PENDING = set(CHECKER.load_pending(os.path.join(HERE, "public-pr-runner-isolation.pending.tsv")))
+FROZEN = set(CHECKER.PULL_REQUEST_BACKLOG) | set(CHECKER.RELAY_BACKLOG)
+if LIVE_PENDING != FROZEN:
+    fail(f"the pending list and the frozen backlog differ: only listed {sorted(LIVE_PENDING - FROZEN)}, "
+         f"only frozen {sorted(FROZEN - LIVE_PENDING)}; remove a fixed job from both")
+else:
+    ok("the live pending list names exactly the frozen backlog")
 
 sys.exit(1 if failures else 0)

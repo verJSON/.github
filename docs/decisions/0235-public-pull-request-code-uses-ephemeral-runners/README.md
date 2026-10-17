@@ -319,9 +319,10 @@ or a literal GitHub-hosted image.
    44 relayed jobs predate this rule. Moving them is #1831's work: most are
    the canonical reusable workflows that adopters call, and some are fleet
    canaries that must run on the pool. They are ratcheted in the pending list
-   under a "relay backlog" header, keyed by a relay digest: SHA-256 over the
-   job's selector and its unresolved reason names. A changed selector, or a
-   new reason such as `head-materialization`, makes the row stop applying.
+   under a "relay backlog" header, keyed by a backlog digest over the job's
+   full content (see the 2026-10-17 amendment). The keys are frozen in the
+   checker, refusals are decided before any row is read, and a key tolerates
+   only the refusal kinds it carried when the backlog froze.
    A row that a reviewed entry also lists is undetermined, and a pending row
    never stands in for a privileged-event review. The two `gate-rearm.yml`
    jobs reached standalone through `workflow_call` are the same jobs already
@@ -470,3 +471,54 @@ whether to take this option.
 Revert the pull request. The previous selector puts public pull-request code
 back on the persistent pool. Treat that as a security regression and record it
 with a tracked cause.
+
+## Amendment (2026-10-17, #1827) — round-4 review
+
+A fourth adversarial review of #1827 failed the change with six findings.
+Each is recorded here with the decision taken.
+
+### 1. The relay backlog no longer waives content or refusals
+
+**Finding.** A relay-backlog row was keyed to a digest over the job's
+selector and its unresolved reason *names*. A backlog job could change
+anything else — a new command, an unpinned `container:` image, a different
+caller — and keep its row. The pending list was also consulted before
+refusals, so a matching row waived refusals that decision 5 says no entry can
+accept.
+
+**Decision.**
+
+- **Frozen keys.** `public-pr-runner-isolation.py` holds the backlog as code:
+  `PULL_REQUEST_BACKLOG` (the five pull_request jobs of decision 4) and
+  `RELAY_BACKLOG` (the 44 relayed jobs). A pending row whose key is in
+  neither is a format error (exit 2), so the list cannot grow.
+  `public-pr-runner-isolation.test.py` pins both as a snapshot that the code
+  may only shrink against, and requires the live pending list to name exactly
+  the frozen keys, so a job that leaves the list leaves the code too.
+- **Refusals first.** Every refusal is tagged with a kind: `remote-callee`,
+  `image`, `runtime-checkout`, or `relay-head`. They are decided before the
+  pending or reviewed list is read. `RELAY_BACKLOG` names, per key, the kinds
+  that job carried when the backlog froze (28 carry `relay-head`, 16 of those
+  also `runtime-checkout`; none carries `image` or `remote-callee`). Only a
+  frozen key *with its own pending row* tolerates those kinds; any other kind,
+  or any kind once the row is gone, fails whatever the lists say, and no
+  reviewed entry stands in for it. A kind the job no longer carries fails as
+  `STALE BACKLOG` until it is removed from the code and the snapshot.
+- **Content binding.** A backlog row now keys to the backlog digest: SHA-256
+  over the job's full normalized content, every calling job, the inherited
+  workflow settings (trigger block, `env`, `permissions`, `defaults`), the
+  bytes of every local action the job runs, and its unresolved reason names.
+  Any edit to the job stops the row applying.
+
+**Trade-off.** Refusing the 28 grandfathered jobs outright would have made
+this pull request #1831: they are canonical reusable workflows that private
+adopters run on the pool by design. Tolerance is therefore granted by code,
+per key and per kind, never by a list row, and can only shrink. The backlog
+digest deliberately leaves out the repository bytes a checkout puts on disk,
+which a reviewed entry binds. A cone checkout of `scripts/ci-gate` (as
+`actionlint.yml`'s policy checkout does) materializes the pending list itself,
+so a digest over those bytes can never match its own row, and the whole-tree
+digest of a full checkout changes on every commit. A backlog row records an
+accepted exposure rather than a safety claim, so binding the job's own
+definition is the bound that matters; the scanned bytes stay under the
+repository's normal review.

@@ -997,26 +997,17 @@ class Finding(NamedTuple):
     # (reason, detail) pairs for what the job puts on disk that the scanned
     # tree does not bound; an entry's `dynamic:` must name every reason.
     unresolved: tuple = ()
-    # A reason no entry can accept this job (an unpinned remote callee).
-    refusal: str = ""
+    # (kind, reason) pairs no entry can accept: an unpinned remote callee
+    # or image, an unbounded runtime checkout, a relayed head.
+    refusals: tuple = ()
     # Reached through a relay event (workflow_dispatch, workflow_call,
     # repository_dispatch); only these may be ratcheted by a pending row.
     relay: bool = False
-    # For a relay finding, SHA-256 over its selector and unresolved reason
-    # names: a pending row keys to it, so a changed selector or a new reason
-    # (such as head-materialization) makes the row stop applying.
-    relay_digest: str = ""
-
-
-def relay_digest(selector, reasons) -> str:
-    canonical = json.dumps(
-        {"selector": selector, "reasons": sorted(set(reasons))},
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        default=str,
-    )
-    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    # For a relay finding, the backlog digest a pending row keys to: the job's
+    # full content, its callers, its inherited settings, the bytes of every
+    # local action it runs, and its unresolved reason names, so any edit to
+    # the job stops the row applying.
+    backlog_digest: str = ""
 
 
 RELAY_HEAD_REFUSAL = (
@@ -1024,6 +1015,77 @@ RELAY_HEAD_REFUSAL = (
     "materializes it or cannot rule that out ({diagnostic}); it must run on an ephemeral "
     "runner, so no reviewed entry can accept it (ADR 0235)"
 )
+
+# The backlog, frozen (round-4 review of #1827). Jobs the pending list may
+# ratchet, as they stood when ADR 0235 began scanning: five pull_request jobs
+# waiting on their event-aware selector, and 44 relayed jobs #1831 moves. A
+# pending row whose key is not here is a format error, so the list cannot
+# grow, and public-pr-runner-isolation.test.py pins both sets as a snapshot
+# that may only shrink. A relayed key also names the refusal kinds it
+# carried then. Refusals are decided before any row is read: a kind outside
+# that set, or any kind once the key's pending row is gone, fails whatever the
+# lists say, so no row can waive a new refusal; a kind the job no longer
+# carries fails as STALE BACKLOG until it is removed here.
+PULL_REQUEST_BACKLOG = frozenset(
+    {
+        ('actionlint-reusable-contract.yml:actionlint -> actionlint.yml', 'actionlint'),
+        ('actionlint.yml', 'actionlint'),
+        ('container-candidate-reusable-contract.yml:validate -> container-candidate.yml', 'prepare'),
+        ('container-candidate-reusable-contract.yml:validate -> container-candidate.yml', 'pull-request-build'),
+        ('container-candidate-reusable-contract.yml:validate -> container-candidate.yml', 'skip-private-node-build'),
+    }
+)
+RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
+    ('actionlint.yml [workflow_call]', 'actionlint'): frozenset({'relay-head'}),
+    ('ai-promotion-retry.yml [workflow_call]', 'resolve'): frozenset({'relay-head'}),
+    ('capability-floor-observe.yml [workflow_dispatch]', 'observe'): frozenset(),
+    ('changelog-release.yml [workflow_call]', 'release'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('changelog-validate.yml [workflow_call]', 'validate'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('container-candidate.yml [workflow_call]', 'prepare'): frozenset({'relay-head'}),
+    ('container-candidate.yml [workflow_call]', 'pull-request-build'): frozenset(),
+    ('container-candidate.yml [workflow_call]', 'skip-private-node-build'): frozenset(),
+    ('container-deployment-review-producer.yml [workflow_call]', 'analyze'):
+        frozenset({'relay-head', 'runtime-checkout'}),
+    ('container-deployment-review-producer.yml [workflow_call]', 'environment-preflight'): frozenset(),
+    ('container-deployment-review-producer.yml [workflow_call]', 'publish-ai'):
+        frozenset({'relay-head', 'runtime-checkout'}),
+    ('container-deployment-review-producer.yml [workflow_call]', 'publish-code'):
+        frozenset({'relay-head', 'runtime-checkout'}),
+    ('container-deployment-review-producer.yml [workflow_call]', 'publish-security'):
+        frozenset({'relay-head', 'runtime-checkout'}),
+    ('container-deployment.yml [workflow_call]', 'deploy'): frozenset({'relay-head'}),
+    ('container-deployment.yml [workflow_call]', 'dry-run'): frozenset({'relay-head'}),
+    ('container-release-workflow-ref-canary.yml [workflow_dispatch]:probe -> container-release.yml', 'retention'):
+        frozenset({'relay-head', 'runtime-checkout'}),
+    ('container-release.yml [workflow_call]', 'retention'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('dependency-supersession-observe.yml [workflow_dispatch]', 'observe'): frozenset({'relay-head'}),
+    ('dependency-supersession-reconcile.yml [workflow_dispatch]', 'reconcile'): frozenset(),
+    ('generated-artifacts.yml [workflow_call]', 'validate'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('helm-ci.yml [workflow_call]', 'lint-template'): frozenset({'relay-head'}),
+    ('node-ci-protected.yml [workflow_call]', 'build-test'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('node-ci-protected.yml [workflow_call]', 'eligibility'): frozenset(),
+    ('node-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),
+    ('node-ci.yml [workflow_call]', 'eligibility'): frozenset(),
+    ('notify-umbrella.yml [workflow_call]', 'dispatch'): frozenset(),
+    ('pulumi-ci.yml [workflow_call]', 'preview'): frozenset({'relay-head'}),
+    ('pulumi-ci.yml [workflow_call]', 'preview-admission'): frozenset(),
+    ('pulumi-ci.yml [workflow_call]', 'validate'): frozenset({'relay-head'}),
+    ('release-app-canary.yml [workflow_dispatch]', 'canary'): frozenset(),
+    ('release-dispatch.yml [workflow_call]', 'release-dispatch'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('release-propose.yml [workflow_call]', 'release-propose'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('release.yml [workflow_dispatch]', 'publish'): frozenset(),
+    ('release.yml [workflow_dispatch]', 'snapshot'): frozenset(),
+    ('release.yml [workflow_dispatch]', 'verify'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('renovate-changelog.yml [workflow_call]', 'attribute'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('renovate-compatibility-canary.yml [workflow_call]', 'receipt'): frozenset(),
+    ('renovate-compatibility-reconcile.yml [workflow_dispatch]', 'observe'): frozenset(),
+    ('renovate-grouping-plan.yml [workflow_dispatch]', 'plan'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('repo-hygiene.yml [workflow_call]', 'hygiene'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('rework-reconcile.yml [workflow_dispatch]', 'reconcile'): frozenset(),
+    ('runner-canary.yml [workflow_dispatch]', 'canary'): frozenset({'relay-head'}),
+    ('ui-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),
+    ('verjson-ci.yml [workflow_call]', 'ci'): frozenset(),
+}
 
 
 def _normalize(value):
@@ -1096,11 +1158,14 @@ class Closure:
         self.root = os.path.normpath(root)
         self.excluded = excluded
         self.files: dict[str, str] = {}
+        # The subset of `files` a local action contributes: the job's own
+        # steps, as opposed to bytes a checkout puts on disk.
+        self.action_files: set[str] = set()
         self.unresolved: dict[str, set[str]] = {}
         # Digest of the whole tracked tree, set when a checkout materializes it.
         self.tree: str | None = None
         # Why no reviewed entry can accept this job, if anything.
-        self.refusals: set[str] = set()
+        self.refusals: set[tuple[str, str]] = set()
 
     def flag(self, reason: str, detail: str) -> None:
         assert reason in REASONS, reason
@@ -1141,6 +1206,8 @@ class Closure:
         if os.path.islink(candidate):
             target = os.readlink(candidate)
             self.files.setdefault(relative, "link " + target)
+            if why.startswith(("local action", "run by local action")):
+                self.action_files.add(relative)
             resolved = os.path.normpath(os.path.join(os.path.dirname(candidate), target))
             if os.path.isabs(target) or (resolved != self.root and not resolved.startswith(self.root + os.sep)):
                 self.flag("unscanned-path", f"{repo_path} ({why}: symlink to {target}, outside the scanned tree)")
@@ -1158,6 +1225,8 @@ class Closure:
         if relative not in self.files:
             with open(candidate, "rb") as handle:
                 self.files[relative] = hashlib.sha256(handle.read()).hexdigest()
+        if why.startswith(("local action", "run by local action")):
+            self.action_files.add(relative)
         return True
 
     def add_direct_files(self, directory: str, why: str) -> None:
@@ -1188,11 +1257,12 @@ class Closure:
                 "selected at runtime, not the scanned tree"
             )
             if not sparse:
-                self.refusals.add(
+                self.refusals.add((
+                    "runtime-checkout",
                     f"checkout of {repository or 'this repository'}@{ref or 'default'} is selected at runtime "
                     "and has no sparse-checkout list, so no review can bind the bytes it puts on disk; "
-                    "add a sparse-checkout list naming only the paths the job needs"
-                )
+                    "add a sparse-checkout list naming only the paths the job needs",
+                ))
             # The scanned bytes of the listed paths still bind the review.
             for path in sparse:
                 self.add_sparse_path(path, cone, "runtime checkout, scanned bytes")
@@ -1274,10 +1344,11 @@ class Closure:
     def require_pinned(self, where: str, image) -> None:
         """Only a digest pin lets a review bind the image a job runs."""
         if not (isinstance(image, str) and PINNED_IMAGE.fullmatch(image.strip())):
-            self.refusals.add(
+            self.refusals.add((
+                "image",
                 f"{where} image {image!r} must be pinned by an @sha256: digest; "
-                "a tag or expression can change after review, so no entry can accept it"
-            )
+                "a tag or expression can change after review, so no entry can accept it",
+            ))
 
     def require_pinned_build(self, action_dir: str, dockerfile: str, uses: str) -> None:
         """A local Docker action built from a Dockerfile pulls every `FROM`
@@ -1566,12 +1637,15 @@ def check_call(
                     name,
                     review_digest(chain, job, inherited_settings(document)),
                     f"remote callee {uses}: its placement cannot be read",
-                    refusal=""
+                    refusals=()
                     if FULL_SHA_PIN.search(uses)
-                    else f"remote callee {uses} must be pinned to a full 40-hex commit SHA; "
-                    "a branch or tag can change after review, so no entry can accept it",
+                    else ((
+                        "remote-callee",
+                        f"remote callee {uses} must be pinned to a full 40-hex commit SHA; "
+                        "a branch or tag can change after review, so no entry can accept it",
+                    ),),
                     relay=scan.relay,
-                    relay_digest=relay_digest(uses, ()),
+                    backlog_digest=review_digest(chain, job, inherited_settings(document)),
                 )
             )
             return []
@@ -1627,9 +1701,23 @@ def check_workflow(
             if head_unresolved:
                 closure.flag("head-materialization", diagnostic)
                 if scan.relay:
-                    closure.refusals.add(RELAY_HEAD_REFUSAL.format(diagnostic=diagnostic))
+                    closure.refusals.add(("relay-head", RELAY_HEAD_REFUSAL.format(diagnostic=diagnostic)))
             pairs = closure.pairs()
             bound = {"files": closure.files, "unresolved": [f"{reason}: {detail}" for reason, detail in pairs]}
+            # The backlog digest binds what the job is, not the repository
+            # bytes a checkout puts on disk: a cone checkout of scripts/ci-gate
+            # holds the pending list itself, so a digest over those bytes could
+            # never match its own row, and every commit would restale a
+            # full-checkout row. Local actions are the job's own steps.
+            backlog_digest = review_digest(
+                chain,
+                job,
+                inherited_settings(document),
+                {
+                    "actions": {path: closure.files[path] for path in sorted(closure.action_files)},
+                    "reasons": sorted({reason for reason, _ in pairs}),
+                },
+            )
             if closure.tree is not None:
                 bound["tree"] = closure.tree
             scan.findings.append(
@@ -1639,9 +1727,9 @@ def check_workflow(
                     review_digest(chain, job, inherited_settings(document), bound),
                     diagnostic,
                     pairs,
-                    refusal="; ".join(sorted(closure.refusals)),
+                    refusals=tuple(sorted(closure.refusals)),
                     relay=scan.relay,
-                    relay_digest=relay_digest(job.get("runs-on"), (reason for reason, _ in pairs)),
+                    backlog_digest=backlog_digest,
                 )
             )
     return violations
@@ -1805,6 +1893,15 @@ def load_pending(path: str | None, row_format: str = PENDING_FORMAT) -> dict[tup
     return pending
 
 
+def require_frozen_backlog(pending: dict[tuple[str, str], Entry], path: str | None) -> None:
+    """The pending list may only shrink: every row names a frozen backlog key."""
+    for path_label, job in sorted(set(pending) - PULL_REQUEST_BACKLOG - set(RELAY_BACKLOG)):
+        raise Undetermined(
+            f"{path}: {path_label} job '{job}' is not in the frozen backlog (ADR 0235); the pending list may only "
+            "shrink, so move the job to an ephemeral runner or give it a reviewed entry instead"
+        )
+
+
 def describe_reasons(pairs, reasons) -> str:
     """`fetch (detail; detail), shell (detail)` for the named reasons."""
     return ", ".join(
@@ -1826,6 +1923,7 @@ def main(argv: list[str]) -> int:
     arguments = parser.parse_args(argv)
     try:
         pending = load_pending(arguments.pending)
+        require_frozen_backlog(pending, arguments.pending)
         reviewed = load_pending(arguments.reviewed, REVIEWED_FORMAT)
         findings: list[Finding] = []
         found = check_tree(
@@ -1855,15 +1953,39 @@ def main(argv: list[str]) -> int:
         print(f"DIAGNOSTIC: {label}: {finding.diagnostic}")
         row = reviewed.get((finding.path, finding.job))
         reasons = {reason for reason, _ in finding.unresolved}
-        pending_row = pending.get((finding.path, finding.job)) if finding.relay else None
+        key = (finding.path, finding.job)
+        pending_row = pending.get(key) if finding.relay else None
         if pending_row is not None:
-            # The relay backlog (#1831): a known relay job, ratcheted exactly
-            # like a pending pull_request job, never accepted by review.
-            ratcheted.add((finding.path, finding.job))
+            ratcheted.add(key)
             if row is not None:
                 print(f"UNDETERMINED: {label} is in both the pending and the reviewed list; keep one", file=sys.stderr)
                 return 2
-            if pending_row.digest == finding.relay_digest:
+        # Refusals first: no row, pending or reviewed, is read until they pass.
+        # Only a frozen backlog key with a pending row tolerates the refusal
+        # kinds it carried when the backlog was frozen.
+        tolerated = RELAY_BACKLOG.get(key, frozenset()) if pending_row is not None else frozenset()
+        refused = [reason for kind, reason in finding.refusals if kind not in tolerated]
+        if refused:
+            violations.append(
+                Violation(
+                    finding.path,
+                    finding.job,
+                    "; ".join(refused)
+                    + (f" (backlog digest {finding.backlog_digest})" if finding.relay else "")
+                    + ("; a pending row cannot waive a refusal" if pending_row is not None else ""),
+                )
+            )
+            continue
+        if pending_row is not None:
+            # The relay backlog (#1831): a known relay job, ratcheted exactly
+            # like a pending pull_request job, never accepted by review.
+            carried = {kind for kind, _ in finding.refusals}
+            for kind in sorted(tolerated - carried):
+                stale_reviews.append(
+                    f"STALE BACKLOG: {label} no longer carries refusal kind {kind}; "
+                    "remove it from RELAY_BACKLOG and the test snapshot"
+                )
+            if pending_row.digest == finding.backlog_digest:
                 print(f"PENDING: {label}: relayed job can resolve to a persistent runner [{pending_row.justification}]")
             else:
                 violations.append(
@@ -1871,19 +1993,10 @@ def main(argv: list[str]) -> int:
                         finding.path,
                         finding.job,
                         f"relayed job can resolve to a persistent runner; pending row no longer applies: "
-                        f"relay digest changed from {pending_row.digest} to {finding.relay_digest}"
+                        f"backlog digest changed from {pending_row.digest} to {finding.backlog_digest}"
                         + (f" (unresolved: {describe_reasons(finding.unresolved, reasons)})" if reasons else ""),
                     )
                 )
-            continue
-        if finding.refusal:
-            violations.append(
-                Violation(
-                    finding.path,
-                    finding.job,
-                    finding.refusal + (f" (relay digest {finding.relay_digest})" if finding.relay else ""),
-                )
-            )
             continue
         if row is None:
             needed = ", ".join(reason for reason in REASONS if reason in reasons)
@@ -1894,7 +2007,7 @@ def main(argv: list[str]) -> int:
                     ("relayed" if finding.relay else "privileged-event")
                     + " job can resolve to a persistent runner and "
                     f"{REVIEW_REQUIRED} (review digest {finding.review_digest}"
-                    + (f", relay digest {finding.relay_digest}" if finding.relay else "")
+                    + (f", backlog digest {finding.backlog_digest}" if finding.relay else "")
                     + ")"
                     + (
                         f"; its entry also needs `dynamic: {needed}: <justification>` for: "

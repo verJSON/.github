@@ -65,7 +65,11 @@ pull request head, and otherwise need a reviewed entry. Dispatch and caller
 inputs take every value their dispatcher can choose. `fork`, `issues`,
 `discussion`, and `discussion_comment` are privileged events. The 44 relayed
 jobs that predate the rule are ratcheted in the pending list as #1831's relay
-backlog, keyed to their selector and unresolved reasons.
+backlog. Its keys are frozen in the checker and may only shrink; refusals are
+decided before any list row is read, and a backlog job tolerates only the
+refusal kinds it carried when the backlog froze; each row binds the job's full
+content, callers, inherited settings, and local actions, so any edit to the job
+stops the row applying.
 `ai-post-merge.yml` now checks its reconciler out at `github.sha`, the commit
 its own workflow file comes from, instead of `pull_request.base.sha`.
 A new `runner-isolation` workflow runs the check on every pull request and push
