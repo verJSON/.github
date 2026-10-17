@@ -74,7 +74,10 @@ case "$operation" in
       exit 0
     }
     before="$(available_bytes /)" || exit 1
-    sudo -n rm -rf -- "${unused_hosted_toolchains[@]}"
+    sudo -n rm -rf -- "${unused_hosted_toolchains[@]}" || {
+      report "::error::could not remove unused hosted toolchains: ${unused_hosted_toolchains[*]}"
+      exit 1
+    }
     after="$(available_bytes /)" || exit 1
     report "reclaimed_bytes=$((after - before)) available_before=$before available_after=$after"
     ;;

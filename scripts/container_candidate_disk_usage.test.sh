@@ -171,3 +171,11 @@ assert_fails_closed 'negative df output' 1000 -5 /var/lib/docker "$context"
 assert_fails_closed 'docker info exit status' 1000 "$plenty" FAIL "$context"
 assert_fails_closed 'relative Docker root' 1000 "$plenty" var/lib/docker "$context"
 assert_fails_closed 'missing build context' 1000 "$plenty" /var/lib/docker "$tmp/absent-context"
+
+# A rejected removal is reported, never swallowed.
+printf '%s\n' 10000000000 30000000000 > "$DF_AVAIL_VALUES"
+if FAIL_SUDO=true RUNNER_ENVIRONMENT=github-hosted "$script" reclaim > "$tmp/reclaim-fail.out" 2>&1; then
+  echo "reclaim succeeded after the toolchain removal failed" >&2
+  exit 1
+fi
+grep -Fq '::error::could not remove unused hosted toolchains' "$tmp/reclaim-fail.out"
