@@ -311,13 +311,13 @@ write_runtime_records() {
   } >"$staged" && mv -f -- "$staged" "$records_file"
 }
 
-record_runtime() { # <index> <status> <elapsed> <timed_out>
-  local index="$1" status="$2" elapsed="$3" timed_out="$4"
+record_runtime() { # <index> <status> <elapsed> <timed_out> <left_background>
+  local index="$1" status="$2" elapsed="$3" timed_out="$4" left_background="$5"
   local budget="${command_budgets[$index]}"
   runtime_record_by_index["$index"]="$(printf \
-    '{"schema_version":1,"group":"%s","command":"%s","status":%s,"elapsed_seconds":%s,"budget_seconds":%s,"started_at":"%s","ended_at":"%s","timed_out":%s,"left_background":false,"runner_name":"%s","runner_environment":"%s"}' \
+    '{"schema_version":1,"group":"%s","command":"%s","status":%s,"elapsed_seconds":%s,"budget_seconds":%s,"started_at":"%s","ended_at":"%s","timed_out":%s,"left_background":%s,"runner_name":"%s","runner_environment":"%s"}' \
     "$group" "${commands[$index]}" "$status" "$elapsed" "${budget:-null}" \
-    "${command_started_at[$index]}" "$(utc_now)" "$timed_out" "$runner_name" "$runner_environment")"
+    "${command_started_at[$index]}" "$(utc_now)" "$timed_out" "$left_background" "$runner_name" "$runner_environment")"
   write_runtime_records
 }
 
@@ -438,7 +438,7 @@ SUPERVISOR
   fi
   trap - EXIT INT TERM
   elapsed="$(( $(date +%s) - started ))"
-  printf '%s\t%s\n' "$status" "$elapsed" >"$tmp/$index.status"
+  printf '%s\t%s\t%s\n' "$status" "$elapsed" "$background_processes" >"$tmp/$index.status"
 }
 
 report_worker_result() {
@@ -448,6 +448,7 @@ report_worker_result() {
   local log_file="$tmp/$index.log"
   local status=''
   local elapsed=''
+  local left_background=''
   local budget="${command_budgets[$index]}"
   local budget_report=''
   [ -z "$budget" ] || budget_report=" budget=${budget}s"
@@ -473,8 +474,9 @@ report_worker_result() {
     return
   fi
 
-  if ! IFS=$'\t' read -r status elapsed <"$status_file" \
-    || [[ ! "$status" =~ ^[0-9]+$ || ! "$elapsed" =~ ^[0-9]+$ ]]; then
+  if ! IFS=$'\t' read -r status elapsed left_background <"$status_file" \
+    || [[ ! "$status" =~ ^[0-9]+$ || ! "$elapsed" =~ ^[0-9]+$ \
+      || ! "$left_background" =~ ^[01]$ ]]; then
     printf '::error::group=%s command=%q worker result is malformed\n' \
       "$group" "${commands[$index]}"
     if ! replay_command_output "$log_file"; then
@@ -524,7 +526,8 @@ report_worker_result() {
   printf '\nactions-ci command group=%s status=%s elapsed=%ss%s command=%q\n' \
     "$group" "$status" "$elapsed" "$budget_report" "${commands[$index]}"
   printf '::endgroup::\n'
-  record_runtime "$index" "$status" "$elapsed" "$timed_out"
+  record_runtime "$index" "$status" "$elapsed" "$timed_out" \
+    "$( [ "$left_background" -eq 1 ] && echo true || echo false )"
   worker_reported_by_index["$index"]=1
 }
 

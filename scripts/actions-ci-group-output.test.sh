@@ -237,7 +237,7 @@ planted_result() { # <printf-format> -> runner output in $tmp/planted.out, statu
   printf '%s\n' "$planted_status"
 }
 malformed_ok=1
-for planted in '' 'garbage\n' '0\t5' '0\t\n' '-1\t5\n'; do
+for planted in '' 'garbage\n' '0\t5' '0\t\n' '-1\t5\n' '0\t5\n' '0\t5\t2\n'; do
   if [ "$(planted_result "$planted")" -ne 1 ] \
     || ! grep -q 'worker result is malformed' "$tmp/planted.out" \
     || ! grep -q 'actions-ci command group=platform status=invalid' "$tmp/planted.out"; then
@@ -251,7 +251,7 @@ if [ "$malformed_ok" -eq 1 ]; then
 else
   fail "a malformed worker result was accepted"
 fi
-if [ "$(planted_result '0\t1\n')" -eq 1 ] \
+if [ "$(planted_result '0\t1\t0\n')" -eq 1 ] \
   && grep -q 'worker exited with status=1' "$tmp/planted.out" \
   && grep -q 'actions-ci command group=platform status=1 ' "$tmp/planted.out"; then
   pass "a worker that exits nonzero fails its row even when its result reads 0"

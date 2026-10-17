@@ -169,6 +169,15 @@ else
   fail "a timed-out row was not recorded as timed out"
 fi
 
+status="$(run_recorded background 5 'platform	sleep 30 &')"
+actual="$(record_fields background status timed_out left_background 2>&1)"
+if [ "$status" -eq 1 ] && [ "$actual" = '1 false true' ]; then
+  pass "a row that leaves a background process records left_background"
+else
+  printf 'actual: %s\n' "$actual" >&2
+  fail "a row that left a background process was not recorded as such"
+fi
+
 if [ "$fails" -ne 0 ]; then
   printf '%d test(s) failed\n' "$fails"
   exit 1
