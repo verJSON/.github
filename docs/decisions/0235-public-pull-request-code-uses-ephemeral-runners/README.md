@@ -243,7 +243,7 @@ or a literal GitHub-hosted image.
    | `full-checkout` | A checkout of the scanned tree with no `sparse-checkout` list. The whole tracked tree is in the digest, as above. |
    | `runtime-checkout` | A checkout whose repository or ref is selected at runtime, not the scanned tree. Only this repository at the default ref or `github.sha` is the scanned tree. `pull_request.base.sha` is the base as of the pull request's last update and is not refreshed when the base branch advances, so a checkout at it can put older bytes on disk than the reviewed tree; it is a runtime checkout. It must carry a `sparse-checkout` list; without one, no review can bind what it puts on disk, so the job is refused and no entry can accept it. |
    | `submodules` | A checkout with `submodules: true` or `recursive`. |
-   | `unscanned-path` | A sparse path, glob, or local-action file that the scanned tree does not contain, or that lies outside it. Symlinks are never followed: a link binds as its target text, so retargeting it changes the digest, and a link whose target leaves the tree, or a path reached through a linked directory, is unscanned, because its bytes would be the runner's rather than the repository's. |
+   | `unscanned-path` | A sparse path, glob, or local-action file that the scanned tree does not contain, or that lies outside it. No digest follows a symlink: a link binds as its target text, so retargeting it changes the digest, and a link whose target leaves the tree, or a path reached through a linked directory, is unscanned, because its bytes would be the runner's rather than the repository's. Head detection reads a program through a link only when the link and every parent resolve inside the scanned tree; otherwise the program is unreadable (2026-10-17 round-6 amendment). |
    | `local-action` | A local action that is missing, nested more than four deep, has no `runs` block, or whose manifest does not parse. |
 
    The entry for an unresolved job needs a fifth field,
@@ -273,9 +273,15 @@ or a literal GitHub-hosted image.
    `npm run`, and data files read by scripts. Each reaches a file that no
    command names. Every shell, interpreter, and build tool has its own way to
    reach a file. The set of bytes a checkout puts on disk does not depend on
-   any of them, so digesting those bytes closes the class. Command parsing
-   remains only for files a local action reaches through
-   `github.action_path` and for head detection.
+   any of them, so digesting those bytes closes the class for a sparse
+   checkout, where the digest holds every listed file. It does not close it
+   for a full checkout. A reviewed entry binds a full checkout by the
+   whole-tree digest. A relay-backlog row cannot, because that digest changes
+   on every commit, so since the round-6 amendment a backlog job may not
+   check out this whole tree at all. The invariant is that every
+   scanned-tree byte a reviewed or pending job can execute or read is either
+   in its digest or refused. Command parsing remains only for files a local
+   action reaches through `github.action_path` and for head detection.
 
    **What the checker still does not enforce.** The `fetch` reason comes from a
    vocabulary, so it is incomplete by construction. A fetch spelled outside it
@@ -782,3 +788,27 @@ scripts through a variable.
 file to a job means editing its sparse list. The closure test catches a
 missing program, import, or sibling. A missing data file breaks the job's next
 run instead, which is why `DATA` in that test names each one explicitly.
+
+**Head detection's call forms (round-6 should-fix).** Head detection is
+diagnostic for reviewed entries and decides the relay-head refusal for
+relays, so the forms it follows matter. It follows `<interpreter> [flags]
+<path>`, `./path`, `../path`, and a bare relative path to a tracked file in a
+command position. A shell's `-e` is errexit, so `bash -e x` runs `x`; only
+`-c` (alone or bundled, such as `-ec`) makes the next word inline code for a
+shell, Python, or pwsh, and `-e` does for node, perl, and ruby. It does not
+follow:
+
+- `bash -o <option> <path>` and other options with values;
+- `sh -c "<path> …"`, `bash -c`, and `eval`;
+- `source <path>` and `. <path>`;
+- `env [NAME=value…] <path>`, `nohup`, `sudo`, `timeout <n>`, `exec`, and
+  `xargs`;
+- compound commands such as `if`, `while`, and functions;
+- quoted command words, variables (`"$here/x.sh"`), and output piped into a
+  shell;
+- input redirected into an interpreter (`bash < path`).
+
+A program that leaves the scanned tree through a link is unreadable rather than
+read from the scanner host. `backlog-sparse-closure.test.py` asserts that no
+relay-backlog job hands a literal tracked path to any of these forms. For a
+converted job the sparse list binds the bytes whatever form reaches them.

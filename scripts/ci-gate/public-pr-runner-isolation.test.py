@@ -3138,4 +3138,47 @@ expect({**CALLER_TREE, "pending.tsv": backlog_row(CALLER_TREE, *CALLER_LABEL)}, 
        "a standalone workflow_call job's checkout of its caller's repository is not refused as this tree",
        *PENDING_ARGS)
 
+# Round-6 should-fix: `-e` is errexit to a shell, not inline code, so
+# `bash -e tools/x.sh` runs the script and head detection must read it. For
+# node, perl, and ruby `-e` is inline code (already in the step text), and a
+# shell's `-c` is inline code too.
+for label, step, followed in (
+    ("bash -e", "- run: bash -e tools/x.sh", True),
+    ("sh -eu", "- run: sh -eu tools/x.sh", True),
+    ("bash -euo pipefail", "- run: bash -eu tools/x.sh", True),
+    ("bash -ec inline", "- run: bash -ec 'echo tools/x.sh'", False),
+    ("node -e inline", "- run: node -e 'console.log(1)' tools/x.sh", False),
+):
+    job = {**backlog_relay("capability-floor-observe.yml", "observe", SPARSE_TOOLS + step),
+           "tools/x.sh": 'gh pr checkout "$PR"\n'}
+    code, output = run_checker(job)
+    if (RELAY_REFUSAL in output) == followed and code == 1:
+        ok(f"`{label}` {'runs the script, so head detection reads it' if followed else 'is inline code'}")
+    else:
+        fail(f"`{label}` should {'' if followed else 'not '}be followed (got {code}: {output.strip()[:300]})")
+
+# Round-6 should-fix: head detection never reads a program through a link that
+# leaves the scanned tree; those are the scanner host's bytes. The sparse
+# closure binds the link text and flags it unscanned instead.
+with tempfile.TemporaryDirectory() as outside:
+    write_file(os.path.join(outside, "host.sh"), 'gh pr checkout "$PR"\n')
+    code, output = linked_run(sparse_steps("scripts/l"), {"scripts/l": os.path.join(outside, "host.sh")})
+if code == 1 and "unscanned-path" in output and HEAD_DIAG not in output:
+    ok("head detection does not read a program through an absolute link out of the tree")
+else:
+    fail(f"head detection read a program through a link out of the tree (got {code}: {output.strip()[:400]})")
+with tempfile.TemporaryDirectory() as outside:
+    write_file(os.path.join(outside, "host.sh"), 'gh pr checkout "$PR"\n')
+    code, output = linked_run(sparse_steps("scripts/d/host.sh"), {"scripts/d": outside})
+if code == 1 and "unscanned-path" in output and HEAD_DIAG not in output:
+    ok("head detection does not read a program through a linked directory out of the tree")
+else:
+    fail(f"head detection read a program through a linked directory (got {code}: {output.strip()[:400]})")
+code, output = linked_run(sparse_steps("scripts/l"), {"scripts/l": "inner.sh"},
+                          files={"scripts/inner.sh": 'gh pr checkout "$PR"\n'})
+if code == 1 and HEAD_DIAG in output:
+    ok("head detection still reads a program through a link that stays in the tree")
+else:
+    fail(f"head detection stopped reading an in-tree link (got {code}: {output.strip()[:400]})")
+
 sys.exit(1 if failures else 0)

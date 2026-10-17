@@ -788,7 +788,7 @@ def is_base_only(value) -> bool:
 
 
 INTERPRETER_CALL = re.compile(
-    r"(?:^|[\s;&|(])(?:sudo[ \t]+)?(?:bash|sh|zsh|python3?|node|pwsh|perl|ruby)"
+    r"(?:^|[\s;&|(])(?:sudo[ \t]+)?(?P<interpreter>bash|sh|zsh|python3?|node|pwsh|perl|ruby)"
     r"((?:[ \t]+-[A-Za-z]+)*)[ \t]+(?!-)(\"[^\"\n]+\"|'[^'\n]+'|[^\s;&|)<>]+)",
     re.M,
 )
@@ -813,13 +813,17 @@ def programs(run: str, root: str | None = None) -> list[str]:
     joined = run.replace("\\\n", " ")
     found = []
     for match in INTERPRETER_CALL.finditer(joined):
-        flags = match.group(1).split()
-        if any(flag in ("-c", "-e") or (flag.startswith("-") and "c" in flag[1:] and len(flag) <= 3) for flag in flags):
+        flags = match.group(2).split()
+        # The flag that makes the next word inline code: `-c` for a shell,
+        # Python, or pwsh (also inside a bundle such as `-ec`), `-e` for node,
+        # perl, and ruby. A shell's `-e` is errexit, so its script still runs.
+        inline = "c" if match.group("interpreter") in ("bash", "sh", "zsh", "python", "python3", "pwsh") else "e"
+        if any(flag.startswith("-") and not flag.startswith("--") and inline in flag[1:] for flag in flags):
             continue
         if "-m" in flags:
             found.append("<module>")
             continue
-        found.append(match.group(2).strip("\"'"))
+        found.append(match.group(3).strip("\"'"))
     found.extend(match.group(1) for match in DIRECT_EXEC.finditer(joined))
     if root is not None:
         found.extend(
@@ -855,10 +859,16 @@ def inline_source(job: dict, program: str) -> str | None:
 
 
 def read_program(root: str, program: str) -> str | None:
+    """A program's scanned-tree bytes, or None. Like Closure.add_file, never
+    read through a link (of the file or a parent) that leaves the tree: those
+    are the scanner host's bytes, not the repository's."""
     if "$" in program or program.startswith(("/", "<")):
         return None
     candidate = os.path.normpath(os.path.join(root, program))
     if not candidate.startswith(os.path.normpath(root) + os.sep) or not os.path.isfile(candidate):
+        return None
+    real_root = os.path.realpath(root)
+    if not os.path.realpath(candidate).startswith(real_root + os.sep):
         return None
     with open(candidate, encoding="utf-8", errors="replace") as handle:
         return handle.read()
