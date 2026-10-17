@@ -42,6 +42,7 @@ def require_immutable_publisher(
     publisher_workflow_sha: str,
     source_repository: str,
     source_commit: str,
+    caller_workflow_sha: str,
 ) -> None:
     """Require the publisher bytes to be named by an immutable commit.
 
@@ -56,7 +57,7 @@ def require_immutable_publisher(
     if parsed["ref"] == publisher_workflow_sha:
         return
     if parsed["repository"] == source_repository:
-        if publisher_workflow_sha != source_commit:
+        if not publisher_workflow_sha == caller_workflow_sha == source_commit:
             raise RetryEvidenceError(
                 "same-repository publisher is not bound to the source commit"
             )
@@ -189,6 +190,7 @@ def validate_cosign_provenance(
         publisher_workflow_sha=contract_sha,
         source_repository=source_repository,
         source_commit=source_commit,
+        caller_workflow_sha=caller_workflow_sha,
     )
     validate_buildkit_provenance(
         buildkit_provenance,
@@ -269,6 +271,7 @@ def build_cosign_provenance_statement(
             publisher_workflow_sha=publisher_workflow_sha,
             source_repository=source_repository,
             source_commit=source_commit,
+            caller_workflow_sha=caller_workflow_sha,
         )
     except RetryEvidenceError as error:
         raise RetryEvidenceError(f"GitHub OIDC {error}") from error

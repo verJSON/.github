@@ -481,6 +481,25 @@ def build_statement(claims):
     )
 
 
+def validate_same_repository_statement(statement, **overrides):
+    policy = {
+        "buildkit_provenance": buildkit_provenance(),
+        "reviewed_platforms": REVIEWED_PLATFORMS,
+        "repository": REPOSITORY,
+        "digest": DIGEST,
+        "source_repository": "Verjson/example",
+        "source_repository_id": "12345",
+        "source_ref": "refs/heads/main",
+        "source_commit": "c" * 40,
+        "caller_workflow_ref": same_repository_claims()["workflow_ref"],
+        "caller_workflow_sha": "c" * 40,
+        "publisher_workflow_ref": SAME_REPOSITORY_PUBLISHER,
+        "contract_sha": "c" * 40,
+    }
+    policy.update(overrides)
+    return MODULE.validate_cosign_provenance(statement, **policy)
+
+
 class SameRepositoryPublisherTests(unittest.TestCase):
     """A `uses: ./` publisher is bound by the source commit instead of an @sha ref."""
 
@@ -499,6 +518,16 @@ class SameRepositoryPublisherTests(unittest.TestCase):
             "same-repository publisher is not bound to the source commit",
         ):
             build_statement(same_repository_claims(job_workflow_sha="d" * 40))
+
+    def test_verifier_rejects_same_repository_caller_sha_that_differs_from_the_source_commit(self):
+        statement = build_statement(same_repository_claims())
+        statement["predicate"]["buildDefinition"]["externalParameters"]["verjson"]["caller"]["workflow_sha"] = "e" * 40
+
+        with self.assertRaisesRegex(
+            MODULE.RetryEvidenceError,
+            "same-repository publisher is not bound to the source commit",
+        ):
+            validate_same_repository_statement(statement, caller_workflow_sha="e" * 40)
 
 
 def candidate_statement():
