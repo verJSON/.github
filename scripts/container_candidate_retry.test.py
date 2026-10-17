@@ -539,6 +539,22 @@ class SameRepositoryPublisherTests(unittest.TestCase):
                 )
             )
 
+    def test_rejects_same_repository_workflow_other_than_the_contract_publisher(self):
+        for path in (
+            ".github/workflows/evil.yml",
+            ".github/workflows/container-candidate-publish.yaml",
+            ".github/workflows/container-candidate.yml",
+        ):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(
+                    MODULE.RetryEvidenceError, "publisher workflow is not immutably pinned"
+                ):
+                    build_statement(
+                        same_repository_claims(
+                            job_workflow_ref=f"Verjson/example/{path}@refs/heads/main"
+                        )
+                    )
+
     def test_verifier_accepts_the_same_repository_statement_the_producer_signs(self):
         identity = validate_same_repository_statement(build_statement(same_repository_claims()))
 

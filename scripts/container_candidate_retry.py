@@ -16,6 +16,7 @@ class RetryEvidenceError(ValueError):
 
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 COMMIT = re.compile(r"[0-9a-f]{40}")
+PUBLISHER_WORKFLOW_PATH = ".github/workflows/container-candidate-publish.yml"
 # GitHub OIDC job_workflow_ref: <owner>/<repository>/<workflow path>@<ref>.
 WORKFLOW_REF = re.compile(
     r"(?P<repository>[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+)"
@@ -49,7 +50,8 @@ def require_immutable_publisher(
 
     A publisher called at `@<job_workflow_sha>` is pinned by its own ref. GitHub
     names a same-repository `uses: ./` publisher by the caller's ref instead, so
-    that form is accepted only from the exact source repository and ref, and only
+    that form is accepted only for the canonical publisher path in the exact source
+    repository and ref, and only
     when job_workflow_sha == workflow_sha == sha binds it to the source commit.
     """
     if not COMMIT.fullmatch(publisher_workflow_sha):
@@ -59,7 +61,11 @@ def require_immutable_publisher(
         raise RetryEvidenceError("publisher workflow ref is malformed")
     if parsed["ref"] == publisher_workflow_sha:
         return
-    if parsed["repository"] == source_repository and parsed["ref"] == source_ref:
+    if (
+        parsed["repository"] == source_repository
+        and parsed["path"] == PUBLISHER_WORKFLOW_PATH
+        and parsed["ref"] == source_ref
+    ):
         if not publisher_workflow_sha == caller_workflow_sha == source_commit:
             raise RetryEvidenceError(
                 "same-repository publisher is not bound to the source commit"
