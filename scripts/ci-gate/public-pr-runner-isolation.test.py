@@ -3116,6 +3116,12 @@ for label, command in (
 ):
     expect_backlog(observe_job(SPARSE_TOOL + "- run: " + command, TOOL), True,
                    f"{label} materializes tracked content no backlog row binds and is refused")
+# The shell expands `$TOOL` before git sees it, so even a tracked file named
+# literally `scripts/$TOOL` is not what a `git show` of that spelling reads.
+LITERAL_DOLLAR = {"scripts/$TOOL": "print('literal')\n"}
+expect_backlog(observe_job(SPARSE_TOOL.replace("scripts/tool.py", "'scripts/$TOOL'")
+                           + '- run: git show "$GITHUB_SHA:scripts/$TOOL" > t.py', LITERAL_DOLLAR),
+               True, "a git show path the shell expands is refused even when a file of that literal name is bound")
 expect_backlog(observe_job(SPARSE_TOOL.replace("scripts/tool.py", "scripts/run.sh") + "- run: bash scripts/run.sh",
                            {**TOOL, "scripts/run.sh": 'git show "$GITHUB_SHA:scripts/other.py" > t.py\n'}),
                True, "a git show inside a script the job runs is refused too")
