@@ -67,6 +67,7 @@ jobs:
       registry-destinations: ${{ steps.config.outputs.registry-destinations }}
       has-gar: ${{ steps.config.outputs.has-gar }}
       mirror-matrix: ${{ steps.config.outputs.mirror-matrix }}
+      publisher-workflow-ref: ${{ steps.config.outputs.publisher-workflow-ref }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -165,6 +166,7 @@ jobs:
             sbomArtifact: ("candidate-sbom-" + ($image.variant | gsub("[^A-Za-z0-9._-]"; "-")) + "-" + .os + "-" + .architecture + (if (.variant // "") == "" then "" else "-" + .variant end))
           }]' "$CONFIG_PATH")"
           candidate="$(jq -r '.nextStableVersion' "$CONFIG_PATH")-rc.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
+          publisher_workflow_ref="Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF"
           {
             echo "matrix=$matrix"
             echo "sbom-matrix=$sbom_matrix"
@@ -177,6 +179,7 @@ jobs:
             echo "registry-destinations=$(jq -c '.destinations' <<<"$destination_contract")"
             echo "has-gar=$(jq -r 'any(.destinations[]; .provider == "gar")' <<<"$destination_contract")"
             echo "mirror-matrix=$mirror_matrix"
+            echo "publisher-workflow-ref=$publisher_workflow_ref"
           } >> "$GITHUB_OUTPUT"
       - name: Remove isolated candidate source
         if: always()

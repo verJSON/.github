@@ -298,8 +298,20 @@ def validate_authority(read_only, publication):
             assert publication_job["outputs"].pop("mirror-matrix", None) == (
                 "${{ steps.config.outputs.mirror-matrix }}"
             )
+            # Only the publisher signs, so only it authorizes a publisher identity.
+            assert publication_job["outputs"].pop("publisher-workflow-ref", None) == (
+                "${{ steps.config.outputs.publisher-workflow-ref }}"
+            )
             publication_config = next(
                 step for step in publication_job["steps"] if step.get("id") == "config"
+            )
+            publisher_identity_block = (
+                'publisher_workflow_ref="Verjson/.github/.github/workflows/'
+                'container-candidate-publish.yml@$CONTRACT_REF"\n'
+            )
+            assert publication_config["run"].count(publisher_identity_block) == 1
+            publication_config["run"] = publication_config["run"].replace(
+                publisher_identity_block, ""
             )
             publication_config_lines = publication_config["run"].splitlines()
             mirror_matrix_line = (
@@ -307,12 +319,14 @@ def validate_authority(read_only, publication):
                 'if length == 0 then [{}] else . end\' <<<"$matrix")"'
             )
             mirror_matrix_output_line = '  echo "mirror-matrix=$mirror_matrix"'
+            publisher_output_line = '  echo "publisher-workflow-ref=$publisher_workflow_ref"'
             assert publication_config_lines.count(mirror_matrix_line) == 1
             assert publication_config_lines.count(mirror_matrix_output_line) == 1
+            assert publication_config_lines.count(publisher_output_line) == 1
             publication_config["run"] = "\n".join(
                 line
                 for line in publication_config_lines
-                if line not in {mirror_matrix_line, mirror_matrix_output_line}
+                if line not in {mirror_matrix_line, mirror_matrix_output_line, publisher_output_line}
             ) + ("\n" if publication_config["run"].endswith("\n") else "")
             assert read_only_job == publication_job, (
                 f"shared trusted-input job {job_name} drifted beyond its trust-isolated runner assignment"
@@ -698,6 +712,45 @@ first_adoption_output="$tmp/first-adoption-output"
     bash "$prepare_script"
 )
 grep -qx 'has-private-node-packages=false' "$first_adoption_output"
+
+publish_prepare_script="$tmp/publish-prepare-config.sh"
+extract_config_run "$publish_workflow" "$publish_prepare_script"
+bash -n "$publish_prepare_script"
+run_publish_prepare() {
+  local consumer=$1
+  local output=$2
+  local repository=$3
+  local source_commit=$4
+  local cleanup=$5
+
+  (
+    cd "$consumer"
+    CONFIG_RELATIVE_PATH=container-candidate.json \
+      CONTAINER_DESTINATION_HELPER="$tmp/contract/scripts/container_registry_destinations.py" \
+      CONTRACT_REF="$ref" \
+      GITHUB_OUTPUT="$output" \
+      GITHUB_REF=refs/heads/main \
+      GITHUB_REPOSITORY="$repository" \
+      GITHUB_REPOSITORY_OWNER="${repository%%/*}" \
+      GITHUB_RUN_ATTEMPT=1 \
+      GITHUB_RUN_ID=12345 \
+      GITHUB_SHA="$source_commit" \
+      JOB_WORKFLOW_SHA="$ref" \
+      CLEANUP_UNUSED_DOCKER_IMAGES="$cleanup" \
+      RETRY_SHA256="$(printf 'c%.0s' {1..64})" \
+      RUNNER_TEMP="$runner_temp" \
+      PATH="$mock_bin:$PATH" \
+      SOURCE_PATH=. \
+      bash "$publish_prepare_script"
+  )
+}
+
+# An adopter calls Verjson/.github at the contract SHA from its own commit.
+adopter_publish_output="$tmp/adopter-publish-output"
+run_publish_prepare "$first_adoption" "$adopter_publish_output" Verjson/example \
+  "$(git -C "$first_adoption" rev-parse HEAD)" false
+grep -qx "publisher-workflow-ref=Verjson/.github/.github/workflows/container-candidate-publish.yml@$ref" "$adopter_publish_output" \
+  || { echo "adopter publication did not authorize the pinned cross-repository publisher" >&2; exit 1; }
 
 case_variant_consumer="$tmp/case-variant-consumer"
 mkdir -p "$case_variant_consumer"
