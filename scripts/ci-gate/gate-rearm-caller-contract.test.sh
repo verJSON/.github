@@ -189,11 +189,11 @@ assert "AI_REVIEW_APP_PRIVATE_KEY" not in create["env"]
 assert 'if [ "$APP_KEY_POLICY_RESULT" != success ]; then' in create["run"]
 script = "\n".join(step.get("run", "") for step in arm["steps"])
 for marker in (
-    '[[ "$TARGET_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]',
-    '[[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]',
+    '[[ "$TARGET_REPO" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+$ ]]',
+    '[[ "$PR_NUMBER" =~ ^[123456789][0123456789]*$ ]]',
     'gh pr view "$PR_NUMBER" --repo "$TARGET_REPO"',
     '--json id,state,isDraft,title,labels,headRefOid,headRepositoryOwner,autoMergeRequest',
-    '[[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]',
+    '[[ "$head_sha" =~ ^[0123456789abcdef]{40}$ ]]',
     '[ "$state" = OPEN ] || exit 0',
 ):
     assert marker in script

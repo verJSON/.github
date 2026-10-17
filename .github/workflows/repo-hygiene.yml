@@ -54,7 +54,7 @@ jobs:
           HYGIENE_REF: ${{ inputs.hygiene_ref }}
         run: |
           set -euo pipefail
-          if ! [[ "$HYGIENE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+          if ! [[ "$HYGIENE_REF" =~ ^[0123456789abcdef]{40}$ ]]; then
             echo "::error::hygiene_ref must be a full lowercase commit SHA; branches and tags are mutable"
             exit 2
           fi

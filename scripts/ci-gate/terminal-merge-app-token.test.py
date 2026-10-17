@@ -61,7 +61,7 @@ def validate(document: dict, raw: str) -> list[str]:
         problems.append("authorization repository token is not exactly read-only")
     preflight_run = preflight.get("run", "")
     for required in (
-        '[[ ! "$MERGE_APP_CLIENT_ID" =~ ^Iv[0-9A-Za-z]{18}$ ]]',
+        '[[ ! "$MERGE_APP_CLIENT_ID" =~ ^Iv[0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz]{18}$ ]]',
         '"$TARGET_REPO" = "$REPOSITORY_CONTEXT"',
         'owner="${TARGET_REPO%%/*}"',
         'repository="${TARGET_REPO#*/}"',

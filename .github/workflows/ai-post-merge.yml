@@ -47,9 +47,9 @@ jobs:
         id: evidence
         run: |
           set -euo pipefail
-          [[ "$MERGED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$EXPECTED_APP_ID" =~ ^[1-9][0-9]*$ ]]
-          [[ "$EXPECTED_APP_SLUG" =~ ^[A-Za-z0-9-]+$ ]]
+          [[ "$MERGED_HEAD_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          [[ "$EXPECTED_APP_ID" =~ ^[123456789][0123456789]{0,14}$ ]]
+          [[ "$EXPECTED_APP_SLUG" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-]+$ ]]
           authorization="$(gh api "repos/$TARGET_REPO/commits/$MERGED_HEAD_SHA/check-runs" \
             --jq "[.check_runs[] | select(.name == \"AI review authorization\" and .head_sha == \"$MERGED_HEAD_SHA\" and .app.id == 15368 and .app.slug == \"github-actions\")] | sort_by(.id) | last // {}")"
           check_id="$(jq -r '.id // ""' <<<"$authorization")"
@@ -57,7 +57,7 @@ jobs:
             echo 'eligible=false' >>"$GITHUB_OUTPUT"
             exit 0
           fi
-          [[ "$check_id" =~ ^[1-9][0-9]*$ ]]
+          [[ "$check_id" =~ ^[123456789][0123456789]*$ ]]
           authorization_markers="$(jq -r '
             (.output.summary // "") | strings | split("\n")[]
             | select(startswith("<!-- ai-review-authorized:v1:"))

@@ -155,9 +155,9 @@ jobs:
         run: |
           [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] || { echo "::notice::runner-acquisition watchdog is dormant on a ${RUNNER_ENVIRONMENT:-unidentified} runner; its write-scoped token is used only on ephemeral GitHub-hosted runners"; exit 0; }
           set -euo pipefail
-          [[ "$TARGET_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || exit 1
-          [[ "$ARM_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
-          [[ "$ARM_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$TARGET_REPO" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+$ ]] || exit 1
+          [[ "$ARM_RUN_ID" =~ ^[123456789][0123456789]*$ ]] || exit 1
+          [[ "$ARM_RUN_ATTEMPT" =~ ^[123456789][0123456789]*$ ]] || exit 1
           jobs_path="repos/$TARGET_REPO/actions/runs/$ARM_RUN_ID/attempts/$ARM_RUN_ATTEMPT/jobs?per_page=100"
           while :; do
             now="$(date -u +%s)"
@@ -170,7 +170,7 @@ jobs:
                 acquired) echo "Every arm job acquired a runner."; exit 0 ;;
                 stalled)
                   stalled_job_id="$(jq -r .id <<<"$verdict")"
-                  [[ "$stalled_job_id" =~ ^[1-9][0-9]*$ ]] || stalled_job_id=''
+                  [[ "$stalled_job_id" =~ ^[123456789][0123456789]*$ ]] || stalled_job_id=''
                   {
                     echo "stalled_job_id=$stalled_job_id"
                     echo 'stalled=true'
@@ -203,7 +203,7 @@ jobs:
           # would orphan that check. An unobservable listing or an unidentified
           # job is not evidence the stall persists.
           state=unobservable
-          if [[ "$STALLED_JOB_ID" =~ ^[1-9][0-9]*$ ]] && listing="$(gh api "$jobs_path")"; then
+          if [[ "$STALLED_JOB_ID" =~ ^[123456789][0123456789]*$ ]] && listing="$(gh api "$jobs_path")"; then
             state="$(jq -r --argjson id "$STALLED_JOB_ID" '
               [.jobs[] | select(.id == $id)] as $same
               | if ($same | length) == 1 and ($same[0].status | IN("queued", "pending", "requested"))
@@ -300,7 +300,7 @@ jobs:
               ;;
             *) echo "::error::unsupported hold-clearing event"; exit 1 ;;
           esac
-          [[ "$REQUEST_ACTOR" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || {
+          [[ "$REQUEST_ACTOR" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-]*$ ]] || {
             echo "::error::hold-clearing actor is invalid"; exit 1;
           }
           actor_permission_response="$(GH_TOKEN="$ACTIONS_TOKEN" gh api \
@@ -328,12 +328,12 @@ jobs:
           APP_KEY_POLICY_RESULT: ${{ needs.app-key-policy.result }}
         run: |
           set -euo pipefail
-          [[ "$TARGET_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || exit 1
-          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || exit 1
-          [[ "$REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
-          [[ "$DEFAULT_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || exit 1
-          [[ "$APP_ID" =~ ^[1-9][0-9]*$ ]] || { echo "::error::AI_REVIEW_APP_ID is unavailable"; exit 1; }
-          [[ "$APP_SLUG" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "::error::AI_REVIEW_APP_SLUG is unavailable"; exit 1; }
+          [[ "$TARGET_REPO" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+$ ]] || exit 1
+          [[ "$PR_NUMBER" =~ ^[123456789][0123456789]*$ ]] || exit 1
+          [[ "$REPOSITORY_ID" =~ ^[123456789][0123456789]*$ ]] || exit 1
+          [[ "$DEFAULT_BRANCH" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]+$ ]] || exit 1
+          [[ "$APP_ID" =~ ^[123456789][0123456789]{0,14}$ ]] || { echo "::error::AI_REVIEW_APP_ID is unavailable"; exit 1; }
+          [[ "$APP_SLUG" =~ ^[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789-]*$ ]] || { echo "::error::AI_REVIEW_APP_SLUG is unavailable"; exit 1; }
 
           source_bound_delivery=false
           explicit_label_delivery=false
@@ -368,9 +368,9 @@ jobs:
               *) echo "::error::local arm caller does not own this delivery event"; exit 1 ;;
             esac
             [ "${GITHUB_RUN_ATTEMPT:-}" = 1 ] || { echo "::error::local arm deliveries cannot be replayed by rerunning a workflow"; exit 1; }
-            [[ "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::local arm delivery run ID is malformed"; exit 1; }
-            [[ "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::protected workflow SHA is malformed"; exit 1; }
-            [[ "$EVENT_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::local arm event head is malformed"; exit 1; }
+            [[ "${GITHUB_RUN_ID:-}" =~ ^[123456789][0123456789]*$ ]] || { echo "::error::local arm delivery run ID is malformed"; exit 1; }
+            [[ "$WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]] || { echo "::error::protected workflow SHA is malformed"; exit 1; }
+            [[ "$EVENT_HEAD_SHA" =~ ^[0123456789abcdef]{40}$ ]] || { echo "::error::local arm event head is malformed"; exit 1; }
             expected_workflow_ref="$TARGET_REPO/$local_delivery_path@refs/heads/$DEFAULT_BRANCH"
             [ "$WORKFLOW_REF" = "$expected_workflow_ref" ] || {
               echo "::error::local arm delivery did not use its exact protected workflow ref"; exit 1;
@@ -390,7 +390,7 @@ jobs:
             source_workflow_id="$(GH_TOKEN="$ACTIONS_TOKEN" gh api "repos/$TARGET_REPO/actions/workflows/$local_workflow" --jq '.id')" || {
               echo "::error::could not authenticate local arm workflow identity"; exit 1;
             }
-            if ! [[ "$source_workflow_id" =~ ^[1-9][0-9]*$ ]] ||
+            if ! [[ "$source_workflow_id" =~ ^[123456789][0123456789]*$ ]] ||
               ! jq -e --argjson workflow_id "$source_workflow_id" '.workflow_id == $workflow_id' <<<"$source_run" >/dev/null; then
               echo "::error::local arm workflow identity does not match its protected path"; exit 1
             fi
@@ -401,7 +401,7 @@ jobs:
             delivery_blob="$(GH_TOKEN="$ACTIONS_TOKEN" gh api "repos/$TARGET_REPO/contents/$local_delivery_path?ref=$WORKFLOW_SHA" --jq '.sha')" || {
               echo "::error::could not resolve delivered local arm workflow"; exit 1;
             }
-            [[ "$protected_blob" =~ ^[0-9a-f]{40}$ ]] && [ "$delivery_blob" = "$protected_blob" ] || {
+            [[ "$protected_blob" =~ ^[0123456789abcdef]{40}$ ]] && [ "$delivery_blob" = "$protected_blob" ] || {
               echo "::error::local arm workflow does not match the protected caller revision"; exit 1;
             }
             source_bound_delivery=true
@@ -417,7 +417,7 @@ jobs:
           state="$(jq -r '.state' <<<"$meta")"
           head_sha="$(jq -r '.headRefOid // ""' <<<"$meta")"
           head_owner="$(jq -r '.headRepositoryOwner.login // ""' <<<"$meta")"
-          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::current PR head is unavailable"; exit 1; }
+          [[ "$head_sha" =~ ^[0123456789abcdef]{40}$ ]] || { echo "::error::current PR head is unavailable"; exit 1; }
           if [ "$source_bound_delivery" = true ] && [ "$head_sha" != "$EVENT_HEAD_SHA" ]; then
             echo "::error::local arm delivery head is stale"; exit 1
           fi
@@ -508,7 +508,7 @@ jobs:
           ai_review_label="$(jq -r '[.labels[].name | select((ascii_downcase | gsub("[ _-]+"; "-")) == "ai-review")] | first // ""' <<<"$meta")"
           authorize_ai_review_actor() {
             local actor="$1"
-            if ! [[ "$actor" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]]; then
+            if ! [[ "$actor" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-]*$ ]]; then
               GH_TOKEN="$ACTIONS_TOKEN" gh pr edit "$PR_NUMBER" --repo "$TARGET_REPO" --remove-label "$ai_review_label" 2>/dev/null || true
               echo "::error::AI review label actor is invalid"; return 1
             fi
@@ -533,7 +533,7 @@ jobs:
             if [ -z "$review_provider" ] || [ -z "$review_model" ] || [ -z "$review_budget_usd" ]; then
               echo "::error::explicit re-review policy is not fully configured; refusing before paid dispatch"; exit 1
             fi
-            [[ "$rereview_actor" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || { echo "::error::re-review actor is invalid"; exit 1; }
+            [[ "$rereview_actor" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-]*$ ]] || { echo "::error::re-review actor is invalid"; exit 1; }
             actor_permission="$(GH_TOKEN="$ACTIONS_TOKEN" gh api "repos/$TARGET_REPO/collaborators/$rereview_actor/permission" --jq '.role_name // ""')" || {
               echo "::error::could not authorize re-review actor"; exit 1;
             }
@@ -568,10 +568,10 @@ jobs:
               ;;
             *) echo "::error::unsupported review provider"; exit 1 ;;
           esac
-          if [ "$review_budget_usd" != auto ] && { ! [[ "$review_budget_usd" =~ ^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$ ]] || ! awk -v b="$review_budget_usd" 'BEGIN { exit !(b > 0) }'; }; then
+          if [ "$review_budget_usd" != auto ] && { ! [[ "$review_budget_usd" =~ ^(0|[123456789][0123456789]{0,2})(\.[0123456789]{1,2})?$ ]] || ! awk -v b="$review_budget_usd" 'BEGIN { exit !(b + 0 > 0) }'; }; then
             echo "::error::invalid review budget"; exit 1
           fi
-          if [ -n "$fallback_budget_usd" ] && { ! [[ "$fallback_budget_usd" =~ ^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$ ]] || ! awk -v b="$fallback_budget_usd" 'BEGIN { exit !(b > 0) }'; }; then
+          if [ -n "$fallback_budget_usd" ] && { ! [[ "$fallback_budget_usd" =~ ^(0|[123456789][0123456789]{0,2})(\.[0123456789]{1,2})?$ ]] || ! awk -v b="$fallback_budget_usd" 'BEGIN { exit !(b + 0 > 0) }'; }; then
             echo "::error::invalid fallback review budget"; exit 1
           fi
           if [ "$explicit_label_delivery" = true ] && [ "$explicit_rereview" = false ]; then
@@ -586,7 +586,7 @@ jobs:
             --argjson explicit_rereview "$explicit_rereview" \
             '{provider:$provider,model:$model,budget_usd:$budget_usd,fallback_model:$fallback_model,fallback_budget_usd:$fallback_budget_usd,pricing_version:$pricing_version,actor:$actor,actor_permission:$actor_permission,authority:$authority,explicit_rereview:$explicit_rereview}')"
           review_policy="$(printf '%s' "$review_policy_json" | base64 -w0 | tr '+/' '-_' | tr -d '=')"
-          [[ "$review_policy" =~ ^[A-Za-z0-9_-]{1,2048}$ ]] || { echo "::error::review policy envelope is invalid"; exit 1; }
+          [[ "$review_policy" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-]{1,2048}$ ]] || { echo "::error::review policy envelope is invalid"; exit 1; }
           [ "$EVENT_ACTION" = ready_for_review ] && hold_removed=true
           if [ "$EVENT_ACTION" = edited ]; then
             [ "$EVENT_OLD_TITLE_HELD" = true ] || exit 0
@@ -628,8 +628,8 @@ jobs:
             IFS=: read -r scheme version receipt_repo receipt_pr receipt_head source_run_id source_attempt nonce extra <<<"$external_id"
             [ "$scheme" = ai-review ] && [ "$version" = v1 ] && [ -z "${extra:-}" ] || return 1
             [ "$receipt_repo" = "$TARGET_REPO" ] && [ "$receipt_pr" = "$PR_NUMBER" ] && [ "$receipt_head" = "$head_sha" ] || return 1
-            [[ "$source_run_id" =~ ^[1-9][0-9]*$ ]] && [[ "$source_attempt" =~ ^[1-9][0-9]*$ ]] \
-              && [[ "$nonce" =~ ^[0-9a-f]{64}$ ]] || return 1
+            [[ "$source_run_id" =~ ^[123456789][0123456789]*$ ]] && [[ "$source_attempt" =~ ^[123456789][0123456789]*$ ]] \
+              && [[ "$nonce" =~ ^[0123456789abcdef]{64}$ ]] || return 1
             [ "$source_run_id" != "$GITHUB_RUN_ID" ] || return 10
             # GitHub stores an Actions-owned check's own page as its details_url (#1648);
             # the arm run is named by external_id and by the receipt, never by this field.
@@ -671,7 +671,7 @@ jobs:
                   (.actor.login | type == "string" and length > 0)
                 ' <<<"$source_run" >/dev/null || return 1
               source_workflow_id="$(GH_TOKEN="$ACTIONS_TOKEN" gh api "repos/$TARGET_REPO/actions/workflows/$source_file" --jq '.id')" || return 1
-              [[ "$source_workflow_id" =~ ^[1-9][0-9]*$ ]] || return 1
+              [[ "$source_workflow_id" =~ ^[123456789][0123456789]*$ ]] || return 1
               jq -e --argjson workflow "$source_workflow_id" '.workflow_id == $workflow' <<<"$source_run" >/dev/null || return 1
             fi
             completed_epoch="$(date -u -d "$(jq -r '.completed_at // .updated_at' <<<"$source_run")" +%s)" || return 1
@@ -708,12 +708,12 @@ jobs:
               if [ -n "${source_file:-}" ]; then
                 local receipt_workflow_sha protected_blob receipt_blob branch_ref expected_ref
                 receipt_workflow_sha="$(jq -er '.workflow_sha' "$receipt_dir/receipt.json")" || { rm -rf "$receipt_dir"; return 1; }
-                [[ "$receipt_workflow_sha" =~ ^[0-9a-f]{40}$ ]] || { rm -rf "$receipt_dir"; return 1; }
+                [[ "$receipt_workflow_sha" =~ ^[0123456789abcdef]{40}$ ]] || { rm -rf "$receipt_dir"; return 1; }
                 # Keep the protected caller and the workflow revision recorded by the receipt identical.
                 branch_ref="$(jq -rn --arg branch "$DEFAULT_BRANCH" '$branch | @uri | gsub("%2F"; "/")')"
                 protected_blob="$(GH_TOKEN="$ACTIONS_TOKEN" gh api "repos/$TARGET_REPO/contents/$source_workflow?ref=$branch_ref" --jq '.sha')" || { rm -rf "$receipt_dir"; return 1; }
                 receipt_blob="$(GH_TOKEN="$ACTIONS_TOKEN" gh api "repos/$TARGET_REPO/contents/$source_workflow?ref=$receipt_workflow_sha" --jq '.sha')" || { rm -rf "$receipt_dir"; return 1; }
-                if ! [[ "$protected_blob" =~ ^[0-9a-f]{40}$ ]] || [ "$protected_blob" != "$receipt_blob" ]; then
+                if ! [[ "$protected_blob" =~ ^[0123456789abcdef]{40}$ ]] || [ "$protected_blob" != "$receipt_blob" ]; then
                   rm -rf "$receipt_dir"
                   return 1
                 fi
@@ -775,7 +775,7 @@ jobs:
           }
 
           if [ "$hold_removed" = false ] && [ "$explicit_rereview" = false ] && [ "$explicit_ai_review" = false ] \
-             && [ "$latest_status" = in_progress ] && [[ "$latest_id" =~ ^[1-9][0-9]*$ ]]; then
+             && [ "$latest_status" = in_progress ] && [[ "$latest_id" =~ ^[123456789][0123456789]*$ ]]; then
             if recover_orphaned_authorization "$latest"; then
               latest_id=''; latest_status=''; latest_conclusion=''; latest_title=''
             else
@@ -808,7 +808,7 @@ jobs:
             latest_id=''; latest_status=''; latest_conclusion=''; latest_title=''
           fi
           # END CROSS-RUN ORPHAN RECOVERY
-          if [ "$hold_removed" = true ] && [[ "$latest_id" =~ ^[1-9][0-9]*$ ]] && [ "$latest_conclusion" = success ]; then
+          if [ "$hold_removed" = true ] && [[ "$latest_id" =~ ^[123456789][0123456789]*$ ]] && [ "$latest_conclusion" = success ]; then
             # The arm run is carried by external_id; details_url is the check's own page (#1648).
             arm_run_id="$(jq -r --arg repo "$TARGET_REPO" --arg pr "$PR_NUMBER" --arg head "$head_sha" '
                 (.external_id // "" | split(":")) as $p |
@@ -816,9 +816,9 @@ jobs:
                    $p[2] == $repo and $p[3] == $pr and $p[4] == $head and
                    ($p[5] | test("^[1-9][0-9]*$")) and
                    ($p[6] | test("^[1-9][0-9]*$")) and ($p[7] | test("^[0-9a-f]{64}$")) then $p[5] else "" end' <<<"$latest")"
-            [[ "$arm_run_id" =~ ^[1-9][0-9]*$ ]] || exit 1
+            [[ "$arm_run_id" =~ ^[123456789][0123456789]*$ ]] || exit 1
             arm_run_attempt="$(GH_TOKEN="$ACTIONS_TOKEN" gh api "repos/$TARGET_REPO/actions/runs/$arm_run_id" --jq '.run_attempt // ""')"
-            [[ "$arm_run_attempt" =~ ^[1-9][0-9]*$ ]] || exit 1
+            [[ "$arm_run_attempt" =~ ^[123456789][0123456789]*$ ]] || exit 1
             receipt_name="ai-review-arm-$arm_run_id-$arm_run_attempt"
             receipt_count="$(GH_TOKEN="$ACTIONS_TOKEN" gh api "repos/$TARGET_REPO/actions/runs/$arm_run_id/artifacts?per_page=100" \
               --jq "[.artifacts[] | select(.name == \"$receipt_name\" and .expired == false)] | length")"
@@ -832,15 +832,15 @@ jobs:
               --name "$receipt_name" --dir "$receipt_dir"
             [ -f "$receipt_dir/receipt.json" ] || exit 1
             review_policy="$(jq -er '.review_policy | select(type == "string")' "$receipt_dir/receipt.json")"
-            [[ "$review_policy" =~ ^[A-Za-z0-9_-]{1,2048}$ ]] || exit 1
-            [[ "$DEFAULT_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || exit 1
+            [[ "$review_policy" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-]{1,2048}$ ]] || exit 1
+            [[ "$DEFAULT_BRANCH" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]+$ ]] || exit 1
             GH_TOKEN="$ACTIONS_TOKEN" gh workflow run ai-privileged-merge.yml --repo "$TARGET_REPO" --ref "$DEFAULT_BRANCH" \
               -f pr_number="$PR_NUMBER" -f expected_head_sha="$head_sha" -f authorization_check_id="$latest_id" \
               -f arm_run_id="$arm_run_id" -f arm_run_attempt="$arm_run_attempt" -f review_policy="$review_policy"
             exit 0
           fi
           if [ "$hold_removed" = true ]; then
-            if [[ "$latest_id" =~ ^[1-9][0-9]*$ ]] && [ "$latest_status" = in_progress ]; then
+            if [[ "$latest_id" =~ ^[123456789][0123456789]*$ ]] && [ "$latest_status" = in_progress ]; then
               pending_guidance='The existing AI review authorization for this exact head is still in progress. Wait for that review; do not add re-review, because it could incur a second model charge. If the linked arm run is stalled, an administrator must recover it without dispatching another model review.'
               arm_run_id="$(jq -r --arg repo "$TARGET_REPO" --arg pr "$PR_NUMBER" --arg head "$head_sha" '
                 (.external_id // "" | split(":")) as $p |
@@ -848,7 +848,7 @@ jobs:
                    $p[2] == $repo and $p[3] == $pr and $p[4] == $head and
                    ($p[5] | test("^[1-9][0-9]*$")) and
                    ($p[6] | test("^[1-9][0-9]*$")) and ($p[7] | test("^[0-9a-f]{64}$")) then $p[5] else "" end' <<<"$latest")"
-              if [[ "$arm_run_id" =~ ^[1-9][0-9]*$ ]]; then
+              if [[ "$arm_run_id" =~ ^[123456789][0123456789]*$ ]]; then
                 arm_run="$(GH_TOKEN="$ACTIONS_TOKEN" gh api "repos/$TARGET_REPO/actions/runs/$arm_run_id")"
                 arm_run_attempt="$(jq -r '.run_attempt // ""' <<<"$arm_run")"
                 receipt_name="ai-review-arm-$arm_run_id-$arm_run_attempt"
@@ -878,16 +878,16 @@ jobs:
               --body "$notice_body"
             exit 0
           fi
-          if [ "$explicit_rereview" = false ] && [ "$explicit_ai_review" = false ] && [[ "$latest_id" =~ ^[1-9][0-9]*$ ]]; then
+          if [ "$explicit_rereview" = false ] && [ "$explicit_ai_review" = false ] && [[ "$latest_id" =~ ^[123456789][0123456789]*$ ]]; then
             echo "Authorization already exists for $head_sha; duplicate event is a no-op."
             exit 0
           fi
 
           review_policy="$(select_compatible_review_policy "$review_policy_json")" || exit 1
-          [[ "$review_policy" =~ ^[A-Za-z0-9_-]{1,2048}$ ]] || { echo "::error::compatible review policy envelope is invalid"; exit 1; }
+          [[ "$review_policy" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-]{1,2048}$ ]] || { echo "::error::compatible review policy envelope is invalid"; exit 1; }
 
           nonce="$(openssl rand -hex 32)"
-          [[ "$nonce" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          [[ "$nonce" =~ ^[0123456789abcdef]{64}$ ]] || exit 1
           external_id="ai-review:v1:$TARGET_REPO:$PR_NUMBER:$head_sha:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT:$nonce"
           # Recorded in the receipt as the arm-run URL; GitHub replaces it on the stored
           # Actions-owned check with the check's own page, so verifiers never read it back (#1648).
@@ -898,7 +898,7 @@ jobs:
               output:{title:"AI review pending",summary:"Trusted review is running for this exact head."}}')"
           check="$(gh api --method POST "repos/$TARGET_REPO/check-runs" --input - <<<"$payload")"
           check_id="$(jq -r '.id // ""' <<<"$check")"
-          [[ "$check_id" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$check_id" =~ ^[123456789][0123456789]*$ ]] || exit 1
           # Publish the accepted identifier before validating response
           # attribution. If attribution fails, the always-run terminalizer can
           # still complete the check instead of leaving it pending forever.
@@ -1328,13 +1328,13 @@ jobs:
           if proof="$(python3 -I "$program" 2>"$RUNNER_TEMP/review-caller-bootstrap.stderr")"; then
             stale_sha="$(jq -r '.stale_sha // ""' <<<"$proof" 2>/dev/null || true)"
             contract_sha="$(jq -r '.contract_sha // ""' <<<"$proof" 2>/dev/null || true)"
-            if [[ "$stale_sha" =~ ^[0-9a-f]{40}$ ]] && [[ "$contract_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            if [[ "$stale_sha" =~ ^[0123456789abcdef]{40}$ ]] && [[ "$contract_sha" =~ ^[0123456789abcdef]{40}$ ]]; then
               eligible=true
             fi
           else
             # The reason can quote untrusted paths: print it with workflow commands disabled.
             token="$(openssl rand -hex 16 2>/dev/null || true)"
-            if [[ "$token" =~ ^[0-9a-f]{32}$ ]]; then
+            if [[ "$token" =~ ^[0123456789abcdef]{32}$ ]]; then
               echo "::stop-commands::$token"
               head -c 400 "$RUNNER_TEMP/review-caller-bootstrap.stderr" || true
               echo
@@ -1383,10 +1383,10 @@ jobs:
         run: |
           set -euo pipefail
           [ "$BOOTSTRAP_ELIGIBLE" = true ] || { echo "::error::stale review caller bootstrap was not proven"; exit 1; }
-          [[ "$CHECK_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
-          [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
-          [[ "$STALE_SHA" =~ ^[0-9a-f]{40}$ ]] && [[ "$CONTRACT_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
-          [[ "$INSTALLATION_ID" =~ ^[1-9][0-9]*$ ]] || {
+          [[ "$CHECK_ID" =~ ^[123456789][0123456789]*$ ]] || exit 1
+          [[ "$EXPECTED_HEAD_SHA" =~ ^[0123456789abcdef]{40}$ ]] || exit 1
+          [[ "$STALE_SHA" =~ ^[0123456789abcdef]{40}$ ]] && [[ "$CONTRACT_SHA" =~ ^[0123456789abcdef]{40}$ ]] || exit 1
+          [[ "$INSTALLATION_ID" =~ ^[123456789][0123456789]*$ ]] || {
             echo "::error::bootstrap App installation identity is unavailable"; exit 1;
           }
           [ -n "$APP_TOKEN" ] && [ "$MINTED_APP_SLUG" = "$APP_SLUG" ] || {
@@ -1396,7 +1396,7 @@ jobs:
           recheck_errors="$RUNNER_TEMP/review-caller-bootstrap-recheck.stderr"
           proof="$(GH_TOKEN="$ACTIONS_TOKEN" python3 -I "$RUNNER_TEMP/review-caller-bootstrap.py" 2>"$recheck_errors")" || {
             token="$(openssl rand -hex 16 2>/dev/null || true)"
-            if [[ "$token" =~ ^[0-9a-f]{32}$ ]]; then
+            if [[ "$token" =~ ^[0123456789abcdef]{32}$ ]]; then
               echo "::stop-commands::$token"
               head -c 400 "$recheck_errors" || true
               echo
@@ -1416,7 +1416,7 @@ jobs:
           ' <<<"$check" >/dev/null || {
             echo "::error::authorization check is not this arm's in-progress exact-head check"; exit 1;
           }
-          [[ "$REVIEW_POLICY" =~ ^[A-Za-z0-9_-]{1,2048}$ ]] || { echo "::error::review policy envelope is invalid"; exit 1; }
+          [[ "$REVIEW_POLICY" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-]{1,2048}$ ]] || { echo "::error::review policy envelope is invalid"; exit 1; }
           padded="$(printf '%s' "$REVIEW_POLICY" | tr -- '-_' '+/')"
           while [ $(( ${#padded} % 4 )) -ne 0 ]; do padded="$padded="; done
           policy_json="$(printf '%s' "$padded" | base64 -d)"
@@ -1472,7 +1472,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ "$DEFAULT_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || exit 1
+          [[ "$DEFAULT_BRANCH" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]+$ ]] || exit 1
           fail_authorization() {
             local title="$1" summary="$2"
             GH_TOKEN="$ACTIONS_TOKEN" gh api --method PATCH "repos/$TARGET_REPO/check-runs/$CHECK_ID" \
@@ -1533,7 +1533,7 @@ jobs:
           BOOTSTRAP_ELIGIBLE: ${{ steps.bootstrap.outputs.eligible || 'false' }}
         run: |
           set -euo pipefail
-          [[ "$CHECK_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$CHECK_ID" =~ ^[123456789][0123456789]*$ ]] || exit 1
           check="$(GH_TOKEN="$ACTIONS_TOKEN" gh api "repos/$TARGET_REPO/check-runs/$CHECK_ID")"
           jq -e --argjson id "$CHECK_ID" --arg head "$EXPECTED_HEAD_SHA" \
             --arg external "$EXPECTED_EXTERNAL_ID" \

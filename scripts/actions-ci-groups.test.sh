@@ -184,6 +184,16 @@ def validate_hosted_compatibility(candidate, candidate_manifest):
     if "hosted-compatibility-tests" not in candidate_jobs:
         raise AssertionError("missing hosted-compatibility-tests job")
     hosted = candidate_jobs["hosted-compatibility-tests"]
+    # continue-on-error in any spelling (true, an expression) would let the
+    # bubblewrap and locale-collation contracts fail without failing the job.
+    if "continue-on-error" in hosted:
+        raise AssertionError("hosted-compatibility-tests job may continue on error")
+    for step in hosted["steps"]:
+        if "continue-on-error" in step:
+            raise AssertionError(
+                "hosted-compatibility-tests step may continue on error: "
+                f"{step.get('name', step.get('uses'))}"
+            )
     assert hosted["runs-on"] == "ubuntu-24.04"
     assert hosted["timeout-minutes"] == 8
     assert hosted["steps"][0]["uses"] == (
@@ -234,6 +244,27 @@ for event in ("pull_request", "push"):
         print(f"ok - {event} shellcheck path removal fails closed")
     else:
         raise AssertionError(f"{event} shellcheck path removal passed")
+
+skippable_job = copy.deepcopy(document)
+skippable_job["jobs"]["hosted-compatibility-tests"]["continue-on-error"] = True
+try:
+    validate_hosted_compatibility(skippable_job, manifest_text)
+except AssertionError:
+    print("ok - continue-on-error hosted compatibility job fails closed")
+else:
+    raise AssertionError("continue-on-error hosted compatibility job passed")
+for index, step in enumerate(document["jobs"]["hosted-compatibility-tests"]["steps"]):
+    skippable_step = copy.deepcopy(document)
+    skippable_step["jobs"]["hosted-compatibility-tests"]["steps"][index][
+        "continue-on-error"
+    ] = True
+    label = step.get("name", step.get("uses", index))
+    try:
+        validate_hosted_compatibility(skippable_step, manifest_text)
+    except AssertionError:
+        print(f"ok - continue-on-error hosted compatibility step fails closed: {label}")
+    else:
+        raise AssertionError(f"continue-on-error hosted compatibility step passed: {label}")
 
 missing_job_mutant = copy.deepcopy(document)
 del missing_job_mutant["jobs"]["hosted-compatibility-tests"]
@@ -290,6 +321,783 @@ except (AssertionError, KeyError, StopIteration):
     print("ok - hosted compatibility aggregate removal fails closed")
 else:
     raise AssertionError("hosted compatibility aggregate removal passed")
+
+# A manifest group that no job runs is registered coverage that never executes,
+# and an en_US.UTF-8 contract on a fleet image fails closed for want of locale
+# data. So every manifest group must be named by exactly one runner, and every
+# contract that imports the locale helper runs in the hosted locale-collation
+# group, which holds nothing else.
+#
+# Membership is derived from the importers, never from the rows: every tracked
+# Python file a row could run (anywhere in the repository) that imports
+# ascii_digit_locales -- `import`, `from ... import`, `__import__(...)` or
+# `importlib.import_module(...)` -- must be exactly the set of scripts the
+# locale-collation rows run. Deriving it from the rows instead (asking "does
+# this row's script import the helper?") passes vacuously when a row is deleted
+# or an import is respelled. A file that names the helper in a way this scan
+# cannot classify fails closed. Each row's scripts are resolved as bash would
+# run them -- quoted, absolute, or relative after `cd` -- and a row whose
+# executed script cannot be resolved to a scanned, tracked file fails.
+#
+# Rows themselves are strict: a `$`, backtick, or glob anywhere in a row fails
+# it. What "fails closed" does not cover is a script or module name that a
+# reached file never writes out whole:
+#   - a name assembled at run time from pieces --
+#     `importlib.import_module("ascii_digit" + "_locales")`, `"$dir/$prefix.py"`,
+#     or a name read from a file or the environment;
+#   - a glob (`for test in scripts/ci-gate/*.test.py`), `find ... -exec`, or a
+#     command substitution `$(...)` in a wrapper body that yields the script;
+#   - JavaScript: `.js`, `.mjs`, and `.cjs` files are scanned for the module
+#     name but not followed into what they run;
+#   - a wrapper launched from Python: a reached Python file is checked for an
+#     importer it names, but not followed into the shell scripts it runs.
+# No static scan can classify these, and flagging name fragments would only
+# move the gap to the next spelling. The backstop is at run time: guard_locales
+# raises under CI=true
+# when en_US.UTF-8 cannot be reproduced (pinned by the missing-hazard-locale
+# test in settable-value-guards.test.py), so such a test on a fleet image fails
+# red, not green.
+import ast
+from functools import lru_cache
+import pathlib
+import posixpath
+import re
+import subprocess
+
+LOCALE_GROUP = "locale-collation"
+LOCALE_STEP = "Run locale-collation shell contracts"
+LOCALE_MODULE = "ascii_digit_locales"
+LOCALE_HELPER = "scripts/ci-gate/ascii_digit_locales.py"
+# Tracked files that name the helper without importing it.
+LOCALE_NON_IMPORTERS = {
+    LOCALE_HELPER,
+    "scripts/actions-ci-groups.tsv",
+    "scripts/actions-ci-groups.test.sh",
+}
+repository_root = pathlib.Path(sys.argv[2]).resolve().parent.parent
+sys.path.insert(0, str(repository_root / "scripts"))
+import shell_words  # noqa: E402
+
+# A row can run any tracked file, so the scan covers every tracked source a row
+# could execute -- not only scripts/ -- plus every other file under scripts/.
+# A row whose script lies outside these roots fails rather than going unscanned.
+SCANNED_SUFFIXES = (".py", ".sh", ".bash", ".js", ".mjs", ".cjs")
+
+
+def scanned(path):
+    return path.startswith("scripts/") or path.endswith(SCANNED_SUFFIXES)
+
+
+def tracked_script_sources():
+    listing = subprocess.run(
+        ["git", "-C", str(repository_root), "ls-files", "-z"],
+        capture_output=True,
+        text=True,
+    )
+    if listing.returncode != 0:
+        raise SystemExit(
+            "git ls-files failed, so the locale-helper importers could not be read: "
+            + listing.stderr.strip()
+        )
+    paths = sorted(entry for entry in listing.stdout.split("\0") if entry and scanned(entry))
+    if LOCALE_HELPER not in paths:
+        raise SystemExit(f"{LOCALE_HELPER} is not tracked; the scan root is wrong")
+    return {
+        path: (repository_root / path).read_bytes().decode("utf-8", "replace")
+        for path in paths
+    }
+
+
+script_sources = tracked_script_sources()
+
+
+def manifest_rows(text):
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        group, command = line.split("\t", 1)
+        yield group, command
+
+
+def names_locale_module(dotted):
+    return isinstance(dotted, str) and LOCALE_MODULE in dotted.split(".")
+
+
+def imports_locale_module(tree):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(names_locale_module(alias.name) for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if names_locale_module(node.module) or any(
+                alias.name == LOCALE_MODULE for alias in node.names
+            ):
+                return True
+        elif isinstance(node, ast.Call) and node.args:
+            function = node.func
+            name = (
+                function.id if isinstance(function, ast.Name)
+                else function.attr if isinstance(function, ast.Attribute)
+                else None
+            )
+            argument = node.args[0]
+            if (
+                name in ("__import__", "import_module")
+                and isinstance(argument, ast.Constant)
+                and names_locale_module(argument.value)
+            ):
+                return True
+    return False
+
+
+def locale_importers(sources):
+    importers = set()
+    for path, text in sources.items():
+        if LOCALE_MODULE not in text or path in LOCALE_NON_IMPORTERS:
+            continue
+        if not path.endswith(".py"):
+            raise AssertionError(
+                f"{path} names {LOCALE_MODULE} but is not Python, so whether it "
+                "imports the locale helper cannot be classified"
+            )
+        try:
+            tree = ast.parse(text, filename=path)
+        except SyntaxError as error:
+            raise AssertionError(f"{path} could not be parsed: {error}") from error
+        if not imports_locale_module(tree):
+            raise AssertionError(
+                f"{path} names {LOCALE_MODULE} without an import this contract "
+                "recognizes; spell it as an import or list it in LOCALE_NON_IMPORTERS"
+            )
+        importers.add(path)
+    return importers
+
+
+# A fleet row reaches what its script names, not only the script itself: a
+# shell wrapper can exec an importer, and a Python test can run one as a
+# subprocess. Shell scripts are followed through their words (comments
+# excluded) into every tracked script they name, by repository path or by a
+# name beside them, up to this many levels; a chain still naming new shell
+# scripts there fails. A reached Python file is checked for an importer named
+# in its string constants but not followed further: Python tests name most of
+# the repository as data, and following them would turn the bound into a guess
+# at the diameter of that graph rather than a limit on wrapper nesting.
+# Shell tests name generators that name others, so real chains already run
+# several levels deep; the bound leaves room for that, and termination does
+# not depend on it (each file is visited once).
+SHELL_FOLLOW_DEPTH = 16
+# This contract names the importers as fixtures; it runs none of them.
+LOCALE_REFERENCE_EXEMPT = {"scripts/actions-ci-groups.test.sh"}
+PATH_FRAGMENT = re.compile(r"[A-Za-z0-9_./-]+\.(?:py|sh|bash)\b")
+
+
+@lru_cache(maxsize=None)
+def path_fragments(path, text):
+    """Path-like fragments in the text a file could run something by."""
+    return tuple(
+        sorted({fragment for chunk in named_chunks(path, text) for fragment in PATH_FRAGMENT.findall(chunk)})
+    )
+
+
+def named_chunks(path, text):
+    """Text a file could run something by: shell words, or Python string constants."""
+    if path.endswith(".py"):
+        try:
+            tree = ast.parse(text, filename=path)
+        except SyntaxError:
+            return [text]
+        return [
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        ]
+    try:
+        return shell_words.words(text)
+    except ValueError:
+        return [text]
+
+
+def named_sources(path, text, runnable_by_name, importers):
+    """Tracked sources `path` names: by repository path, beside it, or any importer by name."""
+    return sources_named_by(path, path_fragments(path, text), runnable_by_name, importers)
+
+
+def sources_named_by(path, fragments, runnable_by_name, importers):
+    """Tracked sources that path-like `fragments` written in `path` resolve to."""
+    parent = posixpath.dirname(path)
+    named = set()
+    for fragment in fragments:
+        for candidate in runnable_by_name.get(posixpath.basename(fragment), ()):
+            if (
+                candidate in importers
+                or fragment == candidate
+                or fragment.endswith("/" + candidate)
+                or posixpath.dirname(candidate) == parent
+            ):
+                named.add(candidate)
+    return named
+
+
+def without_whole_line_comments(text):
+    """Text minus lines that are only a comment.
+
+    A line whose first word is `#` is a comment to bash, and to Python or bash
+    reading it as heredoc or string data, whatever quote state the comment
+    stripper believes it is in. Any other `#` the stripper drops is only as
+    sound as its quote tracking, which does not model heredocs or `$'...'`.
+    """
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def fleet_reached_importers(scripts, sources, importers):
+    """Importers a fleet row runs directly or through what its scripts name."""
+    runnable_by_name = {}
+    for source in sources:
+        if source.endswith((".py", ".sh", ".bash")):
+            runnable_by_name.setdefault(posixpath.basename(source), []).append(source)
+    reached = set()
+    frontier = sorted(scripts)
+    for depth in range(1, SHELL_FOLLOW_DEPTH + 2):
+        following = set()
+        for path in frontier:
+            if path in reached:
+                continue
+            reached.add(path)
+            if path in importers or path in LOCALE_REFERENCE_EXEMPT:
+                continue
+            if path.endswith((".sh", ".bash")):
+                named = named_sources(path, sources[path], runnable_by_name, importers)
+                dropped = sources_named_by(
+                    path,
+                    PATH_FRAGMENT.findall(without_whole_line_comments(sources[path])),
+                    runnable_by_name,
+                    importers,
+                ) - named
+                if dropped:
+                    raise AssertionError(
+                        f"{path} names {sorted(dropped)} outside a whole-line comment, "
+                        "but the lexer dropped them, so what it runs cannot be classified"
+                    )
+                following |= named
+            elif path.endswith(".py"):
+                following |= importers & named_sources(
+                    path, sources[path], runnable_by_name, importers
+                )
+        frontier = sorted(following - reached)
+        if not frontier:
+            return reached & importers
+    raise AssertionError(
+        f"following scripts {sorted(scripts)} stopped after {depth} levels, "
+        f"{frontier} are still unvisited, and the bound is {SHELL_FOLLOW_DEPTH} "
+        "nested wrappers, so whether they run a locale-helper importer cannot be classified"
+    )
+
+
+CONTROL_OPERATORS = {"&&", "||", ";", "|", "|&", "&", "(", ")"}
+REDIRECTION = re.compile(r"^[0-9]*[<>&]*[<>][<>&|]*$")
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+UNRESOLVABLE_CHARACTERS = set("$`*?[]{}~")
+# Quoting is gone once a row is split into words, so a `$` or backtick in any
+# word -- argument, assignment, or redirection target -- may run code.
+RUN_TIME_EXPANSION = set("$`")
+# A row runs under `bash -o pipefail -c` without `-e`: after `||`, `&`, or `;`
+# a failed script no longer decides the row's exit status.
+STATUS_HIDING_OPERATORS = {"||", "&", ";"}
+# Interpreter options a row may pass; anything else (`-c`, `-m`, `-e`) runs code
+# that is not a tracked script, so the row cannot be classified.
+INTERPRETER_OPTIONS = {
+    "bash": set(),
+    "python3": {"-I", "-u", "-B", "-E", "-s", "-S"},
+    "node": {"--test"},
+}
+
+
+def simple_commands(tokens):
+    """Split a row's words at control operators, dropping redirections."""
+    current = []
+    skip_target = False
+    for token in tokens:
+        if skip_target:
+            skip_target = False
+        elif token in CONTROL_OPERATORS:
+            yield current
+            current = []
+        elif REDIRECTION.match(token):
+            skip_target = True
+        else:
+            current.append(token)
+    yield current
+
+
+def resolve_row_path(directory, word, command):
+    """Repository-relative path of `word` as bash would open it from `directory`."""
+    if not word or UNRESOLVABLE_CHARACTERS & set(word):
+        raise AssertionError(f"row path {word!r} cannot be resolved statically: {command}")
+    path = pathlib.PurePosixPath(word)
+    if path.is_absolute():
+        try:
+            path = path.relative_to(repository_root)
+        except ValueError:
+            raise AssertionError(
+                f"row path {word!r} lies outside the repository: {command}"
+            ) from None
+    else:
+        path = directory / path
+    normalized = posixpath.normpath(str(path))
+    if normalized == ".." or normalized.startswith("../"):
+        raise AssertionError(f"row path {word!r} lies outside the repository: {command}")
+    return normalized
+
+
+def row_scripts(command, sources):
+    """Every tracked script a manifest row executes, resolved as bash would.
+
+    Each simple command must be a `cd` or a recognized interpreter running one
+    script, so a row whose executed script cannot be named is unclassifiable
+    and fails rather than passing for want of a match.
+    """
+    body = command
+    while body.startswith("@"):
+        _directive, _separator, body = body.partition(" ")
+    try:
+        tokens = shell_words.words(body)
+    except ValueError as error:
+        raise AssertionError(f"row cannot be parsed: {command}: {error}") from error
+    hiding = sorted(STATUS_HIDING_OPERATORS.intersection(tokens))
+    if hiding:
+        raise AssertionError(
+            f"row operator {hiding} hides the exit status of a script it runs: {command}"
+        )
+    for token in tokens:
+        if RUN_TIME_EXPANSION & set(token):
+            raise AssertionError(
+                f"row word {token!r} expands at run time, so what the row runs "
+                f"cannot be named: {command}"
+            )
+    directory = pathlib.PurePosixPath(".")
+    scripts = set()
+    for words in simple_commands(tokens):
+        while words and ASSIGNMENT.match(words[0]):
+            words = words[1:]
+        if not words:
+            raise AssertionError(f"row has an empty command: {command}")
+        head, arguments = words[0], words[1:]
+        if head == "cd":
+            if len(arguments) != 1:
+                raise AssertionError(f"row cd has no single target: {command}")
+            directory = pathlib.PurePosixPath(
+                resolve_row_path(directory, arguments[0], command)
+            )
+            continue
+        if head in INTERPRETER_OPTIONS:
+            options = INTERPRETER_OPTIONS[head]
+            while arguments and arguments[0] in options:
+                arguments = arguments[1:]
+            if not arguments or arguments[0].startswith("-"):
+                raise AssertionError(
+                    f"row runs {head} without a script this contract can name: {command}"
+                )
+            word = arguments[0]
+        elif "/" in head:
+            word = head
+        else:
+            raise AssertionError(
+                f"row runs {head!r}, which this contract cannot resolve to a script: {command}"
+            )
+        script = resolve_row_path(directory, word, command)
+        if script not in sources:
+            raise AssertionError(
+                f"row script {script} is not a tracked file in the scanned roots: {command}"
+            )
+        scripts.add(script)
+    if not scripts:
+        raise AssertionError(f"row names no script: {command}")
+    return scripts
+
+
+def executed_groups(candidate):
+    runners = []
+    for job_name, job in candidate["jobs"].items():
+        matrix = job.get("strategy", {}).get("matrix", {}).get("group")
+        for step in job.get("steps", []):
+            run = step.get("run", "")
+            if 'bash scripts/actions-ci-group.sh "${{ matrix.group }}"' in run:
+                runners.extend((job_name, group) for group in matrix or [])
+            runners.extend(
+                (job_name, group)
+                for group in re.findall(
+                    r"^\s*bash scripts/actions-ci-group\.sh ([a-z0-9-]+)\s*$",
+                    run,
+                    re.MULTILINE,
+                )
+            )
+    return runners
+
+
+def validate_locale_collation(candidate, candidate_manifest, sources=script_sources):
+    runners = executed_groups(candidate)
+    named = [group for _job, group in runners]
+    manifest_groups = {group for group, _command in manifest_rows(candidate_manifest)}
+    if sorted(set(named)) != sorted(named):
+        raise AssertionError("a manifest group is run by more than one job")
+    if set(named) != manifest_groups:
+        raise AssertionError(
+            f"manifest groups {sorted(manifest_groups)} differ from executed groups {sorted(named)}"
+        )
+    if (("hosted-compatibility-tests", LOCALE_GROUP)) not in runners:
+        raise AssertionError("locale-collation is not run on the hosted image")
+    hosted = candidate["jobs"]["hosted-compatibility-tests"]
+    if hosted["runs-on"] != "ubuntu-24.04":
+        raise AssertionError("locale-collation host is not the hosted image")
+    steps = [step for step in hosted["steps"] if step.get("name") == LOCALE_STEP]
+    if len(steps) != 1 or steps[0] != {
+        "name": LOCALE_STEP,
+        "if": "${{ !cancelled() }}",
+        "env": {
+            "RUNNER_LABELS": "",
+            "ACTIONS_CI_COMMAND_BUDGET_SECONDS": (
+                "${{ github.event_name == 'pull_request' && '60' || '' }}"
+            ),
+        },
+        "run": f"bash scripts/actions-ci-group.sh {LOCALE_GROUP}",
+    }:
+        raise AssertionError("hosted locale-collation step drifted")
+    importers = locale_importers(sources)
+    if not importers:
+        raise AssertionError(f"no tracked script imports {LOCALE_MODULE}")
+    locale_scripts = set()
+    for group, command in manifest_rows(candidate_manifest):
+        scripts = row_scripts(command, sources)
+        if group == LOCALE_GROUP:
+            locale_scripts |= scripts
+        else:
+            escaped = fleet_reached_importers(scripts, sources, importers)
+            if escaped:
+                raise AssertionError(
+                    f"locale-helper importer {sorted(escaped)} runs outside "
+                    f"locale-collation: {group}\t{command}"
+                )
+    if locale_scripts != importers:
+        raise AssertionError(
+            "locale-collation membership drifted: rows run "
+            f"{sorted(locale_scripts)} but {LOCALE_MODULE} importers are "
+            f"{sorted(importers)}"
+        )
+
+
+validate_locale_collation(document, manifest_text)
+print("ok - every manifest group has one runner; en_US.UTF-8 contracts run hosted")
+
+
+def expect_locale_failure(
+    label, candidate, candidate_manifest, sources=script_sources, reason=None
+):
+    """`reason`, when given, must appear in the error, so an unrelated failure is not credit."""
+    try:
+        validate_locale_collation(candidate, candidate_manifest, sources)
+    except (AssertionError, KeyError, ValueError) as error:
+        if reason is not None and reason not in str(error):
+            raise AssertionError(f"{label} failed for another reason: {error}") from error
+        print(f"ok - {label} fails closed")
+    else:
+        raise AssertionError(f"{label} passed")
+
+
+removed_step = copy.deepcopy(document)
+removed_step["jobs"]["hosted-compatibility-tests"]["steps"] = [
+    step for step in removed_step["jobs"]["hosted-compatibility-tests"]["steps"]
+    if step.get("name") != LOCALE_STEP
+]
+expect_locale_failure("hosted locale-collation step removal", removed_step, manifest_text)
+fleet_runner = copy.deepcopy(document)
+fleet_runner["jobs"]["hosted-compatibility-tests"]["runs-on"] = (
+    document["jobs"]["shell-test-groups"]["runs-on"]
+)
+expect_locale_failure("locale-collation fleet routing", fleet_runner, manifest_text)
+wrong_group = copy.deepcopy(document)
+next(
+    step for step in wrong_group["jobs"]["hosted-compatibility-tests"]["steps"]
+    if step.get("name") == LOCALE_STEP
+)["run"] = "bash scripts/actions-ci-group.sh docs"
+expect_locale_failure("locale-collation step running another group", wrong_group, manifest_text)
+skippable = copy.deepcopy(document)
+next(
+    step for step in skippable["jobs"]["hosted-compatibility-tests"]["steps"]
+    if step.get("name") == LOCALE_STEP
+)["continue-on-error"] = True
+expect_locale_failure("continue-on-error locale-collation step", skippable, manifest_text)
+expect_locale_failure(
+    "locale contract moved to a fleet group",
+    document,
+    manifest_text.replace(
+        "locale-collation\tpython3 scripts/ci-gate/settable-value-guards.test.py",
+        "merge-gate\tpython3 scripts/ci-gate/settable-value-guards.test.py",
+    ),
+)
+expect_locale_failure(
+    "non-locale contract added to locale-collation",
+    document,
+    manifest_text + "locale-collation\tbash scripts/actions-ci-group-output.test.sh\n",
+)
+expect_locale_failure(
+    "manifest group without a runner",
+    document,
+    manifest_text + "orphan\tbash scripts/actions-ci-group-output.test.sh\n",
+)
+
+retention_script = "scripts/ci-gate/release-verify-retention-keep.test.py"
+retention_row = f"{LOCALE_GROUP}\tpython3 {retention_script}\n"
+retention_import = "import ascii_digit_locales  # noqa: E402\n"
+if retention_row not in manifest_text or retention_import not in script_sources[retention_script]:
+    raise AssertionError("locale membership mutation fixtures no longer match their sources")
+expect_locale_failure(
+    "locale contract row deleted",
+    document,
+    manifest_text.replace(retention_row, "", 1),
+)
+platform_manifest = manifest_text.replace(
+    retention_row, f"platform\tpython3 {retention_script}\n", 1
+)
+respellings = {
+    "from-import": "from ascii_digit_locales import guard_locales  # noqa: E402\n",
+    "dunder-import": 'ascii_digit_locales = __import__("ascii_digit_locales")\n',
+    "importlib": (
+        "import importlib\n"
+        'ascii_digit_locales = importlib.import_module("ascii_digit_locales")\n'
+    ),
+    "package-from-import": "from ci_gate import ascii_digit_locales\n",
+}
+for spelling, replacement in respellings.items():
+    respelled = dict(script_sources)
+    respelled[retention_script] = respelled[retention_script].replace(
+        retention_import, replacement, 1
+    )
+    # Positive control: the respelled import is still recognized when its row
+    # stays in locale-collation, so the failure below is the move, not the spelling.
+    validate_locale_collation(document, manifest_text, respelled)
+    expect_locale_failure(
+        f"{spelling} importer moved to a fleet group", document, platform_manifest, respelled
+    )
+unclassifiable = dict(script_sources)
+unclassifiable[retention_script] = unclassifiable[retention_script].replace(
+    retention_import,
+    'ascii_digit_locales = getattr(importlib, "import_module")("ascii_digit_locales")\n',
+    1,
+)
+expect_locale_failure(
+    "unclassifiable locale-helper reference", document, manifest_text, unclassifiable
+)
+shell_mention = dict(script_sources)
+shell_mention["scripts/ci-gate/locale-probe.test.sh"] = (
+    "python3 - <<'EOF'\nimport ascii_digit_locales\nEOF\n"
+)
+expect_locale_failure("shell-embedded locale-helper import", document, manifest_text, shell_mention)
+
+# A row runs whatever script bash resolves, however the path is spelled. Each
+# spelling is a positive control in locale-collation and a failure in a fleet
+# group, so the failure is the move, not an unresolvable spelling.
+retention_parent, retention_name = retention_script.rsplit("/", 1)
+for spelling, command in {
+    "quoted": f'python3 "{retention_script}"',
+    "single-quoted": f"python3 '{retention_script}'",
+    "dot-relative": f"python3 ./{retention_script}",
+    "absolute": f"python3 {repository_root}/{retention_script}",
+    "relative after cd": f"cd {retention_parent} && python3 {retention_name}",
+    "relative after quoted cd": f'cd "{retention_parent}" && python3 ./{retention_name}',
+    "flagged interpreter": f"python3 -I {retention_script} >/dev/null 2>&1",
+}.items():
+    validate_locale_collation(
+        document,
+        manifest_text.replace(retention_row, f"{LOCALE_GROUP}\t{command}\n", 1),
+    )
+    expect_locale_failure(
+        f"{spelling} importer path moved to a fleet group",
+        document,
+        manifest_text.replace(retention_row, f"{LOCALE_GROUP}\tpython3 {retention_script}\nplatform\t{command}\n", 1),
+        reason="runs outside locale-collation",
+    )
+for spelling, command in {
+    "variable script path": 'python3 "$SCRIPT"',
+    "inline python": "python3 -c 'import sys'",
+    "module invocation": "python3 -m unittest",
+    "unknown command": "make test",
+    "glob script path": "bash scripts/ci-gate/*.test.sh",
+    "cd to a variable": 'cd "$HOME" && bash scripts/actions-ci-group-output.test.sh',
+    "no command": "@budget=60",
+    "unknown command beside a script": "make check && bash scripts/actions-ci-group-output.test.sh",
+}.items():
+    expect_locale_failure(
+        f"fleet row with an unresolvable {spelling}",
+        document,
+        manifest_text + f"platform\t{command}\n",
+    )
+
+# A `$` or backtick anywhere in a row -- an argument, an assignment, or a
+# redirection target, not only the script word -- can run code at run time.
+benign_row = "bash scripts/actions-ci-group-output.test.sh"
+for spelling, command in {
+    "a command-substitution argument": f'{benign_row} "$(python3 {retention_script})"',
+    "a backtick argument": f"{benign_row} `python3 {retention_script}`",
+    "an expanding assignment": f'PROBE="$(python3 {retention_script})" {benign_row}',
+    "an expanding redirection target": f'{benign_row} >"$(python3 {retention_script})"',
+    "a variable argument": f'{benign_row} "$PROBE"',
+}.items():
+    expect_locale_failure(
+        f"fleet row with {spelling}",
+        document,
+        manifest_text + f"platform\t{command}\n",
+        reason="expands at run time",
+    )
+
+# Rows run under `bash -o pipefail -c` without `-e`, so `||`, `&`, and `;` each
+# let a script fail while the row still exits 0. Only `&&` and `|` chain.
+for spelling, command in {
+    "`||`": f"{benign_row} || {benign_row}",
+    "a mid-row `&`": f"{benign_row} & {benign_row}",
+    "a trailing `&`": f"{benign_row} &",
+    "`;`": f"{benign_row}; {benign_row}",
+}.items():
+    expect_locale_failure(
+        f"fleet row joined by {spelling}",
+        document,
+        manifest_text + f"platform\t{command}\n",
+        reason="hides the exit status",
+    )
+
+# Importers outside scripts/ are scanned too, and a row may not run a script
+# the scan does not cover.
+# Fixture files enter the sources only where tracked_script_sources would scan them.
+def with_tracked(extra):
+    return {**script_sources, **{path: text for path, text in extra.items() if scanned(path)}}
+
+
+action_probe = ".github/actions/zzprobe/zz.test.py"
+action_importer = with_tracked({
+    action_probe: (
+        "import pathlib, sys\n"
+        "sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / 'scripts/ci-gate'))\n"
+        "import ascii_digit_locales\n"
+    ),
+})
+expect_locale_failure(
+    "importer outside scripts/ in a fleet group",
+    document,
+    manifest_text + f"platform\tpython3 {action_probe}\n",
+    action_importer,
+    reason="runs outside locale-collation",
+)
+expect_locale_failure(
+    "unregistered importer outside scripts/",
+    document,
+    manifest_text,
+    action_importer,
+    reason="membership drifted",
+)
+
+# A fleet shell row reaches every script its body runs, transitively, so a
+# wrapper cannot carry an importer out of locale-collation.
+wrapper = "scripts/ci-gate/zz-probe.test.sh"
+for spelling, body in {
+    "sibling exec": f'exec python3 "$(dirname "$0")/{retention_name}"\n',
+    "repository path": f'python3 "$root/{retention_script}" "$@"\n',
+    "assigned name": f'name={retention_name}\nexec python3 "$here/$name"\n',
+}.items():
+    wrapped = dict(script_sources)
+    wrapped[wrapper] = f"#!/usr/bin/env bash\n{body}"
+    expect_locale_failure(
+        f"fleet shell wrapper running an importer by {spelling}",
+        document,
+        manifest_text + f"platform\tbash {wrapper}\n",
+        wrapped,
+        reason="runs outside locale-collation",
+    )
+nested = dict(script_sources)
+nested[wrapper] = 'exec bash "$(dirname "$0")/zz-inner.sh"\n'
+nested["scripts/ci-gate/zz-inner.sh"] = f"exec python3 {retention_script}\n"
+expect_locale_failure(
+    "nested fleet shell wrapper running an importer",
+    document,
+    manifest_text + f"platform\tbash {wrapper}\n",
+    nested,
+    reason="runs outside locale-collation",
+)
+# The comment stripper does not model heredocs or `\'` inside `$'...'`, so a
+# stray quote can shift its quote tracking until a later `#` swallows real code.
+# A runnable name that survives in the raw text (whole-line comments aside) but
+# not in the lexed words makes the wrapper unclassifiable, directly or through
+# a further wrapper whose name was the one dropped.
+for spelling, body in {
+    "heredoc apostrophe": (
+        "cat <<EOF\ndon't\nEOF\n"
+        f"x='a #b'; python3 \"$root/{retention_script}\"\n"
+    ),
+    "ANSI-C escaped quote": f"echo $'it\\'s # x'; python3 \"$root/{retention_script}\"\n",
+    "dropped inner wrapper": (
+        "echo $'it\\'s # x'; exec bash \"$(dirname \"$0\")/zz-inner.sh\"\n"
+    ),
+}.items():
+    misread = dict(script_sources)
+    misread[wrapper] = f"#!/usr/bin/env bash\n{body}"
+    misread["scripts/ci-gate/zz-inner.sh"] = f"exec python3 {retention_script}\n"
+    expect_locale_failure(
+        f"fleet shell wrapper whose {spelling} hides a run from the lexer",
+        document,
+        manifest_text + f"platform\tbash {wrapper}\n",
+        misread,
+        reason="the lexer dropped",
+    )
+subprocess_runner = dict(script_sources)
+subprocess_runner["scripts/ci-gate/zz-sub.test.py"] = (
+    f'import subprocess\nsubprocess.run(["python3", "{retention_script}"], check=True)\n'
+)
+expect_locale_failure(
+    "fleet Python running an importer as a subprocess",
+    document,
+    manifest_text + "platform\tpython3 scripts/ci-gate/zz-sub.test.py\n",
+    subprocess_runner,
+    reason="runs outside locale-collation",
+)
+too_deep = dict(script_sources)
+for level in range(SHELL_FOLLOW_DEPTH + 2):
+    too_deep[f"scripts/ci-gate/zz-level{level}.sh"] = (
+        f'exec bash "$(dirname "$0")/zz-level{level + 1}.sh"\n'
+    )
+too_deep[f"scripts/ci-gate/zz-level{SHELL_FOLLOW_DEPTH + 2}.sh"] = "true\n"
+# The error names where following stopped -- the depth reached and the files
+# still unvisited there -- not only the bound.
+expect_locale_failure(
+    "fleet shell chain deeper than the follow bound",
+    document,
+    manifest_text + "platform\tbash scripts/ci-gate/zz-level0.sh\n",
+    too_deep,
+    reason=(
+        f"after {SHELL_FOLLOW_DEPTH + 1} levels, "
+        f"['scripts/ci-gate/zz-level{SHELL_FOLLOW_DEPTH + 1}.sh'] are still unvisited"
+    ),
+)
+# Positive controls: a comment that names an importer, and a wrapper that runs
+# only a non-importer, stay classifiable in a fleet group.
+benign = dict(script_sources)
+benign[wrapper] = (
+    f"# unlike {retention_script}, this needs no hazard locale\n"
+    "exec bash scripts/actions-ci-group-output.test.sh\n"
+)
+validate_locale_collation(document, manifest_text + f"platform\tbash {wrapper}\n", benign)
+print("ok - a fleet wrapper naming an importer only in a comment stays classifiable")
+
+for location, reason in {
+    "/tmp/zz.test.py": "lies outside the repository",
+    "../zz.test.py": "lies outside the repository",
+    "scripts/ci-gate/zz-untracked.test.py": "is not a tracked file in the scanned roots",
+}.items():
+    expect_locale_failure(
+        f"fleet row script {location} outside the scanned roots",
+        document,
+        manifest_text + f"platform\tpython3 {location}\n",
+        reason=reason,
+    )
 
 required = jobs["shell-tests"]
 assert required["needs"] == [
@@ -463,7 +1271,7 @@ validate_manifest() {
     BEGIN { valid = 1 }
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
     NF != 2 { valid = 0; next }
-    $1 !~ /^(platform|merge-gate|changelog-release-[1-4]|docs)$/ { valid = 0; next }
+    $1 !~ /^(platform|merge-gate|changelog-release-[1-4]|docs|locale-collation)$/ { valid = 0; next }
     seen[$2]++ { valid = 0 }
     { groups[$1]++; total++ }
     END {
@@ -474,7 +1282,8 @@ validate_manifest() {
         groups["changelog-release-2"] > 0 &&
         groups["changelog-release-3"] > 0 &&
         groups["changelog-release-4"] > 0 &&
-        groups["docs"] > 0)) {
+        groups["docs"] > 0 &&
+        groups["locale-collation"] > 0)) {
         valid = 0
       }
       exit valid ? 0 : 1
@@ -509,7 +1318,7 @@ LOAD_BEARING_COMMANDS
 }
 
 if validate_manifest "$manifest"; then
-  pass "manifest assigns every command once across the platform, merge-gate, docs, and changelog-release cells"
+  pass "manifest assigns every command once across the platform, merge-gate, docs, changelog-release, and locale-collation cells"
 else
   fail "manifest is missing, malformed, duplicated, or incompletely grouped"
 fi
@@ -531,8 +1340,10 @@ fi
 #   and must be reachable in Actions, UNLESS it is declared below as a library
 #   module. "Reachable in Actions" means named as a command argument in
 #   `scripts/actions-ci-groups.tsv`, or in the hosted-compatibility job's run
-#   step, or named anywhere in a tracked workflow or composite action under
-#   `.github/` -- each of which is an execution path Actions actually takes.
+#   step, or named in a parsed key or value of a tracked workflow or composite
+#   action under `.github/` -- each of which is an execution path Actions
+#   actually takes. A comment is not one: a mention in a YAML comment, or in a
+#   shell comment inside a `run` block, never counts.
 #
 # Adding a file under `scripts/ci-gate/` therefore has exactly two honest
 # outcomes: register it somewhere Actions runs it, or declare it here as a
@@ -553,20 +1364,21 @@ fi
 # named only by a workflow whose triggers never fire, or guarded by an `if:` that
 # is never true, still counts as reachable here -- as does one named only by a
 # `sparse-checkout:` entry or an `env:` value while its invocation is deleted,
-# since the name is matched anywhere in the workflow text and those shapes are
+# since the name is matched anywhere in the parsed workflow values and those shapes are
 # real in this tree. Reachability of workflows themselves is a separate
 # invariant and a separate check.
 if python3 - "$root" "$manifest" "$workflow" <<'PY'
 import ast
 from functools import lru_cache
 import pathlib
-import shlex
 import subprocess
 import sys
 
 import yaml
 
 root = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+import shell_words  # noqa: E402
 manifest_text = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 document = yaml.safe_load(pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"))
 
@@ -574,6 +1386,12 @@ document = yaml.safe_load(pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"))
 # command of their own, so no manifest row could run them. Each entry carries the
 # reason it is not a gate; adding one is a reviewable act, not a naming accident.
 NON_GATE_MODULES = {
+    "scripts/ci-gate/ascii_digit_locales.py": (
+        "locale-matrix helper imported by the digit-guard tests"
+    ),
+    "scripts/ci-gate/settable_value_guards.py": (
+        "shell guard scanner imported by settable-value-guards.test.py"
+    ),
     "scripts/ci-gate/conformance/adopter.py": (
         "adopter fixture loader imported by conformance.test.py"
     ),
@@ -632,16 +1450,20 @@ if not gate_scripts:
     )
 
 
-def referenced(text):
+# Every mutation re-lexes the same unchanged run blocks; a failed lex raises and
+# is never cached, so a malformed block still fails each time it is read.
+@lru_cache(maxsize=None)
+def shell_tokens(text):
+    return tuple(shell_words.words(text))
+
+
+def referenced(text, candidates=None):
     """Tracked ci-gate paths mentioned by shell tokens on an execution path."""
-    logical_text = text.replace("\\\r\n", "").replace("\\\n", "")
-    lexer = shlex.shlex(logical_text, posix=True, punctuation_chars=True)
-    lexer.whitespace_split = True
-    lexer.commenters = "#"
+    candidates = gate_scripts if candidates is None else candidates
     try:
-        tokens = list(lexer)
+        tokens = shell_tokens(text)
     except ValueError as error:
-        mentioned = sorted(path for path in gate_scripts if path in logical_text)
+        mentioned = sorted(path for path in candidates if path in text)
         if not mentioned:
             return set()
         evidence = ", ".join(mentioned)
@@ -656,8 +1478,26 @@ def referenced(text):
         # unsupported wrapper forms all retain the repository-relative path.
         # Counting every such mention fails closed instead of letting shell
         # spelling turn a declared library into an unregistered gate.
-        seen.update(path for path in gate_scripts if path in token)
+        seen.update(path for path in candidates if path in token)
     return seen
+
+
+# Bash starts a comment only at a word-initial `#`; inside a word (`${#arr[@]}`,
+# a URL fragment) it is data, and dropping the rest of that line would lose a
+# real reference and report a registered gate as unreachable.
+COMMENT_PROBE = "scripts/ci-gate/x.test.sh"
+for source, expected in (
+    (f"n=${{#arr[@]}}; bash {COMMENT_PROBE}", {COMMENT_PROBE}),
+    (f"curl https://h/p#frag && bash {COMMENT_PROBE}", {COMMENT_PROBE}),
+    (f"printf '%s' '# kept' && bash {COMMENT_PROBE}", {COMMENT_PROBE}),
+    (f"echo ok # bash {COMMENT_PROBE}", set()),
+    (f"echo ok;# bash {COMMENT_PROBE}", set()),
+    (f"# bash {COMMENT_PROBE}\necho ok", set()),
+):
+    found = referenced(source, [COMMENT_PROBE])
+    if found != expected:
+        raise AssertionError(f"shell comment handling: {source!r} found {found}")
+print("ok - only a word-initial # starts a shell comment")
 
 
 def workflow_source(path):
@@ -676,9 +1516,6 @@ workflow_sources = {
     for path in tracked(".github/workflows", ".github/actions")
     if path.endswith((".yml", ".yaml"))
 }
-workflow_text = "\n".join(workflow_sources.values())
-
-
 exact_commands = referenced(manifest_text) | referenced(hosted_run)
 
 
@@ -700,15 +1537,47 @@ def parse_workflow(source):
     return yaml.safe_load(source)
 
 
-def invocation_paths(sources):
+def invocation_paths(sources, candidates=None):
     invoked = set(exact_commands)
     for source in sources.values():
         for run_block in run_blocks(parse_workflow(source)):
-            invoked.update(referenced(run_block))
+            invoked.update(referenced(run_block, candidates))
     return invoked
 
 
-invoked_paths = invocation_paths(workflow_sources)
+def yaml_strings(value):
+    """String keys and values a parsed document carries, except shell `run` blocks.
+
+    Parsing drops YAML comments; `run` blocks are read by `referenced`, whose
+    shell lexer drops shell comments, so neither kind of comment is a mention.
+    """
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if isinstance(key, str):
+                yield key
+            if key == "run" and isinstance(child, str):
+                continue
+            yield from yaml_strings(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from yaml_strings(child)
+    elif isinstance(value, str):
+        yield value
+
+
+def reachability(sources, candidates=None):
+    """A comment is not an execution path: a test file named only in a comment
+    beside the step it documents must not count as registered."""
+    invoked = invocation_paths(sources, candidates)
+    mentions = "\n".join(
+        text
+        for source in sources.values()
+        for text in yaml_strings(parse_workflow(source))
+    )
+    return lambda path: path in invoked or path in mentions
+
+
+workflow_reachable = reachability(workflow_sources)
 
 
 CI_GATE_ROOT = pathlib.PurePosixPath("scripts/ci-gate")
@@ -764,13 +1633,28 @@ def namespace_roots(reference, roots, tracked_python):
 def imported_paths(importer, sources):
     """Return exact tracked Python paths statically imported by one script."""
     try:
-        tree = ast.parse(sources[importer], filename=importer)
-    except (KeyError, SyntaxError) as error:
+        text = sources[importer]
+    except KeyError as error:
+        raise SystemExit(
+            f"{importer} could not be parsed while checking non-gate imports: {error}"
+        ) from error
+    return parsed_imports(importer, text, frozenset(sources))
+
+
+# `importers_of` asks every script for its imports once per declared module and
+# once more per mutation, so an uncached walk re-parses each script thousands of
+# times and pushed this row past its pull-request budget on a loaded runner.
+# The key is everything the answer depends on: the script's own text and the
+# tracked set its imports resolve against, so a mutated source still re-parses.
+@lru_cache(maxsize=None)
+def parsed_imports(importer, text, tracked_python):
+    try:
+        tree = ast.parse(text, filename=importer)
+    except SyntaxError as error:
         raise SystemExit(
             f"{importer} could not be parsed while checking non-gate imports: {error}"
         ) from error
 
-    tracked_python = set(sources)
     resolved = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -817,7 +1701,7 @@ def imported_paths(importer, sources):
                 )
         else:
             continue
-    return resolved
+    return frozenset(resolved)
 
 
 def importers_of(path, sources=python_sources):
@@ -828,18 +1712,15 @@ def importers_of(path, sources=python_sources):
     ]
 
 
-def is_reachable(path):
-    # The manifest and the hosted step are executed verbatim, so match their
-    # command arguments exactly. A workflow may interpolate a path into a longer
-    # expression, so accept it being named anywhere in one.
-    return path in exact_commands or path in workflow_text
-
-
-def unaccounted(candidate_paths):
+def unaccounted(candidate_paths, reachable=workflow_reachable):
+    # The manifest and the hosted step are executed verbatim, so their command
+    # arguments match exactly (`invocation_paths` starts from them), as do the
+    # shell tokens of every `run` block. A workflow may interpolate a path into a
+    # longer expression, so any other parsed key or value may also name it.
     return [
         path
         for path in candidate_paths
-        if path not in NON_GATE_MODULES and not is_reachable(path)
+        if path not in NON_GATE_MODULES and not reachable(path)
     ]
 
 
@@ -1013,6 +1894,35 @@ if unaccounted([*gate_scripts, *probes]) != probes:
         "the detector does not flag every known-unregistered gate script; it must "
         "not depend on the `.test.` suffix"
     )
+
+comment_probe = probes[0]
+comment_forms = {
+    "YAML comment": f"# runs {comment_probe}\njobs:\n  probe:\n    steps:\n      - run: true\n",
+    "trailing YAML comment": (
+        f"jobs:\n  probe:\n    steps:\n      - run: true  # {comment_probe}\n"
+    ),
+    "shell comment in a run block": (
+        "jobs:\n  probe:\n    steps:\n      - run: |\n"
+        f"          # guard proven by {comment_probe}\n          true\n"
+    ),
+}
+for form, source in comment_forms.items():
+    commented = dict(workflow_sources)
+    commented[".github/workflows/comment-probe.yml"] = source
+    if unaccounted([comment_probe], reachability(commented, probes)) != [comment_probe]:
+        raise SystemExit(f"a ci-gate path named only in a {form} counted as reachable")
+named_forms = {
+    "run command": f"jobs:\n  probe:\n    steps:\n      - run: bash {comment_probe}\n",
+    "step input": (
+        "jobs:\n  probe:\n    steps:\n      - uses: ./x\n"
+        f"        with:\n          script: {comment_probe}\n"
+    ),
+}
+for form, source in named_forms.items():
+    named = dict(workflow_sources)
+    named[".github/workflows/value-probe.yml"] = source
+    if unaccounted([comment_probe], reachability(named, probes)):
+        raise SystemExit(f"a ci-gate path named in a workflow {form} did not count as reachable")
 PY
 then
   pass "every ci-gate script runs in the actions-ci manifest, the hosted compatibility job, or a workflow"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 1 ] || [[ ! "$1" =~ ^[0-9a-f]{40}$ ]]; then
+if [ "$#" -ne 1 ] || [[ ! "$1" =~ ^[0123456789abcdef]{40}$ ]]; then
   echo "usage: gen-ai-review-caller.sh <40-character-contract-sha>" >&2
   exit 2
 fi

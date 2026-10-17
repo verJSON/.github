@@ -240,7 +240,7 @@ def validate_workflow(path=WORKFLOW):
         'live_state" = open',
         "live_repository",
         'live_head_sha" = "$run_head_sha',
-        '[[ "$live_head_sha" =~ ^[0-9a-f]{40}$ ]]',
+        '[[ "$live_head_sha" =~ ^[0123456789abcdef]{40}$ ]]',
         ".base.ref",
         '[ "$live_base_ref" = main ]',
         "contents/.github/workflows/ci.yml?ref=$live_head_sha",

@@ -38,7 +38,7 @@ def validate(workflow):
         "JOB_CONTEXT": "${{ toJSON(job) }}",
     }
     expected_identity = "Verjson/.github/.github/workflows/container-release.yml@$CONTRACT_REF"
-    if guard.get("env") != expected_guard_env or "^[0-9a-f]{40}$" not in guard_script or expected_identity not in guard_script:
+    if guard.get("env") != expected_guard_env or "^[0123456789abcdef]{40}$" not in guard_script or expected_identity not in guard_script:
         errors.append("contract ref guard is not exact")
     if steps.index(guard) != 0:
         errors.append("contract ref guard does not precede acquisition")

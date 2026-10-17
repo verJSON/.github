@@ -105,7 +105,7 @@ jobs:
           NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
         run: |
           set -euo pipefail
-          [[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]]
           gh api "repos/Verjson/.github/tarball/$CONTRACT_REF" > "$RUNNER_TEMP/deployment-contract.tar.gz"
           mkdir "$RUNNER_TEMP/deployment-contract"
           tar -xzf "$RUNNER_TEMP/deployment-contract.tar.gz" \
@@ -137,8 +137,8 @@ jobs:
           RUNNER_HOST_EVIDENCE_KNOWN_HOSTS: ${{ secrets.RUNNER_HOST_EVIDENCE_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-          [[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$MANIFEST_IDENTITY" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]]
+          [[ "$MANIFEST_IDENTITY" =~ ^sha256:[0123456789abcdef]{64}$ ]]
           python3 -I scripts/container_deployment_controller.py collect-evidence \
             --preview \
             --config "$CONFIG_PATH" --manifest-identity "$MANIFEST_IDENTITY" \
@@ -221,7 +221,7 @@ jobs:
           NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
         run: |
           set -euo pipefail
-          [[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]]
           gh api "repos/Verjson/.github/tarball/$CONTRACT_REF" > "$RUNNER_TEMP/deployment-contract.tar.gz"
           mkdir "$RUNNER_TEMP/deployment-contract"
           tar -xzf "$RUNNER_TEMP/deployment-contract.tar.gz" \
@@ -532,7 +532,7 @@ jobs:
           EXPECTED_INSTALLATION_ID: ${{ vars.GH_RUNNER_REGISTRATION_APP_INSTALLATION_ID }}
         run: |
           set -euo pipefail
-          [[ "$EXPECTED_INSTALLATION_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_INSTALLATION_ID" =~ ^[123456789][0123456789]{0,14}$ ]]
           test "$ACTUAL_INSTALLATION_ID" = "$EXPECTED_INSTALLATION_ID"
       - name: Advance one bounded runner transition
         id: advance_1

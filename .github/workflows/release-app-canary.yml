@@ -56,7 +56,7 @@ jobs:
         env:
           RELEASE_APP_CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
         run: |
-          if [[ -z "$RELEASE_APP_CLIENT_ID" || "$RELEASE_APP_CLIENT_ID" =~ ^[0-9]+$ ]]; then
+          if [[ -z "$RELEASE_APP_CLIENT_ID" || "$RELEASE_APP_CLIENT_ID" =~ ^[0123456789]+$ ]]; then
             echo "::error::RELEASE_APP_CLIENT_ID must be the GitHub App client ID, not an empty or numeric legacy App ID."
             exit 1
           fi

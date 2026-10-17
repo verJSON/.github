@@ -215,7 +215,7 @@ fi
 release_asset_names=()
 release_assets_seen=()
 for release_asset in "${release_assets[@]}"; do
-  [[ "$release_asset" =~ ^[A-Za-z0-9._][A-Za-z0-9._-]*(/[A-Za-z0-9._][A-Za-z0-9._-]*)*$ ]] \
+  [[ "$release_asset" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*(/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*)*$ ]] \
     && [[ "/$release_asset/" != */./* ]] && [[ "/$release_asset/" != */../* ]] || {
     echo "$(basename "$0"): --release-asset must be a normalized repository-relative path" >&2
     exit 2
@@ -241,7 +241,7 @@ if [ "$mode" = release-artifact ] && [ "${#release_build_runners[@]}" -eq 0 ]; t
   exit 2
 fi
 for release_build_runner in "${release_build_runners[@]}"; do
-  [[ "$release_build_runner" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+  [[ "$release_build_runner" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*$ ]] \
     && [[ ! "$release_build_runner" =~ ^(vars|inputs|matrix|needs|github|env|secrets)\. ]] \
     && [[ ! "$release_build_runner" =~ ^(macos|windows)- ]] \
     || [[ "$release_build_runner" =~ ^\$\{\{[[:space:]]fromJSON\(vars\.CI_LANE_TRUSTED_(MACOS|WINDOWS)\)[[:space:]]\}\}$ ]] || {
@@ -251,7 +251,7 @@ for release_build_runner in "${release_build_runners[@]}"; do
 done
 release_approved_packages_seen=()
 for release_approved_package in "${release_approved_internal_packages[@]}"; do
-  [[ "$release_approved_package" =~ ^@verjson/[a-z0-9][a-z0-9._-]*$ ]] || {
+  [[ "$release_approved_package" =~ ^@verjson/[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789._-]*$ ]] || {
     echo "$(basename "$0"): --approved-internal-package must be an exact lowercase @verjson package name" >&2
     exit 2
   }
@@ -273,7 +273,7 @@ if [ "$pr_gate_untrusted_runner_set" = true ] && [ "$mode" != pr-gate ]; then
 fi
 pr_gate_runs_on="ubuntu-24.04"
 if [ "$pr_gate_untrusted_runner_set" = true ]; then
-  [[ "$pr_gate_untrusted_runner" =~ ^[a-z0-9][a-z0-9_.-]*(,[a-z0-9][a-z0-9_.-]*)*$ ]] || {
+  [[ "$pr_gate_untrusted_runner" =~ ^[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789_.-]*(,[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789_.-]*)*$ ]] || {
     echo "$(basename "$0"): --untrusted-runner must be a comma-separated list of runner labels" >&2
     exit 2
   }
@@ -292,12 +292,12 @@ if [ "$mode" = release-propose ]; then
 elif [ -n "$release_autonomy" ]; then
   usage
 fi
-[[ "$release_scope" =~ ^@[a-z0-9][a-z0-9._~-]*$ ]] \
+[[ "$release_scope" =~ ^@[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789._~-]*$ ]] \
   && [ "${#release_scope}" -le 214 ] || {
   echo "$(basename "$0"): scope must be a lowercase npm scope such as @verjson" >&2
   exit 2
 }
-[[ "$release_node_version" =~ ^(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)){0,2}$ ]] || {
+[[ "$release_node_version" =~ ^(0|[123456789][0123456789]*)(\.(0|[123456789][0123456789]*)){0,2}$ ]] || {
   echo "$(basename "$0"): node version must be a numeric major, major.minor, or major.minor.patch" >&2
   exit 2
 }
@@ -306,11 +306,11 @@ if [ "$release_default_prefix_set" != "$release_default_component_set" ]; then
   exit 2
 fi
 if [ "$release_default_prefix_set" = true ]; then
-  [[ "$release_default_prefix" =~ ^[a-z0-9][a-z0-9._-]*-v$ ]] || {
+  [[ "$release_default_prefix" =~ ^[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789._-]*-v$ ]] || {
     echo "$(basename "$0"): --default-prefix must be a lowercase stream name followed by -v" >&2
     exit 2
   }
-  [[ "$release_default_component" =~ ^[a-z0-9]$|^[a-z0-9][a-z0-9._-]{0,62}[a-z0-9]$ ]] || {
+  [[ "$release_default_component" =~ ^[abcdefghijklmnopqrstuvwxyz0123456789]$|^[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789._-]{0,62}[abcdefghijklmnopqrstuvwxyz0123456789]$ ]] || {
     echo "$(basename "$0"): --default-component must be a 1-64 character lowercase component identifier" >&2
     exit 2
   }
@@ -331,7 +331,7 @@ for package_dir in "${release_package_dirs[@]}"; do
   done
   seen_package_dirs+=("$package_dir")
   [ "$package_dir" = . ] && continue
-  [[ "$package_dir" =~ ^[A-Za-z0-9._][A-Za-z0-9._-]*(/[A-Za-z0-9._][A-Za-z0-9._-]*)*$ ]] || {
+  [[ "$package_dir" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*(/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*)*$ ]] || {
     echo "$(basename "$0"): package dir must be a normalized repository-relative path" >&2
     exit 2
   }
@@ -363,7 +363,7 @@ selected_package_dirs_json="$selected_package_dirs_json]"
 # one into YAML, one into a shell assignment — so anything other than a bare
 # commit is an injection vector. The sibling gen-privileged-merge-caller.sh
 # documents a live instance of exactly that class.
-[[ "$ref" =~ ^[0-9a-f]{40}$ ]] || {
+[[ "$ref" =~ ^[0123456789abcdef]{40}$ ]] || {
   echo "$(basename "$0"): ref must be a 40-character lowercase commit SHA" >&2
   exit 2
 }
@@ -408,7 +408,7 @@ contract_sha256="$(resolve_contract_digest)" || {
   echo "$(basename "$0"): cannot resolve the contract digest at $ref" >&2
   exit 1
 }
-[[ "$contract_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+[[ "$contract_sha256" =~ ^[0123456789abcdef]{64}$ ]] || {
   echo "$(basename "$0"): resolved digest is not a sha256: $contract_sha256" >&2
   exit 1
 }
@@ -693,6 +693,15 @@ EOF
 # drift; the generated contract test asserts they are still identical.
 release_runner_expr="github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || '[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]'"
 
+# The package retention window, exactly as the post-publish retention jobs in
+# node-release.yml and container-release.yml read it. A release verification
+# hook that holds back a still-consumed version (verjson-ci#298) must protect
+# against the window those jobs will actually delete against, so it reads the
+# same organization variable through the same expression; a reusable workflow's
+# `vars` context is the caller's, so both halves resolve one value.
+# scripts/ci-gate/release-verify-retention-keep.test.py fails if either drifts.
+package_retention_keep_expr="vars.CI_PACKAGE_RETENTION_KEEP || '3'"
+
 # The audited action commits this repository pins everywhere else
 # (scripts/node-workflow-pins.test.sh).
 release_checkout='actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7'
@@ -954,8 +963,8 @@ ${release_version_guard_step}
         run: |
           if [ -z "\$EXPECTED_HEAD" ] && [ -z "\$SELECTOR_DIGEST" ]; then
             echo "Manual dispatch has no proposer receipt to bind."
-          elif [[ ! "\$EXPECTED_HEAD" =~ ^[0-9a-f]{40}\$ ]] ||
-            [[ ! "\$SELECTOR_DIGEST" =~ ^[0-9a-f]{64}\$ ]]; then
+          elif [[ ! "\$EXPECTED_HEAD" =~ ^[0123456789abcdef]{40}\$ ]] ||
+            [[ ! "\$SELECTOR_DIGEST" =~ ^[0123456789abcdef]{64}\$ ]]; then
             echo "::error::expected_head and selector_digest must either both be empty or both be canonical lowercase digests."
             exit 1
           elif [ "\$GITHUB_SHA" != "\$EXPECTED_HEAD" ]; then
@@ -1166,6 +1175,7 @@ ${release_plan_step}
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           RELEASE_VERIFICATION_PATH: \${{ steps.release-verification-runtime.outputs.path }}
           VERJSON_CHANGELOG_TOOL_CACHE: \${{ steps.release-verification-runtime.outputs.cache }}
+          CI_PACKAGE_RETENTION_KEEP: \${{ ${package_retention_keep_expr} }}
           CI: 'true'
           BASH_ENV: ''
           ENV: ''
@@ -1193,6 +1203,10 @@ ${release_plan_step}
           GIT_TRACE2_ENV_VARS: ''
           GIT_TRACE2_CONFIG_PARAMS: ''
         run: |
+          if [[ ! "\$CI_PACKAGE_RETENTION_KEEP" =~ ^(all|[123456789][0123456789]{0,2})\$ ]]; then
+            echo "::error::CI_PACKAGE_RETENTION_KEEP must be an integer from 1 to 999 or 'all', got '\$CI_PACKAGE_RETENTION_KEEP'."
+            exit 1
+          fi
           verification_home="\$(/usr/bin/mktemp -d "\$RUNNER_TEMP/verjson-release-verification.XXXXXX")"
           trap '/usr/bin/rm -rf -- "\$verification_home"' EXIT
           umask 077
@@ -1225,6 +1239,7 @@ ${release_plan_step}
               PACKAGE_VERSION="\$PACKAGE_VERSION" \\
               RELEASE_VERIFICATION_PATH="\$RELEASE_VERIFICATION_PATH" \\
               VERJSON_CHANGELOG_TOOL_CACHE="\$VERJSON_CHANGELOG_TOOL_CACHE" \\
+              CI_PACKAGE_RETENTION_KEEP="\$CI_PACKAGE_RETENTION_KEEP" \\
               NODE_AUTH_TOKEN='' \\
               GIT_TERMINAL_PROMPT=0 \\
               npm_config_script_shell=/bin/sh \\
@@ -1606,8 +1621,8 @@ ${release_version_guard_step}
         run: |
           if [ -z "\$EXPECTED_HEAD" ] && [ -z "\$SELECTOR_DIGEST" ]; then
             echo "Manual dispatch has no proposer receipt to bind."
-          elif [[ ! "\$EXPECTED_HEAD" =~ ^[0-9a-f]{40}\$ ]] ||
-            [[ ! "\$SELECTOR_DIGEST" =~ ^[0-9a-f]{64}\$ ]]; then
+          elif [[ ! "\$EXPECTED_HEAD" =~ ^[0123456789abcdef]{40}\$ ]] ||
+            [[ ! "\$SELECTOR_DIGEST" =~ ^[0123456789abcdef]{64}\$ ]]; then
             echo "::error::expected_head and selector_digest must either both be empty or both be canonical lowercase digests."
             exit 1
           elif [ "\$GITHUB_SHA" != "\$EXPECTED_HEAD" ]; then
@@ -1797,6 +1812,7 @@ ${required_lane_validation_step}
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           RELEASE_VERIFICATION_PATH: \${{ steps.release-verification-runtime.outputs.path }}
           VERJSON_CHANGELOG_TOOL_CACHE: \${{ steps.release-verification-runtime.outputs.cache }}
+          CI_PACKAGE_RETENTION_KEEP: \${{ ${package_retention_keep_expr} }}
           CI: 'true'
           BASH_ENV: ''
           ENV: ''
@@ -1824,6 +1840,10 @@ ${required_lane_validation_step}
           GIT_TRACE2_ENV_VARS: ''
           GIT_TRACE2_CONFIG_PARAMS: ''
         run: |
+          if [[ ! "\$CI_PACKAGE_RETENTION_KEEP" =~ ^(all|[123456789][0123456789]{0,2})\$ ]]; then
+            echo "::error::CI_PACKAGE_RETENTION_KEEP must be an integer from 1 to 999 or 'all', got '\$CI_PACKAGE_RETENTION_KEEP'."
+            exit 1
+          fi
           verification_home="\$(/usr/bin/mktemp -d "\$RUNNER_TEMP/verjson-release-verification.XXXXXX")"
           trap '/usr/bin/rm -rf -- "\$verification_home"' EXIT
           umask 077
@@ -1855,6 +1875,7 @@ ${required_lane_validation_step}
               RUNNER_TOOL_CACHE="\$RUNNER_TOOL_CACHE" \\
               PACKAGE_VERSION="\$PACKAGE_VERSION" \\
               VERJSON_CHANGELOG_TOOL_CACHE="\$VERJSON_CHANGELOG_TOOL_CACHE" \\
+              CI_PACKAGE_RETENTION_KEEP="\$CI_PACKAGE_RETENTION_KEEP" \\
               NODE_AUTH_TOKEN='' \\
               GIT_TERMINAL_PROMPT=0 \\
               npm_config_script_shell=/bin/sh \\
@@ -2189,8 +2210,8 @@ ${release_version_guard_step}
         run: |
           if [ -z "\$EXPECTED_HEAD" ] && [ -z "\$SELECTOR_DIGEST" ]; then
             echo "Manual dispatch has no proposer receipt to bind."
-          elif [[ ! "\$EXPECTED_HEAD" =~ ^[0-9a-f]{40}\$ ]] ||
-            [[ ! "\$SELECTOR_DIGEST" =~ ^[0-9a-f]{64}\$ ]]; then
+          elif [[ ! "\$EXPECTED_HEAD" =~ ^[0123456789abcdef]{40}\$ ]] ||
+            [[ ! "\$SELECTOR_DIGEST" =~ ^[0123456789abcdef]{64}\$ ]]; then
             echo "::error::expected_head and selector_digest must either both be empty or both be canonical lowercase digests."
             exit 1
           elif [ "\$GITHUB_SHA" != "\$EXPECTED_HEAD" ]; then
@@ -2382,6 +2403,7 @@ ${release_plan_step}
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           RELEASE_VERIFICATION_PATH: \${{ steps.release-verification-runtime.outputs.path }}
           VERJSON_CHANGELOG_TOOL_CACHE: \${{ steps.release-verification-runtime.outputs.cache }}
+          CI_PACKAGE_RETENTION_KEEP: \${{ ${package_retention_keep_expr} }}
           CI: 'true'
           BASH_ENV: ''
           ENV: ''
@@ -2409,6 +2431,10 @@ ${release_plan_step}
           GIT_TRACE2_ENV_VARS: ''
           GIT_TRACE2_CONFIG_PARAMS: ''
         run: |
+          if [[ ! "\$CI_PACKAGE_RETENTION_KEEP" =~ ^(all|[123456789][0123456789]{0,2})\$ ]]; then
+            echo "::error::CI_PACKAGE_RETENTION_KEEP must be an integer from 1 to 999 or 'all', got '\$CI_PACKAGE_RETENTION_KEEP'."
+            exit 1
+          fi
           verification_home="\$(/usr/bin/mktemp -d "\$RUNNER_TEMP/verjson-release-verification.XXXXXX")"
           trap '/usr/bin/rm -rf -- "\$verification_home"' EXIT
           umask 077
@@ -2440,6 +2466,7 @@ ${release_plan_step}
               RUNNER_TOOL_CACHE="\$RUNNER_TOOL_CACHE" \\
               PACKAGE_VERSION="\$PACKAGE_VERSION" \\
               VERJSON_CHANGELOG_TOOL_CACHE="\$VERJSON_CHANGELOG_TOOL_CACHE" \\
+              CI_PACKAGE_RETENTION_KEEP="\$CI_PACKAGE_RETENTION_KEEP" \\
               NODE_AUTH_TOKEN='' \\
               GIT_TERMINAL_PROMPT=0 \\
               npm_config_script_shell=/bin/sh \\
@@ -2750,7 +2777,7 @@ emit_contract_test() {
     }
     release_caller_path="${release_caller_spec%%=*}"
     release_caller_dirs="${release_caller_spec#*=}"
-    [[ "$release_caller_path" =~ ^\.github/workflows/[A-Za-z0-9._-]+\.ya?ml$ ]] \
+    [[ "$release_caller_path" =~ ^\.github/workflows/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+\.ya?ml$ ]] \
       && [ -n "$release_caller_dirs" ] || {
       echo "$(basename "$0"): invalid --release-caller-package-dirs value '$release_caller_spec'" >&2
       return 2
@@ -2766,7 +2793,7 @@ emit_contract_test() {
     release_caller_dirs_separator=''
     expected_release_caller_dirs_seen=()
     for release_caller_dir in "${expected_release_caller_dirs[@]}"; do
-      [[ "$release_caller_dir" =~ ^[A-Za-z0-9._][A-Za-z0-9._-]*(/[A-Za-z0-9._][A-Za-z0-9._-]*)*$ ]] \
+      [[ "$release_caller_dir" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*(/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*)*$ ]] \
         && { [ "$release_caller_dir" = . ] \
           || { [[ "/$release_caller_dir/" != */./* ]] \
             && [[ "/$release_caller_dir/" != */../* ]]; }; } || {
@@ -3134,12 +3161,12 @@ validation_job="$(awk '
   || fail "$validation_workflow changelog job may contain only the canonical uses and with fields; name, strategy, matrix, and other check-shaping fields are forbidden"
 [ "$(grep -Ec '^    with:$' <<<"$validation_job")" = 1 ] \
   || fail "$validation_workflow changelog inputs must be nested under exactly one canonical with mapping"
-[ "$(grep -Ec '^    uses: verJSON/\.github/\.github/workflows/generated-artifacts\.yml@[0-9a-f]{40}$' <<<"$validation_job")" = 1 ] \
+[ "$(grep -Ec '^    uses: verJSON/\.github/\.github/workflows/generated-artifacts\.yml@[0123456789abcdef]{40}$' <<<"$validation_job")" = 1 ] \
   && grep -qE "^    uses: verJSON/\\.github/\\.github/workflows/generated-artifacts\\.yml@$CONTRACT_REF$" <<<"$validation_job" \
   || fail "$validation_workflow does not call generated-artifacts.yml at the shared pin"
 [ "$(grep -Ec '^      changelog: true$' <<<"$validation_job")" = 1 ] \
   || fail "$validation_workflow does not enable changelog validation"
-[ "$(grep -Ec '^      contract_ref: [0-9a-f]{40}$' <<<"$validation_job")" = 1 ] \
+[ "$(grep -Ec '^      contract_ref: [0123456789abcdef]{40}$' <<<"$validation_job")" = 1 ] \
   && grep -qE "^      contract_ref: $CONTRACT_REF$" <<<"$validation_job" \
   || fail "$validation_workflow does not pass the pinned contract_ref"
 expected_input_count=2
@@ -3232,10 +3259,10 @@ RENOVATE_ADMISSION
     || fail "$renovate_attribution_workflow does not preserve the exact same-repository Renovate admission gate"
   grep -qE '^    secrets: inherit$' "$renovate_attribution_workflow" \
     || fail "$renovate_attribution_workflow lacks inherited environment context"
-  [ "$(grep -Ec '^ +uses: verJSON/\.github/\.github/workflows/renovate-changelog\.yml@[0-9a-f]{40}$' "$renovate_attribution_workflow")" = 1 ] \
+  [ "$(grep -Ec '^ +uses: verJSON/\.github/\.github/workflows/renovate-changelog\.yml@[0123456789abcdef]{40}$' "$renovate_attribution_workflow")" = 1 ] \
     && grep -qE "^ +uses: verJSON/\\.github/\\.github/workflows/renovate-changelog\\.yml@$CONTRACT_REF$" "$renovate_attribution_workflow" \
     || fail "$renovate_attribution_workflow does not call the trusted attribution workflow at the shared pin"
-  [ "$(grep -Ec '^ +contract_ref: [0-9a-f]{40}$' "$renovate_attribution_workflow")" = 1 ] \
+  [ "$(grep -Ec '^ +contract_ref: [0123456789abcdef]{40}$' "$renovate_attribution_workflow")" = 1 ] \
     && grep -qE "^ +contract_ref: $CONTRACT_REF$" "$renovate_attribution_workflow" \
     || fail "$renovate_attribution_workflow does not pass the shared pinned contract_ref"
   grep -qE '^ +release_app_client_id: \$\{\{ vars\.RELEASE_APP_CLIENT_ID \}\}$' "$renovate_attribution_workflow" \
@@ -3258,10 +3285,10 @@ if [ -e "$release_propose_workflow" ]; then
   else
     reusable_workflow="release-dispatch.yml"
   fi
-  [ "$(grep -Ec '^ +uses: verJSON/\.github/\.github/workflows/release-(propose|dispatch)\.yml@[0-9a-f]{40}$' "$release_propose_workflow")" -eq 1 ] \
+  [ "$(grep -Ec '^ +uses: verJSON/\.github/\.github/workflows/release-(propose|dispatch)\.yml@[0123456789abcdef]{40}$' "$release_propose_workflow")" -eq 1 ] \
     && grep -qE "^ +uses: verJSON/\.github/\.github/workflows/$reusable_workflow@$CONTRACT_REF$" "$release_propose_workflow" \
     || fail "$release_propose_workflow does not call $reusable_workflow at the shared pin"
-  [ "$(grep -Ec '^ +contract_ref: [0-9a-f]{40}$' "$release_propose_workflow")" -eq 1 ] \
+  [ "$(grep -Ec '^ +contract_ref: [0123456789abcdef]{40}$' "$release_propose_workflow")" -eq 1 ] \
     && grep -qE "^ +contract_ref: $CONTRACT_REF$" "$release_propose_workflow" \
     || fail "$release_propose_workflow does not pass the shared pinned contract_ref"
   ! grep -qE '^ +autonomy:' "$release_propose_workflow" \
@@ -4127,9 +4154,9 @@ APPROVED_RELEASE_STATE_SCRIPT_SHA256 = {
     "release-snapshot": "0860f7c804f4e5111e9461230e9e999ac3b1a0761a54ea57488c9772854ce22c",
 }
 APPROVED_RELEASE_VERIFICATION_SCRIPT_SHA256 = {
-    "release-node": "914b18059a48cc42dfbed8b3b8823a6bf77c0e00d628d914cfb2b04252083345",
-    "release-artifact": "1635cf1d6d0ae9d94469c7da1c1d386ec72aac70c599e8a92efaca27c9f911d7",
-    "release-snapshot": "5de64b89d651333b1a2a2fc11d13a114fd23b2393147ffd68e2e0d81956c5edc",
+    "release-node": "7bc1f813cefabb6c7a44dc1fb4ca272cbba54ce48b7657d9ed35ed9240509af8",
+    "release-artifact": "c241e6f3adc300fbb4ef5223230058609244b65eb6666d7716a39f56cf2ee069",
+    "release-snapshot": "1b412767dc178c65209a3679691a8a60777b937dd6c5d808077ac1d44bc7bb3d",
 }
 APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
     "release-node": "0caf167486937a2def16a5223fcb64b1a4a737447d424c83a891c2aac4e3b3a2",
@@ -4137,9 +4164,9 @@ APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
     "release-snapshot": "0caf167486937a2def16a5223fcb64b1a4a737447d424c83a891c2aac4e3b3a2",
 }
 APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256 = {
-    "release-node": "218a4c9a60752c45fb73123703cce4cd6029c8054ba43fb97fc2e26aebed3d4d",
-    "release-artifact": "7a736889f20b3050d02b82d60c21ae0ab1ca673a332d73bf5235af47288813de",
-    "release-snapshot": "1d1585ea8276b3ff08c0af881ab249ecaf1edc5ecee6ec63db6709d0f6b1b11a",
+    "release-node": "65bcae757d24019f41ee6c87c5d1b77d66a0a332e313fe5b4136b4fe00305865",
+    "release-artifact": "d8b9a888514d46ee507a96432a85c77d2b37fc74150fd3faadfb7bae46d8f6da",
+    "release-snapshot": "dc416645f4c3c86d7cab7937a75564155ba0d231f7cd68ca8d30914571443c70",
 }
 EXPECTED_RELEASE_STATE_ENV = {
     "VERSION": "${{ steps.release-version.outputs.version }}",
@@ -4172,6 +4199,7 @@ EXPECTED_RELEASE_VERIFICATION_ENV = {
     "RELEASE_VERIFICATION_PATH": "${{ steps.release-verification-runtime.outputs.path }}",
     "CI": "'true'",
     "VERJSON_CHANGELOG_TOOL_CACHE": "${{ steps.release-verification-runtime.outputs.cache }}",
+    "CI_PACKAGE_RETENTION_KEEP": "${{ vars.CI_PACKAGE_RETENTION_KEEP || '3' }}",
     "BASH_ENV": "''",
     "ENV": "''",
     "SHELLOPTS": "''",
@@ -5316,7 +5344,7 @@ PY
       || fail "$release_workflow build job does not run on its approved OS matrix"
     while IFS= read -r runner_selector; do
       runner_selector="${runner_selector#*: }"
-      [[ "$runner_selector" =~ ^\'[A-Za-z0-9][A-Za-z0-9._-]*\'$ ]] \
+      [[ "$runner_selector" =~ ^\'[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*\'$ ]] \
         && [[ ! "${runner_selector:1:${#runner_selector}-2}" =~ ^(vars|inputs|matrix|needs|github|env|secrets)\. ]] \
         || [[ "$runner_selector" =~ ^\$\{\{[[:space:]]fromJSON\(vars\.CI_LANE_TRUSTED_(MACOS|WINDOWS)\)[[:space:]]\}\}$ ]] \
         || fail "$release_workflow build matrix contains an unreviewed runner selector: $runner_selector (ADR 0103)"
@@ -5453,7 +5481,7 @@ PY
         || fail "$release_workflow private dependency matrix has no bound index"
       while IFS= read -r runner_selector; do
         runner_selector="${runner_selector#*: }"
-        [[ "$runner_selector" =~ ^\'[A-Za-z0-9][A-Za-z0-9._-]*\'$ ]] \
+        [[ "$runner_selector" =~ ^\'[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*\'$ ]] \
           && [[ ! "${runner_selector:1:${#runner_selector}-2}" =~ ^(vars|inputs|matrix|needs|github|env|secrets)\. ]] \
           || [[ "$runner_selector" =~ ^\$\{\{[[:space:]]fromJSON\(vars\.CI_LANE_TRUSTED_(MACOS|WINDOWS)\)[[:space:]]\}\}$ ]] \
           || fail "$release_workflow acquisition matrix contains an unreviewed runner selector: $runner_selector (ADR 0103)"
@@ -5650,6 +5678,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'exit 23' \
     cd "$verification_fixture"
   RUNNER_TEMP="$verification_fixture/tmp" \
   RELEASE_VERIFICATION_PATH="$PATH" \
+  CI_PACKAGE_RETENTION_KEEP=3 \
   PACKAGE_VERSION=9.8.7 NODE_AUTH_TOKEN=do-not-print-this \
       bash -eo pipefail "$verification_script"
   ) >"$verification_fixture/output" 2>&1 || verification_rc=$?

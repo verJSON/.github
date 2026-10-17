@@ -78,7 +78,7 @@ runs:
         # this guard narrowly: it protects THIS request, which nothing earlier does. The
         # three copies of this script are byte-identical by contract, so the guard is in all
         # of them (Verjson/.github#1464).
-        [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
+        [[ "$HEAD_SHA" =~ ^[0123456789abcdef]{40}$ ]] \
           || { echo "::error::head-sha is not a 40-hex object name"; exit 1; }
         pending=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/status" \
           --jq '[.statuses[]? | select(.context == "renovate/stability-days" and .state == "pending")] | length' 2>/dev/null || echo 0)

@@ -6,7 +6,7 @@ contract_ref="$1"
 if [ "$contract_ref" = --local ]; then
   workflow_ref="./.github/workflows/gate-rearm.yml"
 else
-  [[ "$contract_ref" =~ ^[0-9a-f]{40}$ ]] || { echo "contract SHA must exactly 40 lowercase hexadecimal characters" >&2; exit 2; }
+  [[ "$contract_ref" =~ ^[0123456789abcdef]{40}$ ]] || { echo "contract SHA must exactly 40 lowercase hexadecimal characters" >&2; exit 2; }
   workflow_ref="Verjson/.github/.github/workflows/gate-rearm.yml@$contract_ref"
 fi
 

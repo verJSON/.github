@@ -3490,6 +3490,29 @@ text = text[:env] + "          npm_config_script_shell: /bin/true\n" + text[env:
 open(path, "w", encoding="utf-8").write(text)
 PY
 }
+edit_verification_retention_window() {
+  # edit_verification_retention_window <dir> drop-env|redefault|drop-forward
+  python3 - "$1/.github/workflows/release.yml" "$2" <<'PY'
+import sys
+
+path, action = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8").read()
+step = text.index("      - name: Run the release verification suite\n")
+end = text.index("\n  snapshot:", step)
+verification_step = text[step:end]
+env_line = "          CI_PACKAGE_RETENTION_KEEP: ${{ vars.CI_PACKAGE_RETENTION_KEEP || '3' }}\n"
+forward_line = '              CI_PACKAGE_RETENTION_KEEP="$CI_PACKAGE_RETENTION_KEEP" \\\n'
+needle, replacement = {
+    "drop-env": (env_line, ""),
+    "redefault": (env_line, env_line.replace("|| '3'", "|| '30'")),
+    "drop-forward": (forward_line, ""),
+}[action]
+if verification_step.count(needle) != 1:
+    raise SystemExit("release verification retention-window fixture is stale")
+text = text[:step] + verification_step.replace(needle, replacement, 1) + text[end:]
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
 replace_verification_bash_env() {
   python3 - "$1/.github/workflows/release.yml" <<'PY'
 import re
@@ -3915,6 +3938,26 @@ sync_last_rejection
 grep -qF 'does not isolate release verification from prior lifecycle environment (#1717)' "$tmproot/run.out" \
   && pass "the generated suite rejects a Bash startup script override" \
   || fail "a Bash startup script override was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+# The retention window reaches the verification hook only through the pinned
+# step env and the pinned run_clean allowlist; each must fail on its own.
+expect_rejection "release verifier without the retention window" \
+  edit_verification_retention_window drop-env
+sync_last_rejection
+grep -qF 'does not isolate release verification from prior lifecycle environment (#1717)' "$tmproot/run.out" \
+  && pass "the generated suite rejects a verify step without the retention window" \
+  || fail "a dropped retention window was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "release verifier with a different retention default" \
+  edit_verification_retention_window redefault
+sync_last_rejection
+grep -qF 'does not isolate release verification from prior lifecycle environment (#1717)' "$tmproot/run.out" \
+  && pass "the generated suite rejects a retention default the retention jobs do not use" \
+  || fail "a re-defaulted retention window was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "release verifier that withholds the retention window from the hook" \
+  edit_verification_retention_window drop-forward
+sync_last_rejection
+grep -qF 'does not match the approved release verification script (#1717)' "$tmproot/run.out" \
+  && pass "the generated suite rejects a clean environment that withholds the retention window" \
+  || fail "a withheld retention window was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "stamped-version warning text shadowed outside generated header (#862)" shadow_stamped_version_header
 sync_last_rejection
 grep -qF 'does not carry the stamped-version warning inside the generated header before `on:` (#862)' "$tmproot/run.out" \

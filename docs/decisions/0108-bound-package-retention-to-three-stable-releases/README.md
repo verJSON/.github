@@ -75,3 +75,13 @@ multi-target inventory-before-delete, malformed boundaries, duplicate identities
 container tags, and pagination-origin validation. The Node and container release contract
 tests prove cleanup runs after publication, has least privilege, uses the pinned canonical
 implementation, and cannot fail the publication job.
+
+## 2026-10-16 note — the window is a policy value
+
+Three remains Verjson's default, but it is no longer fixed.
+[ADR 0115](../0115-configurable-package-retention-with-rename-deprecation/README.md)
+made the window configurable through `CI_PACKAGE_RETENTION_KEEP`. Its
+2026-10-16 amendment fixes the accepted grammar: unset (this ADR's 3),
+`1`–`999`, or `all`, which disables deletion. Any other value fails closed.
+That amendment also records how the window gates release availability, and
+the rollout order to follow before an organization sets `all`.

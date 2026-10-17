@@ -57,7 +57,7 @@ def validate(workflow):
 
     client_guard = named_step(promote, "Require the release App client ID")
     guard_script = client_guard.get("run", "")
-    if "-z \"$RELEASE_APP_CLIENT_ID\"" not in guard_script or "^[0-9]+$" not in guard_script:
+    if "-z \"$RELEASE_APP_CLIENT_ID\"" not in guard_script or "^[0123456789]+$" not in guard_script:
         errors.append("client ID guard does not reject missing or numeric IDs")
 
     mint_index = promote["steps"].index(mint)

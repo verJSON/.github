@@ -95,7 +95,7 @@ def validate_common(raw: str) -> list[str]:
         problems.append("a broad credential path remains")
     if not re.search(
         r'\[\[ -z "\$RENOVATE_COMPATIBILITY_CLIENT_ID" \|\| '
-        r'"\$RENOVATE_COMPATIBILITY_CLIENT_ID" =~ \^\[0-9\]\+\$ \]\]',
+        r'"\$RENOVATE_COMPATIBILITY_CLIENT_ID" =~ \^\[0123456789\]\+\$ \]\]',
         raw,
     ):
         problems.append("missing or numeric client IDs do not fail closed")

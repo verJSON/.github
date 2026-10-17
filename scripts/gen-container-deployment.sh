@@ -6,8 +6,8 @@ kind="${1:?kind}"
 ref="${2:?40-hex contract ref}"
 config="${3:-container-deployment.json}"
 
-[[ "$ref" =~ ^[0-9a-f]{40}$ ]] || { echo "contract ref must be 40 lowercase hex" >&2; exit 1; }
-[[ "$config" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*\.json$ && "/$config/" != *"/../"* ]] || {
+[[ "$ref" =~ ^[0123456789abcdef]{40}$ ]] || { echo "contract ref must be 40 lowercase hex" >&2; exit 1; }
+[[ "$config" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]*\.json$ && "/$config/" != *"/../"* ]] || {
   echo "config path must be a repository-relative JSON path" >&2
   exit 2
 }
@@ -237,7 +237,7 @@ if forbidden="\$(grep -En 'secrets\\.|environment:|RUNNER_DEPLOY_TOKEN|DIGITALOC
   .github/workflows/container-deployment.yml)"; then
   contract_fail "\$(printf '.github/workflows/container-deployment.yml must not name secrets, environments, or mutable tags; observed:\\n%s' "\$forbidden")"
 fi
-if named_secrets="\$(grep -En 'secrets:' .github/workflows/container-deployment.yml | grep -Ev '^[0-9]+:    secrets: inherit\$')"; then
+if named_secrets="\$(grep -En 'secrets:' .github/workflows/container-deployment.yml | grep -Ev '^[0123456789]+:    secrets: inherit\$')"; then
   contract_fail "\$(printf '.github/workflows/container-deployment.yml may carry only \`secrets: inherit\` on a reusable edge, never a named secret map; observed:\\n%s' "\$named_secrets")"
 fi
 [ "\$(grep -Ec '^    secrets: inherit\$' .github/workflows/container-deployment.yml)" = 1 ] || contract_fail \\

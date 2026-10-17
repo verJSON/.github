@@ -22,11 +22,11 @@ date="$1"
 identity="$2"
 stale="$3"
 contract="$4"
-[[ "$date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && [ "$(date -u -d "$date" +%F 2>/dev/null)" = "$date" ] || usage
-[[ "$identity" =~ ^([1-9][0-9]{0,8}|[0-9]{8}T[0-9]{6}Z|[0-9a-f]{6,12})$ ]] || usage
-[[ "$stale" =~ ^[0-9a-f]{40}$ ]] && [[ "$contract" =~ ^[0-9a-f]{40}$ ]] && [ "$stale" != "$contract" ] || usage
+[[ "$date" =~ ^[0123456789]{4}-[0123456789]{2}-[0123456789]{2}$ ]] && [ "$(date -u -d "$date" +%F 2>/dev/null)" = "$date" ] || usage
+[[ "$identity" =~ ^([123456789][0123456789]{0,8}|[0123456789]{8}T[0123456789]{6}Z|[0123456789abcdef]{6,12})$ ]] || usage
+[[ "$stale" =~ ^[0123456789abcdef]{40}$ ]] && [[ "$contract" =~ ^[0123456789abcdef]{40}$ ]] && [ "$stale" != "$contract" ] || usage
 key=id
-[[ "$identity" =~ ^[1-9][0-9]*$ ]] && key=issue
+[[ "$identity" =~ ^[123456789][0123456789]*$ ]] && key=issue
 
 printf -- '---\ndate: %s\n%s: %s\nimpact: patch\ntitle: Bootstrap the AI review caller to a current canonical revision\n---\n\n' \
   "$date" "$key" "$identity"
