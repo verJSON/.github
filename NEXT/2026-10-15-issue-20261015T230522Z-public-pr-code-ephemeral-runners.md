@@ -56,7 +56,10 @@ reaches (`preflight`, `gate`, `complete-authorization`, `dispatch-merge`, and
 and a Verjson caller's `runner_labels` is honored only for a private repository.
 Private targets keep their lanes. The change applies to this repository at
 merge; an adopter is covered once its generated `ai-review-merge.yml` caller is
-regenerated at or after the merge commit. No ruleset rotation is needed.
+regenerated at or after the merge commit. Regenerating every public adopter's
+caller is a blocking rollout step: `scripts/ci-gate/public-review-caller-rollout.py
+--minimum <merge-sha>` must exit 0 before the rollout is complete. No ruleset
+rotation is needed.
 
 The checker now scans relays. `workflow_dispatch`, `workflow_call`, and
 `repository_dispatch` jobs that can reach a persistent runner are refused

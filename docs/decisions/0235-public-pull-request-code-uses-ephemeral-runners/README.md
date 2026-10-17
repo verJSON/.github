@@ -421,8 +421,12 @@ or a literal GitHub-hosted image.
    generated caller pinned to a canonical commit, so an adopter is covered
    only after its caller is regenerated at or after the merge commit
    (`scripts/gen-ai-review-caller.sh <merge-sha>`, ADR 0227's consumer
-   recipe). This change does not edit `gate-rearm.yml`, so ruleset 20722935
-   needs no rotation for it.
+   recipe). Regenerating every public adopter's caller is a **blocking**
+   rollout step, not a follow-up: the rollout is incomplete, and #1831's
+   decision-7 item stays open, until
+   `python3 -I scripts/ci-gate/public-review-caller-rollout.py --minimum <merge-sha>`
+   exits 0 (see the 2026-10-17 amendment). This change does not edit
+   `gate-rearm.yml`, so ruleset 20722935 needs no rotation for it.
 
 ### What this decision cannot do
 
@@ -459,7 +463,8 @@ whether to take this option.
   `gate` job keeps its 80-minute ceiling, so a slow review now holds a hosted
   slot rather than a pool runner.
 - Adopters keep the exposure until their generated `ai-review-merge.yml` caller
-  is regenerated at or after the merge commit (decision 7).
+  is regenerated at or after the merge commit (decision 7). The rollout is not
+  complete until `public-review-caller-rollout.py` exits 0 for that commit.
 - The same guarantee for public adopters' calls to the canonical reusable
   workflows is a follow-up tracked in #1831. Those include `node-ci`, `ui-ci`,
   `helm-ci`, `pulumi-ci`, `generated-artifacts`, `repo-hygiene`, and
@@ -541,3 +546,39 @@ files outside that filter; on such a diff the required context does not report
 at all, so the standalone run is the signal there. Making the standalone
 context required would be a ruleset change, which is the owner's decision and
 is not taken here.
+
+### 3. Regenerating the public adopters' callers is a blocking rollout step
+
+**Finding.** Decision 7's rollout said public adopters "come first" but left
+their regeneration as an operator follow-up with no completion criterion, so
+the change could be reported done while `verjson-git-runners` still pinned
+`2d1ea177` and sent public pull-request heads to the pool.
+
+**Decision.** The rollout has an executable exit criterion.
+`scripts/ci-gate/public-review-caller-rollout.py --minimum <merge-sha>` lists
+every public, non-archived repository in the organization (so a repository
+made public later is covered without editing a list), reads its
+default-branch `.github/workflows/ai-review-merge.yml`, requires every job to
+call the canonical `ai-review-merge.yml` at one full commit SHA, and asks the
+compare API whether that commit contains the merge commit. It exits 1 naming
+each stale caller and 2 on any state it cannot establish (an API error other
+than an absent caller, an unparseable caller, a branch or short-SHA pin, an
+unknown compare status). A repository without a caller is reported, not
+failed: nothing there dispatches a gate. It reads only, needs no credentials
+beyond read access, and is not wired into pull-request CI, because its answer
+is organization state that a pull request cannot change.
+
+Rollout order after #1827 merges:
+
+1. Regenerate each stale public adopter's caller at or after the merge commit
+   with ADR 0227's recipe, in that adopter's own repository and PR.
+   On 2026-10-17 the check (run against this branch's head as a stand-in
+   minimum) reported `verjson-git-runners` STALE at `2d1ea177`, and
+   `gguf-demo` and `repo-dashboard` with no caller.
+2. Run the check with the merge SHA; it must exit 0. Record the output on
+   #1831. The rollout, and decision 7, are complete only then.
+3. Only after that, the optional `MINIMUM_SAFE_REVIEW` hardening (raising it
+   to the merge SHA in `gate-rearm.yml`, then rotating ruleset 20722935) can
+   make the requirement continuous, so a later bootstrap or hand edit cannot
+   reintroduce an older caller. That edit and rotation remain the owner's
+   decision.
