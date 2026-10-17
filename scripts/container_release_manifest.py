@@ -144,12 +144,15 @@ def validate_manifest(manifest: dict[str, Any], config: dict[str, Any]) -> None:
         raise ManifestError("candidate source ref must be refs/heads/main")
     if not re.fullmatch(r"[0-9a-f]{40}", source["commit"]):
         raise ManifestError("manifest.source.commit must be a 40-hex commit")
-    # The contract canary signs through its own `uses: ./` publisher, which GitHub
-    # names by the source repository and ref rather than a pinned contract SHA.
-    same_repository_publisher = (
-        f"{source['repository']}/.github/workflows/container-candidate-publish.yml@{source['ref']}"
+    # Only the contract repository's own canary signs through a `uses: ./`
+    # publisher, which GitHub names by the source repository at its branch rather
+    # than a pinned contract SHA; source.ref is refs/heads/main by the check above.
+    is_contract_canary = (
+        source_repository.lower() == "verjson/.github"
+        and source["workflow"]
+        == f"{source_repository}/.github/workflows/container-candidate-publish.yml@refs/heads/main"
     )
-    if source["workflow"] != same_repository_publisher and not source["workflow"].startswith(
+    if not is_contract_canary and not source["workflow"].startswith(
         "Verjson/.github/.github/workflows/container-candidate-publish.yml@"
     ):
         raise ManifestError("candidate signer workflow differs from expected publisher")

@@ -124,8 +124,14 @@ def manifest():
     }
 
 
-def same_repository_publication(publisher):
+CONTRACT_CANARY_PUBLISHER = (
+    "verJSON/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main"
+)
+
+
+def same_repository_publication(publisher, repository="verJSON/.github"):
     candidate, reviewed = manifest(), config()
+    candidate["source"]["repository"] = reviewed["repository"] = repository
     candidate["source"]["workflow"] = publisher
     for image in candidate["images"] + reviewed["images"]:
         image["provenance"]["builderIdentity"] = publisher
@@ -402,22 +408,33 @@ class ContainerReleaseManifestTests(unittest.TestCase):
         candidate["images"].append(duplicate)
         self.assert_rejected(candidate, "duplicate identity 'default'")
 
-    def test_accepts_same_repository_publisher_reviewed_at_the_source_ref(self):
-        candidate, reviewed = same_repository_publication(
-            "Verjson/verjson-github-runner/.github/workflows/container-candidate-publish.yml@refs/heads/main"
-        )
+    def test_accepts_the_contract_canary_same_repository_publisher(self):
+        candidate, reviewed = same_repository_publication(CONTRACT_CANARY_PUBLISHER)
 
         manifest_contract.validate_manifest(candidate, reviewed)
 
+    def test_rejects_same_repository_publisher_from_an_adopter_repository(self):
+        candidate, reviewed = same_repository_publication(
+            "Verjson/verjson-github-runner/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+            repository="Verjson/verjson-github-runner",
+        )
+
+        with self.assertRaisesRegex(
+            manifest_contract.ManifestError,
+            "candidate signer workflow differs from expected publisher",
+        ):
+            manifest_contract.validate_manifest(candidate, reviewed)
+
     def test_rejects_same_repository_publisher_outside_the_exact_source_identity(self):
         for publisher in (
-            "Verjson/verjson-github-runner-evil/.github/workflows/container-candidate-publish.yml@refs/heads/main",
-            "Verjson/verjson-github-runne/.github/workflows/container-candidate-publish.yml@refs/heads/main",
-            "verjson/verjson-github-runner/.github/workflows/container-candidate-publish.yml@refs/heads/main",
-            "Verjson/verjson-github-runner/.github/workflows/container-candidate-publish.yml@refs/heads/feature",
-            "Verjson/verjson-github-runner/.github/workflows/container-candidate-publish.yml@refs/tags/v1",
-            "Verjson/verjson-github-runner/.github/workflows/evil.yml@refs/heads/main",
-            "Verjson/verjson-github-runner/.github/workflows/container-candidate-publish.yml@refs/heads/main@" + "b" * 40,
+            "verJSON/.github-evil/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+            "verJSON/.githu/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+            "verjson/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+            "VERJSON/.GITHUB/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+            "verJSON/.github/.github/workflows/container-candidate-publish.yml@refs/heads/feature",
+            "verJSON/.github/.github/workflows/container-candidate-publish.yml@refs/tags/v1",
+            "verJSON/.github/.github/workflows/evil.yml@refs/heads/main",
+            "verJSON/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main@" + "b" * 40,
             "Verjson/.github-evil/.github/workflows/container-candidate-publish.yml@" + "b" * 40,
         ):
             with self.subTest(publisher=publisher):
