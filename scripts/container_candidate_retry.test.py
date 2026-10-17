@@ -447,6 +447,53 @@ class CosignProvenancePolicyTests(unittest.TestCase):
                     )
 
 
+SAME_REPOSITORY_PUBLISHER = (
+    "Verjson/example/.github/workflows/container-candidate-publish.yml@refs/heads/main"
+)
+
+
+def same_repository_claims(**overrides):
+    claims = {
+        "iss": "https://token.actions.githubusercontent.com",
+        "aud": "sigstore",
+        "repository": "Verjson/example",
+        "repository_id": "12345",
+        "ref": "refs/heads/main",
+        "sha": "c" * 40,
+        "workflow_ref": "Verjson/example/.github/workflows/container-candidate-reusable-contract.yml@refs/heads/main",
+        "workflow_sha": "c" * 40,
+        "job_workflow_ref": SAME_REPOSITORY_PUBLISHER,
+        "job_workflow_sha": "c" * 40,
+        "run_id": "987654",
+        "run_attempt": "1",
+    }
+    claims.update(overrides)
+    return claims
+
+
+def build_statement(claims):
+    return MODULE.build_cosign_provenance_statement(
+        buildkit_provenance(),
+        REVIEWED_PLATFORMS,
+        identity_claims=claims,
+        image_repository=REPOSITORY,
+        image_digest=DIGEST,
+    )
+
+
+class SameRepositoryPublisherTests(unittest.TestCase):
+    """A `uses: ./` publisher is bound by the source commit instead of an @sha ref."""
+
+    def test_signs_same_repository_publisher_bound_to_the_source_commit(self):
+        statement = build_statement(same_repository_claims())
+
+        publisher = statement["predicate"]["buildDefinition"]["externalParameters"]["verjson"]["publisher"]
+        self.assertEqual(
+            publisher,
+            {"workflow_ref": SAME_REPOSITORY_PUBLISHER, "workflow_sha": "c" * 40},
+        )
+
+
 def candidate_statement():
     return {
         "_type": "https://in-toto.io/Statement/v1",

@@ -15,6 +15,13 @@ class RetryEvidenceError(ValueError):
 
 
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+COMMIT = re.compile(r"[0-9a-f]{40}")
+# GitHub OIDC job_workflow_ref: <owner>/<repository>/<workflow path>@<ref>.
+WORKFLOW_REF = re.compile(
+    r"(?P<repository>[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+)"
+    r"/(?P<path>\.github/workflows/[A-Za-z0-9._-]+\.ya?ml)"
+    r"@(?P<ref>[^@\s]+)"
+)
 
 
 def _object(value: Any, field: str) -> dict[str, Any]:
@@ -27,6 +34,29 @@ def _text(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value:
         raise RetryEvidenceError(f"{field} must be a non-empty string")
     return value
+
+
+def require_immutable_publisher(
+    *,
+    publisher_workflow_ref: str,
+    publisher_workflow_sha: str,
+    source_repository: str,
+) -> None:
+    """Require the publisher bytes to be named by an immutable commit.
+
+    A cross-repository publisher must be called at `@<job_workflow_sha>`. A
+    same-repository `uses: ./` publisher is named by the caller's ref instead.
+    """
+    if not COMMIT.fullmatch(publisher_workflow_sha):
+        raise RetryEvidenceError("publisher workflow SHA must be a 40-hex commit")
+    parsed = WORKFLOW_REF.fullmatch(publisher_workflow_ref)
+    if parsed is None:
+        raise RetryEvidenceError("publisher workflow ref is malformed")
+    if parsed["ref"] == publisher_workflow_sha:
+        return
+    if parsed["repository"] == source_repository:
+        return
+    raise RetryEvidenceError("publisher workflow is not immutably pinned")
 
 
 def validate_verified_provenance(
@@ -149,10 +179,11 @@ def validate_cosign_provenance(
             raise RetryEvidenceError(f"Cosign provenance {name} authorization differs")
     if not caller_workflow_ref.endswith(f"@{source_ref}"):
         raise RetryEvidenceError("caller workflow ref does not match authorized source ref")
-    if not re.fullmatch(r"[0-9a-f]{40}", contract_sha):
-        raise RetryEvidenceError("contract SHA must be a 40-hex commit")
-    if not publisher_workflow_ref.endswith(f"@{contract_sha}"):
-        raise RetryEvidenceError("publisher workflow ref does not pin the contract SHA")
+    require_immutable_publisher(
+        publisher_workflow_ref=publisher_workflow_ref,
+        publisher_workflow_sha=contract_sha,
+        source_repository=source_repository,
+    )
     validate_buildkit_provenance(
         buildkit_provenance,
         reviewed_platforms,
@@ -226,10 +257,14 @@ def build_cosign_provenance_statement(
         f"@{source_ref}"
     ):
         raise RetryEvidenceError("GitHub OIDC caller workflow identity differs from source")
-    if not re.fullmatch(r"[0-9a-f]{40}", publisher_workflow_sha) or not publisher_workflow_ref.endswith(
-        f"@{publisher_workflow_sha}"
-    ):
-        raise RetryEvidenceError("GitHub OIDC publisher workflow is not immutably pinned")
+    try:
+        require_immutable_publisher(
+            publisher_workflow_ref=publisher_workflow_ref,
+            publisher_workflow_sha=publisher_workflow_sha,
+            source_repository=source_repository,
+        )
+    except RetryEvidenceError as error:
+        raise RetryEvidenceError(f"GitHub OIDC {error}") from error
     if not re.fullmatch(r"[0-9]+", run_id) or not re.fullmatch(r"[0-9]+", run_attempt):
         raise RetryEvidenceError("GitHub OIDC run identity is malformed")
     if not DIGEST.fullmatch(image_digest):
