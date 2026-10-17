@@ -599,6 +599,9 @@ UNRESOLVABLE_CHARACTERS = set("$`*?[]{}~")
 # Quoting is gone once a row is split into words, so a `$` or backtick in any
 # word -- argument, assignment, or redirection target -- may run code.
 RUN_TIME_EXPANSION = set("$`")
+# A row runs under `bash -o pipefail -c` without `-e`: after `||`, `&`, or `;`
+# a failed script no longer decides the row's exit status.
+STATUS_HIDING_OPERATORS = {"||", "&", ";"}
 # Interpreter options a row may pass; anything else (`-c`, `-m`, `-e`) runs code
 # that is not a tracked script, so the row cannot be classified.
 INTERPRETER_OPTIONS = {
@@ -659,6 +662,11 @@ def row_scripts(command, sources):
         tokens = shell_words.words(body)
     except ValueError as error:
         raise AssertionError(f"row cannot be parsed: {command}: {error}") from error
+    hiding = sorted(STATUS_HIDING_OPERATORS.intersection(tokens))
+    if hiding:
+        raise AssertionError(
+            f"row operator {hiding} hides the exit status of a script it runs: {command}"
+        )
     for token in tokens:
         if RUN_TIME_EXPANSION & set(token):
             raise AssertionError(
@@ -894,7 +902,7 @@ for spelling, command in {
     "dot-relative": f"python3 ./{retention_script}",
     "absolute": f"python3 {repository_root}/{retention_script}",
     "relative after cd": f"cd {retention_parent} && python3 {retention_name}",
-    "relative after quoted cd": f'cd "{retention_parent}"; python3 ./{retention_name}',
+    "relative after quoted cd": f'cd "{retention_parent}" && python3 ./{retention_name}',
     "flagged interpreter": f"python3 -I {retention_script} >/dev/null 2>&1",
 }.items():
     validate_locale_collation(
@@ -938,6 +946,21 @@ for spelling, command in {
         document,
         manifest_text + f"platform\t{command}\n",
         reason="expands at run time",
+    )
+
+# Rows run under `bash -o pipefail -c` without `-e`, so `||`, `&`, and `;` each
+# let a script fail while the row still exits 0. Only `&&` and `|` chain.
+for spelling, command in {
+    "`||`": f"{benign_row} || {benign_row}",
+    "a mid-row `&`": f"{benign_row} & {benign_row}",
+    "a trailing `&`": f"{benign_row} &",
+    "`;`": f"{benign_row}; {benign_row}",
+}.items():
+    expect_locale_failure(
+        f"fleet row joined by {spelling}",
+        document,
+        manifest_text + f"platform\t{command}\n",
+        reason="hides the exit status",
     )
 
 # Importers outside scripts/ are scanned too, and a row may not run a script
