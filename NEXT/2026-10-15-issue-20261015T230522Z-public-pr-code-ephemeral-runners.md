@@ -72,7 +72,9 @@ backlog. Its keys are frozen in the checker and may only shrink; refusals are
 decided before any list row is read, and a backlog job tolerates only the
 refusal kinds it carried when the backlog froze; each row binds the job's full
 content, callers, inherited settings, and local actions, so any edit to the job
-stops the row applying.
+stops the row applying. A non-cone sparse-checkout list is evaluated with git's
+gitignore anchoring (a bare name matches at every depth, `*` matches dotfiles),
+and a pattern the checker cannot evaluate exactly is refused.
 `ai-post-merge.yml` now checks its reconciler out at `github.sha`, the commit
 its own workflow file comes from, instead of `pull_request.base.sha`.
 A new `runner-isolation` workflow runs the check on every pull request and push

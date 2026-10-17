@@ -1277,20 +1277,43 @@ class Closure:
             self.add_sparse_path(path, cone, "sparse-checkout")
 
     def add_sparse_path(self, path: str, cone: bool, why: str) -> None:
-        path = path.strip("/")
-        if not cone:
-            if path.startswith("!"):
-                return  # an exclusion only removes bytes
-            matches = sorted(glob.glob(os.path.join(self.root, path), recursive=True))
-            if not matches:
-                self.flag("unscanned-path", f"{path} ({why}: matches nothing in the scanned tree)")
-            for match in matches:
-                self.add_file(os.path.relpath(match, self.root), why)
+        unprovable = (CONE_UNPROVABLE if cone else PATTERN_UNPROVABLE).search(path) or not path.strip("/")
+        if unprovable:
+            self.refusals.add((
+                "sparse-pattern",
+                f"{'cone-mode' if cone else 'non-cone'} sparse-checkout pattern {path!r} is not one this checker "
+                "evaluates exactly, so no review can bind what it puts on disk and no entry can accept it; "
+                "list literal paths (non-cone patterns may use * and ?)",
+            ))
             return
+        if not cone:
+            self.add_sparse_pattern(path, why)
+            return
+        path = path.strip("/")
         parts = path.split("/")
         for depth in range(1, len(parts)):
             self.add_direct_files("/".join(parts[:depth]), f"cone-mode parent of {path}")
         self.add_file(path, why)
+
+    def add_sparse_pattern(self, pattern: str, why: str) -> None:
+        """Bind what a non-cone (gitignore-syntax) pattern can put on disk.
+
+        A pattern with a slash before its last character is anchored to the
+        root; any other matches at every depth. `*` matches a leading dot. A
+        negation only removes bytes, so the union of the positive patterns
+        over-approximates the checkout.
+        """
+        if pattern.startswith("!"):
+            return
+        anchored = "/" in pattern.rstrip("/")
+        body = pattern.strip("/")
+        found = glob.glob(os.path.join(self.root, body if anchored else "**/" + body), recursive=True,
+                          include_hidden=True)
+        matches = sorted(match for match in found if ".git" not in os.path.relpath(match, self.root).split(os.sep))
+        if not matches:
+            self.flag("unscanned-path", f"{body} ({why}: matches nothing in the scanned tree)")
+        for match in matches:
+            self.add_file(os.path.relpath(match, self.root), why)
 
     def add_steps(self, steps, depth: int, action_dir: str | None = None) -> None:
         for number, step in enumerate(steps or [], 1):
@@ -1427,6 +1450,11 @@ class Closure:
                 self.add_file(os.path.join(action_dir, value), f"local action {uses} entry point")
 
 
+# Sparse-checkout syntax add_sparse_path does not evaluate exactly: in a
+# non-cone (gitignore) pattern a character class or backslash escape differs
+# from Python's glob, and a cone-mode entry is a directory, never a pattern.
+PATTERN_UNPROVABLE = re.compile(r"[\[\]\\]")
+CONE_UNPROVABLE = re.compile(r"[*?\[\]\\]|^!")
 # A container image reference fixed by content: no expression, no whitespace.
 PINNED_IMAGE = re.compile(r"[^\s@${}]+@sha256:[0-9a-f]{64}")
 # `FROM [--platform=…] <image> [AS <stage>]` in a Dockerfile.

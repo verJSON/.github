@@ -189,7 +189,11 @@ or a literal GitHub-hosted image.
      inherited settings;
    - the scanned-tree bytes the job puts on disk. That means what each
      checkout materializes, not what commands name:
-     - non-cone `sparse-checkout`: exactly the listed paths, glob-expanded;
+     - non-cone `sparse-checkout`: every tracked path a listed gitignore
+       pattern can match, evaluated as git does (anchored only by a slash
+       before its last character, otherwise at every depth; `*` matching a
+       leading dot); a pattern it cannot evaluate exactly is refused
+       (2026-10-17 amendment);
      - cone mode: each listed directory recursively, the root-level files,
        and the files directly in every parent directory, as git materializes
        them;
@@ -582,3 +586,24 @@ Rollout order after #1827 merges:
    make the requirement continuous, so a later bootstrap or hand edit cannot
    reintroduce an older caller. That edit and rotation remain the owner's
    decision.
+
+### 4. Non-cone sparse-checkout patterns are evaluated as gitignore patterns, or refused
+
+**Finding.** A non-cone list is gitignore syntax, but the checker expanded each
+line with a root-anchored Python glob that skips dotfiles. `tool.sh` or `lib/`
+matches at every depth in git and only at the root in the glob, and
+`scripts/*` puts `scripts/.env.sh` on disk without binding it, so a reviewed
+job's bytes could change under its entry. Character classes and backslash
+escapes also mean different things to the two matchers.
+
+**Decision.** A pattern is anchored to the root only when it has a slash before
+its last character; otherwise it is evaluated at every depth (`**/<pattern>`),
+with hidden files included and `.git` excluded. A negation is skipped: it only
+removes bytes, so the union of the positive patterns over-approximates the
+checkout. Anything the checker does not evaluate exactly fails closed as a
+`sparse-pattern` refusal that no entry can accept: a character class or
+backslash escape in a non-cone pattern, any wildcard, class, escape, or
+leading `!` in a cone-mode entry (which git reads as a directory), and an
+empty or bare-root pattern. Literal paths and `*`/`?` wildcards remain
+available. Every live sparse list in this repository is a literal path, so no
+entry changed digest.
