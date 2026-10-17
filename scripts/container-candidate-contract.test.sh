@@ -969,7 +969,7 @@ grep -q 'destination digest differs from the candidate digest' "$root/scripts/co
 grep -q 'needs.mirror-gar.result' "$publish_workflow"
 grep -qF 'CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}' "$publish_workflow"
 grep -qF 'CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}' "$publish_workflow"
-grep -qF 'expected-publisher-workflow-ref "Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF"' "$publish_workflow"
+grep -qF 'expected-publisher-workflow-ref "$PUBLISHER_WORKFLOW_REF"' "$publish_workflow"
 if awk '/^  pull-request-build:/{seen=1} /^  publish-base:/{seen=0} seen' "$workflow" | grep -E 'attestations: write|packages: write|id-token: write|docker/login-action|push: true' >/dev/null; then
   echo "pull-request build exposes a publication capability" >&2
   exit 1
