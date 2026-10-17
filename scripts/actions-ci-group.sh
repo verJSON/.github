@@ -331,14 +331,18 @@ utc_now() {
 # any row appended to it is discarded at the next write.
 write_runtime_records() {
   [ -n "$records_file" ] || return 0
-  local index staged="$records_file.$$"
-  {
+  # mktemp creates the staging file exclusively under an unpredictable name, so
+  # a row cannot plant a symlink there to redirect the write.
+  local index staged=''
+  if staged="$(mktemp "$records_file.XXXXXXXX" 2>/dev/null)" && {
     for index in "${!commands[@]}"; do
       [ -z "${runtime_record_by_index[$index]+set}" ] \
         || printf '%s\n' "${runtime_record_by_index[$index]}"
     done
-  } >"$staged" 2>/dev/null && mv -f -- "$staged" "$records_file" 2>/dev/null && return 0
-  rm -f -- "$staged" 2>/dev/null
+  } >"$staged" 2>/dev/null && mv -f -- "$staged" "$records_file" 2>/dev/null; then
+    return 0
+  fi
+  [ -z "$staged" ] || rm -f -- "$staged" 2>/dev/null
   # Fail once by name; a group whose records are incomplete must not pass.
   if [ "$records_write_failed" -eq 0 ]; then
     records_write_failed=1

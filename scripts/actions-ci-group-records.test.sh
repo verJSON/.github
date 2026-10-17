@@ -393,6 +393,24 @@ else
   fail "a cancelled group lost the records of its finished rows"
 fi
 
+# The runner stages each rewrite under a name no row can predict, so a row
+# that plants a symlink at a guessable staging name cannot redirect it.
+cat >"$tmp/plant-staging.sh" <<EOF
+printf 'precious\n' >"$tmp/precious"
+for candidate in \$(pgrep -f "$runner"); do
+  ln -sf "$tmp/precious" "$tmp/records/staging.jsonl.\$candidate"
+done
+EOF
+status="$(run_recorded staging 60 "platform	bash $tmp/plant-staging.sh")"
+if [ "$(cat "$tmp/precious")" = precious ] \
+  && [ "$(record_fields staging status 2>&1)" = 0 ] \
+  && [ ! -L "$tmp/records/staging.jsonl" ]; then
+  pass "a symlink planted at a predictable staging name cannot redirect the records"
+else
+  printf 'precious now: %s\n' "$(head -c 200 "$tmp/precious")" >&2
+  fail "the records rewrite followed a symlink a row planted"
+fi
+
 if [ "$fails" -ne 0 ]; then
   printf '%d test(s) failed\n' "$fails"
   exit 1
