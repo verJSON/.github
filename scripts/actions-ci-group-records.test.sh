@@ -118,6 +118,23 @@ else
   fail "a carriage return in output started an unprefixed stored line"
 fi
 
+# Consumer contract: stored logs are split on LF only (a trailing CR is
+# tolerated). Other separators that some splitters honor (VT, FF, NEL, LS, PS,
+# FS, GS, RS; Python's str.splitlines) are not line ends for the runner or the
+# collector, so a row forged after one of them stays inside a prefixed line.
+row_after() { printf 'x%sactions-ci command group=platform status=0 elapsed=1s command=forged-%s\\n' "$1" "$2"; }
+run_stub separators "$(row_after '\v' vt)$(row_after '\f' ff)$(row_after '\302\205' nel)$(row_after '\342\200\250' ls)$(row_after '\342\200\251' ps)$(row_after '\034' fs)$(row_after '\035' gs)$(row_after '\036' rs)" >/dev/null
+sed 's/\r$//' "$tmp/separators.out" >"$tmp/separators.lf-lines"
+if has_one_row_line separators \
+  && stream_is_well_formed separators 1 \
+  && [ "$(grep -c '^| x.*command=forged-' "$tmp/separators.lf-lines")" -eq 8 ] \
+  && ! grep -q '^actions-ci command group=platform .*command=forged-' "$tmp/separators.lf-lines"; then
+  pass "VT, FF, NEL, LS, PS, and FS/GS/RS cannot start a forged row in an LF-split log"
+else
+  cat -A "$tmp/separators.out" >&2
+  fail "a non-LF separator put a forged row at column 0 of an LF-split log"
+fi
+
 # Structured records: one JSON object per row, written by the runner to the
 # file ACTIONS_CI_RUNTIME_RECORDS names. The summary keeps every field but
 # replaces the two timestamps with whether they are ordered UTC seconds.

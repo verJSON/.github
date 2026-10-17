@@ -124,10 +124,19 @@ amendment of 2026-10-17). Nothing is pushed from the runner.
   wrapped in a random-token `::stop-commands::` block and every replayed line is
   prefixed with `| `, so output can neither execute a workflow command nor store
   a line that matches a row or a group marker.
+- **Consumer contract for the job log.** Split stored logs on LF only, tolerating
+  a trailing CR, and accept a producer line only when it carries the runner's
+  timestamp prefix (`YYYY-MM-DDTHH:MM:SS.fffffffZ `). The replay prefixes after
+  LF and bare CR, the line ends the Actions runner honors, and not after VT,
+  FF, NEL, LS, PS, or FS/GS/RS. A consumer that splits on those (Python
+  `str.splitlines()`, for example) can see a forged row at column 0.
 - **JSONL (artifact).** Each `shell-test-groups` cell uploads
   `actions-ci-runtime-records-<run_id>-<attempt>-<group>` (seven-day retention,
   uploaded even when the cell fails or is cancelled). One object per row, in
-  manifest order:
+  manifest order. The `docs` and `locale-collation` groups run outside that
+  matrix and produce no records. A records path that cannot be written produces
+  one `::warning::` and does not fail the cell, so treat a record count that
+  disagrees with the logged `command_count` as unreadable input:
 
 | Field | Type | Meaning |
 |---|---|---|
