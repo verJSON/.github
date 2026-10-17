@@ -306,8 +306,17 @@ def validate_authority(read_only, publication):
                 step for step in publication_job["steps"] if step.get("id") == "config"
             )
             publisher_identity_block = (
-                'publisher_workflow_ref="Verjson/.github/.github/workflows/'
+                "# contract-ref already equals job.workflow_sha. When it is also the source\n"
+                "# commit, the caller is this repository's `uses: ./` canary: GitHub names\n"
+                "# that publisher by the caller's ref, and the Cosign verifier accepts it\n"
+                "# only while job_workflow_sha == workflow_sha == sha (ADR 0216).\n"
+                'if [ "$CONTRACT_REF" = "$GITHUB_SHA" ]; then\n'
+                '  publisher_workflow_ref="$GITHUB_REPOSITORY/.github/workflows/'
+                'container-candidate-publish.yml@$GITHUB_REF"\n'
+                "else\n"
+                '  publisher_workflow_ref="Verjson/.github/.github/workflows/'
                 'container-candidate-publish.yml@$CONTRACT_REF"\n'
+                "fi\n"
             )
             assert publication_config["run"].count(publisher_identity_block) == 1
             publication_config["run"] = publication_config["run"].replace(
@@ -751,6 +760,17 @@ run_publish_prepare "$first_adoption" "$adopter_publish_output" Verjson/example 
   "$(git -C "$first_adoption" rev-parse HEAD)" false
 grep -qx "publisher-workflow-ref=Verjson/.github/.github/workflows/container-candidate-publish.yml@$ref" "$adopter_publish_output" \
   || { echo "adopter publication did not authorize the pinned cross-repository publisher" >&2; exit 1; }
+
+# The contract canary calls the publisher with `uses: ./` at contract-ref == github.sha,
+# so GitHub's OIDC job_workflow_ref names the canonical repository at the caller's ref.
+canary_consumer="$tmp/canary-consumer"
+mkdir -p "$canary_consumer"
+cp "$root/scripts/fixtures/container-candidate/canary.json" \
+  "$canary_consumer/container-candidate.json"
+canary_publish_output="$tmp/canary-publish-output"
+run_publish_prepare "$canary_consumer" "$canary_publish_output" verJSON/.github "$ref" true
+grep -qx 'publisher-workflow-ref=verJSON/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main' "$canary_publish_output" \
+  || { echo "same-repository publication did not authorize its own uses: ./ publisher" >&2; exit 1; }
 
 case_variant_consumer="$tmp/case-variant-consumer"
 mkdir -p "$case_variant_consumer"

@@ -166,7 +166,15 @@ jobs:
             sbomArtifact: ("candidate-sbom-" + ($image.variant | gsub("[^A-Za-z0-9._-]"; "-")) + "-" + .os + "-" + .architecture + (if (.variant // "") == "" then "" else "-" + .variant end))
           }]' "$CONFIG_PATH")"
           candidate="$(jq -r '.nextStableVersion' "$CONFIG_PATH")-rc.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
-          publisher_workflow_ref="Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF"
+          # contract-ref already equals job.workflow_sha. When it is also the source
+          # commit, the caller is this repository's `uses: ./` canary: GitHub names
+          # that publisher by the caller's ref, and the Cosign verifier accepts it
+          # only while job_workflow_sha == workflow_sha == sha (ADR 0216).
+          if [ "$CONTRACT_REF" = "$GITHUB_SHA" ]; then
+            publisher_workflow_ref="$GITHUB_REPOSITORY/.github/workflows/container-candidate-publish.yml@$GITHUB_REF"
+          else
+            publisher_workflow_ref="Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF"
+          fi
           {
             echo "matrix=$matrix"
             echo "sbom-matrix=$sbom_matrix"
