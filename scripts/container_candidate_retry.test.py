@@ -539,6 +539,91 @@ class SameRepositoryPublisherTests(unittest.TestCase):
                 )
             )
 
+    def test_verifier_accepts_the_same_repository_statement_the_producer_signs(self):
+        identity = validate_same_repository_statement(build_statement(same_repository_claims()))
+
+        self.assertRegex(identity, r"^statement-sha256:[0-9a-f]{64}$")
+
+    def test_rejects_cross_repository_publisher_at_a_branch_or_tag(self):
+        for ref in ("refs/heads/main", "refs/tags/v1", "v1", "main"):
+            with self.subTest(ref=ref):
+                with self.assertRaisesRegex(
+                    MODULE.RetryEvidenceError, "publisher workflow is not immutably pinned"
+                ):
+                    build_statement(
+                        same_repository_claims(
+                            job_workflow_ref=f"Verjson/.github/.github/workflows/container-candidate-publish.yml@{ref}",
+                        )
+                    )
+
+    def test_rejects_same_repository_caller_sha_that_differs_from_the_source_commit(self):
+        with self.assertRaisesRegex(
+            MODULE.RetryEvidenceError, "caller workflow identity differs from source"
+        ):
+            build_statement(same_repository_claims(workflow_sha="e" * 40))
+
+    def test_rejects_lookalike_and_case_variant_publisher_repositories(self):
+        for repository in (
+            "Verjson/example-evil",
+            "Verjson/exampl",
+            "Verjson-evil/example",
+            "verjson/example",
+            "Verjson/Example",
+            "VERJSON/EXAMPLE",
+        ):
+            with self.subTest(repository=repository):
+                with self.assertRaisesRegex(
+                    MODULE.RetryEvidenceError, "publisher workflow is not immutably pinned"
+                ):
+                    build_statement(
+                        same_repository_claims(
+                            job_workflow_ref=f"{repository}/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+                        )
+                    )
+
+    def test_rejects_publisher_refs_that_do_not_parse_as_one_workflow_identity(self):
+        for publisher in (
+            "Verjson/example/evil/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+            "Verjson/example/.github/workflows/container-candidate-publish.yml",
+            "Verjson/example/.github/workflows/container-candidate-publish.yml@refs/heads/main@" + "c" * 40,
+            "Verjson/example@refs/heads/main",
+            "Verjson/example/.github/workflows/container-candidate-publish.yml@ " + "c" * 40,
+            "@" + "c" * 40,
+        ):
+            with self.subTest(publisher=publisher):
+                with self.assertRaisesRegex(
+                    MODULE.RetryEvidenceError, "publisher workflow ref is malformed"
+                ):
+                    build_statement(same_repository_claims(job_workflow_ref=publisher))
+
+    def test_rejects_malformed_publisher_shas_even_when_the_ref_matches(self):
+        for sha in ("C" * 40, "c" * 39, "c" * 41, "", "g" * 40):
+            with self.subTest(sha=sha):
+                with self.assertRaises(MODULE.RetryEvidenceError):
+                    build_statement(
+                        same_repository_claims(
+                            job_workflow_ref=f"Verjson/.github/.github/workflows/container-candidate-publish.yml@{sha}",
+                            job_workflow_sha=sha,
+                        )
+                    )
+
+    def test_rejects_each_missing_identity_claim(self):
+        for claim in same_repository_claims():
+            with self.subTest(claim=claim):
+                claims = same_repository_claims()
+                del claims[claim]
+                with self.assertRaisesRegex(MODULE.RetryEvidenceError, "claims are incomplete"):
+                    build_statement(claims)
+
+    def test_verifier_rejects_a_publisher_outside_the_authorized_source_repository(self):
+        statement = build_statement(same_repository_claims())
+        statement["predicate"]["buildDefinition"]["externalParameters"]["verjson"]["source"]["repository"] = "Verjson/example-evil"
+
+        with self.assertRaisesRegex(
+            MODULE.RetryEvidenceError, "publisher workflow is not immutably pinned"
+        ):
+            validate_same_repository_statement(statement, source_repository="Verjson/example-evil")
+
 
 def candidate_statement():
     return {
