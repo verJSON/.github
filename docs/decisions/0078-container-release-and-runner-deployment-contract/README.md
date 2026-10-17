@@ -647,3 +647,37 @@ without allowing a different repository or changing review authority. The
 producer tests cover mixed-case identity and reject a Unicode lookalike.
 
 The identity correction is tracked in [#1682](https://github.com/Verjson/.github/issues/1682).
+
+## Amendment (2026-10-17) — hosted-only toolchain reclaim and a free-disk floor for candidate builds
+
+The candidate publisher's `publish-base` and `publish-derived` image builds consume a
+transferred `node_modules` build context. On a stock `ubuntu-24.04` runner, that context
+competes for disk with large preinstalled toolchains that no publish step uses.
+terptechpub/self-publish-ai-app's push publication failed with `ENOSPC` on every run
+from 2026-10-04 (evidence runs 39000509900 and 39001337204). A 3.97 GB context
+left 11.03 GB free when the build started, and the adopter's `npm rebuild` install
+scripts and the image export exhausted the rest. Pull-request validation builds with an
+empty context (#1679) and cannot observe this path.
+
+Two runner-disk measures now apply alongside the opt-in unused-image cleanup above:
+
+- **Hosted-only toolchain reclaim.** A step removes a fixed, reviewed list of hosted-image
+  toolchains (Android SDK, .NET, GHC/ghcup, CodeQL, Swift, PowerShell) before the
+  dependency transfer. It runs only when `runner.environment == 'github-hosted'`, only on
+  matrix rows the job builds, and only when
+  `needs.prepare.outputs.has-private-node-packages == 'true'`, the condition that
+  transfers the large context. The helper itself also refuses any runner environment other
+  than exactly `github-hosted`. Self-hosted runners never lose system paths. Unlike image
+  cleanup, it needs no opt-in: it applies only on ephemeral hosted images, and only in the
+  case whose disk demand it exists to meet.
+- **Free-disk floor.** Immediately before each image build, the publisher requires
+  free space on the filesystem holding Docker's data root of at least twice the measured
+  on-disk context size plus 4 GiB. If space is short, it fails with an explicit
+  required-versus-available error. A failed or malformed `du`, `df`, or `docker info`
+  reading fails closed. This is a necessary floor, not a guarantee of sufficiency: the
+  evidence runs failed after the transfer, during adopter install scripts and layer
+  export, whose demand the publisher cannot predict. Passing the floor rules out the known
+  undersized case, but a consumer build can still exhaust the disk.
+
+Neither measure changes consumer Dockerfiles, dependency selection, or runner topology.
+Implemented in Verjson/.github#1836 (part of terptechpub/self-publish-ai-app#1760).
