@@ -337,11 +337,21 @@ else:
 # run them -- quoted, absolute, or relative after `cd` -- and a row whose
 # executed script cannot be resolved to a scanned, tracked file fails.
 #
-# What "fails closed" does not cover: a module name assembled at run time --
-# `importlib.import_module("ascii_digit" + "_locales")`, or a name read from a
-# file or the environment -- never appears in the source, so no static scan can
-# classify it, and flagging name fragments would only move the gap to the next
-# spelling. The backstop is at run time: guard_locales raises under CI=true
+# Rows themselves are strict: a `$`, backtick, or glob anywhere in a row fails
+# it. What "fails closed" does not cover is a script or module name that a
+# reached file never writes out whole:
+#   - a name assembled at run time from pieces --
+#     `importlib.import_module("ascii_digit" + "_locales")`, `"$dir/$prefix.py"`,
+#     or a name read from a file or the environment;
+#   - a glob (`for test in scripts/ci-gate/*.test.py`), `find ... -exec`, or a
+#     command substitution `$(...)` in a wrapper body that yields the script;
+#   - JavaScript: `.js`, `.mjs`, and `.cjs` files are scanned for the module
+#     name but not followed into what they run;
+#   - a wrapper launched from Python: a reached Python file is checked for an
+#     importer it names, but not followed into the shell scripts it runs.
+# No static scan can classify these, and flagging name fragments would only
+# move the gap to the next spelling. The backstop is at run time: guard_locales
+# raises under CI=true
 # when en_US.UTF-8 cannot be reproduced (pinned by the missing-hazard-locale
 # test in settable-value-guards.test.py), so such a test on a fleet image fails
 # red, not green.
@@ -586,6 +596,9 @@ CONTROL_OPERATORS = {"&&", "||", ";", "|", "|&", "&", "(", ")"}
 REDIRECTION = re.compile(r"^[0-9]*[<>&]*[<>][<>&|]*$")
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 UNRESOLVABLE_CHARACTERS = set("$`*?[]{}~")
+# Quoting is gone once a row is split into words, so a `$` or backtick in any
+# word -- argument, assignment, or redirection target -- may run code.
+RUN_TIME_EXPANSION = set("$`")
 # Interpreter options a row may pass; anything else (`-c`, `-m`, `-e`) runs code
 # that is not a tracked script, so the row cannot be classified.
 INTERPRETER_OPTIONS = {
@@ -646,6 +659,12 @@ def row_scripts(command, sources):
         tokens = shell_words.words(body)
     except ValueError as error:
         raise AssertionError(f"row cannot be parsed: {command}: {error}") from error
+    for token in tokens:
+        if RUN_TIME_EXPANSION & set(token):
+            raise AssertionError(
+                f"row word {token!r} expands at run time, so what the row runs "
+                f"cannot be named: {command}"
+            )
     directory = pathlib.PurePosixPath(".")
     scripts = set()
     for words in simple_commands(tokens):
@@ -902,6 +921,23 @@ for spelling, command in {
         f"fleet row with an unresolvable {spelling}",
         document,
         manifest_text + f"platform\t{command}\n",
+    )
+
+# A `$` or backtick anywhere in a row -- an argument, an assignment, or a
+# redirection target, not only the script word -- can run code at run time.
+benign_row = "bash scripts/actions-ci-group-output.test.sh"
+for spelling, command in {
+    "a command-substitution argument": f'{benign_row} "$(python3 {retention_script})"',
+    "a backtick argument": f"{benign_row} `python3 {retention_script}`",
+    "an expanding assignment": f'PROBE="$(python3 {retention_script})" {benign_row}',
+    "an expanding redirection target": f'{benign_row} >"$(python3 {retention_script})"',
+    "a variable argument": f'{benign_row} "$PROBE"',
+}.items():
+    expect_locale_failure(
+        f"fleet row with {spelling}",
+        document,
+        manifest_text + f"platform\t{command}\n",
+        reason="expands at run time",
     )
 
 # Importers outside scripts/ are scanned too, and a row may not run a script
