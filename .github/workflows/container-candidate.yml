@@ -63,10 +63,10 @@ jobs:
           SOURCE_PATH: .container-candidate-source-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          [[ "$CONTRACT_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::contract-ref must be a 40-hex commit"; exit 1; }
+          [[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]] || { echo "::error::contract-ref must be a 40-hex commit"; exit 1; }
           [ "$CONTRACT_REF" = "$JOB_WORKFLOW_SHA" ] || { echo "::error::contract-ref must identify the executing reusable workflow"; exit 1; }
-          [[ "$RETRY_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::retry-sha256 must be a lowercase SHA-256 digest"; exit 1; }
-          [[ "$CONFIG_RELATIVE_PATH" =~ ^([A-Za-z0-9][A-Za-z0-9._-]*/)*[A-Za-z0-9][A-Za-z0-9._-]*\.json$ ]] \
+          [[ "$RETRY_SHA256" =~ ^[0123456789abcdef]{64}$ ]] || { echo "::error::retry-sha256 must be a lowercase SHA-256 digest"; exit 1; }
+          [[ "$CONFIG_RELATIVE_PATH" =~ ^([ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*/)*[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*\.json$ ]] \
             || { echo "::error::config-path must be a normalized repository-relative JSON path"; exit 1; }
           source_root="$(realpath -e "$SOURCE_PATH")" \
             || { echo "::error::isolated candidate source is missing"; exit 1; }

@@ -31,6 +31,24 @@ UNTAGGED_MINIMUM_AGE = datetime.timedelta(days=7)
 REQUEST_TIMEOUT_SECONDS = 30
 
 
+# The retention policy language, shared with the guard in every workflow that
+# reads CI_PACKAGE_RETENTION_KEEP (scripts/ci-gate/release-verify-retention-keep.test.py
+# holds them equal): an integer from 1 to 999 keeps that many newest stable
+# versions, and the exact lowercase word `all` disables retention. Digits are
+# spelled out so the pattern matches only ASCII.
+KEEP_POLICY = re.compile(r"all|[123456789][0123456789]{0,2}", re.ASCII)
+KEEP_ALL = "all"
+
+
+def parse_keep(value: str) -> int | str:
+    """Parse `--keep` into a positive window, or KEEP_ALL to delete nothing."""
+    if not KEEP_POLICY.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            f"--keep must be an integer from 1 to 999 or 'all', got {value!r}"
+        )
+    return KEEP_ALL if value == KEEP_ALL else int(value)
+
+
 class RetentionError(Exception):
     pass
 
@@ -430,20 +448,25 @@ def main() -> int:
     parser.add_argument("--targets", required=True)
     parser.add_argument(
         "--keep",
-        type=int,
+        type=parse_keep,
         default=3,
         help=(
-            "Number of newest stable versions to retain per package. Defaults to the ADR 0108 "
+            "Number of newest stable versions to retain per package (1-999), or 'all' to "
+            "disable retention. Defaults to the ADR 0108 "
             "policy of three; changing it is a storage-cost-vs-consumer-breakage policy decision "
             "for a human (verjson-agents issue #987), not something this script decides."
         ),
     )
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
+    targets = parse_targets(args.targets, args.owner)
+    if args.keep == KEEP_ALL:
+        # Validate the inputs, then stop before any API call: `all` keeps every version.
+        print("package-retention: disabled by policy (keep=all)")
+        return 0
     token = os.environ.get("GH_TOKEN", "")
     if not token:
         raise RetentionError("GH_TOKEN is required")
-    targets = parse_targets(args.targets, args.owner)
     client = GitHubPackages(args.owner, token, os.environ.get("GITHUB_API_URL", "https://api.github.com"))
     inspector = OciInspector()
     deletions = build_plan(

@@ -52,7 +52,7 @@ jobs:
           capacity_id=""
           capacity_owned=0
           capacity_owner=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
-          [[ "$capacity_owner" =~ ^[a-f0-9]{32}$ ]]
+          [[ "$capacity_owner" =~ ^[abcdef0123456789]{32}$ ]]
           umask 077
           capacity_state=""
           capacity_cidfile=""
@@ -69,7 +69,7 @@ jobs:
             cleanup_failed=0
             if [ -z "$capacity_id" ] && [ -f "$capacity_cidfile" ] && [ ! -L "$capacity_cidfile" ]; then
               recovered_capacity_id=$(cat "$capacity_cidfile") || cleanup_failed=1
-              if [[ "$recovered_capacity_id" =~ ^[a-f0-9]{64}$ ]] &&
+              if [[ "$recovered_capacity_id" =~ ^[abcdef0123456789]{64}$ ]] &&
                 [ "$(docker container inspect --format '{{index .Config.Labels "verjson.runner-canary-owner"}}' "$recovered_capacity_id")" = "$capacity_owner" ]; then
                 capacity_id=$recovered_capacity_id
                 capacity_owned=1
@@ -165,7 +165,7 @@ jobs:
           if [ -f "$capacity_cidfile" ] && [ ! -L "$capacity_cidfile" ] &&
             [ "$(stat -c '%u:%a' "$capacity_cidfile")" = "$(id -u):600" ]; then
             recovered_capacity_id=$(cat "$capacity_cidfile")
-            if [[ "$recovered_capacity_id" =~ ^[a-f0-9]{64}$ ]] &&
+            if [[ "$recovered_capacity_id" =~ ^[abcdef0123456789]{64}$ ]] &&
               [ "$(docker container inspect --format '{{index .Config.Labels "verjson.runner-canary-owner"}}' "$recovered_capacity_id")" = "$capacity_owner" ]; then
               capacity_id=$recovered_capacity_id
               capacity_owned=1
@@ -184,7 +184,7 @@ jobs:
               elif [ -z "$observed_ids" ]; then
                 stable_empty=$((stable_empty + 1))
                 if [ "$stable_empty" -ge 3 ]; then break; fi
-              elif [[ "$observed_ids" =~ ^[a-f0-9]{64}$ ]] &&
+              elif [[ "$observed_ids" =~ ^[abcdef0123456789]{64}$ ]] &&
                 [ "$(docker container inspect --format '{{index .Config.Labels "verjson.runner-canary-owner"}}' "$observed_ids")" = "$capacity_owner" ]; then
                 capacity_id=$observed_ids
                 capacity_owned=1
@@ -202,10 +202,10 @@ jobs:
           if [ "$cleanup_signal_status" -ne 0 ]; then exit "$cleanup_signal_status"; fi
           [ "$create_status" -eq 0 ]
           [ "$capacity_owned" -eq 1 ]
-          [[ "$candidate_capacity_id" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$candidate_capacity_id" =~ ^[abcdef0123456789]{64}$ ]]
           [ "$candidate_capacity_id" = "$capacity_id" ]
           capacity_stats=$(docker start --attach "$capacity_id")
-          [[ "$capacity_stats" =~ ^([0-9]{1,18})\ ([0-9]{1,3})$ ]]
+          [[ "$capacity_stats" =~ ^([0123456789]{1,18})\ ([0123456789]{1,3})$ ]]
           free_bytes=${BASH_REMATCH[1]}
           free_inodes=${BASH_REMATCH[2]}
           test "$free_inodes" -le 100

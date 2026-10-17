@@ -42,7 +42,7 @@ extract_step "Verify the policy ref was reviewed and merged" "$verify"
 extract_definition "Validate the immutable policy ref" "$tmp/validate-step.yml"
 extract_definition "Check out the central hygiene policy" "$tmp/checkout-step.yml"
 
-if ! grep -qF '^[0-9a-f]{40}$' "$validate"; then
+if ! grep -qF '^[0123456789abcdef]{40}$' "$validate"; then
   echo "FAIL - could not extract an immutable full-SHA guard from $workflow"
   exit 1
 fi

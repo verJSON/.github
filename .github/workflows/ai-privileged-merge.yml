@@ -170,11 +170,11 @@ jobs:
           REPOSITORY_CONTEXT: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [[ ! "$MERGE_APP_CLIENT_ID" =~ ^Iv[0-9A-Za-z]{18}$ ]]; then
+          if [[ ! "$MERGE_APP_CLIENT_ID" =~ ^Iv[0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz]{18}$ ]]; then
             echo "::error::MERGE_APP_CLIENT_ID must be a canonical GitHub App client ID, not an empty, malformed, or numeric legacy App ID."
             exit 1
           fi
-          [[ "$TARGET_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || {
+          [[ "$TARGET_REPO" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+$ ]] || {
             echo "::error::target repository identity is malformed"; exit 1;
           }
           [ "$TARGET_REPO" = "$REPOSITORY_CONTEXT" ] || {
@@ -214,13 +214,13 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "${GH_TOKEN:-}" ] || { echo "::error::read-only repository token is unavailable"; exit 1; }
-          [[ "$TARGET_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || exit 1
-          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || exit 1
-          [[ "$AUTHORIZATION_CHECK_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
-          [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$TARGET_REPO" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+$ ]] || exit 1
+          [[ "$PR_NUMBER" =~ ^[123456789][0123456789]{0,14}$ ]] || exit 1
+          [[ "$AUTHORIZATION_CHECK_ID" =~ ^[123456789][0123456789]{0,14}$ ]] || exit 1
+          [[ "$EXPECTED_HEAD_SHA" =~ ^[0123456789abcdef]{40}$ ]] || exit 1
 
           default_branch="$(gh api "repos/$TARGET_REPO" --jq '.default_branch // ""')"
-          [[ "$default_branch" =~ ^[A-Za-z0-9._/-]+$ ]] || exit 1
+          [[ "$default_branch" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]+$ ]] || exit 1
           [ "$CALLER_REF" = "refs/heads/$default_branch" ] || {
             echo "::error::promotion must execute from the target repository default branch"; exit 1;
           }
@@ -231,9 +231,9 @@ jobs:
             '$repository | ascii_downcase == "verjson/.github"' >/dev/null || {
             echo "::error::promotion is not executing from the canonical workflow repository"; exit 1;
           }
-          [[ "$EXECUTING_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$EXECUTING_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]] || exit 1
           canonical_main="$(gh api repos/Verjson/.github/commits/main --jq '.sha // ""')"
-          [[ "$canonical_main" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$canonical_main" =~ ^[0123456789abcdef]{40}$ ]] || exit 1
           if [ "$EXECUTING_WORKFLOW_SHA" != "$canonical_main" ]; then
             relation="$(gh api "repos/Verjson/.github/compare/$EXECUTING_WORKFLOW_SHA...$canonical_main" --jq '.status // ""')"
             [ "$relation" = ahead ] || {
@@ -322,7 +322,7 @@ jobs:
           }
           all_checks="$(gh api --paginate "repos/$TARGET_REPO/commits/$EXPECTED_HEAD_SHA/check-runs?per_page=100" | jq -s '[.[].check_runs[]]')"
           default_branch="$(gh api "repos/$TARGET_REPO" --jq '.default_branch // ""')"
-          [[ "$default_branch" =~ ^[A-Za-z0-9._/-]+$ ]] || exit 1
+          [[ "$default_branch" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]+$ ]] || exit 1
           # The adopter's default branch is adopter-controlled text, and the guard above is a
           # general-purpose input check that sits far from the reads below. Encode it here so
           # relaxing that guard cannot re-arm an injection. Two encodings, not one:
@@ -349,13 +349,13 @@ jobs:
             }
             latest="$(jq -c --arg name "$name" '[.[] | select(.name == $name)] | sort_by(.id) | last // {}' <<<"$all_checks")"
             check_id="$(jq -r '.id // ""' <<<"$latest")"
-            if ! [[ "$check_id" =~ ^[1-9][0-9]*$ ]]; then
+            if ! [[ "$check_id" =~ ^[123456789][0123456789]*$ ]]; then
               workflow_runs="$(gh api --paginate \
                 "repos/$TARGET_REPO/actions/workflows/$expected_workflow_id/runs?head_sha=$EXPECTED_HEAD_SHA&event=pull_request&per_page=100" \
                 | jq -s '[.[].workflow_runs[]]')"
               latest_workflow_run="$(jq -c '[.[]] | sort_by(.id) | last // {}' <<<"$workflow_runs")"
               workflow_run_id="$(jq -r '.id // ""' <<<"$latest_workflow_run")"
-              if ! [[ "$workflow_run_id" =~ ^[1-9][0-9]*$ ]]; then
+              if ! [[ "$workflow_run_id" =~ ^[123456789][0123456789]*$ ]]; then
                 echo "Required check $name has not been reported because its trusted workflow has not started; a later workflow event will retry promotion."
                 exit 0
               fi
@@ -389,7 +389,7 @@ jobs:
               echo "::error::required check $name has untrusted Actions details"; exit 1;
             }
             details_suffix="${details_url#"$details_prefix"}"
-            [[ "$details_suffix" =~ ^([1-9][0-9]*)(/job/[1-9][0-9]*)?$ ]] || {
+            [[ "$details_suffix" =~ ^([123456789][0123456789]*)(/job/[123456789][0123456789]*)?$ ]] || {
               echo "::error::required check $name has malformed Actions details"; exit 1;
             }
             ci_run_id="${BASH_REMATCH[1]}"
@@ -399,7 +399,7 @@ jobs:
               | jq -s '[.[].jobs[]]')"
             check_suite_id="$(jq -r '.check_suite.id // ""' <<<"$latest")"
             run_check_suite_id="$(jq -r '.check_suite_id // ""' <<<"$ci_run")"
-            [[ "$check_suite_id" =~ ^[1-9][0-9]*$ ]] && [ "$check_suite_id" = "$run_check_suite_id" ] || {
+            [[ "$check_suite_id" =~ ^[123456789][0123456789]*$ ]] && [ "$check_suite_id" = "$run_check_suite_id" ] || {
               echo "::error::required check $name is not a member of its claimed trusted workflow run"; exit 1;
             }
             jq -e --arg url "$expected_check_run_url" --arg name "$name" '
@@ -430,7 +430,7 @@ jobs:
             }
             head_workflow_blob="$(gh api "repos/$TARGET_REPO/contents/$workflow_path?ref=$EXPECTED_HEAD_SHA" --jq '.sha // ""')"
             trusted_workflow_blob="$(gh api "repos/$TARGET_REPO/contents/$workflow_path?ref=$branch_ref" --jq '.sha // ""')"
-            [[ "$head_workflow_blob" =~ ^[0-9a-f]{40}$ ]] && [ "$head_workflow_blob" = "$trusted_workflow_blob" ] || {
+            [[ "$head_workflow_blob" =~ ^[0123456789abcdef]{40}$ ]] && [ "$head_workflow_blob" = "$trusted_workflow_blob" ] || {
               echo "::error::required check $name executed a workflow revision not equal to the trusted default branch"; exit 1;
             }
           done < <(jq -c '.[]' <<<"$required_checks")
@@ -446,12 +446,12 @@ jobs:
           [ "$base_ref" = "$default_branch" ] || {
             echo "::error::terminal promotion only accepts the trusted default branch as its base"; exit 1;
           }
-          [[ "$authorized_base_sha" =~ ^[0-9a-f]{40}$ ]] || {
+          [[ "$authorized_base_sha" =~ ^[0123456789abcdef]{40}$ ]] || {
             echo "::error::pull request base OID is missing or malformed"; exit 1;
           }
           current_base_sha="$(gh api "repos/$TARGET_REPO/git/ref/heads/$branch_path" \
             --jq 'select(.object.type == "commit") | .object.sha // ""')"
-          [[ "$current_base_sha" =~ ^[0-9a-f]{40}$ ]] && [ "$current_base_sha" = "$authorized_base_sha" ] || {
+          [[ "$current_base_sha" =~ ^[0123456789abcdef]{40}$ ]] && [ "$current_base_sha" = "$authorized_base_sha" ] || {
             echo "::error::pull request base is stale or the trusted default-branch ref moved during authorization"; exit 1;
           }
 
@@ -600,7 +600,7 @@ jobs:
         run: |
           set -euo pipefail
           receipt_artifact_id="$(<"$RUNNER_TEMP/arm-receipt-artifact-id")"
-          [[ "$receipt_artifact_id" =~ ^[1-9][0-9]*$ ]] || {
+          [[ "$receipt_artifact_id" =~ ^[123456789][0123456789]*$ ]] || {
             echo "::error::confirmed terminal merge lacks a valid arm receipt artifact ID"
             exit 1
           }
@@ -639,7 +639,7 @@ jobs:
           # cleanup, not a trust boundary: a delete failure is logged and does
           # not fail an already-completed merge.
           receipt_artifact_id="$ARM_RECEIPT_ARTIFACT_ID"
-          if [[ "$receipt_artifact_id" =~ ^[1-9][0-9]*$ ]]; then
+          if [[ "$receipt_artifact_id" =~ ^[123456789][0123456789]*$ ]]; then
               if gh api --method DELETE "repos/$TARGET_REPO/actions/artifacts/$receipt_artifact_id" \
                   >/dev/null 2>"$RUNNER_TEMP/arm-artifact-delete.stderr"; then
                 echo "Consumed arm receipt artifact $receipt_artifact_id."

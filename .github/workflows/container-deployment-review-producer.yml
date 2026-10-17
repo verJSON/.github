@@ -62,11 +62,11 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$REVIEW_KIND" =~ ^(code|security|ai)$ ]]
-          [[ "$CONFIG_PATH" =~ ^[A-Za-z0-9_./-]+\.json$ && "$CONFIG_PATH" != /* && "$CONFIG_PATH" != *..* ]]
+          [[ "$CONFIG_PATH" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./-]+\.json$ && "$CONFIG_PATH" != /* && "$CONFIG_PATH" != *..* ]]
           head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$TARGET_PULL" --jq .head.sha)"
           # Constrain the ref at its use, not only at its source: 40 hex excludes every
           # character that could change the meaning of the URL it is about to build.
-          [[ "$head" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$head" =~ ^[0123456789abcdef]{40}$ ]]
           gh api "repos/$GITHUB_REPOSITORY/contents/$CONFIG_PATH?ref=$head" --jq .content | tr -d '\n' | base64 -d > "$RUNNER_TEMP/review-config.json"
           value="$(jq -er --arg kind "$REVIEW_KIND" '.reviewAuthority[$kind].installationId | select(type == "number" and . > 0)' "$RUNNER_TEMP/review-config.json")"
           echo "installation-id=$value" >> "$GITHUB_OUTPUT"
@@ -105,9 +105,9 @@ jobs:
         env: {WORKFLOW_REPOSITORY: '${{ needs.environment-preflight.outputs.workflow-repository }}', WORKFLOW_REF: '${{ needs.environment-preflight.outputs.workflow-ref }}', WORKFLOW_SHA: '${{ needs.environment-preflight.outputs.workflow-sha }}', EXPECTED_POLICY_DIGEST: '${{ needs.environment-preflight.outputs.policy-digest }}', GH_TOKEN: '${{ github.token }}'}
         run: |
           set -euo pipefail
-          [[ "$WORKFLOW_REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ &&
+          [[ "$WORKFLOW_REPOSITORY" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+$ &&
              "${WORKFLOW_REPOSITORY,,}" == "verjson/.github" &&
-             "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
+             "$WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
           [[ "$WORKFLOW_REF" == "$WORKFLOW_REPOSITORY/.github/workflows/container-deployment-review-producer.yml@$WORKFLOW_SHA" ]]
           gh api "repos/$GITHUB_REPOSITORY/environments/runner-deploy-code-review-publisher" > "$RUNNER_TEMP/environment.json"
           jq -e '.deployment_branch_policy.protected_branches == true and .deployment_branch_policy.custom_branch_policies == false and (.protection_rules | length) == 1 and .protection_rules[0].type == "branch_policy"' "$RUNNER_TEMP/environment.json" >/dev/null
@@ -142,9 +142,9 @@ jobs:
         env: {WORKFLOW_REPOSITORY: '${{ needs.environment-preflight.outputs.workflow-repository }}', WORKFLOW_REF: '${{ needs.environment-preflight.outputs.workflow-ref }}', WORKFLOW_SHA: '${{ needs.environment-preflight.outputs.workflow-sha }}', EXPECTED_POLICY_DIGEST: '${{ needs.environment-preflight.outputs.policy-digest }}', GH_TOKEN: '${{ github.token }}'}
         run: |
           set -euo pipefail
-          [[ "$WORKFLOW_REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ &&
+          [[ "$WORKFLOW_REPOSITORY" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+$ &&
              "${WORKFLOW_REPOSITORY,,}" == "verjson/.github" &&
-             "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
+             "$WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
           [[ "$WORKFLOW_REF" == "$WORKFLOW_REPOSITORY/.github/workflows/container-deployment-review-producer.yml@$WORKFLOW_SHA" ]]
           gh api "repos/$GITHUB_REPOSITORY/environments/runner-deploy-security-review-publisher" > "$RUNNER_TEMP/environment.json"
           jq -e '.deployment_branch_policy.protected_branches == true and .deployment_branch_policy.custom_branch_policies == false and (.protection_rules | length) == 1 and .protection_rules[0].type == "branch_policy"' "$RUNNER_TEMP/environment.json" >/dev/null
@@ -179,9 +179,9 @@ jobs:
         env: {WORKFLOW_REPOSITORY: '${{ needs.environment-preflight.outputs.workflow-repository }}', WORKFLOW_REF: '${{ needs.environment-preflight.outputs.workflow-ref }}', WORKFLOW_SHA: '${{ needs.environment-preflight.outputs.workflow-sha }}', EXPECTED_POLICY_DIGEST: '${{ needs.environment-preflight.outputs.policy-digest }}', GH_TOKEN: '${{ github.token }}'}
         run: |
           set -euo pipefail
-          [[ "$WORKFLOW_REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ &&
+          [[ "$WORKFLOW_REPOSITORY" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+$ &&
              "${WORKFLOW_REPOSITORY,,}" == "verjson/.github" &&
-             "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
+             "$WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
           [[ "$WORKFLOW_REF" == "$WORKFLOW_REPOSITORY/.github/workflows/container-deployment-review-producer.yml@$WORKFLOW_SHA" ]]
           gh api "repos/$GITHUB_REPOSITORY/environments/runner-deploy-ai-review-publisher" > "$RUNNER_TEMP/environment.json"
           jq -e '.deployment_branch_policy.protected_branches == true and .deployment_branch_policy.custom_branch_policies == false and (.protection_rules | length) == 1 and .protection_rules[0].type == "branch_policy"' "$RUNNER_TEMP/environment.json" >/dev/null

@@ -198,6 +198,8 @@ jobs:
     # The compatibility consumer is intentionally isolated with bubblewrap.
     # Persistent fleet images are not required to carry that host dependency;
     # keep this security contract on the explicit hosted Ubuntu image instead.
+    # The locale-collation group is the same case: its guards must be proven
+    # under en_US.UTF-8, whose locale source data fleet images do not carry.
     runs-on: ubuntu-24.04
     timeout-minutes: 8
     steps:
@@ -1749,7 +1751,7 @@ jobs:
             )" || supervisor_status=$?
             case "$supervisor_status" in
               0)
-                if [[ "$supervisor_output" =~ ^[0-9a-f]{64}$ ]]; then
+                if [[ "$supervisor_output" =~ ^[0123456789abcdef]{64}$ ]]; then
                   printf '%s\n' "$supervisor_output"
                   return 0
                 fi
@@ -1849,6 +1851,13 @@ jobs:
           bash scripts/ci-gate/node-ci-secretless-consumer.test.sh
           bash scripts/ci-gate/node-ci-secretless-nested-manifests.test.sh
           python3 -I scripts/container_release_reconcile.test.py
+      # Fails closed when en_US.UTF-8 cannot be reproduced; never skip it.
+      - name: Run locale-collation shell contracts
+        if: ${{ !cancelled() }}
+        env:
+          RUNNER_LABELS: ''
+          ACTIONS_CI_COMMAND_BUDGET_SECONDS: ${{ github.event_name == 'pull_request' && '60' || '' }}
+        run: bash scripts/actions-ci-group.sh locale-collation
 
   # scripts/gen-adr-index.sh --check (run above, in the changelog-release
   # group) only ever sees this PR's own tree, so it cannot catch two open PRs

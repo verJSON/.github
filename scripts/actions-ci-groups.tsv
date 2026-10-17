@@ -242,3 +242,7 @@ platform	bash scripts/ci-gate/pipefail-sigpipe.test.sh
 platform	bash scripts/ci-gate/hub-changelog-validate.test.sh
 platform	bash scripts/ci-gate/hub-changelog-validate.sh
 platform	python3 scripts/ci-gate/merge-gate-provenance-claims.test.py
+# locale-collation runs in actions-ci hosted-compatibility-tests on ubuntu-24.04:
+# these contracts import ascii_digit_locales and must reproduce en_US.UTF-8.
+locale-collation	python3 scripts/ci-gate/settable-value-guards.test.py
+locale-collation	python3 scripts/ci-gate/release-verify-retention-keep.test.py

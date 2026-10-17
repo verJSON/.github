@@ -534,7 +534,7 @@ extract_config_run() {
       in_prepare = 1
       next
     }
-    in_prepare && /^  [A-Za-z0-9_.-]+:/ {
+    in_prepare && /^  [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-]+:/ {
       fail("prepare job ended before its config run block")
     }
     in_prepare && $0 == "      - id: config" {
@@ -865,8 +865,8 @@ grep -q 'github.event.repository.default_branch' "$publish_workflow"
 grep -q 'packages: write' "$publish_workflow"
 grep -q 'id-token: write' "$publish_workflow"
 ! grep -Eq 'attestations: write|actions/attest|gh attestation verify' "$publish_workflow"
-grep -q 'sigstore/cosign-installer@[0-9a-f]\{40\} # v4.1.2' "$publish_workflow"
-grep -q 'oras-project/setup-oras@[0-9a-f]\{40\} # v2.0.2' "$publish_workflow"
+grep -q 'sigstore/cosign-installer@[0123456789abcdef]\{40\} # v4.1.2' "$publish_workflow"
+grep -q 'oras-project/setup-oras@[0123456789abcdef]\{40\} # v2.0.2' "$publish_workflow"
 grep -q '"attest-blob"' "$root/scripts/container_cosign_provenance.py"
 grep -q '"verify-blob-attestation"' "$root/scripts/container_cosign_provenance.py"
 grep -q 'promotionEligible:false' "$publish_workflow"
@@ -883,7 +883,7 @@ mirror_gar_job="$(awk '/^  mirror-gar:/{seen=1} /^  candidate-manifest:/{seen=0}
 grep -q "github.event_name == 'push'" <<<"$mirror_gar_job"
 grep -q "needs.prepare.outputs.has-gar == 'true'" <<<"$mirror_gar_job"
 grep -q 'id-token: write' <<<"$mirror_gar_job"
-grep -q 'google-github-actions/auth@[0-9a-f]\{40\}' <<<"$mirror_gar_job"
+grep -q 'google-github-actions/auth@[0123456789abcdef]\{40\}' <<<"$mirror_gar_job"
 grep -q 'steps.gar-auth.outputs.access_token' <<<"$mirror_gar_job"
 ! grep -q 'steps.gar-auth.outputs.auth_token' <<<"$mirror_gar_job"
 grep -qF '[.[] | select(.variant == $variant)] | if length == 1 then (.[0] | del(.variant))' "$publish_workflow"
@@ -900,7 +900,7 @@ fi
 attest_sbom_job="$(awk '/^  attest-sbom:/{seen=1} /^  candidate-manifest:/{seen=0} seen' "$publish_workflow")"
 attest_sbom_permissions="$(awk '
   /^    permissions:$/ { seen=1; next }
-  seen && /^    [A-Za-z0-9_.-]+:/ { exit }
+  seen && /^    [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-]+:/ { exit }
   seen { print }
 ' <<<"$attest_sbom_job" | sed 's/^      //')"
 expected_attest_sbom_permissions="$(cat <<'PERMISSIONS'
@@ -994,7 +994,7 @@ grep -qF 'npm ci --ignore-scripts' <<<"$acquisition_job"
 ! grep -Eq 'subprocess|os\.system|extract(all)?\(' "$root/scripts/container_private_dependencies.py"
 grep -qF 'transfer-cache-key: ${{ steps.create-node-modules-cache-key.outputs.cache-key }}' <<<"$acquisition_job"
 grep -qF 'openssl rand -hex 32' <<<"$acquisition_job"
-grep -qF '[[ "$nonce" =~ ^[0-9a-f]{64}$ ]]' <<<"$acquisition_job"
+grep -qF '[[ "$nonce" =~ ^[0123456789abcdef]{64}$ ]]' <<<"$acquisition_job"
 grep -qF 'container-node-modules-${RUN_ID}-${RUN_ATTEMPT}-${nonce}' <<<"$acquisition_job"
 grep -qF 'uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' <<<"$acquisition_job"
 grep -qF 'path: .verjson-container-node-modules-${{ github.run_id }}-${{ github.run_attempt }}' <<<"$acquisition_job"
@@ -1005,7 +1005,7 @@ if grep -qF 'actions/upload-artifact@' <<<"$acquisition_job"; then
 fi
 grep -qF 'name: Remove local acquisition and transfer state' <<<"$acquisition_job"
 grep -qF 'if: always()' <<<"$acquisition_job"
-pr_build_block="$(awk '/^  pull-request-build:/{seen=1} seen && /^  [A-Za-z0-9_.-]+:/{if (seen++ > 1) exit} seen {print}' "$workflow")"
+pr_build_block="$(awk '/^  pull-request-build:/{seen=1} seen && /^  [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-]+:/{if (seen++ > 1) exit} seen {print}' "$workflow")"
 grep -qF "needs.prepare.outputs.has-private-node-packages == 'false'" <<<"$pr_build_block"
 grep -qF 'mkdir "$context"' <<<"$pr_build_block"
 grep -qF 'build-contexts: verjson_node_modules=${{ runner.temp }}/container-node-modules-context' <<<"$pr_build_block"
@@ -1017,7 +1017,7 @@ fi
 for build_job in publish-base publish-derived; do
   build_block="$(awk -v start="  $build_job:" '
     $0 == start { seen=1; next }
-    seen && /^  [A-Za-z0-9_.-]+:/ { exit }
+    seen && /^  [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-]+:/ { exit }
     seen { print }
   ' "$publish_workflow")"
   job_if="$(awk '
@@ -1140,7 +1140,7 @@ if grep -Eqi 'setup-node|node_modules|BASE_SHA|git (show|cat-file|ls-tree)' <<<"
   echo "credential-free preparation imposes Node or reviewed-base requirements" >&2
   exit 1
 fi
-if grep -Eq 'uses: [^ ]+@(main|master|v[0-9]+)$' "$workflow" "$publish_workflow"; then
+if grep -Eq 'uses: [^ ]+@(main|master|v[0123456789]+)$' "$workflow" "$publish_workflow"; then
   echo "container workflow contains an unpinned action" >&2
   exit 1
 fi

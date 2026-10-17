@@ -34,7 +34,7 @@ trap 'rm -f "$tmp_table" "$tmp_rendered"' EXIT
 
 valid_date() {
   local value="$1" year month day max_day
-  [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || return 1
+  [[ "$value" =~ ^[0123456789]{4}-[0123456789]{2}-[0123456789]{2}$ ]] || return 1
   year=$((10#${value:0:4}))
   month=$((10#${value:5:2}))
   day=$((10#${value:8:2}))

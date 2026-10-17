@@ -302,7 +302,7 @@ grep -q 'packages: write' "$workflow"
 grep -q 'needs: promote' "$workflow"
 grep -q 'retention-targets' "$workflow"
 grep -q 'Validate the immutable retention contract ref' "$workflow"
-grep -q '\^\[0-9a-f\]{40}\$' "$workflow"
+grep -q '\^\[0123456789abcdef\]{40}\$' "$workflow"
 guard_line="$(grep -n 'Validate the immutable retention contract ref' "$workflow" | tail -1 | cut -d: -f1)"
 checkout_line="$(grep -n 'path: .package-retention-contract' "$workflow" | cut -d: -f1)"
 [ "$guard_line" -lt "$checkout_line" ]
@@ -312,9 +312,9 @@ grep -qx '          python3 -I scripts/container_release_promotion.py --candidat
 ! grep -Eq '^[[:space:]]+python scripts/container_(artifact_extract|attestation_verify|release_promotion)\.py' "$workflow"
 grep -Fq 'candidate_artifact_digest="${BASH_REMATCH[2]}"' "$workflow"
 ! grep -Fq 'candidate_artifact_digest="${BASH_REMATCH[1]}"' "$workflow"
-grep -Fq '[[ "$CANDIDATE_MANIFEST" =~ ^([0-9]+)@(sha256:[0-9a-f]{64})$ ]]' "$workflow"
+grep -Fq '[[ "$CANDIDATE_MANIFEST" =~ ^([0123456789]{1,15})@(sha256:[0123456789abcdef]{64})$ ]]' "$workflow"
 candidate_identity="9631224154@sha256:70be36dfceee65146fd9942840a227d498506c1edc61af53ed4cb6e642b8d3cd"
-[[ "$candidate_identity" =~ ^([0-9]+)@(sha256:[0-9a-f]{64})$ ]]
+[[ "$candidate_identity" =~ ^([0123456789]{1,15})@(sha256:[0123456789abcdef]{64})$ ]]
 [ "${BASH_REMATCH[1]}" = "9631224154" ]
 [ "${BASH_REMATCH[2]}" = "sha256:70be36dfceee65146fd9942840a227d498506c1edc61af53ed4cb6e642b8d3cd" ]
 grep -q 'existing tag records a divergent release manifest' "$workflow"

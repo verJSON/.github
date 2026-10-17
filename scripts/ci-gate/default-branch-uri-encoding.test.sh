@@ -1270,6 +1270,7 @@ sha_constrained() { # $1 = var, $2 = block slice, $3 = file
   local var="$1"
   if [ "${3##*.}" = py ]; then
     grep -qF "[[ \"\$$var\" =~ ^[0-9a-f]{40}\$ ]]" <<<"$2" && return 0
+    grep -qF "[[ \"\$$var\" =~ ^[0123456789abcdef]{40}\$ ]]" <<<"$2" && return 0
     grep -qE "(^|[[:space:]])${var}[:=][[:space:]]*[\"']?[0-9a-f]{40}[\"']?[[:space:]]*\$" <<<"$2" && return 0
     grep -qE "^[[:space:]]*$var=\"\\\$\(jq -er .*\^\[0-9a-f\]\{40\}\\\$" <<<"$2" && return 0
     return 1
@@ -1277,6 +1278,7 @@ sha_constrained() { # $1 = var, $2 = block slice, $3 = file
   local -a GUARD_RECORDS=()
   mapfile -t GUARD_RECORDS < <(logical_lines slice <<<"$2")
   guard_live_literal_records "[[ \"\$$var\" =~ ^[0-9a-f]{40}\$ ]]" && return 0
+  guard_live_literal_records "[[ \"\$$var\" =~ ^[0123456789abcdef]{40}\$ ]]" && return 0
   guard_live_re_records "(^|[[:space:]])${var}[:=][[:space:]]*[\"']?[0-9a-f]{40}[\"']?([[:space:]]|\$)" && return 0
   # The same 40-hex constraint spelled inside the jq program that produced the value.
   guard_live_re_records "^[[:space:]]*$var=\"[\$][(]jq -er .*\^\[0-9a-f\][{]40[}][\$].*[)]\"" && return 0
@@ -1516,7 +1518,7 @@ for positioned in '  a)' '  "") ;;' '  ahead|identical) ;;' '  *)' '  ( exit 1 )
     || fail "a record outside arm position was read as a label: $positioned"
 done
 
-HEX_GUARD='[[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]'
+HEX_GUARD='[[ "$head_sha" =~ ^[0123456789abcdef]{40}$ ]]'
 
 guard_tail_case() { # $1 = live|dead, $2 = label, $3… = the guard's physical lines
   local expect="$1" label="$2"; shift 2
@@ -2565,7 +2567,7 @@ REF_SITE_ALLOWLIST=(
   $'.github/workflows/ai-review-merge.yml\thead_sha\t\t'
   # sha-guarded: same value, but gate-rearm asserts the pattern itself, in the job that
   # resolves it -- a different step from the read this scan is looking at.
-  $'.github/workflows/gate-rearm.yml\thead_sha\t.github/workflows/gate-rearm.yml\t[[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]'
+  $'.github/workflows/gate-rearm.yml\thead_sha\t.github/workflows/gate-rearm.yml\t[[ "$head_sha" =~ ^[0123456789abcdef]{40}$ ]]'
   # sha-guarded: `git rev-parse HEAD` in the checkout this step just made; git answers a
   # 40-hex object name or fails, and the step runs under `set -euo pipefail`.
   $'.github/workflows/repo-hygiene.yml\tresolved\t.github/workflows/repo-hygiene.yml\tresolved="$(git -C .repo-hygiene rev-parse HEAD)"'

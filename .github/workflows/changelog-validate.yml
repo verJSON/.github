@@ -48,7 +48,7 @@ jobs:
           # pin (#312). Upper-case is rejected too: `ref:` is passed through
           # unchanged, and accepting two spellings of one commit means two
           # spellings to audit for no benefit.
-          ref_is_immutable() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
+          ref_is_immutable() { [[ "$1" =~ ^[0123456789abcdef]{40}$ ]]; }
 
           if ! ref_is_immutable "$CONTRACT_REF"; then
             reason="contract_ref must be a full 40-character lower-case Verjson/.github commit SHA; got '$CONTRACT_REF'. A branch, a tag or refs/pull/<n>/merge can change after review, and an abbreviated SHA is ambiguous, so the contract that runs would not be the contract that was reviewed."

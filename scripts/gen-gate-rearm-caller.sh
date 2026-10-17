@@ -16,7 +16,7 @@ if [ "$#" -ne 1 ]; then
 fi
 
 contract_sha="$1"
-[[ "$contract_sha" =~ ^[0-9a-f]{40}$ ]] || {
+[[ "$contract_sha" =~ ^[0123456789abcdef]{40}$ ]] || {
   echo "contract SHA must be exactly 40 lowercase hexadecimal characters" >&2
   exit 2
 }

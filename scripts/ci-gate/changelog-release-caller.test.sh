@@ -652,6 +652,7 @@ run_guard() { # run_guard <script> [env assignments...]
       COMPONENT= \
       FRAGMENTS= \
       EXPECTED_SELECTOR_DIGEST= \
+      CI_PACKAGE_RETENTION_KEEP=3 \
       "${@:2}" bash -eo pipefail "$1" ) >"$tmp/guard.out" 2>&1
 }
 

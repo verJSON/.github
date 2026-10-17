@@ -59,7 +59,7 @@ def validate(document: dict, raw: str) -> list[str]:
     if "ORG_ADMIN_TOKEN" in raw or "secrets.push_token" in raw:
         problems.append("temporary broad release credential remains")
     if not re.search(
-        r'\[\[ -z "\$RELEASE_APP_CLIENT_ID" \|\| "\$RELEASE_APP_CLIENT_ID" =~ \^\[0-9\]\+\$ \]\]', raw
+        r'\[\[ -z "\$RELEASE_APP_CLIENT_ID" \|\| "\$RELEASE_APP_CLIENT_ID" =~ \^\[0123456789\]\+\$ \]\]', raw
     ):
         problems.append("App client ID guard is absent")
     return problems
@@ -125,7 +125,7 @@ def main() -> int:
     mutations.append(("the temporary push_token secret", mutant, raw + "\nsecrets.push_token"))
 
     guardless = raw.replace(
-        '[[ -z "$RELEASE_APP_CLIENT_ID" || "$RELEASE_APP_CLIENT_ID" =~ ^[0-9]+$ ]]',
+        '[[ -z "$RELEASE_APP_CLIENT_ID" || "$RELEASE_APP_CLIENT_ID" =~ ^[0123456789]+$ ]]',
         "true",
     )
     mutations.append(("a missing App client ID guard", copy.deepcopy(document), guardless))

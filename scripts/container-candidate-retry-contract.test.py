@@ -41,7 +41,7 @@ class RetryWorkflowContractTests(unittest.TestCase):
         )
         self.assertEqual(prepare["env"]["RETRY_SHA256"], "${{ inputs.retry-sha256 }}")
         self.assertIn(
-            '[[ "$RETRY_SHA256" =~ ^[0-9a-f]{64}$ ]]', prepare["run"]
+            '[[ "$RETRY_SHA256" =~ ^[0123456789abcdef]{64}$ ]]', prepare["run"]
         )
         helper_digest = hashlib.sha256(
             (ROOT / "scripts/container_candidate_retry.py").read_bytes()
@@ -124,7 +124,7 @@ class RetryWorkflowContractTests(unittest.TestCase):
             self.assertEqual(readiness["if"], provenance["if"])
             self.assertEqual(readiness["env"]["DIGEST"], "${{ steps.build.outputs.digest }}")
             self.assertEqual(readiness["env"]["REPOSITORY"], "${{ matrix.repository }}")
-            self.assertIn('^sha256:[0-9a-f]{64}$', command)
+            self.assertIn('^sha256:[0123456789abcdef]{64}$', command)
             self.assertIn('reference="$REPOSITORY@$DIGEST"', command)
             self.assertIn("for attempt in 1 2 3 4 5 6", command)
             self.assertIn(
