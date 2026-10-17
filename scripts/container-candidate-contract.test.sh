@@ -771,6 +771,10 @@ canary_publish_output="$tmp/canary-publish-output"
 run_publish_prepare "$canary_consumer" "$canary_publish_output" verJSON/.github "$ref" true
 grep -qx 'publisher-workflow-ref=verJSON/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main' "$canary_publish_output" \
   || { echo "same-repository publication did not authorize its own uses: ./ publisher" >&2; exit 1; }
+canary_publisher="$(sed -n 's/^publisher-workflow-ref=//p' "$canary_publish_output")"
+jq -e --arg publisher "$canary_publisher" 'all(.images[]; .provenance.builderIdentity == $publisher)' \
+  "$root/scripts/fixtures/container-candidate/canary.json" >/dev/null \
+  || { echo "canary config does not review the publisher identity its publication authorizes" >&2; exit 1; }
 
 case_variant_consumer="$tmp/case-variant-consumer"
 mkdir -p "$case_variant_consumer"
