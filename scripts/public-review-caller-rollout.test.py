@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Behavioral tests for scripts/ci-gate/public-review-caller-rollout.py.
+"""Behavioral tests for scripts/public-review-caller-rollout.py.
 
 The rollout gate for ADR 0235 decision 7: a public adopter keeps sending
 public pull-request heads to the persistent pool until its generated
@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import quote
 
 SCRIPT = Path(__file__).resolve().parent / "public-review-caller-rollout.py"
 MINIMUM = "a" * 40
@@ -68,7 +69,7 @@ def listing(*records: dict) -> dict[str, dict]:
 
 
 def caller_path(name: str, branch: str = "main") -> str:
-    return f"repos/Verjson/{name}/contents/.github/workflows/ai-review-merge.yml?ref={branch}"
+    return f"repos/Verjson/{name}/contents/.github/workflows/ai-review-merge.yml?ref={quote(branch)}"
 
 
 def run(responses: dict, *arguments: str) -> tuple[int, str]:
@@ -128,6 +129,18 @@ class PublicReviewCallerRolloutTests(unittest.TestCase):
                     f"STALE: Verjson/verjson-git-runners pins {OLD}, which does not contain {MINIMUM}",
                     "scripts/gen-ai-review-caller.sh",
                 )
+
+    def test_default_branch_is_percent_encoded_in_the_query(self):
+        # A default branch is repository-controlled text; `&` or `#` would
+        # otherwise end the ref and re-address the request.
+        branch = "release/a&ref=evil#x"
+        self.assertNotIn("&", caller_path("r", branch).split("?ref=")[1])
+        self.assertOutcome(
+            {**listing(repository("r", branch)), caller_path("r", branch): contents(caller(CURRENT)),
+             **dict([compare(CURRENT, "ahead")])},
+            0,
+            f"CURRENT: Verjson/r pins {CURRENT}",
+        )
 
     def test_archived_public_repository_is_skipped(self):
         self.assertOutcome(

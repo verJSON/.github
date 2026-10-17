@@ -431,7 +431,7 @@ or a literal GitHub-hosted image.
    recipe). Regenerating every public adopter's caller is a **blocking**
    rollout step, not a follow-up: the rollout is incomplete, and #1831's
    decision-7 item stays open, until
-   `python3 -I scripts/ci-gate/public-review-caller-rollout.py --minimum <merge-sha>`
+   `python3 -I scripts/public-review-caller-rollout.py --minimum <merge-sha>`
    exits 0 (see the 2026-10-17 amendment). This change does not edit
    `gate-rearm.yml`, so ruleset 20722935 needs no rotation for it.
 
@@ -562,7 +562,7 @@ the change could be reported done while `verjson-git-runners` still pinned
 `2d1ea177` and sent public pull-request heads to the pool.
 
 **Decision.** The rollout has an executable exit criterion.
-`scripts/ci-gate/public-review-caller-rollout.py --minimum <merge-sha>` lists
+`scripts/public-review-caller-rollout.py --minimum <merge-sha>` lists
 every public, non-archived repository in the organization (so a repository
 made public later is covered without editing a list), reads its
 default-branch `.github/workflows/ai-review-merge.yml`, requires every job to
@@ -571,7 +571,10 @@ compare API whether that commit contains the merge commit. It exits 1 naming
 each stale caller and 2 on any state it cannot establish (an API error other
 than an absent caller, an unparseable caller, a branch or short-SHA pin, an
 unknown compare status). A repository without a caller is reported, not
-failed: nothing there dispatches a gate. It reads only, needs no credentials
+failed: nothing there dispatches a gate. The default branch is
+percent-encoded before it reaches the contents query. The script lives in
+`scripts/`, not `scripts/ci-gate/`, because ADR 0193 reserves that directory
+for gates Actions runs. It reads only, needs no credentials
 beyond read access, and is not wired into pull-request CI, because its answer
 is organization state that a pull request cannot change.
 

@@ -25,12 +25,13 @@ import json
 import re
 import subprocess
 import sys
+from urllib.parse import quote
 
 import yaml
 
 CALLER_PATH = ".github/workflows/ai-review-merge.yml"
 CANONICAL_REPOSITORY = ".github"
-FULL_SHA = re.compile(r"[0-9a-f]{40}")
+SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 # Any reference to the canonical reusable workflow, pinned or not.
 CANONICAL_CALL = re.compile(r"(?i)^verjson/\.github/\.github/workflows/ai-review-merge\.ya?ml@(.*)$")
 CONTAINS = ("identical", "ahead")
@@ -100,7 +101,7 @@ def pinned_commit(text: str, where: str) -> str:
         match = CANONICAL_CALL.match(uses) if isinstance(uses, str) else None
         if match is None:
             raise Undetermined(f"{where}: job {name!r} does not call the canonical ai-review-merge.yml")
-        if not FULL_SHA.fullmatch(match.group(1)):
+        if not SHA_PATTERN.fullmatch(match.group(1)):
             raise Undetermined(f"{where}: job {name!r} pins {match.group(1)!r}, not a full commit SHA")
         pins.add(match.group(1))
     if len(pins) != 1:
@@ -110,7 +111,7 @@ def pinned_commit(text: str, where: str) -> str:
 
 def read_caller(org: str, name: str, branch: str) -> str | None:
     try:
-        record = gh_json(f"repos/{org}/{name}/contents/{CALLER_PATH}?ref={branch}")
+        record = gh_json(f"repos/{org}/{name}/contents/{CALLER_PATH}?ref={quote(branch)}")
     except NotFound:
         return None
     content = record.get("content") if isinstance(record, dict) else None
@@ -123,6 +124,9 @@ def read_caller(org: str, name: str, branch: str) -> str | None:
 
 
 def contains(org: str, minimum: str, pinned: str) -> bool:
+    # Both operands reach a URL path, so both must be object names, not text.
+    if not (SHA_PATTERN.fullmatch(minimum) and SHA_PATTERN.fullmatch(pinned)):
+        raise Undetermined(f"compare operands must be full commit SHAs: {minimum!r}...{pinned!r}")
     try:
         status = gh_json(f"repos/{org}/{CANONICAL_REPOSITORY}/compare/{minimum}...{pinned}").get("status")
     except NotFound:
@@ -139,7 +143,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--org", default="Verjson")
     parser.add_argument("--minimum", required=True, help="the 40-hex canonical commit every caller must contain")
     arguments = parser.parse_args(argv)
-    if not FULL_SHA.fullmatch(arguments.minimum):
+    if not SHA_PATTERN.fullmatch(arguments.minimum):
         print("UNDETERMINED: --minimum must be a full 40-hex commit SHA", file=sys.stderr)
         return 2
     stale = []
