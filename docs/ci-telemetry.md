@@ -110,3 +110,43 @@ step logs a warning (never fails) if export is rejected.
 `CiTelemetryPayload`, emit via the composite action, keep every step
 `continue-on-error`). Only `ai-review` is wired today to keep the surface
 minimal.
+
+## actions-ci runtime records
+
+Separate from the AI-review payload, `scripts/actions-ci-group.sh` produces
+per-row runtime records for the pull-based collector in
+[verjson-observability#271](https://github.com/Verjson/verjson-observability/issues/271)
+([ADR 0225](decisions/0225-bound-actions-ci-command-runtimes/README.md),
+amendment of 2026-10-17). Nothing is pushed from the runner.
+
+- **Row line (job log).** `actions-ci command group=<g> status=<n> elapsed=<s>s
+  [budget=<s>s] command=<cmd>`, unchanged in format. Replayed command output is
+  wrapped in a random-token `::stop-commands::` block and every replayed line is
+  prefixed with `| `, so output can neither execute a workflow command nor store
+  a line that matches a row or a group marker.
+- **JSONL (artifact).** Each `shell-test-groups` cell uploads
+  `actions-ci-runtime-records-<run_id>-<attempt>-<group>` (seven-day retention,
+  uploaded even when the cell fails or is cancelled). One object per row, in
+  manifest order:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `schema_version` | integer | `1` |
+| `group`, `command` | string | Matrix group and manifest command |
+| `status` | integer, or `"missing"` / `"invalid"` | Exit status as on the row line; a string when the worker left no usable result |
+| `elapsed_seconds` | integer or null | Row wall clock as on the row line |
+| `budget_seconds` | integer or null | Null on push runs, which have no budget |
+| `started_at`, `ended_at` | UTC `YYYY-MM-DDTHH:MM:SSZ` | When the runner launched and reported the row |
+| `timed_out` | boolean or null | Stopped at its budget |
+| `left_background` | boolean or null | The runner terminated processes the row left behind |
+| `runner_name`, `runner_environment` | string or null | `RUNNER_NAME`, `RUNNER_ENVIRONMENT`; null outside Actions |
+
+**Integrity limits.** Rows run as the same user as the runner. The records path
+is not exported to rows and the runner rewrites the file from memory after every
+row, which discards accidental or output-borne writes, but a deliberately
+malicious row could still tamper with the file or the job log, and on pull
+requests the runner itself comes from the pull request head. No HMAC is added:
+an undisclosed key cannot be verified, and a disclosed one is readable by the
+same user. The collector must instead require each record to agree with its row
+line and the record count to equal the logged `command_count`, and fail closed
+on any disagreement.
