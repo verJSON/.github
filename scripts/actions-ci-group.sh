@@ -37,6 +37,10 @@ fi
 records_file="${ACTIONS_CI_RUNTIME_RECORDS-}"
 unset ACTIONS_CI_RUNTIME_RECORDS
 if [ -n "$records_file" ]; then
+  [[ "$records_file" == /* ]] || {
+    printf 'actions-ci runtime records path must be absolute: %s\n' "$records_file" >&2
+    exit 2
+  }
   mkdir -p -- "$(dirname -- "$records_file")" && : >"$records_file" || {
     printf 'cannot create actions-ci runtime records file: %s\n' "$records_file" >&2
     exit 2

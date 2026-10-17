@@ -278,6 +278,31 @@ else
   fail "a command was not recorded as exactly its manifest text"
 fi
 
+# A records path the runner cannot honor fails before any row runs: a relative
+# path would land in the checkout copy the workflow step deletes, and an
+# uncreatable one would silently drop every record.
+: >"$tmp/not-a-directory"
+printf 'platform\ttouch %q\n' "$tmp/row-ran" >"$tmp/bad-path.tsv"
+bad_path_ok=1
+for records_path in records.jsonl "$tmp/not-a-directory/records.jsonl"; do
+  bad_status=0
+  rm -f "$tmp/row-ran"
+  (cd "$tmp" && ACTIONS_CI_GROUP_MANIFEST="$tmp/bad-path.tsv" \
+    ACTIONS_CI_RUNTIME_RECORDS="$records_path" \
+    bash "$runner" platform >"$tmp/bad-path.out" 2>&1) || bad_status=$?
+  if [ "$bad_status" -ne 2 ] || [ -e "$tmp/row-ran" ] \
+    || ! grep -q 'actions-ci runtime records' "$tmp/bad-path.out"; then
+    printf 'records path %s: status %s\n' "$records_path" "$bad_status" >&2
+    cat "$tmp/bad-path.out" >&2
+    bad_path_ok=0
+  fi
+done
+if [ "$bad_path_ok" -eq 1 ]; then
+  pass "a relative or uncreatable records path fails before any row runs"
+else
+  fail "the runner ran rows without a usable records path"
+fi
+
 if [ "$fails" -ne 0 ]; then
   printf '%d test(s) failed\n' "$fails"
   exit 1
