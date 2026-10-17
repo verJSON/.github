@@ -13,7 +13,8 @@
         {"os": "linux", "architecture": "amd64"}
       ],
       "provenance": {
-        "predicateType": "https://slsa.dev/provenance/v1"
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "builderIdentity": "verJSON/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main"
       }
     }
   ]
