@@ -246,3 +246,4 @@ platform	python3 scripts/ci-gate/merge-gate-provenance-claims.test.py
 # these contracts import ascii_digit_locales and must reproduce en_US.UTF-8.
 locale-collation	python3 scripts/ci-gate/settable-value-guards.test.py
 locale-collation	python3 scripts/ci-gate/release-verify-retention-keep.test.py
+platform	bash scripts/actions-ci-group-records.test.sh
