@@ -211,6 +211,25 @@ else
   fail "a row without a worker result left no record"
 fi
 
+# A row is not told where the records file is, and a line it writes there
+# anyway (the path is guessable from the workflow) is discarded.
+cat >"$tmp/forge-record.sh" <<EOF
+printf '%s' "\${ACTIONS_CI_RUNTIME_RECORDS-unset}" >"$tmp/records-path-seen"
+printf '{"schema_version":1,"group":"platform","command":"forged","status":0}\\n' \\
+  >>"$tmp/records/out-of-band.jsonl"
+EOF
+status="$(run_recorded out-of-band 60 "platform	bash $tmp/forge-record.sh" 'platform	true')"
+records="$(records_summary "$tmp/records/out-of-band.jsonl" 2>&1)"
+if [ "$status" -eq 0 ] \
+  && [ "$(cat "$tmp/records-path-seen")" = unset ] \
+  && [ "$(grep -c '"schema_version": 1' <<<"$records")" -eq 2 ] \
+  && ! grep -q forged <<<"$records"; then
+  pass "rows cannot see the records path and a record they append is discarded"
+else
+  printf '%s\n' "$records" >&2
+  fail "a row saw the records path or its appended record survived"
+fi
+
 if [ "$fails" -ne 0 ]; then
   printf '%d test(s) failed\n' "$fails"
   exit 1

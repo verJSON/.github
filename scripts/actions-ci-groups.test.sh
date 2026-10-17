@@ -156,7 +156,29 @@ assert group_step["env"] == {
     "ACTIONS_CI_COMMAND_BUDGET_SECONDS": (
         "${{ github.event_name == 'pull_request' && '60' || '' }}"
     ),
+    # Outside the group's checkout copy, which the step removes on exit.
+    "ACTIONS_CI_RUNTIME_RECORDS": (
+        "${{ runner.temp }}/actions-ci-runtime-records/${{ matrix.group }}.jsonl"
+    ),
 }
+# Runtime records (verjson-observability#271) upload from every cell even when
+# its rows failed or the job was cancelled, named per cell and attempt.
+records_upload = groups["steps"][groups["steps"].index(group_step) + 1]
+assert records_upload == {
+    "name": "Upload ${{ matrix.group }} runtime records",
+    "if": "${{ always() }}",
+    "uses": "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+    "with": {
+        "name": (
+            "actions-ci-runtime-records-${{ github.run_id }}-"
+            "${{ github.run_attempt }}-${{ matrix.group }}"
+        ),
+        "path": "${{ runner.temp }}/actions-ci-runtime-records/${{ matrix.group }}.jsonl",
+        "retention-days": 7,
+        "if-no-files-found": "warn",
+    },
+}, records_upload
+assert groups["steps"][-1] is records_upload
 assert group_step["run"] == (
     'source_root="$GITHUB_WORKSPACE/.actions-ci-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.group }}"\n'
     'group_root="$(mktemp -d "$RUNNER_TEMP/actions-ci-${{ matrix.group }}.XXXXXX")"\n'
