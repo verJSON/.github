@@ -150,3 +150,11 @@ against an image ShellCheck that reports 0.9.0. Adopters calling the reusable
 workflow get the same pinned ShellCheck on every route, so a hosted caller's
 verdict moves from 0.9.0 to 0.11.0; bumping the pin is a reviewed change like
 the actionlint pin.
+
+The round-5 review of #1827 found the version assertion had no behavioral test.
+`actionlint-shellcheck-pin.test.sh` now executes the lint step against stub
+ShellCheck binaries: the pinned version runs actionlint, and other versions
+(0.9.0, 0.11.1, 10.11.0, a pre-release suffix, trailing text, or no version
+line at all) fail before it starts. Writing that test exposed a fail-open: an
+empty `SHELLCHECK_VERSION` compared equal to a binary that reports no version.
+The step now also requires a non-empty pin.

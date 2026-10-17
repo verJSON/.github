@@ -236,7 +236,7 @@ jobs:
             exit 1
           }
           installed="$(shellcheck --version | sed -n 's/^version: //p')"
-          [ "$installed" = "$SHELLCHECK_VERSION" ] || {
+          [ -n "$SHELLCHECK_VERSION" ] && [ "$installed" = "$SHELLCHECK_VERSION" ] || {
             echo "::error::actionlint needs ShellCheck $SHELLCHECK_VERSION, found ${installed:-none}; the verdict must not depend on the runner image (ADR 0026)"
             exit 1
           }

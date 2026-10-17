@@ -3,6 +3,7 @@ platform	@budget=120 python3 scripts/ci-gate/app-key-environment.test.py
 platform	python3 scripts/ci-gate/pr-ci-tiers.test.py
 platform	bash scripts/actionlint-trigger.test.sh
 platform	bash scripts/actionlint-install.test.sh
+platform	bash scripts/actionlint-shellcheck-pin.test.sh
 platform	bash scripts/shellcheck-tracked.test.sh
 platform	@budget=210 bash scripts/shellcheck-tracked.sh
 platform	bash scripts/actionlint-reusable.test.sh
