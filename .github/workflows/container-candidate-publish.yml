@@ -67,6 +67,7 @@ jobs:
       registry-destinations: ${{ steps.config.outputs.registry-destinations }}
       has-gar: ${{ steps.config.outputs.has-gar }}
       mirror-matrix: ${{ steps.config.outputs.mirror-matrix }}
+      publisher-workflow-ref: ${{ steps.config.outputs.publisher-workflow-ref }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -165,6 +166,15 @@ jobs:
             sbomArtifact: ("candidate-sbom-" + ($image.variant | gsub("[^A-Za-z0-9._-]"; "-")) + "-" + .os + "-" + .architecture + (if (.variant // "") == "" then "" else "-" + .variant end))
           }]' "$CONFIG_PATH")"
           candidate="$(jq -r '.nextStableVersion' "$CONFIG_PATH")-rc.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
+          # contract-ref already equals job.workflow_sha. When it is also the source
+          # commit, the caller is this repository's `uses: ./` canary: GitHub names
+          # that publisher by the caller's ref, and the Cosign verifier accepts it
+          # only while job_workflow_sha == workflow_sha == sha (ADR 0216).
+          if [ "$CONTRACT_REF" = "$GITHUB_SHA" ]; then
+            publisher_workflow_ref="$GITHUB_REPOSITORY/.github/workflows/container-candidate-publish.yml@$GITHUB_REF"
+          else
+            publisher_workflow_ref="Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF"
+          fi
           {
             echo "matrix=$matrix"
             echo "sbom-matrix=$sbom_matrix"
@@ -177,6 +187,7 @@ jobs:
             echo "registry-destinations=$(jq -c '.destinations' <<<"$destination_contract")"
             echo "has-gar=$(jq -r 'any(.destinations[]; .provider == "gar")' <<<"$destination_contract")"
             echo "mirror-matrix=$mirror_matrix"
+            echo "publisher-workflow-ref=$publisher_workflow_ref"
           } >> "$GITHUB_OUTPUT"
       - name: Remove isolated candidate source
         if: always()
@@ -520,6 +531,7 @@ jobs:
         name: Reuse only an exactly attested immutable image
         if: matrix.baseVariant == ''
         env:
+          PUBLISHER_WORKFLOW_REF: ${{ needs.prepare.outputs.publisher-workflow-ref }}
           CANDIDATE: ${{ needs.prepare.outputs.candidate }}
           CONFIG_PATH: ${{ inputs.config-path }}
           CONTRACT_REF: ${{ inputs.contract-ref }}
@@ -568,7 +580,7 @@ jobs:
             --expected-source-ref "$GITHUB_REF" --expected-source-commit "$GITHUB_SHA" \
             --expected-caller-workflow-ref "$CALLER_WORKFLOW_REF" \
             --expected-caller-workflow-sha "$CALLER_WORKFLOW_SHA" \
-            --expected-publisher-workflow-ref "Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF" \
+            --expected-publisher-workflow-ref "$PUBLISHER_WORKFLOW_REF" \
             --expected-contract-sha "$CONTRACT_REF")"
           attestation_id="$(jq -er .bundleDigest <<<"$receipt")"
           referrer_digest="$(jq -er .referrerManifestDigest <<<"$receipt")"
@@ -914,6 +926,7 @@ jobs:
         name: Reuse only an exactly attested immutable derived image
         if: matrix.baseVariant != ''
         env:
+          PUBLISHER_WORKFLOW_REF: ${{ needs.prepare.outputs.publisher-workflow-ref }}
           BASE_VARIANT: ${{ matrix.baseVariant }}
           CANDIDATE: ${{ needs.prepare.outputs.candidate }}
           CONFIG_PATH: ${{ inputs.config-path }}
@@ -967,7 +980,7 @@ jobs:
             --expected-source-ref "$GITHUB_REF" --expected-source-commit "$GITHUB_SHA" \
             --expected-caller-workflow-ref "$CALLER_WORKFLOW_REF" \
             --expected-caller-workflow-sha "$CALLER_WORKFLOW_SHA" \
-            --expected-publisher-workflow-ref "Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF" \
+            --expected-publisher-workflow-ref "$PUBLISHER_WORKFLOW_REF" \
             --expected-contract-sha "$CONTRACT_REF")"
           attestation_id="$(jq -er .bundleDigest <<<"$receipt")"
           referrer_digest="$(jq -er .referrerManifestDigest <<<"$receipt")"
@@ -1349,6 +1362,7 @@ jobs:
           password: ${{ steps.gar-auth.outputs.access_token }}
       - name: Mirror and verify the complete OCI candidate
         env:
+          PUBLISHER_WORKFLOW_REF: ${{ needs.prepare.outputs.publisher-workflow-ref }}
           CANDIDATE: ${{ needs.prepare.outputs.candidate }}
           CONFIG_PATH: ${{ inputs.config-path }}
           CONTRACT_REF: ${{ inputs.contract-ref }}
@@ -1412,7 +1426,7 @@ jobs:
             --expected-source-ref "$GITHUB_REF" --expected-source-commit "$GITHUB_SHA" \
             --expected-caller-workflow-ref "$CALLER_WORKFLOW_REF" \
             --expected-caller-workflow-sha "$CALLER_WORKFLOW_SHA" \
-            --expected-publisher-workflow-ref "Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF" \
+            --expected-publisher-workflow-ref "$PUBLISHER_WORKFLOW_REF" \
             --expected-contract-sha "$CONTRACT_REF" "${base_args[@]}"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -1484,6 +1498,7 @@ jobs:
           merge-multiple: false
       - name: Assemble complete candidate manifest
         env:
+          PUBLISHER_WORKFLOW_REF: ${{ needs.prepare.outputs.publisher-workflow-ref }}
           CANDIDATE: ${{ needs.prepare.outputs.candidate }}
           CONFIG_PATH: ${{ inputs.config-path }}
           CONTRACT_REF: ${{ inputs.contract-ref }}
@@ -1546,7 +1561,7 @@ jobs:
               '[.[] | select(.imageVariant == $variant) | del(.imageVariant)] | sort_by(.os,.architecture,(.variant // ""))' \
               "${sbom_artifacts[@]}")"
             jq -n --arg variant "$variant" --arg repository "$repository" --arg index "$index_digest" \
-              --arg commit "sha-$GITHUB_SHA" --arg candidate "$CANDIDATE" --arg workflow "Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF" \
+              --arg commit "sha-$GITHUB_SHA" --arg candidate "$CANDIDATE" --arg workflow "$PUBLISHER_WORKFLOW_REF" \
               --arg bundleDigest "$provenance_bundle_digest" --arg referrerManifestDigest "$provenance_referrer_digest" \
               --argjson platforms "$platforms" --argjson reviewed "$reviewed" \
               --argjson base "$base" --argjson sbomAttestations "$sbom_attestations" --argjson destinations "$destinations" '
@@ -1561,7 +1576,7 @@ jobs:
               > "image-$variant.json"
           done
           jq -s --arg candidate "$CANDIDATE" --arg commit "$GITHUB_SHA" --arg repository "$GITHUB_REPOSITORY" \
-            --arg ref "$GITHUB_REF" --arg workflow "Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF" \
+            --arg ref "$GITHUB_REF" --arg workflow "$PUBLISHER_WORKFLOW_REF" \
             --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" --arg publishedAt "$candidate_published_at" \
             '{schemaVersion:4,kind:"container-candidate",candidateVersion:$candidate,
               promotionEligible:false,

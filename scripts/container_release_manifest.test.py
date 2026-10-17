@@ -124,6 +124,20 @@ def manifest():
     }
 
 
+CONTRACT_CANARY_PUBLISHER = (
+    "verJSON/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main"
+)
+
+
+def same_repository_publication(publisher, repository="verJSON/.github"):
+    candidate, reviewed = manifest(), config()
+    candidate["source"]["repository"] = reviewed["repository"] = repository
+    candidate["source"]["workflow"] = publisher
+    for image in candidate["images"] + reviewed["images"]:
+        image["provenance"]["builderIdentity"] = publisher
+    return candidate, reviewed
+
+
 def multi_registry_config():
     reviewed = config()
     reviewed["registryDestinations"] = [
@@ -393,6 +407,64 @@ class ContainerReleaseManifestTests(unittest.TestCase):
         duplicate["indexDigest"] = "sha256:" + "9" * 64
         candidate["images"].append(duplicate)
         self.assert_rejected(candidate, "duplicate identity 'default'")
+
+    def test_accepts_the_contract_canary_same_repository_publisher(self):
+        candidate, reviewed = same_repository_publication(CONTRACT_CANARY_PUBLISHER)
+
+        manifest_contract.validate_manifest(candidate, reviewed)
+
+    def test_rejects_same_repository_publisher_from_an_adopter_repository(self):
+        candidate, reviewed = same_repository_publication(
+            "Verjson/verjson-github-runner/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+            repository="Verjson/verjson-github-runner",
+        )
+
+        with self.assertRaisesRegex(
+            manifest_contract.ManifestError,
+            "candidate signer workflow differs from expected publisher",
+        ):
+            manifest_contract.validate_manifest(candidate, reviewed)
+
+    def test_rejects_same_repository_publisher_outside_the_exact_source_identity(self):
+        for publisher in (
+            "verJSON/.github-evil/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+            "verJSON/.githu/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+            "verjson/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+            "VERJSON/.GITHUB/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+            "verJSON/.github/.github/workflows/container-candidate-publish.yml@refs/heads/feature",
+            "verJSON/.github/.github/workflows/container-candidate-publish.yml@refs/tags/v1",
+            "verJSON/.github/.github/workflows/evil.yml@refs/heads/main",
+            "verJSON/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main@" + "b" * 40,
+            "Verjson/.github-evil/.github/workflows/container-candidate-publish.yml@" + "b" * 40,
+        ):
+            with self.subTest(publisher=publisher):
+                candidate, reviewed = same_repository_publication(publisher)
+                with self.assertRaisesRegex(
+                    manifest_contract.ManifestError,
+                    "candidate signer workflow differs from expected publisher",
+                ):
+                    manifest_contract.validate_manifest(candidate, reviewed)
+
+    def test_rejects_pinned_publisher_that_is_not_exactly_one_contract_commit(self):
+        publisher = "Verjson/.github/.github/workflows/container-candidate-publish.yml@"
+        for signer in (
+            publisher + "refs/heads/main@" + "b" * 40,
+            publisher + "refs/heads/main",
+            publisher + "b" * 40 + "@refs/heads/main",
+            publisher + "b" * 41,
+            publisher + "B" * 40,
+            publisher + "b" * 39,
+            publisher + "b" * 40 + "\n",
+        ):
+            with self.subTest(signer=signer):
+                candidate, reviewed = same_repository_publication(
+                    signer, repository="Verjson/verjson-github-runner"
+                )
+                with self.assertRaisesRegex(
+                    manifest_contract.ManifestError,
+                    "candidate signer workflow differs from expected publisher",
+                ):
+                    manifest_contract.validate_manifest(candidate, reviewed)
 
     def test_rejects_candidate_contract_pin_different_from_reviewed_config(self):
         candidate = manifest()
