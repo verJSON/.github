@@ -529,6 +529,16 @@ class SameRepositoryPublisherTests(unittest.TestCase):
         ):
             validate_same_repository_statement(statement, caller_workflow_sha="e" * 40)
 
+    def test_rejects_same_repository_publisher_at_a_different_ref_than_the_source(self):
+        with self.assertRaisesRegex(
+            MODULE.RetryEvidenceError, "publisher workflow is not immutably pinned"
+        ):
+            build_statement(
+                same_repository_claims(
+                    job_workflow_ref="Verjson/example/.github/workflows/container-candidate-publish.yml@refs/heads/feature"
+                )
+            )
+
 
 def candidate_statement():
     return {

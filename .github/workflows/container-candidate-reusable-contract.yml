@@ -42,7 +42,7 @@ jobs:
       config-path: scripts/fixtures/container-candidate/canary.json
       cleanup-unused-docker-images: true
       contract-ref: ${{ github.sha }}
-      retry-sha256: '2f5ad093e3b3c6a74bc328aeebc6172ffeb641566b513239c4a884ff8b8952c8'
+      retry-sha256: '9a17d8cab520dfa272718b4516734b1ea8922e7a8fd3329724f20988e00641fe'
       runner: ${{ github.repository_owner == 'Verjson' && (vars.CI_RUNNER_DEFAULT || '["self-hosted","general"]') || '["ubuntu-24.04"]' }}
 
   publish:
@@ -62,6 +62,6 @@ jobs:
       acquisition-sha256: '0000000000000000000000000000000000000000000000000000000000000000'
       transfer-sha256: '6bbd22f2e0c4814d661cb74e1e31e6ed1cb9b5cf744b35571749221579c0b14a'
       disk-sha256: '728f26343beb7189c5522eebceb639c35e0eb37b2df20e4affa2c559918af160'
-      retry-sha256: '2f5ad093e3b3c6a74bc328aeebc6172ffeb641566b513239c4a884ff8b8952c8'
+      retry-sha256: '9a17d8cab520dfa272718b4516734b1ea8922e7a8fd3329724f20988e00641fe'
       provenance-sha256: 'e785ad9fb49d60d0de25dd2214e2c03fbf7fa348a7df2407ee7f187757a91c74'
       runner: ${{ github.repository_owner == 'Verjson' && (vars.CI_RUNNER_DEFAULT || '["self-hosted","general"]') || '["ubuntu-24.04"]' }}

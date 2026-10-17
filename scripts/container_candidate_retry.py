@@ -41,6 +41,7 @@ def require_immutable_publisher(
     publisher_workflow_ref: str,
     publisher_workflow_sha: str,
     source_repository: str,
+    source_ref: str,
     source_commit: str,
     caller_workflow_sha: str,
 ) -> None:
@@ -56,7 +57,7 @@ def require_immutable_publisher(
         raise RetryEvidenceError("publisher workflow ref is malformed")
     if parsed["ref"] == publisher_workflow_sha:
         return
-    if parsed["repository"] == source_repository:
+    if parsed["repository"] == source_repository and parsed["ref"] == source_ref:
         if not publisher_workflow_sha == caller_workflow_sha == source_commit:
             raise RetryEvidenceError(
                 "same-repository publisher is not bound to the source commit"
@@ -189,6 +190,7 @@ def validate_cosign_provenance(
         publisher_workflow_ref=publisher_workflow_ref,
         publisher_workflow_sha=contract_sha,
         source_repository=source_repository,
+        source_ref=source_ref,
         source_commit=source_commit,
         caller_workflow_sha=caller_workflow_sha,
     )
@@ -270,6 +272,7 @@ def build_cosign_provenance_statement(
             publisher_workflow_ref=publisher_workflow_ref,
             publisher_workflow_sha=publisher_workflow_sha,
             source_repository=source_repository,
+            source_ref=source_ref,
             source_commit=source_commit,
             caller_workflow_sha=caller_workflow_sha,
         )
