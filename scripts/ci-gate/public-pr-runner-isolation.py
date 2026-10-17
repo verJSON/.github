@@ -2019,8 +2019,8 @@ def main(argv: list[str]) -> int:
             )
             continue
         if pending_row is not None:
-            # The relay backlog (#1831): a known relay job, ratcheted exactly
-            # like a pending pull_request job, never accepted by review.
+            # The relay backlog (#1831): a known relayed job, an exact ratchet,
+            # never accepted by review.
             carried = {kind for kind, _ in finding.refusals}
             for kind in sorted(tolerated - carried):
                 stale_reviews.append(
