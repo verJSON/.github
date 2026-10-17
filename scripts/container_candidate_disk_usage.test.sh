@@ -33,11 +33,32 @@ case "$*" in
 esac
 DOCKER
 chmod +x "$tmp/bin/docker"
+cat > "$tmp/bin/sudo" <<'SUDO'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$SUDO_CALLS"
+[ "${FAIL_SUDO:-false}" != true ] || exit 1
+SUDO
+cat > "$tmp/bin/df" <<'DF'
+#!/usr/bin/env bash
+case "$*" in
+  "-B1 --output=avail -- "*)
+    [ -s "$DF_AVAIL_VALUES" ] || { echo "df stub has no queued value" >&2; exit 97; }
+    value="$(head -n1 "$DF_AVAIL_VALUES")"
+    sed -i 1d "$DF_AVAIL_VALUES"
+    [ "$value" != FAIL ] || exit 1
+    [ "$value" = EMPTY ] || printf 'Avail\n%s\n' "$value"
+    ;;
+esac
+DF
+chmod +x "$tmp/bin/sudo" "$tmp/bin/df"
 
 export PATH="$tmp/bin:$PATH"
 export RUNNER_TEMP="$tmp/runner-temp"
 export GITHUB_WORKSPACE="$tmp/workspace"
 export DOCKER_CALLS="$tmp/docker-calls"
+export SUDO_CALLS="$tmp/sudo-calls"
+export DF_AVAIL_VALUES="$tmp/df-avail-values"
+: > "$SUDO_CALLS"
 export IMAGE_IN_USE="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 export IMAGE_UNUSED="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 export IMAGE_CHANGED_SNAPSHOT="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
@@ -83,3 +104,10 @@ fi
 [ "$(wc -l < "$DOCKER_CALLS")" -eq "$calls_before_self_hosted" ]
 grep -q 'before-buildx-setup' "$RUNNER_TEMP/container-candidate-disk-usage.log"
 grep -q 'after-cleanup' "$RUNNER_TEMP/container-candidate-disk-usage.log"
+
+# Hosted toolchains the publish build never uses are reclaimed before the dependency transfer.
+printf '%s\n' 10000000000 30000000000 > "$DF_AVAIL_VALUES"
+RUNNER_ENVIRONMENT=github-hosted "$script" reclaim > "$tmp/reclaim.out"
+grep -Fxq -- '-n rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/powershell' "$SUDO_CALLS"
+grep -Fq 'reclaimed_bytes=20000000000' "$tmp/reclaim.out"
+grep -Fq 'reclaimed_bytes=20000000000' "$RUNNER_TEMP/container-candidate-disk-usage.log"

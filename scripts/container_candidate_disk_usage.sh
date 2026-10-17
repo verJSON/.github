@@ -21,7 +21,33 @@ measure() {
   } 2>&1 | tee -a "$log_file" || true
 }
 
+# Large preinstalled hosted-image toolchains that no publish build step uses. The image
+# build runs inside BuildKit, so host SDKs are dead weight competing with node_modules.
+unused_hosted_toolchains=(
+  /usr/local/lib/android
+  /usr/share/dotnet
+  /opt/ghc
+  /usr/local/.ghcup
+  /opt/hostedtoolcache/CodeQL
+  /usr/share/swift
+  /usr/local/share/powershell
+)
+
+report() {
+  printf '%s\n' "$1" | tee -a "$log_file"
+}
+
+available_bytes() {
+  df -B1 --output=avail -- "$1" | sed -n 2p
+}
+
 case "$operation" in
+  reclaim)
+    before="$(available_bytes /)"
+    sudo -n rm -rf -- "${unused_hosted_toolchains[@]}"
+    after="$(available_bytes /)"
+    report "reclaimed_bytes=$((after - before)) available_before=$before available_after=$after"
+    ;;
   snapshot)
     : > "$log_file" || true
     measure "before-buildx-setup"
@@ -81,7 +107,7 @@ case "$operation" in
     exit "$failures"
     ;;
   *)
-    echo "usage: $0 {snapshot|measure <phase>|cleanup}" >&2
+    echo "usage: $0 {snapshot|measure <phase>|cleanup|reclaim}" >&2
     exit 2
     ;;
 esac
