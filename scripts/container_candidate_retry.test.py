@@ -493,6 +493,13 @@ class SameRepositoryPublisherTests(unittest.TestCase):
             {"workflow_ref": SAME_REPOSITORY_PUBLISHER, "workflow_sha": "c" * 40},
         )
 
+    def test_rejects_same_repository_publisher_sha_that_differs_from_the_source_commit(self):
+        with self.assertRaisesRegex(
+            MODULE.RetryEvidenceError,
+            "same-repository publisher is not bound to the source commit",
+        ):
+            build_statement(same_repository_claims(job_workflow_sha="d" * 40))
+
 
 def candidate_statement():
     return {
