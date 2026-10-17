@@ -167,6 +167,9 @@ or a literal GitHub-hosted image.
    worse selector. The checker reports a fixed entry that is still listed as
    `STALE PENDING` and fails. It also fails on any unlisted job that violates
    the rule.
+   **Done (2026-10-17).** #1826 merged first, so both expressions landed in
+   #1827 itself (round-4 finding 6, below); the five pending rows were removed,
+   and the checker now refuses any pull_request row.
 5. **Privileged events use a reviewed-job allowlist, not head detection.**
    `pull_request_target`, `workflow_run`, and `issue_comment` run the base
    workflow with base privileges, and fork activity can trigger them. `fork`,
@@ -414,7 +417,7 @@ or a literal GitHub-hosted image.
    same jobs already run on `ubuntu-24.04` for every caller outside Verjson,
    and ADR 0048 chose the fast lane for public targets because it was hosted
    then; it now names the pool.
-   The four selectors are pinned in `hosted-selector-policy.py`'s
+   The five selectors are pinned in `hosted-selector-policy.py`'s
    `REVIEWED_SELECTOR_EXPRESSIONS`, and `runner-routing-policy.test.sh`
    evaluates every visibility, lookup, and `runner_labels` polarity.
 
@@ -453,7 +456,7 @@ whether to take this option.
 ## Consequences
 
 - No default path sends pull-request code in this repository to a persistent
-  runner, apart from the two ratcheted entries above. The contract test detects
+  runner; the two entries decision 4 ratcheted are fixed. The contract test detects
   a regression to a fallback chain or to a reusable workflow that honors a
   caller runner.
 - `actions-ci` push runs move from the persistent pool to hosted capacity at no
@@ -626,3 +629,30 @@ non-default `# escape=` directive changes line continuation, so the checker
 cannot parse the file and refuses it. Directives are matched on any line, not
 only the top: that over-approximates, and a false refusal is fixed by moving
 the comment. No Dockerfile in this repository is affected.
+
+### 6. The rows #1826 left behind are gone, and the selector count is five
+
+**Finding.** The five pull_request rows for `actionlint.yml` and
+`container-candidate.yml` (each reached directly and through its reusable-call
+contract) waited on #1826, which merged before this review, so they were
+stale. Decision 7 also said "four" selectors where it lists, and
+`hosted-selector-policy.py` pins, five.
+
+**Decision.** Decision 4's expressions landed here: `actionlint.yml` takes
+`github.event_name == 'pull_request' && fromJSON(vars.CI_LANE_UNTRUSTED ||
+'["ubuntu-24.04"]')` right after its private-repository branch, and
+`container-candidate.yml`'s three jobs take the same term ahead of their
+fallback tail. Private repositories and non-pull-request events keep their
+lanes. `hosted-selector-policy.py`, `actionlint-reusable.test.sh`,
+`container-candidate-contract.test.sh`, the `candidate-selector-unbound`
+fixture, and the ADR 0050 routing cases pin the new expressions. The five rows
+are removed, and with them the pull_request half of the pending list:
+`PULL_REQUEST_BACKLOG` and the selector-digest ratchet no longer exist, so the
+checker refuses any pull_request row as outside the frozen backlog, and the
+test requires the live tree to be clean with only relay rows listed. The four
+relay-backlog rows of the same jobs (reached through `workflow_call`) keep
+their keys; their backlog digests were refreshed because their `runs-on`
+changed, which is the content binding of finding 1 working as intended. The
+rollout gate of finding 3 is unaffected: these are reusable workflows that
+adopters call by commit, so an adopter gains the change when it bumps that
+pin.

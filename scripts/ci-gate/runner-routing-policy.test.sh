@@ -430,6 +430,9 @@ const body = raw.trim().replace(/^\$\{\{/, '').replace(/\}\}$/, '')
 const github = {
   repository,
   repository_owner: repository.split('/')[0],
+  // EVENT_NAME selects ADR 0235's pull_request branches; every other case
+  // models a push, which is what an unset event_name evaluated as before.
+  event_name: process.env.EVENT_NAME ?? 'push',
   event: {
     repository: {
       private: priv === '' ? 0 : priv === 'true',
@@ -1034,6 +1037,19 @@ assert_route "$workflows/actionlint.yml" actionlint Verjson/.github '' false \
   '["self-hosted","d"]' '["self-hosted","u"]' '["self-hosted","u"]' \
   "actionlint — an unset fast lane degrades to CI_RUNNER_UNTRUSTED" ''
 
+# ADR 0235 decision 4: a public pull request takes the ephemeral untrusted
+# lane with a hosted tail, ahead of the fast lane; a private one keeps its lane.
+EVENT_NAME=pull_request assert_route "$workflows/actionlint.yml" actionlint Verjson/.github '' false \
+  '["self-hosted","d"]' '' '["ubuntu-24.04"]' \
+  "actionlint — a public pull request takes the untrusted lane's hosted tail, not the fast lane" \
+  '["self-hosted","fast"]'
+EVENT_NAME=pull_request assert_route "$workflows/actionlint.yml" actionlint Verjson/.github '' false \
+  '["self-hosted","d"]' '["untrusted-canary"]' '["untrusted-canary"]' \
+  "actionlint — a public pull request takes a configured untrusted lane" '["self-hosted","fast"]'
+EVENT_NAME=pull_request assert_route "$workflows/actionlint.yml" actionlint Verjson/verjson-authn '' true \
+  '["self-hosted","d"]' '' '["self-hosted","d"]' \
+  "actionlint — a private pull request keeps the trusted lane" '["self-hosted","fast"]'
+
 # Mutation check. The obvious way to write the public branch —
 # `private == false` — is FAIL-OPEN: Actions coerces a missing `private` to 0,
 # and 0 == false, so an unreadable repository would reach the fast lane. That
@@ -1098,6 +1114,17 @@ while read -r wf_name job; do
   assert_route "$wf" "$job" Acme/widgets '' true '["self-hosted","do"]' '["self-hosted","do-isolated"]' \
     'ubuntu-24.04' "$name — configured pools do not leak to callers outside Verjson"
 done < <(policy_jobs)
+
+# ADR 0235 decision 4: container-candidate's pull_request build never falls
+# through to CI_LANE_FALLBACK, so an unset untrusted lane lands on hosted.
+for candidate_job in prepare pull-request-build skip-private-node-build; do
+  EVENT_NAME=pull_request assert_route "$workflows/container-candidate.yml" "$candidate_job" Verjson/.github '' false \
+    '["self-hosted","private-canary"]' '' '["ubuntu-24.04"]' \
+    "container-candidate $candidate_job — a public pull request with no untrusted lane lands on hosted"
+  EVENT_NAME=pull_request assert_route "$workflows/container-candidate.yml" "$candidate_job" Verjson/verjson-authn '' true \
+    '["self-hosted","private-canary"]' '' '["self-hosted","private-canary"]' \
+    "container-candidate $candidate_job — a private pull request keeps the trusted lane"
+done
 
 # The `runner` input is the per-caller override, but only on the jobs that
 # expose it. pulumi-ci's `validate` and `preview-admission` deliberately do not:

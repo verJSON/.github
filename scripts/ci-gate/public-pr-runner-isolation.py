@@ -81,17 +81,9 @@ class Violation(NamedTuple):
     path: str
     job: str
     detail: str
-    selector_digest: str = ""
 
     def __str__(self) -> str:
         return f"{self.path}: job '{self.job}': {self.detail}"
-
-
-def selector_digest(runs_on) -> str:
-    """SHA-256 of a job's runs-on value as canonical JSON, keying pending rows
-    to the exact reviewed selector rather than to a job name alone."""
-    canonical = json.dumps(runs_on, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
@@ -1016,25 +1008,16 @@ RELAY_HEAD_REFUSAL = (
     "runner, so no reviewed entry can accept it (ADR 0235)"
 )
 
-# The backlog, frozen (round-4 review of #1827). Jobs the pending list may
-# ratchet, as they stood when ADR 0235 began scanning: five pull_request jobs
-# waiting on their event-aware selector, and 44 relayed jobs #1831 moves. A
-# pending row whose key is not here is a format error, so the list cannot
-# grow, and public-pr-runner-isolation.test.py pins both sets as a snapshot
-# that may only shrink. A relayed key also names the refusal kinds it
-# carried then. Refusals are decided before any row is read: a kind outside
-# that set, or any kind once the key's pending row is gone, fails whatever the
-# lists say, so no row can waive a new refusal; a kind the job no longer
-# carries fails as STALE BACKLOG until it is removed here.
-PULL_REQUEST_BACKLOG = frozenset(
-    {
-        ('actionlint-reusable-contract.yml:actionlint -> actionlint.yml', 'actionlint'),
-        ('actionlint.yml', 'actionlint'),
-        ('container-candidate-reusable-contract.yml:validate -> container-candidate.yml', 'prepare'),
-        ('container-candidate-reusable-contract.yml:validate -> container-candidate.yml', 'pull-request-build'),
-        ('container-candidate-reusable-contract.yml:validate -> container-candidate.yml', 'skip-private-node-build'),
-    }
-)
+# The relay backlog, frozen (round-4 review of #1827): the 44 relayed jobs
+# #1831 moves, as they stood when ADR 0235 began scanning relays. They are the
+# only keys a pending row may name; any other key, including every
+# pull_request job, is a format error, so the list cannot grow, and
+# public-pr-runner-isolation.test.py pins this set as a snapshot that may only
+# shrink. Each key also names the refusal kinds it carried then. Refusals are
+# decided before any row is read: a kind outside that set, or any kind once the
+# key's pending row is gone, fails whatever the lists say, so no row can waive
+# a new refusal; a kind the job no longer carries fails as STALE BACKLOG until
+# it is removed here.
 RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
     ('actionlint.yml [workflow_call]', 'actionlint'): frozenset({'relay-head'}),
     ('ai-promotion-retry.yml [workflow_call]', 'resolve'): frozenset({'relay-head'}),
@@ -1837,7 +1820,6 @@ def check_job(
                         name,
                         f"{event} in a public repository can resolve to self-hosted "
                         f"or non-ephemeral runner labels {list(outcome)!r} ({describe(assignment)})",
-                        selector_digest(runs_on),
                     )
                 )
                 return violations
@@ -1895,7 +1877,7 @@ def check_tree(
     return violations
 
 
-PENDING_FORMAT = "path<TAB>job<TAB>selector digest<TAB>reason"
+PENDING_FORMAT = "path<TAB>job<TAB>backlog digest<TAB>reason"
 
 
 REVIEWED_FORMAT = (
@@ -1967,7 +1949,7 @@ def load_pending(path: str | None, row_format: str = PENDING_FORMAT) -> dict[tup
 
 def require_frozen_backlog(pending: dict[tuple[str, str], Entry], path: str | None) -> None:
     """The pending list may only shrink: every row names a frozen backlog key."""
-    for path_label, job in sorted(set(pending) - PULL_REQUEST_BACKLOG - set(RELAY_BACKLOG)):
+    for path_label, job in sorted(set(pending) - set(RELAY_BACKLOG)):
         raise Undetermined(
             f"{path}: {path_label} job '{job}' is not in the frozen backlog (ADR 0235); the pending list may only "
             "shrink, so move the job to an ephemeral runner or give it a reviewed entry instead"
@@ -2004,20 +1986,8 @@ def main(argv: list[str]) -> int:
     except Undetermined as error:
         print(f"UNDETERMINED: {error}", file=sys.stderr)
         return 2
-    violations = []
-    for violation in found:
-        row = pending.get((violation.path, violation.job))
-        if row is None:
-            violations.append(violation)
-        elif row.digest != violation.selector_digest:
-            violations.append(
-                violation._replace(
-                    detail=f"{violation.detail}; pending row no longer applies: selector digest "
-                    f"changed from {row.digest} to {violation.selector_digest}"
-                )
-            )
-        else:
-            print(f"PENDING: {violation} [{row.justification}]")
+    # No pull_request job is pending: every one must be ephemeral.
+    violations = list(found)
     stale_reviews = []
     ratcheted: set[tuple[str, str]] = set()
     for finding in findings:
@@ -2140,7 +2110,7 @@ def main(argv: list[str]) -> int:
         return 1
     print(
         f"clean: no pull_request job in {arguments.workflow_dir} can reach a persistent runner"
-        + (f" beyond {len(pending)} pending job(s)" if pending else "")
+        + (f", {len(pending)} relayed job(s) are in the frozen backlog" if pending else "")
         + f", and every privileged-event job that can is one of {len(reviewed)} reviewed entries"
     )
     return 0

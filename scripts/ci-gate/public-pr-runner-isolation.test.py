@@ -184,7 +184,9 @@ def digest(selector) -> str:
 
 
 TRUSTED_SELECTOR = """${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}"""
-# actionlint.yml's `actionlint` is a frozen pull_request backlog key.
+# No pull_request job may be pending (round-4 finding 6): the five that waited
+# on #1826 now select the ephemeral lane, so the checker refuses any
+# pull_request row, even one that names a former backlog job with its digest.
 TRUSTED_LANE_PR_JOB = """
     on: pull_request
     jobs:
@@ -193,49 +195,14 @@ TRUSTED_LANE_PR_JOB = """
         steps:
           - run: 'true'
 """
-
 expect(
     {
         "actionlint.yml": TRUSTED_LANE_PR_JOB,
-        "pending.tsv": (
-            "# path<TAB>job<TAB>selector digest<TAB>reason\n"
-            f"actionlint.yml\tactionlint\t{digest(TRUSTED_SELECTOR)}\tselector pinned elsewhere until a follow-up\n"
-        ),
+        "pending.tsv": f"actionlint.yml\tactionlint\t{digest(TRUSTED_SELECTOR)}\tselector pinned elsewhere\n",
     },
-    0,
-    ("PENDING: actionlint.yml: job 'actionlint'", "selector pinned elsewhere"),
-    "a reviewed pending entry is reported as pending instead of failing",
-    "--pending",
-    "{dir}/pending.tsv",
-)
-
-expect(
-    {
-        "actionlint.yml": TRUSTED_LANE_PR_JOB.replace("vars.CI_LANE_FALLBACK || ", ""),
-        "pending.tsv": f"actionlint.yml\tactionlint\t{digest(TRUSTED_SELECTOR)}\tlisted against the reviewed selector\n",
-    },
-    1,
-    ("VIOLATION: actionlint.yml: job 'actionlint'", "selector digest changed"),
-    "a pending job whose selector changed is a violation, not masked by its row",
-    "--pending",
-    "{dir}/pending.tsv",
-)
-
-expect(
-    {
-        "actionlint.yml": """
-            on: pull_request
-            jobs:
-              actionlint:
-                runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
-                steps:
-                  - run: 'true'
-        """,
-        "pending.tsv": f"actionlint.yml\tactionlint\t{digest(TRUSTED_SELECTOR)}\tfixed but still listed\n",
-    },
-    1,
-    ("STALE PENDING: actionlint.yml: job 'actionlint'",),
-    "a pending entry that no longer violates fails until it is removed",
+    2,
+    ("UNDETERMINED", "actionlint.yml job 'actionlint' is not in the frozen backlog"),
+    "a pull_request job cannot be listed as pending, even a former backlog job",
     "--pending",
     "{dir}/pending.tsv",
 )
@@ -384,7 +351,7 @@ expect({}, 2, ("UNDETERMINED", "no workflow files"), "an empty workflow director
 expect(
     {**pull_request_job("ubuntu-24.04"), "pending.tsv": f"ci.yml\ttest\t{digest('ubuntu-24.04')}\n"},
     2,
-    ("UNDETERMINED", "path<TAB>job<TAB>selector digest<TAB>reason"),
+    ("UNDETERMINED", "path<TAB>job<TAB>backlog digest<TAB>reason"),
     "a pending row without a reason is rejected",
     "--pending",
     "{dir}/pending.tsv",
@@ -392,8 +359,8 @@ expect(
 expect(
     {**pull_request_job("ubuntu-24.04"), "pending.tsv": "ci.yml\ttest\tsha256:abc\treason\n"},
     2,
-    ("UNDETERMINED", "selector digest"),
-    "a pending row with a malformed selector digest is rejected",
+    ("UNDETERMINED", "backlog digest"),
+    "a pending row with a malformed backlog digest is rejected",
     "--pending",
     "{dir}/pending.tsv",
 )
@@ -2839,19 +2806,12 @@ for label, dockerfile in (
     else:
         fail(f"a local docker action with {label} should be reviewable (got {code}: {output.strip()[:400]})")
 
-# The frozen backlog as it stood at the round-4 review of #1827. The checker's
-# sets may only shrink against this snapshot: a key, or a refusal kind a key
-# tolerates, that is not here fails. Never add to this snapshot; when a job
-# leaves the backlog, remove it from the checker, the pending list, and here.
-SNAPSHOT_PULL_REQUEST_BACKLOG = frozenset(
-    {
-        ('actionlint-reusable-contract.yml:actionlint -> actionlint.yml', 'actionlint'),
-        ('actionlint.yml', 'actionlint'),
-        ('container-candidate-reusable-contract.yml:validate -> container-candidate.yml', 'prepare'),
-        ('container-candidate-reusable-contract.yml:validate -> container-candidate.yml', 'pull-request-build'),
-        ('container-candidate-reusable-contract.yml:validate -> container-candidate.yml', 'skip-private-node-build'),
-    }
-)
+# The relay backlog as frozen at the round-4 review of #1827. The checker's
+# set may only shrink against this snapshot: a key, or a refusal kind a key
+# tolerates, that is not here fails. Never add to it. When a job leaves the
+# backlog, remove it from the checker, the pending list, and here in the same
+# change, so a removed key cannot quietly return. The five pull_request keys
+# frozen alongside it have already left (finding 6).
 SNAPSHOT_RELAY_BACKLOG = {
     ('actionlint.yml [workflow_call]', 'actionlint'): frozenset({'relay-head'}),
     ('ai-promotion-retry.yml [workflow_call]', 'resolve'): frozenset({'relay-head'}),
@@ -2913,9 +2873,7 @@ def load_checker():
 
 
 CHECKER = load_checker()
-grown = sorted(set(CHECKER.PULL_REQUEST_BACKLOG) - SNAPSHOT_PULL_REQUEST_BACKLOG) + sorted(
-    set(CHECKER.RELAY_BACKLOG) - set(SNAPSHOT_RELAY_BACKLOG)
-)
+grown = sorted(set(CHECKER.RELAY_BACKLOG) - set(SNAPSHOT_RELAY_BACKLOG))
 widened = sorted(
     (key, sorted(kinds - SNAPSHOT_RELAY_BACKLOG[key]))
     for key, kinds in CHECKER.RELAY_BACKLOG.items()
@@ -2925,20 +2883,51 @@ if grown or widened:
     fail(f"the frozen backlog may only shrink (added keys {grown}, added refusal kinds {widened})")
 else:
     ok("the frozen backlog is a subset of the round-4 snapshot: it may only shrink")
-RELAY_LABEL = re.compile(r"^[^ ]+ \[(?:workflow_dispatch|workflow_call|repository_dispatch)\](?::| |$)")
-misfiled = sorted(key for key in CHECKER.RELAY_BACKLOG if not RELAY_LABEL.match(key[0])) + sorted(
-    key for key in CHECKER.PULL_REQUEST_BACKLOG if "[" in key[0]
+unmirrored = sorted(
+    key for key in SNAPSHOT_RELAY_BACKLOG
+    if key not in CHECKER.RELAY_BACKLOG or CHECKER.RELAY_BACKLOG[key] != SNAPSHOT_RELAY_BACKLOG[key]
 )
+if unmirrored:
+    fail(f"the snapshot still holds what the checker dropped, so it could return unseen: {unmirrored}")
+else:
+    ok("the snapshot mirrors the checker: a key that leaves cannot quietly return")
+RELAY_LABEL = re.compile(r"^[^ ]+ \[(?:workflow_dispatch|workflow_call|repository_dispatch)\](?::| |$)")
+misfiled = sorted(key for key in CHECKER.RELAY_BACKLOG if not RELAY_LABEL.match(key[0]))
+if hasattr(CHECKER, "PULL_REQUEST_BACKLOG"):
+    misfiled.append(("PULL_REQUEST_BACKLOG", "a pull_request backlog exists again"))
 if misfiled:
     fail(f"a frozen backlog key names an event outside its set: {misfiled}")
 else:
-    ok("every relay backlog key is a relay-event label and every pull_request key names no other event")
+    ok("every backlog key is a relay-event label, and no pull_request backlog exists")
 LIVE_PENDING = set(CHECKER.load_pending(os.path.join(HERE, "public-pr-runner-isolation.pending.tsv")))
-FROZEN = set(CHECKER.PULL_REQUEST_BACKLOG) | set(CHECKER.RELAY_BACKLOG)
+FROZEN = set(CHECKER.RELAY_BACKLOG)
 if LIVE_PENDING != FROZEN:
     fail(f"the pending list and the frozen backlog differ: only listed {sorted(LIVE_PENDING - FROZEN)}, "
          f"only frozen {sorted(FROZEN - LIVE_PENDING)}; remove a fixed job from both")
 else:
     ok("the live pending list names exactly the frozen backlog")
+
+# Round-4 finding 6: #1826 has landed, so the five pull_request rows that
+# waited on it are stale. The live tree must be clean with only the relay
+# backlog listed: no pull_request job may reach a persistent runner at all.
+with tempfile.TemporaryDirectory() as lists:
+    relay_only = os.path.join(lists, "pending.tsv")
+    with open(os.path.join(HERE, "public-pr-runner-isolation.pending.tsv"), encoding="utf-8") as handle:
+        rows = [row for row in handle.read().splitlines()
+                if row.startswith("#") or not row.strip() or RELAY_LABEL.match(row.split("\t")[0])]
+    with open(relay_only, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(rows) + "\n")
+    completed = subprocess.run(
+        [sys.executable, SCRIPT, "--pending", relay_only, "--reviewed",
+         os.path.join(HERE, "public-pr-runner-isolation.reviewed.tsv"),
+         os.path.join(os.path.dirname(os.path.dirname(HERE)), ".github", "workflows")],
+        capture_output=True,
+        text=True,
+    )
+if completed.returncode == 0:
+    ok("the live tree is clean with no pull_request row: every pull_request job is on an ephemeral runner")
+else:
+    fail("a live pull_request job still needs a pending row: "
+         + "; ".join(line for line in completed.stdout.splitlines() if line.startswith("VIOLATION"))[:600])
 
 sys.exit(1 if failures else 0)

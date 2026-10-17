@@ -41,10 +41,7 @@ Dockerfile it builds must be pinned by an `@sha256:` digest; a tag or
 expression is refused. The fetch
 vocabulary is not exhaustive; a fetch outside it still turns a reviewed entry
 stale but demands no `dynamic:` field.
-`scripts/ci-gate/public-pr-runner-isolation.pending.tsv` ratchets
-`actionlint.yml` and `container-candidate.yml` as pending.
-Their selectors are pinned in `hosted-selector-policy.py` and change after #1826;
-#1831 tracks them, the adopter reusable workflows, and live lane enforcement.
+#1831 tracks the adopter reusable workflows, and live lane enforcement.
 
 The merge gate's relay no longer puts a public pull request's head on the
 persistent pool. `gate-rearm.yml` dispatches `ai-review-merge.yml`, whose `gate`
@@ -78,6 +75,11 @@ and a pattern the checker cannot evaluate exactly is refused. A local Docker
 action's `COPY --from`, `RUN --mount=…,from=`, and `# syntax=` frontend must
 name an earlier stage or be digest-pinned, and a non-default `# escape=` is
 refused.
+`actionlint.yml` and `container-candidate.yml` now send a public pull request
+to the untrusted lane with a hosted tail, ahead of the fast lane and the
+fallback tail (private repositories and other events keep their lanes), so no
+pull_request job is pending any more and the checker refuses a pull_request
+row.
 `ai-post-merge.yml` now checks its reconciler out at `github.sha`, the commit
 its own workflow file comes from, instead of `pull_request.base.sha`.
 A new `runner-isolation` workflow runs the check on every pull request and push
