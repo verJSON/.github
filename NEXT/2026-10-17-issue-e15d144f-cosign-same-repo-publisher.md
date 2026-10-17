@@ -19,8 +19,9 @@ path and ref exactly equal the source repository and ref, and when
 publisher's `prepare` job authorizes one `publisher-workflow-ref` that the retry, GAR
 mirror, and candidate-manifest steps all read. The candidate validator accepts that signer only
 for the contract repository itself, and the canary fixture reviews that identity.
-Release attestation verification still requires the pinned contract, and promotion now
-also requires a 40-hex contract commit (it previously promoted a
-`Verjson/.github/...@refs/heads/main` candidate), so canary candidates are never promoted
+Release attestation verification still requires the pinned contract, the candidate validator
+full-matches the pinned publisher, and promotion now splits on the first `@` and requires
+the exact publisher path and a 40-hex contract commit (it previously promoted
+`Verjson/.github/...@refs/heads/main` and `...@refs/heads/main@<sha>` candidates), so canary candidates are never promoted
 ([ADR 0216](../docs/decisions/0216-keyless-container-provenance-is-verified-per-registry/README.md)
 amendment of 2026-10-17).
