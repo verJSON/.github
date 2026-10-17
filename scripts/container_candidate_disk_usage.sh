@@ -41,8 +41,30 @@ report() {
   printf '%s\n' "$1" | tee -a "$log_file"
 }
 
+# Writes to stderr so the error is visible even when raised inside a command substitution.
+measurement_failure() {
+  printf '::error::could not measure %s; refusing to continue without a trustworthy disk measurement\n' "$1" \
+    | tee -a "$log_file" >&2
+  exit 1
+}
+
+# Prints the free bytes of the filesystem holding $1, or fails closed on any malformed reading.
 available_bytes() {
-  df -B1 --output=avail -- "$1" | sed -n 2p
+  local output value
+  output="$(df -B1 --output=avail -- "$1")" || measurement_failure "free space on the filesystem holding $1"
+  [ "$(wc -l <<<"$output")" -eq 2 ] || measurement_failure "free space on the filesystem holding $1"
+  value="$(sed -n '2{s/^[[:space:]]*//;p}' <<<"$output")"
+  [[ "$value" =~ ^[0-9]{1,18}$ ]] || measurement_failure "free space on the filesystem holding $1"
+  printf '%s\n' "$value"
+}
+
+# Prints the on-disk bytes of directory $1, or fails closed on any malformed reading.
+directory_bytes() {
+  local output pattern=$'^([0-9]{1,18})\t[^\n]+$'
+  [ -d "$1" ] || measurement_failure "the build context: $1 is not a directory"
+  output="$(du -s -B1 -- "$1")" || measurement_failure "the size of $1"
+  [[ "$output" =~ $pattern ]] || measurement_failure "the size of $1"
+  printf '%s\n' "${BASH_REMATCH[1]}"
 }
 
 case "$operation" in
@@ -51,16 +73,17 @@ case "$operation" in
       report "Skipping hosted toolchain reclaim on runner environment '${RUNNER_ENVIRONMENT:-unknown}'"
       exit 0
     }
-    before="$(available_bytes /)"
+    before="$(available_bytes /)" || exit 1
     sudo -n rm -rf -- "${unused_hosted_toolchains[@]}"
-    after="$(available_bytes /)"
+    after="$(available_bytes /)" || exit 1
     report "reclaimed_bytes=$((after - before)) available_before=$before available_after=$after"
     ;;
   assert-space)
     [ "$#" -eq 2 ] || { echo "usage: $0 assert-space <build-context>" >&2; exit 2; }
-    context_bytes="$(du -s -B1 -- "$2" | cut -f1)"
-    docker_root="$(docker info --format '{{.DockerRootDir}}')"
-    available="$(available_bytes "$docker_root")"
+    context_bytes="$(directory_bytes "$2")" || exit 1
+    docker_root="$(docker info --format '{{.DockerRootDir}}')" || measurement_failure "the Docker data root"
+    [[ "$docker_root" == /* ]] || measurement_failure "the Docker data root: it is not an absolute path"
+    available="$(available_bytes "$docker_root")" || exit 1
     required=$((2 * context_bytes + build_margin_bytes))
     report "context_bytes=$context_bytes required_bytes=$required available_bytes=$available filesystem=$docker_root"
     [ "$available" -ge "$required" ] || {

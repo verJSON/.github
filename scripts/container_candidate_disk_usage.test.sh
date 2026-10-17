@@ -146,3 +146,28 @@ if DU_OUTPUT=4000000000 "$script" assert-space "$context" > "$tmp/assert-short.o
   exit 1
 fi
 grep -Fq "::error::insufficient free disk for the image build: required $((2 * 4000000000 + margin)) bytes, available $((2 * 4000000000 + margin - 1)) bytes" "$tmp/assert-short.out"
+
+# Every measurement failure fails closed. Each case queues ample free space and a small context,
+# so only the malformed measurement under test can stop the build.
+plenty=900000000000
+assert_fails_closed() {
+  local label="$1" du_output="$2" df_value="$3" docker_root="$4" target="$5"
+  printf '%s\n' "$df_value" > "$DF_AVAIL_VALUES"
+  if DU_OUTPUT="$du_output" DOCKER_ROOT_DIR="$docker_root" "$script" assert-space "$target" > "$tmp/assert-closed.out" 2>&1; then
+    echo "assert-space failed open on $label" >&2
+    exit 1
+  fi
+  grep -Fq '::error::could not measure' "$tmp/assert-closed.out" \
+    || { echo "assert-space did not report the measurement failure for $label" >&2; cat "$tmp/assert-closed.out" >&2; exit 1; }
+}
+assert_fails_closed 'du exit status' FAIL "$plenty" /var/lib/docker "$context"
+assert_fails_closed 'empty du output' EMPTY "$plenty" /var/lib/docker "$context"
+assert_fails_closed 'non-numeric du output' abc "$plenty" /var/lib/docker "$context"
+assert_fails_closed 'overflowing du output' 99999999999999999999 "$plenty" /var/lib/docker "$context"
+assert_fails_closed 'df exit status' 1000 FAIL /var/lib/docker "$context"
+assert_fails_closed 'empty df output' 1000 EMPTY /var/lib/docker "$context"
+assert_fails_closed 'non-numeric df output' 1000 12abc /var/lib/docker "$context"
+assert_fails_closed 'negative df output' 1000 -5 /var/lib/docker "$context"
+assert_fails_closed 'docker info exit status' 1000 "$plenty" FAIL "$context"
+assert_fails_closed 'relative Docker root' 1000 "$plenty" var/lib/docker "$context"
+assert_fails_closed 'missing build context' 1000 "$plenty" /var/lib/docker "$tmp/absent-context"
