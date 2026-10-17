@@ -50,7 +50,11 @@ case "$*" in
     value="$(head -n1 "$DF_AVAIL_VALUES")"
     sed -i 1d "$DF_AVAIL_VALUES"
     [ "$value" != FAIL ] || exit 1
-    [ "$value" = EMPTY ] || printf 'Avail\n%s\n' "$value"
+    case "$value" in
+      EMPTY) ;;
+      EXTRA-LINE) printf 'Avail\n%s\n%s\n' 900000000000 1 ;;
+      *) printf 'Avail\n%s\n' "$value" ;;
+    esac
     ;;
 esac
 DF
@@ -168,6 +172,7 @@ assert_fails_closed 'df exit status' 1000 FAIL /var/lib/docker "$context"
 assert_fails_closed 'empty df output' 1000 EMPTY /var/lib/docker "$context"
 assert_fails_closed 'non-numeric df output' 1000 12abc /var/lib/docker "$context"
 assert_fails_closed 'negative df output' 1000 -5 /var/lib/docker "$context"
+assert_fails_closed 'df output with an extra line' 1000 EXTRA-LINE /var/lib/docker "$context"
 assert_fails_closed 'docker info exit status' 1000 "$plenty" FAIL "$context"
 assert_fails_closed 'relative Docker root' 1000 "$plenty" var/lib/docker "$context"
 assert_fails_closed 'missing build context' 1000 "$plenty" /var/lib/docker "$tmp/absent-context"
