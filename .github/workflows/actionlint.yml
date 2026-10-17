@@ -42,6 +42,12 @@ jobs:
       ACTIONLINT_VERSION: 1.7.7
       # From actionlint_1.7.7_checksums.txt on the upstream GitHub Release.
       ACTIONLINT_SHA256: '023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757'
+      # ShellCheck is pinned like actionlint so the lint verdict is the same on
+      # every route (ADR 0026): the hosted image ships 0.9.0, which reports
+      # SC2015 chains the pool image's newer build does not. The digest is the
+      # GitHub Release asset digest of shellcheck-v0.11.0.linux.x86_64.tar.gz.
+      SHELLCHECK_VERSION: 0.11.0
+      SHELLCHECK_SHA256: 'b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6'
       PYYAML_VERSION: 6.0.2
       PYYAML_SHA256: 'd584d9ec91ad65861cc08d42e834324ef890a082e591037abe114850ff7bbc3e'
       PYYAML_SOURCE_URL: 'https://files.pythonhosted.org/packages/54/ed/79a089b6be93607fa5cdaedf301d7dfb23af5f25c398d5ead2525b063e17/pyyaml-6.0.2.tar.gz'
@@ -205,11 +211,29 @@ jobs:
             exit 1
           fi
           [ ! -e "$policy_dir" ] || rm -rf -- "$policy_dir"
+      - name: Install ShellCheck (pinned release binary)
+        run: |
+          set -euo pipefail
+          archive="shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.gz"
+          url="https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/${archive}"
+          curl -fsSL "$url" -o "$archive"
+          printf '%s  %s\n' "$SHELLCHECK_SHA256" "$archive" | sha256sum --check --strict
+          tar -xzf "$archive" "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          mkdir -p .verjson-shellcheck
+          mv "shellcheck-v${SHELLCHECK_VERSION}/shellcheck" .verjson-shellcheck/shellcheck
+          rm -rf -- "$archive" "shellcheck-v${SHELLCHECK_VERSION}"
+          .verjson-shellcheck/shellcheck --version
+          printf '%s\n' "$PWD/.verjson-shellcheck" >>"$GITHUB_PATH"
       - name: Run actionlint over all workflows
         run: |
           set -euo pipefail
           command -v shellcheck >/dev/null || {
             echo "::error::The selected runner must provide shellcheck"
+            exit 1
+          }
+          installed="$(shellcheck --version | sed -n 's/^version: //p')"
+          [ "$installed" = "$SHELLCHECK_VERSION" ] || {
+            echo "::error::actionlint needs ShellCheck $SHELLCHECK_VERSION, found ${installed:-none}; the verdict must not depend on the runner image (ADR 0026)"
             exit 1
           }
           ./actionlint -config-file "$ACTIONLINT_CONFIG_FILE" -shellcheck=shellcheck -color

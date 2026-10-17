@@ -79,7 +79,9 @@ refused.
 to the untrusted lane with a hosted tail, ahead of the fast lane and the
 fallback tail (private repositories and other events keep their lanes), so no
 pull_request job is pending any more and the checker refuses a pull_request
-row.
+row. `actionlint.yml` now installs ShellCheck 0.11.0 by pinned version and
+digest instead of using the runner image's, so its verdict no longer differs
+between the hosted image (0.9.0) and the pool.
 `ai-post-merge.yml` now checks its reconciler out at `github.sha`, the commit
 its own workflow file comes from, instead of `pull_request.base.sha`.
 A new `runner-isolation` workflow runs the check on every pull request and push

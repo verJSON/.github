@@ -659,3 +659,10 @@ changed, which is the content binding of finding 1 working as intended. The
 rollout gate of finding 3 is unaffected: these are reusable workflows that
 adopters call by commit, so an adopter gains the change when it bumps that
 pin.
+
+Moving `actionlint` to the hosted image for a public pull request exposed a
+lint verdict that depended on the image's ShellCheck (0.9.0 on `ubuntu-24.04`
+reports SC2015 chains the pool's build does not). The durable fix is ADR 0026's
+own principle, that lint policy must not be an accidental property of routing:
+`actionlint.yml` now pins ShellCheck 0.11.0 by version and digest (ADR 0026,
+2026-10-17 amendment).

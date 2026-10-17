@@ -129,3 +129,24 @@ the provider-owned workflow so no caller file is executed. The file naming the r
 design was removed with it. The structural test that extracts the inline block, mutation-
 tests both failure branches, and rejects script and source references is
 `scripts/actionlint-reusable.test.sh`.
+
+## Amendment (2026-10-17, #1827) — ShellCheck is pinned, not taken from the image
+
+Requiring ShellCheck on every route did not make the verdict route-independent:
+it made it depend on whichever ShellCheck the image ships. ADR 0235 moved a
+public pull request's `actionlint` run to the hosted `ubuntu-24.04` image, whose
+ShellCheck 0.9.0 reported 56 SC2015 chains (65 findings in all) that the pool
+image's newer build does not, so the same tree failed on one route and passed
+on the other. A local run of actionlint 1.7.7 over the tree reproduces it:
+exit 1 with ShellCheck 0.9.0, exit 0 with 0.11.0.
+
+`actionlint.yml` now installs ShellCheck the way it installs actionlint: a
+pinned `SHELLCHECK_VERSION` (0.11.0) and the release asset's SHA-256, verified
+before extraction, with only that binary put on the job `PATH`. The lint step
+still fails closed without ShellCheck, and now also refuses any other version.
+`actionlint-install.test.sh` executes the installer with a matching and a
+mismatched digest, and `actionlint-reusable.test.sh` executes the lint step
+against an image ShellCheck that reports 0.9.0. Adopters calling the reusable
+workflow get the same pinned ShellCheck on every route, so a hosted caller's
+verdict moves from 0.9.0 to 0.11.0; bumping the pin is a reviewed change like
+the actionlint pin.
