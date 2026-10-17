@@ -4,7 +4,7 @@ id: 83b2ec0e
 impact: patch
 title: Reclaim hosted disk and fail fast before container candidate image builds
 ---
-When a publish build consumes a transferred node_modules context, the container candidate publisher now removes the large preinstalled hosted-image toolchains it never uses (Android SDK, .NET, GHC, CodeQL, Swift, PowerShell). This runs only on GitHub-hosted runners and only on the rows each job builds. The publisher also refuses to start an image build unless the Docker data filesystem holds twice the measured node_modules context plus a 4 GiB margin. If it doesn't, the build fails with an explicit required-versus-available error instead of an opaque `ENOSPC` mid-build.
+On GitHub-hosted runners, the container candidate publisher now removes the large preinstalled hosted-image toolchains its image builds never use (Android SDK, .NET, GHC, CodeQL, Swift, PowerShell) on every row a publish job may build, with or without private Node packages. It also refuses to start an image build unless the Docker data filesystem holds twice the measured node_modules context plus a 4 GiB margin. If it doesn't, the build fails with an explicit required-versus-available error instead of an opaque `ENOSPC` mid-build.
 
 terptechpub/self-publish-ai-app's push-to-main candidate publication had failed on every run since 2026-10-04 (runs 39000509900, 39001337204). A 3.97 GB node_modules was transferred as a named build context and copied into a layer. That left about 11 GB free when the build began, and the adopter's `npm rebuild` install scripts and the layer export exhausted the disk. Pull-request validation builds with an empty node_modules context (#1679), so it stayed green and could not observe this path.
 

@@ -1043,9 +1043,8 @@ for build_job in publish-base publish-derived; do
   grep -qF 'key: ${{ needs.acquire-private-node-dependencies.outputs.transfer-cache-key }}' <<<"$build_block"
   grep -qF 'fail-on-cache-miss: true' <<<"$build_block"
   grep -qF 'name: Remove local node_modules transfer state' <<<"$build_block"
-  # Transfer download, cache restore, context verification, transfer cleanup, and hosted toolchain reclaim.
-  grep -qF "needs.prepare.outputs.has-private-node-packages == 'true' && runner.environment == 'github-hosted'" <<<"$build_block"
-  [ "$(grep -cF "needs.prepare.outputs.has-private-node-packages == 'true'" <<<"$build_block")" -eq 5 ]
+  # Transfer download, cache restore, context verification, and transfer cleanup; reclaim is not private-gated.
+  [ "$(grep -cF "needs.prepare.outputs.has-private-node-packages == 'true'" <<<"$build_block")" -eq 4 ]
   grep -qF 'run: rm -rf "$TRANSFER_DIR"' <<<"$build_block"
   if grep -qF 'restore-keys:' <<<"$build_block" || grep -qF 'actions/download-artifact@' <<<"$build_block"; then
     echo "$build_job permits an inexact cache restore or still uses artifact storage" >&2
@@ -1224,10 +1223,14 @@ for job_name in ("publish-base", "publish-derived"):
     assert set(transfer_terms) <= {build_rows, transfer_condition} and transfer_condition in transfer_terms, (
         "the node_modules build context is transferred only for private Node packages on built rows"
     )
-    expected_reclaim_if = " && ".join((build_rows, transfer_condition, "runner.environment == 'github-hosted'"))
+    # In-build installs and layer export demand disk whether or not node_modules is transferred,
+    # so reclaim covers every hosted row the job may build.
+    assert "has-private-node-packages" not in reclaim["if"], (
+        f"{job_name} toolchain reclaim must not depend on private Node packages"
+    )
+    expected_reclaim_if = " && ".join((build_rows, "runner.environment == 'github-hosted'"))
     assert reclaim["if"] == expected_reclaim_if, (
-        f"{job_name} toolchain reclaim must run only on GitHub-hosted rows this job builds "
-        "from a transferred node_modules context"
+        f"{job_name} toolchain reclaim must run on every GitHub-hosted row this job may build"
     )
     assert reclaim["run"] == 'bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" reclaim'
     assert reclaim.get("continue-on-error") is not True
