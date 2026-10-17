@@ -280,7 +280,9 @@ sanitize_command_output_for_index() {
 # drawn here, after the command exited, so nothing it printed can contain it.
 # Each line is prefixed, which keeps a stored `##[endgroup]` or row text from
 # byte-matching a producer line, and awk terminates the last line, so an
-# unterminated tail cannot run into the resume line or the row after it.
+# unterminated tail cannot run into the resume line or the row after it. The
+# Actions runner also ends a stored line at a bare carriage return, so each
+# one is prefixed too; a CRLF line ending is reduced to its newline first.
 replay_command_output() {
   local log_file="$1" token status=0
   token="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
@@ -289,7 +291,7 @@ replay_command_output() {
     return 1
   fi
   printf '::stop-commands::%s\n' "$token"
-  awk '{ print "| " $0 }' "$log_file" || status=$?
+  awk '{ sub(/\r$/, ""); gsub(/\r/, "\r| "); print "| " $0 }' "$log_file" || status=$?
   printf '\n::%s::\n' "$token"
   return "$status"
 }

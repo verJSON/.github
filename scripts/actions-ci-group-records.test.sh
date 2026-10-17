@@ -59,9 +59,11 @@ fi
 
 # Every replayed byte sits inside one `::stop-commands::<token>` block per row,
 # closed by the same random token, with each line prefixed; every line outside
-# a block is a line the runner itself produces. <name> <expected-blocks>
+# a block is a line the runner itself produces. The Actions runner reads its
+# output with .NET ReadLine, which also ends a line at a bare carriage return,
+# so the check splits there too. <name> <expected-blocks>
 stream_is_well_formed() {
-  awk -v expected="$2" '
+  tr '\r' '\n' <"$tmp/$1.out" | awk -v expected="$2" '
     function bad(why) { printf "line %d: %s: %s\n", NR, why, $0 > "/dev/stderr"; failed = 1 }
     token != "" {
       if ($0 == "::" token "::") { token = ""; next }
@@ -86,7 +88,7 @@ stream_is_well_formed() {
       if (blocks != expected) { printf "%d blocks, expected %d\n", blocks, expected > "/dev/stderr"; failed = 1 }
       exit failed
     }
-  ' "$tmp/$1.out"
+  '
 }
 
 # (c) Run 39064216676: inside stop-commands a forged `##[endgroup]` is stored
@@ -100,6 +102,17 @@ if has_one_row_line stop-commands \
 else
   cat "$tmp/stop-commands.out" >&2
   fail "replayed output escaped its stop-commands block or forged a producer line"
+fi
+
+# A bare carriage return starts a new stored line, so a prefix only at each
+# newline would leave `\r##[endgroup]` and `\r::error::` unprefixed.
+run_stub carriage-return 'progress 50%%\r##[endgroup]\r::error::forged\r\n' >/dev/null
+if has_one_row_line carriage-return \
+  && stream_is_well_formed carriage-return 1; then
+  pass "a carriage return in output cannot start an unprefixed stored line"
+else
+  cat -A "$tmp/carriage-return.out" >&2
+  fail "a carriage return in output started an unprefixed stored line"
 fi
 
 # Structured records: one JSON object per row, written by the runner to the
@@ -241,6 +254,28 @@ if [ "$actual" = 'null null' ]; then
 else
   printf 'actual: %s\n' "$actual" >&2
   fail "an unknown runner identity was recorded as a value"
+fi
+
+# Commands are recorded byte-for-byte: quotes, backslashes, non-ASCII text,
+# and the carriage return a CRLF manifest leaves on every command.
+printf 'platform\tprintf "%%s\\n" "caf\xc3\xa9 \xe2\x9c\x93 \\\\ q" >/dev/null\r\n' >"$tmp/escaping.tsv"
+ACTIONS_CI_GROUP_MANIFEST="$tmp/escaping.tsv" \
+  ACTIONS_CI_RUNTIME_RECORDS="$tmp/records/escaping.jsonl" \
+  bash "$runner" platform >"$tmp/escaping.out" 2>&1
+expected_command="$(cut -f2- "$tmp/escaping.tsv" | head -c -1)"
+if python3 -I - "$tmp/records/escaping.jsonl" "$expected_command" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    (line,) = handle.read().splitlines()
+record = json.loads(line)
+expected = sys.argv[2]
+assert expected.endswith("\r") and "é ✓ \\\\ q" in expected, repr(expected)
+assert record["command"] == expected, (record["command"], expected)
+PY
+then
+  pass "commands with quotes, backslashes, unicode, and control characters round-trip as JSON"
+else
+  fail "a command was not recorded as exactly its manifest text"
 fi
 
 if [ "$fails" -ne 0 ]; then
