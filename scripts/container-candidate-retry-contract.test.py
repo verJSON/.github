@@ -79,7 +79,7 @@ class RetryWorkflowContractTests(unittest.TestCase):
                 '--expected-source-commit "$GITHUB_SHA"',
                 '--expected-caller-workflow-ref "$CALLER_WORKFLOW_REF"',
                 '--expected-caller-workflow-sha "$CALLER_WORKFLOW_SHA"',
-                '--expected-publisher-workflow-ref "Verjson/.github/.github/workflows/container-candidate-publish.yml@$CONTRACT_REF"',
+                '--expected-publisher-workflow-ref "$PUBLISHER_WORKFLOW_REF"',
                 '--expected-contract-sha "$CONTRACT_REF"',
                 "python3 -I \"$oci\" index",
                 '--buildkit-provenance "$buildkit"',
@@ -87,6 +87,44 @@ class RetryWorkflowContractTests(unittest.TestCase):
                 self.assertIn(required, command)
             self.assertNotIn("|| true", command)
             self.assertLess(command.index("verify-image \\"), command.index("imagetools create -t"))
+
+    def test_every_publisher_identity_consumer_reads_the_single_prepare_authorization(self):
+        pinned = "Verjson/.github/.github/workflows/container-candidate-publish.yml@"
+        config = next(
+            step
+            for step in self.workflow["jobs"]["prepare"]["steps"]
+            if step.get("id") == "config"
+        )
+        self.assertEqual(self.text.count(pinned), 1)
+        self.assertIn(f'publisher_workflow_ref="{pinned}$CONTRACT_REF"', config["run"])
+        self.assertEqual(
+            self.workflow["jobs"]["prepare"]["outputs"]["publisher-workflow-ref"],
+            "${{ steps.config.outputs.publisher-workflow-ref }}",
+        )
+        consumers = {
+            ("publish-base", "retry"): ('--expected-publisher-workflow-ref "$PUBLISHER_WORKFLOW_REF"',),
+            ("publish-derived", "retry"): ('--expected-publisher-workflow-ref "$PUBLISHER_WORKFLOW_REF"',),
+            ("mirror-gar", "Mirror and verify the complete OCI candidate"): (
+                '--expected-publisher-workflow-ref "$PUBLISHER_WORKFLOW_REF"',
+            ),
+            ("candidate-manifest", "Assemble complete candidate manifest"): (
+                '--arg workflow "$PUBLISHER_WORKFLOW_REF"',
+            ),
+        }
+        for (job_name, step_key), required in consumers.items():
+            with self.subTest(job=job_name, step=step_key):
+                step = next(
+                    step
+                    for step in self.workflow["jobs"][job_name]["steps"]
+                    if step_key in (step.get("id"), step.get("name"))
+                )
+                self.assertEqual(
+                    step["env"]["PUBLISHER_WORKFLOW_REF"],
+                    "${{ needs.prepare.outputs.publisher-workflow-ref }}",
+                )
+                for fragment in required:
+                    self.assertIn(fragment, step["run"])
+                self.assertNotIn(pinned, step["run"])
 
     def test_missing_or_unreadable_identity_fails_closed_and_immutable_guard_remains(self):
         self.assertEqual(self.text.count("could not prove immutable commit identity state"), 2)

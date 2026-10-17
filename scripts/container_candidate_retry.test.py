@@ -447,6 +447,200 @@ class CosignProvenancePolicyTests(unittest.TestCase):
                     )
 
 
+SAME_REPOSITORY_PUBLISHER = (
+    "Verjson/example/.github/workflows/container-candidate-publish.yml@refs/heads/main"
+)
+
+
+def same_repository_claims(**overrides):
+    claims = {
+        "iss": "https://token.actions.githubusercontent.com",
+        "aud": "sigstore",
+        "repository": "Verjson/example",
+        "repository_id": "12345",
+        "ref": "refs/heads/main",
+        "sha": "c" * 40,
+        "workflow_ref": "Verjson/example/.github/workflows/container-candidate-reusable-contract.yml@refs/heads/main",
+        "workflow_sha": "c" * 40,
+        "job_workflow_ref": SAME_REPOSITORY_PUBLISHER,
+        "job_workflow_sha": "c" * 40,
+        "run_id": "987654",
+        "run_attempt": "1",
+    }
+    claims.update(overrides)
+    return claims
+
+
+def build_statement(claims):
+    return MODULE.build_cosign_provenance_statement(
+        buildkit_provenance(),
+        REVIEWED_PLATFORMS,
+        identity_claims=claims,
+        image_repository=REPOSITORY,
+        image_digest=DIGEST,
+    )
+
+
+def validate_same_repository_statement(statement, **overrides):
+    policy = {
+        "buildkit_provenance": buildkit_provenance(),
+        "reviewed_platforms": REVIEWED_PLATFORMS,
+        "repository": REPOSITORY,
+        "digest": DIGEST,
+        "source_repository": "Verjson/example",
+        "source_repository_id": "12345",
+        "source_ref": "refs/heads/main",
+        "source_commit": "c" * 40,
+        "caller_workflow_ref": same_repository_claims()["workflow_ref"],
+        "caller_workflow_sha": "c" * 40,
+        "publisher_workflow_ref": SAME_REPOSITORY_PUBLISHER,
+        "contract_sha": "c" * 40,
+    }
+    policy.update(overrides)
+    return MODULE.validate_cosign_provenance(statement, **policy)
+
+
+class SameRepositoryPublisherTests(unittest.TestCase):
+    """A `uses: ./` publisher is bound by the source commit instead of an @sha ref."""
+
+    def test_signs_same_repository_publisher_bound_to_the_source_commit(self):
+        statement = build_statement(same_repository_claims())
+
+        publisher = statement["predicate"]["buildDefinition"]["externalParameters"]["verjson"]["publisher"]
+        self.assertEqual(
+            publisher,
+            {"workflow_ref": SAME_REPOSITORY_PUBLISHER, "workflow_sha": "c" * 40},
+        )
+
+    def test_rejects_same_repository_publisher_sha_that_differs_from_the_source_commit(self):
+        with self.assertRaisesRegex(
+            MODULE.RetryEvidenceError,
+            "same-repository publisher is not bound to the source commit",
+        ):
+            build_statement(same_repository_claims(job_workflow_sha="d" * 40))
+
+    def test_verifier_rejects_same_repository_caller_sha_that_differs_from_the_source_commit(self):
+        statement = build_statement(same_repository_claims())
+        statement["predicate"]["buildDefinition"]["externalParameters"]["verjson"]["caller"]["workflow_sha"] = "e" * 40
+
+        with self.assertRaisesRegex(
+            MODULE.RetryEvidenceError,
+            "same-repository publisher is not bound to the source commit",
+        ):
+            validate_same_repository_statement(statement, caller_workflow_sha="e" * 40)
+
+    def test_rejects_same_repository_publisher_at_a_different_ref_than_the_source(self):
+        with self.assertRaisesRegex(
+            MODULE.RetryEvidenceError, "publisher workflow is not immutably pinned"
+        ):
+            build_statement(
+                same_repository_claims(
+                    job_workflow_ref="Verjson/example/.github/workflows/container-candidate-publish.yml@refs/heads/feature"
+                )
+            )
+
+    def test_rejects_same_repository_workflow_other_than_the_contract_publisher(self):
+        for path in (
+            ".github/workflows/evil.yml",
+            ".github/workflows/container-candidate-publish.yaml",
+            ".github/workflows/container-candidate.yml",
+        ):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(
+                    MODULE.RetryEvidenceError, "publisher workflow is not immutably pinned"
+                ):
+                    build_statement(
+                        same_repository_claims(
+                            job_workflow_ref=f"Verjson/example/{path}@refs/heads/main"
+                        )
+                    )
+
+    def test_verifier_accepts_the_same_repository_statement_the_producer_signs(self):
+        identity = validate_same_repository_statement(build_statement(same_repository_claims()))
+
+        self.assertRegex(identity, r"^statement-sha256:[0-9a-f]{64}$")
+
+    def test_rejects_cross_repository_publisher_at_a_branch_or_tag(self):
+        for ref in ("refs/heads/main", "refs/tags/v1", "v1", "main"):
+            with self.subTest(ref=ref):
+                with self.assertRaisesRegex(
+                    MODULE.RetryEvidenceError, "publisher workflow is not immutably pinned"
+                ):
+                    build_statement(
+                        same_repository_claims(
+                            job_workflow_ref=f"Verjson/.github/.github/workflows/container-candidate-publish.yml@{ref}",
+                        )
+                    )
+
+    def test_rejects_same_repository_caller_sha_that_differs_from_the_source_commit(self):
+        with self.assertRaisesRegex(
+            MODULE.RetryEvidenceError, "caller workflow identity differs from source"
+        ):
+            build_statement(same_repository_claims(workflow_sha="e" * 40))
+
+    def test_rejects_lookalike_and_case_variant_publisher_repositories(self):
+        for repository in (
+            "Verjson/example-evil",
+            "Verjson/exampl",
+            "Verjson-evil/example",
+            "verjson/example",
+            "Verjson/Example",
+            "VERJSON/EXAMPLE",
+        ):
+            with self.subTest(repository=repository):
+                with self.assertRaisesRegex(
+                    MODULE.RetryEvidenceError, "publisher workflow is not immutably pinned"
+                ):
+                    build_statement(
+                        same_repository_claims(
+                            job_workflow_ref=f"{repository}/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+                        )
+                    )
+
+    def test_rejects_publisher_refs_that_do_not_parse_as_one_workflow_identity(self):
+        for publisher in (
+            "Verjson/example/evil/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+            "Verjson/example/.github/workflows/container-candidate-publish.yml",
+            "Verjson/example/.github/workflows/container-candidate-publish.yml@refs/heads/main@" + "c" * 40,
+            "Verjson/example@refs/heads/main",
+            "Verjson/example/.github/workflows/container-candidate-publish.yml@ " + "c" * 40,
+            "@" + "c" * 40,
+        ):
+            with self.subTest(publisher=publisher):
+                with self.assertRaisesRegex(
+                    MODULE.RetryEvidenceError, "publisher workflow ref is malformed"
+                ):
+                    build_statement(same_repository_claims(job_workflow_ref=publisher))
+
+    def test_rejects_malformed_publisher_shas_even_when_the_ref_matches(self):
+        for sha in ("C" * 40, "c" * 39, "c" * 41, "", "g" * 40):
+            with self.subTest(sha=sha):
+                with self.assertRaises(MODULE.RetryEvidenceError):
+                    build_statement(
+                        same_repository_claims(
+                            job_workflow_ref=f"Verjson/.github/.github/workflows/container-candidate-publish.yml@{sha}",
+                            job_workflow_sha=sha,
+                        )
+                    )
+
+    def test_rejects_each_missing_identity_claim(self):
+        for claim in same_repository_claims():
+            with self.subTest(claim=claim):
+                claims = same_repository_claims()
+                del claims[claim]
+                with self.assertRaisesRegex(MODULE.RetryEvidenceError, "claims are incomplete"):
+                    build_statement(claims)
+
+    def test_verifier_rejects_a_publisher_outside_the_authorized_source_repository(self):
+        statement = build_statement(same_repository_claims())
+        statement["predicate"]["buildDefinition"]["externalParameters"]["verjson"]["source"]["repository"] = "Verjson/example-evil"
+
+        with self.assertRaisesRegex(
+            MODULE.RetryEvidenceError, "publisher workflow is not immutably pinned"
+        ):
+            validate_same_repository_statement(statement, source_repository="Verjson/example-evil")
+
+
 def candidate_statement():
     return {
         "_type": "https://in-toto.io/Statement/v1",

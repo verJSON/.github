@@ -157,6 +157,27 @@ class ContainerAttestationVerifierTests(unittest.TestCase):
                     cosign_helper=Path("/tmp/container_cosign_provenance.py"),
                 )
 
+    def test_rejects_same_repository_canary_publisher_at_release(self):
+        value = candidate()
+        value["images"][0]["provenance"]["builderIdentity"] = (
+            "Verjson/example/.github/workflows/container-candidate-publish.yml@refs/heads/main"
+        )
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            verifier, "validate_manifest"
+        ):
+            with self.assertRaisesRegex(ValueError, "publisher identity differs from the pinned contract"):
+                verifier.verify(
+                    value,
+                    config(),
+                    Path(directory),
+                    expected_repository="Verjson/example",
+                    repository_id="12345",
+                    expected_source_ref="refs/heads/main",
+                    expected_source_commit=SOURCE_SHA,
+                    contract_ref="b" * 40,
+                    cosign_helper=Path("/tmp/container_cosign_provenance.py"),
+                )
+
     def test_rejects_candidate_publisher_revision_outside_pinned_contract(self):
         value = candidate()
         value["images"][0]["provenance"]["builderIdentity"] = (
