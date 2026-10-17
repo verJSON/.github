@@ -3056,4 +3056,18 @@ expect({**LISTS_OBSERVE, "pending.tsv": LISTS_ROW}, 0,
        ("PENDING: capability-floor-observe.yml [workflow_dispatch]: job 'observe'",),
        "a backlog row whose checkout holds the pending list still matches its own row", *PENDING_ARGS)
 
+# Round-5 should-fix (M1c): tolerance is the key's own frozen kinds, never a
+# kind another key carries. runner-canary's `canary` froze with only
+# relay-head; a head checkout with no sparse list adds a runtime-checkout
+# refusal, which fails with its own matching pending row in place.
+CANARY_UNBOUNDED = backlog_relay("runner-canary.yml", "canary", PROBES["workflow_dispatch"][0])
+expect_no_pending(
+    {**CANARY_UNBOUNDED,
+     "pending.tsv": backlog_row(CANARY_UNBOUNDED, "runner-canary.yml [workflow_dispatch]", "canary")},
+    "a refusal kind outside the key's frozen set fails even with a matching pending row",
+    ("VIOLATION: runner-canary.yml [workflow_dispatch]: job 'canary'", "has no sparse-checkout list",
+     "a pending row cannot waive a refusal"),
+    *PENDING_ARGS,
+)
+
 sys.exit(1 if failures else 0)
