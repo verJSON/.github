@@ -149,6 +149,26 @@ else
   fail "a passing row left no or an incorrect runtime record"
 fi
 
+record_fields() { # <name> <field>... -> the fields of its only record, JSON-encoded
+  python3 -I - "$tmp/records/$1.jsonl" "${@:2}" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    records = [json.loads(line) for line in handle.read().splitlines()]
+if len(records) != 1:
+    sys.exit(f"expected one record, found {len(records)}")
+print(" ".join(json.dumps(records[0][field]) for field in sys.argv[2:]))
+PY
+}
+
+status="$(run_recorded timeout 1 'platform	sleep 5')"
+actual="$(record_fields timeout status timed_out left_background budget_seconds 2>&1)"
+if [ "$status" -eq 1 ] && [ "$actual" = '124 true false 1' ]; then
+  pass "a row stopped at its budget records timed_out"
+else
+  printf 'actual: %s\n' "$actual" >&2
+  fail "a timed-out row was not recorded as timed out"
+fi
+
 if [ "$fails" -ne 0 ]; then
   printf '%d test(s) failed\n' "$fails"
   exit 1

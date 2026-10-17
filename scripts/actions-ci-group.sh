@@ -311,13 +311,13 @@ write_runtime_records() {
   } >"$staged" && mv -f -- "$staged" "$records_file"
 }
 
-record_runtime() { # <index> <status> <elapsed>
-  local index="$1" status="$2" elapsed="$3"
+record_runtime() { # <index> <status> <elapsed> <timed_out>
+  local index="$1" status="$2" elapsed="$3" timed_out="$4"
   local budget="${command_budgets[$index]}"
   runtime_record_by_index["$index"]="$(printf \
-    '{"schema_version":1,"group":"%s","command":"%s","status":%s,"elapsed_seconds":%s,"budget_seconds":%s,"started_at":"%s","ended_at":"%s","timed_out":false,"left_background":false,"runner_name":"%s","runner_environment":"%s"}' \
+    '{"schema_version":1,"group":"%s","command":"%s","status":%s,"elapsed_seconds":%s,"budget_seconds":%s,"started_at":"%s","ended_at":"%s","timed_out":%s,"left_background":false,"runner_name":"%s","runner_environment":"%s"}' \
     "$group" "${commands[$index]}" "$status" "$elapsed" "${budget:-null}" \
-    "${command_started_at[$index]}" "$(utc_now)" "$runner_name" "$runner_environment")"
+    "${command_started_at[$index]}" "$(utc_now)" "$timed_out" "$runner_name" "$runner_environment")"
   write_runtime_records
 }
 
@@ -501,10 +501,14 @@ report_worker_result() {
     [ "$status" -ne 0 ] || status="$worker_status"
   fi
 
+  local timed_out=false
+  if [ -n "$budget" ] \
+    && { [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; } \
+    && [ "$elapsed" -ge "$budget" ]; then
+    timed_out=true
+  fi
   if [ "$status" -ne 0 ]; then
-    if [ -n "$budget" ] \
-      && { [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; } \
-      && [ "$elapsed" -ge "$budget" ]; then
+    if [ "$timed_out" = true ]; then
       printf '::error::group=%s command=%q timed out after %ss (budget=%ss)\n' \
         "$group" "${commands[$index]}" "$elapsed" "$budget"
     else
@@ -520,7 +524,7 @@ report_worker_result() {
   printf '\nactions-ci command group=%s status=%s elapsed=%ss%s command=%q\n' \
     "$group" "$status" "$elapsed" "$budget_report" "${commands[$index]}"
   printf '::endgroup::\n'
-  record_runtime "$index" "$status" "$elapsed"
+  record_runtime "$index" "$status" "$elapsed" "$timed_out"
   worker_reported_by_index["$index"]=1
 }
 
