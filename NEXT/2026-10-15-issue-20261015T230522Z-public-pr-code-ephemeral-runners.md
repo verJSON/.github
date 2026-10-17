@@ -81,7 +81,9 @@ sparse lists that a test derives from their programs and Python imports, and
 exception is `release.yml`'s `verify`, which runs the whole release suite on the
 tagged commit: it alone tolerates a full checkout, and its row binds the
 programs it runs rather than the whole tree, until #1831 moves it off the
-persistent pool. A non-cone sparse-checkout list is evaluated with git's
+persistent pool. That trace covers shell, Python, and JavaScript, including
+the package bins `npm pack` selects, and refuses any program it cannot
+resolve. A non-cone sparse-checkout list is evaluated with git's
 gitignore anchoring (a bare name matches at every depth, `*` matches dotfiles),
 and a pattern the checker cannot evaluate exactly is refused. A local Docker
 action's `COPY --from`, `RUN --mount=…,from=`, and `# syntax=` frontend must

@@ -783,24 +783,45 @@ scripts through a variable.
   By design it runs the repository's whole release suite on the exact commit
   that is tagged, so it needs the full tree. `RELAY_BACKLOG` grants its key,
   and no other, the tolerated kind `full-checkout`. Its row binds the job text
-  and the bytes of every program it runs from the tree, never the whole tree
-  (`tree_programs`). That set is: `release-verify.sh` (run through the
-  `run_clean` wrapper); the programs it runs (`changelog.py`,
-  `render-next.sh`, `gen-adr-index.sh`, `adr-relative-links.test.py`,
-  `doc-fragment-names.test.sh` and its `doc-fragment-names.sh`, and
-  `contract-tools-package.test.js`); and the files its steps and that hook
-  name (`.github/workflows/release.yml`, whose header carries the generator
-  pin the hook compares against; `gen-changelog-caller.sh`; `package.json`).
-  `backlog-sparse-closure.test.py` independently reads the scripts the hook
-  runs and requires each to be bound. A test also fails if any other key is
-  granted `full-checkout`.
+  and the bytes of every scanned-tree program that `ProgramTrace` resolves it
+  running, never the whole tree. The trace covers shell, Python, and
+  JavaScript, follows each program from the shallowest depth it is reached
+  at, and binds what `npm pack` selects when a program packs the package or
+  runs its bins (round-7 amendment). Every program the job runs that the trace
+  cannot resolve is an `unresolved-program` refusal that no key tolerates, so
+  the bound set is complete for every form the trace reads. That set is 13
+  files:
+  - `release-verify.sh` (run through the `run_clean` wrapper);
+  - the programs it runs: `changelog.py`, `render-next.sh`,
+    `gen-adr-index.sh`, `adr-relative-links.test.py`,
+    `doc-fragment-names.test.sh` and its `doc-fragment-names.sh`, and
+    `contract-tools-package.test.js`, which packs the package and runs its
+    bins `bin/render-next.js` and `bin/gen-adr-index.js`;
+  - the files its steps and that hook name: `.github/workflows/release.yml`,
+    whose header carries the generator pin the hook compares against;
+    `gen-changelog-caller.sh`; and `package.json`, whose `files` and `bin`
+    the pack selects.
 
-  **Residual.** A full-checkout release verify still executes tree content
-  outside that set. Examples are an adopter's npm scripts, the Markdown and
-  link checks' inputs, and documentation a deeper check reads. Its protection
-  there is code review of `main`, not this checker. The exception is removed
-  when #1831 moves `verify` off the persistent pool through the generator and
-  a regeneration.
+  `backlog-sparse-closure.test.py` independently reads the scripts the hook
+  runs, and the files the pack selects, and requires each to be bound. A test
+  also fails if any other key is granted `full-checkout`.
+
+  **Residual.** Three things stay outside the checker:
+  - `package-lock.json` decides the dependency code that `npm ci`,
+    `npm rebuild`, and `npm pack` resolve. That code comes from the registry,
+    not the scanned tree, so the row does not bind it.
+  - The frozen pin comparison, `git show "$pin:scripts/gen-changelog-caller.sh"
+    | bash -s …` in `release-verify.sh`, runs the generator as it stood at that
+    pin. It is tolerated only on the exact bytes of that line and of the line
+    that derives `$pin`, and only while `release.yml`'s header names one 40-hex
+    pin. Any other materialization in a traced program refuses.
+  - The inputs the Markdown and link checks read are data. They are not code
+    the job runs.
+
+  Every other form the trace cannot resolve refuses. For what remains, the
+  protection is code review of `main`, not this checker. The exception is
+  removed when #1831 moves `verify` off the persistent pool through the
+  generator and a regeneration.
 
 **Trade-off.** Every converted job must now list what it reads, and adding a
 file to a job means editing its sparse list. The closure test catches a
@@ -830,3 +851,41 @@ A program that leaves the scanned tree through a link is unreadable rather than
 read from the scanner host. `backlog-sparse-closure.test.py` asserts that no
 relay-backlog job hands a literal tracked path to any of these forms. For a
 converted job the sparse list binds the bytes whatever form reaches them.
+
+## Amendment (2026-10-17, #1827) — round-7 review: verify's trace fails closed
+
+**Finding.** The round-7 review found that the `verify` binding missed code
+`verify` runs:
+
+- the package bins that `contract-tools-package.test.js` packs and runs;
+- a `git archive` appended to `release-verify.sh`, which was not refused;
+- a program first met as a data token or at the depth cap, which was never
+  followed;
+- `source`, `bash -c`, an assigned path, `python3 -m`, and a `.`-sourced
+  file, which below depth 1 bound nothing.
+
+**Decision (PM, 2026-10-17; Part of #1831).**
+
+- **Fail closed.** Discovery fails closed. A program the job runs that
+  discovery cannot resolve is the refusal kind `unresolved-program`, which no
+  key tolerates, not even `verify`.
+- **The trace.** `ProgramTrace` replaces the old program closure:
+  - It reads shell as shell, including comments, heredocs, command
+    substitutions, arithmetic, operators, array assignments, `"$@"` wrappers,
+    command prefixes, redirects, and assignments. It reads Python through its
+    imports, `-m`, `-c`, subprocess interpreter calls, and loader calls, and
+    JavaScript through `require`, spawn and exec calls, package bins, and
+    `npm pack`.
+  - It keeps a bound set apart from a followed set, and follows each program
+    from the shallowest depth any path reaches it at. A program at the depth
+    cap that still runs something is unresolved, never truncated.
+  - It refuses as unresolved: `eval`, `xargs`, `npx`, a pipe into an
+    interpreter, an unresolvable variable or untracked path, perl, ruby, and
+    pwsh, and computed loads.
+  - An optional hook that the tree does not hold, and that runs only behind
+    `[ -x path ]`, runs nothing.
+- **Materializations.** A `git show`, `archive`, or `cat-file` in any traced
+  shell text or JavaScript spawn refuses. The one exception is the frozen pin
+  comparison named in the residual above.
+- **Bytes and roots.** Bound programs are hashed as raw bytes. A relative root
+  is made absolute.
