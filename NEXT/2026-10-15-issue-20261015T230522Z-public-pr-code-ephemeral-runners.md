@@ -74,7 +74,10 @@ refusal kinds it carried when the backlog froze; each row binds the job's full
 content, callers, inherited settings, and local actions, so any edit to the job
 stops the row applying. A non-cone sparse-checkout list is evaluated with git's
 gitignore anchoring (a bare name matches at every depth, `*` matches dotfiles),
-and a pattern the checker cannot evaluate exactly is refused.
+and a pattern the checker cannot evaluate exactly is refused. A local Docker
+action's `COPY --from`, `RUN --mount=…,from=`, and `# syntax=` frontend must
+name an earlier stage or be digest-pinned, and a non-default `# escape=` is
+refused.
 `ai-post-merge.yml` now checks its reconciler out at `github.sha`, the commit
 its own workflow file comes from, instead of `pull_request.base.sha`.
 A new `runner-isolation` workflow runs the check on every pull request and push

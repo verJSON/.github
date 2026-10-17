@@ -2788,6 +2788,57 @@ for label, pattern, cone in (
         f"sparse-checkout {label} is refused: the checker cannot prove what it puts on disk",
     )
 
+# ---------------------------------------------------------------------------
+# Round-4 finding 5: a Dockerfile pulls more than its FROM lines. `COPY --from`
+# and `RUN --mount=...,from=` name an image when they do not name an earlier
+# stage, and a `# syntax=` parser directive runs a BuildKit frontend image.
+# Each must be a stage or digest-pinned; an `escape` directive changes how the
+# file parses, so the checker cannot vet it at all.
+# ---------------------------------------------------------------------------
+def docker_build(dockerfile: str) -> dict[str, str]:
+    return {DOCKER_ACTION: "runs:\n  using: docker\n  image: Dockerfile\n",
+            ".github/actions/d/Dockerfile": dockerfile}
+
+
+BASE = f"FROM golang{PIN} AS build\nRUN true\nFROM debian{PIN}\n"
+for label, dockerfile, refusal in (
+    ("COPY --from an unpinned image", BASE + "COPY --from=alpine:3.20 /bin/sh /x\n", "must be pinned"),
+    ("COPY --from a name no earlier stage defines", BASE + "COPY --from=builder /x /x\n", "must be pinned"),
+    ("COPY --from on a continuation line", BASE + "COPY \\\n  --from=alpine /x /x\n", "must be pinned"),
+    ("a lowercase copy --from", BASE + "copy --from=alpine /x /x\n", "must be pinned"),
+    ("COPY --from an expression", BASE + "COPY --from=${IMAGE} /x /x\n", "must be pinned"),
+    ("COPY --from a stage index not yet defined", BASE + "COPY --from=2 /x /x\n", "must be pinned"),
+    ("RUN --mount from an unpinned image", BASE + "RUN --mount=type=bind,from=alpine:3.20,target=/m true\n",
+     "must be pinned"),
+    ("RUN --mount cache from an unpinned image", BASE + "RUN --mount=type=cache,target=/c,from=busybox true\n",
+     "must be pinned"),
+    ("an unpinned # syntax frontend", "# syntax=docker/dockerfile:1\n" + BASE, "must be pinned"),
+    ("a spaced # syntax frontend", "#   syntax = docker/dockerfile:1.7\n" + BASE, "must be pinned"),
+    ("an escape parser directive", "# escape=`\n" + BASE, "parser directive"),
+    ("COPY --from a stage defined later", f"FROM debian{PIN}\nCOPY --from=late /x /x\nFROM golang{PIN} AS late\n",
+     "must be pinned"),
+):
+    code, output = run_checker(shaped_job("- uses: ./.github/actions/d", docker_build(dockerfile)))
+    if code == 1 and "VIOLATION" in output and refusal in output and "no entry can accept it" in output:
+        ok(f"a local docker action with {label} is refused")
+    else:
+        fail(f"a local docker action with {label} should be refused (got {code}: {output.strip()[:400]})")
+for label, dockerfile in (
+    ("COPY --from an earlier stage", BASE + "COPY --from=build /x /x\n"),
+    ("COPY --from an earlier stage index", BASE + "COPY --from=0 /x /x\n"),
+    ("COPY --from a pinned image", BASE + f"COPY --from=alpine{PIN} /x /x\n"),
+    ("RUN --mount from an earlier stage", BASE + "RUN --mount=type=bind,from=build,target=/m true\n"),
+    ("RUN --mount with no from", BASE + "RUN --mount=type=secret,id=token true\n"),
+    ("a pinned # syntax frontend", f"# syntax=docker/dockerfile:1{PIN}\n" + BASE),
+    ("a comment that is not a directive", BASE + "# copy --from=alpine is documented here\n"),
+    ("a command argument that looks like a flag", BASE + "RUN tool --from=alpine --mount=from=busybox\n"),
+):
+    code, output = run_checker(shaped_job("- uses: ./.github/actions/d", docker_build(dockerfile)))
+    if code == 1 and REVIEW_REQUIRED in output and "must be pinned" not in output and "parser directive" not in output:
+        ok(f"a local docker action with {label} needs only a reviewed entry")
+    else:
+        fail(f"a local docker action with {label} should be reviewable (got {code}: {output.strip()[:400]})")
+
 # The frozen backlog as it stood at the round-4 review of #1827. The checker's
 # sets may only shrink against this snapshot: a key, or a refusal kind a key
 # tolerates, that is not here fails. Never add to this snapshot; when a job

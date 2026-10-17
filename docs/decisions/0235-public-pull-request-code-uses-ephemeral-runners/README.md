@@ -233,7 +233,7 @@ or a literal GitHub-hosted image.
 
    | Reason | What the checker matches |
    | --- | --- |
-   | `fetch` | A fetch named anywhere in a step (its `run` without full-line comments, `shell`, `with`, and `env`), in a local composite action's steps, or in any scanned-tree file the job puts on disk. The vocabulary covers `curl`, `wget`, `rsync`, `scp`; git `clone`, `fetch`, `pull`, `submodule`, `ls-remote` after any global options; `gh api`, `gh release download`, `gh run download`, `gh pr checkout`, `gh pr diff`, `gh repo clone`; `npx` and package-manager installs (npm, pnpm, yarn, pip, uv, go, cargo, gem, apt, brew); `docker`/`podman` `run`, `pull`, and `build`; PowerShell `iwr`/`irm`; Python `urllib`, `urlopen`, `requests`, `httpx`, `http.client`, and Node `fetch(`, the `http`/`https` modules, `https.get`, `axios`; and `["gh", "api"]`/`["git", "fetch"]`-style argv lists. It also covers the `actions/download-artifact`, `actions/cache`, and `actions/github-script` actions, `docker://` steps, local Docker actions, and a job's `container:` and `services:` images, in both the string and `image:` forms. Every one of those images must also be pinned by an `@sha256:` digest: a `docker://` step's image, a local Docker action's `docker://` image, every `FROM` in the Dockerfile a local Docker action builds (an earlier stage name or `scratch` excepted), and a job's `container:` and `services:` images. A tag, an expression, or a missing image or `FROM` is refused, and no entry can accept the job. The action-pin conformance test reads only action `uses:` pins, so this is the only rule that pins images. |
+   | `fetch` | A fetch named anywhere in a step (its `run` without full-line comments, `shell`, `with`, and `env`), in a local composite action's steps, or in any scanned-tree file the job puts on disk. The vocabulary covers `curl`, `wget`, `rsync`, `scp`; git `clone`, `fetch`, `pull`, `submodule`, `ls-remote` after any global options; `gh api`, `gh release download`, `gh run download`, `gh pr checkout`, `gh pr diff`, `gh repo clone`; `npx` and package-manager installs (npm, pnpm, yarn, pip, uv, go, cargo, gem, apt, brew); `docker`/`podman` `run`, `pull`, and `build`; PowerShell `iwr`/`irm`; Python `urllib`, `urlopen`, `requests`, `httpx`, `http.client`, and Node `fetch(`, the `http`/`https` modules, `https.get`, `axios`; and `["gh", "api"]`/`["git", "fetch"]`-style argv lists. It also covers the `actions/download-artifact`, `actions/cache`, and `actions/github-script` actions, `docker://` steps, local Docker actions, and a job's `container:` and `services:` images, in both the string and `image:` forms. Every one of those images must also be pinned by an `@sha256:` digest: a `docker://` step's image, a local Docker action's `docker://` image, every `FROM`, `COPY --from`, and `RUN --mount=…,from=` source and any `# syntax=` frontend in the Dockerfile a local Docker action builds (an earlier stage name or index, or `scratch`, excepted; a non-default `escape` directive is refused outright), and a job's `container:` and `services:` images. A tag, an expression, or a missing image or `FROM` is refused, and no entry can accept the job. The action-pin conformance test reads only action `uses:` pins, so this is the only rule that pins images. |
    | `head-materialization` | Head detection concludes that the job materializes the pull request head, or cannot decide. Only "no known head-materializing pattern" leaves this reason unset, and that result is not proof of safety. |
    | `tree-change` | A runtime command that changes the checked-out tree: git `sparse-checkout`, `checkout`, `switch`, `restore`, `reset`, `pull`, `merge`, `rebase`, `worktree`, `apply`, `am`, `cherry-pick`, `read-tree`, or `checkout-index` after any global options; any git command given `--git-dir` or `--work-tree`; `gh pr checkout`; or `patch`. |
    | `shell` | A `shell:` other than `bash` on any step, including a local composite action's step, or in a job or workflow `defaults.run`. |
@@ -607,3 +607,22 @@ leading `!` in a cone-mode entry (which git reads as a directory), and an
 empty or bare-root pattern. Literal paths and `*`/`?` wildcards remain
 available. Every live sparse list in this repository is a literal path, so no
 entry changed digest.
+
+### 5. A Dockerfile's other image sources and frontends are vetted
+
+**Finding.** Only `FROM` lines were checked. `COPY --from=<image>` and
+`RUN --mount=type=bind,from=<image>` pull an image when the name is not an
+earlier stage, and a `# syntax=` parser directive makes BuildKit pull and run
+a frontend image, so a reviewed local Docker action could pull mutable code
+that its review digest never bound.
+
+**Decision.** `COPY --from`, every `from=` in a `RUN --mount=`, and a
+`# syntax=` frontend must name an earlier stage (by name, or by an index lower
+than the number of stages so far) or be pinned by an `@sha256:` digest; an
+expression, a tag, a later stage, or an unknown name fails as an `image`
+refusal no entry can accept. Only leading `--flag=value` tokens are read, so a
+command argument that looks like a flag is not mistaken for one. A
+non-default `# escape=` directive changes line continuation, so the checker
+cannot parse the file and refuses it. Directives are matched on any line, not
+only the top: that over-approximates, and a false refusal is fixed by moving
+the comment. No Dockerfile in this repository is affected.

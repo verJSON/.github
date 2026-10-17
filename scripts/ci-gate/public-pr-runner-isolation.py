@@ -1375,28 +1375,67 @@ class Closure:
 
     def require_pinned_build(self, action_dir: str, dockerfile: str, uses: str) -> None:
         """A local Docker action built from a Dockerfile pulls every `FROM`
-        base image; each must be digest-pinned or name an earlier stage."""
+        base, every `COPY --from` and `RUN --mount=...,from=` source that is
+        not an earlier stage, and any `# syntax=` frontend; each must be
+        digest-pinned. An `escape` directive changes how the file parses, so
+        nothing here can vet it."""
         path = os.path.normpath(os.path.join(self.root, action_dir, dockerfile))
         try:
             with open(path, encoding="utf-8", errors="replace") as handle:
-                lines = handle.read().replace("\\\n", " ").splitlines()
+                text = handle.read()
         except OSError:
             self.flag("local-action", f"{uses} (Dockerfile {dockerfile} not in the scanned tree)")
             return
-        stages: set[str] = set()
+        where = f"local docker action {uses}"
+        # Directives are honored only at the top; matching them anywhere
+        # over-approximates.
+        for name, value in DOCKERFILE_DIRECTIVE.findall(text):
+            if name.lower() == "syntax":
+                self.require_pinned(f"{where} `# syntax` frontend", value.strip())
+            elif name.lower() == "escape" and value.strip() != "\\":
+                self.refusals.add((
+                    "image",
+                    f"{where} sets the parser directive escape={value.strip()}, so this checker cannot read "
+                    "which images it pulls and no entry can accept it",
+                ))
+        lines = [line for line in text.replace("\\\n", " ").splitlines() if not line.lstrip().startswith("#")]
+        stages: list[str] = []
         found = False
         for line in lines:
             match = DOCKERFILE_FROM.match(line)
-            if not match:
+            if match:
+                found = True
+                image, stage = match.group(1), match.group(2)
+                if image.lower() != "scratch" and image.lower() not in stages:
+                    self.require_pinned(f"{where} `FROM`", image)
+                stages.append(stage.lower() if stage else "")
                 continue
-            found = True
-            image, stage = match.group(1), match.group(2)
-            if image.lower() != "scratch" and image.lower() not in stages:
-                self.require_pinned(f"local docker action {uses} `FROM`", image)
-            if stage:
-                stages.add(stage.lower())
+            instruction = DOCKERFILE_INSTRUCTION.match(line)
+            if not instruction:
+                continue
+            flags = []
+            for token in instruction.group(2).split():
+                if not token.startswith("--"):
+                    break  # flags precede the arguments; later text is the command
+                flags.extend(DOCKERFILE_FLAG.findall(token))
+            for flag, value in flags:
+                if flag.lower() == "from":
+                    sources = [(f"`{instruction.group(1).upper()} --from`", value)]
+                elif flag.lower() == "mount":
+                    sources = [
+                        (f"`{instruction.group(1).upper()} --mount`", option.split("=", 1)[1])
+                        for option in value.split(",")
+                        if option.split("=", 1)[0].strip().lower() == "from" and "=" in option
+                    ]
+                else:
+                    continue
+                for label, source in sources:
+                    source = source.strip("\"'")
+                    earlier = source.lower() in stages or (source.isdigit() and int(source) < len(stages))
+                    if not earlier:
+                        self.require_pinned(f"{where} {label}", source)
         if not found:
-            self.require_pinned(f"local docker action {uses} `FROM`", None)
+            self.require_pinned(f"{where} `FROM`", None)
 
     def add_scanned_fetches(self) -> None:
         """A repository file the job puts on disk can fetch when it runs."""
@@ -1459,6 +1498,11 @@ CONE_UNPROVABLE = re.compile(r"[*?\[\]\\]|^!")
 PINNED_IMAGE = re.compile(r"[^\s@${}]+@sha256:[0-9a-f]{64}")
 # `FROM [--platform=…] <image> [AS <stage>]` in a Dockerfile.
 DOCKERFILE_FROM = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?\s*$", re.I)
+# Any other instruction and its flags, and the flags that name an image.
+DOCKERFILE_INSTRUCTION = re.compile(r"^\s*([A-Za-z]+)\s+(.*)$")
+DOCKERFILE_FLAG = re.compile(r"^--([A-Za-z-]+)=(\S+)$")
+# A `# name=value` parser directive (syntax, escape, check).
+DOCKERFILE_DIRECTIVE = re.compile(r"(?m)^[ \t]*#[ \t]*([A-Za-z]+)[ \t]*=[ \t]*(\S*)[ \t]*$")
 
 
 def tracked_files(root: str) -> list[tuple[str, str | None, str | None]]:
