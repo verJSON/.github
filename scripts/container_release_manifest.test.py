@@ -409,6 +409,25 @@ class ContainerReleaseManifestTests(unittest.TestCase):
 
         manifest_contract.validate_manifest(candidate, reviewed)
 
+    def test_rejects_same_repository_publisher_outside_the_exact_source_identity(self):
+        for publisher in (
+            "Verjson/verjson-github-runner-evil/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+            "Verjson/verjson-github-runne/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+            "verjson/verjson-github-runner/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+            "Verjson/verjson-github-runner/.github/workflows/container-candidate-publish.yml@refs/heads/feature",
+            "Verjson/verjson-github-runner/.github/workflows/container-candidate-publish.yml@refs/tags/v1",
+            "Verjson/verjson-github-runner/.github/workflows/evil.yml@refs/heads/main",
+            "Verjson/verjson-github-runner/.github/workflows/container-candidate-publish.yml@refs/heads/main@" + "b" * 40,
+            "Verjson/.github-evil/.github/workflows/container-candidate-publish.yml@" + "b" * 40,
+        ):
+            with self.subTest(publisher=publisher):
+                candidate, reviewed = same_repository_publication(publisher)
+                with self.assertRaisesRegex(
+                    manifest_contract.ManifestError,
+                    "candidate signer workflow differs from expected publisher",
+                ):
+                    manifest_contract.validate_manifest(candidate, reviewed)
+
     def test_rejects_candidate_contract_pin_different_from_reviewed_config(self):
         candidate = manifest()
         candidate["source"]["workflow"] = "Verjson/.github/.github/workflows/container-candidate-publish.yml@" + "c" * 40

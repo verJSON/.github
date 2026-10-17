@@ -63,6 +63,18 @@ class PromotionTest(unittest.TestCase):
         kwargs.setdefault("now", self.now)
         return promotion.release(*args, **kwargs)
 
+    def test_refuses_to_promote_a_same_repository_canary_publisher(self):
+        # Canary candidates validate as candidates but are never promoted (ADR 0216).
+        publisher = "Verjson/example/.github/workflows/container-candidate-publish.yml@refs/heads/main"
+        self.candidate["source"]["workflow"] = publisher
+        self.candidate["images"][0]["provenance"]["builderIdentity"] = publisher
+        self.config["images"][0]["provenance"]["builderIdentity"] = publisher
+
+        with self.assertRaisesRegex(
+            promotion.ManifestError, "candidate workflow is outside the contract repository"
+        ):
+            self.release(self.candidate, self.config, self.state, "1.2.3")
+
     def test_exact_digests_form_deterministic_release(self):
         result = self.release(self.candidate, self.config, self.state, "1.2.3")
         self.schema_validator.validate(result)
