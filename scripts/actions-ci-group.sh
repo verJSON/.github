@@ -294,6 +294,24 @@ replay_command_output() {
   return "$status"
 }
 
+declare -a json_control_chars=()
+for json_code in {1..31}; do
+  printf -v json_octal '%03o' "$json_code"
+  printf -v "json_control_chars[$json_code]" "\\$json_octal"
+done
+
+json_string() { # <value> -> a JSON string literal
+  local value="$1" code escaped
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  for code in "${!json_control_chars[@]}"; do
+    [[ "$value" == *"${json_control_chars[$code]}"* ]] || continue
+    printf -v escaped '\\u%04x' "$code"
+    value="${value//"${json_control_chars[$code]}"/$escaped}"
+  done
+  printf '"%s"' "$value"
+}
+
 utc_now() {
   date -u +%Y-%m-%dT%H:%M:%SZ
 }
@@ -311,12 +329,14 @@ write_runtime_records() {
   } >"$staged" && mv -f -- "$staged" "$records_file"
 }
 
+# The four result arguments are JSON literals; a row without a usable worker
+# result records its row-line status as a string and null for the rest.
 record_runtime() { # <index> <status> <elapsed> <timed_out> <left_background>
   local index="$1" status="$2" elapsed="$3" timed_out="$4" left_background="$5"
   local budget="${command_budgets[$index]}"
   runtime_record_by_index["$index"]="$(printf \
-    '{"schema_version":1,"group":"%s","command":"%s","status":%s,"elapsed_seconds":%s,"budget_seconds":%s,"started_at":"%s","ended_at":"%s","timed_out":%s,"left_background":%s,"runner_name":"%s","runner_environment":"%s"}' \
-    "$group" "${commands[$index]}" "$status" "$elapsed" "${budget:-null}" \
+    '{"schema_version":1,"group":"%s","command":%s,"status":%s,"elapsed_seconds":%s,"budget_seconds":%s,"started_at":"%s","ended_at":"%s","timed_out":%s,"left_background":%s,"runner_name":"%s","runner_environment":"%s"}' \
+    "$group" "$(json_string "${commands[$index]}")" "$status" "$elapsed" "${budget:-null}" \
     "${command_started_at[$index]}" "$(utc_now)" "$timed_out" "$left_background" "$runner_name" "$runner_environment")"
   write_runtime_records
 }
@@ -469,6 +489,7 @@ report_worker_result() {
     printf 'actions-ci command group=%s status=missing elapsed=unknown command=%q\n' \
       "$group" "${commands[$index]}"
     printf '::endgroup::\n'
+    record_runtime "$index" '"missing"' null null null
     worker_reported_by_index["$index"]=1
     failures=$((failures + 1))
     return
@@ -486,6 +507,7 @@ report_worker_result() {
     printf 'actions-ci command group=%s status=invalid elapsed=unknown command=%q\n' \
       "$group" "${commands[$index]}"
     printf '::endgroup::\n'
+    record_runtime "$index" '"invalid"' null null null
     worker_reported_by_index["$index"]=1
     failures=$((failures + 1))
     return

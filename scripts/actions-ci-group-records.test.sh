@@ -178,6 +178,39 @@ else
   fail "a row that left a background process was not recorded as such"
 fi
 
+status="$(run_recorded failure 60 'platform	exit 3')"
+actual="$(record_fields failure status timed_out left_background budget_seconds 2>&1)"
+if [ "$status" -eq 1 ] && [ "$actual" = '3 false false 60' ]; then
+  pass "a failing row records its exit status"
+else
+  printf 'actual: %s\n' "$actual" >&2
+  fail "a failing row's record did not carry its exit status"
+fi
+
+# Push runs set no group budget, so no row has one.
+status="$(run_recorded unbudgeted '' 'platform	@budget=30 true')"
+actual="$(record_fields unbudgeted status budget_seconds timed_out 2>&1)"
+if [ "$status" -eq 0 ] && [ "$actual" = '0 null false' ] \
+  && grep -Eqx 'actions-ci command group=platform status=0 elapsed=[0-9]+s command=true' \
+    "$tmp/unbudgeted.out"; then
+  pass "a row without a budget records budget_seconds as null"
+else
+  printf 'actual: %s\n' "$actual" >&2
+  fail "a row without a budget recorded a budget"
+fi
+
+# A row whose worker died has no result; its record says so instead of
+# disappearing, mirroring the row line's status=missing.
+status="$(run_recorded worker-killed 60 'platform	kill -KILL "$ACTIONS_CI_WORKER_PID"')"
+actual="$(record_fields worker-killed status elapsed_seconds timed_out left_background budget_seconds 2>&1)"
+if [ "$status" -eq 1 ] && [ "$actual" = '"missing" null null null 60' ] \
+  && grep -q 'actions-ci command group=platform status=missing' "$tmp/worker-killed.out"; then
+  pass "a row whose worker left no result still leaves a record"
+else
+  printf 'actual: %s\n' "$actual" >&2
+  fail "a row without a worker result left no record"
+fi
+
 if [ "$fails" -ne 0 ]; then
   printf '%d test(s) failed\n' "$fails"
   exit 1
