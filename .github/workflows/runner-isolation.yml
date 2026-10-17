@@ -1,0 +1,58 @@
+name: runner-isolation
+
+# ADR 0235's runner-isolation contract on every pull request and every push to
+# main. The checker's review digests bind repository bytes outside actions-ci's
+# path filter (config/, bin/, contracts/, package*.json, profile/, index.html,
+# .gitignore, and every other tracked file a full checkout puts on disk), and a
+# documentation-only diff skips actions-ci's heavy groups. actions-ci stays
+# path-filtered on purpose (#233, #234); this one short job is the always-run
+# part. It executes repository code, so it takes the ephemeral untrusted lane.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  runner-isolation:
+    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          path: .runner-isolation-source-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Provision actions CI Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.14'
+      - name: Install actions CI Python dependencies
+        working-directory: .runner-isolation-source-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python3 -I -m pip install \
+            --disable-pip-version-check \
+            --no-input \
+            --quiet \
+            --no-deps \
+            --only-binary=:all: \
+            --require-hashes \
+            --requirement scripts/actions-ci-python.requirements.txt
+      - name: Check public pull-request runner isolation
+        working-directory: .runner-isolation-source-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python3 -I scripts/ci-gate/public-pr-runner-isolation.py \
+            --pending scripts/ci-gate/public-pr-runner-isolation.pending.tsv \
+            --reviewed scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv \
+            .github/workflows
+      - name: Remove the isolated checkout
+        if: ${{ always() }}
+        run: rm -rf ".runner-isolation-source-${{ github.run_id }}-${{ github.run_attempt }}"

@@ -13,8 +13,9 @@ contract tests. These jobs run while a pull request is a draft.
 | --- | --- |
 | `actionlint` and `actionlint reusable-call contract` | Workflow lint and reusable-call checks |
 | `Authn required type surface` | Required type-surface build and compatibility check |
-| `actions-ci` | `change-scope`, `docs-contracts`, and `adr-number-collision` |
+| `actions-ci` | `change-scope`, `docs-contracts`, `adr-number-collision`, and `runner-isolation` |
 | `CLI projects required package surface` | `admission` validates the exact consumer pull-request identity |
+| `runner-isolation` | ADR 0235's runner-isolation contract, on every pull request with no path filter |
 
 ## Tier 2: heavy checks
 
@@ -51,3 +52,29 @@ and
 Keep workflow classifications and their draft/ready conformance assertions in
 `scripts/ci-gate/pr-ci-tiers.test.py`, registered in
 `scripts/actions-ci-groups.tsv`.
+
+## Runner placement for pull-request code
+
+Tiers decide *when* a pull-request job runs; placement decides *where*. This
+repository is public, so every job either tier starts runs code a pull request
+controls and must land on an ephemeral runner: the untrusted lane
+`fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')` or a literal
+GitHub-hosted image, never a selector that can fall through to the persistent
+self-hosted pool ([ADR 0235](decisions/0235-public-pull-request-code-uses-ephemeral-runners/README.md)).
+`scripts/ci-gate/public-pr-runner-isolation.py` enforces that for every job a
+`pull_request` event can reach, including jobs in local reusable workflows,
+by enumerating each organization variable as unset and set.
+Under `pull_request_target`, `workflow_run`, `issue_comment`, `fork`,
+`issues`, and `discussion*`, and under the relays `workflow_dispatch`,
+`workflow_call`, and `repository_dispatch`, every job that can reach a
+persistent runner must instead be listed, by a digest of its reviewed content,
+in `scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv`. A relayed job
+that materializes, or may materialize, a pull request head cannot be listed at
+all. `scripts/ci-gate/public-pr-runner-isolation.pending.tsv` holds the exact,
+digest-ratcheted relay backlog, frozen in the checker, of relayed jobs still
+pending that change; no pull_request job may be listed ([#1831](https://github.com/verJSON/.github/issues/1831)).
+`actions-ci`'s `runner-isolation` job runs the check inside the required
+`shell-tests` aggregate, which fails unless that job succeeded. The standalone
+`runner-isolation` workflow also runs it on every pull request and every push
+to `main`, because its digests bind tracked files outside `actions-ci`'s path
+filter.

@@ -20,10 +20,12 @@ jobs:
       run:
         working-directory: .renovate-compatibility-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: .renovate-compatibility-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
-          persist-credentials: false
+      # The observer reads no repository file: it only needs an isolated
+      # working directory, so it creates one instead of checking out the
+      # tree, which ADR 0235's backlog digest could not bind.
+      - name: Create the isolated observer directory
+        working-directory: ${{ github.workspace }}
+        run: mkdir -- ".renovate-compatibility-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}"
       - name: Require the compatibility App client ID
         env:
           RENOVATE_COMPATIBILITY_CLIENT_ID: ${{ vars.RENOVATE_COMPATIBILITY_CLIENT_ID }}

@@ -3,6 +3,7 @@ platform	@budget=120 python3 scripts/ci-gate/app-key-environment.test.py
 platform	python3 scripts/ci-gate/pr-ci-tiers.test.py
 platform	bash scripts/actionlint-trigger.test.sh
 platform	bash scripts/actionlint-install.test.sh
+platform	bash scripts/actionlint-shellcheck-pin.test.sh
 platform	bash scripts/shellcheck-tracked.test.sh
 platform	@budget=210 bash scripts/shellcheck-tracked.sh
 platform	bash scripts/actionlint-reusable.test.sh
@@ -57,6 +58,11 @@ platform	bash scripts/ci-gate/pulumi-comment-pipefail.test.sh
 platform	bash scripts/ci-gate/generated-artifacts.test.sh
 platform	bash scripts/ci-gate/runner-routing-policy.test.sh
 platform	bash scripts/ci-gate/runner-routing-policy-cwd.test.sh
+platform	@budget=120 python3 scripts/ci-gate/public-pr-runner-isolation.test.py
+platform	python3 scripts/ci-gate/runner-isolation-required.test.py
+platform	python3 scripts/ci-gate/backlog-sparse-closure.test.py
+platform	python3 scripts/public-review-caller-rollout.test.py
+platform	python3 scripts/ci-gate/public-pr-runner-isolation.py --pending scripts/ci-gate/public-pr-runner-isolation.pending.tsv --reviewed scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv .github/workflows
 platform	@budget=90 python3 scripts/ci-gate/hosted-selector-policy.test.py
 platform	python3 scripts/ci-gate/generated-changelog-selector-policy.test.py
 platform	bash scripts/ci-gate/actionlint-hosted-selector-policy.test.sh

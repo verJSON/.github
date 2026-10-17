@@ -303,15 +303,24 @@ grep -qF "github.repository_owner != 'Verjson'" "$workflows/actionlint.yml" \
   && pass "actionlint preserves its bounded external hosted compatibility path" \
   || fail "actionlint runner contract drifted"
 
-# ADR 0047 moves this suite off the shared pool. The contract is that it routes
-# through a VARIABLE with a fallback chain, never a hardcoded label: the lane has
-# to be repointable at a self-hosted pool from org settings alone, and an unset
-# variable must degrade to the ADR 0034 general pool rather than to nothing.
-grep -qF 'vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED' "$workflows/actions-ci.yml" \
-  && grep -qF 'vars.CI_LANE_FALLBACK' "$workflows/actions-ci.yml" \
-  && ! grep -qF 'runs-on: [self-hosted, general]' "$workflows/actions-ci.yml" \
-  && pass "repository shell validation routes through the fast-lane variable with a general fallback" \
-  || fail "actions-ci fast-lane routing drifted (ADR 0047)"
+# ADR 0047 moved this suite off the shared pool through the fast-lane variable;
+# ADR 0235 narrows it further. Every actions-ci job runs code a pull request
+# controls in a public repository, so each one selects the ephemeral untrusted
+# lane with the hosted tail and NO persistent fallback: an unset untrusted lane
+# must degrade to hosted, never to CI_LANE_FALLBACK. Pinned per job, inverted, so
+# an appended job on any other selector fails here as well as in
+# public-pr-runner-isolation.test.py. The compatibility job's literal hosted
+# image is bound by the exact inventory at the top of this file.
+off_untrusted="$(
+  grep -E '^    runs-on:' "$workflows/actions-ci.yml" \
+    | grep -vxF "    runs-on: \${{ fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}" \
+    | grep -vxF '    runs-on: ubuntu-24.04' \
+    || true
+)"
+untrusted_jobs="$(grep -cxF "    runs-on: \${{ fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}" "$workflows/actions-ci.yml")"
+[ -z "$off_untrusted" ] && [ "$untrusted_jobs" -ge 5 ] \
+  && pass "repository shell validation routes every job through the untrusted lane with a hosted tail (ADR 0235)" \
+  || fail "actions-ci untrusted-lane routing drifted (ADR 0235): ${off_untrusted:-only $untrusted_jobs routed jobs}"
 
 # These used to be pinned to the literal `[self-hosted, general]`. A literal label
 # is a rename away from an unplaceable job, and GitHub does not fail an
@@ -421,6 +430,9 @@ const body = raw.trim().replace(/^\$\{\{/, '').replace(/\}\}$/, '')
 const github = {
   repository,
   repository_owner: repository.split('/')[0],
+  // EVENT_NAME selects ADR 0235's pull_request branches; every other case
+  // models a push, which is what an unset event_name evaluated as before.
+  event_name: process.env.EVENT_NAME ?? 'push',
   event: {
     repository: {
       private: priv === '' ? 0 : priv === 'true',
@@ -457,7 +469,8 @@ const inputs = {
 // on that rather than on `github.event.repository`, because on the dispatch path
 // the event repository is the dispatcher, not the target.
   const needs = {
-    preflight: { outputs: { target_private: priv } },
+    // TARGET_PRIVATE separates preflight's API lookup from the event payload.
+    preflight: { outputs: { target_private: process.env.TARGET_PRIVATE ?? priv } },
     resolve_privileged_route: { outputs: { selector: '' } },
   };
 // An unset Actions variable is the empty string, not undefined.
@@ -850,79 +863,113 @@ dispatch_workflow="$workflows/ai-review-merge.yml"
 grep -qF 'CI_LANE_PRIVILEGED || vars.CI_LANE_FALLBACK' "$dispatch_workflow" \
   && pass "dispatch-merge prefers the privileged lane, then the fallback" \
   || fail "dispatch-merge lost its privileged/fallback preference"
-# ADR 0048's complete visibility matrix. These assertions evaluate each exact
-# job expression independently; a repository-wide substring check could stay
-# green when one job inverted its polarity and another retained the right text.
+# ADR 0235's complete visibility matrix for the relay jobs gate-rearm.yml
+# dispatches. These assertions evaluate each exact job expression
+# independently; a repository-wide substring check could stay green when one
+# job inverted its polarity and another retained the right text. A public or
+# payload-less target always takes the ephemeral untrusted lane; only a
+# private event repository reaches a persistent lane. The overflow fixture is
+# set where it is the only thing that separates the two (preflight's private
+# chain also contains CI_LANE_UNTRUSTED).
 assert_route "$dispatch_workflow" preflight Verjson/.github '' false \
-  '["trusted-canary"]' '["untrusted-canary"]' '["fastlane-canary"]' \
-  "preflight — public Verjson event takes the fast lane" '["fastlane-canary"]'
-assert_route "$dispatch_workflow" preflight Verjson/.github '' true \
   '["trusted-canary"]' '["untrusted-canary"]' '["untrusted-canary"]' \
-  "preflight — private Verjson event stays on the untrusted lane" '["fastlane-canary"]'
-# preflight has not resolved TARGET_REPO yet. This empty event-field case pins
-# Actions' loose boolean coercion exactly; gate and dispatch-merge below carry
-# the fail-closed target-visibility contract.
+  "preflight — public Verjson event takes the untrusted lane, never the overflow pool" \
+  '["fastlane-canary"]' '' '["overflow-canary"]'
+assert_route "$dispatch_workflow" preflight Verjson/verjson-authn '' true \
+  '["trusted-canary"]' '["untrusted-canary"]' '["overflow-canary"]' \
+  "preflight — private Verjson event keeps its overflow-first chain" \
+  '["fastlane-canary"]' '' '["overflow-canary"]'
+# preflight has not resolved TARGET_REPO yet. Actions coerces a missing
+# `private` to 0, and `0 == true` is false, so an event without visibility
+# takes the ephemeral lane.
 assert_route "$dispatch_workflow" preflight Verjson/.github '' '' \
-  '["trusted-canary"]' '["untrusted-canary"]' '["fastlane-canary"]' \
-  "preflight — unresolved event visibility follows Actions boolean coercion" '["fastlane-canary"]'
+  '["trusted-canary"]' '["untrusted-canary"]' '["untrusted-canary"]' \
+  "preflight — unresolved event visibility takes the untrusted lane" \
+  '["fastlane-canary"]' '' '["overflow-canary"]'
 assert_route "$dispatch_workflow" preflight Acme/widgets '' true '' '' \
   'ubuntu-24.04' "preflight — external callers retain hosted portability"
 
 assert_route "$dispatch_workflow" gate Verjson/.github '' false \
-  '["trusted-canary"]' '["untrusted-canary"]' '["fastlane-canary"]' \
-  "gate — public target takes the fast lane" '["fastlane-canary"]'
-assert_route "$dispatch_workflow" gate Verjson/.github '' true \
+  '["trusted-canary"]' '["untrusted-canary"]' '["untrusted-canary"]' \
+  "gate — public target takes the untrusted lane" '["fastlane-canary"]'
+assert_route "$dispatch_workflow" gate Verjson/verjson-authn '' true \
   '["trusted-canary"]' '["untrusted-canary"]' '["trusted-canary"]' \
   "gate — private target stays on the trusted lane" '["fastlane-canary"]'
 assert_route "$dispatch_workflow" gate Verjson/.github '' '' \
+  '["trusted-canary"]' '["untrusted-canary"]' '["untrusted-canary"]' \
+  "gate — a payload without visibility takes the untrusted lane" '["fastlane-canary"]'
+TARGET_PRIVATE='' assert_route "$dispatch_workflow" gate Verjson/verjson-authn '' true \
   '["trusted-canary"]' '["untrusted-canary"]' '["trusted-canary"]' \
-  "gate — unresolved target visibility fails closed" '["fastlane-canary"]'
+  "gate — a private payload with an unreadable lookup stays on the trusted lane" '["fastlane-canary"]'
+TARGET_PRIVATE=false assert_route "$dispatch_workflow" gate Verjson/verjson-authn '' true \
+  '["trusted-canary"]' '["untrusted-canary"]' '["untrusted-canary"]' \
+  "gate — a lookup that says public overrides a private payload" '["fastlane-canary"]'
 assert_route "$dispatch_workflow" gate Acme/widgets '' true '' '' \
   'ubuntu-24.04' "gate — external callers retain hosted portability"
 
 assert_route "$dispatch_workflow" dispatch-merge Verjson/.github '' false \
-  '["privileged-canary"]' '["untrusted-canary"]' '["fastlane-canary"]' \
-  "dispatch-merge — public target takes the fast lane" '["fastlane-canary"]'
-assert_route "$dispatch_workflow" dispatch-merge Verjson/.github '' true \
+  '["privileged-canary"]' '["untrusted-canary"]' '["untrusted-canary"]' \
+  "dispatch-merge — public target takes the untrusted lane" '["fastlane-canary"]'
+assert_route "$dispatch_workflow" dispatch-merge Verjson/verjson-authn '' true \
   '["privileged-canary"]' '["untrusted-canary"]' '["privileged-canary"]' \
   "dispatch-merge — private target stays on the privileged lane" '["fastlane-canary"]'
 assert_route "$dispatch_workflow" dispatch-merge Verjson/.github '' '' \
+  '["privileged-canary"]' '["untrusted-canary"]' '["untrusted-canary"]' \
+  "dispatch-merge — a payload without visibility takes the untrusted lane" '["fastlane-canary"]'
+TARGET_PRIVATE='' assert_route "$dispatch_workflow" dispatch-merge Verjson/verjson-authn '' true \
   '["privileged-canary"]' '["untrusted-canary"]' '["privileged-canary"]' \
-  "dispatch-merge — unresolved target visibility fails closed" '["fastlane-canary"]'
+  "dispatch-merge — a private payload with an unreadable lookup stays privileged" '["fastlane-canary"]'
 assert_route "$dispatch_workflow" dispatch-merge Acme/widgets '' true '' '' \
   'ubuntu-24.04' "dispatch-merge — external callers retain hosted portability"
 
-# #411. A supplied runner_labels value is explicit consumer fleet authority and
-# must beat every inferred route on dispatch-merge just as it does on preflight
-# and gate. Four visibility/owner polarities keep a future rewrite from applying
-# the input only to the originally reported off-Verjson case.
+assert_route "$dispatch_workflow" complete-authorization Verjson/.github '' false \
+  '["trusted-canary"]' '["untrusted-canary"]' '["untrusted-canary"]' \
+  "complete-authorization — public target takes the untrusted lane" '["fastlane-canary"]'
+assert_route "$dispatch_workflow" complete-authorization Verjson/verjson-authn '' true \
+  '["trusted-canary"]' '["untrusted-canary"]' '["fastlane-canary"]' \
+  "complete-authorization — private target keeps the fast lane" '["fastlane-canary"]'
+assert_route "$workflows/app-key-environment.yml" validate-ai-review-key Verjson/.github '' false \
+  '["trusted-canary"]' '["untrusted-canary"]' '["untrusted-canary"]' \
+  "validate-ai-review-key — public caller takes the untrusted lane"
+assert_route "$workflows/app-key-environment.yml" validate-ai-review-key Verjson/verjson-authn '' true \
+  '["trusted-canary"]' '["untrusted-canary"]' '["trusted-canary"]' \
+  "validate-ai-review-key — private caller keeps the trusted lane"
+
+# #411 and ADR 0235. A supplied runner_labels value is explicit fleet
+# authority off Verjson and for a private Verjson repository, and must beat
+# every inferred route there. A public or payload-less Verjson target ignores
+# it: a pull request that edits the caller could otherwise name the pool.
 for dispatch_override_case in \
-  'Verjson/.github|false|public Verjson target' \
-  'Verjson/verjson-authn|true|private Verjson target' \
-  'Verjson/.github||unresolved Verjson target' \
-  'Acme/widgets|true|external target'; do
-  IFS='|' read -r override_repo override_private override_label <<<"$dispatch_override_case"
-  assert_route "$dispatch_workflow" dispatch-merge "$override_repo" '' "$override_private" \
-    '["privileged-canary"]' '["untrusted-canary"]' '["consumer-fleet"]' \
-    "dispatch-merge — runner_labels overrides the $override_label" \
-    '["fastlane-canary"]' '["consumer-fleet"]' '["overflow-canary"]'
+  'Verjson/.github|false|["untrusted-canary"]|is ignored for a public Verjson target' \
+  'Verjson/verjson-authn|true|["consumer-fleet"]|overrides a private Verjson target' \
+  'Verjson/.github||["untrusted-canary"]|is ignored for an unresolved Verjson target' \
+  'Acme/widgets|true|["consumer-fleet"]|overrides an external target' \
+  'Acme/widgets|false|["consumer-fleet"]|overrides a public external target'; do
+  IFS='|' read -r override_repo override_private override_expected override_label <<<"$dispatch_override_case"
+  for override_job in preflight gate dispatch-merge; do
+    assert_route "$dispatch_workflow" "$override_job" "$override_repo" '' "$override_private" \
+      '["privileged-canary"]' '["untrusted-canary"]' "$override_expected" \
+      "$override_job — runner_labels $override_label" \
+      '["fastlane-canary"]' '["consumer-fleet"]' '["overflow-canary"]'
+  done
 done
 
 # Mutation fixtures prove that every matrix row is bound to its own job. The
-# inverted public predicate must send a public target to that job's non-fast
-# lane; if a mutation is not applied or the evaluator reads a different job,
-# these assertions fail.
+# inverted private predicate must send a public target to that job's
+# persistent lane; if a mutation is not applied or the evaluator reads a
+# different job, these assertions fail.
 for mutation in \
-  'preflight|github.event.repository.private == false|github.event.repository.private == true|["untrusted-canary"]' \
-  "gate|needs.preflight.outputs.target_private == 'false'|needs.preflight.outputs.target_private == 'true'|[\"trusted-canary\"]" \
-  "dispatch-merge|needs.preflight.outputs.target_private == 'false'|needs.preflight.outputs.target_private == 'true'|[\"privileged-canary\"]"; do
+  'preflight|github.event.repository.private == true \&\& fromJSON|github.event.repository.private == false \&\& fromJSON|["overflow-canary"]' \
+  "gate|github.event.repository.private == true \&\& needs.preflight.outputs.target_private != 'false'|github.event.repository.private == false|[\"overflow-canary\"]" \
+  "dispatch-merge|github.event.repository.private == true \&\& needs.preflight.outputs.target_private != 'false'|github.event.repository.private == false|[\"privileged-canary\"]" \
+  'complete-authorization|github.event.repository.private == true|github.event.repository.private == false|["fastlane-canary"]'; do
   IFS='|' read -r mutation_job old_predicate new_predicate mutation_expected <<<"$mutation"
   mutate_job_expression "$dispatch_workflow" "$mutation_job" \
-    "$old_predicate" "$new_predicate" "$mutated_workflow"
+    "${old_predicate//\\/}" "${new_predicate//\\/}" "$mutated_workflow"
   assert_route "$mutated_workflow" "$mutation_job" Verjson/.github '' false \
-    "$mutation_expected" '["untrusted-canary"]' "$mutation_expected" \
+    '["privileged-canary"]' '["untrusted-canary"]' "$mutation_expected" \
     "$mutation_job — inverted-polarity mutation changes its own semantic route" \
-    '["fastlane-canary"]'
+    '["fastlane-canary"]' '' '["overflow-canary"]'
 done
 
 # The same two #405 polarities for the gate job, the one a cross-org consumer
@@ -990,6 +1037,19 @@ assert_route "$workflows/actionlint.yml" actionlint Verjson/.github '' false \
   '["self-hosted","d"]' '["self-hosted","u"]' '["self-hosted","u"]' \
   "actionlint — an unset fast lane degrades to CI_RUNNER_UNTRUSTED" ''
 
+# ADR 0235 decision 4: a public pull request takes the ephemeral untrusted
+# lane with a hosted tail, ahead of the fast lane; a private one keeps its lane.
+EVENT_NAME=pull_request assert_route "$workflows/actionlint.yml" actionlint Verjson/.github '' false \
+  '["self-hosted","d"]' '' '["ubuntu-24.04"]' \
+  "actionlint — a public pull request takes the untrusted lane's hosted tail, not the fast lane" \
+  '["self-hosted","fast"]'
+EVENT_NAME=pull_request assert_route "$workflows/actionlint.yml" actionlint Verjson/.github '' false \
+  '["self-hosted","d"]' '["untrusted-canary"]' '["untrusted-canary"]' \
+  "actionlint — a public pull request takes a configured untrusted lane" '["self-hosted","fast"]'
+EVENT_NAME=pull_request assert_route "$workflows/actionlint.yml" actionlint Verjson/verjson-authn '' true \
+  '["self-hosted","d"]' '' '["self-hosted","d"]' \
+  "actionlint — a private pull request keeps the trusted lane" '["self-hosted","fast"]'
+
 # Mutation check. The obvious way to write the public branch —
 # `private == false` — is FAIL-OPEN: Actions coerces a missing `private` to 0,
 # and 0 == false, so an unreadable repository would reach the fast lane. That
@@ -1054,6 +1114,17 @@ while read -r wf_name job; do
   assert_route "$wf" "$job" Acme/widgets '' true '["self-hosted","do"]' '["self-hosted","do-isolated"]' \
     'ubuntu-24.04' "$name — configured pools do not leak to callers outside Verjson"
 done < <(policy_jobs)
+
+# ADR 0235 decision 4: container-candidate's pull_request build never falls
+# through to CI_LANE_FALLBACK, so an unset untrusted lane lands on hosted.
+for candidate_job in prepare pull-request-build skip-private-node-build; do
+  EVENT_NAME=pull_request assert_route "$workflows/container-candidate.yml" "$candidate_job" Verjson/.github '' false \
+    '["self-hosted","private-canary"]' '' '["ubuntu-24.04"]' \
+    "container-candidate $candidate_job — a public pull request with no untrusted lane lands on hosted"
+  EVENT_NAME=pull_request assert_route "$workflows/container-candidate.yml" "$candidate_job" Verjson/verjson-authn '' true \
+    '["self-hosted","private-canary"]' '' '["self-hosted","private-canary"]' \
+    "container-candidate $candidate_job — a private pull request keeps the trusted lane"
+done
 
 # The `runner` input is the per-caller override, but only on the jobs that
 # expose it. pulumi-ci's `validate` and `preview-admission` deliberately do not:

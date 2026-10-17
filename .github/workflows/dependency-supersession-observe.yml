@@ -15,10 +15,21 @@ jobs:
   observe:
     runs-on: ${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: .dependency-supersession-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          path: .dependency-supersession-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
           persist-credentials: false
+          # An exact non-cone list of the files this job reads: ADR 0235's
+          # backlog digest binds every byte a checkout puts on disk, and a
+          # full checkout would put the whole tree there. Keep it in step
+          # with backlog-sparse-closure.test.py, which derives the programs
+          # and their imports and requires each one listed here.
+          sparse-checkout: scripts/dependency-supersession.py
+          sparse-checkout-cone-mode: false
       - name: Validate exact target repository
         id: target
         env:
@@ -64,7 +75,10 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dependency-supersession-proposal-${{ github.run_id }}-${{ github.run_attempt }}
-          path: dependency-supersession-proposal.json
+          path: .dependency-supersession-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}/dependency-supersession-proposal.json
           if-no-files-found: error
           retention-days: 30
-
+      - name: Remove the isolated checkout
+        if: ${{ always() }}
+        working-directory: ${{ github.workspace }}
+        run: rm -rf ".dependency-supersession-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}"

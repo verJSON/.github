@@ -85,3 +85,13 @@ Hosted capacity makes that stop hurting other jobs; it does not make it
 efficient, and for private targets it does not help at all. The real fix is to
 stop waiting on a runner — re-enter on `workflow_run: completed` instead of a
 30-second poll — which is a larger change tracked separately.
+
+## 2026-10-16 amendment — a public target leaves the fast lane
+
+[ADR 0235](../0235-public-pull-request-code-uses-ephemeral-runners/README.md)
+decision 7 sends every `ai-review-merge.yml` job of a public target to
+`CI_LANE_UNTRUSTED` with a hosted tail instead of `CI_RUNNER_FASTLANE`. The
+`gate` job checks out and reviews the pull request head, and the fast lane is the
+persistent general pool today. A private target keeps the lanes this record and
+its successors chose; only a payload that says private, with a lookup that does
+not say public, reaches them.

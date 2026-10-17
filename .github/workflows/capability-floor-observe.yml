@@ -25,6 +25,23 @@ jobs:
           path: .capability-floor-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
           fetch-depth: 0
           persist-credentials: false
+          # An exact non-cone list of the files this job reads: ADR 0235's
+          # backlog digest binds every byte a checkout puts on disk, and a
+          # full checkout would put the whole tree there. Keep it in step
+          # with backlog-sparse-closure.test.py, which derives the programs
+          # and their imports and requires each one listed here.
+          sparse-checkout: |
+            scripts/capability-floor-discovery.py
+            scripts/capability-floor-audit.py
+            scripts/github_identity.py
+            config/capability-floor-consumers.json
+            config/capability-floors.json
+            scripts/gen-ai-review-caller.sh
+            scripts/gen-ai-review-label-rearm-caller.sh
+            scripts/gen-changelog-caller.sh
+            scripts/gen-gate-rearm-caller.sh
+            scripts/gen-privileged-merge-caller.sh
+          sparse-checkout-cone-mode: false
       - name: Validate the observer App client ID
         env:
           RENOVATE_COMPATIBILITY_CLIENT_ID: ${{ vars.RENOVATE_COMPATIBILITY_CLIENT_ID }}

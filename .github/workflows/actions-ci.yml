@@ -4,6 +4,12 @@ name: actions-ci
 # persistent-runner credential logic (verjson-cli-cloud#59) regression-covered
 # and makes the "Evidence" for those actions reproducible in CI rather than
 # narrated.
+#
+# Every job here executes repository-controlled code, and this repository is
+# public, so every job selects the ephemeral untrusted lane with a hosted tail
+# and no persistent fallback (ADR 0235). Push validation shares the lane so
+# main is validated on the same image its pull requests were; public
+# repositories pay nothing for standard GitHub-hosted runners.
 
 on:
   pull_request:
@@ -54,7 +60,7 @@ concurrency:
 
 jobs:
   change-scope:
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     timeout-minutes: 5
     outputs:
       heavy: ${{ steps.scope.outputs.heavy }}
@@ -95,7 +101,7 @@ jobs:
     # Thirty minutes still bounds one cell, including runner variance and cleanup.
     # Caller-contract shards run within the four matrix cells so they use
     # command-level parallelism without multiplying runner setup.
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -168,7 +174,7 @@ jobs:
           if-no-files-found: warn
 
   docs-contracts:
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -1882,7 +1888,7 @@ jobs:
   # pull request.
   adr-number-collision:
     if: github.event_name == 'pull_request'
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -1902,13 +1908,55 @@ jobs:
             --repo "${{ github.repository }}" \
             --pr-number "${{ github.event.pull_request.number }}"
 
+  # ADR 0235's runner-isolation contract, inside the required aggregate. The
+  # standalone runner-isolation workflow still runs on every pull request and
+  # push with no path filter, for diffs this workflow's path filter skips;
+  # this copy is what makes a red result block a merge. No draft guard: the
+  # check is one short job, like docs-contracts.
+  runner-isolation:
+    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          path: .runner-isolation-source-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Provision actions CI Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.14'
+      - name: Install actions CI Python dependencies
+        working-directory: .runner-isolation-source-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python3 -I -m pip install \
+            --disable-pip-version-check \
+            --no-input \
+            --quiet \
+            --no-deps \
+            --only-binary=:all: \
+            --require-hashes \
+            --requirement scripts/actions-ci-python.requirements.txt
+      - name: Check public pull-request runner isolation
+        working-directory: .runner-isolation-source-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python3 -I scripts/ci-gate/public-pr-runner-isolation.py \
+            --pending scripts/ci-gate/public-pr-runner-isolation.pending.tsv \
+            --reviewed scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv \
+            .github/workflows
+      - name: Remove the isolated checkout
+        if: ${{ always() }}
+        run: rm -rf ".runner-isolation-source-${{ github.run_id }}-${{ github.run_attempt }}"
+
   # Required-check compatibility boundary. `shell-tests` is the context named
   # by the repository ruleset (ADR 0058), so it remains unmatrixed and reports
   # the aggregate result after every group reaches a terminal state.
   shell-tests:
-    needs: [change-scope, shell-test-groups, docs-contracts, hosted-compatibility-tests, adr-number-collision]
+    needs: [change-scope, shell-test-groups, docs-contracts, hosted-compatibility-tests, adr-number-collision, runner-isolation]
     if: ${{ always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     timeout-minutes: 2
     steps:
       - name: Preserve the required shell-tests context
@@ -1919,9 +1967,16 @@ jobs:
           DOCS_RESULT: ${{ needs.docs-contracts.result }}
           COMPATIBILITY_RESULT: ${{ needs.hosted-compatibility-tests.result }}
           COLLISION_RESULT: ${{ needs.adr-number-collision.result }}
+          ISOLATION_RESULT: ${{ needs.runner-isolation.result }}
         run: |
           if [ "$SCOPE_RESULT" != "success" ]; then
             echo "::error::changed-path classification failed"
+            exit 1
+          fi
+          # ADR 0235: the runner-isolation contract runs on every event, so
+          # anything but success, including skipped, fails the required context.
+          if [ "$ISOLATION_RESULT" != "success" ]; then
+            echo "::error::runner-isolation contract failed (ADR 0235)"
             exit 1
           fi
           if [ "$DOCS_RESULT" != "success" ]; then
