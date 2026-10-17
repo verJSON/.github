@@ -250,8 +250,8 @@ sanitize_command_output_for_index() {
   local log_file="$tmp/$index.log"
 
   if ! sed -u -E \
-    -e 's/^::(add-mask|stop-commands)::.*/[workflow-command:\1]:/' \
-    -e 's/^::(error|warning|notice|debug|group|endgroup|echo)([^:]*)::/[workflow-command:\1]\2:/' \
+    -e 's/^([[:space:]]*)::(add-mask|stop-commands)::.*/\1[workflow-command:\2]:/' \
+    -e 's/^([[:space:]]*)::(error|warning|notice|debug|group|endgroup|echo)([^:]*)::/\1[workflow-command:\2]\3:/' \
     "$raw_log" >"$log_file"; then
     printf 'failed to sanitize command output\n' >>"$log_file"
     return 1
