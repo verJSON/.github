@@ -40,10 +40,7 @@ here.
    `3`), and `main()` exposes `--keep` on the CLI (default `3`). The only
    validation is that `keep` is a positive integer — the prior "must equal
    3" assertion is gone, because it existed solely to block exactly the
-   configurability this issue asks for. (Superseded in part by the
-   2026-10-16 amendment below: `--keep` now takes a policy value, an
-   integer from `1` to `999` or the exact word `all`, not any positive
-   integer.)
+   configurability this issue asks for.
    `node-release.yml` and `container-release.yml` source `--keep` from the
    org variable `VERJSON_PACKAGE_RETENTION_KEEP`, falling back to `3` when
    unset, with the value validated as a positive integer before use. No org
@@ -51,8 +48,10 @@ here.
    exactly three — is unchanged for every repository. A human can raise
    (or further bound) the window later by setting one org variable; that is
    the "simple config change instead of a code change" this issue asked for.
-   (The 2026-10-16 amendment below replaces "positive integer" here with
-   the same policy grammar.)
+   (Superseded in part by the 2026-10-16 amendment below: `--keep` and the
+   workflows' validation of the variable now take a policy value, an
+   integer from `1` to `999` or the exact word `all`, in place of any
+   positive integer.)
 
 2. **A package rename gets a first-class deprecation step.**
    `node-release.yml` gains an optional `deprecates` input — a JSON array of
