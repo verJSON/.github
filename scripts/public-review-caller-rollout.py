@@ -128,10 +128,17 @@ def read_callers(org: str, name: str, branch: str) -> list[tuple[str, str]]:
         except (binascii.Error, UnicodeDecodeError) as error:
             raise Undetermined(f"{org}/{name}: {path} does not decode: {error}") from None
     if not found:
+        # "No caller" is only a finding about the branch that was listed: a
+        # repository that vanished or whose default branch moved is unknown.
         try:
-            gh_json(f"repos/{org}/{name}")
+            record = gh_json(f"repos/{org}/{name}")
         except NotFound:
             raise Undetermined(f"{org}/{name} was listed but no longer exists; rerun the check") from None
+        current = record.get("default_branch") if isinstance(record, dict) else None
+        if current != branch:
+            raise Undetermined(
+                f"{org}/{name} default branch is now {current!r}, not the listed {branch!r}; rerun the check"
+            )
     return found
 
 

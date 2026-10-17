@@ -81,7 +81,7 @@ def no_caller(name: str, branch: str = "main") -> dict[str, dict]:
     return {
         caller_path(name, branch): {"status": 404, "message": "Not Found"},
         caller_path(name, branch, "yaml"): {"status": 404, "message": "Not Found"},
-        f"repos/Verjson/{name}": {"body": {"name": name}},
+        f"repos/Verjson/{name}": {"body": {"name": name, "default_branch": branch}},
     }
 
 
@@ -184,6 +184,17 @@ class PublicReviewCallerRolloutTests(unittest.TestCase):
             "UNDETERMINED",
         )
 
+    def test_a_default_branch_renamed_mid_run_is_undetermined(self):
+        # Both spellings 404 on the listed branch because it no longer exists.
+        self.assertOutcome(
+            {**listing(repository("r")), caller_path("r"): {"status": 404},
+             caller_path("r", suffix="yaml"): {"status": 404},
+             "repos/Verjson/r": {"body": {"name": "r", "default_branch": "trunk"}}},
+            2,
+            "UNDETERMINED",
+            "default branch",
+        )
+
     def test_archived_public_repository_is_skipped(self):
         self.assertOutcome(
             {**listing(repository("old", archived=True), repository("r")), **no_caller("r")},
@@ -196,7 +207,7 @@ class PublicReviewCallerRolloutTests(unittest.TestCase):
         # absent, the repository exists), so each case fails on the fault it
         # names rather than on an unserved request.
         good = {**listing(repository("r")), caller_path("r"): contents(caller(CURRENT)), **no_yaml("r"),
-                "repos/Verjson/r": {"body": {"name": "r"}}, **dict([compare(CURRENT, "ahead")])}
+                "repos/Verjson/r": {"body": {"name": "r", "default_branch": "main"}}, **dict([compare(CURRENT, "ahead")])}
         cases = {
             "listing API failure": {**good, REPOS_PATH: {"status": 502}},
             "listing not paged arrays": {**good, REPOS_PATH: {"body": {"message": "x"}}},
@@ -233,7 +244,7 @@ class PublicReviewCallerRolloutTests(unittest.TestCase):
     def test_each_fault_is_reported_by_the_guard_that_owns_it(self):
         # A later guard (the compare operands, an unserved request) also fails
         # closed, so these assert the message of the guard under test.
-        base = {**listing(repository("r")), **no_yaml("r"), "repos/Verjson/r": {"body": {"name": "r"}}}
+        base = {**listing(repository("r")), **no_yaml("r"), "repos/Verjson/r": {"body": {"name": "r", "default_branch": "main"}}}
         for label, responses, message in (
             ("a 403 on the caller", {**base, caller_path("r"): {"status": 403}}, "GitHub API read failed"),
             ("a branch pin", {**base, caller_path("r"): contents(caller("main")), **dict([compare("main", "ahead")])},
