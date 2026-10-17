@@ -1055,9 +1055,10 @@ RELAY_HEAD_REFUSAL = (
 # The relay backlog, frozen (round-4 review of #1827): the 44 relayed jobs
 # #1831 moves, as they stood when ADR 0235 began scanning relays. They are the
 # only keys a pending row may name; any other key, including every
-# pull_request job, is a format error, so the list cannot grow, and
-# public-pr-runner-isolation.test.py pins this set as a snapshot that may only
-# shrink. Each key also names the refusal kinds it carried then. Refusals are
+# pull_request job, is a format error, so the list cannot grow without
+# editing this set, and public-pr-runner-isolation.test.py pins it against a
+# snapshot it may only shrink from. Both live in this repository, so a change
+# can edit both: growth is a visible, reviewed code change, not impossible. Each key also names the refusal kinds it carried then. Refusals are
 # decided before any row is read: a kind outside that set, or any kind once the
 # key's pending row is gone, fails whatever the lists say, so no row can waive
 # a new refusal; a kind the job no longer carries fails as STALE BACKLOG until

@@ -503,7 +503,8 @@ accept.
 - **Frozen keys.** `public-pr-runner-isolation.py` holds the backlog as code:
   `PULL_REQUEST_BACKLOG` (the five pull_request jobs of decision 4) and
   `RELAY_BACKLOG` (the 44 relayed jobs). A pending row whose key is in
-  neither is a format error (exit 2), so the list cannot grow.
+  neither is a format error (exit 2), so the list cannot grow without a code
+  change (see the round-5 amendment for what that guarantees).
   `public-pr-runner-isolation.test.py` pins both as a snapshot that the code
   may only shrink against, and requires the live pending list to name exactly
   the frozen keys, so a job that leaves the list leaves the code too.
@@ -709,3 +710,12 @@ reviewer should look. The closure is still a vocabulary: a program reached
 through an indirection the patterns do not model (an alias, `xargs`, a Python
 `subprocess` call) is not followed. This is the same residual decision 5
 records for fetches.
+
+
+**Shrink-only, stated accurately.** The frozen backlog cannot grow without a
+visible code change: a pending row naming a key outside `RELAY_BACKLOG` is a
+format error, and `public-pr-runner-isolation.test.py` fails if `RELAY_BACKLOG`
+holds a key or tolerated kind its round-4 snapshot lacks. Both the code and
+the snapshot live in this repository, though, so a pull request can edit both
+together. The guarantee is that growth is explicit and reviewable, not that it
+is impossible.

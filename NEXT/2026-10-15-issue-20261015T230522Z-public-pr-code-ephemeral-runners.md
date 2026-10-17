@@ -65,7 +65,8 @@ pull request head, and otherwise need a reviewed entry. Dispatch and caller
 inputs take every value their dispatcher can choose. `fork`, `issues`,
 `discussion`, and `discussion_comment` are privileged events. The 44 relayed
 jobs that predate the rule are ratcheted in the pending list as #1831's relay
-backlog. Its keys are frozen in the checker and may only shrink; refusals are
+backlog. Its keys are frozen in the checker, and a test pins them against a
+snapshot so that growth is an explicit, reviewed code change; refusals are
 decided before any list row is read, and a backlog job tolerates only the
 refusal kinds it carried when the backlog froze; each row binds the job's full
 content, callers, inherited settings, the bytes its sparse checkouts and local
