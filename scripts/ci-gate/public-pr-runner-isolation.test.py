@@ -3290,6 +3290,72 @@ for label, hook, release in (
     )
 
 # ---------------------------------------------------------------------------
+# Round-7 findings 3 and 4: verify's trace follows each program from the
+# shallowest depth it is reached at, whatever order discovery meets it in, and
+# every invocation form it cannot resolve refuses as `unresolved-program`.
+# ---------------------------------------------------------------------------
+UNRESOLVED = "unresolved-program"
+
+
+def verify_with(hook_tail: str, files: dict[str, str]) -> dict[str, str]:
+    """The verify fixture with lines appended to release-verify.sh."""
+    workflows = {**VERIFY, "scripts/release-verify.sh": HOOK + hook_tail, **files}
+    rows = "".join(backlog_row(workflows, "release.yml [workflow_dispatch]", job)
+                   for job in ("verify", "snapshot", "publish"))
+    return {**workflows, "pending.tsv": rows}
+
+
+def expect_bound(hook_tail: str, files: dict[str, str], edited: str, label: str) -> None:
+    fixture = verify_with(hook_tail, files)
+    expect({**fixture}, 0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
+           f"{label}: the unedited fixture is ratcheted", *PENDING_ARGS)
+    change = {".py": "print('changed')\n", ".js": "// changed\n"}.get(os.path.splitext(edited)[1], "echo changed\n")
+    expect_verify_refused({**fixture, edited: fixture[edited] + change},
+                          f"{label}: editing {edited} stops the row applying", ("pending row no longer applies",))
+
+
+# Finding 3: zz-a.sh is first met as a data token in the hook's echo, then run;
+# it must still be followed into zz-b.sh.
+# (The reviewer's repro: the hook's echo names zz-a.sh, which a script the
+# hook runs then runs; the old trace bound it as data and never followed it.)
+expect_bound('echo "runs scripts/zz-a.sh"\nbash scripts/zz-sub.sh\n',
+             {"scripts/zz-sub.sh": "bash scripts/zz-a.sh\n", "scripts/zz-a.sh": "bash scripts/zz-b.sh\n",
+              "scripts/zz-b.sh": "echo b\n"},
+             "scripts/zz-b.sh", "a program first met as a data token is still followed")
+# A chain deeper than the cap still runs something: refused, never truncated.
+CHAIN = {f"scripts/c{level}.sh": f"bash scripts/c{level + 1}.sh\n" for level in range(1, 6)}
+CHAIN["scripts/c6.sh"] = "echo end\n"
+expect_verify_refused(verify_with("bash scripts/c1.sh\n", CHAIN),
+                      "a program chain nested beyond the depth cap refuses as unresolved",
+                      ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "nested beyond"))
+# Finding 4: each form, at depth 2 (inside a script the hook runs) and at 1.
+for label, sub, extra, edited in (
+    ("source at depth 2", "source scripts/f.sh\n", {}, "scripts/f.sh"),
+    ("bash -c at depth 2", 'bash -c "scripts/f.sh"\n', {}, "scripts/f.sh"),
+    ("an assigned path at depth 2", 'f=scripts/f.sh; bash "$f"\n', {}, "scripts/f.sh"),
+    ("python -m at depth 2", "python3 -m scripts.fmod\n", {"scripts/fmod.py": "print(1)\n"}, "scripts/fmod.py"),
+):
+    expect_bound("bash scripts/sub.sh\n", {"scripts/sub.sh": sub, "scripts/f.sh": "echo f\n", **extra},
+                 edited, f"verify follows {label}")
+expect_bound("python3 -m scripts.fmod\n", {"scripts/fmod.py": "import scripts.fhelper\n",
+                                            "scripts/fhelper.py": "print(1)\n"},
+             "scripts/fhelper.py", "verify follows python -m at depth 1 into its imports")
+expect_bound(". scripts/f.sh\n", {"scripts/f.sh": "bash scripts/g.sh\n", "scripts/g.sh": "echo g\n"},
+             "scripts/g.sh", "verify follows a file sourced with . at depth 1")
+for label, sub in (
+    ("eval", 'eval "$command"\n'),
+    ("an unresolvable variable path", 'bash "$UNSET_ROOT/x.sh"\n'),
+    ("xargs", "printf x | xargs bash\n"),
+    ("a pipe into bash", "cat scripts/f.sh | bash\n"),
+    ("a computed python import", "python3 -c 'import importlib; importlib.import_module(name)'\n"),
+    ("an untraced interpreter", "perl scripts/f.pl\n"),
+    ("npx", "npx some-tool\n"),
+):
+    expect_verify_refused(verify_with("bash scripts/sub.sh\n", {"scripts/sub.sh": sub, "scripts/f.sh": "echo f\n"}),
+                          f"verify refuses {label} as an unresolved program",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED))
+
+# ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
 # sequences must not decode to the same replacement text and digest), and a
 # relative root is made absolute rather than silently binding nothing.

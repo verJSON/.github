@@ -35,10 +35,12 @@ import ast
 import functools
 import glob
 import hashlib
+import heapq
 import itertools
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from typing import NamedTuple
@@ -888,86 +890,677 @@ def tracked_paths(root: str) -> frozenset[str]:
 
 
 SHELL_WRAPPER = re.compile(r"(?m)^[ \t]*([A-Za-z_][\w-]*)[ \t]*\(\)[ \t]*\{(.*?)^[ \t]*\}", re.S)
-SHELL_SIBLING = re.compile(r'(?:\$here|\$\{here\}|\$\(dirname "\$0"\)|\$\(dirname \$0\))/([A-Za-z0-9_.-]+)')
 # Only a program is followed through a variable-rooted path; a data file a
 # deeper check reads (an index, a manifest) is that check's input, not code.
 PROGRAM_SUFFIXES = (".sh", ".py", ".js", ".mjs", ".cjs")
 VARIABLE_ROOTED = re.compile(r"\$\{?[A-Za-z_]\w*\}?/([\w.-]+(?:/[\w.-]+)*)")
 DATA_TOKEN_SPLIT = re.compile(r"[\s\"'`;&|()<>=,:$]+")
+UNRESOLVED_PROGRAM = "unresolved-program"
+SHELL_NAMES = frozenset({"bash", "sh", "zsh", "dash"})
+PYTHON_NAMES = frozenset({"python", "python3"})
+NODE_NAMES = frozenset({"node", "nodejs"})
+OTHER_INTERPRETERS = frozenset({"perl", "ruby", "pwsh"})
+# Words that run the next word as the command (their own options skipped).
+COMMAND_PREFIXES = frozenset({"exec", "nohup", "sudo", "time", "command", "builtin", "!"})
+COMPOUND_WORDS = frozenset({"if", "then", "do", "else", "elif", "while", "until", "{", "}", "fi", "done", "esac"})
+SEPARATOR_TOKENS = frozenset({";", "&&", "||", "|", "&", "|&", "(", ")", ";;", "\n"})
+REDIRECTS = frozenset({">", ">>", "<", "<<", ">&", "<&", "&>", "&>>", ">|", "<>"})
+HEREDOC_MARK = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+ASSIGNMENT = re.compile(r"^([A-Za-z_]\w*)(?:\[[^\]]*\])?\+?=(.*)$", re.S)
+PYTHON_SPAWNS = frozenset({"run", "call", "check_call", "check_output", "Popen"})
+
+
+def strip_shell_comments(text: str) -> str:
+    """Drop `#` comments outside quotes, keeping the newline that ends them."""
+    out: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote:
+            out.append(char)
+            if char == "\\" and quote == '"' and index + 1 < len(text):
+                out.append(text[index + 1])
+                index += 1
+            elif char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+            out.append(char)
+        elif char == "\\" and index + 1 < len(text):
+            out.append(text[index : index + 2])
+            index += 1
+        elif char == "#" and (index == 0 or text[index - 1] in " \t\n;&|("):
+            while index < len(text) and text[index] != "\n":
+                index += 1
+            continue
+        else:
+            out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def split_heredocs(text: str) -> tuple[str, dict[str, str]]:
+    """Replace each `<<TERM` with `< __HEREDOC_n__` and lift its body out, so a
+    body is read as the input it is, never as commands of the outer text."""
+    lines = text.split("\n")
+    out: list[str] = []
+    bodies: dict[str, str] = {}
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        for mark in list(HEREDOC_MARK.finditer(line)):
+            terminator, strip = mark.group(3), mark.group(1) == "-"
+            body: list[str] = []
+            while index < len(lines) and (lines[index].lstrip("\t") if strip else lines[index]) != terminator:
+                body.append(lines[index])
+                index += 1
+            index += 1
+            token = f"__HEREDOC_{len(bodies)}__"
+            bodies[token] = "\n".join(body)
+            line = line.replace(mark.group(0), "< " + token, 1)
+        out.append(line)
+    return "\n".join(out), bodies
+
+
+SHELL_OPERATORS = (
+    "&&", "||", ";;", "|&", ">>", "<<", "&>", ">&", "<&", ">|", "<>", ";", "&", "|", "(", ")", "<", ">", "\n",
+)
+
+
+def shell_tokens(text: str) -> list[str]:
+    """Words and operators. shlex groups adjacent punctuation (`)\n`, `;\n`),
+    so a punctuation-only token is split back into shell operators, and an
+    array assignment `name=( … )` becomes one assignment word per element."""
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()<>\n")
+    lexer.whitespace = " \t\r"
+    lexer.commenters = ""
+    lexer.whitespace_split = True
+    tokens: list[str] = []
+    for token in lexer:
+        if token and all(char in ";&|()<>\n" for char in token):
+            while token:
+                operator = next(op for op in SHELL_OPERATORS if token.startswith(op))
+                tokens.append(operator)
+                token = token[len(operator) :]
+        else:
+            tokens.append(token)
+    out: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if re.fullmatch(r"[A-Za-z_]\w*\+?=", token) and index + 1 < len(tokens) and tokens[index + 1] == "(":
+            end = tokens.index(")", index + 1) if ")" in tokens[index + 1 :] else len(tokens)
+            elements = [item for item in tokens[index + 2 : end] if item != "\n"]
+            out += [token + element for element in elements] or [token]
+            index = end + 1
+            continue
+        out.append(token)
+        index += 1
+    return out
+
+
+def matching_paren(text: str, start: int) -> int:
+    """Index of the `)` closing the `(` before `start`, honoring quotes and
+    nesting the way a shell does inside a command substitution."""
+    depth, quote, index = 1, "", start
+    while index < len(text):
+        char = text[index]
+        if quote == "'":
+            if char == "'":
+                quote = ""
+        elif quote == '"':
+            if char == "\\":
+                index += 1
+            elif char == '"':
+                quote = ""
+            elif text.startswith("$(", index):
+                index = matching_paren(text, index + 2)
+        elif char in "'\"":
+            quote = char
+        elif char == "\\":
+            index += 1
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return len(text)
+
+
+def lift_substitutions(text: str) -> tuple[str, list[str]]:
+    """Replace each `$( … )` and backtick command outside single quotes with
+    a placeholder word, returning the commands they run. Quoting restarts
+    inside a substitution, so it is read as its own text."""
+    out: list[str] = []
+    inner: list[str] = []
+    quote, index = "", 0
+    while index < len(text):
+        char = text[index]
+        if quote == "'":
+            out.append(char)
+            if char == "'":
+                quote = ""
+            index += 1
+            continue
+        if text.startswith("$((", index):
+            # Arithmetic runs no command: an opaque word, so its parentheses
+            # are never read as subshells.
+            end = matching_paren(text, index + 3)
+            out.append("__ARITH__")
+            index = end + 2
+            continue
+        if text.startswith("$(", index):
+            end = matching_paren(text, index + 2)
+            inner.append(text[index + 2 : end])
+            out.append(f"__SUBST_{len(inner) - 1}__")
+            index = end + 1
+            continue
+        if char == "`":
+            end = text.find("`", index + 1)
+            end = len(text) if end == -1 else end
+            inner.append(text[index + 1 : end])
+            out.append(f"__SUBST_{len(inner) - 1}__")
+            index = end + 1
+            continue
+        if char == "\\" and index + 1 < len(text):
+            out.append(text[index : index + 2])
+            index += 2
+            continue
+        if char == '"':
+            quote = "" if quote == '"' else '"'
+        elif char == "'" and not quote:
+            quote = "'"
+        out.append(char)
+        index += 1
+    return "".join(out), inner
+
+
+@functools.lru_cache(maxsize=None)
+def tracked_bytes(root: str, relative: str) -> bytes | None:
+    if read_program(root, relative) is None:
+        return None
+    with open(os.path.join(root, relative), "rb") as handle:
+        return handle.read()
+
+
+class ProgramTrace:
+    """Every scanned-tree program a full-checkout backlog job runs, followed
+    from the shallowest depth it is reached at, and every form it cannot
+    resolve (round-7 review of #1827; Part of #1831).
+
+    Bound: the bytes of each program and of the files the steps and the
+    programs they run directly name. Followed: shell (commands, `source`/`.`,
+    `-c` code, "$@" wrappers, assignments, variable-rooted and `$here`
+    paths, npm scripts and `npm pack`), Python (imports, `-m`, subprocess and
+    loader calls) and JavaScript (require, spawn and exec targets, package
+    bins). A form no rule resolves is an `unresolved-program`: the row cannot
+    bind what it runs, so it refuses. A program reached at MAX_CLOSURE_DEPTH
+    that still runs something is unresolved rather than truncated.
+    """
+
+    def __init__(self, job: dict, root: str, excluded: frozenset[str] = frozenset(), tolerated=None):
+        self.root = os.path.abspath(root)
+        self.tracked = tracked_paths(self.root)
+        self.excluded = excluded
+        # (program, exact logical line): the frozen, reviewed materialization.
+        self.tolerated = tolerated
+        self.bound: dict[str, str] = {}
+        self.followed: set[str] = set()
+        self.best: dict[str, int] = {}
+        self.heap: list[tuple[int, str]] = []
+        self.unresolved: set[str] = set()
+        self.texts: list[tuple[str, str]] = []
+        self.capped: str | None = None
+        # Paths a text runs only behind an existence test (`[ -x path ]`).
+        self.guarded: set[str] = set()
+        # Python programs run with -m import from the working directory, not
+        # from their own directory (sys.path[0] is the cwd for -m).
+        self.module_programs: set[str] = set()
+        self.immutable_roots = set()
+        for step in job.get("steps") or []:
+            options = step.get("with") if isinstance(step, dict) else None
+            if str(step.get("uses", "")).startswith("actions/checkout@") and isinstance(options, dict):
+                ref = str(options.get("ref") or "")
+                if options.get("repository") and options.get("path") and re.fullmatch(r"[0-9a-f]{40}", ref):
+                    self.immutable_roots.add(os.path.normpath(str(options["path"])))
+        package = tracked_bytes(self.root, "package.json") if "package.json" in self.tracked else None
+        try:
+            self.package = json.loads(package) if package else {}
+        except ValueError:
+            self.package = {}
+            self.unresolve("package.json does not parse")
+        runs = [
+            step["run"]
+            for step in job.get("steps") or []
+            if isinstance(step, dict) and isinstance(step.get("run"), str)
+        ]
+        for run in runs:
+            self.shell(run, "", 0, data=True)
+        while self.heap:
+            depth, program = heapq.heappop(self.heap)
+            if program in self.followed:
+                continue
+            self.followed.add(program)
+            self.follow(program, depth)
+
+    # -- binding ---------------------------------------------------------
+    def unresolve(self, reason: str) -> None:
+        self.unresolved.add(reason)
+
+    def bind(self, relative: str) -> str | None:
+        if relative in self.excluded or relative not in self.tracked:
+            return None
+        path = os.path.join(self.root, relative)
+        if os.path.islink(path):
+            self.bound.setdefault(relative, "link " + os.readlink(path))
+            return None
+        raw = tracked_bytes(self.root, relative)
+        if raw is None:
+            return None
+        self.bound.setdefault(relative, hashlib.sha256(raw).hexdigest())
+        return raw.decode("utf-8", "surrogateescape")
+
+    def reach(self, relative: str, depth: int, why: str) -> None:
+        """A program the job runs: bind it and follow it from its shallowest depth."""
+        relative = os.path.normpath(relative)
+        if self.capped is not None:
+            self.unresolve(f"{self.capped} is nested beyond {MAX_CLOSURE_DEPTH} and still runs {relative} ({why})")
+            return
+        if self.bind(relative) is None and relative not in self.bound:
+            self.unresolve(f"{relative} ({why}) is not a file in the scanned tree")
+            return
+        if depth < self.best.get(relative, MAX_CLOSURE_DEPTH + 2):
+            self.best[relative] = depth
+            heapq.heappush(self.heap, (depth, relative))
+
+    def follow(self, program: str, depth: int) -> None:
+        content = self.bind(program)
+        if content is None:
+            return
+        if depth >= MAX_CLOSURE_DEPTH:
+            self.capped = program
+        try:
+            if program.endswith(".py") or re.match(r"#!.*\bpython", content):
+                self.python(content, program, depth)
+            elif is_shell_script(program, content):
+                self.shell(content, program, depth, data=depth <= 1)
+        finally:
+            self.capped = None
+
+    # -- paths -----------------------------------------------------------
+    def resolve(self, token: str, origin: str, assignments: dict[str, set[str]]) -> tuple[str, str]:
+        """("tree", path), ("external", ""), or ("unresolved", why)."""
+        for _ in range(4):
+            names = re.findall(r"\$\{?([A-Za-z_]\w*)\}?", token)
+            if not names:
+                break
+            replaced = token
+            for name in names:
+                values = assignments.get(name, set())
+                if len(values) == 1:
+                    value = next(iter(values))
+                    if "$(" not in value and "__SUBST_" not in value:
+                        replaced = re.sub(r"\$\{?" + name + r"\}?(?!\w)", lambda _: value, replaced)
+            if replaced == token:
+                break
+            token = replaced
+        if "$" in token:
+            for tail in VARIABLE_ROOTED.findall(token)[-1:]:
+                for base in ("", os.path.dirname(origin)):
+                    candidate = os.path.normpath(os.path.join(base, tail))
+                    if candidate in self.tracked:
+                        return "tree", candidate
+            return "unresolved", token
+        if token.startswith("/"):
+            return "external", ""
+        for base in ("", os.path.dirname(origin)):
+            candidate = os.path.normpath(os.path.join(base, token))
+            if candidate in self.tracked:
+                return "tree", candidate
+        if os.path.normpath(token).split(os.sep)[0] in self.immutable_roots:
+            return "external", ""
+        return "unresolved", token
+
+    def run_target(self, token: str, origin: str, assignments: dict[str, set[str]], depth: int, why: str) -> None:
+        kind, value = self.resolve(token, origin, assignments)
+        if kind == "tree":
+            self.reach(value, depth + 1, why)
+        elif kind == "unresolved":
+            if value in self.guarded and "$" not in value and not value.startswith("/"):
+                # An optional hook the scanned tree does not hold: a checkout of
+                # this tree has no such file, so the guarded call runs nothing.
+                return
+            self.unresolve(f"{origin or 'a step'} runs {value!r} ({why}), which no rule resolves to a scanned file")
+
+    # -- shell -----------------------------------------------------------
+    def shell(self, text: str, origin: str, depth: int, data: bool = False, inherited=None) -> None:
+        text = without_comments(text)
+        self.texts.append((origin, text))
+        if data:
+            for token in DATA_TOKEN_SPLIT.split(text):
+                if token:
+                    self.bind(os.path.normpath(token))
+        if self.tolerated and origin == self.tolerated[0]:
+            # The frozen pin comparison runs the pinned generator, which a
+            # 40-hex commit fixes; it is neither followed nor unresolved.
+            text = text.replace(self.tolerated[1], "true", 1)
+        body, heredocs = split_heredocs(strip_shell_comments(text.replace("\\\n", " ")))
+        body, substitutions = lift_substitutions(body)
+        self.guarded |= set(re.findall(r"\[\[?\s+-[xef]\s+([\w./-]+)\s*\]", body))
+        assignments: dict[str, set[str]] = {key: set(value) for key, value in (inherited or ({}, set(), {}))[0].items()}
+        wrappers = set((inherited or ({}, set(), {}))[1])
+        heredocs = {**(inherited or ({}, set(), {}))[2], **heredocs}
+        wrappers |= {name for name, block in SHELL_WRAPPER.findall(body) if '"$@"' in block}
+        try:
+            tokens = shell_tokens(body)
+        except ValueError as error:
+            self.unresolve(f"{origin or 'a step'} does not tokenize as shell ({error})")
+            return
+        for token in tokens:
+            match = ASSIGNMENT.match(token)
+            if match:
+                assignments.setdefault(match.group(1), set()).add(match.group(2))
+        scope = (assignments, wrappers, heredocs)
+        for inner in substitutions:
+            self.shell(inner, origin, depth, inherited=scope)
+        command: list[str] = []
+        for token in tokens + ["\n"]:
+            if token in SEPARATOR_TOKENS:
+                self.command(command, origin, depth, scope)
+                command = []
+            else:
+                command.append(token)
+
+    def command(self, words, origin, depth, scope) -> None:
+        assignments, wrappers, heredocs = scope
+        words = list(words)
+        while words and (ASSIGNMENT.match(words[0]) or words[0] in COMMAND_PREFIXES or words[0] in COMPOUND_WORDS):
+            words.pop(0)
+        if not words:
+            return
+        head = words[0]
+        if head == "env":
+            words.pop(0)
+            while words and (words[0].startswith("-") or ASSIGNMENT.match(words[0])):
+                words.pop(0)
+            return self.command(words, origin, depth, scope)
+        if head == "timeout":
+            words.pop(0)
+            while words and words[0].startswith("-"):
+                words.pop(0)
+            return self.command(words[1:], origin, depth, scope)
+        if head in wrappers:
+            return self.command(words[1:], origin, depth, scope)
+        stdin = None
+        kept: list[str] = []
+        index = 0
+        while index < len(words):
+            word = words[index]
+            following = words[index + 1] if index + 1 < len(words) else None
+            if word.isdigit() and following in REDIRECTS:
+                index += 1
+                continue
+            if word in REDIRECTS:
+                if word == "<" and following is not None:
+                    stdin = following
+                index += 2
+                continue
+            kept.append(word)
+            index += 1
+        words = kept
+        if not words:
+            return
+        name = os.path.basename(head)
+        where = f"{origin or 'a step'}: {' '.join(words)[:80]}"
+        if name in SHELL_NAMES:
+            return self.shell_call(words[1:], stdin, origin, depth, scope, where)
+        if name in PYTHON_NAMES:
+            return self.python_call(words[1:], stdin, origin, depth, scope, where)
+        if name in NODE_NAMES:
+            return self.node_call(words[1:], stdin, origin, depth, scope, where)
+        if name in OTHER_INTERPRETERS:
+            self.unresolve(f"{where}: {name} programs are not traced")
+            return
+        if head in ("source", "."):
+            if len(words) < 2:
+                self.unresolve(f"{where}: source without a file")
+                return
+            return self.run_target(words[1], origin, assignments, depth, "sourced")
+        if head in ("eval", "xargs", "npx"):
+            self.unresolve(f"{where}: {head} runs a command this checker cannot read")
+            return
+        if head == "npm":
+            return self.npm(words[1:], origin, depth, where)
+        if "/" in head or "$" in head:
+            return self.run_target(head, origin, assignments, depth, "run directly")
+
+    def shell_call(self, args, stdin, origin, depth, scope, where) -> None:
+        assignments, _, heredocs = scope
+        index = 0
+        while index < len(args) and args[index].startswith("-") and args[index] not in ("-", "--"):
+            flag = args[index]
+            if flag in ("-o", "+o"):
+                index += 2
+                continue
+            if not flag.startswith("--") and "c" in flag[1:]:
+                if index + 1 >= len(args):
+                    self.unresolve(f"{where}: -c without code")
+                    return
+                self.shell(args[index + 1], origin, depth, inherited=scope)
+                return
+            index += 1
+        if index < len(args) and args[index] == "--":
+            index += 1
+        if index < len(args) and args[index] not in ("-", "-s"):
+            return self.run_target(args[index], origin, assignments, depth, "shell script")
+        if stdin in heredocs:
+            return self.shell(heredocs[stdin], origin, depth, inherited=scope)
+        if stdin:
+            return self.run_target(stdin, origin, assignments, depth, "shell input")
+        self.unresolve(f"{where}: a shell reading its program from a pipe")
+
+    def python_call(self, args, stdin, origin, depth, scope, where) -> None:
+        assignments, _, heredocs = scope
+        index = 0
+        while index < len(args) and args[index].startswith("-") and args[index] != "-":
+            flag = args[index]
+            if flag in ("-X", "-W", "-Q"):
+                index += 2
+                continue
+            if flag == "-c":
+                if index + 1 >= len(args):
+                    self.unresolve(f"{where}: -c without code")
+                    return
+                rest = [self.resolve(arg, origin, assignments) for arg in args[index + 2 :]]
+                self.python(args[index + 1], origin, depth, argv=[("inline", "")] + rest, inline=True)
+                return
+            if flag == "-m":
+                if index + 1 >= len(args):
+                    self.unresolve(f"{where}: -m without a module")
+                    return
+                module = args[index + 1].replace(".", "/")
+                for candidate in (module + ".py", module + "/__main__.py"):
+                    for base in ("", os.path.dirname(origin)):
+                        path = os.path.normpath(os.path.join(base, candidate))
+                        if path in self.tracked:
+                            self.module_programs.add(path)
+                            return self.reach(path, depth + 1, f"python -m {args[index + 1]}")
+                self.unresolve(f"{where}: python -m {args[index + 1]} is no module in the scanned tree")
+                return
+            index += 1
+        if index < len(args) and args[index] != "-":
+            return self.run_target(args[index], origin, assignments, depth, "python program")
+        if stdin in heredocs:
+            return self.python(heredocs[stdin], origin, depth, inline=True)
+        if stdin:
+            return self.run_target(stdin, origin, assignments, depth, "python input")
+        self.unresolve(f"{where}: python reading its program from a pipe")
+
+    def node_call(self, args, stdin, origin, depth, scope, where) -> None:
+        assignments, _, heredocs = scope
+        index = 0
+        while index < len(args) and args[index].startswith("-") and args[index] != "-":
+            flag = args[index]
+            if flag in ("-e", "-p", "--eval", "--print"):
+                return  # inline code, bound as the text that holds it
+            if flag in ("-r", "--require", "--import", "--loader", "--experimental-loader"):
+                if index + 1 < len(args):
+                    self.run_target(args[index + 1], origin, assignments, depth, "node preload")
+                index += 2
+                continue
+            index += 1
+        if index < len(args) and args[index] != "-":
+            return self.run_target(args[index], origin, assignments, depth, "node program")
+        if stdin in heredocs:
+            return
+        self.unresolve(f"{where}: node reading its program from a pipe")
+
+    def npm(self, args, origin, depth, where) -> None:
+        verbs = [arg for arg in args if not arg.startswith("-")]
+        verb = verbs[0] if verbs else ""
+        scripts = self.package.get("scripts") if isinstance(self.package.get("scripts"), dict) else {}
+        if verb in ("run", "run-script") and len(verbs) > 1 or verb in ("test", "t", "start", "stop", "restart"):
+            script = verbs[1] if verb in ("run", "run-script") else {"t": "test"}.get(verb, verb)
+            self.bind("package.json")
+            if isinstance(scripts.get(script), str):
+                self.shell(scripts[script], "package.json", depth + 1)
+            return
+        if verb in ("ci", "install", "i", "rebuild", "version"):
+            # Dependency lifecycle code comes from package-lock.json and the
+            # registry, not the scanned tree: ADR 0235's named residual. The
+            # package's own lifecycle scripts run unless --ignore-scripts.
+            if "--ignore-scripts" not in args:
+                for name in ("preinstall", "install", "postinstall", "prepare", "preversion", "version", "postversion"):
+                    if isinstance(scripts.get(name), str):
+                        self.shell(scripts[name], "package.json", depth + 1)
+            return
+        self.unresolve(f"{where}: npm {verb or '(no command)'} is not traced")
+
+    # -- python ----------------------------------------------------------
+    def python(self, source: str, origin: str, depth: int, argv=None, inline: bool = False) -> None:
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as error:
+            self.unresolve(f"{origin or 'a step'}: python code does not parse ({error.msg})")
+            return
+        base = os.path.dirname(origin) if not inline and origin not in self.module_programs else ""
+        self.spawn_aliases = {
+            alias.asname or alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "subprocess"
+            for alias in node.names
+            if alias.name in PYTHON_SPAWNS
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names = [node.module]
+            elif isinstance(node, ast.ImportFrom) and node.level > 0:
+                names = [("." * node.level) + (node.module or "")]
+            else:
+                names = []
+            for name in names:
+                stripped = name.lstrip(".")
+                levels = len(name) - len(stripped)
+                start = base
+                for _ in range(max(levels - 1, 0)):
+                    start = os.path.dirname(start)
+                for candidate in (os.path.join(start, *stripped.split(".")) + ".py",
+                                  os.path.join(start, *stripped.split("."), "__init__.py")):
+                    if os.path.normpath(candidate) in self.tracked:
+                        if origin in self.module_programs:
+                            self.module_programs.add(os.path.normpath(candidate))
+                        self.reach(candidate, depth + 1, f"imported by {origin or 'inline python'}")
+                        break
+            if isinstance(node, ast.Call):
+                self.python_call_site(node, origin, depth, argv)
+
+    def python_call_site(self, node: ast.Call, origin: str, depth: int, argv) -> None:
+        name = ast.unparse(node.func)
+        where = f"{origin or 'inline python'}: {name}(…)"
+        leaf = name.split(".")[-1]
+        if name.startswith("subprocess.") and leaf in PYTHON_SPAWNS or name in self.spawn_aliases:
+            if not node.args:
+                return
+            first = node.args[0]
+            shell = any(keyword.arg == "shell" and isinstance(keyword.value, ast.Constant) and keyword.value.value
+                        for keyword in node.keywords)
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                if shell:
+                    self.shell(first.value, origin, depth)
+                return
+            if not isinstance(first, (ast.List, ast.Tuple)) or not first.elts:
+                self.unresolve(f"{where}: an argument vector this checker cannot read")
+                return
+            command = first.elts[0]
+            if not (isinstance(command, ast.Constant) and isinstance(command.value, str)):
+                self.unresolve(f"{where}: a command this checker cannot read")
+                return
+            program = os.path.basename(command.value)
+            if program in SHELL_NAMES | PYTHON_NAMES | NODE_NAMES | OTHER_INTERPRETERS:
+                rest = first.elts[1:]
+                target = rest[0] if rest else None
+                literal = isinstance(target, ast.Constant) and isinstance(target.value, str)
+                if literal and not target.value.startswith("-"):
+                    kind, value = self.resolve(target.value, origin, {})
+                    if kind == "tree":
+                        self.reach(value, depth + 1, f"run by {origin}")
+                    elif kind == "unresolved":
+                        self.unresolve(f"{where}: runs {value!r}, which no rule resolves")
+                else:
+                    self.unresolve(f"{where}: an interpreter whose program this checker cannot read")
+            return
+        if name in ("os.system", "os.popen"):
+            first = node.args[0] if node.args else None
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                self.shell(first.value, origin, depth)
+            else:
+                self.unresolve(f"{where}: a shell command this checker cannot read")
+            return
+        dynamic = ("exec", "eval", "compile", "__import__")
+        if name.startswith(("os.exec", "os.spawn", "os.posix_spawn")) or name in dynamic:
+            self.unresolve(f"{where}: dynamic execution this checker cannot read")
+            return
+        if leaf in ("import_module", "run_module", "run_path", "spec_from_file_location"):
+            target = node.args[1] if leaf == "spec_from_file_location" and len(node.args) > 1 else (
+                node.args[0] if node.args else None)
+            value = None
+            if isinstance(target, ast.Constant) and isinstance(target.value, str):
+                value = ("tree", target.value) if leaf.endswith("path") or leaf == "spec_from_file_location" else (
+                    "tree", target.value.replace(".", "/") + ".py")
+                kind, path = self.resolve(value[1], origin, {})
+                value = (kind, path)
+            elif (isinstance(target, ast.Subscript) and ast.unparse(target.value) == "sys.argv"
+                  and isinstance(target.slice, ast.Constant) and argv and target.slice.value < len(argv)):
+                value = argv[target.slice.value]
+            if value and value[0] == "tree":
+                self.reach(value[1], depth + 1, f"loaded by {origin or 'inline python'}")
+            elif not value or value[0] != "external":
+                self.unresolve(f"{where}: loads code this checker cannot resolve")
 
 
 def tree_programs(
-    job: dict, root: str, excluded: frozenset[str] = frozenset(), texts: list[tuple[str, str]] | None = None
+    job: dict,
+    root: str,
+    excluded: frozenset[str] = frozenset(),
+    texts: list[tuple[str, str]] | None = None,
+    unresolved: set[str] | None = None,
+    tolerated=None,
 ) -> dict[str, str]:
-    """For the one backlog job that tolerates a full checkout: the bytes of
-    every program it runs from the tree, and the files its steps and the
-    scripts they run name (the pinned files they compare against).
-
-    Programs: what `programs()` follows, arguments of a shell function that
-    forwards "$@" (a wrapper such as `run_clean`), `$here/` siblings, and
-    variable-rooted paths such as `"$repo_root/scripts/x.sh"`,
-    followed through shell scripts to MAX_CLOSURE_DEPTH; Python imports from
-    the program's directory. Named files are collected only from the steps
-    and the scripts they run directly, so documentation a deeper check reads
-    is not bound. Links bind as their target text and are never read through.
-    """
-    # A relative root ('.') would make every candidate fail read_program's
-    # containment check and bind nothing; fail fast to an absolute one.
-    root = os.path.abspath(root)
-    tracked = tracked_paths(root)
-    found: dict[str, str] = {}
-
-    def bind(relative: str) -> str | None:
-        if relative in found or relative in excluded or relative not in tracked:
-            return None
-        path = os.path.join(root, relative)
-        if os.path.islink(path):
-            found[relative] = "link " + os.readlink(path)
-            return None
-        if read_program(root, relative) is None:
-            return None
-        with open(path, "rb") as handle:
-            raw = handle.read()
-        # Hash the bytes, not decoded text: invalid sequences would otherwise
-        # collapse to one replacement character and one digest.
-        found[relative] = hashlib.sha256(raw).hexdigest()
-        return raw.decode("utf-8", "surrogateescape")
-
-    queue = [
-        ("", without_comments(step["run"]), 0)
-        for step in job.get("steps") or []
-        if isinstance(step, dict) and isinstance(step.get("run"), str)
-    ]
-    while queue:
-        origin, text, depth = queue.pop()
-        if texts is not None:
-            texts.append((origin, text))
-        candidates = [os.path.normpath(program) for program in programs(text, root)]
-        for name, body in SHELL_WRAPPER.findall(text):
-            if '"$@"' in body:
-                pattern = COMMAND_POSITION + re.escape(name) + r"[ \t]+[\"']?([\w./-]+)"
-                candidates += [os.path.normpath(match) for match in re.findall(pattern, text, re.M)]
-        candidates += [os.path.join(os.path.dirname(origin), sibling) for sibling in SHELL_SIBLING.findall(text)]
-        # `"$repo_root/scripts/x.sh"`: a variable-rooted path names a tracked
-        # program relative to the repository root or to the script's directory.
-        for tail in VARIABLE_ROOTED.findall(text):
-            for base in ("", os.path.dirname(origin)):
-                candidate = os.path.normpath(os.path.join(base, tail))
-                if candidate in tracked and candidate.endswith(PROGRAM_SUFFIXES):
-                    candidates.append(candidate)
-        for program in candidates:
-            content = bind(program)
-            if content is None or depth + 1 >= MAX_CLOSURE_DEPTH:
-                continue
-            if is_shell_script(program, content):
-                queue.append((program, without_comments(content), depth + 1))
-            elif program.endswith(".py"):
-                for module in python_imports(root, program, tracked):
-                    bind(module)
-        if depth <= 1:
-            for token in DATA_TOKEN_SPLIT.split(text):
-                bind(os.path.normpath(token) if token else token)
-    return dict(sorted(found.items()))
+    """The bytes of every scanned-tree program a full-checkout backlog job
+    runs (ProgramTrace). `texts` collects every shell text traced; `unresolved`
+    every form no rule resolves."""
+    trace = ProgramTrace(job, root, excluded, tolerated)
+    if texts is not None:
+        texts.extend(trace.texts)
+    if unresolved is not None:
+        unresolved |= trace.unresolved
+    return dict(sorted(trace.bound.items()))
 
 
 # The one reviewed materialization in a program a backlog job runs (PM
@@ -1004,10 +1597,13 @@ def logical_lines(text: str) -> list[str]:
     return joined
 
 
-def traced_materializations(key: tuple[str, str], root: str, texts: list[tuple[str, str]]) -> set[tuple[str, str]]:
-    """Unbound (kind, reason) pairs for git show/archive/cat-file in every
-    shell text a full-checkout backlog job runs, less the frozen exception."""
+def frozen_tolerated(key: tuple[str, str], root: str) -> tuple[str, str] | None:
+    """(program, exact logical line) of the key's frozen materialization, or
+    None when its bytes, its $pin derivation, or release.yml's pin moved."""
     frozen = FROZEN_MATERIALIZATIONS.get(key)
+    if not frozen:
+        return None
+    root = os.path.abspath(root)
     tolerated_line = None
     if frozen:
         hook = read_program(root, frozen["program"]) or ""
@@ -1020,11 +1616,19 @@ def traced_materializations(key: tuple[str, str], root: str, texts: list[tuple[s
                  if hashlib.sha256(line.encode("utf-8", "surrogateescape")).hexdigest() == frozen["line_sha256"]]
         if len(pins) == 1 and len(pin_lines) == 1 and len(shows) == 1:
             tolerated_line = shows[0]
+    return (frozen["program"], tolerated_line) if tolerated_line else None
+
+
+def traced_materializations(
+    texts: list[tuple[str, str]], tolerated: tuple[str, str] | None
+) -> set[tuple[str, str]]:
+    """Unbound (kind, reason) pairs for git show/archive/cat-file in every
+    shell text a full-checkout backlog job runs, less the frozen exception."""
     found: set[tuple[str, str]] = set()
     for origin, text in texts:
         for line in logical_lines(text):
             for match in GIT_MATERIALIZE_TRACKED.finditer(line.replace("\\\n", " ")):
-                if frozen and origin == frozen["program"] and line == tolerated_line:
+                if tolerated and (origin, line) == tolerated:
                     continue
                 found.add((
                     "tracked-materialization",
@@ -1032,32 +1636,6 @@ def traced_materializations(key: tuple[str, str], root: str, texts: list[tuple[s
                     "tracked content outside any checkout this row binds; only the frozen, reviewed pin "
                     "comparison in release-verify.sh is tolerated",
                 ))
-    return found
-
-
-def python_imports(root: str, program: str, tracked: frozenset[str]) -> set[str]:
-    """Repository modules a Python program imports from its own directory,
-    transitively (the programs put their directory on sys.path)."""
-    found: set[str] = set()
-    queue = [program]
-    while queue:
-        current = queue.pop()
-        try:
-            tree = ast.parse(read_program(root, current) or "")
-        except SyntaxError:
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                names = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-                names = [node.module]
-            else:
-                continue
-            for name in names:
-                candidate = os.path.join(os.path.dirname(current), *name.split(".")) + ".py"
-                if candidate in tracked and candidate not in found:
-                    found.add(candidate)
-                    queue.append(candidate)
     return found
 
 
@@ -2053,19 +2631,22 @@ def check_workflow(
             # restaling on every commit, so a pending row refuses it
             # (Closure.unbound) rather than binding a parser's guess at it.
             traced: list[tuple[str, str]] = []
+            unresolved: set[str] = set()
+            tolerated = frozen_tolerated((path, name), scan.root)
             backlog_digest = review_digest(
                 chain,
                 job,
                 inherited_settings(document),
                 {"files": closure.files, "reasons": sorted({reason for reason, _ in pairs})}
                 | (
-                    {"programs": tree_programs(job, scan.root, scan.excluded, traced)}
+                    {"programs": tree_programs(job, scan.root, scan.excluded, traced, unresolved, tolerated)}
                     if closure.tree is not None and not closure.caller_checkout
                     else {}
                 ),
             )
             closure.check_materializations(job)
-            closure.unbound |= traced_materializations((path, name), scan.root, traced)
+            closure.unbound |= traced_materializations(traced, tolerated)
+            closure.unbound |= {(UNRESOLVED_PROGRAM, f"{UNRESOLVED_PROGRAM}: {reason}") for reason in unresolved}
             if closure.tree is not None:
                 bound["tree"] = closure.tree
             scan.findings.append(
