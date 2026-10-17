@@ -312,6 +312,10 @@ json_string() { # <value> -> a JSON string literal
   printf '"%s"' "$value"
 }
 
+json_string_or_null() { # <value> -> a JSON string literal, or null when empty
+  if [ -n "$1" ]; then json_string "$1"; else printf 'null'; fi
+}
+
 utc_now() {
   date -u +%Y-%m-%dT%H:%M:%SZ
 }
@@ -335,9 +339,10 @@ record_runtime() { # <index> <status> <elapsed> <timed_out> <left_background>
   local index="$1" status="$2" elapsed="$3" timed_out="$4" left_background="$5"
   local budget="${command_budgets[$index]}"
   runtime_record_by_index["$index"]="$(printf \
-    '{"schema_version":1,"group":"%s","command":%s,"status":%s,"elapsed_seconds":%s,"budget_seconds":%s,"started_at":"%s","ended_at":"%s","timed_out":%s,"left_background":%s,"runner_name":"%s","runner_environment":"%s"}' \
+    '{"schema_version":1,"group":"%s","command":%s,"status":%s,"elapsed_seconds":%s,"budget_seconds":%s,"started_at":"%s","ended_at":"%s","timed_out":%s,"left_background":%s,"runner_name":%s,"runner_environment":%s}' \
     "$group" "$(json_string "${commands[$index]}")" "$status" "$elapsed" "${budget:-null}" \
-    "${command_started_at[$index]}" "$(utc_now)" "$timed_out" "$left_background" "$runner_name" "$runner_environment")"
+    "${command_started_at[$index]}" "$(utc_now)" "$timed_out" "$left_background" \
+    "$(json_string_or_null "$runner_name")" "$(json_string_or_null "$runner_environment")")"
   write_runtime_records
 }
 

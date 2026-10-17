@@ -230,6 +230,19 @@ else
   fail "a row saw the records path or its appended record survived"
 fi
 
+# Outside Actions (a local run) the runner identity is unknown, not empty.
+printf 'platform\ttrue\n' >"$tmp/no-runner.tsv"
+env -u RUNNER_NAME -u RUNNER_ENVIRONMENT ACTIONS_CI_GROUP_MANIFEST="$tmp/no-runner.tsv" \
+  ACTIONS_CI_RUNTIME_RECORDS="$tmp/records/no-runner.jsonl" \
+  bash "$runner" platform >"$tmp/no-runner.out" 2>&1
+actual="$(record_fields no-runner runner_name runner_environment 2>&1)"
+if [ "$actual" = 'null null' ]; then
+  pass "an unknown runner identity is recorded as null"
+else
+  printf 'actual: %s\n' "$actual" >&2
+  fail "an unknown runner identity was recorded as a value"
+fi
+
 if [ "$fails" -ne 0 ]; then
   printf '%d test(s) failed\n' "$fails"
   exit 1
