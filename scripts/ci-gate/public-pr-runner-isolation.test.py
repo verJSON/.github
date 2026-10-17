@@ -3263,6 +3263,33 @@ expect_verify_refused(
 )
 
 # ---------------------------------------------------------------------------
+# Round-7 finding 2: a materialization inside a program verify runs refuses.
+# The hook's one `git show "$pin:…" | bash` (the pinned generator compared
+# against release.yml) is a frozen, reviewed exception matched on its exact
+# bytes and on $pin coming from release.yml's 40-hex header pin.
+# ---------------------------------------------------------------------------
+HOOK = VERIFY["scripts/release-verify.sh"]
+SHOW_LINE = next(line for line in HOOK.splitlines() if line.startswith('git show "$pin:'))
+MATERIALIZES = "materializes tracked content"
+for label, hook, release in (
+    ("an injected git archive in the hook", HOOK + "git archive HEAD scripts | tar -x\n", None),
+    ("a second, identical git show of the pin", HOOK.replace(SHOW_LINE, SHOW_LINE + "\n  || true\n" + SHOW_LINE, 1), None),
+    ("a second git show of the pin naming another file",
+     HOOK + 'git show "$pin:scripts/render-next.sh" | bash\n', None),
+    ("an edit to the tolerated line's bytes", HOOK.replace(SHOW_LINE, SHOW_LINE.replace("cmp -s -", "cmp -s  -"), 1), None),
+    ("an edit to the line that derives $pin", HOOK.replace('pin="$(sed -nE', 'pin="${PIN_OVERRIDE:-$(sed -nE', 1).replace(
+        '.github/workflows/release.yml)"\n', '.github/workflows/release.yml)}"\n', 1), None),
+    ("a release.yml header pin that is not 40-hex", HOOK,
+     re.sub(r"release-node [0-9a-f]{40} ", "release-node main ", VERIFY["release.yml"], count=1)),
+):
+    expect_verify_refused(
+        {**VERIFY, "pending.tsv": VERIFY_ROW, "scripts/release-verify.sh": hook,
+         **({"release.yml": release} if release else {})},
+        f"verify refuses {label}",
+        ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", MATERIALIZES),
+    )
+
+# ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
 # sequences must not decode to the same replacement text and digest), and a
 # relative root is made absolute rather than silently binding nothing.
