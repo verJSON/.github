@@ -303,6 +303,24 @@ else
   fail "the runner ran rows without a usable records path"
 fi
 
+# A records file the runner can no longer write fails the group by name
+# rather than passing with its records silently missing.
+mkdir -p "$tmp/records-locked"
+status="$(
+  printf 'platform\tchmod 555 %q\n' "$tmp/records-locked" >"$tmp/locked.tsv"
+  ACTIONS_CI_GROUP_MANIFEST="$tmp/locked.tsv" \
+    ACTIONS_CI_RUNTIME_RECORDS="$tmp/records-locked/locked.jsonl" \
+    bash "$runner" platform >"$tmp/locked.out" 2>"$tmp/locked.err" || printf '%s' "$?"
+)"
+chmod 755 "$tmp/records-locked"
+if [ "${status:-0}" -eq 1 ] \
+  && grep -q '^::error::.*runtime records could not be written' "$tmp/locked.out"; then
+  pass "a records file that cannot be written fails the group"
+else
+  cat "$tmp/locked.out" "$tmp/locked.err" >&2
+  fail "the group passed although its runtime records could not be written"
+fi
+
 if [ "$fails" -ne 0 ]; then
   printf '%d test(s) failed\n' "$fails"
   exit 1

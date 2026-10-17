@@ -104,6 +104,7 @@ declare -A worker_reported_by_index=()
 declare -A command_started_at=()
 declare -A runtime_record_by_index=()
 worker_wait_failures=0
+records_write_failed=0
 failures=0
 commands_started=0
 # Count the selected rows independently of the parser below, so any path that
@@ -336,7 +337,15 @@ write_runtime_records() {
       [ -z "${runtime_record_by_index[$index]+set}" ] \
         || printf '%s\n' "${runtime_record_by_index[$index]}"
     done
-  } >"$staged" && mv -f -- "$staged" "$records_file"
+  } >"$staged" 2>/dev/null && mv -f -- "$staged" "$records_file" 2>/dev/null && return 0
+  rm -f -- "$staged" 2>/dev/null
+  # Fail once by name; a group whose records are incomplete must not pass.
+  if [ "$records_write_failed" -eq 0 ]; then
+    records_write_failed=1
+    failures=$((failures + 1))
+    printf '\n::error::group=%s runtime records could not be written\n' "$group"
+  fi
+  return 1
 }
 
 # The four result arguments are JSON literals; a row without a usable worker
@@ -349,7 +358,7 @@ record_runtime() { # <index> <status> <elapsed> <timed_out> <left_background>
     "$group" "$(json_string "${commands[$index]}")" "$status" "$elapsed" "${budget:-null}" \
     "${command_started_at[$index]}" "$(utc_now)" "$timed_out" "$left_background" \
     "$(json_string_or_null "$runner_name")" "$(json_string_or_null "$runner_environment")")"
-  write_runtime_records
+  write_runtime_records || true
 }
 
 trap cleanup_group_runner EXIT
