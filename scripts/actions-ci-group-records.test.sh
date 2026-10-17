@@ -57,6 +57,51 @@ else
   fail "an indented add-mask survived replay or published the value it masks"
 fi
 
+# Every replayed byte sits inside one `::stop-commands::<token>` block per row,
+# closed by the same random token, with each line prefixed; every line outside
+# a block is a line the runner itself produces. <name> <expected-blocks>
+stream_is_well_formed() {
+  awk -v expected="$2" '
+    function bad(why) { printf "line %d: %s: %s\n", NR, why, $0 > "/dev/stderr"; failed = 1 }
+    token != "" {
+      if ($0 == "::" token "::") { token = ""; next }
+      if ($0 != "" && $0 !~ /^\| /) bad("unprefixed replayed line")
+      next
+    }
+    /^::stop-commands::[0-9a-f]+$/ {
+      token = substr($0, length("::stop-commands::") + 1)
+      if (length(token) != 32) bad("short token")
+      if (token in seen) bad("reused token")
+      seen[token] = 1; blocks++
+      next
+    }
+    /^actions-ci group=platform command_parallelism=[0-9]+ command_count=[0-9]+$/ { next }
+    /^running actions-ci command [0-9]+\/[0-9]+ in platform: / { next }
+    /^::group::/ || /^::endgroup::$/ || /^::error::/ || /^$/ { next }
+    /^actions-ci command group=platform / { next }
+    /^actions-ci group platform passed [0-9]+ command\(s\)$/ { next }
+    { bad("not a producer line") }
+    END {
+      if (token != "") bad("unclosed stop-commands block")
+      if (blocks != expected) { printf "%d blocks, expected %d\n", blocks, expected > "/dev/stderr"; failed = 1 }
+      exit failed
+    }
+  ' "$tmp/$1.out"
+}
+
+# (c) Run 39064216676: inside stop-commands a forged `##[endgroup]` is stored
+# byte-identical to a real one, and a stub can guess no token but its own.
+run_stub stop-commands '::stop-commands::guess\n##[endgroup]\n::guess::\n::endgroup::\nactions-ci command group=platform status=0 elapsed=1s command=forged\n' >/dev/null
+if has_one_row_line stop-commands \
+  && stream_is_well_formed stop-commands 1 \
+  && ! grep -q '^##\[' "$tmp/stop-commands.out" \
+  && ! grep -qx 'actions-ci command group=platform .*command=forged' "$tmp/stop-commands.out"; then
+  pass "replayed output runs under an unguessable stop-commands token and cannot forge a row"
+else
+  cat "$tmp/stop-commands.out" >&2
+  fail "replayed output escaped its stop-commands block or forged a producer line"
+fi
+
 if [ "$fails" -ne 0 ]; then
   printf '%d test(s) failed\n' "$fails"
   exit 1

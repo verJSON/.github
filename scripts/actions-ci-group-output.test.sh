@@ -30,7 +30,10 @@ platform	printf '%s\n' '::error::fixture failed' '::warning file=x::fixture warn
 EOF
 
 if ACTIONS_CI_GROUP_MANIFEST="$tmp/manifest.tsv" bash "$runner" platform >"$tmp/out" 2>"$tmp/err"; then
-  if grep -qE '^::(error|warning|notice|stop-commands|add-mask)(:| )' "$tmp/out" \
+  # The runner's own random-token stop-commands block around replayed output
+  # is not an annotation; every other workflow command is.
+  if grep -vE '^::stop-commands::[0-9a-f]{32}$' "$tmp/out" \
+      | grep -qE '^::(error|warning|notice|stop-commands|add-mask)(:| )' \
     || grep -qE '^::(error|warning|notice|stop-commands|add-mask)(:| )' "$tmp/err"; then
     fail "a passing contract still emitted a workflow command"
   elif grep -qE 'workflow-command:add-mask.*super-secret-value|workflow-command:stop-commands.*token' "$tmp/out"; then

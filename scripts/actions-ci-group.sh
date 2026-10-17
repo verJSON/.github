@@ -259,11 +259,24 @@ sanitize_command_output_for_index() {
   rm -f -- "$raw_log"
 }
 
-# Replayed output is prefixed line by line, and awk terminates its last line,
-# so no command byte can start a producer line or run into the row after it
-# (verjson-observability#271).
+# Replay a command's output so that no byte of it can act as, end, or forge a
+# producer line (verjson-observability#271). The runner ignores workflow
+# commands between `::stop-commands::<token>` and `::<token>::`; the token is
+# drawn here, after the command exited, so nothing it printed can contain it.
+# Each line is prefixed, which keeps a stored `##[endgroup]` or row text from
+# byte-matching a producer line, and awk terminates the last line, so an
+# unterminated tail cannot run into the resume line or the row after it.
 replay_command_output() {
-  awk '{ print "| " $0 }' "$1"
+  local log_file="$1" token status=0
+  token="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+  if [[ ! "$token" =~ ^[0-9a-f]{32}$ ]]; then
+    printf '\n::error::group=%s could not draw a stop-commands token; output withheld\n' "$group"
+    return 1
+  fi
+  printf '::stop-commands::%s\n' "$token"
+  awk '{ print "| " $0 }' "$log_file" || status=$?
+  printf '\n::%s::\n' "$token"
+  return "$status"
 }
 
 trap cleanup_group_runner EXIT
@@ -406,7 +419,7 @@ report_worker_result() {
   if [ ! -f "$status_file" ] || [ ! -f "$log_file" ]; then
     printf '::error::group=%s command=%q worker did not produce complete result files\n' \
       "$group" "${commands[$index]}"
-    if [ -f "$log_file" ] && ! cat -- "$log_file"; then
+    if [ -f "$log_file" ] && ! replay_command_output "$log_file"; then
       printf '::error::group=%s command=%q log could not be read\n' \
         "$group" "${commands[$index]}"
     fi
@@ -422,7 +435,7 @@ report_worker_result() {
     || [[ ! "$status" =~ ^[0-9]+$ || ! "$elapsed" =~ ^[0-9]+$ ]]; then
     printf '::error::group=%s command=%q worker result is malformed\n' \
       "$group" "${commands[$index]}"
-    if ! cat -- "$log_file"; then
+    if ! replay_command_output "$log_file"; then
       printf '::error::group=%s command=%q log could not be read\n' \
         "$group" "${commands[$index]}"
     fi
