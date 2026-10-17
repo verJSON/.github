@@ -74,4 +74,6 @@ stops the row applying.
 its own workflow file comes from, instead of `pull_request.base.sha`.
 A new `runner-isolation` workflow runs the check on every pull request and push
 to `main` with no path filter, because the review digests bind tracked files
-outside `actions-ci`'s path filter.
+outside `actions-ci`'s path filter. `actions-ci` also runs it as a
+`runner-isolation` job that the required `shell-tests` aggregate needs, so a
+failing check blocks a merge.

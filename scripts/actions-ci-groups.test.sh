@@ -40,6 +40,7 @@ assert set(jobs) == {
     "docs-contracts",
     "hosted-compatibility-tests",
     "adr-number-collision",
+    "runner-isolation",
     "shell-tests",
 }
 assert jobs["shell-test-groups"]["needs"] == "change-scope"
@@ -54,6 +55,7 @@ assert jobs["hosted-compatibility-tests"]["if"] == (
 )
 assert "if" not in jobs["change-scope"]
 assert "if" not in jobs["docs-contracts"]
+assert "if" not in jobs["runner-isolation"]
 assert jobs["adr-number-collision"]["if"] == "github.event_name == 'pull_request'"
 assert jobs["shell-tests"]["if"] == (
     "${{ always() && (github.event_name != 'pull_request' "
@@ -296,6 +298,7 @@ assert required["needs"] == [
     "docs-contracts",
     "hosted-compatibility-tests",
     "adr-number-collision",
+    "runner-isolation",
 ]
 assert required["if"] == (
     "${{ always() && (github.event_name != 'pull_request' "
@@ -310,10 +313,17 @@ assert required["steps"][0]["env"] == {
     "DOCS_RESULT": "${{ needs.docs-contracts.result }}",
     "COMPATIBILITY_RESULT": "${{ needs.hosted-compatibility-tests.result }}",
     "COLLISION_RESULT": "${{ needs.adr-number-collision.result }}",
+    "ISOLATION_RESULT": "${{ needs.runner-isolation.result }}",
 }
 assert required["steps"][0]["run"] == (
     'if [ "$SCOPE_RESULT" != "success" ]; then\n'
     '  echo "::error::changed-path classification failed"\n'
+    "  exit 1\n"
+    "fi\n"
+    "# ADR 0235: the runner-isolation contract runs on every event, so\n"
+    "# anything but success, including skipped, fails the required context.\n"
+    'if [ "$ISOLATION_RESULT" != "success" ]; then\n'
+    '  echo "::error::runner-isolation contract failed (ADR 0235)"\n'
     "  exit 1\n"
     "fi\n"
     'if [ "$DOCS_RESULT" != "success" ]; then\n'

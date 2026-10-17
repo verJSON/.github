@@ -13,7 +13,7 @@ contract tests. These jobs run while a pull request is a draft.
 | --- | --- |
 | `actionlint` and `actionlint reusable-call contract` | Workflow lint and reusable-call checks |
 | `Authn required type surface` | Required type-surface build and compatibility check |
-| `actions-ci` | `change-scope`, `docs-contracts`, and `adr-number-collision` |
+| `actions-ci` | `change-scope`, `docs-contracts`, `adr-number-collision`, and `runner-isolation` |
 | `CLI projects required package surface` | `admission` validates the exact consumer pull-request identity |
 | `runner-isolation` | ADR 0235's runner-isolation contract, on every pull request with no path filter |
 
@@ -73,6 +73,8 @@ that materializes, or may materialize, a pull request head cannot be listed at
 all. `scripts/ci-gate/public-pr-runner-isolation.pending.tsv` holds the exact,
 digest-ratcheted list of canonical reusable workflows and relayed jobs still
 pending that change ([#1831](https://github.com/verJSON/.github/issues/1831)).
-The `runner-isolation` workflow runs the check on every pull request and every
-push to `main`, because its digests bind tracked files outside `actions-ci`'s
-path filter.
+`actions-ci`'s `runner-isolation` job runs the check inside the required
+`shell-tests` aggregate, which fails unless that job succeeded. The standalone
+`runner-isolation` workflow also runs it on every pull request and every push
+to `main`, because its digests bind tracked files outside `actions-ci`'s path
+filter.

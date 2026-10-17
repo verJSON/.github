@@ -58,6 +58,7 @@ platform	bash scripts/ci-gate/generated-artifacts.test.sh
 platform	bash scripts/ci-gate/runner-routing-policy.test.sh
 platform	bash scripts/ci-gate/runner-routing-policy-cwd.test.sh
 platform	python3 scripts/ci-gate/public-pr-runner-isolation.test.py
+platform	python3 scripts/ci-gate/runner-isolation-required.test.py
 platform	python3 scripts/ci-gate/public-pr-runner-isolation.py --pending scripts/ci-gate/public-pr-runner-isolation.pending.tsv --reviewed scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv .github/workflows
 platform	@budget=90 python3 scripts/ci-gate/hosted-selector-policy.test.py
 platform	python3 scripts/ci-gate/generated-changelog-selector-policy.test.py

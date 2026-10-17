@@ -522,3 +522,22 @@ digest of a full checkout changes on every commit. A backlog row records an
 accepted exposure rather than a safety claim, so binding the job's own
 definition is the bound that matters; the scanned bytes stay under the
 repository's normal review.
+
+### 2. The runner-isolation check is part of the required `shell-tests` context
+
+**Finding.** The checker ran only in the standalone `runner-isolation`
+workflow. Repository ruleset `core-checks-actions` (20515822) requires only the
+`shell-tests` context, so a red isolation run was advisory and a pull request
+could merge past it.
+
+**Decision.** `actions-ci.yml` gains a `runner-isolation` job (no draft guard,
+untrusted lane, the same checkout-isolated steps as the standalone workflow),
+and the `shell-tests` aggregate needs it and fails unless its result is
+`success`; `skipped` and `cancelled` fail too, because the job has no `if:`.
+`scripts/ci-gate/runner-isolation-required.test.py` executes the live
+aggregate step against stubbed `needs` results. The standalone workflow stays,
+because `actions-ci` is path-filtered (#233, #234) and the review digests bind
+files outside that filter; on such a diff the required context does not report
+at all, so the standalone run is the signal there. Making the standalone
+context required would be a ruleset change, which is the owner's decision and
+is not taken here.
