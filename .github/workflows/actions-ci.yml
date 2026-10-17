@@ -145,8 +145,11 @@ jobs:
           ACTIONS_CI_SHELLCHECK_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.sha || '' }}
           ACTIONS_CI_COMMAND_BUDGET_SECONDS: ${{ github.event_name == 'pull_request' && '60' || '' }}
           # The runner unsets this before any row starts and writes one JSON
-          # record per row after it is reaped (verjson-observability#271).
-          ACTIONS_CI_RUNTIME_RECORDS: ${{ runner.temp }}/actions-ci-runtime-records/${{ matrix.group }}.jsonl
+          # record per row after it is reaped (verjson-observability#271). The
+          # run and attempt keep reused self-hosted temp dirs apart, as for
+          # the checkout path above. The docs and locale-collation groups
+          # write no records.
+          ACTIONS_CI_RUNTIME_RECORDS: ${{ runner.temp }}/actions-ci-runtime-records-${{ github.run_id }}-${{ github.run_attempt }}/${{ matrix.group }}.jsonl
         run: |
           source_root="$GITHUB_WORKSPACE/.actions-ci-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.group }}"
           group_root="$(mktemp -d "$RUNNER_TEMP/actions-ci-${{ matrix.group }}.XXXXXX")"
@@ -160,7 +163,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: actions-ci-runtime-records-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.group }}
-          path: ${{ runner.temp }}/actions-ci-runtime-records/${{ matrix.group }}.jsonl
+          path: ${{ runner.temp }}/actions-ci-runtime-records-${{ github.run_id }}-${{ github.run_attempt }}/${{ matrix.group }}.jsonl
           retention-days: 7
           if-no-files-found: warn
 

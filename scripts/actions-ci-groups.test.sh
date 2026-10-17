@@ -158,7 +158,8 @@ assert group_step["env"] == {
     ),
     # Outside the group's checkout copy, which the step removes on exit.
     "ACTIONS_CI_RUNTIME_RECORDS": (
-        "${{ runner.temp }}/actions-ci-runtime-records/${{ matrix.group }}.jsonl"
+        "${{ runner.temp }}/actions-ci-runtime-records-${{ github.run_id }}-"
+        "${{ github.run_attempt }}/${{ matrix.group }}.jsonl"
     ),
 }
 # Runtime records (verjson-observability#271) upload from every cell even when
@@ -173,7 +174,10 @@ assert records_upload == {
             "actions-ci-runtime-records-${{ github.run_id }}-"
             "${{ github.run_attempt }}-${{ matrix.group }}"
         ),
-        "path": "${{ runner.temp }}/actions-ci-runtime-records/${{ matrix.group }}.jsonl",
+        "path": (
+            "${{ runner.temp }}/actions-ci-runtime-records-${{ github.run_id }}-"
+            "${{ github.run_attempt }}/${{ matrix.group }}.jsonl"
+        ),
         "retention-days": 7,
         "if-no-files-found": "warn",
     },
