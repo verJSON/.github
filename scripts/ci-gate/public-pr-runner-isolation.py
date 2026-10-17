@@ -909,6 +909,9 @@ def tree_programs(job: dict, root: str, excluded: frozenset[str] = frozenset()) 
     and the scripts they run directly, so documentation a deeper check reads
     is not bound. Links bind as their target text and are never read through.
     """
+    # A relative root ('.') would make every candidate fail read_program's
+    # containment check and bind nothing; fail fast to an absolute one.
+    root = os.path.abspath(root)
     tracked = tracked_paths(root)
     found: dict[str, str] = {}
 
@@ -919,11 +922,14 @@ def tree_programs(job: dict, root: str, excluded: frozenset[str] = frozenset()) 
         if os.path.islink(path):
             found[relative] = "link " + os.readlink(path)
             return None
-        content = read_program(root, relative)
-        if content is None:
+        if read_program(root, relative) is None:
             return None
-        found[relative] = hashlib.sha256(content.encode("utf-8", "surrogateescape")).hexdigest()
-        return content
+        with open(path, "rb") as handle:
+            raw = handle.read()
+        # Hash the bytes, not decoded text: invalid sequences would otherwise
+        # collapse to one replacement character and one digest.
+        found[relative] = hashlib.sha256(raw).hexdigest()
+        return raw.decode("utf-8", "surrogateescape")
 
     queue = [
         ("", without_comments(step["run"]), 0)

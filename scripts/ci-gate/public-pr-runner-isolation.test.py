@@ -3262,4 +3262,39 @@ expect_verify_refused(
     ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNBOUND),
 )
 
+# ---------------------------------------------------------------------------
+# Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
+# sequences must not decode to the same replacement text and digest), and a
+# relative root is made absolute rather than silently binding nothing.
+# ---------------------------------------------------------------------------
+def trace_tree(files: dict[str, bytes], steps: str) -> dict:
+    with tempfile.TemporaryDirectory() as root:
+        for name, body in files.items():
+            os.makedirs(os.path.dirname(os.path.join(root, name)) or root, exist_ok=True)
+            with open(os.path.join(root, name), "wb") as handle:
+                handle.write(body)
+        subprocess.run(["git", "init", "-q", root], check=True)
+        subprocess.run(["git", "-C", root, "add", "-A"], check=True)
+        job = {"steps": [{"run": steps}]}
+        absolute = CHECKER.tree_programs(job, root)
+        here = os.getcwd()
+        os.chdir(root)
+        try:
+            relative = CHECKER.tree_programs(job, ".")
+        finally:
+            os.chdir(here)
+    return {"absolute": absolute, "relative": relative}
+
+
+BYTES_A = trace_tree({"scripts/x.sh": b"echo \xff\n"}, "bash scripts/x.sh")
+BYTES_B = trace_tree({"scripts/x.sh": b"echo \xfe\n"}, "bash scripts/x.sh")
+if BYTES_A["absolute"].get("scripts/x.sh") and BYTES_A["absolute"] != BYTES_B["absolute"]:
+    ok("the verify binding hashes raw bytes: different invalid UTF-8 bytes bind different digests")
+else:
+    fail(f"the verify binding decoded bytes before hashing ({BYTES_A['absolute']} vs {BYTES_B['absolute']})")
+if BYTES_A["relative"] == BYTES_A["absolute"] and BYTES_A["absolute"]:
+    ok("tree_programs with a relative root binds what it binds with the absolute root")
+else:
+    fail(f"tree_programs with a relative root bound {BYTES_A['relative']}, not {BYTES_A['absolute']}")
+
 sys.exit(1 if failures else 0)
