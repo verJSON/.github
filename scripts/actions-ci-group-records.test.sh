@@ -396,21 +396,45 @@ else
 fi
 
 # The runner stages each rewrite under a name no row can predict, so a row
-# that plants a symlink at a guessable staging name cannot redirect it.
+# that plants symlinks at the guessable staging names cannot redirect it. An
+# `mv` shim logs each staging name so two runs can be compared.
+mkdir -p "$tmp/mv-shim"
+real_mv="$(command -v mv)"
+cat >"$tmp/mv-shim/mv" <<EOF
+#!/usr/bin/env bash
+[ "\$#" -ne 4 ] || [ "\$1 \$2" != '-f --' ] || printf '%s\n' "\$3" >>"$tmp/staging-names"
+exec "$real_mv" "\$@"
+EOF
+chmod +x "$tmp/mv-shim/mv"
 cat >"$tmp/plant-staging.sh" <<EOF
-printf 'precious\n' >"$tmp/precious"
-for candidate in \$(pgrep -f "$runner"); do
-  ln -sf "$tmp/precious" "$tmp/records/staging.jsonl.\$candidate"
+records="\$1"
+for suffix in .tmp .new '~' \$(pgrep -f "$runner" | sed 's/^/./'); do
+  printf 'precious\n' >"$tmp/precious\$suffix"
+  ln -sfn "$tmp/precious\$suffix" "\$records\$suffix"
 done
 EOF
-status="$(run_recorded staging 60 "platform	bash $tmp/plant-staging.sh")"
-if [ "$(cat "$tmp/precious")" = precious ] \
-  && [ "$(record_fields staging status 2>&1)" = 0 ] \
-  && [ ! -L "$tmp/records/staging.jsonl" ]; then
-  pass "a symlink planted at a predictable staging name cannot redirect the records"
+staging_ok=1
+: >"$tmp/staging-names"
+for attempt in 1 2; do
+  status="$(PATH="$tmp/mv-shim:$PATH" run_recorded "staging-$attempt" 60 \
+    "platform	bash $tmp/plant-staging.sh $tmp/records/staging-$attempt.jsonl")"
+  if [ "$status" -ne 0 ] || [ -L "$tmp/records/staging-$attempt.jsonl" ] \
+    || [ "$(record_fields "staging-$attempt" status 2>&1)" != 0 ]; then
+    staging_ok=0
+  fi
+done
+for planted in "$tmp"/precious.* "$tmp"/precious~; do
+  [ "$(cat "$planted")" = precious ] || { printf 'overwritten: %s\n' "$planted" >&2; staging_ok=0; }
+done
+# One rewrite per run; the two names differ once the per-run path is removed.
+names="$(sed -E 's#/staging-[12]\.jsonl#/staging-N.jsonl#' "$tmp/staging-names")"
+if [ "$staging_ok" -eq 1 ] && [ "$(grep -c '' <<<"$names")" -eq 2 ] \
+  && [ "$(sort -u <<<"$names" | grep -c '')" -eq 2 ] \
+  && ! grep -Eq '\.(tmp|new|[0-9]+)$|~$' <<<"$names"; then
+  pass "staging names are unpredictable and planted symlinks cannot redirect the records"
 else
-  printf 'precious now: %s\n' "$(head -c 200 "$tmp/precious")" >&2
-  fail "the records rewrite followed a symlink a row planted"
+  printf 'staging names:\n%s\n' "$(cat "$tmp/staging-names")" >&2
+  fail "the records rewrite used a predictable staging name or followed a planted symlink"
 fi
 
 if [ "$fails" -ne 0 ]; then
