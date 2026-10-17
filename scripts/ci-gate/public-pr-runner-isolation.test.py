@@ -3209,8 +3209,11 @@ VERIFY_FILES = (
     "scripts/doc-fragment-names.test.sh",
     "scripts/doc-fragment-names.sh",
     "scripts/ci-gate/contract-tools-package.test.js",
+    "bin/render-next.js",
+    "bin/gen-adr-index.js",
     "scripts/gen-changelog-caller.sh",
-    "package.json",
+    # A bare name would land in .github/workflows; this is the repository root.
+    "./package.json",
 )
 VERIFY = {"release.yml": live(".github/workflows/release.yml"), **{path: live(path) for path in VERIFY_FILES}}
 # release.yml's snapshot and publish are backlog jobs too; their rows keep
@@ -3287,6 +3290,29 @@ for label, hook, release in (
          **({"release.yml": release} if release else {})},
         f"verify refuses {label}",
         ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", MATERIALIZES),
+    )
+
+# ---------------------------------------------------------------------------
+# Round-7 finding 1: verify runs JavaScript. contract-tools-package.test.js
+# packs the package (`npm pack`) and runs its bins, which run changelog.py and
+# gen-adr-index.sh, so the row binds everything `files` and `bin` select, and a
+# spawn target the trace cannot read refuses as unresolved-program.
+# ---------------------------------------------------------------------------
+CONTRACT_TEST = "scripts/ci-gate/contract-tools-package.test.js"
+for bin_file in ("bin/render-next.js", "bin/gen-adr-index.js"):
+    expect_verify_refused({**VERIFY, "pending.tsv": VERIFY_ROW, bin_file: VERIFY[bin_file] + "// changed\n"},
+                          f"verify's row stops applying when the packed bin {bin_file} changes",
+                          ("pending row no longer applies",))
+for label, line, fragment in (
+    ("a spawn of a computed program", "spawnSync(toolFromEnvironment, []);\n", "unresolved-program"),
+    ("a computed require", "require(modulePath);\n", "unresolved-program"),
+    ("an npx spawn", 'spawnSync("npx", ["some-tool"]);\n', "unresolved-program"),
+    ("a git show spawn", 'spawnSync("git", ["show", "HEAD:scripts/changelog.py"]);\n', "materializes tracked content"),
+):
+    expect_verify_refused(
+        {**VERIFY, "pending.tsv": VERIFY_ROW, CONTRACT_TEST: VERIFY[CONTRACT_TEST] + line},
+        f"verify refuses {label} in the JavaScript it runs",
+        ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", fragment),
     )
 
 # ---------------------------------------------------------------------------

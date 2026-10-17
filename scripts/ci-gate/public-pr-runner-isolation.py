@@ -1186,6 +1186,8 @@ class ProgramTrace:
         try:
             if program.endswith(".py") or re.match(r"#!.*\bpython", content):
                 self.python(content, program, depth)
+            elif program.endswith((".js", ".mjs", ".cjs")) or re.match(r"#!.*\bnode\b", content):
+                self.javascript(content, program, depth)
             elif is_shell_script(program, content):
                 self.shell(content, program, depth, data=depth <= 1)
         finally:
@@ -1406,7 +1408,9 @@ class ProgramTrace:
         while index < len(args) and args[index].startswith("-") and args[index] != "-":
             flag = args[index]
             if flag in ("-e", "-p", "--eval", "--print"):
-                return  # inline code, bound as the text that holds it
+                if index + 1 < len(args):
+                    self.javascript(args[index + 1], origin, depth, inline=True)
+                return
             if flag in ("-r", "--require", "--import", "--loader", "--experimental-loader"):
                 if index + 1 < len(args):
                     self.run_target(args[index + 1], origin, assignments, depth, "node preload")
@@ -1416,7 +1420,7 @@ class ProgramTrace:
         if index < len(args) and args[index] != "-":
             return self.run_target(args[index], origin, assignments, depth, "node program")
         if stdin in heredocs:
-            return
+            return self.javascript(heredocs[stdin], origin, depth, inline=True)
         self.unresolve(f"{where}: node reading its program from a pipe")
 
     def npm(self, args, origin, depth, where) -> None:
@@ -1429,6 +1433,8 @@ class ProgramTrace:
             if isinstance(scripts.get(script), str):
                 self.shell(scripts[script], "package.json", depth + 1)
             return
+        if verb == "pack":
+            return self.pack(depth)
         if verb in ("ci", "install", "i", "rebuild", "version"):
             # Dependency lifecycle code comes from package-lock.json and the
             # registry, not the scanned tree: ADR 0235's named residual. The
@@ -1439,6 +1445,27 @@ class ProgramTrace:
                         self.shell(scripts[name], "package.json", depth + 1)
             return
         self.unresolve(f"{where}: npm {verb or '(no command)'} is not traced")
+
+    def pack(self, depth: int) -> None:
+        """`npm pack` puts package.json and what its `files` and `bin` select in
+        the package, and its bins are what a consumer runs. (npm also adds
+        README and LICENSE files; they are documents nothing executes, so they
+        are not bound.)"""
+        self.bind("package.json")
+        selected = set()
+        for entry in self.package.get("files") or []:
+            entry = os.path.normpath(str(entry))
+            selected |= {path for path in self.tracked if path == entry or path.startswith(entry + os.sep)}
+        for path in sorted(selected):
+            self.bind(path)
+        for target in self.bins().values():
+            self.reach(target, depth + 1, "package bin")
+
+    def bins(self) -> dict[str, str]:
+        bins = self.package.get("bin")
+        if isinstance(bins, str):
+            bins = {str(self.package.get("name", "")).split("/")[-1]: bins}
+        return {name: os.path.normpath(str(path)) for name, path in (bins or {}).items()}
 
     # -- python ----------------------------------------------------------
     def python(self, source: str, origin: str, depth: int, argv=None, inline: bool = False) -> None:
@@ -1542,6 +1569,125 @@ class ProgramTrace:
                 self.reach(value[1], depth + 1, f"loaded by {origin or 'inline python'}")
             elif not value or value[0] != "external":
                 self.unresolve(f"{where}: loads code this checker cannot resolve")
+
+    # -- javascript ------------------------------------------------------
+    def javascript(self, source: str, origin: str, depth: int, inline: bool = False) -> None:
+        base = os.path.dirname(origin) if not inline else ""
+        for literal in re.findall(r"\brequire\(\s*(?:\"([^\"]+)\"|'([^']+)')\s*\)", source):
+            module = literal[0] or literal[1]
+            if module.startswith("."):
+                for candidate in (module, module + ".js", os.path.join(module, "index.js")):
+                    path = os.path.normpath(os.path.join(base, candidate))
+                    if path in self.tracked:
+                        self.reach(path, depth + 1, f"required by {origin}")
+                        break
+                else:
+                    self.unresolve(f"{origin}: require({module!r}) is not a file in the scanned tree")
+        if re.search(r"\brequire\(\s*[^\"'\s)]", source) or re.search(r"\bimport\(", source):
+            self.unresolve(f"{origin or 'inline javascript'}: a computed require or import")
+        constants = {
+            name: os.path.normpath(os.path.join(base, path))
+            for name, path in re.findall(
+                r"(?:const|let|var)\s+(\w+)\s*=\s*path\.(?:resolve|join)\(\s*__dirname\s*,\s*[\"']([^\"']+)[\"']\s*\)",
+                source,
+            )
+        }
+        wrappers = {
+            name: parameter
+            for name, parameter, body in re.findall(r"function\s+(\w+)\s*\(\s*(\w+)[^)]*\)\s*\{(.*?)\n\}", source, re.S)
+            if re.search(r"\b(?:spawnSync|spawn|execFileSync|execFile|fork)\(\s*" + parameter + r"\b", body)
+        }
+        for name in {"spawnSync", "spawn", "execFileSync", "execFile", "fork", "execSync", "exec"} | set(wrappers):
+            for match in re.finditer(r"(?<![\w.])(?:child_process\.)?" + name + r"\s*\(", source):
+                if re.search(r"function\s+$", source[max(0, match.start() - 20) : match.start()]):
+                    continue
+                arguments = javascript_arguments(source, match.end())
+                if not arguments:
+                    continue
+                if arguments[0].strip() in set(wrappers.values()):
+                    continue  # the wrapper's own forwarding call
+                self.javascript_spawn(name, arguments, constants, origin, depth)
+
+    def javascript_spawn(self, name, arguments, constants, origin, depth) -> None:
+        where = f"{origin or 'inline javascript'}: {name}({arguments[0].strip()[:40]}, …)"
+        first = arguments[0].strip()
+        literal = re.fullmatch(r"[\"']([^\"']*)[\"']", first)
+        if name in ("execSync", "exec"):
+            if literal:
+                self.shell(literal.group(1), origin, depth)
+            else:
+                self.unresolve(f"{where}: a shell command this checker cannot read")
+            return
+        vector = []
+        if len(arguments) > 1:
+            array = re.match(r"\s*\[(.*)\]\s*$", arguments[1], re.S)
+            vector = [item.strip() for item in javascript_arguments(array.group(1) + ")", 0)] if array else []
+        if literal:
+            program = os.path.basename(literal.group(1))
+            if program == "npm":
+                verbs = [re.sub(r"^[\"']|[\"']$", "", item) for item in vector]
+                return self.npm(verbs, origin, depth, where)
+            if program == "npx":
+                self.unresolve(f"{where}: npx runs a package this checker cannot read")
+                return
+            verb = re.sub(r"^[\"']|[\"']$", "", vector[0]) if vector else ""
+            if program == "git" and verb in ("show", "archive", "cat-file"):
+                self.texts.append((origin, "git " + " ".join(re.sub(r"^[\"']|[\"']$", "", item) for item in vector)))
+                return
+            if program in SHELL_NAMES | PYTHON_NAMES | NODE_NAMES | OTHER_INTERPRETERS:
+                target = vector[0] if vector else ""
+                target_literal = re.fullmatch(r"[\"']([^\"'-][^\"']*)[\"']", target)
+                if target in constants:
+                    return self.reach(constants[target], depth + 1, f"run by {origin}")
+                if target_literal:
+                    kind, value = self.resolve(target_literal.group(1), origin, {})
+                    if kind == "tree":
+                        return self.reach(value, depth + 1, f"run by {origin}")
+                    if kind == "external":
+                        return
+                self.unresolve(f"{where}: an interpreter whose program this checker cannot read")
+            return
+        if first in constants:
+            return self.reach(constants[first], depth + 1, f"run by {origin}")
+        bin_match = re.search(r"node_modules/\.bin/([\w.-]+)[\"']\s*\)\s*$", first)
+        if bin_match and bin_match.group(1) in self.bins():
+            # Running a package bin runs what `npm pack` selects; bind it all.
+            return self.pack(depth)
+        self.unresolve(f"{where}: a program this checker cannot read")
+
+
+def javascript_arguments(source: str, start: int) -> list[str]:
+    """Top-level comma-separated arguments from `start` to the closing paren."""
+    depth, quote, current, out = 0, "", [], []
+    index = start
+    while index < len(source):
+        char = source[index]
+        if quote:
+            current.append(char)
+            if char == "\\":
+                current.append(source[index + 1 : index + 2])
+                index += 1
+            elif char == quote:
+                quote = ""
+        elif char in "\"'`":
+            quote = char
+            current.append(char)
+        elif char in "([{":
+            depth += 1
+            current.append(char)
+        elif char in ")]}":
+            if depth == 0:
+                out.append("".join(current))
+                return [item for item in out if item.strip()]
+            depth -= 1
+            current.append(char)
+        elif char == "," and depth == 0:
+            out.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    return []
 
 
 def tree_programs(

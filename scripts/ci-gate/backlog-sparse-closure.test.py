@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import os
 import re
 import shlex
@@ -187,6 +188,18 @@ class BacklogSparseClosureTests(unittest.TestCase):
         }
         compared = {path for path in re.findall(r"[\w./-]+", text) if path in TRACKED} - runs_from_hook
         expected = {hook} | runs_from_hook | compared
+        # A JavaScript test the hook runs packs the package and runs its bins:
+        # everything package.json's `files` and `bin` select is code it runs.
+        package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+        packers = [path for path in runs_from_hook if path.endswith(".js")
+                   and re.search(r"[\"']pack[\"']", (ROOT / path).read_text(encoding="utf-8"))]
+        self.assertTrue(packers, "the hook no longer runs a packing JavaScript test; revisit this reader")
+        packed = set(package.get("bin", {}).values())
+        for entry in package.get("files", []):
+            entry = os.path.normpath(entry)
+            packed |= {path for path in TRACKED if path == entry or path.startswith(entry + os.sep)}
+        self.assertTrue({"bin/render-next.js", "bin/gen-adr-index.js"} <= packed)
+        expected |= packed
         self.assertGreaterEqual(len(runs_from_hook), 5)
         self.assertIn(".github/workflows/release.yml", compared)
         self.assertIn("scripts/gen-changelog-caller.sh", compared)
