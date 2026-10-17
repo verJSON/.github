@@ -33,30 +33,6 @@ has_one_row_line() { # <name>: exactly one whole, unmodified row line was produc
     "$tmp/$1.out")" -eq 1 ]
 }
 
-# (a) Run 39064216676: output ending in `##[endgroup]` with no newline is
-# stored as a bare `##[endgroup]` and the producer's next line is lost.
-run_stub unterminated 'output line\n##[endgroup]' >/dev/null
-if has_one_row_line unterminated \
-  && ! grep -q '^##\[' "$tmp/unterminated.out"; then
-  pass "output without a final newline cannot swallow the row or close its group"
-else
-  cat "$tmp/unterminated.out" >&2
-  fail "unterminated output hid the row or replayed a bare ##[endgroup]"
-fi
-
-# (b) Run 39064216676: the runner trims leading whitespace, so
-# ` ::add-mask::command group=` masked every later row as `actions-ci ***`.
-run_stub leading-space ' ::add-mask::command group=\n' >/dev/null
-if has_one_row_line leading-space \
-  && ! grep -Eq '^[[:space:]]*::add-mask::' "$tmp/leading-space.out" \
-  && ! grep -q 'command group=$' "$tmp/leading-space.out" \
-  && grep -q '\[workflow-command:add-mask\]' "$tmp/leading-space.out"; then
-  pass "an indented add-mask is neither executed nor allowed to publish its value"
-else
-  cat "$tmp/leading-space.out" >&2
-  fail "an indented add-mask survived replay or published the value it masks"
-fi
-
 # Every replayed byte sits inside one `::stop-commands::<token>` block per row,
 # closed by the same random token, with each line prefixed; every line outside
 # a block is a line the runner itself produces. The Actions runner reads its
@@ -90,6 +66,32 @@ stream_is_well_formed() {
     }
   '
 }
+
+# (a) Run 39064216676: output ending in `##[endgroup]` with no newline is
+# stored as a bare `##[endgroup]` and the producer's next line is lost.
+run_stub unterminated 'output line\n##[endgroup]' >/dev/null
+if has_one_row_line unterminated \
+  && stream_is_well_formed unterminated 1 \
+  && ! grep -q '^##\[' "$tmp/unterminated.out"; then
+  pass "output without a final newline cannot swallow the row or close its group"
+else
+  cat "$tmp/unterminated.out" >&2
+  fail "unterminated output hid the row or replayed a bare ##[endgroup]"
+fi
+
+# (b) Run 39064216676: the runner trims leading whitespace, so
+# ` ::add-mask::command group=` masked every later row as `actions-ci ***`.
+run_stub leading-space ' ::add-mask::command group=\n' >/dev/null
+if has_one_row_line leading-space \
+  && stream_is_well_formed leading-space 1 \
+  && ! grep -Eq '^[[:space:]]*::add-mask::' "$tmp/leading-space.out" \
+  && ! grep -q 'command group=$' "$tmp/leading-space.out" \
+  && grep -q '\[workflow-command:add-mask\]' "$tmp/leading-space.out"; then
+  pass "an indented add-mask is neither executed nor allowed to publish its value"
+else
+  cat "$tmp/leading-space.out" >&2
+  fail "an indented add-mask survived replay or published the value it masks"
+fi
 
 # (c) Run 39064216676: inside stop-commands a forged `##[endgroup]` is stored
 # byte-identical to a real one, and a stub can guess no token but its own.
