@@ -1440,11 +1440,18 @@ if not gate_scripts:
     )
 
 
+# Every mutation re-lexes the same unchanged run blocks; a failed lex raises and
+# is never cached, so a malformed block still fails each time it is read.
+@lru_cache(maxsize=None)
+def shell_tokens(text):
+    return tuple(shell_words.words(text))
+
+
 def referenced(text, candidates=None):
     """Tracked ci-gate paths mentioned by shell tokens on an execution path."""
     candidates = gate_scripts if candidates is None else candidates
     try:
-        tokens = shell_words.words(text)
+        tokens = shell_tokens(text)
     except ValueError as error:
         mentioned = sorted(path for path in candidates if path in text)
         if not mentioned:
@@ -1616,13 +1623,28 @@ def namespace_roots(reference, roots, tracked_python):
 def imported_paths(importer, sources):
     """Return exact tracked Python paths statically imported by one script."""
     try:
-        tree = ast.parse(sources[importer], filename=importer)
-    except (KeyError, SyntaxError) as error:
+        text = sources[importer]
+    except KeyError as error:
+        raise SystemExit(
+            f"{importer} could not be parsed while checking non-gate imports: {error}"
+        ) from error
+    return parsed_imports(importer, text, frozenset(sources))
+
+
+# `importers_of` asks every script for its imports once per declared module and
+# once more per mutation, so an uncached walk re-parses each script thousands of
+# times and pushed this row past its pull-request budget on a loaded runner.
+# The key is everything the answer depends on: the script's own text and the
+# tracked set its imports resolve against, so a mutated source still re-parses.
+@lru_cache(maxsize=None)
+def parsed_imports(importer, text, tracked_python):
+    try:
+        tree = ast.parse(text, filename=importer)
+    except SyntaxError as error:
         raise SystemExit(
             f"{importer} could not be parsed while checking non-gate imports: {error}"
         ) from error
 
-    tracked_python = set(sources)
     resolved = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -1669,7 +1691,7 @@ def imported_paths(importer, sources):
                 )
         else:
             continue
-    return resolved
+    return frozenset(resolved)
 
 
 def importers_of(path, sources=python_sources):
