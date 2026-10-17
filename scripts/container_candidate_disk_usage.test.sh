@@ -179,3 +179,24 @@ if FAIL_SUDO=true RUNNER_ENVIRONMENT=github-hosted "$script" reclaim > "$tmp/rec
   exit 1
 fi
 grep -Fq '::error::could not remove unused hosted toolchains' "$tmp/reclaim-fail.out"
+
+# Reclaim deletes nothing when it cannot first measure the root filesystem.
+for df_value in FAIL EMPTY garbage; do
+  : > "$SUDO_CALLS"
+  printf '%s\n' "$df_value" 30000000000 > "$DF_AVAIL_VALUES"
+  if RUNNER_ENVIRONMENT=github-hosted "$script" reclaim > "$tmp/reclaim-unmeasured.out" 2>&1; then
+    echo "reclaim succeeded without a trustworthy measurement ($df_value)" >&2
+    exit 1
+  fi
+  [ ! -s "$SUDO_CALLS" ] || { echo "reclaim deleted system paths without a trustworthy measurement ($df_value)" >&2; exit 1; }
+  grep -Fq '::error::could not measure' "$tmp/reclaim-unmeasured.out"
+done
+
+# An empty context (no private packages) needs exactly the margin.
+printf '%s\n' "$margin" > "$DF_AVAIL_VALUES"
+DU_OUTPUT=0 "$script" assert-space "$context" > /dev/null
+printf '%s\n' "$((margin - 1))" > "$DF_AVAIL_VALUES"
+if DU_OUTPUT=0 "$script" assert-space "$context" > /dev/null 2>&1; then
+  echo "assert-space accepted an empty context with less than the margin free" >&2
+  exit 1
+fi
