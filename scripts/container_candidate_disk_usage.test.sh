@@ -138,3 +138,11 @@ margin=4294967296
 printf '%s\n' "$((2 * 4000000000 + margin))" > "$DF_AVAIL_VALUES"
 DU_OUTPUT=4000000000 "$script" assert-space "$context" > "$tmp/assert-ok.out"
 grep -Fq "required_bytes=$((2 * 4000000000 + margin))" "$tmp/assert-ok.out"
+
+# One byte short of the requirement fails before BuildKit can hit an opaque ENOSPC.
+printf '%s\n' "$((2 * 4000000000 + margin - 1))" > "$DF_AVAIL_VALUES"
+if DU_OUTPUT=4000000000 "$script" assert-space "$context" > "$tmp/assert-short.out" 2>&1; then
+  echo "assert-space accepted a filesystem one byte short of the requirement" >&2
+  exit 1
+fi
+grep -Fq "::error::insufficient free disk for the image build: required $((2 * 4000000000 + margin)) bytes, available $((2 * 4000000000 + margin - 1)) bytes" "$tmp/assert-short.out"

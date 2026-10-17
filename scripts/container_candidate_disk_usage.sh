@@ -63,6 +63,10 @@ case "$operation" in
     available="$(available_bytes "$docker_root")"
     required=$((2 * context_bytes + build_margin_bytes))
     report "context_bytes=$context_bytes required_bytes=$required available_bytes=$available filesystem=$docker_root"
+    [ "$available" -ge "$required" ] || {
+      report "::error::insufficient free disk for the image build: required $required bytes, available $available bytes on the filesystem holding $docker_root (2 x node_modules context $context_bytes + margin $build_margin_bytes)"
+      exit 1
+    }
     ;;
   snapshot)
     : > "$log_file" || true
