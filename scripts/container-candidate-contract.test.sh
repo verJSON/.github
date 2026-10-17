@@ -1212,11 +1212,13 @@ for job_name in ("publish-base", "publish-derived"):
     names = [step.get("name", "") for step in steps]
     reclaim_index = names.index("Reclaim unused hosted toolchains")
     reclaim = steps[reclaim_index]
+    build_step = next(step for step in steps if step.get("id") == "build")
+    build_rows = next(term for term in build_step["if"].split(" && ") if term.startswith("matrix.baseVariant"))
     helper_download = next(step for step in steps if step.get("name") == "Download pinned candidate disk diagnostics helper")
-    helper_rows = helper_download.get("if")
-    expected_reclaim_if = " && ".join(filter(None, (helper_rows, "runner.environment == 'github-hosted'")))
+    assert helper_download.get("if") in (None, build_rows), "reclaim rows must download the disk helper"
+    expected_reclaim_if = " && ".join((build_rows, "runner.environment == 'github-hosted'"))
     assert reclaim["if"] == expected_reclaim_if, (
-        f"{job_name} toolchain reclaim must be bound to GitHub-hosted runners and to rows that download its helper"
+        f"{job_name} toolchain reclaim must be bound to GitHub-hosted runners and to the rows this job builds"
     )
     assert reclaim["run"] == 'bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" reclaim'
     assert reclaim.get("continue-on-error") is not True
