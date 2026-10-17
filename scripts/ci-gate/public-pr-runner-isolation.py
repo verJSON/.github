@@ -31,6 +31,7 @@ Verjson/.github ADR 0235.
 from __future__ import annotations
 
 import argparse
+import ast
 import functools
 import glob
 import hashlib
@@ -881,6 +882,110 @@ def is_shell_script(path: str, content: str) -> bool:
     return path.endswith(".sh") or bool(SHELL_SHEBANG.match(content))
 
 
+@functools.lru_cache(maxsize=None)
+def tracked_paths(root: str) -> frozenset[str]:
+    return frozenset(path for path, _, _ in tracked_files(root))
+
+
+SHELL_WRAPPER = re.compile(r"(?m)^[ \t]*([A-Za-z_][\w-]*)[ \t]*\(\)[ \t]*\{(.*?)^[ \t]*\}", re.S)
+SHELL_SIBLING = re.compile(r'(?:\$here|\$\{here\}|\$\(dirname "\$0"\)|\$\(dirname \$0\))/([A-Za-z0-9_.-]+)')
+# Only a program is followed through a variable-rooted path; a data file a
+# deeper check reads (an index, a manifest) is that check's input, not code.
+PROGRAM_SUFFIXES = (".sh", ".py", ".js", ".mjs", ".cjs")
+VARIABLE_ROOTED = re.compile(r"\$\{?[A-Za-z_]\w*\}?/([\w.-]+(?:/[\w.-]+)*)")
+DATA_TOKEN_SPLIT = re.compile(r"[\s\"'`;&|()<>=,:$]+")
+
+
+def tree_programs(job: dict, root: str, excluded: frozenset[str] = frozenset()) -> dict[str, str]:
+    """For the one backlog job that tolerates a full checkout: the bytes of
+    every program it runs from the tree, and the files its steps and the
+    scripts they run name (the pinned files they compare against).
+
+    Programs: what `programs()` follows, arguments of a shell function that
+    forwards "$@" (a wrapper such as `run_clean`), `$here/` siblings, and
+    variable-rooted paths such as `"$repo_root/scripts/x.sh"`,
+    followed through shell scripts to MAX_CLOSURE_DEPTH; Python imports from
+    the program's directory. Named files are collected only from the steps
+    and the scripts they run directly, so documentation a deeper check reads
+    is not bound. Links bind as their target text and are never read through.
+    """
+    tracked = tracked_paths(root)
+    found: dict[str, str] = {}
+
+    def bind(relative: str) -> str | None:
+        if relative in found or relative in excluded or relative not in tracked:
+            return None
+        path = os.path.join(root, relative)
+        if os.path.islink(path):
+            found[relative] = "link " + os.readlink(path)
+            return None
+        content = read_program(root, relative)
+        if content is None:
+            return None
+        found[relative] = hashlib.sha256(content.encode("utf-8", "surrogateescape")).hexdigest()
+        return content
+
+    queue = [
+        ("", without_comments(step["run"]), 0)
+        for step in job.get("steps") or []
+        if isinstance(step, dict) and isinstance(step.get("run"), str)
+    ]
+    while queue:
+        origin, text, depth = queue.pop()
+        candidates = [os.path.normpath(program) for program in programs(text, root)]
+        for name, body in SHELL_WRAPPER.findall(text):
+            if '"$@"' in body:
+                pattern = COMMAND_POSITION + re.escape(name) + r"[ \t]+[\"']?([\w./-]+)"
+                candidates += [os.path.normpath(match) for match in re.findall(pattern, text, re.M)]
+        candidates += [os.path.join(os.path.dirname(origin), sibling) for sibling in SHELL_SIBLING.findall(text)]
+        # `"$repo_root/scripts/x.sh"`: a variable-rooted path names a tracked
+        # program relative to the repository root or to the script's directory.
+        for tail in VARIABLE_ROOTED.findall(text):
+            for base in ("", os.path.dirname(origin)):
+                candidate = os.path.normpath(os.path.join(base, tail))
+                if candidate in tracked and candidate.endswith(PROGRAM_SUFFIXES):
+                    candidates.append(candidate)
+        for program in candidates:
+            content = bind(program)
+            if content is None or depth + 1 >= MAX_CLOSURE_DEPTH:
+                continue
+            if is_shell_script(program, content):
+                queue.append((program, without_comments(content), depth + 1))
+            elif program.endswith(".py"):
+                for module in python_imports(root, program, tracked):
+                    bind(module)
+        if depth <= 1:
+            for token in DATA_TOKEN_SPLIT.split(text):
+                bind(os.path.normpath(token) if token else token)
+    return dict(sorted(found.items()))
+
+
+def python_imports(root: str, program: str, tracked: frozenset[str]) -> set[str]:
+    """Repository modules a Python program imports from its own directory,
+    transitively (the programs put their directory on sys.path)."""
+    found: set[str] = set()
+    queue = [program]
+    while queue:
+        current = queue.pop()
+        try:
+            tree = ast.parse(read_program(root, current) or "")
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                names = [node.module]
+            else:
+                continue
+            for name in names:
+                candidate = os.path.join(os.path.dirname(current), *name.split(".")) + ".py"
+                if candidate in tracked and candidate not in found:
+                    found.add(candidate)
+                    queue.append(candidate)
+    return found
+
+
 def materializes_head(job: dict, workflow_env, root: str, label: str) -> bool:
     """Whether a pull_request_target job can put head-controlled bytes on disk.
 
@@ -1045,7 +1150,8 @@ RELAY_HEAD_REFUSAL = (
 # pull_request job, is a format error, so the list cannot grow without
 # editing this set, and public-pr-runner-isolation.test.py pins it against a
 # snapshot it may only shrink from. Both live in this repository, so a change
-# can edit both: growth is a visible, reviewed code change, not impossible. Each key also names the refusal kinds it carried then. Refusals are
+# can edit both: growth is a visible, reviewed code change, not impossible.
+# Each key also names the refusal kinds it carried then. Refusals are
 # decided before any row is read: a kind outside that set, or any kind once the
 # key's pending row is gone, fails whatever the lists say, so no row can waive
 # a new refusal; a kind the job no longer carries fails as STALE BACKLOG until
@@ -1090,7 +1196,11 @@ RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
     ('release-propose.yml [workflow_call]', 'release-propose'): frozenset({'relay-head', 'runtime-checkout'}),
     ('release.yml [workflow_dispatch]', 'publish'): frozenset(),
     ('release.yml [workflow_dispatch]', 'snapshot'): frozenset(),
-    ('release.yml [workflow_dispatch]', 'verify'): frozenset({'relay-head', 'runtime-checkout'}),
+    # The one full-checkout tolerance (Part of #1831): verify runs the release
+    # suite on the tagged commit and is generator-pinned. Its row binds the
+    # programs it runs (tree_programs), never the whole tree.
+    ('release.yml [workflow_dispatch]', 'verify'):
+        frozenset({'full-checkout', 'relay-head', 'runtime-checkout'}),
     ('renovate-changelog.yml [workflow_call]', 'attribute'): frozenset({'relay-head', 'runtime-checkout'}),
     ('renovate-compatibility-canary.yml [workflow_call]', 'receipt'): frozenset(),
     ('renovate-compatibility-reconcile.yml [workflow_dispatch]', 'observe'): frozenset(),
@@ -1177,7 +1287,7 @@ class Closure:
         self.caller_checkout = caller_checkout
         # Why a backlog row cannot bind what this job puts on disk. Never
         # tolerated by a frozen key: a row binds bytes, not a parser's view.
-        self.unbound: set[str] = set()
+        self.unbound: set[tuple[str, str]] = set()
         self.files: dict[str, str] = {}
         # The subset of `files` a local action contributes: the job's own
         # steps, as opposed to bytes a checkout puts on disk.
@@ -1294,11 +1404,12 @@ class Closure:
             self.flag("full-checkout", "full checkout of the scanned tree (no sparse-checkout list bounds it)")
             self.tree = tree_digest(self.root, self.excluded)
             if not self.caller_checkout:
-                self.unbound.add(
+                self.unbound.add((
+                    "full-checkout",
                     "a full checkout of the scanned tree puts every tracked file on disk, and imports, shell "
                     "functions, data files, and variables reach bytes no command pattern names; check out an "
                     "exact non-cone sparse list of the files the job needs"
-                )
+                ))
             return
         if cone:
             self.add_direct_files("", "cone-mode root")
@@ -1328,11 +1439,12 @@ class Closure:
                 verb, arguments = match.group(1), match.group(2)
                 if verb == "show" and self.shown_file_is_bound(arguments):
                     continue
-                self.unbound.add(
+                self.unbound.add((
+                    "tracked-materialization",
                     f"`git {verb}{arguments.rstrip()}` materializes tracked content outside any checkout this "
                     "row binds; check the file out with an exact sparse list and show only that path at the "
                     "dispatch commit"
-                )
+                ))
 
     def shown_file_is_bound(self, arguments: str) -> bool:
         arguments = re.sub(r"\$\{\{\s*github\.sha\s*\}\}", "$GITHUB_SHA", arguments)
@@ -1869,7 +1981,12 @@ def check_workflow(
                 chain,
                 job,
                 inherited_settings(document),
-                {"files": closure.files, "reasons": sorted({reason for reason, _ in pairs})},
+                {"files": closure.files, "reasons": sorted({reason for reason, _ in pairs})}
+                | (
+                    {"programs": tree_programs(job, scan.root, scan.excluded)}
+                    if closure.tree is not None and not closure.caller_checkout
+                    else {}
+                ),
             )
             closure.check_materializations(job)
             if closure.tree is not None:
@@ -2108,7 +2225,7 @@ def main(argv: list[str]) -> int:
         tolerated = RELAY_BACKLOG.get(key, frozenset()) if pending_row is not None else frozenset()
         refused = [reason for kind, reason in finding.refusals if kind not in tolerated]
         if pending_row is not None:
-            refused += [f"{UNBOUND_BACKLOG}: {reason}" for reason in finding.unbound]
+            refused += [f"{UNBOUND_BACKLOG}: {reason}" for kind, reason in finding.unbound if kind not in tolerated]
         if refused:
             violations.append(
                 Violation(
@@ -2123,7 +2240,7 @@ def main(argv: list[str]) -> int:
         if pending_row is not None:
             # The relay backlog (#1831): a known relayed job, an exact ratchet,
             # never accepted by review.
-            carried = {kind for kind, _ in finding.refusals}
+            carried = {kind for kind, _ in finding.refusals} | {kind for kind, _ in finding.unbound}
             for kind in sorted(tolerated - carried):
                 stale_reviews.append(
                     f"STALE BACKLOG: {label} no longer carries refusal kind {kind}; "

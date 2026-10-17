@@ -2852,7 +2852,7 @@ SNAPSHOT_RELAY_BACKLOG = {
     ('release-propose.yml [workflow_call]', 'release-propose'): frozenset({'relay-head', 'runtime-checkout'}),
     ('release.yml [workflow_dispatch]', 'publish'): frozenset(),
     ('release.yml [workflow_dispatch]', 'snapshot'): frozenset(),
-    ('release.yml [workflow_dispatch]', 'verify'): frozenset({'relay-head', 'runtime-checkout'}),
+    ('release.yml [workflow_dispatch]', 'verify'): frozenset({'full-checkout', 'relay-head', 'runtime-checkout'}),
     ('renovate-changelog.yml [workflow_call]', 'attribute'): frozenset({'relay-head', 'runtime-checkout'}),
     ('renovate-compatibility-canary.yml [workflow_call]', 'receipt'): frozenset(),
     ('renovate-compatibility-reconcile.yml [workflow_dispatch]', 'observe'): frozenset(),
@@ -2895,6 +2895,11 @@ RELAY_LABEL = re.compile(r"^[^ ]+ \[(?:workflow_dispatch|workflow_call|repositor
 misfiled = sorted(key for key in CHECKER.RELAY_BACKLOG if not RELAY_LABEL.match(key[0]))
 if hasattr(CHECKER, "PULL_REQUEST_BACKLOG"):
     misfiled.append(("PULL_REQUEST_BACKLOG", "a pull_request backlog exists again"))
+FULL_CHECKOUT_KEYS = sorted(key for key, kinds in CHECKER.RELAY_BACKLOG.items() if "full-checkout" in kinds)
+if FULL_CHECKOUT_KEYS != [("release.yml [workflow_dispatch]", "verify")]:
+    fail(f"full-checkout is tolerated by exactly release.yml verify, not {FULL_CHECKOUT_KEYS}")
+else:
+    ok("full-checkout is tolerated by exactly one key, release.yml verify (Part of #1831)")
 if misfiled:
     fail(f"a frozen backlog key names an event outside its set: {misfiled}")
 else:
@@ -3186,5 +3191,68 @@ if code == 1 and HEAD_DIAG in output:
     ok("head detection still reads a program through a link that stays in the tree")
 else:
     fail(f"head detection stopped reading an in-tree link (got {code}: {output.strip()[:400]})")
+
+# ---------------------------------------------------------------------------
+# PM decision on #1827 round 6: release.yml's `verify` needs the whole tree
+# (it runs the repository's release suite on the commit that is tagged) and is
+# generator-pinned, so it alone tolerates `full-checkout` until #1831 moves it
+# off the persistent pool. Its row binds the job and the bytes of every
+# program it runs from the tree, never the whole tree.
+# ---------------------------------------------------------------------------
+VERIFY_LABEL = ("release.yml [workflow_dispatch]", "verify")
+VERIFY_FILES = (
+    "scripts/release-verify.sh",
+    "scripts/changelog.py",
+    "scripts/render-next.sh",
+    "scripts/gen-adr-index.sh",
+    "scripts/adr-relative-links.test.py",
+    "scripts/doc-fragment-names.test.sh",
+    "scripts/ci-gate/contract-tools-package.test.js",
+    "scripts/gen-changelog-caller.sh",
+    "package.json",
+)
+VERIFY = {"release.yml": live(".github/workflows/release.yml"), **{path: live(path) for path in VERIFY_FILES}}
+# release.yml's snapshot and publish are backlog jobs too; their rows keep
+# the fixture about verify alone.
+VERIFY_ROW = "".join(backlog_row(VERIFY, "release.yml [workflow_dispatch]", job)
+                     for job in ("verify", "snapshot", "publish"))
+
+
+def expect_verify_refused(workflows: dict[str, str], label: str, fragments: tuple[str, ...]) -> None:
+    """Exit 1 with the fragments and no PENDING line for verify itself."""
+    actual, output = run_checker(workflows, *PENDING_ARGS)
+    missing = [fragment for fragment in fragments if fragment not in output]
+    if actual != 1 or missing or "PENDING: release.yml [workflow_dispatch]: job 'verify'" in output:
+        fail(f"{label} (expected exit 1 with {missing or fragments} and verify not PENDING, got {actual}: "
+             f"{output.strip()[:600]})")
+    else:
+        ok(label)
+expect({**VERIFY, "pending.tsv": VERIFY_ROW}, 0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
+       "release.yml verify, the one key that tolerates full-checkout, is ratcheted by its row", *PENDING_ARGS)
+expect_verify_refused(
+    {**VERIFY, "pending.tsv": VERIFY_ROW,
+     "scripts/release-verify.sh": VERIFY["scripts/release-verify.sh"] + 'gh pr checkout "$PR"\n'},
+    "release.yml verify's row stops applying when release-verify.sh changes",
+    ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", "pending row no longer applies"),
+)
+expect_verify_refused(
+    {**VERIFY, "pending.tsv": VERIFY_ROW,
+     "scripts/render-next.sh": VERIFY["scripts/render-next.sh"] + "echo changed\n"},
+    "release.yml verify's row stops applying when a script release-verify.sh runs changes",
+    ("pending row no longer applies",),
+)
+expect({**VERIFY, "pending.tsv": VERIFY_ROW, "docs/unrelated.md": "# not run by verify\n"}, 0,
+       ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
+       "release.yml verify's row does not bind tree bytes it does not run (no whole-tree digest)", *PENDING_ARGS)
+# The tolerance is the key's own: a git show/archive/cat-file in a step is
+# still refused for verify, because only full-checkout was granted.
+expect_verify_refused(
+    {**VERIFY, "pending.tsv": VERIFY_ROW,
+     "release.yml": VERIFY["release.yml"].replace(
+         "          if [ -x scripts/release-verify.sh ]; then\n",
+         '          git archive "$GITHUB_SHA" scripts | tar -x\n          if [ -x scripts/release-verify.sh ]; then\n', 1)},
+    "release.yml verify's full-checkout tolerance does not extend to a git archive",
+    ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNBOUND),
+)
 
 sys.exit(1 if failures else 0)

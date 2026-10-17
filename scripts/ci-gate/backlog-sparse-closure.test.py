@@ -172,6 +172,28 @@ class BacklogSparseClosureTests(unittest.TestCase):
             "scripts/ci-telemetry/rework-classify.sh", needed("rework-reconcile.yml", "reconcile")
         )
 
+    def test_release_verify_binds_every_script_it_runs(self):
+        # The one full-checkout exception (Part of #1831). Independently of the
+        # checker's derivation, read the scripts verify runs: the hook its step
+        # runs through the run_clean wrapper, every program that hook runs, and
+        # the pinned files it compares against. The checker must bind them all.
+        hook = "scripts/release-verify.sh"
+        self.assertIn(f"run_clean {hook}", "\n".join(runs(job("release.yml", "verify"))))
+        text = (ROOT / hook).read_text(encoding="utf-8")
+        runs_from_hook = {
+            match.group(1)
+            for match in re.finditer(r"(?m)^(?:node --test|python3|bash)\s+([\w./-]+)", text)
+            if match.group(1) in TRACKED
+        }
+        compared = {path for path in re.findall(r"[\w./-]+", text) if path in TRACKED} - runs_from_hook
+        expected = {hook} | runs_from_hook | compared
+        self.assertGreaterEqual(len(runs_from_hook), 5)
+        self.assertIn(".github/workflows/release.yml", compared)
+        self.assertIn("scripts/gen-changelog-caller.sh", compared)
+        bound = checker.tree_programs(job("release.yml", "verify"), str(ROOT))
+        self.assertEqual(sorted(expected - set(bound)), [], "scripts verify runs that its row does not bind")
+        self.assertLess(len(bound), 60, "the verify binding must stay a program set, not the tree")
+
     def test_no_backlog_job_hands_a_literal_tracked_path_to_an_unfollowed_form(self):
         offenders = []
         for (label, job_name) in sorted(checker.RELAY_BACKLOG):

@@ -11,7 +11,9 @@
 # as their target text, these two lists excluded. A backlog job may not check
 # out this whole tree or materialize tracked content with git show, archive,
 # or cat-file (a show of a file its own sparse list holds at the dispatch
-# commit excepted); such a job fails whatever its row says. A standalone
+# commit excepted); such a job fails whatever its row says, except that
+# release.yml verify alone tolerates a full checkout and binds instead the
+# programs it runs (tree_programs; Part of #1831). A standalone
 # workflow_call job's default checkout is its caller's repository, which no
 # row can bind. The keys are frozen in public-pr-runner-isolation.py
 # (RELAY_BACKLOG), which also names the refusal kinds each tolerated then;
@@ -52,7 +54,7 @@ release-dispatch.yml [workflow_call]	release-dispatch	sha256:31417be9f8b0e45c9a5
 release-propose.yml [workflow_call]	release-propose	sha256:82db12e6f99d6143c0fc12bb2a564489020fd71068395488f1840e09ccbffb10	#1831 relay backlog, present before ADR 0235 scanned relays: can resolve to a persistent runner; head detection: materializes; reasons: head-materialization, full-checkout, runtime-checkout; move to the ephemeral lane or give it a reviewed entry
 release.yml [workflow_dispatch]	publish	sha256:45b07fd2c630a138425941834e995b323768faeecbd84a526c1fdc73dcb395d5	#1831 relay backlog, present before ADR 0235 scanned relays: can resolve to a persistent runner; remote callee, placement unreadable; move to the ephemeral lane or give it a reviewed entry
 release.yml [workflow_dispatch]	snapshot	sha256:214b258be73a8e41b62b817e192bdd24e654658707129edad20ce264598669f3	#1831 relay backlog, present before ADR 0235 scanned relays: can resolve to a persistent runner; remote callee, placement unreadable; move to the ephemeral lane or give it a reviewed entry
-release.yml [workflow_dispatch]	verify	sha256:f801bdc07f1ffb6734b718b4591577f7a8bebb4b3e16a2aebba8df9dcbc8fafb	#1831 relay backlog, present before ADR 0235 scanned relays: can resolve to a persistent runner; head detection: materializes; reasons: fetch, head-materialization, shell, full-checkout, runtime-checkout; move to the ephemeral lane or give it a reviewed entry
+release.yml [workflow_dispatch]	verify	sha256:48339c77b4b6aa1ad6d1aa7f2faecf294a5e9e70bfd3f2a673218f8568e9f8ec	#1831 relay backlog, present before ADR 0235 scanned relays: can resolve to a persistent runner; head detection: materializes; reasons: fetch, head-materialization, shell, full-checkout, runtime-checkout; move to the ephemeral lane or give it a reviewed entry
 renovate-changelog.yml [workflow_call]	attribute	sha256:cb208a7033cd4c1f89d3bbe3bc01065c14063514f40466c5a1f3c3f49bca3716	#1831 relay backlog, present before ADR 0235 scanned relays: can resolve to a persistent runner; head detection: undetermined; reasons: head-materialization, runtime-checkout; move to the ephemeral lane or give it a reviewed entry
 renovate-compatibility-canary.yml [workflow_call]	receipt	sha256:961057bc41c1461dfae1620e7a5bfe4a41e8f1a0ccd41e5779f0c4aa8bafac51	#1831 relay backlog, present before ADR 0235 scanned relays: can resolve to a persistent runner; head detection: no known pattern; move to the ephemeral lane or give it a reviewed entry
 renovate-compatibility-reconcile.yml [workflow_dispatch]	observe	sha256:062085763045a9ba88babaf028f3683b147f574d67250aeec4fb07b717486090	#1831 relay backlog, present before ADR 0235 scanned relays: can resolve to a persistent runner; head detection: no known pattern; reasons: fetch, full-checkout; move to the ephemeral lane or give it a reviewed entry
