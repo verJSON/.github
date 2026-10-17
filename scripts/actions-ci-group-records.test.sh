@@ -39,7 +39,8 @@ has_one_row_line() { # <name>: exactly one whole, unmodified row line was produc
 # output with .NET ReadLine, which also ends a line at a bare carriage return,
 # so the check splits there too. <name> <expected-blocks>
 stream_is_well_formed() {
-  tr '\r' '\n' <"$tmp/$1.out" | awk -v expected="$2" '
+  tr '\r' '\n' <"$tmp/$1.out" >"$tmp/$1.lines"
+  awk -v expected="$2" '
     function bad(why) { printf "line %d: %s: %s\n", NR, why, $0 > "/dev/stderr"; failed = 1 }
     token != "" {
       if ($0 == "::" token "::") { token = ""; next }
@@ -64,7 +65,7 @@ stream_is_well_formed() {
       if (blocks != expected) { printf "%d blocks, expected %d\n", blocks, expected > "/dev/stderr"; failed = 1 }
       exit failed
     }
-  '
+  ' "$tmp/$1.lines"
 }
 
 # (a) Run 39064216676: output ending in `##[endgroup]` with no newline is
@@ -264,7 +265,8 @@ printf 'platform\tprintf "%%s\\n" "caf\xc3\xa9 \xe2\x9c\x93 \\\\ q" >/dev/null\r
 ACTIONS_CI_GROUP_MANIFEST="$tmp/escaping.tsv" \
   ACTIONS_CI_RUNTIME_RECORDS="$tmp/records/escaping.jsonl" \
   bash "$runner" platform >"$tmp/escaping.out" 2>&1
-expected_command="$(cut -f2- "$tmp/escaping.tsv" | head -c -1)"
+# Command substitution drops the newline and keeps the carriage return.
+expected_command="$(cut -f2- "$tmp/escaping.tsv")"
 if python3 -I - "$tmp/records/escaping.jsonl" "$expected_command" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as handle:
