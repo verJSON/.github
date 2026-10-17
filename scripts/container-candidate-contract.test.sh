@@ -468,6 +468,10 @@ assert canary["jobs"]["publish"]["if"] == (
 assert canary["jobs"]["publish"]["with"]["transfer-sha256"] == transfer_digest, (
     "reusable-call canary transfer helper digest must match the checked-in helper"
 )
+disk_helper = Path(os.environ["CANARY_WORKFLOW"]).parents[2] / "scripts/container_candidate_disk_usage.sh"
+assert canary["jobs"]["publish"]["with"]["disk-sha256"] == hashlib.sha256(disk_helper.read_bytes()).hexdigest(), (
+    "reusable-call canary disk helper digest must match the checked-in helper"
+)
 expected_runner = (
     "${{ github.repository_owner == 'Verjson' && "
     "(vars.CI_RUNNER_DEFAULT || '[\"self-hosted\",\"general\"]') || "
@@ -1205,6 +1209,24 @@ for job_name in ("publish-base", "publish-derived"):
     assert measurements
     assert all(step.get("continue-on-error") is True for step in measurements)
     assert cleanup.get("continue-on-error") is not True
+    names = [step.get("name", "") for step in steps]
+    reclaim_index = names.index("Reclaim unused hosted toolchains")
+    reclaim = steps[reclaim_index]
+    assert reclaim["if"] == "runner.environment == 'github-hosted'", "toolchain reclaim must be bound to GitHub-hosted runners"
+    assert reclaim["run"] == 'bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" reclaim'
+    assert reclaim.get("continue-on-error") is not True
+    assert reclaim_index < names.index("Prepare credential-free dependency build context"), (
+        "toolchain reclaim must free disk before the node_modules transfer"
+    )
+    build_index = next(index for index, step in enumerate(steps) if step.get("id") == "build")
+    guard = steps[build_index - 1]
+    assert guard.get("name") == "Require free disk for the image build", f"{job_name} build is not guarded by free disk"
+    assert guard["if"] == steps[build_index]["if"], "free-disk guard must run exactly when the build runs"
+    assert guard["run"] == (
+        'bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" assert-space "$RUNNER_TEMP/container-node-modules-context"'
+    )
+    assert guard.get("continue-on-error") is not True
+    assert "verjson_node_modules=${{ runner.temp }}/container-node-modules-context" in steps[build_index]["with"]["build-contexts"]
 
 publisher_text = open(os.environ["PUBLISHER"], encoding="utf-8").read()
 assert all(phase in publisher_text for phase in (

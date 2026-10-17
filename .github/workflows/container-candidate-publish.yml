@@ -431,6 +431,11 @@ jobs:
           CLEANUP_UNUSED_DOCKER_IMAGES: ${{ needs.prepare.outputs.cleanup-unused-docker-images }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" cleanup
+      - name: Reclaim unused hosted toolchains
+        if: runner.environment == 'github-hosted'
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" reclaim
       - name: Measure runner usage after Docker image cleanup
         if: always()
         continue-on-error: true
@@ -582,6 +587,11 @@ jobs:
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" measure before-image-build
+      - name: Require free disk for the image build
+        if: matrix.baseVariant == '' && steps.retry.outputs.reused != 'true'
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" assert-space "$RUNNER_TEMP/container-node-modules-context"
       - id: build
         if: matrix.baseVariant == '' && steps.retry.outputs.reused != 'true'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -813,6 +823,11 @@ jobs:
           CLEANUP_UNUSED_DOCKER_IMAGES: ${{ needs.prepare.outputs.cleanup-unused-docker-images }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" cleanup
+      - name: Reclaim unused hosted toolchains
+        if: runner.environment == 'github-hosted'
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" reclaim
       - name: Measure runner usage after Docker image cleanup
         if: always() && matrix.baseVariant != ''
         continue-on-error: true
@@ -983,6 +998,11 @@ jobs:
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" measure before-image-build
+      - name: Require free disk for the image build
+        if: matrix.baseVariant != '' && steps.retry.outputs.reused != 'true'
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash "$RUNNER_TEMP/container_candidate_disk_usage.sh" assert-space "$RUNNER_TEMP/container-node-modules-context"
       - id: build
         if: matrix.baseVariant != '' && steps.retry.outputs.reused != 'true'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0

@@ -61,7 +61,7 @@ jobs:
       contract-ref: ${{ github.sha }}
       acquisition-sha256: '0000000000000000000000000000000000000000000000000000000000000000'
       transfer-sha256: '6bbd22f2e0c4814d661cb74e1e31e6ed1cb9b5cf744b35571749221579c0b14a'
-      disk-sha256: '9b1d77af25f26af137bcfc50900073b7db89575cb65a126dfee1f5202e66c39d'
+      disk-sha256: 'fcd08878245885eb8a294e56b839809ec3506ea7bb62b005001698a913399e8f'
       retry-sha256: '9072934bc1c5262623dfbe7c325665dfc58a7373d666d5ac4fd9e394bd5bfc2f'
       provenance-sha256: 'e785ad9fb49d60d0de25dd2214e2c03fbf7fa348a7df2407ee7f187757a91c74'
       runner: ${{ github.repository_owner == 'Verjson' && (vars.CI_RUNNER_DEFAULT || '["self-hosted","general"]') || '["ubuntu-24.04"]' }}
