@@ -68,8 +68,21 @@ def listing(*records: dict) -> dict[str, dict]:
     return {REPOS_PATH: {"body": [list(records)]}}
 
 
-def caller_path(name: str, branch: str = "main") -> str:
-    return f"repos/Verjson/{name}/contents/.github/workflows/ai-review-merge.yml?ref={quote(branch)}"
+def caller_path(name: str, branch: str = "main", suffix: str = "yml") -> str:
+    return f"repos/Verjson/{name}/contents/.github/workflows/ai-review-merge.{suffix}?ref={quote(branch)}"
+
+
+def no_yaml(name: str, branch: str = "main") -> dict[str, dict]:
+    return {caller_path(name, branch, "yaml"): {"status": 404, "message": "Not Found"}}
+
+
+def no_caller(name: str, branch: str = "main") -> dict[str, dict]:
+    """A repository that exists and has neither caller spelling."""
+    return {
+        caller_path(name, branch): {"status": 404, "message": "Not Found"},
+        caller_path(name, branch, "yaml"): {"status": 404, "message": "Not Found"},
+        f"repos/Verjson/{name}": {"body": {"name": name}},
+    }
 
 
 def run(responses: dict, *arguments: str) -> tuple[int, str]:
@@ -99,8 +112,9 @@ class PublicReviewCallerRolloutTests(unittest.TestCase):
                 **listing(repository(".github"), repository("verjson-git-runners"), repository("gguf-demo"),
                           repository("repo-dashboard", "master")),
                 caller_path("verjson-git-runners"): contents(caller(CURRENT)),
-                caller_path("gguf-demo"): {"status": 404, "message": "Not Found"},
-                caller_path("repo-dashboard", "master"): {"status": 404, "message": "Not Found"},
+                caller_path("verjson-git-runners", "main", "yaml"): {"status": 404},
+                **no_caller("gguf-demo"),
+                **no_caller("repo-dashboard", "master"),
                 **dict([compare(CURRENT, "ahead")]),
             },
             0,
@@ -113,7 +127,8 @@ class PublicReviewCallerRolloutTests(unittest.TestCase):
 
     def test_identical_pin_contains_the_minimum(self):
         self.assertOutcome(
-            {**listing(repository("r")), caller_path("r"): contents(caller(MINIMUM)), **dict([compare(MINIMUM, "identical")])},
+            {**listing(repository("r")), caller_path("r"): contents(caller(MINIMUM)), **no_yaml("r"),
+             **dict([compare(MINIMUM, "identical")])},
             0,
             f"CURRENT: Verjson/r pins {MINIMUM}",
         )
@@ -123,7 +138,7 @@ class PublicReviewCallerRolloutTests(unittest.TestCase):
             with self.subTest(status=status):
                 self.assertOutcome(
                     {**listing(repository("verjson-git-runners")),
-                     caller_path("verjson-git-runners"): contents(caller(OLD)),
+                     caller_path("verjson-git-runners"): contents(caller(OLD)), **no_yaml("verjson-git-runners"),
                      **dict([compare(OLD, status)])},
                     1,
                     f"STALE: Verjson/verjson-git-runners pins {OLD}, which does not contain {MINIMUM}",
@@ -137,20 +152,50 @@ class PublicReviewCallerRolloutTests(unittest.TestCase):
         self.assertNotIn("&", caller_path("r", branch).split("?ref=")[1])
         self.assertOutcome(
             {**listing(repository("r", branch)), caller_path("r", branch): contents(caller(CURRENT)),
+             **no_yaml("r", branch),
              **dict([compare(CURRENT, "ahead")])},
             0,
             f"CURRENT: Verjson/r pins {CURRENT}",
         )
 
+    def test_a_caller_spelled_yaml_is_checked(self):
+        # GitHub runs `.yaml` workflows too; a stale one must not read as absent.
+        self.assertOutcome(
+            {**listing(repository("r")), caller_path("r"): {"status": 404},
+             caller_path("r", suffix="yaml"): contents(caller(OLD)), **dict([compare(OLD, "behind")])},
+            1,
+            f"STALE: Verjson/r pins {OLD}",
+        )
+
+    def test_both_spellings_are_checked(self):
+        self.assertOutcome(
+            {**listing(repository("r")), caller_path("r"): contents(caller(CURRENT)),
+             caller_path("r", suffix="yaml"): contents(caller(OLD)),
+             **dict([compare(CURRENT, "ahead"), compare(OLD, "diverged")])},
+            1,
+            f"STALE: Verjson/r pins {OLD}",
+        )
+
+    def test_a_repository_that_vanishes_mid_run_is_undetermined(self):
+        self.assertOutcome(
+            {**listing(repository("r")), caller_path("r"): {"status": 404},
+             caller_path("r", suffix="yaml"): {"status": 404}, "repos/Verjson/r": {"status": 404}},
+            2,
+            "UNDETERMINED",
+        )
+
     def test_archived_public_repository_is_skipped(self):
         self.assertOutcome(
-            {**listing(repository("old", archived=True), repository("r")), caller_path("r"): {"status": 404}},
+            {**listing(repository("old", archived=True), repository("r")), **no_caller("r")},
             0,
             "NO CALLER: Verjson/r@main",
         )
 
     def test_unreadable_or_unexpected_state_fails_closed(self):
-        good = {**listing(repository("r")), caller_path("r"): contents(caller(CURRENT)), **dict([compare(CURRENT, "ahead")])}
+        # The .yaml spelling is absent, so each case below fails on the fault
+        # it names rather than on an unserved request.
+        good = {**listing(repository("r")), caller_path("r"): contents(caller(CURRENT)), **no_yaml("r"),
+                **dict([compare(CURRENT, "ahead")])}
         cases = {
             "listing API failure": {**good, REPOS_PATH: {"status": 502}},
             "listing not paged arrays": {**good, REPOS_PATH: {"body": {"message": "x"}}},

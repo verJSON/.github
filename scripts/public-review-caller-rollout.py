@@ -29,7 +29,8 @@ from urllib.parse import quote
 
 import yaml
 
-CALLER_PATH = ".github/workflows/ai-review-merge.yml"
+# GitHub runs a workflow under either extension, so both spellings are callers.
+CALLER_PATHS = (".github/workflows/ai-review-merge.yml", ".github/workflows/ai-review-merge.yaml")
 CANONICAL_REPOSITORY = ".github"
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 # Any reference to the canonical reusable workflow, pinned or not.
@@ -109,18 +110,29 @@ def pinned_commit(text: str, where: str) -> str:
     return pins.pop()
 
 
-def read_caller(org: str, name: str, branch: str) -> str | None:
-    try:
-        record = gh_json(f"repos/{org}/{name}/contents/{CALLER_PATH}?ref={quote(branch)}")
-    except NotFound:
-        return None
-    content = record.get("content") if isinstance(record, dict) else None
-    if not isinstance(content, str) or record.get("encoding") != "base64":
-        raise Undetermined(f"{org}/{name}: {CALLER_PATH} is not a base64 file")
-    try:
-        return base64.b64decode(content, validate=False).decode("utf-8")
-    except (binascii.Error, UnicodeDecodeError) as error:
-        raise Undetermined(f"{org}/{name}: {CALLER_PATH} does not decode: {error}") from None
+def read_callers(org: str, name: str, branch: str) -> list[tuple[str, str]]:
+    """(path, text) of each caller spelling the default branch holds. With
+    neither, the repository must still exist: one deleted or renamed after
+    the listing is undetermined, never "no caller"."""
+    found = []
+    for path in CALLER_PATHS:
+        try:
+            record = gh_json(f"repos/{org}/{name}/contents/{path}?ref={quote(branch)}")
+        except NotFound:
+            continue
+        content = record.get("content") if isinstance(record, dict) else None
+        if not isinstance(content, str) or record.get("encoding") != "base64":
+            raise Undetermined(f"{org}/{name}: {path} is not a base64 file")
+        try:
+            found.append((path, base64.b64decode(content, validate=False).decode("utf-8")))
+        except (binascii.Error, UnicodeDecodeError) as error:
+            raise Undetermined(f"{org}/{name}: {path} does not decode: {error}") from None
+    if not found:
+        try:
+            gh_json(f"repos/{org}/{name}")
+        except NotFound:
+            raise Undetermined(f"{org}/{name} was listed but no longer exists; rerun the check") from None
+    return found
 
 
 def contains(org: str, minimum: str, pinned: str) -> bool:
@@ -152,15 +164,19 @@ def main(argv: list[str]) -> int:
             if name.casefold() == CANONICAL_REPOSITORY:
                 print(f"CANONICAL: {arguments.org}/{name} dispatches its own default-branch workflow")
                 continue
-            text = read_caller(arguments.org, name, branch)
-            if text is None:
-                print(f"NO CALLER: {arguments.org}/{name}@{branch} has no {CALLER_PATH}")
+            callers = read_callers(arguments.org, name, branch)
+            if not callers:
+                print(f"NO CALLER: {arguments.org}/{name}@{branch} has no {' or '.join(CALLER_PATHS)}")
                 continue
-            pinned = pinned_commit(text, f"{arguments.org}/{name}@{branch}")
-            if contains(arguments.org, arguments.minimum, pinned):
-                print(f"CURRENT: {arguments.org}/{name} pins {pinned}")
-            else:
-                stale.append(f"STALE: {arguments.org}/{name} pins {pinned}, which does not contain {arguments.minimum}")
+            for path, text in callers:
+                pinned = pinned_commit(text, f"{arguments.org}/{name}@{branch}:{path}")
+                if contains(arguments.org, arguments.minimum, pinned):
+                    print(f"CURRENT: {arguments.org}/{name} pins {pinned} ({path})")
+                else:
+                    stale.append(
+                        f"STALE: {arguments.org}/{name} pins {pinned}, "
+                        f"which does not contain {arguments.minimum} ({path})"
+                    )
     except Undetermined as error:
         print(f"UNDETERMINED: {error}", file=sys.stderr)
         return 2
