@@ -31,6 +31,28 @@ if [ -n "$command_budget" ]; then
     exit 2
   }
 fi
+# Runtime records (verjson-observability#271): the runner, never a row, writes
+# one JSON line per row to this file. The variable is removed before any row
+# starts, so rows are not told where it is. A relative path is a configuration
+# bug and fails here; a path that cannot be written only warns (see
+# write_runtime_records), because merges must not depend on telemetry disk I/O.
+records_file="${ACTIONS_CI_RUNTIME_RECORDS-}"
+unset ACTIONS_CI_RUNTIME_RECORDS
+records_write_failed=0
+if [ -n "$records_file" ]; then
+  [[ "$records_file" == /* ]] || {
+    printf 'actions-ci runtime records path must be absolute: %s\n' "$records_file" >&2
+    exit 2
+  }
+  mkdir -p -- "$(dirname -- "$records_file")" 2>/dev/null \
+    && : 2>/dev/null >"$records_file" || {
+    records_write_failed=1
+    printf '\n::warning::group=%s runtime records could not be written to %s; rows still decide the result\n' \
+      "$group" "$records_file"
+  }
+fi
+runner_name="${RUNNER_NAME-}"
+runner_environment="${RUNNER_ENVIRONMENT-}"
 command -v setsid >/dev/null 2>&1 || {
   printf 'setsid is required to isolate actions-ci command process groups\n' >&2
   exit 2
@@ -84,6 +106,8 @@ declare -a command_budgets=()
 declare -A command_index_by_pid=()
 declare -A worker_wait_status_by_index=()
 declare -A worker_reported_by_index=()
+declare -A command_started_at=()
+declare -A runtime_record_by_index=()
 worker_wait_failures=0
 failures=0
 commands_started=0
@@ -237,7 +261,7 @@ cleanup_group_runner() {
     cleanup_command_group_for_index "$index" || true
   done
   if [ -e "$tmp/survivors" ]; then
-    printf '::error::actions-ci group=%s has command processes that survived SIGKILL; preserving scratch data in %s\n' \
+    printf '\n::error::actions-ci group=%s has command processes that survived SIGKILL; preserving scratch data in %s\n' \
       "$group" "$tmp"
     exit 1
   fi
@@ -250,13 +274,100 @@ sanitize_command_output_for_index() {
   local log_file="$tmp/$index.log"
 
   if ! sed -u -E \
-    -e 's/^::(add-mask|stop-commands)::.*/[workflow-command:\1]:/' \
-    -e 's/^::(error|warning|notice|debug|group|endgroup|echo)([^:]*)::/[workflow-command:\1]\2:/' \
+    -e 's/^([[:space:]]*)::(add-mask|stop-commands)::.*/\1[workflow-command:\2]:/' \
+    -e 's/^([[:space:]]*)::(error|warning|notice|debug|group|endgroup|echo)([^:]*)::/\1[workflow-command:\2]\3:/' \
     "$raw_log" >"$log_file"; then
     printf 'failed to sanitize command output\n' >>"$log_file"
     return 1
   fi
   rm -f -- "$raw_log"
+}
+
+# Replay a command's output so that no byte of it can act as, end, or forge a
+# producer line (verjson-observability#271). The runner ignores workflow
+# commands between `::stop-commands::<token>` and `::<token>::`; the token is
+# drawn here, after the command exited, so nothing it printed can contain it.
+# Each line is prefixed, which keeps a stored `##[endgroup]` or row text from
+# byte-matching a producer line, and awk terminates the last line, so an
+# unterminated tail cannot run into the resume line or the row after it. The
+# Actions runner also ends a stored line at a bare carriage return, so each
+# one is prefixed too; a CRLF line ending is reduced to its newline first.
+replay_command_output() {
+  local log_file="$1" token status=0
+  token="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+  if [[ ! "$token" =~ ^[0-9a-f]{32}$ ]]; then
+    printf '\n::error::group=%s could not draw a stop-commands token; output withheld\n' "$group"
+    return 1
+  fi
+  printf '::stop-commands::%s\n' "$token"
+  awk '{ sub(/\r$/, ""); gsub(/\r/, "\r| "); print "| " $0 }' "$log_file" || status=$?
+  printf '\n::%s::\n' "$token"
+  return "$status"
+}
+
+declare -a json_control_chars=()
+for json_code in {1..31}; do
+  printf -v json_octal '%03o' "$json_code"
+  printf -v "json_control_chars[$json_code]" "\\$json_octal"
+done
+
+json_string() { # <value> -> a JSON string literal
+  local value="$1" code escaped
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  for code in "${!json_control_chars[@]}"; do
+    [[ "$value" == *"${json_control_chars[$code]}"* ]] || continue
+    printf -v escaped '\\u%04x' "$code"
+    value="${value//"${json_control_chars[$code]}"/$escaped}"
+  done
+  printf '"%s"' "$value"
+}
+
+json_string_or_null() { # <value> -> a JSON string literal, or null when empty
+  if [ -n "$1" ]; then json_string "$1"; else printf 'null'; fi
+}
+
+utc_now() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+# Rewrite the whole file from the runner's memory after every row, so a line
+# any row appended to it is discarded at the next write.
+write_runtime_records() {
+  [ -n "$records_file" ] || return 0
+  # mktemp creates the staging file exclusively under an unpredictable name, so
+  # a row cannot plant a symlink there to redirect the write.
+  local index staged=''
+  if staged="$(mktemp "$records_file.XXXXXXXX" 2>/dev/null)" && {
+    for index in "${!commands[@]}"; do
+      [ -z "${runtime_record_by_index[$index]+set}" ] \
+        || printf '%s\n' "${runtime_record_by_index[$index]}"
+    done
+  } >"$staged" 2>/dev/null && mv -f -- "$staged" "$records_file" 2>/dev/null; then
+    return 0
+  fi
+  [ -z "$staged" ] || rm -f -- "$staged" 2>/dev/null
+  # Warn once by name and leave the group result to its rows; the collector
+  # fails closed when the record count disagrees with command_count.
+  if [ "$records_write_failed" -eq 0 ]; then
+    records_write_failed=1
+    printf '\n::warning::group=%s runtime records could not be written to %s; rows still decide the result\n' \
+      "$group" "$records_file"
+  fi
+  return 1
+}
+
+# The four result arguments are JSON literals; a row without a usable worker
+# result records its row-line status as a string and null for the rest.
+record_runtime() { # <index> <status> <elapsed> <timed_out> <left_background>
+  local index="$1" status="$2" elapsed="$3" timed_out="$4" left_background="$5"
+  local budget="${command_budgets[$index]}"
+  runtime_record_by_index["$index"]="$(printf \
+    '{"schema_version":1,"group":"%s","command":%s,"status":%s,"elapsed_seconds":%s,"budget_seconds":%s,"started_at":"%s","ended_at":"%s","timed_out":%s,"left_background":%s,"runner_name":%s,"runner_environment":%s}' \
+    "$group" "$(json_string "${commands[$index]}")" "$status" "$elapsed" "${budget:-null}" \
+    "${command_started_at[$index]}" "$(utc_now)" "$timed_out" "$left_background" \
+    "$(json_string_or_null "$runner_name")" "$(json_string_or_null "$runner_environment")")"
+  write_runtime_records || true
 }
 
 trap cleanup_group_runner EXIT
@@ -376,7 +487,7 @@ SUPERVISOR
   fi
   trap - EXIT INT TERM
   elapsed="$(( $(date +%s) - started ))"
-  printf '%s\t%s\n' "$status" "$elapsed" >"$tmp/$index.status"
+  printf '%s\t%s\t%s\n' "$status" "$elapsed" "$background_processes" >"$tmp/$index.status"
 }
 
 report_worker_result() {
@@ -386,6 +497,7 @@ report_worker_result() {
   local log_file="$tmp/$index.log"
   local status=''
   local elapsed=''
+  local left_background=''
   local budget="${command_budgets[$index]}"
   local budget_report=''
   [ -z "$budget" ] || budget_report=" budget=${budget}s"
@@ -393,71 +505,80 @@ report_worker_result() {
   printf '::group::%s\n' "${commands[$index]}"
   if [ -f "$tmp/$index.raw.log" ] \
     && ! sanitize_command_output_for_index "$index"; then
-    printf '::error::group=%s command=%q raw worker output could not be sanitized\n' \
+    printf '\n::error::group=%s command=%q raw worker output could not be sanitized\n' \
       "$group" "${commands[$index]}"
   fi
   if [ ! -f "$status_file" ] || [ ! -f "$log_file" ]; then
-    printf '::error::group=%s command=%q worker did not produce complete result files\n' \
+    printf '\n::error::group=%s command=%q worker did not produce complete result files\n' \
       "$group" "${commands[$index]}"
-    if [ -f "$log_file" ] && ! cat -- "$log_file"; then
-      printf '::error::group=%s command=%q log could not be read\n' \
+    if [ -f "$log_file" ] && ! replay_command_output "$log_file"; then
+      printf '\n::error::group=%s command=%q log could not be read\n' \
         "$group" "${commands[$index]}"
     fi
-    printf 'actions-ci command group=%s status=missing elapsed=unknown command=%q\n' \
+    printf '\nactions-ci command group=%s status=missing elapsed=unknown command=%q\n' \
       "$group" "${commands[$index]}"
     printf '::endgroup::\n'
+    record_runtime "$index" '"missing"' null null null
     worker_reported_by_index["$index"]=1
     failures=$((failures + 1))
     return
   fi
 
-  if ! IFS=$'\t' read -r status elapsed <"$status_file" \
-    || [[ ! "$status" =~ ^[0-9]+$ || ! "$elapsed" =~ ^[0-9]+$ ]]; then
-    printf '::error::group=%s command=%q worker result is malformed\n' \
+  if ! IFS=$'\t' read -r status elapsed left_background <"$status_file" \
+    || [[ ! "$status" =~ ^[0-9]+$ || ! "$elapsed" =~ ^[0-9]+$ \
+      || ! "$left_background" =~ ^[01]$ ]]; then
+    printf '\n::error::group=%s command=%q worker result is malformed\n' \
       "$group" "${commands[$index]}"
-    if ! cat -- "$log_file"; then
-      printf '::error::group=%s command=%q log could not be read\n' \
+    if ! replay_command_output "$log_file"; then
+      printf '\n::error::group=%s command=%q log could not be read\n' \
         "$group" "${commands[$index]}"
     fi
-    printf 'actions-ci command group=%s status=invalid elapsed=unknown command=%q\n' \
+    printf '\nactions-ci command group=%s status=invalid elapsed=unknown command=%q\n' \
       "$group" "${commands[$index]}"
     printf '::endgroup::\n'
+    record_runtime "$index" '"invalid"' null null null
     worker_reported_by_index["$index"]=1
     failures=$((failures + 1))
     return
   fi
 
-  if ! cat -- "$log_file"; then
+  if ! replay_command_output "$log_file"; then
     [ "$status" -ne 0 ] || status=1
-    printf '::error::group=%s command=%q log could not be read\n' \
+    printf '\n::error::group=%s command=%q log could not be read\n' \
       "$group" "${commands[$index]}"
   fi
 
   if [ "$worker_status" -ne 0 ]; then
-    printf '::error::group=%s command=%q worker exited with status=%d\n' \
+    printf '\n::error::group=%s command=%q worker exited with status=%d\n' \
       "$group" "${commands[$index]}" "$worker_status"
     [ "$status" -ne 0 ] || status="$worker_status"
   fi
 
+  local timed_out=false
+  if [ -n "$budget" ] \
+    && { [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; } \
+    && [ "$elapsed" -ge "$budget" ]; then
+    timed_out=true
+  fi
   if [ "$status" -ne 0 ]; then
-    if [ -n "$budget" ] \
-      && { [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; } \
-      && [ "$elapsed" -ge "$budget" ]; then
-      printf '::error::group=%s command=%q timed out after %ss (budget=%ss)\n' \
+    if [ "$timed_out" = true ]; then
+      printf '\n::error::group=%s command=%q timed out after %ss (budget=%ss)\n' \
         "$group" "${commands[$index]}" "$elapsed" "$budget"
     else
-      printf '::error::group=%s command=%q exit=%d elapsed=%ss\n' \
+      printf '\n::error::group=%s command=%q exit=%d elapsed=%ss\n' \
         "$group" "${commands[$index]}" "$status" "$elapsed"
     fi
     failures=$((failures + 1))
   elif [ -n "$budget" ] && [ "$elapsed" -gt "$budget" ]; then
-    printf '::error::group=%s command=%q elapsed=%ss budget=%ss\n' \
+    printf '\n::error::group=%s command=%q elapsed=%ss budget=%ss\n' \
       "$group" "${commands[$index]}" "$elapsed" "$budget"
     failures=$((failures + 1))
   fi
-  printf 'actions-ci command group=%s status=%s elapsed=%ss%s command=%q\n' \
+  printf '\nactions-ci command group=%s status=%s elapsed=%ss%s command=%q\n' \
     "$group" "$status" "$elapsed" "$budget_report" "${commands[$index]}"
   printf '::endgroup::\n'
+  record_runtime "$index" "$status" "$elapsed" "$timed_out" \
+    "$( [ "$left_background" -eq 1 ] && echo true || echo false )"
   worker_reported_by_index["$index"]=1
 }
 
@@ -505,6 +626,7 @@ for index in "${!commands[@]}"; do
   fi
   printf 'running actions-ci command %s/%s in %s: %s\n' \
     "$((index + 1))" "${#commands[@]}" "$group" "${commands[$index]}"
+  command_started_at["$index"]="$(utc_now)"
   run_command "$index" "${commands[$index]}" </dev/null &
   command_index_by_pid["$!"]="$index"
   commands_started=$((commands_started + 1))
@@ -530,13 +652,13 @@ done
 commands_reported="${#worker_reported_by_index[@]}"
 if [ "$commands_started" -ne "$selected_rows" ] \
   || [ "$commands_reported" -ne "$selected_rows" ]; then
-  printf '::error::actions-ci manifest selects %d command(s) for %s; ran %d and reported %d\n' \
+  printf '\n::error::actions-ci manifest selects %d command(s) for %s; ran %d and reported %d\n' \
     "$selected_rows" "$group" "$commands_started" "$commands_reported"
   failures=$((failures + 1))
 fi
 
 if [ "$worker_wait_failures" -ne 0 ]; then
-  printf '::error::actions-ci group=%s could not identify %d completed worker(s)\n' \
+  printf '\n::error::actions-ci group=%s could not identify %d completed worker(s)\n' \
     "$group" "$worker_wait_failures"
   failures=$((failures + worker_wait_failures))
 fi

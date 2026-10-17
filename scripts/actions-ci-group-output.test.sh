@@ -30,7 +30,10 @@ platform	printf '%s\n' '::error::fixture failed' '::warning file=x::fixture warn
 EOF
 
 if ACTIONS_CI_GROUP_MANIFEST="$tmp/manifest.tsv" bash "$runner" platform >"$tmp/out" 2>"$tmp/err"; then
-  if grep -qE '^::(error|warning|notice|stop-commands|add-mask)(:| )' "$tmp/out" \
+  # The runner's own random-token stop-commands block around replayed output
+  # is not an annotation; every other workflow command is.
+  if grep -vE '^::stop-commands::[0-9a-f]{32}$' "$tmp/out" \
+      | grep -E '^::(error|warning|notice|stop-commands|add-mask)(:| )' >/dev/null \
     || grep -qE '^::(error|warning|notice|stop-commands|add-mask)(:| )' "$tmp/err"; then
     fail "a passing contract still emitted a workflow command"
   elif grep -qE 'workflow-command:add-mask.*super-secret-value|workflow-command:stop-commands.*token' "$tmp/out"; then
@@ -234,7 +237,7 @@ planted_result() { # <printf-format> -> runner output in $tmp/planted.out, statu
   printf '%s\n' "$planted_status"
 }
 malformed_ok=1
-for planted in '' 'garbage\n' '0\t5' '0\t\n' '-1\t5\n'; do
+for planted in '' 'garbage\n' '0\t5' '0\t\n' '-1\t5\n' '0\t5\n' '0\t5\t2\n'; do
   if [ "$(planted_result "$planted")" -ne 1 ] \
     || ! grep -q 'worker result is malformed' "$tmp/planted.out" \
     || ! grep -q 'actions-ci command group=platform status=invalid' "$tmp/planted.out"; then
@@ -248,7 +251,7 @@ if [ "$malformed_ok" -eq 1 ]; then
 else
   fail "a malformed worker result was accepted"
 fi
-if [ "$(planted_result '0\t1\n')" -eq 1 ] \
+if [ "$(planted_result '0\t1\t0\n')" -eq 1 ] \
   && grep -q 'worker exited with status=1' "$tmp/planted.out" \
   && grep -q 'actions-ci command group=platform status=1 ' "$tmp/planted.out"; then
   pass "a worker that exits nonzero fails its row even when its result reads 0"
@@ -505,11 +508,11 @@ forced="$(quota_parallelism "$tmp/quota/limited" 3)"
 invalid_status=0
 quota_parallelism "$tmp/quota/limited" 0 >"$tmp/invalid-parallelism.out" || invalid_status=$?
 if grep -q 'command_parallelism=2 command_count=4' <<<"$limited" \
-  && grep -q '^cpus=2$' <<<"$limited" \
+  && grep -q '^| cpus=2$' <<<"$limited" \
   && grep -q 'command_parallelism=4 command_count=4' <<<"$unlimited" \
-  && grep -q '^cpus=4$' <<<"$unlimited" \
+  && grep -q '^| cpus=4$' <<<"$unlimited" \
   && grep -q 'command_parallelism=3 command_count=4' <<<"$forced" \
-  && grep -q '^cpus=2$' <<<"$forced" \
+  && grep -q '^| cpus=2$' <<<"$forced" \
   && [ "$invalid_status" -eq 2 ] \
   && grep -q 'invalid actions-ci command parallelism: 0' "$tmp/invalid-parallelism.out"; then
   pass "row parallelism follows the CPU quota, not nproc, and an explicit override wins"
