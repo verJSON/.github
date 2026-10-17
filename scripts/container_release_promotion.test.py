@@ -63,17 +63,27 @@ class PromotionTest(unittest.TestCase):
         kwargs.setdefault("now", self.now)
         return promotion.release(*args, **kwargs)
 
-    def test_refuses_to_promote_a_same_repository_canary_publisher(self):
+    def test_refuses_to_promote_a_contract_repository_publisher_at_a_branch(self):
         # Canary candidates validate as candidates but are never promoted (ADR 0216).
-        publisher = "Verjson/example/.github/workflows/container-candidate-publish.yml@refs/heads/main"
-        self.candidate["source"]["workflow"] = publisher
-        self.candidate["images"][0]["provenance"]["builderIdentity"] = publisher
-        self.config["images"][0]["provenance"]["builderIdentity"] = publisher
-
-        with self.assertRaisesRegex(
-            promotion.ManifestError, "candidate workflow is outside the contract repository"
+        for publisher, reason in (
+            (
+                "verJSON/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+                "candidate workflow is outside the contract repository",
+            ),
+            (
+                "Verjson/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+                "candidate publisher is not pinned to a contract commit",
+            ),
         ):
-            self.release(self.candidate, self.config, self.state, "1.2.3")
+            with self.subTest(publisher=publisher):
+                candidate, config = copy.deepcopy(self.candidate), copy.deepcopy(self.config)
+                candidate["source"]["repository"] = config["repository"] = "verJSON/.github"
+                candidate["source"]["workflow"] = publisher
+                candidate["images"][0]["provenance"]["builderIdentity"] = publisher
+                config["images"][0]["provenance"]["builderIdentity"] = publisher
+
+                with self.assertRaisesRegex(promotion.ManifestError, reason):
+                    self.release(candidate, config, self.state, "1.2.3")
 
     def test_exact_digests_form_deterministic_release(self):
         result = self.release(self.candidate, self.config, self.state, "1.2.3")

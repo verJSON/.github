@@ -109,6 +109,10 @@ def release(
     path_prefix = "Verjson/.github/"
     if not workflow.startswith(path_prefix):
         raise ManifestError("candidate workflow is outside the contract repository")
+    # Only a pinned contract commit is promotable; a branch-named publisher (the
+    # same-repository contract canary) is never released (ADR 0216).
+    if not re.fullmatch(r"[0-9a-f]{40}", contract):
+        raise ManifestError("candidate publisher is not pinned to a contract commit")
     return {
         "schemaVersion": 3,
         "releaseVersion": version,
