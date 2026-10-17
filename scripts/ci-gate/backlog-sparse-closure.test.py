@@ -193,6 +193,10 @@ class BacklogSparseClosureTests(unittest.TestCase):
         bound = checker.tree_programs(job("release.yml", "verify"), str(ROOT))
         self.assertEqual(sorted(expected - set(bound)), [], "scripts verify runs that its row does not bind")
         self.assertLess(len(bound), 60, "the verify binding must stay a program set, not the tree")
+        # Data a deeper check reads is that check's input, not code: binding it
+        # would restale the row on every ADR or manifest change.
+        for data in ("README.md", "docs/decisions/README.md", "scripts/actions-ci-groups.tsv"):
+            self.assertNotIn(data, bound)
 
     def test_no_backlog_job_hands_a_literal_tracked_path_to_an_unfollowed_form(self):
         offenders = []

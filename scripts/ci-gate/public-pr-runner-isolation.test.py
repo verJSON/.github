@@ -3207,6 +3207,7 @@ VERIFY_FILES = (
     "scripts/gen-adr-index.sh",
     "scripts/adr-relative-links.test.py",
     "scripts/doc-fragment-names.test.sh",
+    "scripts/doc-fragment-names.sh",
     "scripts/ci-gate/contract-tools-package.test.js",
     "scripts/gen-changelog-caller.sh",
     "package.json",
@@ -3239,6 +3240,12 @@ expect_verify_refused(
     {**VERIFY, "pending.tsv": VERIFY_ROW,
      "scripts/render-next.sh": VERIFY["scripts/render-next.sh"] + "echo changed\n"},
     "release.yml verify's row stops applying when a script release-verify.sh runs changes",
+    ("pending row no longer applies",),
+)
+expect_verify_refused(
+    {**VERIFY, "pending.tsv": VERIFY_ROW,
+     "scripts/doc-fragment-names.sh": VERIFY["scripts/doc-fragment-names.sh"] + "echo changed\n"},
+    "release.yml verify's row stops applying when a script reached through \"$repo_root/…\" changes",
     ("pending row no longer applies",),
 )
 expect({**VERIFY, "pending.tsv": VERIFY_ROW, "docs/unrelated.md": "# not run by verify\n"}, 0,
