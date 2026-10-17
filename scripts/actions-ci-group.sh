@@ -259,6 +259,13 @@ sanitize_command_output_for_index() {
   rm -f -- "$raw_log"
 }
 
+# Replayed output is prefixed line by line, and awk terminates its last line,
+# so no command byte can start a producer line or run into the row after it
+# (verjson-observability#271).
+replay_command_output() {
+  awk '{ print "| " $0 }' "$1"
+}
+
 trap cleanup_group_runner EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
@@ -427,7 +434,7 @@ report_worker_result() {
     return
   fi
 
-  if ! cat -- "$log_file"; then
+  if ! replay_command_output "$log_file"; then
     [ "$status" -ne 0 ] || status=1
     printf '::error::group=%s command=%q log could not be read\n' \
       "$group" "${commands[$index]}"
@@ -455,7 +462,7 @@ report_worker_result() {
       "$group" "${commands[$index]}" "$elapsed" "$budget"
     failures=$((failures + 1))
   fi
-  printf 'actions-ci command group=%s status=%s elapsed=%ss%s command=%q\n' \
+  printf '\nactions-ci command group=%s status=%s elapsed=%ss%s command=%q\n' \
     "$group" "$status" "$elapsed" "$budget_report" "${commands[$index]}"
   printf '::endgroup::\n'
   worker_reported_by_index["$index"]=1

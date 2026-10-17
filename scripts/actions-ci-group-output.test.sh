@@ -505,11 +505,11 @@ forced="$(quota_parallelism "$tmp/quota/limited" 3)"
 invalid_status=0
 quota_parallelism "$tmp/quota/limited" 0 >"$tmp/invalid-parallelism.out" || invalid_status=$?
 if grep -q 'command_parallelism=2 command_count=4' <<<"$limited" \
-  && grep -q '^cpus=2$' <<<"$limited" \
+  && grep -q '^| cpus=2$' <<<"$limited" \
   && grep -q 'command_parallelism=4 command_count=4' <<<"$unlimited" \
-  && grep -q '^cpus=4$' <<<"$unlimited" \
+  && grep -q '^| cpus=4$' <<<"$unlimited" \
   && grep -q 'command_parallelism=3 command_count=4' <<<"$forced" \
-  && grep -q '^cpus=2$' <<<"$forced" \
+  && grep -q '^| cpus=2$' <<<"$forced" \
   && [ "$invalid_status" -eq 2 ] \
   && grep -q 'invalid actions-ci command parallelism: 0' "$tmp/invalid-parallelism.out"; then
   pass "row parallelism follows the CPU quota, not nproc, and an explicit override wins"
