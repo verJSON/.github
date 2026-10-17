@@ -152,9 +152,13 @@ def validate_manifest(manifest: dict[str, Any], config: dict[str, Any]) -> None:
         and source["workflow"]
         == f"{source_repository}/.github/workflows/container-candidate-publish.yml@refs/heads/main"
     )
-    if not is_contract_canary and not source["workflow"].startswith(
-        "Verjson/.github/.github/workflows/container-candidate-publish.yml@"
-    ):
+    # Exactly what the publisher emits for every non-canary run: its prepare job
+    # requires contract-ref to be one lowercase 40-hex commit.
+    is_pinned_publisher = re.fullmatch(
+        r"Verjson/\.github/\.github/workflows/container-candidate-publish\.yml@[0-9a-f]{40}",
+        source["workflow"],
+    )
+    if not is_contract_canary and not is_pinned_publisher:
         raise ManifestError("candidate signer workflow differs from expected publisher")
 
     next_stable = _text(config.get("nextStableVersion"), "config.nextStableVersion")

@@ -445,6 +445,27 @@ class ContainerReleaseManifestTests(unittest.TestCase):
                 ):
                     manifest_contract.validate_manifest(candidate, reviewed)
 
+    def test_rejects_pinned_publisher_that_is_not_exactly_one_contract_commit(self):
+        publisher = "Verjson/.github/.github/workflows/container-candidate-publish.yml@"
+        for signer in (
+            publisher + "refs/heads/main@" + "b" * 40,
+            publisher + "refs/heads/main",
+            publisher + "b" * 40 + "@refs/heads/main",
+            publisher + "b" * 41,
+            publisher + "B" * 40,
+            publisher + "b" * 39,
+            publisher + "b" * 40 + "\n",
+        ):
+            with self.subTest(signer=signer):
+                candidate, reviewed = same_repository_publication(
+                    signer, repository="Verjson/verjson-github-runner"
+                )
+                with self.assertRaisesRegex(
+                    manifest_contract.ManifestError,
+                    "candidate signer workflow differs from expected publisher",
+                ):
+                    manifest_contract.validate_manifest(candidate, reviewed)
+
     def test_rejects_candidate_contract_pin_different_from_reviewed_config(self):
         candidate = manifest()
         candidate["source"]["workflow"] = "Verjson/.github/.github/workflows/container-candidate-publish.yml@" + "c" * 40
