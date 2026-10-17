@@ -124,6 +124,14 @@ def manifest():
     }
 
 
+def same_repository_publication(publisher):
+    candidate, reviewed = manifest(), config()
+    candidate["source"]["workflow"] = publisher
+    for image in candidate["images"] + reviewed["images"]:
+        image["provenance"]["builderIdentity"] = publisher
+    return candidate, reviewed
+
+
 def multi_registry_config():
     reviewed = config()
     reviewed["registryDestinations"] = [
@@ -393,6 +401,13 @@ class ContainerReleaseManifestTests(unittest.TestCase):
         duplicate["indexDigest"] = "sha256:" + "9" * 64
         candidate["images"].append(duplicate)
         self.assert_rejected(candidate, "duplicate identity 'default'")
+
+    def test_accepts_same_repository_publisher_reviewed_at_the_source_ref(self):
+        candidate, reviewed = same_repository_publication(
+            "Verjson/verjson-github-runner/.github/workflows/container-candidate-publish.yml@refs/heads/main"
+        )
+
+        manifest_contract.validate_manifest(candidate, reviewed)
 
     def test_rejects_candidate_contract_pin_different_from_reviewed_config(self):
         candidate = manifest()
