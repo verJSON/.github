@@ -33,6 +33,10 @@ unused_hosted_toolchains=(
   /usr/local/share/powershell
 )
 
+# The node_modules context is copied at least twice (BuildKit context transfer and the
+# image layer); the margin covers base layers, install scripts, and image export.
+build_margin_bytes=4294967296
+
 report() {
   printf '%s\n' "$1" | tee -a "$log_file"
 }
@@ -51,6 +55,14 @@ case "$operation" in
     sudo -n rm -rf -- "${unused_hosted_toolchains[@]}"
     after="$(available_bytes /)"
     report "reclaimed_bytes=$((after - before)) available_before=$before available_after=$after"
+    ;;
+  assert-space)
+    [ "$#" -eq 2 ] || { echo "usage: $0 assert-space <build-context>" >&2; exit 2; }
+    context_bytes="$(du -s -B1 -- "$2" | cut -f1)"
+    docker_root="$(docker info --format '{{.DockerRootDir}}')"
+    available="$(available_bytes "$docker_root")"
+    required=$((2 * context_bytes + build_margin_bytes))
+    report "context_bytes=$context_bytes required_bytes=$required available_bytes=$available filesystem=$docker_root"
     ;;
   snapshot)
     : > "$log_file" || true
@@ -111,7 +123,7 @@ case "$operation" in
     exit "$failures"
     ;;
   *)
-    echo "usage: $0 {snapshot|measure <phase>|cleanup|reclaim}" >&2
+    echo "usage: $0 {snapshot|measure <phase>|cleanup|reclaim|assert-space <build-context>}" >&2
     exit 2
     ;;
 esac

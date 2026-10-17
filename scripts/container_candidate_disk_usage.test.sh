@@ -28,6 +28,10 @@ case "$*" in
     ;;
   "image rm $IMAGE_DANGLING") ;;
   "system df"|"buildx du") ;;
+  "info --format {{.DockerRootDir}}")
+    [ "${DOCKER_ROOT_DIR:-}" != FAIL ] || exit 1
+    printf '%s\n' "${DOCKER_ROOT_DIR:-/var/lib/docker}"
+    ;;
   "image rm "*) exit 1 ;;
   *) exit 2 ;;
 esac
@@ -50,7 +54,13 @@ case "$*" in
     ;;
 esac
 DF
-chmod +x "$tmp/bin/sudo" "$tmp/bin/df"
+cat > "$tmp/bin/du" <<'DU'
+#!/usr/bin/env bash
+[ "$1 $2 $3" = "-s -B1 --" ] || exit 98
+[ "${DU_OUTPUT:-}" != FAIL ] || exit 1
+[ "${DU_OUTPUT:-}" = EMPTY ] || printf '%s\t%s\n' "${DU_OUTPUT:-0}" "$4"
+DU
+chmod +x "$tmp/bin/sudo" "$tmp/bin/df" "$tmp/bin/du"
 
 export PATH="$tmp/bin:$PATH"
 export RUNNER_TEMP="$tmp/runner-temp"
@@ -120,3 +130,11 @@ for environment in self-hosted '' github-hosted-lookalike; do
   [ ! -s "$SUDO_CALLS" ] || { echo "reclaim deleted system paths on runner environment '$environment'" >&2; exit 1; }
   grep -Fq 'Skipping hosted toolchain reclaim' "$tmp/reclaim-skip.out"
 done
+
+# The image build may start only when the Docker data filesystem holds the context twice plus a margin.
+context="$tmp/node-modules-context"
+mkdir "$context"
+margin=4294967296
+printf '%s\n' "$((2 * 4000000000 + margin))" > "$DF_AVAIL_VALUES"
+DU_OUTPUT=4000000000 "$script" assert-space "$context" > "$tmp/assert-ok.out"
+grep -Fq "required_bytes=$((2 * 4000000000 + margin))" "$tmp/assert-ok.out"
