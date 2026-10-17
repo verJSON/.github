@@ -102,6 +102,53 @@ else
   fail "replayed output escaped its stop-commands block or forged a producer line"
 fi
 
+# Structured records: one JSON object per row, written by the runner to the
+# file ACTIONS_CI_RUNTIME_RECORDS names. The summary keeps every field but
+# replaces the two timestamps with whether they are ordered UTC seconds.
+records_summary() { # <file> -> one canonical JSON line per record
+  python3 -I - "$1" <<'PY'
+import json, re, sys
+from datetime import datetime
+
+UTC = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for line in handle.read().splitlines():
+        record = json.loads(line)
+        started, ended = record.pop("started_at"), record.pop("ended_at")
+        stamps = isinstance(started, str) and isinstance(ended, str) \
+            and bool(UTC.fullmatch(started)) and bool(UTC.fullmatch(ended))
+        record["timestamps_ok"] = stamps and (
+            datetime.fromisoformat(started[:-1]) <= datetime.fromisoformat(ended[:-1])
+        )
+        print(json.dumps(record, sort_keys=True))
+PY
+}
+run_recorded() { # <name> <budget> <manifest-line>... -> status echoed
+  local name="$1" budget="$2" status=0
+  shift 2
+  printf '%s\n' "$@" >"$tmp/$name.tsv"
+  ACTIONS_CI_GROUP_MANIFEST="$tmp/$name.tsv" \
+    ACTIONS_CI_COMMAND_BUDGET_SECONDS="$budget" \
+    ACTIONS_CI_RUNTIME_RECORDS="$tmp/records/$name.jsonl" \
+    RUNNER_NAME=gha-general-7 RUNNER_ENVIRONMENT=self-hosted \
+    bash "$runner" platform >"$tmp/$name.out" 2>"$tmp/$name.err" || status=$?
+  printf '%s\n' "$status"
+}
+
+row_elapsed() { # <name> -> the elapsed seconds its row line reports
+  sed -n 's/^actions-ci command group=platform status=[0-9]* elapsed=\([0-9]*\)s .*/\1/p' "$tmp/$1.out"
+}
+
+status="$(run_recorded success 60 'platform	true')"
+expected='{"budget_seconds": 60, "command": "true", "elapsed_seconds": '"$(row_elapsed success)"', "group": "platform", "left_background": false, "runner_environment": "self-hosted", "runner_name": "gha-general-7", "schema_version": 1, "status": 0, "timed_out": false, "timestamps_ok": true}'
+actual="$(records_summary "$tmp/records/success.jsonl" 2>&1)"
+if [ "$status" -eq 0 ] && [ "$actual" = "$expected" ]; then
+  pass "a passing row leaves one complete runtime record"
+else
+  printf 'expected: %s\nactual:   %s\n' "$expected" "$actual" >&2
+  fail "a passing row left no or an incorrect runtime record"
+fi
+
 if [ "$fails" -ne 0 ]; then
   printf '%d test(s) failed\n' "$fails"
   exit 1

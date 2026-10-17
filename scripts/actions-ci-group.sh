@@ -31,6 +31,19 @@ if [ -n "$command_budget" ]; then
     exit 2
   }
 fi
+# Runtime records (verjson-observability#271): the runner, never a row, writes
+# one JSON line per row to this file. The variable is removed before any row
+# starts, so rows are not told where it is.
+records_file="${ACTIONS_CI_RUNTIME_RECORDS-}"
+unset ACTIONS_CI_RUNTIME_RECORDS
+if [ -n "$records_file" ]; then
+  mkdir -p -- "$(dirname -- "$records_file")" && : >"$records_file" || {
+    printf 'cannot create actions-ci runtime records file: %s\n' "$records_file" >&2
+    exit 2
+  }
+fi
+runner_name="${RUNNER_NAME-}"
+runner_environment="${RUNNER_ENVIRONMENT-}"
 command -v setsid >/dev/null 2>&1 || {
   printf 'setsid is required to isolate actions-ci command process groups\n' >&2
   exit 2
@@ -84,6 +97,8 @@ declare -a command_budgets=()
 declare -A command_index_by_pid=()
 declare -A worker_wait_status_by_index=()
 declare -A worker_reported_by_index=()
+declare -A command_started_at=()
+declare -A runtime_record_by_index=()
 worker_wait_failures=0
 failures=0
 commands_started=0
@@ -277,6 +292,33 @@ replay_command_output() {
   awk '{ print "| " $0 }' "$log_file" || status=$?
   printf '\n::%s::\n' "$token"
   return "$status"
+}
+
+utc_now() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+# Rewrite the whole file from the runner's memory after every row, so a line
+# any row appended to it is discarded at the next write.
+write_runtime_records() {
+  [ -n "$records_file" ] || return 0
+  local index staged="$records_file.$$"
+  {
+    for index in "${!commands[@]}"; do
+      [ -z "${runtime_record_by_index[$index]+set}" ] \
+        || printf '%s\n' "${runtime_record_by_index[$index]}"
+    done
+  } >"$staged" && mv -f -- "$staged" "$records_file"
+}
+
+record_runtime() { # <index> <status> <elapsed>
+  local index="$1" status="$2" elapsed="$3"
+  local budget="${command_budgets[$index]}"
+  runtime_record_by_index["$index"]="$(printf \
+    '{"schema_version":1,"group":"%s","command":"%s","status":%s,"elapsed_seconds":%s,"budget_seconds":%s,"started_at":"%s","ended_at":"%s","timed_out":false,"left_background":false,"runner_name":"%s","runner_environment":"%s"}' \
+    "$group" "${commands[$index]}" "$status" "$elapsed" "${budget:-null}" \
+    "${command_started_at[$index]}" "$(utc_now)" "$runner_name" "$runner_environment")"
+  write_runtime_records
 }
 
 trap cleanup_group_runner EXIT
@@ -478,6 +520,7 @@ report_worker_result() {
   printf '\nactions-ci command group=%s status=%s elapsed=%ss%s command=%q\n' \
     "$group" "$status" "$elapsed" "$budget_report" "${commands[$index]}"
   printf '::endgroup::\n'
+  record_runtime "$index" "$status" "$elapsed"
   worker_reported_by_index["$index"]=1
 }
 
@@ -525,6 +568,7 @@ for index in "${!commands[@]}"; do
   fi
   printf 'running actions-ci command %s/%s in %s: %s\n' \
     "$((index + 1))" "${#commands[@]}" "$group" "${commands[$index]}"
+  command_started_at["$index"]="$(utc_now)"
   run_command "$index" "${commands[$index]}" </dev/null &
   command_index_by_pid["$!"]="$index"
   commands_started=$((commands_started + 1))
