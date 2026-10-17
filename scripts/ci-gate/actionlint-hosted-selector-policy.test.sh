@@ -30,6 +30,7 @@ assert set(checkout["with"]["sparse-checkout"].splitlines()) == {
     ".github/actionlint.yaml",
     "scripts/ci-gate/hosted-selector-policy.py",
 }
+assert checkout["with"]["sparse-checkout-cone-mode"] is False
 assert checkout["with"]["persist-credentials"] is False
 
 install = steps["Install hosted-selector policy dependency"]

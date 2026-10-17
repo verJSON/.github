@@ -2910,24 +2910,150 @@ else:
 # Round-4 finding 6: #1826 has landed, so the five pull_request rows that
 # waited on it are stale. The live tree must be clean with only the relay
 # backlog listed: no pull_request job may reach a persistent runner at all.
-with tempfile.TemporaryDirectory() as lists:
-    relay_only = os.path.join(lists, "pending.tsv")
-    with open(os.path.join(HERE, "public-pr-runner-isolation.pending.tsv"), encoding="utf-8") as handle:
-        rows = [row for row in handle.read().splitlines()
-                if row.startswith("#") or not row.strip() or RELAY_LABEL.match(row.split("\t")[0])]
-    with open(relay_only, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(rows) + "\n")
-    completed = subprocess.run(
-        [sys.executable, SCRIPT, "--pending", relay_only, "--reviewed",
-         os.path.join(HERE, "public-pr-runner-isolation.reviewed.tsv"),
-         os.path.join(os.path.dirname(os.path.dirname(HERE)), ".github", "workflows")],
-        capture_output=True,
-        text=True,
-    )
+# The checker runs with the live lists in place: their own bytes are excluded
+# from every digest only at their real paths, so a filtered copy elsewhere would
+# bind the in-tree list like any other file.
+LIVE_PENDING_PATH = os.path.join(HERE, "public-pr-runner-isolation.pending.tsv")
+with open(LIVE_PENDING_PATH, encoding="utf-8") as handle:
+    non_relay = [row.split("\t")[0] for row in handle.read().splitlines()
+                 if row.strip() and not row.startswith("#") and not RELAY_LABEL.match(row.split("\t")[0])]
+completed = subprocess.run(
+    [sys.executable, SCRIPT, "--pending", LIVE_PENDING_PATH, "--reviewed",
+     os.path.join(HERE, "public-pr-runner-isolation.reviewed.tsv"),
+     os.path.join(os.path.dirname(os.path.dirname(HERE)), ".github", "workflows")],
+    capture_output=True,
+    text=True,
+    cwd=os.path.dirname(os.path.dirname(HERE)),
+)
+if non_relay:
+    fail(f"the live pending list names non-relay rows: {non_relay}")
 if completed.returncode == 0:
     ok("the live tree is clean with no pull_request row: every pull_request job is on an ephemeral runner")
 else:
     fail("a live pull_request job still needs a pending row: "
          + "; ".join(line for line in completed.stdout.splitlines() if line.startswith("VIOLATION"))[:600])
+
+# ---------------------------------------------------------------------------
+# Round-5 review of #1827: a pending row still applied after the job's runtime
+# behavior changed. Head detection never read a program run by a bare
+# relative path (`scripts/x.sh`), and the backlog digest bound neither the
+# bytes a sparse checkout puts on disk nor the programs a full-checkout job
+# runs. These fixtures copy the live rework-reconcile job and script.
+# ---------------------------------------------------------------------------
+REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
+
+
+def live(path: str) -> str:
+    with open(os.path.join(REPO_ROOT, path), encoding="utf-8") as handle:
+        return handle.read()
+
+
+REWORK = {
+    "rework-reconcile.yml": live(".github/workflows/rework-reconcile.yml"),
+    "scripts/ci-telemetry/rework-reconcile.sh": live("scripts/ci-telemetry/rework-reconcile.sh"),
+}
+REWORK_LABEL = ("rework-reconcile.yml [workflow_dispatch]", "reconcile")
+REWORK_PENDING = backlog_row(REWORK, *REWORK_LABEL)
+expect({**REWORK, "pending.tsv": REWORK_PENDING}, 0,
+       ("PENDING: rework-reconcile.yml [workflow_dispatch]: job 'reconcile'",),
+       "the live rework-reconcile job is ratcheted by its own backlog row", *PENDING_ARGS)
+expect_no_pending(
+    {**REWORK, "pending.tsv": REWORK_PENDING,
+     "scripts/ci-telemetry/rework-reconcile.sh": REWORK["scripts/ci-telemetry/rework-reconcile.sh"]
+     + 'gh pr checkout "$PR"\ngit fetch origin "refs/pull/$PR/head" && git checkout FETCH_HEAD\n'},
+    "round-5 repro: a backlog job's bare-path script that starts checking out a pull request head is refused",
+    ("VIOLATION: rework-reconcile.yml [workflow_dispatch]: job 'reconcile'", RELAY_REFUSAL),
+    *PENDING_ARGS,
+)
+expect_no_pending(
+    {**REWORK, "pending.tsv": REWORK_PENDING,
+     "scripts/ci-telemetry/rework-reconcile.sh": REWORK["scripts/ci-telemetry/rework-reconcile.sh"]
+     + 'printf "%s\\n" "${EXTRA:-}" >>"$GITHUB_STEP_SUMMARY"\n'},
+    "a backlog row stops applying when a program a full-checkout job runs changes at all",
+    ("VIOLATION: rework-reconcile.yml [workflow_dispatch]: job 'reconcile'", "pending row no longer applies"),
+    *PENDING_ARGS,
+)
+
+# A bare relative path in any command position is followed: after `&&`, after
+# `;`, inside `$( )`, and behind an assignment prefix.
+BARE_STEPS = {
+    "line start": "- run: tools/observe.sh --weekly",
+    "after &&": "- run: cd . && tools/observe.sh --weekly",
+    "after ;": "- run: true; tools/observe.sh --weekly",
+    "inside $( )": '- run: echo "$(tools/observe.sh --weekly)"',
+    "after an assignment": "- run: MODE=weekly tools/observe.sh",
+}
+for label, step in BARE_STEPS.items():
+    job = {**backlog_relay("capability-floor-observe.yml", "observe", "- uses: actions/checkout@v4\n" + step),
+           "tools/observe.sh": "echo observe\n"}
+    expect_no_pending(
+        {**job, "pending.tsv": backlog_row(job, "capability-floor-observe.yml [workflow_dispatch]", "observe"),
+         "tools/observe.sh": "gh pr checkout \"$PR\"\n"},
+        f"a bare relative program ({label}) that starts checking out a head is refused",
+        (RELAY_REFUSAL,),
+        *PENDING_ARGS,
+    )
+# The closure follows a shell script into the scripts it runs, so an edit
+# two calls deep still stops the row applying; another interpreter's source is
+# bound by its bytes but not parsed as shell, so its string literals do not
+# pull the rest of the tree into the digest.
+NESTED = {
+    **backlog_relay("capability-floor-observe.yml", "observe",
+                    "- uses: actions/checkout@v4\n- run: bash tools/outer.sh"),
+    "tools/outer.sh": "#!/usr/bin/env bash\ntools/inner.sh --weekly\n",
+    "tools/inner.sh": "echo inner\n",
+}
+NESTED_ROW = backlog_row(NESTED, "capability-floor-observe.yml [workflow_dispatch]", "observe")
+expect_no_pending(
+    {**NESTED, "tools/inner.sh": "echo inner changed\n", "pending.tsv": NESTED_ROW},
+    "a backlog row stops applying when a script its script runs changes",
+    ("pending row no longer applies",),
+    *PENDING_ARGS,
+)
+PY_JOB = {
+    **backlog_relay("capability-floor-observe.yml", "observe",
+                    "- uses: actions/checkout@v4\n- run: python3 tools/report.py"),
+    "tools/report.py": '"""Summarize the weekly data.\n\ntools/data.sh writes the input.\n"""\n',
+    "tools/data.sh": "echo data\n",
+}
+expect({**PY_JOB, "tools/data.sh": "echo other\n",
+        "pending.tsv": backlog_row(PY_JOB, "capability-floor-observe.yml [workflow_dispatch]", "observe")}, 0,
+       ("PENDING: capability-floor-observe.yml [workflow_dispatch]: job 'observe'",),
+       "a path inside a Python program's string literal is not followed as a shell command", *PENDING_ARGS)
+# A command word that is not a tracked file is not a program to follow, so a
+# step naming a head value beside it is not made undetermined by it.
+UNTRACKED_WORD = backlog_relay(
+    "capability-floor-observe.yml", "observe",
+    "- uses: actions/checkout@v4\n- run: node_modules/.bin/tool \"$SHA\"\n"
+    "  env:\n    SHA: ${{ github.event.pull_request.head.sha }}",
+)
+code, output = run_checker(UNTRACKED_WORD)
+if code == 1 and REVIEW_REQUIRED in output and RELAY_REFUSAL not in output and "cannot read" not in output:
+    ok("a bare command word that is not a tracked file is not followed, even beside a head value")
+else:
+    fail(f"a bare untracked command word was followed as a program (got {code}: {output.strip()[:400]})")
+
+# A sparse checkout's bytes bind the backlog row, except the pending and
+# reviewed lists themselves, which a checkout of their directory holds.
+SPARSE_OBSERVE = {
+    **backlog_relay("capability-floor-observe.yml", "observe",
+                    "- uses: actions/checkout@v4\n  with:\n    sparse-checkout: config\n- run: echo observe"),
+    "config/policy.json": '{"allow": false}\n',
+}
+SPARSE_PENDING = backlog_row(SPARSE_OBSERVE, "capability-floor-observe.yml [workflow_dispatch]", "observe")
+expect_no_pending(
+    {**SPARSE_OBSERVE, "config/policy.json": '{"allow": true}\n', "pending.tsv": SPARSE_PENDING},
+    "a backlog row stops applying when a file its sparse checkout puts on disk changes",
+    ("pending row no longer applies",),
+    *PENDING_ARGS,
+)
+LISTS_OBSERVE = backlog_relay(
+    "capability-floor-observe.yml", "observe",
+    "- uses: actions/checkout@v4\n  with:\n    sparse-checkout: .github/workflows\n- run: echo observe",
+)
+LISTS_ROW = backlog_row(LISTS_OBSERVE, "capability-floor-observe.yml [workflow_dispatch]", "observe")
+expect({**LISTS_OBSERVE, "pending.tsv": LISTS_ROW}, 0,
+       ("PENDING: capability-floor-observe.yml [workflow_dispatch]: job 'observe'",),
+       "a backlog row whose checkout holds the pending list still matches its own row", *PENDING_ARGS)
 
 sys.exit(1 if failures else 0)

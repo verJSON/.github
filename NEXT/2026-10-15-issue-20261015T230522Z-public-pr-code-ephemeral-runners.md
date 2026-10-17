@@ -68,8 +68,10 @@ jobs that predate the rule are ratcheted in the pending list as #1831's relay
 backlog. Its keys are frozen in the checker and may only shrink; refusals are
 decided before any list row is read, and a backlog job tolerates only the
 refusal kinds it carried when the backlog froze; each row binds the job's full
-content, callers, inherited settings, and local actions, so any edit to the job
-stops the row applying. A non-cone sparse-checkout list is evaluated with git's
+content, callers, inherited settings, the bytes its sparse checkouts and local
+actions put on disk, and every scanned-tree program it runs (including bare
+`scripts/x.sh` calls, followed through shell scripts), so any change to what
+the job runs stops the row applying. A non-cone sparse-checkout list is evaluated with git's
 gitignore anchoring (a bare name matches at every depth, `*` matches dotfiles),
 and a pattern the checker cannot evaluate exactly is refused. A local Docker
 action's `COPY --from`, `RUN --mount=…,from=`, and `# syntax=` frontend must

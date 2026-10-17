@@ -792,11 +792,18 @@ INTERPRETER_CALL = re.compile(
     r"((?:[ \t]+-[A-Za-z]+)*)[ \t]+(?!-)(\"[^\"\n]+\"|'[^'\n]+'|[^\s;&|)<>]+)",
     re.M,
 )
-DIRECT_EXEC = re.compile(r"^\s*(?:[A-Za-z_]\w*=\S*\s+)*(\.\.?/[^\s;&|)<>]+)", re.M)
+# A command position: a line start, after `;`, `&`, `|`, `(`, `$(`, a
+# backtick, or a compound keyword, past any `NAME=value` prefixes.
+COMMAND_POSITION = r"(?:^|[;&|(`]|\$\(|\b(?:then|do|else|exec|time)\b)[ \t]*(?:[A-Za-z_]\w*=\S*[ \t]+)*"
+DIRECT_EXEC = re.compile(COMMAND_POSITION + r"(\.\.?/[^\s;&|)<>`]+)", re.M)
+# A bare relative command word (`scripts/x.sh`): followed only when it names a
+# file in the scanned tree, so `node_modules/.bin/tool` is not a program here.
+BARE_EXEC = re.compile(COMMAND_POSITION + r"([A-Za-z0-9_][\w.-]*/[^\s;&|)<>`$\"']+)", re.M)
 
 
-def programs(run: str) -> list[str]:
-    """Files a run block executes: `<interpreter> [flags] <path>` or `./path`.
+def programs(run: str, root: str | None = None) -> list[str]:
+    """Files a run block executes: `<interpreter> [flags] <path>`, `./path`,
+    or, given the scanned root, a bare relative path to a file in it.
 
     Deliberately a pattern match rather than a shell parser: it only has to
     find candidate programs, and an unreadable one matters only when the same
@@ -814,6 +821,10 @@ def programs(run: str) -> list[str]:
             continue
         found.append(match.group(2).strip("\"'"))
     found.extend(match.group(1) for match in DIRECT_EXEC.finditer(joined))
+    if root is not None:
+        found.extend(
+            match.group(1) for match in BARE_EXEC.finditer(joined) if read_program(root, match.group(1)) is not None
+        )
     # `program="$RUNNER_TEMP/tool.py"; python3 "$program"`: follow one level of
     # plain assignment so the program's file name can still be matched.
     assigned = {
@@ -851,6 +862,39 @@ def read_program(root: str, program: str) -> str | None:
         return None
     with open(candidate, encoding="utf-8", errors="replace") as handle:
         return handle.read()
+
+
+SHELL_SHEBANG = re.compile(r"#![ \t]*(?:/usr)?/bin/(?:env[ \t]+)?(?:ba|z|da)?sh\b")
+
+
+def is_shell_script(path: str, content: str) -> bool:
+    return path.endswith(".sh") or bool(SHELL_SHEBANG.match(content))
+
+
+def executed_programs(job: dict, root: str, excluded: frozenset[str] = frozenset()) -> dict[str, str]:
+    """SHA-256 of every scanned-tree program a job's steps run, and of every
+    program those run in turn (to MAX_CLOSURE_DEPTH), keyed by path. Binds
+    what a full-checkout job executes without binding the whole tree."""
+    found: dict[str, str] = {}
+    queue = [
+        (without_comments(step["run"]), 0)
+        for step in job.get("steps") or []
+        if isinstance(step, dict) and isinstance(step.get("run"), str)
+    ]
+    while queue:
+        text, depth = queue.pop()
+        for program in programs(text, root):
+            content = read_program(root, program)
+            relative = os.path.relpath(os.path.normpath(os.path.join(root, program)), root)
+            if content is None or relative in found or relative in excluded:
+                continue
+            found[relative] = hashlib.sha256(content.encode("utf-8", "surrogateescape")).hexdigest()
+            # Only a shell script is read with shell grammar; another
+            # interpreter's source would match command positions in its
+            # string literals and bind most of the tree.
+            if depth + 1 < MAX_CLOSURE_DEPTH and is_shell_script(relative, content):
+                queue.append((without_comments(content), depth + 1))
+    return dict(sorted(found.items()))
 
 
 def materializes_head(job: dict, workflow_env, root: str, label: str) -> bool:
@@ -907,7 +951,7 @@ def materializes_head(job: dict, workflow_env, root: str, label: str) -> bool:
         local_head = step_names_head(step)
         if local_head and OPAQUE_PIPE.search(run):
             raise Undetermined(f"{label}: a step pipes a head value into a program the checker cannot read")
-        for program in programs(run):
+        for program in programs(run, root):
             content = read_program(root, program) or inline_source(job, program)
             if content is None:
                 if local_head:
@@ -1176,6 +1220,8 @@ class Closure:
             self.flag("unscanned-path", f"{repo_path} ({why}: outside the scanned tree)")
             return False
         relative = os.path.relpath(candidate, self.root)
+        if relative in self.excluded:
+            return True  # the pending and reviewed lists: reviewed as the change that edits them
         parts = [] if relative == os.curdir else relative.split(os.sep)
         for depth in range(1, len(parts)):
             ancestor = os.path.join(self.root, *parts[:depth])
@@ -1759,17 +1805,19 @@ def check_workflow(
                     closure.refusals.add(("relay-head", RELAY_HEAD_REFUSAL.format(diagnostic=diagnostic)))
             pairs = closure.pairs()
             bound = {"files": closure.files, "unresolved": [f"{reason}: {detail}" for reason, detail in pairs]}
-            # The backlog digest binds what the job is, not the repository
-            # bytes a checkout puts on disk: a cone checkout of scripts/ci-gate
-            # holds the pending list itself, so a digest over those bytes could
-            # never match its own row, and every commit would restale a
-            # full-checkout row. Local actions are the job's own steps.
+            # The backlog digest binds what the job is and what it runs: the
+            # bytes its sparse checkouts and local actions put on disk (the
+            # pending and reviewed lists excluded, or no row could match
+            # itself) and every scanned-tree program its steps execute. A full
+            # checkout's whole-tree digest is left out, because every commit
+            # would restale the row; the programs it runs stand in for it.
             backlog_digest = review_digest(
                 chain,
                 job,
                 inherited_settings(document),
                 {
-                    "actions": {path: closure.files[path] for path in sorted(closure.action_files)},
+                    "files": closure.files,
+                    "programs": executed_programs(job, scan.root, scan.excluded),
                     "reasons": sorted({reason for reason, _ in pairs}),
                 },
             )

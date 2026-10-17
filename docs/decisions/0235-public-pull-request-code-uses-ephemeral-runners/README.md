@@ -525,15 +525,10 @@ accept.
 **Trade-off.** Refusing the 28 grandfathered jobs outright would have made
 this pull request #1831: they are canonical reusable workflows that private
 adopters run on the pool by design. Tolerance is therefore granted by code,
-per key and per kind, never by a list row, and can only shrink. The backlog
-digest deliberately leaves out the repository bytes a checkout puts on disk,
-which a reviewed entry binds. A cone checkout of `scripts/ci-gate` (as
-`actionlint.yml`'s policy checkout does) materializes the pending list itself,
-so a digest over those bytes can never match its own row, and the whole-tree
-digest of a full checkout changes on every commit. A backlog row records an
-accepted exposure rather than a safety claim, so binding the job's own
-definition is the bound that matters; the scanned bytes stay under the
-repository's normal review.
+per key and per kind, never by a list row, and can only shrink. As first
+written, the backlog digest left out the repository bytes a checkout puts on
+disk; the 2026-10-17 round-5 amendment below replaces that choice, which
+let a row survive a change to what the job runs.
 
 ### 2. The runner-isolation check is part of the required `shell-tests` context
 
@@ -666,3 +661,51 @@ reports SC2015 chains the pool's build does not). The durable fix is ADR 0026's
 own principle, that lint policy must not be an accidental property of routing:
 `actionlint.yml` now pins ShellCheck 0.11.0 by version and digest (ADR 0026,
 2026-10-17 amendment).
+
+## Amendment (2026-10-17, #1827) — round-5 review: a backlog row binds what the job runs
+
+**Finding.** A pending row still applied after the job's runtime behavior
+changed. The reviewer appended `gh pr checkout "$PR"` and a `refs/pull/$PR/head`
+fetch-and-checkout to `scripts/ci-telemetry/rework-reconcile.sh`, which the
+frozen backlog job `rework-reconcile.yml [workflow_dispatch]` / `reconcile`
+runs from a full checkout; the checker printed `PENDING` and exited 0. Two
+causes: head detection followed only `./x`, `../x`, and interpreter-invoked
+programs, so the bare relative call `scripts/ci-telemetry/rework-reconcile.sh …`
+was never read; and the backlog digest bound none of the bytes the job runs.
+The earlier reason for leaving checkout bytes out (a checkout of the list's own
+directory, and the whole-tree digest of a full checkout) held only for full
+checkouts and the lists themselves.
+
+**Decision.**
+
+- Head detection and the program closure follow a bare relative command word
+  (`scripts/x.sh`) in any command position (line start, after `;`, `&`, `|`,
+  `(`, `$(`, a backtick, or a compound keyword, past `NAME=value` prefixes)
+  when it names a file in the scanned tree. A word that names no tracked file,
+  such as `node_modules/.bin/tool`, is not a program, so it cannot make a step
+  undetermined.
+- The pending and reviewed lists are left out of every on-disk binding at their
+  real paths, as the tree digest already did, because a list edit is reviewed
+  as the pull request that makes it.
+- The backlog digest now binds the job, its callers, its inherited settings,
+  its reason names, the bytes its sparse checkouts and local actions put on
+  disk, and the bytes of every scanned-tree program its steps execute. For
+  shell scripts that closure is followed through to the scripts they run, to
+  the closure depth limit of 4. Another interpreter's source is bound by its
+  bytes but not read as shell, because its string literals would otherwise pull
+  most of the tree in. A full checkout's whole-tree digest stays out; the
+  programs it executes stand in for it.
+- `actionlint.yml`'s policy checkout is non-cone, so it puts exactly its two
+  files on disk. In cone mode it also put every file directly in `.github/`,
+  `scripts/`, and `scripts/ci-gate/` on disk, about 360 files, and binding those
+  would have restaled the actionlint backlog row on nearly every pull request.
+
+**Trade-off.** A backlog row now goes stale when any program its job runs
+changes, not only when the job definition changes. That is the intended
+content binding. Its cost is a mechanical digest refresh for the affected rows,
+which changes only the digest column. A pull request that edits a script a
+backlog job runs therefore shows that job in its diff, and that is where a
+reviewer should look. The closure is still a vocabulary: a program reached
+through an indirection the patterns do not model (an alias, `xargs`, a Python
+`subprocess` call) is not followed. This is the same residual decision 5
+records for fetches.
