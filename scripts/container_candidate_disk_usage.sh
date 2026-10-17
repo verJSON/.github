@@ -21,7 +21,82 @@ measure() {
   } 2>&1 | tee -a "$log_file" || true
 }
 
+# Large preinstalled hosted-image toolchains that no publish build step uses. The image
+# build runs inside BuildKit, so host SDKs are dead weight competing with node_modules.
+unused_hosted_toolchains=(
+  /usr/local/lib/android
+  /usr/share/dotnet
+  /opt/ghc
+  /usr/local/.ghcup
+  /opt/hostedtoolcache/CodeQL
+  /usr/share/swift
+  /usr/local/share/powershell
+)
+
+# A necessary floor, not a sufficiency guarantee: the node_modules context is copied at
+# least twice (BuildKit context transfer and the image layer), and the margin is headroom
+# for base layers, install scripts, and image export. Run 39001337204 hit ENOSPC after the
+# transfer, in npm rebuild install scripts and layer export, whose demand the publisher
+# cannot predict; passing this floor only rules out the known-undersized case.
+build_margin_bytes=4294967296
+
+report() {
+  printf '%s\n' "$1" | tee -a "$log_file"
+}
+
+# Writes to stderr so the error is visible even when raised inside a command substitution.
+measurement_failure() {
+  printf '::error::could not measure %s; refusing to continue without a trustworthy disk measurement\n' "$1" \
+    | tee -a "$log_file" >&2
+  exit 1
+}
+
+# Prints the free bytes of the filesystem holding $1, or fails closed on any malformed reading.
+available_bytes() {
+  local output value
+  output="$(df -B1 --output=avail -- "$1")" || measurement_failure "free space on the filesystem holding $1"
+  [ "$(wc -l <<<"$output")" -eq 2 ] || measurement_failure "free space on the filesystem holding $1"
+  value="$(sed -n '2{s/^[[:space:]]*//;p}' <<<"$output")"
+  [[ "$value" =~ ^[0-9]{1,18}$ ]] || measurement_failure "free space on the filesystem holding $1"
+  printf '%s\n' "$value"
+}
+
+# Prints the on-disk bytes of directory $1, or fails closed on any malformed reading.
+directory_bytes() {
+  local output pattern=$'^([0-9]{1,18})\t[^\n]+$'
+  [ -d "$1" ] || measurement_failure "the build context: $1 is not a directory"
+  output="$(du -s -B1 -- "$1")" || measurement_failure "the size of $1"
+  [[ "$output" =~ $pattern ]] || measurement_failure "the size of $1"
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
 case "$operation" in
+  reclaim)
+    [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] || {
+      report "Skipping hosted toolchain reclaim on runner environment '${RUNNER_ENVIRONMENT:-unknown}'"
+      exit 0
+    }
+    before="$(available_bytes /)" || exit 1
+    sudo -n rm -rf -- "${unused_hosted_toolchains[@]}" || {
+      report "::error::could not remove unused hosted toolchains: ${unused_hosted_toolchains[*]}"
+      exit 1
+    }
+    after="$(available_bytes /)" || exit 1
+    report "reclaimed_bytes=$((after - before)) available_before=$before available_after=$after"
+    ;;
+  assert-space)
+    [ "$#" -eq 2 ] || { echo "usage: $0 assert-space <build-context>" >&2; exit 2; }
+    context_bytes="$(directory_bytes "$2")" || exit 1
+    docker_root="$(docker info --format '{{.DockerRootDir}}')" || measurement_failure "the Docker data root"
+    [[ "$docker_root" == /* ]] || measurement_failure "the Docker data root: it is not an absolute path"
+    available="$(available_bytes "$docker_root")" || exit 1
+    required=$((2 * context_bytes + build_margin_bytes))
+    report "context_bytes=$context_bytes required_bytes=$required available_bytes=$available filesystem=$docker_root"
+    [ "$available" -ge "$required" ] || {
+      report "::error::insufficient free disk for the image build: required $required bytes, available $available bytes on the filesystem holding $docker_root (2 x node_modules context $context_bytes + margin $build_margin_bytes)"
+      exit 1
+    }
+    ;;
   snapshot)
     : > "$log_file" || true
     measure "before-buildx-setup"
@@ -81,7 +156,7 @@ case "$operation" in
     exit "$failures"
     ;;
   *)
-    echo "usage: $0 {snapshot|measure <phase>|cleanup}" >&2
+    echo "usage: $0 {snapshot|measure <phase>|cleanup|reclaim|assert-space <build-context>}" >&2
     exit 2
     ;;
 esac
