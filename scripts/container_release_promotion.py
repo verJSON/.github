@@ -105,10 +105,14 @@ def release(
             "provenance": {"predicateType": image["provenance"]["predicateType"], "attestationDigest": attestation_digest, "builderIdentity": image["provenance"]["builderIdentity"]},
             "sbom": {"predicateType": image["sbom"]["predicateType"], "attestationDigest": sbom_digest},
         })
-    workflow, contract = candidate["source"]["workflow"].rsplit("@", 1)
+    # Split on the first `@`: a signer such as `...yml@refs/heads/main@<sha>` must
+    # not pass as pinned because its last segment happens to be a commit.
+    workflow, _, contract = candidate["source"]["workflow"].partition("@")
     path_prefix = "Verjson/.github/"
     if not workflow.startswith(path_prefix):
         raise ManifestError("candidate workflow is outside the contract repository")
+    if workflow != path_prefix + ".github/workflows/container-candidate-publish.yml":
+        raise ManifestError("candidate workflow is not the contract publisher")
     # Only a pinned contract commit is promotable; a branch-named publisher (the
     # same-repository contract canary) is never released (ADR 0216).
     if not re.fullmatch(r"[0-9a-f]{40}", contract):

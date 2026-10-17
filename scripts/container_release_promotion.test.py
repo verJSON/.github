@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -63,33 +64,46 @@ class PromotionTest(unittest.TestCase):
         kwargs.setdefault("now", self.now)
         return promotion.release(*args, **kwargs)
 
-    def test_refuses_to_promote_a_contract_repository_publisher_at_a_branch(self):
-        # Canary candidates validate as candidates but are never promoted (ADR 0216).
-        for publisher, reason in (
-            (
-                "verJSON/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main",
-                "candidate workflow is outside the contract repository",
-            ),
-            (
-                "Verjson/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main",
-                "candidate publisher is not pinned to a contract commit",
-            ),
-            *(
-                (
-                    "Verjson/.github/.github/workflows/container-candidate-publish.yml@" + contract,
-                    "candidate publisher is not pinned to a contract commit",
-                )
-                for contract in ("b" * 41, "B" * 40, "b" * 39, "b" * 7)
-            ),
-        ):
-            with self.subTest(publisher=publisher):
-                candidate, config = copy.deepcopy(self.candidate), copy.deepcopy(self.config)
-                candidate["source"]["repository"] = config["repository"] = "verJSON/.github"
-                candidate["source"]["workflow"] = publisher
-                candidate["images"][0]["provenance"]["builderIdentity"] = publisher
-                config["images"][0]["provenance"]["builderIdentity"] = publisher
+    def contract_repository_candidate(self, publisher):
+        candidate, config = copy.deepcopy(self.candidate), copy.deepcopy(self.config)
+        candidate["source"]["repository"] = config["repository"] = "verJSON/.github"
+        candidate["source"]["workflow"] = publisher
+        candidate["images"][0]["provenance"]["builderIdentity"] = publisher
+        config["images"][0]["provenance"]["builderIdentity"] = publisher
+        return candidate, config
 
-                with self.assertRaisesRegex(promotion.ManifestError, reason):
+    def test_refuses_to_promote_a_publisher_other_than_one_pinned_contract_commit(self):
+        # Promotion rejects these on its own, independent of the candidate validator
+        # (ADR 0216); canary candidates are never released.
+        publisher = "Verjson/.github/.github/workflows/container-candidate-publish.yml"
+        unpinned = "candidate publisher is not pinned to a contract commit"
+        cases = [
+            ("verJSON/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+             "candidate workflow is outside the contract repository"),
+            (publisher + "@refs/heads/main", unpinned),
+            (publisher + "@refs/heads/main@" + "b" * 40, unpinned),
+            ("Verjson/.github/.github/workflows/evil.yml@" + "b" * 40,
+             "candidate workflow is not the contract publisher"),
+            ("Verjson/.github/evil/.github/workflows/container-candidate-publish.yml@" + "b" * 40,
+             "candidate workflow is not the contract publisher"),
+        ]
+        cases.extend((publisher + "@" + contract, unpinned) for contract in ("b" * 41, "B" * 40, "b" * 39, "b" * 7))
+        for signer, reason in cases:
+            with self.subTest(signer=signer):
+                candidate, config = self.contract_repository_candidate(signer)
+                with patch.object(promotion, "validate_manifest"):
+                    with self.assertRaisesRegex(promotion.ManifestError, reason):
+                        self.release(candidate, config, self.state, "1.2.3")
+
+    def test_release_rejects_every_unpinned_contract_publisher_end_to_end(self):
+        for signer in (
+            "verJSON/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+            "Verjson/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main",
+            "Verjson/.github/.github/workflows/container-candidate-publish.yml@refs/heads/main@" + "b" * 40,
+        ):
+            with self.subTest(signer=signer):
+                candidate, config = self.contract_repository_candidate(signer)
+                with self.assertRaises(promotion.ManifestError):
                     self.release(candidate, config, self.state, "1.2.3")
 
     def test_exact_digests_form_deterministic_release(self):
