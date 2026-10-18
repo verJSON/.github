@@ -2,6 +2,7 @@
 import argparse
 import base64
 import copy
+import hashlib
 import json
 import os
 import re
@@ -521,16 +522,29 @@ def matches_image(live, image) -> bool:
     return not image_mismatches(live, image)
 
 
+def sampled_items(items: list[str], limit: int) -> tuple[list[str], str]:
+    """A readable sample of `items` and the tail that binds the text to all of them.
+
+    The sample is for a reader; the digest is for the adjudicator. ADR 0189
+    fingerprints the exact finding text, so without a digest over every item a
+    same-count change among the unsampled ones would replay as a match.
+    """
+    sample = items[:limit]
+    suffix = f" (plus {len(items) - len(sample)} more)" if len(items) > len(sample) else ""
+    digest = hashlib.sha256(
+        json.dumps(sorted(items), ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return sample, f"{suffix} items=sha256:{digest}"
+
+
 def concise_mismatches(mismatches: list[str]) -> str:
-    sample = mismatches[:4]
-    suffix = f" (plus {len(mismatches) - len(sample)} more)" if len(mismatches) > len(sample) else ""
-    return f"{'; '.join(sample)}{suffix}"
+    sample, tail = sampled_items(mismatches, 4)
+    return f"{'; '.join(sample)}{tail}"
 
 
 def concise_findings(name: str, findings: list[str]) -> str:
-    sample = findings[:8]
-    suffix = f" (plus {len(findings) - len(sample)} more)" if len(findings) > len(sample) else ""
-    return f"{name}: missing={len(findings)} sample={sample}{suffix}"
+    sample, tail = sampled_items(findings, 8)
+    return f"{name}: missing={len(findings)} sample={sample}{tail}"
 
 
 def concise_missing(name: str, missing: list[str]) -> None:
