@@ -438,11 +438,17 @@ class OrgRulesetConformanceTest(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stderr)
 
+    def cli_projects_exception(self, policy):
+        [entry] = [
+            item
+            for item in policy["bypassless_required_workflows"]
+            if item["name"] == "cli-projects-package-surface-required-workflow"
+        ]
+        return entry
+
     def declared_check_policy(self, **declared):
         policy = json.loads(self.committed_policy_without_bypass_contracts())
-        entry = policy["bypassless_required_workflows"][1]
-        self.assertEqual("cli-projects-package-surface-required-workflow", entry["name"])
-        entry["required_status_check"].update(declared)
+        self.cli_projects_exception(policy)["required_status_check"].update(declared)
         return json.dumps(policy)
 
     def test_any_departure_from_the_declared_admission_rule_still_fails(self):
@@ -514,7 +520,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
     def test_an_exception_declaring_no_status_check_rejects_one(self):
         detail = self.cli_projects_required_workflow()
         policy = json.loads(self.committed_policy_without_bypass_contracts())
-        policy["bypassless_required_workflows"][1]["required_status_check"] = None
+        self.cli_projects_exception(policy)["required_status_check"] = None
 
         result, _ = self.run_audit(
             [[{"id": 21830367}]], {21830367: detail}, raw_policy=json.dumps(policy)
@@ -528,11 +534,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
         rollout = json.loads(
             (ROOT / "config/cli-projects-package-surface-ruleset.json").read_text(encoding="utf-8")
         )["rollout"]
-        [entry] = [
-            item
-            for item in policy["bypassless_required_workflows"]
-            if item["name"] == "cli-projects-package-surface-required-workflow"
-        ]
+        entry = self.cli_projects_exception(policy)
 
         self.assertEqual(rollout["freshness_status_check"], entry["required_status_check"])
 
@@ -595,7 +597,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
         for name, mutate in cases.items():
             with self.subTest(case=name):
                 policy = json.loads(self.committed_policy_without_bypass_contracts())
-                mutate(policy["bypassless_required_workflows"][1]["required_status_check"])
+                mutate(self.cli_projects_exception(policy)["required_status_check"])
 
                 result, _ = self.run_audit(
                     [[{"id": 21830367}]],
