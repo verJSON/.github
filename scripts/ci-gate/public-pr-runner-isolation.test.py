@@ -3470,6 +3470,27 @@ expect_verify_refused(
     ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED),
 )
 
+# Round-8 finding 4: `npm pack` runs the package's prepack, prepare and
+# postpack scripts unless --ignore-scripts, exactly as install runs its own.
+# (prepare is also reached by verify's own `npm rebuild` step.)
+
+
+def with_scripts(scripts: dict[str, str]) -> str:
+    """The verify fixture's package.json, with these scripts added."""
+    package = json.loads(VERIFY["./package.json"])
+    return json.dumps({**package, "scripts": {**package.get("scripts", {}), **scripts}})
+
+
+for script in ("prepack", "prepare", "postpack"):
+    expect_verify_refused(
+        verify_with("npm pack\n", {"./package.json": with_scripts({script: "bash \"$TOOL\""})}),
+        f"verify refuses an `npm pack` whose {script} script runs a computed program",
+        ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED),
+    )
+expect(verify_with("npm pack --ignore-scripts\n", {"./package.json": with_scripts({"prepack": "bash \"$TOOL\""})}),
+       0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
+       "an `npm pack --ignore-scripts` does not trace the lifecycle scripts it skips", *PENDING_ARGS)
+
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
 # sequences must not decode to the same replacement text and digest), and a

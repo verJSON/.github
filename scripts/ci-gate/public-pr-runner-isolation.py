@@ -1499,6 +1499,11 @@ class ProgramTrace:
                 self.shell(scripts[script], "package.json", depth + 1)
             return
         if verb == "pack":
+            # npm pack runs the package's own prepack, prepare and postpack.
+            if "--ignore-scripts" not in args:
+                for name in ("prepack", "prepare", "postpack"):
+                    if isinstance(scripts.get(name), str):
+                        self.shell(scripts[name], "package.json", depth + 1)
             return self.pack(depth)
         if verb in ("ci", "install", "i", "rebuild", "version"):
             # Dependency lifecycle code comes from package-lock.json and the
