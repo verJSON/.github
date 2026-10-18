@@ -963,14 +963,24 @@ forms and generalize the binding.
   refuse. `patch` refuses behind any command prefix the trace models
   (`exec`, `nohup`, `sudo`, `time`, `command`, `builtin`, `!`, `env`,
   `timeout`, `nice`, `stdbuf`, `doas`), including the prefix's options and
-  their arguments, and when named by a path (rounds 11 and 12). Examples are
-  `sudo -u root`, `sudo -Eu root`, `time -p`, `env -iu X`, and
-  `timeout -sKILL 5`. A short-option cluster is read letter by letter: a
-  letter that takes an argument consumes the rest of the cluster, or the
-  next word when it ends the cluster. The shell trace uses the same option
-  table to find the command a prefix runs. `env -S`, in any spelling
-  (attached, clustered, or `--split-string=`), refuses, because its command
-  is a split string. `command -v` or `-V` runs nothing and does not refuse.
+  their arguments, and when named by a path (rounds 11 to 13). Examples are
+  `sudo -u root`, `sudo -Eu root`, `time -p`, `env -iu X`, `env -`, and
+  `timeout -sKILL 5`. The `patch` pattern shares only the prefix names with
+  the trace. It accepts any option, with or without one following
+  argument, and env's assignments, which is a superset of what each prefix
+  takes. The shell trace, which must find the exact command a prefix runs,
+  reads a per-prefix option table:
+  - A short-option cluster is read letter by letter. A letter that takes an
+    argument consumes the rest of the cluster, or the next word when it ends
+    the cluster.
+  - A long option is resolved as `getopt_long` resolves it, from an exact
+    name or any unambiguous prefix (`--sig`, `--us`, `--split`). A long
+    option the prefix does not resolve refuses.
+  - env's bare `-` is its empty-environment option.
+
+  `env -S` refuses in every spelling: attached, clustered, `--split-string`,
+  or any abbreviation of it. That is because its command is a split string.
+  `command -v` or `-V` runs nothing and does not refuse.
 - **Frozen data read.** One vector is tolerated as a data read (round 10):
   `scripts/changelog.py`'s `git_file()` runs
   `["git", "show", f"{revision}:{path}"]` and parses the bytes it returns.
@@ -1057,12 +1067,21 @@ everything the job executes. These residuals stay outside it:
     `exec /usr/bin/git "$@"`.
     Refusing a computed verb would refuse both, so it is a residual, not a
     refusal; #1831 removes it.
-11. **Three narrower forms are not read.** Each was confirmed by a probe at
-    round 11:
+11. **Narrower forms are not read.** Each was confirmed by a probe in
+    round 11, 12, or 13:
     - A prefix option argument quoted with a space, such as
       `env -C '/a b' patch`, ends the `patch` pattern's option match.
-    - A spawn bound by assignment, such as `run = subprocess.getoutput`, is
-      not classified, because only import names are mapped.
+    - Any non-import binding of a spawn, module, or loader is not classified,
+      because only import names are mapped. That covers assignment
+      (`run = subprocess.getoutput`), comprehension and `for` targets,
+      walrus, `with … as`, parameters, and `globals()[…]`.
+    - A spawn reached as a class attribute, such as `C.g(…)` after
+      `class C: from subprocess import getoutput as g`, is not classified.
+    - A spawn re-exported from another file, such as `helper.getoutput` or
+      `helper.subprocess.run`, is not classified, because each file's
+      imports are read on their own.
+    - A spawn called through `.__call__`, such as
+      `subprocess.run.__call__(…)`, is not classified.
     - A `shell=True` passed through `**{"shell": True}` is not seen, so the
       string is read as one program word.
 
@@ -1168,10 +1187,30 @@ falsely refused.
 
 - A name bound to more than one import refuses when any reading of it is a
   classified call.
-- Prefix option clusters are parsed letter by letter, from one table shared
-  by the trace and the `patch` pattern.
+- The shell trace parses prefix option clusters letter by letter, from a
+  per-prefix option table. The `patch` pattern shares only the prefix
+  names, and accepts every option with or without an argument.
 - `env -S` refuses in every spelling.
 - `command -v` and `-V` run nothing.
 - `nice`, `stdbuf`, and `doas` are prefixes.
 - Residual 11's three forms are unchanged.
+
+## Amendment (2026-10-18, #1827) — round-13 review: builtins, env's dash, and long options
+
+**Finding.** Round 12 read a name bound by a single import as that import.
+So an unused `from json import loads as exec` hid a top-level `exec(…)`, and
+the same held for `eval`, `compile`, and `__import__`. env's bare `-` ended
+option parsing. Only the exact `--split-string` refused, so `env --split`,
+`timeout --sig`, and `sudo --us` passed or lost their command. The previous
+amendment also overstated what the `patch` pattern shares with the trace.
+
+**Decision (PM, 2026-10-18; Part of #1831).**
+
+- A dynamic-execution builtin is an implicit binding of its own name.
+- env's `-` is an option.
+- Long options resolve as `getopt_long` does, and one that does not resolve
+  refuses.
+- The ADR now says that the `patch` pattern shares only prefix names.
+- Residual 11 lists every non-import binding, class attributes, cross-file
+  re-exports, and `.__call__`.
 
