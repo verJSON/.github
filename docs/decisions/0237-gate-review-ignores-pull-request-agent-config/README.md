@@ -37,10 +37,26 @@ Reading the action at that commit (untrusted source, read only):
   `enableAllProjectMcpServers: true` into the user settings it prepares.
 
 So any pull-request head that reached this step could run commands inside the gate
-job with its credentials. A scratch reproduction with Claude Code 2.1.302, no real
-credentials, and an unreachable API endpoint confirmed it: a fixture project hook and
-a fixture project MCP server both executed under the action's default source list,
-and neither executed under `--setting-sources user`.
+job with its credentials. A scratch reproduction confirmed it with Claude Code 2.1.241
+(the version `src/entrypoints/run.ts:80` installs) and 2.1.302, using no real
+credentials and an unreachable API endpoint. Under the action's default source list a
+fixture project hook, a fixture project MCP server, a runner-home hook, and a
+runner-home MCP server all executed. Under `--setting-sources user` alone the
+runner-home hook still executed, and without `--strict-mcp-config` so did the
+runner-home MCP server. With both flags and a fresh `CLAUDE_CONFIG_DIR`, nothing did.
+
+Three neighboring trust gaps in the same job came out of the review:
+
+- The pull-request head checkout persisted the job token, and in agent mode the
+  action's `configureGitAuth` (`src/github/operations/git-config.ts:22-48,128-135`)
+  rewrites `origin` to a URL embedding its token. Both land in git configuration the
+  review's `Read` tool can open. That rewrite runs inside a `try`/`catch` that
+  continues on failure (`src/modes/agent/index.ts:57-65`).
+- Review diffs read git attributes for the reviewed paths from the checkout, so a pull
+  request could mark a changed text file `-diff`, directly or through a macro, and the
+  model would see only `Binary files … differ`.
+- `--setting-sources user` reads the runner's `~/.claude` and `~/.claude.json`, which
+  an earlier job on a persistent runner could have written.
 
 Reachability: `gate-rearm.yml` terminalizes the authorization check and dispatches
 nothing when the head repository owner differs from the repository owner, so a fork
@@ -80,11 +96,45 @@ that write access alone does not grant. The exposure is pre-existing on `main`
    configuration. No other workflow or generator in this repository runs
    `claude-code-action` or a model CLI over pull-request content.
 
-`scripts/ci-gate/review-agent-config-isolation.test.py` enforces decisions 1–3: it
-reads `claude_args` the way the pinned action's parser does, executes the removal
-step against fixture workspaces (including planted links and an unremovable path),
-and evaluates both step conditions under Actions' implicit `success()` across every
-lane, provider, and removal outcome.
+6. **The review checkout holds no credential.** `Checkout PR head` sets
+   `persist-credentials: false`. The two later steps that fetch base history,
+   `rereview` and `prep`, receive the job token through step-scoped `GIT_CONFIG_*`
+   environment: the first entry resets any runner-configured credential helpers, and
+   the second adds a helper for `github.server_url` that answers only `get` from the
+   step's `GH_TOKEN` and stores nothing. A step immediately before the Claude review,
+   under its exact condition, removes the `origin` remote, after the last fetch, so the
+   action's token rewrite fails and is skipped.
+7. **Review diffs ignore pull-request attributes.** A step right after the head
+   removal writes `* !diff` to `$GIT_DIR/info/attributes`, which outranks every
+   in-tree `.gitattributes`. It replaces a planted link there rather than writing
+   through it. Both diff commands also pass `--no-ext-diff --no-textconv`, so runner
+   configuration cannot substitute their output. Genuinely binary content still
+   renders as a binary marker, which keeps the bounded diff valid UTF-8 for the
+   tool-free providers. `--text` was rejected for that reason.
+   The rereview patch-id needed no content-binding change: for a binary path git
+   includes the blob ids, so a swapped binary already changes it. A pull request
+   whose files were attribute-marked gets a new patch-id once, which forces one fresh
+   review rather than a skipped one. `review-verdict.py` reads evidence with
+   `git cat-file blob`, which applies no attributes.
+8. **The review's user layer is fresh per run.** The Claude step sets
+   `CLAUDE_CONFIG_DIR` to `$RUNNER_TEMP/claude-config-<run id>-<run attempt>`. The
+   isolation step creates it with `mkdir -m 0700` and fails if anything, including a
+   link, already exists there. The action's own `setupClaudeCodeSettings` still
+   writes `~/.claude/settings.json`, which is now unread. The gate passes no
+   `settings`, `plugins`, or `plugin_marketplaces` input, so the only lost setting
+   is the project MCP pre-approval this decision does not want. A future change that
+   needs one of those inputs must write it into the fresh directory instead.
+
+`scripts/ci-gate/review-agent-config-isolation.test.py` enforces decisions 1–3 and
+6–8, and every deliberate removal of a protection turns it red:
+
+- It reads `claude_args` the way the pinned action's parser does.
+- It executes the removal, isolation, attribute, `rereview`, and `prep` steps against
+  fixture repositories with a stubbed `gh`, a planted storing credential helper, a
+  substituting external diff, planted links, an unremovable path, and a pre-existing
+  config directory.
+- It evaluates every protection-to-consumer step pair under Actions' implicit
+  `success()` across every lane, provider, and failure outcome.
 
 ## Rollout
 
@@ -104,8 +154,13 @@ lane, provider, and removal outcome.
   into code execution inside the gate job.
 - The reviewer cannot open the pull request's `.claude/` files or root `CLAUDE.md`
   at head; it reviews them from the diff.
-- **Residual, accepted:** the user setting source still loads `~/.claude` from the
-  runner. On an ephemeral runner that is the action's own output. On the persistent
-  private-repository lane an earlier job on the same host could have written it,
-  which is the cross-job persistence class ADR 0235 already accepts for private
-  repositories.
+- The review model's `Read` tool no longer finds the job token in the checkout's git
+  configuration, and attribute-marked text changes reach the reviewer as text hunks.
+- **Residual, inherent to the action:** the CLI process environment still carries the
+  model credential and the action's GitHub token, because the CLI needs the first and
+  the action exports the second before starting it. The verdict schema,
+  `review-verdict.py`, and the short token lifetime are the remaining bounds on a
+  prompt-injected attempt to echo either.
+- **Residual, accepted:** managed policy settings under `/etc/claude-code` are always
+  loaded. They are root-owned runner state, the same persistent-host class ADR 0235
+  accepts for private repositories.
