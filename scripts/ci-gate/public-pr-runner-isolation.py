@@ -970,6 +970,32 @@ PREFIX_OPTIONS = {
     "env": frozenset({"-u", "-C", "--unset", "--chdir"}),
     "timeout": frozenset({"-s", "-k", "--signal", "--kill-after"}),
 }
+# Every long option each prefix accepts (GNU coreutils, sudo), so an
+# abbreviation resolves the way getopt_long resolves it (round 13).
+PREFIX_LONG_OPTIONS = {
+    "env": ("--ignore-environment", "--null", "--unset", "--chdir", "--split-string", "--block-signal",
+            "--default-signal", "--ignore-signal", "--list-signal-handling", "--debug", "--help", "--version"),
+    "timeout": ("--foreground", "--kill-after", "--preserve-status", "--signal", "--verbose", "--help", "--version"),
+    "nice": ("--adjustment", "--help", "--version"),
+    "stdbuf": ("--input", "--output", "--error", "--help", "--version"),
+    "nohup": ("--help", "--version"),
+    "time": ("--format", "--portability", "--output", "--append", "--verbose", "--quiet", "--help", "--version"),
+    "sudo": ("--askpass", "--background", "--bell", "--close-from", "--chdir", "--preserve-env", "--edit",
+             "--group", "--set-home", "--help", "--host", "--login", "--remove-timestamp", "--reset-timestamp",
+             "--list", "--non-interactive", "--preserve-groups", "--prompt", "--chroot", "--role", "--stdin",
+             "--shell", "--type", "--command-timeout", "--other-user", "--user", "--version", "--validate"),
+}
+
+
+def resolve_long_option(prefix: str, name: str) -> str | None:
+    """The long option `name` (an exact name or an unambiguous prefix of one)
+    stands for, or None when the prefix has no such option or it is
+    ambiguous (round 13)."""
+    known = PREFIX_LONG_OPTIONS.get(prefix, ())
+    if name in known:
+        return name
+    matches = [option for option in known if option.startswith(name)]
+    return matches[0] if len(matches) == 1 else None
 
 
 PYTHON_LOADERS = ("import_module", "run_module", "run_path", "spec_from_file_location")
@@ -988,14 +1014,21 @@ def skip_prefix_options(prefix: str, words: list[str]) -> str | None:
     letter that takes an argument consumes the rest of the cluster, or the
     next word when it ends the cluster (`sudo -Eu root`). Returns
     "split-string" for env -S in any spelling, "runs-nothing" for
-    `command -v`/`-V`, and otherwise None (round 12)."""
+    `command -v`/`-V`, "unknown-option" for a long option the prefix does not
+    resolve, and otherwise None (rounds 12-13). A long option may be any
+    unambiguous prefix of its name, and env's bare `-` is its
+    empty-environment option."""
     takes_argument = PREFIX_OPTIONS[prefix]
-    while words and words[0].startswith("-") and words[0] != "-":
+    while words and words[0].startswith("-") and (words[0] != "-" or prefix == "env"):
         option = words.pop(0)
         if option == "--":
             return None
         if option.startswith("--"):
-            name, equals, _ = option.partition("=")
+            written, equals, _ = option.partition("=")
+            name = resolve_long_option(prefix, written)
+            if name is None:
+                words.insert(0, written)  # the caller names it
+                return "unknown-option"
             if prefix == "env" and name == "--split-string":
                 return "split-string"
             if name in takes_argument and not equals and words:
@@ -1459,6 +1492,10 @@ class ProgramTrace:
                 return
             if effect == "runs-nothing":
                 return  # `command -v`/`-V` only reports what a name is
+            if effect == "unknown-option":
+                self.unresolve(f"{origin or 'a step'}: {prefix} {words[0]} is a long option this checker cannot "
+                               "resolve")
+                return
             if prefix == "timeout" and words:
                 words.pop(0)  # the duration
         if not words:
@@ -1770,7 +1807,10 @@ class ProgramTrace:
         written = ast.unparse(node.func)
         where = f"{origin or 'inline python'}: {written}(…)"
         head, dot, rest = written.partition(".")
-        candidates = sorted(original + dot + rest for original in imported.get(head, {head}))
+        # A dynamic-execution builtin is also an implicit binding of its own
+        # name, so an import of that name anywhere makes it multi-bound (round 13).
+        bindings = imported.get(head, set()) | ({head} if head not in imported or head in PYTHON_DYNAMIC else set())
+        candidates = sorted(original + dot + rest for original in bindings)
         if len(candidates) > 1 and any(is_traced_python_call(candidate) for candidate in candidates):
             # The name means different imports on different paths, and one
             # reading is a call this trace classifies; which one runs is not
@@ -2091,7 +2131,7 @@ TRACED_TREE_CHANGE = re.compile(
     # may take an argument and env's assignments, or by path (rounds 10-11).
     r"|(?:^|[;&|(]|&&|\|\|)[ \t]*(?:(?:(?:"
     + "|".join(re.escape(word) for word in sorted(PREFIX_OPTIONS) if word not in ("command", "timeout"))
-    + r")(?:[ \t]+(?:-\S+(?:[ \t]+(?!-)\S+)?|[A-Za-z_]\w*=\S*))*"
+    + r")(?:[ \t]+(?:-\S*(?:[ \t]+(?!-)\S+)?|[A-Za-z_]\w*=\S*))*"
     r"|command(?:[ \t]+-[^\svV]*)*"  # `command -v`/`-V` runs nothing
     r"|timeout(?:[ \t]+-\S+(?:[ \t]+(?!-)\S+)?)*[ \t]+\S+)[ \t]+)*"
     r"\\?(?:[\w./-]*/)?patch(?=[ \t]|$)",

@@ -3900,6 +3900,50 @@ for line in ("command -v python3 >/dev/null || exit 1", "command -v patch >/dev/
     expect(verify_with(line + "\n", {}), 0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
            f"`{line}` is not refused", *PENDING_ARGS)
 
+# Round-13 blocker 1: a dynamic-execution builtin is an implicit binding of
+# its own name, so an import of the same name anywhere makes it multi-bound.
+for name, call in (
+    ("exec", 'exec(os.environ["CODE"])'), ("eval", 'eval(os.environ["CODE"])'),
+    ("compile", 'compile(os.environ["CODE"], "x", "exec")'),
+    ("__import__", '__import__("subprocess").run("bash \\"$TOOL\\"", shell=True)'),
+):
+    expect_verify_refused(
+        verify_with("python3 scripts/zz-spawn.py\n", {"scripts/zz-spawn.py":
+                    f"import os\ndef unused():\n    from json import loads as {name}\n{call}\n"}),
+        f"verify refuses the builtin {name} shadowed by an unused import",
+        ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED))
+
+# Round-13 blocker 2: a bare `-` is env's empty-environment option.
+for line in ('env - bash scripts/zz-target.sh', 'env - bash "$TOOL"', "env -i - bash scripts/zz-target.sh"):
+    expect_verify_refused(verify_with(line + "\n", {"scripts/zz-target.sh": 'bash "$TOOL"\n'}),
+                          f"verify follows `{line}`", ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED))
+expect_verify_refused(verify_with("env - patch -p1 < changes.diff\n", {}), "verify refuses env - patch",
+                      ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", "changes the checked-out tree"))
+expect_verify_refused(
+    verify_with("python3 scripts/zz-spawn.py\n", {"scripts/zz-spawn.py":
+                'import os, subprocess\nsubprocess.run(["env", "-", "bash", os.environ["T"]])\n'}),
+    "verify refuses an env - vector running a computed program",
+    ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED))
+
+# Round-13 blocker 3: a long option is any unambiguous prefix of its name
+# (GNU getopt_long), resolved against each prefix's long options.
+for line in ('env --split="bash scripts/zz-target.sh"', 'env --sp "bash scripts/zz-target.sh"',
+             'env --split "bash scripts/zz-target.sh"'):
+    expect_verify_refused(verify_with(line + "\n", {"scripts/zz-target.sh": "echo ok\n"}), f"verify refuses `{line}`",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "env -S"))
+for line in ("timeout --sig KILL 5 bash scripts/zz-target.sh", "sudo --us root bash scripts/zz-target.sh",
+             "nice --adj 5 bash scripts/zz-target.sh", "stdbuf --out L bash scripts/zz-target.sh",
+             "env --uns X bash scripts/zz-target.sh"):
+    expect_verify_refused(verify_with(line + "\n", {"scripts/zz-target.sh": 'bash "$TOOL"\n'}),
+                          f"verify follows `{line}` as invoked",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "zz-target.sh"))
+expect_verify_refused(verify_with("sudo --bogus-option root bash scripts/zz-ok.sh\n", {"scripts/zz-ok.sh": "echo ok\n"}),
+                      "verify refuses a prefix long option it cannot resolve",
+                      ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "--bogus-option"))
+for line in ("env -uS echo hi", "env --ignore-environment echo hi", "timeout --preserve-status 5 echo hi"):
+    expect(verify_with(line + "\n", {}), 0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
+           f"`{line}` is not refused", *PENDING_ARGS)
+
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
 # sequences must not decode to the same replacement text and digest), and a
