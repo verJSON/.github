@@ -3445,6 +3445,31 @@ for label, line, fragment in (
                           f"verify refuses {label} in a program it runs",
                           ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", fragment))
 
+# Round-8 finding 3: aliased spawns are recognized, per file, and a spawn or
+# exec on an object the trace cannot identify refuses.
+for label, files in (
+    ("an `import subprocess as` alias with a computed argv",
+     {"scripts/probe.py": "import subprocess as sp\nsp.run(command)\n"}),
+    ("a `from subprocess import run` alias with a computed argv",
+     {"scripts/probe.py": "from subprocess import run\nrun(command)\n"}),
+    ("a computed spawn after nested inline Python",
+     {"scripts/probe.py": "from subprocess import run\nimport os\n"
+                          "os.system(\"python3 -c 'import json'\")\nrun(command)\n"}),
+):
+    expect_verify_refused(verify_with("python3 scripts/probe.py\n", files),
+                          f"verify refuses {label}", ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED))
+expect_verify_refused(
+    verify_with("node scripts/probe.js\n", {"scripts/probe.js": 'const cp = require("node:child_process");\n'
+                                                               "cp.spawnSync(tool, []);\n"}),
+    "verify refuses a spawn on a child_process object under another name",
+    ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED),
+)
+expect_verify_refused(
+    verify_with("node scripts/probe.js\n", {"scripts/probe.js": 'require("node:child_process").execSync(command);\n'}),
+    "verify refuses a spawn on the result of a call",
+    ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED),
+)
+
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
 # sequences must not decode to the same replacement text and digest), and a

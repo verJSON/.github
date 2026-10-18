@@ -1541,13 +1541,23 @@ class ProgramTrace:
             self.unresolve(f"{origin or 'a step'}: python code does not parse ({error.msg})")
             return
         base = os.path.dirname(origin) if not inline and origin not in self.module_programs else ""
-        self.spawn_aliases = {
+        # Per source: a nested inline program must not clobber the names its
+        # enclosing file bound (round 8).
+        spawn_names = {
             alias.asname or alias.name
             for node in ast.walk(tree)
             if isinstance(node, ast.ImportFrom) and node.module == "subprocess"
             for alias in node.names
             if alias.name in PYTHON_SPAWNS
         }
+        module_names = {"subprocess"} | {
+            alias.asname
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+            if alias.name == "subprocess" and alias.asname
+        }
+        aliases = (spawn_names, module_names)
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 names = [alias.name for alias in node.names]
@@ -1571,13 +1581,14 @@ class ProgramTrace:
                         self.reach(candidate, depth + 1, f"imported by {origin or 'inline python'}")
                         break
             if isinstance(node, ast.Call):
-                self.python_call_site(node, origin, depth, argv)
+                self.python_call_site(node, origin, depth, argv, aliases)
 
-    def python_call_site(self, node: ast.Call, origin: str, depth: int, argv) -> None:
+    def python_call_site(self, node: ast.Call, origin: str, depth: int, argv, aliases) -> None:
         name = ast.unparse(node.func)
         where = f"{origin or 'inline python'}: {name}(…)"
         leaf = name.split(".")[-1]
-        if name.startswith("subprocess.") and leaf in PYTHON_SPAWNS or name in self.spawn_aliases:
+        spawn_names, module_names = aliases
+        if name.split(".")[0] in module_names and name.count(".") == 1 and leaf in PYTHON_SPAWNS or name in spawn_names:
             if not node.args:
                 return
             first = node.args[0]
@@ -1664,6 +1675,11 @@ class ProgramTrace:
             for name, parameter, body in re.findall(r"function\s+(\w+)\s*\(\s*(\w+)[^)]*\)\s*\{(.*?)\n\}", source, re.S)
             if re.search(r"\b(?:spawnSync|spawn|execFileSync|execFile|fork)\(\s*" + parameter + r"\b", body)
         }
+        for match in re.finditer(r"([\w$]+|[)\]])\s*\.\s*(spawn\w*|exec\w*|fork)\s*\(", source):
+            if match.group(1) != "child_process":
+                # A spawn or exec on an object the trace cannot identify (round 8).
+                self.unresolve(f"{origin or 'inline javascript'}: {match.group(1)}.{match.group(2)}(…) on an "
+                               "object this checker cannot identify")
         for name in {"spawnSync", "spawn", "execFileSync", "execFile", "fork", "execSync", "exec"} | set(wrappers):
             for match in re.finditer(r"(?<![\w.])(?:child_process\.)?" + name + r"\s*\(", source):
                 if re.search(r"function\s+$", source[max(0, match.start() - 20) : match.start()]):
