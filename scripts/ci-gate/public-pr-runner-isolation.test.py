@@ -3590,6 +3590,24 @@ expect(verify_with('export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"\n', {}),
        0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
        "a PATH entry outside the workspace is not refused", *PENDING_ARGS)
 
+# Round-8 mutation survivors. The literal rule binds a sourced or `bash -c`
+# program whatever form reaches it, but only the invoked trace refuses what it
+# composes; a bare file name next to the program naming it is a literal; and a
+# link without a program extension is a program when its target is one.
+for label, line, files in (
+    ("a computed program inside `bash -c`", "bash -c 'bash \"$TOOL\"'\n", {}),
+    ("a computed program in a sourced file", "source scripts/zz-sourced.sh\n",
+     {"scripts/zz-sourced.sh": 'bash "$TOOL"\n'}),
+    ("a computed program in a dot-sourced file", ". scripts/zz-sourced.sh\n",
+     {"scripts/zz-sourced.sh": 'bash "$TOOL"\n'}),
+):
+    expect_verify_refused(verify_with(line, files), f"verify refuses {label}",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED))
+expect_bound('echo "see zz-bare.sh"\n', {"scripts/zz-bare.sh": "echo bare\n"}, "scripts/zz-bare.sh",
+             "a bare program file name beside the program naming it")
+expect_bound('echo "see scripts/zz-tool"\n', {"scripts/zz-tool": Link("real.sh"), "scripts/real.sh": "echo real\n"},
+             "scripts/real.sh", "an extensionless link to a program, named literally")
+
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
 # sequences must not decode to the same replacement text and digest), and a

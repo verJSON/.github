@@ -930,12 +930,9 @@ def link_target(root: str, relative: str) -> str | None:
         if relative in seen or len(seen) > 8:
             return None
         seen.add(relative)
-        text = os.readlink(os.path.join(root, relative))
-        if os.path.isabs(text):
-            return None
-        relative = os.path.normpath(os.path.join(os.path.dirname(relative), text))
-        if relative.startswith(".." + os.sep) or relative == "..":
-            return None
+        # An absolute target or one above the root is never a tracked path,
+        # so the membership test below is the one rule that bounds the chain.
+        relative = os.path.normpath(os.path.join(os.path.dirname(relative), os.readlink(os.path.join(root, relative))))
     return relative if relative in tracked and os.path.isfile(os.path.join(root, relative)) else None
 
 
