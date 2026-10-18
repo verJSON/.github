@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0237](0237-gate-review-ignores-pull-request-agent-config/README.md) | 2026-10-18 | The gate review never loads agent configuration from the pull request |
 | [0235](0235-public-pull-request-code-uses-ephemeral-runners/README.md) | 2026-10-15 | Public pull-request code runs only on ephemeral runners |
 | [0234](0234-route-secretless-trusted-ref-builds-to-the-hosted-lane/README.md) | 2026-10-15 | Route secretless trusted-ref builds to the hosted untrusted lane |
 | [0233](0233-capability-floor-records-provably-absent-callers/README.md) | 2026-10-15 | Capability-floor discovery records a provably absent caller as a finding |

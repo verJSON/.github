@@ -114,6 +114,7 @@ merge-gate	python3 scripts/ci-gate/renovate-model-action-pin.test.py
 merge-gate	python3 scripts/ci-gate/openai-review.test.py
 merge-gate	python3 scripts/ci-gate/deepseek-review.test.py
 merge-gate	python3 scripts/ci-gate/deepseek-cancellation.test.py
+merge-gate	python3 scripts/ci-gate/review-agent-config-isolation.test.py
 merge-gate	python3 scripts/ci-gate/deepseek-replay.test.py
 merge-gate	bash scripts/ci-gate/deepseek-replay-handoff.test.sh
 merge-gate	python3 scripts/ci-gate/review-verdict.test.py
