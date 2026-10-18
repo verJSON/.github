@@ -2071,9 +2071,11 @@ expected = shards | {
     "merge-gate\tpython3 scripts/ci-gate/review-caller-bootstrap.test.py": 360,
     # 31s serially on main run 38513400637.
     "platform\tpython3 scripts/ci-gate/hosted-selector-policy.test.py": 90,
-    # 72-86s at #1827's rounds 8-9, after one checker run per backlog fixture
-    # (85s inside the full platform group); 180s is about twice that.
-    "platform\tpython3 scripts/ci-gate/public-pr-runner-isolation.test.py": 180,
+    # The runner-isolation test measured 122s whole inside the platform group
+    # at #1827's round 13, so it runs as two parts: 62s (core) and 69s
+    # (probes) inside the platform group, each about a third of 180s.
+    "platform\tRUNNER_ISOLATION_TEST_PART=core python3 scripts/ci-gate/public-pr-runner-isolation.test.py": 180,
+    "platform\tRUNNER_ISOLATION_TEST_PART=probes python3 scripts/ci-gate/public-pr-runner-isolation.test.py": 180,
     # 51s on main run 38799238936, before #1822 added 15 assertions to it.
     "merge-gate\tbash scripts/assert-mergeable-head.test.sh": 120,
 }

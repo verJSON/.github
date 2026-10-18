@@ -9,6 +9,7 @@ message, because one "violation" exit cannot tell which rule tripped.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import json
@@ -33,6 +34,44 @@ def fail(label: str) -> None:
     global failures
     failures += 1
     print(f"FAIL - {label}")
+
+
+# actions-ci runs this file as two rows, each under its budget:
+# RUNNER_ISOLATION_TEST_PART=core runs every check outside the probes block
+# (round-8 finding 6 through round 13, between the two markers below), and
+# =probes runs that block on top of every definition outside it. Unset (or `all`) runs everything once. The parts
+# partition the checks (public-pr-runner-isolation-parts.test.py pins it).
+TEST_PART = os.environ.get("RUNNER_ISOLATION_TEST_PART", "all")
+PROBES_BEGIN = "# >>> runner-isolation probes part begins"
+PROBES_END = "# <<< runner-isolation probes part ends"
+
+
+def run_part(part: str) -> int:
+    with open(__file__, encoding="utf-8") as handle:
+        source = handle.read()
+    lines = source.split("\n")
+    begin, end = lines.index(PROBES_BEGIN) + 1, lines.index(PROBES_END) + 1
+    definitions = (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef, ast.Assign, ast.AnnAssign)
+    selected = []
+    for node in ast.parse(source).body:
+        inside = begin < node.lineno < end
+        if isinstance(node, ast.If) and "TEST_PART" in ast.unparse(node.test):
+            continue  # the selector itself
+        if (part == "core" and not inside) or (part == "probes" and (inside or isinstance(node, definitions))):
+            selected.append(node)
+    scope = {"__name__": "__main__", "__file__": __file__}
+    try:
+        exec(compile(ast.Module(body=selected, type_ignores=[]), __file__, "exec"), scope)
+    except SystemExit as stop:
+        return int(stop.code or 0)
+    return 1 if scope["failures"] else 0
+
+
+if TEST_PART not in ("all", "core", "probes"):
+    print(f"unknown RUNNER_ISOLATION_TEST_PART {TEST_PART!r}: expected all, core, or probes", file=sys.stderr)
+    sys.exit(2)
+if TEST_PART != "all" and __name__ == "__main__":
+    sys.exit(run_part(TEST_PART))
 
 
 class Link(str):
@@ -3532,6 +3571,7 @@ expect(verify_with("npm pack --ignore-scripts\n", {"./package.json": with_script
        0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
        "an `npm pack --ignore-scripts` does not trace the lifecycle scripts it skips", *PENDING_ARGS)
 
+# >>> runner-isolation probes part begins
 # Round-8 finding 6: a program reached through a symbolic link binds the link
 # and its target's bytes and is followed into the target; a link out of the
 # tree, or a broken one, is a program the row cannot bind.
@@ -3957,6 +3997,7 @@ for line in ("env -uS echo hi", "env --ignore-environment echo hi", "timeout --p
     expect(verify_with(line + "\n", {}), 0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
            f"`{line}` is not refused", *PENDING_ARGS)
 
+# <<< runner-isolation probes part ends
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
 # sequences must not decode to the same replacement text and digest), and a
