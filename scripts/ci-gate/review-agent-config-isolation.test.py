@@ -149,6 +149,25 @@ class ClaudeIsolationStepTest(unittest.TestCase):
         self.assertNotEqual(set_url.returncode, 0)
         self.assertNotIn('mock-job-token', (self.workspace / '.git/config').read_text())
 
+    def claude_config_dir(self):
+        value = STEPS['claude'].get('env', {}).get('CLAUDE_CONFIG_DIR', '')
+        for expression, rendered in (('${{ runner.temp }}', str(self.root / 'runner-temp')),
+                                     ('${{ github.run_id }}', '4242'), ('${{ github.run_attempt }}', '3')):
+            value = value.replace(expression, rendered)
+        self.assertNotIn('${{', value)
+        return Path(value)
+
+    def test_claude_review_reads_its_user_layer_from_a_fresh_empty_per_run_directory(self):
+        config_dir = self.claude_config_dir()
+        self.assertTrue(config_dir.is_relative_to(self.root / 'runner-temp'))
+        result = run_isolation(self.root, self.workspace)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(config_dir.is_dir() and not config_dir.is_symlink())
+        self.assertEqual(list(config_dir.iterdir()), [])
+        self.assertEqual(config_dir.stat().st_mode & 0o777, 0o700)
+        # The action writes these inputs to ~/.claude, which the review no longer reads.
+        self.assertFalse({'settings', 'plugins', 'plugin_marketplaces'} & set(STEPS['claude']['with']))
+
 
 class RemovalPrecedesReviewTest(unittest.TestCase):
     def test_removal_runs_immediately_after_the_head_checkout_under_its_condition(self):

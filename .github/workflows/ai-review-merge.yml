@@ -1473,6 +1473,9 @@ jobs:
           set -euo pipefail
           cd -- "$GITHUB_WORKSPACE"
           git remote remove origin
+          # A fresh, empty user layer for the CLI instead of the runner's ~/.claude,
+          # which an earlier job on a persistent runner could have written.
+          mkdir -m 0700 -- "$RUNNER_TEMP/claude-config-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 
       - name: Claude review (merge gate)
         id: claude
@@ -1481,6 +1484,8 @@ jobs:
         # cannot produce a usable verdict. Automatic escalation is forbidden:
         # another paid attempt requires a maintainer-authorized `re-review`.
         continue-on-error: true
+        env:
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/claude-config-${{ github.run_id }}-${{ github.run_attempt }}
         uses: anthropics/claude-code-action@c81e3bc69d1b18badbb63ba39581218f02421678 # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
