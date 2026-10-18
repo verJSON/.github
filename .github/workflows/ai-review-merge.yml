@@ -1463,6 +1463,17 @@ jobs:
           echo "started_epoch=$started_epoch" >> "$GITHUB_OUTPUT"
           echo "::notice::phase=model started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ) provider=${{ needs.preflight.outputs.provider }} model=${{ needs.preflight.outputs.model }} budget_usd=${{ needs.preflight.outputs.budget_usd }} pricing=${{ needs.preflight.outputs.pricing_version }}"
 
+      # The pinned action rewrites `origin` to a URL carrying the job token
+      # (configureGitAuth) and carries on when that fails, so with no remote no
+      # credential lands in the checkout the review can read (ADR 0237).
+      - name: Isolate the Claude review checkout
+        id: claude-isolation
+        if: needs.preflight.outputs.lane == 'ai' && needs.preflight.outputs.provider == 'anthropic' && steps.rereview.outputs.skip_model != 'true' && steps.reserve_1.outputs.allowed == 'true'
+        run: |
+          set -euo pipefail
+          cd -- "$GITHUB_WORKSPACE"
+          git remote remove origin
+
       - name: Claude review (merge gate)
         id: claude
         if: needs.preflight.outputs.lane == 'ai' && needs.preflight.outputs.provider == 'anthropic' && steps.rereview.outputs.skip_model != 'true' && steps.reserve_1.outputs.allowed == 'true'

@@ -24,6 +24,7 @@ WORKFLOW = yaml.safe_load((ROOT / '.github/workflows/ai-review-merge.yml').read_
 GATE_STEPS = WORKFLOW['jobs']['gate']['steps']
 STEPS = {step.get('id'): step for step in GATE_STEPS if step.get('id')}
 REMOVAL_ID = 'pr-agent-config'
+ISOLATION_ID = 'claude-isolation'
 # The root-level paths the pinned action treats as sensitive (restore-config.ts SENSITIVE_PATHS).
 AGENT_CONFIG_PATHS = (
     '.claude', '.claude.json', '.mcp.json', 'CLAUDE.md', 'CLAUDE.local.md',
@@ -111,6 +112,42 @@ class ReviewCheckoutCredentialTest(unittest.TestCase):
                                cwd=home / 'repo', text=True, capture_output=True)
                 written = [path for path in home.rglob('*') if path.is_file() and b'mock-job-token' in path.read_bytes()]
                 self.assertEqual(written, [])
+
+
+def run_isolation(root, workspace, extra_env=None):
+    env = {'PATH': os.defpath, 'HOME': str(root), 'GIT_CONFIG_NOSYSTEM': '1', 'GITHUB_WORKSPACE': str(workspace),
+           'RUNNER_TEMP': str(root / 'runner-temp'), 'GITHUB_RUN_ID': '4242', 'GITHUB_RUN_ATTEMPT': '3'}
+    env.update(extra_env or {})
+    return subprocess.run(['bash', '-e', '-c', STEPS[ISOLATION_ID]['run']], env=env, cwd='/',
+                          text=True, capture_output=True)
+
+
+class ClaudeIsolationStepTest(unittest.TestCase):
+    def setUp(self):
+        self.assertTrue(ISOLATION_ID in STEPS, 'the gate job has no Claude isolation step')
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        (self.root / 'runner-temp').mkdir()
+        self.workspace = self.root / 'workspace'
+        subprocess.run(['git', 'init', '-q', str(self.workspace)], check=True)
+        subprocess.run(['git', '-C', str(self.workspace), 'remote', 'add', 'origin', 'https://github.com/Verjson/target.git'],
+                       check=True)
+
+    def test_isolation_runs_immediately_before_the_claude_review_under_its_condition(self):
+        claude = GATE_STEPS.index(STEPS['claude'])
+        self.assertEqual(GATE_STEPS[claude - 1].get('id'), ISOLATION_ID)
+        self.assertEqual(STEPS[ISOLATION_ID].get('if'), STEPS['claude'].get('if'))
+
+    def test_action_cannot_write_the_job_token_into_the_review_checkout_remote(self):
+        result = run_isolation(self.root, self.workspace)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The pinned action's configureGitAuth runs exactly this, inside a try/catch.
+        set_url = subprocess.run(['git', 'remote', 'set-url', 'origin', 'https://x-access-token:mock-job-token@github.com/Verjson/target.git'],
+                                 cwd=self.workspace, env={'PATH': os.defpath, 'HOME': str(self.root), 'GIT_CONFIG_NOSYSTEM': '1'},
+                                 text=True, capture_output=True)
+        self.assertNotEqual(set_url.returncode, 0)
+        self.assertNotIn('mock-job-token', (self.workspace / '.git/config').read_text())
 
 
 class RemovalPrecedesReviewTest(unittest.TestCase):
