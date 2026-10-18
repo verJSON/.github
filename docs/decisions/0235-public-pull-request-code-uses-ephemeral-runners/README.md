@@ -1072,7 +1072,7 @@ everything the job executes. These residuals stay outside it:
     Refusing a computed verb would refuse both, so it is a residual, not a
     refusal; #1831 removes it.
 11. **Narrower forms are not read.** Each was confirmed by a probe in
-    round 11, 12, or 13:
+    round 11, 12, 13, or 15:
     - A prefix option argument quoted with a space, such as
       `env -C '/a b' patch`, ends the `patch` pattern's option match.
     - Any non-import binding of a spawn, module, or loader is not classified,
@@ -1088,6 +1088,10 @@ everything the job executes. These residuals stay outside it:
       `subprocess.run.__call__(…)`, is not classified.
     - A `shell=True` passed through `**{"shell": True}` is not seen, so the
       string is read as one program word.
+    - A builtin looked up by subscript or through `sys.modules`, such as
+      `builtins.__dict__["exec"]`, `vars(builtins)["exec"]`,
+      `__builtins__["exec"]`, or `sys.modules["builtins"].exec`, is not
+      classified; only attribute access and `getattr` on `builtins` are.
 
 All of these are removed when #1831 moves `verify` off the persistent pool.
 
