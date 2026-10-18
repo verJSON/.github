@@ -100,6 +100,20 @@ def select_policy(arguments: list[str]):
     )
 
 
+def read_declared_status_check(value, location: str):
+    if value is None:
+        return None
+    check = require_mapping(value, location)
+    require_exact_keys(check, {"context", "integration_id", "strict"}, location)
+    return {
+        "context": require_string(check["context"], f"{location}.context"),
+        "integration_id": require_positive_integer(
+            check["integration_id"], f"{location}.integration_id"
+        ),
+        "strict": check["strict"],
+    }
+
+
 def read_policy(policy: Path):
     document = require_mapping(
         load_json(policy.read_text(encoding="utf-8"), "ruleset policy"),
@@ -165,6 +179,7 @@ def read_policy(policy: Path):
                 "workflow_repository_id",
                 "workflow_path",
                 "workflow_ref",
+                "required_status_check",
             },
             location,
         )
@@ -182,6 +197,10 @@ def read_policy(policy: Path):
             ),
             "workflow_ref": require_string(
                 item["workflow_ref"], f"{location}.workflow_ref"
+            ),
+            "required_status_check": read_declared_status_check(
+                item["required_status_check"],
+                f"{location}.required_status_check",
             ),
         }
         if parsed["name"] in names:

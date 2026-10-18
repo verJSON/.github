@@ -189,6 +189,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                     "workflow_repository_id": 1269388380,
                     "workflow_path": ".github/workflows/authn-type-surface-required.yml",
                     "workflow_ref": "refs/heads/main",
+                    "required_status_check": None,
                 },
                 {
                     "name": "cli-projects-package-surface-required-workflow",
@@ -196,6 +197,11 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                     "workflow_repository_id": 1269388380,
                     "workflow_path": ".github/workflows/cli-projects-package-surface-required.yml",
                     "workflow_ref": "refs/heads/main",
+                    "required_status_check": {
+                        "context": "admission",
+                        "integration_id": 15368,
+                        "strict": True,
+                    },
                 },
                 ],
                 "bypass_actor_contracts": [
