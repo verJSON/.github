@@ -3662,6 +3662,23 @@ for label, hook, files in (
     expect_verify_refused(verify_with(hook, files), f"verify refuses {label}",
                           ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", "changes the checked-out tree"))
 
+# Round-9 nits: a spawn the trace cannot recognize refuses rather than
+# passing unexamined.
+for label, hook, files in (
+    ("a renamed destructured JavaScript spawn", "node scripts/zz-spawn.js\n",
+     {"scripts/zz-spawn.js": 'const { spawnSync: go } = require("node:child_process");\ngo(tool, []);\n'}),
+    ("a bracket-accessed JavaScript spawn", "node scripts/zz-spawn.js\n",
+     {"scripts/zz-spawn.js": 'const cp = require("node:child_process");\ncp["spawnSync"](tool, []);\n'}),
+    ("a star import from subprocess", "python3 scripts/zz-spawn.py\n",
+     {"scripts/zz-spawn.py": "from subprocess import *\nrun(command)\n"}),
+    ("a getattr on subprocess", "python3 scripts/zz-spawn.py\n",
+     {"scripts/zz-spawn.py": 'import subprocess\ngetattr(subprocess, "run")(command)\n'}),
+    ("an os.system imported by name", "python3 scripts/zz-spawn.py\n",
+     {"scripts/zz-spawn.py": "from os import system\nsystem(command)\n"}),
+):
+    expect_verify_refused(verify_with(hook, files), f"verify refuses {label}",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED))
+
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
 # sequences must not decode to the same replacement text and digest), and a

@@ -1653,6 +1653,23 @@ class ProgramTrace:
             if alias.name == "subprocess" and alias.asname
         }
         aliases = (spawn_names, module_names)
+        # Spawn forms the call-site rules cannot see refuse (round 9): a star
+        # import, os's spawners imported by name, and getattr on either module.
+        for node in ast.walk(tree):
+            hidden = None
+            if isinstance(node, ast.ImportFrom) and node.module in ("subprocess", "os"):
+                names = [alias.name for alias in node.names]
+                if "*" in names:
+                    hidden = f"from {node.module} import *"
+                elif node.module == "os" and any(
+                        name in ("system", "popen") or name.startswith(("exec", "spawn", "posix_spawn"))
+                        for name in names):
+                    hidden = f"from os import {', '.join(names)}"
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr"
+                  and node.args and isinstance(node.args[0], ast.Name) and node.args[0].id in module_names | {"os"}):
+                hidden = f"getattr({node.args[0].id}, …)"
+            if hidden:
+                self.unresolve(f"{origin or 'inline python'}: {hidden} spawns in a form this checker cannot read")
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 names = [alias.name for alias in node.names]
@@ -1764,6 +1781,11 @@ class ProgramTrace:
                 # A spawn or exec on an object the trace cannot identify (round 8).
                 self.unresolve(f"{origin or 'inline javascript'}: {match.group(1)}.{match.group(2)}(…) on an "
                                "object this checker cannot identify")
+        for match in re.finditer(r"\{[^{}]*?\b(spawn\w*|exec\w*|fork)\s*:\s*[\w$]+"
+                                 r"|\[\s*[\"'`](spawn\w*|exec\w*|fork)[\"'`]\s*\]", source):
+            # A renamed destructuring or a bracket access hides the spawn (round 9).
+            self.unresolve(f"{origin or 'inline javascript'}: {match.group(0)[:40]!r} spawns in a form this "
+                           "checker cannot read")
         for name in {"spawnSync", "spawn", "execFileSync", "execFile", "fork", "execSync", "exec"} | set(wrappers):
             for match in re.finditer(r"(?<![\w.])(?:child_process\.)?" + name + r"\s*\(", source):
                 if re.search(r"function\s+$", source[max(0, match.start() - 20) : match.start()]):
