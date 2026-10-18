@@ -3289,6 +3289,17 @@ for label, hook, release in (
         '.github/workflows/release.yml)"\n', '.github/workflows/release.yml)}"\n', 1), None),
     ("a release.yml header pin that is not 40-hex", HOOK,
      re.sub(r"release-node [0-9a-f]{40} ", "release-node main ", VERIFY["release.yml"], count=1)),
+    # Round-8 finding 5: the derivation is the only assignment to $pin, and
+    # nothing before the show can change what $pin holds when it runs.
+    ("a `pin=HEAD` between the derivation and the show",
+     HOOK.replace(SHOW_LINE, "pin=HEAD\n" + SHOW_LINE, 1), None),
+    ("a `pin=HEAD` after the show", HOOK + "pin=HEAD\n", None),
+    ("a DEBUG trap ahead of the derivation that rewrites $pin",
+     HOOK.replace("set -euo pipefail\n", "set -euo pipefail\ntrap 'pin=HEAD' DEBUG\n", 1), None),
+    ("a `sed` function ahead of the derivation",
+     HOOK.replace("set -euo pipefail\n", "set -euo pipefail\nsed() { echo HEAD; }\n", 1), None),
+    ("an edit to the guard between the derivation and the show",
+     HOOK.replace("carries no package-release pin header", "carries no pin header", 1), None),
 ):
     expect_verify_refused(
         {**VERIFY, "pending.tsv": VERIFY_ROW, "scripts/release-verify.sh": hook,
@@ -3296,6 +3307,14 @@ for label, hook, release in (
         f"verify refuses {label}",
         ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", MATERIALIZES),
     )
+# The pin the show reads comes from release.yml, so verify's row binds all of
+# release.yml as the frozen pin source, not only the verify job's own text.
+expect_verify_refused(
+    {**VERIFY, "pending.tsv": VERIFY_ROW,
+     "release.yml": VERIFY["release.yml"].replace("\n", "\n# an edit outside every job\n", 1)},
+    "verify's row binds release.yml, the source of the frozen $pin",
+    ("pending row no longer applies",),
+)
 
 # ---------------------------------------------------------------------------
 # Round-7 finding 1: verify runs JavaScript. contract-tools-package.test.js
@@ -3525,5 +3544,22 @@ if BYTES_A["relative"] == BYTES_A["absolute"] and BYTES_A["absolute"]:
     ok("tree_programs with a relative root binds what it binds with the absolute root")
 else:
     fail(f"tree_programs with a relative root bound {BYTES_A['relative']}, not {BYTES_A['absolute']}")
+
+# Round-8 finding 5: the frozen show's pin source is bound because the show
+# reads $pin from it, not because some traced text happens to name it.
+with tempfile.TemporaryDirectory() as root:
+    for name, body in {"scripts/hook.sh": "echo hook\n", "pins/source.yml": "pin: data\n"}.items():
+        os.makedirs(os.path.dirname(os.path.join(root, name)), exist_ok=True)
+        with open(os.path.join(root, name), "w", encoding="utf-8") as handle:
+            handle.write(body)
+    subprocess.run(["git", "init", "-q", root], check=True)
+    subprocess.run(["git", "-C", root, "add", "-A"], check=True)
+    show = CHECKER.FrozenShow("scripts/hook.sh", "git show x", "pins/source.yml")
+    bound = CHECKER.tree_programs({"steps": [{"run": "bash scripts/hook.sh"}]}, root, tolerated=show)
+    unbound = CHECKER.tree_programs({"steps": [{"run": "bash scripts/hook.sh"}]}, root)
+if "pins/source.yml" in bound and "pins/source.yml" not in unbound:
+    ok("the frozen show binds its pin source though no traced text names it")
+else:
+    fail(f"the frozen show's pin source binding: with {sorted(bound)}, without {sorted(unbound)}")
 
 sys.exit(1 if failures else 0)
