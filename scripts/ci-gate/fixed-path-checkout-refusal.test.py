@@ -42,6 +42,11 @@ RUNNER_STATE = "runner state\n"
 REQUIRED_SITES = (
     ("changelog-validate.yml", "validate", ".changelog-contract"),
     ("generated-artifacts.yml", "validate", ".changelog-contract"),
+    ("ai-review-merge.yml", "gate", ".gate-tools"),
+    ("ai-review-merge.yml", "preflight", ".gate-recovery"),
+    ("ai-review-merge.yml", "preflight", ".gate-policy"),
+    ("ai-review-merge.yml", "gate", ".gate-trust"),
+    ("ai-review-merge.yml", "complete-authorization", ".gate-trust"),
 )
 
 
@@ -165,6 +170,32 @@ def checkout_runs_after_refusal(site, guard):
     return bool(guard.get("continue-on-error")) or runs_after_failure(checkout)
 
 
+def consumer_failures(site, guard):
+    """Steps that read the checkout must not run after the refusal stopped it.
+
+    A refusal with continue-on-error, a checkout with continue-on-error, or a
+    reader whose condition runs after a failure would otherwise execute from
+    the path while it is still the planted link.
+    """
+    checkout = site.checkout
+    tolerated = bool(guard.get("continue-on-error")) or bool(checkout.get("continue-on-error"))
+    failures = []
+    for step in site.steps[site.index + 1:]:
+        text = yaml.safe_dump(step)
+        if f"{site.path}/" not in text:
+            continue
+        if not (tolerated or runs_after_failure(step)):
+            continue
+        checkout_id = checkout.get("id")
+        if checkout_id and requires_success(step, checkout_id):
+            continue
+        failures.append(
+            f"{site.label}: step {step.get('name')!r} reads {site.path}/ even when the "
+            "refusal stopped its checkout, so it would execute through the planted link"
+        )
+    return failures
+
+
 def guard_failures(site, root):
     """Why a planted symlink still reaches this checkout; empty when it cannot."""
     failures = []
@@ -186,6 +217,8 @@ def guard_failures(site, root):
     if not is_refusal:
         guard = None
     checkout_runs = guard is None or checkout_runs_after_refusal(site, guard)
+    if guard is not None:
+        failures += consumer_failures(site, guard)
     if guard is not None and condition(guard) != condition(site.checkout).replace(
         f" && steps.{guard.get('id')}.outcome == 'success'", ""
     ):
