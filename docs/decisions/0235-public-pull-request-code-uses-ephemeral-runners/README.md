@@ -788,35 +788,31 @@ scripts through a variable.
   JavaScript, follows each program from the shallowest depth it is reached
   at, and binds what `npm pack` selects when a program packs the package or
   runs its bins (round-7 amendment). Every program the job runs that the trace
-  cannot resolve is an `unresolved-program` refusal that no key tolerates, so
-  the bound set is complete for every form the trace reads. That set is 13
-  files:
+  cannot resolve is an `unresolved-program` refusal that no key tolerates.
+  Since round 8 the trace also binds every tracked program a traced text names
+  literally, so the set is 36 files on this branch rather than the 13 the
+  round-6 trace bound; the round-8 amendment lists them and states what the
+  binding guarantees and what it does not:
   - `release-verify.sh` (run through the `run_clean` wrapper);
   - the programs it runs: `changelog.py`, `render-next.sh`,
     `gen-adr-index.sh`, `adr-relative-links.test.py`,
     `doc-fragment-names.test.sh` and its `doc-fragment-names.sh`, and
     `contract-tools-package.test.js`, which packs the package and runs its
     bins `bin/render-next.js` and `bin/gen-adr-index.js`;
-  - the files its steps and that hook name: `.github/workflows/release.yml`,
-    whose header carries the generator pin the hook compares against;
-    `gen-changelog-caller.sh`; and `package.json`, whose `files` and `bin`
-    the pack selects.
+  - two data files: `.github/workflows/release.yml`, whose header carries the
+    generator pin the hook compares against, and `package.json`, whose
+    `files` and `bin` the pack selects;
+  - 24 programs reached only because a bound program names them (round 8).
 
   `backlog-sparse-closure.test.py` independently reads the scripts the hook
   runs, and the files the pack selects, and requires each to be bound. A test
   also fails if any other key is granted `full-checkout`.
 
-  **Residual.** Three things stay outside the checker:
-  - `package-lock.json` decides the dependency code that `npm ci`,
-    `npm rebuild`, and `npm pack` resolve. That code comes from the registry,
-    not the scanned tree, so the row does not bind it.
-  - The frozen pin comparison, `git show "$pin:scripts/gen-changelog-caller.sh"
-    | bash -s …` in `release-verify.sh`, runs the generator as it stood at that
-    pin. It is tolerated only on the exact bytes of that line and of the line
-    that derives `$pin`, and only while `release.yml`'s header names one 40-hex
-    pin. Any other materialization in a traced program refuses.
-  - The inputs the Markdown and link checks read are data. They are not code
-    the job runs.
+  **Residual.** The round-8 amendment names every residual. In short: code
+  resolved through PATH from outside the tree, git objects `changelog.py`
+  reads as data, an absent guarded hook, `package-lock.json` dependency code,
+  the frozen pin comparison, a resumed release's tag tree, and the inputs the
+  Markdown and link checks read.
 
   Every other form the trace cannot resolve refuses. For what remains, the
   protection is code review of `main`, not this checker. The exception is
@@ -889,3 +885,129 @@ converted job the sparse list binds the bytes whatever form reaches them.
   comparison named in the residual above.
 - **Bytes and roots.** Bound programs are hashed as raw bytes. A relative root
   is made absolute.
+
+## Amendment (2026-10-17, #1827) — round-8 review: bind every literal tracked program
+
+**Finding.** The round-8 review found forms the round-7 trace did not model:
+
+- a literal program path handed to `spawnSync("./scripts/x.sh")`,
+  `subprocess.run(["scripts/x.sh"])`, or `subprocess.run("scripts/x.sh")`;
+- `git show` spelled `/usr/bin/git show` or `"git" show`, and a
+  `git checkout <rev> -- <path>` or `git restore --source=` in a traced
+  program, which changes the checked-out tree at runtime;
+- `import subprocess as sp`, a from-import overwritten by nested inline
+  Python, and a spawn on a `child_process` object under another name;
+- the prepack, prepare, and postpack scripts `npm pack` runs;
+- a `pin=HEAD`, a DEBUG trap, or a `sed` function that changes what the
+  frozen pin comparison runs while its line stays byte-identical;
+- a program reached through a symbolic link;
+- `bash -s` operands taken as a script path, and `npm --prefix` reading the
+  root `package.json` in place of another package's.
+
+**Decision (PM, 2026-10-17; Part of #1831).** Stop enumerating invocation
+forms and generalize the binding.
+
+- **Literal rule.** Any literal in a traced program text that names a tracked
+  program is bound and followed. A program is a tracked file with a shebang,
+  the exec bit, or a `.sh`, `.bash`, `.py`, `.js`, `.mjs`, or `.cjs`
+  extension. Data files stay excluded.
+- **Two modes.** A program reached by an invocation the trace models is
+  followed as *invoked*: every form in it is traced, the depth cap applies,
+  and a composed target it cannot resolve refuses. A program reached only
+  because a literal names it is followed as *named*: its bytes are bound and
+  its own literals followed, but its forms are not traced, because nothing
+  shows that the job runs it. Per-form tracing remains only for composed
+  targets (`python -m`, imports, spawns, `npm` verbs); an unresolvable
+  composed target stays `unresolved-program`.
+- **Symbolic links.** A program reached through a link binds the link text
+  and the target's bytes and is followed into the target, through any chain
+  of in-tree links. A link that leaves the tree, is broken, or loops refuses
+  as `unresolved-program`.
+- **Spawns.** Python spawn aliases (`import subprocess as X`,
+  `from subprocess import run`) are computed per source. A `.spawn*`,
+  `.exec*`, or `.fork(` call in JavaScript on any receiver other than
+  `child_process` refuses, because the trace cannot identify the object;
+  that also refuses a RegExp `.exec`, an accepted false positive.
+- **Materializations.** `git` is matched when spelled by path or quoted. A
+  tree-changing git verb (`checkout`, `restore`, `reset`, `switch`, and the
+  rest of the runtime tree-change set) or `gh pr checkout` in a traced text
+  refuses as `tracked-materialization`.
+- **The frozen pin comparison.** It is tolerated only while everything that
+  runs before it is reviewed bytes. The hook's leading logical lines must be
+  the preamble, matched by digest, then the `$pin` derivation, its guard, and
+  the show line, in that order. The derivation is stored as explicit text in
+  `FROZEN_MATERIALIZATIONS` and must be the hook's only `pin=` assignment.
+  `release.yml`'s header must name one 40-hex pin. The frozen show binds
+  `release.yml`, the pin's source, into the row itself rather than through
+  an incidental data token.
+- **npm.** `npm pack` traces the package's prepack, prepare, and postpack
+  scripts unless `--ignore-scripts` is given. A verb that reads package
+  scripts in another package directory (`--prefix`, `-C`, `--workspace`,
+  `-w`, `--workspaces`) refuses.
+- **`bash -s`.** `-s` ends option parsing, its operands are arguments, and
+  standard input is what the trace reads; a pipe into it refuses with a
+  reason of its own.
+- **PATH.** A PATH entry naming the workspace or working directory, or a
+  relative one, refuses as `unresolved-program`. This covers an assignment,
+  a `GITHUB_PATH` append, and a job or step `env` block.
+
+**What the check guarantees.** The trace is a static approximation of what
+`verify` runs, not a proof of it. It guarantees two things. Every literal
+tracked program reachable from `verify` is bound into its row. Every
+composed target that an invocation form the trace models cannot resolve
+refuses before any row is read. It does not claim that the bound set is
+everything the job executes. These residuals stay outside it:
+
+1. **Bare command words resolve through PATH.** A workspace PATH entry
+   refuses, but a bare word that resolves to a program outside the scanned
+   tree, such as one on the runner image or in a tool cache, is not bound.
+2. **`changelog.py` reads git objects as data.** It reads
+   `git show <revision>:<path>` and `git cat-file -e <tag>:<path>`, for
+   fragments and the pre-contract migration document. It parses those
+   bytes and never executes them.
+3. **An absent guarded hook binds nothing.** A hook that runs only behind
+   `[ -x path ]` and that the tree does not hold runs nothing. Adding it
+   changes the tree, and the trace then follows it.
+4. **`package-lock.json` selects dependency code.** That code comes from the
+   registry, not the scanned tree. It is what `npm ci`, `npm rebuild`,
+   `npm pack`, and `node_modules/.bin` run.
+5. **The frozen pin comparison runs a historical generator.**
+   `git show "$pin:scripts/gen-changelog-caller.sh" | bash -s …` runs the
+   generator as it stood at that 40-hex commit, not the scanned tree's copy.
+6. **A resumed release runs the tag's tree.** When the version's tag already
+   exists, `verify` checks the tag out. Its tree's bytes are what run, and
+   the row, bound against the default-branch head, did not bind them. The
+   step requires the tag to be an ancestor of that head, so those bytes were
+   once on `main` and were reviewed under the gate as it stood then.
+7. **The Markdown and link checks read data.** Their inputs are not code
+   the job runs.
+8. **Unmodeled forms with composed targets.** A literal is a path the
+   checker's literal pattern matches: letters, digits, and `_.@+-`, either
+   joined by `/` or ending in a program extension. A program named only by a string the code
+   assembles at runtime, and run through an invocation form the trace does
+   not model, is neither bound nor refused. Review of `main` is the
+   protection there.
+
+All of these are removed when #1831 moves `verify` off the persistent pool.
+
+**Bound set.** `verify` binds 36 files on this branch:
+
+- 10 invoked programs: `release-verify.sh`, `changelog.py`,
+  `render-next.sh`, `gen-adr-index.sh`, `adr-relative-links.test.py`,
+  `doc-fragment-names.test.sh`, `doc-fragment-names.sh`,
+  `contract-tools-package.test.js`, `bin/render-next.js`, and
+  `bin/gen-adr-index.js`;
+- 2 data files: `release.yml` and `package.json`;
+- 24 named programs, reached through chains of literal names that start in
+  the job's steps and the invoked programs. They include this checker and
+  its test file.
+
+Because the checker and its tests are among the named programs, editing
+either stales `verify`'s row. The pending row is regenerated in the same
+commit.
+
+**Trade-off.** A named program's edit now stales `verify`'s row even when
+`verify` never runs it. That cost is deliberate: the alternative is
+enumerating every way a literal can become an execution, and each review
+round found another way. A future invocation form needs no checker change
+to be bound, only to be refused when it composes its target.
