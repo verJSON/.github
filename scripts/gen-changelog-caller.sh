@@ -1490,7 +1490,7 @@ ${build_runners_yaml%$'\n'}
             if (!path && typeof entry.resolved === 'string') throw new Error('private release acquisition rejects a resolved root lock entry');
             if (!path || (!path.includes('node_modules/') && typeof entry.resolved !== 'string')) continue;
             let host = '';
-            try { host = new URL(entry.resolved).hostname; } catch {}
+            try { host = new URL(entry.resolved).hostname.replace(/\\.+\$/, ''); } catch {}
             const installed = path.includes('node_modules/');
             const name = installed ? path.slice(path.lastIndexOf('node_modules/') + 13) : path;
             // An npm alias installs a GitHub Packages package under another name,
@@ -1502,7 +1502,7 @@ ${build_runners_yaml%$'\n'}
             if (entry.name && entry.name !== name) throw new Error('internal dependency aliases unexpected package: ' + name);
             const url = new URL(entry.resolved);
             const parts = url.pathname.split('/');
-            if (url.protocol !== 'https:' || url.host !== 'npm.pkg.github.com' || url.username || url.password || url.search || url.hash || url.pathname.includes('\\\\') || decodeURIComponent(url.pathname) !== url.pathname || parts.length !== 6 || parts[1] !== 'download' || parts[2].toLowerCase() + '/' + parts[3] !== name || !parts[4] || !parts[5]) throw new Error('internal dependency is not pinned to its exact GitHub Packages download URL: ' + name);
+            if (entry.resolved !== url.origin + url.pathname || url.protocol !== 'https:' || url.host !== 'npm.pkg.github.com' || url.username || url.password || url.search || url.hash || url.pathname.includes('\\\\') || decodeURIComponent(url.pathname) !== url.pathname || parts.length !== 6 || parts[1] !== 'download' || parts[2].toLowerCase() + '/' + parts[3] !== name || !parts[4] || !parts[5]) throw new Error('internal dependency is not pinned to its exact GitHub Packages download URL: ' + name);
             if (typeof entry.integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(entry.integrity)) throw new Error('internal dependency requires exact sha512 integrity: ' + name);
             found.add(name);
           }
@@ -4398,6 +4398,26 @@ if private_acquisition_steps:
         "NPM_CONFIG_USERCONFIG": "${{ runner.temp }}/release-install.npmrc",
         "npm_config_cache": "${{ runner.temp }}/verjson-npm-cache",
     }
+    # Both allowlists are compared as parsed values against the generated
+    # list. A grep of the job text also matched a comment holding that text
+    # beside a widened value.
+    expected_allowlist = os.environ.get("EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES", "")
+    validation_steps = private_acquisition_steps_named("Validate the approved private dependency lock")
+    parsed_allowlists = (
+        [step_mapping_values(step, "env") or {} for step in validation_steps],
+        [step_mapping_values(step, "env") or {} for step in acquisition_steps],
+    )
+    if (
+        not expected_allowlist
+        or len(validation_steps) != 1
+        or len(acquisition_steps) != 1
+        or yaml_scalar_value(parsed_allowlists[0][0].get("APPROVED_INTERNAL_PACKAGES", "")) != expected_allowlist
+        or yaml_scalar_value(parsed_allowlists[1][0].get("APPROVED_PRIVATE_PACKAGES", "")) != expected_allowlist
+    ):
+        problems.append(
+            "does not pin the private dependency allowlists to the generated contract (#1712)"
+        )
+
     def with_generated_allowlist(environment):
         if environment is None or "APPROVED_PRIVATE_PACKAGES" not in environment:
             return environment
@@ -4438,7 +4458,7 @@ if private_acquisition_steps:
         "  if (!path && typeof entry.resolved === 'string') throw new Error('private release acquisition rejects a resolved root lock entry');",
         "  if (!path || (!path.includes('node_modules/') && typeof entry.resolved !== 'string')) continue;",
         "  let host = '';",
-        '  try { host = new URL(entry.resolved).hostname; } catch {}',
+        "  try { host = new URL(entry.resolved).hostname.replace(/\\.+$/, ''); } catch {}",
         "  const installed = path.includes('node_modules/');",
         "  const name = installed ? path.slice(path.lastIndexOf('node_modules/') + 13) : path;",
         '  // An npm alias installs a GitHub Packages package under another name,',
@@ -4450,7 +4470,7 @@ if private_acquisition_steps:
         "  if (entry.name && entry.name !== name) throw new Error('internal dependency aliases unexpected package: ' + name);",
         '  const url = new URL(entry.resolved);',
         "  const parts = url.pathname.split('/');",
-        "  if (url.protocol !== 'https:' || url.host !== 'npm.pkg.github.com' || url.username || url.password || url.search || url.hash || url.pathname.includes('\\\\') || decodeURIComponent(url.pathname) !== url.pathname || parts.length !== 6 || parts[1] !== 'download' || parts[2].toLowerCase() + '/' + parts[3] !== name || !parts[4] || !parts[5]) throw new Error('internal dependency is not pinned to its exact GitHub Packages download URL: ' + name);",
+        "  if (entry.resolved !== url.origin + url.pathname || url.protocol !== 'https:' || url.host !== 'npm.pkg.github.com' || url.username || url.password || url.search || url.hash || url.pathname.includes('\\\\') || decodeURIComponent(url.pathname) !== url.pathname || parts.length !== 6 || parts[1] !== 'download' || parts[2].toLowerCase() + '/' + parts[3] !== name || !parts[4] || !parts[5]) throw new Error('internal dependency is not pinned to its exact GitHub Packages download URL: ' + name);",
         "  if (typeof entry.integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(entry.integrity)) throw new Error('internal dependency requires exact sha512 integrity: ' + name);",
         '  found.add(name);',
         '}',
@@ -5648,8 +5668,10 @@ private_guard_step="$(awk '
     if [ -n "$EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES" ]; then
       [ -n "$acquisition_job" ] \
         || fail "$release_workflow omits the independently authorized private dependency acquisition"
-      [ "$(grep -cF "APPROVED_INTERNAL_PACKAGES: '$EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES'" <<<"$acquisition_job")" -eq 1 ] \
-        && [ "$(grep -cF "APPROVED_PRIVATE_PACKAGES: '$EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES'" <<<"$acquisition_job")" -eq 1 ] \
+      acquisition_job_code="$(sed -e 's/^[[:space:]]*#.*//' -e 's/^[[:space:]]*//' <<<"$acquisition_job")"
+      [ "$(grep -cxF "APPROVED_INTERNAL_PACKAGES: '$EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES'" <<<"$acquisition_job_code")" -eq 1 ] \
+        && [ "$(grep -cxF "APPROVED_PRIVATE_PACKAGES: '$EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES'" <<<"$acquisition_job_code")" -eq 1 ] \
+        && [ "$(grep -cE 'APPROVED_(INTERNAL|PRIVATE)_PACKAGES:' <<<"$acquisition_job_code")" -eq 2 ] \
         || fail "$release_workflow private package allowlist differs from the generated contract"
       # npm ci and the acquisition script prefer npm-shrinkwrap.json, so the lock
       # held to the allowlist must be the only lock either one can read.
@@ -5685,7 +5707,7 @@ for path, entry in lock["packages"].items():
         try:
             # WHATWG URL parsing, which the acquisition script uses, reads a
             # backslash in a special scheme's authority as a path separator.
-            resolved_host = (urlparse(entry["resolved"].replace("\\", "/")).hostname or "").lower()
+            resolved_host = (urlparse(entry["resolved"].replace("\\", "/")).hostname or "").lower().rstrip(".")
         except ValueError:
             resolved_host = ""
     # An npm alias installs a GitHub Packages package under another name, so
@@ -6015,6 +6037,7 @@ PY
     EXPECTED_RELEASE_CHECKOUT="$EXPECTED_RELEASE_CHECKOUT" \
     EXPECTED_RELEASE_SETUP_NODE="$EXPECTED_RELEASE_SETUP_NODE" \
     EXPECTED_RELEASE_CACHE_SAVE="$EXPECTED_RELEASE_CACHE_SAVE" \
+    EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES="$EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES" \
     RELEASE_CALLER_PACKAGE_DIRS_JSON="$workflow_package_dirs_json" \
     python3 "$work/release-shape.py" "$release_workflow" \
     || fail "$release_workflow: see above"

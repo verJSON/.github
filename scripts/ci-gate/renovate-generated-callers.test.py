@@ -599,7 +599,9 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
             CHANGELOG_GENERATOR.read_text(encoding="utf-8"), "release-artifact", self.ref,
             "--build-runner", "ubuntu-24.04", "--approved-internal-package", "@verjson/ai",
         )
-        self.assertEqual(self.check(workflow).returncode, 0)
+        self.assertEqual(
+            self.check(workflow, EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES="@verjson/ai").returncode, 0,
+        )
         for step_name, variable in (
             ("Check out the canonical dependency acquisition contract", "EXPECTED_RELEASE_CHECKOUT"),
             ("Save exact-attempt credentialless dependencies", "EXPECTED_RELEASE_CACHE_SAVE"),
@@ -609,8 +611,36 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
                 swapped = workflow[:start] + self.swap_step_pin(workflow[start:], step_name, variable)
                 self.assertNotEqual(swapped, workflow)
                 self.assert_rejected(
-                    self.check(swapped),
+                    self.check(swapped, EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES="@verjson/ai"),
                     "does not match the approved private dependency acquisition job (#1712)",
+                )
+
+    def test_private_allowlists_are_compared_as_parsed_values(self) -> None:
+        """A comment holding the generated text cannot stand in for a widened value."""
+        workflow = generate(
+            CHANGELOG_GENERATOR.read_text(encoding="utf-8"), "release-artifact", self.ref,
+            "--build-runner", "ubuntu-24.04", "--approved-internal-package", "@verjson/ai",
+        )
+        allowlist = {"EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES": "@verjson/ai"}
+        self.assertEqual(self.check(workflow, **allowlist).returncode, 0)
+        self.assert_rejected(
+            self.check(workflow), "does not pin the private dependency allowlists to the generated contract (#1712)",
+        )
+        for names in (
+            ("APPROVED_PRIVATE_PACKAGES",),
+            ("APPROVED_INTERNAL_PACKAGES",),
+            ("APPROVED_PRIVATE_PACKAGES", "APPROVED_INTERNAL_PACKAGES"),
+        ):
+            with self.subTest(names=names):
+                lines = workflow.split("\n")
+                for name in names:
+                    index = next(i for i, line in enumerate(lines) if line.strip() == f"{name}: '@verjson/ai'")
+                    indent = lines[index][: len(lines[index]) - len(lines[index].lstrip())]
+                    lines[index] = f"{indent}{name}: '@verjson/ai,@verjson/secret'"
+                    lines.insert(index + 1, f"{indent}# {name}: '@verjson/ai'")
+                self.assert_rejected(
+                    self.check("\n".join(lines), **allowlist),
+                    "does not pin the private dependency allowlists to the generated contract (#1712)",
                 )
 
     def test_an_unusable_declared_pin_refuses_to_check(self) -> None:

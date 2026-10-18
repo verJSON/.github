@@ -26,6 +26,12 @@
 # exact locked private download is fetched: node-release and the generated
 # verify jobs trust the caller's reviewed lockfile (ADR 0220).
 set -euo pipefail
+# The .npmrc quarantined below is $GITHUB_WORKSPACE's, and the lockfile is read
+# from the working directory, so both must be the same tree.
+if [[ "$(pwd -P)" != "$(cd "$GITHUB_WORKSPACE" && pwd -P)" ]]; then
+  echo "::error::dependency acquisition must run from GITHUB_WORKSPACE."
+  exit 1
+fi
 acquisition_dir="$(mktemp -d "$RUNNER_TEMP/verjson-private-acquisition.XXXXXX")"
 project_npmrc="$GITHUB_WORKSPACE/.npmrc"
 quarantined=false
@@ -97,7 +103,7 @@ if (typeof lock.packages !== "object" || lock.packages === null) {
 }
 // GitHub Packages may record the owner's own spelling of the scope.
 const downloadPath =
-  /^\/download\/@[A-Za-z0-9][A-Za-z0-9._~-]*\/[A-Za-z0-9._~-]+\/[0-9A-Za-z.+-]+\/[0-9A-Za-z._-]+$/;
+  /^\/download\/@[A-Za-z0-9][A-Za-z0-9._~-]*\/[A-Za-z0-9._~-]+\/[0-9A-Za-z][0-9A-Za-z.+-]*\/[0-9A-Za-z._-]+$/;
 let approved = null;
 if (approvedArgument.startsWith("approved:")) {
   approved = new Set(approvedArgument.slice("approved:".length).split(",").filter(Boolean));

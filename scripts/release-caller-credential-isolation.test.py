@@ -455,7 +455,7 @@ def integrity_of(data):
     return harness.integrity_of(data)
 
 
-def token_fetches(workspace, root, approved=None):
+def token_fetches(workspace, root, approved=None, github_workspace=None):
     """The URLs the real acquisition script fetches with the token for this tree.
 
     With `approved`, the script is given that allowlist, as release-artifact
@@ -477,7 +477,7 @@ def token_fetches(workspace, root, approved=None):
         cwd=workspace, text=True, capture_output=True,
         env=os.environ | {
             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
-            "GITHUB_WORKSPACE": str(workspace),
+            "GITHUB_WORKSPACE": str(github_workspace or workspace),
             "RUNNER_TEMP": str(runner_temp),
             "PRIVATE_PACKAGE_REGISTRY": CANONICAL_REGISTRY,
             "npm_config_cache": str(runner_temp / "npm-cache"),
@@ -539,6 +539,20 @@ def verify_private_lock_validation(workflow, root):
             canonical | {"": {"name": "fixture", **secret}}, {},
             "private release acquisition rejects a resolved root lock entry",
         ),
+        # WHATWG parsing drops a tab and keeps a trailing host dot; the script
+        # refuses both, and so must validation.
+        "tab in an approved download path": (
+            canonical | {"node_modules/@verjson/fixture": {
+                **approved_entry, "resolved": approved_entry["resolved"].replace("0123abcd", "0123\tabcd"),
+            }}, {"script-refuses": True},
+            "internal dependency is not pinned to its exact GitHub Packages download URL",
+        ),
+        "trailing-dot private host": (
+            canonical | {"node_modules/innocent": private_download(
+                "@verjson/secret", host="https://npm.pkg.github.com.",
+            )}, {"script-refuses": True},
+            "unapproved internal dependency: innocent",
+        ),
         # L1: npm ci and the acquisition script both prefer npm-shrinkwrap.json.
         "npm-shrinkwrap.json beside a clean package-lock.json": (
             canonical, {"shrinkwrap": canonical | {"node_modules/@verjson/secret": secret}},
@@ -591,7 +605,8 @@ def check_lock_case(step, root, case, packages, extras, message, approved_urls):
         assert fetched and fetched <= approved_urls, f"{case}: token fetched {sorted(fetched)}"
     else:
         assert result.returncode != 0 and message in output, f"{case}: accepted or wrong reason: {output}"
-        if extras.get("reserved") is None and not extras.get("shrinkwrap-link"):
+        # The script itself refuses or skips these URLs; validation must too.
+        if extras.get("reserved") is None and not extras.get("shrinkwrap-link") and not extras.get("script-refuses"):
             _, fetched, _ = token_fetches(workspace, root)
             assert fetched - approved_urls, f"{case}: the attack reaches no unapproved download"
 
@@ -624,6 +639,13 @@ def verify_script_allowlist(root):
             base | {"": {"name": "fixture", **private_download("@verjson/secret")}}, APPROVED, False,
         ),
         "empty allowlist": (base, "", False),
+        # A version segment of dots alone is a path GitHub Packages need not
+        # resolve to the named package, so the script never sends it the token.
+        "dot-only version segment": (
+            base | {"node_modules/@verjson/fixture": private_download("@verjson/fixture") | {
+                "resolved": "https://npm.pkg.github.com/download/@verjson/fixture/.../0123abcd",
+            }}, APPROVED, "is not an exact private registry download URL",
+        ),
     }
     for case, (packages, approved, allowed) in cases.items():
         workspace = root / case.replace(" ", "-")
@@ -631,12 +653,29 @@ def verify_script_allowlist(root):
         (workspace / "package-lock.json").write_text(json.dumps({"lockfileVersion": 3, "packages": packages}))
         result, fetched, calls = token_fetches(workspace, root, approved=approved)
         output = result.stdout + result.stderr
-        if allowed:
+        if allowed is True:
             assert result.returncode == 0, f"{case}: {output}"
             assert fetched and fetched <= APPROVED_URLS, f"{case}: {sorted(fetched)}"
         else:
-            assert result.returncode != 0 and UNAPPROVED_MESSAGE in output, f"{case}: accepted: {output}"
+            message = allowed if isinstance(allowed, str) else UNAPPROVED_MESSAGE
+            assert result.returncode != 0 and message in output, f"{case}: accepted: {output}"
             assert calls == [], f"{case}: npm ran before the allowlist refusal: {calls}"
+    # The quarantined .npmrc is $GITHUB_WORKSPACE's, so the lockfile must come
+    # from that same tree: any other working directory is refused before npm.
+    elsewhere = root / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "package-lock.json").write_text(json.dumps({"lockfileVersion": 3, "packages": base}))
+    (elsewhere / ".npmrc").write_text("//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}\n")
+    result, fetched, calls = token_fetches(elsewhere, root, approved=APPROVED, github_workspace=root / "approved-only")
+    assert result.returncode != 0 and "must run from GITHUB_WORKSPACE" in result.stdout + result.stderr, (
+        f"acquisition ran outside GITHUB_WORKSPACE: {result.stdout}{result.stderr}"
+    )
+    assert calls == [], f"npm ran outside GITHUB_WORKSPACE: {calls}"
+    # The same tree through a symlinked path is the same workspace.
+    linked = root / "linked-workspace"
+    linked.symlink_to(root / "approved-only")
+    result, fetched, _ = token_fetches(root / "approved-only", root, approved=APPROVED, github_workspace=linked)
+    assert result.returncode == 0 and fetched <= APPROVED_URLS, result.stdout + result.stderr
     # Without an allowlist the script fetches every locked private download:
     # node-release and the verify jobs trust the caller's reviewed lockfile.
     workspace = root / "no-allowlist"

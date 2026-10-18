@@ -3202,6 +3202,23 @@ elif kind == "drop-npmrc-refusal":
 elif kind == "job-container":
     swap("    timeout-minutes: 45\n",
          "    timeout-minutes: 45\n    container: ghcr.io/attacker/node:24\n")
+elif kind in ("comment-private", "comment-internal", "comment-both"):
+    # Widen an allowlist and leave the generated text behind in a comment.
+    names = {
+        "comment-private": ["APPROVED_PRIVATE_PACKAGES"],
+        "comment-internal": ["APPROVED_INTERNAL_PACKAGES"],
+        "comment-both": ["APPROVED_PRIVATE_PACKAGES", "APPROVED_INTERNAL_PACKAGES"],
+    }[kind]
+    lines = job.split("\n")
+    for name in names:
+        matches = [i for i, line in enumerate(lines) if line.lstrip().startswith(name + ": '")]
+        if len(matches) != 1:
+            raise SystemExit(f"private acquisition fixture for {kind} no longer matches generated output")
+        line = lines[matches[0]]
+        indent = line[:len(line) - len(line.lstrip())]
+        lines[matches[0]] = line[:-1] + ",@verjson/secret'"
+        lines.insert(matches[0] + 1, indent + "# " + line.lstrip())
+    job = "\n".join(lines)
 elif kind == "drop-script-allowlist":
     lines = job.split("\n")
     kept = [line for line in lines if not line.lstrip().startswith("APPROVED_PRIVATE_PACKAGES:")]
@@ -5289,6 +5306,107 @@ else
   grep -qF 'repository lock differs from the generated private package authorization' "$ADOPTER_LOG" \
     && pass "emitted suite rejects a full-width-dot GitHub Packages host" \
     || fail "emitted suite rejected a full-width-dot GitHub Packages host for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_comment_private_adopter="$tmproot/adopter-artifact-private-comment-private"
+cp -a "$private_artifact_adopter" "$private_acquisition_comment_private_adopter"
+mutate_private_acquisition "$private_acquisition_comment_private_adopter/.github/workflows/release.yml" comment-private \
+  || fail "the comment-private private acquisition fixture no longer matches generated output"
+git -C "$private_acquisition_comment_private_adopter" commit -aqm 'a widened script allowlist hidden behind a comment'
+schedule_adopter_script "$private_acquisition_comment_private_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a widened script allowlist hidden behind a comment"
+else
+  grep -qF 'private package allowlist differs from the generated contract' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects a widened script allowlist hidden behind a comment" \
+    || fail "emitted suite rejected a widened script allowlist hidden behind a comment for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_comment_internal_adopter="$tmproot/adopter-artifact-private-comment-internal"
+cp -a "$private_artifact_adopter" "$private_acquisition_comment_internal_adopter"
+mutate_private_acquisition "$private_acquisition_comment_internal_adopter/.github/workflows/release.yml" comment-internal \
+  || fail "the comment-internal private acquisition fixture no longer matches generated output"
+git -C "$private_acquisition_comment_internal_adopter" commit -aqm 'a widened lock allowlist hidden behind a comment'
+schedule_adopter_script "$private_acquisition_comment_internal_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a widened lock allowlist hidden behind a comment"
+else
+  grep -qF 'private package allowlist differs from the generated contract' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects a widened lock allowlist hidden behind a comment" \
+    || fail "emitted suite rejected a widened lock allowlist hidden behind a comment for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_comment_both_adopter="$tmproot/adopter-artifact-private-comment-both"
+cp -a "$private_artifact_adopter" "$private_acquisition_comment_both_adopter"
+mutate_private_acquisition "$private_acquisition_comment_both_adopter/.github/workflows/release.yml" comment-both \
+  || fail "the comment-both private acquisition fixture no longer matches generated output"
+git -C "$private_acquisition_comment_both_adopter" commit -aqm 'both allowlists widened behind comments'
+schedule_adopter_script "$private_acquisition_comment_both_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted both allowlists widened behind comments"
+else
+  grep -qF 'private package allowlist differs from the generated contract' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects both allowlists widened behind comments" \
+    || fail "emitted suite rejected both allowlists widened behind comments for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_lock_trailing_dot_host_adopter="$tmproot/adopter-artifact-private-lock-trailing-dot-host"
+cp -a "$private_artifact_adopter" "$private_acquisition_lock_trailing_dot_host_adopter"
+python3 - "$private_acquisition_lock_trailing_dot_host_adopter/package-lock.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+lock = json.load(open(path, encoding="utf-8"))
+lock["packages"]["node_modules/innocent"] = {
+    "version": "1.0.0",
+    "resolved": "https://npm.pkg.github.com./download/@verjson/secret/1.0.0/hash",
+    "integrity": "sha512-" + "A" * 86 + "==",
+}
+json.dump(lock, open(path, "w", encoding="utf-8"))
+PY
+git -C "$private_acquisition_lock_trailing_dot_host_adopter" add -A
+git -C "$private_acquisition_lock_trailing_dot_host_adopter" commit -qm 'lock a trailing-dot GitHub Packages host'
+schedule_adopter_script "$private_acquisition_lock_trailing_dot_host_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a trailing-dot GitHub Packages host"
+else
+  grep -qF 'repository lock differs from the generated private package authorization' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects a trailing-dot GitHub Packages host" \
+    || fail "emitted suite rejected a trailing-dot GitHub Packages host for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_lock_tab_in_path_adopter="$tmproot/adopter-artifact-private-lock-tab-in-path"
+cp -a "$private_artifact_adopter" "$private_acquisition_lock_tab_in_path_adopter"
+python3 - "$private_acquisition_lock_tab_in_path_adopter/package-lock.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+lock = json.load(open(path, encoding="utf-8"))
+entry = lock["packages"]["node_modules/@verjson/ai"]
+entry["resolved"] = entry["resolved"].replace("/hash", "/ha\tsh")
+json.dump(lock, open(path, "w", encoding="utf-8"))
+PY
+git -C "$private_acquisition_lock_tab_in_path_adopter" add -A
+git -C "$private_acquisition_lock_tab_in_path_adopter" commit -qm 'lock a tab in an approved GitHub Packages download path'
+schedule_adopter_script "$private_acquisition_lock_tab_in_path_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a tab in an approved GitHub Packages download path"
+else
+  grep -qF 'repository lock differs from the generated private package authorization' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects a tab in an approved GitHub Packages download path" \
+    || fail "emitted suite rejected a tab in an approved GitHub Packages download path for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
