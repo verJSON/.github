@@ -3940,6 +3940,19 @@ for line in ("timeout --sig KILL 5 bash scripts/zz-target.sh", "sudo --us root b
 expect_verify_refused(verify_with("sudo --bogus-option root bash scripts/zz-ok.sh\n", {"scripts/zz-ok.sh": "echo ok\n"}),
                       "verify refuses a prefix long option it cannot resolve",
                       ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "--bogus-option"))
+expect_verify_refused(verify_with("env --ignore bash scripts/zz-ok.sh\n", {"scripts/zz-ok.sh": "echo ok\n"}),
+                      "verify refuses an ambiguous long-option abbreviation (--ignore-environment, --ignore-signal)",
+                      ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "--ignore"))
+# getopt_long prefers an exact name over a longer option it prefixes; no
+# real table has such a pair today, so the rule is pinned on a synthetic one.
+CHECKER.PREFIX_LONG_OPTIONS["zz-prefix"] = ("--out", "--output")
+if (CHECKER.resolve_long_option("zz-prefix", "--out") == "--out"
+        and CHECKER.resolve_long_option("zz-prefix", "--outp") == "--output"
+        and CHECKER.resolve_long_option("zz-prefix", "--ou") is None):
+    ok("a long option's exact name wins over a longer option it prefixes")
+else:
+    fail("resolve_long_option does not prefer an exact name, or accepts an ambiguous prefix")
+del CHECKER.PREFIX_LONG_OPTIONS["zz-prefix"]
 for line in ("env -uS echo hi", "env --ignore-environment echo hi", "timeout --preserve-status 5 echo hi"):
     expect(verify_with(line + "\n", {}), 0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
            f"`{line}` is not refused", *PENDING_ARGS)
