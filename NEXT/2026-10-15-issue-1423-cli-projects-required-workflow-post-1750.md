@@ -20,12 +20,3 @@ The rotation tool no longer keeps a record of the revision it replaces.
 values. The predecessor is now read from the live ruleset and admitted only when it is an
 ancestor of the rotation target and its required workflow is exactly the output of its own
 generator. That record went stale after every rotation (#1824).
-
-Fix: the scheduled `Organization ruleset conformance` audit again accepts ruleset
-21830367 (`cli-projects-package-surface-required-workflow`). The audit had failed with
-`required release authorization bypass is absent` since the 2026-10-15 rotation added
-ADR 0212's strict `admission` status check. Each bypassless required-workflow exception in
-`config/org-ruleset-conformance-policy.json` now declares its exact status-check image, or
-`null`. Anything that does not match that declaration still fails. No bypass actor is
-added ([ADR 0153](../docs/decisions/0153-cli-projects-package-surface-required-workflow/README.md)
-amendment of 2026-10-17).
