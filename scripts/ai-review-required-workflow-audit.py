@@ -2,6 +2,7 @@
 import argparse
 import base64
 import copy
+import hashlib
 import json
 import os
 import re
@@ -528,9 +529,15 @@ def concise_mismatches(mismatches: list[str]) -> str:
 
 
 def concise_findings(name: str, findings: list[str]) -> str:
+    # The sample is for a reader; the digest is for the adjudicator. ADR 0189
+    # fingerprints this exact text, so without a digest over every item a
+    # same-count change among the unsampled ones would replay as a match.
     sample = findings[:8]
     suffix = f" (plus {len(findings) - len(sample)} more)" if len(findings) > len(sample) else ""
-    return f"{name}: missing={len(findings)} sample={sample}{suffix}"
+    digest = hashlib.sha256(
+        json.dumps(sorted(findings), ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"{name}: missing={len(findings)} sample={sample}{suffix} items=sha256:{digest}"
 
 
 def concise_missing(name: str, missing: list[str]) -> None:

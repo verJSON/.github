@@ -101,3 +101,23 @@ either to an inherited or untrusted path.
   command; no change to this script is required.
 - The expiry date is a maintenance obligation: it must be resolved or
   deliberately re-reviewed before it lapses. That cost is the point.
+
+## 2026-10-18 amendment: a truncated finding carries a digest of every item
+
+"What keeps this from failing open" says any change to the finding text is loud.
+That held only for the part of the text a reader can see. The authorization-arm
+audit renders a list finding as a count, the first eight items, and `(plus N more)`.
+A change that kept the count and touched only unsampled items therefore produced
+identical text, the same fingerprint, and a `match`. For example, one adopter
+regenerates while another loses a caller. Review of #1839 found the hole while
+re-recording the #1810 finding, which has 20 items and a sample of 8.
+
+`concise_findings` in `scripts/ai-review-required-workflow-audit.py` now appends
+`items=sha256:<hex>`. The hex is the SHA-256 of the full item list, sorted and encoded
+as compact JSON. The sample stays short for a reader, while the fingerprint the
+adjudicator compares now covers every item. The adjudicator is unchanged: it still
+hashes the exact text, so a sibling audit adopting this mechanism must likewise make
+its finding text a function of every item it reports. Changing the format changed
+every recorded arm fingerprint once. The single recorded entry was re-recorded in
+the same pull request. Tests show that a same-count swap among unsampled items
+changes the finding, and that the digest does not depend on item order.
