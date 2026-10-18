@@ -3589,6 +3589,7 @@ for label, line in (
     ("an empty PATH entry in the middle", 'PATH="/usr/bin::/bin"'),
     ("a PATH += append of a relative entry", "PATH+=:scripts"),
     ("an empty PATH, which is the working directory", "PATH= tool"),
+    ("an empty line appended to GITHUB_PATH", 'echo "" >> "$GITHUB_PATH"'),
     ("a relative directory appended to GITHUB_PATH with printf", "printf 'bin\\n' >> $GITHUB_PATH"),
 ):
     expect_verify_refused(verify_with(line + "\n", {}), f"verify refuses {label}",
@@ -3652,6 +3653,9 @@ expect(verify_with("node scripts/zz-spawn.js\n",
                     "scripts/zz-ok.sh": "echo ok\n"}),
        0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
        "a JavaScript spawn with shell: true is read as a shell command", *PENDING_ARGS)
+expect_verify_refused(verify_with("find scripts -name '*.sh' -exec {} \\;\n", {}),
+                      "verify refuses find -exec running the files it finds",
+                      ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "runs the files it finds"))
 # The reviewer's scenario: the target changes the checked-out tree.
 expect_verify_refused(
     verify_with("python3 scripts/zz-spawn.py\n",

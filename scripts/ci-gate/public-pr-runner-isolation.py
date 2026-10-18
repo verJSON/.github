@@ -1815,9 +1815,6 @@ class ProgramTrace:
             if program == "npm":
                 verbs = [re.sub(r"^[\"']|[\"']$", "", item) for item in vector]
                 return self.npm(verbs, origin, depth, where)
-            if program == "npx":
-                self.unresolve(f"{where}: npx runs a package this checker cannot read")
-                return
             verb = re.sub(r"^[\"']|[\"']$", "", vector[0]) if vector else ""
             if program == "git" and verb in ("show", "archive", "cat-file"):
                 self.texts.append((origin, "git " + " ".join(re.sub(r"^[\"']|[\"']$", "", item) for item in vector)))
@@ -2023,24 +2020,24 @@ def workspace_path_entries(job: dict, texts: list[tuple[str, str]]) -> set[str]:
     found: set[str] = set()
     # (origin, entries): an assignment's colon-separated entries, where an empty
     # one is the working directory (round 9); a `+=` appends, so its leading
-    # colon is the join; a GITHUB_PATH line is one directory.
+    # colon is the join; a GITHUB_PATH line is one directory, and an empty one refuses too.
     values = []
     for origin, text in texts:
         for match in PATH_ASSIGNMENT.finditer(text):
             value = match.group(2).strip().strip("\"'")
             if match.group(1):
                 value = value[1:] if value.startswith(":") else value
-            values.append((origin, value.split(":"), True))
+            values.append((origin, value.split(":")))
         for match in GITHUB_PATH_APPEND.finditer(text):
-            values.append((origin, [match.group(1)], False))
+            values.append((origin, [match.group(1)]))
     for scope in [job] + [step for step in job.get("steps") or [] if isinstance(step, dict)]:
         env = scope.get("env")
         if isinstance(env, dict) and "PATH" in env:
-            values.append(("an env block", str(env["PATH"]).split(":"), True))
-    for origin, entries, empty_is_cwd in values:
+            values.append(("an env block", str(env["PATH"]).split(":")))
+    for origin, entries in values:
         for entry in entries:
             entry = entry.strip().strip("\"'")
-            if not entry and empty_is_cwd:
+            if not entry:
                 found.add(f"{origin or 'a step'}: an empty PATH entry is the working directory and puts the "
                           "workspace on PATH, so a bare command word could run tracked bytes no row binds")
             elif entry and (WORKSPACE_ENTRY.search(entry) or not entry.startswith(("/", "$", "~"))):
