@@ -144,6 +144,147 @@ def verify_project_npmrc_isolation(script):
         assert not project_npmrc.exists()
 
 
+def private_lock(resolved, integrity=None):
+    return {
+        "": {"name": "fixture", "version": "1.0.0"},
+        "node_modules/@verjson/fixture": {
+            "version": "1.0.0",
+            "resolved": resolved,
+            "integrity": integrity_of(FAKE_CONTENT) if integrity is None else integrity,
+        },
+    }
+
+
+def verify_private_download_selection(script):
+    # GitHub Packages records the owner's own spelling of the scope in download
+    # URLs, such as @verJSON for the lowercase package @verjson/fixture.
+    owner_spelling = f"{FAKE_REGISTRY}/download/@verJSON/fixture/1.0.0/0123abcd"
+    with tempfile.TemporaryDirectory(prefix="node-release-owner-scope-") as temp:
+        env, _ = fake_npm_workspace(Path(temp), lock_packages=private_lock(owner_spelling))
+        result = run_step(script, cwd=temp, env=env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert npm_trace_of(env)[-1] == f"absent|present|cache add {owner_spelling}"
+
+    download = f"{FAKE_REGISTRY}/download/@verjson/fixture/1.0.0/0123abcd"
+    sha1 = "sha1-" + base64.b64encode(hashlib.sha1(FAKE_CONTENT).digest()).decode()
+    rejected_locks = {
+        "query string": private_lock(f"{download}?x=1"),
+        "fragment": private_lock(f"{download}#x"),
+        "userinfo": private_lock(download.replace("https://", "https://user:secret@")),
+        "explicit port": private_lock(download.replace(".com/", ".com:8443/")),
+        "plain http": private_lock(download.replace("https://", "http://")),
+        "non-canonical host": private_lock(download.replace("npm.pkg", "NPM.pkg")),
+        "dot segment": private_lock(f"{FAKE_REGISTRY}/download/@verjson/../fixture/1.0.0/0123abcd"),
+        "encoded slash": private_lock(f"{FAKE_REGISTRY}/download/@verjson%2ffixture/1.0.0/0123abcd/x"),
+        "registry API path": private_lock(f"{FAKE_REGISTRY}/@verjson/fixture/-/fixture-1.0.0.tgz"),
+        "extra segment": private_lock(f"{download}/extra"),
+        "missing integrity": private_lock(download, integrity=""),
+        "sha1 integrity": private_lock(download, integrity=sha1),
+        "two integrities": private_lock(download, integrity=f"{integrity_of(FAKE_CONTENT)} {sha1}"),
+        "truncated integrity": private_lock(download, integrity=integrity_of(FAKE_CONTENT)[:-4] + "=="),
+        "conflicting integrity": private_lock(download) | {
+            "node_modules/other/node_modules/@verjson/fixture": {
+                "resolved": download,
+                "integrity": integrity_of(b"different archive"),
+            },
+        },
+    }
+    for case, lock_packages in rejected_locks.items():
+        with tempfile.TemporaryDirectory(prefix="node-release-rejected-lock-") as temp:
+            env, runner_temp = fake_npm_workspace(Path(temp), lock_packages=lock_packages)
+            result = run_step(script, cwd=temp, env=env)
+            assert result.returncode != 0, f"{case}: accepted"
+            assert "::error::" in result.stderr, f"{case}: {result.stdout}{result.stderr}"
+            assert npm_trace_of(env) == [], f"{case}: npm ran with the credential"
+            assert not list(runner_temp.iterdir()), case
+
+    for case, lockfile in {
+        "missing lockfile": None,
+        "lockfile version 1": {"lockfileVersion": 1, "dependencies": {}},
+        "no packages map": {"lockfileVersion": 3},
+        "invalid JSON": "{",
+    }.items():
+        with tempfile.TemporaryDirectory(prefix="node-release-invalid-lockfile-") as temp:
+            env, _ = fake_npm_workspace(Path(temp))
+            lock_path = Path(temp, "package-lock.json")
+            if lockfile is None:
+                lock_path.unlink()
+            else:
+                lock_path.write_text(lockfile if isinstance(lockfile, str) else json.dumps(lockfile))
+            result = run_step(script, cwd=temp, env=env)
+            assert result.returncode != 0 and "::error::" in result.stderr, case
+            assert npm_trace_of(env) == [], case
+
+    public_only = {
+        "": {"name": "fixture", "version": "1.0.0"},
+        "node_modules/zod": {
+            "resolved": "https://registry.npmjs.org/zod/-/zod-1.0.0.tgz",
+            "integrity": integrity_of(b"zod"),
+        },
+        "node_modules/git-dependency": {"resolved": "git+https://github.com/verjson/x.git#0123abcd"},
+        "node_modules/linked": {"resolved": "linked", "link": True},
+        "node_modules/tarball": {"resolved": "file:vendor/tarball.tgz"},
+        "node_modules/bundled": {"inBundle": True},
+    }
+    with tempfile.TemporaryDirectory(prefix="node-release-public-only-") as temp:
+        env, _ = fake_npm_workspace(Path(temp), lock_packages=public_only)
+        result = run_step(script, cwd=temp, env=env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert npm_trace_of(env) == [], "npm must not receive the credential without private downloads"
+
+    with tempfile.TemporaryDirectory(prefix="node-release-shrinkwrap-") as temp:
+        env, _ = fake_npm_workspace(Path(temp), lock_packages=private_lock(f"{download}?stale=1"))
+        Path(temp, "npm-shrinkwrap.json").write_text(
+            json.dumps({"lockfileVersion": 3, "packages": private_lock(download)})
+        )
+        result = run_step(script, cwd=temp, env=env)
+        assert result.returncode == 0, "npm ci prefers npm-shrinkwrap.json; so must acquisition"
+        assert npm_trace_of(env)[-1] == f"absent|present|cache add {download}"
+
+    for case, overrides in {
+        "tampered content": {"FAKE_CONTENT_BYTES": "tampered archive"},
+        "content outside the cache": {"FAKE_CONTENT_PATH": "/dev/null/never"},
+    }.items():
+        with tempfile.TemporaryDirectory(prefix="node-release-cache-content-") as temp:
+            env, _ = fake_npm_workspace(Path(temp))
+            if case == "content outside the cache":
+                overrides = {"FAKE_CONTENT_PATH": str(Path(temp, "elsewhere/content"))}
+            result = run_step(script, cwd=temp, env=env | overrides)
+            assert result.returncode != 0, f"{case}: accepted"
+            assert "did not cache the exact locked content" in result.stdout, case
+    with tempfile.TemporaryDirectory(prefix="node-release-cache-symlink-") as temp:
+        env, _ = fake_npm_workspace(Path(temp))
+        real = Path(temp, "real-content")
+        env["FAKE_CONTENT_PATH"] = str(real)
+        content = Path(temp, "npm-cache/_cacache/content-v2/sha512")
+        digest = hashlib.sha512(FAKE_CONTENT).hexdigest()
+        link = content / digest[:2] / digest[2:4] / digest[4:]
+        link.parent.mkdir(parents=True)
+        link.symlink_to(real)
+        result = run_step(script, cwd=temp, env=env)
+        assert result.returncode != 0 and "did not cache the exact locked content" in result.stdout
+
+
+def verify_npm_major_gate(script):
+    def outcome(npm_version):
+        with tempfile.TemporaryDirectory(prefix="node-release-npm-gate-") as temp:
+            env, _ = fake_npm_workspace(Path(temp), npm_version=npm_version)
+            result = run_step(script, cwd=temp, env=env)
+            added = any("|cache add " in line for line in npm_trace_of(env))
+            assert added == (result.returncode == 0), (npm_version, result.stdout)
+            if result.returncode != 0:
+                assert "has no verified credential-isolation contract" in result.stdout
+            return result.returncode == 0
+
+    accepted = {major for major in range(1, 21) if outcome(f"{major}.4.2")}
+    assert accepted == set(SUPPORTED_NPM_RELEASES), (
+        f"the workflow gives the credential to npm majors {sorted(accepted)}, but the test "
+        f"verifies isolation under {sorted(SUPPORTED_NPM_RELEASES)}"
+    )
+    for malformed in ("10", "11.0.0-pre.1", "v11.0.0", "11.0.0\n12.0.0", "110.0.0", ""):
+        assert not outcome(malformed), malformed
+
+
 def verify_npm_cache_policy(script):
     cases = (
         ("true", "true", "true", "false", True),
@@ -277,6 +418,8 @@ def main():
     steps = prepare_job["steps"]
     assert steps.index(acquisition_step) + 1 == steps.index(install_step)
     verify_project_npmrc_isolation(acquisition_step["run"])
+    verify_private_download_selection(acquisition_step["run"])
+    verify_npm_major_gate(acquisition_step["run"])
     cache_policy_step = next(
         step for step in prepare_job["steps"] if step.get("id") == "npm-cache-policy"
     )
@@ -289,6 +432,7 @@ def main():
     verify_cache_namespace(prepare_job["steps"])
 
     runner_guards_reject_self_hosted(runner_guard_commands)
+    verified_majors = set()
     for major, (version, integrity) in sorted(SUPPORTED_NPM_RELEASES.items()):
         with tempfile.TemporaryDirectory(prefix=f"node-release-npm{major}-") as temp:
             root = Path(temp)
@@ -299,6 +443,11 @@ def main():
             verify_empty_dependency_tree(
                 npm_bin, version, acquisition_step["run"], install_step["run"], root,
             )
+        verified_majors.add(int(version.split(".", 1)[0]))
+    assert verified_majors == set(SUPPORTED_NPM_RELEASES), (
+        f"isolation was exercised under npm majors {sorted(verified_majors)}, "
+        f"not every major the workflow accepts: {sorted(SUPPORTED_NPM_RELEASES)}"
+    )
 
 
 ACQUISITION_STEP = "Acquire private registry packages with credentials"

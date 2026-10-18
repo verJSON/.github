@@ -296,8 +296,9 @@ jobs:
             || typeof lock.packages !== "object" || lock.packages === null) {
             fail(`${lockfilePath} must be lockfileVersion 2 or 3 with a packages map.`);
           }
+          // GitHub Packages may record the owner's own spelling of the scope.
           const downloadPath =
-            /^\/download\/@[a-z0-9][a-z0-9._~-]*\/[a-z0-9._~-]+\/[0-9A-Za-z.+-]+\/[0-9A-Za-z._-]+$/;
+            /^\/download\/@[A-Za-z0-9][A-Za-z0-9._~-]*\/[A-Za-z0-9._~-]+\/[0-9A-Za-z.+-]+\/[0-9A-Za-z._-]+$/;
           const downloads = new Map();
           for (const [location, entry] of Object.entries(lock.packages)) {
             const resolved = entry?.resolved;
