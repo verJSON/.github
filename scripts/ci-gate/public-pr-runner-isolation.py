@@ -943,6 +943,8 @@ PROGRAM_SUFFIXES = (".sh", ".py", ".js", ".mjs", ".cjs")
 VARIABLE_ROOTED = re.compile(r"\$\{?[A-Za-z_]\w*\}?/([\w.-]+(?:/[\w.-]+)*)")
 DATA_TOKEN_SPLIT = re.compile(r"[\s\"'`;&|()<>=,:$]+")
 UNRESOLVED_PROGRAM = "unresolved-program"
+# An argument a spawn computes at runtime; resolving it always fails.
+COMPUTED_WORD = "$__computed_argument"
 SHELL_NAMES = frozenset({"bash", "sh", "zsh", "dash"})
 PYTHON_NAMES = frozenset({"python", "python3"})
 NODE_NAMES = frozenset({"node", "nodejs"})
@@ -1435,8 +1437,35 @@ class ProgramTrace:
             return
         if head == "npm":
             return self.npm(words[1:], origin, depth, where)
+        if name == "find":
+            return self.find_exec(words, origin, depth, scope, where)
         if "/" in head or "$" in head:
             return self.run_target(head, origin, assignments, depth, "run directly")
+
+    def find_exec(self, words, origin, depth, scope, where) -> None:
+        """`find … -exec CMD … ;` runs CMD as a command (round 9)."""
+        for index, word in enumerate(words):
+            if word in ("-exec", "-execdir", "-ok", "-okdir"):
+                rest = words[index + 1 :]
+                end = next((at for at, item in enumerate(rest) if item in (";", "\\;", "+")), len(rest))
+                if rest[:1] == ["{}"]:
+                    self.unresolve(f"{where}: find runs the files it finds")
+                else:
+                    self.command(rest[:end], origin, depth, scope)
+
+    def argv(self, words: list[str], origin: str, depth: int, where: str) -> None:
+        """An argument vector a spawn runs, read as the command it is (round 9):
+        an interpreter's program, a tree path, npm, or find -exec is followed as
+        invoked, and a tree-changing git verb refuses like one in shell."""
+        if not words or words[0] == COMPUTED_WORD:
+            self.unresolve(f"{where}: a command this checker cannot read")
+            return
+        if os.path.basename(words[0]) == "git":
+            line = "git " + shlex.join(words[1:])
+            if TRACED_TREE_CHANGE.search(line):
+                self.texts.append((origin, line))
+            return
+        self.command(list(words), origin, depth, ({}, set(), {}))
 
     def shell_call(self, args, stdin, origin, depth, scope, where) -> None:
         assignments, _, heredocs = scope
@@ -1662,27 +1691,16 @@ class ProgramTrace:
             if isinstance(first, ast.Constant) and isinstance(first.value, str):
                 if shell:
                     self.shell(first.value, origin, depth)
+                else:
+                    self.argv([first.value], origin, depth, where)
                 return
             if not isinstance(first, (ast.List, ast.Tuple)) or not first.elts:
                 self.unresolve(f"{where}: an argument vector this checker cannot read")
                 return
-            command = first.elts[0]
-            if not (isinstance(command, ast.Constant) and isinstance(command.value, str)):
-                self.unresolve(f"{where}: a command this checker cannot read")
-                return
-            program = os.path.basename(command.value)
-            if program in SHELL_NAMES | PYTHON_NAMES | NODE_NAMES | OTHER_INTERPRETERS:
-                rest = first.elts[1:]
-                target = rest[0] if rest else None
-                literal = isinstance(target, ast.Constant) and isinstance(target.value, str)
-                if literal and not target.value.startswith("-"):
-                    kind, value = self.resolve(target.value, origin, {})
-                    if kind == "tree":
-                        self.reach(value, depth + 1, f"run by {origin}")
-                    elif kind == "unresolved":
-                        self.unresolve(f"{where}: runs {value!r}, which no rule resolves")
-                else:
-                    self.unresolve(f"{where}: an interpreter whose program this checker cannot read")
+            self.argv([
+                element.value if isinstance(element, ast.Constant) and isinstance(element.value, str) else COMPUTED_WORD
+                for element in first.elts
+            ], origin, depth, where)
             return
         if name in ("os.system", "os.popen"):
             first = node.args[0] if node.args else None
@@ -1782,19 +1800,10 @@ class ProgramTrace:
             if program == "git" and verb in ("show", "archive", "cat-file"):
                 self.texts.append((origin, "git " + " ".join(re.sub(r"^[\"']|[\"']$", "", item) for item in vector)))
                 return
-            if program in SHELL_NAMES | PYTHON_NAMES | NODE_NAMES | OTHER_INTERPRETERS:
-                target = vector[0] if vector else ""
-                target_literal = re.fullmatch(r"[\"']([^\"'-][^\"']*)[\"']", target)
-                if target in constants:
-                    return self.reach(constants[target], depth + 1, f"run by {origin}")
-                if target_literal:
-                    kind, value = self.resolve(target_literal.group(1), origin, {})
-                    if kind == "tree":
-                        return self.reach(value, depth + 1, f"run by {origin}")
-                    if kind == "external":
-                        return
-                self.unresolve(f"{where}: an interpreter whose program this checker cannot read")
-            return
+            words = [literal.group(1)] + [javascript_word(item, constants) for item in vector]
+            if re.search(r"\bshell\s*:\s*true\b", ",".join(arguments[1:])):
+                return self.shell(" ".join(words), origin, depth)
+            return self.argv(words, origin, depth, where)
         if first in constants:
             return self.reach(constants[first], depth + 1, f"run by {origin}")
         bin_match = re.search(r"node_modules/\.bin/([\w.-]+)[\"']\s*\)\s*$", first)
@@ -1802,6 +1811,15 @@ class ProgramTrace:
             # Running a package bin runs what `npm pack` selects; bind it all.
             return self.pack(depth)
         self.unresolve(f"{where}: a program this checker cannot read")
+
+
+def javascript_word(item: str, constants: dict[str, str]) -> str:
+    """A JavaScript argv element as a literal word, a constant path, or the
+    computed placeholder."""
+    literal = re.fullmatch(r"[\"']([^\"']*)[\"']", item.strip())
+    if literal:
+        return literal.group(1)
+    return constants.get(item.strip(), COMPUTED_WORD)
 
 
 def javascript_arguments(source: str, start: int) -> list[str]:

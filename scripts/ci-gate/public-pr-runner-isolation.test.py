@@ -3608,6 +3608,40 @@ expect_bound('echo "see zz-bare.sh"\n', {"scripts/zz-bare.sh": "echo bare\n"}, "
 expect_bound('echo "see scripts/zz-tool"\n', {"scripts/zz-tool": Link("real.sh"), "scripts/real.sh": "echo real\n"},
              "scripts/real.sh", "an extensionless link to a program, named literally")
 
+# Round-9 blocker (PM decision): a target reached through an invocation form
+# the trace recognizes is followed as invoked, so what it composes refuses; a
+# bare mention no invocation wraps is the only literal followed as named.
+COMPUTED_TARGET = {"scripts/zz-target.sh": 'bash "$TOOL"\n'}
+for label, hook, files in (
+    ("a Python argv list", "python3 scripts/zz-spawn.py\n",
+     {"scripts/zz-spawn.py": 'import subprocess\nsubprocess.run(["scripts/zz-target.sh"])\n'}),
+    ("a Python argv string", "python3 scripts/zz-spawn.py\n",
+     {"scripts/zz-spawn.py": 'import subprocess\nsubprocess.run("scripts/zz-target.sh")\n'}),
+    ("a Python argv list with arguments", "python3 scripts/zz-spawn.py\n",
+     {"scripts/zz-spawn.py": 'import subprocess\nsubprocess.check_call(["./scripts/zz-target.sh", "--x"])\n'}),
+    ("a JavaScript spawn", "node scripts/zz-spawn.js\n",
+     {"scripts/zz-spawn.js": 'const { spawnSync } = require("node:child_process");\nspawnSync("./scripts/zz-target.sh");\n'}),
+    ("a JavaScript execFile with arguments", "node scripts/zz-spawn.js\n",
+     {"scripts/zz-spawn.js": 'const { execFileSync } = require("node:child_process");\n'
+                             'execFileSync("scripts/zz-target.sh", ["--x"]);\n'}),
+    ("find -exec", "find . -name '*.md' -exec scripts/zz-target.sh {} \\;\n", {}),
+    ("find -execdir", "find . -name '*.md' -execdir ./scripts/zz-target.sh {} +\n", {}),
+):
+    expect_verify_refused(verify_with(hook, {**COMPUTED_TARGET, **files}),
+                          f"verify follows a target run through {label} as invoked",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "zz-target.sh"))
+# The reviewer's scenario: the target changes the checked-out tree.
+expect_verify_refused(
+    verify_with("python3 scripts/zz-spawn.py\n",
+                {"scripts/zz-spawn.py": 'import subprocess\nsubprocess.run(["scripts/zz-target.sh"])\n',
+                 "scripts/zz-target.sh": "git checkout HEAD~1 -- scripts/changelog.py\n"}),
+    "verify refuses a tree change in a target a Python spawn runs",
+    ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", "changes the checked-out tree"))
+# A bare mention stays named: bound, not traced.
+expect(verify_with('echo "see scripts/zz-target.sh"\n', COMPUTED_TARGET), 0,
+       ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
+       "a target only mentioned is bound but not traced as invoked", *PENDING_ARGS)
+
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
 # sequences must not decode to the same replacement text and digest), and a
