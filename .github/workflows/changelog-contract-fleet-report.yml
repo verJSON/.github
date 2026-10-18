@@ -38,6 +38,11 @@ jobs:
             exit 1
           fi
 
+      # actions/checkout follows a symlink at its path and empties the target;
+      # refuse one before it reaches runner state (ADR 0236).
+      - name: Refuse a symlink at the contract-source checkout path
+        run: |
+          if [ -L contract-source ]; then echo "::error::contract-source is a symlink; actions/checkout would empty its target"; exit 1; fi
       - name: Check out the pinned inventory implementation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

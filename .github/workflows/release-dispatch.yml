@@ -63,6 +63,11 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      # actions/checkout follows a symlink at its path and empties the target;
+      # refuse one before it reaches runner state (ADR 0236).
+      - name: Refuse a symlink at the .changelog-contract checkout path
+        run: |
+          if [ -L .changelog-contract ]; then echo "::error::.changelog-contract is a symlink; actions/checkout would empty its target"; exit 1; fi
       - name: Check out the canonical contract
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

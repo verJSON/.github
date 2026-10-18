@@ -190,6 +190,11 @@ jobs:
           EXECUTING_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: echo "sha=$EXECUTING_WORKFLOW_SHA" >>"$GITHUB_OUTPUT"
 
+      # actions/checkout follows a symlink at its path and empties the target;
+      # refuse one before it reaches runner state (ADR 0236).
+      - name: Refuse a symlink at the .gate-trust checkout path
+        run: |
+          if [ -L .gate-trust ]; then echo "::error::.gate-trust is a symlink; actions/checkout would empty its target"; exit 1; fi
       - name: Check out immutable arm verifier
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
