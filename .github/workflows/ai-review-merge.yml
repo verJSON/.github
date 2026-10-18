@@ -964,6 +964,19 @@ jobs:
           token: ${{ github.token }}
           fetch-depth: 2
 
+      # The head is pull-request content. The Claude CLI acts on agent configuration
+      # in its working directory (hooks, environment, credential helpers, MCP servers)
+      # before any tool gating, and the pinned action restores it from the base branch
+      # only for pull-request events, not this dispatch. Remove the paths the action
+      # treats as sensitive before any later step runs (ADR 0237).
+      - name: Remove pull-request agent configuration
+        id: pr-agent-config
+        if: needs.preflight.outputs.lane == 'ai'
+        run: |
+          set -euo pipefail
+          cd -- "$GITHUB_WORKSPACE"
+          rm -rf -- .claude .claude.json .mcp.json CLAUDE.md CLAUDE.local.md .gitmodules .ripgreprc .husky
+
       # Cost/latency optimization (#120): when main is active a green PR keeps
       # getting a base-merge from preflight, which re-fires `synchronize` and
       # re-pays a full model review even though the PR's own net diff is
