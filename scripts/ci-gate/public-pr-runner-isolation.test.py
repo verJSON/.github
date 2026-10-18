@@ -3316,6 +3316,12 @@ for label, hook, release in (
      HOOK.replace("set -euo pipefail\n", "set -euo pipefail\nsed() { echo HEAD; }\n", 1), None),
     ("an edit to the guard between the derivation and the show",
      HOOK.replace("carries no package-release pin header", "carries no pin header", 1), None),
+    # Round-9 nit: a line between the guard and the show can redefine what the
+    # show runs, so the order check has a killer beside the guard edit.
+    ("a git function between the guard and the show",
+     HOOK.replace(SHOW_LINE, 'git() { echo "$@"; }\n' + SHOW_LINE, 1), None),
+    ("a trap between the guard and the show",
+     HOOK.replace(SHOW_LINE, "trap 'pin=HEAD' DEBUG\n" + SHOW_LINE, 1), None),
 ):
     expect_verify_refused(
         {**VERIFY, "pending.tsv": VERIFY_ROW, "scripts/release-verify.sh": hook,
