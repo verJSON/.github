@@ -438,6 +438,140 @@ class OrgRulesetConformanceTest(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stderr)
 
+    def declared_check_policy(self, **declared):
+        policy = json.loads(self.committed_policy_without_bypass_contracts())
+        entry = policy["bypassless_required_workflows"][1]
+        self.assertEqual("cli-projects-package-surface-required-workflow", entry["name"])
+        entry["required_status_check"].update(declared)
+        return json.dumps(policy)
+
+    def test_any_departure_from_the_declared_admission_rule_still_fails(self):
+        def status_parameters(detail):
+            return detail["rules"][1]["parameters"]
+
+        mutations = {
+            "not strict": lambda d: status_parameters(d).update(
+                strict_required_status_checks_policy=False
+            ),
+            "enforced on create": lambda d: status_parameters(d).update(
+                do_not_enforce_on_create=True
+            ),
+            "falsy create flag": lambda d: status_parameters(d).update(
+                do_not_enforce_on_create=0
+            ),
+            "other context": lambda d: status_parameters(d)["required_status_checks"][0].update(
+                context="ci"
+            ),
+            "unbound check": lambda d: status_parameters(d)["required_status_checks"][0].pop(
+                "integration_id"
+            ),
+            "second check": lambda d: status_parameters(d)["required_status_checks"].append(
+                {"context": "ci", "integration_id": 15368}
+            ),
+            "no checks": lambda d: status_parameters(d).update(required_status_checks=[]),
+            "extra check key": lambda d: status_parameters(d)["required_status_checks"][0].update(
+                extra=True
+            ),
+            "extra parameter": lambda d: status_parameters(d).update(extra=True),
+            "extra rule key": lambda d: d["rules"][1].update(extra=True),
+            "status rule removed": lambda d: d["rules"].pop(1),
+            "status rule duplicated": lambda d: d["rules"].append(copy.deepcopy(d["rules"][1])),
+            "workflows rule removed": lambda d: d["rules"].pop(0),
+            "workflows rule duplicated": lambda d: d["rules"].append(copy.deepcopy(d["rules"][0])),
+            "unrelated rule added": lambda d: d["rules"].append(
+                {"type": "deletion"}
+            ),
+            "bypass actor added": lambda d: d.update(bypass_actors=[
+                {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "pull_request"},
+            ]),
+        }
+        policy = self.committed_policy_without_bypass_contracts()
+        for name, mutate in mutations.items():
+            with self.subTest(mutation=name):
+                detail = self.cli_projects_required_workflow()
+                mutate(detail)
+
+                result, _ = self.run_audit(
+                    [[{"id": 21830367}]], {21830367: detail}, raw_policy=policy
+                )
+
+                self.assertEqual(1, result.returncode, result.stderr)
+                self.assertIn("required release authorization bypass is absent", result.stderr)
+
+        with self.subTest(mutation="rules reordered"):
+            detail = self.cli_projects_required_workflow()
+            detail["rules"].reverse()
+
+            result, _ = self.run_audit(
+                [[{"id": 21830367}]], {21830367: detail}, raw_policy=policy
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_an_exception_declaring_no_status_check_rejects_one(self):
+        detail = self.cli_projects_required_workflow()
+        policy = json.loads(self.committed_policy_without_bypass_contracts())
+        policy["bypassless_required_workflows"][1]["required_status_check"] = None
+
+        result, _ = self.run_audit(
+            [[{"id": 21830367}]], {21830367: detail}, raw_policy=json.dumps(policy)
+        )
+
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertIn("required release authorization bypass is absent", result.stderr)
+
+    def test_declared_admission_check_matches_the_cli_projects_rollout_contract(self):
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+        rollout = json.loads(
+            (ROOT / "config/cli-projects-package-surface-ruleset.json").read_text(encoding="utf-8")
+        )["rollout"]
+        [entry] = [
+            item
+            for item in policy["bypassless_required_workflows"]
+            if item["name"] == "cli-projects-package-surface-required-workflow"
+        ]
+
+        self.assertEqual(rollout["freshness_status_check"], entry["required_status_check"])
+
+    def test_live_strictness_that_only_compares_equal_to_true_is_rejected(self):
+        detail = self.cli_projects_required_workflow()
+        detail["rules"][1]["parameters"]["strict_required_status_checks_policy"] = 1
+
+        result, _ = self.run_audit(
+            [[{"id": 21830367}]],
+            {21830367: detail},
+            raw_policy=self.committed_policy_without_bypass_contracts(),
+        )
+
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertIn("required release authorization bypass is absent", result.stderr)
+
+    def test_declared_status_check_strictness_must_be_a_boolean(self):
+        result, _ = self.run_audit(
+            [[{"id": 21830367}]],
+            {21830367: self.cli_projects_required_workflow()},
+            raw_policy=self.declared_check_policy(strict=1),
+        )
+
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn("required_status_check.strict must be a boolean", result.stderr)
+
+    def test_declared_status_check_must_bind_the_declared_producer_app(self):
+        detail = self.cli_projects_required_workflow()
+        detail["rules"][1]["parameters"]["required_status_checks"][0]["integration_id"] = 2740
+
+        result, _ = self.run_audit(
+            [[{"id": 21830367}]],
+            {21830367: detail},
+            raw_policy=self.declared_check_policy(integration_id=2740),
+        )
+
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn(
+            "required_status_check.integration_id must be the declared producer App 15368",
+            result.stderr,
+        )
+
     def test_wrong_actor_type_id_or_mode_does_not_satisfy_policy(self):
         wrong_actors = [
             {"actor_type": "Team", "actor_id": 4583107, "bypass_mode": "always"},

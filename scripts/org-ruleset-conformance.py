@@ -100,16 +100,23 @@ def select_policy(arguments: list[str]):
     )
 
 
-def read_declared_status_check(value, location: str):
+def read_declared_status_check(value, producer_app_id: int, location: str):
     if value is None:
         return None
     check = require_mapping(value, location)
     require_exact_keys(check, {"context", "integration_id", "strict"}, location)
+    if not isinstance(check["strict"], bool):
+        raise AuditDataError(f"{location}.strict must be a boolean")
+    integration_id = require_positive_integer(
+        check["integration_id"], f"{location}.integration_id"
+    )
+    if integration_id != producer_app_id:
+        raise AuditDataError(
+            f"{location}.integration_id must be the declared producer App {producer_app_id}"
+        )
     return {
         "context": require_string(check["context"], f"{location}.context"),
-        "integration_id": require_positive_integer(
-            check["integration_id"], f"{location}.integration_id"
-        ),
+        "integration_id": integration_id,
         "strict": check["strict"],
     }
 
@@ -200,6 +207,7 @@ def read_policy(policy: Path):
             ),
             "required_status_check": read_declared_status_check(
                 item["required_status_check"],
+                producer_app_id,
                 f"{location}.required_status_check",
             ),
         }
@@ -412,6 +420,35 @@ def has_expected_actor(ruleset: dict, expected: dict):
     )
 
 
+def is_declared_status_check_rule(rule: dict, declared: dict):
+    # Identity, not equality: `1 == True` and `0 == False`, so a dict comparison
+    # would accept a non-boolean strictness the API never returns.
+    parameters = rule.get("parameters")
+    if set(rule) != {"type", "parameters"} or not isinstance(parameters, dict):
+        return False
+    if set(parameters) != {
+        "strict_required_status_checks_policy",
+        "do_not_enforce_on_create",
+        "required_status_checks",
+    }:
+        return False
+    if (
+        parameters["strict_required_status_checks_policy"] is not declared["strict"]
+        or parameters["do_not_enforce_on_create"] is not False
+    ):
+        return False
+    checks = parameters["required_status_checks"]
+    if not isinstance(checks, list) or len(checks) != 1:
+        return False
+    check = checks[0]
+    return (
+        isinstance(check, dict)
+        and set(check) == {"context", "integration_id"}
+        and check["context"] == declared["context"]
+        and check["integration_id"] == declared["integration_id"]
+    )
+
+
 def is_exact_bypassless_required_workflow(ruleset: dict, exceptions: list[dict]):
     matching = [item for item in exceptions if item["name"] == ruleset["name"]]
     if len(matching) != 1 or ruleset["bypass_actors"] != []:
@@ -436,19 +473,9 @@ def is_exact_bypassless_required_workflow(ruleset: dict, exceptions: list[dict])
         len(rules) != 1 for rules in rules_by_type.values()
     ):
         return False
-    if declared_check is not None and rules_by_type["required_status_checks"][0] != {
-        "type": "required_status_checks",
-        "parameters": {
-            "strict_required_status_checks_policy": declared_check["strict"],
-            "do_not_enforce_on_create": False,
-            "required_status_checks": [
-                {
-                    "context": declared_check["context"],
-                    "integration_id": declared_check["integration_id"],
-                }
-            ],
-        },
-    }:
+    if declared_check is not None and not is_declared_status_check_rule(
+        rules_by_type["required_status_checks"][0], declared_check
+    ):
         return False
     parameters = rules_by_type["workflows"][0].get("parameters")
     if not isinstance(parameters, dict) or set(parameters) != {
