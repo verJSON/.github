@@ -3858,11 +3858,17 @@ for label, program in (
      'import os as o\ndef f():\n    import json as o\no.system("echo ok")\n'),
     ("an aliased loader shadowed by a function-local import",
      'from importlib import import_module as load\ndef f():\n    from json import loads as load\nload("json")\n'),
+    ("an aliased loader of a tree module shadowed by a function-local import",
+     'from importlib import import_module as load\ndef f():\n    from json import loads as load\nload("scripts.zz_mod")\n'),
+    ("an untraced module's loader-named function shadowed by another import",
+     'from mylib import run_path as go\ndef f():\n    from json import loads as go\ngo("x")\n'),
 ):
-    expect_verify_refused(verify_with("python3 scripts/zz-spawn.py\n", {"scripts/zz-spawn.py": program}),
+    expect_verify_refused(verify_with("python3 scripts/zz-spawn.py\n",
+                                      {"scripts/zz-spawn.py": program, "scripts/zz_mod.py": "VALUE = 1\n"}),
                           f"verify refuses {label}",
                           ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED))
 for label, program in (
+    ("a name bound to two untraced imports", 'import json as j\ndef f():\n    import csv as j\nj.loads("{}")\n'),
     ("a json function imported as run", 'from json import loads as run\nrun("{}")\n'),
     ("json imported as subprocess", 'import json as subprocess\nsubprocess.loads("{}")\n'),
     ("os.path imported as p", 'import os.path as p\nprint(p.join("a", "b"))\n'),
@@ -3884,6 +3890,10 @@ for prefix in ("sudo -Eu root", "env -iu X", "timeout -sKILL 5", "nice -n 5", "s
                           ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "zz-target.sh"))
     expect_verify_refused(verify_with(prefix + " patch -p1 < changes.diff\n", {}), f"verify refuses {prefix} patch",
                           ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", "changes the checked-out tree"))
+for line in ("timeout -sKILL 5 bash -c 'bash \"$TOOL\"'", "env -uX bash -c 'bash \"$TOOL\"'",
+             "stdbuf -oL bash -c 'bash \"$TOOL\"'"):
+    expect_verify_refused(verify_with(line + "\n", {}), f"verify reads an attached option argument in `{line}`",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED))
 for line in ("command -v python3 >/dev/null || exit 1", "command -v patch >/dev/null || exit 1",
              "command -V patch", "command -pv patch", "time -p echo hi", "timeout 5 echo hi", "env -u X echo hi",
              "sudo -n true"):

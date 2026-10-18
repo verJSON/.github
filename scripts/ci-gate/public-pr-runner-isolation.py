@@ -972,6 +972,16 @@ PREFIX_OPTIONS = {
 }
 
 
+PYTHON_LOADERS = ("import_module", "run_module", "run_path", "spec_from_file_location")
+PYTHON_DYNAMIC = ("exec", "eval", "compile", "__import__")
+
+
+def is_traced_python_call(name: str) -> bool:
+    """Whether python_call_site classifies a call to this dotted name: a
+    subprocess or os call, a loader, or dynamic execution (round 12)."""
+    return name.startswith(("subprocess.", "os.")) or name.split(".")[-1] in PYTHON_LOADERS or name in PYTHON_DYNAMIC
+
+
 def skip_prefix_options(prefix: str, words: list[str]) -> str | None:
     """Pop a command prefix's options, and each option's argument, from the
     front of `words`. A short-option cluster is read letter by letter: a
@@ -1006,8 +1016,6 @@ SEPARATOR_TOKENS = frozenset({";", "&&", "||", "|", "&", "|&", "(", ")", ";;", "
 REDIRECTS = frozenset({">", ">>", "<", "<<", ">&", "<&", "&>", "&>>", ">|", "<>"})
 HEREDOC_MARK = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 ASSIGNMENT = re.compile(r"^([A-Za-z_]\w*)(?:\[[^\]]*\])?\+?=(.*)$", re.S)
-# Modules whose calls python_call_site classifies (round 12).
-TRACED_MODULES = frozenset({"subprocess", "os", "importlib", "runpy"})
 PYTHON_SPAWNS = frozenset({"run", "call", "check_call", "check_output", "Popen", "getoutput", "getstatusoutput"})
 # subprocess spawns that always run their string through a shell (round 10).
 PYTHON_SHELL_SPAWNS = frozenset({"getoutput", "getstatusoutput"})
@@ -1762,13 +1770,14 @@ class ProgramTrace:
         written = ast.unparse(node.func)
         where = f"{origin or 'inline python'}: {written}(…)"
         head, dot, rest = written.partition(".")
-        originals = imported.get(head, {head})
-        if len(originals) > 1 and any(original.split(".")[0] in TRACED_MODULES for original in originals):
-            # The name means different imports on different paths, one of them
-            # a module whose calls are traced; which one runs is not static.
-            self.unresolve(f"{where}: {head} is bound to more than one import ({', '.join(sorted(originals))})")
+        candidates = sorted(original + dot + rest for original in imported.get(head, {head}))
+        if len(candidates) > 1 and any(is_traced_python_call(candidate) for candidate in candidates):
+            # The name means different imports on different paths, and one
+            # reading is a call this trace classifies; which one runs is not
+            # static, so it fails closed (round 12).
+            self.unresolve(f"{where}: {head} is bound to more than one import ({', '.join(candidates)})")
             return
-        name = next(iter(originals)) + dot + rest
+        name = candidates[0]
         leaf = name.split(".")[-1]
         if name.count(".") == 1 and name.startswith("subprocess.") and leaf in PYTHON_SPAWNS:
             if not node.args:
@@ -1804,11 +1813,10 @@ class ProgramTrace:
             else:
                 self.unresolve(f"{where}: a shell command this checker cannot read")
             return
-        dynamic = ("exec", "eval", "compile", "__import__")
-        if name.startswith(("os.exec", "os.spawn", "os.posix_spawn")) or name in dynamic:
+        if name.startswith(("os.exec", "os.spawn", "os.posix_spawn")) or name in PYTHON_DYNAMIC:
             self.unresolve(f"{where}: dynamic execution this checker cannot read")
             return
-        if leaf in ("import_module", "run_module", "run_path", "spec_from_file_location"):
+        if leaf in PYTHON_LOADERS:
             target = node.args[1] if leaf == "spec_from_file_location" and len(node.args) > 1 else (
                 node.args[0] if node.args else None)
             value = None
