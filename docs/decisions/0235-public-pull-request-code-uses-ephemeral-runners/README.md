@@ -942,10 +942,15 @@ forms and generalize the binding.
   spawners imported by name. `subprocess.getoutput` and `getstatusoutput`
   are read as shell, and a spawn whose `shell=` is not a literal refuses,
   because its shell-ness is decided at runtime (round 10). Every Python call
-  is classified by the name it was imported as (round 11), so
-  `from subprocess import getoutput as g`, `import os as o`, and a loader
-  imported by name (`import_module as load`, `run_path as rp`) are read
-  exactly like the original.
+  is classified by the import its name is bound to (rounds 11 and 12). A
+  name the file binds to one import, such as
+  `from subprocess import getoutput as g`, `import os as o`, or a loader
+  imported by name (`import_module as load`, `run_path as rp`), is read
+  exactly like that import. Every binding anywhere in the file counts. A
+  name bound to more than one import, at least one of them a `subprocess`,
+  `os`, `importlib`, or `runpy` name, refuses, because which binding runs
+  is not static; this covers a second import in a function, a branch, or an
+  unused `def`.
 - **Materializations.** `git` is matched when spelled by path, quoted, or
   backslash-escaped (`\git`). A tree-changing git verb (`checkout`,
   `restore`, `reset`, `switch`, and the rest of the runtime tree-change set),
@@ -956,11 +961,15 @@ forms and generalize the binding.
   `["gh", "pr", "checkout", …]`, and `git` behind `env` or `sudo` all
   refuse. `patch` refuses behind any command prefix the trace models
   (`exec`, `nohup`, `sudo`, `time`, `command`, `builtin`, `!`, `env`,
-  `timeout`), including the prefix's options and their arguments (such as
-  `sudo -u root`, `time -p`, `env -u X`, and `timeout -s KILL 5`), and when
-  named by a path (round 11). The shell trace skips the same options to find
-  the command a prefix runs, and `env -S` refuses, because its command is a
-  split string.
+  `timeout`, `nice`, `stdbuf`, `doas`), including the prefix's options and
+  their arguments, and when named by a path (rounds 11 and 12). Examples are
+  `sudo -u root`, `sudo -Eu root`, `time -p`, `env -iu X`, and
+  `timeout -sKILL 5`. A short-option cluster is read letter by letter: a
+  letter that takes an argument consumes the rest of the cluster, or the
+  next word when it ends the cluster. The shell trace uses the same option
+  table to find the command a prefix runs. `env -S`, in any spelling
+  (attached, clustered, or `--split-string=`), refuses, because its command
+  is a split string. `command -v` or `-V` runs nothing and does not refuse.
 - **Frozen data read.** One vector is tolerated as a data read (round 10):
   `scripts/changelog.py`'s `git_file()` runs
   `["git", "show", f"{revision}:{path}"]` and parses the bytes it returns.
@@ -1144,4 +1153,23 @@ tree-change scan, and `sudo -u root bash x.sh` lost its command.
 - One table of prefix options drives both the shell trace and the `patch`
   pattern.
 - The three narrower forms listed in residual 11 stay residuals.
+
+## Amendment (2026-10-18, #1827) — round-12 review: shadowed imports and option clusters
+
+**Finding.** Round 11 kept one original per local name, the last one the
+parser met. A second import of the same name, in a function, a branch, or
+an unused `def`, hid a spawn alias, which regressed from `78357580`. An
+attached or clustered `env -S` passed. `sudo -Eu root` and `env -iu X` did
+not find their command. `command -v python3` and `command -v patch` were
+falsely refused.
+
+**Decision (PM, 2026-10-18; Part of #1831).**
+
+- A name bound to more than one import, any of them traced, refuses.
+- Prefix option clusters are parsed letter by letter, from one table shared
+  by the trace and the `patch` pattern.
+- `env -S` refuses in every spelling.
+- `command -v` and `-V` run nothing.
+- `nice`, `stdbuf`, and `doas` are prefixes.
+- Residual 11's three forms are unchanged.
 
