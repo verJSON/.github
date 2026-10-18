@@ -953,8 +953,11 @@ OTHER_INTERPRETERS = frozenset({"perl", "ruby", "pwsh"})
 # Words that run the next word as the command (their own options skipped).
 COMMAND_PREFIXES = frozenset({"exec", "nohup", "sudo", "time", "command", "builtin", "!"})
 # Each command prefix the trace models, with its options that take a separate
-# argument (round 11); `timeout` also takes a duration before its command.
+# argument (rounds 11-12); `timeout` also takes a duration before its command.
 PREFIX_OPTIONS = {
+    "nice": frozenset({"-n", "--adjustment"}),
+    "stdbuf": frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}),
+    "doas": frozenset({"-u", "-C"}),
     "exec": frozenset({"-a"}),
     "nohup": frozenset(),
     "sudo": frozenset({"-u", "-g", "-C", "-h", "-p", "-r", "-t", "-U", "-D", "-R", "-T", "--user", "--group",
@@ -967,11 +970,44 @@ PREFIX_OPTIONS = {
     "env": frozenset({"-u", "-C", "--unset", "--chdir"}),
     "timeout": frozenset({"-s", "-k", "--signal", "--kill-after"}),
 }
+
+
+def skip_prefix_options(prefix: str, words: list[str]) -> str | None:
+    """Pop a command prefix's options, and each option's argument, from the
+    front of `words`. A short-option cluster is read letter by letter: a
+    letter that takes an argument consumes the rest of the cluster, or the
+    next word when it ends the cluster (`sudo -Eu root`). Returns
+    "split-string" for env -S in any spelling, "runs-nothing" for
+    `command -v`/`-V`, and otherwise None (round 12)."""
+    takes_argument = PREFIX_OPTIONS[prefix]
+    while words and words[0].startswith("-") and words[0] != "-":
+        option = words.pop(0)
+        if option == "--":
+            return None
+        if option.startswith("--"):
+            name, equals, _ = option.partition("=")
+            if prefix == "env" and name == "--split-string":
+                return "split-string"
+            if name in takes_argument and not equals and words:
+                words.pop(0)
+            continue
+        for index, letter in enumerate(option[1:], start=1):
+            if prefix == "env" and letter == "S":
+                return "split-string"
+            if prefix == "command" and letter in "vV":
+                return "runs-nothing"
+            if "-" + letter in takes_argument:
+                if index == len(option) - 1 and words:
+                    words.pop(0)
+                break
+    return None
 COMPOUND_WORDS = frozenset({"if", "then", "do", "else", "elif", "while", "until", "{", "}", "fi", "done", "esac"})
 SEPARATOR_TOKENS = frozenset({";", "&&", "||", "|", "&", "|&", "(", ")", ";;", "\n"})
 REDIRECTS = frozenset({">", ">>", "<", "<<", ">&", "<&", "&>", "&>>", ">|", "<>"})
 HEREDOC_MARK = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 ASSIGNMENT = re.compile(r"^([A-Za-z_]\w*)(?:\[[^\]]*\])?\+?=(.*)$", re.S)
+# Modules whose calls python_call_site classifies (round 12).
+TRACED_MODULES = frozenset({"subprocess", "os", "importlib", "runpy"})
 PYTHON_SPAWNS = frozenset({"run", "call", "check_call", "check_output", "Popen", "getoutput", "getstatusoutput"})
 # subprocess spawns that always run their string through a shell (round 10).
 PYTHON_SHELL_SPAWNS = frozenset({"getoutput", "getstatusoutput"})
@@ -1408,16 +1444,13 @@ class ProgramTrace:
             if prefix not in PREFIX_OPTIONS:
                 continue
             # A prefix's own options, and the arguments its options take, are
-            # not the command it runs (round 11).
-            while words and words[0].startswith("-") and words[0] != "-":
-                option = words.pop(0)
-                if option == "--":
-                    break
-                if prefix == "env" and option.split("=")[0] in ("-S", "--split-string"):
-                    self.unresolve(f"{origin or 'a step'}: env -S runs a split string this checker cannot read")
-                    return
-                if option in PREFIX_OPTIONS[prefix] and words:
-                    words.pop(0)
+            # not the command it runs (rounds 11-12).
+            effect = skip_prefix_options(prefix, words)
+            if effect == "split-string":
+                self.unresolve(f"{origin or 'a step'}: env -S runs a split string this checker cannot read")
+                return
+            if effect == "runs-nothing":
+                return  # `command -v`/`-V` only reports what a name is
             if prefix == "timeout" and words:
                 words.pop(0)  # the duration
         if not words:
@@ -1667,18 +1700,20 @@ class ProgramTrace:
         # Every call is classified by the name it was imported as (round 11):
         # local name -> dotted original, so `getoutput as g`, `import os as o`,
         # and a loader imported by name are read exactly like the original.
-        imported: dict[str, str] = {}
+        # Every binding anywhere in the file counts (round 12): a name bound
+        # in a function, a branch, or an unused def must not hide another.
+        imported: dict[str, set[str]] = {}
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.asname:
-                        imported[alias.asname] = alias.name
+                    local = alias.asname or alias.name.split(".")[0]
+                    imported.setdefault(local, set()).add(alias.name if alias.asname else local)
             elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                 for alias in node.names:
                     if alias.name != "*":
-                        imported[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+                        imported.setdefault(alias.asname or alias.name, set()).add(f"{node.module}.{alias.name}")
         module_names = {"subprocess", "os"} | {
-            local for local, original in imported.items() if original in ("subprocess", "os")}
+            local for local, originals in imported.items() if originals & {"subprocess", "os"}}
         aliases = (imported, None if inline else source.split("\n"))
         # Spawn forms the call-site rules cannot see refuse (round 9): a star
         # import, os's spawners imported by name, and getattr on either module.
@@ -1727,7 +1762,13 @@ class ProgramTrace:
         written = ast.unparse(node.func)
         where = f"{origin or 'inline python'}: {written}(…)"
         head, dot, rest = written.partition(".")
-        name = imported.get(head, head) + dot + rest
+        originals = imported.get(head, {head})
+        if len(originals) > 1 and any(original.split(".")[0] in TRACED_MODULES for original in originals):
+            # The name means different imports on different paths, one of them
+            # a module whose calls are traced; which one runs is not static.
+            self.unresolve(f"{where}: {head} is bound to more than one import ({', '.join(sorted(originals))})")
+            return
+        name = next(iter(originals)) + dot + rest
         leaf = name.split(".")[-1]
         if name.count(".") == 1 and name.startswith("subprocess.") and leaf in PYTHON_SPAWNS:
             if not node.args:
@@ -2040,8 +2081,10 @@ TRACED_TREE_CHANGE = re.compile(
     r"|\bgh[ \t]+pr[ \t]+checkout\b"
     # patch behind the command prefixes the trace models, each with options that
     # may take an argument and env's assignments, or by path (rounds 10-11).
-    r"|(?:^|[;&|(]|&&|\|\|)[ \t]*(?:(?:(?:" + "|".join(re.escape(word) for word in sorted(PREFIX_OPTIONS))
+    r"|(?:^|[;&|(]|&&|\|\|)[ \t]*(?:(?:(?:"
+    + "|".join(re.escape(word) for word in sorted(PREFIX_OPTIONS) if word not in ("command", "timeout"))
     + r")(?:[ \t]+(?:-\S+(?:[ \t]+(?!-)\S+)?|[A-Za-z_]\w*=\S*))*"
+    r"|command(?:[ \t]+-[^\svV]*)*"  # `command -v`/`-V` runs nothing
     r"|timeout(?:[ \t]+-\S+(?:[ \t]+(?!-)\S+)?)*[ \t]+\S+)[ \t]+)*"
     r"\\?(?:[\w./-]*/)?patch(?=[ \t]|$)",
     re.M,

@@ -3844,6 +3844,52 @@ expect_verify_refused(verify_with('env -S "bash scripts/zz-target.sh"\n', {"scri
                       "verify refuses env -S, whose command is a split string",
                       ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "env -S"))
 
+# Round-12 blocker 1: a name the file binds to more than one import, one of
+# them a spawn or loader module, refuses rather than taking whichever import
+# the parser met last.
+for label, program in (
+    ("a spawn alias shadowed by a function-local import",
+     'from subprocess import getoutput as g\ndef f():\n    from json import loads as g\ng("patch -p1 < changes.diff")\n'),
+    ("a spawn alias shadowed in an unused def",
+     'from subprocess import getoutput as g\ndef unused():\n    from json import loads as g\ng("cd tools && sh run")\n'),
+    ("a module alias bound in an if/else",
+     'import sys\nif sys.argv:\n    import subprocess as sp\nelse:\n    import json as sp\nsp.run("echo ok", shell=True)\n'),
+    ("an aliased os shadowed by a function-local import",
+     'import os as o\ndef f():\n    import json as o\no.system("echo ok")\n'),
+    ("an aliased loader shadowed by a function-local import",
+     'from importlib import import_module as load\ndef f():\n    from json import loads as load\nload("json")\n'),
+):
+    expect_verify_refused(verify_with("python3 scripts/zz-spawn.py\n", {"scripts/zz-spawn.py": program}),
+                          f"verify refuses {label}",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED))
+for label, program in (
+    ("a json function imported as run", 'from json import loads as run\nrun("{}")\n'),
+    ("json imported as subprocess", 'import json as subprocess\nsubprocess.loads("{}")\n'),
+    ("os.path imported as p", 'import os.path as p\nprint(p.join("a", "b"))\n'),
+):
+    expect(verify_with("python3 scripts/zz-spawn.py\n", {"scripts/zz-spawn.py": program}), 0,
+           ("PENDING: release.yml [workflow_dispatch]: job 'verify'",), f"{label} is not a spawn", *PENDING_ARGS)
+
+# Round-12 blocker 2 and should-fixes: env -S in any spelling refuses; a
+# short-option cluster whose last letter takes an argument consumes the next
+# word; `command -v`/`-V` runs nothing; nice, stdbuf and doas are prefixes.
+for line in ("env -S'bash scripts/zz-target.sh'", 'env --split-string="bash scripts/zz-target.sh"',
+             'env -iS "bash scripts/zz-target.sh"'):
+    expect_verify_refused(verify_with(line + "\n", {"scripts/zz-target.sh": "echo ok\n"}), f"verify refuses `{line}`",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "env -S"))
+for prefix in ("sudo -Eu root", "env -iu X", "timeout -sKILL 5", "nice -n 5", "stdbuf -oL", "doas -u root",
+               "nice --adjustment 5", "stdbuf -o L"):
+    expect_verify_refused(verify_with(prefix + " bash scripts/zz-target.sh\n", {"scripts/zz-target.sh": 'bash "$TOOL"\n'}),
+                          f"verify follows a target run through {prefix} bash as invoked",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "zz-target.sh"))
+    expect_verify_refused(verify_with(prefix + " patch -p1 < changes.diff\n", {}), f"verify refuses {prefix} patch",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", "changes the checked-out tree"))
+for line in ("command -v python3 >/dev/null || exit 1", "command -v patch >/dev/null || exit 1",
+             "command -V patch", "command -pv patch", "time -p echo hi", "timeout 5 echo hi", "env -u X echo hi",
+             "sudo -n true"):
+    expect(verify_with(line + "\n", {}), 0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
+           f"`{line}` is not refused", *PENDING_ARGS)
+
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
 # sequences must not decode to the same replacement text and digest), and a
