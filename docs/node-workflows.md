@@ -518,7 +518,8 @@ dependency's own `.npmrc`. Consequences for callers:
 
 - every GitHub Packages entry in `package-lock.json` or `npm-shrinkwrap.json`
   needs lockfile version 2 or 3, its exact download `resolved` URL, and one
-  sha512 `integrity`; anything else fails the acquisition step. A version 1
+  sha512 `integrity`; anything else fails the acquisition step or, when the
+  entry is not recognized as private, the tokenless install. A version 1
   lockfile that names no GitHub Packages host still installs;
 - both steps use one explicit cache, `${{ runner.temp }}/verjson-npm-cache`;
 - a git dependency whose own preparation installs private GitHub Packages no
