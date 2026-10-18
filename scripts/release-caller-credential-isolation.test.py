@@ -154,6 +154,11 @@ def materialize_contract_checkout(step, sha, workspace):
     assert options.get("ref") == sha, options
     assert options.get("persist-credentials") is False, options
     destination = workspace / options["path"]
+    # actions/checkout follows an existing link at its path and empties the
+    # target, so reaching one here is the defect, not a fixture problem.
+    assert not destination.is_symlink() and not destination.exists(), (
+        f"checkout of {options['path']} reached a path the release tree already holds"
+    )
     shutil.copytree(
         REPO_ROOT / "scripts", destination / "scripts",
         ignore=shutil.ignore_patterns("__pycache__"),
@@ -363,6 +368,52 @@ def verify_reserved_contract_path(label, steps, *, sha, root):
         assert (outside / "keep").read_text() == "runner state\n", label
 
 
+SELECTION_PATH = ".changelog-contract"
+SELECTION_MESSAGE = f"{SELECTION_PATH} is reserved for the canonical selection contract"
+
+
+def selection_checkout_steps(workflow):
+    """The verify steps from the release-tree checkout to the selection checkout."""
+    steps = workflow["jobs"]["verify"]["steps"]
+    start = next(
+        index for index, step in enumerate(steps)
+        if step.get("name") == "Check out the tree that will be released"
+    )
+    end = next(
+        index for index, step in enumerate(steps)
+        if step.get("name") == "Check out the canonical selection contract"
+    )
+    return steps[start + 1:end + 1]
+
+
+def verify_reserved_selection_path(label, workflow, *, sha, root):
+    """The verify job refuses a release tree carrying the selection contract path."""
+    for kind in ("symlink", "directory"):
+        case = root / f"selection-{kind}"
+        case.mkdir()
+        workspace = case / "workspace"
+        workspace.mkdir()
+        outside = case / "runner-state"
+        outside.mkdir()
+        (outside / "keep").write_text("runner state\n")
+        if kind == "symlink":
+            (workspace / SELECTION_PATH).symlink_to(outside)
+        else:
+            (workspace / SELECTION_PATH / "scripts").mkdir(parents=True)
+        runner_temp = case / "runner-temp"
+        runner_temp.mkdir()
+        registry = type("Registry", (), {"origin": "http://127.0.0.1:9"})()
+        failed = run_steps(
+            selection_checkout_steps(workflow), sha=sha, workspace=workspace,
+            job_env=os.environ | {"GITHUB_WORKSPACE": str(workspace), "RUNNER_TEMP": str(runner_temp)},
+            runner_temp=runner_temp, registry=registry, expect_failure=True,
+        )
+        assert failed is not None and SELECTION_MESSAGE in failed[1], (
+            f"{label}: a committed {kind} at {SELECTION_PATH} was not refused before checkout: {failed}"
+        )
+        assert (outside / "keep").read_text() == "runner state\n", label
+
+
 def private_lock_validation_step(workflow):
     steps = workflow["jobs"]["acquire-private-dependencies"]["steps"]
     return next(step for step in steps if step.get("name") == "Validate the approved private dependency lock")
@@ -460,6 +511,7 @@ def main():
             verify_reserved_contract_path(
                 f"{label} verify", verify_dependency_steps(workflow), sha=sha, root=case_root,
             )
+            verify_reserved_selection_path(f"{label} verify", workflow, sha=sha, root=case_root)
         verify_private_lock_validation(workflows["release-artifact"], Path(temp) / "lock")
     verified = set()
     for major, (version, integrity) in sorted(harness.SUPPORTED_NPM_RELEASES.items()):

@@ -282,7 +282,7 @@ import sys
 
 caller, shard, manifest = sys.argv[1:]
 text = open(caller, encoding="utf-8").read()
-expected_calls = 240
+expected_calls = 241
 calls = len(re.findall(r"^schedule_adopter_script ", text, re.M))
 calls += len(re.findall(r"^[ \t]*expect_rejection ", text, re.M))
 calls += len(re.findall(r"^expect_release_mode_rejection ", text, re.M))

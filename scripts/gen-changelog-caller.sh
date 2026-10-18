@@ -1043,6 +1043,12 @@ ${release_version_guard_step}
           ref: \${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      # actions/checkout follows a link at its path and empties the target, and
+      # this job later holds the package token, so the release tree may not
+      # carry the selection contract's checkout path (ADR 0220, 2026-10-18).
+      - name: Refuse a repository-controlled selection contract path
+        run: |
+          if [ -e .changelog-contract ] || [ -L .changelog-contract ]; then echo "::error::.changelog-contract is reserved for the canonical selection contract"; exit 1; fi
       - name: Check out the canonical selection contract
         uses: ${release_checkout}
         with:
@@ -1713,6 +1719,12 @@ ${release_version_guard_step}
           ref: \${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      # actions/checkout follows a link at its path and empties the target, and
+      # this job later holds the package token, so the release tree may not
+      # carry the selection contract's checkout path (ADR 0220, 2026-10-18).
+      - name: Refuse a repository-controlled selection contract path
+        run: |
+          if [ -e .changelog-contract ] || [ -L .changelog-contract ]; then echo "::error::.changelog-contract is reserved for the canonical selection contract"; exit 1; fi
       - name: Check out the canonical selection contract
         uses: ${release_checkout}
         with:
@@ -2283,6 +2295,12 @@ ${release_version_guard_step}
           ref: \${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      # actions/checkout follows a link at its path and empties the target, and
+      # this job later holds the package token, so the release tree may not
+      # carry the selection contract's checkout path (ADR 0220, 2026-10-18).
+      - name: Refuse a repository-controlled selection contract path
+        run: |
+          if [ -e .changelog-contract ] || [ -L .changelog-contract ]; then echo "::error::.changelog-contract is reserved for the canonical selection contract"; exit 1; fi
       - name: Check out the canonical selection contract
         uses: ${release_checkout}
         with:
@@ -4197,9 +4215,9 @@ APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
     "release-snapshot": "0caf167486937a2def16a5223fcb64b1a4a737447d424c83a891c2aac4e3b3a2",
 }
 APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256 = {
-    "release-node": "65bcae757d24019f41ee6c87c5d1b77d66a0a332e313fe5b4136b4fe00305865",
-    "release-artifact": "d8b9a888514d46ee507a96432a85c77d2b37fc74150fd3faadfb7bae46d8f6da",
-    "release-snapshot": "dc416645f4c3c86d7cab7937a75564155ba0d231f7cd68ca8d30914571443c70",
+    "release-node": "6aedd9fb8cf31648d7172575f99eab93f785f741313880f2a63298b72e8fc9d7",
+    "release-artifact": "cdc96e2dfc87263418d76b5e3332252838c2ec9f71bc2640a2135d59799d011a",
+    "release-snapshot": "d8738716f844b29bb794c5e1a4555859cd6b6906f29036ead4be7dcea700a57b",
 }
 EXPECTED_RELEASE_STATE_ENV = {
     "VERSION": "${{ steps.release-version.outputs.version }}",
@@ -4780,6 +4798,22 @@ if release_mode == "release-snapshot":
     expected_install_condition += " && hashFiles('package.json') != ''"
 # The token reaches only the shared acquisition script, which npm cache adds
 # the exact locked private downloads; the tree installs without it (ADR 0220).
+selection_path_guard_step = named_step(
+    "Refuse a repository-controlled selection contract path", "verify"
+)
+selection_path_guard_fields = step_mapping_entries(selection_path_guard_step)
+if (
+    selection_path_guard_fields is None
+    or set(selection_path_guard_fields) != {"name", "run"}
+    or run_body(selection_path_guard_step) != (
+        "if [ -e .changelog-contract ] || [ -L .changelog-contract ]; "
+        'then echo "::error::.changelog-contract is reserved for the canonical '
+        'selection contract"; exit 1; fi'
+    )
+):
+    problems.append(
+        "does not refuse a repository-controlled selection contract path (#1712)"
+    )
 contract_path_guard_step = named_step(
     "Refuse a repository-controlled dependency acquisition contract path", "verify"
 )
@@ -4910,6 +4944,7 @@ expected_verification_step_identities = [
     ("Release only from the default branch", ""),
     ("Bind a proposer dispatch to its exact derived head", ""),
     ("Check out the tree that will be released", RELEASE_CHECKOUT),
+    ("Refuse a repository-controlled selection contract path", ""),
     ("Check out the canonical selection contract", RELEASE_CHECKOUT),
     ("Resolve the release selection and version", ""),
     ("Resolve restart-safe release state", ""),

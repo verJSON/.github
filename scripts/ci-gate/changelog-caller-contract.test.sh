@@ -3229,6 +3229,19 @@ text = text[:position] + "    container: ghcr.io/attacker/node:24\n" + text[posi
 open(path, "w", encoding="utf-8").write(text)
 PY
 }
+drop_verify_selection_path_guard() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+start = text.find("      - name: Refuse a repository-controlled selection contract path\n")
+end = text.find("      - name: Check out the canonical selection contract\n", start)
+if start < 0 or end < 0:
+    raise SystemExit("verify selection path guard fixture no longer matches generated output")
+open(path, "w", encoding="utf-8").write(text[:start] + text[end:])
+PY
+}
 drop_verify_contract_path_guard() {
   python3 - "$1/.github/workflows/release.yml" <<'PY'
 import sys
@@ -3766,6 +3779,13 @@ sync_last_rejection
 grep -qF 'configures unapproved release verification job settings (#1712)' "$tmproot/run.out" \
   && pass "the generated suite pins the release verification job settings" \
   || fail "a verify job container was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify job without its reserved selection contract path refusal (#1712)" \
+  drop_verify_selection_path_guard
+sync_last_rejection
+grep -qF 'does not refuse a repository-controlled selection contract path (#1712)' \
+  "$tmproot/run.out" \
+  && pass "the generated suite requires the reserved selection contract path refusal" \
+  || fail "a missing selection-path refusal was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a verify job without its reserved acquisition contract path refusal (#1712)" \
   drop_verify_contract_path_guard
 sync_last_rejection
