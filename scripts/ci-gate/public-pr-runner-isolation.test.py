@@ -3273,10 +3273,13 @@ expect_verify_refused(
 # ---------------------------------------------------------------------------
 HOOK = VERIFY["scripts/release-verify.sh"]
 SHOW_LINE = next(line for line in HOOK.splitlines() if line.startswith('git show "$pin:'))
+# The whole logical line: the show continues onto the `|| { … }` that follows.
+SHOW_LOGICAL = SHOW_LINE + "\n" + HOOK.split(SHOW_LINE + "\n", 1)[1].split("\n", 1)[0]
 MATERIALIZES = "materializes tracked content"
 for label, hook, release in (
     ("an injected git archive in the hook", HOOK + "git archive HEAD scripts | tar -x\n", None),
-    ("a second, identical git show of the pin", HOOK.replace(SHOW_LINE, SHOW_LINE + "\n  || true\n" + SHOW_LINE, 1), None),
+    ("a second, byte-identical git show of the pin", HOOK.replace(SHOW_LOGICAL, SHOW_LOGICAL + "\n" + SHOW_LOGICAL, 1),
+     None),
     ("a second git show of the pin naming another file",
      HOOK + 'git show "$pin:scripts/render-next.sh" | bash\n', None),
     ("an edit to the tolerated line's bytes", HOOK.replace(SHOW_LINE, SHOW_LINE.replace("cmp -s -", "cmp -s  -"), 1), None),
@@ -3303,6 +3306,32 @@ for bin_file in ("bin/render-next.js", "bin/gen-adr-index.js"):
     expect_verify_refused({**VERIFY, "pending.tsv": VERIFY_ROW, bin_file: VERIFY[bin_file] + "// changed\n"},
                           f"verify's row stops applying when the packed bin {bin_file} changes",
                           ("pending row no longer applies",))
+# A bin run and a pack, each alone, in a hook of their own: running the bin
+# binds and follows it, and packing binds every file `files` selects, even one
+# nothing else reaches.
+PACKAGE = json.dumps({"name": "@verjson/fixture", "bin": {"extra": "bin/extra.js"},
+                      "files": ["bin/", "lib/"]})
+OWN_HOOK = {
+    **VERIFY,
+    "./package.json": PACKAGE,
+    "bin/extra.js": "#!/usr/bin/env node\nconsole.log('extra');\n",
+    "lib/data.txt": "packed data\n",
+}
+for label, hook, program, edited in (
+    ("running a package bin", "node scripts/runbin.js\n",
+     'const { spawnSync } = require("node:child_process");\nconst path = require("node:path");\n'
+     'spawnSync(path.join(process.cwd(), "node_modules/.bin/extra"), []);\n', "bin/extra.js"),
+    ("packing the package", "node scripts/packer.js\n",
+     'const { spawnSync } = require("node:child_process");\nspawnSync("npm", ["pack", "--ignore-scripts"]);\n',
+     "lib/data.txt"),
+):
+    fixture = {**OWN_HOOK, "scripts/release-verify.sh": "#!/usr/bin/env bash\n" + hook,
+               "scripts/" + hook.split("scripts/")[1].split("\n")[0]: program}
+    rows = "".join(backlog_row(fixture, "release.yml [workflow_dispatch]", job) for job in ("verify", "snapshot", "publish"))
+    expect({**fixture, "pending.tsv": rows}, 0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
+           f"a hook {label} is ratcheted", *PENDING_ARGS)
+    expect_verify_refused({**fixture, "pending.tsv": rows, edited: fixture[edited] + "// changed\n"},
+                          f"{label} binds {edited}", ("pending row no longer applies",))
 for label, line, fragment in (
     ("a spawn of a computed program", "spawnSync(toolFromEnvironment, []);\n", "unresolved-program"),
     ("a computed require", "require(modulePath);\n", "unresolved-program"),
