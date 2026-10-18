@@ -998,6 +998,21 @@ jobs:
           cd -- "$GITHUB_WORKSPACE"
           rm -rf -- .claude .claude.json .mcp.json CLAUDE.md CLAUDE.local.md .gitmodules .ripgreprc .husky
 
+      # Git reads attributes for reviewed paths from the checkout, so a pull request
+      # could mark a changed text file `-diff` and show the reviewer only "Binary
+      # files differ". $GIT_DIR/info/attributes outranks every in-tree file, and
+      # unsetting `diff` there leaves only git's own content check (ADR 0237).
+      - name: Ignore pull-request git attributes in review diffs
+        id: pr-git-attributes
+        if: needs.preflight.outputs.lane == 'ai'
+        run: |
+          set -euo pipefail
+          cd -- "$GITHUB_WORKSPACE"
+          attributes="$(git rev-parse --git-path info/attributes)"
+          mkdir -p -- "$(dirname -- "$attributes")"
+          rm -f -- "$attributes"
+          printf '* !diff\n' >"$attributes"
+
       # Cost/latency optimization (#120): when main is active a green PR keeps
       # getting a base-merge from preflight, which re-fires `synchronize` and
       # re-pays a full model review even though the PR's own net diff is
@@ -1048,7 +1063,7 @@ jobs:
               mb="$(git merge-base "origin/$base_ref" HEAD 2>/dev/null || true)"
             fi
             if [ -n "$mb" ]; then
-              diff="$(git diff "$mb" HEAD 2>/dev/null || true)"
+              diff="$(git diff --no-ext-diff --no-textconv "$mb" HEAD 2>/dev/null || true)"
               # An empty net diff (no real change) is UNKNOWN, not a match.
               if [ -n "$diff" ]; then
                 patch_id="$(printf '%s\n' "$diff" | git patch-id --stable | awk '{print $1}')"
@@ -1317,7 +1332,7 @@ jobs:
             echo "::error::phase=review-input result=unavailable kind=merge_base_unavailable — fetched base history has no merge base with the checked-out PR head"
             exit 1
           }
-          if ! git diff --find-renames "$merge_base" HEAD >.ai-review/pr.full.diff; then
+          if ! git diff --no-ext-diff --no-textconv --find-renames "$merge_base" HEAD >.ai-review/pr.full.diff; then
             {
               echo "review_input_available=false"
               echo "review_input_failure=local_diff_failed"

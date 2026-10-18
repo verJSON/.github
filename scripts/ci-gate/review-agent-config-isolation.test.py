@@ -25,6 +25,7 @@ GATE_STEPS = WORKFLOW['jobs']['gate']['steps']
 STEPS = {step.get('id'): step for step in GATE_STEPS if step.get('id')}
 REMOVAL_ID = 'pr-agent-config'
 ISOLATION_ID = 'claude-isolation'
+ATTRIBUTES_ID = 'pr-git-attributes'
 # The root-level paths the pinned action treats as sensitive (restore-config.ts SENSITIVE_PATHS).
 AGENT_CONFIG_PATHS = (
     '.claude', '.claude.json', '.mcp.json', 'CLAUDE.md', 'CLAUDE.local.md',
@@ -167,6 +168,80 @@ class ClaudeIsolationStepTest(unittest.TestCase):
         self.assertEqual(config_dir.stat().st_mode & 0o777, 0o700)
         # The action writes these inputs to ~/.claude, which the review no longer reads.
         self.assertFalse({'settings', 'plugins', 'plugin_marketplaces'} & set(STEPS['claude']['with']))
+
+
+def git(cwd, *args, env=None):
+    base = {'PATH': os.defpath, 'HOME': str(cwd), 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
+            'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
+            'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@example.invalid'}
+    return subprocess.run(['git', *args], cwd=cwd, env={**base, **(env or {})}, check=True,
+                          text=True, capture_output=True).stdout.strip()
+
+
+class ReviewDiffIgnoresPullRequestAttributesTest(unittest.TestCase):
+    """A pull request must not hide a text change from the reviewer behind git attributes."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        source = self.root / 'source'
+        source.mkdir()
+        git(source, 'init', '-q', '-b', 'main')
+        (source / 'deploy.sh').write_text('echo base\n')
+        (source / 'lib').mkdir()
+        (source / 'lib/util.py').write_text('VALUE = 1\n')
+        git(source, 'add', '-A')
+        git(source, 'commit', '-qm', 'base')
+        git(source, 'switch', '-qc', 'feature')
+        (source / 'deploy.sh').write_text('echo base\necho hidden-shell-change\n')
+        (source / 'lib/util.py').write_text('VALUE = 1\nHIDDEN = "hidden-python-change"\n')
+        (source / '.gitattributes').write_text('deploy.sh -diff\n[attr]opaque binary\n')
+        (source / 'lib/.gitattributes').write_text('util.py opaque diff=nonexistent\n')
+        git(source, 'add', '-A')
+        git(source, 'commit', '-qm', 'pull request')
+        self.head = git(source, 'rev-parse', 'HEAD')
+        self.workspace = self.root / 'workspace'
+        git(self.root, 'clone', '-q', '--no-checkout', f'file://{source}', str(self.workspace))
+        git(self.workspace, 'checkout', '-q', self.head)
+        bin_path = self.root / 'bin'
+        bin_path.mkdir()
+        (bin_path / 'gh').write_text(
+            '#!/bin/sh\ncase "$*" in\n'
+            '  *headRefOid*) printf "%s\\n" "$HEAD_SHA" ;;\n'
+            '  *) printf \'{"title":"t","body":"","baseRefName":"main","headRefName":"feature"}\\n\' ;;\n'
+            'esac\n')
+        (bin_path / 'gh').chmod(0o755)
+        self.env = {'PATH': f'{bin_path}{os.pathsep}{os.defpath}', 'HOME': str(self.root), 'GIT_CONFIG_NOSYSTEM': '1',
+                    'GIT_CONFIG_GLOBAL': os.devnull, 'GITHUB_WORKSPACE': str(self.workspace), 'HEAD_SHA': self.head,
+                    'GITHUB_OUTPUT': str(self.root / 'output'), 'PR_NUMBER': '7', 'TARGET_REPO': 'Verjson/target',
+                    'DEPENDENCY_MAJOR': 'false', 'GH_TOKEN': 'mock-job-token',
+                    # Runner state may configure an external diff that prints nothing.
+                    'GIT_EXTERNAL_DIFF': '/bin/true'}
+
+    def run_step(self, step_id):
+        script = STEPS[step_id]['run'].replace('${{ needs.preflight.outputs.head_sha }}', self.head)
+        self.assertNotIn('${{', script)
+        return subprocess.run(['bash', '-e', '-c', script], cwd=self.workspace, env=self.env,
+                              text=True, capture_output=True)
+
+    def test_neutralizing_step_runs_after_the_head_checkout_and_before_any_diff(self):
+        self.assertTrue(ATTRIBUTES_ID in STEPS, 'the gate job has no git attribute neutralization step')
+        position = GATE_STEPS.index(STEPS[ATTRIBUTES_ID])
+        self.assertLess(checkout_index(), position)
+        self.assertLess(position, GATE_STEPS.index(STEPS['rereview']))
+        self.assertEqual(STEPS[ATTRIBUTES_ID].get('if'), GATE_STEPS[checkout_index()].get('if'))
+
+    def test_review_diff_shows_attribute_marked_changes_as_text_hunks(self):
+        self.assertTrue(ATTRIBUTES_ID in STEPS, 'the gate job has no git attribute neutralization step')
+        neutralize = self.run_step(ATTRIBUTES_ID)
+        self.assertEqual(neutralize.returncode, 0, neutralize.stderr)
+        prep = self.run_step('prep')
+        self.assertEqual(prep.returncode, 0, prep.stderr + prep.stdout)
+        diff = (self.workspace / '.ai-review/pr.diff').read_text()
+        self.assertIn('+echo hidden-shell-change\n', diff)
+        self.assertIn('+HIDDEN = "hidden-python-change"\n', diff)
+        self.assertNotIn('Binary files', diff)
 
 
 class RemovalPrecedesReviewTest(unittest.TestCase):
