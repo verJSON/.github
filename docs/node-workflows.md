@@ -508,7 +508,10 @@ Two properties to respect:
 `NODE_AUTH_TOKEN` reaches exactly one step, and that step never builds a
 dependency tree: it runs `npm cache add` for each locked
 `https://npm.pkg.github.com/download/...` URL, checks that the npm cache holds
-the content named by the lockfile's sha512 `integrity`, and exits. The next
+the content named by the lockfile's sha512 `integrity`, and exits. That step is
+the contract's `scripts/npm-private-acquisition.sh`, checked out at
+`contract-ref`; the release callers `scripts/gen-changelog-caller.sh` generates
+run the same file in `verify` (ADR 0220). The next
 step runs `npm ci --prefer-offline` without the token, so every lifecycle hook,
 git dependency preparation, and dependency-owned `.npmrc` runs with no package
 credential. `npm ci --ignore-scripts` is not that boundary: npm 10 still runs

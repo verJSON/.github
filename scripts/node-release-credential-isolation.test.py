@@ -46,6 +46,18 @@ FAKE_DOWNLOAD = f"{FAKE_REGISTRY}/download/@verjson/fixture/1.0.0/0123abcd"
 FAKE_CONTENT = b"locked private package archive"
 
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+ACQUISITION_CONTRACT = ".verjson-npm-acquisition-contract"
+ACQUISITION_SCRIPT = "scripts/npm-private-acquisition.sh"
+
+
+def materialize_acquisition_contract(workspace):
+    """Emulate the contract checkout that precedes the acquisition step."""
+    destination = Path(workspace) / ACQUISITION_CONTRACT / ACQUISITION_SCRIPT
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(REPO_ROOT / ACQUISITION_SCRIPT, destination)
+
+
 def resolve_step_env(step, runner_temp):
     """The step's YAML `env`, with the expressions Actions would substitute resolved."""
     resolved = {}
@@ -67,6 +79,7 @@ def fake_npm_workspace(root, step, *, lock_packages=None, npm_version="11.19.1")
     runner_temp.mkdir()
     wrapper_dir = root / "bin"
     wrapper_dir.mkdir()
+    materialize_acquisition_contract(root)
     step_env = resolve_step_env(step, runner_temp)
     assert step_env.get("PRIVATE_PACKAGE_REGISTRY") == FAKE_REGISTRY, step_env
     cache_dir = Path(step_env.get("npm_config_cache", root / "unset-npm-cache"))
@@ -144,6 +157,7 @@ def verify_project_npmrc_isolation(step):
 
         Path(env["NPM_TRACE"]).unlink()
         env["NPM_EXIT_CODE"] = "23"
+        materialize_acquisition_contract(root)
         result = run_step(script, cwd=root, env=env)
         assert result.returncode == 23, result.stdout + result.stderr
         assert npm_trace_of(env) == expected_trace
@@ -153,6 +167,7 @@ def verify_project_npmrc_isolation(step):
         Path(env["NPM_TRACE"]).unlink()
         project_npmrc.unlink()
         env["NPM_EXIT_CODE"] = "0"
+        materialize_acquisition_contract(root)
         result = run_step(script, cwd=root, env=env)
         assert result.returncode == 0, result.stdout + result.stderr
         assert npm_trace_of(env) == expected_trace
@@ -479,6 +494,20 @@ def main():
         f"only the acquisition step may receive a secret; found secret expressions in {secret_steps}"
     )
     assert steps.index(acquisition_step) + 1 == steps.index(install_step)
+    acquisition_index = steps.index(acquisition_step)
+    contract_ref_guard, contract_checkout = steps[acquisition_index - 2:acquisition_index]
+    assert contract_ref_guard.get("env") == {"CONTRACT_REF": "${{ inputs.contract-ref }}"}
+    assert contract_ref_guard.get("run") == '[[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]]'
+    assert str(contract_checkout.get("uses", "")).startswith("actions/checkout@")
+    assert contract_checkout.get("with") == {
+        "repository": "Verjson/.github",
+        "ref": "${{ inputs.contract-ref }}",
+        "path": ACQUISITION_CONTRACT,
+        "persist-credentials": False,
+    }, "acquisition must run the contract's script from the immutable contract commit"
+    assert acquisition_step["run"] == (
+        f"bash {ACQUISITION_CONTRACT}/{ACQUISITION_SCRIPT}\nrm -rf {ACQUISITION_CONTRACT}\n"
+    ), "the credentialed step must run only the shared acquisition and remove its checkout"
     verify_secret_expression_matcher()
     verify_project_npmrc_isolation(acquisition_step)
     verify_private_download_selection(acquisition_step)
@@ -555,11 +584,14 @@ SUPPORTED_NPM_RELEASES = {
     ),
 }
 
+# The recorder assembles the token at run time: a literal copy in its source
+# would make every installed dependency tree contain the credential.
 LIFECYCLE_RECORDER = (
     "const fs = require('node:fs');\n"
+    "const needle = ['synthetic', 'package', 'token'].join('-');\n"
     "const token = process.env.NODE_AUTH_TOKEN || '<unset>';\n"
     "const tokenEnvKeys = Object.entries(process.env)\n"
-    "  .filter(([, value]) => typeof value === 'string' && value.includes('synthetic-package-token'))\n"
+    "  .filter(([, value]) => typeof value === 'string' && value.includes(needle))\n"
     "  .map(([key]) => key);\n"
     "const tokenAncestorPids = [];\n"
     "let parentPid = process.ppid;\n"
@@ -570,7 +602,7 @@ LIFECYCLE_RECORDER = (
     "    parentEnvironment = fs.readFileSync(`/proc/${parentPid}/environ`, 'utf8').split('\\0');\n"
     "    parentStatus = fs.readFileSync(`/proc/${parentPid}/status`, 'utf8');\n"
     "  } catch { break; }\n"
-    "  if (parentEnvironment.includes('NODE_AUTH_TOKEN=synthetic-package-token')) tokenAncestorPids.push(parentPid);\n"
+    "  if (parentEnvironment.includes(`NODE_AUTH_TOKEN=${needle}`)) tokenAncestorPids.push(parentPid);\n"
     "  const parentPidMatch = parentStatus.match(/^PPid:\\s*(\\d+)/m);\n"
     "  if (!parentPidMatch) break;\n"
     "  parentPid = Number(parentPidMatch[1]);\n"
@@ -926,8 +958,12 @@ def verify_dependency_code_never_sees_credential(npm_bin, version, acquisition_s
         assert install_env["NODE_AUTH_TOKEN"] == ""
         private_registry.requests.clear()
         attacker_registry.requests.clear()
+        materialize_acquisition_contract(project)
         acquired = run_step(acquisition, cwd=project, env=acquisition_env)
         assert acquired.returncode == 0, f"npm {version}: {acquired.stdout}{acquired.stderr}"
+        assert not (project / ACQUISITION_CONTRACT).exists(), (
+            "the acquisition contract checkout must not remain in the workspace for packing"
+        )
         acquisition_requests = list(private_registry.requests)
         private_registry.requests.clear()
         installed = run_step(install, cwd=project, env=install_env)
@@ -964,7 +1000,7 @@ def verify_dependency_code_never_sees_credential(npm_bin, version, acquisition_s
         node_trace = Path(job_env["NODE_TRACE"]).read_text().splitlines()
         credentialed_node = [line.rsplit("|", 1)[0] for line in node_trace if line.endswith("|present")]
         assert credentialed_node == [
-            f"- package-lock.json {private_registry.origin}",
+            f"- package-lock.json {private_registry.origin} unset",
             f"{npm_cli} --version",
             f"{npm_cli} cache add {download_url}",
         ], f"npm {version}: unexpected node invocations with the credential: {credentialed_node}"
@@ -1045,6 +1081,7 @@ def verify_empty_dependency_tree(npm_bin, version, acquisition_step, install_ste
         acquisition_env = job_env | resolve_step_env(acquisition_step, runner_temp) | {
             "PRIVATE_PACKAGE_REGISTRY": private_registry.origin,
         }
+        materialize_acquisition_contract(empty_root)
         acquired = run_step(acquisition, cwd=empty_root, env=acquisition_env)
         assert acquired.returncode == 0, f"npm {version}: {acquired.stdout}{acquired.stderr}"
         installed = run_step(install, cwd=empty_root, env=job_env | resolve_step_env(install_step, runner_temp))
