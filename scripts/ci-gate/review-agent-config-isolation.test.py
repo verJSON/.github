@@ -7,7 +7,9 @@ project, and local setting sources unless `--setting-sources` says otherwise, an
 restores project configuration from the base branch only for pull-request events, never
 for the `workflow_dispatch` this gate runs under.
 """
+import itertools
 import os
+import re
 import shlex
 import subprocess
 import tempfile
@@ -59,6 +61,61 @@ class ClaudeReviewArgumentsTest(unittest.TestCase):
         self.assertEqual(strict, [None])
 
 
+def evaluate_condition(condition, values, job_succeeded):
+    """Evaluate a step `if:` the way Actions does for the expressions this job uses.
+
+    Without a status function Actions applies an implicit `success()`.
+    """
+    expression = condition.removeprefix('${{').removesuffix('}}').strip()
+    has_status_function = re.search(r'\b(always|success|failure|cancelled)\(\)', expression)
+    expression = re.sub(r'\b(?:steps|needs)\.[\w-]+\.(?:outputs\.[\w-]+|outcome|conclusion|result)',
+                        lambda match: repr(values.get(match.group(0), '')), expression)
+    expression = (expression.replace('always()', 'True').replace('cancelled()', 'False')
+                  .replace('success()', repr(job_succeeded)).replace('failure()', repr(not job_succeeded)))
+    expression = re.sub(r'(?<![\w\'"])true(?![\w\'"])', 'True', expression)
+    expression = re.sub(r'(?<![\w\'"])false(?![\w\'"])', 'False', expression)
+    expression = expression.replace('&&', ' and ').replace('||', ' or ')
+    expression = re.sub(r'!(?!=)', 'not ', expression)
+    result = eval(expression, {'__builtins__': {}}, {})  # noqa: S307 - workflow text under test
+    return bool(result) and (job_succeeded or bool(has_status_function))
+
+
+def checkout_index():
+    names = [step.get('name') for step in GATE_STEPS]
+    return names.index('Checkout PR head')
+
+
+class RemovalPrecedesReviewTest(unittest.TestCase):
+    def test_removal_runs_immediately_after_the_head_checkout_under_its_condition(self):
+        checkout = checkout_index()
+        removal = GATE_STEPS[checkout + 1]
+        self.assertEqual(removal.get('id'), REMOVAL_ID)
+        self.assertEqual(removal.get('if'), GATE_STEPS[checkout].get('if'))
+        self.assertLess(checkout + 1, GATE_STEPS.index(STEPS['claude']))
+
+    def test_claude_review_never_runs_unless_the_removal_succeeded(self):
+        removal = STEPS[REMOVAL_ID]
+        claude = STEPS['claude']
+        removal_tolerated = bool(removal.get('continue-on-error'))
+        for lane, provider, skip_model, allowed, removal_fails in itertools.product(
+            ('ai', 'fast'), ('anthropic', 'openai', 'deepseek'), ('true', 'false'), ('true', 'false'), (True, False),
+        ):
+            values = {
+                'needs.preflight.outputs.lane': lane,
+                'needs.preflight.outputs.provider': provider,
+                'steps.rereview.outputs.skip_model': skip_model,
+                'steps.reserve_1.outputs.allowed': allowed,
+            }
+            removal_ran = evaluate_condition('${{ %s }}' % removal['if'], values, True)
+            outcome = 'skipped' if not removal_ran else 'failure' if removal_fails else 'success'
+            values[f'steps.{REMOVAL_ID}.outcome'] = outcome
+            job_succeeded = not (outcome == 'failure' and not removal_tolerated)
+            claude_runs = evaluate_condition('${{ %s }}' % claude['if'], values, job_succeeded)
+            with self.subTest(lane=lane, provider=provider, skip_model=skip_model, allowed=allowed,
+                              removal_fails=removal_fails):
+                self.assertFalse(claude_runs and outcome != 'success')
+
+
 def plant_agent_config(workspace):
     (workspace / '.claude').mkdir()
     (workspace / '.claude/settings.json').write_text('{"hooks": {}}\n')
@@ -104,6 +161,40 @@ class PullRequestAgentConfigRemovalTest(unittest.TestCase):
         result = run_removal(self.workspace)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.workspace / 'README.md').exists())
+
+    def test_removal_unlinks_symlinks_without_touching_their_targets(self):
+        outside = self.root / 'runner-state'
+        outside.mkdir()
+        (outside / 'keep').write_text('runner\n')
+        (self.workspace / 'AGENTS.md').write_text('agents\n')
+        (self.workspace / 'CLAUDE.md').symlink_to('AGENTS.md')
+        (self.workspace / '.mcp.json').symlink_to(outside / 'keep')
+        (self.workspace / '.claude').symlink_to(outside)
+        (self.workspace / '.husky').mkdir()
+        (self.workspace / '.husky/state').symlink_to(outside)
+        result = run_removal(self.workspace)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in ('CLAUDE.md', '.mcp.json', '.claude', '.husky'):
+            with self.subTest(path=name):
+                self.assertFalse(os.path.lexists(self.workspace / name))
+        self.assertEqual((self.workspace / 'AGENTS.md').read_text(), 'agents\n')
+        self.assertEqual((outside / 'keep').read_text(), 'runner\n')
+
+    @unittest.skipIf(os.geteuid() == 0, 'root ignores directory write permission')
+    def test_removal_fails_closed_when_a_path_cannot_be_removed(self):
+        plant_agent_config(self.workspace)
+        self.workspace.chmod(0o555)
+        self.addCleanup(self.workspace.chmod, 0o755)
+        result = run_removal(self.workspace)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_removal_fails_closed_without_a_workspace(self):
+        plant_agent_config(self.workspace)
+        step = STEPS[REMOVAL_ID]
+        result = subprocess.run(['bash', '-e', '-c', step['run']], env={'PATH': os.defpath},
+                                cwd=self.workspace, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((self.workspace / '.mcp.json').exists())
 
 
 if __name__ == '__main__':

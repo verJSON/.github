@@ -60,10 +60,13 @@ that write access alone does not grant. The exposure is pre-existing on `main`
    immediately after `Checkout PR head`, under that checkout's condition, deletes the
    root-level paths the pinned action itself treats as sensitive
    (`restore-config.ts:26-35`): `.claude`, `.claude.json`, `.mcp.json`, `CLAUDE.md`,
-   `CLAUDE.local.md`, `.gitmodules`, `.ripgreprc`, and `.husky`. It fails the job if
-   any survives, and the Claude step requires its `outcome == 'success'`. Removal is
-   defense in depth for decision 1: either control alone stops the reproduced
-   execution, and a regression in one leaves the other.
+   `CLAUDE.local.md`, `.gitmodules`, `.ripgreprc`, and `.husky`. A path that cannot
+   be removed, or a missing workspace, fails the step. The step is not
+   `continue-on-error` and the Claude step's condition calls no status function, so
+   a failed removal fails the job before the review can start. A change that adds
+   either must make the Claude step require `steps.pr-agent-config.outcome == 'success'`.
+   Removal is defense in depth for decision 1: either control alone stops the
+   reproduced execution, and a regression in one leaves the other.
 3. **A symlink is unlinked, not refused.** Unlike the fixed-path checkout refusal in
    #1849, these paths are pull-request content, and a repository may legitimately
    link `CLAUDE.md` to `AGENTS.md`. Refusing would block every review in such a
@@ -79,7 +82,9 @@ that write access alone does not grant. The exposure is pre-existing on `main`
 
 `scripts/ci-gate/review-agent-config-isolation.test.py` enforces decisions 1–3: it
 reads `claude_args` the way the pinned action's parser does, executes the removal
-step against fixture workspaces, and evaluates the step conditions.
+step against fixture workspaces (including planted links and an unremovable path),
+and evaluates both step conditions under Actions' implicit `success()` across every
+lane, provider, and removal outcome.
 
 ## Rollout
 
