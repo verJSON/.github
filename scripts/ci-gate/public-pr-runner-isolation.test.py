@@ -3236,8 +3236,10 @@ expect({**VERIFY, "pending.tsv": VERIFY_ROW}, 0, ("PENDING: release.yml [workflo
 expect_verify_refused(
     {**VERIFY, "pending.tsv": VERIFY_ROW,
      "scripts/release-verify.sh": VERIFY["scripts/release-verify.sh"] + 'gh pr checkout "$PR"\n'},
-    "release.yml verify's row stops applying when release-verify.sh changes",
-    ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", "pending row no longer applies"),
+    # Since round 8 a runtime tree change in a traced program refuses before
+    # any row is read, so `gh pr checkout` no longer merely stales the row.
+    "release.yml verify refuses gh pr checkout appended to release-verify.sh, before reading its row",
+    ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", "changes the checked-out tree"),
 )
 expect_verify_refused(
     {**VERIFY, "pending.tsv": VERIFY_ROW,
@@ -3430,6 +3432,18 @@ for label, hook, files in (
      {"scripts/sub.sh": 'run_later="scripts/evil.sh"\necho "$run_later" >/dev/null\n'}),
 ):
     expect_bound(hook, {**EVIL, **files}, "scripts/evil.sh", f"verify binds a program named by {label}")
+
+# Round-8 finding 2: the materialization scan reads `git` behind a path or a
+# quote, and a runtime tree change in a traced program refuses too.
+for label, line, fragment in (
+    ("/usr/bin/git show", "/usr/bin/git show HEAD:scripts/changelog.py > /tmp/x\n", "materializes tracked content"),
+    ('a quoted "git" show', '"git" show HEAD:scripts/changelog.py > /tmp/x\n', "materializes tracked content"),
+    ("git checkout <rev> -- path", "git checkout HEAD~1 -- scripts/changelog.py\n", "changes the checked-out tree"),
+    ("git restore --source", "git restore --source=HEAD~1 scripts/changelog.py\n", "changes the checked-out tree"),
+):
+    expect_verify_refused(verify_with("bash scripts/sub.sh\n", {"scripts/sub.sh": line}),
+                          f"verify refuses {label} in a program it runs",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", fragment))
 
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8

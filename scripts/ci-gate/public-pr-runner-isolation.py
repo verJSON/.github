@@ -736,6 +736,8 @@ HEAD_TOKEN = re.compile(
 # git global options before the subcommand: `-C dir`, `-c k=v`, `--git-dir=x`,
 # `--work-tree x`, `--no-pager`.
 GIT_OPTIONS = r"(?:-[\w-]+(?:=\S*|[ \t]+(?!-)\S+)?[ \t]+)*"
+# `git` may be spelled by path (/usr/bin/git) or quoted ("git") (round 8).
+GIT_WORD = r"""(?:^|[\s;&|(`])["']?(?:[\w./-]*/)?git["']?[ \t]+"""
 # Commands that put head-controlled bytes on disk when given a head value.
 PR_MATERIALIZE = re.compile(r"\bgh\s+pr\s+(?:checkout|diff)\b")
 GIT_MATERIALIZE = re.compile(
@@ -1830,6 +1832,18 @@ def frozen_tolerated(key: tuple[str, str], root: str) -> tuple[str, str] | None:
     return (frozen["program"], tolerated_line) if tolerated_line else None
 
 
+# A runtime tree change in a traced program (round 8): the same verbs as
+# RUNTIME_TREE_CHANGE, with `git` spelled by path or quoted.
+TRACED_TREE_CHANGE = re.compile(
+    GIT_WORD + rf"{GIT_OPTIONS}"
+    r"(?:sparse-checkout|checkout|switch|restore|reset|pull|merge|rebase|worktree|apply|am|cherry-pick"
+    r"|read-tree|checkout-index)(?![\w-])"
+    r"|" + GIT_WORD + r"[^\n]*?--(?:git-dir|work-tree)\b"
+    r"|\bgh[ \t]+pr[ \t]+checkout\b",
+    re.M,
+)
+
+
 def traced_materializations(
     texts: list[tuple[str, str]], tolerated: tuple[str, str] | None
 ) -> set[tuple[str, str]]:
@@ -1846,6 +1860,12 @@ def traced_materializations(
                     f"`git {match.group(1)}{match.group(2).rstrip()}` in {origin or 'a step'} materializes "
                     "tracked content outside any checkout this row binds; only the frozen, reviewed pin "
                     "comparison in release-verify.sh is tolerated",
+                ))
+            for match in TRACED_TREE_CHANGE.finditer(line.replace("\\\n", " ")):
+                found.add((
+                    "tracked-materialization",
+                    f"`{' '.join(match.group(0).split())}` in {origin or 'a step'} changes the checked-out tree "
+                    "at runtime, which no row can bind",
                 ))
     return found
 
@@ -2535,8 +2555,10 @@ class Closure:
 
 
 # `git [options] show|archive|cat-file <args>` up to the end of the command.
+# A verb ends at a non-word, non-dash character, so `show-ref` and
+# `merge-base` are other commands; `cat-file -e/-t/-s` only tests an object.
 GIT_MATERIALIZE_TRACKED = re.compile(
-    rf"(?:^|[\s;&|(`])git[ \t]+{GIT_OPTIONS}(show|archive|cat-file)\b([^\n;&|>)]*)", re.M
+    GIT_WORD + rf"{GIT_OPTIONS}(show|archive|cat-file(?![ \t]+-[ets]\b))(?![\w-])([^\n;&|>)]*)", re.M
 )
 # The commit a dispatched run's own checkout is: the scanned tree.
 DISPATCH_COMMIT = frozenset({"$GITHUB_SHA", "${GITHUB_SHA}"})
