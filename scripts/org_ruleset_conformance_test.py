@@ -575,6 +575,37 @@ class OrgRulesetConformanceTest(unittest.TestCase):
             result.stderr,
         )
 
+    def test_declared_status_check_without_a_binding_fails_closed(self):
+        result, _ = self.run_audit(
+            [[{"id": 21830367}]],
+            {21830367: self.cli_projects_required_workflow()},
+            raw_policy=self.declared_check_policy(integration_id=None),
+        )
+
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn(
+            "required_status_check.integration_id must be a positive integer", result.stderr
+        )
+
+    def test_declared_status_check_keys_must_be_exact(self):
+        cases = {
+            "unknown key": lambda check: check.update(do_not_enforce_on_create=False),
+            "missing key": lambda check: check.pop("strict"),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(case=name):
+                policy = json.loads(self.committed_policy_without_bypass_contracts())
+                mutate(policy["bypassless_required_workflows"][1]["required_status_check"])
+
+                result, _ = self.run_audit(
+                    [[{"id": 21830367}]],
+                    {21830367: self.cli_projects_required_workflow()},
+                    raw_policy=json.dumps(policy),
+                )
+
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertIn("required_status_check keys are", result.stderr)
+
     def test_wrong_actor_type_id_or_mode_does_not_satisfy_policy(self):
         wrong_actors = [
             {"actor_type": "Team", "actor_id": 4583107, "bypass_mode": "always"},
