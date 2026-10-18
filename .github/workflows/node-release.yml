@@ -331,7 +331,7 @@ jobs:
           NODE
           if [[ -s "$acquisition_dir/downloads.tsv" ]]; then
             npm_version="$(npm --version)"
-            if [[ ! "$npm_version" =~ ^(10|11)\.[0-9]+\.[0-9]+$ ]]; then
+            if [[ ! "$npm_version" =~ ^(10|11)\.[0123456789]+\.[0123456789]+$ ]]; then
               echo "::error::npm $npm_version has no verified credential-isolation contract; use a node-version that bundles npm 10 or 11."
               exit 1
             fi
