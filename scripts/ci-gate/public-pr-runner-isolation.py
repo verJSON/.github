@@ -1441,6 +1441,8 @@ class ProgramTrace:
     def shell_call(self, args, stdin, origin, depth, scope, where) -> None:
         assignments, _, heredocs = scope
         index = 0
+        # `-s`: the program is standard input and every operand an argument.
+        reads_stdin = False
         while index < len(args) and args[index].startswith("-") and args[index] not in ("-", "--"):
             flag = args[index]
             if flag in ("-o", "+o"):
@@ -1453,14 +1455,20 @@ class ProgramTrace:
                 self.shell(args[index + 1], origin, depth, inherited=scope)
                 return
             index += 1
+            if not flag.startswith("--") and "s" in flag[1:]:
+                reads_stdin = True
+                break
         if index < len(args) and args[index] == "--":
             index += 1
-        if index < len(args) and args[index] not in ("-", "-s"):
+        if not reads_stdin and index < len(args) and args[index] != "-":
             return self.run_target(args[index], origin, assignments, depth, "shell script")
         if stdin in heredocs:
             return self.shell(heredocs[stdin], origin, depth, inherited=scope)
         if stdin:
             return self.run_target(stdin, origin, assignments, depth, "shell input")
+        if reads_stdin:
+            self.unresolve(f"{where}: `-s` reads its program from a pipe this checker cannot read")
+            return
         self.unresolve(f"{where}: a shell reading its program from a pipe")
 
     def python_call(self, args, stdin, origin, depth, scope, where) -> None:

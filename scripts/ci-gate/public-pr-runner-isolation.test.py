@@ -3538,6 +3538,15 @@ for label, files, reason in (
     expect_verify_refused(verify_with("bash scripts/link.sh\n", files), f"verify refuses {label}",
                           ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, reason))
 
+# Round-8 nit 9: `bash -s` takes its program from standard input and its
+# operands as arguments, never as a script path; a pipe into it has a reason
+# of its own.
+expect_verify_refused(verify_with("produce | bash -s some-argument\n", {}),
+                      "verify refuses `bash -s` reading a piped program, with its own reason",
+                      ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "`-s` reads its program"))
+expect_bound("bash -s some-argument < scripts/real.sh\n", {"scripts/real.sh": "echo real\n"},
+             "scripts/real.sh", "`bash -s` reading a tracked program on standard input")
+
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
 # sequences must not decode to the same replacement text and digest), and a
