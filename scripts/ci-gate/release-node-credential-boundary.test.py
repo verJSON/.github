@@ -27,13 +27,22 @@ PACKAGE_VERSION = "1.0.0"
 PACKAGE_TOKEN = "fixture-package-token"
 GITHUB_TOKEN_EXPRESSION = "${{ github.token }}"
 PACKAGE_TOKEN_EXPRESSION = "${{ secrets.NODE_AUTH_TOKEN }}"
-EXPECTED_INSTALL_COMMAND = """\
+ACQUISITION_CONTRACT = ".verjson-npm-acquisition-contract"
+ACQUISITION_SCRIPT = "scripts/npm-private-acquisition.sh"
+EXPECTED_INSTALL_COMMAND = f"""\
 workspace_root="$(git rev-parse --show-toplevel)"
 if [ -e "$workspace_root/.npmrc" ] || [ -L "$workspace_root/.npmrc" ]; then
   echo "::error::repository-controlled .npmrc is not allowed during credentialed release installation"
   exit 1
 fi
-npm ci --ignore-scripts"""
+bash {ACQUISITION_CONTRACT}/{ACQUISITION_SCRIPT}
+rm -rf {ACQUISITION_CONTRACT}"""
+SHARED_NPM_CACHE = "${{ runner.temp }}/verjson-npm-cache"
+EXPECTED_ACQUISITION_ENV = {
+    "NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}",
+    "PRIVATE_PACKAGE_REGISTRY": "https://npm.pkg.github.com",
+    "npm_config_cache": SHARED_NPM_CACHE,
+}
 APPROVED_RELEASE_STATE_SCRIPT_SHA256 = {
     "693948193bdfaa07608ffa3faa3005974e5e13dd83d3aa200382c3b63937d33c",
 }
@@ -167,18 +176,42 @@ def validate_generated_workflow(workflow):
             f"{step.get('name', 'unnamed step')} receives Git credentials",
         )
 
-    install = find_step(steps, "Install dependencies")
+    # ADR 0220 (2026-10-18): the token reaches only the contract's shared
+    # acquisition, and the tree installs from its cache with no credential.
+    contract_checkout = find_step(steps, "Check out the canonical dependency acquisition contract")
+    checkout_inputs = contract_checkout.get("with") or {}
+    require(
+        str(contract_checkout.get("uses", "")).startswith("actions/checkout@")
+        and str(checkout_inputs.get("repository", "")) == "verJSON/.github"
+        and re.fullmatch(r"[0123456789abcdef]{40}", str(checkout_inputs.get("ref", ""))) is not None
+        and checkout_inputs.get("path") == ACQUISITION_CONTRACT,
+        "dependency acquisition does not run the contract at an immutable commit",
+    )
+    install = find_step(steps, "Acquire private registry packages with credentials")
+    require(
+        steps.index(contract_checkout) + 1 == steps.index(install),
+        "dependency acquisition does not run the contract at an immutable commit",
+    )
     require(
         str(install.get("run") or "").strip() == EXPECTED_INSTALL_COMMAND,
-        "credentialed package installation does not reject workspace .npmrc files before npm ci",
+        "credentialed package installation does not reject workspace .npmrc files before acquisition",
     )
     require(
         (install.get("env") or {}).get("NODE_AUTH_TOKEN") == PACKAGE_TOKEN_EXPRESSION,
         "package acquisition lost private package authorization",
     )
     require(
-        (install.get("env") or {}) == {"NODE_AUTH_TOKEN": PACKAGE_TOKEN_EXPRESSION},
+        (install.get("env") or {}) == EXPECTED_ACQUISITION_ENV,
         "package acquisition carries credentials beyond NODE_AUTH_TOKEN",
+    )
+    tokenless_install = find_step(steps, "Install dependencies without credentials")
+    require(
+        steps.index(install) + 1 == steps.index(tokenless_install)
+        and str(tokenless_install.get("run") or "").strip()
+        == "npm ci --ignore-scripts --prefer-offline"
+        and (tokenless_install.get("env") or {})
+        == {"NODE_AUTH_TOKEN": "", "npm_config_cache": SHARED_NPM_CACHE},
+        "dependency tree is not installed from the acquisition cache without credentials",
     )
     for step in steps:
         if step is install:
@@ -207,7 +240,7 @@ def validate_generated_workflow(workflow):
         acquisition_steps = acquisition.get("steps") or []
         for step in acquisition_steps:
             step_text = json.dumps(step)
-            if step.get("name") == "Acquire dependencies without lifecycle execution":
+            if step.get("name") == "Acquire private registry packages with credentials":
                 require(
                     (step.get("env") or {}).get("NODE_AUTH_TOKEN") == PACKAGE_TOKEN_EXPRESSION,
                     "private acquisition lost private package authorization",
@@ -220,6 +253,7 @@ def validate_generated_workflow(workflow):
 
     downstream_names = (
         "Run dependency lifecycle scripts without credentials",
+        "Install dependencies without credentials",
         "Prepare release package metadata",
         "Stamp the dispatched package versions",
         "Run the release verification suite",
@@ -318,34 +352,81 @@ class ReleaseNodeCredentialBoundaryTests(unittest.TestCase):
                 validate_generated_workflow(workflow)
 
     def test_emitted_install_command_blocks_workspace_npmrc_before_npm(self):
-        install = find_step(self.workflow["jobs"]["verify"]["steps"], "Install dependencies")
+        install = find_step(
+            self.workflow["jobs"]["verify"]["steps"], "Acquire private registry packages with credentials"
+        )
+        content = b"locked private package archive"
+        digest = sha512(content).hexdigest()
+        download = "https://npm.pkg.github.com/download/@verjson/fixture/1.0.0/0123abcd"
         with tempfile.TemporaryDirectory(prefix="release-node-install-guard-") as temporary:
             root = Path(temporary)
             workspace = root / "workspace"
             workspace.mkdir()
             subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+            (workspace / "package-lock.json").write_text(
+                json.dumps({
+                    "lockfileVersion": 3,
+                    "packages": {
+                        "": {"name": "fixture"},
+                        "node_modules/@verjson/fixture": {
+                            "resolved": download,
+                            "integrity": "sha512-" + base64.b64encode(sha512(content).digest()).decode(),
+                        },
+                    },
+                }),
+                encoding="utf-8",
+            )
             bin_dir = root / "bin"
             bin_dir.mkdir()
             runner_temp = root / "runner-temp"
             runner_temp.mkdir()
             runner_npmrc = runner_temp / ".npmrc"
             runner_npmrc.write_text("//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}\n", encoding="utf-8")
+            cache = runner_temp / "verjson-npm-cache"
             npm_marker = root / "npm-called"
             npm_config_marker = root / "npm-user-config"
             npm = bin_dir / "npm"
             npm.write_text(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$NPM_STUB_MARKER\"\nprintf '%s\\n' \"${NPM_CONFIG_USERCONFIG-}\" > \"$NPM_CONFIG_MARKER\"\n",
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" >> \"$NPM_STUB_MARKER\"\n"
+                "printf '%s\\n' \"${NPM_CONFIG_USERCONFIG-}\" > \"$NPM_CONFIG_MARKER\"\n"
+                "case \"$1\" in\n"
+                "  --version) echo 11.0.0 ;;\n"
+                "  cache) mkdir -p \"$(dirname \"$FAKE_CONTENT_PATH\")\" && printf %s \"$FAKE_CONTENT\" > \"$FAKE_CONTENT_PATH\" ;;\n"
+                "esac\n",
                 encoding="utf-8",
             )
             npm.chmod(0o755)
             environment = {
                 **os.environ,
                 "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+                "GITHUB_WORKSPACE": str(workspace),
                 "RUNNER_TEMP": str(runner_temp),
+                "NODE_AUTH_TOKEN": PACKAGE_TOKEN,
+                "PRIVATE_PACKAGE_REGISTRY": "https://npm.pkg.github.com",
+                "npm_config_cache": str(cache),
                 "NPM_CONFIG_USERCONFIG": str(runner_npmrc),
                 "NPM_CONFIG_MARKER": str(npm_config_marker),
                 "NPM_STUB_MARKER": str(npm_marker),
+                "FAKE_CONTENT": content.decode(),
+                "FAKE_CONTENT_PATH": str(
+                    cache / "_cacache/content-v2/sha512" / digest[:2] / digest[2:4] / digest[4:]
+                ),
             }
+
+            def run_install():
+                # Emulates the contract checkout that precedes this step.
+                script = workspace / ACQUISITION_CONTRACT / ACQUISITION_SCRIPT
+                script.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / ACQUISITION_SCRIPT, script)
+                return subprocess.run(
+                    ["/bin/bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", install["run"]],
+                    cwd=workspace,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
 
             for npmrc_kind in ("file", "symlink"):
                 with self.subTest(npmrc_kind=npmrc_kind):
@@ -356,14 +437,7 @@ class ReleaseNodeCredentialBoundaryTests(unittest.TestCase):
                     else:
                         npmrc.symlink_to(workspace / "attacker-npmrc")
                     npm_marker.unlink(missing_ok=True)
-                    result = subprocess.run(
-                        ["/bin/bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", install["run"]],
-                        cwd=workspace,
-                        env=environment,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
+                    result = run_install()
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertIn(
                         "repository-controlled .npmrc is not allowed",
@@ -372,17 +446,18 @@ class ReleaseNodeCredentialBoundaryTests(unittest.TestCase):
                     self.assertFalse(npm_marker.exists(), "npm ran before the workspace config guard")
 
             (workspace / ".npmrc").unlink()
-            result = subprocess.run(
-                ["/bin/bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", install["run"]],
-                cwd=workspace,
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            result = run_install()
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(npm_marker.read_text(encoding="utf-8"), "ci --ignore-scripts\n")
+            self.assertEqual(
+                npm_marker.read_text(encoding="utf-8").splitlines(),
+                ["--version", f"cache add {download}"],
+                "the credential reached npm for more than the exact locked download",
+            )
             self.assertEqual(npm_config_marker.read_text(encoding="utf-8"), f"{runner_npmrc}\n")
+            self.assertFalse(
+                (workspace / ACQUISITION_CONTRACT).exists(),
+                "the acquisition contract checkout remained in the release tree",
+            )
 
     def test_emitted_verification_command_clears_package_token_for_hook(self):
         npm = shutil.which("npm")
@@ -490,9 +565,49 @@ class ReleaseNodeCredentialBoundaryTests(unittest.TestCase):
 
         with self.subTest("acquisition extra command"):
             mutated = deepcopy(self.workflow)
-            install = find_step(mutated["jobs"]["verify"]["steps"], "Install dependencies")
+            install = find_step(
+                mutated["jobs"]["verify"]["steps"], "Acquire private registry packages with credentials"
+            )
             install["run"] += "\nnode ./scripts/leak-token.js"
             with self.assertRaisesRegex(ValueError, "credentialed package installation"):
+                validate_generated_workflow(mutated)
+
+        with self.subTest("acquisition builds the tree with the token"):
+            mutated = deepcopy(self.workflow)
+            install = find_step(
+                mutated["jobs"]["verify"]["steps"], "Acquire private registry packages with credentials"
+            )
+            install["run"] = install["run"].replace(
+                f"bash {ACQUISITION_CONTRACT}/{ACQUISITION_SCRIPT}", "npm ci --ignore-scripts"
+            )
+            with self.assertRaisesRegex(ValueError, "credentialed package installation"):
+                validate_generated_workflow(mutated)
+
+        with self.subTest("acquisition contract on a branch"):
+            mutated = deepcopy(self.workflow)
+            checkout = find_step(
+                mutated["jobs"]["verify"]["steps"], "Check out the canonical dependency acquisition contract"
+            )
+            checkout["with"]["ref"] = "main"
+            with self.assertRaisesRegex(ValueError, "immutable commit"):
+                validate_generated_workflow(mutated)
+
+        with self.subTest("tree-building install token"):
+            mutated = deepcopy(self.workflow)
+            tokenless = find_step(
+                mutated["jobs"]["verify"]["steps"], "Install dependencies without credentials"
+            )
+            tokenless["env"]["NODE_AUTH_TOKEN"] = PACKAGE_TOKEN_EXPRESSION
+            with self.assertRaisesRegex(ValueError, "without credentials"):
+                validate_generated_workflow(mutated)
+
+        with self.subTest("tree-building install bypasses the acquisition cache"):
+            mutated = deepcopy(self.workflow)
+            tokenless = find_step(
+                mutated["jobs"]["verify"]["steps"], "Install dependencies without credentials"
+            )
+            tokenless["run"] = "npm ci --ignore-scripts"
+            with self.assertRaisesRegex(ValueError, "acquisition cache"):
                 validate_generated_workflow(mutated)
 
         with self.subTest("persisted checkout token"):
@@ -806,7 +921,7 @@ class ReleaseNodeCredentialBoundaryTests(unittest.TestCase):
     def test_private_acquisition_succeeds_and_lifecycle_runs_without_credential(self):
         archive = create_package_archive()
         integrity = "sha512-" + base64.b64encode(sha512(archive).digest()).decode("ascii")
-        expected_path = f"/{PACKAGE_NAME}/-/{PACKAGE_NAME.rsplit('/', 1)[-1]}-{PACKAGE_VERSION}.tgz"
+        expected_path = f"/download/{PACKAGE_NAME}/{PACKAGE_VERSION}/{sha256(archive).hexdigest()}"
         authorizations = []
 
         class RegistryHandler(BaseHTTPRequestHandler):
@@ -834,17 +949,24 @@ class ReleaseNodeCredentialBoundaryTests(unittest.TestCase):
         self.addCleanup(server_thread.join, timeout=5)
         self.addCleanup(server.shutdown)
 
+        steps = self.workflow["jobs"]["verify"]["steps"]
+        acquisition = find_step(steps, "Acquire private registry packages with credentials")
+        tokenless_install = find_step(steps, "Install dependencies without credentials")
+        lifecycle = find_step(steps, "Run dependency lifecycle scripts without credentials")
         with tempfile.TemporaryDirectory(prefix="release-node-credential-boundary-") as temporary:
             root = Path(temporary)
-            registry = f"http://127.0.0.1:{server.server_port}/"
-            archive_url = registry + expected_path.lstrip("/")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            origin = f"http://127.0.0.1:{server.server_port}"
+            archive_url = origin + expected_path
             npmrc = root / "npmrc"
             npmrc.write_text(
-                f"registry={registry}\n"
                 f"//127.0.0.1:{server.server_port}/:_authToken=${{NODE_AUTH_TOKEN}}\n",
                 encoding="utf-8",
             )
-            (root / "package.json").write_text(
+            (workspace / "package.json").write_text(
                 json.dumps(
                     {
                         "name": PROJECT_NAME,
@@ -855,7 +977,7 @@ class ReleaseNodeCredentialBoundaryTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            (root / "package-lock.json").write_text(
+            (workspace / "package-lock.json").write_text(
                 json.dumps(
                     {
                         "name": PROJECT_NAME,
@@ -879,38 +1001,58 @@ class ReleaseNodeCredentialBoundaryTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+            script = workspace / ACQUISITION_CONTRACT / ACQUISITION_SCRIPT
+            script.parent.mkdir(parents=True)
+            shutil.copy2(ROOT / ACQUISITION_SCRIPT, script)
             marker = root / "postinstall-token.txt"
-            environment = {
+            job_environment = {
                 **os.environ,
-                "NODE_AUTH_TOKEN": PACKAGE_TOKEN,
+                "HOME": str(root),
+                "GITHUB_WORKSPACE": str(workspace),
+                "RUNNER_TEMP": str(runner_temp),
                 "NPM_CONFIG_USERCONFIG": str(npmrc),
                 "POSTINSTALL_MARKER": str(marker),
                 "NO_PROXY": "127.0.0.1,localhost",
                 "no_proxy": "127.0.0.1,localhost",
             }
-            install = subprocess.run(
-                ["npm", "ci", "--ignore-scripts", "--audit=false", "--fund=false"],
-                cwd=root,
-                env=environment,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            self.assertEqual(install.returncode, 0, install.stdout + install.stderr)
-            self.assertTrue((root / "node_modules" / "@verjson" / "credential-boundary-fixture").is_dir())
-            self.assertFalse(marker.exists(), "npm ci ran package lifecycle code during credentialed acquisition")
-            self.assertIn(f"Bearer {PACKAGE_TOKEN}", authorizations)
 
-            credentialless_environment = {**environment, "NODE_AUTH_TOKEN": ""}
-            rebuild = subprocess.run(
-                ["npm", "rebuild"],
-                cwd=root,
-                env=credentialless_environment,
-                capture_output=True,
-                text=True,
-                timeout=60,
+            def run_step(step, overrides):
+                environment = dict(job_environment)
+                for key, value in (step.get("env") or {}).items():
+                    environment[key] = str(value).replace("${{ runner.temp }}", str(runner_temp))
+                environment.update(overrides)
+                return subprocess.run(
+                    ["/bin/bash", "-e", "-c", step["run"]],
+                    cwd=workspace,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+
+            acquired = run_step(
+                acquisition,
+                {"NODE_AUTH_TOKEN": PACKAGE_TOKEN, "PRIVATE_PACKAGE_REGISTRY": origin},
             )
-            self.assertEqual(rebuild.returncode, 0, rebuild.stdout + rebuild.stderr)
+            self.assertEqual(acquired.returncode, 0, acquired.stdout + acquired.stderr)
+            self.assertFalse((workspace / "node_modules").exists(), "credentialed acquisition built a tree")
+            self.assertFalse(marker.exists(), "package lifecycle code ran during credentialed acquisition")
+            self.assertTrue(authorizations)
+            self.assertTrue(all(value == f"Bearer {PACKAGE_TOKEN}" for value in authorizations))
+            credentialed_requests = len(authorizations)
+
+            installed = run_step(tokenless_install, {})
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            self.assertTrue((workspace / "node_modules" / "@verjson" / "credential-boundary-fixture").is_dir())
+            self.assertEqual(
+                len(authorizations), credentialed_requests,
+                "the tokenless install contacted the private registry",
+            )
+            self.assertFalse(marker.exists(), "the tokenless install ran lifecycle code before npm rebuild")
+
+            rebuilt = run_step(lifecycle, {})
+            self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout + rebuilt.stderr)
             self.assertTrue(marker.exists(), "npm rebuild did not restore dependency lifecycle execution")
             self.assertEqual(marker.read_text(encoding="utf-8"), "")
 

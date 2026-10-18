@@ -243,22 +243,32 @@ else:
 
 
 # #465(1). A repository-scoped GITHUB_TOKEN cannot read a private GitHub
-# Packages package owned by another repository, so an install wired to it 401s
-# for every adopter with a private @verjson dependency.
+# Packages package owned by another repository, so acquisition wired to it 401s
+# for every adopter with a private @verjson dependency. ADR 0220 (2026-10-18):
+# the package token reaches only the contract's acquisition script, and
+# `npm ci` builds the tree from its cache with no credential, because
+# `npm ci --ignore-scripts` still hands the token to git dependency preparation.
+acquisitions = 0
 installs = 0
 for name, job in jobs.items():
     for step in steps_of(job):
         run = step.get("run") or ""
+        token = str((step.get("env") or {}).get("NODE_AUTH_TOKEN") or "")
+        if "scripts/npm-private-acquisition.sh" in run:
+            acquisitions += 1
+            if not token:
+                bad("the dependency acquisition step in `%s` passes no NODE_AUTH_TOKEN" % name)
+            elif GITHUB_TOKEN.search(token):
+                bad("the dependency acquisition step in `%s` uses GITHUB_TOKEN, which "
+                    "cannot read a private @verjson package owned by another "
+                    "repository (#465)" % name)
         if not re.search(r"\bnpm ci\b", run):
             continue
         installs += 1
-        token = str((step.get("env") or {}).get("NODE_AUTH_TOKEN") or "")
-        if not token:
-            bad("the `npm ci` step in `%s` passes no NODE_AUTH_TOKEN" % name)
-        elif GITHUB_TOKEN.search(token):
-            bad("the `npm ci` step in `%s` installs with GITHUB_TOKEN, which "
-                "cannot read a private @verjson package owned by another "
-                "repository (#465)" % name)
+        if token:
+            bad("the `npm ci` step in `%s` builds the dependency tree with a credential" % name)
+if acquisitions != 1:
+    bad("expected one dependency acquisition step in `verify`, found %d" % acquisitions)
 if installs != 1:
     bad("expected one install step in `verify`, found %d" % installs)
 
@@ -378,7 +388,7 @@ for job_name, job in jobs.items():
         token = str((step.get("env") or {}).get("NODE_AUTH_TOKEN") or "")
         run = step.get("run") or ""
         if token == private_token and not (
-            re.search(r"\bnpm ci\b", run)
+            "scripts/npm-private-acquisition.sh" in run
             or step.get("name") == "Run the release verification suite"
         ):
             bad("an unrelated step in `%s` receives the private-package token "
@@ -517,7 +527,7 @@ expect_shape_rejection "snapshot without restart condition (#588)" drop_snapshot
 expect_shape_rejection "publish skipped after a reused snapshot (#588)" drop_publish_restart_condition
 expect_shape_rejection "verify without snapshot state output (#588)" drop_snapshot_state_output
 expect_shape_rejection "resumed verification without the tagged snapshot checkout (#591)" drop_resume_snapshot_checkout
-expect_shape_rejection "npm ci installing with GITHUB_TOKEN (#465)" install_with_github_token
+expect_shape_rejection "dependency acquisition with GITHUB_TOKEN (#465)" install_with_github_token
 expect_shape_rejection "snapshot without an explicit runner (#465)" drop_explicit_runner
 expect_shape_rejection "snapshot and publish on different pools (#465)" diverge_runner_pool
 expect_shape_rejection "a push: trigger that derives a release from a merge" add_push_trigger

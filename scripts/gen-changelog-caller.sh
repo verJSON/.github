@@ -807,6 +807,58 @@ release_plan_step=$(cat <<'EOF'
 EOF
 )
 
+# The verify job's dependency installation, one emitter for every release mode.
+# The package token reaches only `npm cache add` for the exact locked GitHub
+# Packages downloads, through the contract's scripts/npm-private-acquisition.sh,
+# which node-release.yml runs too. `npm ci --ignore-scripts` is not a credential
+# boundary: npm 10 runs `prepare` for linked and directory dependencies, and npm
+# 10 and 11 prepare a git dependency through a child `npm install` that inherits
+# the token and reads the dependency's own .npmrc (ADR 0220, 2026-10-18).
+emit_verify_dependency_steps() {
+  local condition="$1"
+  cat <<EOF
+      # The acquisition contract is checked out after any resumed-snapshot
+      # checkout has cleaned the workspace, and removed before any other step.
+      - name: Check out the canonical dependency acquisition contract
+        if: ${condition}
+        uses: ${release_checkout}
+        with:
+          repository: verJSON/.github
+          ref: ${ref}
+          path: .verjson-npm-acquisition-contract
+          persist-credentials: false
+      - name: Acquire private registry packages with credentials
+        if: ${condition}
+        run: |
+          workspace_root="\$(git rev-parse --show-toplevel)"
+          if [ -e "\$workspace_root/.npmrc" ] || [ -L "\$workspace_root/.npmrc" ]; then
+            echo "::error::repository-controlled .npmrc is not allowed during credentialed release installation"
+            exit 1
+          fi
+          bash .verjson-npm-acquisition-contract/scripts/npm-private-acquisition.sh
+          rm -rf .verjson-npm-acquisition-contract
+        env:
+          # NOT GITHUB_TOKEN (#465). A repository-scoped GITHUB_TOKEN cannot read
+          # a private GitHub Packages package owned by a DIFFERENT repository, so
+          # an adopter with a private @verjson devDependency 401s here. Canonical
+          # node-ci.yml states the same requirement for the same reason.
+          NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}
+          PRIVATE_PACKAGE_REGISTRY: https://npm.pkg.github.com
+          npm_config_cache: \${{ runner.temp }}/verjson-npm-cache
+      - name: Install dependencies without credentials
+        if: ${condition}
+        run: npm ci --ignore-scripts --prefer-offline
+        env:
+          NODE_AUTH_TOKEN: ''
+          npm_config_cache: \${{ runner.temp }}/verjson-npm-cache
+      - name: Run dependency lifecycle scripts without credentials
+        if: ${condition}
+        run: npm rebuild
+        env:
+          NODE_AUTH_TOKEN: ''
+EOF
+}
+
 emit_release_node() {
   local generation_command="release-node ${ref}"
   local package_dirs_json="$selected_package_dirs_json"
@@ -1123,27 +1175,7 @@ ${release_plan_step}
               exit 1
             fi
           done
-      - name: Install dependencies
-        if: steps.release-version.outputs.selected == 'true'
-        run: |
-          workspace_root="\$(git rev-parse --show-toplevel)"
-          if [ -e "\$workspace_root/.npmrc" ] || [ -L "\$workspace_root/.npmrc" ]; then
-            echo "::error::repository-controlled .npmrc is not allowed during credentialed release installation"
-            exit 1
-          fi
-          npm ci --ignore-scripts
-        env:
-          # NOT GITHUB_TOKEN (#465). A repository-scoped GITHUB_TOKEN cannot read
-          # a private GitHub Packages package owned by a DIFFERENT repository, so
-          # an adopter with a private @verjson devDependency 401s here. Canonical
-          # node-ci.yml states the same requirement for the same reason. Lifecycle
-          # scripts wait until this step-scoped package credential is gone.
-          NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}
-      - name: Run dependency lifecycle scripts without credentials
-        if: steps.release-version.outputs.selected == 'true'
-        run: npm rebuild
-        env:
-          NODE_AUTH_TOKEN: ''
+$(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'")
       - name: Prepare release package metadata
         if: steps.release-version.outputs.selected == 'true'
         env:
@@ -1451,21 +1483,49 @@ ${build_runners_yaml%$'\n'}
           }
           for (const name of approved) if (!found.has(name)) throw new Error('approved internal dependency absent from lock: ' + name);
           NODE
-      - name: Acquire dependencies without lifecycle execution
+      # The token reaches only \`npm cache add\` for the exact locked GitHub
+      # Packages downloads (ADR 0220, 2026-10-18): \`npm ci --ignore-scripts\`
+      # still prepares git dependencies through a child \`npm install\` that
+      # inherits the token and reads the dependency's own .npmrc. The tree is
+      # then installed from that cache by a step that holds no credential.
+      - name: Check out the canonical dependency acquisition contract
+        uses: ${release_checkout}
+        with:
+          repository: verJSON/.github
+          ref: ${ref}
+          path: .verjson-npm-acquisition-contract
+          persist-credentials: false
+      - name: Acquire private registry packages with credentials
         shell: bash
         env:
           NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}
+          PRIVATE_PACKAGE_REGISTRY: https://npm.pkg.github.com
           NPM_CONFIG_GLOBALCONFIG: \${{ runner.temp }}/release-empty-global.npmrc
           NPM_CONFIG_USERCONFIG: \${{ runner.temp }}/release-acquisition.npmrc
+          npm_config_cache: \${{ runner.temp }}/verjson-npm-cache
         run: |
           set -euo pipefail
           umask 077
           [ -n "\$NODE_AUTH_TOKEN" ] || { echo "::error::private release acquisition requires NODE_AUTH_TOKEN"; exit 1; }
           : > "\$NPM_CONFIG_GLOBALCONFIG"
-          printf '%s\n' 'registry=https://registry.npmjs.org/' '@verjson:registry=https://npm.pkg.github.com/' '//npm.pkg.github.com/:_authToken=\${NODE_AUTH_TOKEN}' > "\$NPM_CONFIG_USERCONFIG"
-          npm ci --ignore-scripts --audit=false --fund=false
+          printf '%s\n' 'registry=https://registry.npmjs.org/' '//npm.pkg.github.com/:_authToken=\${NODE_AUTH_TOKEN}' > "\$NPM_CONFIG_USERCONFIG"
+          bash .verjson-npm-acquisition-contract/scripts/npm-private-acquisition.sh
+          rm -rf .verjson-npm-acquisition-contract
+          rm -f "\$NPM_CONFIG_USERCONFIG"
+      # The @verjson scope stays mapped to GitHub Packages so an unlocked
+      # internal package fails closed instead of resolving from the public registry.
+      - name: Install dependencies without lifecycle execution or credentials
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ''
+          NPM_CONFIG_GLOBALCONFIG: \${{ runner.temp }}/release-empty-global.npmrc
+          NPM_CONFIG_USERCONFIG: \${{ runner.temp }}/release-install.npmrc
+          npm_config_cache: \${{ runner.temp }}/verjson-npm-cache
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'registry=https://registry.npmjs.org/' '@verjson:registry=https://npm.pkg.github.com/' > "\$NPM_CONFIG_USERCONFIG"
+          npm ci --ignore-scripts --prefer-offline --audit=false --fund=false
           [ -d node_modules ] || { echo "::error::npm produced no dependency tree"; exit 1; }
-          if grep -R -a -F -q -- "\$NODE_AUTH_TOKEN" node_modules; then echo "::error::dependency tree contains the acquisition credential"; exit 1; fi
           [ "\$(du -sk node_modules | awk '{print \$1}')" -le 2097152 ] || { echo "::error::dependency transfer exceeds 2 GiB"; exit 1; }
           rm -f "\$NPM_CONFIG_USERCONFIG" "\$NPM_CONFIG_GLOBALCONFIG"
       - name: Save exact-attempt credentialless dependencies
@@ -1476,7 +1536,7 @@ ${build_runners_yaml%$'\n'}
       - name: Remove acquisition state
         if: always()
         shell: bash
-        run: rm -rf node_modules "\$RUNNER_TEMP/release-acquisition.npmrc" "\$RUNNER_TEMP/release-empty-global.npmrc"
+        run: rm -rf node_modules .verjson-npm-acquisition-contract "\$RUNNER_TEMP/release-acquisition.npmrc" "\$RUNNER_TEMP/release-install.npmrc" "\$RUNNER_TEMP/release-empty-global.npmrc" "\$RUNNER_TEMP/verjson-npm-cache"
 
 EOF
 )"
@@ -1761,26 +1821,7 @@ ${required_lane_validation_step}
               output.write("path=" + path + chr(10))
               output.write("cache=" + cache + chr(10))
           PY
-      - name: Install dependencies
-        if: steps.release-version.outputs.selected == 'true'
-        run: |
-          workspace_root="\$(git rev-parse --show-toplevel)"
-          if [ -e "\$workspace_root/.npmrc" ] || [ -L "\$workspace_root/.npmrc" ]; then
-            echo "::error::repository-controlled .npmrc is not allowed during credentialed release installation"
-            exit 1
-          fi
-          npm ci --ignore-scripts
-        env:
-          # NOT GITHUB_TOKEN (#465). A repository-scoped GITHUB_TOKEN cannot read
-          # a private GitHub Packages package owned by a DIFFERENT repository, so
-          # an adopter with a private @verjson devDependency 401s here. Canonical
-          # node-ci.yml states the same requirement for the same reason.
-          NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}
-      - name: Run dependency lifecycle scripts without credentials
-        if: steps.release-version.outputs.selected == 'true'
-        run: npm rebuild
-        env:
-          NODE_AUTH_TOKEN: ''
+$(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'")
       - name: Prepare release package metadata
         if: steps.release-version.outputs.selected == 'true'
         env:
@@ -2352,26 +2393,7 @@ ${release_plan_step}
               output.write("path=" + path + chr(10))
               output.write("cache=" + cache + chr(10))
           PY
-      - name: Install dependencies
-        if: steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''
-        run: |
-          workspace_root="\$(git rev-parse --show-toplevel)"
-          if [ -e "\$workspace_root/.npmrc" ] || [ -L "\$workspace_root/.npmrc" ]; then
-            echo "::error::repository-controlled .npmrc is not allowed during credentialed release installation"
-            exit 1
-          fi
-          npm ci --ignore-scripts
-        env:
-          # NOT GITHUB_TOKEN (#465). A repository-scoped GITHUB_TOKEN cannot read
-          # a private GitHub Packages package owned by a DIFFERENT repository, so
-          # an adopter with a private @verjson devDependency 401s here. Canonical
-          # node-ci.yml states the same requirement for the same reason.
-          NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}
-      - name: Run dependency lifecycle scripts without credentials
-        if: steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''
-        run: npm rebuild
-        env:
-          NODE_AUTH_TOKEN: ''
+$(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''")
       - name: Prepare release package metadata
         if: steps.release-version.outputs.selected == 'true'
         env:
@@ -4055,9 +4077,9 @@ def context_match_lines(pattern, start, end):
     return matched_lines
 
 
-def named_step(name):
+def named_step(name, job_name=None):
     matches = []
-    for step in workflow_step_blocks():
+    for step in workflow_step_blocks(job_name):
         fields = step_mapping_entries(step)
         if fields is not None and yaml_scalar_value(fields.get("name", "")) == name:
             matches.append(step)
@@ -4307,28 +4329,62 @@ if UNSUPPORTED_STEP_COLLECTIONS:
 
 private_acquisition_steps = list(workflow_step_blocks("acquire-private-dependencies"))
 expected_private_acquisition_env = {}
+expected_private_install_env = {}
 if private_acquisition_steps:
-    acquisition_steps = [
-        step for step in private_acquisition_steps
-        if (fields := step_mapping_entries(step)) is not None
-        and yaml_scalar_value(fields.get("name", ""))
-        == "Acquire dependencies without lifecycle execution"
-    ]
+    def private_acquisition_steps_named(name):
+        return [
+            step for step in private_acquisition_steps
+            if (fields := step_mapping_entries(step)) is not None
+            and yaml_scalar_value(fields.get("name", "")) == name
+        ]
+    acquisition_steps = private_acquisition_steps_named(
+        "Acquire private registry packages with credentials"
+    )
+    install_steps = private_acquisition_steps_named(
+        "Install dependencies without lifecycle execution or credentials"
+    )
     expected_acquisition_env = {
         "NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}",
+        "PRIVATE_PACKAGE_REGISTRY": "https://npm.pkg.github.com",
         "NPM_CONFIG_GLOBALCONFIG": "${{ runner.temp }}/release-empty-global.npmrc",
         "NPM_CONFIG_USERCONFIG": "${{ runner.temp }}/release-acquisition.npmrc",
+        "npm_config_cache": "${{ runner.temp }}/verjson-npm-cache",
+    }
+    expected_install_env = {
+        "NODE_AUTH_TOKEN": "''",
+        "NPM_CONFIG_GLOBALCONFIG": "${{ runner.temp }}/release-empty-global.npmrc",
+        "NPM_CONFIG_USERCONFIG": "${{ runner.temp }}/release-install.npmrc",
+        "npm_config_cache": "${{ runner.temp }}/verjson-npm-cache",
     }
     if (
         len(acquisition_steps) != 1
         or step_mapping_values(acquisition_steps[0], "env")
         != expected_acquisition_env
+        or len(install_steps) != 1
+        or step_mapping_values(install_steps[0], "env")
+        != expected_install_env
     ):
         problems.append(
             "does not allowlist the private dependency acquisition environment (#1712)"
         )
     else:
         expected_private_acquisition_env = expected_acquisition_env
+        expected_private_install_env = expected_install_env
+    private_contract_checkouts = private_acquisition_steps_named(
+        "Check out the canonical dependency acquisition contract"
+    )
+    if (
+        len(private_contract_checkouts) != 1
+        or step_mapping_values(private_contract_checkouts[0], "with") != {
+            "repository": "verJSON/.github",
+            "ref": os.environ.get("CONTRACT_REF", ""),
+            "path": ".verjson-npm-acquisition-contract",
+            "persist-credentials": "false",
+        }
+    ):
+        problems.append(
+            "does not check out the dependency acquisition contract at its pinned ref (#1712)"
+        )
 
 release_state_step = named_step("Resolve restart-safe release state")
 if release_state_step is None or not any(
@@ -4353,6 +4409,7 @@ elif any(
         (key in EXPECTED_RELEASE_STATE_ENV)
         + (key in EXPECTED_RELEASE_VERIFICATION_ENV)
         + (key in expected_private_acquisition_env)
+        + (key in expected_private_install_env)
     )
     for key in CREDENTIAL_PROCESS_ENV_KEYS
 ):
@@ -4463,10 +4520,7 @@ else:
         is_package_acquisition = (
             line.strip() == "NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}"
             and any(
-                name in (
-                    "- name: Install dependencies",
-                    "- name: Acquire dependencies without lifecycle execution",
-                )
+                name == "- name: Acquire private registry packages with credentials"
                 for name in step_names
             )
         )
@@ -4541,7 +4595,7 @@ if acquisition_job_start is not None:
         ]
         is_package_acquisition = (
             line.strip() == "NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}"
-            and "- name: Acquire dependencies without lifecycle execution" in step_names
+            and "- name: Acquire private registry packages with credentials" in step_names
         )
         if not is_package_acquisition:
             problems.append(
@@ -4556,15 +4610,36 @@ if verify_job_start is not None and permission_values(
 ) != {"contents": "read"}:
     problems.append("requires verify-job permissions to be exactly contents: read (#1712)")
 
-install_step = named_step("Install dependencies")
-install_fields = step_mapping_entries(install_step)
 expected_install_condition = "steps.release-version.outputs.selected == 'true'"
 if release_mode == "release-snapshot":
     expected_install_condition += " && hashFiles('package.json') != ''"
+# The token reaches only the shared acquisition script, which npm cache adds
+# the exact locked private downloads; the tree installs without it (ADR 0220).
+acquisition_checkout_step = named_step("Check out the canonical dependency acquisition contract", "verify")
+acquisition_checkout_fields = step_mapping_entries(acquisition_checkout_step)
+if (
+    acquisition_checkout_fields is None
+    or set(acquisition_checkout_fields) != {"name", "if", "uses", "with"}
+    or yaml_scalar_value(acquisition_checkout_fields.get("if", ""))
+    != expected_install_condition
+    or yaml_scalar_value(acquisition_checkout_fields.get("uses", "")) != RELEASE_CHECKOUT
+    or step_mapping_values(acquisition_checkout_step, "with") != {
+        "repository": "verJSON/.github",
+        "ref": os.environ.get("CONTRACT_REF", ""),
+        "path": ".verjson-npm-acquisition-contract",
+        "persist-credentials": "false",
+    }
+):
+    problems.append(
+        "does not check out the dependency acquisition contract at its pinned ref (#1712)"
+    )
+install_step = named_step("Acquire private registry packages with credentials", "verify")
+install_fields = step_mapping_entries(install_step)
 if (
     install_fields is None
     or set(install_fields) != {"name", "if", "run", "env"}
-    or yaml_scalar_value(install_fields.get("name", "")) != "Install dependencies"
+    or yaml_scalar_value(install_fields.get("name", ""))
+    != "Acquire private registry packages with credentials"
     or yaml_scalar_value(install_fields.get("if", ""))
     != expected_install_condition
     or install_fields.get("env") != ""
@@ -4578,20 +4653,40 @@ expected_install_run = "\n".join((
     '  echo "::error::repository-controlled .npmrc is not allowed during credentialed release installation"',
     "  exit 1",
     "fi",
-    "npm ci --ignore-scripts",
+    "bash .verjson-npm-acquisition-contract/scripts/npm-private-acquisition.sh",
+    "rm -rf .verjson-npm-acquisition-contract",
 ))
 if run_body(install_step) != expected_install_run:
     problems.append(
         "does not reject repository-controlled npm configuration before credentialed install (#1717)"
     )
 if step_mapping_values(install_step, "env") != {
-    "NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}"
+    "NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}",
+    "PRIVATE_PACKAGE_REGISTRY": "https://npm.pkg.github.com",
+    "npm_config_cache": "${{ runner.temp }}/verjson-npm-cache",
 }:
     problems.append(
         "does not allowlist the credentialed dependency installation environment (#1717)"
     )
+tokenless_install_step = named_step("Install dependencies without credentials")
+tokenless_install_fields = step_mapping_entries(tokenless_install_step)
+if (
+    tokenless_install_fields is None
+    or set(tokenless_install_fields) != {"name", "if", "run", "env"}
+    or yaml_scalar_value(tokenless_install_fields.get("if", ""))
+    != expected_install_condition
+    or run_body(tokenless_install_step) != "npm ci --ignore-scripts --prefer-offline"
+    or step_mapping_values(tokenless_install_step, "env") != {
+        "NODE_AUTH_TOKEN": "''",
+        "npm_config_cache": "${{ runner.temp }}/verjson-npm-cache",
+    }
+):
+    problems.append(
+        "does not install the dependency tree from the acquisition cache without credentials (#1712)"
+    )
 
 for name in (
+    "Install dependencies without credentials",
     "Run dependency lifecycle scripts without credentials",
     "Prepare release package metadata",
     "Stamp the dispatched package versions",
@@ -4644,7 +4739,9 @@ if release_mode == "release-node":
         ("Refuse a package this release can never publish", "")
     )
 expected_verification_step_identities.extend((
-    ("Install dependencies", ""),
+    ("Check out the canonical dependency acquisition contract", RELEASE_CHECKOUT),
+    ("Acquire private registry packages with credentials", ""),
+    ("Install dependencies without credentials", ""),
     ("Run dependency lifecycle scripts without credentials", ""),
     ("Prepare release package metadata", ""),
     ("Stamp the dispatched package versions", ""),
@@ -4692,7 +4789,7 @@ for step in verification_job_steps:
     if fields is None:
         continue
     step_name = yaml_scalar_value(fields.get("name", "")) or ""
-    if step_name == "Install dependencies":
+    if step_name == "Check out the canonical dependency acquisition contract":
         break
     if step_name == "Validate required OS-scoped build lanes":
         # The generated contract pins this step to the dispatch options and
@@ -4949,35 +5046,34 @@ for index, line in enumerate(lines):
         for entry in step
         if entry.strip().startswith("- name: ")
     ]
-    is_acquisition = any(
-        name in (
-            "- name: Install dependencies",
-            "- name: Acquire dependencies without lifecycle execution",
-        )
-        for name in step_names
+    is_acquisition = (
+        "- name: Acquire private registry packages with credentials" in step_names
     )
     expected_run = None
-    if "- name: Install dependencies" in step_names:
+    in_private_acquisition_job = (
+        acquisition_job_start is not None
+        and acquisition_job_start < index < acquisition_job_end
+    )
+    if is_acquisition and not in_private_acquisition_job:
         expected_run = "\n".join((
             'workspace_root="$(git rev-parse --show-toplevel)"',
             'if [ -e "$workspace_root/.npmrc" ] || [ -L "$workspace_root/.npmrc" ]; then',
             '  echo "::error::repository-controlled .npmrc is not allowed during credentialed release installation"',
             "  exit 1",
             "fi",
-            "npm ci --ignore-scripts",
+            "bash .verjson-npm-acquisition-contract/scripts/npm-private-acquisition.sh",
+            "rm -rf .verjson-npm-acquisition-contract",
         ))
-    elif "- name: Acquire dependencies without lifecycle execution" in step_names:
+    elif is_acquisition:
         expected_run = "\n".join((
             "set -euo pipefail",
             "umask 077",
             '[ -n "$NODE_AUTH_TOKEN" ] || { echo "::error::private release acquisition requires NODE_AUTH_TOKEN"; exit 1; }',
             ': > "$NPM_CONFIG_GLOBALCONFIG"',
-            r'''printf '%s\n' 'registry=https://registry.npmjs.org/' '@verjson:registry=https://npm.pkg.github.com/' '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' > "$NPM_CONFIG_USERCONFIG"''',
-            "npm ci --ignore-scripts --audit=false --fund=false",
-            '[ -d node_modules ] || { echo "::error::npm produced no dependency tree"; exit 1; }',
-            'if grep -R -a -F -q -- "$NODE_AUTH_TOKEN" node_modules; then echo "::error::dependency tree contains the acquisition credential"; exit 1; fi',
-            r"""[ "$(du -sk node_modules | awk '{print $1}')" -le 2097152 ] || { echo "::error::dependency transfer exceeds 2 GiB"; exit 1; }""",
-            'rm -f "$NPM_CONFIG_USERCONFIG" "$NPM_CONFIG_GLOBALCONFIG"',
+            r'''printf '%s\n' 'registry=https://registry.npmjs.org/' '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' > "$NPM_CONFIG_USERCONFIG"''',
+            "bash .verjson-npm-acquisition-contract/scripts/npm-private-acquisition.sh",
+            "rm -rf .verjson-npm-acquisition-contract",
+            'rm -f "$NPM_CONFIG_USERCONFIG"',
         ))
     if not is_acquisition or run_body(step) != expected_run:
         problems.append(
@@ -5452,7 +5548,7 @@ PY
         || fail "$release_workflow private acquisition must have exactly contents-read and packages-read"
       grep -qF 'ref: ${{ needs.verify.outputs.version }}' <<<"$acquisition_job" \
         && grep -qF 'persist-credentials: false' <<<"$acquisition_job" \
-        && grep -qF 'npm ci --ignore-scripts --audit=false --fund=false' <<<"$acquisition_job" \
+        && grep -qF 'npm ci --ignore-scripts --prefer-offline --audit=false --fund=false' <<<"$acquisition_job" \
         && grep -qF 'NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}' <<<"$acquisition_job" \
         && grep -qF "uses: $EXPECTED_RELEASE_CACHE_SAVE" <<<"$acquisition_job" \
         || fail "$release_workflow private acquisition weakened its credentialless handoff"

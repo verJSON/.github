@@ -25,9 +25,10 @@ for wf in "$ci" "$release" "$actions_ci"; do
     expected_checkouts=3
     expected_setups=2
   elif [ "$wf" = "$release" ]; then
-    # Prepare checks out the release; publication checks out the release and
-    # contract; retention checks out its contract.
-    expected_checkouts=4
+    # Prepare checks out the release and its dependency acquisition contract
+    # (ADR 0220); publication checks out the release and contract; retention
+    # checks out its contract.
+    expected_checkouts=5
     expected_setups=2
   elif [ "$wf" = "$actions_ci" ]; then
     # shell-test-groups, adr-number-collision (#983), hosted compatibility

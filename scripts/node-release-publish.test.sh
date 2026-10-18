@@ -67,10 +67,21 @@ steps = release["steps"]
 assert "semantic-release" not in raw
 
 install = next(step for step in prepare_steps if step.get("name") == "Acquire private registry packages with credentials")
-assert "npm ci" not in (install.get("run") or "")
-assert 'npm cache add "$resolved"' in (install.get("run") or "")
-assert "project_npmrc=\"$GITHUB_WORKSPACE/.npmrc\"" in (install.get("run") or "")
-assert "trap finish_acquisition EXIT" in (install.get("run") or "")
+# The step runs the contract's shared acquisition (ADR 0220, 2026-10-18).
+assert install.get("run") == (
+    "bash .verjson-npm-acquisition-contract/scripts/npm-private-acquisition.sh\n"
+    "rm -rf .verjson-npm-acquisition-contract\n"
+)
+acquisition = (
+    pathlib.Path(sys.argv[1]).resolve().parents[2] / "scripts/npm-private-acquisition.sh"
+).read_text(encoding="utf-8")
+acquisition_code = "\n".join(
+    line for line in acquisition.splitlines() if not line.lstrip().startswith("#")
+)
+assert "npm ci" not in acquisition_code
+assert 'npm cache add "$resolved"' in acquisition
+assert "project_npmrc=\"$GITHUB_WORKSPACE/.npmrc\"" in acquisition
+assert "trap finish_acquisition EXIT" in acquisition
 assert install.get("env") == {
     "NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}",
     "PRIVATE_PACKAGE_REGISTRY": "https://npm.pkg.github.com",

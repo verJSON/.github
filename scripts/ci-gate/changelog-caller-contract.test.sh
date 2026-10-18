@@ -2416,7 +2416,7 @@ import sys
 
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
-command = "          npm ci --ignore-scripts\n"
+command = "          bash .verjson-npm-acquisition-contract/scripts/npm-private-acquisition.sh\n"
 if text.count(command) != 1:
     raise SystemExit("credentialed install command fixture no longer matches generated output")
 open(path, "w", encoding="utf-8").write(
@@ -2448,7 +2448,7 @@ import sys
 
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
-start = text.index("      - name: Install dependencies\n")
+start = text.index("      - name: Acquire private registry packages with credentials\n")
 condition = "        if: steps.release-version.outputs.selected == 'true'\n"
 position = text.find(condition, start)
 if position < 0:
@@ -3156,6 +3156,58 @@ text = text[:ref] + "main" + text[line_end:]
 open(path, "w", encoding="utf-8").write(text)
 PY
 }
+drift_acquisition_contract_checkout_ref() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+if text.count("- name: Check out the canonical dependency acquisition contract\n") != 1:
+    raise SystemExit("acquisition contract checkout fixture no longer matches generated output")
+step = text.index("- name: Check out the canonical dependency acquisition contract\n")
+ref = text.index("ref:", step)
+line_start = text.rfind("\n", 0, ref) + 1
+line_end = text.index("\n", ref)
+if not text[line_start:line_end].lstrip().startswith("ref:"):
+    raise SystemExit("acquisition contract checkout ref fixture no longer matches generated output")
+text = text[:ref] + "ref: main" + text[line_end:]
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+install_tokenless_tree_online() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+command = "        run: npm ci --ignore-scripts --prefer-offline\n"
+if text.count(command) != 1:
+    raise SystemExit("tokenless install command fixture no longer matches generated output")
+open(path, "w", encoding="utf-8").write(
+    text.replace(command, "        run: npm ci --ignore-scripts\n", 1)
+)
+PY
+}
+credential_tokenless_install() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+start = text.index("      - name: Install dependencies without credentials\n")
+needle = "          NODE_AUTH_TOKEN: ''\n"
+position = text.find(needle, start)
+end = text.find("      - name:", start + 1)
+if position < 0 or position > end:
+    raise SystemExit("tokenless install credential fixture no longer matches generated output")
+text = (
+    text[:position]
+    + "          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}\n"
+    + text[position + len(needle):]
+)
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
 inline_checkout_reference() {
   python3 - "$1/.github/workflows/release.yml" "$2" <<'PY'
 import re
@@ -3447,7 +3499,7 @@ import sys
 
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
-step = text.index("      - name: Install dependencies\n")
+step = text.index("      - name: Acquire private registry packages with credentials\n")
 needle = "        env:\n"
 environment = text.index(needle, step)
 text = text[:environment] + text[environment:].replace(
@@ -3612,6 +3664,30 @@ grep -qF 'does not check out the canonical selection contract at its pinned ref 
   "$tmproot/run.out" \
   && pass "the generated suite binds its canonical checkout to the contract ref" \
   || fail "a canonical selection checkout ref drift was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+# ADR 0220 (2026-10-18): the credentialed step runs the contract's shared
+# acquisition script, so its checkout must be the pinned contract commit and
+# the tree must install from the acquisition cache with no credential.
+expect_rejection "a dependency acquisition contract checkout on an unpinned branch (#1712)" \
+  drift_acquisition_contract_checkout_ref
+sync_last_rejection
+grep -qF 'does not check out the dependency acquisition contract at its pinned ref (#1712)' \
+  "$tmproot/run.out" \
+  && pass "the generated suite binds the dependency acquisition checkout to the contract ref" \
+  || fail "an acquisition contract checkout ref drift was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a tokenless dependency install that bypasses the acquisition cache (#1712)" \
+  install_tokenless_tree_online
+sync_last_rejection
+grep -qF 'does not install the dependency tree from the acquisition cache without credentials (#1712)' \
+  "$tmproot/run.out" \
+  && pass "the generated suite requires the tokenless install to read the acquisition cache" \
+  || fail "an online tokenless install was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a package credential on the tree-building install (#1712)" \
+  credential_tokenless_install
+sync_last_rejection
+grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' \
+  "$tmproot/run.out" \
+  && pass "the generated suite keeps the package credential off the tree-building install" \
+  || fail "a credentialed tree-building install was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "an escaped YAML explicit key setting inherited working-directory defaults (#1717)" \
   add_escaped_defaults_explicit_key
 sync_last_rejection
@@ -4400,7 +4476,8 @@ grep -qF 'acquire-private-dependencies:' <<<"$private_artifact_release" \
   && grep -qF 'permissions:' <<<"$private_artifact_release" \
   && grep -qF 'packages: read' <<<"$private_artifact_release" \
   && grep -qF 'timeout-minutes: 45' <<<"$private_artifact_release" \
-  && grep -qF 'npm ci --ignore-scripts --audit=false --fund=false' <<<"$private_artifact_release" \
+  && grep -qF 'npm ci --ignore-scripts --prefer-offline --audit=false --fund=false' <<<"$private_artifact_release" \
+  && grep -qF 'bash .verjson-npm-acquisition-contract/scripts/npm-private-acquisition.sh' <<<"$private_artifact_release" \
   && grep -qF 'fail-on-cache-miss: true' <<<"$private_artifact_release" \
   && grep -qF "APPROVED_INTERNAL_PACKAGES: '@verjson/ai,@verjson/ai-gguf'" <<<"$private_artifact_release" \
   && pass "release-artifact separates approved private acquisition from credentialless build hooks" \
@@ -4744,7 +4821,7 @@ SCHED_SCRIPT
 
 private_lifecycle_adopter="$tmproot/adopter-artifact-private-lifecycle"
 cp -a "$private_artifact_adopter" "$private_lifecycle_adopter"
-sed -i 's/npm ci --ignore-scripts --audit=false --fund=false/npm ci --audit=false --fund=false/' \
+sed -i 's/npm ci --ignore-scripts --prefer-offline --audit=false --fund=false/npm ci --prefer-offline --audit=false --fund=false/' \
   "$private_lifecycle_adopter/.github/workflows/release.yml"
 git -C "$private_lifecycle_adopter" commit -aqm 'execute lifecycle scripts beside package credential'
 schedule_adopter_script "$private_lifecycle_adopter" "$(cat <<'SCHED_SCRIPT'
@@ -4770,6 +4847,33 @@ else
   grep -qF 'another secret' "$ADOPTER_LOG" \
     && pass "emitted suite rejects additional acquisition secrets" \
     || fail "emitted suite rejected acquisition secret widening for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_contract_ref_adopter="$tmproot/adopter-artifact-private-contract-ref"
+cp -a "$private_artifact_adopter" "$private_contract_ref_adopter"
+python3 - "$private_contract_ref_adopter/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+job = text.index("  acquire-private-dependencies:\n")
+step = text.index("- name: Check out the canonical dependency acquisition contract\n", job)
+ref = text.index("ref:", step)
+line_end = text.index("\n", ref)
+if text.index("  build:\n", job) < ref:
+    raise SystemExit("private acquisition contract checkout fixture no longer matches generated output")
+open(path, "w", encoding="utf-8").write(text[:ref] + "ref: main" + text[line_end:])
+PY
+git -C "$private_contract_ref_adopter" commit -aqm 'run acquisition from an unpinned contract branch'
+schedule_adopter_script "$private_contract_ref_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted an unpinned private acquisition contract checkout"
+else
+  grep -qF 'does not check out the dependency acquisition contract at its pinned ref (#1712)' "$ADOPTER_LOG" \
+    && pass "emitted suite pins the private acquisition contract checkout" \
+    || fail "emitted suite rejected the private acquisition checkout drift for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
@@ -5099,10 +5203,10 @@ grep -qE '^  verify:$' <<<"$snapshot_release" \
 # guarded on package.json and a repository without one must verify through its
 # own scripts/release-verify.sh rather than falling back to npm test.
 snapshot_verify_job="$(awk '/^  verify:[[:space:]]*$/{seen=1} /^  snapshot:[[:space:]]*$/{seen=0} seen' <<<"$snapshot_release")"
-[ "$(grep -cF "&& hashFiles('package.json') != ''" <<<"$snapshot_verify_job")" -eq 4 ] \
+[ "$(grep -cF "&& hashFiles('package.json') != ''" <<<"$snapshot_verify_job")" -eq 6 ] \
   && grep -qF 'elif [ ! -f package.json ]; then' <<<"$snapshot_verify_job" \
   && grep -qF 'No package.json and no executable scripts/release-verify.sh' <<<"$snapshot_verify_job" \
-  && pass "release-snapshot guards setup-node, npm ci, lifecycle execution, and version stamping on package.json and fails closed without a verify hook (#1206)" \
+  && pass "release-snapshot guards setup-node, dependency acquisition and installation, lifecycle execution, and version stamping on package.json and fails closed without a verify hook (#1206)" \
   || fail "release-snapshot still assumes a Node project: a non-npm adopter would fail at npm ci or verify nothing"
 snapshot_publish_job="$(awk '/^  publish:[[:space:]]*$/{seen=1} seen' <<<"$snapshot_release")"
 sync_last_rejection
