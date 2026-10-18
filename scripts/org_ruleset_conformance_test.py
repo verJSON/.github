@@ -462,6 +462,9 @@ class OrgRulesetConformanceTest(unittest.TestCase):
             "other context": lambda d: status_parameters(d)["required_status_checks"][0].update(
                 context="ci"
             ),
+            "other App": lambda d: status_parameters(d)["required_status_checks"][0].update(
+                integration_id=2740
+            ),
             "unbound check": lambda d: status_parameters(d)["required_status_checks"][0].pop(
                 "integration_id"
             ),
