@@ -387,6 +387,57 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                 self.assertEqual(1, result.returncode)
                 self.assertIn("required release authorization bypass is absent", result.stderr)
 
+    def cli_projects_required_workflow(self):
+        """The live image of ruleset 21830367 since the 2026-10-15 rotation (ADR 0212)."""
+        detail = ruleset(
+            21830367,
+            name="cli-projects-package-surface-required-workflow",
+            bypass_actors=[],
+            rules=[
+                {
+                    "type": "workflows",
+                    "parameters": {
+                        "do_not_enforce_on_create": False,
+                        "workflows": [{
+                            "repository_id": 1269388380,
+                            "path": ".github/workflows/cli-projects-package-surface-required.yml",
+                            "sha": "c78fcd4ef9ab83b6775ae2ede94ebce475b3943c",
+                            "ref": "refs/heads/main",
+                        }],
+                    },
+                },
+                {
+                    "type": "required_status_checks",
+                    "parameters": {
+                        "strict_required_status_checks_policy": True,
+                        "do_not_enforce_on_create": False,
+                        "required_status_checks": [
+                            {"context": "admission", "integration_id": 15368},
+                        ],
+                    },
+                },
+            ],
+        )
+        detail["conditions"] = {
+            "ref_name": {"exclude": [], "include": ["~DEFAULT_BRANCH"]},
+            "repository_id": {"repository_ids": [1277452690]},
+        }
+        return detail
+
+    def committed_policy_without_bypass_contracts(self):
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+        policy["bypass_actor_contracts"] = []
+        return json.dumps(policy)
+
+    def test_bypassless_cli_projects_workflow_with_its_strict_admission_check_passes(self):
+        result, _ = self.run_audit(
+            [[{"id": 21830367}]],
+            {21830367: self.cli_projects_required_workflow()},
+            raw_policy=self.committed_policy_without_bypass_contracts(),
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+
     def test_wrong_actor_type_id_or_mode_does_not_satisfy_policy(self):
         wrong_actors = [
             {"actor_type": "Team", "actor_id": 4583107, "bypass_mode": "always"},

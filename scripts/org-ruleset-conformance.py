@@ -425,9 +425,32 @@ def is_exact_bypassless_required_workflow(ruleset: dict, exceptions: list[dict])
         return False
     if ruleset["target"] != "branch" or ruleset["enforcement"] != "active":
         return False
-    if len(ruleset["rules"]) != 1 or ruleset["rules"][0].get("type") != "workflows":
+    rules_by_type = {}
+    for rule in ruleset["rules"]:
+        rules_by_type.setdefault(rule["type"], []).append(rule)
+    declared_check = expected["required_status_check"]
+    expected_types = {"workflows"}
+    if declared_check is not None:
+        expected_types.add("required_status_checks")
+    if set(rules_by_type) != expected_types or any(
+        len(rules) != 1 for rules in rules_by_type.values()
+    ):
         return False
-    parameters = ruleset["rules"][0].get("parameters")
+    if declared_check is not None and rules_by_type["required_status_checks"][0] != {
+        "type": "required_status_checks",
+        "parameters": {
+            "strict_required_status_checks_policy": declared_check["strict"],
+            "do_not_enforce_on_create": False,
+            "required_status_checks": [
+                {
+                    "context": declared_check["context"],
+                    "integration_id": declared_check["integration_id"],
+                }
+            ],
+        },
+    }:
+        return False
+    parameters = rules_by_type["workflows"][0].get("parameters")
     if not isinstance(parameters, dict) or set(parameters) != {
         "do_not_enforce_on_create", "workflows",
     } or parameters["do_not_enforce_on_create"] is not False:
