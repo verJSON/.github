@@ -85,6 +85,34 @@ def checkout_index():
     return names.index('Checkout PR head')
 
 
+class ReviewCheckoutCredentialTest(unittest.TestCase):
+    def test_head_checkout_does_not_persist_the_job_token(self):
+        checkout = GATE_STEPS[checkout_index()]
+        self.assertIs(checkout['with'].get('persist-credentials'), False)
+
+    def test_every_later_fetch_authenticates_from_its_own_step_environment(self):
+        fetching = [step for step in GATE_STEPS[checkout_index() + 1:] if 'git fetch' in step.get('run', '')]
+        self.assertEqual(sorted(step.get('id') for step in fetching), ['prep', 'rereview'])
+        for step in fetching:
+            with self.subTest(step=step['id']), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                subprocess.run(['git', 'init', '-q', str(home / 'repo')], check=True)
+                env = {'PATH': os.defpath, 'HOME': str(home), 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_TERMINAL_PROMPT': '0'}
+                for name, value in step.get('env', {}).items():
+                    if name == 'GH_TOKEN' or name.startswith('GIT_CONFIG_'):
+                        env[name] = (str(value).replace('${{ github.server_url }}', 'https://github.com')
+                                     .replace('${{ github.token }}', 'mock-job-token'))
+                request = 'protocol=https\nhost=github.com\npath=Verjson/target.git\n\n'
+                fill = subprocess.run(['git', 'credential', 'fill'], input=request, env=env,
+                                      cwd=home / 'repo', text=True, capture_output=True)
+                self.assertEqual(fill.returncode, 0, fill.stderr)
+                self.assertIn('password=mock-job-token\n', fill.stdout)
+                subprocess.run(['git', 'credential', 'approve'], input=fill.stdout, env=env,
+                               cwd=home / 'repo', text=True, capture_output=True)
+                written = [path for path in home.rglob('*') if path.is_file() and b'mock-job-token' in path.read_bytes()]
+                self.assertEqual(written, [])
+
+
 class RemovalPrecedesReviewTest(unittest.TestCase):
     def test_removal_runs_immediately_after_the_head_checkout_under_its_condition(self):
         checkout = checkout_index()

@@ -983,6 +983,7 @@ jobs:
           ref: ${{ needs.preflight.outputs.head_sha }}
           token: ${{ github.token }}
           fetch-depth: 2
+          persist-credentials: false
 
       # The head is pull-request content. The Claude CLI acts on agent configuration
       # in its working directory (hooks, environment, credential helpers, MCP servers)
@@ -1013,6 +1014,13 @@ jobs:
         if: needs.preflight.outputs.lane == 'ai'
         env:
           GH_TOKEN: ${{ github.token }}
+          # The review checkout persists no credential (ADR 0237); git reads this
+          # step's token through a helper that only answers `get`.
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
+          GIT_CONFIG_VALUE_1: '!f() { test "$1" = get || return 0; echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
           EXPLICIT_REREVIEW: ${{ inputs.explicit_rereview }}
         run: |
           # GitHub runs `run:` under `bash -e`, and `set -uo pipefail` does NOT
@@ -1241,6 +1249,13 @@ jobs:
         if: needs.preflight.outputs.lane == 'ai' && steps.rereview.outputs.skip_model != 'true' && steps.reserve_1.outputs.allowed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          # The review checkout persists no credential (ADR 0237); git reads this
+          # step's token through a helper that only answers `get`.
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
+          GIT_CONFIG_VALUE_1: '!f() { test "$1" = get || return 0; echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
           DEPENDENCY_MAJOR: ${{ needs.preflight.outputs.dependency_major }}
         run: |
           set -euo pipefail
