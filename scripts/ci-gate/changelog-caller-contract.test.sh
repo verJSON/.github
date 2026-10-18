@@ -3202,6 +3202,13 @@ elif kind == "drop-npmrc-refusal":
 elif kind == "job-container":
     swap("    timeout-minutes: 45\n",
          "    timeout-minutes: 45\n    container: ghcr.io/attacker/node:24\n")
+elif kind == "ungated-job":
+    lines = job.split("\n")
+    gated = [i for i, line in enumerate(lines) if line.startswith("    if: always() && needs.verify.result")]
+    if len(gated) != 1:
+        raise SystemExit(f"private acquisition fixture for {kind} no longer matches generated output")
+    lines[gated[0]] = "    if: always()"
+    job = "\n".join(lines)
 elif kind == "drop-contract-path-guard":
     lines = job.split("\n")
     kept = [line for line in lines if ".verjson-npm-acquisition-contract is reserved" not in line]
@@ -5105,6 +5112,108 @@ else
   grep -qF 'does not match the approved private dependency acquisition job (#1712)' "$ADOPTER_LOG" \
     && pass "emitted suite rejects private acquisition without its reserved contract path refusal" \
     || fail "emitted suite rejected private acquisition without its reserved contract path refusal for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_ungated_job_adopter="$tmproot/adopter-artifact-private-ungated-job"
+cp -a "$private_artifact_adopter" "$private_acquisition_ungated_job_adopter"
+mutate_private_acquisition "$private_acquisition_ungated_job_adopter/.github/workflows/release.yml" ungated-job \
+  || fail "the ungated-job private acquisition fixture no longer matches generated output"
+git -C "$private_acquisition_ungated_job_adopter" commit -aqm 'run private acquisition without a verified selection'
+schedule_adopter_script "$private_acquisition_ungated_job_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a private acquisition job that runs without a verified selection"
+else
+  grep -qF 'configures unapproved private dependency acquisition job settings (#1712)' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects a private acquisition job that runs without a verified selection" \
+    || fail "emitted suite rejected the ungated acquisition job for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_lock_outside_node_modules_adopter="$tmproot/adopter-artifact-private-lock-outside-node-modules"
+cp -a "$private_artifact_adopter" "$private_acquisition_lock_outside_node_modules_adopter"
+python3 - "$private_acquisition_lock_outside_node_modules_adopter/package-lock.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+lock = json.load(open(path, encoding="utf-8"))
+lock["packages"]["vendor/x"] = {
+    "version": "1.0.0",
+    "resolved": "https://npm.pkg.github.com/download/@verjson/secret/1.0.0/hash",
+    "integrity": "sha512-" + "A" * 86 + "==",
+}
+json.dump(lock, open(path, "w", encoding="utf-8"))
+PY
+git -C "$private_acquisition_lock_outside_node_modules_adopter" add -A
+git -C "$private_acquisition_lock_outside_node_modules_adopter" commit -qm 'lock a GitHub Packages download outside node_modules'
+schedule_adopter_script "$private_acquisition_lock_outside_node_modules_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a GitHub Packages download outside node_modules"
+else
+  grep -qF 'repository lock differs from the generated private package authorization' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects a GitHub Packages download outside node_modules" \
+    || fail "emitted suite rejected a GitHub Packages download outside node_modules for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_lock_backslash_authority_adopter="$tmproot/adopter-artifact-private-lock-backslash-authority"
+cp -a "$private_artifact_adopter" "$private_acquisition_lock_backslash_authority_adopter"
+python3 - "$private_acquisition_lock_backslash_authority_adopter/package-lock.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+lock = json.load(open(path, encoding="utf-8"))
+lock["packages"]["node_modules/innocent"] = {
+    "version": "1.0.0",
+    "resolved": "https://npm.pkg.github.com\\@evil.example/download/@verjson/secret/1.0.0/hash",
+    "integrity": "sha512-" + "A" * 86 + "==",
+}
+json.dump(lock, open(path, "w", encoding="utf-8"))
+PY
+git -C "$private_acquisition_lock_backslash_authority_adopter" add -A
+git -C "$private_acquisition_lock_backslash_authority_adopter" commit -qm 'lock a backslash-authority GitHub Packages download'
+schedule_adopter_script "$private_acquisition_lock_backslash_authority_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a backslash-authority GitHub Packages download"
+else
+  grep -qF 'repository lock differs from the generated private package authorization' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects a backslash-authority GitHub Packages download" \
+    || fail "emitted suite rejected a backslash-authority GitHub Packages download for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_lock_shrinkwrap_adopter="$tmproot/adopter-artifact-private-lock-shrinkwrap"
+cp -a "$private_artifact_adopter" "$private_acquisition_lock_shrinkwrap_adopter"
+python3 - "$private_acquisition_lock_shrinkwrap_adopter/package-lock.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+lock = json.load(open(path, encoding="utf-8"))
+shrinkwrap = json.loads(json.dumps(lock))
+shrinkwrap["packages"]["node_modules/@verjson/secret"] = {
+    "version": "1.0.0",
+    "resolved": "https://npm.pkg.github.com/download/@verjson/secret/1.0.0/hash",
+    "integrity": "sha512-" + "A" * 86 + "==",
+}
+json.dump(shrinkwrap, open(path.replace("package-lock.json", "npm-shrinkwrap.json"), "w", encoding="utf-8"))
+json.dump(lock, open(path, "w", encoding="utf-8"))
+PY
+git -C "$private_acquisition_lock_shrinkwrap_adopter" add -A
+git -C "$private_acquisition_lock_shrinkwrap_adopter" commit -qm 'lock an npm-shrinkwrap.json beside the validated package-lock.json'
+schedule_adopter_script "$private_acquisition_lock_shrinkwrap_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted an npm-shrinkwrap.json beside the validated package-lock.json"
+else
+  grep -qF 'private acquisition cannot hold npm-shrinkwrap.json to the generated private package authorization' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects an npm-shrinkwrap.json beside the validated package-lock.json" \
+    || fail "emitted suite rejected an npm-shrinkwrap.json beside the validated package-lock.json for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"

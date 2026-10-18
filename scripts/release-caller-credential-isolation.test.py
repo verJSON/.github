@@ -419,72 +419,156 @@ def private_lock_validation_step(workflow):
     return next(step for step in steps if step.get("name") == "Validate the approved private dependency lock")
 
 
+FETCH_RECORDER = """#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  --version) echo 11.19.1 ;;
+  cache)
+    url="$3"
+    printf '%s\\n' "$url" >> "$FETCH_LOG"
+    content="archive $url"
+    digest="$(printf %s "$content" | sha512sum | cut -d' ' -f1)"
+    target="$npm_config_cache/_cacache/content-v2/sha512/${digest:0:2}/${digest:2:2}/${digest:4}"
+    mkdir -p "$(dirname "$target")"
+    printf %s "$content" > "$target" ;;
+  *) exit 97 ;;
+esac
+"""
+
+
+def private_download(name, *, host="https://npm.pkg.github.com"):
+    """A lock entry whose integrity matches the bytes FETCH_RECORDER caches for it."""
+    url = f"{host}/download/{name}/1.0.0/0123abcd"
+    return {"version": "1.0.0", "resolved": url, "integrity": integrity_of(f"archive {url}".encode())}
+
+
+def integrity_of(data):
+    return harness.integrity_of(data)
+
+
+def token_fetches(workspace, root):
+    """The URLs the real acquisition script fetches with the token for this tree."""
+    bin_dir = root / "fetch-bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "npm").write_text(FETCH_RECORDER)
+    (bin_dir / "npm").chmod(0o755)
+    runner_temp = workspace.parent / f"{workspace.name}-runner-temp"
+    runner_temp.mkdir(exist_ok=True)
+    log = workspace.parent / f"{workspace.name}-fetches.log"
+    result = subprocess.run(
+        ["bash", "-e", str(REPO_ROOT / "scripts/npm-private-acquisition.sh")],
+        cwd=workspace, text=True, capture_output=True,
+        env=os.environ | {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "GITHUB_WORKSPACE": str(workspace),
+            "RUNNER_TEMP": str(runner_temp),
+            "PRIVATE_PACKAGE_REGISTRY": CANONICAL_REGISTRY,
+            "npm_config_cache": str(runner_temp / "npm-cache"),
+            "FETCH_LOG": str(log),
+        },
+    )
+    fetched = set(log.read_text().split()) if log.exists() else set()
+    return result, fetched
+
+
 def verify_private_lock_validation(workflow, root):
-    """The release-artifact allowlist covers every GitHub Packages download.
+    """Validation accepts only trees whose token fetches are all approved.
 
     The acquisition script fetches every locked npm.pkg.github.com download
-    with the token, so an npm alias that installs an unapproved private package
-    under another name must fail validation rather than pass as public.
+    with the token, wherever it sits in the lock and from whichever lockfile
+    npm ci will read, so the property checked is end to end: when validation
+    accepts a tree, the real script's credentialed fetches are a subset of the
+    approved downloads. Each rejected attack is also shown to reach an
+    unapproved download through the script, so its rejection is not vacuous.
     """
     root.mkdir()
     step = private_lock_validation_step(workflow)
-    approved = "@verjson/fixture"
-    integrity = "sha512-" + "A" * 86 + "=="
+    approved_entry = private_download("@verjson/fixture")
+    approved_urls = {approved_entry["resolved"]}
     canonical = {
         "": {"name": "fixture"},
-        "node_modules/@verjson/fixture": {
-            "version": "1.0.0",
-            "resolved": "https://npm.pkg.github.com/download/@verjson/fixture/1.0.0/0123abcd",
-            "integrity": integrity,
-        },
+        "node_modules/@verjson/fixture": approved_entry,
         "node_modules/zod": {
             "version": "1.0.0",
             "resolved": "https://registry.npmjs.org/zod/-/zod-1.0.0.tgz",
-            "integrity": integrity,
+            "integrity": integrity_of(b"zod"),
         },
     }
+    secret = private_download("@verjson/secret")
     cases = {
-        "approved lock": (canonical, None, None),
-        "aliased unapproved @verjson package": (canonical | {
-            "node_modules/innocent": {
-                "name": "@verjson/other",
-                "version": "1.0.0",
-                "resolved": "https://npm.pkg.github.com/download/@verjson/other/1.0.0/0123abcd",
-                "integrity": integrity,
-            },
-        }, None, "unapproved internal dependency: innocent"),
-        "other scope on GitHub Packages": (canonical | {
-            "node_modules/@acme/private": {
-                "version": "1.0.0",
-                "resolved": "https://NPM.pkg.github.com/download/@acme/private/1.0.0/0123abcd",
-                "integrity": integrity,
-            },
-        }, None, "unapproved internal dependency: @acme/private"),
-        "reserved contract directory": (canonical, "directory", RESERVED_MESSAGE),
-        "reserved contract symlink": (canonical, "symlink", RESERVED_MESSAGE),
+        "approved lock": (canonical, {}, None),
+        "aliased unapproved @verjson package": (
+            canonical | {"node_modules/innocent": {**private_download("@verjson/other"), "name": "@verjson/other"}},
+            {}, "unapproved internal dependency: innocent",
+        ),
+        "other scope on GitHub Packages": (
+            canonical | {"node_modules/@acme/private": private_download("@acme/private")},
+            {}, "unapproved internal dependency: @acme/private",
+        ),
+        # L2: a download keyed outside node_modules/ is still fetched with the token.
+        "private download outside node_modules": (
+            canonical | {"vendor/x": secret}, {},
+            "private release acquisition rejects a private package download outside node_modules: vendor/x",
+        ),
+        # A workspace member named in the scope is local, never fetched.
+        "workspace member in the private scope": (
+            canonical | {"packages/tool": {"name": "@verjson/tool", "version": "1.0.0"}}, {}, None,
+        ),
+        # L1: npm ci and the acquisition script both prefer npm-shrinkwrap.json.
+        "npm-shrinkwrap.json beside a clean package-lock.json": (
+            canonical, {"shrinkwrap": canonical | {"node_modules/@verjson/secret": secret}},
+            "private release acquisition requires package-lock.json without npm-shrinkwrap.json",
+        ),
+        "npm-shrinkwrap.json symlink": (
+            canonical, {"shrinkwrap-link": True},
+            "private release acquisition requires package-lock.json without npm-shrinkwrap.json",
+        ),
+        "reserved contract directory": (canonical, {"reserved": "directory"}, RESERVED_MESSAGE),
+        "reserved contract symlink": (canonical, {"reserved": "symlink"}, RESERVED_MESSAGE),
     }
-    for case, (packages, reserved, message) in cases.items():
-        workspace = root / case.replace(" ", "-")
-        workspace.mkdir()
-        (workspace / "package-lock.json").write_text(
-            json.dumps({"lockfileVersion": 3, "packages": packages})
+    failures = []
+    for case, (packages, extras, message) in cases.items():
+        try:
+            check_lock_case(step, root, case, packages, extras, message, approved_urls)
+        except AssertionError as error:
+            failures.append(str(error))
+    assert not failures, "release-artifact lock validation:\n" + "\n".join(failures)
+
+
+def check_lock_case(step, root, case, packages, extras, message, approved_urls):
+    workspace = root / case.replace(" ", "-").replace("/", "-")
+    workspace.mkdir()
+    (workspace / "package-lock.json").write_text(
+        json.dumps({"lockfileVersion": 3, "packages": packages})
+    )
+    if "shrinkwrap" in extras:
+        (workspace / "npm-shrinkwrap.json").write_text(
+            json.dumps({"lockfileVersion": 3, "packages": extras["shrinkwrap"]})
         )
-        if reserved == "directory":
-            (workspace / RESERVED_PATH).mkdir()
-        elif reserved == "symlink":
-            (workspace / RESERVED_PATH).symlink_to(root)
-        with tempfile.TemporaryDirectory(prefix="release-caller-lock-") as script_dir:
-            script_path = Path(script_dir) / "step.sh"
-            script_path.write_text(step["run"])
-            result = subprocess.run(
-                shell_command(step, script_path), cwd=workspace, text=True, capture_output=True,
-                env=os.environ | {"APPROVED_INTERNAL_PACKAGES": approved},
-            )
-        output = result.stdout + result.stderr
-        if message is None:
-            assert result.returncode == 0, f"{case}: {output}"
-        else:
-            assert result.returncode != 0 and message in output, f"{case}: accepted or wrong reason: {output}"
+    if extras.get("shrinkwrap-link"):
+        (workspace / "npm-shrinkwrap.json").symlink_to(workspace / "package-lock.json")
+    if extras.get("reserved") == "directory":
+        (workspace / RESERVED_PATH).mkdir()
+    elif extras.get("reserved") == "symlink":
+        (workspace / RESERVED_PATH).symlink_to(root)
+    with tempfile.TemporaryDirectory(prefix="release-caller-lock-") as script_dir:
+        script_path = Path(script_dir) / "step.sh"
+        script_path.write_text(step["run"])
+        result = subprocess.run(
+            shell_command(step, script_path), cwd=workspace, text=True, capture_output=True,
+            env=os.environ | {"APPROVED_INTERNAL_PACKAGES": "@verjson/fixture"},
+        )
+    output = result.stdout + result.stderr
+    if message is None:
+        assert result.returncode == 0, f"{case}: {output}"
+        acquired, fetched = token_fetches(workspace, root)
+        assert acquired.returncode == 0, f"{case}: {acquired.stdout}{acquired.stderr}"
+        assert fetched and fetched <= approved_urls, f"{case}: token fetched {sorted(fetched)}"
+    else:
+        assert result.returncode != 0 and message in output, f"{case}: accepted or wrong reason: {output}"
+        if extras.get("reserved") is None and not extras.get("shrinkwrap-link"):
+            _, fetched = token_fetches(workspace, root)
+            assert fetched - approved_urls, f"{case}: the attack reaches no unapproved download"
 
 
 def main():

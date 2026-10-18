@@ -1467,6 +1467,8 @@ ${build_runners_yaml%$'\n'}
         with:
           node-version: '${release_node_version}'
           package-manager-cache: false
+      # npm ci and the acquisition script both prefer npm-shrinkwrap.json, so the
+      # lock validated here must be the only lock either one can read.
       - name: Validate the approved private dependency lock
         shell: bash
         env:
@@ -1474,6 +1476,7 @@ ${build_runners_yaml%$'\n'}
         run: |
           set -euo pipefail
           [ -f package-lock.json ] || { echo "::error::private release acquisition requires package-lock.json"; exit 1; }
+          if [ -e npm-shrinkwrap.json ] || [ -L npm-shrinkwrap.json ]; then echo "::error::private release acquisition requires package-lock.json without npm-shrinkwrap.json"; exit 1; fi
           [ -z "\$(find . -name .npmrc -print -quit)" ] || { echo "::error::private release acquisition rejects repository-controlled npm configuration"; exit 1; }
           if [ -e .verjson-npm-acquisition-contract ] || [ -L .verjson-npm-acquisition-contract ]; then echo "::error::.verjson-npm-acquisition-contract is reserved for the canonical dependency acquisition contract"; exit 1; fi
           node <<'NODE'
@@ -1483,12 +1486,17 @@ ${build_runners_yaml%$'\n'}
           if (![2, 3].includes(lock.lockfileVersion) || !lock.packages || Array.isArray(lock.packages)) throw new Error('private release acquisition requires package-lock lockfileVersion 2 or 3');
           const found = new Set();
           for (const [path, entry] of Object.entries(lock.packages)) {
-            if (!path || !path.includes('node_modules/')) continue;
-            const name = path.slice(path.lastIndexOf('node_modules/') + 13);
+            // Workspace members are local, never fetched, and carry no resolved URL.
+            if (!path || (!path.includes('node_modules/') && typeof entry.resolved !== 'string')) continue;
             let host = '';
             try { host = new URL(entry.resolved).hostname; } catch {}
-            // An npm alias installs a GitHub Packages package under another name.
+            const installed = path.includes('node_modules/');
+            const name = installed ? path.slice(path.lastIndexOf('node_modules/') + 13) : path;
+            // An npm alias installs a GitHub Packages package under another name,
+            // and acquisition fetches every locked GitHub Packages download, so
+            // neither the install path nor the scope decides what is checked.
             if (!name.startsWith('@verjson/') && !String(entry.name ?? '').startsWith('@verjson/') && host !== 'npm.pkg.github.com') continue;
+            if (!installed) throw new Error('private release acquisition rejects a private package download outside node_modules: ' + path);
             if (!approved.has(name)) throw new Error('unapproved internal dependency: ' + name);
             if (entry.name && entry.name !== name) throw new Error('internal dependency aliases unexpected package: ' + name);
             const url = new URL(entry.resolved);
@@ -4406,6 +4414,7 @@ if private_acquisition_steps:
     PRIVATE_LOCK_VALIDATION_RUN = "\n".join((
         'set -euo pipefail',
         '[ -f package-lock.json ] || { echo "::error::private release acquisition requires package-lock.json"; exit 1; }',
+        'if [ -e npm-shrinkwrap.json ] || [ -L npm-shrinkwrap.json ]; then echo "::error::private release acquisition requires package-lock.json without npm-shrinkwrap.json"; exit 1; fi',
         '[ -z "$(find . -name .npmrc -print -quit)" ] || { echo "::error::private release acquisition rejects repository-controlled npm configuration"; exit 1; }',
         'if [ -e .verjson-npm-acquisition-contract ] || [ -L .verjson-npm-acquisition-contract ]; then echo "::error::.verjson-npm-acquisition-contract is reserved for the canonical dependency acquisition contract"; exit 1; fi',
         "node <<'NODE'",
@@ -4415,12 +4424,17 @@ if private_acquisition_steps:
         "if (![2, 3].includes(lock.lockfileVersion) || !lock.packages || Array.isArray(lock.packages)) throw new Error('private release acquisition requires package-lock lockfileVersion 2 or 3');",
         'const found = new Set();',
         'for (const [path, entry] of Object.entries(lock.packages)) {',
-        "  if (!path || !path.includes('node_modules/')) continue;",
-        "  const name = path.slice(path.lastIndexOf('node_modules/') + 13);",
+        '  // Workspace members are local, never fetched, and carry no resolved URL.',
+        "  if (!path || (!path.includes('node_modules/') && typeof entry.resolved !== 'string')) continue;",
         "  let host = '';",
         '  try { host = new URL(entry.resolved).hostname; } catch {}',
-        '  // An npm alias installs a GitHub Packages package under another name.',
+        "  const installed = path.includes('node_modules/');",
+        "  const name = installed ? path.slice(path.lastIndexOf('node_modules/') + 13) : path;",
+        '  // An npm alias installs a GitHub Packages package under another name,',
+        '  // and acquisition fetches every locked GitHub Packages download, so',
+        '  // neither the install path nor the scope decides what is checked.',
         "  if (!name.startsWith('@verjson/') && !String(entry.name ?? '').startsWith('@verjson/') && host !== 'npm.pkg.github.com') continue;",
+        "  if (!installed) throw new Error('private release acquisition rejects a private package download outside node_modules: ' + path);",
         "  if (!approved.has(name)) throw new Error('unapproved internal dependency: ' + name);",
         "  if (entry.name && entry.name !== name) throw new Error('internal dependency aliases unexpected package: ' + name);",
         '  const url = new URL(entry.resolved);',
@@ -4474,8 +4488,26 @@ if private_acquisition_steps:
             ),
             4,
         )
+    acquisition_job_values = {}
+    if acquisition_job_bounds is not None:
+        for line in lines[acquisition_job_bounds + 1:]:
+            if re.match(r"^  [A-Za-z0-9_.-]+:\s*$", line):
+                break
+            if len(line) - len(line.lstrip()) == 4 and line.strip():
+                key, _, value = line.strip().partition(":")
+                acquisition_job_values[key] = value.strip()
+    gated = "always() && needs.verify.result == 'success' && needs.verify.outputs.selected == 'true' && (needs.snapshot.result == 'success' || needs.snapshot.result == 'skipped')"
     if acquisition_job_keys != {
         "name", "needs", "if", "strategy", "runs-on", "timeout-minutes", "permissions", "steps",
+    } or {
+        key: acquisition_job_values.get(key)
+        for key in ("name", "needs", "if", "runs-on", "timeout-minutes")
+    } != {
+        "name": "Acquire approved private dependencies (${{ matrix.os }})",
+        "needs": "[verify, snapshot]",
+        "if": gated,
+        "runs-on": "${{ matrix.os }}",
+        "timeout-minutes": "45",
     }:
         problems.append(
             "configures unapproved private dependency acquisition job settings (#1712)"
@@ -5603,6 +5635,10 @@ private_guard_step="$(awk '
         || fail "$release_workflow omits the independently authorized private dependency acquisition"
       [ "$(grep -cF "APPROVED_INTERNAL_PACKAGES: '$EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES'" <<<"$acquisition_job")" -eq 1 ] \
         || fail "$release_workflow private package allowlist differs from the generated contract"
+      # npm ci and the acquisition script prefer npm-shrinkwrap.json, so the lock
+      # held to the allowlist must be the only lock either one can read.
+      [ ! -e "$root/npm-shrinkwrap.json" ] && [ ! -L "$root/npm-shrinkwrap.json" ] \
+        || fail "$release_workflow private acquisition cannot hold npm-shrinkwrap.json to the generated private package authorization"
       python3 - "$root/package-lock.json" "$EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES" <<'PY' \
         || fail "$release_workflow repository lock differs from the generated private package authorization"
 import base64
@@ -5618,13 +5654,17 @@ if lock.get("lockfileVersion") not in (2, 3) or not isinstance(lock.get("package
     raise SystemExit(1)
 found = set()
 for path, entry in lock["packages"].items():
-    if not path or "node_modules/" not in path:
+    installed = "node_modules/" in path
+    # Workspace members are local, never fetched, and carry no resolved URL.
+    if not path or (not installed and not isinstance(entry.get("resolved"), str)):
         continue
-    name = path.rsplit("node_modules/", 1)[1]
+    name = path.rsplit("node_modules/", 1)[1] if installed else path
     resolved_host = ""
     if isinstance(entry.get("resolved"), str):
         try:
-            resolved_host = (urlparse(entry["resolved"]).hostname or "").lower()
+            # WHATWG URL parsing, which the acquisition script uses, reads a
+            # backslash in a special scheme's authority as a path separator.
+            resolved_host = (urlparse(entry["resolved"].replace("\\", "/")).hostname or "").lower()
         except ValueError:
             resolved_host = ""
     # An npm alias installs a GitHub Packages package under another name, so
@@ -5635,7 +5675,7 @@ for path, entry in lock["packages"].items():
         and resolved_host != "npm.pkg.github.com"
     ):
         continue
-    if name not in approved or (entry.get("name") not in (None, name)):
+    if not installed or name not in approved or (entry.get("name") not in (None, name)):
         raise SystemExit(1)
     resolved = entry.get("resolved", "")
     parsed = urlparse(resolved)
