@@ -941,7 +941,11 @@ forms and generalize the binding.
   `from subprocess import *`, `getattr` on `subprocess` or `os`, and os's
   spawners imported by name. `subprocess.getoutput` and `getstatusoutput`
   are read as shell, and a spawn whose `shell=` is not a literal refuses,
-  because its shell-ness is decided at runtime (round 10).
+  because its shell-ness is decided at runtime (round 10). Every Python call
+  is classified by the name it was imported as (round 11), so
+  `from subprocess import getoutput as g`, `import os as o`, and a loader
+  imported by name (`import_module as load`, `run_path as rp`) are read
+  exactly like the original.
 - **Materializations.** `git` is matched when spelled by path, quoted, or
   backslash-escaped (`\git`). A tree-changing git verb (`checkout`,
   `restore`, `reset`, `switch`, and the rest of the runtime tree-change set),
@@ -952,7 +956,11 @@ forms and generalize the binding.
   `["gh", "pr", "checkout", …]`, and `git` behind `env` or `sudo` all
   refuse. `patch` refuses behind any command prefix the trace models
   (`exec`, `nohup`, `sudo`, `time`, `command`, `builtin`, `!`, `env`,
-  `timeout`) and when named by a path.
+  `timeout`), including the prefix's options and their arguments (such as
+  `sudo -u root`, `time -p`, `env -u X`, and `timeout -s KILL 5`), and when
+  named by a path (round 11). The shell trace skips the same options to find
+  the command a prefix runs, and `env -S` refuses, because its command is a
+  split string.
 - **Frozen data read.** One vector is tolerated as a data read (round 10):
   `scripts/changelog.py`'s `git_file()` runs
   `["git", "show", f"{revision}:{path}"]` and parses the bytes it returns.
@@ -1039,6 +1047,14 @@ everything the job executes. These residuals stay outside it:
     `exec /usr/bin/git "$@"`.
     Refusing a computed verb would refuse both, so it is a residual, not a
     refusal; #1831 removes it.
+11. **Three narrower forms are not read.** Each was confirmed by a probe at
+    round 11:
+    - A prefix option argument quoted with a space, such as
+      `env -C '/a b' patch`, ends the `patch` pattern's option match.
+    - A spawn bound by assignment, such as `run = subprocess.getoutput`, is
+      not classified, because only import names are mapped.
+    - A `shell=True` passed through `**{"shell": True}` is not seen, so the
+      string is read as one program word.
 
 All of these are removed when #1831 moves `verify` off the persistent pool.
 
@@ -1111,4 +1127,21 @@ wrappers, so it was dropped and is residual 10. The same pass made `patch`
 refuse behind command prefixes and by path, and read `PATH="$PATH":`. It
 also added `getoutput` and `getstatusoutput` as shell spawns and made a
 non-literal `shell=` refuse.
+
+## Amendment (2026-10-18, #1827) — round-11 review: aliases and prefix options
+
+**Finding.** The spawns bullet said `getoutput` is read as shell, but the
+decision used the call-site name. So `from subprocess import getoutput as g`
+followed by `g("cd tools && sh run")` was read as one program word, and the
+same aliased call with `patch` passed. An audit found the same gap in an
+aliased `os` module and in loaders imported by name. Separately, the prefix
+handling did not skip option arguments: `sudo -u root patch` passed the
+tree-change scan, and `sudo -u root bash x.sh` lost its command.
+
+**Decision (PM, 2026-10-18; Part of #1831).**
+
+- Every Python call is classified by its imported original name.
+- One table of prefix options drives both the shell trace and the `patch`
+  pattern.
+- The three narrower forms listed in residual 11 stay residuals.
 
