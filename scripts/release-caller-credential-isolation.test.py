@@ -12,6 +12,7 @@ reaches anything but the exact locked private download.
 The harness (pinned npm, fixture registries, lifecycle recorder) is the one
 scripts/node-release-credential-isolation.test.py uses for node-release.yml.
 """
+import copy
 import importlib.util
 import json
 import os
@@ -122,8 +123,15 @@ def private_acquisition_job_steps(workflow):
     validation = steps[setup + 1]
     assert validation.get("name") == "Validate the approved private dependency lock", validation
     assert "secrets" not in json.dumps(validation).lower()
-    sequence = steps[setup + 2:end]
+    sequence = copy.deepcopy(steps[setup + 2:end])
     assert sequence, "the acquisition job installs no dependencies"
+    # The harness registry serves @fixture/private-dependency, so the approved
+    # list the script enforces is pointed at it; the generated value is asserted.
+    acquisition = next(
+        step for step in sequence if step.get("name") == "Acquire private registry packages with credentials"
+    )
+    assert acquisition["env"]["APPROVED_PRIVATE_PACKAGES"] == "@verjson/fixture", acquisition["env"]
+    acquisition["env"]["APPROVED_PRIVATE_PACKAGES"] = "@fixture/private-dependency"
     return sequence
 
 
@@ -421,6 +429,7 @@ def private_lock_validation_step(workflow):
 
 FETCH_RECORDER = """#!/usr/bin/env bash
 set -euo pipefail
+printf '%s\\n' "$*" >> "$CALLS_LOG"
 case "$1" in
   --version) echo 11.19.1 ;;
   cache)
@@ -446,8 +455,12 @@ def integrity_of(data):
     return harness.integrity_of(data)
 
 
-def token_fetches(workspace, root):
-    """The URLs the real acquisition script fetches with the token for this tree."""
+def token_fetches(workspace, root, approved=None):
+    """The URLs the real acquisition script fetches with the token for this tree.
+
+    With `approved`, the script is given that allowlist, as release-artifact
+    gives it; without, it runs as node-release and the verify jobs run it.
+    """
     bin_dir = root / "fetch-bin"
     bin_dir.mkdir(exist_ok=True)
     (bin_dir / "npm").write_text(FETCH_RECORDER)
@@ -455,6 +468,10 @@ def token_fetches(workspace, root):
     runner_temp = workspace.parent / f"{workspace.name}-runner-temp"
     runner_temp.mkdir(exist_ok=True)
     log = workspace.parent / f"{workspace.name}-fetches.log"
+    calls = workspace.parent / f"{workspace.name}-npm-calls.log"
+    for stale in (log, calls):
+        stale.unlink(missing_ok=True)
+    allowlist = {} if approved is None else {"APPROVED_PRIVATE_PACKAGES": approved}
     result = subprocess.run(
         ["bash", "-e", str(REPO_ROOT / "scripts/npm-private-acquisition.sh")],
         cwd=workspace, text=True, capture_output=True,
@@ -465,10 +482,12 @@ def token_fetches(workspace, root):
             "PRIVATE_PACKAGE_REGISTRY": CANONICAL_REGISTRY,
             "npm_config_cache": str(runner_temp / "npm-cache"),
             "FETCH_LOG": str(log),
-        },
+            "CALLS_LOG": str(calls),
+        } | allowlist,
     )
     fetched = set(log.read_text().split()) if log.exists() else set()
-    return result, fetched
+    npm_calls = calls.read_text().splitlines() if calls.exists() else []
+    return result, fetched, npm_calls
 
 
 def verify_private_lock_validation(workflow, root):
@@ -513,6 +532,12 @@ def verify_private_lock_validation(workflow, root):
         # A workspace member named in the scope is local, never fetched.
         "workspace member in the private scope": (
             canonical | {"packages/tool": {"name": "@verjson/tool", "version": "1.0.0"}}, {}, None,
+        ),
+        # The project's own entry is never a download, but the script reads
+        # every resolved URL in the packages map, the root's included.
+        "root entry with a resolved download": (
+            canonical | {"": {"name": "fixture", **secret}}, {},
+            "private release acquisition rejects a resolved root lock entry",
         ),
         # L1: npm ci and the acquisition script both prefer npm-shrinkwrap.json.
         "npm-shrinkwrap.json beside a clean package-lock.json": (
@@ -561,14 +586,146 @@ def check_lock_case(step, root, case, packages, extras, message, approved_urls):
     output = result.stdout + result.stderr
     if message is None:
         assert result.returncode == 0, f"{case}: {output}"
-        acquired, fetched = token_fetches(workspace, root)
+        acquired, fetched, _ = token_fetches(workspace, root)
         assert acquired.returncode == 0, f"{case}: {acquired.stdout}{acquired.stderr}"
         assert fetched and fetched <= approved_urls, f"{case}: token fetched {sorted(fetched)}"
     else:
         assert result.returncode != 0 and message in output, f"{case}: accepted or wrong reason: {output}"
         if extras.get("reserved") is None and not extras.get("shrinkwrap-link"):
-            _, fetched = token_fetches(workspace, root)
+            _, fetched, _ = token_fetches(workspace, root)
             assert fetched - approved_urls, f"{case}: the attack reaches no unapproved download"
+
+
+APPROVED = "@verjson/fixture"
+APPROVED_URLS = {
+    private_download("@verjson/fixture")["resolved"],
+    # GitHub Packages records the owner's own spelling of the scope.
+    private_download("@verJSON/fixture")["resolved"],
+}
+UNAPPROVED_MESSAGE = "is not an approved private package"
+
+
+def verify_script_allowlist(root):
+    """Given an allowlist, the script refuses any other private download before npm runs."""
+    root.mkdir()
+    base = {
+        "": {"name": "fixture"},
+        "node_modules/@verjson/fixture": private_download("@verjson/fixture"),
+    }
+    cases = {
+        "approved only": (base, APPROVED, True),
+        "owner-spelled approved scope": (
+            base | {"node_modules/@verjson/fixture": private_download("@verJSON/fixture")}, APPROVED, True,
+        ),
+        "unapproved download": (
+            base | {"node_modules/@verjson/secret": private_download("@verjson/secret")}, APPROVED, False,
+        ),
+        "unapproved root download": (
+            base | {"": {"name": "fixture", **private_download("@verjson/secret")}}, APPROVED, False,
+        ),
+        "empty allowlist": (base, "", False),
+    }
+    for case, (packages, approved, allowed) in cases.items():
+        workspace = root / case.replace(" ", "-")
+        workspace.mkdir()
+        (workspace / "package-lock.json").write_text(json.dumps({"lockfileVersion": 3, "packages": packages}))
+        result, fetched, calls = token_fetches(workspace, root, approved=approved)
+        output = result.stdout + result.stderr
+        if allowed:
+            assert result.returncode == 0, f"{case}: {output}"
+            assert fetched and fetched <= APPROVED_URLS, f"{case}: {sorted(fetched)}"
+        else:
+            assert result.returncode != 0 and UNAPPROVED_MESSAGE in output, f"{case}: accepted: {output}"
+            assert calls == [], f"{case}: npm ran before the allowlist refusal: {calls}"
+    # Without an allowlist the script fetches every locked private download:
+    # node-release and the verify jobs trust the caller's reviewed lockfile.
+    workspace = root / "no-allowlist"
+    workspace.mkdir()
+    secret = private_download("@verjson/secret")
+    (workspace / "package-lock.json").write_text(json.dumps(
+        {"lockfileVersion": 3, "packages": base | {"node_modules/@verjson/secret": secret}}
+    ))
+    result, fetched, _ = token_fetches(workspace, root)
+    assert result.returncode == 0 and secret["resolved"] in fetched, result.stdout + result.stderr
+
+
+# Every kind of packages-map entry the acquisition script reads a resolved URL from.
+ENTRY_KINDS = {
+    "root": lambda entry: {"": {"name": "fixture", **entry}},
+    "workspace member": lambda entry: {"packages/tool": {"name": "@verjson/tool", **entry}},
+    "top-level dependency": lambda entry: {"node_modules/dep": entry},
+    "scoped dependency": lambda entry: {"node_modules/@verjson/dep": entry},
+    "nested dependency": lambda entry: {"node_modules/a/node_modules/@verjson/dep": entry},
+    "workspace dependency": lambda entry: {"packages/tool/node_modules/dep": entry},
+    "link": lambda entry: {"node_modules/linked": {**entry, "link": True}},
+    "bundled": lambda entry: {"node_modules/a/node_modules/b": {**entry, "inBundle": True}},
+    "outside node_modules": lambda entry: {"vendor/x": entry},
+}
+PAYLOADS = {
+    "approved": private_download("@verjson/fixture"),
+    "owner-spelled approved": private_download("@verJSON/fixture"),
+    "unapproved": private_download("@verjson/secret"),
+    "other scope": private_download("@acme/secret"),
+    "aliased unapproved": {**private_download("@verjson/secret"), "name": "@verjson/secret"},
+    "uppercase host": private_download("@verjson/secret", host="https://NPM.PKG.GITHUB.COM"),
+    "full-width dot host": private_download("@verjson/secret", host="https://npm\uff0epkg.github.com"),
+    "backslash authority": private_download("@verjson/secret", host="https://npm.pkg.github.com\\@evil.example"),
+    "public": {
+        "version": "1.0.0",
+        "resolved": "https://registry.npmjs.org/zod/-/zod-1.0.0.tgz",
+        "integrity": integrity_of(b"zod"),
+    },
+}
+
+
+def verify_allowlist_sweep(workflow, root):
+    """Sweep every entry kind, payload, and lockfile the script can read.
+
+    For each generated tree: (1) the script given the allowlist fetches
+    only approved downloads with the token, by construction and whatever
+    the validators select; (2) whenever the release-artifact validation step
+    accepts, the script without an allowlist also fetches only approved
+    downloads, so the validators remain a sound second layer.
+    """
+    root.mkdir()
+    step = private_lock_validation_step(workflow)
+    base = {
+        "": {"name": "fixture"},
+        "node_modules/@verjson/fixture": private_download("@verjson/fixture"),
+    }
+    exposures = 0
+    failures = []
+    for kind, place in ENTRY_KINDS.items():
+        for payload_name, payload in PAYLOADS.items():
+            for lockfile in ("package-lock.json", "npm-shrinkwrap.json"):
+                case = f"{kind} / {payload_name} / {lockfile}"
+                workspace = root / f"case-{len(list(root.iterdir()))}"
+                workspace.mkdir()
+                packages = base | place(payload)
+                (workspace / lockfile).write_text(json.dumps({"lockfileVersion": 3, "packages": packages}))
+                if lockfile != "package-lock.json":
+                    (workspace / "package-lock.json").write_text(
+                        json.dumps({"lockfileVersion": 3, "packages": base})
+                    )
+                _, guarded, _ = token_fetches(workspace, root, approved=APPROVED)
+                if not guarded <= APPROVED_URLS:
+                    failures.append(f"{case}: the allowlisted script fetched {sorted(guarded - APPROVED_URLS)}")
+                _, unguarded, _ = token_fetches(workspace, root)
+                exposed = unguarded - APPROVED_URLS
+                exposures += bool(exposed)
+                with tempfile.TemporaryDirectory(prefix="release-caller-sweep-") as script_dir:
+                    script_path = Path(script_dir) / "step.sh"
+                    script_path.write_text(step["run"])
+                    validated = subprocess.run(
+                        shell_command(step, script_path), cwd=workspace, text=True, capture_output=True,
+                        env=os.environ | {"APPROVED_INTERNAL_PACKAGES": APPROVED},
+                    )
+                if validated.returncode == 0 and exposed:
+                    failures.append(f"{case}: validation accepted a tree whose token fetches include {sorted(exposed)}")
+    assert not failures, "allowlist sweep:\n" + "\n".join(failures)
+    # Without the allowlist, many generated trees reach an unapproved download,
+    # so the two properties above are not vacuous.
+    assert exposures >= len(ENTRY_KINDS) * 2, f"only {exposures} trees exercise an unapproved download"
 
 
 def main():
@@ -597,6 +754,8 @@ def main():
             )
             verify_reserved_selection_path(f"{label} verify", workflow, sha=sha, root=case_root)
         verify_private_lock_validation(workflows["release-artifact"], Path(temp) / "lock")
+        verify_script_allowlist(Path(temp) / "script-allowlist")
+        verify_allowlist_sweep(workflows["release-artifact"], Path(temp) / "sweep")
     verified = set()
     for major, (version, integrity) in sorted(harness.SUPPORTED_NPM_RELEASES.items()):
         with tempfile.TemporaryDirectory(prefix=f"release-caller-npm{major}-") as temp:

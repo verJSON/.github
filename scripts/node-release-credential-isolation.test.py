@@ -1000,7 +1000,7 @@ def verify_dependency_code_never_sees_credential(npm_bin, version, acquisition_s
         node_trace = Path(job_env["NODE_TRACE"]).read_text().splitlines()
         credentialed_node = [line.rsplit("|", 1)[0] for line in node_trace if line.endswith("|present")]
         assert credentialed_node == [
-            f"- package-lock.json {private_registry.origin}",
+            f"- package-lock.json {private_registry.origin} unset",
             f"{npm_cli} --version",
             f"{npm_cli} cache add {download_url}",
         ], f"npm {version}: unexpected node invocations with the credential: {credentialed_node}"

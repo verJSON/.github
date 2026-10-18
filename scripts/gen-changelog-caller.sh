@@ -1487,6 +1487,7 @@ ${build_runners_yaml%$'\n'}
           const found = new Set();
           for (const [path, entry] of Object.entries(lock.packages)) {
             // Workspace members are local, never fetched, and carry no resolved URL.
+            if (!path && typeof entry.resolved === 'string') throw new Error('private release acquisition rejects a resolved root lock entry');
             if (!path || (!path.includes('node_modules/') && typeof entry.resolved !== 'string')) continue;
             let host = '';
             try { host = new URL(entry.resolved).hostname; } catch {}
@@ -1524,6 +1525,8 @@ ${build_runners_yaml%$'\n'}
         env:
           NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}
           PRIVATE_PACKAGE_REGISTRY: https://npm.pkg.github.com
+          # The script refuses any other private download before any npm call.
+          APPROVED_PRIVATE_PACKAGES: '${approved_packages_csv}'
           NPM_CONFIG_GLOBALCONFIG: \${{ runner.temp }}/release-empty-global.npmrc
           NPM_CONFIG_USERCONFIG: \${{ runner.temp }}/release-acquisition.npmrc
           npm_config_cache: \${{ runner.temp }}/verjson-npm-cache
@@ -4380,9 +4383,11 @@ if private_acquisition_steps:
     install_steps = private_acquisition_steps_named(
         "Install dependencies without lifecycle execution or credentials"
     )
+    # The allowlist value is held to the generated contract by the shell checks.
     expected_acquisition_env = {
         "NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}",
         "PRIVATE_PACKAGE_REGISTRY": "https://npm.pkg.github.com",
+        "APPROVED_PRIVATE_PACKAGES": "<generated allowlist>",
         "NPM_CONFIG_GLOBALCONFIG": "${{ runner.temp }}/release-empty-global.npmrc",
         "NPM_CONFIG_USERCONFIG": "${{ runner.temp }}/release-acquisition.npmrc",
         "npm_config_cache": "${{ runner.temp }}/verjson-npm-cache",
@@ -4393,9 +4398,14 @@ if private_acquisition_steps:
         "NPM_CONFIG_USERCONFIG": "${{ runner.temp }}/release-install.npmrc",
         "npm_config_cache": "${{ runner.temp }}/verjson-npm-cache",
     }
+    def with_generated_allowlist(environment):
+        if environment is None or "APPROVED_PRIVATE_PACKAGES" not in environment:
+            return environment
+        return environment | {"APPROVED_PRIVATE_PACKAGES": "<generated allowlist>"}
+
     if (
         len(acquisition_steps) != 1
-        or step_mapping_values(acquisition_steps[0], "env")
+        or with_generated_allowlist(step_mapping_values(acquisition_steps[0], "env"))
         != expected_acquisition_env
         or len(install_steps) != 1
         or step_mapping_values(install_steps[0], "env")
@@ -4425,6 +4435,7 @@ if private_acquisition_steps:
         'const found = new Set();',
         'for (const [path, entry] of Object.entries(lock.packages)) {',
         '  // Workspace members are local, never fetched, and carry no resolved URL.',
+        "  if (!path && typeof entry.resolved === 'string') throw new Error('private release acquisition rejects a resolved root lock entry');",
         "  if (!path || (!path.includes('node_modules/') && typeof entry.resolved !== 'string')) continue;",
         "  let host = '';",
         '  try { host = new URL(entry.resolved).hostname; } catch {}',
@@ -4585,6 +4596,10 @@ if private_acquisition_steps:
                 and set(environment) == {"APPROVED_INTERNAL_PACKAGES"}
             ):
                 environment = {"APPROVED_INTERNAL_PACKAGES": "<generated allowlist>"}
+            if (
+                normalized["fields"].get("name") == "Acquire private registry packages with credentials"
+            ):
+                environment = with_generated_allowlist(environment)
             normalized["env"] = environment
         if "run" in fields:
             normalized["run"] = run_body(step)
@@ -5634,6 +5649,7 @@ private_guard_step="$(awk '
       [ -n "$acquisition_job" ] \
         || fail "$release_workflow omits the independently authorized private dependency acquisition"
       [ "$(grep -cF "APPROVED_INTERNAL_PACKAGES: '$EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES'" <<<"$acquisition_job")" -eq 1 ] \
+        && [ "$(grep -cF "APPROVED_PRIVATE_PACKAGES: '$EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES'" <<<"$acquisition_job")" -eq 1 ] \
         || fail "$release_workflow private package allowlist differs from the generated contract"
       # npm ci and the acquisition script prefer npm-shrinkwrap.json, so the lock
       # held to the allowlist must be the only lock either one can read.
@@ -5655,8 +5671,13 @@ if lock.get("lockfileVersion") not in (2, 3) or not isinstance(lock.get("package
 found = set()
 for path, entry in lock["packages"].items():
     installed = "node_modules/" in path
+    resolved_value = entry.get("resolved")
+    # The script reads every resolved URL, the root entry's included, and
+    # WHATWG URL parsing maps non-ASCII hosts that a Python parse does not.
+    if isinstance(resolved_value, str) and (not path or not resolved_value.isascii()):
+        raise SystemExit(1)
     # Workspace members are local, never fetched, and carry no resolved URL.
-    if not path or (not installed and not isinstance(entry.get("resolved"), str)):
+    if not path or (not installed and not isinstance(resolved_value, str)):
         continue
     name = path.rsplit("node_modules/", 1)[1] if installed else path
     resolved_host = ""

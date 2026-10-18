@@ -3202,6 +3202,12 @@ elif kind == "drop-npmrc-refusal":
 elif kind == "job-container":
     swap("    timeout-minutes: 45\n",
          "    timeout-minutes: 45\n    container: ghcr.io/attacker/node:24\n")
+elif kind == "drop-script-allowlist":
+    lines = job.split("\n")
+    kept = [line for line in lines if not line.lstrip().startswith("APPROVED_PRIVATE_PACKAGES:")]
+    if len(kept) != len(lines) - 1:
+        raise SystemExit(f"private acquisition fixture for {kind} no longer matches generated output")
+    job = "\n".join(kept)
 elif kind == "ungated-job":
     lines = job.split("\n")
     gated = [i for i, line in enumerate(lines) if line.startswith("    if: always() && needs.verify.result")]
@@ -5214,6 +5220,75 @@ else
   grep -qF 'private acquisition cannot hold npm-shrinkwrap.json to the generated private package authorization' "$ADOPTER_LOG" \
     && pass "emitted suite rejects an npm-shrinkwrap.json beside the validated package-lock.json" \
     || fail "emitted suite rejected an npm-shrinkwrap.json beside the validated package-lock.json for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_script_allowlist_adopter="$tmproot/adopter-artifact-private-script-allowlist"
+cp -a "$private_artifact_adopter" "$private_acquisition_script_allowlist_adopter"
+mutate_private_acquisition "$private_acquisition_script_allowlist_adopter/.github/workflows/release.yml" drop-script-allowlist \
+  || fail "the drop-script-allowlist private acquisition fixture no longer matches generated output"
+git -C "$private_acquisition_script_allowlist_adopter" commit -aqm 'acquire without the script allowlist'
+schedule_adopter_script "$private_acquisition_script_allowlist_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted private acquisition without the script allowlist"
+else
+  grep -qF 'private package allowlist differs from the generated contract' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects private acquisition without the script allowlist" \
+    || fail "emitted suite rejected the dropped script allowlist for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_lock_root_resolved_adopter="$tmproot/adopter-artifact-private-lock-root-resolved"
+cp -a "$private_artifact_adopter" "$private_acquisition_lock_root_resolved_adopter"
+python3 - "$private_acquisition_lock_root_resolved_adopter/package-lock.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+lock = json.load(open(path, encoding="utf-8"))
+lock["packages"][""]["resolved"] = "https://npm.pkg.github.com/download/@verjson/secret/1.0.0/hash"
+lock["packages"][""]["integrity"] = "sha512-" + "A" * 86 + "=="
+json.dump(lock, open(path, "w", encoding="utf-8"))
+PY
+git -C "$private_acquisition_lock_root_resolved_adopter" add -A
+git -C "$private_acquisition_lock_root_resolved_adopter" commit -qm 'lock a resolved root lock entry'
+schedule_adopter_script "$private_acquisition_lock_root_resolved_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a resolved root lock entry"
+else
+  grep -qF 'repository lock differs from the generated private package authorization' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects a resolved root lock entry" \
+    || fail "emitted suite rejected a resolved root lock entry for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_lock_full_width_host_adopter="$tmproot/adopter-artifact-private-lock-full-width-host"
+cp -a "$private_artifact_adopter" "$private_acquisition_lock_full_width_host_adopter"
+python3 - "$private_acquisition_lock_full_width_host_adopter/package-lock.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+lock = json.load(open(path, encoding="utf-8"))
+lock["packages"]["node_modules/innocent"] = {
+    "version": "1.0.0",
+    "resolved": "https://npm\uff0epkg.github.com/download/@verjson/secret/1.0.0/hash",
+    "integrity": "sha512-" + "A" * 86 + "==",
+}
+json.dump(lock, open(path, "w", encoding="utf-8"))
+PY
+git -C "$private_acquisition_lock_full_width_host_adopter" add -A
+git -C "$private_acquisition_lock_full_width_host_adopter" commit -qm 'lock a full-width-dot GitHub Packages host'
+schedule_adopter_script "$private_acquisition_lock_full_width_host_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a full-width-dot GitHub Packages host"
+else
+  grep -qF 'repository lock differs from the generated private package authorization' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects a full-width-dot GitHub Packages host" \
+    || fail "emitted suite rejected a full-width-dot GitHub Packages host for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"

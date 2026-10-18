@@ -17,6 +17,14 @@
 # Environment: NODE_AUTH_TOKEN (read by npm through its user config),
 # PRIVATE_PACKAGE_REGISTRY, npm_config_cache (absolute, shared with the
 # tokenless install), GITHUB_WORKSPACE, RUNNER_TEMP. Run from the project root.
+#
+# APPROVED_PRIVATE_PACKAGES, when set (even empty), is a comma-separated list
+# of package names. The script then refuses, before npm runs at all, any
+# locked private download whose package name, read from its URL path, is not
+# listed, so every credentialed fetch is approved by construction whatever a
+# caller's own lock validation selects (release-artifact). Unset, every
+# exact locked private download is fetched: node-release and the generated
+# verify jobs trust the caller's reviewed lockfile (ADR 0220).
 set -euo pipefail
 acquisition_dir="$(mktemp -d "$RUNNER_TEMP/verjson-private-acquisition.XXXXXX")"
 project_npmrc="$GITHUB_WORKSPACE/.npmrc"
@@ -45,9 +53,13 @@ lockfile=package-lock.json
 if [[ -e npm-shrinkwrap.json ]]; then
   lockfile=npm-shrinkwrap.json
 fi
-node - "$lockfile" "$PRIVATE_PACKAGE_REGISTRY" >"$acquisition_dir/downloads.tsv" <<'NODE'
+approved_packages='unset'
+if [[ -n "${APPROVED_PRIVATE_PACKAGES+set}" ]]; then
+  approved_packages="approved:$APPROVED_PRIVATE_PACKAGES"
+fi
+node - "$lockfile" "$PRIVATE_PACKAGE_REGISTRY" "$approved_packages" >"$acquisition_dir/downloads.tsv" <<'NODE'
 const fs = require("node:fs");
-const [lockfilePath, registry] = process.argv.slice(2);
+const [lockfilePath, registry, approvedArgument] = process.argv.slice(2);
 const fail = (message) => {
   console.error(`::error::${message}`);
   process.exit(1);
@@ -86,6 +98,15 @@ if (typeof lock.packages !== "object" || lock.packages === null) {
 // GitHub Packages may record the owner's own spelling of the scope.
 const downloadPath =
   /^\/download\/@[A-Za-z0-9][A-Za-z0-9._~-]*\/[A-Za-z0-9._~-]+\/[0-9A-Za-z.+-]+\/[0-9A-Za-z._-]+$/;
+let approved = null;
+if (approvedArgument.startsWith("approved:")) {
+  approved = new Set(approvedArgument.slice("approved:".length).split(",").filter(Boolean));
+  for (const name of approved) {
+    if (!/^@[a-z0-9][a-z0-9._~-]*\/[a-z0-9._~-]+$/.test(name)) {
+      fail(`APPROVED_PRIVATE_PACKAGES names an invalid package: ${JSON.stringify(name)}`);
+    }
+  }
+}
 const downloads = new Map();
 for (const [location, entry] of Object.entries(lock.packages)) {
   const resolved = entry?.resolved;
@@ -101,6 +122,11 @@ for (const [location, entry] of Object.entries(lock.packages)) {
     || resolved !== `${url.origin}${url.pathname}`
     || !downloadPath.test(url.pathname)) {
     fail(`${JSON.stringify(location)} is not an exact private registry download URL.`);
+  }
+  const [, , scope, packageBasename] = url.pathname.split("/");
+  const packageName = `${scope.toLowerCase()}/${packageBasename}`;
+  if (approved !== null && !approved.has(packageName)) {
+    fail(`${JSON.stringify(location)} downloads ${packageName}, which is not an approved private package.`);
   }
   const integrity = /^sha512-([A-Za-z0-9+/]{86}==)$/.exec(entry.integrity ?? "");
   if (!integrity) {
