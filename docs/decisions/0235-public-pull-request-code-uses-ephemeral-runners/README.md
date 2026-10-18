@@ -911,14 +911,22 @@ forms and generalize the binding.
   program is bound and followed. A program is a tracked file with a shebang,
   the exec bit, or a `.sh`, `.bash`, `.py`, `.js`, `.mjs`, or `.cjs`
   extension. Data files stay excluded.
-- **Two modes.** A program reached by an invocation the trace models is
-  followed as *invoked*: every form in it is traced, the depth cap applies,
-  and a composed target it cannot resolve refuses. A program reached only
-  because a literal names it is followed as *named*: its bytes are bound and
-  its own literals followed, but its forms are not traced, because nothing
-  shows that the job runs it. Per-form tracing remains only for composed
-  targets (`python -m`, imports, spawns, `npm` verbs); an unresolvable
-  composed target stays `unresolved-program`.
+- **Two modes.** A program reached through an invocation form the trace
+  models is followed as *invoked*: every form in it is traced, the depth cap
+  applies, and a composed target it cannot resolve refuses. The modeled
+  forms are a command word holding a `/`, an interpreter's program
+  (`bash`, `sh`, `python3`, `node`, including `-c`, `-m`, and `-s`),
+  `source` and `.`, `env`, `timeout`, the `exec`/`nohup`/`sudo`/`time`/
+  `command` prefixes, `"$@"` wrapper functions, `find -exec`/`-execdir`/
+  `-ok`/`-okdir`, `npm` verbs and package bins, Python imports, `-m`, and
+  loader calls, JavaScript `require`, `os.system`, `os.popen`, and
+  JavaScript `exec`/`execSync` (read as shell), and a Python `subprocess` or
+  JavaScript `child_process` spawn, whose argument vector is read as the
+  command it is (round 9). A program reached only because a literal names
+  it, and wrapped by none of those forms, is followed as *named*: its bytes
+  are bound and its own literals followed, but its forms are not traced,
+  because nothing shows that the job runs it. A target that a modeled form
+  composes and the trace cannot resolve stays `unresolved-program`.
 - **Symbolic links.** A program reached through a link binds the link text
   and the target's bytes and is followed into the target, through any chain
   of in-tree links. A link that leaves the tree, is broken, or loops refuses
@@ -927,11 +935,16 @@ forms and generalize the binding.
   `from subprocess import run`) are computed per source. A `.spawn*`,
   `.exec*`, or `.fork(` call in JavaScript on any receiver other than
   `child_process` refuses, because the trace cannot identify the object;
-  that also refuses a RegExp `.exec`, an accepted false positive.
-- **Materializations.** `git` is matched when spelled by path or quoted. A
-  tree-changing git verb (`checkout`, `restore`, `reset`, `switch`, and the
-  rest of the runtime tree-change set) or `gh pr checkout` in a traced text
-  refuses as `tracked-materialization`.
+  that also refuses a RegExp `.exec`, an accepted false positive. A spawn
+  hidden from the call-site rules refuses too (round 9): a renamed
+  destructuring (`{ spawnSync: go }`), bracket access (`cp["spawnSync"]`),
+  `from subprocess import *`, `getattr` on `subprocess` or `os`, and os's
+  spawners imported by name.
+- **Materializations.** `git` is matched when spelled by path, quoted, or
+  backslash-escaped (`\git`). A tree-changing git verb (`checkout`,
+  `restore`, `reset`, `switch`, and the rest of the runtime tree-change set),
+  `gh pr checkout`, or `patch`, in a traced text or a Python or JavaScript
+  argument vector, refuses as `tracked-materialization`.
 - **The frozen pin comparison.** It is tolerated only while everything that
   runs before it is reviewed bytes. The hook's leading logical lines must be
   the preamble, matched by digest, then the `$pin` derivation, its guard, and
@@ -947,14 +960,16 @@ forms and generalize the binding.
 - **`bash -s`.** `-s` ends option parsing, its operands are arguments, and
   standard input is what the trace reads; a pipe into it refuses with a
   reason of its own.
-- **PATH.** A PATH entry naming the workspace or working directory, or a
-  relative one, refuses as `unresolved-program`. This covers an assignment,
-  a `GITHUB_PATH` append, and a job or step `env` block.
+- **PATH.** A PATH entry naming the workspace or working directory, a
+  relative one, or an empty one (the working directory) refuses as
+  `unresolved-program`. This covers an assignment, a `+=` append, a
+  `GITHUB_PATH` append, and a job or step `env` block.
 
 **What the check guarantees.** The trace is a static approximation of what
 `verify` runs, not a proof of it. It guarantees two things. Every literal
 tracked program reachable from `verify` is bound into its row. Every
-composed target that an invocation form the trace models cannot resolve
+program reached through an invocation form the trace models is traced as
+invoked, so every target such a form composes and the trace cannot resolve
 refuses before any row is read. It does not claim that the bound set is
 everything the job executes. These residuals stay outside it:
 
@@ -987,6 +1002,13 @@ everything the job executes. These residuals stay outside it:
    assembles at runtime, and run through an invocation form the trace does
    not model, is neither bound nor refused. Review of `main` is the
    protection there.
+9. **Literals run through an unmodeled form are followed as named only.**
+   A literal tracked program run through a form outside the modeled list
+   above is bound, and its own literals followed, but its forms are not
+   traced, so a target it composes does not refuse. Such forms include
+   command wrappers such as `nice`, `setsid`, `stdbuf`, `flock`, and
+   `watch`; Python `asyncio.create_subprocess_exec` and `pty.spawn`;
+   JavaScript `new Worker(…)`; and a `make` recipe.
 
 All of these are removed when #1831 moves `verify` off the persistent pool.
 
@@ -1002,12 +1024,42 @@ All of these are removed when #1831 moves `verify` off the persistent pool.
   the job's steps and the invoked programs. They include this checker and
   its test file.
 
-Because the checker and its tests are among the named programs, editing
-either stales `verify`'s row. The pending row is regenerated in the same
-commit.
+**Row contention.** `verify`'s row binds 24 programs it does not run,
+among them this checker and its test file. Any pull request that touches
+one of them changes the same `verify` line in
+`public-pr-runner-isolation.pending.tsv`, so parallel pull requests that
+touch any of those 24 files conflict on that line. The remedy is to
+regenerate the digest on rebase from the checker's own report, never to
+hand-merge the two digests. #1831 removes the contention with the row.
 
 **Trade-off.** A named program's edit now stales `verify`'s row even when
 `verify` never runs it. That cost is deliberate: the alternative is
 enumerating every way a literal can become an execution, and each review
 round found another way. A future invocation form needs no checker change
 to be bound, only to be refused when it composes its target.
+
+## Amendment (2026-10-17, #1827) — round-9 review: spawned targets are invoked
+
+**Finding.** The round-9 review found the round-8 guarantee false. A target
+run through a form the trace already recognized was reached only through
+the literal rule, so it was followed as named. The forms were
+`subprocess.run(["scripts/x.sh"])`, `subprocess.run("scripts/x.sh")`,
+`spawnSync("./scripts/x.sh")`, and `find -exec scripts/x.sh`. Its own
+`bash "$TOOL"` or `git checkout HEAD~1 -- path` therefore did not refuse.
+
+**Decision (PM, 2026-10-17; Part of #1831).** Fix the code, not just the
+wording. A Python or JavaScript argument vector is read as the shell command
+it is, with each computed element an unresolvable placeholder. `find -exec`
+is modeled. Every target a modeled form runs is followed as invoked, and
+named mode is kept only for a bare mention that no modeled form wraps. The
+round-8 amendment above now lists the modeled forms. Its guarantee
+paragraph states what the trace does, and residual 9 names the forms that
+stay named-only. The same pass made these changes:
+
+- `\git` and `patch` are tree changes;
+- empty PATH entries and `PATH +=` appends are read;
+- hidden spawn forms refuse;
+- the checker test row's budget is 180 seconds, about twice its measured
+  72 to 86 seconds;
+- the 24-file row contention is recorded above.
+

@@ -86,7 +86,9 @@ the package bins `npm pack` selects, and refuses any program it cannot
 resolve. It also binds every tracked program a traced text names
 literally, follows symbolic links within the tree, and refuses a PATH entry
 inside the workspace. The pinned generator comparison is tolerated only while
-everything before it in `release-verify.sh` is the reviewed bytes. ADR 0235
+everything before it in `release-verify.sh` is the reviewed bytes. A target run
+through a Python or JavaScript spawn or `find -exec` is traced like a shell
+command, so what it composes refuses. ADR 0235
 states this as a static approximation and names what stays outside it. A non-cone sparse-checkout list is evaluated with git's
 gitignore anchoring (a bare name matches at every depth, `*` matches dotfiles),
 and a pattern the checker cannot evaluate exactly is refused. A local Docker
