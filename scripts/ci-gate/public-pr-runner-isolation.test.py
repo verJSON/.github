@@ -3560,6 +3560,28 @@ expect(verify_with("npm version --prefix sub 1.0.0 --ignore-scripts\n", SUB_PACK
        0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
        "an npm verb in another package directory that runs no package script is not refused", *PENDING_ARGS)
 
+# Round-8 residual (a): a bare command word resolves through PATH, so a PATH
+# entry inside the workspace would run tracked bytes no literal names. Such an
+# entry refuses; an entry outside the workspace does not.
+for label, line in (
+    ("an exported PATH led by the workspace", 'export PATH="$GITHUB_WORKSPACE/bin:$PATH"'),
+    ("a braced workspace PATH entry", 'export PATH="${GITHUB_WORKSPACE}/bin:${PATH}"'),
+    ("a PATH prefix assignment with a relative entry", "PATH=scripts:$PATH tool"),
+    ("a PATH entry from the working directory", 'PATH="$(pwd)/bin:$PATH"'),
+    ("a workspace directory appended to GITHUB_PATH", 'echo "$PWD/bin" >> "$GITHUB_PATH"'),
+):
+    expect_verify_refused(verify_with(line + "\n", {}), f"verify refuses {label}",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED,
+                           "puts the workspace on PATH"))
+ENV_PATH = verify_with("", {})
+ENV_PATH["release.yml"] = ENV_PATH["release.yml"].replace(
+    "          NODE_AUTH_TOKEN: ''\n", "          NODE_AUTH_TOKEN: ''\n          PATH: scripts:/usr/bin\n", 1)
+expect_verify_refused(ENV_PATH, "verify refuses a step env PATH with a relative entry",
+                      ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "puts the workspace on PATH"))
+expect(verify_with('export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"\n', {}),
+       0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
+       "a PATH entry outside the workspace is not refused", *PENDING_ARGS)
+
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
 # sequences must not decode to the same replacement text and digest), and a

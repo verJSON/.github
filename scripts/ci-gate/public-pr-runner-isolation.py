@@ -1971,6 +1971,33 @@ def traced_materializations(
     return found
 
 
+# A PATH assignment, or a GITHUB_PATH append, in a traced text (round 8,
+# residual a): a bare command word resolves through PATH, so an entry inside
+# the workspace runs tracked bytes no literal names.
+PATH_ASSIGNMENT = re.compile(r"""(?:^|[\s;&|(])(?:export[ \t]+)?PATH=("[^"]*"|'[^']*'|[^\s;&|)]*)""", re.M)
+GITHUB_PATH_APPEND = re.compile(r"""(?m)^[^\n]*?(?:echo|printf)[ \t]+([^\n>]*?)>>[ \t]*["']?\$\{?GITHUB_PATH\b""")
+WORKSPACE_ENTRY = re.compile(r"GITHUB_WORKSPACE|\$\{?PWD\b|\$\(\s*pwd\s*\)|`\s*pwd\s*`|github\.workspace")
+
+
+def workspace_path_entries(job: dict, texts: list[tuple[str, str]]) -> set[str]:
+    """Reasons for every PATH entry a backlog job puts inside the workspace:
+    one naming the workspace or working directory, or a relative one."""
+    found: set[str] = set()
+    values = [(origin, match.group(1)) for origin, text in texts for match in PATH_ASSIGNMENT.finditer(text)]
+    values += [(origin, match.group(1)) for origin, text in texts for match in GITHUB_PATH_APPEND.finditer(text)]
+    for scope in [job] + [step for step in job.get("steps") or [] if isinstance(step, dict)]:
+        env = scope.get("env")
+        if isinstance(env, dict) and "PATH" in env:
+            values.append(("an env block", str(env["PATH"])))
+    for origin, value in values:
+        for entry in value.strip().strip("\"'").split(":"):
+            entry = entry.strip().strip("\"'")
+            if entry and (WORKSPACE_ENTRY.search(entry) or not entry.startswith(("/", "$", "~"))):
+                found.add(f"{origin or 'a step'}: PATH entry {entry!r} puts the workspace on PATH, so a bare "
+                          "command word could run tracked bytes no row binds")
+    return found
+
+
 def materializes_head(job: dict, workflow_env, root: str, label: str) -> bool:
     """Whether a pull_request_target job can put head-controlled bytes on disk.
 
@@ -2980,6 +3007,7 @@ def check_workflow(
             )
             closure.check_materializations(job)
             closure.unbound |= traced_materializations(traced, tolerated)
+            unresolved |= workspace_path_entries(job, traced)
             closure.unbound |= {(UNRESOLVED_PROGRAM, f"{UNRESOLVED_PROGRAM}: {reason}") for reason in unresolved}
             if closure.tree is not None:
                 bound["tree"] = closure.tree
