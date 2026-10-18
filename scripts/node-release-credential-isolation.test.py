@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -45,13 +46,30 @@ FAKE_DOWNLOAD = f"{FAKE_REGISTRY}/download/@verjson/fixture/1.0.0/0123abcd"
 FAKE_CONTENT = b"locked private package archive"
 
 
-def fake_npm_workspace(root, *, lock_packages=None, npm_version="11.19.1"):
+def resolve_step_env(step, runner_temp):
+    """The step's YAML `env`, with the expressions Actions would substitute resolved."""
+    resolved = {}
+    for key, value in (step.get("env") or {}).items():
+        text = str(value).replace("${{ runner.temp }}", str(runner_temp))
+        text = text.replace("${{ secrets.NODE_AUTH_TOKEN }}", TOKEN)
+        assert "${{" not in text, f"{step.get('name')}: unresolved expression in env {key}: {value}"
+        resolved[key] = text
+    return resolved
+
+
+def leftover_acquisition_dirs(runner_temp):
+    return list(runner_temp.glob("verjson-private-acquisition.*"))
+
+
+def fake_npm_workspace(root, step, *, lock_packages=None, npm_version="11.19.1"):
     """A workspace whose npm is a recorder that caches FAKE_CONTENT on `cache add`."""
     runner_temp = root / "runner-temp"
     runner_temp.mkdir()
     wrapper_dir = root / "bin"
     wrapper_dir.mkdir()
-    cache_dir = root / "npm-cache"
+    step_env = resolve_step_env(step, runner_temp)
+    assert step_env.get("PRIVATE_PACKAGE_REGISTRY") == FAKE_REGISTRY, step_env
+    cache_dir = Path(step_env.get("npm_config_cache", root / "unset-npm-cache"))
     digest = hashlib.sha512(FAKE_CONTENT).hexdigest()
     content = cache_dir / "_cacache/content-v2/sha512" / digest[:2] / digest[2:4] / digest[4:]
     wrapper = wrapper_dir / "npm"
@@ -63,7 +81,6 @@ def fake_npm_workspace(root, *, lock_packages=None, npm_version="11.19.1"):
         'printf "%s|%s|%s\\n" "$config" "$token" "$*" >>"$NPM_TRACE"\n'
         'case "$*" in\n'
         '  --version) printf "%s\\n" "$FAKE_NPM_VERSION" ;;\n'
-        '  "config get cache") printf "%s\\n" "$FAKE_NPM_CACHE" ;;\n'
         '  "cache add "*)\n'
         '    [[ "${NPM_EXIT_CODE:-0}" == 0 ]] || exit "$NPM_EXIT_CODE"\n'
         '    mkdir -p "$(dirname "$FAKE_CONTENT_PATH")"\n'
@@ -84,15 +101,13 @@ def fake_npm_workspace(root, *, lock_packages=None, npm_version="11.19.1"):
     (root / "package-lock.json").write_text(
         json.dumps({"name": "fixture", "lockfileVersion": 3, "packages": lock_packages})
     )
-    env = os.environ | {
+    inherited = {key: value for key, value in os.environ.items() if key.lower() != "npm_config_cache"}
+    env = inherited | step_env | {
         "GITHUB_WORKSPACE": str(root),
         "RUNNER_TEMP": str(runner_temp),
-        "NODE_AUTH_TOKEN": TOKEN,
-        "PRIVATE_PACKAGE_REGISTRY": FAKE_REGISTRY,
         "NPM_TRACE": str(root / "npm-observation.log"),
         "PATH": f"{wrapper_dir}{os.pathsep}{os.environ['PATH']}",
         "FAKE_NPM_VERSION": npm_version,
-        "FAKE_NPM_CACHE": str(cache_dir),
         "FAKE_CONTENT_PATH": str(content),
         "FAKE_CONTENT_BYTES": FAKE_CONTENT.decode(),
         "NPM_EXIT_CODE": "0",
@@ -105,10 +120,11 @@ def npm_trace_of(env):
     return trace.read_text(encoding="utf-8").splitlines() if trace.exists() else []
 
 
-def verify_project_npmrc_isolation(script):
+def verify_project_npmrc_isolation(step):
+    script = step["run"]
     with tempfile.TemporaryDirectory(prefix="node-release-npmrc-isolation-") as temp:
         root = Path(temp)
-        env, runner_temp = fake_npm_workspace(root)
+        env, runner_temp = fake_npm_workspace(root, step)
         project_npmrc = root / ".npmrc"
         malicious_config = (
             "registry=https://attacker.example/\n"
@@ -117,7 +133,6 @@ def verify_project_npmrc_isolation(script):
         project_npmrc.write_text(malicious_config, encoding="utf-8")
         expected_trace = [
             "absent|present|--version",
-            "absent|present|config get cache",
             f"absent|present|cache add {FAKE_DOWNLOAD}",
         ]
 
@@ -125,7 +140,7 @@ def verify_project_npmrc_isolation(script):
         assert result.returncode == 0, result.stdout + result.stderr
         assert npm_trace_of(env) == expected_trace
         assert project_npmrc.read_text(encoding="utf-8") == malicious_config
-        assert not list(runner_temp.iterdir())
+        assert not leftover_acquisition_dirs(runner_temp)
 
         Path(env["NPM_TRACE"]).unlink()
         env["NPM_EXIT_CODE"] = "23"
@@ -133,7 +148,7 @@ def verify_project_npmrc_isolation(script):
         assert result.returncode == 23, result.stdout + result.stderr
         assert npm_trace_of(env) == expected_trace
         assert project_npmrc.read_text(encoding="utf-8") == malicious_config
-        assert not list(runner_temp.iterdir())
+        assert not leftover_acquisition_dirs(runner_temp)
 
         Path(env["NPM_TRACE"]).unlink()
         project_npmrc.unlink()
@@ -155,12 +170,13 @@ def private_lock(resolved, integrity=None):
     }
 
 
-def verify_private_download_selection(script):
+def verify_private_download_selection(step):
+    script = step["run"]
     # GitHub Packages records the owner's own spelling of the scope in download
     # URLs, such as @verJSON for the lowercase package @verjson/fixture.
     owner_spelling = f"{FAKE_REGISTRY}/download/@verJSON/fixture/1.0.0/0123abcd"
     with tempfile.TemporaryDirectory(prefix="node-release-owner-scope-") as temp:
-        env, _ = fake_npm_workspace(Path(temp), lock_packages=private_lock(owner_spelling))
+        env, _ = fake_npm_workspace(Path(temp), step, lock_packages=private_lock(owner_spelling))
         result = run_step(script, cwd=temp, env=env)
         assert result.returncode == 0, result.stdout + result.stderr
         assert npm_trace_of(env)[-1] == f"absent|present|cache add {owner_spelling}"
@@ -191,21 +207,44 @@ def verify_private_download_selection(script):
     }
     for case, lock_packages in rejected_locks.items():
         with tempfile.TemporaryDirectory(prefix="node-release-rejected-lock-") as temp:
-            env, runner_temp = fake_npm_workspace(Path(temp), lock_packages=lock_packages)
+            env, runner_temp = fake_npm_workspace(Path(temp), step, lock_packages=lock_packages)
             result = run_step(script, cwd=temp, env=env)
             assert result.returncode != 0, f"{case}: accepted"
             assert "::error::" in result.stderr, f"{case}: {result.stdout}{result.stderr}"
             assert npm_trace_of(env) == [], f"{case}: npm ran with the credential"
-            assert not list(runner_temp.iterdir()), case
+            assert not leftover_acquisition_dirs(runner_temp), case
 
+    public_v1 = {
+        "lockfileVersion": 1,
+        "dependencies": {
+            "zod": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/zod/-/zod-1.0.0.tgz"},
+        },
+    }
+    with tempfile.TemporaryDirectory(prefix="node-release-public-v1-") as temp:
+        env, _ = fake_npm_workspace(Path(temp), step)
+        Path(temp, "package-lock.json").write_text(json.dumps(public_v1))
+        result = run_step(script, cwd=temp, env=env)
+        assert result.returncode == 0, "a v1 lockfile without private packages needs no credential"
+        assert npm_trace_of(env) == [], "npm must not receive the credential without private downloads"
+
+    private_v1 = {
+        "lockfileVersion": 1,
+        "dependencies": {
+            "@verjson/fixture": {"version": "1.0.0", "resolved": FAKE_DOWNLOAD},
+        },
+    }
     for case, lockfile in {
         "missing lockfile": None,
-        "lockfile version 1": {"lockfileVersion": 1, "dependencies": {}},
+        "v1 lockfile with a private package": private_v1,
+        "v1 lockfile naming the registry in a nested key": {
+            "lockfileVersion": 1,
+            "dependencies": {"a": {"dependencies": {"HTTPS://NPM.PKG.GITHUB.COM/x": {}}}},
+        },
         "no packages map": {"lockfileVersion": 3},
         "invalid JSON": "{",
     }.items():
         with tempfile.TemporaryDirectory(prefix="node-release-invalid-lockfile-") as temp:
-            env, _ = fake_npm_workspace(Path(temp))
+            env, _ = fake_npm_workspace(Path(temp), step)
             lock_path = Path(temp, "package-lock.json")
             if lockfile is None:
                 lock_path.unlink()
@@ -227,13 +266,13 @@ def verify_private_download_selection(script):
         "node_modules/bundled": {"inBundle": True},
     }
     with tempfile.TemporaryDirectory(prefix="node-release-public-only-") as temp:
-        env, _ = fake_npm_workspace(Path(temp), lock_packages=public_only)
+        env, _ = fake_npm_workspace(Path(temp), step, lock_packages=public_only)
         result = run_step(script, cwd=temp, env=env)
         assert result.returncode == 0, result.stdout + result.stderr
         assert npm_trace_of(env) == [], "npm must not receive the credential without private downloads"
 
     with tempfile.TemporaryDirectory(prefix="node-release-shrinkwrap-") as temp:
-        env, _ = fake_npm_workspace(Path(temp), lock_packages=private_lock(f"{download}?stale=1"))
+        env, _ = fake_npm_workspace(Path(temp), step, lock_packages=private_lock(f"{download}?stale=1"))
         Path(temp, "npm-shrinkwrap.json").write_text(
             json.dumps({"lockfileVersion": 3, "packages": private_lock(download)})
         )
@@ -246,14 +285,14 @@ def verify_private_download_selection(script):
         "content outside the cache": {"FAKE_CONTENT_PATH": "/dev/null/never"},
     }.items():
         with tempfile.TemporaryDirectory(prefix="node-release-cache-content-") as temp:
-            env, _ = fake_npm_workspace(Path(temp))
+            env, _ = fake_npm_workspace(Path(temp), step)
             if case == "content outside the cache":
                 overrides = {"FAKE_CONTENT_PATH": str(Path(temp, "elsewhere/content"))}
             result = run_step(script, cwd=temp, env=env | overrides)
             assert result.returncode != 0, f"{case}: accepted"
             assert "did not cache the exact locked content" in result.stdout, case
     with tempfile.TemporaryDirectory(prefix="node-release-cache-symlink-") as temp:
-        env, _ = fake_npm_workspace(Path(temp))
+        env, _ = fake_npm_workspace(Path(temp), step)
         real = Path(temp, "real-content")
         env["FAKE_CONTENT_PATH"] = str(real)
         content = Path(temp, "npm-cache/_cacache/content-v2/sha512")
@@ -265,10 +304,26 @@ def verify_private_download_selection(script):
         assert result.returncode != 0 and "did not cache the exact locked content" in result.stdout
 
 
-def verify_npm_major_gate(script):
+def verify_explicit_cache_path(step):
+    script = step["run"]
+    for case, cache in {"unset": None, "relative": "verjson-npm-cache", "empty": ""}.items():
+        with tempfile.TemporaryDirectory(prefix="node-release-cache-path-") as temp:
+            env, runner_temp = fake_npm_workspace(Path(temp), step)
+            env.pop("npm_config_cache", None)
+            if cache is not None:
+                env["npm_config_cache"] = cache
+            result = run_step(script, cwd=temp, env=env)
+            assert result.returncode != 0, f"{case} cache path: accepted"
+            assert "npm_config_cache must be the absolute cache path" in result.stdout, case
+            assert not any("|cache add " in line for line in npm_trace_of(env)), case
+            assert not leftover_acquisition_dirs(runner_temp), case
+
+
+def verify_npm_major_gate(step):
+    script = step["run"]
     def outcome(npm_version):
         with tempfile.TemporaryDirectory(prefix="node-release-npm-gate-") as temp:
-            env, _ = fake_npm_workspace(Path(temp), npm_version=npm_version)
+            env, _ = fake_npm_workspace(Path(temp), step, npm_version=npm_version)
             result = run_step(script, cwd=temp, env=env)
             added = any("|cache add " in line for line in npm_trace_of(env))
             assert added == (result.returncode == 0), (npm_version, result.stdout)
@@ -403,26 +458,37 @@ def main():
         step for step in prepare_job["steps"]
         if str(step.get("uses", "")).startswith("actions/setup-node@")
     )
+    shared_cache = "${{ runner.temp }}/verjson-npm-cache"
     assert acquisition_step.get("env") == {
         "NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}",
         "PRIVATE_PACKAGE_REGISTRY": setup_node_step["with"]["registry-url"],
+        "npm_config_cache": shared_cache,
     }
     assert setup_node_step["with"]["registry-url"] == "https://npm.pkg.github.com"
     assert install_step.get("run", "").strip() == "npm ci --prefer-offline"
-    assert "env" not in install_step, "the dependency install must not receive credentials"
-    token_steps = [
-        step.get("name") for step in prepare_job["steps"]
-        if "${{ secrets.NODE_AUTH_TOKEN }}" in (step.get("env") or {}).values()
-    ]
-    assert token_steps == [ACQUISITION_STEP], token_steps
+    assert install_step.get("env") == {"npm_config_cache": shared_cache}, (
+        "the dependency install must receive no credential and share the acquisition cache"
+    )
+    for step in (acquisition_step, install_step):
+        assert "shell" not in step, "run_step reproduces the default `bash -e` shell only"
     steps = prepare_job["steps"]
+    secret_steps = [
+        step.get("name") for step in steps if SECRETS_EXPRESSION.search(json.dumps(step))
+    ]
+    assert secret_steps == [CACHE_POLICY_STEP, ACQUISITION_STEP], (
+        f"only the acquisition step may receive a secret; found secret expressions in {secret_steps}"
+    )
     assert steps.index(acquisition_step) + 1 == steps.index(install_step)
-    verify_project_npmrc_isolation(acquisition_step["run"])
-    verify_private_download_selection(acquisition_step["run"])
-    verify_npm_major_gate(acquisition_step["run"])
+    verify_secret_expression_matcher()
+    verify_project_npmrc_isolation(acquisition_step)
+    verify_private_download_selection(acquisition_step)
+    verify_explicit_cache_path(acquisition_step)
+    verify_npm_major_gate(acquisition_step)
     cache_policy_step = next(
         step for step in prepare_job["steps"] if step.get("id") == "npm-cache-policy"
     )
+    assert cache_policy_step.get("name") == CACHE_POLICY_STEP
+    assert "secrets" not in cache_policy_step["run"].lower()
     assert cache_policy_step.get("env") == {
         "CACHE_REQUESTED": "${{ inputs.cache }}",
         "HAS_PRIVATE_PACKAGE_TOKEN": "${{ secrets.NODE_AUTH_TOKEN != '' }}",
@@ -438,10 +504,10 @@ def main():
             root = Path(temp)
             npm_bin = provision_npm(version, integrity, root / "npm")
             verify_dependency_code_never_sees_credential(
-                npm_bin, version, acquisition_step["run"], install_step["run"], root,
+                npm_bin, version, acquisition_step, install_step, root,
             )
             verify_empty_dependency_tree(
-                npm_bin, version, acquisition_step["run"], install_step["run"], root,
+                npm_bin, version, acquisition_step, install_step, root,
             )
         verified_majors.add(int(version.split(".", 1)[0]))
     assert verified_majors == set(SUPPORTED_NPM_RELEASES), (
@@ -452,7 +518,26 @@ def main():
 
 ACQUISITION_STEP = "Acquire private registry packages with credentials"
 TOKENLESS_INSTALL_STEP = "Install dependencies without credentials"
+CACHE_POLICY_STEP = "Decide whether npm download caching is safe"
 TOKEN = "synthetic-package-token"
+# Any Actions expression that reads the secrets context, in any spelling.
+SECRETS_EXPRESSION = re.compile(
+    r"\$\{\{(?:(?!\}\}).)*(?<![\w.-])secrets(?![\w-])", re.IGNORECASE | re.DOTALL,
+)
+
+
+def verify_secret_expression_matcher():
+    for spelling in (
+        "${{ secrets.NODE_AUTH_TOKEN }}",
+        "${{secrets.NODE_AUTH_TOKEN}}",
+        "${{  Secrets.node_auth_token  }}",
+        "${{ secrets['NODE_AUTH_TOKEN'] }}",
+        "${{ format('{0}', secrets.NODE_AUTH_TOKEN) }}",
+        "${{ toJSON(secrets) }}",
+    ):
+        assert SECRETS_EXPRESSION.search(json.dumps({"env": {"X": spelling}})), spelling
+    for unrelated in ("${{ runner.temp }}", "secrets.NODE_AUTH_TOKEN", "${{ inputs.secrets-file }}x"):
+        assert not SECRETS_EXPRESSION.search(json.dumps({"env": {"X": unrelated}})), unrelated
 
 # One exact npm per major that a Node line node-release accepts bundles: Node
 # 18, 20, and 22 ship npm 10 and Node 24, 25, and 26 ship npm 11. 10.9.9 is the
@@ -743,17 +828,37 @@ def write_dependency_fixture(root, private_registry, attacker_registry):
 
 
 def run_step(script, *, cwd, env):
-    """Run a workflow `run:` body the way GitHub Actions runs a bash step."""
-    return subprocess.run(
-        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
-        cwd=cwd, env=env, text=True, capture_output=True,
-    )
+    """Run a `run:` body as Actions runs a Linux step with no `shell:`: `bash -e {0}`."""
+    with tempfile.TemporaryDirectory(prefix="node-release-step-") as script_dir:
+        script_path = Path(script_dir) / "step.sh"
+        script_path.write_text(script)
+        return subprocess.run(
+            ["bash", "-e", str(script_path)],
+            cwd=cwd, env=env, text=True, capture_output=True,
+        )
 
 
 def with_npm_trace(env, root):
-    """Put a recorder in front of npm that logs each invocation and token presence."""
+    """Put recorders in front of npm and node that log each invocation and token presence.
+
+    npm, npx, and any `#!/usr/bin/env node` script resolve node through PATH, so
+    the node recorder sees them all. A step that runs node by absolute path would
+    bypass it; the lifecycle recorder's ancestor-environment scan and the
+    registries' request logs remain the backstop for that case.
+    """
     wrapper_dir = root / "npm-trace-bin"
     wrapper_dir.mkdir(exist_ok=True)
+    node_wrapper = wrapper_dir / "node"
+    node_wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'if [[ -n "${NODE_AUTH_TOKEN-}" ]]; then credential=present; else credential=absent; fi\n'
+        "printf '%s|%s\\n' \"$*\" \"$credential\" >> \"$NODE_TRACE\"\n"
+        "exec \"$REAL_NODE\" \"$@\"\n"
+    )
+    node_wrapper.chmod(0o755)
+    real_node = shutil.which("node", path=env["PATH"])
+    assert real_node, "node is not on PATH"
     wrapper = wrapper_dir / "npm"
     wrapper.write_text(
         "#!/usr/bin/env bash\n"
@@ -769,6 +874,8 @@ def with_npm_trace(env, root):
         "PATH": f"{wrapper_dir}{os.pathsep}{env['PATH']}",
         "REAL_NPM": real_npm,
         "NPM_TRACE": str(root / "npm-trace.log"),
+        "REAL_NODE": real_node,
+        "NODE_TRACE": str(root / "node-trace.log"),
     }
 
 
@@ -780,7 +887,8 @@ def hooks_by_package(hook_records):
     return hooks
 
 
-def verify_dependency_code_never_sees_credential(npm_bin, version, acquisition, install, root):
+def verify_dependency_code_never_sees_credential(npm_bin, version, acquisition_step, install_step, root):
+    acquisition, install = acquisition_step["run"], install_step["run"]
     private_registry = FixtureRegistry(require_token=True)
     attacker_registry = FixtureRegistry(require_token=False)
     try:
@@ -800,23 +908,32 @@ def verify_dependency_code_never_sees_credential(npm_bin, version, acquisition, 
             f"//{attacker_registry.origin.removeprefix('http://')}/:_authToken=${{NODE_AUTH_TOKEN}}\n"
         )
 
-        runner_temp = root / "runner-temp"
+        # A UUID in the runner temp path makes `npm config get cache` refuse to
+        # print the cache path, as npm treats such a value as possibly secret.
+        runner_temp = root / "runner-temp-3f2b8c1e-9a4d-4e6f-8b2a-1c3d5e7f9a0b"
         runner_temp.mkdir()
-        step_env = with_npm_trace(npm_environment(root, npm_bin, private_registry, "release"), root) | {
+        job_env = with_npm_trace(npm_environment(root, npm_bin, private_registry, "release"), root) | {
             "GITHUB_WORKSPACE": str(project),
             "RUNNER_TEMP": str(runner_temp),
+            "NODE_AUTH_TOKEN": "",
+        }
+        del job_env["npm_config_cache"]
+        acquisition_env = job_env | resolve_step_env(acquisition_step, runner_temp) | {
             "PRIVATE_PACKAGE_REGISTRY": private_registry.origin,
         }
+        install_env = job_env | resolve_step_env(install_step, runner_temp)
+        assert acquisition_env["NODE_AUTH_TOKEN"] == TOKEN
+        assert install_env["NODE_AUTH_TOKEN"] == ""
         private_registry.requests.clear()
         attacker_registry.requests.clear()
-        acquired = run_step(acquisition, cwd=project, env=step_env | {"NODE_AUTH_TOKEN": TOKEN})
+        acquired = run_step(acquisition, cwd=project, env=acquisition_env)
         assert acquired.returncode == 0, f"npm {version}: {acquired.stdout}{acquired.stderr}"
         acquisition_requests = list(private_registry.requests)
         private_registry.requests.clear()
-        installed = run_step(install, cwd=project, env=step_env | {"NODE_AUTH_TOKEN": ""})
+        installed = run_step(install, cwd=project, env=install_env)
         assert installed.returncode == 0, f"npm {version}: {installed.stdout}{installed.stderr}"
 
-        records = Path(step_env["LIFECYCLE_LOG"]).read_text().splitlines()
+        records = Path(job_env["LIFECYCLE_LOG"]).read_text().splitlines()
         exposed = [record for record in records if not record.endswith(":<unset>:[]:[]")]
         assert not exposed, f"npm {version}: dependency code observed the credential: {exposed}"
         attacker_token_requests = [
@@ -835,16 +952,22 @@ def verify_dependency_code_never_sees_credential(npm_bin, version, acquisition, 
             f"{private_registry.requests}"
         )
         assert (project / "node_modules/@fixture/private-dependency/package.json").is_file()
-        assert runner_temp.exists() and not list(runner_temp.iterdir()), list(runner_temp.iterdir())
-        trace = Path(step_env["NPM_TRACE"]).read_text().splitlines()
+        assert not leftover_acquisition_dirs(runner_temp), list(runner_temp.iterdir())
+        download_url = f"{private_registry.origin}{download_path}"
+        trace = Path(job_env["NPM_TRACE"]).read_text().splitlines()
         credentialed = [line.rsplit("|", 1)[0] for line in trace if line.endswith("|present")]
-        assert f"cache add {private_registry.origin}{download_path}" in credentialed, trace
-        assert all(
-            command in ("--version", "config get cache")
-            or command == f"cache add {private_registry.origin}{download_path}"
-            for command in credentialed
-        ), f"npm {version}: npm ran a non-fetch command with the credential: {credentialed}"
+        assert credentialed == ["--version", f"cache add {download_url}"], (
+            f"npm {version}: unexpected npm invocations with the credential: {credentialed}"
+        )
         assert "ci --prefer-offline|absent" in trace, trace
+        npm_cli = Path(npm_bin).parent / "package/bin/npm-cli.js"
+        node_trace = Path(job_env["NODE_TRACE"]).read_text().splitlines()
+        credentialed_node = [line.rsplit("|", 1)[0] for line in node_trace if line.endswith("|present")]
+        assert credentialed_node == [
+            f"- package-lock.json {private_registry.origin}",
+            f"{npm_cli} --version",
+            f"{npm_cli} cache add {download_url}",
+        ], f"npm {version}: unexpected node invocations with the credential: {credentialed_node}"
 
         # Without the workflow's boundary the same fixture leaks the credential
         # through lifecycle hooks, an ancestor environment, and a git
@@ -889,7 +1012,8 @@ def verify_dependency_code_never_sees_credential(npm_bin, version, acquisition, 
         attacker_registry.close()
 
 
-def verify_empty_dependency_tree(npm_bin, version, acquisition, install, root):
+def verify_empty_dependency_tree(npm_bin, version, acquisition_step, install_step, root):
+    acquisition, install = acquisition_step["run"], install_step["run"]
     private_registry = FixtureRegistry(require_token=True)
     try:
         empty_root = root / "empty-dependency-fixture"
@@ -913,14 +1037,17 @@ def verify_empty_dependency_tree(npm_bin, version, acquisition, install, root):
         )
         runner_temp = root / "empty-runner-temp"
         runner_temp.mkdir()
-        step_env = env | {
+        job_env = env | {
             "GITHUB_WORKSPACE": str(empty_root),
             "RUNNER_TEMP": str(runner_temp),
+            "NODE_AUTH_TOKEN": "",
+        }
+        acquisition_env = job_env | resolve_step_env(acquisition_step, runner_temp) | {
             "PRIVATE_PACKAGE_REGISTRY": private_registry.origin,
         }
-        acquired = run_step(acquisition, cwd=empty_root, env=step_env | {"NODE_AUTH_TOKEN": TOKEN})
+        acquired = run_step(acquisition, cwd=empty_root, env=acquisition_env)
         assert acquired.returncode == 0, f"npm {version}: {acquired.stdout}{acquired.stderr}"
-        installed = run_step(install, cwd=empty_root, env=step_env | {"NODE_AUTH_TOKEN": ""})
+        installed = run_step(install, cwd=empty_root, env=job_env | resolve_step_env(install_step, runner_temp))
         assert installed.returncode == 0, f"npm {version}: {installed.stdout}{installed.stderr}"
         assert private_registry.requests == []
         records = Path(env["LIFECYCLE_LOG"]).read_text().splitlines()

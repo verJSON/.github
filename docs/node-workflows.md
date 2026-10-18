@@ -517,13 +517,16 @@ dependency with a child `npm install` that inherits the token and reads the
 dependency's own `.npmrc`. Consequences for callers:
 
 - every GitHub Packages entry in `package-lock.json` or `npm-shrinkwrap.json`
-  (lockfile version 2 or 3) needs its exact download `resolved` URL and one
-  sha512 `integrity`; anything else fails the acquisition step;
+  needs lockfile version 2 or 3, its exact download `resolved` URL, and one
+  sha512 `integrity`; anything else fails the acquisition step. A version 1
+  lockfile that names no GitHub Packages host still installs;
+- both steps use one explicit cache, `${{ runner.temp }}/verjson-npm-cache`;
 - a git dependency whose own preparation installs private GitHub Packages no
   longer receives the token and fails rather than exposing it;
-- acquisition refuses any npm other than major 10 or 11, the majors bundled
-  by Node 18 through 26 and verified by
-  `scripts/node-release-credential-isolation.test.py`.
+- when private downloads exist, acquisition refuses any npm other than major
+  10 or 11, the majors bundled by current Node 18 through 26 releases and
+  verified by `scripts/node-release-credential-isolation.test.py`. Early
+  Node 18.x and 20.x releases shipped npm 8 or 9, which the gate rejects.
 
 The decision and its evidence are in
 [ADR 0220](decisions/0220-confine-release-credentials-to-dependency-acquisition/README.md).

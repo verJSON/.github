@@ -292,9 +292,29 @@ jobs:
           } catch {
             fail(`dependency installation requires a readable JSON ${lockfilePath}.`);
           }
-          if (![2, 3].includes(lock?.lockfileVersion)
-            || typeof lock.packages !== "object" || lock.packages === null) {
-            fail(`${lockfilePath} must be lockfileVersion 2 or 3 with a packages map.`);
+          const lockfileStrings = function* (value) {
+            if (typeof value === "string") {
+              yield value;
+            } else if (typeof value === "object" && value !== null) {
+              for (const [key, member] of Object.entries(value)) {
+                yield key;
+                yield* lockfileStrings(member);
+              }
+            }
+          };
+          if (![2, 3].includes(lock?.lockfileVersion)) {
+            // An older lockfile has no flat packages map to select downloads
+            // from. It installs without credentials unless it names the
+            // private registry anywhere.
+            for (const text of lockfileStrings(lock)) {
+              if (text.toLowerCase().includes(registryUrl.hostname)) {
+                fail(`${lockfilePath} names ${registryUrl.hostname}; private packages require lockfileVersion 2 or 3.`);
+              }
+            }
+            process.exit(0);
+          }
+          if (typeof lock.packages !== "object" || lock.packages === null) {
+            fail(`${lockfilePath} lockfileVersion ${lock.lockfileVersion} has no packages map.`);
           }
           // GitHub Packages may record the owner's own spelling of the scope.
           const downloadPath =
@@ -335,7 +355,14 @@ jobs:
               echo "::error::npm $npm_version has no verified credential-isolation contract; use a node-version that bundles npm 10 or 11."
               exit 1
             fi
-            cache_dir="$(npm config get cache)"
+            # The cache path comes from the step environment, which the
+            # tokenless install shares, rather than `npm config get cache`,
+            # whose output npm redacts when a path segment looks secret.
+            cache_dir="${npm_config_cache-}"
+            if [[ "$cache_dir" != /* ]]; then
+              echo "::error::npm_config_cache must be the absolute cache path shared with the tokenless install."
+              exit 1
+            fi
             while IFS=$'\t' read -r resolved digest; do
               npm cache add "$resolved"
               content="$cache_dir/_cacache/content-v2/sha512/${digest:0:2}/${digest:2:2}/${digest:4}"
@@ -349,8 +376,11 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
           PRIVATE_PACKAGE_REGISTRY: https://npm.pkg.github.com
+          npm_config_cache: ${{ runner.temp }}/verjson-npm-cache
       - name: Install dependencies without credentials
         run: npm ci --prefer-offline
+        env:
+          npm_config_cache: ${{ runner.temp }}/verjson-npm-cache
       - name: Prepare release package metadata
         env:
           PACKAGE_VERSION: ${{ steps.release-tag.outputs.package-version }}

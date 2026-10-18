@@ -74,10 +74,11 @@ assert "trap finish_acquisition EXIT" in (install.get("run") or "")
 assert install.get("env") == {
     "NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}",
     "PRIVATE_PACKAGE_REGISTRY": "https://npm.pkg.github.com",
+    "npm_config_cache": "${{ runner.temp }}/verjson-npm-cache",
 }
 lifecycle = next(step for step in prepare_steps if step.get("name") == "Install dependencies without credentials")
 assert (lifecycle.get("run") or "").strip() == "npm ci --prefer-offline"
-assert "NODE_AUTH_TOKEN" not in (lifecycle.get("env") or {})
+assert lifecycle.get("env") == {"npm_config_cache": "${{ runner.temp }}/verjson-npm-cache"}
 assert prepare_steps.index(install) < prepare_steps.index(lifecycle)
 package_token_steps = [
     step for step in prepare_steps
