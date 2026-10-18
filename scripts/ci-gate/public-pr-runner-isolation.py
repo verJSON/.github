@@ -889,6 +889,30 @@ def tracked_paths(root: str) -> frozenset[str]:
     return frozenset(path for path, _, _ in tracked_files(root))
 
 
+@functools.lru_cache(maxsize=None)
+def tracked_modes(root: str) -> dict[str, str]:
+    return {path: mode or "" for path, mode, _ in tracked_files(root)}
+
+
+PROGRAM_EXTENSIONS = (".sh", ".bash", ".py", ".js", ".mjs", ".cjs")
+# A literal that may name a file: a path with a separator, or a bare name with
+# a program extension (resolved against the naming program's directory).
+LITERAL_PATH = re.compile(
+    r"[A-Za-z0-9_.@+-]*(?:/[A-Za-z0-9_.@+-]+)+|[A-Za-z0-9_@+-][A-Za-z0-9_.@+-]*\.(?:sh|bash|py|js|mjs|cjs)\b"
+)
+
+
+def is_program(root: str, relative: str) -> bool:
+    """A shebang, the exec bit, or a program extension (PM design, round 8)."""
+    if relative.endswith(PROGRAM_EXTENSIONS) or "100755" in tracked_modes(root).get(relative, "").split():
+        return True
+    path = os.path.join(root, relative)
+    if os.path.islink(path) or not os.path.isfile(path):
+        return False
+    with open(path, "rb") as handle:
+        return handle.read(2) == b"#!"
+
+
 SHELL_WRAPPER = re.compile(r"(?m)^[ \t]*([A-Za-z_][\w-]*)[ \t]*\(\)[ \t]*\{(.*?)^[ \t]*\}", re.S)
 # Only a program is followed through a variable-rooted path; a data file a
 # deeper check reads (an index, a manifest) is that check's input, not code.
@@ -1109,9 +1133,13 @@ class ProgramTrace:
         # (program, exact logical line): the frozen, reviewed materialization.
         self.tolerated = tolerated
         self.bound: dict[str, str] = {}
-        self.followed: set[str] = set()
+        # program -> modes followed. "invoked": reached by an invocation the
+        # trace models, so every form in it is traced and an unresolvable
+        # composed target refuses. "named": reached only because a literal
+        # names it, so it is bound and its own literals followed (round 8).
+        self.followed: dict[str, set[str]] = {}
         self.best: dict[str, int] = {}
-        self.heap: list[tuple[int, str]] = []
+        self.heap: list[tuple[int, int, str]] = []
         self.unresolved: set[str] = set()
         self.texts: list[tuple[str, str]] = []
         self.capped: str | None = None
@@ -1141,11 +1169,13 @@ class ProgramTrace:
         for run in runs:
             self.shell(run, "", 0, data=True)
         while self.heap:
-            depth, program = heapq.heappop(self.heap)
-            if program in self.followed:
+            depth, rank, program = heapq.heappop(self.heap)
+            mode = ("invoked", "named")[rank]
+            done = self.followed.setdefault(program, set())
+            if "invoked" in done or mode in done:
                 continue
-            self.followed.add(program)
-            self.follow(program, depth)
+            done.add(mode)
+            self.follow(program, depth, mode)
 
     # -- binding ---------------------------------------------------------
     def unresolve(self, reason: str) -> None:
@@ -1164,22 +1194,46 @@ class ProgramTrace:
         self.bound.setdefault(relative, hashlib.sha256(raw).hexdigest())
         return raw.decode("utf-8", "surrogateescape")
 
-    def reach(self, relative: str, depth: int, why: str) -> None:
-        """A program the job runs: bind it and follow it from its shallowest depth."""
+    def reach(self, relative: str, depth: int, why: str, mode: str = "invoked") -> None:
+        """A program the job runs (or names): bind it and follow it from the
+        shallowest depth it is reached at in that mode."""
         relative = os.path.normpath(relative)
-        if self.capped is not None:
+        if self.capped is not None and mode == "invoked":
             self.unresolve(f"{self.capped} is nested beyond {MAX_CLOSURE_DEPTH} and still runs {relative} ({why})")
             return
         if self.bind(relative) is None and relative not in self.bound:
             self.unresolve(f"{relative} ({why}) is not a file in the scanned tree")
             return
-        if depth < self.best.get(relative, MAX_CLOSURE_DEPTH + 2):
-            self.best[relative] = depth
-            heapq.heappush(self.heap, (depth, relative))
+        key = f"{mode}:{relative}"
+        if depth < self.best.get(key, 1 << 30):
+            self.best[key] = depth
+            heapq.heappush(self.heap, (depth, 0 if mode == "invoked" else 1, relative))
 
-    def follow(self, program: str, depth: int) -> None:
+    def literals(self, text: str, origin: str, depth: int) -> None:
+        """Bind and follow every tracked program a literal in `text` names,
+        whatever invokes it (PM design, round 8): a spawn, an argv list, a
+        PATH trick, or a form no rule here models. Order and form then never
+        decide whether an edit to a program stales the row."""
+        base = os.path.dirname(origin)
+        for match in LITERAL_PATH.finditer(text):
+            parts = match.group(0).split("/")
+            for start in range(len(parts)):
+                tail = "/".join(parts[start:])
+                for prefix in ("", base):
+                    candidate = os.path.normpath(os.path.join(prefix, tail)) if tail else ""
+                    if candidate in self.tracked and is_program(self.root, candidate):
+                        self.reach(candidate, depth + 1, f"named literally in {origin or 'a step'}", "named")
+
+    def follow(self, program: str, depth: int, mode: str = "invoked") -> None:
         content = self.bind(program)
         if content is None:
+            return
+        if mode == "named":
+            # No invocation the trace models runs it, so its forms are not
+            # traced; its bytes are bound and every program it names is
+            # followed in turn. The literal closure is finite (the tracked
+            # programs), so it needs no depth cap.
+            self.literals(content, program, depth)
             return
         if depth >= MAX_CLOSURE_DEPTH:
             self.capped = program
@@ -1242,6 +1296,15 @@ class ProgramTrace:
     def shell(self, text: str, origin: str, depth: int, data: bool = False, inherited=None) -> None:
         text = without_comments(text)
         self.texts.append((origin, text))
+        if self.tolerated and origin == self.tolerated[0] and self.tolerated[1] in text:
+            # The frozen pin comparison runs the generator as it stood at the
+            # pin, not the tree's copy: its literals are bound, not followed.
+            for match in LITERAL_PATH.finditer(self.tolerated[1]):
+                for part in range(len(match.group(0).split("/"))):
+                    self.bind(os.path.normpath("/".join(match.group(0).split("/")[part:])))
+            self.literals(text.replace(self.tolerated[1], "true", 1), origin, depth)
+        else:
+            self.literals(text, origin, depth)
         if data:
             for token in DATA_TOKEN_SPLIT.split(text):
                 if token:
@@ -1469,6 +1532,7 @@ class ProgramTrace:
 
     # -- python ----------------------------------------------------------
     def python(self, source: str, origin: str, depth: int, argv=None, inline: bool = False) -> None:
+        self.literals(source, origin, depth)
         try:
             tree = ast.parse(source)
         except SyntaxError as error:
@@ -1572,6 +1636,7 @@ class ProgramTrace:
 
     # -- javascript ------------------------------------------------------
     def javascript(self, source: str, origin: str, depth: int, inline: bool = False) -> None:
+        self.literals(source, origin, depth)
         base = os.path.dirname(origin) if not inline else ""
         for literal in re.findall(r"\brequire\(\s*(?:\"([^\"]+)\"|'([^']+)')\s*\)", source):
             module = literal[0] or literal[1]

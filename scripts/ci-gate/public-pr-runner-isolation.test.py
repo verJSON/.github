@@ -3411,6 +3411,27 @@ for label, sub in (
                           ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED))
 
 # ---------------------------------------------------------------------------
+# Round-8 finding 1 (PM design): any literal in a traced program text that
+# names a tracked program is bound and followed, whatever invokes it, so the
+# invocation form never decides whether an edit stales the row.
+# ---------------------------------------------------------------------------
+EVIL = {"scripts/evil.sh": "echo evil\n"}
+for label, hook, files in (
+    ("a JavaScript spawn of a literal path", "node scripts/probe.js\n",
+     {"scripts/probe.js": 'const { spawnSync } = require("node:child_process");\nspawnSync("./scripts/evil.sh");\n'}),
+    ("a Python argv list naming a literal path", "python3 scripts/probe.py\n",
+     {"scripts/probe.py": 'import subprocess\nsubprocess.run(["scripts/evil.sh"])\n'}),
+    ("a Python string command naming a literal path", "python3 scripts/probe.py\n",
+     {"scripts/probe.py": 'import subprocess\nsubprocess.run("scripts/evil.sh")\n'}),
+    ("an aliased subprocess call", "python3 scripts/probe.py\n",
+     {"scripts/probe.py": 'import subprocess as sp\nsp.check_call(["bash", "scripts/evil.sh"])\n'}),
+    ("find -exec", "find . -name x -exec scripts/evil.sh {} +\n", {}),
+    ("a deeper script that only names it in data", "bash scripts/sub.sh\n",
+     {"scripts/sub.sh": 'run_later="scripts/evil.sh"\necho "$run_later" >/dev/null\n'}),
+):
+    expect_bound(hook, {**EVIL, **files}, "scripts/evil.sh", f"verify binds a program named by {label}")
+
+# ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
 # sequences must not decode to the same replacement text and digest), and a
 # relative root is made absolute rather than silently binding nothing.
