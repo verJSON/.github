@@ -1440,6 +1440,7 @@ jobs:
             --json-schema '{"type":"object","properties":{"blocking":{"type":"boolean"},"summary":{"type":"string"},"review_first":{"type":"array","items":{"type":"object","properties":{"location":{"type":"string","description":"Exactly one file and positive line number (path/to/file.ext:42); no ranges or comma-separated locations."},"why":{"type":"string"}},"required":["location","why"],"additionalProperties":false}},"findings":{"type":"array","items":{"type":"object","properties":{"location":{"type":"string","description":"Exactly one repository-relative file and one positive line number (path/to/file.ext:42); no ranges or comma-separated locations."},"reason":{"type":"string"},"failure_scenario":{"type":"string"},"evidence":{"type":"string","description":"An 8-240 character exact fragment from the cited source line, or the entire trimmed line when shorter than 8 characters."}},"required":["location","reason","failure_scenario","evidence"],"additionalProperties":false}},"followups":{"type":"array","items":{"type":"object","properties":{"location":{"type":"string"},"note":{"type":"string"}},"required":["location","note"],"additionalProperties":false}}},"required":["blocking","summary","review_first","findings","followups"],"additionalProperties":false}'
             --allowedTools "Read,Grep,Glob"
             --setting-sources user
+            --strict-mcp-config
 
       - name: OpenAI review (explicit re-review only)
         id: openai

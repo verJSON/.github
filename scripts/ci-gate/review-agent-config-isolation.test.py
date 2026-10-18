@@ -44,6 +44,11 @@ class ClaudeReviewArgumentsTest(unittest.TestCase):
         sources = [value for flag, value in claude_flags(STEPS['claude']) if flag == 'setting-sources']
         self.assertEqual(sources, ['user'])
 
+    def test_claude_review_starts_only_explicitly_configured_mcp_servers(self):
+        strict = [value for flag, value in claude_flags(STEPS['claude']) if flag == 'strict-mcp-config']
+        # A value would be consumed as the flag's argument and passed on as a stray token.
+        self.assertEqual(strict, [None])
+
 
 if __name__ == '__main__':
     unittest.main()
