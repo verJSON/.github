@@ -505,6 +505,29 @@ Two properties to respect:
   workflow uses its repository-scoped `GITHUB_TOKEN` only to publish that
   repository's package and GitHub release.
 
+`NODE_AUTH_TOKEN` reaches exactly one step, and that step never builds a
+dependency tree: it runs `npm cache add` for each locked
+`https://npm.pkg.github.com/download/...` URL, checks that the npm cache holds
+the content named by the lockfile's sha512 `integrity`, and exits. The next
+step runs `npm ci --prefer-offline` without the token, so every lifecycle hook,
+git dependency preparation, and dependency-owned `.npmrc` runs with no package
+credential. `npm ci --ignore-scripts` is not that boundary: npm 10 still runs
+`prepare` for linked and directory dependencies, and every npm prepares a git
+dependency with a child `npm install` that inherits the token and reads the
+dependency's own `.npmrc`. Consequences for callers:
+
+- every GitHub Packages entry in `package-lock.json` or `npm-shrinkwrap.json`
+  (lockfile version 2 or 3) needs its exact download `resolved` URL and one
+  sha512 `integrity`; anything else fails the acquisition step;
+- a git dependency whose own preparation installs private GitHub Packages no
+  longer receives the token and fails rather than exposing it;
+- acquisition refuses any npm other than major 10 or 11, the majors bundled
+  by Node 18 through 26 and verified by
+  `scripts/node-release-credential-isolation.test.py`.
+
+The decision and its evidence are in
+[ADR 0220](decisions/0220-confine-release-credentials-to-dependency-acquisition/README.md).
+
 The credentialed acquisition step temporarily moves the tagged workspace's
 root `.npmrc` out of npm's project-config search path, then restores it on
 success or failure. Persistent npm caching is opt-in and disabled whenever

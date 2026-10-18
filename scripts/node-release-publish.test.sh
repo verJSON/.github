@@ -66,12 +66,16 @@ prepare_steps = prepare["steps"]
 steps = release["steps"]
 assert "semantic-release" not in raw
 
-install = next(step for step in prepare_steps if step.get("name") == "Install dependencies")
-assert "npm ci --ignore-scripts" in (install.get("run") or "")
+install = next(step for step in prepare_steps if step.get("name") == "Acquire private registry packages with credentials")
+assert "npm ci" not in (install.get("run") or "")
+assert 'npm cache add "$resolved"' in (install.get("run") or "")
 assert "project_npmrc=\"$GITHUB_WORKSPACE/.npmrc\"" in (install.get("run") or "")
-assert "trap restore_project_npmrc EXIT" in (install.get("run") or "")
-assert install.get("env") == {"NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}"}
-lifecycle = next(step for step in prepare_steps if step.get("name") == "Run dependency lifecycle scripts without credentials")
+assert "trap finish_acquisition EXIT" in (install.get("run") or "")
+assert install.get("env") == {
+    "NODE_AUTH_TOKEN": "${{ secrets.NODE_AUTH_TOKEN }}",
+    "PRIVATE_PACKAGE_REGISTRY": "https://npm.pkg.github.com",
+}
+lifecycle = next(step for step in prepare_steps if step.get("name") == "Install dependencies without credentials")
 assert (lifecycle.get("run") or "").strip() == "npm ci --prefer-offline"
 assert "NODE_AUTH_TOKEN" not in (lifecycle.get("env") or {})
 assert prepare_steps.index(install) < prepare_steps.index(lifecycle)
