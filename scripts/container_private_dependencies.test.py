@@ -84,6 +84,15 @@ class PrivateDependencyTests(unittest.TestCase):
             with self.subTest(resolved=resolved), self.assertRaises(contract.DependencyError):
                 contract.build_plan(candidate, ["@verjson/pg"])
 
+    def test_rejects_a_non_ascii_scope_that_lowercases_to_an_approved_scope(self):
+        candidate = lock()
+        entry = candidate["packages"].pop("node_modules/@verjson/pg")
+        # The Kelvin sign lowercases to an ASCII "k"; only an ASCII scope may fold.
+        entry["resolved"] = "https://npm.pkg.github.com/download/@\u212Aorg/pg/1.2.3/hash"
+        candidate["packages"]["node_modules/@korg/pg"] = entry
+        with self.assertRaises(contract.DependencyError):
+            contract.build_plan(candidate, ["@korg/pg"])
+
     def test_rejects_transitive_internal_package_not_in_exact_allowlist(self):
         candidate = lock()
         candidate["packages"]["node_modules/zod/node_modules/@verjson/transitive"] = {
