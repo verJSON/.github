@@ -3577,6 +3577,12 @@ for label, line in (
     ("a PATH prefix assignment with a relative entry", "PATH=scripts:$PATH tool"),
     ("a PATH entry from the working directory", 'PATH="$(pwd)/bin:$PATH"'),
     ("a workspace directory appended to GITHUB_PATH", 'echo "$PWD/bin" >> "$GITHUB_PATH"'),
+    # Round-9 nits: an empty entry is the working directory, and += appends.
+    ("a trailing empty PATH entry", 'export PATH="$PATH:"'),
+    ("a leading empty PATH entry", 'PATH=":$PATH"'),
+    ("an empty PATH entry in the middle", 'PATH="/usr/bin::/bin"'),
+    ("a PATH += append of a relative entry", "PATH+=:scripts"),
+    ("a relative directory appended to GITHUB_PATH with printf", "printf 'bin\\n' >> $GITHUB_PATH"),
 ):
     expect_verify_refused(verify_with(line + "\n", {}), f"verify refuses {label}",
                           ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED,

@@ -1991,7 +1991,7 @@ def traced_materializations(
 # A PATH assignment, or a GITHUB_PATH append, in a traced text (round 8,
 # residual a): a bare command word resolves through PATH, so an entry inside
 # the workspace runs tracked bytes no literal names.
-PATH_ASSIGNMENT = re.compile(r"""(?:^|[\s;&|(])(?:export[ \t]+)?PATH=("[^"]*"|'[^']*'|[^\s;&|)]*)""", re.M)
+PATH_ASSIGNMENT = re.compile(r"""(?:^|[\s;&|(])(?:export[ \t]+)?PATH(\+?)=("[^"]*"|'[^']*'|[^\s;&|)]*)""", re.M)
 GITHUB_PATH_APPEND = re.compile(r"""(?m)^[^\n]*?(?:echo|printf)[ \t]+([^\n>]*?)>>[ \t]*["']?\$\{?GITHUB_PATH\b""")
 WORKSPACE_ENTRY = re.compile(r"GITHUB_WORKSPACE|\$\{?PWD\b|\$\(\s*pwd\s*\)|`\s*pwd\s*`|github\.workspace")
 
@@ -2000,16 +2000,29 @@ def workspace_path_entries(job: dict, texts: list[tuple[str, str]]) -> set[str]:
     """Reasons for every PATH entry a backlog job puts inside the workspace:
     one naming the workspace or working directory, or a relative one."""
     found: set[str] = set()
-    values = [(origin, match.group(1)) for origin, text in texts for match in PATH_ASSIGNMENT.finditer(text)]
-    values += [(origin, match.group(1)) for origin, text in texts for match in GITHUB_PATH_APPEND.finditer(text)]
+    # (origin, entries): an assignment's colon-separated entries, where an empty
+    # one is the working directory (round 9); a `+=` appends, so its leading
+    # colon is the join; a GITHUB_PATH line is one directory.
+    values = []
+    for origin, text in texts:
+        for match in PATH_ASSIGNMENT.finditer(text):
+            value = match.group(2).strip().strip("\"'")
+            if match.group(1):
+                value = value[1:] if value.startswith(":") else value
+            values.append((origin, value.split(":")))
+        for match in GITHUB_PATH_APPEND.finditer(text):
+            values.append((origin, [match.group(1)]))
     for scope in [job] + [step for step in job.get("steps") or [] if isinstance(step, dict)]:
         env = scope.get("env")
         if isinstance(env, dict) and "PATH" in env:
-            values.append(("an env block", str(env["PATH"])))
-    for origin, value in values:
-        for entry in value.strip().strip("\"'").split(":"):
+            values.append(("an env block", str(env["PATH"]).split(":")))
+    for origin, entries in values:
+        for entry in entries:
             entry = entry.strip().strip("\"'")
-            if entry and (WORKSPACE_ENTRY.search(entry) or not entry.startswith(("/", "$", "~"))):
+            if not entry and len(entries) > 1:
+                found.add(f"{origin or 'a step'}: an empty PATH entry is the working directory and puts the "
+                          "workspace on PATH, so a bare command word could run tracked bytes no row binds")
+            elif entry and (WORKSPACE_ENTRY.search(entry) or not entry.startswith(("/", "$", "~"))):
                 found.add(f"{origin or 'a step'}: PATH entry {entry!r} puts the workspace on PATH, so a bare "
                           "command word could run tracked bytes no row binds")
     return found
