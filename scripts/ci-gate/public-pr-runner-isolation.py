@@ -957,7 +957,9 @@ SEPARATOR_TOKENS = frozenset({";", "&&", "||", "|", "&", "|&", "(", ")", ";;", "
 REDIRECTS = frozenset({">", ">>", "<", "<<", ">&", "<&", "&>", "&>>", ">|", "<>"})
 HEREDOC_MARK = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 ASSIGNMENT = re.compile(r"^([A-Za-z_]\w*)(?:\[[^\]]*\])?\+?=(.*)$", re.S)
-PYTHON_SPAWNS = frozenset({"run", "call", "check_call", "check_output", "Popen"})
+PYTHON_SPAWNS = frozenset({"run", "call", "check_call", "check_output", "Popen", "getoutput", "getstatusoutput"})
+# subprocess spawns that always run their string through a shell (round 10).
+PYTHON_SHELL_SPAWNS = frozenset({"getoutput", "getstatusoutput"})
 
 
 def strip_shell_comments(text: str) -> str:
@@ -1709,8 +1711,13 @@ class ProgramTrace:
             if not node.args:
                 return
             first = node.args[0]
-            shell = any(keyword.arg == "shell" and isinstance(keyword.value, ast.Constant) and keyword.value.value
-                        for keyword in node.keywords)
+            shell_keywords = [keyword.value for keyword in node.keywords if keyword.arg == "shell"]
+            if any(not isinstance(value, ast.Constant) for value in shell_keywords):
+                # Whether the command is a shell string or a program name is
+                # decided at runtime (round 10).
+                self.unresolve(f"{where}: a shell= this checker cannot decide")
+                return
+            shell = leaf in PYTHON_SHELL_SPAWNS or any(value.value for value in shell_keywords)
             if isinstance(first, ast.Constant) and isinstance(first.value, str):
                 if shell:
                     self.shell(first.value, origin, depth)
@@ -2008,7 +2015,10 @@ TRACED_TREE_CHANGE = re.compile(
     r"|read-tree|checkout-index)(?![\w-])"
     r"|" + GIT_WORD + r"[^\n]*?--(?:git-dir|work-tree)\b"
     r"|\bgh[ \t]+pr[ \t]+checkout\b"
-    r"|(?:^|[;&|(]|&&|\|\|)[ \t]*(?:sudo[ \t]+)?\\?patch(?=[ \t]|$)",
+    # patch behind the command prefixes the trace models, or by path (round 10).
+    r"|(?:^|[;&|(]|&&|\|\|)[ \t]*(?:(?:" + "|".join(re.escape(word) for word in sorted(COMMAND_PREFIXES))
+    + r"|env(?:[ \t]+(?:-\S+|[A-Za-z_]\w*=\S*))*|timeout(?:[ \t]+-\S+)*[ \t]+\S+)[ \t]+)*"
+    r"\\?(?:[\w./-]*/)?patch(?=[ \t]|$)",
     re.M,
 )
 
@@ -2042,7 +2052,10 @@ def traced_materializations(
 # A PATH assignment, or a GITHUB_PATH append, in a traced text (round 8,
 # residual a): a bare command word resolves through PATH, so an entry inside
 # the workspace runs tracked bytes no literal names.
-PATH_ASSIGNMENT = re.compile(r"""(?:^|[\s;&|(])(?:export[ \t]+)?PATH(\+?)=("[^"]*"|'[^']*'|[^\s;&|)]*)""", re.M)
+# The value is every quoted or bare segment, so `"$PATH":` keeps its empty
+# trailing entry (round 10).
+PATH_ASSIGNMENT = re.compile(
+    r"""(?:^|[\s;&|(])(?:export[ \t]+)?PATH(\+?)=((?:"[^"]*"|'[^']*'|[^\s;&|)"'])*)""", re.M)
 GITHUB_PATH_APPEND = re.compile(r"""(?m)^[^\n]*?(?:echo|printf)[ \t]+([^\n>]*?)>>[ \t]*["']?\$\{?GITHUB_PATH\b""")
 WORKSPACE_ENTRY = re.compile(r"GITHUB_WORKSPACE|\$\{?PWD\b|\$\(\s*pwd\s*\)|`\s*pwd\s*`|github\.workspace")
 
@@ -2057,7 +2070,7 @@ def workspace_path_entries(job: dict, texts: list[tuple[str, str]]) -> set[str]:
     values = []
     for origin, text in texts:
         for match in PATH_ASSIGNMENT.finditer(text):
-            value = match.group(2).strip().strip("\"'")
+            value = match.group(2).strip().replace('"', "").replace("'", "")
             if match.group(1):
                 value = value[1:] if value.startswith(":") else value
             values.append((origin, value.split(":")))

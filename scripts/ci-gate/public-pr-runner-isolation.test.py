@@ -3757,6 +3757,38 @@ if for_verify == {("scripts/changelog.py", DATA_READ)} and not for_other:
 else:
     fail(f"the frozen data read's keys: verify {for_verify}, snapshot {for_other}")
 
+# Round-10 nits: `patch` behind the command prefixes the trace models or by
+# path; an empty entry after a closing quote; getoutput-style string spawns;
+# and a shell= the trace cannot decide.
+for label, line in (
+    ("env patch", "env patch -p1 < changes.diff"),
+    ("nohup patch", "nohup patch -p1 < changes.diff"),
+    ("time patch", "time patch -p1 < changes.diff"),
+    ("command patch", "command patch -p1 < changes.diff"),
+    ("a path-qualified patch", "/usr/bin/patch -p1 < changes.diff"),
+    ("a relative path-qualified patch", "tools/bin/patch -p1 < changes.diff"),
+):
+    expect_verify_refused(verify_with(line + "\n", {}), f"verify refuses {label}",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", "changes the checked-out tree"))
+expect_verify_refused(verify_with('export PATH="$PATH":\n', {}), "verify refuses an empty PATH entry after a closing quote",
+                      ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "puts the workspace on PATH"))
+for label, call in (
+    ("subprocess.getoutput", 'subprocess.getoutput("bash \\"$TOOL\\"")'),
+    ("subprocess.getstatusoutput", 'subprocess.getstatusoutput("bash \\"$TOOL\\"")'),
+):
+    expect_verify_refused(verify_with("python3 scripts/zz-spawn.py\n",
+                                      {"scripts/zz-spawn.py": "import subprocess\n" + call + "\n"}),
+                          f"verify refuses {label} running a computed program",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED))
+expect_verify_refused(verify_with("python3 scripts/zz-spawn.py\n",
+                                  {"scripts/zz-spawn.py": 'import subprocess\nsubprocess.run("echo ok", shell=use_shell)\n'}),
+                      "verify refuses a string spawn whose shell= it cannot decide",
+                      ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "shell="))
+expect(verify_with("python3 scripts/zz-spawn.py\n",
+                   {"scripts/zz-spawn.py": 'import subprocess\nsubprocess.getoutput("echo ok")\n'}),
+       0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
+       "a getoutput of a resolvable command is traced, not refused", *PENDING_ARGS)
+
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
 # sequences must not decode to the same replacement text and digest), and a
