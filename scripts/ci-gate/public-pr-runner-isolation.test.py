@@ -3792,6 +3792,58 @@ expect_bound("python3 scripts/zz-spawn.py\n",
               "scripts/zz-ok.sh": "echo ok\n"},
              "scripts/zz-ok.sh", "a getoutput string read as a shell command")
 
+# Round-11 blocker: every Python call is classified by its imported name, so
+# an alias (`from subprocess import getoutput as g`, `import os as o`, a
+# loader imported by name) is read exactly like the original.
+for label, program in (
+    ("an aliased getoutput running cd && sh",
+     'from subprocess import getoutput as g\ng("cd tools && sh \\"$TOOL\\"")\n'),
+    ("an aliased getstatusoutput running a computed program",
+     'from subprocess import getstatusoutput as gs\ngs("bash \\"$TOOL\\"")\n'),
+    ("an aliased os module's system", 'import os as o\no.system("bash \\"$TOOL\\"")\n'),
+    ("an aliased os module's execv", 'import os as o\no.execv(tool, [tool])\n'),
+    ("an aliased import_module loading a computed module",
+     'from importlib import import_module as load\nload(name)\n'),
+    ("an aliased run_path loading a computed path", 'from runpy import run_path as rp\nrp(path)\n'),
+    ("a getattr on an aliased os module", 'import os as o\ngetattr(o, "system")(command)\n'),
+):
+    expect_verify_refused(verify_with("python3 scripts/zz-spawn.py\n", {"scripts/zz-spawn.py": program}),
+                          f"verify refuses {label}",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED))
+expect_verify_refused(
+    verify_with("python3 scripts/zz-spawn.py\n",
+                {"scripts/zz-spawn.py": 'from subprocess import getoutput as g\ng("patch -p1 < changes.diff")\n'}),
+    "verify refuses an aliased getoutput running patch",
+    ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", "changes the checked-out tree"))
+expect_bound("python3 scripts/zz-spawn.py\n",
+             {"scripts/zz-spawn.py": 'from subprocess import getoutput as g\ng("cd tools && sh scripts/zz-ok.sh")\n',
+              "scripts/zz-ok.sh": "echo ok\n"},
+             "scripts/zz-ok.sh", "an aliased getoutput's shell command")
+
+# Round-11 nit: the command prefixes skip their own option arguments, both in
+# the tree-change scan and when the trace finds the command they run.
+for label, line in (
+    ("sudo -u root patch", "sudo -u root patch -p1 < changes.diff"),
+    ("time -p patch", "time -p patch -p1 < changes.diff"),
+    ("command -p patch", "command -p patch -p1 < changes.diff"),
+    ("env -u X patch", "env -u X patch -p1 < changes.diff"),
+    ("timeout -s KILL 5 patch", "timeout -s KILL 5 patch -p1 < changes.diff"),
+):
+    expect_verify_refused(verify_with(line + "\n", {}), f"verify refuses {label}",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", "changes the checked-out tree"))
+for label, line in (
+    ("sudo -u root bash", "sudo -u root bash scripts/zz-target.sh"),
+    ("timeout -s KILL 5 bash", "timeout -s KILL 5 bash scripts/zz-target.sh"),
+    ("env -u X bash", "env -u X bash scripts/zz-target.sh"),
+    ("time -f %e bash", "time -f %e bash scripts/zz-target.sh"),
+):
+    expect_verify_refused(verify_with(line + "\n", {"scripts/zz-target.sh": 'bash "$TOOL"\n'}),
+                          f"verify follows a target run through {label} as invoked",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "zz-target.sh"))
+expect_verify_refused(verify_with('env -S "bash scripts/zz-target.sh"\n', {"scripts/zz-target.sh": "echo ok\n"}),
+                      "verify refuses env -S, whose command is a split string",
+                      ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "env -S"))
+
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
 # sequences must not decode to the same replacement text and digest), and a

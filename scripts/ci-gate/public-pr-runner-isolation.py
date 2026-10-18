@@ -952,6 +952,21 @@ NODE_NAMES = frozenset({"node", "nodejs"})
 OTHER_INTERPRETERS = frozenset({"perl", "ruby", "pwsh"})
 # Words that run the next word as the command (their own options skipped).
 COMMAND_PREFIXES = frozenset({"exec", "nohup", "sudo", "time", "command", "builtin", "!"})
+# Each command prefix the trace models, with its options that take a separate
+# argument (round 11); `timeout` also takes a duration before its command.
+PREFIX_OPTIONS = {
+    "exec": frozenset({"-a"}),
+    "nohup": frozenset(),
+    "sudo": frozenset({"-u", "-g", "-C", "-h", "-p", "-r", "-t", "-U", "-D", "-R", "-T", "--user", "--group",
+                       "--close-from", "--host", "--prompt", "--role", "--type", "--other-user", "--chdir",
+                       "--chroot", "--command-timeout"}),
+    "time": frozenset({"-f", "-o", "--format", "--output"}),
+    "command": frozenset(),
+    "builtin": frozenset(),
+    "!": frozenset(),
+    "env": frozenset({"-u", "-C", "--unset", "--chdir"}),
+    "timeout": frozenset({"-s", "-k", "--signal", "--kill-after"}),
+}
 COMPOUND_WORDS = frozenset({"if", "then", "do", "else", "elif", "while", "until", "{", "}", "fi", "done", "esac"})
 SEPARATOR_TOKENS = frozenset({";", "&&", "||", "|", "&", "|&", "(", ")", ";;", "\n"})
 REDIRECTS = frozenset({">", ">>", "<", "<<", ">&", "<&", "&>", "&>>", ">|", "<>"})
@@ -1388,21 +1403,26 @@ class ProgramTrace:
     def command(self, words, origin, depth, scope) -> None:
         assignments, wrappers, heredocs = scope
         words = list(words)
-        while words and (ASSIGNMENT.match(words[0]) or words[0] in COMMAND_PREFIXES or words[0] in COMPOUND_WORDS):
-            words.pop(0)
+        while words and (ASSIGNMENT.match(words[0]) or words[0] in COMPOUND_WORDS or words[0] in PREFIX_OPTIONS):
+            prefix = words.pop(0)
+            if prefix not in PREFIX_OPTIONS:
+                continue
+            # A prefix's own options, and the arguments its options take, are
+            # not the command it runs (round 11).
+            while words and words[0].startswith("-") and words[0] != "-":
+                option = words.pop(0)
+                if option == "--":
+                    break
+                if prefix == "env" and option.split("=")[0] in ("-S", "--split-string"):
+                    self.unresolve(f"{origin or 'a step'}: env -S runs a split string this checker cannot read")
+                    return
+                if option in PREFIX_OPTIONS[prefix] and words:
+                    words.pop(0)
+            if prefix == "timeout" and words:
+                words.pop(0)  # the duration
         if not words:
             return
         head = words[0]
-        if head == "env":
-            words.pop(0)
-            while words and (words[0].startswith("-") or ASSIGNMENT.match(words[0])):
-                words.pop(0)
-            return self.command(words, origin, depth, scope)
-        if head == "timeout":
-            words.pop(0)
-            while words and words[0].startswith("-"):
-                words.pop(0)
-            return self.command(words[1:], origin, depth, scope)
         if head in wrappers:
             return self.command(words[1:], origin, depth, scope)
         stdin = None
@@ -1644,21 +1664,22 @@ class ProgramTrace:
         base = os.path.dirname(origin) if not inline and origin not in self.module_programs else ""
         # Per source: a nested inline program must not clobber the names its
         # enclosing file bound (round 8).
-        spawn_names = {
-            alias.asname or alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module == "subprocess"
-            for alias in node.names
-            if alias.name in PYTHON_SPAWNS
-        }
-        module_names = {"subprocess"} | {
-            alias.asname
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Import)
-            for alias in node.names
-            if alias.name == "subprocess" and alias.asname
-        }
-        aliases = (spawn_names, module_names, None if inline else source.split("\n"))
+        # Every call is classified by the name it was imported as (round 11):
+        # local name -> dotted original, so `getoutput as g`, `import os as o`,
+        # and a loader imported by name are read exactly like the original.
+        imported: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.asname:
+                        imported[alias.asname] = alias.name
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                for alias in node.names:
+                    if alias.name != "*":
+                        imported[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+        module_names = {"subprocess", "os"} | {
+            local for local, original in imported.items() if original in ("subprocess", "os")}
+        aliases = (imported, None if inline else source.split("\n"))
         # Spawn forms the call-site rules cannot see refuse (round 9): a star
         # import, os's spawners imported by name, and getattr on either module.
         for node in ast.walk(tree):
@@ -1672,7 +1693,7 @@ class ProgramTrace:
                         for name in names):
                     hidden = f"from os import {', '.join(names)}"
             elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr"
-                  and node.args and isinstance(node.args[0], ast.Name) and node.args[0].id in module_names | {"os"}):
+                  and node.args and isinstance(node.args[0], ast.Name) and node.args[0].id in module_names):
                 hidden = f"getattr({node.args[0].id}, …)"
             if hidden:
                 self.unresolve(f"{origin or 'inline python'}: {hidden} spawns in a form this checker cannot read")
@@ -1702,11 +1723,13 @@ class ProgramTrace:
                 self.python_call_site(node, origin, depth, argv, aliases)
 
     def python_call_site(self, node: ast.Call, origin: str, depth: int, argv, aliases) -> None:
-        name = ast.unparse(node.func)
-        where = f"{origin or 'inline python'}: {name}(…)"
+        imported, lines = aliases
+        written = ast.unparse(node.func)
+        where = f"{origin or 'inline python'}: {written}(…)"
+        head, dot, rest = written.partition(".")
+        name = imported.get(head, head) + dot + rest
         leaf = name.split(".")[-1]
-        spawn_names, module_names, lines = aliases
-        if name.split(".")[0] in module_names and name.count(".") == 1 and leaf in PYTHON_SPAWNS or name in spawn_names:
+        if name.count(".") == 1 and name.startswith("subprocess.") and leaf in PYTHON_SPAWNS:
             if not node.args:
                 return
             first = node.args[0]
@@ -2015,9 +2038,11 @@ TRACED_TREE_CHANGE = re.compile(
     r"|read-tree|checkout-index)(?![\w-])"
     r"|" + GIT_WORD + r"[^\n]*?--(?:git-dir|work-tree)\b"
     r"|\bgh[ \t]+pr[ \t]+checkout\b"
-    # patch behind the command prefixes the trace models, or by path (round 10).
-    r"|(?:^|[;&|(]|&&|\|\|)[ \t]*(?:(?:" + "|".join(re.escape(word) for word in sorted(COMMAND_PREFIXES))
-    + r"|env(?:[ \t]+(?:-\S+|[A-Za-z_]\w*=\S*))*|timeout(?:[ \t]+-\S+)*[ \t]+\S+)[ \t]+)*"
+    # patch behind the command prefixes the trace models, each with options that
+    # may take an argument and env's assignments, or by path (rounds 10-11).
+    r"|(?:^|[;&|(]|&&|\|\|)[ \t]*(?:(?:(?:" + "|".join(re.escape(word) for word in sorted(PREFIX_OPTIONS))
+    + r")(?:[ \t]+(?:-\S+(?:[ \t]+(?!-)\S+)?|[A-Za-z_]\w*=\S*))*"
+    r"|timeout(?:[ \t]+-\S+(?:[ \t]+(?!-)\S+)?)*[ \t]+\S+)[ \t]+)*"
     r"\\?(?:[\w./-]*/)?patch(?=[ \t]|$)",
     re.M,
 )
