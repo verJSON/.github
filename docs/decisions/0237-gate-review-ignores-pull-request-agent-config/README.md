@@ -156,6 +156,10 @@ that write access alone does not grant. The exposure is pre-existing on `main`
   at head; it reviews them from the diff.
 - The review model's `Read` tool no longer finds the job token in the checkout's git
   configuration, and attribute-marked text changes reach the reviewer as text hunks.
+- On a persistent runner, a later job that reuses this workspace's `.git` keeps the
+  `* !diff` override, because `actions/checkout` leaves `info/` alone. Its only effect
+  is that `git diff` there renders attribute-marked files as text. A missing `origin`
+  makes the next `actions/checkout` re-clone instead of reusing the directory.
 - **Residual, inherent to the action:** the CLI process environment still carries the
   model credential and the action's GitHub token, because the CLI needs the first and
   the action exports the second before starting it. The verdict schema,
