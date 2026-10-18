@@ -18,7 +18,7 @@
        if [ -L <path> ]; then echo "::error::<path> is a symlink; actions/checkout would empty its target"; exit 1; fi
    ```
 
-   No step runs between the refusal and its checkout, and the refusal runs under the checkout's own `if:`. A workflow step cannot share code with another workflow before anything is checked out, which is what the step protects, so the shared mechanism is this fixed shape and the test that executes it rather than a script or a composite action.
+   No step runs between the refusal and its checkout, and the refusal runs under the checkout's own `if:`. A checkout that would still start after a failed refusal, because the refusal is `continue-on-error` or the checkout's condition calls `always()`, `failure()`, or `cancelled()`, must also require `steps.<refusal id>.outcome == 'success'`. Any later step that reads from the path under those conditions must require the checkout's own `outcome == 'success'`. A workflow step cannot share code with another workflow before anything is checked out, which is what the step protects, so the shared mechanism is this fixed shape and the test that executes it rather than a script or a composite action.
 
 2. **It refuses a symlink, not a directory.** #1847's release-caller step refuses both, because a release tree never legitimately carries those paths. Here a persistent runner keeps a real `.gate-policy` or `.gate-trust` directory from the previous run, and checkout either reuses it or removes its entries with a recursive `rm` that does not follow nested links. Refusing a directory would fail the second run on every persistent runner and protect nothing.
 
@@ -47,4 +47,5 @@ Four sites are exempt. Each exemption fails the test once its site is protected,
 ## Consequences
 
 - A pull request that commits a symlink at one of these paths fails the job instead of deleting runner state.
+- A link left on a persistent runner fails that job on that runner until a later checkout of the repository removes it, or an operator does. This is deliberate: deleting the link silently would hide that it was planted.
 - Paths built from `${{ github.run_id }}` are outside this decision: a pull request cannot know the run identifier when it is authored.
