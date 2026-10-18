@@ -58,7 +58,7 @@ platform	bash scripts/ci-gate/pulumi-comment-pipefail.test.sh
 platform	bash scripts/ci-gate/generated-artifacts.test.sh
 platform	bash scripts/ci-gate/runner-routing-policy.test.sh
 platform	bash scripts/ci-gate/runner-routing-policy-cwd.test.sh
-platform	@budget=120 python3 scripts/ci-gate/public-pr-runner-isolation.test.py
+platform	@budget=240 python3 scripts/ci-gate/public-pr-runner-isolation.test.py
 platform	python3 scripts/ci-gate/runner-isolation-required.test.py
 platform	python3 scripts/ci-gate/backlog-sparse-closure.test.py
 platform	python3 scripts/public-review-caller-rollout.test.py

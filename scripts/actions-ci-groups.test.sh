@@ -2071,9 +2071,10 @@ expected = shards | {
     "merge-gate\tpython3 scripts/ci-gate/review-caller-bootstrap.test.py": 360,
     # 31s serially on main run 38513400637.
     "platform\tpython3 scripts/ci-gate/hosted-selector-policy.test.py": 90,
-    # 35s locally under full platform parallelism at #1827's round 4: about
-    # 480 checker subprocesses, close to the 60s pull-request default.
-    "platform\tpython3 scripts/ci-gate/public-pr-runner-isolation.test.py": 120,
+    # 139s under full platform parallelism at #1827's round 8 (110s alone):
+    # about 890 checker subprocesses. One checker run per backlog fixture
+    # brought it to 81s alone, still two thirds of the old 120s.
+    "platform\tpython3 scripts/ci-gate/public-pr-runner-isolation.test.py": 240,
     # 51s on main run 38799238936, before #1822 added 15 assertions to it.
     "merge-gate\tbash scripts/assert-mergeable-head.test.sh": 120,
 }

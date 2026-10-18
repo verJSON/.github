@@ -2446,9 +2446,17 @@ def backlog_fixture(steps: str, extra: str = "") -> dict[str, str]:
     }
 
 
+# One checker run names every backlog row a fixture has: the rows for a
+# fixture's jobs come from one run, not one run per job.
+BACKLOG_OUTPUT: dict[tuple, str] = {}
+
+
 def backlog_row(workflows: dict[str, str], path: str, job: str) -> str:
     """The pending row the checker itself names for a backlog job."""
-    _, output = run_checker(workflows)
+    key = tuple(sorted((name, type(body).__name__, body) for name, body in workflows.items()))
+    if key not in BACKLOG_OUTPUT:
+        BACKLOG_OUTPUT[key] = run_checker(workflows)[1]
+    output = BACKLOG_OUTPUT[key]
     found = [
         match.group(1)
         for line in output.splitlines()
