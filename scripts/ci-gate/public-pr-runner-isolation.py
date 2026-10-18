@@ -1165,11 +1165,10 @@ class ProgramTrace:
         self.bound: dict[str, str] = {}
         if tolerated:
             self.bind(tolerated.pin_source)
-        # (program, exact source line) vectors that are frozen data reads; each
-        # program is bound, so an edit to it stales the row (round 10).
+        # (program, exact source line) vectors that are frozen data reads
+        # (round 10). A read is only met in a program the trace follows, which
+        # is therefore already bound, so an edit to it stales the row.
         self.data_reads = data_reads
-        for program, _ in data_reads:
-            self.bind(program)
         # program -> modes followed. "invoked": reached by an invocation the
         # trace models, so every form in it is traced and an unresolvable
         # composed target refuses. "named": reached only because a literal
@@ -1727,7 +1726,8 @@ class ProgramTrace:
             if not isinstance(first, (ast.List, ast.Tuple)) or not first.elts:
                 self.unresolve(f"{where}: an argument vector this checker cannot read")
                 return
-            line = lines[first.lineno - 1] if lines and first.lineno == first.end_lineno else None
+            # The frozen line holds the whole vector, so a vector starting on it ends there.
+            line = lines[first.lineno - 1] if lines else None
             self.argv([
                 element.value if isinstance(element, ast.Constant) and isinstance(element.value, str) else COMPUTED_WORD
                 for element in first.elts

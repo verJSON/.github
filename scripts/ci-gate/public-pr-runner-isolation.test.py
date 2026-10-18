@@ -3733,6 +3733,9 @@ SECOND_READ = ('\n\ndef second_read(revision, path):\n    return subprocess.run(
                '\n        stdout=subprocess.PIPE,\n    )\n')
 for label, files in (
     ("a second identical data-read vector in changelog.py", {"scripts/changelog.py": CHANGELOG + SECOND_READ}),
+    ("another git show vector in changelog.py beside the frozen one",
+     {"scripts/changelog.py": CHANGELOG + '\n\ndef other_read(rev):\n    return subprocess.run(\n'
+                                         '        ["git", "show", f"{rev}:scripts/x.py"],\n    )\n'}),
     ("an edit to the data-read vector's bytes",
      {"scripts/changelog.py": CHANGELOG.replace(DATA_READ, DATA_READ.replace('"show", f', '"show",  f'), 1)}),
 ):
@@ -3784,10 +3787,10 @@ expect_verify_refused(verify_with("python3 scripts/zz-spawn.py\n",
                                   {"scripts/zz-spawn.py": 'import subprocess\nsubprocess.run("echo ok", shell=use_shell)\n'}),
                       "verify refuses a string spawn whose shell= it cannot decide",
                       ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "shell="))
-expect(verify_with("python3 scripts/zz-spawn.py\n",
-                   {"scripts/zz-spawn.py": 'import subprocess\nsubprocess.getoutput("echo ok")\n'}),
-       0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
-       "a getoutput of a resolvable command is traced, not refused", *PENDING_ARGS)
+expect_bound("python3 scripts/zz-spawn.py\n",
+             {"scripts/zz-spawn.py": 'import subprocess\nsubprocess.getoutput("bash scripts/zz-ok.sh")\n',
+              "scripts/zz-ok.sh": "echo ok\n"},
+             "scripts/zz-ok.sh", "a getoutput string read as a shell command")
 
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
