@@ -99,6 +99,8 @@ class ReviewCheckoutCredentialTest(unittest.TestCase):
             with self.subTest(step=step['id']), tempfile.TemporaryDirectory() as directory:
                 home = Path(directory)
                 subprocess.run(['git', 'init', '-q', str(home / 'repo')], check=True)
+                # Runner state may already configure a helper that stores what it is given.
+                (home / '.gitconfig').write_text('[credential]\n\thelper = store\n')
                 env = {'PATH': os.defpath, 'HOME': str(home), 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_TERMINAL_PROMPT': '0'}
                 for name, value in step.get('env', {}).items():
                     if name == 'GH_TOKEN' or name.startswith('GIT_CONFIG_'):
@@ -169,6 +171,22 @@ class ClaudeIsolationStepTest(unittest.TestCase):
         # The action writes these inputs to ~/.claude, which the review no longer reads.
         self.assertFalse({'settings', 'plugins', 'plugin_marketplaces'} & set(STEPS['claude']['with']))
 
+    def test_isolation_refuses_a_config_directory_that_already_exists(self):
+        config_dir = self.claude_config_dir()
+        config_dir.mkdir()
+        (config_dir / 'settings.json').write_text('{"hooks": {}}\n')
+        result = run_isolation(self.root, self.workspace)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_isolation_refuses_a_planted_link_at_the_config_directory(self):
+        config_dir = self.claude_config_dir()
+        planted = self.root / 'planted'
+        planted.mkdir()
+        config_dir.symlink_to(planted)
+        result = run_isolation(self.root, self.workspace)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(list(planted.iterdir()), [])
+
 
 def git(cwd, *args, env=None):
     base = {'PATH': os.defpath, 'HOME': str(cwd), 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
@@ -209,6 +227,9 @@ class ReviewDiffIgnoresPullRequestAttributesTest(unittest.TestCase):
         (bin_path / 'gh').write_text(
             '#!/bin/sh\ncase "$*" in\n'
             '  *headRefOid*) printf "%s\\n" "$HEAD_SHA" ;;\n'
+            '  *"--jq .baseRefName"*) echo main ;;\n'
+            '  *"api user"*) echo gate-bot ;;\n'
+            '  *reviews,comments*) echo "{}" ;;\n'
             '  *) printf \'{"title":"t","body":"","baseRefName":"main","headRefName":"feature"}\\n\' ;;\n'
             'esac\n')
         (bin_path / 'gh').chmod(0o755)
@@ -243,6 +264,36 @@ class ReviewDiffIgnoresPullRequestAttributesTest(unittest.TestCase):
         self.assertIn('+HIDDEN = "hidden-python-change"\n', diff)
         self.assertNotIn('Binary files', diff)
 
+    def test_rereview_patch_id_binds_the_attribute_marked_text(self):
+        fake = self.root / 'fake-diff'
+        fake.write_text('#!/bin/sh\nprintf "diff --git a/x b/x\\n--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-a\\n+b\\n"\n')
+        fake.chmod(0o755)
+        self.env['GIT_EXTERNAL_DIFF'] = str(fake)
+        self.assertEqual(self.run_step(ATTRIBUTES_ID).returncode, 0)
+        result = self.run_step('rereview')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = dict(line.split('=', 1) for line in (self.root / 'output').read_text().splitlines() if '=' in line)
+        base = git(self.workspace, 'merge-base', 'origin/main', 'HEAD')
+        neutral = {'GIT_CONFIG_GLOBAL': os.devnull}
+        text_diff = git(self.workspace, 'diff', '--no-ext-diff', '--no-textconv', base, 'HEAD', env=neutral)
+        self.assertIn('+echo hidden-shell-change', text_diff)
+        expected = subprocess.run(['git', 'patch-id', '--stable'], input=text_diff + '\n', cwd=self.workspace,
+                                  text=True, capture_output=True, check=True).stdout.split()[0]
+        self.assertEqual(outputs.get('patch_id'), expected)
+
+    def test_neutralizing_replaces_a_planted_link_without_writing_through_it(self):
+        outside = self.root / 'runner-file'
+        outside.write_text('runner\n')
+        attributes = Path(git(self.workspace, 'rev-parse', '--absolute-git-dir')) / 'info/attributes'
+        attributes.parent.mkdir(exist_ok=True)
+        attributes.unlink(missing_ok=True)
+        attributes.symlink_to(outside)
+        result = self.run_step(ATTRIBUTES_ID)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(outside.read_text(), 'runner\n')
+        self.assertFalse(attributes.is_symlink())
+        self.assertEqual(attributes.read_text(), '* !diff\n')
+
 
 class RemovalPrecedesReviewTest(unittest.TestCase):
     def test_removal_runs_immediately_after_the_head_checkout_under_its_condition(self):
@@ -252,28 +303,29 @@ class RemovalPrecedesReviewTest(unittest.TestCase):
         self.assertEqual(removal.get('if'), GATE_STEPS[checkout].get('if'))
         self.assertLess(checkout + 1, GATE_STEPS.index(STEPS['claude']))
 
-    def test_claude_review_never_runs_unless_the_removal_succeeded(self):
-        removal = STEPS[REMOVAL_ID]
-        claude = STEPS['claude']
-        removal_tolerated = bool(removal.get('continue-on-error'))
-        for lane, provider, skip_model, allowed, removal_fails in itertools.product(
-            ('ai', 'fast'), ('anthropic', 'openai', 'deepseek'), ('true', 'false'), ('true', 'false'), (True, False),
-        ):
-            values = {
-                'needs.preflight.outputs.lane': lane,
-                'needs.preflight.outputs.provider': provider,
-                'steps.rereview.outputs.skip_model': skip_model,
-                'steps.reserve_1.outputs.allowed': allowed,
-            }
-            removal_ran = evaluate_condition('${{ %s }}' % removal['if'], values, True)
-            outcome = 'skipped' if not removal_ran else 'failure' if removal_fails else 'success'
-            values[f'steps.{REMOVAL_ID}.outcome'] = outcome
-            job_succeeded = not (outcome == 'failure' and not removal_tolerated)
-            claude_runs = evaluate_condition('${{ %s }}' % claude['if'], values, job_succeeded)
-            with self.subTest(lane=lane, provider=provider, skip_model=skip_model, allowed=allowed,
-                              removal_fails=removal_fails):
-                self.assertFalse(claude_runs and outcome != 'success')
-
+    def test_no_consumer_runs_unless_each_protection_succeeded(self):
+        pairs = (('claude', REMOVAL_ID), ('claude', ISOLATION_ID), ('claude', ATTRIBUTES_ID),
+                 ('rereview', ATTRIBUTES_ID), ('prep', ATTRIBUTES_ID), ('prep', REMOVAL_ID))
+        for consumer_id, protection_id in pairs:
+            protection, consumer = STEPS[protection_id], STEPS[consumer_id]
+            tolerated = bool(protection.get('continue-on-error'))
+            for lane, provider, skip_model, allowed, fails in itertools.product(
+                ('ai', 'fast'), ('anthropic', 'openai', 'deepseek'), ('true', 'false'), ('true', 'false'), (True, False),
+            ):
+                values = {
+                    'needs.preflight.outputs.lane': lane,
+                    'needs.preflight.outputs.provider': provider,
+                    'steps.rereview.outputs.skip_model': skip_model,
+                    'steps.reserve_1.outputs.allowed': allowed,
+                }
+                ran = evaluate_condition('${{ %s }}' % protection['if'], values, True)
+                outcome = 'skipped' if not ran else 'failure' if fails else 'success'
+                values[f'steps.{protection_id}.outcome'] = outcome
+                job_succeeded = not (outcome == 'failure' and not tolerated)
+                consumer_runs = evaluate_condition('${{ %s }}' % consumer['if'], values, job_succeeded)
+                with self.subTest(consumer=consumer_id, protection=protection_id, lane=lane, provider=provider,
+                                  skip_model=skip_model, allowed=allowed, fails=fails):
+                    self.assertFalse(consumer_runs and outcome != 'success')
 
 def plant_agent_config(workspace):
     (workspace / '.claude').mkdir()
