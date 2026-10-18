@@ -282,3 +282,29 @@ c78fcd4e…` printed `verified: fresh exact-head required-workflow run and stric
 admission check` and exited 0; the read-only `audit` exited 0. The rotation to
 `c78fcd4e` is complete. Every other cli-projects pull request keeps failing admission
 until #142 lands the generated caller on `main`.
+
+## 2026-10-17 amendment: the general audit's bypassless exception includes the strict `admission` check
+
+The 2026-10-15 rotation (#1828, history versions `53404850` and `53429969`) was the first
+to apply [ADR 0212](../0212-cli-projects-admission-accepts-only-generated-caller/README.md)'s
+strict `admission` status check to ruleset 21830367. The live image gained a second rule:
+`required_status_checks` with `admission` bound to App `15368` and strict freshness. The
+narrow bypassless exception in the general organization ruleset audit (`Decision`, above)
+still required exactly one `workflows` rule. It therefore classified the reviewed image
+as a ruleset missing the release-App bypass. Scheduled runs `38914987536` (2026-10-16) and
+`39035898571` (2026-10-17) failed with `required release authorization bypass is absent`.
+Run `38751595403` on 2026-10-15 passed because it ran before the rotation, when the
+single-rule image from version `51521743` was still live. The bypass set was empty
+throughout, as this ADR requires.
+
+The live ruleset was correct, and the audit had not kept up with ADR 0212. Each entry in
+`config/org-ruleset-conformance-policy.json` `bypassless_required_workflows` now declares
+`required_status_check`: `null` when the ruleset carries no status-check rule, or the
+exact `{context, integration_id, strict}` image. The predicate accepts exactly one
+`workflows` rule plus, when one is declared, exactly one `required_status_checks` rule
+equal to that declaration. Any other rule, a second check, a missing or non-strict
+`admission` check, or a binding to another App still fails as before. The declaration
+matches `rollout.freshness_status_check` in `config/cli-projects-package-surface-ruleset.json`,
+and a test pins the two together. This also keeps the release-App bypass off this ruleset:
+adding one would widen who can land on the cli-projects default branch, which this ADR
+rejects.

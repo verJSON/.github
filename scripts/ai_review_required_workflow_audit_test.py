@@ -37,6 +37,42 @@ def environment_key_path(full_name):
     return f"repos/{full_name}/environments/ai-review-app/secrets/{PRIVATE_KEY}"
 
 
+class ConciseFindingTest(unittest.TestCase):
+    """A finding's text is its adjudicated identity (ADR 0189), so it must name every item."""
+
+    def test_a_same_count_swap_among_unsampled_items_changes_the_finding(self):
+        recorded = [f"Verjson/repo-{index:02}:.github/workflows/ai-review-label-rearm.yml" for index in range(10)]
+        swapped = recorded[:9] + ["Verjson/repo-99:.github/workflows/ai-review-label-rearm.yml"]
+
+        before = AUDIT.concise_findings("armed adopters with an incomplete set", recorded)
+        after = AUDIT.concise_findings("armed adopters with an incomplete set", swapped)
+
+        self.assertIn("missing=10", before)
+        self.assertIn("(plus 2 more)", before)
+        self.assertNotIn("repo-09", before)
+        self.assertNotEqual(before, after)
+
+    def test_a_same_count_swap_among_unsampled_mismatches_changes_the_finding(self):
+        recorded = [f"rules[{index}].parameters.sha: expected 'a', found 'b'" for index in range(6)]
+        swapped = recorded[:5] + ["rules[9].parameters.sha: expected 'a', found 'b'"]
+
+        before = AUDIT.concise_mismatches(recorded)
+        after = AUDIT.concise_mismatches(swapped)
+
+        self.assertIn("(plus 2 more)", before)
+        self.assertNotIn("rules[5]", before)
+        self.assertNotEqual(before, after)
+
+    def test_the_item_digest_does_not_depend_on_item_order(self):
+        items = [f"Verjson/repo-{index:02}:caller" for index in range(10)]
+
+        forward = AUDIT.concise_findings("name", items).rsplit(" items=", 1)[1]
+        backward = AUDIT.concise_findings("name", list(reversed(items))).rsplit(" items=", 1)[1]
+
+        self.assertRegex(forward, r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(forward, backward)
+
+
 class AiReviewRequiredWorkflowAuditTest(unittest.TestCase):
     def setUp(self):
         self.contract = AUDIT.read_contract()
