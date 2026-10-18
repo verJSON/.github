@@ -947,10 +947,11 @@ forms and generalize the binding.
   `from subprocess import getoutput as g`, `import os as o`, or a loader
   imported by name (`import_module as load`, `run_path as rp`), is read
   exactly like that import. Every binding anywhere in the file counts. A
-  name bound to more than one import, at least one of them a `subprocess`,
-  `os`, `importlib`, or `runpy` name, refuses, because which binding runs
-  is not static; this covers a second import in a function, a branch, or an
-  unused `def`.
+  name bound to more than one import refuses when any of its readings is a
+  call the trace classifies: a `subprocess` or `os` call, a loader such as
+  `import_module` or `run_path`, or dynamic execution. That is because
+  which binding runs is not static. It covers a second import in a
+  function, a branch, or an unused `def`.
 - **Materializations.** `git` is matched when spelled by path, quoted, or
   backslash-escaped (`\git`). A tree-changing git verb (`checkout`,
   `restore`, `reset`, `switch`, and the rest of the runtime tree-change set),
@@ -1165,7 +1166,8 @@ falsely refused.
 
 **Decision (PM, 2026-10-18; Part of #1831).**
 
-- A name bound to more than one import, any of them traced, refuses.
+- A name bound to more than one import refuses when any reading of it is a
+  classified call.
 - Prefix option clusters are parsed letter by letter, from one table shared
   by the trace and the `patch` pattern.
 - `env -S` refuses in every spelling.
