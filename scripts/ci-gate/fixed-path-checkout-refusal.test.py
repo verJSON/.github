@@ -199,8 +199,33 @@ def checkout_runs_after_refusal(site, guard):
     return bool(guard.get("continue-on-error")) or runs_after_failure(checkout)
 
 
+def scalars(node):
+    """Every key and string value in a step, so `working-directory:` counts too."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield str(key)
+            yield from scalars(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from scalars(item)
+    elif node is not None:
+        yield str(node)
+
+
+def mentions_path(step, path):
+    """Whether any part of a step names the path as a whole token.
+
+    A reader need not spell `<path>/`: `cd <path>`, `pushd <path>`,
+    `git -C <path>`, `working-directory: <path>`, and `"$GITHUB_WORKSPACE/<path>"`
+    all use the checkout. Over-approximating here is deliberate; a path built
+    from parts at run time is outside what a static scan can see.
+    """
+    token = re.compile(r"(?<![A-Za-z0-9_.-])" + re.escape(path) + r"(?![A-Za-z0-9_-])")
+    return any(token.search(text) for text in scalars(step))
+
+
 def consumer_failures(site, guard):
-    """Steps that read the checkout must not run after the refusal stopped it.
+    """Steps that use the checkout must not run after the refusal stopped it.
 
     A refusal with continue-on-error, a checkout with continue-on-error, or a
     reader whose condition runs after a failure would otherwise execute from
@@ -210,8 +235,7 @@ def consumer_failures(site, guard):
     tolerated = bool(guard.get("continue-on-error")) or bool(checkout.get("continue-on-error"))
     failures = []
     for step in site.steps[site.index + 1:]:
-        text = yaml.safe_dump(step)
-        if f"{site.path}/" not in text:
+        if not mentions_path(step, site.path):
             continue
         if not (tolerated or runs_after_failure(step)):
             continue
@@ -219,7 +243,7 @@ def consumer_failures(site, guard):
         if checkout_id and requires_success(step, checkout_id):
             continue
         failures.append(
-            f"{site.label}: step {step.get('name')!r} reads {site.path}/ even when the "
+            f"{site.label}: step {step.get('name')!r} uses {site.path} even when the "
             "refusal stopped its checkout, so it would execute through the planted link"
         )
     return failures
