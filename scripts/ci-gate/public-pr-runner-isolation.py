@@ -999,13 +999,22 @@ def resolve_long_option(prefix: str, name: str) -> str | None:
 
 
 PYTHON_LOADERS = ("import_module", "run_module", "run_path", "spec_from_file_location")
-PYTHON_DYNAMIC = ("exec", "eval", "compile", "__import__")
+# breakpoint runs whatever callable PYTHONBREAKPOINT names (round 14).
+PYTHON_DYNAMIC = ("exec", "eval", "compile", "__import__", "breakpoint")
+BUILTINS_MODULES = ("builtins", "__builtins__")
+
+
+def without_builtins_module(name: str) -> str:
+    """`builtins.exec` and `__builtins__.exec` name the builtin itself (round 14)."""
+    head, dot, rest = name.partition(".")
+    return rest if dot and head in BUILTINS_MODULES else name
 
 
 def is_traced_python_call(name: str) -> bool:
     """Whether python_call_site classifies a call to this dotted name: a
     subprocess or os call, a loader, or dynamic execution (round 12)."""
-    return name.startswith(("subprocess.", "os.")) or name.split(".")[-1] in PYTHON_LOADERS or name in PYTHON_DYNAMIC
+    return (name.startswith(("subprocess.", "os.")) or name.split(".")[-1] in PYTHON_LOADERS
+            or without_builtins_module(name) in PYTHON_DYNAMIC)
 
 
 def skip_prefix_options(prefix: str, words: list[str]) -> str | None:
@@ -1757,8 +1766,9 @@ class ProgramTrace:
                 for alias in node.names:
                     if alias.name != "*":
                         imported.setdefault(alias.asname or alias.name, set()).add(f"{node.module}.{alias.name}")
-        module_names = {"subprocess", "os"} | {
-            local for local, originals in imported.items() if originals & {"subprocess", "os"}}
+        spawning_modules = {"subprocess", "os", *BUILTINS_MODULES}
+        module_names = spawning_modules | {
+            local for local, originals in imported.items() if originals & spawning_modules}
         aliases = (imported, None if inline else source.split("\n"))
         # Spawn forms the call-site rules cannot see refuse (round 9): a star
         # import, os's spawners imported by name, and getattr on either module.
@@ -1817,7 +1827,7 @@ class ProgramTrace:
             # static, so it fails closed (round 12).
             self.unresolve(f"{where}: {head} is bound to more than one import ({', '.join(candidates)})")
             return
-        name = candidates[0]
+        name = without_builtins_module(candidates[0])
         leaf = name.split(".")[-1]
         if name.count(".") == 1 and name.startswith("subprocess.") and leaf in PYTHON_SPAWNS:
             if not node.args:

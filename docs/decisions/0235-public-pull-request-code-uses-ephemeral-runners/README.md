@@ -941,7 +941,11 @@ forms and generalize the binding.
   `from subprocess import *`, `getattr` on `subprocess` or `os`, and os's
   spawners imported by name. `subprocess.getoutput` and `getstatusoutput`
   are read as shell, and a spawn whose `shell=` is not a literal refuses,
-  because its shell-ness is decided at runtime (round 10). Every Python call
+  because its shell-ness is decided at runtime (round 10). Dynamic
+  execution includes `breakpoint`, which runs whatever `PYTHONBREAKPOINT`
+  names, and the `builtins` module's spellings: `builtins.exec`, an aliased
+  `builtins`, `from builtins import exec as run`, `__builtins__.exec`, and
+  `getattr` on `builtins` or `__builtins__` (round 14). Every Python call
   is classified by the import its name is bound to (rounds 11 and 12). A
   name the file binds to one import, such as
   `from subprocess import getoutput as g`, `import os as o`, or a loader
@@ -1052,8 +1056,8 @@ everything the job executes. These residuals stay outside it:
    A literal tracked program run through a form outside the modeled list
    above is bound, and its own literals followed, but its forms are not
    traced, so a target it composes does not refuse. Such forms include
-   command wrappers such as `nice`, `setsid`, `stdbuf`, `flock`, and
-   `watch`; Python `asyncio.create_subprocess_exec` and `pty.spawn`;
+   command wrappers such as `setsid`, `flock`, and `watch` (`nice` and
+   `stdbuf` are modeled prefixes since round 12); Python `asyncio.create_subprocess_exec` and `pty.spawn`;
    JavaScript `new Worker(…)`; and a `make` recipe.
 10. **A computed git verb is traced as named only.** A git call whose verb
     is computed is bound with its program, but neither tree-change nor
@@ -1193,7 +1197,8 @@ falsely refused.
 - `env -S` refuses in every spelling.
 - `command -v` and `-V` run nothing.
 - `nice`, `stdbuf`, and `doas` are prefixes.
-- Residual 11's three forms are unchanged.
+- Residual 11's three forms stayed as they were in round 12. This records
+  that point in time; round 13 broadened residual 11.
 
 ## Amendment (2026-10-18, #1827) — round-13 review: builtins, env's dash, and long options
 
@@ -1206,7 +1211,10 @@ amendment also overstated what the `patch` pattern shares with the trace.
 
 **Decision (PM, 2026-10-18; Part of #1831).**
 
-- A dynamic-execution builtin is an implicit binding of its own name.
+- A dynamic-execution builtin is an implicit binding of its own name. Fail
+  closed has a cost: an import of the same name refuses even when it is
+  benign, so `from re import compile` followed by `compile("a+")` now
+  refuses. A pattern compiled through `re.compile(…)` is unaffected.
 - env's `-` is an option.
 - Long options resolve as `getopt_long` does, and one that does not resolve
   refuses.

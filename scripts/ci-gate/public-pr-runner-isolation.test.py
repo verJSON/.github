@@ -39,11 +39,18 @@ def fail(label: str) -> None:
 # actions-ci runs this file as two rows, each under its budget:
 # RUNNER_ISOLATION_TEST_PART=core runs every check outside the probes block
 # (round-8 finding 6 through round 13, between the two markers below), and
-# =probes runs that block on top of every definition outside it. Unset (or `all`) runs everything once. The parts
-# partition the checks (public-pr-runner-isolation-parts.test.py pins it).
+# =probes runs that block on top of every definition outside it. Unset (or
+# `all`) runs everything once. The parts partition the checks
+# (public-pr-runner-isolation-parts.test.py pins it).
 TEST_PART = os.environ.get("RUNNER_ISOLATION_TEST_PART", "all")
 PROBES_BEGIN = "# >>> runner-isolation probes part begins"
 PROBES_END = "# <<< runner-isolation probes part ends"
+# The two selector conditions, exactly as ast.unparse renders them; only these
+# two `if` statements are left out of a part (round 14).
+SELECTOR_CONDITIONS = (
+    "TEST_PART not in ('all', 'core', 'probes')",
+    "TEST_PART != 'all' and __name__ == '__main__'",
+)
 
 
 def run_part(part: str) -> int:
@@ -55,7 +62,7 @@ def run_part(part: str) -> int:
     selected = []
     for node in ast.parse(source).body:
         inside = begin < node.lineno < end
-        if isinstance(node, ast.If) and "TEST_PART" in ast.unparse(node.test):
+        if isinstance(node, ast.If) and ast.unparse(node.test) in SELECTOR_CONDITIONS:
             continue  # the selector itself
         if (part == "core" and not inside) or (part == "probes" and (inside or isinstance(node, definitions))):
             selected.append(node)
@@ -3996,6 +4003,27 @@ del CHECKER.PREFIX_LONG_OPTIONS["zz-prefix"]
 for line in ("env -uS echo hi", "env --ignore-environment echo hi", "timeout --preserve-status 5 echo hi"):
     expect(verify_with(line + "\n", {}), 0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
            f"`{line}` is not refused", *PENDING_ARGS)
+
+# Round-14 nit: the builtins module's spellings of dynamic execution, and
+# breakpoint (PYTHONBREAKPOINT can name any callable), are dynamic execution.
+for label, program in (
+    ("builtins.exec", 'import builtins, os\nbuiltins.exec(os.environ["CODE"])\n'),
+    ("an aliased builtins module's exec", 'import builtins as b, os\nb.exec(os.environ["CODE"])\n'),
+    ("exec imported from builtins under another name", 'import os\nfrom builtins import exec as run\nrun(os.environ["CODE"])\n'),
+    ("builtins.__import__", 'import builtins\nbuiltins.__import__("subprocess").run("bash \\"$TOOL\\"", shell=True)\n'),
+    ("__builtins__.exec", 'import os\n__builtins__.exec(os.environ["CODE"])\n'),
+    ("getattr on __builtins__", 'import os\ngetattr(__builtins__, "exec")(os.environ["CODE"])\n'),
+    ("getattr on an aliased builtins module", 'import builtins as b, os\ngetattr(b, "exec")(os.environ["CODE"])\n'),
+    ("breakpoint", 'import os\nos.environ["PYTHONBREAKPOINT"] = "os.system"\nbreakpoint("bash \\"$TOOL\\"")\n'),
+    ("a builtins exec alias shadowed by an import that sorts before it",
+     'import os\nfrom builtins import exec as run\ndef f():\n    from ast import literal_eval as run\nrun(os.environ["CODE"])\n'),
+):
+    expect_verify_refused(verify_with("python3 scripts/zz-spawn.py\n", {"scripts/zz-spawn.py": program}),
+                          f"verify refuses {label}",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED))
+expect(verify_with("python3 scripts/zz-spawn.py\n", {"scripts/zz-spawn.py": 'import builtins\nprint(builtins.len("ab"))\n'}),
+       0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",), "a builtins call that runs nothing is not refused",
+       *PENDING_ARGS)
 
 # <<< runner-isolation probes part ends
 # ---------------------------------------------------------------------------

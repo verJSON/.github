@@ -62,14 +62,55 @@ while True:
     reporting = grown
 reporting -= {"run_part"}  # the selector, never replayed
 
-statements = [node for node in tree.body
-              if not (isinstance(node, ast.If) and "TEST_PART" in ast.unparse(node.test))]
+selector_conditions = next(
+    (ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
+     and [ast.unparse(target) for target in node.targets] == ["SELECTOR_CONDITIONS"]), ())
+selectors = [node for node in tree.body if isinstance(node, ast.If) and ast.unparse(node.test) in selector_conditions]
+check(len(selector_conditions) == 2 and len(selectors) == 2,
+      "the test file has exactly the two selector `if` statements SELECTOR_CONDITIONS names")
+# Any other reference to TEST_PART could drop checks from both parts (round 14).
+part_definition = [node for node in tree.body if isinstance(node, ast.Assign)
+                   and [ast.unparse(target) for target in node.targets] == ["TEST_PART"]]
+others = [node for node in tree.body if node not in selectors and node not in part_definition
+          and any(isinstance(name, ast.Name) and name.id == "TEST_PART" for name in ast.walk(node))]
+check(len(part_definition) == 1 and not others, "TEST_PART is referenced only by its definition and the selectors"
+      + "".join(f" (line {node.lineno} also does)" for node in others))
+# A part's exit status is `failures`: rebinding it anywhere but its one
+# definition and fail() could hide a failure in the replayed part (round 14).
+stores = [name for name in ast.walk(tree) if isinstance(name, ast.Name) and name.id == "failures"
+          and isinstance(name.ctx, ast.Store)]
+fail_function = next((node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "fail"), None)
+allowed = {id(node.targets[0]) for node in tree.body if isinstance(node, ast.Assign)
+           and [ast.unparse(target) for target in node.targets] == ["failures"]}
+inside_fail = {id(name) for name in ast.walk(fail_function)} if fail_function else set()
+rebinding = [name for name in stores if id(name) not in allowed and id(name) not in inside_fail]
+declarers = [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and node is not fail_function
+             and any(isinstance(statement, ast.Global) and "failures" in statement.names for statement in ast.walk(node))]
+check(len(allowed) == 1 and not rebinding and not declarers,
+      "the failure counter is bound only by its definition and fail()"
+      + "".join(f" (line {node.lineno} also does)" for node in rebinding + declarers))
+statements = [node for node in tree.body if node not in selectors]
 inside = [node for node in statements if begin < node.lineno < end]
 outside = [node for node in statements if not begin < node.lineno < end]
 check(bool(inside) and any(called_names(node) & reporting for node in inside),
       f"the probes block holds checks ({len(inside)} statements)")
-replayed = [node for node in outside if isinstance(node, DEFINITIONS) and not isinstance(node, ast.FunctionDef)
-            and not isinstance(node, ast.ClassDef) and called_names(node) & reporting]
+
+
+def eager_parts(node: ast.AST) -> list[ast.AST]:
+    """What runs when a definition is executed, not when it is called: a
+    function's decorators and defaults; a class's decorators, bases and body,
+    recursively (round 14); an assignment's whole statement."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return [*node.decorator_list, *node.args.defaults, *[d for d in node.args.kw_defaults if d]]
+    if isinstance(node, ast.ClassDef):
+        return [*node.decorator_list, *node.bases, *node.keywords,
+                *[part for statement in node.body for part in eager_parts(statement)]]
+    return [node]
+
+
+replayed = [node for node in outside if isinstance(node, DEFINITIONS)
+            and any(called_names(part) & reporting for part in eager_parts(node))]
 check(not replayed, "no definition the probes part replays reports a check"
       + "".join(f" (line {node.lineno} does)" for node in replayed))
 straddling = [node for node in statements
