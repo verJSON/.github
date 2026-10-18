@@ -909,10 +909,31 @@ def is_program(root: str, relative: str) -> bool:
     if relative.endswith(PROGRAM_EXTENSIONS) or "100755" in tracked_modes(root).get(relative, "").split():
         return True
     path = os.path.join(root, relative)
-    if os.path.islink(path) or not os.path.isfile(path):
+    if os.path.islink(path):
+        target = link_target(root, relative)
+        return target is not None and is_program(root, target)
+    if not os.path.isfile(path):
         return False
     with open(path, "rb") as handle:
         return handle.read(2) == b"#!"
+
+
+def link_target(root: str, relative: str) -> str | None:
+    """The tracked file a symbolic link resolves to through any chain of
+    in-tree links, or None when it leaves the tree, breaks, or loops."""
+    tracked = tracked_paths(root)
+    seen = set()
+    while os.path.islink(os.path.join(root, relative)):
+        if relative in seen or len(seen) > 8:
+            return None
+        seen.add(relative)
+        text = os.readlink(os.path.join(root, relative))
+        if os.path.isabs(text):
+            return None
+        relative = os.path.normpath(os.path.join(os.path.dirname(relative), text))
+        if relative.startswith(".." + os.sep) or relative == "..":
+            return None
+    return relative if relative in tracked and os.path.isfile(os.path.join(root, relative)) else None
 
 
 SHELL_WRAPPER = re.compile(r"(?m)^[ \t]*([A-Za-z_][\w-]*)[ \t]*\(\)[ \t]*\{(.*?)^[ \t]*\}", re.S)
@@ -1203,6 +1224,15 @@ class ProgramTrace:
         """A program the job runs (or names): bind it and follow it from the
         shallowest depth it is reached at in that mode."""
         relative = os.path.normpath(relative)
+        if os.path.islink(os.path.join(self.root, relative)) and relative in self.tracked:
+            # The link binds as its text, the target as its bytes, and the
+            # target is what runs (round 8, finding 6).
+            self.bind(relative)
+            target = link_target(self.root, relative)
+            if target is None:
+                self.unresolve(f"{relative} ({why}) is a symbolic link out of the scanned tree, broken, or looping")
+                return
+            return self.reach(target, depth, f"{why}, through the link {relative}", mode)
         if self.capped is not None and mode == "invoked":
             self.unresolve(f"{self.capped} is nested beyond {MAX_CLOSURE_DEPTH} and still runs {relative} ({why})")
             return

@@ -35,15 +35,23 @@ def fail(label: str) -> None:
     print(f"FAIL - {label}")
 
 
+class Link(str):
+    """A fixture entry laid out as a symbolic link to this target."""
+
+
 def run_checker(workflows: dict[str, str], *arguments: str) -> tuple[int, str]:
     """Lay out a repository: bare names are workflows (or lists) in
-    .github/workflows; names with a slash are repository paths."""
+    .github/workflows; names with a slash are repository paths; a Link
+    value is a symbolic link."""
     with tempfile.TemporaryDirectory() as root:
         directory = os.path.join(root, ".github", "workflows")
         os.makedirs(directory)
         for name, body in workflows.items():
             target = os.path.join(root, name) if "/" in name else os.path.join(directory, name)
             os.makedirs(os.path.dirname(target), exist_ok=True)
+            if isinstance(body, Link):
+                os.symlink(str(body), target)
+                continue
             with open(target, "w", encoding="utf-8") as handle:
                 handle.write(textwrap.dedent(body))
         arguments = tuple(argument.replace("{dir}", directory) for argument in arguments)
@@ -3509,6 +3517,26 @@ for script in ("prepack", "prepare", "postpack"):
 expect(verify_with("npm pack --ignore-scripts\n", {"./package.json": with_scripts({"prepack": "bash \"$TOOL\""})}),
        0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
        "an `npm pack --ignore-scripts` does not trace the lifecycle scripts it skips", *PENDING_ARGS)
+
+# Round-8 finding 6: a program reached through a symbolic link binds the link
+# and its target's bytes and is followed into the target; a link out of the
+# tree, or a broken one, is a program the row cannot bind.
+expect_bound("bash scripts/link.sh\n", {"scripts/link.sh": Link("real.sh"), "scripts/real.sh": "echo real\n"},
+             "scripts/real.sh", "a program run through a symlink")
+expect_bound('echo "see scripts/link.sh"\n',
+             {"scripts/link.sh": Link("real.sh"), "scripts/real.sh": "echo real\n"},
+             "scripts/real.sh", "a symlink named literally")
+LINK_OUT = "is a symbolic link out of the scanned tree"
+for label, files, reason in (
+    ("a symlinked program whose target runs a computed program",
+     {"scripts/link.sh": Link("real.sh"), "scripts/real.sh": 'bash "$TOOL"\n'}, "scripts/real.sh"),
+    ("a symlinked program pointing out of the tree", {"scripts/link.sh": Link("/etc/hostname")}, LINK_OUT),
+    ("a symlinked program pointing up out of the tree", {"scripts/link.sh": Link("../../outside.sh")}, LINK_OUT),
+    ("a broken symlinked program", {"scripts/link.sh": Link("missing.sh")}, LINK_OUT),
+    ("a looping symlinked program", {"scripts/link.sh": Link("loop.sh"), "scripts/loop.sh": Link("link.sh")}, LINK_OUT),
+):
+    expect_verify_refused(verify_with("bash scripts/link.sh\n", files), f"verify refuses {label}",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, reason))
 
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
