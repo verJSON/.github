@@ -83,3 +83,13 @@ change and is tracked separately.
 
 Delete `VERJSON_RUNNER_FASTLANE`, or set it to `["self-hosted","general"]`. No
 workflow change is required — that is the point of routing through a variable.
+
+## 2026-10-15 amendment — `actions-ci` leaves the fast lane
+
+[ADR 0235](../0235-public-pull-request-code-uses-ephemeral-runners/README.md)
+moves every `actions-ci.yml` job from `CI_RUNNER_FASTLANE || CI_LANE_TRUSTED`
+to `CI_LANE_UNTRUSTED` with a hosted tail. Those jobs run pull-request code in a
+public repository, and the fast lane resolves to the persistent general pool
+today. The rollback above (set the variable to `["self-hosted","general"]`) is
+therefore no longer a safe choice for any workflow that public pull-request code
+can reach.

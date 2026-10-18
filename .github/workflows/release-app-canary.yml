@@ -50,7 +50,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
+          path: .release-app-canary-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
           persist-credentials: false
+          # An exact non-cone list of the file this job runs: ADR 0235's
+          # backlog digest binds every byte a checkout puts on disk, and a
+          # full checkout would put the whole tree there. Keep it in step
+          # with backlog-sparse-closure.test.py, which derives the programs
+          # and their imports and requires each one listed here.
+          # The release CLI still runs from `git show "$GITHUB_SHA:…"` below,
+          # so replace refs and working-tree edits cannot change it; that
+          # path must stay in this list for the checker to bind it.
+          sparse-checkout: scripts/changelog.py
+          sparse-checkout-cone-mode: false
 
       - name: Require the release App client ID
         env:
@@ -77,6 +88,7 @@ jobs:
           APP_TOKEN: ${{ steps.release-app-token.outputs.token }}
           CANARY_BRANCH_REF: refs/heads/develop
           CANARY_VERSION: v0.0.1-release-app-canary.${{ github.run_id }}.${{ github.run_attempt }}
+          CANARY_SOURCE: ${{ github.workspace }}/.release-app-canary-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
         run: |
           set -euo pipefail
           remote_url="https://github.com/$GITHUB_REPOSITORY.git"
@@ -111,7 +123,7 @@ jobs:
           git -C "$canary_root" commit -qm "test(release): seed App canary"
 
           release_cli="$RUNNER_TEMP/release-app-canary-changelog-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.py"
-          git --no-replace-objects -C "$GITHUB_WORKSPACE" \
+          git --no-replace-objects -C "$CANARY_SOURCE" \
             show "$GITHUB_SHA:scripts/changelog.py" > "$release_cli"
           python3 -I "$release_cli" release \
             --repo-root "$canary_root" \
@@ -202,3 +214,7 @@ jobs:
             echo "- Cleanup: atomically deleted the owned branch and tag after exact-SHA verification"
             echo "- Cleanup verification: both remote refs are absent"
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove the isolated checkout
+        if: ${{ always() }}
+        working-directory: ${{ github.workspace }}
+        run: rm -rf ".release-app-canary-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}"

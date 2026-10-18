@@ -102,11 +102,29 @@ class PullRequestCiTierTests(unittest.TestCase):
             condition(workflow, "publish"),
         )
 
+    def test_runner_isolation_runs_on_every_pull_request_and_main_push(self):
+        # ADR 0235: the review digests bind every tracked file, so the check
+        # cannot sit behind a path filter or a draft guard.
+        workflow = load_workflow("runner-isolation.yml")
+        trigger = workflow["on"]
+        self.assertTrue(EXPECTED_REVIEW_TYPES <= pull_request_types(workflow))
+        for event in ("pull_request", "push"):
+            self.assertNotIn("paths", trigger[event], event)
+            self.assertNotIn("paths-ignore", trigger[event], event)
+        self.assertEqual(trigger["push"]["branches"], ["main"])
+        self.assertEqual(list(workflow["jobs"]), ["runner-isolation"])
+        self.assertEqual(condition(workflow, "runner-isolation"), "")
+        runs = "\n".join(step.get("run", "") for step in workflow["jobs"]["runner-isolation"]["steps"])
+        self.assertIn("scripts/ci-gate/public-pr-runner-isolation.py", runs)
+        self.assertIn("--pending scripts/ci-gate/public-pr-runner-isolation.pending.tsv", runs)
+        self.assertIn("--reviewed scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv", runs)
+
     def test_fast_workflows_remain_active_for_drafts(self):
         for name in (
             "actionlint.yml",
             "actionlint-reusable-contract.yml",
             "authn-type-surface-required.yml",
+            "runner-isolation.yml",
         ):
             workflow = load_workflow(name)
             self.assertNotIn("draft", str(workflow["jobs"]), name)
@@ -121,6 +139,7 @@ class PullRequestCiTierTests(unittest.TestCase):
             "change-scope",
             "docs-contracts",
             "adr-number-collision",
+            "runner-isolation",
             "shell-test-groups",
             "CLI projects required package surface",
             "container candidate reusable-call contract",

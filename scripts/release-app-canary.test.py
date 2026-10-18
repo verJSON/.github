@@ -55,6 +55,17 @@ def validate(document: dict, raw: str) -> list[str]:
     checkout_with = checkout.get("with") or {}
     if checkout_with.get("ref") != "${{ github.sha }}" or checkout_with.get("persist-credentials") is not False:
         problems.append("checkout is not bound to the executing revision without credentials")
+    # ADR 0235: the job checks out exactly the CLI it materializes, in an
+    # isolated directory, so its relay-backlog row binds those bytes.
+    source = ".release-app-canary-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}"
+    if (
+        checkout_with.get("sparse-checkout") != "scripts/changelog.py"
+        or checkout_with.get("sparse-checkout-cone-mode") is not False
+        or checkout_with.get("path") != source
+    ):
+        problems.append("checkout is not an exact isolated sparse checkout of the release CLI")
+    if (push.get("env") or {}).get("CANARY_SOURCE") != "${{ github.workspace }}/" + source:
+        problems.append("the release CLI is not materialized from the isolated checkout")
     if mint.get("uses") != TOKEN_ACTION:
         problems.append("token action pin changed")
     expected_mint = {
@@ -86,7 +97,7 @@ def validate(document: dict, raw: str) -> list[str]:
     required_push_fragments = (
         'ls-remote --refs "$remote_url" "$CANARY_BRANCH_REF" "$tag_ref"',
         'release_cli="$RUNNER_TEMP/release-app-canary-changelog-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.py"',
-        'git --no-replace-objects -C "$GITHUB_WORKSPACE"',
+        'git --no-replace-objects -C "$CANARY_SOURCE"',
         'show "$GITHUB_SHA:scripts/changelog.py" > "$release_cli"',
         'python3 -I "$release_cli" release',
         'fragment_id="$(date -u +%Y%m%dT%H%M%SZ)"',
@@ -261,7 +272,8 @@ def prove_cli_materializes_from_bound_object(push_run: str) -> None:
         environment = os.environ.copy()
         environment.update(
             {
-                "GITHUB_WORKSPACE": str(workspace),
+                "GITHUB_WORKSPACE": str(root),
+                "CANARY_SOURCE": str(workspace),
                 "GITHUB_SHA": bound_sha,
                 "GITHUB_RUN_ID": "1",
                 "GITHUB_RUN_ATTEMPT": "1",

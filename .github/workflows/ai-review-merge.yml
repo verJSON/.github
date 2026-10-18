@@ -291,19 +291,17 @@ jobs:
           needs.title-policy.outputs.title_held != 'true'
         )
       )
-    # A workflow_call consumer sets its own fleet via `with.runner_labels`; the
-    # org direct paths (pull_request/workflow_dispatch) leave it empty and route
-    # org-aware (#175, ADR 0030): non-Verjson callers to GitHub-hosted
-    # ubuntu-24.04. Verjson preflight always takes the untrusted lane.
-    # Downstream gate uses the resolved target visibility (#225, ADR 0035).
-    # Fast lane for PUBLIC targets (ADR 0048). preflight cannot consult
-    # `target_private` because it is the job that resolves it, so it keys on the
-    # event's own repository — correct for the pull_request path, which is every
-    # path that queues. `== false` and not `!= true`: an unresolved value must
-    # fall through to the lane chain rather than take the fast lane. With every
-    # lane variable set — the live state — that is the self-hosted pool; the
-    # hosted tail beneath it is reached only if a lane variable is deleted.
-    runs-on: ${{ inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == false && fromJSON(vars.CI_RUNNER_FASTLANE || '["ubuntu-24.04"]') || fromJSON(vars.CI_RUNNER_OVERFLOW || vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    # Off-Verjson callers keep their own fleet via `with.runner_labels`, or run
+    # on GitHub-hosted ubuntu-24.04 (#175, ADR 0030). A Verjson caller's
+    # `runner_labels` is honored only for a private repository (ADR 0235).
+    # Only a repository whose event payload says private reaches the persistent
+    # pool. A public target, or one whose visibility the payload omits, takes the
+    # ephemeral untrusted lane: this run is dispatched from pull_request_target
+    # with fork-derived inputs, and ADR 0235 keeps public pull-request activity
+    # off persistent runners. preflight cannot consult `target_private` because
+    # it is the job that resolves it; TARGET_REPO is always the event
+    # repository since ADR 0036 retired cross-repository dispatch.
+    runs-on: ${{ (github.repository_owner != 'Verjson' || github.event.repository.private == true) && inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_RUNNER_OVERFLOW || vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     # This job combines the former 10-minute freshness and classification jobs.
     timeout-minutes: 20
     permissions:
@@ -332,8 +330,9 @@ jobs:
       head_sha: ${{ steps.classify.outputs.head_sha || inputs.expected_head_sha }}
       zero_provider_recovery: ${{ steps.zero-provider-recovery.outputs.eligible || 'false' }}
       completed_at: ${{ steps.preflight_complete.outputs.completed_at }}
-      # 'false' → public target → hosted runner; 'true' or '' (unresolved,
-      # fail closed) → self-hosted `gate`. See the gate job's `runs-on` (#170).
+      # gate and dispatch-merge reach the persistent pool only when the event
+      # payload says private AND this is not 'false'; 'true' or '' (unresolved)
+      # keeps a private target on its lane. See the gate job's `runs-on` (#170).
       target_private: ${{ steps.target_visibility.outputs.target_private }}
       trusted_review_sha: ${{ steps.trusted-revision.outputs.sha }}
     steps:
@@ -368,9 +367,9 @@ jobs:
           # DISPATCHING repo, not the target. Resolve the org-guarded
           # TARGET_REPO's actual visibility here so the gate job routes
           # hosted-vs-self-hosted on the target, not the dispatcher. An
-          # unreadable repo emits an empty value and the gate falls back to
-          # the self-hosted `gate` pool — fail closed to the operator-only
-          # path, never onto a hosted runner with the wrong assumptions.
+          # unreadable repo emits an empty value; a private event repository
+          # then stays on its self-hosted lane, and a public one still takes
+          # the ephemeral lane (ADR 0235).
           if ! target_private="$(gh api "repos/$TARGET_REPO" --jq .private 2>"$RUNNER_TEMP/tv.err")"; then
             target_private=""
             echo "::warning::target visibility lookup failed for $TARGET_REPO (routing fail-closed to the gate pool): $(head -c 200 "$RUNNER_TEMP/tv.err" | tr -d '\n')"
@@ -824,20 +823,19 @@ jobs:
     if: ${{ needs.app-key-policy.result == 'success' && (needs.preflight.outputs.lane == 'fast' || needs.preflight.outputs.lane == 'ai') }}
     outputs:
       review_outcome: ${{ steps.submit.outputs.outcome || 'skipped' }}
-    # A workflow_call consumer sets its own fleet via `with.runner_labels`; the
-    # org direct paths leave it empty. Non-Verjson callers run on GitHub-hosted
-    # ubuntu-24.04. Verjson targets use the default or untrusted lane variable
-    # from preflight visibility; both currently select the permissive `general`
-    # pool (#204, ADR 0035).
-    # Fast lane for PUBLIC targets (ADR 0048). This job no longer waits for
-    # ordinary CI: it performs the bounded review and dispatches one immediate
-    # promotion attempt. Deterministic CI completion re-enters through
-    # ai-promotion-retry.yml (ADRs 0081 and 0087).
-    # `== 'false'` is the explicitly-resolved-public case; '' (unreadable) and
-    # 'true' both fall through to the lane chain, so visibility that fails to
-    # resolve never takes the fast lane. The chain's hosted tail is an
-    # operator-error landing (a deleted lane variable), not a routing choice.
-    runs-on: ${{ inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || needs.preflight.outputs.target_private == 'false' && fromJSON(vars.CI_RUNNER_FASTLANE || '["ubuntu-24.04"]') || fromJSON(vars.CI_RUNNER_OVERFLOW || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    # Off-Verjson callers keep their own fleet via `with.runner_labels`, or run
+    # on GitHub-hosted ubuntu-24.04. A Verjson caller's `runner_labels` is
+    # honored only for a private repository (ADR 0235).
+    # This job checks out the pull request head and runs the review on it, so
+    # a PUBLIC target always takes the ephemeral untrusted lane (ADR 0235,
+    # superseding ADR 0048's fast lane here). The persistent pool needs both
+    # the event payload and preflight's API lookup to agree the target is
+    # private: an unreadable lookup ('') keeps a private target on its lane,
+    # and a payload that does not say private never reaches the pool.
+    # This job no longer waits for ordinary CI: it performs the bounded review
+    # and dispatches one immediate promotion attempt. Deterministic CI
+    # completion re-enters through ai-promotion-retry.yml (ADRs 0081 and 0087).
+    runs-on: ${{ (github.repository_owner != 'Verjson' || github.event.repository.private == true) && inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && needs.preflight.outputs.target_private != 'false' && fromJSON(vars.CI_RUNNER_OVERFLOW || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     # Fast retains its former 45-minute ceiling. AI gets a bounded review
     # allowance plus checkout, input preparation, submission, and dispatch
     # buffer; none of this budget is an ordinary-CI wait.
@@ -2052,7 +2050,7 @@ jobs:
     if: ${{ always() && inputs.authorization_check_id != '' && (github.event_name != 'workflow_dispatch' || inputs.ai_review_environment == 'ai-review-app') }}
     outputs:
       ai_authorized: ${{ steps.complete.outputs.ai_authorized }}
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_FASTLANE || '["ubuntu-24.04"]') }}
+    runs-on: ${{ github.event.repository.private == true && fromJSON(vars.CI_RUNNER_FASTLANE || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     timeout-minutes: 5
     permissions:
       actions: write
@@ -2357,7 +2355,7 @@ jobs:
   dispatch-merge:
     needs: [preflight, gate, complete-authorization]
     if: needs.complete-authorization.result == 'success' && needs.complete-authorization.outputs.ai_authorized == 'true' && needs.preflight.outputs.authority == 'ai-merge'
-    runs-on: ${{ inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || needs.preflight.outputs.target_private == 'false' && fromJSON(vars.CI_RUNNER_FASTLANE || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_PRIVILEGED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ (github.repository_owner != 'Verjson' || github.event.repository.private == true) && inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && needs.preflight.outputs.target_private != 'false' && fromJSON(vars.CI_LANE_PRIVILEGED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     timeout-minutes: 5
     permissions:
       actions: write

@@ -51,7 +51,7 @@ grep -qE '^      config-file:$' <<<"$workflow_call" \
 # because Actions coerces an absent `private` to 0, making `== false` true for
 # an unreadable repository too — fail-open. The unresolved case must keep
 # falling through to CI_LANE_UNTRUSTED, which is the final lane term.
-expected_runs_on='    runs-on: ${{ (github.repository_owner != '\''Verjson'\'' || inputs.github-hosted-runner) && '\''ubuntu-24.04'\'' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '\''["ubuntu-24.04"]'\'') || github.event.repository.visibility == '\''public'\'' && fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '\''["ubuntu-24.04"]'\'') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '\''["ubuntu-24.04"]'\'') }}'
+expected_runs_on='    runs-on: ${{ (github.repository_owner != '\''Verjson'\'' || inputs.github-hosted-runner) && '\''ubuntu-24.04'\'' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '\''["ubuntu-24.04"]'\'') || github.event_name == '\''pull_request'\'' && fromJSON(vars.CI_LANE_UNTRUSTED || '\''["ubuntu-24.04"]'\'') || github.event.repository.visibility == '\''public'\'' && fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '\''["ubuntu-24.04"]'\'') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '\''["ubuntu-24.04"]'\'') }}'
 grep -qxF "$expected_runs_on" "$wf" \
   && pass "hosted stays opt-in while Verjson callers follow the visibility policy" \
   || fail "runs-on does not preserve the bounded runner mapping"
@@ -229,18 +229,27 @@ cat >"$lint_dir/actionlint" <<'SH'
 #!/bin/bash
 printf '%s\n' "$*" >"$ACTIONARGS"
 SH
-cat >"$tmp/with-shellcheck/shellcheck" <<'SH'
+# A ShellCheck that reports the pinned version, and one that reports the
+# hosted image's 0.9.0: lint policy must not depend on which image a route
+# lands on (ADR 0026), so the step accepts only the pinned binary.
+pinned_shellcheck="$(awk '$1 == "SHELLCHECK_VERSION:" {gsub(/['\''"]/, "", $2); print $2; exit}' "$wf")"
+mkdir -p "$tmp/image-shellcheck"
+cat >"$tmp/with-shellcheck/shellcheck" <<SH
 #!/bin/bash
-exit 0
+printf 'ShellCheck - shell script analysis tool\nversion: %s\n' "${pinned_shellcheck:-unpinned}"
 SH
-chmod +x "$lint_dir/actionlint" "$tmp/with-shellcheck/shellcheck"
+cat >"$tmp/image-shellcheck/shellcheck" <<'SH'
+#!/bin/bash
+printf 'ShellCheck - shell script analysis tool\nversion: 0.9.0\n'
+SH
+chmod +x "$lint_dir/actionlint" "$tmp/with-shellcheck/shellcheck" "$tmp/image-shellcheck/shellcheck"
 
 ACTIONARGS="$tmp/actionlint.args"
 export ACTIONARGS
 (
   cd "$lint_dir" || exit 1
-  ACTIONLINT_CONFIG_FILE="$root/.github/actionlint.yaml" \
-    PATH="$tmp/with-shellcheck" /bin/bash "$lint_script"
+  ACTIONLINT_CONFIG_FILE="$root/.github/actionlint.yaml" SHELLCHECK_VERSION="$pinned_shellcheck" \
+    PATH="$tmp/with-shellcheck:/usr/bin:/bin" /bin/bash "$lint_script"
 ) >"$tmp/lint.out" 2>&1
 rc=$?
 [ "$rc" -eq 0 ] \
@@ -252,7 +261,7 @@ rc=$?
 
 (
   cd "$lint_dir" || exit 1
-  ACTIONLINT_CONFIG_FILE="$root/.github/actionlint.yaml" \
+  ACTIONLINT_CONFIG_FILE="$root/.github/actionlint.yaml" SHELLCHECK_VERSION="$pinned_shellcheck" \
     PATH="$tmp/without-shellcheck" /bin/bash "$lint_script"
 ) >"$tmp/no-shellcheck.out" 2>&1
 rc=$?
@@ -260,6 +269,19 @@ rc=$?
   && grep -qF 'The selected runner must provide shellcheck' "$tmp/no-shellcheck.out" \
   && pass "repository lint fails closed when the runner lacks ShellCheck" \
   || fail "repository lint did not reject a runner without ShellCheck"
+
+(
+  cd "$lint_dir" || exit 1
+  rm -f "$ACTIONARGS"
+  ACTIONLINT_CONFIG_FILE="$root/.github/actionlint.yaml" SHELLCHECK_VERSION="$pinned_shellcheck" \
+    PATH="$tmp/image-shellcheck:/usr/bin:/bin" /bin/bash "$lint_script"
+) >"$tmp/image-shellcheck.out" 2>&1
+rc=$?
+[[ "$pinned_shellcheck" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+  && [ "$rc" -ne 0 ] && [ ! -e "$ACTIONARGS" ] \
+  && grep -qF "ShellCheck $pinned_shellcheck" "$tmp/image-shellcheck.out" \
+  && pass "repository lint refuses an image ShellCheck that is not the pinned $pinned_shellcheck" \
+  || fail "repository lint ran with an unpinned ShellCheck version: $(cat "$tmp/image-shellcheck.out")"
 
 grep -qF 'uses: ./.github/workflows/actionlint.yml' "$contract" \
   && pass "repository contract exercises the current reusable policy" \

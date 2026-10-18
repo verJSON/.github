@@ -81,8 +81,10 @@ awk '
 
 # (e) Every gate job's runs-on prefers inputs.runner_labels before the org
 # fallback — so a consumer's fleet actually takes effect. All three jobs
-# (preflight, gate, dispatch-merge) must carry the same first term.
-runs_on_parameterized="$(grep -cE "runs-on: \\\$\{\{ inputs\.runner_labels && fromJSON\(inputs\.runner_labels\) \|\|" "$wf")"
+# (preflight, gate, dispatch-merge) must carry the same first term, which
+# honors the input off Verjson and for a private Verjson repository only: a
+# public Verjson caller cannot name the persistent pool (ADR 0235).
+runs_on_parameterized="$(grep -cF "runs-on: \${{ (github.repository_owner != 'Verjson' || github.event.repository.private == true) && inputs.runner_labels && fromJSON(inputs.runner_labels) ||" "$wf")"
 [ "${runs_on_parameterized:-0}" -eq 3 ] \
   && pass "all three gate jobs prefer inputs.runner_labels then fall back to the org pool" \
   || fail "runs-on is not runner_labels-parameterized on all three jobs (got ${runs_on_parameterized:-0}/3)"
@@ -90,13 +92,13 @@ runs_on_parameterized="$(grep -cE "runs-on: \\\$\{\{ inputs\.runner_labels && fr
 # (f) Verjson gate jobs expose independent default/untrusted variables while
 # both keep the compatible general fallback during the permissive exception.
 # Non-Verjson consumers retain the hosted fallback and explicit fleet input.
-# ADR 0048 splits the Verjson lanes by target visibility, so UNTRUSTED is now
-# preflight's fallback only — gate reaches the fast lane for a public target and
-# DEFAULT for a private one. What must hold regardless: the cross-org hosted
+# ADR 0235 sends every public target to the ephemeral untrusted lane, so each
+# of the four relay jobs ends in it; a private target keeps its own lane. What must hold regardless: the cross-org hosted
 # route survives, every lane is still variable-selected rather than hardcoded,
 # and CI_LANE_FALLBACK remains the terminal lane term everywhere.
 grep -qE "github\.repository_owner != 'Verjson' && 'ubuntu-24\.04'" "$wf" \
-  && [ "$(grep -cF 'CI_RUNNER_FASTLANE' "$wf")" -ge 3 ] \
+  && [ "$(grep -cF 'CI_RUNNER_FASTLANE' "$wf")" -ge 1 ] \
+  && [ "$(grep -cF "|| fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}" "$wf")" -eq 4 ] \
   && [ "$(grep -cF 'CI_LANE_PRIVILEGED' "$wf")" -ge 1 ] \
   && [ "$(grep -cF 'CI_LANE_TRUSTED' "$wf")" -ge 1 ] \
   && [ "$(grep -cF 'CI_LANE_UNTRUSTED' "$wf")" -ge 1 ] \

@@ -34,9 +34,11 @@ jobs:
       - name: Check out trusted reconciler
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          # pull_request_target base SHA is trusted and immutable; never execute
-          # the merged PR head's copy of this privileged reconciler.
-          ref: ${{ github.event.pull_request.base.sha }}
+          # github.sha is the base branch commit this workflow file was read
+          # from, so the reconciler's bytes are the ones the ADR 0235 review
+          # digest binds. pull_request.base.sha is the base as of the PR's
+          # last update and can be older than that reviewed tree.
+          ref: ${{ github.sha }}
           path: .ai-post-merge-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
           sparse-checkout: scripts/ci-gate/post-merge-reconcile.sh
           sparse-checkout-cone-mode: false
