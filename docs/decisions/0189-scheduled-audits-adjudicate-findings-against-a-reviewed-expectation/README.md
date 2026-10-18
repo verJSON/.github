@@ -112,12 +112,14 @@ identical text, the same fingerprint, and a `match`. For example, one adopter
 regenerates while another loses a caller. Review of #1839 found the hole while
 re-recording the #1810 finding, which has 20 items and a sample of 8.
 
-`concise_findings` in `scripts/ai-review-required-workflow-audit.py` now appends
+`sampled_items` in `scripts/ai-review-required-workflow-audit.py` appends
 `items=sha256:<hex>`. The hex is the SHA-256 of the full item list, sorted and encoded
-as compact JSON. The sample stays short for a reader, while the fingerprint the
+as compact JSON. Both truncating renderers use this helper: `concise_findings` for
+missing-item lists (sample of 8) and `concise_mismatches` for image mismatches (sample of
+4), which also become finding text. The sample stays short for a reader, while the fingerprint the
 adjudicator compares now covers every item. The adjudicator is unchanged: it still
 hashes the exact text, so a sibling audit adopting this mechanism must likewise make
 its finding text a function of every item it reports. Changing the format changed
 every recorded arm fingerprint once. The single recorded entry was re-recorded in
-the same pull request. Tests show that a same-count swap among unsampled items
-changes the finding, and that the digest does not depend on item order.
+the same pull request. Tests show that a same-count swap among unsampled items or
+unsampled mismatches changes the finding, and that the digest does not depend on item order.

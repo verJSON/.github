@@ -52,6 +52,17 @@ class ConciseFindingTest(unittest.TestCase):
         self.assertNotIn("repo-09", before)
         self.assertNotEqual(before, after)
 
+    def test_a_same_count_swap_among_unsampled_mismatches_changes_the_finding(self):
+        recorded = [f"rules[{index}].parameters.sha: expected 'a', found 'b'" for index in range(6)]
+        swapped = recorded[:5] + ["rules[9].parameters.sha: expected 'a', found 'b'"]
+
+        before = AUDIT.concise_mismatches(recorded)
+        after = AUDIT.concise_mismatches(swapped)
+
+        self.assertIn("(plus 2 more)", before)
+        self.assertNotIn("rules[5]", before)
+        self.assertNotEqual(before, after)
+
     def test_the_item_digest_does_not_depend_on_item_order(self):
         items = [f"Verjson/repo-{index:02}:caller" for index in range(10)]
 
