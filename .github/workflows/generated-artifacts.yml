@@ -78,6 +78,12 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
+      # The consumer tree above is pull-request content. actions/checkout
+      # follows a symlink at its path and empties the target (ADR 0236).
+      - name: Refuse a symlink at the .changelog-contract checkout path
+        if: inputs.changelog && inputs.contract_ref != ''
+        run: |
+          if [ -L .changelog-contract ]; then echo "::error::.changelog-contract is a symlink; actions/checkout would empty its target"; exit 1; fi
       - name: Check out canonical contract
         if: inputs.changelog && inputs.contract_ref != ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

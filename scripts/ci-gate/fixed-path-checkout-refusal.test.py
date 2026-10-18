@@ -41,6 +41,7 @@ RUNNER_STATE = "runner state\n"
 # scanner that silently finds nothing.
 REQUIRED_SITES = (
     ("changelog-validate.yml", "validate", ".changelog-contract"),
+    ("generated-artifacts.yml", "validate", ".changelog-contract"),
 )
 
 
