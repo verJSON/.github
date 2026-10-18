@@ -13,9 +13,11 @@ and on a persistent runner it is expected residue from the previous run.
 
 For every protected site this test plants a symlink at the checkout path that
 points at a stand-in for runner state. It then executes the step immediately
-before the checkout, as that step's own `run:` text, once with the link and
-once without. A step counts as the refusal only when it fails with the link and
-succeeds without it, and succeeds with a real directory there too. It then
+before the checkout, as that step's own `run:` text, with a link to a directory,
+a dangling link, no entry, and a real directory. A step counts as the refusal
+only when it fails with the link and succeeds with no entry; it must also fail
+with the dangling link and, outside generated callers, succeed with the
+directory. It then
 applies Actions' step-condition rules to decide whether the checkout still
 runs, and if it does, emulates the checkout's readdir-and-remove. The runner
 state must survive.
@@ -96,7 +98,7 @@ class Site:
 def fixed_path_checkouts():
     """Every actions/checkout step whose path is a literal, by workflow and job."""
     sites = []
-    for workflow in sorted(WORKFLOWS.glob("*.yml")):
+    for workflow in sorted([*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")]):
         document = yaml.safe_load(workflow.read_text())
         for job_name, job in (document.get("jobs") or {}).items():
             steps = tuple((job or {}).get("steps") or ())
@@ -182,6 +184,9 @@ def plant(case, path, kind):
     (state / "keep").write_text(RUNNER_STATE)
     if kind == "symlink":
         (workspace / path).symlink_to(state)
+    elif kind == "dangling":
+        # checkout would create the missing target through the link.
+        (workspace / path).symlink_to(case / "absent-runner-state")
     elif kind == "directory":
         (workspace / path).mkdir()
         (workspace / path / "residue").write_text("previous run\n")
@@ -225,16 +230,21 @@ def consumer_failures(site, guard):
 def guard_failures(site, root):
     """Why a planted symlink still reaches this checkout; empty when it cannot."""
     failures = []
+    if "/" in site.path.strip("/") or site.path in (".", ".."):
+        # `[ -L a/b ]` does not see a link at `a`.
+        return [f"{site.label}: a checkout path must be one workspace entry so one -L test covers it"]
     guard = site.steps[site.index - 1] if site.index else None
     is_refusal = False
     if guard is not None and refusal_candidate(guard, site.path):
         outcomes = {}
-        for kind in ("symlink", "absent", "directory"):
+        for kind in ("symlink", "dangling", "absent", "directory"):
             case = root / f"{kind}-probe"
             case.mkdir()
             workspace, _ = plant(case, site.path, kind)
             outcomes[kind] = run_shell(guard, workspace)
         is_refusal = outcomes["symlink"][0] != 0 and outcomes["absent"][0] == 0
+        if is_refusal and outcomes["dangling"][0] == 0:
+            failures.append(f"{site.label}: the refusal accepts a symlink whose target does not exist")
         if is_refusal and outcomes["directory"][0] != 0 and not site.generated:
             failures.append(
                 f"{site.label}: the refusal also rejects a real directory, which a "
