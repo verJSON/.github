@@ -1918,10 +1918,10 @@ def frozen_tolerated(key: tuple[str, str], root: str) -> FrozenShow | None:
     hook = read_program(root, frozen["program"]) or ""
     pins = RELEASE_PIN_HEADER.findall(read_program(root, frozen["pin_source"]) or "")
     lines = logical_lines(hook)
-    derivations = [index for index, line in enumerate(lines) if line == frozen["pin_line"]]
-    if len(pins) != 1 or len(derivations) != 1 or len(PIN_ASSIGNMENT.findall(hook)) != 1:
+    # The derivation holds a `pin=`, so one assignment means one derivation.
+    if len(pins) != 1 or frozen["pin_line"] not in lines or len(PIN_ASSIGNMENT.findall(hook)) != 1:
         return None
-    at = derivations[0]
+    at = lines.index(frozen["pin_line"])
     preamble = "\n".join(lines[:at]).encode("utf-8", "surrogateescape")
     if (hashlib.sha256(preamble).hexdigest() != frozen["preamble_sha256"]
             or lines[at + 1 : at + 3] != [frozen["guard_line"], frozen["show_line"]]
