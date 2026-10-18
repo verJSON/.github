@@ -3588,6 +3588,7 @@ for label, line in (
     ("a leading empty PATH entry", 'PATH=":$PATH"'),
     ("an empty PATH entry in the middle", 'PATH="/usr/bin::/bin"'),
     ("a PATH += append of a relative entry", "PATH+=:scripts"),
+    ("an empty PATH, which is the working directory", "PATH= tool"),
     ("a relative directory appended to GITHUB_PATH with printf", "printf 'bin\\n' >> $GITHUB_PATH"),
 ):
     expect_verify_refused(verify_with(line + "\n", {}), f"verify refuses {label}",
@@ -3598,6 +3599,8 @@ ENV_PATH["release.yml"] = ENV_PATH["release.yml"].replace(
     "          NODE_AUTH_TOKEN: ''\n", "          NODE_AUTH_TOKEN: ''\n          PATH: scripts:/usr/bin\n", 1)
 expect_verify_refused(ENV_PATH, "verify refuses a step env PATH with a relative entry",
                       ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "puts the workspace on PATH"))
+expect(verify_with("PATH+=:/opt/tool/bin\n", {}), 0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
+       "a PATH += append outside the workspace is not refused", *PENDING_ARGS)
 expect(verify_with('export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"\n', {}),
        0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
        "a PATH entry outside the workspace is not refused", *PENDING_ARGS)
@@ -3642,6 +3645,13 @@ for label, hook, files in (
     expect_verify_refused(verify_with(hook, {**COMPUTED_TARGET, **files}),
                           f"verify follows a target run through {label} as invoked",
                           ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED, "zz-target.sh"))
+# A JavaScript spawn with `shell: true` runs its command through a shell.
+expect(verify_with("node scripts/zz-spawn.js\n",
+                   {"scripts/zz-spawn.js": 'const { spawnSync } = require("node:child_process");\n'
+                                           'spawnSync("scripts/zz-ok.sh --flag", { shell: true });\n',
+                    "scripts/zz-ok.sh": "echo ok\n"}),
+       0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
+       "a JavaScript spawn with shell: true is read as a shell command", *PENDING_ARGS)
 # The reviewer's scenario: the target changes the checked-out tree.
 expect_verify_refused(
     verify_with("python3 scripts/zz-spawn.py\n",

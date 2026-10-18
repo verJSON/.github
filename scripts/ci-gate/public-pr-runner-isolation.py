@@ -1458,8 +1458,7 @@ class ProgramTrace:
         """An argument vector a spawn runs, read as the command it is (round 9):
         an interpreter's program, a tree path, npm, or find -exec is followed as
         invoked, and a tree-changing git verb refuses like one in shell."""
-        if not words or words[0] == COMPUTED_WORD:
-            self.unresolve(f"{where}: a command this checker cannot read")
+        if not words:
             return
         if os.path.basename(words[0]) == "git":
             line = "git " + shlex.join(words[1:])
@@ -2031,17 +2030,17 @@ def workspace_path_entries(job: dict, texts: list[tuple[str, str]]) -> set[str]:
             value = match.group(2).strip().strip("\"'")
             if match.group(1):
                 value = value[1:] if value.startswith(":") else value
-            values.append((origin, value.split(":")))
+            values.append((origin, value.split(":"), True))
         for match in GITHUB_PATH_APPEND.finditer(text):
-            values.append((origin, [match.group(1)]))
+            values.append((origin, [match.group(1)], False))
     for scope in [job] + [step for step in job.get("steps") or [] if isinstance(step, dict)]:
         env = scope.get("env")
         if isinstance(env, dict) and "PATH" in env:
-            values.append(("an env block", str(env["PATH"]).split(":")))
-    for origin, entries in values:
+            values.append(("an env block", str(env["PATH"]).split(":"), True))
+    for origin, entries, empty_is_cwd in values:
         for entry in entries:
             entry = entry.strip().strip("\"'")
-            if not entry and len(entries) > 1:
+            if not entry and empty_is_cwd:
                 found.add(f"{origin or 'a step'}: an empty PATH entry is the working directory and puts the "
                           "workspace on PATH, so a bare command word could run tracked bytes no row binds")
             elif entry and (WORKSPACE_ENTRY.search(entry) or not entry.startswith(("/", "$", "~"))):
