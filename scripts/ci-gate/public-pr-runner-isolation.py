@@ -1152,7 +1152,8 @@ class ProgramTrace:
     that still runs something is unresolved rather than truncated.
     """
 
-    def __init__(self, job: dict, root: str, excluded: frozenset[str] = frozenset(), tolerated=None):
+    def __init__(self, job: dict, root: str, excluded: frozenset[str] = frozenset(), tolerated=None,
+                 data_reads: frozenset[tuple[str, str]] = frozenset()):
         self.root = os.path.abspath(root)
         self.tracked = tracked_paths(self.root)
         self.excluded = excluded
@@ -1162,6 +1163,11 @@ class ProgramTrace:
         self.bound: dict[str, str] = {}
         if tolerated:
             self.bind(tolerated.pin_source)
+        # (program, exact source line) vectors that are frozen data reads; each
+        # program is bound, so an edit to it stales the row (round 10).
+        self.data_reads = data_reads
+        for program, _ in data_reads:
+            self.bind(program)
         # program -> modes followed. "invoked": reached by an invocation the
         # trace models, so every form in it is traced and an unresolvable
         # composed target refuses. "named": reached only because a literal
@@ -1454,16 +1460,16 @@ class ProgramTrace:
                 else:
                     self.command(rest[:end], origin, depth, scope)
 
-    def argv(self, words: list[str], origin: str, depth: int, where: str) -> None:
+    def argv(self, words: list[str], origin: str, depth: int, where: str, data_read: bool = False) -> None:
         """An argument vector a spawn runs, read as the command it is (round 9):
         an interpreter's program, a tree path, npm, or find -exec is followed as
-        invoked, and a tree-changing git verb refuses like one in shell."""
-        if not words:
+        invoked. Every vector is also a traced text (round 10), so a tree
+        change or materialization in it refuses whatever word leads it:
+        `patch`, `gh pr checkout`, or `git` behind `env` or `sudo`."""
+        if not words or data_read:
             return
+        self.texts.append((origin, shlex.join(words)))
         if os.path.basename(words[0]) == "git":
-            line = "git " + shlex.join(words[1:])
-            if TRACED_TREE_CHANGE.search(line):
-                self.texts.append((origin, line))
             return
         self.command(list(words), origin, depth, ({}, set(), {}))
 
@@ -1651,7 +1657,7 @@ class ProgramTrace:
             for alias in node.names
             if alias.name == "subprocess" and alias.asname
         }
-        aliases = (spawn_names, module_names)
+        aliases = (spawn_names, module_names, None if inline else source.split("\n"))
         # Spawn forms the call-site rules cannot see refuse (round 9): a star
         # import, os's spawners imported by name, and getattr on either module.
         for node in ast.walk(tree):
@@ -1698,7 +1704,7 @@ class ProgramTrace:
         name = ast.unparse(node.func)
         where = f"{origin or 'inline python'}: {name}(…)"
         leaf = name.split(".")[-1]
-        spawn_names, module_names = aliases
+        spawn_names, module_names, lines = aliases
         if name.split(".")[0] in module_names and name.count(".") == 1 and leaf in PYTHON_SPAWNS or name in spawn_names:
             if not node.args:
                 return
@@ -1714,10 +1720,11 @@ class ProgramTrace:
             if not isinstance(first, (ast.List, ast.Tuple)) or not first.elts:
                 self.unresolve(f"{where}: an argument vector this checker cannot read")
                 return
+            line = lines[first.lineno - 1] if lines and first.lineno == first.end_lineno else None
             self.argv([
                 element.value if isinstance(element, ast.Constant) and isinstance(element.value, str) else COMPUTED_WORD
                 for element in first.elts
-            ], origin, depth, where)
+            ], origin, depth, where, data_read=(origin, line) in self.data_reads)
             return
         if name in ("os.system", "os.popen"):
             first = node.args[0] if node.args else None
@@ -1882,11 +1889,12 @@ def tree_programs(
     texts: list[tuple[str, str]] | None = None,
     unresolved: set[str] | None = None,
     tolerated=None,
+    data_reads: frozenset[tuple[str, str]] = frozenset(),
 ) -> dict[str, str]:
     """The bytes of every scanned-tree program a full-checkout backlog job
     runs (ProgramTrace). `texts` collects every shell text traced; `unresolved`
     every form no rule resolves."""
-    trace = ProgramTrace(job, root, excluded, tolerated)
+    trace = ProgramTrace(job, root, excluded, tolerated, data_reads)
     if texts is not None:
         texts.extend(trace.texts)
     if unresolved is not None:
@@ -1917,6 +1925,31 @@ FROZEN_MATERIALIZATIONS = {
     },
 }
 PIN_ASSIGNMENT = re.compile(r"(?<![\w$])pin\+?=")
+
+
+# Frozen data reads (PM decision on #1827 round 10; Part of #1831): a spawn
+# vector that shows a git object whose bytes return to the caller, which parses
+# them and never runs them. Each is tolerated on its exact source line, held
+# once in its program, for its key only; any other git show, cat-file, or
+# archive in any vector refuses.
+FROZEN_DATA_READS = {
+    ("release.yml [workflow_dispatch]", "verify"): (
+        # changelog.py git_file(): fragments and the pre-contract migration
+        # document at a revision, parsed as data (ADR 0235 residual 2).
+        ("scripts/changelog.py", '        ["git", "show", f"{revision}:{path}"],'),
+    ),
+}
+
+
+def frozen_data_reads(key: tuple[str, str], root: str) -> frozenset[tuple[str, str]]:
+    """The key's (program, exact line) data reads whose line its program holds
+    exactly once."""
+    root = os.path.abspath(root)
+    return frozenset(
+        (program, line)
+        for program, line in FROZEN_DATA_READS.get(key, ())
+        if (read_program(root, program) or "").split("\n").count(line) == 1
+    )
 
 
 class FrozenShow(NamedTuple):
@@ -3042,13 +3075,15 @@ def check_workflow(
             traced: list[tuple[str, str]] = []
             unresolved: set[str] = set()
             tolerated = frozen_tolerated((path, name), scan.root)
+            data_reads = frozen_data_reads((path, name), scan.root)
             backlog_digest = review_digest(
                 chain,
                 job,
                 inherited_settings(document),
                 {"files": closure.files, "reasons": sorted({reason for reason, _ in pairs})}
                 | (
-                    {"programs": tree_programs(job, scan.root, scan.excluded, traced, unresolved, tolerated)}
+                    {"programs": tree_programs(
+                        job, scan.root, scan.excluded, traced, unresolved, tolerated, data_reads)}
                     if closure.tree is not None and not closure.caller_checkout
                     else {}
                 ),

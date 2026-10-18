@@ -3699,6 +3699,64 @@ for label, hook, files in (
     expect_verify_refused(verify_with(hook, files), f"verify refuses {label}",
                           ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED))
 
+# Round-10 blocker: every argument vector a spawn runs is scanned for tree
+# changes, not only one whose first word is git.
+PY_SPAWN = 'import subprocess\nsubprocess.run({})\n'
+JS_SPAWN = 'const {{ spawnSync }} = require("node:child_process");\nspawnSync({});\n'
+for label, files in (
+    ("a Python patch vector", {"scripts/zz-spawn.py": PY_SPAWN.format('["patch", "-p1", "-i", "changes.diff"]')}),
+    ("a JavaScript patch vector", {"scripts/zz-spawn.js": JS_SPAWN.format('"patch", ["-p1", "-i", "changes.diff"]')}),
+    ("a Python gh pr checkout vector", {"scripts/zz-spawn.py": PY_SPAWN.format('["gh", "pr", "checkout", "7"]')}),
+    ("a JavaScript gh pr checkout vector", {"scripts/zz-spawn.js": JS_SPAWN.format('"gh", ["pr", "checkout", "7"]')}),
+    ("a Python env git checkout vector",
+     {"scripts/zz-spawn.py": PY_SPAWN.format('["env", "git", "checkout", "HEAD~1", "--", "p"]')}),
+    ("a JavaScript sudo git restore vector",
+     {"scripts/zz-spawn.js": JS_SPAWN.format('"sudo", ["git", "restore", "--source=HEAD~1", "p"]')}),
+):
+    program = next(iter(files))
+    hook = ("python3 " if program.endswith(".py") else "node ") + program + "\n"
+    expect_verify_refused(verify_with(hook, files), f"verify refuses {label}",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", "changes the checked-out tree"))
+expect_verify_refused(
+    verify_with("python3 scripts/zz-spawn.py\n",
+                {"scripts/zz-spawn.py": PY_SPAWN.format('["env", "git", "show", "HEAD:scripts/changelog.py"]')}),
+    "verify refuses a git show behind env in a Python vector",
+    ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", "materializes tracked content"))
+
+# Round-10 PM decision: changelog.py's git_file() vector is a frozen data read
+# (its bytes go back to the caller and are parsed, never run), tolerated on its
+# exact line bytes, once, in changelog.py, for verify only.
+DATA_READ = '        ["git", "show", f"{revision}:{path}"],'
+CHANGELOG = VERIFY["scripts/changelog.py"]
+assert CHANGELOG.count(DATA_READ + "\n") == 1, "the fixture's changelog.py must hold the frozen data read"
+SECOND_READ = ('\n\ndef second_read(revision, path):\n    return subprocess.run(\n' + DATA_READ +
+               '\n        stdout=subprocess.PIPE,\n    )\n')
+for label, files in (
+    ("a second identical data-read vector in changelog.py", {"scripts/changelog.py": CHANGELOG + SECOND_READ}),
+    ("an edit to the data-read vector's bytes",
+     {"scripts/changelog.py": CHANGELOG.replace(DATA_READ, DATA_READ.replace('"show", f', '"show",  f'), 1)}),
+):
+    expect_verify_refused({**VERIFY, "pending.tsv": VERIFY_ROW, **files}, f"verify refuses {label}",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", "materializes tracked content"))
+expect_verify_refused(
+    verify_with("python3 scripts/zz-spawn.py\n",
+                {"scripts/zz-spawn.py": "import subprocess\n\ndef read(revision, path):\n    return subprocess.run(\n"
+                                        + DATA_READ + "\n    )\n"}),
+    "verify refuses the data-read vector in a program other than changelog.py",
+    ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", "materializes tracked content"))
+with tempfile.TemporaryDirectory() as root:
+    os.makedirs(os.path.join(root, "scripts"))
+    with open(os.path.join(root, "scripts/changelog.py"), "w", encoding="utf-8") as handle:
+        handle.write(CHANGELOG)
+    subprocess.run(["git", "init", "-q", root], check=True)
+    subprocess.run(["git", "-C", root, "add", "-A"], check=True)
+    for_verify = CHECKER.frozen_data_reads(("release.yml [workflow_dispatch]", "verify"), root)
+    for_other = CHECKER.frozen_data_reads(("release.yml [workflow_dispatch]", "snapshot"), root)
+if for_verify == {("scripts/changelog.py", DATA_READ)} and not for_other:
+    ok("the frozen data read is tolerated for verify only")
+else:
+    fail(f"the frozen data read's keys: verify {for_verify}, snapshot {for_other}")
+
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
 # sequences must not decode to the same replacement text and digest), and a
