@@ -168,7 +168,8 @@ def shell_command(step, script_path):
     return ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script_path)]
 
 
-def run_steps(steps, *, sha, workspace, job_env, runner_temp, registry):
+def run_steps(steps, *, sha, workspace, job_env, runner_temp, registry, expect_failure=False):
+    """Run steps in order; with expect_failure, return the first failing step and its output."""
     for step in steps:
         assert step.get("if") in KNOWN_CONDITIONS, f"{step.get('name')}: if {step.get('if')}"
         if "uses" in step:
@@ -184,7 +185,11 @@ def run_steps(steps, *, sha, workspace, job_env, runner_temp, registry):
                 text=True,
                 capture_output=True,
             )
+        if expect_failure and result.returncode != 0:
+            return step.get("name"), result.stdout + result.stderr
         assert result.returncode == 0, f"{step.get('name')}: {result.stdout}{result.stderr}"
+    assert not expect_failure, "every step succeeded, but a failure was expected"
+    return None
 
 
 def token_tracing_path(root, env):
@@ -310,6 +315,127 @@ def verify_steps_isolate_credential(
         attacker_registry.close()
 
 
+RESERVED_PATH = ".verjson-npm-acquisition-contract"
+RESERVED_MESSAGE = f"{RESERVED_PATH} is reserved for the canonical dependency acquisition contract"
+
+
+def verify_reserved_contract_path(label, steps, *, sha, root):
+    """A release tree carrying the contract checkout path is refused before checkout.
+
+    actions/checkout follows a symlink at its path and empties the target, so a
+    committed link would let the release tree aim that at runner state.
+    """
+    for kind in ("symlink", "directory"):
+        case = root / kind
+        case.mkdir()
+        workspace = case / "workspace"
+        workspace.mkdir()
+        outside = case / "runner-state"
+        outside.mkdir()
+        (outside / "keep").write_text("runner state\n")
+        if kind == "symlink":
+            (workspace / RESERVED_PATH).symlink_to(outside)
+        else:
+            planted = workspace / RESERVED_PATH / "scripts"
+            planted.mkdir(parents=True)
+            (planted / "npm-private-acquisition.sh").write_text("echo planted\n")
+        trace = case / "npm-trace.log"
+        wrapper_dir = case / "bin"
+        wrapper_dir.mkdir()
+        (wrapper_dir / "npm").write_text(f"#!/bin/sh\necho \"$*\" >> {trace}\n")
+        (wrapper_dir / "npm").chmod(0o755)
+        runner_temp = case / "runner-temp"
+        runner_temp.mkdir()
+        job_env = os.environ | {
+            "PATH": f"{wrapper_dir}{os.pathsep}{os.environ['PATH']}",
+            "GITHUB_WORKSPACE": str(workspace),
+            "RUNNER_TEMP": str(runner_temp),
+        }
+        registry = type("Registry", (), {"origin": "http://127.0.0.1:9"})()
+        failed = run_steps(
+            steps, sha=sha, workspace=workspace, job_env=job_env,
+            runner_temp=runner_temp, registry=registry, expect_failure=True,
+        )
+        assert failed is not None and RESERVED_MESSAGE in failed[1], (
+            f"{label}: a committed {kind} at {RESERVED_PATH} was not refused: {failed}"
+        )
+        assert not trace.exists(), f"{label}: npm ran before the reserved-path refusal"
+        assert (outside / "keep").read_text() == "runner state\n", label
+
+
+def private_lock_validation_step(workflow):
+    steps = workflow["jobs"]["acquire-private-dependencies"]["steps"]
+    return next(step for step in steps if step.get("name") == "Validate the approved private dependency lock")
+
+
+def verify_private_lock_validation(workflow, root):
+    """The release-artifact allowlist covers every GitHub Packages download.
+
+    The acquisition script fetches every locked npm.pkg.github.com download
+    with the token, so an npm alias that installs an unapproved private package
+    under another name must fail validation rather than pass as public.
+    """
+    root.mkdir()
+    step = private_lock_validation_step(workflow)
+    approved = "@verjson/fixture"
+    integrity = "sha512-" + "A" * 86 + "=="
+    canonical = {
+        "": {"name": "fixture"},
+        "node_modules/@verjson/fixture": {
+            "version": "1.0.0",
+            "resolved": "https://npm.pkg.github.com/download/@verjson/fixture/1.0.0/0123abcd",
+            "integrity": integrity,
+        },
+        "node_modules/zod": {
+            "version": "1.0.0",
+            "resolved": "https://registry.npmjs.org/zod/-/zod-1.0.0.tgz",
+            "integrity": integrity,
+        },
+    }
+    cases = {
+        "approved lock": (canonical, None, None),
+        "aliased unapproved @verjson package": (canonical | {
+            "node_modules/innocent": {
+                "name": "@verjson/other",
+                "version": "1.0.0",
+                "resolved": "https://npm.pkg.github.com/download/@verjson/other/1.0.0/0123abcd",
+                "integrity": integrity,
+            },
+        }, None, "unapproved internal dependency: innocent"),
+        "other scope on GitHub Packages": (canonical | {
+            "node_modules/@acme/private": {
+                "version": "1.0.0",
+                "resolved": "https://NPM.pkg.github.com/download/@acme/private/1.0.0/0123abcd",
+                "integrity": integrity,
+            },
+        }, None, "unapproved internal dependency: @acme/private"),
+        "reserved contract directory": (canonical, "directory", RESERVED_MESSAGE),
+        "reserved contract symlink": (canonical, "symlink", RESERVED_MESSAGE),
+    }
+    for case, (packages, reserved, message) in cases.items():
+        workspace = root / case.replace(" ", "-")
+        workspace.mkdir()
+        (workspace / "package-lock.json").write_text(
+            json.dumps({"lockfileVersion": 3, "packages": packages})
+        )
+        if reserved == "directory":
+            (workspace / RESERVED_PATH).mkdir()
+        elif reserved == "symlink":
+            (workspace / RESERVED_PATH).symlink_to(root)
+        with tempfile.TemporaryDirectory(prefix="release-caller-lock-") as script_dir:
+            script_path = Path(script_dir) / "step.sh"
+            script_path.write_text(step["run"])
+            result = subprocess.run(
+                shell_command(step, script_path), cwd=workspace, text=True, capture_output=True,
+                env=os.environ | {"APPROVED_INTERNAL_PACKAGES": approved},
+            )
+        output = result.stdout + result.stderr
+        if message is None:
+            assert result.returncode == 0, f"{case}: {output}"
+        else:
+            assert result.returncode != 0 and message in output, f"{case}: accepted or wrong reason: {output}"
+
+
 def main():
     sha = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True, capture_output=True, check=True,
@@ -327,6 +453,14 @@ def main():
         )
         for major in harness.SUPPORTED_NPM_RELEASES
     }
+    with tempfile.TemporaryDirectory(prefix="release-caller-reserved-") as temp:
+        for label, workflow in workflows.items():
+            case_root = Path(temp) / label.replace(" ", "_").replace("/", "_")
+            case_root.mkdir()
+            verify_reserved_contract_path(
+                f"{label} verify", verify_dependency_steps(workflow), sha=sha, root=case_root,
+            )
+        verify_private_lock_validation(workflows["release-artifact"], Path(temp) / "lock")
     verified = set()
     for major, (version, integrity) in sorted(harness.SUPPORTED_NPM_RELEASES.items()):
         with tempfile.TemporaryDirectory(prefix=f"release-caller-npm{major}-") as temp:

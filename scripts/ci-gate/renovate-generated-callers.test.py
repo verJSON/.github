@@ -393,7 +393,7 @@ class GeneratorPinManager(unittest.TestCase):
             "RELEASE_CALLER_PACKAGE_DIRS_JSON": '["."]',
             **{
                 name: contract_test_constant(contract_test, name)
-                for name in ("EXPECTED_RELEASE_CHECKOUT", "EXPECTED_RELEASE_SETUP_NODE")
+                for name in ("EXPECTED_RELEASE_CHECKOUT", "EXPECTED_RELEASE_SETUP_NODE", "EXPECTED_RELEASE_CACHE_SAVE")
             },
         }
         with tempfile.TemporaryDirectory() as scratch:
@@ -534,7 +534,7 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
         cls.release_shape = extract_heredoc(contract_test, "RELEASE_SHAPE_PY")
         cls.pins = {
             name: contract_test_constant(contract_test, name)
-            for name in ("EXPECTED_RELEASE_CHECKOUT", "EXPECTED_RELEASE_SETUP_NODE")
+            for name in ("EXPECTED_RELEASE_CHECKOUT", "EXPECTED_RELEASE_SETUP_NODE", "EXPECTED_RELEASE_CACHE_SAVE")
         }
         cls.workflows = {
             mode: generate(generator, mode, cls.ref, *arguments)
@@ -593,6 +593,25 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
                 result = self.check(swapped)
                 self.assert_rejected(result, "does not use the approved verify-job step sequence (#1717)")
                 self.assert_rejected(result, "does not use the approved setup-node inputs (#1717)")
+
+    def test_private_acquisition_actions_moved_off_their_declared_commits_are_rejected(self) -> None:
+        workflow = generate(
+            CHANGELOG_GENERATOR.read_text(encoding="utf-8"), "release-artifact", self.ref,
+            "--build-runner", "ubuntu-24.04", "--approved-internal-package", "@verjson/ai",
+        )
+        self.assertEqual(self.check(workflow).returncode, 0)
+        for step_name, variable in (
+            ("Check out the canonical dependency acquisition contract", "EXPECTED_RELEASE_CHECKOUT"),
+            ("Save exact-attempt credentialless dependencies", "EXPECTED_RELEASE_CACHE_SAVE"),
+        ):
+            with self.subTest(step=step_name):
+                start = workflow.index("  acquire-private-dependencies:\n")
+                swapped = workflow[:start] + self.swap_step_pin(workflow[start:], step_name, variable)
+                self.assertNotEqual(swapped, workflow)
+                self.assert_rejected(
+                    self.check(swapped),
+                    "does not match the approved private dependency acquisition job (#1712)",
+                )
 
     def test_an_unusable_declared_pin_refuses_to_check(self) -> None:
         workflow = self.workflows["release-node"]

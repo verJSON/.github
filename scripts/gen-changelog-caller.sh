@@ -819,6 +819,12 @@ emit_verify_dependency_steps() {
   cat <<EOF
       # The acquisition contract is checked out after any resumed-snapshot
       # checkout has cleaned the workspace, and removed before any other step.
+      # actions/checkout follows a committed symlink at its path and empties the
+      # target, so the release tree may not carry that path at all.
+      - name: Refuse a repository-controlled dependency acquisition contract path
+        if: ${condition}
+        run: |
+          if [ -e .verjson-npm-acquisition-contract ] || [ -L .verjson-npm-acquisition-contract ]; then echo "::error::.verjson-npm-acquisition-contract is reserved for the canonical dependency acquisition contract"; exit 1; fi
       - name: Check out the canonical dependency acquisition contract
         if: ${condition}
         uses: ${release_checkout}
@@ -1463,6 +1469,7 @@ ${build_runners_yaml%$'\n'}
           set -euo pipefail
           [ -f package-lock.json ] || { echo "::error::private release acquisition requires package-lock.json"; exit 1; }
           [ -z "\$(find . -name .npmrc -print -quit)" ] || { echo "::error::private release acquisition rejects repository-controlled npm configuration"; exit 1; }
+          if [ -e .verjson-npm-acquisition-contract ] || [ -L .verjson-npm-acquisition-contract ]; then echo "::error::.verjson-npm-acquisition-contract is reserved for the canonical dependency acquisition contract"; exit 1; fi
           node <<'NODE'
           const fs = require('fs');
           const approved = new Set(process.env.APPROVED_INTERNAL_PACKAGES.split(',').filter(Boolean));
@@ -1472,7 +1479,10 @@ ${build_runners_yaml%$'\n'}
           for (const [path, entry] of Object.entries(lock.packages)) {
             if (!path || !path.includes('node_modules/')) continue;
             const name = path.slice(path.lastIndexOf('node_modules/') + 13);
-            if (!name.startsWith('@verjson/')) continue;
+            let host = '';
+            try { host = new URL(entry.resolved).hostname; } catch {}
+            // An npm alias installs a GitHub Packages package under another name.
+            if (!name.startsWith('@verjson/') && !String(entry.name ?? '').startsWith('@verjson/') && host !== 'npm.pkg.github.com') continue;
             if (!approved.has(name)) throw new Error('unapproved internal dependency: ' + name);
             if (entry.name && entry.name !== name) throw new Error('internal dependency aliases unexpected package: ' + name);
             const url = new URL(entry.resolved);
@@ -3375,6 +3385,7 @@ def pinned_action(variable, action):
 
 RELEASE_CHECKOUT = pinned_action("EXPECTED_RELEASE_CHECKOUT", "actions/checkout")
 RELEASE_SETUP_NODE = pinned_action("EXPECTED_RELEASE_SETUP_NODE", "actions/setup-node")
+RELEASE_CACHE_SAVE = pinned_action("EXPECTED_RELEASE_CACHE_SAVE", "actions/cache/save")
 
 with open(path, encoding="utf-8") as handle:
     raw_lines = handle.read().splitlines()
@@ -4370,20 +4381,167 @@ if private_acquisition_steps:
     else:
         expected_private_acquisition_env = expected_acquisition_env
         expected_private_install_env = expected_install_env
-    private_contract_checkouts = private_acquisition_steps_named(
-        "Check out the canonical dependency acquisition contract"
+    # ADR 0220 (2026-10-18): this job holds the package token and hands a
+    # node_modules tree to every build runner, so its settings, step sequence,
+    # actions, and every run body are pinned exactly; a grep for the install
+    # command accepted an extra command or a dropped scope mapping beside it.
+    PRIVATE_LOCK_VALIDATION_RUN = "\n".join((
+        'set -euo pipefail',
+        '[ -f package-lock.json ] || { echo "::error::private release acquisition requires package-lock.json"; exit 1; }',
+        '[ -z "$(find . -name .npmrc -print -quit)" ] || { echo "::error::private release acquisition rejects repository-controlled npm configuration"; exit 1; }',
+        'if [ -e .verjson-npm-acquisition-contract ] || [ -L .verjson-npm-acquisition-contract ]; then echo "::error::.verjson-npm-acquisition-contract is reserved for the canonical dependency acquisition contract"; exit 1; fi',
+        "node <<'NODE'",
+        "const fs = require('fs');",
+        "const approved = new Set(process.env.APPROVED_INTERNAL_PACKAGES.split(',').filter(Boolean));",
+        "const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));",
+        "if (![2, 3].includes(lock.lockfileVersion) || !lock.packages || Array.isArray(lock.packages)) throw new Error('private release acquisition requires package-lock lockfileVersion 2 or 3');",
+        'const found = new Set();',
+        'for (const [path, entry] of Object.entries(lock.packages)) {',
+        "  if (!path || !path.includes('node_modules/')) continue;",
+        "  const name = path.slice(path.lastIndexOf('node_modules/') + 13);",
+        "  let host = '';",
+        '  try { host = new URL(entry.resolved).hostname; } catch {}',
+        '  // An npm alias installs a GitHub Packages package under another name.',
+        "  if (!name.startsWith('@verjson/') && !String(entry.name ?? '').startsWith('@verjson/') && host !== 'npm.pkg.github.com') continue;",
+        "  if (!approved.has(name)) throw new Error('unapproved internal dependency: ' + name);",
+        "  if (entry.name && entry.name !== name) throw new Error('internal dependency aliases unexpected package: ' + name);",
+        '  const url = new URL(entry.resolved);',
+        "  const parts = url.pathname.split('/');",
+        "  if (url.protocol !== 'https:' || url.host !== 'npm.pkg.github.com' || url.username || url.password || url.search || url.hash || url.pathname.includes('\\\\') || decodeURIComponent(url.pathname) !== url.pathname || parts.length !== 6 || parts[1] !== 'download' || parts[2].toLowerCase() + '/' + parts[3] !== name || !parts[4] || !parts[5]) throw new Error('internal dependency is not pinned to its exact GitHub Packages download URL: ' + name);",
+        "  if (typeof entry.integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(entry.integrity)) throw new Error('internal dependency requires exact sha512 integrity: ' + name);",
+        '  found.add(name);',
+        '}',
+        "for (const name of approved) if (!found.has(name)) throw new Error('approved internal dependency absent from lock: ' + name);",
+        'NODE',
+    ))
+    PRIVATE_ACQUISITION_RUN = "\n".join((
+        'set -euo pipefail',
+        'umask 077',
+        '[ -n "$NODE_AUTH_TOKEN" ] || { echo "::error::private release acquisition requires NODE_AUTH_TOKEN"; exit 1; }',
+        ': > "$NPM_CONFIG_GLOBALCONFIG"',
+        'printf \'%s\\n\' \'registry=https://registry.npmjs.org/\' \'//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}\' > "$NPM_CONFIG_USERCONFIG"',
+        'bash .verjson-npm-acquisition-contract/scripts/npm-private-acquisition.sh',
+        'rm -rf .verjson-npm-acquisition-contract',
+        'rm -f "$NPM_CONFIG_USERCONFIG"',
+    ))
+    PRIVATE_INSTALL_RUN = "\n".join((
+        'set -euo pipefail',
+        'printf \'%s\\n\' \'registry=https://registry.npmjs.org/\' \'@verjson:registry=https://npm.pkg.github.com/\' > "$NPM_CONFIG_USERCONFIG"',
+        'npm ci --ignore-scripts --prefer-offline --audit=false --fund=false',
+        '[ -d node_modules ] || { echo "::error::npm produced no dependency tree"; exit 1; }',
+        '[ "$(du -sk node_modules | awk \'{print $1}\')" -le 2097152 ] || { echo "::error::dependency transfer exceeds 2 GiB"; exit 1; }',
+        'rm -f "$NPM_CONFIG_USERCONFIG" "$NPM_CONFIG_GLOBALCONFIG"',
+    ))
+    PRIVATE_ACQUISITION_CLEANUP_RUN = "\n".join((
+        'rm -rf node_modules .verjson-npm-acquisition-contract "$RUNNER_TEMP/release-acquisition.npmrc" "$RUNNER_TEMP/release-install.npmrc" "$RUNNER_TEMP/release-empty-global.npmrc" "$RUNNER_TEMP/verjson-npm-cache"',
+    ))
+    acquisition_job_bounds = next(
+        (
+            index for index, line in enumerate(lines)
+            if line == "  acquire-private-dependencies:"
+        ),
+        None,
     )
-    if (
-        len(private_contract_checkouts) != 1
-        or step_mapping_values(private_contract_checkouts[0], "with") != {
-            "repository": "verJSON/.github",
-            "ref": os.environ.get("CONTRACT_REF", ""),
-            "path": ".verjson-npm-acquisition-contract",
-            "persist-credentials": "false",
-        }
-    ):
+    acquisition_job_keys = None
+    if acquisition_job_bounds is not None:
+        acquisition_job_keys = mapping_keys_at_indent(
+            lines,
+            acquisition_job_bounds + 1,
+            next(
+                (
+                    index for index in range(acquisition_job_bounds + 1, len(lines))
+                    if re.match(r"^  [A-Za-z0-9_.-]+:\s*$", lines[index])
+                ),
+                len(lines),
+            ),
+            4,
+        )
+    if acquisition_job_keys != {
+        "name", "needs", "if", "strategy", "runs-on", "timeout-minutes", "permissions", "steps",
+    }:
         problems.append(
-            "does not check out the dependency acquisition contract at its pinned ref (#1712)"
+            "configures unapproved private dependency acquisition job settings (#1712)"
+        )
+    setup_node = expected_setup_node_inputs()
+    acquisition_node_version = (
+        setup_node["node-version"][len("${{ '"):-len("' }}")] if setup_node else None
+    )
+    expected_private_job = [
+        {
+            "fields": {"name": "Check out the tagged release tree without credentials",
+                       "uses": RELEASE_CHECKOUT, "with": ""},
+            "with": {"ref": "${{ needs.verify.outputs.version }}", "persist-credentials": "false"},
+        },
+        {
+            "fields": {"uses": RELEASE_SETUP_NODE, "with": ""},
+            "with": {"node-version": f"'{acquisition_node_version}'", "package-manager-cache": "false"},
+        },
+        {
+            "fields": {"name": "Validate the approved private dependency lock",
+                       "shell": "bash", "env": "", "run": "|"},
+            # The allowlist value is held to the generated contract below.
+            "env": {"APPROVED_INTERNAL_PACKAGES": "<generated allowlist>"},
+            "run": PRIVATE_LOCK_VALIDATION_RUN,
+        },
+        {
+            "fields": {"name": "Check out the canonical dependency acquisition contract",
+                       "uses": RELEASE_CHECKOUT, "with": ""},
+            "with": {"repository": "verJSON/.github", "ref": os.environ.get("CONTRACT_REF", ""),
+                     "path": ".verjson-npm-acquisition-contract", "persist-credentials": "false"},
+        },
+        {
+            "fields": {"name": "Acquire private registry packages with credentials",
+                       "shell": "bash", "env": "", "run": "|"},
+            "env": expected_acquisition_env,
+            "run": PRIVATE_ACQUISITION_RUN,
+        },
+        {
+            "fields": {"name": "Install dependencies without lifecycle execution or credentials",
+                       "shell": "bash", "env": "", "run": "|"},
+            "env": expected_install_env,
+            "run": PRIVATE_INSTALL_RUN,
+        },
+        {
+            "fields": {"name": "Save exact-attempt credentialless dependencies",
+                       "uses": RELEASE_CACHE_SAVE, "with": ""},
+            "with": {"path": "node_modules",
+                     "key": "release-dependencies-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.dependency-index }}"},
+        },
+        {
+            "fields": {"name": "Remove acquisition state", "if": "always()", "shell": "bash",
+                       "run": PRIVATE_ACQUISITION_CLEANUP_RUN},
+            "run": PRIVATE_ACQUISITION_CLEANUP_RUN,
+        },
+    ]
+    actual_private_job = []
+    for step in private_acquisition_steps:
+        fields = step_mapping_entries(step)
+        if fields is None:
+            actual_private_job.append(None)
+            continue
+        normalized = {
+            "fields": {
+                key: (yaml_scalar_value(value) if key in ("name", "uses", "if", "shell") else value)
+                for key, value in fields.items()
+            },
+        }
+        if "with" in fields:
+            normalized["with"] = step_mapping_values(step, "with")
+        if "env" in fields:
+            environment = step_mapping_values(step, "env")
+            if (
+                environment is not None
+                and normalized["fields"].get("name") == "Validate the approved private dependency lock"
+                and set(environment) == {"APPROVED_INTERNAL_PACKAGES"}
+            ):
+                environment = {"APPROVED_INTERNAL_PACKAGES": "<generated allowlist>"}
+            normalized["env"] = environment
+        if "run" in fields:
+            normalized["run"] = run_body(step)
+        actual_private_job.append(normalized)
+    if setup_node is None or actual_private_job != expected_private_job:
+        problems.append(
+            "does not match the approved private dependency acquisition job (#1712)"
         )
 
 release_state_step = named_step("Resolve restart-safe release state")
@@ -4499,6 +4657,13 @@ else:
         problems.append("allows the release verification job to continue after failure (#1717)")
     elif "env" in verify_job_keys:
         problems.append("inherits unapproved job-level environment in release verification (#1717)")
+    elif verify_job_keys != {
+        "name", "runs-on", "timeout-minutes", "permissions", "outputs", "steps",
+    }:
+        # The verify job holds the package token in its acquisition step, so a
+        # caller-chosen container, service, or default would run beside it
+        # (ADR 0220, 2026-10-18).
+        problems.append("configures unapproved release verification job settings (#1712)")
     credential_context_lines = (
         context_match_lines(GITHUB_TOKEN, verify_job_start + 1, verify_job_end)
         | context_match_lines(GITHUB_CONTEXT_OBJECT, verify_job_start + 1, verify_job_end)
@@ -4615,6 +4780,24 @@ if release_mode == "release-snapshot":
     expected_install_condition += " && hashFiles('package.json') != ''"
 # The token reaches only the shared acquisition script, which npm cache adds
 # the exact locked private downloads; the tree installs without it (ADR 0220).
+contract_path_guard_step = named_step(
+    "Refuse a repository-controlled dependency acquisition contract path", "verify"
+)
+contract_path_guard_fields = step_mapping_entries(contract_path_guard_step)
+if (
+    contract_path_guard_fields is None
+    or set(contract_path_guard_fields) != {"name", "if", "run"}
+    or yaml_scalar_value(contract_path_guard_fields.get("if", ""))
+    != expected_install_condition
+    or run_body(contract_path_guard_step) != (
+        "if [ -e .verjson-npm-acquisition-contract ] || [ -L .verjson-npm-acquisition-contract ]; "
+        'then echo "::error::.verjson-npm-acquisition-contract is reserved for the canonical '
+        'dependency acquisition contract"; exit 1; fi'
+    )
+):
+    problems.append(
+        "does not refuse a repository-controlled dependency acquisition contract path (#1712)"
+    )
 acquisition_checkout_step = named_step("Check out the canonical dependency acquisition contract", "verify")
 acquisition_checkout_fields = step_mapping_entries(acquisition_checkout_step)
 if (
@@ -4739,6 +4922,7 @@ if release_mode == "release-node":
         ("Refuse a package this release can never publish", "")
     )
 expected_verification_step_identities.extend((
+    ("Refuse a repository-controlled dependency acquisition contract path", ""),
     ("Check out the canonical dependency acquisition contract", RELEASE_CHECKOUT),
     ("Acquire private registry packages with credentials", ""),
     ("Install dependencies without credentials", ""),
@@ -4789,7 +4973,7 @@ for step in verification_job_steps:
     if fields is None:
         continue
     step_name = yaml_scalar_value(fields.get("name", "")) or ""
-    if step_name == "Check out the canonical dependency acquisition contract":
+    if step_name == "Refuse a repository-controlled dependency acquisition contract path":
         break
     if step_name == "Validate required OS-scoped build lanes":
         # The generated contract pins this step to the dispatch options and
@@ -5402,7 +5586,19 @@ for path, entry in lock["packages"].items():
     if not path or "node_modules/" not in path:
         continue
     name = path.rsplit("node_modules/", 1)[1]
-    if not name.startswith("@verjson/"):
+    resolved_host = ""
+    if isinstance(entry.get("resolved"), str):
+        try:
+            resolved_host = (urlparse(entry["resolved"]).hostname or "").lower()
+        except ValueError:
+            resolved_host = ""
+    # An npm alias installs a GitHub Packages package under another name, so
+    # the alias target and the download host count as well as the path.
+    if (
+        not name.startswith("@verjson/")
+        and not str(entry.get("name") or "").startswith("@verjson/")
+        and resolved_host != "npm.pkg.github.com"
+    ):
         continue
     if name not in approved or (entry.get("name") not in (None, name)):
         raise SystemExit(1)
@@ -5722,6 +5918,7 @@ PY
   CONTRACT_REF="$CONTRACT_REF" \
     EXPECTED_RELEASE_CHECKOUT="$EXPECTED_RELEASE_CHECKOUT" \
     EXPECTED_RELEASE_SETUP_NODE="$EXPECTED_RELEASE_SETUP_NODE" \
+    EXPECTED_RELEASE_CACHE_SAVE="$EXPECTED_RELEASE_CACHE_SAVE" \
     RELEASE_CALLER_PACKAGE_DIRS_JSON="$workflow_package_dirs_json" \
     python3 "$work/release-shape.py" "$release_workflow" \
     || fail "$release_workflow: see above"

