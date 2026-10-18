@@ -1,3 +1,147 @@
+# v4.1.0
+
+## Give the node-release package token only to exact private package downloads
+
+Security fix: `node-release` no longer gives `NODE_AUTH_TOKEN` to `npm ci --ignore-scripts`. Under npm 10, which current Node 18, 20, and 22 releases bundle, that command still ran `prepare` for linked and directory dependencies with the token. Under every npm, a git dependency's preparation passed the token to a child `npm install` that read the dependency's own `.npmrc`. The credentialed step now only runs `npm cache add` for each locked `npm.pkg.github.com` download URL and checks the cached content against the lockfile's sha512 integrity. Then `npm ci --prefer-offline` installs and runs every lifecycle script without the token. When private downloads exist, acquisition refuses npm majors other than 10 and 11, and both steps share one explicit npm cache under `RUNNER_TEMP`. Private lock entries need lockfile version 2 or 3, an exact download URL, and sha512 integrity; a version 1 lockfile with no private packages still installs. A git dependency whose preparation needs private packages now fails instead of receiving the token. See ADR 0220's 2026-10-18 amendment.
+
+_Date: 2026-10-18; id:fde0ede7_
+
+## Accept the owner's scope spelling in container private-dependency download URLs
+
+Fix: the container candidate's private-dependency acquisition
+(`scripts/container_private_dependencies.py`) now accepts a GitHub Packages download URL
+that records the organization's own spelling of the scope, such as
+`https://npm.pkg.github.com/download/@verJSON/pg/1.2.3/<hash>`, for the lowercase package
+`@verjson/pg`. Before this change, the scope was compared case-sensitively, so every lock
+entry resolved with that URL was rejected as an unapproved private package. Only the scope
+is folded, and only when it is ASCII: Python's `str.lower()` maps the Kelvin sign (U+212A)
+to `k`, so a non-ASCII scope is rejected rather than folded. The package name, version,
+approved-list membership, and the exact URL shape are still matched exactly, as the
+generated release caller's private lock validator already does (#1713). Adopters pick up
+the fix when their container-candidate caller is regenerated at a contract SHA that
+includes it, because the caller pins this script by digest.
+
+_Date: 2026-10-18; id:9c4e17a2_
+
+## Re-record the authorization-arm finding after verjson-editor regenerated
+
+Maintenance: the scheduled `arm-audit` job adjudicates the reduced finding again.
+verjson-editor landed its four generated callers, including the `ai-review-merge.yml`
+admission caller. The live finding therefore shrank to 20 missing generated callers across
+18 armed repositories (17 `ai-review-label-rearm.yml`, 3 `ai-promotion-retry.yml`). Any
+change to the finding counts as drift, so the job failed on 2026-10-16 and 2026-10-17
+until `config/audit-expected-findings.json` recorded it. The remaining callers are
+consumer regeneration tracked by #1810.
+
+_Date: 2026-10-17; issue #1810_
+
+## Bind the contract canary's same-repository Cosign publisher to its source commit
+
+Fix: the container-candidate contract canary can sign and verify its own provenance
+again. It calls the publisher with `uses: ./`, so its GitHub OIDC `job_workflow_ref`
+ends in `@refs/heads/main`. Since #1690, the signer had rejected every such ref as "not
+immutably pinned" (run 39060824097). Adopters, which call `Verjson/.github/...@<sha>`,
+see no behavior change.
+
+_Date: 2026-10-17; id:e15d144f_
+
+## Make actions-ci row lines unforgeable and add structured runtime records
+
+The actions-ci group runner now replays each row's output inside a random-token `::stop-commands::` block with every line, and every bare-carriage-return segment, prefixed by `| `, so command output can no longer hide, mask, or forge the `actions-ci command group=…` row line that the verjson-observability#271 collector parses; the row line's format is unchanged. Each `shell-test-groups` cell also uploads a seven-day `actions-ci-runtime-records-<run>-<attempt>-<group>` artifact holding one JSON record per row (status, elapsed, budget, timestamps, timeout, background processes, runner identity), written by the runner after each row exits to a path no row is told.
+
+_Date: 2026-10-17; id:c4b5a059_
+
+## Reclaim hosted disk and fail fast before container candidate image builds
+
+On GitHub-hosted runners, the container candidate publisher now removes the large preinstalled hosted-image toolchains its image builds never use (Android SDK, .NET, GHC, CodeQL, Swift, PowerShell) on every row a publish job may build, with or without private Node packages. It also refuses to start an image build unless the Docker data filesystem holds twice the measured node_modules context plus a 4 GiB margin. If it doesn't, the build fails with an explicit required-versus-available error instead of an opaque `ENOSPC` mid-build.
+
+_Date: 2026-10-17; id:83b2ec0e_
+
+## Accept the strict admission check in the bypassless cli-projects ruleset exception
+
+Fix: the scheduled `Organization ruleset conformance` audit accepts ruleset 21830367
+(`cli-projects-package-surface-required-workflow`) again. Since the 2026-10-15 rotation
+added ADR 0212's strict `admission` status check, the audit had reported `required release
+authorization bypass is absent`. No bypass actor is added.
+
+_Date: 2026-10-17; id:20261018T045749Z; refs #1423_
+
+## Record the live receipts for both #1828 required-workflow rotations
+
+ADRs 0151 and 0153 now record the exact-head `verify-run` receipts that complete the
+rotations of rulesets 21750617 (authn) and 21830367 (CLI projects) to `c78fcd4e` (Part of #1423). Both
+exited 0 against fresh organization-rule runs. ADR 0153 also records why the first CLI
+projects run was refused: its head still carried the pre-generator caller.
+
+_Date: 2026-10-16; id:20261016T145143Z_
+
+## Pin the generator sandbox to the interpreter's runtime library directory and record pending rotation receipts
+
+A test now gives the sandboxed historical generator a decoy build-time `LIBDIR`. It
+asserts that the runtime prefix (`sys.base_prefix/lib`) is the only library directory
+used. Without it, a switch to the build-time path could pass review while it breaks
+self-hosted runners.
+
+_Date: 2026-10-16; id:20261016T014014Z_
+
+## Repin the CLI projects required workflow to node-ci-protected v4.0.0
+
+Hardening: both protected Node lanes of `cli-projects-package-surface-required.yml`
+now call `node-ci-protected.yml` at `576707fe` (v4.0.0), which contains #1750 and
+#1759, instead of `1c7659b7`. `config/cli-projects-required-node-ci.json` now pins the
+protected lanes (`protected_node_ci_sha`) separately from the push-only consumer caller
+(`consumer_node_ci_sha`), so this repin leaves the consumer `ci.yml` digest that admission
+requires unchanged and needs no `verjson-cli-projects` change. Organization ruleset
+21830367 keeps running the old revision until an operator rotates it to this change's
+merge commit ([ADR 0153](../docs/decisions/0153-cli-projects-package-surface-required-workflow/README.md)).
+
+_Date: 2026-10-15; issue #1423_
+
+## Route secretless trusted-ref builds to the hosted untrusted lane
+
+Canonical `node-ci.yml` (and the generated `node-ci-protected.yml`) now routes the `build-test` job of a `secretless-trusted-ref` call to `CI_LANE_UNTRUSTED`, the same ephemeral GitHub-hosted lane secretless pull-request builds already use, ahead of a caller's `runner` input. Every other job, including `eligibility`, keeps the caller's route, so push validation pays for hosted capacity only in the one job whose lifecycle rebuild and candidate sandbox refuse to run elsewhere.
+
+_Date: 2026-10-15; id:f5f026ef_
+
+## Admit heads whose cancelled run was displaced by another re-arm workflow or left an aggregator failure behind
+
+`scripts/assert-mergeable-head.sh` now sets aside a cancelled run displaced from a declared concurrency family by a later successful run of that family, and an aggregator failure that completed after the latest cancelled check of its run when the newest later run of the same workflow re-did that check to SUCCESS (ADR 0226 amendments, 2026-10-15).
+
+_Date: 2026-10-15; id:f26743133a_
+
+## Forward the package retention window to the release verification hook
+
+Generated `release-node`, `release-artifact`, and `release-snapshot` callers now pass `CI_PACKAGE_RETENTION_KEEP` into the clean `env -i` environment of the release verification step, so a repository `scripts/release-verify.sh` sees the same retention window the post-publish retention job deletes against. Consumers pick it up by regenerating their adopter set at the new contract SHA; verjson-ci#298's retention-aware release hold is the first consumer.
+
+_Date: 2026-10-15; id:20261015T232302Z_
+
+## Keep public pull-request code off persistent self-hosted runners
+
+`actions-ci` now runs every job on the ephemeral untrusted lane
+(`CI_LANE_UNTRUSTED` with a hosted tail and no persistent fallback). Before
+this change, code from any pull request to this public repository, including
+forks, ran on the shared DigitalOcean `general` pool that also runs privileged
+jobs. A new contract check, `scripts/ci-gate/public-pr-runner-isolation.py`,
+fails if a job that a `pull_request` event can reach could land on a persistent
+runner through a variable fallback or a caller-supplied input
+([ADR 0235](../docs/decisions/0235-public-pull-request-code-uses-ephemeral-runners/README.md)).
+`pull_request_review`, `pull_request_review_comment`, and `merge_group` are held
+to the same rule. A trigger the checker does not classify, such as
+`check_suite`, `status`, or an unknown `pull_request_*` name, is undetermined
+rather than clean, and a duplicate list row is a format error.
+
+_Date: 2026-10-15; id:20261015T230522Z_
+
+## Repin the authn required workflow to node-ci-protected v4.0.0
+
+Hardening: the generated `authn-type-surface-required.yml` now calls
+`node-ci-protected.yml` at `576707fe` (v4.0.0), which contains #1750 and #1759,
+instead of `3f8fb4ba`. Organization ruleset 21750617 keeps running the old revision
+until an operator rotates it to this change's merge commit
+([ADR 0151](../docs/decisions/0151-authn-type-surface-required-workflow/README.md)).
+
+_Date: 2026-10-15; id:20261015T230400Z_
+
 # v4.0.0
 
 ## Renovate maintains generator action pins so adopters stop hand-editing generated callers
