@@ -391,6 +391,13 @@ jobs:
           fi
           echo "sha=$trusted_review_sha" >>"$GITHUB_OUTPUT"
 
+      # A persistent runner keeps the previous job's root checkout, which can be
+      # a pull-request head; actions/checkout follows a symlink at its path and
+      # empties the target (ADR 0236).
+      - name: Refuse a symlink at the .gate-recovery checkout path
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ -L .gate-recovery ]; then echo "::error::.gate-recovery is a symlink; actions/checkout would empty its target"; exit 1; fi
       - name: Check out immutable zero-provider recovery verifier
         if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -600,6 +607,13 @@ jobs:
 
           out proceed true
 
+      # A persistent runner keeps the previous job's root checkout, which can be
+      # a pull-request head; actions/checkout follows a symlink at its path and
+      # empties the target (ADR 0236).
+      - name: Refuse a symlink at the .gate-policy checkout path
+        if: steps.freshness.outputs.proceed == 'true'
+        run: |
+          if [ -L .gate-policy ]; then echo "::error::.gate-policy is a symlink; actions/checkout would empty its target"; exit 1; fi
       - name: Check out immutable policy decoder
         if: steps.freshness.outputs.proceed == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -865,6 +879,12 @@ jobs:
           fi
           echo "sha=$TRUSTED_REVIEW_SHA" >>"$GITHUB_OUTPUT"
 
+      # A persistent runner keeps the previous job's root checkout, which can be
+      # a pull-request head; actions/checkout follows a symlink at its path and
+      # empties the target (ADR 0236).
+      - name: Refuse a symlink at the .gate-trust checkout path
+        run: |
+          if [ -L .gate-trust ]; then echo "::error::.gate-trust is a symlink; actions/checkout would empty its target"; exit 1; fi
       - name: Check out immutable arm verifier
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -1958,8 +1978,20 @@ jobs:
       # OTEL_EXPORTER_OTLP_ENDPOINT is set — the composite action no-ops without
       # an endpoint. Emits one CiTelemetryPayload for the review. See ADR 0004
       # and docs/ci-telemetry.md.
-      - name: Fetch telemetry helper scripts
+      # The PR head is checked out at the workspace root above, and
+      # actions/checkout follows a symlink at its path and empties the target,
+      # so a committed .gate-tools link would aim that at runner state or at
+      # another gate checkout (ADR 0236). Telemetry never blocks the gate, so
+      # a refusal skips the fetch instead of failing the job.
+      - name: Refuse a symlink at the .gate-tools checkout path
+        id: gate-tools-path
         if: always() && needs.preflight.outputs.lane == 'ai'
+        continue-on-error: true
+        run: |
+          if [ -L .gate-tools ]; then echo "::error::.gate-tools is a symlink; actions/checkout would empty its target"; exit 1; fi
+      - name: Fetch telemetry helper scripts
+        id: gate-tools
+        if: always() && needs.preflight.outputs.lane == 'ai' && steps.gate-tools-path.outcome == 'success'
         continue-on-error: true
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1969,8 +2001,10 @@ jobs:
           sparse-checkout: scripts/ci-telemetry
           sparse-checkout-cone-mode: false
 
+      # Runs .gate-tools only when the fetch above succeeded; otherwise that
+      # path is whatever the PR head committed there.
       - name: Build ai-review telemetry payload
-        if: always() && needs.preflight.outputs.lane == 'ai'
+        if: always() && needs.preflight.outputs.lane == 'ai' && steps.gate-tools.outcome == 'success'
         continue-on-error: true
         env:
           # Only the semantically validated verdict published by submit is a verdict.
@@ -2111,6 +2145,12 @@ jobs:
           fi
           echo "sha=$TRUSTED_REVIEW_SHA" >>"$GITHUB_OUTPUT"
 
+      # A persistent runner keeps the previous job's root checkout, which can be
+      # a pull-request head; actions/checkout follows a symlink at its path and
+      # empties the target (ADR 0236).
+      - name: Refuse a symlink at the .gate-trust checkout path
+        run: |
+          if [ -L .gate-trust ]; then echo "::error::.gate-trust is a symlink; actions/checkout would empty its target"; exit 1; fi
       - name: Check out immutable arm verifier
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

@@ -86,6 +86,14 @@ jobs:
           EXECUTING_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: echo "sha=$EXECUTING_WORKFLOW_SHA" >>"$GITHUB_OUTPUT"
 
+      # This job runs on persistent runners, whose workspace keeps an earlier
+      # job's checkout. actions/checkout follows a symlink at its path and
+      # empties the target, so refuse one before it reaches runner state
+      # (ADR 0236).
+      - name: Refuse a symlink at the .promotion-trust checkout path
+        if: steps.adoption.outputs.adopted == 'true'
+        run: |
+          if [ -L .promotion-trust ]; then echo "::error::.promotion-trust is a symlink; actions/checkout would empty its target"; exit 1; fi
       - name: Check out immutable review-policy decoder
         if: steps.adoption.outputs.adopted == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

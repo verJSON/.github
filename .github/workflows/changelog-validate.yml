@@ -69,6 +69,13 @@ jobs:
           # `.git/config` sits inside the blast radius of whatever that engine
           # does. Nothing here pushes. Matches generated-artifacts.yml.
           persist-credentials: false
+      # The consumer tree above is pull-request content. actions/checkout
+      # follows a symlink at its path and empties the target, so a committed
+      # .changelog-contract link would aim that at runner state. A real
+      # directory is harmless: checkout replaces it without following links.
+      - name: Refuse a symlink at the .changelog-contract checkout path
+        run: |
+          if [ -L .changelog-contract ]; then echo "::error::.changelog-contract is a symlink; actions/checkout would empty its target"; exit 1; fi
       - name: Check out canonical contract
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

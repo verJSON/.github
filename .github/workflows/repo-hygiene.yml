@@ -73,6 +73,11 @@ jobs:
       # The check and the exemption register come from the central repository at
       # a pinned ref, never from the tree being audited. An exemption the audited
       # repository could assert about itself would be a bypass, not an exemption.
+      # actions/checkout follows a symlink at its path and empties the target;
+      # refuse one before it reaches runner state (ADR 0236).
+      - name: Refuse a symlink at the .repo-hygiene checkout path
+        run: |
+          if [ -L .repo-hygiene ]; then echo "::error::.repo-hygiene is a symlink; actions/checkout would empty its target"; exit 1; fi
       - name: Check out the central hygiene policy
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

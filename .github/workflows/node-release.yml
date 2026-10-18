@@ -254,6 +254,11 @@ jobs:
         env:
           CONTRACT_REF: ${{ inputs.contract-ref }}
         run: '[[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]]'
+      # actions/checkout follows a symlink at its path and empties the target;
+      # refuse one before it reaches runner state (ADR 0236).
+      - name: Refuse a symlink at the .verjson-npm-acquisition-contract checkout path
+        run: |
+          if [ -L .verjson-npm-acquisition-contract ]; then echo "::error::.verjson-npm-acquisition-contract is a symlink; actions/checkout would empty its target"; exit 1; fi
       - name: Check out the canonical dependency acquisition contract
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -466,6 +471,11 @@ jobs:
         env:
           CONTRACT_REF: ${{ inputs.contract-ref }}
         run: '[[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]]'
+      # actions/checkout follows a symlink at its path and empties the target;
+      # refuse one before it reaches runner state (ADR 0236).
+      - name: Refuse a symlink at the .node-release-contract checkout path
+        run: |
+          if [ -L .node-release-contract ]; then echo "::error::.node-release-contract is a symlink; actions/checkout would empty its target"; exit 1; fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: Verjson/.github
@@ -935,6 +945,11 @@ jobs:
         env:
           CONTRACT_REF: ${{ inputs.contract-ref }}
         run: '[[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]]'
+      # actions/checkout follows a symlink at its path and empties the target;
+      # refuse one before it reaches runner state (ADR 0236).
+      - name: Refuse a symlink at the .package-retention-contract checkout path
+        run: |
+          if [ -L .package-retention-contract ]; then echo "::error::.package-retention-contract is a symlink; actions/checkout would empty its target"; exit 1; fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: Verjson/.github
