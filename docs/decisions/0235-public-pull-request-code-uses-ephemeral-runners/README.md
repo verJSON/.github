@@ -939,12 +939,27 @@ forms and generalize the binding.
   hidden from the call-site rules refuses too (round 9): a renamed
   destructuring (`{ spawnSync: go }`), bracket access (`cp["spawnSync"]`),
   `from subprocess import *`, `getattr` on `subprocess` or `os`, and os's
-  spawners imported by name.
+  spawners imported by name. `subprocess.getoutput` and `getstatusoutput`
+  are read as shell, and a spawn whose `shell=` is not a literal refuses,
+  because its shell-ness is decided at runtime (round 10).
 - **Materializations.** `git` is matched when spelled by path, quoted, or
   backslash-escaped (`\git`). A tree-changing git verb (`checkout`,
   `restore`, `reset`, `switch`, and the rest of the runtime tree-change set),
-  `gh pr checkout`, or `patch`, in a traced text or a Python or JavaScript
-  argument vector, refuses as `tracked-materialization`.
+  `gh pr checkout`, or `patch` refuses as `tracked-materialization`. So does
+  a `git show`, `archive`, or `cat-file` other than the frozen ones. Both
+  scans read every traced shell text and, since round 10, every Python or
+  JavaScript argument vector, whatever word leads it: `["patch", …]`,
+  `["gh", "pr", "checkout", …]`, and `git` behind `env` or `sudo` all
+  refuse. `patch` refuses behind any command prefix the trace models
+  (`exec`, `nohup`, `sudo`, `time`, `command`, `builtin`, `!`, `env`,
+  `timeout`) and when named by a path.
+- **Frozen data read.** One vector is tolerated as a data read (round 10):
+  `scripts/changelog.py`'s `git_file()` runs
+  `["git", "show", f"{revision}:{path}"]` and parses the bytes it returns.
+  It is matched on that exact source line, which `changelog.py` must hold
+  exactly once, for `verify` only (`FROZEN_DATA_READS`), and `changelog.py`
+  is bound into the row. A second identical vector, an edit to the line, the
+  same vector in another program, or another key refuses.
 - **The frozen pin comparison.** It is tolerated only while everything that
   runs before it is reviewed bytes. The hook's leading logical lines must be
   the preamble, matched by digest, then the `$pin` derivation, its guard, and
@@ -962,8 +977,9 @@ forms and generalize the binding.
   reason of its own.
 - **PATH.** A PATH entry naming the workspace or working directory, a
   relative one, or an empty one (the working directory) refuses as
-  `unresolved-program`. This covers an assignment, a `+=` append, a
-  `GITHUB_PATH` append, and a job or step `env` block.
+  `unresolved-program`. This covers an assignment, including an empty entry
+  after a closing quote (`PATH="$PATH":`), a `+=` append, a `GITHUB_PATH`
+  append, and a job or step `env` block.
 
 **What the check guarantees.** The trace is a static approximation of what
 `verify` runs, not a proof of it. It guarantees two things. Every literal
@@ -979,7 +995,9 @@ everything the job executes. These residuals stay outside it:
 2. **`changelog.py` reads git objects as data.** It reads
    `git show <revision>:<path>` and `git cat-file -e <tag>:<path>`, for
    fragments and the pre-contract migration document. It parses those
-   bytes and never executes them.
+   bytes and never executes them. The `git show` vector in `git_file()`
+   (`scripts/changelog.py:1110`) is the one frozen data read named under
+   *Frozen data read* above; `cat-file -e` reads no content.
 3. **An absent guarded hook binds nothing.** A hook that runs only behind
    `[ -x path ]` and that the tree does not hold runs nothing. Adding it
    changes the tree, and the trace then follows it.
@@ -1009,6 +1027,18 @@ everything the job executes. These residuals stay outside it:
    command wrappers such as `nice`, `setsid`, `stdbuf`, `flock`, and
    `watch`; Python `asyncio.create_subprocess_exec` and `pty.spawn`;
    JavaScript `new Worker(…)`; and a `make` recipe.
+10. **A computed git verb is traced as named only.** A git call whose verb
+    is computed is bound with its program, but neither tree-change nor
+    materialization scan can read the verb, so it does not refuse. Two real
+    wrappers do this. One is the `git(*args)` helper at
+    `scripts/changelog.py:756-757`, which runs
+    `["git", "-c", "core.hooksPath=/dev/null", *args]`. Its callers in
+    `changelog.py` pass literal verbs, among them a `git show` data read at
+    `:484` that neither scan sees through the helper. The other is verify's
+    release-state step at `.github/workflows/release.yml:296`, which runs
+    `exec /usr/bin/git "$@"`.
+    Refusing a computed verb would refuse both, so it is a residual, not a
+    refusal; #1831 removes it.
 
 All of these are removed when #1831 moves `verify` off the persistent pool.
 
@@ -1062,4 +1092,23 @@ stay named-only. The same pass made these changes:
 - the checker test row's budget is 180 seconds, about twice its measured
   72 to 86 seconds;
 - the 24-file row contention is recorded above.
+
+## Amendment (2026-10-18, #1827) — round-10 review: every spawn vector is scanned
+
+**Finding.** The round-9 amendment said `gh pr checkout` and `patch` refuse
+inside a Python or JavaScript argument vector. The code scanned only a
+vector whose first word was `git`, so `["patch", …]`,
+`["gh", "pr", "checkout", "7"]`, and `["env", "git", "checkout", …]` passed.
+
+**Decision (PM, 2026-10-18; Part of #1831).** Fix the code, not just the
+wording. Every vector is a traced text, read by both the tree-change scan
+and the materialization scan. That scan refused one line `verify` really
+runs: `changelog.py` `git_file()`'s `["git", "show", f"{revision}:{path}"]`.
+Its bytes are parsed, never run, so it is frozen as the one data read on its
+exact bytes, as the pinned show is frozen, rather than loosening the scan.
+A proposed refusal of computed git verbs would have refused two real
+wrappers, so it was dropped and is residual 10. The same pass made `patch`
+refuse behind command prefixes and by path, and read `PATH="$PATH":`. It
+also added `getoutput` and `getstatusoutput` as shell spawns and made a
+non-literal `shell=` refuse.
 
