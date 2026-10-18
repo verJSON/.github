@@ -74,6 +74,11 @@ jobs:
           }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: {fetch-depth: 0, persist-credentials: false}
+      # actions/checkout follows a symlink at its path and empties the target;
+      # refuse one before it reaches runner state (ADR 0236).
+      - name: Refuse a symlink at the .container-release-contract checkout path
+        run: |
+          if [ -L .container-release-contract ]; then echo "::error::.container-release-contract is a symlink; actions/checkout would empty its target"; exit 1; fi
       - name: Check out the immutable provenance and changelog contract
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -424,6 +429,11 @@ jobs:
         env:
           CONTRACT_REF: ${{ inputs.contract-ref }}
         run: '[[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]]'
+      # actions/checkout follows a symlink at its path and empties the target;
+      # refuse one before it reaches runner state (ADR 0236).
+      - name: Refuse a symlink at the .package-retention-contract checkout path
+        run: |
+          if [ -L .package-retention-contract ]; then echo "::error::.package-retention-contract is a symlink; actions/checkout would empty its target"; exit 1; fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: Verjson/.github

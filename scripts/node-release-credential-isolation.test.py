@@ -495,9 +495,11 @@ def main():
     )
     assert steps.index(acquisition_step) + 1 == steps.index(install_step)
     acquisition_index = steps.index(acquisition_step)
-    contract_ref_guard, contract_checkout = steps[acquisition_index - 2:acquisition_index]
+    contract_ref_guard, symlink_refusal, contract_checkout = steps[acquisition_index - 3:acquisition_index]
     assert contract_ref_guard.get("env") == {"CONTRACT_REF": "${{ inputs.contract-ref }}"}
     assert contract_ref_guard.get("run") == '[[ "$CONTRACT_REF" =~ ^[0123456789abcdef]{40}$ ]]'
+    # ADR 0236; scripts/ci-gate/fixed-path-checkout-refusal.test.py executes it.
+    assert symlink_refusal.get("name") == f"Refuse a symlink at the {ACQUISITION_CONTRACT} checkout path"
     assert str(contract_checkout.get("uses", "")).startswith("actions/checkout@")
     assert contract_checkout.get("with") == {
         "repository": "Verjson/.github",
