@@ -3547,6 +3547,19 @@ expect_verify_refused(verify_with("produce | bash -s some-argument\n", {}),
 expect_bound("bash -s some-argument < scripts/real.sh\n", {"scripts/real.sh": "echo real\n"},
              "scripts/real.sh", "`bash -s` reading a tracked program on standard input")
 
+# Round-8 nit 10: npm run in another package directory reads that package's
+# scripts, which this trace does not model, so it refuses rather than read the
+# root package.json in their place.
+SUB_PACKAGE = {"sub/package.json": json.dumps({"name": "sub", "scripts": {"build": 'bash "$TOOL"'}})}
+for invocation in ("npm --prefix sub run build", "npm run build --prefix=sub", "npm -C sub run build",
+                   "npm run build --workspace sub", "npm run build --workspaces", "npm pack -w=sub"):
+    expect_verify_refused(verify_with(invocation + "\n", SUB_PACKAGE), f"verify refuses `{invocation}`",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", UNRESOLVED,
+                           "another package directory"))
+expect(verify_with("npm version --prefix sub 1.0.0 --ignore-scripts\n", SUB_PACKAGE),
+       0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
+       "an npm verb in another package directory that runs no package script is not refused", *PENDING_ARGS)
+
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
 # sequences must not decode to the same replacement text and digest), and a

@@ -896,6 +896,9 @@ def tracked_modes(root: str) -> dict[str, str]:
     return {path: mode or "" for path, mode, _ in tracked_files(root)}
 
 
+# npm options that run a verb in another package's directory.
+NPM_PACKAGE_SELECTORS = ("--prefix", "-C", "--workspace", "-w")
+NPM_ALL_WORKSPACES = ("--workspaces", "-ws", "--include-workspace-root")
 PROGRAM_EXTENSIONS = (".sh", ".bash", ".py", ".js", ".mjs", ".cjs")
 # A literal that may name a file: a path with a separator, or a bare name with
 # a program extension (resolved against the naming program's directory).
@@ -1530,8 +1533,27 @@ class ProgramTrace:
         self.unresolve(f"{where}: node reading its program from a pipe")
 
     def npm(self, args, origin, depth, where) -> None:
-        verbs = [arg for arg in args if not arg.startswith("-")]
+        verbs, elsewhere, index = [], None, 0
+        while index < len(args):
+            flag = args[index]
+            name, equals, value = flag.partition("=")
+            if name in NPM_PACKAGE_SELECTORS and not equals:
+                elsewhere = args[index + 1] if index + 1 < len(args) else flag
+                index += 2
+                continue
+            if name in NPM_PACKAGE_SELECTORS or flag in NPM_ALL_WORKSPACES:
+                elsewhere = value or flag
+            elif not flag.startswith("-"):
+                verbs.append(flag)
+            index += 1
         verb = verbs[0] if verbs else ""
+        reads_scripts = verb in ("run", "run-script", "test", "t", "start", "stop", "restart", "pack") or (
+            verb in ("ci", "install", "i", "rebuild", "version") and "--ignore-scripts" not in args)
+        if elsewhere not in (None, ".", "./") and reads_scripts:
+            # Another package's scripts: not modeled, so never read in place of
+            # the root package.json (round 8, nit 10).
+            self.unresolve(f"{where}: npm {verb} in another package directory ({elsewhere}) is not traced")
+            return
         scripts = self.package.get("scripts") if isinstance(self.package.get("scripts"), dict) else {}
         if verb in ("run", "run-script") and len(verbs) > 1 or verb in ("test", "t", "start", "stop", "restart"):
             script = verbs[1] if verb in ("run", "run-script") else {"t": "test"}.get(verb, verb)
