@@ -736,8 +736,9 @@ HEAD_TOKEN = re.compile(
 # git global options before the subcommand: `-C dir`, `-c k=v`, `--git-dir=x`,
 # `--work-tree x`, `--no-pager`.
 GIT_OPTIONS = r"(?:-[\w-]+(?:=\S*|[ \t]+(?!-)\S+)?[ \t]+)*"
-# `git` may be spelled by path (/usr/bin/git) or quoted ("git") (round 8).
-GIT_WORD = r"""(?:^|[\s;&|(`])["']?(?:[\w./-]*/)?git["']?[ \t]+"""
+# `git` may be spelled by path (/usr/bin/git), quoted ("git") (round 8), or
+# backslash-escaped to bypass an alias (\git) (round 9).
+GIT_WORD = r"""(?:^|[\s;&|(`])(?:\\|["'])?(?:[\w./-]*/)?git["']?[ \t]+"""
 # Commands that put head-controlled bytes on disk when given a head value.
 PR_MATERIALIZE = re.compile(r"\bgh\s+pr\s+(?:checkout|diff)\b")
 GIT_MATERIALIZE = re.compile(
@@ -1955,7 +1956,8 @@ TRACED_TREE_CHANGE = re.compile(
     r"(?:sparse-checkout|checkout|switch|restore|reset|pull|merge|rebase|worktree|apply|am|cherry-pick"
     r"|read-tree|checkout-index)(?![\w-])"
     r"|" + GIT_WORD + r"[^\n]*?--(?:git-dir|work-tree)\b"
-    r"|\bgh[ \t]+pr[ \t]+checkout\b",
+    r"|\bgh[ \t]+pr[ \t]+checkout\b"
+    r"|(?:^|[;&|(]|&&|\|\|)[ \t]*(?:sudo[ \t]+)?\\?patch(?=[ \t]|$)",
     re.M,
 )
 

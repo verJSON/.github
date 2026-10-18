@@ -3642,6 +3642,20 @@ expect(verify_with('echo "see scripts/zz-target.sh"\n', COMPUTED_TARGET), 0,
        ("PENDING: release.yml [workflow_dispatch]: job 'verify'",),
        "a target only mentioned is bound but not traced as invoked", *PENDING_ARGS)
 
+# Round-9 nits: `\git` (alias-bypassing) and `patch` are tree changes in a
+# traced program, and a git verb in a Python or JavaScript argv is read too.
+for label, hook, files in (
+    ("a backslash-escaped git checkout", "\\git checkout HEAD~1 -- scripts/changelog.py\n", {}),
+    ("a patch in a program it runs", "patch -p1 < changes.diff\n", {}),
+    ("a git checkout in a Python argv", "python3 scripts/zz-spawn.py\n",
+     {"scripts/zz-spawn.py": 'import subprocess\nsubprocess.run(["git", "checkout", "HEAD~1", "--", "p"])\n'}),
+    ("a git restore in a JavaScript argv", "node scripts/zz-spawn.js\n",
+     {"scripts/zz-spawn.js": 'const { spawnSync } = require("node:child_process");\n'
+                             'spawnSync("git", ["restore", "--source=HEAD~1", "p"]);\n'}),
+):
+    expect_verify_refused(verify_with(hook, files), f"verify refuses {label}",
+                          ("VIOLATION: release.yml [workflow_dispatch]: job 'verify'", "changes the checked-out tree"))
+
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
 # sequences must not decode to the same replacement text and digest), and a
