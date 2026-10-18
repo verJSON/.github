@@ -75,7 +75,9 @@ def validate_url(path: str, name: str, version: str, resolved: str, approved: se
             or parts[4] != version
         ):
             raise DependencyError(f"lock entry {path} has an invalid GitHub Packages URL")
-        registry_name = f"{parts[2]}/{parts[3]}"
+        # GitHub Packages records the owner's own spelling of the scope (@verJSON);
+        # npm scopes are lowercase, so only the scope is folded, never the package name.
+        registry_name = f"{parts[2].lower()}/{parts[3]}"
         if registry_name != name or registry_name not in approved:
             raise DependencyError(f"unapproved private package: {registry_name}")
     else:
