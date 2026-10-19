@@ -693,6 +693,30 @@ EOF
 # drift; the generated contract test asserts they are still identical.
 release_runner_expr="github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || '[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]'"
 
+# The snapshot job's inputs to changelog-release.yml, in every release caller
+# mode. One definition, because the generated contract test pins this mapping
+# exactly (keys and values): the snapshot receives its credential only through
+# `secrets: inherit` and the release-app environment, and an input value the
+# generator did not write is either a forwarded credential or an unverified
+# selection (#784, ADR 0099).
+release_snapshot_with() {
+  local ref="$1"
+  cat <<EOF
+    with:
+      contract_ref: ${ref}
+      version: \${{ needs.verify.outputs.version }}
+      fragments: \${{ inputs.fragments }}
+      component: \${{ inputs.component }}
+      prefix: \${{ inputs.prefix }}
+      selection_digest: \${{ needs.verify.outputs.selection-digest }}
+      # v3 recommends the App client ID and deprecates its legacy numeric ID.
+      release_app_client_id: \${{ vars.RELEASE_APP_CLIENT_ID }}
+      release_environment: release-app
+      # Explicit, so both halves of one release share one pool (#465).
+      runner: \${{ ${release_runner_expr} }}
+EOF
+}
+
 # The package retention window, exactly as the post-publish retention jobs in
 # node-release.yml and container-release.yml read it. A release verification
 # hook that holds back a still-consumed version (verjson-ci#298) must protect
@@ -1328,18 +1352,7 @@ $(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'
       # The reusable workflow pushes with its separately minted release App
       # token. This caller grant caps only its read-only GITHUB_TOKEN (#784).
       contents: read
-    with:
-      contract_ref: ${ref}
-      version: \${{ needs.verify.outputs.version }}
-      fragments: \${{ inputs.fragments }}
-      component: \${{ inputs.component }}
-      prefix: \${{ inputs.prefix }}
-      selection_digest: \${{ needs.verify.outputs.selection-digest }}
-      # v3 recommends the App client ID and deprecates its legacy numeric ID.
-      release_app_client_id: \${{ vars.RELEASE_APP_CLIENT_ID }}
-      release_environment: release-app
-      # Explicit, so both halves of one release share one pool (#465).
-      runner: \${{ ${release_runner_expr} }}
+$(release_snapshot_with "$ref")
 
   publish:
     name: Publish the released snapshot
@@ -1994,18 +2007,7 @@ $(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'
       # The reusable workflow pushes with its separately minted release App
       # token. This caller grant caps only its read-only GITHUB_TOKEN (#784).
       contents: read
-    with:
-      contract_ref: ${ref}
-      version: \${{ needs.verify.outputs.version }}
-      fragments: \${{ inputs.fragments }}
-      component: \${{ inputs.component }}
-      prefix: \${{ inputs.prefix }}
-      selection_digest: \${{ needs.verify.outputs.selection-digest }}
-      # v3 recommends the App client ID and deprecates its legacy numeric ID.
-      release_app_client_id: \${{ vars.RELEASE_APP_CLIENT_ID }}
-      release_environment: release-app
-      # Explicit, so both halves of one release share one pool (#465).
-      runner: \${{ ${release_runner_expr} }}
+$(release_snapshot_with "$ref")
 
 ${private_acquisition_job}
   build:
@@ -2575,18 +2577,7 @@ $(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'
       # The reusable workflow pushes with its separately minted release App
       # token. This caller grant caps only its read-only GITHUB_TOKEN (#784).
       contents: read
-    with:
-      contract_ref: ${ref}
-      version: \${{ needs.verify.outputs.version }}
-      fragments: \${{ inputs.fragments }}
-      component: \${{ inputs.component }}
-      prefix: \${{ inputs.prefix }}
-      selection_digest: \${{ needs.verify.outputs.selection-digest }}
-      # v3 recommends the App client ID and deprecates its legacy numeric ID.
-      release_app_client_id: \${{ vars.RELEASE_APP_CLIENT_ID }}
-      release_environment: release-app
-      # Explicit, so both halves of one release share one pool (#465).
-      runner: \${{ ${release_runner_expr} }}
+$(release_snapshot_with "$ref")
 
   publish:
     name: Publish the released snapshot
@@ -2942,6 +2933,12 @@ EXPECTED_RELEASE_UPLOAD_ARTIFACT='${release_upload_artifact}'
 EXPECTED_RELEASE_DOWNLOAD_ARTIFACT='${release_download_artifact}'
 EXPECTED_RELEASE_CACHE_SAVE='${release_cache_save}'
 EXPECTED_RELEASE_CACHE_RESTORE='${release_cache_restore}'
+# The snapshot job's changelog-release.yml inputs, one entry per line, exactly as
+# every release caller mode writes them (release_snapshot_with).
+EXPECTED_RELEASE_SNAPSHOT_INPUTS="\$(cat <<'SNAPSHOT_INPUTS'
+$(release_snapshot_with "$ref" | sed -e '1d' -e '/^[[:space:]]*#/d' -e 's/^      //')
+SNAPSHOT_INPUTS
+)"
 EOF
   cat <<'EOF'
 
@@ -3771,7 +3768,9 @@ GITHUB_TOKEN = re.compile(
     r"secrets\s*(?:\.|\[\s*['\"]?)\s*GITHUB_TOKEN)\b",
     re.IGNORECASE,
 )
-GITHUB_CONTEXT_OBJECT = re.compile(r"(?<![\w.])github\b(?!\s*\.)", re.IGNORECASE)
+# The bare context object, an index into it, or an object filter over it
+# (`github.*`): anything but a named property read.
+GITHUB_CONTEXT_OBJECT = re.compile(r"(?<![\w.])github\b(?!\s*\.\s*[A-Za-z_])", re.IGNORECASE)
 PRIVATE_NODE_TOKEN = re.compile(
     r"\bsecrets\s*(?:\.|\[\s*['\"]?)\s*NODE_AUTH_TOKEN\b",
     re.IGNORECASE,
@@ -4108,8 +4107,15 @@ def expression_code(expression):
 
 
 def context_match_lines(pattern, start, end):
-    """Find source lines for sensitive contexts, including folded scalars."""
-    block = "\n".join(lines[start:end])
+    """Find source lines for sensitive contexts, including folded scalars.
+
+    Reads the raw lines. A line-wise comment strip cannot know when a `#` is
+    inside a block scalar, a multi-line quoted scalar, or after an escaped
+    quote, and an expression it wrongly strips is one the scan never sees. No
+    generated caller writes an expression inside a comment, so reading them
+    costs nothing.
+    """
+    block = "\n".join(raw_lines[start:end])
     matched_lines = set()
     for offset, expression in action_expressions(block):
         if pattern.search(expression_code(expression)):
@@ -4815,10 +4821,58 @@ if build_job_start is not None:
         )
 
 # The job that calls changelog-release.yml receives its credential only through
-# `secrets: inherit` and the release-app environment (#784). Any expression in
-# it that reads the token or secrets context forwards a credential, however the
-# access is spelled, so it gets the build job's expression scan rather than a
-# list of names.
+# `secrets: inherit` and the release-app environment (#784). Its `with:` mapping
+# is the generator's, entry for entry: a value the generator did not write is
+# either a forwarded credential or an unverified selection, whatever its
+# spelling. The expression scan over the whole job is defense in depth.
+EXPECTED_SNAPSHOT_INPUTS = os.environ.get("EXPECTED_RELEASE_SNAPSHOT_INPUTS", "").splitlines()
+
+
+def comment_or_blank(line):
+    text = line.strip()
+    return not text or text.startswith("#")
+
+
+def leading_spaces(line):
+    return len(line) - len(line.lstrip(" "))
+
+
+def snapshot_inputs_are_generated(start, end):
+    """True only for exactly one plain `with:` whose entries are the generator's.
+
+    Every expected entry is a single-line plain scalar, so no entry that matches
+    can open a block or multi-line scalar; a skipped `#` line is a comment.
+    """
+    if not EXPECTED_SNAPSHOT_INPUTS:
+        return False
+    fields = [index for index in range(start + 1, end) if not comment_or_blank(raw_lines[index])]
+    if not fields:
+        return False
+    field_indent = leading_spaces(raw_lines[fields[0]])
+    with_keys = [
+        index for index in fields
+        if leading_spaces(raw_lines[index]) == field_indent
+        and re.match(r"""\s*(?:with|'with'|"with")\s*:""", raw_lines[index], re.IGNORECASE)
+    ]
+    if len(with_keys) != 1 or raw_lines[with_keys[0]].rstrip() != " " * field_indent + "with:":
+        return False
+    entries = []
+    for index in range(with_keys[0] + 1, end):
+        line = raw_lines[index]
+        if comment_or_blank(line):
+            continue
+        if leading_spaces(line) <= field_indent:
+            break
+        entries.append(line.rstrip())
+    if not entries:
+        return False
+    entry_indent = " " * leading_spaces(entries[0])
+    return entries == [entry_indent + entry for entry in EXPECTED_SNAPSHOT_INPUTS]
+
+
+if not EXPECTED_SNAPSHOT_INPUTS:
+    problems.append("cannot read the generated snapshot inputs to pin them (#784)")
+snapshot_jobs = 0
 for snapshot_index, (snapshot_job_start, header_indent, _key, _value) in enumerate(job_headers):
     if header_indent != jobs_indent:
         continue
@@ -4830,10 +4884,16 @@ for snapshot_index, (snapshot_job_start, header_indent, _key, _value) in enumera
         jobs_end,
     )
     if not any(
-        "changelog-release.yml@" in lines[index]
+        "changelog-release.yml@" in raw_lines[index] and not comment_or_blank(raw_lines[index])
         for index in range(snapshot_job_start + 1, snapshot_job_end)
     ):
         continue
+    snapshot_jobs += 1
+    if not snapshot_inputs_are_generated(snapshot_job_start, snapshot_job_end):
+        problems.append(
+            "snapshot job does not pass exactly the generated changelog-release.yml "
+            "inputs (#784)"
+        )
     if (
         context_match_lines(GITHUB_TOKEN, snapshot_job_start + 1, snapshot_job_end)
         or context_match_lines(GITHUB_CONTEXT_OBJECT, snapshot_job_start + 1, snapshot_job_end)
@@ -4843,7 +4903,10 @@ for snapshot_index, (snapshot_job_start, header_indent, _key, _value) in enumera
             "snapshot job references a secrets context or GitHub token context "
             "instead of selecting its environment (#784)"
         )
-        break
+if not snapshot_jobs:
+    # This file was selected because it names changelog-release.yml@; a caller
+    # whose snapshot job cannot be found has inputs nothing pinned.
+    problems.append("has no readable job calling changelog-release.yml to pin (#784)")
 
 acquisition_job_start = next(
     (index for index, line in enumerate(lines) if line == "  acquire-private-dependencies:"),
@@ -6073,6 +6136,7 @@ PY
     EXPECTED_RELEASE_CHECKOUT="$EXPECTED_RELEASE_CHECKOUT" \
     EXPECTED_RELEASE_SETUP_NODE="$EXPECTED_RELEASE_SETUP_NODE" \
     EXPECTED_RELEASE_CACHE_SAVE="$EXPECTED_RELEASE_CACHE_SAVE" \
+    EXPECTED_RELEASE_SNAPSHOT_INPUTS="$EXPECTED_RELEASE_SNAPSHOT_INPUTS" \
     EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES="$EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES" \
     RELEASE_CALLER_PACKAGE_DIRS_JSON="$workflow_package_dirs_json" \
     python3 "$work/release-shape.py" "$release_workflow" \

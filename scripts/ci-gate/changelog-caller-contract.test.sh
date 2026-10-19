@@ -2372,20 +2372,91 @@ leak_secret_into_large_build_job() {
   bury_credential_in_large_job "$1" "  build:" "    timeout-minutes: 45" \
     "    env:" '      LEAKED: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}'
 }
-# A name list cannot see a context it does not spell. The snapshot job is read
-# by the same quote-aware expression scan as the build job, so each spelling of
-# the token and secrets contexts below has to be rejected, and an ordinary `#`
-# inside a quoted value has to stay legal.
-add_snapshot_input() {
+# A hand-edited caller changes the value of an input changelog-release.yml
+# declares. The snapshot job's `with:` is pinned to the generator's mapping, so
+# every such edit is rejected by that pin, whatever the value spells; the
+# expression scan behind it is defense in depth, and the build job's scan is
+# exercised directly below.
+set_snapshot_input() {
+  # set_snapshot_input <adopter> <input> [replacement-line]...
+  python3 - "$1/.github/workflows/release.yml" "${@:2}" <<'PY'
+import sys
+
+path, key, *replacement = sys.argv[1:]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+start = lines.index("  snapshot:\n")
+at = next(
+    index for index in range(start, len(lines))
+    if lines[index].startswith("      %s: " % key)
+)
+lines[at:at + 1] = [line + "\n" for line in replacement]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+snapshot_input_index_token() {
+  set_snapshot_input "$1" component "      component: \${{ github['token'] }}"
+}
+snapshot_input_token_after_quoted_hash() {
+  set_snapshot_input "$1" component '      component: "x # ${{ github.token }}"'
+}
+snapshot_input_dotted_secret() {
+  set_snapshot_input "$1" component '      component: ${{ secrets.NPM_TOKEN }}'
+}
+snapshot_input_index_secret() {
+  set_snapshot_input "$1" component "      component: \${{ secrets['NPM_TOKEN'] }}"
+}
+snapshot_input_block_scalar_hash_line() {
+  set_snapshot_input "$1" component '      component: |' '        # ${{ github.token }}'
+}
+snapshot_input_hash_after_escaped_quote() {
+  set_snapshot_input "$1" component '      component: "\" # ${{ github.token }}"'
+}
+snapshot_input_multiline_quoted_hash_line() {
+  set_snapshot_input "$1" component '      component: "x' '        # ${{ github.token }}"'
+}
+snapshot_input_object_wildcard() {
+  set_snapshot_input "$1" component "      component: \${{ join(github.*, ',') }}"
+}
+snapshot_input_unverified_version() {
+  set_snapshot_input "$1" version '      version: ${{ inputs.version }}'
+}
+snapshot_input_suffixed_prefix() {
+  set_snapshot_input "$1" prefix '      prefix: ${{ inputs.prefix }}-rc'
+}
+snapshot_input_dropped() {
+  set_snapshot_input "$1" fragments
+}
+# The build job is scanned rather than pinned. A `#`-leading line inside a
+# block scalar is script text, not a comment, and an object filter over the
+# github context reads every property of it.
+build_heredoc_hash_line_token() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index("          mkdir -p release-artifacts\n", lines.index("  build:\n")) + 1
+lines[at:at] = [
+    "          cat >release-notes.txt <<'NOTES'\n",
+    "          # ${{ github.token }}\n",
+    "          NOTES\n",
+]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+build_env_line() {
   python3 - "$1/.github/workflows/release.yml" "$2" <<'PY'
 import sys
 
-path, inserted = sys.argv[1:]
+path, entry = sys.argv[1:]
 lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
-at = lines.index("    with:\n", lines.index("  snapshot:\n")) + 1
-lines[at:at] = [inserted + "\n"]
+at = lines.index("    timeout-minutes: 45\n", lines.index("  build:\n")) + 1
+lines[at:at] = ["    env:\n", entry + "\n"]
 open(path, "w", encoding="utf-8").write("".join(lines))
 PY
+}
+build_env_object_wildcard() {
+  build_env_line "$1" "      RELEASE_CONTEXT: \${{ join(github.*, ',') }}"
 }
 
 # #463/#464/#465. Each mutation below reproduces one defect the hand-copied
@@ -3819,40 +3890,92 @@ expect_release_mode_rejection release-artifact \
   leak_secret_into_large_build_job \
   'build job references a secrets context; the build matrix runs adopter-owned scripts/release-build.sh'
 
-expect_rejection "a snapshot input reading the token context by index" \
-  add_snapshot_input "      notes_token: \${{ github['token'] }}"
+expect_rejection "a snapshot input carrying index-syntax token context access" snapshot_input_index_token
 sync_last_rejection
-grep -qF 'snapshot job references a secrets context or GitHub token context' "$tmproot/run.out" \
-  && pass "the snapshot scan rejects index-syntax token context access" \
-  || fail "an index-syntax token read in the snapshot was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a snapshot input whose token expression follows a quoted #" \
-  add_snapshot_input '      release_title: "release # ${{ github.token }}"'
+grep -qF 'snapshot job does not pass exactly the generated changelog-release.yml inputs (#784)' "$tmproot/run.out" \
+  && pass "the snapshot input pin rejects index-syntax token context access" \
+  || fail "a snapshot input carrying index-syntax token context access was not rejected by the input pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying a token expression after a quoted #" snapshot_input_token_after_quoted_hash
 sync_last_rejection
-grep -qF 'snapshot job references a secrets context or GitHub token context' "$tmproot/run.out" \
-  && pass "the snapshot scan reads past a # inside a quoted value" \
-  || fail "a token read after a quoted # in the snapshot was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a snapshot input reading a secret by dotted access" \
-  add_snapshot_input '      notes_token: ${{ secrets.NPM_TOKEN }}'
+grep -qF 'snapshot job does not pass exactly the generated changelog-release.yml inputs (#784)' "$tmproot/run.out" \
+  && pass "the snapshot input pin rejects a token expression after a quoted #" \
+  || fail "a snapshot input carrying a token expression after a quoted # was not rejected by the input pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying dotted secrets context access" snapshot_input_dotted_secret
 sync_last_rejection
-grep -qF 'snapshot job references a secrets context or GitHub token context' "$tmproot/run.out" \
-  && pass "the snapshot scan rejects dotted secrets context access" \
-  || fail "a dotted secrets read in the snapshot was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-expect_rejection "a snapshot input reading a secret by index" \
-  add_snapshot_input "      notes_token: \${{ secrets['NPM_TOKEN'] }}"
+grep -qF 'snapshot job does not pass exactly the generated changelog-release.yml inputs (#784)' "$tmproot/run.out" \
+  && pass "the snapshot input pin rejects dotted secrets context access" \
+  || fail "a snapshot input carrying dotted secrets context access was not rejected by the input pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying index-syntax secrets context access" snapshot_input_index_secret
 sync_last_rejection
-grep -qF 'snapshot job references a secrets context or GitHub token context' "$tmproot/run.out" \
-  && pass "the snapshot scan rejects index-syntax secrets context access" \
-  || fail "an index-syntax secrets read in the snapshot was rejected for another reason: $(tail -2 "$tmproot/run.out")"
-quoted_hash_snapshot_adopter="$tmproot/adopter-snapshot-quoted-hash"
-cp -a "$adopter_template" "$quoted_hash_snapshot_adopter"
-add_snapshot_input "$quoted_hash_snapshot_adopter" \
-  '      release_title: "release # ${{ needs.verify.outputs.version }}"'
-git -C "$quoted_hash_snapshot_adopter" commit -aqm 'title the snapshot with a quoted #'
-schedule_adopter_script "$quoted_hash_snapshot_adopter" "$(cat <<'SCHED_SCRIPT'
+grep -qF 'snapshot job does not pass exactly the generated changelog-release.yml inputs (#784)' "$tmproot/run.out" \
+  && pass "the snapshot input pin rejects index-syntax secrets context access" \
+  || fail "a snapshot input carrying index-syntax secrets context access was not rejected by the input pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying a #-leading block scalar line carrying a token expression" snapshot_input_block_scalar_hash_line
+sync_last_rejection
+grep -qF 'snapshot job does not pass exactly the generated changelog-release.yml inputs (#784)' "$tmproot/run.out" \
+  && pass "the snapshot input pin rejects a #-leading block scalar line carrying a token expression" \
+  || fail "a snapshot input carrying a #-leading block scalar line carrying a token expression was not rejected by the input pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying a # after an escaped double quote" snapshot_input_hash_after_escaped_quote
+sync_last_rejection
+grep -qF 'snapshot job does not pass exactly the generated changelog-release.yml inputs (#784)' "$tmproot/run.out" \
+  && pass "the snapshot input pin rejects a # after an escaped double quote" \
+  || fail "a snapshot input carrying a # after an escaped double quote was not rejected by the input pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying a #-leading continuation of a multi-line quoted scalar" snapshot_input_multiline_quoted_hash_line
+sync_last_rejection
+grep -qF 'snapshot job does not pass exactly the generated changelog-release.yml inputs (#784)' "$tmproot/run.out" \
+  && pass "the snapshot input pin rejects a #-leading continuation of a multi-line quoted scalar" \
+  || fail "a snapshot input carrying a #-leading continuation of a multi-line quoted scalar was not rejected by the input pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying an object filter over the github context" snapshot_input_object_wildcard
+sync_last_rejection
+grep -qF 'snapshot job does not pass exactly the generated changelog-release.yml inputs (#784)' "$tmproot/run.out" \
+  && pass "the snapshot input pin rejects an object filter over the github context" \
+  || fail "a snapshot input carrying an object filter over the github context was not rejected by the input pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying an unverified dispatch version" snapshot_input_unverified_version
+sync_last_rejection
+grep -qF 'snapshot job does not pass exactly the generated changelog-release.yml inputs (#784)' "$tmproot/run.out" \
+  && pass "the snapshot input pin rejects an unverified dispatch version" \
+  || fail "a snapshot input carrying an unverified dispatch version was not rejected by the input pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying a prefix with text after the generated value" snapshot_input_suffixed_prefix
+sync_last_rejection
+grep -qF 'snapshot job does not pass exactly the generated changelog-release.yml inputs (#784)' "$tmproot/run.out" \
+  && pass "the snapshot input pin rejects a prefix with text after the generated value" \
+  || fail "a snapshot input carrying a prefix with text after the generated value was not rejected by the input pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying a dropped declared input" snapshot_input_dropped
+sync_last_rejection
+grep -qF 'snapshot job does not pass exactly the generated changelog-release.yml inputs (#784)' "$tmproot/run.out" \
+  && pass "the snapshot input pin rejects a dropped declared input" \
+  || fail "a snapshot input carrying a dropped declared input was not rejected by the input pin: $(tail -2 "$tmproot/run.out")"
+expect_release_mode_rejection release-artifact \
+  "a build step heredoc line that starts with # and carries a token expression" \
+  build_heredoc_hash_line_token \
+  'build job references a secrets context or GitHub token context (#1712)'
+expect_release_mode_rejection release-artifact \
+  "a build job env value filtering every property of the github context" \
+  build_env_object_wildcard \
+  'build job references a secrets context or GitHub token context (#1712)'
+commented_snapshot_adopter="$tmproot/adopter-snapshot-commented-inputs"
+cp -a "$adopter_template" "$commented_snapshot_adopter"
+set_snapshot_input "$commented_snapshot_adopter" component \
+  '      # A comment the caller added.' '      component: ${{ inputs.component }}'
+git -C "$commented_snapshot_adopter" commit -aqm 'comment the snapshot inputs'
+schedule_adopter_script "$commented_snapshot_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
-  pass "emitted suite accepts a # inside a quoted non-credential snapshot input"
+  pass "emitted suite accepts a full-line comment among the generated snapshot inputs"
 else
-  fail "emitted suite rejected a quoted # in a non-credential snapshot input: $(tail -2 "$ADOPTER_LOG")"
+  fail "emitted suite rejected a comment among the generated snapshot inputs: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+quoted_hash_build_adopter="$tmproot/adopter-artifact-quoted-hash-build"
+build_adopter "$quoted_hash_build_adopter" yes workflow release-artifact
+build_env_line "$quoted_hash_build_adopter" \
+  '      RELEASE_LABEL: "build # ${{ needs.verify.outputs.version }}"'
+git -C "$quoted_hash_build_adopter" commit -aqm 'label the build with a quoted #'
+schedule_adopter_script "$quoted_hash_build_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite accepts a # inside a quoted non-credential build value"
+else
+  fail "emitted suite rejected a quoted # in a non-credential build value: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"

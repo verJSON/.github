@@ -391,6 +391,7 @@ class GeneratorPinManager(unittest.TestCase):
         inputs = {
             "CONTRACT_REF": ref,
             "RELEASE_CALLER_PACKAGE_DIRS_JSON": '["."]',
+            "EXPECTED_RELEASE_SNAPSHOT_INPUTS": extract_heredoc(contract_test, "SNAPSHOT_INPUTS"),
             **{
                 name: contract_test_constant(contract_test, name)
                 for name in ("EXPECTED_RELEASE_CHECKOUT", "EXPECTED_RELEASE_SETUP_NODE", "EXPECTED_RELEASE_CACHE_SAVE")
@@ -536,6 +537,8 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
             name: contract_test_constant(contract_test, name)
             for name in ("EXPECTED_RELEASE_CHECKOUT", "EXPECTED_RELEASE_SETUP_NODE", "EXPECTED_RELEASE_CACHE_SAVE")
         }
+        # The snapshot inputs the emitted suite pins exactly (#784).
+        cls.snapshot_inputs = extract_heredoc(contract_test, "SNAPSHOT_INPUTS")
         cls.workflows = {
             mode: generate(generator, mode, cls.ref, *arguments)
             for mode, arguments in RELEASE_MODES.items()
@@ -550,6 +553,7 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
             return run_release_shape(checker, target, {
                 "CONTRACT_REF": self.ref,
                 "RELEASE_CALLER_PACKAGE_DIRS_JSON": '["."]',
+                "EXPECTED_RELEASE_SNAPSHOT_INPUTS": self.snapshot_inputs,
                 **self.pins,
                 **pins,
             })

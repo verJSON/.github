@@ -9,7 +9,7 @@ CHANGELOG_CALLER_CONTRACT_SHARD_WIDTH=4
 # every shard; the caller fails if the count drifts, so a case added or lost
 # cannot silently change which shard owns what. Update it with the case list.
 # shellcheck disable=SC2034 # Read by the caller contract that sources this file.
-CHANGELOG_CALLER_CONTRACT_CASES=305
+CHANGELOG_CALLER_CONTRACT_CASES=315
 
 changelog_caller_shard_name_ok() {
   case "${1:-all}" in
