@@ -309,7 +309,10 @@ class PullRequestCheckoutFixture(unittest.TestCase):
         for relative, content in files.items():
             path = self.workspace / relative
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content)
+            if content is None:
+                git(self.workspace, 'rm', '-q', '--', relative)
+                continue
+            path.write_bytes(content) if isinstance(content, bytes) else path.write_text(content)
             git(self.workspace, 'add', '--', relative)
         git(self.workspace, 'commit', '-qm', 'more changes')
         self.head = git(self.workspace, 'rev-parse', 'HEAD')
@@ -357,6 +360,44 @@ class ReviewDiffKeepsEveryPathSpellingTest(PullRequestCheckoutFixture):
         self.assertNotIn('lock-content', diff)
         self.assertIn('+echo hidden-shell-change', diff)
         self.assertIn('Generated lockfiles were omitted', outputs.get('review_prompt', ''))
+
+
+class BinaryContentNeedsHumanReviewTest(PullRequestCheckoutFixture):
+    """No provider can read a binary section, so only inert binary types may be AI-approved."""
+
+    def prep(self):
+        self.assertEqual(self.run_step(ATTRIBUTES_ID).returncode, 0)
+        (self.root / 'output').unlink(missing_ok=True)
+        return self.run_step('prep'), step_outputs(self.root / 'output')
+
+    def assert_human_review_required(self):
+        result, outputs = self.prep()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(outputs.get('review_input_available'), 'false')
+        self.assertEqual(outputs.get('review_input_failure'), 'binary_content_unreviewable')
+        self.assertNotIn('review_dir', outputs)
+
+    def test_a_script_carrying_a_nul_byte_is_not_ai_reviewable(self):
+        self.add_head_commit({'tools/setup.sh': b'echo visible\n\x00\necho not-shown\n'})
+        self.assert_human_review_required()
+
+    def test_an_archive_is_not_ai_reviewable(self):
+        self.add_head_commit({'vendor/bundle.zip': b'PK\x03\x04\x00\x00opaque'})
+        self.assert_human_review_required()
+
+    def test_an_image_or_font_stays_ai_reviewable(self):
+        self.add_head_commit({'assets/logo.PNG': b'\x89PNG\r\n\x1a\n\x00\x00', 'assets/body.woff2': b'wOF2\x00\x01'})
+        result, outputs = self.prep()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(outputs.get('review_input_available'), 'true')
+
+    def test_deleting_a_binary_stays_ai_reviewable(self):
+        self.add_head_commit({'tools/old.bin': b'\x00\x01'})
+        git(self.workspace, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        self.add_head_commit({'tools/old.bin': None})
+        result, outputs = self.prep()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(outputs.get('review_input_available'), 'true')
 
 
 class RereviewSkipBindsExactContentTest(PullRequestCheckoutFixture):
@@ -505,6 +546,7 @@ class ReviewInputsStayOutsideTheCheckoutTest(PullRequestCheckoutFixture):
         self.assertEqual(list(outside.iterdir()), [])
 
     def test_review_directory_is_private_to_the_run(self):
+        self.assertEqual(self.run_step(ATTRIBUTES_ID).returncode, 0)
         self.assertEqual(self.run_step('prep').returncode, 0)
         review_dir, _ = self.model_input()
         self.assertFalse(review_dir.is_symlink())
@@ -517,7 +559,9 @@ class ReviewDiffIgnoresTextconvTest(PullRequestCheckoutFixture):
     def setUp(self):
         super().setUp()
         (self.workspace / 'settings.conf').write_text('mode = review-sees-this-raw-line\n')
-        (self.workspace / '.gitattributes').write_text('deploy.sh -diff\n[attr]opaque binary\nsettings.conf diff=conv\n')
+        # Only the conversion driver is in play: no attribute here marks a file binary.
+        (self.workspace / '.gitattributes').write_text('settings.conf diff=conv\n')
+        git(self.workspace, 'rm', '-q', 'lib/.gitattributes')
         git(self.workspace, 'add', 'settings.conf', '.gitattributes')
         git(self.workspace, 'commit', '-qm', 'converted file')
         self.head = git(self.workspace, 'rev-parse', 'HEAD')

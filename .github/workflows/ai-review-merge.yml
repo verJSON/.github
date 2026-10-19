@@ -1403,6 +1403,36 @@ jobs:
             echo "::error::phase=review-input result=unavailable kind=review_input_empty — the rendered review diff is empty for a head that changes files"
             exit 1
           fi
+
+          # No provider can read a binary section, so a binary added or changed
+          # outside a short list of inert media types needs a human: a text file
+          # carrying one NUL byte renders only as "Binary files differ". Archives
+          # are opaque containers and are deliberately not on the list (ADR 0237).
+          if ! git diff --no-ext-diff --no-textconv --no-renames --diff-filter=d --numstat -z "$merge_base" HEAD -- . "${lockfile_excludes[@]}" >"$review_dir/numstat"; then
+            {
+              echo "review_input_available=false"
+              echo "review_input_failure=local_diff_failed"
+            } >>"$GITHUB_OUTPUT"
+            echo "::error::phase=review-input result=unavailable kind=local_diff_failed — could not list binary review sections"
+            exit 1
+          fi
+          unreviewable_binaries=0
+          while IFS= read -r -d '' numstat_record; do
+            [ "${numstat_record%%$'\t'*}" = - ] || continue
+            numstat_path="${numstat_record#*$'\t'*$'\t'}"
+            case "${numstat_path,,}" in
+              *.png|*.jpg|*.jpeg|*.gif|*.webp|*.avif|*.bmp|*.ico|*.woff|*.woff2|*.ttf|*.otf|*.eot) ;;
+              *) unreviewable_binaries=$((unreviewable_binaries + 1)) ;;
+            esac
+          done <"$review_dir/numstat"
+          if [ "$unreviewable_binaries" -gt 0 ]; then
+            {
+              echo "review_input_available=false"
+              echo "review_input_failure=binary_content_unreviewable"
+            } >>"$GITHUB_OUTPUT"
+            echo "::error::phase=review-input result=unavailable kind=binary_content_unreviewable count=$unreviewable_binaries — binary content outside the inert media types needs human review"
+            exit 1
+          fi
           {
             echo "review_input_available=true"
             echo "review_input_failure=none"
