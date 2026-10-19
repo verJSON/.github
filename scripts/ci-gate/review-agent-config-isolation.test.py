@@ -562,7 +562,7 @@ class ReviewInputsStayOutsideTheCheckoutTest(PullRequestCheckoutFixture):
     def test_planted_links_neither_empty_the_model_input_nor_reach_their_targets(self):
         self.assertEqual(self.run_step(ATTRIBUTES_ID).returncode, 0)
         attributes = Path(git(self.workspace, 'rev-parse', '--absolute-git-dir')) / 'info/attributes'
-        targets = {name: self.root / f'runner-{name}' for name in ('pr.full.diff', 'pr.diff', 'base-fetch.error')}
+        targets = {name: self.root / f'runner-{name}' for name in ('pr.diff', 'reviewed.status', 'base-fetch.error')}
         for name, target in targets.items():
             target.write_text('runner state\n')
             self.plant(self.workspace / '.ai-review' / name, target)
@@ -656,6 +656,8 @@ class EveryChangeShapeReachesTheReviewTest(PullRequestCheckoutFixture):
                     self.assertEqual(diff.count(f'diff --git a/{name} b/{name}'), 2)
 
     def test_a_rename_is_reviewed_as_one_section(self):
+        # Runner configuration may turn git's default rename detection off.
+        git(self.workspace, 'config', 'diff.renames', 'false')
         body = ''.join(f'line_{index} = {index}\n' for index in range(20))
         self.add_head_commit({'src/module.py': body})
         self.publish_as_base()
@@ -678,6 +680,13 @@ class EveryChangeShapeReachesTheReviewTest(PullRequestCheckoutFixture):
         self.submodule_pr(IGNORE_ALL, IGNORE_ALL)
         self.assert_reviewed(f'+Subproject commit {POINTER_HEAD}')
 
+    def test_a_pointer_only_change_under_an_ignore_setting_is_reviewed(self):
+        self.add_head_commit({'.gitmodules': IGNORE_ALL, 'vendor/lib': ('gitlink', POINTER_BASE)})
+        self.publish_as_base()
+        self.add_head_commit({'vendor/lib': ('gitlink', POINTER_HEAD)})
+        diff = self.assert_reviewed(f'+Subproject commit {POINTER_HEAD}')
+        self.assertEqual(diff.count('diff --git '), 1)
+
     def test_a_pointer_change_under_an_ignore_setting_the_pr_adds_is_reviewed(self):
         self.submodule_pr(TRACKED, IGNORE_ALL)
         self.assert_reviewed(f'+Subproject commit {POINTER_HEAD}')
@@ -697,6 +706,15 @@ class EveryChangeShapeReachesTheReviewTest(PullRequestCheckoutFixture):
                 self.assertEqual(self.rereview_outputs().get('skip_model'), 'true')
                 self.add_head_commit({'vendor/lib': ('gitlink', POINTER_LATER)})
                 self.assertEqual(self.rereview_outputs().get('skip_model'), 'false')
+
+    def test_a_submodule_replaced_by_a_binary_still_needs_a_human(self):
+        self.add_head_commit({'.gitmodules': IGNORE_ALL, 'vendor/lib': ('gitlink', POINTER_BASE)})
+        self.publish_as_base()
+        git(self.workspace, 'rm', '-q', '--cached', 'vendor/lib')
+        self.add_head_commit({'vendor/lib': b'\x00opaque-binary'})
+        result, outputs = self.prep()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(outputs.get('review_input_failure'), 'binary_content_unreviewable')
 
     def test_a_link_or_submodule_at_a_lockfile_path_is_never_elided(self):
         for name, entry in (('vendor/yarn.lock', ('gitlink', POINTER_HEAD)), ('package-lock.json', ('symlink', 'deploy.sh'))):
@@ -718,7 +736,7 @@ class EmptyReviewInputFailsClosedTest(PullRequestCheckoutFixture):
         wrapper = self.root / 'bin' / 'git'
         wrapper.write_text(
             '#!/bin/sh\n'
-            'case " $* " in *" --name-only "*|*" --name-status "*|*" --raw "*) ;; *" diff "*" --find-renames "*) printf "%s" "$RENDERED"; exit 0 ;; esac\n'
+            'case " $* " in *" --name-status "*|*" --raw "*) [ -n "$BLANK_LISTS" ] && exit 0 ;; *" --name-only "*) ;; *" diff "*" --find-renames "*) printf "%s" "$RENDERED"; exit 0 ;; esac\n'
             f'exec {shutil.which("git")} "$@"\n')
         wrapper.chmod(0o755)
         self.env['RENDERED'] = rendered
@@ -742,6 +760,14 @@ class EmptyReviewInputFailsClosedTest(PullRequestCheckoutFixture):
 
     def sections(self, count):
         return ''.join(f'diff --git a/f{index} b/f{index}\n+line\n' for index in range(count))
+
+    def test_a_change_missing_from_every_path_list_is_unavailable_input(self):
+        # Pointer-only change under an ignore setting: only git's own comparison still sees it.
+        self.add_head_commit({'.gitmodules': IGNORE_ALL, 'vendor/lib': ('gitlink', POINTER_BASE)})
+        self.publish_as_base()
+        self.add_head_commit({'vendor/lib': ('gitlink', POINTER_HEAD)})
+        self.env['BLANK_LISTS'] = '1'
+        self.assert_unavailable('', 'review_input_empty')
 
     def test_fewer_sections_than_reviewed_paths_is_incomplete_input(self):
         self.assert_unavailable(self.sections(3), 'review_input_incomplete')

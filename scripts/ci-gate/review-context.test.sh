@@ -54,7 +54,7 @@ awk '
   }
 ' "$workflow" >"$prep"
 sed -i 's/${{ needs.preflight.outputs.head_sha }}/0123456789abcdef0123456789abcdef01234567/g' "$prep"
-grep -q 'pr.full.diff' "$prep" || {
+grep -q 'reviewed.status' "$prep" || {
   echo "FAIL - could not extract the active context-preparation block"
   exit 1
 }
@@ -121,7 +121,7 @@ run_prep 1 \
   && grep -q 'result=retry' "$tmp/prep.out" \
   && review_dir="$(sed -n 's/^review_dir=//p' "$tmp/github-output.txt")" \
   && [ -n "$review_dir" ] \
-  && [ "$(grep -c '^diff --git ' "$review_dir/pr.full.diff")" -eq 301 ] \
+  && [ "$(grep -c '^diff --git ' "$review_dir/pr.diff")" -eq 301 ] \
   && pass "base fetch retries once and renders all 301 changed files locally" \
   || fail "large local diff did not recover through the bounded base fetch"
 

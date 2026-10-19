@@ -1342,18 +1342,6 @@ jobs:
             echo "::error::phase=review-input result=unavailable kind=merge_base_unavailable — fetched base history has no merge base with the checked-out PR head"
             exit 1
           }
-          # --ignore-submodules=none overrides a submodule `ignore` setting from
-          # .gitmodules (which git also reads from the index and HEAD), the repo,
-          # or the runner, so a pointer change is never hidden (ADR 0237).
-          if ! git diff --no-ext-diff --no-textconv --ignore-submodules=none --find-renames "$merge_base" HEAD >"$review_dir/pr.full.diff"; then
-            {
-              echo "review_input_available=false"
-              echo "review_input_failure=local_diff_failed"
-            } >>"$GITHUB_OUTPUT"
-            echo "::error::phase=review-input result=unavailable kind=local_diff_failed — could not render the checked-out PR head against its merge base"
-            exit 1
-          fi
-
           # Elide generated lockfiles from the review payload. A lockfile is a
           # derived artifact — the reviewer scrutinizes the manifest
           # (package.json, Cargo.toml, …), never the machine-generated lock. An
@@ -1362,6 +1350,10 @@ jobs:
           # otherwise-small PR (Verjson/.github#110). Keep the full diff on disk
           # for reference; hand the model the filtered diff plus a note of what
           # was dropped so it still scrutinizes the manifest counterpart.
+          # Every diff here passes --ignore-submodules=none: it overrides a
+          # submodule `ignore` setting from .gitmodules (which git also reads from
+          # the index and HEAD), the repository, or the runner, so a pointer change
+          # is never hidden (ADR 0237).
           # Git pathspecs select lockfiles by path; nothing parses diff headers, so
           # no path spelling (spaces, quotes, newlines) can move a section in or
           # out of the review (ADR 0237).
@@ -1409,18 +1401,18 @@ jobs:
             reviewed_path_count=$((reviewed_path_count + 1))
           done <"$review_dir/reviewed.status"
 
-          # A real change must reach the providers whole. An empty rendering is
-          # accepted only when git confirms the head changes nothing; otherwise the
+          # A real change must reach the providers whole. With no reviewed or
+          # elided path, git must confirm the head changes nothing; otherwise the
           # filtered diff must carry exactly the sections its reviewed paths imply
           # (git quotes unusual paths, so a section header is one line).
           review_input_failure=""
           reviewed_section_count="$(grep -c '^diff --git ' "$review_dir/pr.diff" || true)"
-          if [ ! -s "$review_dir/pr.full.diff" ]; then
-            git diff --quiet --no-ext-diff --ignore-submodules=none "$merge_base" HEAD \
-              || review_input_failure="review_input_empty:the rendered review diff is empty for a head that changes files"
-          elif [ "$irregular_lockfiles" -gt 0 ]; then
+          if [ "$irregular_lockfiles" -gt 0 ]; then
             review_input_failure="lockfile_not_regular_file:a link or submodule pointer sits at a lockfile path and would be elided"
           elif [ "$reviewed_path_count" -eq 0 ] && [ -z "$elided_lockfiles" ]; then
+            git diff --quiet --no-ext-diff --ignore-submodules=none "$merge_base" HEAD \
+              || review_input_failure="review_input_empty:git lists no changed path for a head that changes files"
+          elif [ "$reviewed_path_count" -gt 0 ] && [ ! -s "$review_dir/pr.diff" ]; then
             review_input_failure="review_input_empty:the rendered review diff is empty for a head that changes files"
           elif [ "$reviewed_section_count" != "$expected_section_count" ]; then
             review_input_failure="review_input_incomplete:the review diff has $reviewed_section_count sections where its $reviewed_path_count reviewed paths imply $expected_section_count"
