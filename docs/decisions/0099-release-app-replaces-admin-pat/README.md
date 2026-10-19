@@ -316,19 +316,43 @@ refuses every construct after which that reading could part from a parser's:
 - a document marker or directive;
 - a tab in indentation;
 - a block-scalar indentation indicator;
+- a block-scalar header with no key or sequence entry on its own line, whose
+  parent column is on an earlier line;
 - a block-scalar line indented less than its first line;
+- an expression in a mapping key or inside a flow collection;
+- an expression, or a string inside one, that its scalar leaves open;
 - a C0 or C1 control, LS, PS or BOM character, which `str.splitlines()` treats
   as a line break and a YAML 1.2 parser does not.
 
+A block scalar's body is the lines indented past the node its header follows
+on that line. That node is the key, quoted and flow keys included, or the
+sequence entry. An earlier round took the parent of `- "key": |` to be the
+dash, so the step's remaining keys read as the body of that empty scalar and
+were never checked. It also took a header alone on its line as its own
+parent, so the body below read as structure and a `#` in it as a comment.
+Whether an expression closed is recorded when the scan finds its `}}`. An
+earlier round inferred it from the text ending in `}}`, which a string left
+open can also do.
+
+The scanner also produces a copy of the file with every YAML comment blanked
+to spaces, including a comment after a block-scalar header. Block-scalar bodies
+stay raw. The expression scan reads that copy. An earlier round of this change
+read raw lines, so a quote inside a comment could open an expression string
+that hid the next line's value.
+
 No generated caller, and none of eight live adopter callers checked, uses any
-of them. What this guarantees is narrower than "decoded equals raw". A decoded
-scalar still differs from its raw text in quote delimiters, indentation, and
-line folding, which replaces a line break and the whitespace around it with a
-space or a newline. Folding never joins text across a break, so every `${{`,
-`}}`, quote and context name in a decoded value appears in the raw text. The
-expression scan reads that raw text in the verify, build and acquisition jobs.
-It matches the token context, the `secrets` context, and the `github` object
-read whole, by index, or through an object filter.
+refused construct. What this guarantees is narrower than "decoded equals raw".
+A decoded scalar still differs from its raw text in quote delimiters,
+indentation, and line folding, which replaces a line break and the whitespace
+around it with a space or a newline. Folding never joins text across a break,
+so every `${{`, `}}`, quote and context name in a decoded value appears in the
+scanned text. Every expression closes inside its own scalar, and comments are
+blanked, so the scan's reading of one value cannot run into another.
+
+The expression scan covers workflow scope and the verify, build and acquisition
+jobs. It matches the token context, the `secrets` context, and the `github`
+object read whole, by index, or through an object filter. The verify and
+acquisition jobs allow only their existing approved reads (#1712).
 
 **Generator.** The generator now computes every value it interpolates into a
 here-document before writing that document, and returns on failure. Bash
@@ -338,13 +362,25 @@ contract suite refuses any command substitution in an unquoted here-document
 of the generator. It also asserts that every mode it captures writes nothing
 to stderr.
 
-**Residual.** No residual is known for the escape, tag, comment or job-set
-classes. The scanner is deliberately narrower than YAML, so a hand-written
-caller that uses the refused constructs is rejected rather than read. The
-`publish` job holds publication credentials by design. It is neither pinned
-whole nor scanned for contexts, and it keeps its existing per-field checks.
-A generator function that exits silently inside a command substitution, as
-opposed to returning non-zero or writing to stderr, is not detected.
+**Residual.**
+
+- No residual is known for the escape, tag, comment, block-scalar or job-set
+  classes in the scanned and pinned jobs. A differential fuzz decoded random
+  small documents with PyYAML and compared them with the scanner. After these
+  fixes it found no decoded context read that the scanner neither saw nor
+  refused. PyYAML implements YAML 1.1 and Actions does not use it, so this is
+  evidence, not proof.
+- The scanner is deliberately narrower than YAML, so a hand-written caller that
+  uses a refused construct is rejected rather than read.
+- These controls cover token and `secrets` context reads, the job set, and the
+  pinned snapshot and build jobs. They do not show that a hand-edited caller
+  cannot forward a credential by every route.
+- The `publish` job holds publication credentials by design. It is neither
+  pinned whole nor scanned for contexts, and keeps its existing per-field
+  checks.
+- Data passed between jobs through outputs is outside this amendment.
+- A generator function that exits silently inside a command substitution, as
+  opposed to returning non-zero or writing to stderr, is not detected.
 
 ## Rollback
 

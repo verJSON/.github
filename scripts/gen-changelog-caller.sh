@@ -3505,8 +3505,11 @@ lines = [strip_comment(line) for line in raw_lines]
 # block scalar bodies and comments), a quoted scalar or flow collection left
 # open at the end of a line, an escaped quote inside a single-quoted scalar, a
 # tag, anchor or alias, a document marker or directive, a tab in indentation, a
-# block scalar indentation indicator, a block scalar line indented less than
-# its first line, and (above) any character splitlines() and YAML disagree on.
+# block scalar indentation indicator, a block scalar header with no key or
+# sequence entry on its line (its parent column is on an earlier line), a block
+# scalar line indented less than its first line, and (above) any character
+# splitlines() and YAML disagree on. A block scalar body is the lines indented
+# past the node the header follows on its line, quoted and flow keys included.
 # No generated caller uses any of them. In what remains, a decoded scalar
 # differs from its raw text only by its quote delimiters, its indentation, and
 # line folding, which replaces a line break and the whitespace around it with a
@@ -3519,17 +3522,26 @@ PROPERTY_OR_ALIAS = "!&*"
 
 
 def scan_yaml_lines(source_lines):
-    """Return (full-line comment indices, [(line number, refusal)])."""
+    """Read lines as YAML structure; refuse what this reading cannot follow.
+
+    Returns (full-line comment indices, refusals as (line number, reason),
+    the lines with every YAML comment blanked to spaces so offsets hold, and
+    the indices of block scalar body lines, which are content and stay raw).
+    """
     comments = set()
     refusals = []
+    blanked = list(source_lines)
+    block_lines = set()
     block_parent = None
     block_content = None
     for number, line in enumerate(source_lines):
         indentation = len(line) - len(line.lstrip(" "))
         if block_parent is not None:
             if not line.strip():
+                block_lines.add(number)
                 continue
             if indentation > block_parent:
+                block_lines.add(number)
                 if block_content is None:
                     block_content = indentation
                 elif indentation < block_content:
@@ -3544,6 +3556,7 @@ def scan_yaml_lines(source_lines):
             continue
         if line.lstrip().startswith("#"):
             comments.add(number)
+            blanked[number] = " " * len(line)
             continue
         if line.startswith("%") or (
             line[:3] in ("---", "...") and line[3:4] in ("", " ", "\t")
@@ -3555,6 +3568,10 @@ def scan_yaml_lines(source_lines):
         position = indentation
         node_start = True
         key_column = indentation
+        # A block scalar's body indents past its parent node. Only a key or
+        # sequence entry on the header's own line shows that parent's column.
+        parent_on_line = False
+        scalar_start = None
         flow_depth = 0
         length = len(line)
         while position < length:
@@ -3563,11 +3580,20 @@ def scan_yaml_lines(source_lines):
                 position += 1
                 continue
             if char == "#" and position > 0 and line[position - 1] in " \t":
+                blanked[number] = line[:position] + " " * (length - position)
+                break
+            if flow_depth and line.startswith("${{", position):
+                refusals.append((number + 1, "an expression inside a flow collection"))
                 break
             if node_start:
+                scalar_start = position
                 following = line[position + 1:position + 2]
+                if flow_depth == 0 and char not in "|>":
+                    # Every block node, quoted and flow keys included, is the
+                    # parent a block scalar header after it indents past.
+                    key_column = position
                 if flow_depth == 0 and char in "-?:" and following in ("", " ", "\t"):
-                    key_column = position if char == "-" else key_column
+                    parent_on_line = True
                     position += 1
                     continue
                 if char in PROPERTY_OR_ALIAS:
@@ -3583,6 +3609,9 @@ def scan_yaml_lines(source_lines):
                     if char == "'" and line[close + 1:close + 2] == "'":
                         refusals.append((number + 1, "an escaped quote inside a single-quoted scalar"))
                         break
+                    if flow_depth and "${{" in line[position:close]:
+                        refusals.append((number + 1, "an expression inside a flow collection"))
+                        break
                     position = close + 1
                     node_start = False
                     continue
@@ -3591,13 +3620,17 @@ def scan_yaml_lines(source_lines):
                     position += 1
                     continue
                 if flow_depth == 0 and char in "|>":
-                    header = line[position + 1:].split(" #", 1)[0].rstrip()
-                    if header not in ("", "+", "-"):
+                    header, comment, _ = line[position + 1:].partition(" #")
+                    if not parent_on_line:
+                        refusals.append((number + 1, "a block scalar header with no key or sequence entry on its line"))
+                    elif header.rstrip() not in ("", "+", "-"):
                         refusals.append((number + 1, "a block scalar indentation indicator"))
                     else:
                         block_parent = key_column
+                        if comment:
+                            comment_start = position + 1 + len(header)
+                            blanked[number] = line[:comment_start] + " " * (length - comment_start)
                     break
-                key_column = position if flow_depth == 0 else key_column
                 node_start = False
             if flow_depth and char in ",[{":
                 flow_depth += char in "[{"
@@ -3609,13 +3642,17 @@ def scan_yaml_lines(source_lines):
                 position += 1
                 continue
             if char == ":" and (flow_depth or line[position + 1:position + 2] in ("", " ", "\t")):
+                if scalar_start is not None and "${{" in line[scalar_start:position]:
+                    refusals.append((number + 1, "an expression in a mapping key"))
+                    break
+                parent_on_line = parent_on_line or flow_depth == 0
                 node_start = True
                 position += 1
                 continue
             position += 1
         if flow_depth > 0:
             refusals.append((number + 1, "a flow collection left open at the end of a line"))
-    return comments, refusals
+    return comments, refusals, blanked, block_lines
 
 
 def yaml_comment_indices(source_lines):
@@ -3623,7 +3660,7 @@ def yaml_comment_indices(source_lines):
     return scan_yaml_lines(source_lines)[0]
 
 
-_, unreadable_yaml = scan_yaml_lines(raw_lines)
+_, unreadable_yaml, BLANKED_LINES, BLOCK_SCALAR_LINES = scan_yaml_lines(raw_lines)
 if line_break_disagreement is not None:
     unreadable_yaml.insert(0, (
         raw_text.count("\n", 0, line_break_disagreement.start()) + 1,
@@ -4257,8 +4294,12 @@ def yaml_scalar_value(value):
         return None
 
 
-def action_expressions(text):
-    """Yield GitHub expressions, respecting braces inside quoted strings."""
+def action_expression_spans(text):
+    """Yield (offset, expression, closed), respecting braces inside quoted strings.
+
+    An expression still open at the end of the text runs to that end, and is
+    not closed even when the text ends in `}}` inside one of its strings.
+    """
     cursor = 0
     while True:
         start = text.find("${{", cursor)
@@ -4274,13 +4315,19 @@ def action_expressions(text):
                 in_string = not in_string
             elif not in_string and text.startswith("}}", position):
                 end = position + 2
-                yield start, text[start:end]
+                yield start, text[start:end], True
                 cursor = end
                 break
             position += 1
         else:
-            yield start, text[start:]
+            yield start, text[start:], False
             return
+
+
+def action_expressions(text):
+    """Yield GitHub expressions, respecting braces inside quoted strings."""
+    for start, expression, _ in action_expression_spans(text):
+        yield start, expression
 
 
 def expression_code(expression):
@@ -4306,18 +4353,54 @@ def expression_code(expression):
 def context_match_lines(pattern, start, end):
     """Find source lines for sensitive contexts, including folded scalars.
 
-    Reads the raw lines. A line-wise comment strip cannot know when a `#` is
-    inside a block scalar, a multi-line quoted scalar, or after an escaped
-    quote, and an expression it wrongly strips is one the scan never sees. No
-    generated caller writes an expression inside a comment, so reading them
-    costs nothing.
+    Reads the scanner's copy of the lines: YAML comments blanked to spaces,
+    block scalar bodies raw. A line-wise comment strip cannot know when a `#`
+    is inside a block scalar or a quoted scalar, and a comment read as text
+    can open an expression string that hides the next line's value. With
+    comments blanked and every scalar closing the expressions it opens
+    (below), no text outside a value carries state into one.
     """
-    block = "\n".join(raw_lines[start:end])
+    block = "\n".join(BLANKED_LINES[start:end])
     matched_lines = set()
     for offset, expression in action_expressions(block):
         if pattern.search(expression_code(expression)):
             matched_lines.add(start + block.count("\n", 0, offset))
     return matched_lines
+
+
+def expression_left_open(text):
+    """True if an expression, or a string inside one, is still open at the end."""
+    return any(not closed for _, _, closed in action_expression_spans(text))
+
+
+# Outside block scalars a line holds at most one value scalar (a mapping key
+# holding `${{` and an expression inside a flow collection are refused above),
+# and a block scalar body is one scalar. Actions evaluates each scalar on its
+# own, so an expression or expression string a scalar leaves open would let the
+# scan's reading run into the next value while Actions' does not.
+open_expression_line = None
+segment_start = None
+for index in range(len(BLANKED_LINES) + 1):
+    in_block = index in BLOCK_SCALAR_LINES
+    if segment_start is not None and (not in_block or index == len(BLANKED_LINES)):
+        if expression_left_open("\n".join(BLANKED_LINES[segment_start:index])):
+            open_expression_line = segment_start + 1
+            break
+        segment_start = None
+    if index == len(BLANKED_LINES):
+        break
+    if in_block:
+        if segment_start is None:
+            segment_start = index
+        continue
+    if expression_left_open(BLANKED_LINES[index]):
+        open_expression_line = index + 1
+        break
+if open_expression_line is not None:
+    problems.append(
+        "uses YAML the release-shape check cannot read: an expression left open "
+        "at the end of its scalar at line %d (#1712)" % open_expression_line
+    )
 
 
 def named_step(name, job_name=None):
@@ -4887,7 +4970,7 @@ if (
         GITHUB_TOKEN.search(expression_code(expression))
         or GITHUB_CONTEXT_OBJECT.search(expression_code(expression))
         or SECRETS_CONTEXT.search(expression_code(expression))
-        for _, expression in action_expressions(workflow_scope)
+        for _, expression in action_expressions("\n".join(BLANKED_LINES[:jobs_index]))
     )
 ):
     problems.append("exposes a GitHub token at workflow scope (#1712)")

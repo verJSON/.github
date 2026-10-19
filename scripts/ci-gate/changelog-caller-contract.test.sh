@@ -1156,26 +1156,55 @@ stray_titles="$(grep -oE "\^## [A-Za-z][^']*" "$emitted" | grep -vxE '\^## (Newe
 # caller and the generator still exited 0. The generator now computes every
 # such value before its here-document and returns on failure; these assertions
 # keep it that way and prove a failure is fatal.
-heredoc_substitutions="$(python3 - "$gen" <<'PY'
+heredoc_guard="$tmproot/heredoc-substitutions.py"
+cat >"$heredoc_guard" <<'PY'
+"""Print each command substitution inside an unquoted here-document."""
 import re
 import sys
 
-lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
-opener = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
-inside = None
-for number, line in enumerate(lines, 1):
-    if inside is None:
-        match = opener.search(line)
-        if match:
-            inside = (match.group(2), match.group(1) == "")
+# `<<` but not a `<<<` here-string; every opener on a line queues a body.
+OPENER = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+
+
+def live_substitutions(line):
+    """`$(` or a backtick preceded by an even number of backslashes."""
+    for match in re.finditer(r"\$\(|`", line):
+        backslashes = len(line[:match.start()]) - len(line[:match.start()].rstrip("\\"))
+        if backslashes % 2 == 0:
+            yield match.start()
+
+
+pending = []
+for number, line in enumerate(open(sys.argv[1], encoding="utf-8").read().split("\n"), 1):
+    if pending:
+        strip_tabs, quoted, delimiter = pending[0]
+        if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+            pending.pop(0)
+            continue
+        if not quoted and any(True for _ in live_substitutions(line)):
+            print(f"{number}: {line.strip()[:100]}")
         continue
-    if line == inside[0]:
-        inside = None
-        continue
-    if inside[1] and re.search(r"(?<!\\)(?:\$\(|`)", line):
-        print(f"{number}: {line.strip()[:100]}")
+    for match in OPENER.finditer(line):
+        pending.append((match.group(1) == "-", match.group(2) != "", match.group(3)))
 PY
-)"
+heredoc_guard_case() {
+  # heredoc_guard_case <label> <expected findings> <file body>
+  local fixture="$tmproot/heredoc-guard-$1.sh" found
+  printf '%s\n' "$3" >"$fixture"
+  found="$(python3 "$heredoc_guard" "$fixture" | grep -c .)"
+  [ "$found" = "$2" ] \
+    && pass "the here-document guard reports $2 substitution(s) for $1" \
+    || fail "the here-document guard reported $found substitution(s) for $1, expected $2"
+}
+# shellcheck disable=SC2016 # each body is a fixture for the guard, never run
+{
+  heredoc_guard_case "an escaped substitution" 0 $'cat <<EOF\n\\$(not run)\nEOF'
+  heredoc_guard_case "a substitution behind an escaped backslash" 1 $'cat <<EOF\n\\\\$(run)\nEOF'
+  heredoc_guard_case "a here-string followed by a substitution" 1 $'grep -q x <<<ready\nz="$(run)"\ncat <<EOF\n$(run)\nEOF'
+  heredoc_guard_case "a tab-stripped terminator" 1 $'cat <<-EOF\n\tplain\n\tEOF\ncat <<\'Q\'\n$(quoted)\nQ\ncat <<EOF\n$(run)\nEOF'
+  heredoc_guard_case "two here-documents opened on one line" 2 $'cat <<\'A\' <<B\n$(quoted)\nA\n$(run)\nB\ncat <<EOF\n$(run)\nEOF'
+}
+heredoc_substitutions="$(python3 "$heredoc_guard" "$gen")"
 [ -z "$heredoc_substitutions" ] \
   && pass "no unquoted here-document in the generator runs a command substitution" \
   || fail "the generator runs command substitutions inside unquoted here-documents: $(tr '\n' ';' <<<"$heredoc_substitutions")"
@@ -2697,6 +2726,139 @@ path = sys.argv[1]
 lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
 at = lines.index("    timeout-minutes: 15\n", lines.index("  publish:\n")) + 1
 lines[at:at] = ["    environment: release-app\n"]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+# A quote inside a comment opened an expression string in the raw-text scan,
+# and that string hid the live value on the next line. The scan now reads the
+# lines with comments blanked, and every scalar must close what it opens.
+verify_comment_carried_expression() {
+  verify_metadata_env_line "$1" \
+    "          # \${{ '" \
+    '          RELEASE_CONTEXT: ${{ secrets.NPM_TOKEN }}' \
+    "          # ' }}"
+}
+verify_trailing_comment_carried_expression() {
+  verify_metadata_env_line "$1" \
+    "          RELEASE_LABEL: release # \${{ '" \
+    '          RELEASE_CONTEXT: ${{ secrets.NPM_TOKEN }}' \
+    "          RELEASE_NOTE: none # ' }}"
+}
+# The same carry without a comment: one value leaves an expression string open
+# and a later value closes it, so the scan read the middle value as a string.
+verify_value_carried_expression() {
+  verify_metadata_env_line "$1" \
+    "          RELEASE_LABEL: \${{ 'release" \
+    '          RELEASE_CONTEXT: ${{ secrets.NPM_TOKEN }}' \
+    "          RELEASE_NOTE: none' }}"
+}
+# A key and its value are separate scalars, but on one line the scan read an
+# expression string opened in the key as running through the value, which
+# YAML decodes to a live secrets read. Only the mapping-key refusal sees it:
+# the line as a whole closes every expression it opens.
+verify_expression_in_mapping_key() {
+  verify_metadata_env_line "$1" \
+    "          \"RELEASE_NOTE \${{ '\": \"\${{ secrets.NPM_TOKEN }} '}}\""
+}
+verify_expression_in_flow_collection() {
+  verify_metadata_env_line "$1" \
+    "          RELEASE_LABELS: [\"\${{ 'a\", \"\${{ secrets.NPM_TOKEN }}\", \"' }}\"]"
+}
+build_comment_carried_expression() {
+  build_env_line "$1" "      # \${{ '"
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index("      # ${{ '\n", lines.index("  build:\n")) + 1
+lines[at:at] = ["      RELEASE_CONTEXT: ${{ secrets.NPM_TOKEN }}\n", "      # ' }}\n"]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+# The workflow-scope scan read comment-stripped lines, but that strip treats a
+# quote in a plain scalar as opening a string and so keeps the comment after
+# it, whose expression string then hid the token read on the next line.
+workflow_scope_comment_carried_expression() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+old = "name: Release\nrun-name: Release ${{ inputs.version }} ${{ inputs.selector_digest || 'manual' }}\n"
+if text.count(old) != 1:
+    raise SystemExit("the release caller lost its name and run-name")
+text = text.replace(old, (
+    "name: Release it's # ${{ '\n"
+    "run-name: Release ${{ inputs.version }} ${{ inputs.selector_digest || 'manual' }} ${{ github.token }}\n"
+))
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+snapshot_comment_carried_expression() {
+  set_snapshot_input "$1" component \
+    "      # \${{ '" '      component: ${{ secrets.NPM_TOKEN }}' "      # ' }}"
+}
+# A quoted key after a sequence dash left the scanner's block scalar parent at
+# the dash, so the step's remaining keys read as the body of that empty scalar
+# and an escape among them was never refused. YAML decodes the env value below
+# to a live secrets read.
+verify_dash_quoted_key_block_header() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index("      - name: Prepare release package metadata\n", lines.index("  verify:\n"))
+if not (lines[at + 1].startswith("        if: ") and lines[at + 2] == "        env:\n"):
+    raise SystemExit("the metadata step lost its if and env lines")
+lines[at:at + 3] = [
+    '      - "if": |\n',
+    "        name: Prepare release package metadata\n",
+    "        env:\n",
+    '          RELEASE_CONTEXT: "\\x24{{ secrets.NPM_TOKEN }}"\n',
+]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+# A block scalar header alone on its line took that line's column as the
+# scalar's parent. YAML indents the body past the key on the line above, so
+# the body line below read as structure and its `#` as a comment the scan
+# blanked, while YAML decodes it to a live secrets read.
+verify_block_header_on_own_line() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+start = lines.index("      - name: Prepare release package metadata\n", lines.index("  verify:\n"))
+at = lines.index("        env:\n", start)
+lines[at:at] = [
+    "        working-directory:\n",
+    "          >-\n",
+    "          . # ${{ secrets.NPM_TOKEN }}\n",
+]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+# The open-expression check took text ending in `}}` for a closed expression,
+# but here those braces sit inside the string the scalar leaves open, so the
+# scan's string ran on through the secrets read below it.
+verify_open_string_ending_in_braces() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+start = lines.index("      - name: Prepare release package metadata\n", lines.index("  verify:\n"))
+at = lines.index("        env:\n", start)
+lines[at:at + 1] = [
+    "        working-directory: >-\n",
+    "          ${{ 'a }}\n",
+    "        env:\n",
+    "          RELEASE_CONTEXT: ${{ secrets.NPM_TOKEN }}\n",
+    "          RELEASE_TAIL: x' }}\n",
+]
 open(path, "w", encoding="utf-8").write("".join(lines))
 PY
 }
@@ -4232,6 +4394,29 @@ else
 fi
 SCHED_SCRIPT
 )"
+# A comment after a block scalar header is a comment like any other: the scan
+# blanks it rather than reading its text as an expression.
+header_comment_adopter="$tmproot/adopter-block-header-comment"
+build_adopter "$header_comment_adopter" yes workflow
+python3 - "$header_comment_adopter/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+start = lines.index("      - name: Prepare release package metadata\n", lines.index("  verify:\n"))
+at = lines.index("        run: |\n", start)
+lines[at] = "        run: | # never ${{ secrets.NPM_TOKEN }}\n"
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+git -C "$header_comment_adopter" commit -aqm 'comment a generated block scalar header'
+schedule_adopter_script "$header_comment_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite blanks a comment after a block scalar header"
+else
+  fail "emitted suite read a comment after a block scalar header: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 expect_rejection "a verify step env value spelling an expression through a YAML escape" \
   verify_escaped_expression
 sync_last_rejection
@@ -4264,6 +4449,65 @@ sync_last_rejection
 grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
   && pass "the release-shape check refuses an anchored quoted scalar left open across lines" \
   || fail "an anchored quoted scalar left open across lines in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with full-line comments carrying an expression string across a value" verify_comment_carried_expression
+sync_last_rejection
+grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+  && pass "the verify-job context scan sees the value between full-line comments" \
+  || fail "the verify-job context scan missed the value between full-line comments: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with trailing comments carrying an expression string across a value" verify_trailing_comment_carried_expression
+sync_last_rejection
+grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+  && pass "the verify-job context scan sees the value between trailing comments" \
+  || fail "the verify-job context scan missed the value between trailing comments: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with a value leaving an expression string open across the next value" verify_value_carried_expression
+sync_last_rejection
+grep -qF 'an expression left open at the end of its scalar' "$tmproot/run.out" \
+  && pass "the release-shape check refuses a value leaving an expression string open across the next value" \
+  || fail "a value leaving an expression string open across the next value in the verify job was not refused for that reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with an expression opened in a mapping key" verify_expression_in_mapping_key
+sync_last_rejection
+grep -qF 'an expression in a mapping key' "$tmproot/run.out" \
+  && pass "the release-shape check refuses an expression opened in a mapping key" \
+  || fail "an expression opened in a mapping key in the verify job was not refused for that reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with an expression inside a flow collection" verify_expression_in_flow_collection
+sync_last_rejection
+grep -qF 'an expression inside a flow collection' "$tmproot/run.out" \
+  && pass "the release-shape check refuses an expression inside a flow collection" \
+  || fail "an expression inside a flow collection in the verify job was not refused for that reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a workflow-scope value after a comment carrying an expression string" \
+  workflow_scope_comment_carried_expression
+sync_last_rejection
+grep -qF 'exposes a GitHub token at workflow scope (#1712)' "$tmproot/run.out" \
+  && pass "the workflow-scope scan reads past a comment carrying an expression string" \
+  || fail "a workflow-scope token read after an expression-carrying comment was not refused by the scan: $(tail -2 "$tmproot/run.out")"
+expect_release_mode_rejection release-artifact \
+  "a build job env value between comments carrying an expression string" \
+  build_comment_carried_expression \
+  'build job references a secrets context'
+expect_rejection "a snapshot input between comments carrying an expression string" \
+  snapshot_comment_carried_expression
+sync_last_rejection
+grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
+  && pass "the snapshot job pin rejects an input between comments carrying an expression string" \
+  || fail "a snapshot input between expression-carrying comments was not rejected by the pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step whose dash-led quoted key opens an empty block scalar" \
+  verify_dash_quoted_key_block_header
+sync_last_rejection
+grep -qF 'the release-shape check cannot read: a backslash' "$tmproot/run.out" \
+  && pass "the scanner reads the keys after a dash-led quoted block scalar key as structure" \
+  || fail "an escape after a dash-led quoted block scalar key in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step value whose block scalar header sits alone on its line" \
+  verify_block_header_on_own_line
+sync_last_rejection
+grep -qF 'a block scalar header with no key or sequence entry on its line' "$tmproot/run.out" \
+  && pass "the release-shape check refuses a block scalar header alone on its line" \
+  || fail "a block scalar header alone on its line in the verify job was not refused for that reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step block scalar leaving an expression string open over closing braces" \
+  verify_open_string_ending_in_braces
+sync_last_rejection
+grep -qF 'an expression left open at the end of its scalar' "$tmproot/run.out" \
+  && pass "the release-shape check refuses an expression string left open over closing braces" \
+  || fail "an expression string left open over closing braces in the verify job was not refused for that reason: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a verify step env value with a doubled quote that moves where an expression ends" verify_escaped_single_quote_expression
 sync_last_rejection
 grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
