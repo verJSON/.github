@@ -2,7 +2,9 @@
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -500,6 +502,108 @@ after=$(git ls-remote --refs origin "$tag_ref")
 
         self.assertEqual(mismatch["diagnostic"]["path"], "reviewed_head")
         self.assertEqual(unsafe["diagnostic"]["path"], "findings[0].location")
+
+
+
+def clean_verdict(**overrides):
+    verdict = {"blocking": False, "summary": "No defects found.", "review_first": [], "findings": [], "followups": []}
+    verdict.update(overrides)
+    return json.dumps(verdict)
+
+
+# Assembled at runtime so no credential-shaped literal is committed.
+GITHUB_SHAPED = "gh" + "s_" + "Q7" * 18
+FINE_GRAINED_SHAPED = "github" + "_pat_" + "11AAAA" * 5
+ANTHROPIC_SHAPED = "sk" + "-ant-" + "api03-" + "x9" * 16
+
+
+class CredentialRefusalTest(unittest.TestCase):
+    """A verdict is posted to the pull request, so it must never carry credential material."""
+
+    secrets = {"ANTHROPIC_API_KEY": "placeholder-model-credential-0123", "GITHUB_TOKEN": "placeholder-job-token-4567"}
+
+    def assert_refused(self, raw, secrets=()):
+        result = review.confirm_output(raw, sensitive=False, secrets=secrets)
+        self.assertFalse(result["usable"])
+        self.assertEqual(result["diagnostic"]["observed"], "credential material")
+        for secret in secrets:
+            self.assertNotIn(secret, json.dumps(result))
+        return result
+
+    def test_exact_secret_value_anywhere_in_the_verdict_is_refused(self):
+        values = tuple(self.secrets.values())
+        for field, raw in (
+            ("summary", clean_verdict(summary=f"The environment holds {values[0]}.")),
+            ("followups", clean_verdict(followups=[{"location": "app.py:3", "note": f"token {values[1]} seen"}])),
+            ("review_first", clean_verdict(review_first=[{"location": "app.py:3", "why": f"prefix{values[0]}suffix"}])),
+        ):
+            with self.subTest(field=field):
+                self.assertTrue(self.assert_refused(raw, values)["diagnostic"]["path"].startswith(field))
+
+    def test_credential_shaped_tokens_are_refused_without_knowing_the_value(self):
+        for token in (GITHUB_SHAPED, FINE_GRAINED_SHAPED, ANTHROPIC_SHAPED):
+            with self.subTest(prefix=token[:7]):
+                self.assert_refused(clean_verdict(summary=f"Found {token} in the log."))
+
+    def test_credential_used_as_a_field_name_is_refused_without_being_echoed(self):
+        secret = self.secrets["ANTHROPIC_API_KEY"]
+        for raw in (
+            json.dumps({**json.loads(clean_verdict()), secret: "x"}),
+            clean_verdict(followups=[{"location": "app.py:3", "note": "n", secret: "x"}]),
+        ):
+            with self.subTest(raw=raw[:40]):
+                result = review.confirm_output(raw, sensitive=False, secrets=(secret,))
+                self.assertFalse(result["usable"])
+                self.assertNotIn(secret, json.dumps(result))
+
+    def test_naming_a_token_prefix_is_not_credential_material(self):
+        raw = clean_verdict(summary="Rotate any ghp_ or github_pat_ tokens and sk-ant- keys this change logged.")
+        self.assertTrue(review.confirm_output(raw, sensitive=False, secrets=tuple(self.secrets.values()))["usable"])
+
+    def test_main_reads_secret_values_from_its_environment_and_keeps_them_out_of_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            env = {"PATH": os.defpath, "GITHUB_OUTPUT": str(output), "SENSITIVE": "false", "REVIEW_PASS": "1",
+                   "VERDICT": clean_verdict(summary=f"Leaked {self.secrets['ANTHROPIC_API_KEY']}"), **self.secrets}
+            result = subprocess.run([sys.executable, "-I", str(path)], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            written = output.read_text()
+            self.assertIn("usable=false\n", written)
+            for secret in self.secrets.values():
+                self.assertNotIn(secret, written + result.stdout + result.stderr)
+
+    def test_source_lookups_never_receive_the_secret_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            head = CredentialRefusalTest.commit(repository, {"app.py": "value = compute_the_answer()\n"})
+            recorder = root / "bin" / "git"
+            recorder.parent.mkdir()
+            recorder.write_text(f'#!/bin/sh\nenv >>"{root}/git-env"\nexec {shutil.which("git")} "$@"\n')
+            recorder.chmod(0o755)
+            verdict = clean_verdict(blocking=True, findings=[{
+                "location": "app.py:1", "reason": "r", "failure_scenario": "f", "evidence": "compute_the_answer()"}])
+            env = {"PATH": f"{recorder.parent}{os.pathsep}{os.defpath}", "GITHUB_OUTPUT": str(root / "output"),
+                   "SENSITIVE": "false", "REVIEW_PASS": "1", "VERDICT": verdict, "REVIEW_REPOSITORY": str(repository),
+                   "REVIEWED_HEAD_SHA": head, **self.secrets}
+            result = subprocess.run([sys.executable, "-I", str(path)], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("usable=true\n", (root / "output").read_text())
+            recorded = (root / "git-env").read_text()
+            self.assertIn("PATH=", recorded)
+            for name, secret in self.secrets.items():
+                self.assertNotIn(secret, recorded)
+
+    @staticmethod
+    def commit(repository, files):
+        for relative_path, content in files.items():
+            (repository / relative_path).write_text(content, encoding="utf-8")
+        for arguments in (("init", "-q"), ("add", "."), ("-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                                                         "commit", "-qm", "fixture")):
+            subprocess.run(["git", *arguments], cwd=repository, check=True, capture_output=True)
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repository, check=True, capture_output=True,
+                              text=True).stdout.strip()
 
 
 if __name__ == "__main__":

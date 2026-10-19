@@ -983,6 +983,40 @@ jobs:
           ref: ${{ needs.preflight.outputs.head_sha }}
           token: ${{ github.token }}
           fetch-depth: 2
+          persist-credentials: false
+
+      # The head is pull-request content. The Claude CLI acts on agent configuration
+      # in its working directory (hooks, environment, credential helpers, MCP servers)
+      # before any tool gating, and the pinned action restores it from the base branch
+      # only for pull-request events, not this dispatch. Remove the paths the action
+      # treats as sensitive before any later step runs (ADR 0237).
+      - name: Remove pull-request agent configuration
+        id: pr-agent-config
+        if: needs.preflight.outputs.lane == 'ai'
+        run: |
+          set -euo pipefail
+          cd -- "$GITHUB_WORKSPACE"
+          rm -rf -- .claude .claude.json .mcp.json CLAUDE.md CLAUDE.local.md .gitmodules .ripgreprc .husky .ai-review
+
+      # Git reads attributes for reviewed paths from the checkout, so a pull request
+      # could mark a changed text file `-diff` and show the reviewer only "Binary
+      # files differ". $GIT_DIR/info/attributes outranks every in-tree file, and
+      # unsetting `diff` there leaves only git's own content check (ADR 0237).
+      - name: Ignore pull-request git attributes in review diffs
+        id: pr-git-attributes
+        if: needs.preflight.outputs.lane == 'ai'
+        run: |
+          set -euo pipefail
+          cd -- "$GITHUB_WORKSPACE"
+          attributes="$(git rev-parse --git-path info/attributes)"
+          info="$(dirname -- "$attributes")"
+          if [ -L "$info" ] || [ -L "$attributes" ]; then
+            echo "::error::$attributes or its directory is a symlink; refusing to write the review attribute override"
+            exit 1
+          fi
+          mkdir -p -- "$info"
+          rm -f -- "$attributes"
+          (set -o noclobber; printf '* !diff\n' >"$attributes")
 
       # Cost/latency optimization (#120): when main is active a green PR keeps
       # getting a base-merge from preflight, which re-fires `synchronize` and
@@ -999,7 +1033,17 @@ jobs:
         id: rereview
         if: needs.preflight.outputs.lane == 'ai'
         env:
+          # A replace ref left in a reused .git would swap object content in every
+          # diff, patch id, and evidence lookup (ADR 0237).
+          GIT_NO_REPLACE_OBJECTS: "1"
           GH_TOKEN: ${{ github.token }}
+          # The review checkout persists no credential (ADR 0237); git reads this
+          # step's token through a helper that only answers `get`.
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
+          GIT_CONFIG_VALUE_1: '!f() { test "$1" = get || return 0; echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
           EXPLICIT_REREVIEW: ${{ inputs.explicit_rereview }}
         run: |
           # GitHub runs `run:` under `bash -e`, and `set -uo pipefail` does NOT
@@ -1015,8 +1059,8 @@ jobs:
           approved_head=""
 
           # 1. Current PR net patch-id. The depth-2 checkout lacks the base, so
-          #    fetch it and use the merge-base; patch-id --stable is invariant to
-          #    later base-merges/rebases. Any failure -> patch_id stays empty
+          #    fetch it and use the merge-base; the patch-id of the net diff is
+          #    invariant to later base-merges/rebases. Any failure -> patch_id stays empty
           #    (UNKNOWN) -> never skip.
           base_ref="$(gh pr view "$PR_NUMBER" --repo "$TARGET_REPO" --json baseRefName --jq .baseRefName 2>/dev/null || true)"
           if [ -n "$base_ref" ]; then
@@ -1027,10 +1071,12 @@ jobs:
               mb="$(git merge-base "origin/$base_ref" HEAD 2>/dev/null || true)"
             fi
             if [ -n "$mb" ]; then
-              diff="$(git diff "$mb" HEAD 2>/dev/null || true)"
+              diff="$(git diff --no-ext-diff --no-textconv --ignore-submodules=none --submodule=short "$mb" HEAD 2>/dev/null || true)"
               # An empty net diff (no real change) is UNKNOWN, not a match.
               if [ -n "$diff" ]; then
-                patch_id="$(printf '%s\n' "$diff" | git patch-id --stable | awk '{print $1}')"
+                # --verbatim (git >= 2.39) keeps whitespace, which can change a
+                # command's meaning; a git without it yields no id and never skips.
+                patch_id="$(printf '%s\n' "$diff" | git patch-id --verbatim | awk '{print $1}')"
               fi
             fi
           fi
@@ -1227,27 +1273,40 @@ jobs:
         id: prep
         if: needs.preflight.outputs.lane == 'ai' && steps.rereview.outputs.skip_model != 'true' && steps.reserve_1.outputs.allowed == 'true'
         env:
+          # A replace ref left in a reused .git would swap object content in every
+          # diff, patch id, and evidence lookup (ADR 0237).
+          GIT_NO_REPLACE_OBJECTS: "1"
           GH_TOKEN: ${{ github.token }}
+          # The review checkout persists no credential (ADR 0237); git reads this
+          # step's token through a helper that only answers `get`.
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
+          GIT_CONFIG_VALUE_1: '!f() { test "$1" = get || return 0; echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
           DEPENDENCY_MAJOR: ${{ needs.preflight.outputs.dependency_major }}
         run: |
           set -euo pipefail
-          mkdir -p .ai-review
+          # Review inputs live outside the pull-request checkout, in a directory
+          # this run creates privately: a link the head commits at any path in
+          # the tree cannot redirect, replace, or empty them (ADR 0237).
+          review_dir="$(mktemp -d "$RUNNER_TEMP/ai-review.XXXXXXXXXX")"
           gh pr view "$PR_NUMBER" --repo "$TARGET_REPO" \
             --json title,body,author,labels,baseRefName,headRefName,additions,deletions,changedFiles \
-            > .ai-review/pr.json
+            > "$review_dir/pr.json"
           # Build the diff from the immutable checked-out PR head instead of
           # GitHub's whole-diff endpoint, which rejects PRs over 300 files
           # (#323). Fetch only base history, retry bounded transport failures,
           # and fail closed when the merge base cannot be established. Keep
           # stderr off the log so a remote response can never leak through the
           # retry diagnostics.
-          base_ref="$(jq -r '.baseRefName' .ai-review/pr.json)"
+          base_ref="$(jq -r '.baseRefName' "$review_dir/pr.json")"
           if [ -z "$base_ref" ] || [ "$base_ref" = null ]; then
             echo "::error::phase=review-input result=unavailable kind=base_ref_missing — PR metadata did not identify a base ref"
             exit 1
           fi
           diff_max_attempts=4
-          diff_error=.ai-review/base-fetch.error
+          diff_error="$review_dir/base-fetch.error"
           fetch_base_history() {
             local fetch_mode="$1" diff_attempt=1 diff_rc diff_delay
             while :; do
@@ -1289,37 +1348,123 @@ jobs:
             echo "::error::phase=review-input result=unavailable kind=merge_base_unavailable — fetched base history has no merge base with the checked-out PR head"
             exit 1
           }
-          if ! git diff --find-renames "$merge_base" HEAD >.ai-review/pr.full.diff; then
+          # Elide generated lockfiles from the review payload. A lockfile is a
+          # derived artifact — the reviewer scrutinizes the manifest
+          # (package.json, Cargo.toml, …), never the machine-generated lock. An
+          # 8k-line package-lock in the diff once consumed the whole review
+          # budget and produced a no-verdict, fail-closed run on an
+          # otherwise-small PR (Verjson/.github#110). Hand the model the filtered
+          # diff plus a note of what was dropped so it still scrutinizes the
+          # manifest counterpart.
+          # Every diff here passes --ignore-submodules=none: it overrides a
+          # submodule `ignore` setting from .gitmodules (which git also reads from
+          # the index and HEAD), the repository, or the runner, so a pointer change
+          # is never hidden (ADR 0237).
+          # Git pathspecs select lockfiles by path; nothing parses diff headers, so
+          # no path spelling (spaces, quotes, newlines) can move a section in or
+          # out of the review (ADR 0237).
+          lockfile_excludes=()
+          lockfile_matches=()
+          for lockfile in package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock bun.lock bun.lockb \
+            Cargo.lock go.sum poetry.lock composer.lock gradle.lockfile Gemfile.lock; do
+            lockfile_excludes+=(":(exclude,glob)**/$lockfile")
+            lockfile_matches+=(":(glob)**/$lockfile")
+          done
+          if ! git diff --no-ext-diff --no-textconv --ignore-submodules=none --submodule=short --find-renames "$merge_base" HEAD -- . "${lockfile_excludes[@]}" >"$review_dir/pr.diff" \
+            || ! git diff --no-ext-diff --ignore-submodules=none --find-renames --raw -z "$merge_base" HEAD -- "${lockfile_matches[@]}" >"$review_dir/elided.raw" \
+            || ! git diff --no-ext-diff --ignore-submodules=none --find-renames --name-status -z "$merge_base" HEAD -- . "${lockfile_excludes[@]}" >"$review_dir/reviewed.status"; then
             {
               echo "review_input_available=false"
               echo "review_input_failure=local_diff_failed"
             } >>"$GITHUB_OUTPUT"
-            echo "::error::phase=review-input result=unavailable kind=local_diff_failed — could not render the checked-out PR head against its merge base"
+            echo "::error::phase=review-input result=unavailable kind=local_diff_failed — could not render the lockfile-elided review diff"
+            exit 1
+          fi
+          # Only a regular file is a lockfile: a link or submodule pointer at a
+          # lockfile path is content the review must see.
+          elided_lockfiles=""
+          irregular_lockfiles=0
+          while IFS= read -r -d '' raw_record; do
+            read -r old_mode new_mode _ _ raw_status <<<"${raw_record#:}"
+            IFS= read -r -d '' raw_path || break
+            case "$raw_status" in R*|C*) IFS= read -r -d '' raw_path || break ;; esac
+            for raw_mode in "$old_mode" "$new_mode"; do
+              case "$raw_mode" in 000000|100644|100755) ;; *) irregular_lockfiles=$((irregular_lockfiles + 1)) ;; esac
+            done
+            elided_lockfiles+="${elided_lockfiles:+$'\n'}$raw_path"
+          done <"$review_dir/elided.raw"
+          # Each reviewed path renders as one section, except a type change
+          # (file <-> link), which git renders as a deletion and a creation.
+          expected_section_count=0
+          reviewed_path_count=0
+          while IFS= read -r -d '' review_status; do
+            IFS= read -r -d '' _ || break
+            case "$review_status" in
+              R*|C*) IFS= read -r -d '' _ || break; expected_section_count=$((expected_section_count + 1)) ;;
+              T) expected_section_count=$((expected_section_count + 2)) ;;
+              *) expected_section_count=$((expected_section_count + 1)) ;;
+            esac
+            reviewed_path_count=$((reviewed_path_count + 1))
+          done <"$review_dir/reviewed.status"
+
+          # A real change must reach the providers whole. With no reviewed or
+          # elided path, git must confirm the head changes nothing; otherwise the
+          # filtered diff must carry exactly the sections its reviewed paths imply
+          # (git quotes unusual paths, so a section header is one line).
+          review_input_failure=""
+          reviewed_section_count="$(grep -c '^diff --git ' "$review_dir/pr.diff" || true)"
+          if [ "$irregular_lockfiles" -gt 0 ]; then
+            review_input_failure="lockfile_not_regular_file:a link or submodule pointer sits at a lockfile path and would be elided"
+          elif [ "$reviewed_path_count" -eq 0 ] && [ -z "$elided_lockfiles" ]; then
+            git diff --quiet --no-ext-diff --ignore-submodules=none "$merge_base" HEAD \
+              || review_input_failure="review_input_empty:git lists no changed path for a head that changes files"
+          elif [ "$reviewed_path_count" -gt 0 ] && [ ! -s "$review_dir/pr.diff" ]; then
+            review_input_failure="review_input_empty:the rendered review diff is empty for a head that changes files"
+          elif [ "$reviewed_section_count" != "$expected_section_count" ]; then
+            review_input_failure="review_input_incomplete:the review diff has $reviewed_section_count sections where its $reviewed_path_count reviewed paths imply $expected_section_count"
+          fi
+          if [ -n "$review_input_failure" ]; then
+            {
+              echo "review_input_available=false"
+              echo "review_input_failure=${review_input_failure%%:*}"
+            } >>"$GITHUB_OUTPUT"
+            echo "::error::phase=review-input result=unavailable kind=${review_input_failure%%:*} — ${review_input_failure#*:}"
+            exit 1
+          fi
+
+          # No provider can read a binary section, so a binary added or changed
+          # outside a short list of inert media types needs a human: a text file
+          # carrying one NUL byte renders only as "Binary files differ". Archives
+          # are opaque containers and are deliberately not on the list (ADR 0237).
+          if ! git diff --no-ext-diff --no-textconv --ignore-submodules=none --no-renames --diff-filter=d --numstat -z "$merge_base" HEAD -- . "${lockfile_excludes[@]}" >"$review_dir/numstat"; then
+            {
+              echo "review_input_available=false"
+              echo "review_input_failure=local_diff_failed"
+            } >>"$GITHUB_OUTPUT"
+            echo "::error::phase=review-input result=unavailable kind=local_diff_failed — could not list binary review sections"
+            exit 1
+          fi
+          unreviewable_binaries=0
+          while IFS= read -r -d '' numstat_record; do
+            [ "${numstat_record%%$'\t'*}" = - ] || continue
+            numstat_path="${numstat_record#*$'\t'*$'\t'}"
+            case "${numstat_path,,}" in
+              *.png|*.jpg|*.jpeg|*.gif|*.webp|*.avif|*.bmp|*.ico|*.woff|*.woff2|*.ttf|*.otf|*.eot) ;;
+              *) unreviewable_binaries=$((unreviewable_binaries + 1)) ;;
+            esac
+          done <"$review_dir/numstat"
+          if [ "$unreviewable_binaries" -gt 0 ]; then
+            {
+              echo "review_input_available=false"
+              echo "review_input_failure=binary_content_unreviewable"
+            } >>"$GITHUB_OUTPUT"
+            echo "::error::phase=review-input result=unavailable kind=binary_content_unreviewable count=$unreviewable_binaries — binary content outside the inert media types needs human review"
             exit 1
           fi
           {
             echo "review_input_available=true"
             echo "review_input_failure=none"
           } >>"$GITHUB_OUTPUT"
-
-          # Elide generated lockfiles from the review payload. A lockfile is a
-          # derived artifact — the reviewer scrutinizes the manifest
-          # (package.json, Cargo.toml, …), never the machine-generated lock. An
-          # 8k-line package-lock in the diff once consumed the whole review
-          # budget and produced a no-verdict, fail-closed run on an
-          # otherwise-small PR (Verjson/.github#110). Keep the full diff on disk
-          # for reference; hand the model the filtered diff plus a note of what
-          # was dropped so it still scrutinizes the manifest counterpart.
-          LOCK_RE='(^|/)(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|Cargo\.lock|go\.sum|poetry\.lock|composer\.lock|gradle\.lockfile|Gemfile\.lock)$'
-          awk -v re="$LOCK_RE" '
-            /^diff --git / { p = $4; sub(/^b\//, "", p); keep = (p !~ re) }
-            keep
-          ' .ai-review/pr.full.diff > .ai-review/pr.diff
-          elided_lockfiles="$(awk -v re="$LOCK_RE" '
-            /^diff --git / { p = $4; sub(/^b\//, "", p);
-              if (p ~ re) out = out (out == "" ? "" : ", ") p }
-            END { print out }
-          ' .ai-review/pr.full.diff)"
 
           # Re-read immediately before model spend. Duplicate webhook delivery
           # is deduplicated by the trusted arm; no runner debounce is needed.
@@ -1347,8 +1492,8 @@ jobs:
           You are the autonomous merge gate for ${TARGET_REPO}.
           Review PR #${PR_NUMBER} in ${TARGET_REPO}.
           PR metadata and the generated-lockfile-elided diff are the required
-          review inputs. They are available as .ai-review/pr.json and
-          .ai-review/pr.diff on tool-capable paths and are embedded directly on
+          review inputs. They are available as ${review_dir}/pr.json and
+          ${review_dir}/pr.diff on tool-capable paths and are embedded directly on
           tool-free paths. Review those inputs first; on tool-capable paths,
           open only specific repository files a potential finding depends on.
 
@@ -1426,6 +1571,7 @@ jobs:
           EOF
             echo "PROMPT_EOF"
           } >> "$GITHUB_OUTPUT"
+          echo "review_dir=$review_dir" >>"$GITHUB_OUTPUT"
 
       - name: Record model phase start
         id: model_timing
@@ -1435,6 +1581,23 @@ jobs:
           echo "started_epoch=$started_epoch" >> "$GITHUB_OUTPUT"
           echo "::notice::phase=model started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ) provider=${{ needs.preflight.outputs.provider }} model=${{ needs.preflight.outputs.model }} budget_usd=${{ needs.preflight.outputs.budget_usd }} pricing=${{ needs.preflight.outputs.pricing_version }}"
 
+      # The pinned action rewrites `origin` to a URL carrying the job token
+      # (configureGitAuth) and carries on when that fails, so with no remote no
+      # credential lands in the checkout the review can read (ADR 0237).
+      - name: Isolate the Claude review checkout
+        id: claude-isolation
+        if: needs.preflight.outputs.lane == 'ai' && needs.preflight.outputs.provider == 'anthropic' && steps.rereview.outputs.skip_model != 'true' && steps.reserve_1.outputs.allowed == 'true'
+        run: |
+          set -euo pipefail
+          cd -- "$GITHUB_WORKSPACE"
+          git remote remove origin
+          # A fresh, empty user layer for the CLI instead of the runner's ~/.claude,
+          # which an earlier job on a persistent runner could have written.
+          mkdir -m 0700 -- "$RUNNER_TEMP/claude-config-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+
+      # Only read-only tools exist, and with no allow rule they read only the checkout
+      # and the review directory; /proc is denied outright, including through a link
+      # the head commits, because it holds this process's credentials (ADR 0237).
       - name: Claude review (merge gate)
         id: claude
         if: needs.preflight.outputs.lane == 'ai' && needs.preflight.outputs.provider == 'anthropic' && steps.rereview.outputs.skip_model != 'true' && steps.reserve_1.outputs.allowed == 'true'
@@ -1442,6 +1605,8 @@ jobs:
         # cannot produce a usable verdict. Automatic escalation is forbidden:
         # another paid attempt requires a maintainer-authorized `re-review`.
         continue-on-error: true
+        env:
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/claude-config-${{ github.run_id }}-${{ github.run_attempt }}
         uses: anthropics/claude-code-action@c81e3bc69d1b18badbb63ba39581218f02421678 # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -1458,7 +1623,11 @@ jobs:
             --max-turns 30
             --max-budget-usd ${{ needs.preflight.outputs.budget_usd }}
             --json-schema '{"type":"object","properties":{"blocking":{"type":"boolean"},"summary":{"type":"string"},"review_first":{"type":"array","items":{"type":"object","properties":{"location":{"type":"string","description":"Exactly one file and positive line number (path/to/file.ext:42); no ranges or comma-separated locations."},"why":{"type":"string"}},"required":["location","why"],"additionalProperties":false}},"findings":{"type":"array","items":{"type":"object","properties":{"location":{"type":"string","description":"Exactly one repository-relative file and one positive line number (path/to/file.ext:42); no ranges or comma-separated locations."},"reason":{"type":"string"},"failure_scenario":{"type":"string"},"evidence":{"type":"string","description":"An 8-240 character exact fragment from the cited source line, or the entire trimmed line when shorter than 8 characters."}},"required":["location","reason","failure_scenario","evidence"],"additionalProperties":false}},"followups":{"type":"array","items":{"type":"object","properties":{"location":{"type":"string"},"note":{"type":"string"}},"required":["location","note"],"additionalProperties":false}}},"required":["blocking","summary","review_first","findings","followups"],"additionalProperties":false}'
-            --allowedTools "Read,Grep,Glob"
+            --tools "Read,Grep,Glob"
+            --disallowedTools "Read(//proc/**)"
+            --add-dir "${{ steps.prep.outputs.review_dir }}"
+            --setting-sources user
+            --strict-mcp-config
 
       - name: OpenAI review (explicit re-review only)
         id: openai
@@ -1470,8 +1639,8 @@ jobs:
           BUDGET_USD: ${{ needs.preflight.outputs.budget_usd }}
           REVIEW_PROMPT: ${{ steps.prep.outputs.review_prompt }}
           PROMPT_FILE: ${{ runner.temp }}/ai-review-openai-prompt.txt
-          PR_JSON_FILE: ${{ github.workspace }}/.ai-review/pr.json
-          PR_DIFF_FILE: ${{ github.workspace }}/.ai-review/pr.diff
+          PR_JSON_FILE: ${{ steps.prep.outputs.review_dir }}/pr.json
+          PR_DIFF_FILE: ${{ steps.prep.outputs.review_dir }}/pr.diff
         run: |
           umask 077
           printf '%s' "$REVIEW_PROMPT" >"$PROMPT_FILE"
@@ -1489,8 +1658,8 @@ jobs:
           BUDGET_USD: ${{ needs.preflight.outputs.budget_usd }}
           REVIEW_PROMPT: ${{ steps.prep.outputs.review_prompt }}
           PROMPT_FILE: ${{ runner.temp }}/ai-review-deepseek-primary-prompt.txt
-          PR_JSON_FILE: ${{ github.workspace }}/.ai-review/pr.json
-          PR_DIFF_FILE: ${{ github.workspace }}/.ai-review/pr.diff
+          PR_JSON_FILE: ${{ steps.prep.outputs.review_dir }}/pr.json
+          PR_DIFF_FILE: ${{ steps.prep.outputs.review_dir }}/pr.diff
           REPLAY_FILE: ${{ runner.temp }}/deepseek-replay-pass-1.json
           REVIEWED_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
           REVIEW_PASS: "1"
@@ -1511,11 +1680,20 @@ jobs:
         id: verdict_1
         if: always() && needs.preflight.outputs.lane == 'ai' && steps.rereview.outputs.skip_model != 'true' && steps.reserve_1.outputs.allowed == 'true'
         env:
+          # A replace ref left in a reused .git would swap object content in every
+          # diff, patch id, and evidence lookup (ADR 0237).
+          GIT_NO_REPLACE_OBJECTS: "1"
           VERDICT: ${{ needs.preflight.outputs.provider == 'openai' && steps.openai.outputs.structured_output || needs.preflight.outputs.provider == 'deepseek' && steps.deepseek_primary.outputs.structured_output || steps.claude.outputs.structured_output }}
           SENSITIVE: ${{ needs.preflight.outputs.sensitive }}
           REVIEW_PASS: "1"
           REVIEW_REPOSITORY: ${{ github.workspace }}
           REVIEWED_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+          # Exact values the validator refuses to publish in a verdict (ADR 0237).
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 -I "$RUNNER_TEMP/review-verdict.py"
 
@@ -1587,8 +1765,8 @@ jobs:
           BUDGET_USD: ${{ needs.preflight.outputs.fallback_budget_usd }}
           REVIEW_PROMPT: ${{ steps.prep.outputs.review_prompt }}
           PROMPT_FILE: ${{ runner.temp }}/ai-review-deepseek-fallback-prompt.txt
-          PR_JSON_FILE: ${{ github.workspace }}/.ai-review/pr.json
-          PR_DIFF_FILE: ${{ github.workspace }}/.ai-review/pr.diff
+          PR_JSON_FILE: ${{ steps.prep.outputs.review_dir }}/pr.json
+          PR_DIFF_FILE: ${{ steps.prep.outputs.review_dir }}/pr.diff
           REPLAY_FILE: ${{ runner.temp }}/deepseek-replay-pass-2.json
           REVIEWED_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
           REVIEW_PASS: "2"
@@ -1609,11 +1787,20 @@ jobs:
         id: verdict_2
         if: always() && inputs.explicit_rereview != true && needs.preflight.outputs.provider == 'deepseek' && steps.deepseek_fallback.conclusion != 'skipped'
         env:
+          # A replace ref left in a reused .git would swap object content in every
+          # diff, patch id, and evidence lookup (ADR 0237).
+          GIT_NO_REPLACE_OBJECTS: "1"
           VERDICT: ${{ steps.deepseek_fallback.outputs.structured_output }}
           SENSITIVE: ${{ needs.preflight.outputs.sensitive }}
           REVIEW_PASS: "2"
           REVIEW_REPOSITORY: ${{ github.workspace }}
           REVIEWED_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+          # Exact values the validator refuses to publish in a verdict (ADR 0237).
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 -I "$RUNNER_TEMP/review-verdict.py"
 
@@ -2012,7 +2199,7 @@ jobs:
           DEPENDENCY_MAJOR: ${{ needs.preflight.outputs.dependency_major }}
         run: |
           set -uo pipefail    # deliberately no -e: telemetry must never abort
-          mkdir -p .telemetry
+          telemetry_dir="$(mktemp -d "$RUNNER_TEMP/ai-review-telemetry.XXXXXXXXXX")"
           exec_summary=$(.gate-tools/scripts/ci-telemetry/parse-claude-execution.sh "${EXECUTION_FILE:-}" 2>/dev/null || echo '{}')
           verdict_blocking=null
           findings_count=null
@@ -2067,7 +2254,7 @@ jobs:
               execution_file_parse_ok: ($exec.execution_file_parse_ok // false),
               total_cost_usd: ($exec.total_cost_usd // null),
               total_turns: ($exec.num_turns // null)
-            }' > .telemetry/ai-review.json
+            }' > "$telemetry_dir/ai-review.json"
 
       # NOTE: OTLP emit temporarily removed. `uses: Verjson/verjson-observability`
       # resolves on the gce runners but NOT on gha-meta-1 (used for this repo's

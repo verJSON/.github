@@ -1007,7 +1007,7 @@ def main() -> int:
             "trusted arm must make an explicit fork policy decision")
     require("authorization_check_id" in review_text and "expected_head_sha" in review_text,
             "review dispatch must carry trusted head/check identities")
-    require('--allowedTools "Read,Grep,Glob"' in review_text,
+    require('--tools "Read,Grep,Glob"' in review_text and "--allowedTools" not in review_text,
             "secret-backed model review must not execute pull-request code")
     require("ai_review_environment: ai-review-app" in rearm_generator and "PRIVATE_KEY" not in rearm_generator and "checks: write" in rearm_generator and
             all(event in rearm_generator for event in ("opened", "synchronize", "reopened")),

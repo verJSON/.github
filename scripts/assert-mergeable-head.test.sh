@@ -678,7 +678,7 @@ expect "a real failure completed after the superseding run's creation, in a run 
 # cancel (its `lint` sibling cancelled at T_CANCEL), so the timing rule admits it and
 # each case below refuses on the one condition it varies: the later run's report of
 # the same name, or the two runs' identity.
-fail_in() { printf '%s' "$(check_run 11 'ci / build-test' completed failure "$APP_ID" 501 "${1:-$T_AFTER}"),$(check_run 12 'changelog / validate' completed success "$APP_ID" 501),$(check_run 13 'lint' completed cancelled "$APP_ID" 501 "$T_CANCEL")"; }
+fail_in() { printf '%s' "$(check_run 11 'ci / build-test' completed failure "$APP_ID" 501 "$T_AFTER"),$(check_run 12 'changelog / validate' completed success "$APP_ID" 501),$(check_run 13 'lint' completed cancelled "$APP_ID" 501 "$T_CANCEL")"; }
 later_ci() { # conclusion-of-the-same-name-check
   printf '%s' "$(check_run 21 'ci / build-test' completed "$1" "$APP_ID" 502),$(check_run 22 'changelog / validate' completed success "$APP_ID" 502),$(check_run 23 'lint' completed success "$APP_ID" 502)"
 }
