@@ -48,7 +48,9 @@ run_filter() {
       file="${spec%%=*}"; mkdir -p "$(dirname "$file")"; printf '%s\n' "${spec#*=}" >"$file"
     done
     git add -A && git -c user.name=t -c user.email=t@example.invalid commit -qm head
-    merge_base="$(git rev-parse HEAD~1)" review_dir="$tmp/work/review" GITHUB_OUTPUT="$tmp/work/output"
+    # The sourced fragment reads these from its environment, as the workflow step does.
+    merge_base="$(git rev-parse HEAD~1)"
+    export merge_base review_dir="$tmp/work/review" GITHUB_OUTPUT="$tmp/work/output"
     # shellcheck disable=SC1090,SC2154 # The extracted fragment defines these values.
     source "$slice" && printf '%s' "$elided_lockfiles" >"$tmp/work/elided.out"
   )
