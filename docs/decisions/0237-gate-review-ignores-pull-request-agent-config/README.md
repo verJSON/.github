@@ -110,9 +110,20 @@ that write access alone does not grant. The exposure is pre-existing on `main`
    Generated lockfiles are elided with git pathspec excludes, never by parsing diff
    headers, so no path spelling (spaces, quotes, newlines) can move a file in or out
    of the review. The elided and reviewed path lists come from `--name-only -z`.
+   Only a regular file is treated as a lockfile; a link or submodule pointer at a
+   lockfile path fails closed with `lockfile_not_regular_file` rather than being elided.
+   Every diff in `prep` and `rereview` passes `--ignore-submodules=none`. Git otherwise
+   honors a submodule `ignore` setting from `.gitmodules`, and it reads that file from
+   the index and `HEAD` even after decision 2 removes the working-tree copy, as well as
+   from repository or runner configuration. Such a setting would hide a pointer change
+   from the review diff, from the path lists, and from the rereview patch id. The diffs
+   whose content the model or the patch id consumes also pass `--submodule=short`, so
+   configuration cannot switch a pointer change to a format without a diff section.
    `prep` fails closed with `review_input_empty` when the rendered diff is empty for a
-   head that changes files, or when the filtered diff does not carry exactly one
-   section per reviewed path. The model still sees every changed text line, and
+   head that changes files. It fails with `review_input_incomplete` when the filtered
+   diff's section count differs, in either direction, from what `--name-status -z`
+   implies: one section per reviewed path, two for a type change between a file and a
+   link, which git renders as a deletion and a creation. The model still sees every changed text line, and
    `review-verdict.py` resolves cited evidence from git objects at the reviewed
    commit, not the working tree.
 5. **The OpenAI and DeepSeek passes need no change.** They run the trusted,
