@@ -10,6 +10,7 @@ for the `workflow_dispatch` this gate runs under.
 import itertools
 import os
 import re
+import shutil
 import shlex
 import subprocess
 import tempfile
@@ -374,6 +375,33 @@ class ReviewInputsStayOutsideTheCheckoutTest(PullRequestCheckoutFixture):
         review_dir, _ = self.model_input()
         self.assertFalse(review_dir.is_symlink())
         self.assertEqual(review_dir.stat().st_mode & 0o777, 0o700)
+
+
+class EmptyReviewInputFailsClosedTest(PullRequestCheckoutFixture):
+    """A non-empty change must never reach a provider as an empty diff."""
+
+    def run_prep_with_rendered_diff(self, rendered):
+        wrapper = self.root / 'bin' / 'git'
+        wrapper.write_text(
+            '#!/bin/sh\n'
+            'case " $* " in *" diff "*" --find-renames "*) printf "%s" "$RENDERED"; exit 0 ;; esac\n'
+            f'exec {shutil.which("git")} "$@"\n')
+        wrapper.chmod(0o755)
+        self.env['RENDERED'] = rendered
+        self.assertEqual(self.run_step(ATTRIBUTES_ID).returncode, 0)
+        return self.run_step('prep'), step_outputs(self.root / 'output')
+
+    def test_empty_rendered_diff_of_a_real_change_is_unavailable_input(self):
+        result, outputs = self.run_prep_with_rendered_diff('')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(outputs.get('review_input_available'), 'false')
+        self.assertNotIn('review_dir', outputs)
+
+    def test_rendered_diff_with_no_reviewable_section_is_unavailable_input(self):
+        result, outputs = self.run_prep_with_rendered_diff('not a diff section\n')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(outputs.get('review_input_available'), 'false')
+        self.assertNotIn('review_dir', outputs)
 
 
 class TelemetryStaysOutsideTheCheckoutTest(unittest.TestCase):

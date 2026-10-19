@@ -1343,10 +1343,6 @@ jobs:
             echo "::error::phase=review-input result=unavailable kind=local_diff_failed — could not render the checked-out PR head against its merge base"
             exit 1
           fi
-          {
-            echo "review_input_available=true"
-            echo "review_input_failure=none"
-          } >>"$GITHUB_OUTPUT"
 
           # Elide generated lockfiles from the review payload. A lockfile is a
           # derived artifact — the reviewer scrutinizes the manifest
@@ -1366,6 +1362,28 @@ jobs:
               if (p ~ re) out = out (out == "" ? "" : ", ") p }
             END { print out }
           ' "$review_dir/pr.full.diff")"
+
+          # A real change must reach the providers as a non-empty diff. An empty
+          # rendering is accepted only when git confirms the head changes nothing;
+          # an empty filtered diff only when every section was an elided lockfile.
+          review_input_empty=false
+          if [ ! -s "$review_dir/pr.full.diff" ]; then
+            git diff --quiet --no-ext-diff "$merge_base" HEAD || review_input_empty=true
+          elif [ ! -s "$review_dir/pr.diff" ] && [ -z "$elided_lockfiles" ]; then
+            review_input_empty=true
+          fi
+          if [ "$review_input_empty" = true ]; then
+            {
+              echo "review_input_available=false"
+              echo "review_input_failure=review_input_empty"
+            } >>"$GITHUB_OUTPUT"
+            echo "::error::phase=review-input result=unavailable kind=review_input_empty — the rendered review diff is empty for a head that changes files"
+            exit 1
+          fi
+          {
+            echo "review_input_available=true"
+            echo "review_input_failure=none"
+          } >>"$GITHUB_OUTPUT"
 
           # Re-read immediately before model spend. Duplicate webhook delivery
           # is deduplicated by the trusted arm; no runner debounce is needed.
