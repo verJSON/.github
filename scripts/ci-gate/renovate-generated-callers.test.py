@@ -277,6 +277,15 @@ def extract_heredoc(text: str, delimiter: str) -> str:
     return match["body"] + "\n"
 
 
+def generated_job_expectations(contract_test: str) -> dict[str, str]:
+    """The whole-job pins the emitted suite hands its release-shape check."""
+    return {
+        "EXPECTED_RELEASE_SNAPSHOT_JOB": extract_heredoc(contract_test, "SNAPSHOT_JOB"),
+        "EXPECTED_RELEASE_BUILD_JOB": extract_heredoc(contract_test, "BUILD_JOB"),
+        "EXPECTED_RELEASE_PRIVATE_BUILD_JOB": extract_heredoc(contract_test, "PRIVATE_BUILD_JOB"),
+    }
+
+
 def contract_test_constant(text: str, name: str) -> str:
     match = re.search(rf"^{name}='(?P<value>[^']*)'$", text, re.MULTILINE)
     if match is None:
@@ -391,7 +400,7 @@ class GeneratorPinManager(unittest.TestCase):
         inputs = {
             "CONTRACT_REF": ref,
             "RELEASE_CALLER_PACKAGE_DIRS_JSON": '["."]',
-            "EXPECTED_RELEASE_SNAPSHOT_INPUTS": extract_heredoc(contract_test, "SNAPSHOT_INPUTS"),
+            **generated_job_expectations(contract_test),
             **{
                 name: contract_test_constant(contract_test, name)
                 for name in ("EXPECTED_RELEASE_CHECKOUT", "EXPECTED_RELEASE_SETUP_NODE", "EXPECTED_RELEASE_CACHE_SAVE")
@@ -537,8 +546,8 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
             name: contract_test_constant(contract_test, name)
             for name in ("EXPECTED_RELEASE_CHECKOUT", "EXPECTED_RELEASE_SETUP_NODE", "EXPECTED_RELEASE_CACHE_SAVE")
         }
-        # The snapshot inputs the emitted suite pins exactly (#784).
-        cls.snapshot_inputs = extract_heredoc(contract_test, "SNAPSHOT_INPUTS")
+        # The whole jobs the emitted suite pins (ADR 0099).
+        cls.job_expectations = generated_job_expectations(contract_test)
         cls.workflows = {
             mode: generate(generator, mode, cls.ref, *arguments)
             for mode, arguments in RELEASE_MODES.items()
@@ -553,7 +562,7 @@ class ReleaseShapeBindsDeclaredPins(unittest.TestCase):
             return run_release_shape(checker, target, {
                 "CONTRACT_REF": self.ref,
                 "RELEASE_CALLER_PACKAGE_DIRS_JSON": '["."]',
-                "EXPECTED_RELEASE_SNAPSHOT_INPUTS": self.snapshot_inputs,
+                **self.job_expectations,
                 **self.pins,
                 **pins,
             })

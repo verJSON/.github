@@ -268,42 +268,59 @@ regenerate at a contract SHA that contains it.
 That fix concerns only block size. Review then found that the snapshot guard
 was incomplete in a way that has nothing to do with size. It matched a fixed
 list of names after a comment strip that also cut text following a `#` inside a
-quoted value. It therefore accepted index-syntax access to the token context, a
-token expression placed after a quoted `#`, and a secret read under a name the
-list did not include. A first correction routed the snapshot job through the
-#1712 expression scan. A second review showed that scan has its own gaps, and
-that they affect the build job as well. The scan read comment-stripped lines,
-and its line-wise strip cannot tell when a `#` sits inside a block scalar, a
-multi-line quoted scalar, or after an escaped quote. Its object pattern also
-missed an object filter over the `github` context. Each of these let an
-expression through.
+quoted value. It therefore missed index-syntax context access, an expression
+after a quoted `#`, and secrets read under a name the list did not include.
+Successive reviews of this PR showed that the #1712 expression scan behind both
+jobs had gaps of its own. A line-wise comment strip misread `#` inside block
+scalars, inside multi-line quoted scalars, and after escaped quotes. The object
+pattern missed an object filter over the `github` context. And because the scan
+reads text without decoding YAML, a double-quoted escape could spell an
+expression that YAML decodes but no raw-text scan sees. The controls are now as
+follows.
 
-The controls are now as follows:
+**Pinned whole (generator-determined).** Neither job contains content the
+adopter writes. The generator writes each from one definition, and the contract
+test pins each against that same definition.
 
-- **Snapshot inputs are pinned exactly.** The `with:` mapping of every job that
-  calls `changelog-release.yml` must be the generator's mapping, key for key and
-  value for value, in order. Full-line comments are the only addition allowed.
-  The generator writes that mapping from one definition (`release_snapshot_with`),
-  shared by the three release caller modes and the contract test that pins it.
-  This is the primary control, and it does not depend on how a value is spelled.
-  It also pins `version`, `fragments`, `component`, `prefix`, and `runner`, which
-  were previously unchecked or checked only by substring.
-- **Every job that calls `changelog-release.yml`, the build job, and the verify
-  and acquisition jobs are scanned.** The scan reads raw lines, so a `#` hides
-  nothing from it. It matches the token context, the `secrets` context, and the
-  `github` context object read whole, by index, or through an object filter. No
-  generated caller has an expression inside a comment. The contract suite passes
-  every generated release mode and fixture with the raw-line scan.
+- **Snapshot job:** `release_snapshot_job`, which all three release caller
+  modes call. Every field is pinned: `needs`, `if`, `uses`, `secrets: inherit`,
+  `permissions`, and the full `with:` mapping.
+- **Release-artifact `build` job:** `release_artifact_build_job_for`. Every
+  field is pinned: name, gate, permissions, step sequence, `uses`, env values,
+  and run bodies, with or without the approved private dependency restore. The
+  one substituted part is the runner matrix. Each entry there must be a runner
+  selector the generator's own grammar admits, followed by its
+  `dependency-index`, in order. The dependency acquisition job was already
+  pinned the same way.
 
-**Residual.** The scan is textual and does not decode YAML. A double-quoted
-escape that decodes to an expression opener passes it. Locally, a build-job
-environment value written that way was accepted by the emitted suite. Whether
-GitHub Actions evaluates an expression assembled this way was not tested. This
-gap does not reach the snapshot inputs, which are pinned byte for byte. It does
-reach the scanned jobs. In the snapshot job, the fields other than `with:` are
-checked by the existing per-field assertions and the scan, not pinned whole.
-Closing the residual for the build job means pinning that job whole, as the
-acquisition job already is.
+Each comparison skips blank lines and full-line YAML comments, which existing
+callers and `docs/changelog/README.md` put beside the generated wiring. A `#`
+line inside a block scalar is content, not a comment, so it is compared. One
+uniform indentation shift of the job body is tolerated, because it changes no
+YAML value. Everything else must match the generator byte for byte. Callers are
+byte-identical before and after this change in every release mode and option
+set checked.
+
+**Scanned and parse-checked (the rest of the caller).** The verify job carries
+adopter-dependent inputs, such as package directories and runner lanes, and is
+pinned step by step by the existing #1712 and #1717 checks rather than whole.
+The expression scan covers the verify, snapshot, build, and acquisition jobs and
+reads raw lines. It matches the token context, the `secrets` context, and the
+`github` context object, whether read whole, by index, or through an object
+filter. A parse rule covers the whole release caller file. It refuses any YAML
+that would decode to something other than its raw text: a backslash anywhere outside block-scalar bodies and
+full-line comments, or a quoted scalar left open at the end of its line. Block
+scalars do not process escapes. With both refused, every flow scalar decodes to
+its own raw text, so what the scan reads is what Actions evaluates. No generated
+caller contains either form.
+
+**Residual.** No residual is known for the escape and comment classes anywhere
+in a release caller, because the parse rule covers the whole file. The rule is
+deliberately narrower than YAML: a hand-written caller that uses escapes or
+multi-line quoted scalars is refused rather than read. The `publish` job holds
+the publication credentials by design, so it is neither pinned whole nor
+covered by the expression scan. It keeps its existing per-field checks, and
+this amendment does not change them.
 
 ## Rollback
 
