@@ -121,4 +121,22 @@ else
   fail "fixture did not produce the diagnostic and the crash, so this case is vacuous: $(tail -3 "$d/out")"
 fi
 
+# 7. The diagnostic is excused only with the status changelog.py returns for a
+# ChangelogError (1). Here the real engine prints exactly the empty-NEXT/ sentence
+# and then exits 3 from an atexit hook; the row must fail and keep that status
+# rather than flattening it to a fixed code.
+d="$(new_fixture)"
+sed -i '/^from __future__ import annotations$/a import atexit, os; atexit.register(lambda: os._exit(3))' \
+  "$d/scripts/changelog.py"
+run_row "$d"; row_status=$?
+if [ "$row_status" -eq 0 ]; then
+  fail "the empty-NEXT/ diagnostic with exit status 3 must fail the row"
+elif ! grep -qx 'changelog: no unreleased fragments' "$d/out"; then
+  fail "fixture did not produce the empty-NEXT/ diagnostic, so this case is vacuous: $(tail -3 "$d/out")"
+elif [ "$row_status" -eq 3 ]; then
+  pass "the empty-NEXT/ diagnostic with a non-ChangelogError status fails the row and keeps status 3"
+else
+  fail "the row must keep the renderer's exit status 3, got $row_status"
+fi
+
 if [ "$fails" -eq 0 ]; then echo "All tests passed."; exit 0; else echo "$fails test(s) failed."; exit 1; fi
