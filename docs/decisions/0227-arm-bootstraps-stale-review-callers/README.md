@@ -69,7 +69,7 @@ The proof admits a pull request only when all of these hold:
    base it was asked about. `MINIMUM_SAFE_REVIEW` is currently `4d95c2ee` (#1850; see
    the 2026-10-19 amendment). The previous floor, `12098a0e` (#1700),
    fixed #1650, where the finalizer did not bind the check to the exact head, and it
-   contains the casing repair. A revision from `65529002` up to but not including that fix
+   contains the casing repair. A revision from `65529002` up to but not including the #1650 fix
    would otherwise be approved without model review while carrying a known authorization
    defect. The constant is raised whenever a review-path security fix lands on `main`.
 5. **Companions.** Every other modified file lies outside `.github/`, is not `action.yml`
@@ -215,10 +215,19 @@ decision's rule a bootstrap must not move a caller to any revision before the fi
 `gate-rearm.yml` now sets `MINIMUM_SAFE_REVIEW` to `4d95c2ee`, which contains both
 `65529002` and the previous floor `12098a0e`. Nothing else in the rule changes.
 
-The arm runs `gate-rearm.yml` at the commit stored in organization ruleset 20722935, so
-this takes effect only after that ruleset is rotated to this amendment's merge commit.
+The floor is enforced wherever the arm's bootstrap step runs, and that is at two kinds
+of revision. The organization arm runs `gate-rearm.yml` at the commit stored in ruleset
+20722935, so it enforces the new floor once that ruleset is rotated to this amendment's
+merge commit. A repository that carries its own generated `gate-rearm.yml` caller runs
+the arm again at that caller's pinned revision. On 2026-10-19 that was verjson-cli and
+verjson-cli-cloud at `576707fe`, and verjson-agents at `b1c24e67`; both revisions carry
+the bootstrap step with the old floor. Those repositories enforce the new floor only once
+their callers are regenerated at or after this amendment's merge commit, which the
+organization-wide adopter regeneration after the next release does. Until then a
+bootstrap there may still move a caller to a revision between `12098a0e` and
+`4d95c2ee`. Repositories whose callers predate the bootstrap step are not exposed.
 `python3 scripts/ci-gate/review-caller-bootstrap.test.py` covers the floor with a stubbed
 comparison. Its mutation proof shows that removing the floor guard admits a revision
-between the casing repair and the floor. The ADR 0235 reviewed digests for the three
+between the casing repair and the floor. The ADR 0235 reviewed digests for the four
 `arm` entries that reach this job were re-recorded: the change touches only this
 constant and its comment, so their justification is unchanged.
