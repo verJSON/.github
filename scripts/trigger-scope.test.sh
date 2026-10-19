@@ -104,6 +104,14 @@ assert_scanner_covered "doc-tag-pins.sh scans workflow definitions" '.github/wor
 # deployment CLI package under contracts/. A Renovate bump there must run the
 # suite, and it must report the required shell-tests check that admission needs.
 assert_scanner_covered "container-deployment-contract.test.sh reads contracts/" 'contracts/'
+assert_scanner_covered "capability-floor, audit and ruleset tests read config/" 'config/'
+assert_scanner_covered "contract-tools-package.test.js reads the root package and bin/" 'package.json' 'package-lock.json' 'bin/'
+assert_scanner_covered "renovate-generated-callers.test.py reads renovate/" 'renovate/'
+assert_scanner_covered "required-checks-audit and node-floor tests read the required-check contract" '.github/required-check-contract.json'
+assert_scanner_covered "codeowners_test.py reads CODEOWNERS" '.github/CODEOWNERS'
+assert_scanner_covered "the runner-isolation checker digests telemetry thresholds" '.telemetry/'
+# matches_any reads only the pull_request list; the push list is held to it by
+# the set-parity assertion below.
 
 # doc-tag-pins.sh reads every tracked file, and the narrowing above leaves a real
 # gap (#360): a pin example in a tracked file that is neither markdown nor

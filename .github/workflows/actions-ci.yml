@@ -37,6 +37,18 @@ on:
       # container-deployment-contract.test.sh reads the pinned deployment CLI
       # package, so its Renovate bumps must run the suite.
       - 'contracts/**'
+      # Data and package inputs that registered tests read: contract configs,
+      # the contract-tools package, the Renovate preset, the required-check
+      # contract, CODEOWNERS, and telemetry thresholds that the runner-isolation
+      # checker digests. A change to any of them alone must report shell-tests.
+      - 'config/**'
+      - 'bin/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'renovate/**'
+      - '.github/required-check-contract.json'
+      - '.github/CODEOWNERS'
+      - '.telemetry/**'
   push:
     branches: [main]
     paths:
@@ -56,6 +68,18 @@ on:
       # container-deployment-contract.test.sh reads the pinned deployment CLI
       # package, so its Renovate bumps must run the suite.
       - 'contracts/**'
+      # Data and package inputs that registered tests read: contract configs,
+      # the contract-tools package, the Renovate preset, the required-check
+      # contract, CODEOWNERS, and telemetry thresholds that the runner-isolation
+      # checker digests. A change to any of them alone must report shell-tests.
+      - 'config/**'
+      - 'bin/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'renovate/**'
+      - '.github/required-check-contract.json'
+      - '.github/CODEOWNERS'
+      - '.telemetry/**'
 
 permissions:
   contents: read
