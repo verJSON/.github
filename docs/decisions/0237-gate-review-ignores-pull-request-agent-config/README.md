@@ -101,13 +101,20 @@ that write access alone does not grant. The exposure is pre-existing on `main`
    review directory with `mktemp -d` under `RUNNER_TEMP` (mode 0700) and publishes it
    as the `review_dir` output only after it succeeds. Every provider, the prompt, and
    the Claude review's `--add-dir` name it by absolute path. The telemetry payload is
-   written the same way. After the checkout, the only writes inside the workspace are
-   git's own metadata: base-history fetches and decision 7's override. A link the head
-   commits therefore cannot redirect, replace, or empty a review input. `prep` also
-   fails closed with `review_input_empty` when the rendered diff is empty for a head
-   that changes files, or the filtered diff is empty without an elided lockfile. The
-   model still sees every changed line, and `review-verdict.py` resolves cited evidence
-   from git objects at the reviewed commit, not the working tree.
+   written the same way. After the head checkout, the gate writes inside the workspace
+   only in three places, none of which a review input passes through: git's own
+   metadata (base-history fetches and decision 7's override), and the telemetry
+   helpers' sparse checkout into `.gate-tools`, which ADR 0236's refusal guards and
+   which runs after the review. A link the head commits therefore cannot redirect,
+   replace, or empty a review input.
+   Generated lockfiles are elided with git pathspec excludes, never by parsing diff
+   headers, so no path spelling (spaces, quotes, newlines) can move a file in or out
+   of the review. The elided and reviewed path lists come from `--name-only -z`.
+   `prep` fails closed with `review_input_empty` when the rendered diff is empty for a
+   head that changes files, or when the filtered diff does not carry exactly one
+   section per reviewed path. The model still sees every changed text line, and
+   `review-verdict.py` resolves cited evidence from git objects at the reviewed
+   commit, not the working tree.
 5. **The OpenAI and DeepSeek passes need no change.** They run the trusted,
    standard-library-only `openai-review.py` and `deepseek-review.py` under
    `python3 -I` from `RUNNER_TEMP`. Neither starts a CLI or reads repository-local
@@ -130,14 +137,28 @@ that write access alone does not grant. The exposure is pre-existing on `main`
    (decision 4), so nothing can redirect a write onto the override. Both diff commands
    also pass `--no-ext-diff --no-textconv`, so neither an external diff nor a
    conversion driver in runner configuration can substitute their output; each of
-   those controls is tested on its own. Genuinely binary content still
-   renders as a binary marker, which keeps the bounded diff valid UTF-8 for the
-   tool-free providers. `--text` was rejected for that reason.
-   The rereview patch-id needed no content-binding change: for a binary path git
-   includes the blob ids, so a swapped binary already changes it. A pull request
-   whose files were attribute-marked gets a new patch-id once, which forces one fresh
-   review rather than a skipped one. `review-verdict.py` reads evidence with
+   those controls is tested on its own. `review-verdict.py` reads evidence with
    `git cat-file blob`, which applies no attributes.
+   Content git itself detects as binary, such as a text file carrying one NUL byte,
+   still renders only as a binary marker. `--text` was rejected because it would make
+   the bounded diff invalid UTF-8 for the tool-free providers. Instead, `prep` lists
+   added and modified binary paths with `--numstat -z` and fails closed with
+   `binary_content_unreviewable`, leaving the decision to a human, unless every one is
+   an inert media type: `png`, `jpg`, `jpeg`, `gif`, `webp`, `avif`, `bmp`, `ico`,
+   `woff`, `woff2`, `ttf`, `otf`, or `eot`, matched case-insensitively. Archives are
+   deliberately excluded: they are opaque containers of arbitrary content, including
+   runnable content. Deleted binaries and elided lockfiles are not counted. The
+   remaining limit is that the allowance is by name: a file carrying an allowed
+   extension is accepted unseen, so anything that later loads it as something other
+   than media is outside this check, as is content the model can see but
+   misjudges.
+   The rereview skip compares `git patch-id --verbatim` ids (git 2.39 or later; the
+   hosted image ships 2.55). The previous `--stable` ids strip whitespace, so a push
+   after approval that only changed whitespace inside a command reused the approval.
+   A git without `--verbatim` yields no id, and an unknown id never skips. Existing
+   approval markers carry the old ids, so each open approved pull request gets one
+   fresh review. For a binary path git includes the blob ids, so a swapped binary also
+   changes the id.
 8. **The review's user layer is fresh per run.** The Claude step sets
    `CLAUDE_CONFIG_DIR` to `$RUNNER_TEMP/claude-config-<run id>-<run attempt>`. The
    isolation step creates it with `mkdir -m 0700` and fails if anything, including a
@@ -159,13 +180,20 @@ that write access alone does not grant. The exposure is pre-existing on `main`
    the placeholder key and `/etc` was readable. With these arguments both were denied,
    while the checkout and the review directory stayed readable through all three
    tools. The action's own `parseSdkOptions` maps the workflow's `claude_args` to
-   exactly those SDK options.
+   exactly those SDK options. A second probe drove the SDK with that parser's output
+   for the workflow's literal `claude_args`, including `--json-schema`. The CLI offered
+   `Glob`, `Grep`, `Read`, and `StructuredOutput`, read the review directory's diff,
+   and returned a `success` result whose `structured_output` was the schema-shaped
+   verdict. `--tools` therefore does not withhold the tool the structured verdict
+   depends on.
 10. **A verdict that carries credential material is unusable.** The verdict steps pass
     the model credentials and the job token to `review-verdict.py`. It refuses a
     verdict when any text in it contains one of those exact values, or a GitHub
     (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`, `github_pat_`) or Anthropic (`sk-ant-`)
     prefix followed by a token-length body. Its diagnostic names only the field. A bare
-    prefix, as in a security review that mentions token formats, stays usable. The
+    prefix, as in a security review that mentions token formats, stays usable. Only
+    field values are scanned: canonicalization has already rejected every field name
+    outside the fixed schema, so a name cannot carry text into the published verdict. The
     submit step posts only a validated verdict, so a refused verdict becomes the
     existing fail-closed no-usable-verdict outcome. The validator's own git lookups
     run without those values in their environment.
@@ -182,7 +210,11 @@ deliberate removal of a protection turns them red:
   - a substituting external diff and a configured conversion driver;
   - links planted at every former in-tree output path and at the attributes override;
   - an unremovable path and a pre-existing config directory;
-  - an empty or sectionless rendered diff.
+  - an empty or sectionless rendered diff;
+  - paths with spaces, a lockfile name inside a longer path, and a newline;
+  - a NUL-bearing script, an archive, an image and a font, and a deleted binary;
+  - an approval followed by a whitespace-only change, and a git without `--verbatim`;
+  - a checkout whose `origin` cannot be removed.
 - It evaluates every protection-to-consumer step pair under Actions' implicit
   `success()` across every lane, provider, and failure outcome.
 
