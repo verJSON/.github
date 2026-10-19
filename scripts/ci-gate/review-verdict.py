@@ -335,13 +335,13 @@ def validate_source_evidence(verdict: dict, repository_text: str, reviewed_head:
 
 
 def text_leaves(value: object, path: str = "$"):
+    # Field names need no scan: canonicalize_verdict has already rejected every
+    # name outside the fixed schema, so only values can carry free text.
     if isinstance(value, str):
         yield path, value
     elif isinstance(value, dict):
         for key, item in value.items():
-            child = key if path == "$" else f"{path}.{key}"
-            yield child, key
-            yield from text_leaves(item, child)
+            yield from text_leaves(item, key if path == "$" else f"{path}.{key}")
     elif isinstance(value, list):
         for index, item in enumerate(value):
             yield from text_leaves(item, f"{path}[{index}]")

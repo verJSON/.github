@@ -545,6 +545,17 @@ class CredentialRefusalTest(unittest.TestCase):
             with self.subTest(prefix=token[:7]):
                 self.assert_refused(clean_verdict(summary=f"Found {token} in the log."))
 
+    def test_credential_used_as_a_field_name_is_refused_without_being_echoed(self):
+        secret = self.secrets["ANTHROPIC_API_KEY"]
+        for raw in (
+            json.dumps({**json.loads(clean_verdict()), secret: "x"}),
+            clean_verdict(followups=[{"location": "app.py:3", "note": "n", secret: "x"}]),
+        ):
+            with self.subTest(raw=raw[:40]):
+                result = review.confirm_output(raw, sensitive=False, secrets=(secret,))
+                self.assertFalse(result["usable"])
+                self.assertNotIn(secret, json.dumps(result))
+
     def test_naming_a_token_prefix_is_not_credential_material(self):
         raw = clean_verdict(summary="Rotate any ghp_ or github_pat_ tokens and sk-ant- keys this change logged.")
         self.assertTrue(review.confirm_output(raw, sensitive=False, secrets=tuple(self.secrets.values()))["usable"])

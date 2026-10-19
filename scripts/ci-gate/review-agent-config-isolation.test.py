@@ -190,6 +190,15 @@ class ClaudeIsolationStepTest(unittest.TestCase):
         self.assertNotEqual(set_url.returncode, 0)
         self.assertNotIn('mock-job-token', (self.workspace / '.git/config').read_text())
 
+    @unittest.skipIf(os.geteuid() == 0, 'root ignores directory write permission')
+    def test_isolation_fails_when_the_remote_cannot_be_removed(self):
+        git_dir = self.workspace / '.git'
+        git_dir.chmod(0o555)
+        self.addCleanup(git_dir.chmod, 0o755)
+        result = run_isolation(self.root, self.workspace)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('url = https://github.com/Verjson/target.git', (git_dir / 'config').read_text())
+
     def claude_config_dir(self):
         value = STEPS['claude'].get('env', {}).get('CLAUDE_CONFIG_DIR', '')
         for expression, rendered in (('${{ runner.temp }}', str(self.root / 'runner-temp')),
