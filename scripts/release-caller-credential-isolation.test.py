@@ -17,6 +17,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -216,8 +217,10 @@ def token_tracing_path(root, env):
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         # The token is written into this file, never into an environment
-        # variable, so the recorder itself cannot become an exposure.
-        f"if env | grep -qF {TOKEN}; then credential=present; else credential=absent; fi\n"
+        # variable, so the recorder itself cannot become an exposure. No pipe:
+        # under pipefail an early-exiting reader can kill the writer with
+        # SIGPIPE and turn a match into "absent".
+        f"if [[ \"$(env)\" == *{shlex.quote(TOKEN)}* ]]; then credential=present; else credential=absent; fi\n"
         "printf '%s|%s\\n' \"$*\" \"$credential\" >> \"$NPM_TRACE\"\n"
         "exec \"$REAL_NPM\" \"$@\"\n"
     )
@@ -227,6 +230,30 @@ def token_tracing_path(root, env):
         "REAL_NPM": real_npm,
         "NPM_TRACE": str(root / "npm-trace.log"),
     }
+
+
+def verify_token_tracing_is_reliable(root):
+    """The recorder must see the token however large the environment around it is.
+
+    Undercounting is the dangerous direction: a credentialed npm call recorded as
+    absent would let a real exposure pass the isolation assertions below.
+    """
+    fake_bin = root / "fake-npm-bin"
+    fake_bin.mkdir(parents=True)
+    (fake_bin / "npm").write_text("#!/bin/sh\nexit 0\n")
+    (fake_bin / "npm").chmod(0o755)
+    tracing = token_tracing_path(root, {"PATH": f"{fake_bin}{os.pathsep}/usr/bin:/bin"})
+    # A large environment after the token keeps the environment dump writing
+    # after any early-exiting reader would already have seen the token.
+    padding = {f"TRACE_PADDING_{index:04d}": "x" * 1024 for index in range(400)}
+    trace = Path(tracing["NPM_TRACE"])
+    for credential, expected in ((TOKEN, "present"), (None, "absent")):
+        trace.unlink(missing_ok=True)
+        env = ({"NODE_AUTH_TOKEN": credential} if credential else {}) | tracing | padding
+        for _ in range(25):
+            subprocess.run([str(root / "npm-trace-bin/npm"), "--version"], env=env, check=True)
+        recorded = [line.rsplit("|", 1)[1] for line in trace.read_text().splitlines()]
+        assert recorded == [expected] * 25, f"npm trace recorder misrecorded the credential: {recorded}"
 
 
 def build_fixture(root, npm_bin, private_registry, attacker_registry):
@@ -784,6 +811,8 @@ def main():
         )
         for major in harness.SUPPORTED_NPM_RELEASES
     }
+    with tempfile.TemporaryDirectory(prefix="release-caller-trace-") as temp:
+        verify_token_tracing_is_reliable(Path(temp))
     with tempfile.TemporaryDirectory(prefix="release-caller-reserved-") as temp:
         for label, workflow in workflows.items():
             case_root = Path(temp) / label.replace(" ", "_").replace("/", "_")
