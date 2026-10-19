@@ -1056,8 +1056,8 @@ jobs:
           approved_head=""
 
           # 1. Current PR net patch-id. The depth-2 checkout lacks the base, so
-          #    fetch it and use the merge-base; patch-id --stable is invariant to
-          #    later base-merges/rebases. Any failure -> patch_id stays empty
+          #    fetch it and use the merge-base; the patch-id of the net diff is
+          #    invariant to later base-merges/rebases. Any failure -> patch_id stays empty
           #    (UNKNOWN) -> never skip.
           base_ref="$(gh pr view "$PR_NUMBER" --repo "$TARGET_REPO" --json baseRefName --jq .baseRefName 2>/dev/null || true)"
           if [ -n "$base_ref" ]; then
@@ -1068,7 +1068,7 @@ jobs:
               mb="$(git merge-base "origin/$base_ref" HEAD 2>/dev/null || true)"
             fi
             if [ -n "$mb" ]; then
-              diff="$(git diff --no-ext-diff --no-textconv "$mb" HEAD 2>/dev/null || true)"
+              diff="$(git diff --no-ext-diff --no-textconv --ignore-submodules=none --submodule=short "$mb" HEAD 2>/dev/null || true)"
               # An empty net diff (no real change) is UNKNOWN, not a match.
               if [ -n "$diff" ]; then
                 # --verbatim (git >= 2.39) keeps whitespace, which can change a
@@ -1342,7 +1342,10 @@ jobs:
             echo "::error::phase=review-input result=unavailable kind=merge_base_unavailable — fetched base history has no merge base with the checked-out PR head"
             exit 1
           }
-          if ! git diff --no-ext-diff --no-textconv --find-renames "$merge_base" HEAD >"$review_dir/pr.full.diff"; then
+          # --ignore-submodules=none overrides a submodule `ignore` setting from
+          # .gitmodules (which git also reads from the index and HEAD), the repo,
+          # or the runner, so a pointer change is never hidden (ADR 0237).
+          if ! git diff --no-ext-diff --no-textconv --ignore-submodules=none --find-renames "$merge_base" HEAD >"$review_dir/pr.full.diff"; then
             {
               echo "review_input_available=false"
               echo "review_input_failure=local_diff_failed"
@@ -1369,9 +1372,9 @@ jobs:
             lockfile_excludes+=(":(exclude,glob)**/$lockfile")
             lockfile_matches+=(":(glob)**/$lockfile")
           done
-          if ! git diff --no-ext-diff --no-textconv --find-renames "$merge_base" HEAD -- . "${lockfile_excludes[@]}" >"$review_dir/pr.diff" \
-            || ! git diff --no-ext-diff --find-renames --name-only -z "$merge_base" HEAD -- "${lockfile_matches[@]}" >"$review_dir/elided.paths" \
-            || ! git diff --no-ext-diff --find-renames --name-only -z "$merge_base" HEAD -- . "${lockfile_excludes[@]}" >"$review_dir/reviewed.paths"; then
+          if ! git diff --no-ext-diff --no-textconv --ignore-submodules=none --submodule=short --find-renames "$merge_base" HEAD -- . "${lockfile_excludes[@]}" >"$review_dir/pr.diff" \
+            || ! git diff --no-ext-diff --ignore-submodules=none --find-renames --raw -z "$merge_base" HEAD -- "${lockfile_matches[@]}" >"$review_dir/elided.raw" \
+            || ! git diff --no-ext-diff --ignore-submodules=none --find-renames --name-status -z "$merge_base" HEAD -- . "${lockfile_excludes[@]}" >"$review_dir/reviewed.status"; then
             {
               echo "review_input_available=false"
               echo "review_input_failure=local_diff_failed"
@@ -1379,28 +1382,55 @@ jobs:
             echo "::error::phase=review-input result=unavailable kind=local_diff_failed — could not render the lockfile-elided review diff"
             exit 1
           fi
-          elided_lockfiles="$(tr '\0' '\n' <"$review_dir/elided.paths")"
-          reviewed_path_count="$(tr -cd '\0' <"$review_dir/reviewed.paths" | wc -c)"
+          # Only a regular file is a lockfile: a link or submodule pointer at a
+          # lockfile path is content the review must see.
+          elided_lockfiles=""
+          irregular_lockfiles=0
+          while IFS= read -r -d '' raw_record; do
+            read -r old_mode new_mode _ _ raw_status <<<"${raw_record#:}"
+            IFS= read -r -d '' raw_path || break
+            case "$raw_status" in R*|C*) IFS= read -r -d '' raw_path || break ;; esac
+            for raw_mode in "$old_mode" "$new_mode"; do
+              case "$raw_mode" in 000000|100644|100755) ;; *) irregular_lockfiles=$((irregular_lockfiles + 1)) ;; esac
+            done
+            elided_lockfiles+="${elided_lockfiles:+$'\n'}$raw_path"
+          done <"$review_dir/elided.raw"
+          # Each reviewed path renders as one section, except a type change
+          # (file <-> link), which git renders as a deletion and a creation.
+          expected_section_count=0
+          reviewed_path_count=0
+          while IFS= read -r -d '' review_status; do
+            IFS= read -r -d '' _ || break
+            case "$review_status" in
+              R*|C*) IFS= read -r -d '' _ || break; expected_section_count=$((expected_section_count + 1)) ;;
+              T) expected_section_count=$((expected_section_count + 2)) ;;
+              *) expected_section_count=$((expected_section_count + 1)) ;;
+            esac
+            reviewed_path_count=$((reviewed_path_count + 1))
+          done <"$review_dir/reviewed.status"
 
-          # A real change must reach the providers as a non-empty diff. An empty
-          # rendering is accepted only when git confirms the head changes nothing;
-          # every path outside the lockfile set must render as its own section of
-          # the filtered diff (git quotes unusual paths, so a header is one line).
-          review_input_empty=false
+          # A real change must reach the providers whole. An empty rendering is
+          # accepted only when git confirms the head changes nothing; otherwise the
+          # filtered diff must carry exactly the sections its reviewed paths imply
+          # (git quotes unusual paths, so a section header is one line).
+          review_input_failure=""
           reviewed_section_count="$(grep -c '^diff --git ' "$review_dir/pr.diff" || true)"
           if [ ! -s "$review_dir/pr.full.diff" ]; then
-            git diff --quiet --no-ext-diff "$merge_base" HEAD || review_input_empty=true
-          elif [ "$reviewed_section_count" != "$reviewed_path_count" ]; then
-            review_input_empty=true
-          elif [ "$reviewed_path_count" -eq 0 ] && [ ! -s "$review_dir/elided.paths" ]; then
-            review_input_empty=true
+            git diff --quiet --no-ext-diff --ignore-submodules=none "$merge_base" HEAD \
+              || review_input_failure="review_input_empty:the rendered review diff is empty for a head that changes files"
+          elif [ "$irregular_lockfiles" -gt 0 ]; then
+            review_input_failure="lockfile_not_regular_file:a link or submodule pointer sits at a lockfile path and would be elided"
+          elif [ "$reviewed_path_count" -eq 0 ] && [ -z "$elided_lockfiles" ]; then
+            review_input_failure="review_input_empty:the rendered review diff is empty for a head that changes files"
+          elif [ "$reviewed_section_count" != "$expected_section_count" ]; then
+            review_input_failure="review_input_incomplete:the review diff has $reviewed_section_count sections where its $reviewed_path_count reviewed paths imply $expected_section_count"
           fi
-          if [ "$review_input_empty" = true ]; then
+          if [ -n "$review_input_failure" ]; then
             {
               echo "review_input_available=false"
-              echo "review_input_failure=review_input_empty"
+              echo "review_input_failure=${review_input_failure%%:*}"
             } >>"$GITHUB_OUTPUT"
-            echo "::error::phase=review-input result=unavailable kind=review_input_empty — the rendered review diff is empty for a head that changes files"
+            echo "::error::phase=review-input result=unavailable kind=${review_input_failure%%:*} — ${review_input_failure#*:}"
             exit 1
           fi
 
@@ -1408,7 +1438,7 @@ jobs:
           # outside a short list of inert media types needs a human: a text file
           # carrying one NUL byte renders only as "Binary files differ". Archives
           # are opaque containers and are deliberately not on the list (ADR 0237).
-          if ! git diff --no-ext-diff --no-textconv --no-renames --diff-filter=d --numstat -z "$merge_base" HEAD -- . "${lockfile_excludes[@]}" >"$review_dir/numstat"; then
+          if ! git diff --no-ext-diff --no-textconv --ignore-submodules=none --no-renames --diff-filter=d --numstat -z "$merge_base" HEAD -- . "${lockfile_excludes[@]}" >"$review_dir/numstat"; then
             {
               echo "review_input_available=false"
               echo "review_input_failure=local_diff_failed"

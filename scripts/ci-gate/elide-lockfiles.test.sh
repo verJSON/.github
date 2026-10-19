@@ -32,9 +32,9 @@ awk '
 ' "$wf" > "$block"
 
 slice="$tmp/elide.sh"
-awk '/^lockfile_excludes=\(\)$/ { c = 1 } c { print } /^reviewed_path_count=/ { if (c) exit }' "$block" > "$slice"
+awk '/^lockfile_excludes=\(\)$/ { c = 1 } c { print } /^expected_section_count=0$/ { if (c) exit }' "$block" > "$slice"
 grep -q '^lockfile_excludes=()$' "$slice" || { echo "FAIL - could not extract the lockfile pathspecs from $wf"; exit 1; }
-grep -q '^reviewed_path_count=' "$slice" || { echo "FAIL - could not extract the elided-path list from $wf"; exit 1; }
+grep -q '^expected_section_count=0$' "$slice" || { echo "FAIL - could not extract the elided-path list from $wf"; exit 1; }
 
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 # run_filter <file>=<content>...: commit the files on top of a base commit,

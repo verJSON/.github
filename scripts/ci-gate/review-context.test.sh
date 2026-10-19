@@ -91,8 +91,8 @@ case "$1" in
     ;;
   diff)
     case " $* " in
-      *" --name-only "*" :(glob)"*) exit 0 ;;
-      *" --name-only "*) for n in $(seq 1 301); do printf 'src/file-%03d.ts\0' "$n"; done; exit 0 ;;
+      *" --raw "*" :(glob)"*) exit 0 ;;
+      *" --name-status "*) for n in $(seq 1 301); do printf 'M\0src/file-%03d.ts\0' "$n"; done; exit 0 ;;
     esac
     for n in $(seq 1 301); do
       printf 'diff --git a/src/file-%03d.ts b/src/file-%03d.ts\n' "$n" "$n"

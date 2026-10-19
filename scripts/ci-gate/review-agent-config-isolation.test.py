@@ -321,11 +321,60 @@ class PullRequestCheckoutFixture(unittest.TestCase):
             if content is None:
                 git(self.workspace, 'rm', '-q', '--', relative)
                 continue
+            if isinstance(content, tuple):
+                kind, value = content
+                if os.path.lexists(path):
+                    git(self.workspace, 'rm', '-q', '--cached', '--', relative)
+                    path.unlink()
+                if kind == 'symlink':
+                    path.symlink_to(value)
+                    git(self.workspace, 'add', '--', relative)
+                else:
+                    # A submodule pointer needs only its commit id in the index.
+                    git(self.workspace, 'update-index', '--add', '--cacheinfo', f'160000,{value},{relative}')
+                continue
+            if path.is_symlink():
+                path.unlink()
             path.write_bytes(content) if isinstance(content, bytes) else path.write_text(content)
             git(self.workspace, 'add', '--', relative)
         git(self.workspace, 'commit', '-qm', 'more changes')
         self.head = git(self.workspace, 'rev-parse', 'HEAD')
         self.env['HEAD_SHA'] = self.head
+
+    def publish_as_base(self):
+        """Make the current head the base branch, so the next commit is the whole change."""
+        git(self.workspace, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+
+    def prep(self):
+        self.assertEqual(self.run_step(ATTRIBUTES_ID).returncode, 0)
+        (self.root / 'output').unlink(missing_ok=True)
+        return self.run_step('prep'), step_outputs(self.root / 'output')
+
+    def assert_reviewed(self, *expected_lines):
+        result, outputs = self.prep()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(outputs.get('review_input_failure'), 'none')
+        diff = (Path(outputs['review_dir']) / 'pr.diff').read_text()
+        for line in expected_lines:
+            self.assertIn(line, diff)
+        return diff
+
+    def rereview_outputs(self):
+        (self.root / 'output').unlink(missing_ok=True)
+        result = self.run_step('rereview')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return step_outputs(self.root / 'output')
+
+    def approve_current_head(self):
+        self.assertEqual(self.run_step(ATTRIBUTES_ID).returncode, 0)
+        patch_id = self.rereview_outputs().get('patch_id', '')
+        self.assertRegex(patch_id, r'^[0-9a-f]{40}$')
+        body = f'approved <!-- ai-review-head:{self.head} patchid:{patch_id} model:m -->'
+        prdata = self.root / 'prdata.json'
+        prdata.write_text(json.dumps({'reviews': [{'state': 'APPROVED', 'author': {'login': 'gate-bot'},
+                                                    'submittedAt': '2026-10-18T00:00:00Z', 'body': body}],
+                                      'comments': []}))
+        self.env['PRDATA'] = str(prdata)
 
     def model_input(self):
         """The review directory prep hands to every provider, and its outputs."""
@@ -413,21 +462,7 @@ class RereviewSkipBindsExactContentTest(PullRequestCheckoutFixture):
     """An approval may be reused only for byte-identical changes, whitespace included."""
 
     def rereview(self):
-        (self.root / 'output').unlink(missing_ok=True)
-        result = self.run_step('rereview')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        return step_outputs(self.root / 'output')
-
-    def approve_current_head(self):
-        self.assertEqual(self.run_step(ATTRIBUTES_ID).returncode, 0)
-        patch_id = self.rereview().get('patch_id', '')
-        self.assertRegex(patch_id, r'^[0-9a-f]{40}$')
-        body = f'approved <!-- ai-review-head:{self.head} patchid:{patch_id} model:m -->'
-        prdata = self.root / 'prdata.json'
-        prdata.write_text(json.dumps({'reviews': [{'state': 'APPROVED', 'author': {'login': 'gate-bot'},
-                                                    'submittedAt': '2026-10-18T00:00:00Z', 'body': body}],
-                                      'comments': []}))
-        self.env['PRDATA'] = str(prdata)
+        return self.rereview_outputs()
 
     def test_an_unchanged_diff_reuses_its_approval(self):
         self.approve_current_head()
@@ -600,6 +635,82 @@ class ReviewDiffIgnoresTextconvTest(PullRequestCheckoutFixture):
         self.assertEqual(step_outputs(self.root / 'output').get('patch_id'), expected)
 
 
+POINTER_BASE, POINTER_HEAD, POINTER_LATER = 'a1' * 20, 'b2' * 20, 'c3' * 20
+IGNORE_ALL = '[submodule "vendor/lib"]\n\tpath = vendor/lib\n\turl = ../lib.git\n\tignore = all\n'
+TRACKED = '[submodule "vendor/lib"]\n\tpath = vendor/lib\n\turl = ../lib.git\n'
+
+
+class EveryChangeShapeReachesTheReviewTest(PullRequestCheckoutFixture):
+    """Type changes, renames, submodule pointers, and binary lockfiles keep the review complete and accurate."""
+
+    def test_file_to_symlink_and_back_are_reviewed(self):
+        for name, file_content in (('tools/run.sh', 'echo run\n'), ('assets/icon.png', b'\x89PNG\r\n\x1a\n\x00')):
+            for to_link in (True, False):
+                with self.subTest(path=name, to_link=to_link):
+                    self.setUp()
+                    first, second = (file_content, ('symlink', 'target')) if to_link else (('symlink', 'target'), file_content)
+                    self.add_head_commit({name: first})
+                    self.publish_as_base()
+                    self.add_head_commit({name: second})
+                    diff = self.assert_reviewed(f'diff --git a/{name} b/{name}')
+                    self.assertEqual(diff.count(f'diff --git a/{name} b/{name}'), 2)
+
+    def test_a_rename_is_reviewed_as_one_section(self):
+        body = ''.join(f'line_{index} = {index}\n' for index in range(20))
+        self.add_head_commit({'src/module.py': body})
+        self.publish_as_base()
+        self.add_head_commit({'src/renamed.py': body + 'added_after_rename = True\n', 'src/module.py': None})
+        diff = self.assert_reviewed('rename from src/module.py', 'rename to src/renamed.py', '+added_after_rename = True')
+        self.assertEqual(diff.count('diff --git '), 1)
+
+    def test_a_binary_lockfile_is_elided_not_sent_to_a_human(self):
+        self.add_head_commit({'bun.lockb': b'\x00\x01binary-lock'})
+        diff = self.assert_reviewed('+echo hidden-shell-change')
+        self.assertNotIn('bun.lockb', diff)
+
+    def submodule_pr(self, base_modules, head_modules):
+        self.add_head_commit({'.gitmodules': base_modules, 'vendor/lib': ('gitlink', POINTER_BASE)})
+        self.publish_as_base()
+        self.add_head_commit({'.gitmodules': head_modules, 'vendor/lib': ('gitlink', POINTER_HEAD),
+                              'deploy.sh': 'echo submodule-pr\n'})
+
+    def test_a_pointer_change_under_an_ignore_setting_on_the_base_is_reviewed(self):
+        self.submodule_pr(IGNORE_ALL, IGNORE_ALL)
+        self.assert_reviewed(f'+Subproject commit {POINTER_HEAD}')
+
+    def test_a_pointer_change_under_an_ignore_setting_the_pr_adds_is_reviewed(self):
+        self.submodule_pr(TRACKED, IGNORE_ALL)
+        self.assert_reviewed(f'+Subproject commit {POINTER_HEAD}')
+
+    def test_a_pointer_change_is_reviewed_when_runner_config_picks_the_log_format(self):
+        git(self.workspace, 'config', 'diff.submodule', 'log')
+        self.submodule_pr(IGNORE_ALL, IGNORE_ALL)
+        self.assert_reviewed(f'+Subproject commit {POINTER_HEAD}')
+
+    def test_a_re_point_after_approval_is_reviewed_again(self):
+        for base_modules in (IGNORE_ALL, TRACKED):
+            with self.subTest(base_ignores=base_modules == IGNORE_ALL):
+                self.setUp()
+                git(self.workspace, 'config', 'diff.submodule', 'log')
+                self.submodule_pr(base_modules, IGNORE_ALL)
+                self.approve_current_head()
+                self.assertEqual(self.rereview_outputs().get('skip_model'), 'true')
+                self.add_head_commit({'vendor/lib': ('gitlink', POINTER_LATER)})
+                self.assertEqual(self.rereview_outputs().get('skip_model'), 'false')
+
+    def test_a_link_or_submodule_at_a_lockfile_path_is_never_elided(self):
+        for name, entry in (('vendor/yarn.lock', ('gitlink', POINTER_HEAD)), ('package-lock.json', ('symlink', 'deploy.sh'))):
+            with self.subTest(path=name):
+                self.setUp()
+                files = {name: entry}
+                if entry[0] == 'gitlink':
+                    files['.gitmodules'] = IGNORE_ALL.replace('vendor/lib', name)
+                self.add_head_commit(files)
+                result, outputs = self.prep()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(outputs.get('review_input_failure'), 'lockfile_not_regular_file')
+
+
 class EmptyReviewInputFailsClosedTest(PullRequestCheckoutFixture):
     """A non-empty change must never reach a provider as an empty diff."""
 
@@ -607,24 +718,36 @@ class EmptyReviewInputFailsClosedTest(PullRequestCheckoutFixture):
         wrapper = self.root / 'bin' / 'git'
         wrapper.write_text(
             '#!/bin/sh\n'
-            'case " $* " in *" --name-only "*) ;; *" diff "*" --find-renames "*) printf "%s" "$RENDERED"; exit 0 ;; esac\n'
+            'case " $* " in *" --name-only "*|*" --name-status "*|*" --raw "*) ;; *" diff "*" --find-renames "*) printf "%s" "$RENDERED"; exit 0 ;; esac\n'
             f'exec {shutil.which("git")} "$@"\n')
         wrapper.chmod(0o755)
         self.env['RENDERED'] = rendered
         self.assertEqual(self.run_step(ATTRIBUTES_ID).returncode, 0)
         return self.run_step('prep'), step_outputs(self.root / 'output')
 
-    def test_empty_rendered_diff_of_a_real_change_is_unavailable_input(self):
-        result, outputs = self.run_prep_with_rendered_diff('')
+    def assert_unavailable(self, rendered, reason):
+        result, outputs = self.run_prep_with_rendered_diff(rendered)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(outputs.get('review_input_available'), 'false')
+        self.assertEqual(outputs.get('review_input_failure'), reason)
         self.assertNotIn('review_dir', outputs)
+        return result
+
+    def test_empty_rendered_diff_of_a_real_change_is_unavailable_input(self):
+        self.assert_unavailable('', 'review_input_empty')
 
     def test_rendered_diff_with_no_reviewable_section_is_unavailable_input(self):
-        result, outputs = self.run_prep_with_rendered_diff('not a diff section\n')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(outputs.get('review_input_available'), 'false')
-        self.assertNotIn('review_dir', outputs)
+        result = self.assert_unavailable('not a diff section\n', 'review_input_incomplete')
+        self.assertNotIn('is empty', result.stdout + result.stderr)
+
+    def sections(self, count):
+        return ''.join(f'diff --git a/f{index} b/f{index}\n+line\n' for index in range(count))
+
+    def test_fewer_sections_than_reviewed_paths_is_incomplete_input(self):
+        self.assert_unavailable(self.sections(3), 'review_input_incomplete')
+
+    def test_more_sections_than_reviewed_paths_is_incomplete_input(self):
+        self.assert_unavailable(self.sections(5), 'review_input_incomplete')
 
 
 class TelemetryStaysOutsideTheCheckoutTest(unittest.TestCase):
