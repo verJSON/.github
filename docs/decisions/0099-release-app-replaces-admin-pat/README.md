@@ -245,6 +245,26 @@ build hook has no legitimate need for any secret today. This restores the
 invariant this ADR already establishes; it does not change the App's scope, the
 minting path, or which job may hold the credential.
 
+## Amendment (2026-10-19) — the credential guards no longer fail open on large job blocks
+
+The snapshot guard (#784) and the build-job guard (#975) above each piped the
+comment-stripped job block from `sed` into `grep -q` under `pipefail`, behind a
+`!`. `grep -q` exits on its first match. With the forbidden reference early in a
+block larger than a pipe, `sed` was still writing, died of SIGPIPE, and the
+pipeline's status 141 was inverted into success. A caller that forwarded a
+credential from `snapshot` therefore passed the generated contract test with
+exit 0. A `build` job that referenced a secret passed this guard as well, and
+was rejected only by the later `#1712` Python scan (ADR 0220).
+
+Both guards now capture the stripped block into a variable and grep a
+here-string. A failed capture aborts the suite under `set -e`, and no pipe
+writer remains to be killed. `scripts/ci-gate/changelog-caller-contract.test.sh`
+has one case for each guard. Each case places the reference before a MiB of
+YAML and requires that guard's own message. Both cases failed against the
+previous generator. This restores the invariant recorded above. It changes no
+credential, scope, or job boundary. Adopters receive the fix when they
+regenerate at a contract SHA that contains it.
+
 ## Rollback
 
 Reverting the #803 implementation removes the scheduled conformance signal but

@@ -5497,8 +5497,11 @@ PY
     || fail "$release_workflow does not select the release-app environment"
   grep -qE '^[[:space:]]+secrets: inherit$' <<<"$snapshot_job" \
     || fail "$release_workflow snapshot lacks inherited environment context"
-  ! sed 's/#.*//' <<<"$snapshot_job" \
-    | grep -qE 'PRIVATE_KEY|ORG_ADMIN_TOKEN|push_token|github\.token' \
+  # Captured, never piped: under pipefail an early-exit `grep -q` that matches
+  # while sed is still writing kills sed with SIGPIPE, and the negated 141
+  # would accept the very reference this guard exists to reject.
+  snapshot_effective="$(sed 's/#.*//' <<<"$snapshot_job")"
+  ! grep -qE 'PRIVATE_KEY|ORG_ADMIN_TOKEN|push_token|github\.token' <<<"$snapshot_effective" \
     || fail "$release_workflow snapshot forwards credentials instead of selecting its environment"
   snapshot_permissions="$(awk '
     NR == 1 { job_indent = match($0, /[^ ]/) - 1; next }
@@ -5941,7 +5944,9 @@ PY
     # Match the bare word, not just the dot-accessor form: ${{ secrets['NAME'] }}
     # and ${{ toJSON(secrets) }} both expose secret material without the literal
     # substring "secrets." ever appearing, and both must be caught too.
-    ! sed 's/#.*//' <<<"$build_job" | grep -qE 'secrets\b' \
+    # Captured rather than piped into grep -q, as for the snapshot guard above.
+    build_job_effective="$(sed 's/#.*//' <<<"$build_job")"
+    ! grep -qE 'secrets\b' <<<"$build_job_effective" \
       || fail "$release_workflow build job references a secrets context; the build matrix runs adopter-owned scripts/release-build.sh on caller-chosen runners and must never receive any secret, especially not the release App credential that mints main-protection-bypass tokens (#975)"
     grep -qF 'needs: [verify, snapshot, build]' <<<"$publish_job" \
       || fail "$release_workflow does not gate publication on verification, snapshot, and build state"

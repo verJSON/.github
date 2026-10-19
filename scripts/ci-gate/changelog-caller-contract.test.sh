@@ -2340,6 +2340,38 @@ open(path, "w", encoding="utf-8").write(text[:start] + snapshot + text[end:])
 PY
 }
 
+# A credential guard that pipes a job block into `grep -q` under pipefail fails
+# open once the block outgrows the pipe: grep exits on its first match, the
+# still-writing producer dies of SIGPIPE, and the negated pipeline reads the
+# 141 as "no match". So the reference sits first and a MiB of ordinary YAML
+# follows it, which is past any pipe capacity and makes the race deterministic.
+bury_credential_in_large_job() {
+  # bury_credential_in_large_job <adopter> <job-header> <anchor-line> <inserted-line>...
+  local workflow="$1/.github/workflows/release.yml"
+  shift
+  python3 - "$workflow" "$@" <<'PY'
+import sys
+
+path, job, anchor, *inserted = sys.argv[1:]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+start = lines.index(job + "\n")
+at = lines.index(anchor + "\n", start) + 1
+indent = inserted[-1][: len(inserted[-1]) - len(inserted[-1].lstrip())]
+padding = [indent + "release_notes_preamble: |\n"]
+padding += [indent + "  " + "p" * 4096 + "\n" for _ in range(256)]
+lines[at:at] = [line + "\n" for line in inserted] + padding
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+forward_credential_from_large_snapshot() {
+  bury_credential_in_large_job "$1" "  snapshot:" "    with:" \
+    '      push_token: ${{ github.token }}'
+}
+leak_secret_into_large_build_job() {
+  bury_credential_in_large_job "$1" "  build:" "    timeout-minutes: 45" \
+    "    env:" '      LEAKED: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}'
+}
+
 # #463/#464/#465. Each mutation below reproduces one defect the hand-copied
 # release caller shipped to every migrated repository, applied to the generated
 # caller so the emitted suite is the thing under test rather than the fixture.
@@ -3756,6 +3788,20 @@ sync_last_rejection
 grep -qE 'snapshot forwards credentials|release-app environment' "$tmproot/run.out" \
   && pass "the broad-token rejection names the dedicated release App remedy" \
   || fail "the last credential case failed for some other reason: $(tail -2 "$tmproot/run.out")"
+
+# The cases above replace release_environment, so they are rejected before the
+# forwarding guard runs. These keep it and grow the job past a pipe's capacity:
+# a guard that pipes into an early-exit reader accepts both under pipefail.
+expect_rejection "a large snapshot job forwarding a credential before its padding" \
+  forward_credential_from_large_snapshot
+sync_last_rejection
+grep -qF 'snapshot forwards credentials instead of selecting its environment' "$tmproot/run.out" \
+  && pass "the snapshot forwarding guard holds for a job block larger than a pipe" \
+  || fail "a large credential-forwarding snapshot was not rejected by its forwarding guard: $(tail -2 "$tmproot/run.out")"
+expect_release_mode_rejection release-artifact \
+  "a large build job referencing a secret before its padding" \
+  leak_secret_into_large_build_job \
+  'build job references a secrets context; the build matrix runs adopter-owned scripts/release-build.sh'
 
 expect_rejection "a snapshot caller granting GITHUB_TOKEN contents-write (#784)" grant_snapshot_github_token_write
 expect_rejection "a snapshot job that verifies nothing first (#463, #464)" drop_snapshot_needs
