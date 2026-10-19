@@ -34,6 +34,9 @@ on:
       # Redundant while every released entry is Markdown, but deliberately
       # covers future non-Markdown files read by doc-tag-pins.
       - 'CHANGELOG/**'
+      # container-deployment-contract.test.sh reads the pinned deployment CLI
+      # package, so its Renovate bumps must run the suite.
+      - 'contracts/**'
   push:
     branches: [main]
     paths:
@@ -50,6 +53,9 @@ on:
       - 'NEXT/**'
       - '**/*.md'
       - 'CHANGELOG/**'
+      # container-deployment-contract.test.sh reads the pinned deployment CLI
+      # package, so its Renovate bumps must run the suite.
+      - 'contracts/**'
 
 permissions:
   contents: read

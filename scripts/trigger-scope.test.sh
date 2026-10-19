@@ -100,6 +100,11 @@ assert_scanner_covered "doc-fragment-names.sh scans tracked *.md" '*.md'
 assert_scanner_covered "doc-tag-pins.sh scans documentation" '*.md'
 assert_scanner_covered "doc-tag-pins.sh scans workflow definitions" '.github/workflows/*' '.github/actions/*'
 
+# container-deployment-contract.test.sh (changelog-release-1) reads the pinned
+# deployment CLI package under contracts/. A Renovate bump there must run the
+# suite, and it must report the required shell-tests check that admission needs.
+assert_scanner_covered "container-deployment-contract.test.sh reads contracts/" 'contracts/'
+
 # doc-tag-pins.sh reads every tracked file, and the narrowing above leaves a real
 # gap (#360): a pin example in a tracked file that is neither markdown nor
 # workflow/action YAML — `.github/FUNDING.yml`, a release config — does not trigger
