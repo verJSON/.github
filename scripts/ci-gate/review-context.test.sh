@@ -90,6 +90,10 @@ case "$1" in
     printf '%s\n' true
     ;;
   diff)
+    case " $* " in
+      *" --name-only "*" :(glob)"*) exit 0 ;;
+      *" --name-only "*) for n in $(seq 1 301); do printf 'src/file-%03d.ts\0' "$n"; done; exit 0 ;;
+    esac
     for n in $(seq 1 301); do
       printf 'diff --git a/src/file-%03d.ts b/src/file-%03d.ts\n' "$n" "$n"
       printf '@@ -0,0 +1 @@\n+export const value%03d = true\n' "$n"

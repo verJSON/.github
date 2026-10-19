@@ -314,6 +314,50 @@ class PullRequestCheckoutFixture(unittest.TestCase):
         return review_dir, outputs
 
 
+class ReviewDiffKeepsEveryPathSpellingTest(PullRequestCheckoutFixture):
+    """Lockfile elision must select files by path, never by parsing diff headers."""
+
+    def add_head_commit(self, files):
+        for relative, content in files.items():
+            path = self.workspace / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+            git(self.workspace, 'add', '--', relative)
+        git(self.workspace, 'commit', '-qm', 'more changes')
+        self.head = git(self.workspace, 'rev-parse', 'HEAD')
+        self.env['HEAD_SHA'] = self.head
+
+    def reviewed_diff(self):
+        self.assertEqual(self.run_step(ATTRIBUTES_ID).returncode, 0)
+        prep = self.run_step('prep')
+        self.assertEqual(prep.returncode, 0, prep.stderr + prep.stdout)
+        review_dir, outputs = self.model_input()
+        return (review_dir / 'pr.diff').read_text(), outputs
+
+    def test_a_spaced_path_reaches_the_model_input(self):
+        self.add_head_commit({'docs/release notes.md': 'spaced-path-content\n'})
+        diff, _ = self.reviewed_diff()
+        self.assertIn('+spaced-path-content\n', diff)
+
+    def test_a_spaced_path_naming_a_lockfile_is_reviewed_not_elided(self):
+        self.add_head_commit({'tools/run b/yarn.lock now.sh': 'lockfile-named-content\n'})
+        diff, outputs = self.reviewed_diff()
+        self.assertIn('+lockfile-named-content\n', diff)
+        self.assertNotIn('Generated lockfiles were omitted', outputs.get('review_prompt', ''))
+
+    def test_a_path_with_a_newline_reaches_the_model_input(self):
+        self.add_head_commit({'notes/line\nbreak yarn.lock': 'newline-path-content\n'})
+        diff, _ = self.reviewed_diff()
+        self.assertIn('+newline-path-content\n', diff)
+
+    def test_real_lockfiles_at_any_depth_are_elided_and_reported(self):
+        self.add_head_commit({'yarn.lock': 'root-lock-content\n', 'svc/app dir/Cargo.lock': 'nested-lock-content\n'})
+        diff, outputs = self.reviewed_diff()
+        self.assertNotIn('lock-content', diff)
+        self.assertIn('+echo hidden-shell-change', diff)
+        self.assertIn('Generated lockfiles were omitted', outputs.get('review_prompt', ''))
+
+
 class ReviewDiffIgnoresPullRequestAttributesTest(PullRequestCheckoutFixture):
     """A pull request must not hide a text change from the reviewer behind git attributes."""
 
@@ -469,7 +513,7 @@ class EmptyReviewInputFailsClosedTest(PullRequestCheckoutFixture):
         wrapper = self.root / 'bin' / 'git'
         wrapper.write_text(
             '#!/bin/sh\n'
-            'case " $* " in *" diff "*" --find-renames "*) printf "%s" "$RENDERED"; exit 0 ;; esac\n'
+            'case " $* " in *" --name-only "*) ;; *" diff "*" --find-renames "*) printf "%s" "$RENDERED"; exit 0 ;; esac\n'
             f'exec {shutil.which("git")} "$@"\n')
         wrapper.chmod(0o755)
         self.env['RENDERED'] = rendered

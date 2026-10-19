@@ -1357,24 +1357,40 @@ jobs:
           # otherwise-small PR (Verjson/.github#110). Keep the full diff on disk
           # for reference; hand the model the filtered diff plus a note of what
           # was dropped so it still scrutinizes the manifest counterpart.
-          LOCK_RE='(^|/)(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|Cargo\.lock|go\.sum|poetry\.lock|composer\.lock|gradle\.lockfile|Gemfile\.lock)$'
-          awk -v re="$LOCK_RE" '
-            /^diff --git / { p = $4; sub(/^b\//, "", p); keep = (p !~ re) }
-            keep
-          ' "$review_dir/pr.full.diff" > "$review_dir/pr.diff"
-          elided_lockfiles="$(awk -v re="$LOCK_RE" '
-            /^diff --git / { p = $4; sub(/^b\//, "", p);
-              if (p ~ re) out = out (out == "" ? "" : ", ") p }
-            END { print out }
-          ' "$review_dir/pr.full.diff")"
+          # Git pathspecs select lockfiles by path; nothing parses diff headers, so
+          # no path spelling (spaces, quotes, newlines) can move a section in or
+          # out of the review (ADR 0237).
+          lockfile_excludes=()
+          lockfile_matches=()
+          for lockfile in package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock bun.lock bun.lockb \
+            Cargo.lock go.sum poetry.lock composer.lock gradle.lockfile Gemfile.lock; do
+            lockfile_excludes+=(":(exclude,glob)**/$lockfile")
+            lockfile_matches+=(":(glob)**/$lockfile")
+          done
+          if ! git diff --no-ext-diff --no-textconv --find-renames "$merge_base" HEAD -- . "${lockfile_excludes[@]}" >"$review_dir/pr.diff" \
+            || ! git diff --no-ext-diff --find-renames --name-only -z "$merge_base" HEAD -- "${lockfile_matches[@]}" >"$review_dir/elided.paths" \
+            || ! git diff --no-ext-diff --find-renames --name-only -z "$merge_base" HEAD -- . "${lockfile_excludes[@]}" >"$review_dir/reviewed.paths"; then
+            {
+              echo "review_input_available=false"
+              echo "review_input_failure=local_diff_failed"
+            } >>"$GITHUB_OUTPUT"
+            echo "::error::phase=review-input result=unavailable kind=local_diff_failed — could not render the lockfile-elided review diff"
+            exit 1
+          fi
+          elided_lockfiles="$(tr '\0' '\n' <"$review_dir/elided.paths")"
+          reviewed_path_count="$(tr -cd '\0' <"$review_dir/reviewed.paths" | wc -c)"
 
           # A real change must reach the providers as a non-empty diff. An empty
           # rendering is accepted only when git confirms the head changes nothing;
-          # an empty filtered diff only when every section was an elided lockfile.
+          # every path outside the lockfile set must render as its own section of
+          # the filtered diff (git quotes unusual paths, so a header is one line).
           review_input_empty=false
+          reviewed_section_count="$(grep -c '^diff --git ' "$review_dir/pr.diff" || true)"
           if [ ! -s "$review_dir/pr.full.diff" ]; then
             git diff --quiet --no-ext-diff "$merge_base" HEAD || review_input_empty=true
-          elif [ ! -s "$review_dir/pr.diff" ] && [ -z "$elided_lockfiles" ]; then
+          elif [ "$reviewed_section_count" != "$reviewed_path_count" ]; then
+            review_input_empty=true
+          elif [ "$reviewed_path_count" -eq 0 ] && [ ! -s "$review_dir/elided.paths" ]; then
             review_input_empty=true
           fi
           if [ "$review_input_empty" = true ]; then
