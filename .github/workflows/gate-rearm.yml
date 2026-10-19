@@ -995,9 +995,10 @@ jobs:
           # stale pin is one that predates it. Fixed: it defines which callers are stale.
           CASING_REPAIR = "65529002f4fecf2a5bb634047b07ead3ff0bdeaa"
           # The oldest review revision without a known, already-fixed authorization defect
-          # (12098a0e, #1650: the finalizer binds the check to the exact head). It contains
-          # CASING_REPAIR. Raise it whenever a review-path security fix lands on main.
-          MINIMUM_SAFE_REVIEW = "12098a0e495317699131e97f1b2e136c5297ccad"
+          # (4d95c2ee, #1850: the review ignores pull-request agent configuration and reads
+          # only what it is shown, ADR 0237). It contains CASING_REPAIR and the previous floor
+          # 12098a0e (#1650). Raise it whenever a review-path security fix lands on main.
+          MINIMUM_SAFE_REVIEW = "4d95c2ee5884ae2a4eb0732b655dbd43b7211262"
           CALLER = ".github/workflows/ai-review-merge.yml"
           MAX_PATHS = 32
           MAX_BLOB_BYTES = 262144
