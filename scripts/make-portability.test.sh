@@ -47,7 +47,10 @@ if grep -q $'\tbash scripts/gen-adr-index.sh --check$' "$actions_ci"; then
 else
   fail "actions-ci bypasses the portable ADR-index target"
 fi
-if grep -q $'\tbash scripts/render-next.sh >/dev/null$' "$actions_ci"; then
+# The row wraps the renderer so an emptied post-release NEXT/ passes; it must
+# still execute the same portable script the `render` target runs.
+if grep -q $'\tbash scripts/render-next-check.sh$' "$actions_ci" \
+  && grep -qF 'bash "$repo_root/scripts/render-next.sh"' "$root/scripts/render-next-check.sh"; then
   pass "actions-ci consumes the portable render command without requiring make"
 else
   fail "actions-ci bypasses the portable render target"

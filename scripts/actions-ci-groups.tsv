@@ -172,7 +172,8 @@ changelog-release-1	bash scripts/ci-gate/changelog-caller-contract-shard.test.sh
 changelog-release-1	bash scripts/ci-gate/gen-adr-index.test.sh
 changelog-release-2	python3 scripts/ci-gate/adr-live-coverage-claims.test.py
 changelog-release-3	python3 scripts/ci-gate/adr-number-collision.test.py
-docs	bash scripts/render-next.sh >/dev/null
+docs	bash scripts/render-next-check.sh
+docs	bash scripts/ci-gate/render-next-check.test.sh
 changelog-release-4	bash scripts/ci-gate/render-next.test.sh
 changelog-release-1	python3 scripts/changelog.test.py
 docs	bash scripts/changelog-fragment-schema.test.sh
