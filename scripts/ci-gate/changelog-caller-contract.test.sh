@@ -102,7 +102,7 @@ capture_mode() {
     mode_capture_failures=$((mode_capture_failures + 1))
     return
   }
-  out="$(bash "$gen" "$@" 2>"$err")" || status=$?
+  out="$(bash "${capture_gen:-$gen}" "$@" 2>"$err")" || status=$?
   if [ "$status" -ne 0 ]; then
     # Bounded: a verbose mode's stderr is unbounded, and one verdict line that scrolls the
     # named cause off the top defeats the point of naming it.
@@ -112,6 +112,12 @@ capture_mode() {
     # An empty capture is never a fixture: an empty contract suite exits 0 and
     # turns every positive case into a pass (#1736).
     fail "generator mode '$mode' exited 0 but emitted nothing"
+    mode_capture_failures=$((mode_capture_failures + 1))
+  elif [ -s "$err" ]; then
+    # Bash reports a failed command substitution inside a here-document on
+    # stderr and carries on, so a mode that succeeded while saying anything
+    # rendered from a failure. A succeeding generator is silent.
+    fail "generator mode '$mode' exited 0 but wrote to stderr: $(tr '\n' ' ' <"$err" | cut -c1-500)"
     mode_capture_failures=$((mode_capture_failures + 1))
   fi
   rm -f "$err"
@@ -1145,6 +1151,80 @@ stray_titles="$(grep -oE "\^## [A-Za-z][^']*" "$emitted" | grep -vxE '\^## (Newe
   && pass "fragment assertions are derived from the tree, not named inline" \
   || fail "emitted test greps for literal fragment titles: $(tr '\n' ' ' <<<"$stray_titles")"
 
+# Bash expands a here-document's command substitutions and ignores their
+# status, so a generator function that failed inside one rendered a truncated
+# caller and the generator still exited 0. The generator now computes every
+# such value before its here-document and returns on failure; these assertions
+# keep it that way and prove a failure is fatal.
+heredoc_substitutions="$(python3 - "$gen" <<'PY'
+import re
+import sys
+
+lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
+opener = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+inside = None
+for number, line in enumerate(lines, 1):
+    if inside is None:
+        match = opener.search(line)
+        if match:
+            inside = (match.group(2), match.group(1) == "")
+        continue
+    if line == inside[0]:
+        inside = None
+        continue
+    if inside[1] and re.search(r"(?<!\\)(?:\$\(|`)", line):
+        print(f"{number}: {line.strip()[:100]}")
+PY
+)"
+[ -z "$heredoc_substitutions" ] \
+  && pass "no unquoted here-document in the generator runs a command substitution" \
+  || fail "the generator runs command substitutions inside unquoted here-documents: $(tr '\n' ';' <<<"$heredoc_substitutions")"
+injected_generator_git_dir="$(git -C "$repo_root" rev-parse --absolute-git-dir)"
+inject_generator() {
+  # inject_generator <name> <function> <line>: a generator copy with <line> as
+  # the first command of <function>, run against this repository's objects.
+  local copy="$tmproot/injected-generators/$1/scripts/gen-changelog-caller.sh"
+  mkdir -p "$(dirname "$copy")"
+  python3 - "$gen" "$copy" "$2" "$3" <<'PY'
+import sys
+
+source, target, function, line = sys.argv[1:]
+text = open(source, encoding="utf-8").read()
+header = function + "() {\n"
+if text.count(header) != 1:
+    raise SystemExit("cannot inject into " + function)
+open(target, "w", encoding="utf-8").write(text.replace(header, header + line + "\n"))
+PY
+  printf '%s\n' "$copy"
+}
+while IFS='|' read -r injected_function injected_mode injected_args; do
+  injected_gen="$(inject_generator "fail-$injected_function-$injected_mode" "$injected_function" '  return 3')"
+  # shellcheck disable=SC2086 # the extra generator arguments are word-split on purpose
+  injected_out="$(GIT_DIR="$injected_generator_git_dir" bash "$injected_gen" "$injected_mode" "$sha" $injected_args 2>/dev/null)" \
+    && fail "the generator exited 0 when $injected_function failed inside $injected_mode" \
+    || { [ -z "$injected_out" ] \
+      && pass "a failing $injected_function stops $injected_mode with no output" \
+      || fail "a failing $injected_function stopped $injected_mode only after emitting output"; }
+done <<'INJECTIONS'
+release_snapshot_with|release-node|
+release_snapshot_job|release-snapshot|
+release_artifact_build_job_for|release-artifact|--build-runner ubuntu-24.04
+release_snapshot_job|contract-test|
+emit_verify_dependency_steps|release-node|
+INJECTIONS
+injected_warning_gen="$(inject_generator warning release_snapshot_with '  echo "injected rendering warning" >&2')"
+injected_warning_failures="$(
+  # A fresh count in a subshell: this case asserts that capture_mode FAILS.
+  # shellcheck disable=SC2034 # read by capture_mode
+  capture_gen="$injected_warning_gen" GIT_DIR="$injected_generator_git_dir"
+  export GIT_DIR
+  mode_capture_failures=0
+  capture_mode injected_warning_release release-node "$sha" >/dev/null
+  printf '%s' "$mode_capture_failures"
+)"
+[ "$injected_warning_failures" = 1 ] \
+  && pass "capture_mode refuses a generator mode that succeeded while writing to stderr" \
+  || fail "capture_mode accepted a generator mode that wrote to stderr (failures: ${injected_warning_failures:-none})"
 if generator_only_row; then
   [ "$fails" -eq 0 ] || exit 1
   echo "All generator contract assertions passed."
@@ -2533,9 +2613,95 @@ verify_escaped_expression() {
 }
 verify_quoted_scalar_behind_block_header() {
   verify_metadata_env_line "$1" \
-    '          RELEASE_LABEL: "release' \
+    "          RELEASE_LABEL: ${2:-}\"release" \
     '            notes: |' \
     '              \x24{{ toJSON(\x67ithub) }}"'
+}
+# The emitted suite has no YAML parser, so the scanner refuses node properties
+# outright: a tag or anchor in front of a quote hid the quote from the earlier
+# scanner, which then took `notes: |` for a block scalar and skipped the escape.
+verify_tagged_quoted_scalar_behind_block_header() {
+  verify_quoted_scalar_behind_block_header "$1" '!!str '
+}
+verify_nonspecific_tagged_quoted_scalar_behind_block_header() {
+  verify_quoted_scalar_behind_block_header "$1" '! '
+}
+verify_verbatim_tagged_quoted_scalar_behind_block_header() {
+  verify_quoted_scalar_behind_block_header "$1" '!<tag:yaml.org,2002:str> '
+}
+verify_anchored_quoted_scalar_behind_block_header() {
+  verify_quoted_scalar_behind_block_header "$1" '&label '
+}
+# A doubled quote decodes to one, so the scan's reading of where an expression
+# ends differs from the expression Actions evaluates.
+verify_escaped_single_quote_expression() {
+  verify_metadata_env_line "$1" \
+    "          RELEASE_CONTEXT: '\${{ format(''}}'') || toJSON(secrets) }}'"
+}
+# str.splitlines() breaks at U+2028, which YAML 1.2 reads as text: the scanner
+# saw a block scalar header inside a comment, indented so the env entries below
+# it read as that scalar's body, and skipped the escape among them.
+verify_line_separator_in_comment() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+start = lines.index("      - name: Prepare release package metadata\n", lines.index("  verify:\n"))
+at = lines.index("        env:\n", start) + 1
+lines[at:at] = [
+    "          RELEASE_LABEL: release # note\u2028        notes: |\n",
+    '          RELEASE_CONTEXT: "\\x24{{ toJSON(\\x67ithub) }}"\n',
+]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+# The generator writes each mode's whole job set. An extra job could select
+# the release environment or read any secret beside the pinned ones.
+add_release_job() {
+  python3 - "$1/.github/workflows/release.yml" "${@:2}" <<'PY'
+import sys
+
+path, *job = sys.argv[1:]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index("  publish:\n")
+lines[at:at] = [line + "\n" for line in job] + ["\n"]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+add_release_environment_job() {
+  add_release_job "$1" '  notes:' '    runs-on: ubuntu-24.04' '    environment: release-app' \
+    '    steps:' '      - run: echo notes'
+}
+add_secret_reading_job() {
+  add_release_job "$1" '  notes:' '    runs-on: ubuntu-24.04' '    steps:' \
+    '      - run: echo "${{ secrets.NPM_TOKEN }}"'
+}
+duplicate_snapshot_job() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+start = lines.index("  snapshot:\n")
+end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith("  ") and not lines[i].startswith("   ") and lines[i].strip())
+lines[end:end] = lines[start:end]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+publish_environment() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index("    timeout-minutes: 15\n", lines.index("  publish:\n")) + 1
+lines[at:at] = ["    environment: release-app\n"]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+build_matrix_dependency_index_changed() {
+  sed -i 's/^            dependency-index: 0$/            dependency-index: 1/' "$1/.github/workflows/release.yml"
 }
 
 # #463/#464/#465. Each mutation below reproduces one defect the hand-copied
@@ -4069,15 +4235,68 @@ SCHED_SCRIPT
 expect_rejection "a verify step env value spelling an expression through a YAML escape" \
   verify_escaped_expression
 sync_last_rejection
-grep -qF 'uses a YAML escape or a multi-line quoted scalar the release-shape check cannot read (#1712)' "$tmproot/run.out" \
+grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
   && pass "the release-shape check refuses a YAML escape it cannot read" \
   || fail "a YAML escape in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a verify step env value hiding an escape in a quoted scalar behind a block header" \
   verify_quoted_scalar_behind_block_header
 sync_last_rejection
-grep -qF 'uses a YAML escape or a multi-line quoted scalar the release-shape check cannot read (#1712)' "$tmproot/run.out" \
+grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
   && pass "the release-shape check refuses a quoted scalar left open across lines" \
   || fail "a multi-line quoted scalar in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with a !!str-tagged quoted scalar left open across lines" verify_tagged_quoted_scalar_behind_block_header
+sync_last_rejection
+grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
+  && pass "the release-shape check refuses a !!str-tagged quoted scalar left open across lines" \
+  || fail "a !!str-tagged quoted scalar left open across lines in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with a !-tagged quoted scalar left open across lines" verify_nonspecific_tagged_quoted_scalar_behind_block_header
+sync_last_rejection
+grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
+  && pass "the release-shape check refuses a !-tagged quoted scalar left open across lines" \
+  || fail "a !-tagged quoted scalar left open across lines in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with a verbatim-tagged quoted scalar left open across lines" verify_verbatim_tagged_quoted_scalar_behind_block_header
+sync_last_rejection
+grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
+  && pass "the release-shape check refuses a verbatim-tagged quoted scalar left open across lines" \
+  || fail "a verbatim-tagged quoted scalar left open across lines in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with an anchored quoted scalar left open across lines" verify_anchored_quoted_scalar_behind_block_header
+sync_last_rejection
+grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
+  && pass "the release-shape check refuses an anchored quoted scalar left open across lines" \
+  || fail "an anchored quoted scalar left open across lines in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with a doubled quote that moves where an expression ends" verify_escaped_single_quote_expression
+sync_last_rejection
+grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
+  && pass "the release-shape check refuses a doubled quote that moves where an expression ends" \
+  || fail "a doubled quote that moves where an expression ends in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with a line separator that splitlines() and YAML read differently" verify_line_separator_in_comment
+sync_last_rejection
+grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
+  && pass "the release-shape check refuses a line separator that splitlines() and YAML read differently" \
+  || fail "a line separator that splitlines() and YAML read differently in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a release caller with an extra job selecting the release environment" add_release_environment_job
+sync_last_rejection
+grep -qF 'declares jobs other than the generated' "$tmproot/run.out" \
+  && pass "the release caller job set refuses an extra job selecting the release environment" \
+  || fail "a release caller with an extra job selecting the release environment was not refused by the job set pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a release caller with an extra job reading a secret" add_secret_reading_job
+sync_last_rejection
+grep -qF 'declares jobs other than the generated' "$tmproot/run.out" \
+  && pass "the release caller job set refuses an extra job reading a secret" \
+  || fail "a release caller with an extra job reading a secret was not refused by the job set pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a release caller with a duplicate snapshot job key" duplicate_snapshot_job
+sync_last_rejection
+grep -qF 'declares a duplicate job or top-level key' "$tmproot/run.out" \
+  && pass "the release caller job set refuses a duplicate snapshot job key" \
+  || fail "a release caller with a duplicate snapshot job key was not refused by the job set pin: $(tail -2 "$tmproot/run.out")"
+expect_release_mode_rejection release-artifact \
+  "a publish job that selects the release environment" \
+  publish_environment \
+  'declares a job environment or an unreadable job mapping'
+expect_release_mode_rejection release-artifact \
+  "a build matrix entry with a dependency index the generator did not write" \
+  build_matrix_dependency_index_changed \
+  'build job is not the generated release-artifact build job (#975)'
 
 expect_rejection "a snapshot caller granting GITHUB_TOKEN contents-write (#784)" grant_snapshot_github_token_write
 expect_rejection "a snapshot job that verifies nothing first (#463, #464)" drop_snapshot_needs

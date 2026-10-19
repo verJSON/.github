@@ -693,17 +693,17 @@ EOF
 # drift; the generated contract test asserts they are still identical.
 release_runner_expr="github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || '[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]'"
 
-# The snapshot job's inputs to changelog-release.yml, in every release caller
-# mode. One definition, because the generated contract test pins this mapping
-# exactly (keys and values): the snapshot receives its credential only through
-# `secrets: inherit` and the release-app environment, and an input value the
-# generator did not write is either a forwarded credential or an unverified
-# selection (#784, ADR 0099).
-# The whole snapshot job of every release caller mode. The generated contract
-# test pins this job byte for byte (#784, ADR 0099): it is the only job that
-# reaches the release App, and nothing in it is adopter-authored.
+# The whole snapshot job of every release caller mode, and nothing in it is
+# adopter-authored. The generated contract test pins it against this function
+# (#784, ADR 0099). It is the only job that reaches the release App: the suite
+# also pins the caller's job set and refuses a job-level environment.
 release_snapshot_job() {
   local ref="$1"
+  # Computed before the here-document: a command substitution inside one
+  # cannot fail the generator, and a caller rendered from a failed one is
+  # truncated in silence.
+  local snapshot_with
+  snapshot_with="$(release_snapshot_with "$ref")" || return
   cat <<EOF
   snapshot:
     # The irreversible act, and the only job that may not run first.
@@ -716,14 +716,15 @@ release_snapshot_job() {
       # The reusable workflow pushes with its separately minted release App
       # token. This caller grant caps only its read-only GITHUB_TOKEN (#784).
       contents: read
-$(release_snapshot_with "$ref")
+${snapshot_with}
 EOF
 }
 
 # The release-artifact build job. Its only generator inputs are the runner
 # matrix and whether approved private dependencies are restored; the contract
-# test renders this same function as its expectation and pins the job byte for
-# byte, with only the grammar-checked matrix substituted (#975, ADR 0099).
+# test renders this same function as its expectation and pins the job whole
+# (YAML comments, blank lines and one uniform reindent aside), with only the
+# grammar-checked matrix substituted (#975, ADR 0099).
 release_artifact_build_job() {
   local needs="$1" condition="$2" matrix="$3" restore_step="$4"
   cat <<EOF
@@ -817,6 +818,11 @@ EOF
   release_artifact_build_job "$needs" "$condition" "$matrix" "$restore_step"
 }
 
+# The snapshot job's inputs to changelog-release.yml. An input value the
+# generator did not write is either a forwarded credential or an unverified
+# selection, so the contract test pins them as part of release_snapshot_job:
+# the snapshot receives its credential only through `secrets: inherit` and the
+# release-app environment (#784, ADR 0099).
 release_snapshot_with() {
   local ref="$1"
   cat <<EOF
@@ -1027,6 +1033,12 @@ emit_release_node() {
   release_assets_json="$release_assets_json]"
   printf -v package_dirs_shell '%q ' "${release_package_dirs[@]}"
   package_dirs_shell="${package_dirs_shell% }"
+  # Computed before the here-document: a command substitution inside one
+  # cannot fail the generator, and a caller rendered from a failed one is
+  # truncated in silence.
+  local verify_dependency_steps snapshot_job
+  verify_dependency_steps="$(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'")" || return
+  snapshot_job="$(release_snapshot_job "$ref")" || return
   cat <<EOF
 name: Release
 run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}
@@ -1329,7 +1341,7 @@ ${release_plan_step}
               exit 1
             fi
           done
-$(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'")
+${verify_dependency_steps}
       - name: Prepare release package metadata
         if: steps.release-version.outputs.selected == 'true'
         env:
@@ -1459,7 +1471,7 @@ $(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'
             exit "\$verification_status"
           fi
 
-$(release_snapshot_job "$ref")
+${snapshot_job}
 
   publish:
     name: Publish the released snapshot
@@ -1686,6 +1698,13 @@ ${build_runners_yaml%$'\n'}
 EOF
 )"
   fi
+  # Computed before the here-document: a command substitution inside one
+  # cannot fail the generator, and a caller rendered from a failed one is
+  # truncated in silence.
+  local verify_dependency_steps snapshot_job build_job
+  verify_dependency_steps="$(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'")" || return
+  snapshot_job="$(release_snapshot_job "$ref")" || return
+  build_job="$(release_artifact_build_job_for "$private_dependencies" "${build_runners_yaml%$'\n'}")" || return
   cat <<EOF
 name: Release
 run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}
@@ -1963,7 +1982,7 @@ ${required_lane_validation_step}
               output.write("path=" + path + chr(10))
               output.write("cache=" + cache + chr(10))
           PY
-$(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'")
+${verify_dependency_steps}
       - name: Prepare release package metadata
         if: steps.release-version.outputs.selected == 'true'
         env:
@@ -2092,10 +2111,10 @@ $(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'
             exit "\$verification_status"
           fi
 
-$(release_snapshot_job "$ref")
+${snapshot_job}
 
 ${private_acquisition_job}
-$(release_artifact_build_job_for "$private_dependencies" "${build_runners_yaml%$'\n'}")
+${build_job}
 
   publish:
     name: Publish the released snapshot
@@ -2178,6 +2197,12 @@ emit_release_snapshot() {
   generation_command="$generation_command$selected_package_dir_args"
   printf -v package_dirs_shell '%q ' "${release_package_dirs[@]}"
   package_dirs_shell="${package_dirs_shell% }"
+  # Computed before the here-document: a command substitution inside one
+  # cannot fail the generator, and a caller rendered from a failed one is
+  # truncated in silence.
+  local verify_dependency_steps snapshot_job
+  verify_dependency_steps="$(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''")" || return
+  snapshot_job="$(release_snapshot_job "$ref")" || return
   cat <<EOF
 name: Release
 run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}
@@ -2455,7 +2480,7 @@ ${release_plan_step}
               output.write("path=" + path + chr(10))
               output.write("cache=" + cache + chr(10))
           PY
-$(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''")
+${verify_dependency_steps}
       - name: Prepare release package metadata
         if: steps.release-version.outputs.selected == 'true'
         env:
@@ -2587,7 +2612,7 @@ $(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'
             exit "\$verification_status"
           fi
 
-$(release_snapshot_job "$ref")
+${snapshot_job}
 
   publish:
     name: Publish the released snapshot
@@ -2901,6 +2926,13 @@ emit_contract_test() {
     release_lane_preflight="$(emit_release_lane_preflight "$release_lane_names" "$release_lane_env")"
     release_lane_preflight_sha256="$(printf '%s' "$release_lane_preflight" | digest_of)"
   fi
+  # Computed before the here-document: a command substitution inside one
+  # cannot fail the generator, and a caller rendered from a failed one is
+  # truncated in silence.
+  local carried_snapshot_job carried_build_job carried_private_build_job
+  carried_snapshot_job="$(release_snapshot_job "$ref" | sed 's/^/|/')" || return
+  carried_build_job="$(release_artifact_build_job_for false '@@BUILD_MATRIX@@' | sed 's/^/|/')" || return
+  carried_private_build_job="$(release_artifact_build_job_for true '@@BUILD_MATRIX@@' | sed 's/^/|/')" || return
   cat <<EOF
 #!/usr/bin/env bash
 # Asserts that this repository still satisfies the canonical verJSON changelog
@@ -2948,15 +2980,15 @@ EXPECTED_RELEASE_CACHE_RESTORE='${release_cache_restore}'
 # carries a leading pipe character so no dependency manager reads these copies
 # as workflow steps: they move only when this suite is regenerated.
 EXPECTED_RELEASE_SNAPSHOT_JOB="\$(cat <<'SNAPSHOT_JOB'
-$(release_snapshot_job "$ref" | sed 's/^/|/')
+${carried_snapshot_job}
 SNAPSHOT_JOB
 )"
 EXPECTED_RELEASE_BUILD_JOB="\$(cat <<'BUILD_JOB'
-$(release_artifact_build_job_for false '@@BUILD_MATRIX@@' | sed 's/^/|/')
+${carried_build_job}
 BUILD_JOB
 )"
 EXPECTED_RELEASE_PRIVATE_BUILD_JOB="\$(cat <<'PRIVATE_BUILD_JOB'
-$(release_artifact_build_job_for true '@@BUILD_MATRIX@@' | sed 's/^/|/')
+${carried_private_build_job}
 PRIVATE_BUILD_JOB
 )"
 EOF
@@ -3434,7 +3466,13 @@ RELEASE_SETUP_NODE = pinned_action("EXPECTED_RELEASE_SETUP_NODE", "actions/setup
 RELEASE_CACHE_SAVE = pinned_action("EXPECTED_RELEASE_CACHE_SAVE", "actions/cache/save")
 
 with open(path, encoding="utf-8") as handle:
-    raw_lines = handle.read().splitlines()
+    raw_text = handle.read()
+# str.splitlines() breaks lines at characters a YAML 1.2 parser reads as
+# content (NEL, LS, PS, and C0/C1 controls), so the lines below would not be
+# the lines Actions parses. None appears in a generated caller (ADR 0099).
+LINE_BREAK_DISAGREEMENT = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\ufeff]")
+line_break_disagreement = LINE_BREAK_DISAGREEMENT.search(raw_text)
+raw_lines = raw_text.splitlines()
 
 
 def strip_comment(line):
@@ -3459,72 +3497,143 @@ def strip_comment(line):
 
 lines = [strip_comment(line) for line in raw_lines]
 
-# YAML decodes escapes in double-quoted scalars and folds multi-line quoted
-# scalars, so the text a job runs with can differ from the text this file
-# scans: an escape can spell an expression opener the scan never sees, and a
-# quoted scalar that spans lines can pass for a block scalar header. Neither
-# appears in a generated caller, so both are refused rather than decoded. With
-# no backslash outside block scalar bodies and full-line comments, and no
-# quoted scalar left open at the end of its line, every flow scalar decodes to
-# its own raw text (ADR 0099, 2026-10-19).
-BLOCK_SCALAR_HEADER = re.compile(r"^( *)(?:- )?[A-Za-z0-9_.-]+:[ \t]*[|>][+-]?[ \t]*$")
+# The emitted suite runs on a bare python3 with no YAML parser (see the
+# release-shape docstring), so it cannot decode the caller the way Actions
+# does. Instead it reads the file with this scanner, which follows YAML's
+# node structure line by line, and refuses every construct after which its
+# reading could part from the parser's: a YAML escape (any backslash outside
+# block scalar bodies and comments), a quoted scalar or flow collection left
+# open at the end of a line, an escaped quote inside a single-quoted scalar, a
+# tag, anchor or alias, a document marker or directive, a tab in indentation, a
+# block scalar indentation indicator, a block scalar line indented less than
+# its first line, and (above) any character splitlines() and YAML disagree on.
+# No generated caller uses any of them. In what remains, a decoded scalar
+# differs from its raw text only by its quote delimiters, its indentation, and
+# line folding, which replaces a line break and the whitespace around it with a
+# space or a newline and so never joins text across a break. Every `${{`, `}}`,
+# quote and context name a decoded value holds is therefore in the raw text
+# the context scan reads. This is not "decoded equals raw": folding and
+# indentation still differ, and the scan's patterns allow whitespace for that
+# reason (ADR 0099, 2026-10-19).
+PROPERTY_OR_ALIAS = "!&*"
 
 
-def opens_quoted_scalar(line, index):
-    before = line[:index].rstrip()
-    return not before or before[-1] in ":-[{,?"
+def scan_yaml_lines(source_lines):
+    """Return (full-line comment indices, [(line number, refusal)])."""
+    comments = set()
+    refusals = []
+    block_parent = None
+    block_content = None
+    for number, line in enumerate(source_lines):
+        indentation = len(line) - len(line.lstrip(" "))
+        if block_parent is not None:
+            if not line.strip():
+                continue
+            if indentation > block_parent:
+                if block_content is None:
+                    block_content = indentation
+                elif indentation < block_content:
+                    refusals.append((number + 1, "a block scalar line indented less than its first line"))
+                continue
+            block_parent = None
+            block_content = None
+        if not line.strip():
+            continue
+        if line[indentation:indentation + 1] == "\t":
+            refusals.append((number + 1, "a tab in indentation"))
+            continue
+        if line.lstrip().startswith("#"):
+            comments.add(number)
+            continue
+        if line.startswith("%") or (
+            line[:3] in ("---", "...") and line[3:4] in ("", " ", "\t")
+        ):
+            refusals.append((number + 1, "a YAML document marker or directive"))
+            continue
+        if "\\" in line:
+            refusals.append((number + 1, "a backslash, which YAML may decode as an escape"))
+        position = indentation
+        node_start = True
+        key_column = indentation
+        flow_depth = 0
+        length = len(line)
+        while position < length:
+            char = line[position]
+            if char in " \t":
+                position += 1
+                continue
+            if char == "#" and position > 0 and line[position - 1] in " \t":
+                break
+            if node_start:
+                following = line[position + 1:position + 2]
+                if flow_depth == 0 and char in "-?:" and following in ("", " ", "\t"):
+                    key_column = position if char == "-" else key_column
+                    position += 1
+                    continue
+                if char in PROPERTY_OR_ALIAS:
+                    refusals.append((number + 1, "a YAML tag, anchor or alias"))
+                    break
+                if char in "'\"":
+                    close = position + 1
+                    while close < length and line[close] != char:
+                        close += 1
+                    if close >= length:
+                        refusals.append((number + 1, "a quoted scalar left open at the end of a line"))
+                        break
+                    if char == "'" and line[close + 1:close + 2] == "'":
+                        refusals.append((number + 1, "an escaped quote inside a single-quoted scalar"))
+                        break
+                    position = close + 1
+                    node_start = False
+                    continue
+                if char in "[{":
+                    flow_depth += 1
+                    position += 1
+                    continue
+                if flow_depth == 0 and char in "|>":
+                    header = line[position + 1:].split(" #", 1)[0].rstrip()
+                    if header not in ("", "+", "-"):
+                        refusals.append((number + 1, "a block scalar indentation indicator"))
+                    else:
+                        block_parent = key_column
+                    break
+                key_column = position if flow_depth == 0 else key_column
+                node_start = False
+            if flow_depth and char in ",[{":
+                flow_depth += char in "[{"
+                node_start = True
+                position += 1
+                continue
+            if flow_depth and char in "]}":
+                flow_depth -= 1
+                position += 1
+                continue
+            if char == ":" and (flow_depth or line[position + 1:position + 2] in ("", " ", "\t")):
+                node_start = True
+                position += 1
+                continue
+            position += 1
+        if flow_depth > 0:
+            refusals.append((number + 1, "a flow collection left open at the end of a line"))
+    return comments, refusals
 
 
 def yaml_comment_indices(source_lines):
     """Indices of full-line YAML comments; a `#` line inside a block scalar is content."""
-    found = set()
-    block_indent = None
-    for number, line in enumerate(source_lines):
-        indentation = len(line) - len(line.lstrip(" "))
-        if block_indent is not None:
-            if not line.strip() or indentation > block_indent:
-                continue
-            block_indent = None
-        if line.lstrip().startswith("#"):
-            found.add(number)
-            continue
-        if BLOCK_SCALAR_HEADER.match(line):
-            block_indent = indentation
-    return found
+    return scan_yaml_lines(source_lines)[0]
 
 
-def unreadable_scalar_lines():
-    found = []
-    block_indent = None
-    for number, line in enumerate(raw_lines):
-        indentation = len(line) - len(line.lstrip(" "))
-        if block_indent is not None:
-            if not line.strip() or indentation > block_indent:
-                continue
-            block_indent = None
-        if line.lstrip().startswith("#"):
-            continue
-        quote = None
-        for index, char in enumerate(line):
-            if quote:
-                if char == quote:
-                    quote = None
-                continue
-            if char == "#" and (index == 0 or line[index - 1] in " \t"):
-                break
-            if char in "'\"" and opens_quoted_scalar(line, index):
-                quote = char
-        if "\\" in line or quote:
-            found.append(number + 1)
-        if BLOCK_SCALAR_HEADER.match(line):
-            block_indent = indentation
-    return found
-
-
-if unreadable_scalar_lines():
+_, unreadable_yaml = scan_yaml_lines(raw_lines)
+if line_break_disagreement is not None:
+    unreadable_yaml.insert(0, (
+        raw_text.count("\n", 0, line_break_disagreement.start()) + 1,
+        "a control, line-separator or byte-order-mark character",
+    ))
+if unreadable_yaml:
+    line_number, refusal = unreadable_yaml[0]
     problems.append(
-        "uses a YAML escape or a multi-line quoted scalar the release-shape check "
-        "cannot read (#1712)"
+        "uses YAML the release-shape check cannot read: %s at line %d (#1712)"
+        % (refusal, line_number)
     )
 
 
@@ -4804,6 +4913,62 @@ for index in range(jobs_index + 1, jobs_end):
         continue
     job_headers.append((index, indentation, key, value))
 jobs_indent = min((entry[1] for entry in job_headers), default=None)
+
+# The release caller is generated whole and never hand-edited
+# (docs/changelog/README.md), so its job set is the generator's for its mode:
+# an extra job could select the release environment or read any secret, and a
+# duplicate key is resolved differently by different YAML parsers (ADR 0099).
+# Every generated release mode passes this check unmodified, which the caller
+# contract suite asserts, so a generator that adds a job must update this table.
+RELEASE_JOB_IDS = {
+    "release-node": ["verify", "snapshot", "publish"],
+    "release-snapshot": ["verify", "snapshot", "publish"],
+    "release-artifact": ["verify", "snapshot", "build", "publish"],
+}
+expected_job_ids = list(RELEASE_JOB_IDS.get(release_mode, []))
+if release_mode == "release-artifact" and os.environ.get("EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES", ""):
+    expected_job_ids.insert(2, "acquire-private-dependencies")
+top_level_keys = []
+for line in workflow_structure_lines:
+    if line.strip() and len(line) == len(line.lstrip()):
+        try:
+            top_level_keys.append(mapping_entry(line.strip())[0])
+        except ValueError:
+            top_level_keys.append(None)
+job_ids = [entry[2] for entry in job_headers if entry[1] == jobs_indent]
+if len(set(top_level_keys)) != len(top_level_keys) or len(set(job_ids)) != len(job_ids):
+    problems.append("declares a duplicate job or top-level key (ADR 0099)")
+if not expected_job_ids:
+    problems.append("has no generated job set for its declared mode (ADR 0099)")
+elif sorted(job_ids) != sorted(expected_job_ids):
+    problems.append(
+        "declares jobs other than the generated %s jobs (%s) (ADR 0099)"
+        % (release_mode, ", ".join(expected_job_ids))
+    )
+for job_position, (job_start, job_indent, _key, _value) in enumerate(job_headers):
+    if job_indent != jobs_indent:
+        continue
+    job_end = next(
+        (entry[0] for entry in job_headers[job_position + 1:] if entry[1] == jobs_indent),
+        jobs_end,
+    )
+    field_indent = min(
+        (
+            len(line) - len(line.lstrip())
+            for line in workflow_structure_lines[job_start + 1:job_end]
+            if line.strip()
+        ),
+        default=None,
+    )
+    if field_indent is None:
+        continue
+    fields = mapping_keys_at_indent(workflow_structure_lines, job_start + 1, job_end, field_indent)
+    if fields is None or "environment" in fields:
+        # changelog-release.yml selects the release-app environment itself; a
+        # caller job that names one could receive its App credential.
+        problems.append("declares a job environment or an unreadable job mapping (ADR 0099)")
+        break
+
 verify_job_header = next(
     (entry for entry in job_headers if entry[1] == jobs_indent and entry[2] == "verify"),
     None,
@@ -4909,10 +5074,10 @@ if build_job_start is not None:
         )
 
 # The job that calls changelog-release.yml receives its credential only through
-# `secrets: inherit` and the release-app environment (#784). Its `with:` mapping
-# is the generator's, entry for entry: a value the generator did not write is
-# either a forwarded credential or an unverified selection, whatever its
-# spelling. The expression scan over the whole job is defense in depth.
+# `secrets: inherit` and the release-app environment (#784), and the
+# release-artifact build job runs adopter-owned build code (#975). Both are
+# generator-determined, so both are pinned whole against the generator's own
+# definitions, which the contract test carries.
 def expected_job(variable):
     """A generated job the contract test carries line-prefixed with `|`."""
     carried = os.environ.get(variable, "").splitlines()
@@ -5023,17 +5188,10 @@ for snapshot_index, (snapshot_job_start, header_indent, _key, _value) in enumera
     ):
         continue
     snapshot_jobs += 1
+    # Pinned whole, so no separate context scan: the generated job reads no
+    # token or secrets context, and any job that differs is already refused.
     if dedented_job_body(snapshot_job_start, snapshot_job_end, 4) != template_body(EXPECTED_SNAPSHOT_JOB):
         problems.append("snapshot job is not the generated snapshot job (#784)")
-    if (
-        context_match_lines(GITHUB_TOKEN, snapshot_job_start + 1, snapshot_job_end)
-        or context_match_lines(GITHUB_CONTEXT_OBJECT, snapshot_job_start + 1, snapshot_job_end)
-        or context_match_lines(SECRETS_CONTEXT, snapshot_job_start + 1, snapshot_job_end)
-    ):
-        problems.append(
-            "snapshot job references a secrets context or GitHub token context "
-            "instead of selecting its environment (#784)"
-        )
 if not snapshot_jobs:
     # This file was selected because it names changelog-release.yml@; a caller
     # whose snapshot job cannot be found has inputs nothing pinned.

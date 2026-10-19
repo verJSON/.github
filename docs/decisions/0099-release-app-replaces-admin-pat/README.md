@@ -265,62 +265,86 @@ previous generator. This restores the invariant recorded above. It changes no
 credential, scope, or job boundary. Adopters receive the fix when they
 regenerate at a contract SHA that contains it.
 
-That fix concerns only block size. Review then found that the snapshot guard
-was incomplete in a way that has nothing to do with size. It matched a fixed
-list of names after a comment strip that also cut text following a `#` inside a
-quoted value. It therefore missed index-syntax context access, an expression
-after a quoted `#`, and secrets read under a name the list did not include.
-Successive reviews of this PR showed that the #1712 expression scan behind both
-jobs had gaps of its own. A line-wise comment strip misread `#` inside block
-scalars, inside multi-line quoted scalars, and after escaped quotes. The object
-pattern missed an object filter over the `github` context. And because the scan
-reads text without decoding YAML, a double-quoted escape could spell an
-expression that YAML decodes but no raw-text scan sees. The controls are now as
-follows.
+That fix concerns only block size. Later review rounds found two further
+gaps. Each guard matched a fixed list of names. The #1712 expression scan
+behind them read text without decoding YAML, so a YAML escape, a tag in front
+of a quote, or a `#` inside a block or multi-line scalar could put an
+expression in front of Actions that the scan never saw. The release caller's
+job set was also unconstrained. The controls are now as follows.
 
-**Pinned whole (generator-determined).** Neither job contains content the
-adopter writes. The generator writes each from one definition, and the contract
-test pins each against that same definition.
+**Pinned whole (generator-determined).** Neither job below has
+adopter-authored content.
 
-- **Snapshot job:** `release_snapshot_job`, which all three release caller
-  modes call. Every field is pinned: `needs`, `if`, `uses`, `secrets: inherit`,
-  `permissions`, and the full `with:` mapping.
-- **Release-artifact `build` job:** `release_artifact_build_job_for`. Every
-  field is pinned: name, gate, permissions, step sequence, `uses`, env values,
-  and run bodies, with or without the approved private dependency restore. The
-  one substituted part is the runner matrix. Each entry there must be a runner
-  selector the generator's own grammar admits, followed by its
-  `dependency-index`, in order. The dependency acquisition job was already
-  pinned the same way.
+- **Snapshot job.** Written by `release_snapshot_job` in all three release
+  caller modes. Every field is pinned: `needs`, `if`, `uses`,
+  `secrets: inherit`, `permissions`, and every `with:` input.
+- **Release-artifact `build` job.** Written by
+  `release_artifact_build_job_for`. Its settings, gate, permissions, step
+  sequence, `uses`, env values and run bodies are pinned. The one substituted
+  part is the runner matrix, whose entries must match the generator's runner
+  grammar and its `dependency-index` order.
 
-Each comparison skips blank lines and full-line YAML comments, which existing
-callers and `docs/changelog/README.md` put beside the generated wiring. A `#`
-line inside a block scalar is content, not a comment, so it is compared. One
-uniform indentation shift of the job body is tolerated, because it changes no
-YAML value. Everything else must match the generator byte for byte. Callers are
-byte-identical before and after this change in every release mode and option
-set checked.
+The contract test carries these same definitions, so the generator and the
+check cannot disagree. The comparison skips blank lines and full-line YAML
+comments, and tolerates one uniform reindent of the job body. A `#` line inside
+a block scalar is content, so it is compared. The dependency acquisition job
+was already pinned this way. Generated callers are byte-identical before and
+after this change in every mode and option set checked.
 
-**Scanned and parse-checked (the rest of the caller).** The verify job carries
-adopter-dependent inputs, such as package directories and runner lanes, and is
-pinned step by step by the existing #1712 and #1717 checks rather than whole.
-The expression scan covers the verify, snapshot, build, and acquisition jobs and
-reads raw lines. It matches the token context, the `secrets` context, and the
-`github` context object, whether read whole, by index, or through an object
-filter. A parse rule covers the whole release caller file. It refuses any YAML
-that would decode to something other than its raw text: a backslash anywhere outside block-scalar bodies and
-full-line comments, or a quoted scalar left open at the end of its line. Block
-scalars do not process escapes. With both refused, every flow scalar decodes to
-its own raw text, so what the scan reads is what Actions evaluates. No generated
-caller contains either form.
+**Job set.** The release caller is generated whole and never hand-edited
+(`docs/changelog/README.md`). Its job ids must therefore be exactly the
+generator's set for its declared mode:
 
-**Residual.** No residual is known for the escape and comment classes anywhere
-in a release caller, because the parse rule covers the whole file. The rule is
-deliberately narrower than YAML: a hand-written caller that uses escapes or
-multi-line quoted scalars is refused rather than read. The `publish` job holds
-the publication credentials by design, so it is neither pinned whole nor
-covered by the expression scan. It keeps its existing per-field checks, and
-this amendment does not change them.
+- `release-node` and `release-snapshot`: `verify`, `snapshot`, `publish`.
+- `release-artifact`: `verify`, `snapshot`, `build`, `publish`, plus
+  `acquire-private-dependencies` when private packages are approved.
+
+A duplicate job id or top-level key is refused, and so is a job-level
+`environment`. `changelog-release.yml` is therefore the only place that
+selects the release-app environment, and the snapshot job is the only caller
+job that reaches the release App.
+
+**Scanned and refused rather than decoded.** The emitted suite runs on a bare
+`python3` with no YAML parser, so it cannot decode the caller as Actions does.
+It reads the whole file with a scanner that follows YAML's node structure, and
+refuses every construct after which that reading could part from a parser's:
+
+- a backslash outside block-scalar bodies and comments;
+- a quoted scalar or flow collection left open at the end of a line;
+- an escaped quote inside a single-quoted scalar;
+- a YAML tag, anchor or alias;
+- a document marker or directive;
+- a tab in indentation;
+- a block-scalar indentation indicator;
+- a block-scalar line indented less than its first line;
+- a C0 or C1 control, LS, PS or BOM character, which `str.splitlines()` treats
+  as a line break and a YAML 1.2 parser does not.
+
+No generated caller, and none of eight live adopter callers checked, uses any
+of them. What this guarantees is narrower than "decoded equals raw". A decoded
+scalar still differs from its raw text in quote delimiters, indentation, and
+line folding, which replaces a line break and the whitespace around it with a
+space or a newline. Folding never joins text across a break, so every `${{`,
+`}}`, quote and context name in a decoded value appears in the raw text. The
+expression scan reads that raw text in the verify, build and acquisition jobs.
+It matches the token context, the `secrets` context, and the `github` object
+read whole, by index, or through an object filter.
+
+**Generator.** The generator now computes every value it interpolates into a
+here-document before writing that document, and returns on failure. Bash
+ignores the status of a command substitution inside a here-document, so a
+failed one used to render a truncated caller with exit status 0. The caller
+contract suite refuses any command substitution in an unquoted here-document
+of the generator. It also asserts that every mode it captures writes nothing
+to stderr.
+
+**Residual.** No residual is known for the escape, tag, comment or job-set
+classes. The scanner is deliberately narrower than YAML, so a hand-written
+caller that uses the refused constructs is rejected rather than read. The
+`publish` job holds publication credentials by design. It is neither pinned
+whole nor scanned for contexts, and it keeps its existing per-field checks.
+A generator function that exits silently inside a command substitution, as
+opposed to returning non-zero or writing to stderr, is not detected.
 
 ## Rollback
 
