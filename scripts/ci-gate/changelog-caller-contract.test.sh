@@ -2344,7 +2344,8 @@ PY
 # open once the block outgrows the pipe: grep exits on its first match, the
 # still-writing producer dies of SIGPIPE, and the negated pipeline reads the
 # 141 as "no match". So the reference sits first and a MiB of ordinary YAML
-# follows it, which is past any pipe capacity and makes the race deterministic.
+# follows it, far past the 64 KiB default pipe capacity, so the race is
+# deterministic.
 bury_credential_in_large_job() {
   # bury_credential_in_large_job <adopter> <job-header> <anchor-line> <inserted-line>...
   local workflow="$1/.github/workflows/release.yml"
@@ -2370,6 +2371,21 @@ forward_credential_from_large_snapshot() {
 leak_secret_into_large_build_job() {
   bury_credential_in_large_job "$1" "  build:" "    timeout-minutes: 45" \
     "    env:" '      LEAKED: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}'
+}
+# A name list cannot see a context it does not spell. The snapshot job is read
+# by the same quote-aware expression scan as the build job, so each spelling of
+# the token and secrets contexts below has to be rejected, and an ordinary `#`
+# inside a quoted value has to stay legal.
+add_snapshot_input() {
+  python3 - "$1/.github/workflows/release.yml" "$2" <<'PY'
+import sys
+
+path, inserted = sys.argv[1:]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index("    with:\n", lines.index("  snapshot:\n")) + 1
+lines[at:at] = [inserted + "\n"]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
 }
 
 # #463/#464/#465. Each mutation below reproduces one defect the hand-copied
@@ -3802,6 +3818,44 @@ expect_release_mode_rejection release-artifact \
   "a large build job referencing a secret before its padding" \
   leak_secret_into_large_build_job \
   'build job references a secrets context; the build matrix runs adopter-owned scripts/release-build.sh'
+
+expect_rejection "a snapshot input reading the token context by index" \
+  add_snapshot_input "      notes_token: \${{ github['token'] }}"
+sync_last_rejection
+grep -qF 'snapshot job references a secrets context or GitHub token context' "$tmproot/run.out" \
+  && pass "the snapshot scan rejects index-syntax token context access" \
+  || fail "an index-syntax token read in the snapshot was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input whose token expression follows a quoted #" \
+  add_snapshot_input '      release_title: "release # ${{ github.token }}"'
+sync_last_rejection
+grep -qF 'snapshot job references a secrets context or GitHub token context' "$tmproot/run.out" \
+  && pass "the snapshot scan reads past a # inside a quoted value" \
+  || fail "a token read after a quoted # in the snapshot was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input reading a secret by dotted access" \
+  add_snapshot_input '      notes_token: ${{ secrets.NPM_TOKEN }}'
+sync_last_rejection
+grep -qF 'snapshot job references a secrets context or GitHub token context' "$tmproot/run.out" \
+  && pass "the snapshot scan rejects dotted secrets context access" \
+  || fail "a dotted secrets read in the snapshot was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input reading a secret by index" \
+  add_snapshot_input "      notes_token: \${{ secrets['NPM_TOKEN'] }}"
+sync_last_rejection
+grep -qF 'snapshot job references a secrets context or GitHub token context' "$tmproot/run.out" \
+  && pass "the snapshot scan rejects index-syntax secrets context access" \
+  || fail "an index-syntax secrets read in the snapshot was rejected for another reason: $(tail -2 "$tmproot/run.out")"
+quoted_hash_snapshot_adopter="$tmproot/adopter-snapshot-quoted-hash"
+cp -a "$adopter_template" "$quoted_hash_snapshot_adopter"
+add_snapshot_input "$quoted_hash_snapshot_adopter" \
+  '      release_title: "release # ${{ needs.verify.outputs.version }}"'
+git -C "$quoted_hash_snapshot_adopter" commit -aqm 'title the snapshot with a quoted #'
+schedule_adopter_script "$quoted_hash_snapshot_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite accepts a # inside a quoted non-credential snapshot input"
+else
+  fail "emitted suite rejected a quoted # in a non-credential snapshot input: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 
 expect_rejection "a snapshot caller granting GITHUB_TOKEN contents-write (#784)" grant_snapshot_github_token_write
 expect_rejection "a snapshot job that verifies nothing first (#463, #464)" drop_snapshot_needs

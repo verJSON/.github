@@ -265,6 +265,22 @@ previous generator. This restores the invariant recorded above. It changes no
 credential, scope, or job boundary. Adopters receive the fix when they
 regenerate at a contract SHA that contains it.
 
+That fix concerns only block size. Review found that the snapshot guard's
+pattern was itself incomplete, independent of size. It matched a fixed list of
+names, after a comment strip that also cut text following a `#` inside a quoted
+value. As a result it accepted index-syntax access to the token context, a token
+expression placed after a quoted `#`, and secrets read under a name the list did
+not include. The build job had no such gap, because the #1712 Python scan reads
+every Actions expression in it. That scan is quote-aware and catches the token
+context, the bare `github` context object, and the `secrets` context in any
+spelling. Every job that calls `changelog-release.yml` now goes through the same
+expression scan. The snapshot job receives credentials only through
+`secrets: inherit` and the release-app environment, so any expression in it that
+reads those contexts is rejected. The name-list guard remains as an earlier,
+cheaper check. New cases cover both token spellings, dotted and index-syntax
+`secrets` access, and a quoted `#` in a non-credential input, which stays legal.
+Each rejection case failed against the previous generator.
+
 ## Rollback
 
 Reverting the #803 implementation removes the scheduled conformance signal but

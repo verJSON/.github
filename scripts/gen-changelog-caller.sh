@@ -4814,6 +4814,37 @@ if build_job_start is not None:
             "build job references a secrets context or GitHub token context (#1712)"
         )
 
+# The job that calls changelog-release.yml receives its credential only through
+# `secrets: inherit` and the release-app environment (#784). Any expression in
+# it that reads the token or secrets context forwards a credential, however the
+# access is spelled, so it gets the build job's expression scan rather than a
+# list of names.
+for snapshot_index, (snapshot_job_start, header_indent, _key, _value) in enumerate(job_headers):
+    if header_indent != jobs_indent:
+        continue
+    snapshot_job_end = next(
+        (
+            entry[0] for entry in job_headers[snapshot_index + 1:]
+            if entry[1] == jobs_indent
+        ),
+        jobs_end,
+    )
+    if not any(
+        "changelog-release.yml@" in lines[index]
+        for index in range(snapshot_job_start + 1, snapshot_job_end)
+    ):
+        continue
+    if (
+        context_match_lines(GITHUB_TOKEN, snapshot_job_start + 1, snapshot_job_end)
+        or context_match_lines(GITHUB_CONTEXT_OBJECT, snapshot_job_start + 1, snapshot_job_end)
+        or context_match_lines(SECRETS_CONTEXT, snapshot_job_start + 1, snapshot_job_end)
+    ):
+        problems.append(
+            "snapshot job references a secrets context or GitHub token context "
+            "instead of selecting its environment (#784)"
+        )
+        break
+
 acquisition_job_start = next(
     (index for index, line in enumerate(lines) if line == "  acquire-private-dependencies:"),
     None,
