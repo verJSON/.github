@@ -262,6 +262,7 @@ def verify_token_tracing_is_reliable(root):
             subprocess.run([str(root / "npm-trace-bin/npm"), "--version"], env=env, check=True)
         recorded = [line.rsplit("|", 1)[1] for line in trace.read_text().splitlines()]
         assert recorded == [expected] * 3, f"npm trace recorder misrecorded the credential: {recorded}"
+    return True
 
 
 def build_fixture(root, npm_bin, private_registry, attacker_registry):
@@ -812,11 +813,13 @@ CONTRACT_CHECKS = (
 )
 
 
+ISOLATION_LABELS = (*(f"{label} verify" for label in VERIFY_MODES), ACQUISITION_LABEL)
+
+
 def case_space():
     """Every case this test runs: contract checks need no npm; isolation cases run per npm major."""
-    labels = [f"{label} verify" for label in VERIFY_MODES] + [ACQUISITION_LABEL]
     return {("contract", check) for check in CONTRACT_CHECKS} | {
-        ("isolation", label, major) for label in labels for major in harness.SUPPORTED_NPM_RELEASES
+        ("isolation", label, major) for label in ISOLATION_LABELS for major in harness.SUPPORTED_NPM_RELEASES
     }
 
 
@@ -829,13 +832,18 @@ def parts():
     }
 
 
+def selected_part(environ):
+    """The requested part; unset means `all`, while an empty value stays empty and is refused."""
+    return environ.get(PART_VARIABLE, "all")
+
+
 def selected_cases(part):
     """The cases a part runs; `all` runs everything; None for an unknown part."""
     return case_space() if part == "all" else parts().get(part)
 
 
 def main():
-    part = os.environ.get(PART_VARIABLE, "all")
+    part = selected_part(os.environ)
     selected = selected_cases(part)
     if selected is None:
         print(f"unknown {PART_VARIABLE} {part!r}: expected all or one of {sorted(parts())}", file=sys.stderr)
@@ -856,9 +864,14 @@ def main():
         )
         for major in harness.SUPPORTED_NPM_RELEASES
     }
+    # The run tables must name exactly the case space, so neither can drift.
+    assert set(cases) == {case for case in case_space() if case[0] == "isolation"}, (
+        f"isolation run table and case space differ: {sorted(set(cases) ^ {case for case in case_space() if case[0] == 'isolation'})}"
+    )
     # Every part runs the recorder guard: the isolation assertions rely on it.
+    guard_verified = False
     with tempfile.TemporaryDirectory(prefix="release-caller-trace-") as temp:
-        verify_token_tracing_is_reliable(Path(temp))
+        guard_verified = verify_token_tracing_is_reliable(Path(temp))
     ran = set()
     with tempfile.TemporaryDirectory(prefix="release-caller-reserved-") as temp:
         contract_checks = {
@@ -882,6 +895,9 @@ def main():
             "script allowlist": lambda: verify_script_allowlist(Path(temp) / "script-allowlist"),
             "allowlist sweep": lambda: verify_allowlist_sweep(workflows["release-artifact"], Path(temp) / "sweep"),
         }
+        assert set(contract_checks) == set(CONTRACT_CHECKS), (
+            f"contract run table and case space differ: {sorted(set(contract_checks) ^ set(CONTRACT_CHECKS))}"
+        )
         for kind, check in sorted(case for case in selected if case[0] == "contract"):
             if check.startswith("reserved paths "):
                 (Path(temp) / check.removeprefix("reserved paths ").removesuffix(" verify")
@@ -904,6 +920,7 @@ def main():
                     setup_node_registry=setup_node_registry, required_hooks=required_hooks,
                 )
                 ran.add(case)
+    assert guard_verified is True, "the npm trace recorder guard did not run"
     assert ran == selected, f"unexercised cases: {sorted(selected - ran)}"
     isolated = sum(case[0] == "isolation" for case in ran)
     print(f"ok - part {part}: {len(ran) - isolated} contract checks and {isolated} generated "

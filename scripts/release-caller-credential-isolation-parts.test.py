@@ -34,6 +34,34 @@ spec.loader.exec_module(module)
 
 cases = module.case_space()
 parts = module.parts()
+
+# Independent anchors: the case space must still name exactly these checks and
+# labels, so dropping one from both the selection and the runner tables is red.
+EXPECTED_CONTRACT_CHECKS = {
+    "reserved paths release-node --only-package-dir . verify",
+    "reserved paths release-snapshot verify",
+    "reserved paths release-artifact verify",
+    "private lock validation",
+    "script allowlist",
+    "allowlist sweep",
+}
+EXPECTED_ISOLATION_LABELS = {
+    "release-node --only-package-dir . verify",
+    "release-snapshot verify",
+    "release-artifact verify",
+    "release-artifact acquire-private-dependencies",
+}
+check({case[1] for case in cases if case[0] == "contract"} == EXPECTED_CONTRACT_CHECKS,
+      "the case space names exactly the expected contract checks")
+check({case[1:] for case in cases if case[0] == "isolation"}
+      == {(label, major) for label in EXPECTED_ISOLATION_LABELS for major in module.harness.SUPPORTED_NPM_RELEASES},
+      "the case space runs every expected label under every supported npm major")
+check(len(cases) == len(EXPECTED_CONTRACT_CHECKS)
+      + len(EXPECTED_ISOLATION_LABELS) * len(module.harness.SUPPORTED_NPM_RELEASES),
+      f"the case space holds exactly the expected number of cases ({len(cases)})")
+check(set(module.CONTRACT_CHECKS) == {case[1] for case in cases if case[0] == "contract"}
+      and set(module.ISOLATION_LABELS) == {case[1] for case in cases if case[0] == "isolation"},
+      "the runner tables' keys are the case space's checks and labels")
 check(bool(cases), f"the test defines a non-empty case space ({len(cases)} cases)")
 check(len(parts) >= 2, f"the case space is split into at least two parts ({sorted(parts)})")
 for name, selected in sorted(parts.items()):
@@ -46,15 +74,18 @@ for (left, left_cases), (right, right_cases) in itertools.combinations(sorted(pa
     overlap = left_cases & right_cases
     check(not overlap, f"parts {left} and {right} share no case"
           + "".join(f" ({case})" for case in sorted(overlap)))
-check(module.selected_cases("all") == cases, "an unset part runs every case")
+check(module.selected_part({}) == "all", "an unset part selects all")
+check(module.selected_part({module.PART_VARIABLE: "npm10"}) == "npm10", "a set part selects that part")
+check(module.selected_cases(module.selected_part({})) == cases, "an unset part runs every case")
 check(module.selected_cases("no-such-part") is None, "an unknown part selects nothing")
 
-completed = subprocess.run(
-    [sys.executable, str(TEST)], capture_output=True, text=True,
-    env={**os.environ, module.PART_VARIABLE: "no-such-part"},
-)
-check(completed.returncode == 2 and not completed.stdout.strip(),
-      f"{module.PART_VARIABLE}='no-such-part' exits 2 and runs no case (rc={completed.returncode})")
+for refused in ("no-such-part", ""):
+    completed = subprocess.run(
+        [sys.executable, str(TEST)], capture_output=True, text=True,
+        env={**os.environ, module.PART_VARIABLE: refused},
+    )
+    check(completed.returncode == 2 and not completed.stdout.strip(),
+          f"{module.PART_VARIABLE}={refused!r} exits 2 and runs no case (rc={completed.returncode})")
 
 rows = [line.rstrip("\n").split("\t", 1)[-1] for line in MANIFEST.read_text().splitlines()
         if line and not line.startswith("#")]
