@@ -1009,9 +1009,14 @@ jobs:
           set -euo pipefail
           cd -- "$GITHUB_WORKSPACE"
           attributes="$(git rev-parse --git-path info/attributes)"
-          mkdir -p -- "$(dirname -- "$attributes")"
+          info="$(dirname -- "$attributes")"
+          if [ -L "$info" ] || [ -L "$attributes" ]; then
+            echo "::error::$attributes or its directory is a symlink; refusing to write the review attribute override"
+            exit 1
+          fi
+          mkdir -p -- "$info"
           rm -f -- "$attributes"
-          printf '* !diff\n' >"$attributes"
+          (set -o noclobber; printf '* !diff\n' >"$attributes")
 
       # Cost/latency optimization (#120): when main is active a green PR keeps
       # getting a base-merge from preflight, which re-fires `synchronize` and

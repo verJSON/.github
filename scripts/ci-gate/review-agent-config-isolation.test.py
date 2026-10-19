@@ -319,7 +319,7 @@ class ReviewDiffIgnoresPullRequestAttributesTest(PullRequestCheckoutFixture):
                                   text=True, capture_output=True, check=True).stdout.split()[0]
         self.assertEqual(outputs.get('patch_id'), expected)
 
-    def test_neutralizing_replaces_a_planted_link_without_writing_through_it(self):
+    def test_neutralizing_refuses_a_planted_link_at_the_attributes_file(self):
         outside = self.root / 'runner-file'
         outside.write_text('runner\n')
         attributes = Path(git(self.workspace, 'rev-parse', '--absolute-git-dir')) / 'info/attributes'
@@ -327,11 +327,26 @@ class ReviewDiffIgnoresPullRequestAttributesTest(PullRequestCheckoutFixture):
         attributes.unlink(missing_ok=True)
         attributes.symlink_to(outside)
         result = self.run_step(ATTRIBUTES_ID)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(result.returncode, 0)
         self.assertEqual(outside.read_text(), 'runner\n')
-        self.assertFalse(attributes.is_symlink())
-        self.assertEqual(attributes.read_text(), '* !diff\n')
+        self.assertTrue(attributes.is_symlink())
 
+    def test_neutralizing_refuses_a_planted_link_at_the_info_directory(self):
+        outside = self.root / 'runner-dir'
+        outside.mkdir()
+        info = Path(git(self.workspace, 'rev-parse', '--absolute-git-dir')) / 'info'
+        shutil.rmtree(info, ignore_errors=True)
+        info.symlink_to(outside)
+        result = self.run_step(ATTRIBUTES_ID)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_neutralizing_rewrites_its_own_previous_override(self):
+        self.assertEqual(self.run_step(ATTRIBUTES_ID).returncode, 0)
+        result = self.run_step(ATTRIBUTES_ID)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        attributes = Path(git(self.workspace, 'rev-parse', '--absolute-git-dir')) / 'info/attributes'
+        self.assertEqual(attributes.read_text(), '* !diff\n')
 
 class ReviewInputsStayOutsideTheCheckoutTest(PullRequestCheckoutFixture):
     """Links the pull request commits where the gate writes must not redirect or empty the review input."""
