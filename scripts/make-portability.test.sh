@@ -47,7 +47,18 @@ if grep -q $'\tbash scripts/gen-adr-index.sh --check$' "$actions_ci"; then
 else
   fail "actions-ci bypasses the portable ADR-index target"
 fi
-if grep -q $'\tbash scripts/render-next.sh >/dev/null$' "$actions_ci"; then
+# The row wraps the renderer so an emptied post-release NEXT/ passes; it must
+# still execute the same portable script the `render` target runs. Run the row
+# against a stub renderer that records its execution, so a reference that only
+# appears in a comment cannot satisfy the check.
+render_fixture="$tmp/render-row"
+mkdir -p "$render_fixture/scripts" "$render_fixture/NEXT"
+cp "$root/scripts/render-next-check.sh" "$render_fixture/scripts/"
+printf '%s\n' '#!/usr/bin/env bash' ': >"$(dirname "$0")/../render-next.ran"' \
+  > "$render_fixture/scripts/render-next.sh"
+if grep -q $'\tbash scripts/render-next-check.sh$' "$actions_ci" \
+  && (cd "$render_fixture" && bash -o pipefail -c 'bash scripts/render-next-check.sh') >/dev/null 2>&1 \
+  && [ -e "$render_fixture/render-next.ran" ]; then
   pass "actions-ci consumes the portable render command without requiring make"
 else
   fail "actions-ci bypasses the portable render target"
