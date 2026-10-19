@@ -1519,6 +1519,9 @@ jobs:
           # which an earlier job on a persistent runner could have written.
           mkdir -m 0700 -- "$RUNNER_TEMP/claude-config-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 
+      # Only read-only tools exist, and with no allow rule they read only the checkout
+      # and the review directory; /proc is denied outright, including through a link
+      # the head commits, because it holds this process's credentials (ADR 0237).
       - name: Claude review (merge gate)
         id: claude
         if: needs.preflight.outputs.lane == 'ai' && needs.preflight.outputs.provider == 'anthropic' && steps.rereview.outputs.skip_model != 'true' && steps.reserve_1.outputs.allowed == 'true'
@@ -1544,7 +1547,8 @@ jobs:
             --max-turns 30
             --max-budget-usd ${{ needs.preflight.outputs.budget_usd }}
             --json-schema '{"type":"object","properties":{"blocking":{"type":"boolean"},"summary":{"type":"string"},"review_first":{"type":"array","items":{"type":"object","properties":{"location":{"type":"string","description":"Exactly one file and positive line number (path/to/file.ext:42); no ranges or comma-separated locations."},"why":{"type":"string"}},"required":["location","why"],"additionalProperties":false}},"findings":{"type":"array","items":{"type":"object","properties":{"location":{"type":"string","description":"Exactly one repository-relative file and one positive line number (path/to/file.ext:42); no ranges or comma-separated locations."},"reason":{"type":"string"},"failure_scenario":{"type":"string"},"evidence":{"type":"string","description":"An 8-240 character exact fragment from the cited source line, or the entire trimmed line when shorter than 8 characters."}},"required":["location","reason","failure_scenario","evidence"],"additionalProperties":false}},"followups":{"type":"array","items":{"type":"object","properties":{"location":{"type":"string"},"note":{"type":"string"}},"required":["location","note"],"additionalProperties":false}}},"required":["blocking","summary","review_first","findings","followups"],"additionalProperties":false}'
-            --allowedTools "Read,Grep,Glob"
+            --tools "Read,Grep,Glob"
+            --disallowedTools "Read(//proc/**)"
             --add-dir "${{ steps.prep.outputs.review_dir }}"
             --setting-sources user
             --strict-mcp-config

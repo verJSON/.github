@@ -65,6 +65,21 @@ class ClaudeReviewArgumentsTest(unittest.TestCase):
         # A value would be consumed as the flag's argument and passed on as a stray token.
         self.assertEqual(strict, [None])
 
+    def test_claude_review_offers_only_read_only_tools(self):
+        tools = [value for flag, value in claude_flags(STEPS['claude']) if flag == 'tools']
+        self.assertEqual(tools, ['Read,Grep,Glob'])
+
+    def test_claude_review_reads_only_the_checkout_and_its_review_directory(self):
+        flags = claude_flags(STEPS['claude'])
+        # A bare allow rule for a read tool permits reads anywhere the runner user can read.
+        self.assertEqual([value for flag, value in flags if flag in ('allowedTools', 'allowed-tools')], [])
+        self.assertEqual([value for flag, value in flags if flag == 'add-dir'], ['${{ steps.prep.outputs.review_dir }}'])
+
+    def test_claude_review_denies_reads_of_process_state(self):
+        denied = [value for flag, value in claude_flags(STEPS['claude']) if flag in ('disallowedTools', 'disallowed-tools')]
+        rules = {rule.strip() for value in denied for rule in value.split(',')}
+        self.assertIn('Read(//proc/**)', rules)
+
 
 def evaluate_condition(condition, values, job_succeeded):
     """Evaluate a step `if:` the way Actions does for the expressions this job uses.
