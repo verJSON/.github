@@ -243,17 +243,19 @@ def verify_token_tracing_is_reliable(root):
     (fake_bin / "npm").write_text("#!/bin/sh\nexit 0\n")
     (fake_bin / "npm").chmod(0o755)
     tracing = token_tracing_path(root, {"PATH": f"{fake_bin}{os.pathsep}/usr/bin:/bin"})
-    # A large environment after the token keeps the environment dump writing
-    # after any early-exiting reader would already have seen the token.
-    padding = {f"TRACE_PADDING_{index:04d}": "x" * 1024 for index in range(400)}
+    # 512 KiB after the token keeps the environment dump writing after an
+    # early-exiting reader has seen the token: a piped probe then misrecords
+    # every call (500 of 500 locally), while below ~320 KiB it does so only
+    # intermittently. Three calls per direction are enough to fail it.
+    padding = {f"TRACE_PADDING_{index:04d}": "x" * 1024 for index in range(512)}
     trace = Path(tracing["NPM_TRACE"])
     for credential, expected in ((TOKEN, "present"), (None, "absent")):
         trace.unlink(missing_ok=True)
         env = ({"NODE_AUTH_TOKEN": credential} if credential else {}) | tracing | padding
-        for _ in range(25):
+        for _ in range(3):
             subprocess.run([str(root / "npm-trace-bin/npm"), "--version"], env=env, check=True)
         recorded = [line.rsplit("|", 1)[1] for line in trace.read_text().splitlines()]
-        assert recorded == [expected] * 25, f"npm trace recorder misrecorded the credential: {recorded}"
+        assert recorded == [expected] * 3, f"npm trace recorder misrecorded the credential: {recorded}"
 
 
 def build_fixture(root, npm_bin, private_registry, attacker_registry):
