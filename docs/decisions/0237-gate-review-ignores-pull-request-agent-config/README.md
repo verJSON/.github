@@ -45,7 +45,7 @@ runner-home MCP server all executed. Under `--setting-sources user` alone the
 runner-home hook still executed, and without `--strict-mcp-config` so did the
 runner-home MCP server. With both flags and a fresh `CLAUDE_CONFIG_DIR`, nothing did.
 
-Three neighboring trust gaps in the same job came out of the review:
+Reviews of this change found further trust gaps in the same job:
 
 - The pull-request head checkout persisted the job token, and in agent mode the
   action's `configureGitAuth` (`src/github/operations/git-config.ts:22-48,128-135`)
@@ -57,6 +57,15 @@ Three neighboring trust gaps in the same job came out of the review:
   model would see only `Binary files … differ`.
 - `--setting-sources user` reads the runner's `~/.claude` and `~/.claude.json`, which
   an earlier job on a persistent runner could have written.
+- The gate wrote its review inputs (`.ai-review/`) and telemetry (`.telemetry/`) into
+  the pull-request working tree with plain redirections, which follow a link the head
+  commits at those paths. A planted link could leave the provider input empty while
+  `prep` still reported it available, or overwrite a file the gate relies on.
+- The bare `Read`, `Grep`, and `Glob` allow rules let the review read any file the
+  runner user can. That includes the review process's own environment, which holds the
+  model credential: the CLI refuses a direct read of that file, but not one reached
+  through a link the pull request commits. The validated verdict is posted to the pull
+  request without redaction.
 
 Reachability: `gate-rearm.yml` terminalizes the authorization check and dispatches
 nothing when the head repository owner differs from the repository owner, so a fork
@@ -76,7 +85,8 @@ that write access alone does not grant. The exposure is pre-existing on `main`
    immediately after `Checkout PR head`, under that checkout's condition, deletes the
    root-level paths the pinned action itself treats as sensitive
    (`restore-config.ts:26-35`): `.claude`, `.claude.json`, `.mcp.json`, `CLAUDE.md`,
-   `CLAUDE.local.md`, `.gitmodules`, `.ripgreprc`, and `.husky`. A path that cannot
+   `CLAUDE.local.md`, `.gitmodules`, `.ripgreprc`, and `.husky`, plus the gate's former
+   in-tree review directory `.ai-review`, so it cannot hold a decoy. A path that cannot
    be removed, or a missing workspace, fails the step. The step is not
    `continue-on-error` and the Claude step's condition calls no status function, so
    a failed removal fails the job before the review can start. A change that adds
@@ -87,9 +97,17 @@ that write access alone does not grant. The exposure is pre-existing on `main`
    #1849, these paths are pull-request content, and a repository may legitimately
    link `CLAUDE.md` to `AGENTS.md`. Refusing would block every review in such a
    repository. `rm -rf -- <name>` removes the link itself and never follows it.
-4. **The review evidence is unaffected.** The model still sees every changed line in
-   `.ai-review/pr.diff`, and `review-verdict.py` resolves cited evidence from git
-   objects at the reviewed commit, not the working tree.
+4. **No gate step writes into the pull-request working tree.** `prep` creates the
+   review directory with `mktemp -d` under `RUNNER_TEMP` (mode 0700) and publishes it
+   as the `review_dir` output only after it succeeds. Every provider, the prompt, and
+   the Claude review's `--add-dir` name it by absolute path. The telemetry payload is
+   written the same way. After the checkout, the only writes inside the workspace are
+   git's own metadata: base-history fetches and decision 7's override. A link the head
+   commits therefore cannot redirect, replace, or empty a review input. `prep` also
+   fails closed with `review_input_empty` when the rendered diff is empty for a head
+   that changes files, or the filtered diff is empty without an elided lockfile. The
+   model still sees every changed line, and `review-verdict.py` resolves cited evidence
+   from git objects at the reviewed commit, not the working tree.
 5. **The OpenAI and DeepSeek passes need no change.** They run the trusted,
    standard-library-only `openai-review.py` and `deepseek-review.py` under
    `python3 -I` from `RUNNER_TEMP`. Neither starts a CLI or reads repository-local
@@ -106,9 +124,13 @@ that write access alone does not grant. The exposure is pre-existing on `main`
    action's token rewrite fails and is skipped.
 7. **Review diffs ignore pull-request attributes.** A step right after the head
    removal writes `* !diff` to `$GIT_DIR/info/attributes`, which outranks every
-   in-tree `.gitattributes`. It replaces a planted link there rather than writing
-   through it. Both diff commands also pass `--no-ext-diff --no-textconv`, so runner
-   configuration cannot substitute their output. Genuinely binary content still
+   in-tree `.gitattributes`. A link at that file or at its directory can only be runner
+   residue, because git metadata is never pull-request content, so the step refuses it
+   and creates the file exclusively. No later step writes into the working tree
+   (decision 4), so nothing can redirect a write onto the override. Both diff commands
+   also pass `--no-ext-diff --no-textconv`, so neither an external diff nor a
+   conversion driver in runner configuration can substitute their output; each of
+   those controls is tested on its own. Genuinely binary content still
    renders as a binary marker, which keeps the bounded diff valid UTF-8 for the
    tool-free providers. `--text` was rejected for that reason.
    The rereview patch-id needed no content-binding change: for a binary path git
@@ -124,15 +146,43 @@ that write access alone does not grant. The exposure is pre-existing on `main`
    `settings`, `plugins`, or `plugin_marketplaces` input, so the only lost setting
    is the project MCP pre-approval this decision does not want. A future change that
    needs one of those inputs must write it into the fresh directory instead.
+9. **The review reads only the checkout and its review directory.** `claude_args`
+   pass `--tools "Read,Grep,Glob"`, so no other built-in tool exists, and no allow
+   rule, so the CLI's default permission applies: reads within the working directory
+   and the `--add-dir` review directory are allowed, and anything else asks for
+   permission, which the non-interactive review denies. `--disallowedTools
+   "Read(//proc/**)"` denies process state outright, so re-adding a broad allow rule
+   would still not expose it. This was verified against CLI 2.1.241 through
+   `@anthropic-ai/claude-agent-sdk` 0.3.241, the versions the pinned action uses. A
+   local stand-in for the model API issued scripted tool calls with no real
+   credentials. With the previous arguments, a link committed in the workspace exposed
+   the placeholder key and `/etc` was readable. With these arguments both were denied,
+   while the checkout and the review directory stayed readable through all three
+   tools. The action's own `parseSdkOptions` maps the workflow's `claude_args` to
+   exactly those SDK options.
+10. **A verdict that carries credential material is unusable.** The verdict steps pass
+    the model credentials and the job token to `review-verdict.py`. It refuses a
+    verdict when any text in it contains one of those exact values, or a GitHub
+    (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`, `github_pat_`) or Anthropic (`sk-ant-`)
+    prefix followed by a token-length body. Its diagnostic names only the field. A bare
+    prefix, as in a security review that mentions token formats, stays usable. The
+    submit step posts only a validated verdict, so a refused verdict becomes the
+    existing fail-closed no-usable-verdict outcome. The validator's own git lookups
+    run without those values in their environment.
 
-`scripts/ci-gate/review-agent-config-isolation.test.py` enforces decisions 1–3 and
-6–8, and every deliberate removal of a protection turns it red:
+`scripts/ci-gate/review-agent-config-isolation.test.py` enforces decisions 1–4 and
+6–9, and `scripts/ci-gate/review-verdict.test.py` enforces decision 10. Every
+deliberate removal of a protection turns them red:
 
 - It reads `claude_args` the way the pinned action's parser does.
-- It executes the removal, isolation, attribute, `rereview`, and `prep` steps against
-  fixture repositories with a stubbed `gh`, a planted storing credential helper, a
-  substituting external diff, planted links, an unremovable path, and a pre-existing
-  config directory.
+- It executes the removal, isolation, attribute, `rereview`, `prep`, and telemetry
+  steps against fixture repositories. The fixtures include:
+  - a stubbed `gh`;
+  - a planted storing credential helper;
+  - a substituting external diff and a configured conversion driver;
+  - links planted at every former in-tree output path and at the attributes override;
+  - an unremovable path and a pre-existing config directory;
+  - an empty or sectionless rendered diff.
 - It evaluates every protection-to-consumer step pair under Actions' implicit
   `success()` across every lane, provider, and failure outcome.
 
@@ -160,11 +210,21 @@ that write access alone does not grant. The exposure is pre-existing on `main`
   `* !diff` override, because `actions/checkout` leaves `info/` alone. Its only effect
   is that `git diff` there renders attribute-marked files as text. A missing `origin`
   makes the next `actions/checkout` re-clone instead of reusing the directory.
-- **Residual, inherent to the action:** the CLI process environment still carries the
-  model credential and the action's GitHub token, because the CLI needs the first and
-  the action exports the second before starting it. The verdict schema,
-  `review-verdict.py`, and the short token lifetime are the remaining bounds on a
-  prompt-injected attempt to echo either.
+- **Residual, inherent to the action:** the CLI process environment still holds the
+  long-lived model credential and the action's GitHub token, because the CLI needs the
+  first and the action exports the second before starting it. Decision 9 removes the
+  review's read path to them, and decision 10 refuses their exact values and token
+  shapes in published text. Neither stops a value the model obtained some other way
+  from being published in a transformed form, such as encoded or split. The job
+  token's lifetime bounds only the token: the model credential stays valid until it is
+  rotated, which is the remedy if exposure is ever suspected.
+- **Residual, persistent-runner class (ADR 0235):** on the persistent
+  private-repository lane, a reused workspace's `.git/config` and `.git/hooks` from an
+  earlier job are not neutralized. Configuration such as a filesystem monitor command,
+  or a hook git runs during a fetch, executes during the checkout and the gate's own
+  git commands. `--no-ext-diff`, `--no-textconv`, and the attribute override do not
+  cover it. This is the cross-job persistence ADR 0235 accepts for private
+  repositories, which already keeps public pull-request heads on ephemeral runners.
 - **Residual, accepted:** managed policy settings under `/etc/claude-code` are always
   loaded. They are root-owned runner state, the same persistent-host class ADR 0235
   accepts for private repositories.
