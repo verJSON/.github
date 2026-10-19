@@ -231,3 +231,22 @@ comparison. Its mutation proof shows that removing the floor guard admits a revi
 between the casing repair and the floor. The ADR 0235 reviewed digests for the four
 `arm` entries that reach this job were re-recorded: the change touches only this
 constant and its comment, so their justification is unchanged.
+
+### 2026-10-19 — Rotation receipt for ruleset 20722935 at `180b8dbb`
+
+#1855 merged as `180b8dbb`. The owner authorized the rotation. Organization ruleset
+20722935 (`ai-authorization-arm-required`) was then rotated from `a195d5a8` to
+`180b8dbb`, at `updated_at` 2026-10-19T05:27:56Z (00:27:56 -05:00). The PUT sent the live
+image back with only `workflows[0].sha` changed. A read-back diff against the
+pre-rotation image showed that SHA as the only difference, so enforcement, targeting and
+bypass actors are unchanged. Besides this floor, the gate-rearm changes between `a195d5a8` and `180b8dbb` are:
+character classes spelled out without locale-dependent ranges, an action digest move,
+and two added length bounds. `AI_REVIEW_APP_ID` is now at most 15 digits, and each
+review budget's whole-number part at most 3 digits. Both bounds only reject more
+input, and the live organization values (a 7-digit App ID and budgets of `5.00`)
+are well inside them.
+
+Live receipt: verjson-cli#342, run 39205143913 ("AI review authorization arm",
+`workflow_url` under `actions/required_workflows/`), created 2026-10-19T05:33:06Z, after
+the ruleset update, on head `dd79b13c`. It concluded `success`.
+
