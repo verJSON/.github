@@ -109,9 +109,13 @@ that write access alone does not grant. The exposure is pre-existing on `main`
    replace, or empty a review input.
    Generated lockfiles are elided with git pathspec excludes, never by parsing diff
    headers, so no path spelling (spaces, quotes, newlines) can move a file in or out
-   of the review. The elided and reviewed path lists come from `--name-only -z`.
-   Only a regular file is treated as a lockfile; a link or submodule pointer at a
-   lockfile path fails closed with `lockfile_not_regular_file` rather than being elided.
+   of the review. The elided list comes from `--raw -z`, whose file modes are checked,
+   and the reviewed list from `--name-status -z`, whose status letters give the
+   expected section count. Only a regular file is treated as a lockfile: a link or
+   submodule pointer on either side of a change at a lockfile path fails closed with
+   `lockfile_not_regular_file` rather than being elided. The prep, rereview, and
+   verdict steps set `GIT_NO_REPLACE_OBJECTS=1`, so a replace ref left in a reused
+   `.git` cannot substitute content in a diff, a patch id, or an evidence lookup.
    Every diff in `prep` and `rereview` passes `--ignore-submodules=none`. Git otherwise
    honors a submodule `ignore` setting from `.gitmodules`, and it reads that file from
    the index and `HEAD` even after decision 2 removes the working-tree copy, as well as
@@ -265,11 +269,13 @@ deliberate removal of a protection turns them red:
   token's lifetime bounds only the token: the model credential stays valid until it is
   rotated, which is the remedy if exposure is ever suspected.
 - **Residual, persistent-runner class (ADR 0235):** on the persistent
-  private-repository lane, a reused workspace's `.git/config` and `.git/hooks` from an
-  earlier job are not neutralized. Configuration such as a filesystem monitor command,
-  or a hook git runs during a fetch, executes during the checkout and the gate's own
-  git commands. `--no-ext-diff`, `--no-textconv`, and the attribute override do not
-  cover it. This is the cross-job persistence ADR 0235 accepts for private
+  private-repository lane, the reused `.git` directory from an earlier job is not
+  neutralized as a whole. Its configuration, hooks, object store, and refs persist.
+  Configuration such as a filesystem monitor command, or a hook git runs during a
+  fetch, executes during the checkout and the gate's own git commands. The gate
+  closes only the specific paths it can name: external diff and conversion drivers,
+  attributes, submodule ignore settings, the submodule display format, and replace
+  refs. This is the cross-job persistence ADR 0235 accepts for private
   repositories, which already keeps public pull-request heads on ephemeral runners.
 - **Residual, accepted:** managed policy settings under `/etc/claude-code` are always
   loaded. They are root-owned runner state, the same persistent-host class ADR 0235
