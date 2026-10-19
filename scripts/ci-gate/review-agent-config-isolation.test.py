@@ -196,8 +196,27 @@ def git(cwd, *args, env=None):
                           text=True, capture_output=True).stdout.strip()
 
 
-class ReviewDiffIgnoresPullRequestAttributesTest(unittest.TestCase):
-    """A pull request must not hide a text change from the reviewer behind git attributes."""
+def step_outputs(path):
+    """Parse a GITHUB_OUTPUT file, including `name<<DELIMITER` blocks."""
+    outputs, lines = {}, path.read_text().splitlines() if path.exists() else []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if '<<' in line and '=' not in line.split('<<', 1)[0]:
+            name, delimiter = line.split('<<', 1)
+            end = lines.index(delimiter, index + 1)
+            outputs[name] = '\n'.join(lines[index + 1:end])
+            index = end + 1
+            continue
+        if '=' in line:
+            name, value = line.split('=', 1)
+            outputs[name] = value
+        index += 1
+    return outputs
+
+
+class PullRequestCheckoutFixture(unittest.TestCase):
+    """A checked-out pull-request head whose text changes are marked with git attributes."""
 
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -233,7 +252,9 @@ class ReviewDiffIgnoresPullRequestAttributesTest(unittest.TestCase):
             '  *) printf \'{"title":"t","body":"","baseRefName":"main","headRefName":"feature"}\\n\' ;;\n'
             'esac\n')
         (bin_path / 'gh').chmod(0o755)
-        self.env = {'PATH': f'{bin_path}{os.pathsep}{os.defpath}', 'HOME': str(self.root), 'GIT_CONFIG_NOSYSTEM': '1',
+        self.runner_temp = self.root / 'runner-temp'
+        self.runner_temp.mkdir()
+        self.env = {'RUNNER_TEMP': str(self.runner_temp), 'PATH': f'{bin_path}{os.pathsep}{os.defpath}', 'HOME': str(self.root), 'GIT_CONFIG_NOSYSTEM': '1',
                     'GIT_CONFIG_GLOBAL': os.devnull, 'GITHUB_WORKSPACE': str(self.workspace), 'HEAD_SHA': self.head,
                     'GITHUB_OUTPUT': str(self.root / 'output'), 'PR_NUMBER': '7', 'TARGET_REPO': 'Verjson/target',
                     'DEPENDENCY_MAJOR': 'false', 'GH_TOKEN': 'mock-job-token',
@@ -245,6 +266,19 @@ class ReviewDiffIgnoresPullRequestAttributesTest(unittest.TestCase):
         self.assertNotIn('${{', script)
         return subprocess.run(['bash', '-e', '-c', script], cwd=self.workspace, env=self.env,
                               text=True, capture_output=True)
+
+    def model_input(self):
+        """The review directory prep hands to every provider, and its outputs."""
+        outputs = step_outputs(self.root / 'output')
+        review_dir = Path(outputs.get('review_dir', ''))
+        self.assertTrue(review_dir.is_absolute(), 'prep publishes no absolute review directory')
+        self.assertTrue(review_dir.is_relative_to(self.runner_temp))
+        self.assertFalse(review_dir.is_relative_to(self.workspace))
+        return review_dir, outputs
+
+
+class ReviewDiffIgnoresPullRequestAttributesTest(PullRequestCheckoutFixture):
+    """A pull request must not hide a text change from the reviewer behind git attributes."""
 
     def test_neutralizing_step_runs_after_the_head_checkout_and_before_any_diff(self):
         self.assertTrue(ATTRIBUTES_ID in STEPS, 'the gate job has no git attribute neutralization step')
@@ -259,7 +293,8 @@ class ReviewDiffIgnoresPullRequestAttributesTest(unittest.TestCase):
         self.assertEqual(neutralize.returncode, 0, neutralize.stderr)
         prep = self.run_step('prep')
         self.assertEqual(prep.returncode, 0, prep.stderr + prep.stdout)
-        diff = (self.workspace / '.ai-review/pr.diff').read_text()
+        review_dir, _ = self.model_input()
+        diff = (review_dir / 'pr.diff').read_text()
         self.assertIn('+echo hidden-shell-change\n', diff)
         self.assertIn('+HIDDEN = "hidden-python-change"\n', diff)
         self.assertNotIn('Binary files', diff)
@@ -293,6 +328,50 @@ class ReviewDiffIgnoresPullRequestAttributesTest(unittest.TestCase):
         self.assertEqual(outside.read_text(), 'runner\n')
         self.assertFalse(attributes.is_symlink())
         self.assertEqual(attributes.read_text(), '* !diff\n')
+
+
+class ReviewInputsStayOutsideTheCheckoutTest(PullRequestCheckoutFixture):
+    """Links the pull request commits where the gate writes must not redirect or empty the review input."""
+
+    def plant(self, link, target):
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(target)
+
+    def test_planted_links_neither_empty_the_model_input_nor_reach_their_targets(self):
+        self.assertEqual(self.run_step(ATTRIBUTES_ID).returncode, 0)
+        attributes = Path(git(self.workspace, 'rev-parse', '--absolute-git-dir')) / 'info/attributes'
+        targets = {name: self.root / f'runner-{name}' for name in ('pr.full.diff', 'pr.diff', 'base-fetch.error')}
+        for name, target in targets.items():
+            target.write_text('runner state\n')
+            self.plant(self.workspace / '.ai-review' / name, target)
+        self.plant(self.workspace / '.ai-review/pr.json', attributes)
+        prep = self.run_step('prep')
+        self.assertEqual(prep.returncode, 0, prep.stderr + prep.stdout)
+        review_dir, outputs = self.model_input()
+        self.assertEqual(outputs.get('review_input_available'), 'true')
+        self.assertIn('+echo hidden-shell-change\n', (review_dir / 'pr.diff').read_text())
+        self.assertIn(f'{review_dir}/pr.diff', outputs.get('review_prompt', ''))
+        for name, target in targets.items():
+            with self.subTest(path=name):
+                self.assertEqual(target.read_text(), 'runner state\n')
+        self.assertEqual(attributes.read_text(), '* !diff\n')
+
+    def test_a_planted_review_directory_link_is_never_written_through(self):
+        outside = self.root / 'runner-dir'
+        outside.mkdir()
+        self.plant(self.workspace / '.ai-review', outside)
+        self.assertEqual(self.run_step(ATTRIBUTES_ID).returncode, 0)
+        prep = self.run_step('prep')
+        self.assertEqual(prep.returncode, 0, prep.stderr + prep.stdout)
+        review_dir, _ = self.model_input()
+        self.assertIn('+echo hidden-shell-change\n', (review_dir / 'pr.diff').read_text())
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_review_directory_is_private_to_the_run(self):
+        self.assertEqual(self.run_step('prep').returncode, 0)
+        review_dir, _ = self.model_input()
+        self.assertFalse(review_dir.is_symlink())
+        self.assertEqual(review_dir.stat().st_mode & 0o777, 0o700)
 
 
 class RemovalPrecedesReviewTest(unittest.TestCase):

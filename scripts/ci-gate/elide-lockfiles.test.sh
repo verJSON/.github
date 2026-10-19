@@ -36,7 +36,7 @@ awk '
 ' "$wf" > "$block"
 
 slice="$tmp/elide.sh"
-awk '/^LOCK_RE=/ { c = 1 } c { print } /full\.diff\)"/ { if (c) exit }' "$block" > "$slice"
+awk '/^LOCK_RE=/ { c = 1 } c { print } /full\.diff"?\)"/ { if (c) exit }' "$block" > "$slice"
 grep -q '^LOCK_RE=' "$slice" || { echo "FAIL - could not extract LOCK_RE (filter moved/renamed?) from $wf"; exit 1; }
 grep -q 'elided_lockfiles=' "$slice" || { echo "FAIL - could not extract elided_lockfiles awk from $wf"; exit 1; }
 
@@ -47,7 +47,7 @@ run_filter() {
   cp "$1" "$tmp/work/.ai-review/pr.full.diff"
   # shellcheck disable=SC1090,SC2154 # The generated fixture defines this value.
   (
-    cd "$tmp/work" && source "$slice" &&
+    cd "$tmp/work" && review_dir="$tmp/work/.ai-review" && source "$slice" &&
       printf '%s' "$elided_lockfiles" >elided.out
   )
   filtered="$tmp/work/.ai-review/pr.diff"

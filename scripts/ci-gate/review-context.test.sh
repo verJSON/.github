@@ -59,7 +59,7 @@ grep -q 'pr.full.diff' "$prep" || {
   exit 1
 }
 
-mkdir -p "$tmp/bin" "$tmp/run"
+mkdir -p "$tmp/bin" "$tmp/run" "$tmp/runner-temp"
 cat >"$tmp/bin/gh" <<'GH'
 #!/usr/bin/env bash
 if [ "$1 $2" = "pr view" ]; then
@@ -105,7 +105,7 @@ run_prep() {
   : >"$tmp/github-output.txt"
   (
     cd "$tmp/run" || exit
-    PATH="$tmp/bin:$PATH" GH_TOKEN=token TARGET_REPO=Verjson/example PR_NUMBER=7 \
+    PATH="$tmp/bin:$PATH" GH_TOKEN=token TARGET_REPO=Verjson/example PR_NUMBER=7 RUNNER_TEMP="$tmp/runner-temp" \
       DEPENDENCY_MAJOR=false FETCH_COUNT="$tmp/fetch-count" \
       GITHUB_OUTPUT="$tmp/github-output.txt" FETCH_FAILURES="${1-0}" NO_MERGE_BASE="${2-false}" \
       bash "$prep"
@@ -115,7 +115,9 @@ run_prep() {
 run_prep 1 \
   && [ "$(cat "$tmp/fetch-count")" -eq 2 ] \
   && grep -q 'result=retry' "$tmp/prep.out" \
-  && [ "$(grep -c '^diff --git ' "$tmp/run/.ai-review/pr.full.diff")" -eq 301 ] \
+  && review_dir="$(sed -n 's/^review_dir=//p' "$tmp/github-output.txt")" \
+  && [ -n "$review_dir" ] \
+  && [ "$(grep -c '^diff --git ' "$review_dir/pr.full.diff")" -eq 301 ] \
   && pass "base fetch retries once and renders all 301 changed files locally" \
   || fail "large local diff did not recover through the bounded base fetch"
 

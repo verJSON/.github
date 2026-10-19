@@ -1274,23 +1274,26 @@ jobs:
           DEPENDENCY_MAJOR: ${{ needs.preflight.outputs.dependency_major }}
         run: |
           set -euo pipefail
-          mkdir -p .ai-review
+          # Review inputs live outside the pull-request checkout, in a directory
+          # this run creates privately: a link the head commits at any path in
+          # the tree cannot redirect, replace, or empty them (ADR 0237).
+          review_dir="$(mktemp -d "$RUNNER_TEMP/ai-review.XXXXXXXXXX")"
           gh pr view "$PR_NUMBER" --repo "$TARGET_REPO" \
             --json title,body,author,labels,baseRefName,headRefName,additions,deletions,changedFiles \
-            > .ai-review/pr.json
+            > "$review_dir/pr.json"
           # Build the diff from the immutable checked-out PR head instead of
           # GitHub's whole-diff endpoint, which rejects PRs over 300 files
           # (#323). Fetch only base history, retry bounded transport failures,
           # and fail closed when the merge base cannot be established. Keep
           # stderr off the log so a remote response can never leak through the
           # retry diagnostics.
-          base_ref="$(jq -r '.baseRefName' .ai-review/pr.json)"
+          base_ref="$(jq -r '.baseRefName' "$review_dir/pr.json")"
           if [ -z "$base_ref" ] || [ "$base_ref" = null ]; then
             echo "::error::phase=review-input result=unavailable kind=base_ref_missing — PR metadata did not identify a base ref"
             exit 1
           fi
           diff_max_attempts=4
-          diff_error=.ai-review/base-fetch.error
+          diff_error="$review_dir/base-fetch.error"
           fetch_base_history() {
             local fetch_mode="$1" diff_attempt=1 diff_rc diff_delay
             while :; do
@@ -1332,7 +1335,7 @@ jobs:
             echo "::error::phase=review-input result=unavailable kind=merge_base_unavailable — fetched base history has no merge base with the checked-out PR head"
             exit 1
           }
-          if ! git diff --no-ext-diff --no-textconv --find-renames "$merge_base" HEAD >.ai-review/pr.full.diff; then
+          if ! git diff --no-ext-diff --no-textconv --find-renames "$merge_base" HEAD >"$review_dir/pr.full.diff"; then
             {
               echo "review_input_available=false"
               echo "review_input_failure=local_diff_failed"
@@ -1357,12 +1360,12 @@ jobs:
           awk -v re="$LOCK_RE" '
             /^diff --git / { p = $4; sub(/^b\//, "", p); keep = (p !~ re) }
             keep
-          ' .ai-review/pr.full.diff > .ai-review/pr.diff
+          ' "$review_dir/pr.full.diff" > "$review_dir/pr.diff"
           elided_lockfiles="$(awk -v re="$LOCK_RE" '
             /^diff --git / { p = $4; sub(/^b\//, "", p);
               if (p ~ re) out = out (out == "" ? "" : ", ") p }
             END { print out }
-          ' .ai-review/pr.full.diff)"
+          ' "$review_dir/pr.full.diff")"
 
           # Re-read immediately before model spend. Duplicate webhook delivery
           # is deduplicated by the trusted arm; no runner debounce is needed.
@@ -1390,8 +1393,8 @@ jobs:
           You are the autonomous merge gate for ${TARGET_REPO}.
           Review PR #${PR_NUMBER} in ${TARGET_REPO}.
           PR metadata and the generated-lockfile-elided diff are the required
-          review inputs. They are available as .ai-review/pr.json and
-          .ai-review/pr.diff on tool-capable paths and are embedded directly on
+          review inputs. They are available as ${review_dir}/pr.json and
+          ${review_dir}/pr.diff on tool-capable paths and are embedded directly on
           tool-free paths. Review those inputs first; on tool-capable paths,
           open only specific repository files a potential finding depends on.
 
@@ -1469,6 +1472,7 @@ jobs:
           EOF
             echo "PROMPT_EOF"
           } >> "$GITHUB_OUTPUT"
+          echo "review_dir=$review_dir" >>"$GITHUB_OUTPUT"
 
       - name: Record model phase start
         id: model_timing
@@ -1518,6 +1522,7 @@ jobs:
             --max-budget-usd ${{ needs.preflight.outputs.budget_usd }}
             --json-schema '{"type":"object","properties":{"blocking":{"type":"boolean"},"summary":{"type":"string"},"review_first":{"type":"array","items":{"type":"object","properties":{"location":{"type":"string","description":"Exactly one file and positive line number (path/to/file.ext:42); no ranges or comma-separated locations."},"why":{"type":"string"}},"required":["location","why"],"additionalProperties":false}},"findings":{"type":"array","items":{"type":"object","properties":{"location":{"type":"string","description":"Exactly one repository-relative file and one positive line number (path/to/file.ext:42); no ranges or comma-separated locations."},"reason":{"type":"string"},"failure_scenario":{"type":"string"},"evidence":{"type":"string","description":"An 8-240 character exact fragment from the cited source line, or the entire trimmed line when shorter than 8 characters."}},"required":["location","reason","failure_scenario","evidence"],"additionalProperties":false}},"followups":{"type":"array","items":{"type":"object","properties":{"location":{"type":"string"},"note":{"type":"string"}},"required":["location","note"],"additionalProperties":false}}},"required":["blocking","summary","review_first","findings","followups"],"additionalProperties":false}'
             --allowedTools "Read,Grep,Glob"
+            --add-dir "${{ steps.prep.outputs.review_dir }}"
             --setting-sources user
             --strict-mcp-config
 
@@ -1531,8 +1536,8 @@ jobs:
           BUDGET_USD: ${{ needs.preflight.outputs.budget_usd }}
           REVIEW_PROMPT: ${{ steps.prep.outputs.review_prompt }}
           PROMPT_FILE: ${{ runner.temp }}/ai-review-openai-prompt.txt
-          PR_JSON_FILE: ${{ github.workspace }}/.ai-review/pr.json
-          PR_DIFF_FILE: ${{ github.workspace }}/.ai-review/pr.diff
+          PR_JSON_FILE: ${{ steps.prep.outputs.review_dir }}/pr.json
+          PR_DIFF_FILE: ${{ steps.prep.outputs.review_dir }}/pr.diff
         run: |
           umask 077
           printf '%s' "$REVIEW_PROMPT" >"$PROMPT_FILE"
@@ -1550,8 +1555,8 @@ jobs:
           BUDGET_USD: ${{ needs.preflight.outputs.budget_usd }}
           REVIEW_PROMPT: ${{ steps.prep.outputs.review_prompt }}
           PROMPT_FILE: ${{ runner.temp }}/ai-review-deepseek-primary-prompt.txt
-          PR_JSON_FILE: ${{ github.workspace }}/.ai-review/pr.json
-          PR_DIFF_FILE: ${{ github.workspace }}/.ai-review/pr.diff
+          PR_JSON_FILE: ${{ steps.prep.outputs.review_dir }}/pr.json
+          PR_DIFF_FILE: ${{ steps.prep.outputs.review_dir }}/pr.diff
           REPLAY_FILE: ${{ runner.temp }}/deepseek-replay-pass-1.json
           REVIEWED_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
           REVIEW_PASS: "1"
@@ -1648,8 +1653,8 @@ jobs:
           BUDGET_USD: ${{ needs.preflight.outputs.fallback_budget_usd }}
           REVIEW_PROMPT: ${{ steps.prep.outputs.review_prompt }}
           PROMPT_FILE: ${{ runner.temp }}/ai-review-deepseek-fallback-prompt.txt
-          PR_JSON_FILE: ${{ github.workspace }}/.ai-review/pr.json
-          PR_DIFF_FILE: ${{ github.workspace }}/.ai-review/pr.diff
+          PR_JSON_FILE: ${{ steps.prep.outputs.review_dir }}/pr.json
+          PR_DIFF_FILE: ${{ steps.prep.outputs.review_dir }}/pr.diff
           REPLAY_FILE: ${{ runner.temp }}/deepseek-replay-pass-2.json
           REVIEWED_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
           REVIEW_PASS: "2"
