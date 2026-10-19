@@ -1347,9 +1347,9 @@ jobs:
           # (package.json, Cargo.toml, …), never the machine-generated lock. An
           # 8k-line package-lock in the diff once consumed the whole review
           # budget and produced a no-verdict, fail-closed run on an
-          # otherwise-small PR (Verjson/.github#110). Keep the full diff on disk
-          # for reference; hand the model the filtered diff plus a note of what
-          # was dropped so it still scrutinizes the manifest counterpart.
+          # otherwise-small PR (Verjson/.github#110). Hand the model the filtered
+          # diff plus a note of what was dropped so it still scrutinizes the
+          # manifest counterpart.
           # Every diff here passes --ignore-submodules=none: it overrides a
           # submodule `ignore` setting from .gitmodules (which git also reads from
           # the index and HEAD), the repository, or the runner, so a pointer change

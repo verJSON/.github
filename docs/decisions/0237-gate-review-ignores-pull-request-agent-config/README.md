@@ -119,11 +119,14 @@ that write access alone does not grant. The exposure is pre-existing on `main`
    from the review diff, from the path lists, and from the rereview patch id. The diffs
    whose content the model or the patch id consumes also pass `--submodule=short`, so
    configuration cannot switch a pointer change to a format without a diff section.
-   `prep` fails closed with `review_input_empty` when the rendered diff is empty for a
-   head that changes files. It fails with `review_input_incomplete` when the filtered
-   diff's section count differs, in either direction, from what `--name-status -z`
-   implies: one section per reviewed path, two for a type change between a file and a
-   link, which git renders as a deletion and a creation. The model still sees every changed text line, and
+   These checks run unconditionally. `prep` fails closed with `review_input_empty`
+   when git's own comparison sees a change that no path list does, or when the
+   filtered diff is empty although it has reviewed paths. It fails with
+   `review_input_incomplete` when the filtered diff's section count differs, in
+   either direction, from what `--name-status -z` implies: one section per reviewed
+   path, and two for a type change between a file and a link, which git renders as a
+   deletion and a creation. The unused full diff is no longer rendered. The model
+   still sees every changed text line, and
    `review-verdict.py` resolves cited evidence from git objects at the reviewed
    commit, not the working tree.
 5. **The OpenAI and DeepSeek passes need no change.** They run the trusted,
