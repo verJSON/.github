@@ -45,7 +45,10 @@ platform	python3 scripts/ci-gate/fleet-contract-inventory.test.py
 platform	python3 scripts/ci-gate/contract-version.test.py
 platform	bash scripts/node-release-publish.test.sh
 platform	python3 scripts/node-release-credential-isolation.test.py
-platform	python3 scripts/release-caller-credential-isolation.test.py
+platform	RELEASE_CALLER_ISOLATION_PART=contract python3 scripts/release-caller-credential-isolation.test.py
+platform	RELEASE_CALLER_ISOLATION_PART=npm10 python3 scripts/release-caller-credential-isolation.test.py
+platform	RELEASE_CALLER_ISOLATION_PART=npm11 python3 scripts/release-caller-credential-isolation.test.py
+platform	python3 scripts/release-caller-credential-isolation-parts.test.py
 platform	python3 scripts/package_retention_test.py
 platform	python3 scripts/ci-gate/renovate-compatibility.test.py
 platform	bash scripts/ci-gate/renovate-compatibility-workflow.test.sh
@@ -115,6 +118,7 @@ merge-gate	python3 scripts/ci-gate/renovate-model-action-pin.test.py
 merge-gate	python3 scripts/ci-gate/openai-review.test.py
 merge-gate	python3 scripts/ci-gate/deepseek-review.test.py
 merge-gate	python3 scripts/ci-gate/deepseek-cancellation.test.py
+merge-gate	python3 scripts/ci-gate/review-agent-config-isolation.test.py
 merge-gate	python3 scripts/ci-gate/deepseek-replay.test.py
 merge-gate	bash scripts/ci-gate/deepseek-replay-handoff.test.sh
 merge-gate	python3 scripts/ci-gate/review-verdict.test.py
