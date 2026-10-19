@@ -392,6 +392,42 @@ class ReviewInputsStayOutsideTheCheckoutTest(PullRequestCheckoutFixture):
         self.assertEqual(review_dir.stat().st_mode & 0o777, 0o700)
 
 
+class ReviewDiffIgnoresTextconvTest(PullRequestCheckoutFixture):
+    """--no-textconv alone keeps a configured conversion driver from rewriting the reviewed text."""
+
+    def setUp(self):
+        super().setUp()
+        (self.workspace / 'settings.conf').write_text('mode = review-sees-this-raw-line\n')
+        (self.workspace / '.gitattributes').write_text('deploy.sh -diff\n[attr]opaque binary\nsettings.conf diff=conv\n')
+        git(self.workspace, 'add', 'settings.conf', '.gitattributes')
+        git(self.workspace, 'commit', '-qm', 'converted file')
+        self.head = git(self.workspace, 'rev-parse', 'HEAD')
+        self.env['HEAD_SHA'] = self.head
+        converter = self.root / 'converter'
+        converter.write_text('#!/bin/sh\necho converted-text-hides-the-change\n')
+        converter.chmod(0o755)
+        # Persistent-runner shape: the reused checkout's own config names the driver.
+        git(self.workspace, 'config', 'diff.conv.textconv', str(converter))
+
+    def test_prep_renders_raw_text_for_a_textconv_attribute(self):
+        prep = self.run_step('prep')
+        self.assertEqual(prep.returncode, 0, prep.stderr + prep.stdout)
+        review_dir, _ = self.model_input()
+        diff = (review_dir / 'pr.diff').read_text()
+        self.assertIn('+mode = review-sees-this-raw-line\n', diff)
+        self.assertNotIn('converted-text-hides-the-change', diff)
+
+    def test_rereview_patch_id_binds_raw_text_for_a_textconv_attribute(self):
+        result = self.run_step('rereview')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        base = git(self.workspace, 'merge-base', 'origin/main', 'HEAD')
+        raw = git(self.workspace, 'diff', '--no-ext-diff', '--no-textconv', base, 'HEAD')
+        self.assertIn('+mode = review-sees-this-raw-line', raw)
+        expected = subprocess.run(['git', 'patch-id', '--stable'], input=raw + '\n', cwd=self.workspace,
+                                  text=True, capture_output=True, check=True).stdout.split()[0]
+        self.assertEqual(step_outputs(self.root / 'output').get('patch_id'), expected)
+
+
 class EmptyReviewInputFailsClosedTest(PullRequestCheckoutFixture):
     """A non-empty change must never reach a provider as an empty diff."""
 
