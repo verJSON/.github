@@ -29,6 +29,20 @@ NORMALIZABLE_LOCATION = re.compile(
     rf"^(?P<path>[^\r\n]+):(?P<line>[1-9][0-9]*)(?:-[1-9][0-9]*)?(?:\s*,\s*{LINE_REFERENCE})*$"
 )
 EXACT_LOCATION = re.compile(r"^(?P<path>[^\r\n]+):(?P<line>[1-9][0-9]*)$")
+# The verdict is posted to the pull request. The review model's process held these
+# values, so the workflow passes the same secrets here for an exact-match refusal.
+SECRET_ENVIRONMENT = (
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GITHUB_TOKEN",
+)
+# Credential-shaped text even when the value is unknown here: a prefix followed by a
+# token-length body. A bare prefix, as in "rotate any ghp_ tokens", is not material.
+CREDENTIAL_SHAPE = re.compile(
+    r"(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|sk-ant-[A-Za-z0-9_-]{20,})"
+)
 
 
 class VerdictError(ValueError):
@@ -259,9 +273,11 @@ def source_path(location: str, finding_path: str) -> tuple[str, int]:
 
 
 def git_output(repository: Path, *arguments: str) -> bytes:
+    environment = {name: value for name, value in os.environ.items() if name not in SECRET_ENVIRONMENT}
     try:
         return subprocess.run(
             ["git", "-C", str(repository), *arguments],
+            env=environment,
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -318,11 +334,35 @@ def validate_source_evidence(verdict: dict, repository_text: str, reviewed_head:
             )
 
 
+def text_leaves(value: object, path: str = "$"):
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            child = key if path == "$" else f"{path}.{key}"
+            yield child, key
+            yield from text_leaves(item, child)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from text_leaves(item, f"{path}[{index}]")
+
+
+def reject_credential_material(verdict: dict, secrets: tuple[str, ...]) -> None:
+    for path, text in text_leaves(verdict):
+        if any(secret in text for secret in secrets) or CREDENTIAL_SHAPE.search(text):
+            raise VerdictError(path, "no credential material", "credential material")
+
+
+def configured_secrets() -> tuple[str, ...]:
+    return tuple(value for name in SECRET_ENVIRONMENT if (value := os.environ.get(name, "")).strip())
+
+
 def confirm_output(
     raw: str,
     sensitive: bool,
     repository: str = "",
     reviewed_head: str = "",
+    secrets: tuple[str, ...] = (),
 ) -> dict:
     if not isinstance(raw, str) or not raw.strip():
         return {
@@ -332,6 +372,7 @@ def confirm_output(
     try:
         parsed = parse_json_value(raw)
         verdict = canonicalize_verdict(parsed, sensitive)
+        reject_credential_material(verdict, secrets)
         validate_source_evidence(verdict, repository, reviewed_head)
     except json.JSONDecodeError:
         return {
@@ -361,7 +402,7 @@ def main() -> int:
         review_pass = "unknown"
     if sensitive_text not in {"true", "false"} or not output_path:
         raise ValueError("SENSITIVE must be true or false and GITHUB_OUTPUT is required")
-    result = confirm_output(raw, sensitive_text == "true", repository, reviewed_head)
+    result = confirm_output(raw, sensitive_text == "true", repository, reviewed_head, configured_secrets())
     with open(output_path, "a", encoding="utf-8") as output:
         output.write(f"usable={'true' if result['usable'] else 'false'}\n")
         if result["usable"]:

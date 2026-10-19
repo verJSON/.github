@@ -1609,6 +1609,12 @@ jobs:
           REVIEW_PASS: "1"
           REVIEW_REPOSITORY: ${{ github.workspace }}
           REVIEWED_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+          # Exact values the validator refuses to publish in a verdict (ADR 0237).
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 -I "$RUNNER_TEMP/review-verdict.py"
 
@@ -1707,6 +1713,12 @@ jobs:
           REVIEW_PASS: "2"
           REVIEW_REPOSITORY: ${{ github.workspace }}
           REVIEWED_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+          # Exact values the validator refuses to publish in a verdict (ADR 0237).
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 -I "$RUNNER_TEMP/review-verdict.py"
 

@@ -105,6 +105,25 @@ def checkout_index():
     return names.index('Checkout PR head')
 
 
+class VerdictCredentialRefusalWiringTest(unittest.TestCase):
+    EXPECTED = {
+        'ANTHROPIC_API_KEY': '${{ secrets.ANTHROPIC_API_KEY }}',
+        'CLAUDE_CODE_OAUTH_TOKEN': '${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}',
+        'OPENAI_API_KEY': '${{ secrets.OPENAI_API_KEY }}',
+        'DEEPSEEK_API_KEY': '${{ secrets.DEEPSEEK_API_KEY }}',
+        'GITHUB_TOKEN': '${{ github.token }}',
+    }
+
+    def test_every_verdict_validation_sees_the_values_it_must_refuse(self):
+        validator = (ROOT / 'scripts/ci-gate/review-verdict.py').read_text()
+        names = re.search(r'SECRET_ENVIRONMENT = \((.*?)\)', validator, re.S).group(1)
+        self.assertEqual(set(re.findall(r'"([A-Z_]+)"', names)), set(self.EXPECTED))
+        for step_id in ('verdict_1', 'verdict_2'):
+            env = STEPS[step_id].get('env', {})
+            with self.subTest(step=step_id):
+                self.assertEqual({name: env.get(name) for name in self.EXPECTED}, self.EXPECTED)
+
+
 class ReviewCheckoutCredentialTest(unittest.TestCase):
     def test_head_checkout_does_not_persist_the_job_token(self):
         checkout = GATE_STEPS[checkout_index()]
