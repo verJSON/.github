@@ -31,6 +31,8 @@ AGENT_CONFIG_PATHS = (
     '.claude', '.claude.json', '.mcp.json', 'CLAUDE.md', 'CLAUDE.local.md',
     '.gitmodules', '.ripgreprc', '.husky',
 )
+# The gate's former in-tree review directory: a decoy there could mislead a reviewer told to read it.
+GATE_DECOY_PATHS = ('.ai-review',)
 
 
 def claude_flags(step):
@@ -374,6 +376,29 @@ class ReviewInputsStayOutsideTheCheckoutTest(PullRequestCheckoutFixture):
         self.assertEqual(review_dir.stat().st_mode & 0o777, 0o700)
 
 
+class TelemetryStaysOutsideTheCheckoutTest(unittest.TestCase):
+    def test_telemetry_payload_is_never_written_through_a_planted_link(self):
+        step = next(step for step in GATE_STEPS if step.get('name') == 'Build ai-review telemetry payload')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace, runner_temp, outside = root / 'workspace', root / 'runner-temp', root / 'runner-dir'
+            for path in (workspace, runner_temp, outside):
+                path.mkdir()
+            (workspace / '.telemetry').symlink_to(outside)
+            env = {'PATH': os.defpath, 'RUNNER_TEMP': str(runner_temp), 'GITHUB_OUTPUT': str(root / 'output'),
+                   'VERDICT_JSON': '{"blocking":false,"findings":[]}', 'TARGET_REPO': 'Verjson/target',
+                   'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_WORKFLOW': 'AI review'}
+            for name in ('ACTION_CONCLUSION', 'BUDGET_USD', 'DEPENDENCY_MAJOR', 'EXECUTION_FILE', 'FALLBACK_COST_USD',
+                         'INPUT_TOKEN_BOUND', 'LANE', 'LANE_REASON', 'MAX_OUTPUT_TOKENS', 'MODEL', 'PRICING_VERSION',
+                         'PRIMARY_COST_USD', 'PROVIDER', 'REPORTED_COST_USD', 'REPORTED_INPUT_TOKENS',
+                         'REPORTED_OUTPUT_TOKENS'):
+                env[name] = ''
+            result = subprocess.run(['bash', '-c', step['run']], cwd=workspace, env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertEqual(len(list(runner_temp.rglob('ai-review.json'))), 1)
+
+
 class RemovalPrecedesReviewTest(unittest.TestCase):
     def test_removal_runs_immediately_after_the_head_checkout_under_its_condition(self):
         checkout = checkout_index()
@@ -414,6 +439,8 @@ def plant_agent_config(workspace):
     (workspace / '.husky/pre-commit').write_text('exit 0\n')
     for name in ('.claude.json', '.mcp.json', 'CLAUDE.md', 'CLAUDE.local.md', '.gitmodules', '.ripgreprc'):
         (workspace / name).write_text('pull-request content\n')
+    (workspace / '.ai-review').mkdir()
+    (workspace / '.ai-review/pr.diff').write_text('decoy\n')
 
 
 def run_removal(workspace):
@@ -440,7 +467,7 @@ class PullRequestAgentConfigRemovalTest(unittest.TestCase):
         (self.workspace / 'src/app.py').write_text('print(1)\n')
         result = run_removal(self.workspace)
         self.assertEqual(result.returncode, 0, result.stderr)
-        for name in AGENT_CONFIG_PATHS:
+        for name in AGENT_CONFIG_PATHS + GATE_DECOY_PATHS:
             with self.subTest(path=name):
                 self.assertFalse(os.path.lexists(self.workspace / name))
         self.assertEqual(sorted(path.name for path in self.workspace.iterdir()), ['AGENTS.md', 'README.md', 'src'])

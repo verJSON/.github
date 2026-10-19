@@ -996,7 +996,7 @@ jobs:
         run: |
           set -euo pipefail
           cd -- "$GITHUB_WORKSPACE"
-          rm -rf -- .claude .claude.json .mcp.json CLAUDE.md CLAUDE.local.md .gitmodules .ripgreprc .husky
+          rm -rf -- .claude .claude.json .mcp.json CLAUDE.md CLAUDE.local.md .gitmodules .ripgreprc .husky .ai-review
 
       # Git reads attributes for reviewed paths from the checkout, so a pull request
       # could mark a changed text file `-diff` and show the reviewer only "Binary
@@ -2078,7 +2078,7 @@ jobs:
           DEPENDENCY_MAJOR: ${{ needs.preflight.outputs.dependency_major }}
         run: |
           set -uo pipefail    # deliberately no -e: telemetry must never abort
-          mkdir -p .telemetry
+          telemetry_dir="$(mktemp -d "$RUNNER_TEMP/ai-review-telemetry.XXXXXXXXXX")"
           exec_summary=$(.gate-tools/scripts/ci-telemetry/parse-claude-execution.sh "${EXECUTION_FILE:-}" 2>/dev/null || echo '{}')
           verdict_blocking=null
           findings_count=null
@@ -2133,7 +2133,7 @@ jobs:
               execution_file_parse_ok: ($exec.execution_file_parse_ok // false),
               total_cost_usd: ($exec.total_cost_usd // null),
               total_turns: ($exec.num_turns // null)
-            }' > .telemetry/ai-review.json
+            }' > "$telemetry_dir/ai-review.json"
 
       # NOTE: OTLP emit temporarily removed. `uses: Verjson/verjson-observability`
       # resolves on the gce runners but NOT on gha-meta-1 (used for this repo's
