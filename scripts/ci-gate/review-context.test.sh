@@ -54,12 +54,12 @@ awk '
   }
 ' "$workflow" >"$prep"
 sed -i 's/${{ needs.preflight.outputs.head_sha }}/0123456789abcdef0123456789abcdef01234567/g' "$prep"
-grep -q 'pr.full.diff' "$prep" || {
+grep -q 'reviewed.status' "$prep" || {
   echo "FAIL - could not extract the active context-preparation block"
   exit 1
 }
 
-mkdir -p "$tmp/bin" "$tmp/run"
+mkdir -p "$tmp/bin" "$tmp/run" "$tmp/runner-temp"
 cat >"$tmp/bin/gh" <<'GH'
 #!/usr/bin/env bash
 if [ "$1 $2" = "pr view" ]; then
@@ -90,6 +90,10 @@ case "$1" in
     printf '%s\n' true
     ;;
   diff)
+    case " $* " in
+      *" --raw "*" :(glob)"*) exit 0 ;;
+      *" --name-status "*) for n in $(seq 1 301); do printf 'M\0src/file-%03d.ts\0' "$n"; done; exit 0 ;;
+    esac
     for n in $(seq 1 301); do
       printf 'diff --git a/src/file-%03d.ts b/src/file-%03d.ts\n' "$n" "$n"
       printf '@@ -0,0 +1 @@\n+export const value%03d = true\n' "$n"
@@ -105,7 +109,7 @@ run_prep() {
   : >"$tmp/github-output.txt"
   (
     cd "$tmp/run" || exit
-    PATH="$tmp/bin:$PATH" GH_TOKEN=token TARGET_REPO=Verjson/example PR_NUMBER=7 \
+    PATH="$tmp/bin:$PATH" GH_TOKEN=token TARGET_REPO=Verjson/example PR_NUMBER=7 RUNNER_TEMP="$tmp/runner-temp" \
       DEPENDENCY_MAJOR=false FETCH_COUNT="$tmp/fetch-count" \
       GITHUB_OUTPUT="$tmp/github-output.txt" FETCH_FAILURES="${1-0}" NO_MERGE_BASE="${2-false}" \
       bash "$prep"
@@ -115,7 +119,9 @@ run_prep() {
 run_prep 1 \
   && [ "$(cat "$tmp/fetch-count")" -eq 2 ] \
   && grep -q 'result=retry' "$tmp/prep.out" \
-  && [ "$(grep -c '^diff --git ' "$tmp/run/.ai-review/pr.full.diff")" -eq 301 ] \
+  && review_dir="$(sed -n 's/^review_dir=//p' "$tmp/github-output.txt")" \
+  && [ -n "$review_dir" ] \
+  && [ "$(grep -c '^diff --git ' "$review_dir/pr.diff")" -eq 301 ] \
   && pass "base fetch retries once and renders all 301 changed files locally" \
   || fail "large local diff did not recover through the bounded base fetch"
 

@@ -11,14 +11,21 @@ reaches anything but the exact locked private download.
 
 The harness (pinned npm, fixture registries, lifecycle recorder) is the one
 scripts/node-release-credential-isolation.test.py uses for node-release.yml.
+
+RELEASE_CALLER_ISOLATION_PART selects one part of the case space (see
+parts()) so actions-ci can run it as several rows inside their budgets.
+Unset, or `all`, runs every case; an unknown part exits 2 and runs nothing.
+scripts/release-caller-credential-isolation-parts.test.py pins the partition.
 """
 import copy
 import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 
 import yaml
@@ -216,8 +223,10 @@ def token_tracing_path(root, env):
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         # The token is written into this file, never into an environment
-        # variable, so the recorder itself cannot become an exposure.
-        f"if env | grep -qF {TOKEN}; then credential=present; else credential=absent; fi\n"
+        # variable, so the recorder itself cannot become an exposure. No pipe:
+        # under pipefail an early-exiting reader can kill the writer with
+        # SIGPIPE and turn a match into "absent".
+        f"if [[ \"$(env)\" == *{shlex.quote(TOKEN)}* ]]; then credential=present; else credential=absent; fi\n"
         "printf '%s|%s\\n' \"$*\" \"$credential\" >> \"$NPM_TRACE\"\n"
         "exec \"$REAL_NPM\" \"$@\"\n"
     )
@@ -227,6 +236,33 @@ def token_tracing_path(root, env):
         "REAL_NPM": real_npm,
         "NPM_TRACE": str(root / "npm-trace.log"),
     }
+
+
+def verify_token_tracing_is_reliable(root):
+    """The recorder must see the token however large the environment around it is.
+
+    Undercounting is the dangerous direction: a credentialed npm call recorded as
+    absent would let a real exposure pass the isolation assertions below.
+    """
+    fake_bin = root / "fake-npm-bin"
+    fake_bin.mkdir(parents=True)
+    (fake_bin / "npm").write_text("#!/bin/sh\nexit 0\n")
+    (fake_bin / "npm").chmod(0o755)
+    tracing = token_tracing_path(root, {"PATH": f"{fake_bin}{os.pathsep}/usr/bin:/bin"})
+    # 512 KiB after the token keeps the environment dump writing after an
+    # early-exiting reader has seen the token: a piped probe then misrecords
+    # every call (500 of 500 locally), while below ~320 KiB it does so only
+    # intermittently. Three calls per direction are enough to fail it.
+    padding = {f"TRACE_PADDING_{index:04d}": "x" * 1024 for index in range(512)}
+    trace = Path(tracing["NPM_TRACE"])
+    for credential, expected in ((TOKEN, "present"), (None, "absent")):
+        trace.unlink(missing_ok=True)
+        env = ({"NODE_AUTH_TOKEN": credential} if credential else {}) | tracing | padding
+        for _ in range(3):
+            subprocess.run([str(root / "npm-trace-bin/npm"), "--version"], env=env, check=True)
+        recorded = [line.rsplit("|", 1)[1] for line in trace.read_text().splitlines()]
+        assert recorded == [expected] * 3, f"npm trace recorder misrecorded the credential: {recorded}"
+    return True
 
 
 def build_fixture(root, npm_bin, private_registry, attacker_registry):
@@ -767,51 +803,129 @@ def verify_allowlist_sweep(workflow, root):
     assert exposures >= len(ENTRY_KINDS) * 2, f"only {exposures} trees exercise an unapproved download"
 
 
+PART_VARIABLE = "RELEASE_CALLER_ISOLATION_PART"
+ACQUISITION_LABEL = "release-artifact acquire-private-dependencies"
+CONTRACT_CHECKS = (
+    *(f"reserved paths {label} verify" for label in VERIFY_MODES),
+    "private lock validation",
+    "script allowlist",
+    "allowlist sweep",
+)
+
+
+ISOLATION_LABELS = (*(f"{label} verify" for label in VERIFY_MODES), ACQUISITION_LABEL)
+
+
+def case_space():
+    """Every case this test runs: contract checks need no npm; isolation cases run per npm major."""
+    return {("contract", check) for check in CONTRACT_CHECKS} | {
+        ("isolation", label, major) for label in ISOLATION_LABELS for major in harness.SUPPORTED_NPM_RELEASES
+    }
+
+
+def parts():
+    """Deterministic actions-ci parts: the npm-free contract checks, then one part per npm major."""
+    cases = case_space()
+    return {"contract": {case for case in cases if case[0] == "contract"}} | {
+        f"npm{major}": {case for case in cases if case[0] == "isolation" and case[2] == major}
+        for major in harness.SUPPORTED_NPM_RELEASES
+    }
+
+
+def selected_part(environ):
+    """The requested part; unset means `all`, while an empty value stays empty and is refused."""
+    return environ.get(PART_VARIABLE, "all")
+
+
+def selected_cases(part):
+    """The cases a part runs; `all` runs everything; None for an unknown part."""
+    return case_space() if part == "all" else parts().get(part)
+
+
 def main():
+    part = selected_part(os.environ)
+    selected = selected_cases(part)
+    if selected is None:
+        print(f"unknown {PART_VARIABLE} {part!r}: expected all or one of {sorted(parts())}", file=sys.stderr)
+        return 2
     sha = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True, capture_output=True, check=True,
     ).stdout.strip()
     workflows = {label: generate(arguments, sha) for label, arguments in VERIFY_MODES.items()}
     cases = {
-        (f"{label} verify", major): (verify_dependency_steps(workflow), True, VERIFY_REQUIRED_HOOKS)
+        ("isolation", f"{label} verify", major): (verify_dependency_steps(workflow), True, VERIFY_REQUIRED_HOOKS)
         for label, workflow in workflows.items()
         for major in harness.SUPPORTED_NPM_RELEASES
     } | {
         # Lifecycle scripts never run there; the git dependency's preparation,
         # which the attacker registry observes, is what exercises the path.
-        ("release-artifact acquire-private-dependencies", major): (
+        ("isolation", ACQUISITION_LABEL, major): (
             private_acquisition_job_steps(workflows["release-artifact"]), False, set(),
         )
         for major in harness.SUPPORTED_NPM_RELEASES
     }
+    # The run tables must name exactly the case space, so neither can drift.
+    assert set(cases) == {case for case in case_space() if case[0] == "isolation"}, (
+        f"isolation run table and case space differ: {sorted(set(cases) ^ {case for case in case_space() if case[0] == 'isolation'})}"
+    )
+    # Every part runs the recorder guard: the isolation assertions rely on it.
+    guard_verified = False
+    with tempfile.TemporaryDirectory(prefix="release-caller-trace-") as temp:
+        guard_verified = verify_token_tracing_is_reliable(Path(temp))
+    ran = set()
     with tempfile.TemporaryDirectory(prefix="release-caller-reserved-") as temp:
-        for label, workflow in workflows.items():
-            case_root = Path(temp) / label.replace(" ", "_").replace("/", "_")
-            case_root.mkdir()
-            verify_reserved_contract_path(
-                f"{label} verify", verify_dependency_steps(workflow), sha=sha, root=case_root,
+        contract_checks = {
+            f"reserved paths {label} verify": (
+                lambda label=label, workflow=workflow: (
+                    verify_reserved_contract_path(
+                        f"{label} verify", verify_dependency_steps(workflow), sha=sha,
+                        root=Path(temp) / label.replace(" ", "_").replace("/", "_"),
+                    ),
+                    verify_reserved_selection_path(
+                        f"{label} verify", workflow, sha=sha,
+                        root=Path(temp) / label.replace(" ", "_").replace("/", "_"),
+                    ),
+                )
             )
-            verify_reserved_selection_path(f"{label} verify", workflow, sha=sha, root=case_root)
-        verify_private_lock_validation(workflows["release-artifact"], Path(temp) / "lock")
-        verify_script_allowlist(Path(temp) / "script-allowlist")
-        verify_allowlist_sweep(workflows["release-artifact"], Path(temp) / "sweep")
-    verified = set()
+            for label, workflow in workflows.items()
+        } | {
+            "private lock validation": lambda: verify_private_lock_validation(
+                workflows["release-artifact"], Path(temp) / "lock",
+            ),
+            "script allowlist": lambda: verify_script_allowlist(Path(temp) / "script-allowlist"),
+            "allowlist sweep": lambda: verify_allowlist_sweep(workflows["release-artifact"], Path(temp) / "sweep"),
+        }
+        assert set(contract_checks) == set(CONTRACT_CHECKS), (
+            f"contract run table and case space differ: {sorted(set(contract_checks) ^ set(CONTRACT_CHECKS))}"
+        )
+        for kind, check in sorted(case for case in selected if case[0] == "contract"):
+            if check.startswith("reserved paths "):
+                (Path(temp) / check.removeprefix("reserved paths ").removesuffix(" verify")
+                 .replace(" ", "_").replace("/", "_")).mkdir()
+            contract_checks[check]()
+            ran.add((kind, check))
     for major, (version, integrity) in sorted(harness.SUPPORTED_NPM_RELEASES.items()):
+        major_cases = sorted(case for case in selected if case[0] == "isolation" and case[2] == major)
+        if not major_cases:
+            continue
         with tempfile.TemporaryDirectory(prefix=f"release-caller-npm{major}-") as temp:
             npm_bin = harness.provision_npm(version, integrity, Path(temp) / "npm")
-            for (label, case_major), (steps, setup_node_registry, required_hooks) in cases.items():
-                if case_major != major:
-                    continue
+            for case in major_cases:
+                steps, setup_node_registry, required_hooks = cases[case]
+                label = case[1]
                 case_root = Path(temp) / label.replace(" ", "_").replace("/", "_")
                 case_root.mkdir()
                 verify_steps_isolate_credential(
                     label, steps, sha=sha, npm_bin=npm_bin, version=version, root=case_root,
                     setup_node_registry=setup_node_registry, required_hooks=required_hooks,
                 )
-                verified.add((label, major))
-    assert verified == set(cases), f"unexercised cases: {sorted(set(cases) - verified)}"
-    print(f"ok - {len(verified)} generated dependency-installation cases isolate the package credential")
-
+                ran.add(case)
+    assert guard_verified is True, "the npm trace recorder guard did not run"
+    assert ran == selected, f"unexercised cases: {sorted(selected - ran)}"
+    isolated = sum(case[0] == "isolation" for case in ran)
+    print(f"ok - part {part}: {len(ran) - isolated} contract checks and {isolated} generated "
+          "dependency-installation cases isolate the package credential")
+    return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
