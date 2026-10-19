@@ -262,6 +262,16 @@ def step_outputs(path):
     return outputs
 
 
+def step_literal_env(step):
+    """The step's own env entries that need no workflow context, as the runner would set them."""
+    env = {}
+    for name, value in step.get('env', {}).items():
+        value = str(value).replace('${{ github.server_url }}', 'https://github.com')
+        if '${{' not in value:
+            env[name] = value
+    return env
+
+
 class PullRequestCheckoutFixture(unittest.TestCase):
     """A checked-out pull-request head whose text changes are marked with git attributes."""
 
@@ -309,9 +319,10 @@ class PullRequestCheckoutFixture(unittest.TestCase):
                     'GIT_EXTERNAL_DIFF': '/bin/true'}
 
     def run_step(self, step_id):
-        script = STEPS[step_id]['run'].replace('${{ needs.preflight.outputs.head_sha }}', self.head)
+        step = STEPS[step_id]
+        script = step['run'].replace('${{ needs.preflight.outputs.head_sha }}', self.head)
         self.assertNotIn('${{', script)
-        return subprocess.run(['bash', '-e', '-c', script], cwd=self.workspace, env=self.env,
+        return subprocess.run(['bash', '-e', '-c', script], cwd=self.workspace, env={**step_literal_env(step), **self.env},
                               text=True, capture_output=True)
 
     def add_head_commit(self, files):
@@ -716,6 +727,23 @@ class EveryChangeShapeReachesTheReviewTest(PullRequestCheckoutFixture):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(outputs.get('review_input_failure'), 'binary_content_unreviewable')
 
+    def test_a_link_or_submodule_leaving_a_lockfile_path_is_never_elided(self):
+        for name, entry, files in (
+            ('vendor/yarn.lock', ('gitlink', POINTER_BASE), {'.gitmodules': IGNORE_ALL.replace('vendor/lib', 'vendor/yarn.lock')}),
+            ('package-lock.json', ('symlink', 'deploy.sh'), {}),
+        ):
+            for successor in (None, '{"lockfileVersion": 3}\n'):
+                with self.subTest(path=name, deleted=successor is None):
+                    self.setUp()
+                    self.add_head_commit({**files, name: entry})
+                    self.publish_as_base()
+                    if entry[0] == 'gitlink' and successor is not None:
+                        git(self.workspace, 'rm', '-q', '--cached', name)
+                    self.add_head_commit({name: successor})
+                    result, outputs = self.prep()
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(outputs.get('review_input_failure'), 'lockfile_not_regular_file')
+
     def test_a_link_or_submodule_at_a_lockfile_path_is_never_elided(self):
         for name, entry in (('vendor/yarn.lock', ('gitlink', POINTER_HEAD)), ('package-lock.json', ('symlink', 'deploy.sh'))):
             with self.subTest(path=name):
@@ -729,6 +757,47 @@ class EveryChangeShapeReachesTheReviewTest(PullRequestCheckoutFixture):
                 self.assertEqual(outputs.get('review_input_failure'), 'lockfile_not_regular_file')
 
 
+class ReplaceRefsCannotSubstituteContentTest(PullRequestCheckoutFixture):
+    """A replace ref left in a reused .git must not change what is reviewed, hashed, or cited."""
+
+    def plant_replacement(self, path, fake_content):
+        real = git(self.workspace, 'rev-parse', f'HEAD:{path}')
+        fake_file = self.root / 'fake-blob'
+        fake_file.write_text(fake_content)
+        fake = git(self.workspace, 'hash-object', '-w', str(fake_file))
+        git(self.workspace, 'replace', real, fake)
+        self.assertEqual(git(self.workspace, 'cat-file', 'blob', f'HEAD:{path}'), fake_content.strip())
+
+    def test_the_model_input_carries_the_real_content(self):
+        self.plant_replacement('deploy.sh', 'echo base\necho substituted-content\n')
+        diff = self.assert_reviewed('+echo hidden-shell-change')
+        self.assertNotIn('substituted-content', diff)
+
+    def test_the_rereview_patch_id_binds_the_real_content(self):
+        self.assertEqual(self.run_step(ATTRIBUTES_ID).returncode, 0)
+        honest = self.rereview_outputs().get('patch_id')
+        self.assertRegex(honest, r'^[0-9a-f]{40}$')
+        self.plant_replacement('deploy.sh', 'echo base\necho substituted-content\n')
+        self.assertEqual(self.rereview_outputs().get('patch_id'), honest)
+
+    def test_verdict_evidence_is_checked_against_the_real_content(self):
+        self.plant_replacement('deploy.sh', 'echo base\necho substituted-content\n')
+        shutil.copy(ROOT / 'scripts/ci-gate/review-verdict.py', self.runner_temp / 'review-verdict.py')
+        verdict = json.dumps({'blocking': True, 'summary': 's', 'review_first': [], 'followups': [], 'findings': [
+            {'location': 'deploy.sh:2', 'reason': 'r', 'failure_scenario': 'f', 'evidence': 'echo substituted-content'}]})
+        for step_id in ('verdict_1', 'verdict_2'):
+            with self.subTest(step=step_id):
+                output = self.root / f'{step_id}.out'
+                env = {**step_literal_env(STEPS[step_id]), 'PATH': self.env['PATH'], 'HOME': str(self.root),
+                       'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1', 'RUNNER_TEMP': str(self.runner_temp),
+                       'GITHUB_OUTPUT': str(output), 'VERDICT': verdict, 'SENSITIVE': 'false',
+                       'REVIEW_REPOSITORY': str(self.workspace), 'REVIEWED_HEAD_SHA': self.head}
+                result = subprocess.run(['bash', '-e', '-c', STEPS[step_id]['run']], cwd=self.workspace, env=env,
+                                        text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('usable=false\n', output.read_text())
+
+
 class EmptyReviewInputFailsClosedTest(PullRequestCheckoutFixture):
     """A non-empty change must never reach a provider as an empty diff."""
 
@@ -736,7 +805,7 @@ class EmptyReviewInputFailsClosedTest(PullRequestCheckoutFixture):
         wrapper = self.root / 'bin' / 'git'
         wrapper.write_text(
             '#!/bin/sh\n'
-            'case " $* " in *" --name-status "*|*" --raw "*) [ -n "$BLANK_LISTS" ] && exit 0 ;; *" --name-only "*) ;; *" diff "*" --find-renames "*) printf "%s" "$RENDERED"; exit 0 ;; esac\n'
+            'case " $* " in *" --name-status "*|*" --raw "*) [ -n "$BLANK_LISTS" ] && exit 0 ;; *" diff "*" --find-renames "*) printf "%s" "$RENDERED"; exit 0 ;; esac\n'
             f'exec {shutil.which("git")} "$@"\n')
         wrapper.chmod(0o755)
         self.env['RENDERED'] = rendered

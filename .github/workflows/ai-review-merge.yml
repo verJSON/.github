@@ -1033,6 +1033,9 @@ jobs:
         id: rereview
         if: needs.preflight.outputs.lane == 'ai'
         env:
+          # A replace ref left in a reused .git would swap object content in every
+          # diff, patch id, and evidence lookup (ADR 0237).
+          GIT_NO_REPLACE_OBJECTS: "1"
           GH_TOKEN: ${{ github.token }}
           # The review checkout persists no credential (ADR 0237); git reads this
           # step's token through a helper that only answers `get`.
@@ -1270,6 +1273,9 @@ jobs:
         id: prep
         if: needs.preflight.outputs.lane == 'ai' && steps.rereview.outputs.skip_model != 'true' && steps.reserve_1.outputs.allowed == 'true'
         env:
+          # A replace ref left in a reused .git would swap object content in every
+          # diff, patch id, and evidence lookup (ADR 0237).
+          GIT_NO_REPLACE_OBJECTS: "1"
           GH_TOKEN: ${{ github.token }}
           # The review checkout persists no credential (ADR 0237); git reads this
           # step's token through a helper that only answers `get`.
@@ -1674,6 +1680,9 @@ jobs:
         id: verdict_1
         if: always() && needs.preflight.outputs.lane == 'ai' && steps.rereview.outputs.skip_model != 'true' && steps.reserve_1.outputs.allowed == 'true'
         env:
+          # A replace ref left in a reused .git would swap object content in every
+          # diff, patch id, and evidence lookup (ADR 0237).
+          GIT_NO_REPLACE_OBJECTS: "1"
           VERDICT: ${{ needs.preflight.outputs.provider == 'openai' && steps.openai.outputs.structured_output || needs.preflight.outputs.provider == 'deepseek' && steps.deepseek_primary.outputs.structured_output || steps.claude.outputs.structured_output }}
           SENSITIVE: ${{ needs.preflight.outputs.sensitive }}
           REVIEW_PASS: "1"
@@ -1778,6 +1787,9 @@ jobs:
         id: verdict_2
         if: always() && inputs.explicit_rereview != true && needs.preflight.outputs.provider == 'deepseek' && steps.deepseek_fallback.conclusion != 'skipped'
         env:
+          # A replace ref left in a reused .git would swap object content in every
+          # diff, patch id, and evidence lookup (ADR 0237).
+          GIT_NO_REPLACE_OBJECTS: "1"
           VERDICT: ${{ steps.deepseek_fallback.outputs.structured_output }}
           SENSITIVE: ${{ needs.preflight.outputs.sensitive }}
           REVIEW_PASS: "2"
