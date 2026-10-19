@@ -1071,7 +1071,9 @@ jobs:
               diff="$(git diff --no-ext-diff --no-textconv "$mb" HEAD 2>/dev/null || true)"
               # An empty net diff (no real change) is UNKNOWN, not a match.
               if [ -n "$diff" ]; then
-                patch_id="$(printf '%s\n' "$diff" | git patch-id --stable | awk '{print $1}')"
+                # --verbatim (git >= 2.39) keeps whitespace, which can change a
+                # command's meaning; a git without it yields no id and never skips.
+                patch_id="$(printf '%s\n' "$diff" | git patch-id --verbatim | awk '{print $1}')"
               fi
             fi
           fi

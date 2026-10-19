@@ -8,6 +8,7 @@ restores project configuration from the base branch only for pull-request events
 for the `workflow_dispatch` this gate runs under.
 """
 import itertools
+import json
 import os
 import re
 import shutil
@@ -285,7 +286,7 @@ class PullRequestCheckoutFixture(unittest.TestCase):
             '  *headRefOid*) printf "%s\\n" "$HEAD_SHA" ;;\n'
             '  *"--jq .baseRefName"*) echo main ;;\n'
             '  *"api user"*) echo gate-bot ;;\n'
-            '  *reviews,comments*) echo "{}" ;;\n'
+            '  *reviews,comments*) cat "$PRDATA" 2>/dev/null || echo "{}" ;;\n'
             '  *) printf \'{"title":"t","body":"","baseRefName":"main","headRefName":"feature"}\\n\' ;;\n'
             'esac\n')
         (bin_path / 'gh').chmod(0o755)
@@ -304,6 +305,16 @@ class PullRequestCheckoutFixture(unittest.TestCase):
         return subprocess.run(['bash', '-e', '-c', script], cwd=self.workspace, env=self.env,
                               text=True, capture_output=True)
 
+    def add_head_commit(self, files):
+        for relative, content in files.items():
+            path = self.workspace / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+            git(self.workspace, 'add', '--', relative)
+        git(self.workspace, 'commit', '-qm', 'more changes')
+        self.head = git(self.workspace, 'rev-parse', 'HEAD')
+        self.env['HEAD_SHA'] = self.head
+
     def model_input(self):
         """The review directory prep hands to every provider, and its outputs."""
         outputs = step_outputs(self.root / 'output')
@@ -316,16 +327,6 @@ class PullRequestCheckoutFixture(unittest.TestCase):
 
 class ReviewDiffKeepsEveryPathSpellingTest(PullRequestCheckoutFixture):
     """Lockfile elision must select files by path, never by parsing diff headers."""
-
-    def add_head_commit(self, files):
-        for relative, content in files.items():
-            path = self.workspace / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content)
-            git(self.workspace, 'add', '--', relative)
-        git(self.workspace, 'commit', '-qm', 'more changes')
-        self.head = git(self.workspace, 'rev-parse', 'HEAD')
-        self.env['HEAD_SHA'] = self.head
 
     def reviewed_diff(self):
         self.assertEqual(self.run_step(ATTRIBUTES_ID).returncode, 0)
@@ -356,6 +357,46 @@ class ReviewDiffKeepsEveryPathSpellingTest(PullRequestCheckoutFixture):
         self.assertNotIn('lock-content', diff)
         self.assertIn('+echo hidden-shell-change', diff)
         self.assertIn('Generated lockfiles were omitted', outputs.get('review_prompt', ''))
+
+
+class RereviewSkipBindsExactContentTest(PullRequestCheckoutFixture):
+    """An approval may be reused only for byte-identical changes, whitespace included."""
+
+    def rereview(self):
+        (self.root / 'output').unlink(missing_ok=True)
+        result = self.run_step('rereview')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return step_outputs(self.root / 'output')
+
+    def approve_current_head(self):
+        self.assertEqual(self.run_step(ATTRIBUTES_ID).returncode, 0)
+        patch_id = self.rereview().get('patch_id', '')
+        self.assertRegex(patch_id, r'^[0-9a-f]{40}$')
+        body = f'approved <!-- ai-review-head:{self.head} patchid:{patch_id} model:m -->'
+        prdata = self.root / 'prdata.json'
+        prdata.write_text(json.dumps({'reviews': [{'state': 'APPROVED', 'author': {'login': 'gate-bot'},
+                                                    'submittedAt': '2026-10-18T00:00:00Z', 'body': body}],
+                                      'comments': []}))
+        self.env['PRDATA'] = str(prdata)
+
+    def test_an_unchanged_diff_reuses_its_approval(self):
+        self.approve_current_head()
+        self.assertEqual(self.rereview().get('skip_model'), 'true')
+
+    def test_a_whitespace_only_change_inside_a_command_is_reviewed_again(self):
+        self.approve_current_head()
+        self.add_head_commit({'deploy.sh': 'echo base\necho hidden-shell- change\n'})
+        self.assertEqual(self.rereview().get('skip_model'), 'false')
+
+    def test_a_git_without_verbatim_patch_ids_never_skips(self):
+        self.approve_current_head()
+        wrapper = self.root / 'bin' / 'git'
+        wrapper.write_text('#!/bin/sh\nfor argument in "$@"; do [ "$argument" = --verbatim ] && exit 129; done\n'
+                           f'exec {shutil.which("git")} "$@"\n')
+        wrapper.chmod(0o755)
+        outputs = self.rereview()
+        self.assertEqual(outputs.get('skip_model'), 'false')
+        self.assertEqual(outputs.get('patch_id'), '')
 
 
 class ReviewDiffIgnoresPullRequestAttributesTest(PullRequestCheckoutFixture):
@@ -393,7 +434,7 @@ class ReviewDiffIgnoresPullRequestAttributesTest(PullRequestCheckoutFixture):
         neutral = {'GIT_CONFIG_GLOBAL': os.devnull}
         text_diff = git(self.workspace, 'diff', '--no-ext-diff', '--no-textconv', base, 'HEAD', env=neutral)
         self.assertIn('+echo hidden-shell-change', text_diff)
-        expected = subprocess.run(['git', 'patch-id', '--stable'], input=text_diff + '\n', cwd=self.workspace,
+        expected = subprocess.run(['git', 'patch-id', '--verbatim'], input=text_diff + '\n', cwd=self.workspace,
                                   text=True, capture_output=True, check=True).stdout.split()[0]
         self.assertEqual(outputs.get('patch_id'), expected)
 
@@ -501,7 +542,7 @@ class ReviewDiffIgnoresTextconvTest(PullRequestCheckoutFixture):
         base = git(self.workspace, 'merge-base', 'origin/main', 'HEAD')
         raw = git(self.workspace, 'diff', '--no-ext-diff', '--no-textconv', base, 'HEAD')
         self.assertIn('+mode = review-sees-this-raw-line', raw)
-        expected = subprocess.run(['git', 'patch-id', '--stable'], input=raw + '\n', cwd=self.workspace,
+        expected = subprocess.run(['git', 'patch-id', '--verbatim'], input=raw + '\n', cwd=self.workspace,
                                   text=True, capture_output=True, check=True).stdout.split()[0]
         self.assertEqual(step_outputs(self.root / 'output').get('patch_id'), expected)
 
