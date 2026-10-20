@@ -4419,7 +4419,11 @@ def context_match_lines(pattern, start, end):
     return matched_lines
 
 
-IF_KEY = re.compile(r"^((?:[ ]*-[ ]+)*[ ]*)(?:if|\"if\"|'if')[ ]*:(?=[ ]|$)")
+# A tab separates a value as a space does, and any case variant of the key is
+# read as a condition: refusing to recognize one would fail open.
+IF_KEY = re.compile(
+    r"^((?:[ ]*-[ \t]+)*[ ]*)(?:if|\"if\"|'if')[ \t]*:(?=[ \t]|$)", re.IGNORECASE
+)
 
 
 def if_conditions(start, end):

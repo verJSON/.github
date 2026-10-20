@@ -4659,6 +4659,20 @@ grep -qF 'an expression left open at the end of its scalar' "$tmproot/run.out" \
   grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
     && pass 'the verify-job context scan reads a single-quoted if as an expression' \
     || fail "a token read in a single-quoted verify step if was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
+  # A tab after the colon separates the value as a space does.
+  expect_rejection 'a verify step if separated by a tab reading the token' verify_step_if \
+    "        if:"$'\t'"steps.release-version.outputs.selected == 'true' || contains(github.token, 'x')"
+  sync_last_rejection
+  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+    && pass 'the verify-job context scan reads an if separated by a tab' \
+    || fail "a token read in a tab-separated verify step if was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
+  # Fail closed on key case: any case variant of `if` is read as expression code.
+  expect_rejection 'a verify step uppercase IF reading the token' verify_step_if \
+    "        IF: steps.release-version.outputs.selected == 'true' || contains(github.token, 'x')"
+  sync_last_rejection
+  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+    && pass 'the verify-job context scan reads an uppercase IF as an expression' \
+    || fail "a token read in an uppercase verify step IF was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
   expect_rejection 'a verify step if continued onto the next line reading the token' verify_step_if \
     "        if: steps.release-version.outputs.selected == 'true' ||" \
     "          contains(github.TOKEN, 'x')"
