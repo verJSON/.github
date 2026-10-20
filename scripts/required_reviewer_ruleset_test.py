@@ -416,5 +416,19 @@ class CheckTest(unittest.TestCase):
                 self.assertNotIn(f"verified: {live[0]['name']}", result.stdout)
 
 
+    def test_check_fails_closed_when_live_state_cannot_be_read(self):
+        failures = {
+            "listing": ["GET orgs/Verjson/rulesets?per_page=100"],
+            "detail": ["GET orgs/Verjson/rulesets/25000000"],
+        }
+        for label, fail in failures.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
+                result = FakeGitHub(directory, live_store(), fail=fail).run("check")
+
+                self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                self.assertIn("error: GitHub API request failed", result.stderr)
+                self.assertNotIn("verified:", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
