@@ -132,12 +132,18 @@ def live_ruleset(ruleset_id):
 
 def check(config):
     entries = list_organization_rulesets(ORGANIZATION)
+    findings = []
     for expected in config["rulesets"]:
         named = [entry for entry in entries if entry.get("name") == expected["name"]]
+        if not named:
+            findings.append(f"{expected['name']}: absent; apply the reviewed config")
+            continue
         live = live_ruleset(named[0]["id"])
         if mutable_ruleset(live) == expected:
             print(f"verified: {expected['name']} ({live['id']})")
-    return 0
+    for finding in findings:
+        print(f"ERROR: {finding}", file=sys.stderr)
+    return 1 if findings else 0
 
 
 def parse_arguments(arguments):

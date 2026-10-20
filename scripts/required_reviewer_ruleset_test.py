@@ -352,5 +352,14 @@ class CheckTest(unittest.TestCase):
         self.assertEqual([], fake.writes())
 
 
+    def test_check_fails_when_a_reviewed_ruleset_is_absent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = FakeGitHub(directory, live_store([])).run("check")
+
+        self.assertEqual(1, result.returncode, result.stderr)
+        for ruleset in desired_rulesets():
+            self.assertIn(f"{ruleset['name']}: absent", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
