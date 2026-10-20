@@ -7,15 +7,114 @@ import sys
 
 # `python3 -I` does not put the script directory on sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from org_ruleset_api import ContractError, load_json  # noqa: E402
+from org_ruleset_api import ContractError, load_json, require  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "config/required-reviewer-rulesets.json"
+ORGANIZATION = "Verjson"
+ISSUE = 1816
+APPLY_ACKNOWLEDGEMENT = f"APPLY-REQUIRED-REVIEWERS-{ISSUE}"
+NAME_SUFFIX = "-sensitive-path-admin-review"
+ADMINS_TEAM = {"type": "Team", "id": 17813010}
+# ADR 0210 (2026-10-19 amendment): only the release-authorization App may bypass. The
+# merge App, Renovate, and organization owners stay subject to the admin approval.
+RELEASE_BYPASS = [{"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"}]
+RULESET_KEYS = {"name", "target", "enforcement", "conditions", "bypass_actors", "rules"}
+# Everything but the reviewer requirement is neutral, so the ruleset adds the admin
+# approval and changes no other review behavior `main-protection` already sets.
+NEUTRAL_PARAMETERS = {
+    "allowed_merge_methods": ["squash"],
+    "dismiss_stale_reviews_on_push": True,
+    "require_code_owner_review": False,
+    "require_last_push_approval": False,
+    "require_extra_approval_for_unattributed_changes": False,
+    "required_approving_review_count": 0,
+    "required_review_thread_resolution": False,
+}
+
+
+def is_positive_integer(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def validate_file_patterns(patterns, location):
+    require(
+        isinstance(patterns, list) and patterns
+        and all(isinstance(pattern, str) and pattern.strip() == pattern and pattern
+                and not pattern.startswith("/") for pattern in patterns)
+        and len(set(patterns)) == len(patterns),
+        f"{location}: file_patterns must be a non-empty list of distinct "
+        "repository-relative patterns",
+    )
+
+
+def validate_ruleset(ruleset, location):
+    require(isinstance(ruleset, dict) and set(ruleset) == RULESET_KEYS,
+            f"{location}: ruleset keys drifted")
+    require(ruleset["target"] == "branch" and ruleset["enforcement"] == "active",
+            f"{location}: must be an active branch ruleset")
+    repository_name = ruleset["conditions"].get("repository_name") \
+        if isinstance(ruleset["conditions"], dict) else None
+    repositories = repository_name.get("include") if isinstance(repository_name, dict) else None
+    repository = repositories[0] if isinstance(repositories, list) and len(repositories) == 1 else None
+    require(
+        isinstance(repository, str) and ruleset["conditions"] == {
+            "ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []},
+            "repository_name": {"include": [repository], "exclude": [], "protected": True},
+        },
+        f"{location}: conditions must target exactly one protected repository's default branch",
+    )
+    require(ruleset["name"] == f"{repository}{NAME_SUFFIX}",
+            f"{location}: name must be <repository>{NAME_SUFFIX}")
+    require(ruleset["bypass_actors"] == RELEASE_BYPASS,
+            f"{location}: bypass actors must be exactly the release-authorization App")
+    rules = ruleset["rules"]
+    require(isinstance(rules, list) and len(rules) == 1 and isinstance(rules[0], dict)
+            and set(rules[0]) == {"type", "parameters"} and rules[0]["type"] == "pull_request",
+            f"{location}: must hold exactly one pull_request rule")
+    parameters = rules[0]["parameters"]
+    require(
+        isinstance(parameters, dict)
+        and set(parameters) == set(NEUTRAL_PARAMETERS) | {"required_reviewers"}
+        and all(type(parameters[key]) is type(value) and parameters[key] == value
+                for key, value in NEUTRAL_PARAMETERS.items()),
+        f"{location}: pull_request parameters must stay neutral",
+    )
+    reviewers = parameters["required_reviewers"]
+    require(isinstance(reviewers, list) and len(reviewers) == 1
+            and isinstance(reviewers[0], dict)
+            and set(reviewers[0]) == {"reviewer", "minimum_approvals", "file_patterns"},
+            f"{location}: must declare exactly one required reviewer")
+    reviewer = reviewers[0]
+    require(reviewer["reviewer"] == ADMINS_TEAM
+            and type(reviewer["reviewer"].get("id")) is int,
+            f"{location}: reviewer must be the admins team")
+    require(is_positive_integer(reviewer["minimum_approvals"]),
+            f"{location}: minimum_approvals must be a positive integer")
+    validate_file_patterns(reviewer["file_patterns"], location)
+    return repository
 
 
 def read_config(path=CONFIG):
-    return load_json(path.read_text(encoding="utf-8"), str(path))
+    config = load_json(path.read_text(encoding="utf-8"), str(path))
+    require(isinstance(config, dict) and set(config) == {
+        "schema_version", "organization", "issue", "apply_acknowledgement", "rulesets",
+    }, "config top-level keys drifted")
+    require(config["schema_version"] == 1 and config["organization"] == ORGANIZATION
+            and config["issue"] == ISSUE, "config identity drifted")
+    require(config["apply_acknowledgement"] == APPLY_ACKNOWLEDGEMENT,
+            "apply acknowledgement drifted")
+    rulesets = config["rulesets"]
+    require(isinstance(rulesets, list) and rulesets,
+            "config must declare at least one ruleset")
+    repositories = set()
+    for index, ruleset in enumerate(rulesets):
+        repository = validate_ruleset(ruleset, f"rulesets[{index}]")
+        require(repository not in repositories,
+                f"rulesets[{index}]: duplicate ruleset for {repository}")
+        repositories.add(repository)
+    return config
 
 
 def parse_arguments(arguments):

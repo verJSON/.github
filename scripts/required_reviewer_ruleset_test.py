@@ -179,5 +179,155 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(CLI_CLOUD_PROPOSAL, rendered[0])
 
 
+def mutate_parameters(change):
+    def apply(config):
+        change(config["rulesets"][0]["rules"][0]["parameters"])
+    return apply
+
+
+def mutate_reviewer(change):
+    return mutate_parameters(lambda parameters: change(parameters["required_reviewers"][0]))
+
+
+CONFIG_MUTATIONS = {
+    "organization admin bypass": (
+        lambda config: config["rulesets"][0]["bypass_actors"].append(
+            {"actor_type": "OrganizationAdmin", "actor_id": None, "bypass_mode": "always"}),
+        "bypass actors must be exactly the release-authorization App",
+    ),
+    "merge App bypass replaces release": (
+        lambda config: config["rulesets"][0].update(bypass_actors=[
+            {"actor_type": "Integration", "actor_id": 4693283, "bypass_mode": "always"}]),
+        "bypass actors must be exactly the release-authorization App",
+    ),
+    "no bypass": (
+        lambda config: config["rulesets"][0].update(bypass_actors=[]),
+        "bypass actors must be exactly the release-authorization App",
+    ),
+    "code-owner review": (
+        mutate_parameters(lambda parameters: parameters.update(require_code_owner_review=True)),
+        "pull_request parameters must stay neutral",
+    ),
+    "approving review count": (
+        mutate_parameters(lambda parameters: parameters.update(required_approving_review_count=1)),
+        "pull_request parameters must stay neutral",
+    ),
+    "last push approval": (
+        mutate_parameters(lambda parameters: parameters.update(require_last_push_approval=True)),
+        "pull_request parameters must stay neutral",
+    ),
+    "stale approvals survive a push": (
+        mutate_parameters(lambda parameters: parameters.update(dismiss_stale_reviews_on_push=False)),
+        "pull_request parameters must stay neutral",
+    ),
+    "extra parameter": (
+        mutate_parameters(lambda parameters: parameters.update(automatic_copilot_code_review_enabled=False)),
+        "pull_request parameters must stay neutral",
+    ),
+    "another team": (
+        mutate_reviewer(lambda reviewer: reviewer["reviewer"].update(id=1)),
+        "reviewer must be the admins team",
+    ),
+    "a user reviewer": (
+        mutate_reviewer(lambda reviewer: reviewer["reviewer"].update(type="User")),
+        "reviewer must be the admins team",
+    ),
+    "zero approvals": (
+        mutate_reviewer(lambda reviewer: reviewer.update(minimum_approvals=0)),
+        "minimum_approvals must be a positive integer",
+    ),
+    "boolean approvals": (
+        mutate_reviewer(lambda reviewer: reviewer.update(minimum_approvals=True)),
+        "minimum_approvals must be a positive integer",
+    ),
+    "no file patterns": (
+        mutate_reviewer(lambda reviewer: reviewer.update(file_patterns=[])),
+        "file_patterns must be a non-empty list of distinct repository-relative patterns",
+    ),
+    "anchored CODEOWNERS pattern": (
+        mutate_reviewer(lambda reviewer: reviewer.update(file_patterns=["/.github/"])),
+        "file_patterns must be a non-empty list of distinct repository-relative patterns",
+    ),
+    "duplicate pattern": (
+        mutate_reviewer(lambda reviewer: reviewer.update(file_patterns=[".github/**", ".github/**"])),
+        "file_patterns must be a non-empty list of distinct repository-relative patterns",
+    ),
+    "second reviewer entry": (
+        mutate_parameters(lambda parameters: parameters["required_reviewers"].append(
+            copy.deepcopy(parameters["required_reviewers"][0]))),
+        "exactly one required reviewer",
+    ),
+    "second rule": (
+        lambda config: config["rulesets"][0]["rules"].append({"type": "deletion"}),
+        "exactly one pull_request rule",
+    ),
+    "name does not name the repository": (
+        lambda config: config["rulesets"][0].update(name="verjson-cli-sensitive-path-admin-review"),
+        "name must be <repository>-sensitive-path-admin-review",
+    ),
+    "second repository": (
+        lambda config: config["rulesets"][0]["conditions"]["repository_name"]["include"].append("verjson-cli"),
+        "conditions must target exactly one protected repository's default branch",
+    ),
+    "renameable repository": (
+        lambda config: config["rulesets"][0]["conditions"]["repository_name"].update(protected=False),
+        "conditions must target exactly one protected repository's default branch",
+    ),
+    "every branch": (
+        lambda config: config["rulesets"][0]["conditions"]["ref_name"].update(include=["~ALL"]),
+        "conditions must target exactly one protected repository's default branch",
+    ),
+    "evaluate only": (
+        lambda config: config["rulesets"][0].update(enforcement="evaluate"),
+        "must be an active branch ruleset",
+    ),
+    "unknown ruleset key": (
+        lambda config: config["rulesets"][0].update(id=1),
+        "ruleset keys drifted",
+    ),
+    "unknown top-level key": (
+        lambda config: config.update(owner_bypass=True),
+        "config top-level keys drifted",
+    ),
+    "acknowledgement for another issue": (
+        lambda config: config.update(apply_acknowledgement="APPLY-REQUIRED-REVIEWERS-1"),
+        "apply acknowledgement drifted",
+    ),
+    "no rulesets": (
+        lambda config: config.update(rulesets=[]),
+        "config must declare at least one ruleset",
+    ),
+    "duplicate repository": (
+        lambda config: config["rulesets"].append(copy.deepcopy(config["rulesets"][0])),
+        "duplicate ruleset",
+    ),
+}
+
+
+class ConfigTest(unittest.TestCase):
+    def test_committed_config_is_admissible(self):
+        load_module().read_config()
+
+    def test_config_admits_only_the_reviewed_ruleset_shape(self):
+        module = load_module()
+        baseline = json.loads(CONFIG.read_text(encoding="utf-8"))
+        for label, (mutate, message) in CONFIG_MUTATIONS.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
+                config = copy.deepcopy(baseline)
+                mutate(config)
+                path = Path(directory) / "config.json"
+                path.write_text(json.dumps(config), encoding="utf-8")
+                with self.assertRaisesRegex(module.ContractError, message):
+                    module.read_config(path)
+
+    def test_config_rejects_a_duplicated_json_key(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text('{"schema_version": 1, "schema_version": 1}', encoding="utf-8")
+            with self.assertRaisesRegex(module.ContractError, "duplicate key schema_version"):
+                module.read_config(path)
+
+
 if __name__ == "__main__":
     unittest.main()
