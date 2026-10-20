@@ -261,14 +261,17 @@ def read_policy(policy: Path):
                 )
             actor_identities.add(identity)
             bypass_actors.append(parsed_actor)
+        # A null id keys the contract by name: a ruleset applied from reviewed
+        # config (#1816) has no id until it is created, and its own check owns
+        # its presence and full image.
         parsed = {
-            "ruleset_id": require_positive_integer(
-                item["ruleset_id"], f"{location}.ruleset_id"
-            ),
+            "ruleset_id": None
+            if item["ruleset_id"] is None
+            else require_positive_integer(item["ruleset_id"], f"{location}.ruleset_id"),
             "name": require_string(item["name"], f"{location}.name"),
             "bypass_actors": bypass_actors,
         }
-        if parsed["ruleset_id"] in contract_ids:
+        if parsed["ruleset_id"] is not None and parsed["ruleset_id"] in contract_ids:
             raise AuditDataError(
                 f"ruleset policy contains duplicate bypass contract id {parsed['ruleset_id']}"
             )
@@ -522,12 +525,28 @@ def producer_binding_findings(ruleset: dict, producer_app_id: int):
 def bypass_contract_findings(rulesets: list[dict], contracts: list[dict]):
     """Require every non-empty bypass list to match one reviewed actor image."""
     live_by_id = {ruleset["id"]: ruleset for ruleset in rulesets}
-    contracts_by_id = {contract["ruleset_id"]: contract for contract in contracts}
+    contracts_by_id = {
+        contract["ruleset_id"]: contract
+        for contract in contracts
+        if contract["ruleset_id"] is not None
+    }
+    name_keyed = {
+        contract["name"]: contract for contract in contracts if contract["ruleset_id"] is None
+    }
     findings = []
 
     for contract in contracts:
-        ruleset = live_by_id.get(contract["ruleset_id"])
         label = f"reviewed bypass contract {contract['name']} ({contract['ruleset_id']})"
+        if contract["ruleset_id"] is None:
+            named = [ruleset for ruleset in rulesets if ruleset["name"] == contract["name"]]
+            if not named:
+                continue
+            if len(named) > 1:
+                findings.append(f"{label}: {len(named)} live rulesets share the name")
+                continue
+            ruleset = named[0]
+        else:
+            ruleset = live_by_id.get(contract["ruleset_id"])
         if ruleset is None:
             findings.append(f"{label}: ruleset is absent; remove the stale contract")
         elif ruleset["name"] != contract["name"]:
@@ -542,7 +561,7 @@ def bypass_contract_findings(rulesets: list[dict], contracts: list[dict]):
     for ruleset in rulesets:
         if not ruleset["bypass_actors"]:
             continue
-        contract = contracts_by_id.get(ruleset["id"])
+        contract = contracts_by_id.get(ruleset["id"]) or name_keyed.get(ruleset["name"])
         if contract is None or contract["name"] != ruleset["name"]:
             findings.append(
                 f"{ruleset['name']} ({ruleset['id']}): bypass actors are not covered "

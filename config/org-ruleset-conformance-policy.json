@@ -91,6 +91,34 @@
         {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"},
         {"actor_type": "Integration", "actor_id": 4693283, "bypass_mode": "always"}
       ]
+    },
+    {
+      "ruleset_id": null,
+      "name": "verjson-cli-cloud-sensitive-path-admin-review",
+      "bypass_actors": [
+        {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"}
+      ]
+    },
+    {
+      "ruleset_id": null,
+      "name": "verjson-cli-projects-sensitive-path-admin-review",
+      "bypass_actors": [
+        {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"}
+      ]
+    },
+    {
+      "ruleset_id": null,
+      "name": "verjson-cli-sensitive-path-admin-review",
+      "bypass_actors": [
+        {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"}
+      ]
+    },
+    {
+      "ruleset_id": null,
+      "name": "verjson-object-storage-sensitive-path-admin-review",
+      "bypass_actors": [
+        {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"}
+      ]
     }
   ]
 }

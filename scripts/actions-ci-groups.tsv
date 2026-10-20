@@ -88,6 +88,7 @@ platform	python3 scripts/org_ruleset_conformance_test.py
 platform	python3 scripts/package_type_surface_ruleset_test.py
 platform	python3 scripts/github_identity_test.py
 platform	python3 scripts/authn_type_surface_ruleset_test.py
+platform	python3 scripts/required_reviewer_ruleset_test.py
 platform	node --test scripts/npm_pack_json_test.mjs
 platform	bash scripts/type-surface-contract-generator.test.sh
 platform	python3 scripts/cli_projects_package_surface_test.py

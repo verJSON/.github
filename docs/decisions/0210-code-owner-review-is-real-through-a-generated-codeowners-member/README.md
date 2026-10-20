@@ -107,3 +107,153 @@ across repositories without further code.
   epic was never the prerequisite, verjson-ci#212 was, and it has merged.
 - If `main-protection` ever drops `require_code_owner_review`, this member becomes
   advisory and a successor ADR should demote it to `optional`.
+
+## 2026-10-19 amendment — Per-repository sensitive-path approval is a native required-reviewer rule
+
+- **Issue:** [#1816](https://github.com/Verjson/.github/issues/1816)
+- **Category:** organization ruleset behavior and review routing (sensitive class)
+
+### Context
+
+The canonical CODEOWNERS is the single rule `* @verJSON/devs`, and the generated
+contract test refuses a local edit, so regeneration drops any hand-written
+path-scoped route. `verjson-cli` lost `/.github/` and `/.gitmodules` →
+`@Verjson/admins` in its #302 regeneration (`00800b0f` → `3275e8fc`), and on
+2026-10-19 `verjson-cli-cloud`, `verjson-cli-projects` and `verjson-object-storage`
+still carry admin routes on `main` that their next regeneration removes. A read-only
+sweep that day of the current and historical CODEOWNERS of all 106 non-archived
+organization repositories found admin routes in no others; `verjson-ci`, `verjson-compliance` and `verjson-compliance-schema`
+adopted the canonical file without ever having one. Even where they existed, those
+routes never constrained the merge Apps or organization owners, which bypass
+`main-protection` (18098028) and with it its code-owner requirement.
+
+The owner decided on 2026-10-19 (recorded by the PM on #1816) that canonical
+CODEOWNERS stays default ownership only, and that additional admin approval is a
+native organization `required_reviewers` ruleset managed as reviewed config here.
+The 2026-10-18 rehearsal on #1816 (ruleset 25327030, since deleted) established
+that such a ruleset refuses an unapproved sensitive-path merge even by an
+organization owner using `--admin`, that `src/steps/**` matches nested directories
+while `src/pulumi/**` does not match `src/pulumifoo/`, that ordinary paths are
+unaffected, and that an organization-owner token reads
+`current_user_can_bypass: never` on it.
+
+### Decision
+
+- **CODEOWNERS is unchanged.** The decision above and ADR 0174 stand: the canonical
+  file states default ownership, and no path-specific override is generated.
+- **Additional approval is one native ruleset per repository.** Each holds a single
+  `pull_request` rule whose `required_reviewers` names `@verJSON/admins` (team
+  17813010, exactly one approval) for the repository's sensitive `file_patterns`, targets
+  `~DEFAULT_BRANCH` of exactly one rename-protected repository, and is named
+  `<repository>-sensitive-path-admin-review`. Every other pull-request parameter is
+  neutral (no approving-review count, code-owner, last-push, thread-resolution or
+  unattributed-change requirement), so the ruleset adds the admin approval and
+  changes no review behavior `main-protection` already sets;
+  `dismiss_stale_reviews_on_push: true` makes a later push discard the approval.
+  One approval is a cap, not a default: `@admins` has three members and an author
+  cannot approve their own pull request, so two would stall an admin-authored
+  change whenever one other member is unavailable.
+- **Desired state lives in `config/required-reviewer-rulesets.json`.**
+  `scripts/required-reviewer-ruleset.py render` prints the exact payloads, `check`
+  compares the live organization rulesets by name and fails on absence, drift in any
+  mutable field (compared without JSON type coercion), a duplicated name, or a live
+  `*-sensitive-path-admin-review` ruleset the config no longer declares, and exits 2
+  when live state cannot be read or a target is not a live, unarchived repository
+  whose default branch is `main` (a misspelled name would otherwise enforce nothing
+  while `check` stayed green). `apply --ack APPLY-REQUIRED-REVIEWERS-1816` makes the
+  same target check and resolves every action before writing. It brings an absent
+  ruleset, and any existing ruleset that is not active (such as a failed create's
+  disabled leftover), to the reviewed image by writing it disabled, verifying it,
+  then activating and re-verifying it, restoring the verified disabled image if
+  activation reads back differently. An already-active drifted ruleset is rewritten
+  in place without rollback: its prior image is drifted, so it is not a state worth
+  restoring, and a failed read-back exits 2 for `check` to report. If activation reads
+  back wrong and the disabling restore also fails, the ruleset may be left active with
+  an unverified image; `apply` says so explicitly, names `check`, and a re-run takes
+  the active-drifted path above. The rulesets API has no conditional write, so `apply`
+  relies on full-image `PUT`s each followed by a read-back; two concurrent applies can
+  each create the same ruleset, and the identical, stricter-not-weaker duplicate makes
+  `check` and `apply` refuse the shared name until one is deleted. The config loader
+  admits only the shape above, compared without JSON type coercion and with one
+  literal repository name (no glob or `~ALL`), so weakening the bypass, neutrality,
+  reviewer or target is a reviewed code change, not a data edit.
+- **Scope is every dropped admin route**, with the routes it carried:
+
+  | Repository | `file_patterns` | CODEOWNERS evidence |
+  | --- | --- | --- |
+  | `verjson-cli-cloud` | `.github/**`, `src/pulumi/**`, `src/steps/**`, `src/dns/**` | `main`, 2026-10-19 |
+  | `verjson-cli-projects` | `.github/**`, `templates/**` | `main`, 2026-10-19 |
+  | `verjson-cli` | `.github/**`, `.gitmodules` | `00800b0f`, before #302 |
+  | `verjson-object-storage` | `.github/**`, `scripts/**`, `docs/decisions/**` | `main`, 2026-10-19 |
+
+  `verjson-cli` has no `.gitmodules` on `main` today (2026-10-19); the pattern keeps
+  the route it had, so reintroducing submodules needs an admin approval again.
+- **Only the release-authorization App (Integration 4583107) bypasses.** The
+  `pull_request` rule would otherwise block its direct release push. The merge App
+  (4693283), Renovate (2740) and `OrganizationAdmin` are deliberately absent.
+- **No organization-owner bypass.** This is the PM's technical decision on #1816's
+  open question, flagged for the owner. Agent sessions run with an organization-owner
+  token, so an owner bypass would let any such session merge a sensitive-path change
+  with no second human, which is the gap this amendment closes. The cost is that an
+  owner cannot merge a sensitive-path change alone in an emergency: another
+  `@admins` member must approve, or an owner must visibly edit the ruleset, which
+  `check` reports as drift until `apply` restores it — automatically once rollout
+  step 4 schedules `check`, and only when someone runs it before then.
+- **Conformance keys these contracts by name.** `config/org-ruleset-conformance-policy.json`
+  carries a `bypass_actor_contracts` entry with `"ruleset_id": null` for each ruleset,
+  and `scripts/org-ruleset-conformance.py` matches a null-id contract by name: an
+  absent ruleset is not a finding there (`check` owns presence and the full image), a
+  present one must carry exactly the reviewed bypass actors, and two live rulesets
+  under the name fail. The id does not exist until `apply`, and recording it would
+  need a follow-up change while the daily audit reported the applied ruleset as
+  uncovered; `check` already verifies the whole image by name.
+  `scripts/required_reviewer_ruleset_test.py` keeps the two files in agreement.
+
+### `reviewDecision` is not a review verdict here
+
+On the rehearsal's refused sensitive-path pull requests GitHub reported
+`reviewDecision` as null, while ordinary ones reported `REVIEW_REQUIRED` from
+`main-protection`. Null means GitHub's summary does not describe the required-reviewer
+rule, not that no review is required. Enforcement does not depend on that field —
+GitHub refuses the merge natively for every actor without a bypass — but merge
+automation must treat a null `reviewDecision` as unknown and blocked, never as
+satisfied. `scripts/assert-mergeable-head.sh` reads no review state at all (its Gates
+A–C are check-run assertions), so it has no fail-open here, and its `true` never
+asserted that review requirements are met.
+
+### Rollout
+
+1. Merging this amendment changes nothing live.
+2. An organization owner, from a clean checkout of merged `main`, runs
+   `python3 -I scripts/required-reviewer-ruleset.py render`, then
+   `apply --ack APPLY-REQUIRED-REVIEWERS-1816`, then `check`, which must exit 0.
+3. At that rollout, verify what the rehearsal did not establish: an eligible
+   `@admins` approval satisfies the rule (rehearsal step 2); a push after approval
+   dismisses it (step 3); the merge-authorization App's installation token reads
+   `current_user_can_bypass: never` and the release-authorization App's reads
+   `always` (steps 6 and 7); that the bare-file pattern `.gitmodules` matches the root
+   file; and that `.github/**` matches dotfile paths such as `.github/workflows/x.yml`
+   under the ruleset's actual pattern semantics (plausible from rehearsal pull request
+   #3, which was refused for that path, but not isolated as a dotfile question). Also
+   confirm GitHub echoes `repository_name.protected: true` on read-back; that echo is
+   unverified, and if GitHub omits it the create path fails safe, leaving the ruleset
+   disabled with a read-back error rather than enforcing an unverified image.
+4. Then add `check` to the scheduled `org-ruleset-conformance.yml` audit, so it
+   starts green rather than reporting the pre-apply absence daily.
+5. Only then regenerate the remaining adopters' CODEOWNERS (`verjson-cli-cloud#575`,
+   `verjson-cli-projects`, `verjson-object-storage`), so no repository is without
+   admin review in between. #1816 closes after steps 2–5.
+
+### Consequences
+
+- Sensitive-path pull requests in these four repositories wait for a human `@admins`
+  approval even when the AI gate has approved them, including Renovate pull requests
+  that bump an action pin under `.github/` (and, in `verjson-object-storage`, anything
+  under `scripts/`). That is the requirement the routes expressed, now made binding
+  on the autonomous path as well.
+- `@admins` has three members (pyousefi, manishb27, AceVentura7). A member cannot
+  approve their own pull request, so each sensitive change needs another member's
+  review; that is an operational dependency on a small team.
+- A new repository that needs sensitive-path approval adds an entry to the config and
+  is applied the same way; a fleet-wide `/.github/` requirement remains a separate
+  policy decision that the same config can express later.
