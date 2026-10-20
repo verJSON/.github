@@ -99,7 +99,14 @@ def save():
         json.dump(state, stream)
 
 prefix = "orgs/Verjson/rulesets"
-if method == "GET" and path == f"{prefix}?per_page=100" and paginate:
+if method == "GET" and path.startswith("repos/Verjson/") and not paginate:
+    name = path.removeprefix("repos/Verjson/")
+    if name not in state["repositories"]:
+        print("Not Found", file=sys.stderr); sys.exit(1)
+    print(json.dumps(dict({"name": name, "full_name": f"verJSON/{name}",
+                           "archived": False, "default_branch": "main"},
+                          **state["repositories"][name])))
+elif method == "GET" and path == f"{prefix}?per_page=100" and paginate:
     print(json.dumps([[{"id": int(key), "name": value["name"]}
                        for key, value in state["rulesets"].items()]]))
 elif method == "GET" and path.startswith(prefix + "/") and not paginate:
@@ -133,6 +140,10 @@ class FakeGitHub:
         self.directory = Path(directory)
         self.state = self.directory / "state.json"
         self.calls_file = self.directory / "calls.jsonl"
+        options.setdefault("repositories", {
+            ruleset["conditions"]["repository_name"]["include"][0]: {}
+            for ruleset in desired_rulesets()
+        })
         self.state.write_text(json.dumps({
             "rulesets": {str(key): value for key, value in (rulesets or {}).items()},
             "fail": fail or [],
@@ -530,6 +541,38 @@ class CheckTest(unittest.TestCase):
             f"{desired_rulesets()[0]['name']}: 2 live rulesets share the name",
             result.stderr,
         )
+
+
+    def test_check_and_apply_refuse_a_target_that_is_not_a_live_default_main_repository(self):
+        # A typo or retired repository would let check stay green while the
+        # ruleset enforces nothing (#1859 review).
+        repository = desired_rulesets()[0]["conditions"]["repository_name"]["include"][0]
+        targets = {
+            "missing": None,
+            "archived": {"archived": True},
+            "default branch is not main": {"default_branch": "master"},
+            "another repository answered": {"name": "verjson-other",
+                                            "full_name": "verJSON/verjson-other"},
+        }
+        for label, metadata in targets.items():
+            repositories = {
+                ruleset["conditions"]["repository_name"]["include"][0]: {}
+                for ruleset in desired_rulesets()
+            }
+            if metadata is None:
+                del repositories[repository]
+            else:
+                repositories[repository] = metadata
+            for mode, arguments in (("check", ()), ("apply", ("--ack", ACK))):
+                with self.subTest(label=label, mode=mode), \
+                        tempfile.TemporaryDirectory() as directory:
+                    fake = FakeGitHub(directory, live_store(), repositories=repositories)
+                    result = fake.run(mode, *arguments)
+
+                    self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("error:", result.stderr)
+                    self.assertNotIn(f"verified: {desired_rulesets()[0]['name']}", result.stdout)
+                    self.assertEqual([], fake.writes())
 
 
 class ApplyTest(unittest.TestCase):

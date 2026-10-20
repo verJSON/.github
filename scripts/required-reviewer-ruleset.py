@@ -8,7 +8,7 @@ import sys
 
 # `python3 -I` does not put the script directory on sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from github_identity import same_organization  # noqa: E402
+from github_identity import same_organization, same_repository  # noqa: E402
 from org_ruleset_api import (  # noqa: E402
     ContractError, drifted_fields, gh_json, gh_json_input, is_positive_integer,
     list_organization_rulesets, load_json, require, same_json,
@@ -136,7 +136,26 @@ def live_ruleset(ruleset_id):
     return live
 
 
+def target_repository(ruleset):
+    return ruleset["conditions"]["repository_name"]["include"][0]
+
+
+def verify_targets(config):
+    """Refuse a target that is not a live repository: a typo would enforce nothing."""
+    for ruleset in config["rulesets"]:
+        repository = target_repository(ruleset)
+        live = gh_json(f"repos/{ORGANIZATION}/{repository}")
+        require(isinstance(live, dict)
+                and same_repository(live.get("full_name"), f"{ORGANIZATION}/{repository}"),
+                f"{ruleset['name']}: repository {repository} identity drifted")
+        require(live.get("archived") is False,
+                f"{ruleset['name']}: repository {repository} is archived")
+        require(live.get("default_branch") == "main",
+                f"{ruleset['name']}: repository {repository} default branch is not main")
+
+
 def check(config):
+    verify_targets(config)
     entries = list_organization_rulesets(ORGANIZATION)
     findings = []
     for expected in config["rulesets"]:
@@ -211,6 +230,7 @@ def restore_disabled(ruleset_id, staged, cause):
 
 def plan(config):
     """Resolve every ruleset's action from live state before anything is written."""
+    verify_targets(config)
     entries = list_organization_rulesets(ORGANIZATION)
     actions = []
     for expected in config["rulesets"]:
