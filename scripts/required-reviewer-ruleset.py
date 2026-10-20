@@ -7,7 +7,10 @@ import sys
 
 # `python3 -I` does not put the script directory on sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from org_ruleset_api import ContractError, load_json, require  # noqa: E402
+from github_identity import same_organization  # noqa: E402
+from org_ruleset_api import (  # noqa: E402
+    ContractError, gh_json, list_organization_rulesets, load_json, mutable_ruleset, require,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,15 +120,37 @@ def read_config(path=CONFIG):
     return config
 
 
+def live_ruleset(ruleset_id):
+    live = gh_json(f"orgs/{ORGANIZATION}/rulesets/{ruleset_id}")
+    require(isinstance(live, dict) and live.get("id") == ruleset_id,
+            f"ruleset {ruleset_id} detail identity drifted")
+    require(live.get("source_type") == "Organization"
+            and same_organization(live.get("source"), ORGANIZATION),
+            f"ruleset {ruleset_id} is not an organization ruleset")
+    return live
+
+
+def check(config):
+    entries = list_organization_rulesets(ORGANIZATION)
+    for expected in config["rulesets"]:
+        named = [entry for entry in entries if entry.get("name") == expected["name"]]
+        live = live_ruleset(named[0]["id"])
+        if mutable_ruleset(live) == expected:
+            print(f"verified: {expected['name']} ({live['id']})")
+    return 0
+
+
 def parse_arguments(arguments):
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("render",))
+    parser.add_argument("mode", choices=("render", "check"))
     return parser.parse_args(arguments)
 
 
 def main(arguments=None):
-    parse_arguments(sys.argv[1:] if arguments is None else arguments)
+    args = parse_arguments(sys.argv[1:] if arguments is None else arguments)
     config = read_config()
+    if args.mode == "check":
+        return check(config)
     print(json.dumps(config["rulesets"], indent=2, sort_keys=True))
     return 0
 

@@ -329,5 +329,28 @@ class ConfigTest(unittest.TestCase):
                 module.read_config(path)
 
 
+def live_store(rulesets=None):
+    """A live organization holding main-protection plus the given managed rulesets."""
+    store = {18098028: {
+        "name": "main-protection", "target": "branch", "enforcement": "active",
+        "conditions": {}, "bypass_actors": [], "rules": [],
+    }}
+    for index, ruleset in enumerate(desired_rulesets() if rulesets is None else rulesets):
+        store[25000000 + index] = copy.deepcopy(ruleset)
+    return store
+
+
+class CheckTest(unittest.TestCase):
+    def test_check_passes_when_every_live_ruleset_equals_the_reviewed_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeGitHub(directory, live_store())
+            result = fake.run("check")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        for ruleset in desired_rulesets():
+            self.assertIn(f"verified: {ruleset['name']}", result.stdout)
+        self.assertEqual([], fake.writes())
+
+
 if __name__ == "__main__":
     unittest.main()

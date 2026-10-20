@@ -5,6 +5,7 @@
 predate this module and still carry private copies of these helpers.
 """
 import json
+import subprocess
 
 
 class ContractError(Exception):
@@ -29,3 +30,36 @@ def load_json(text, source):
         return json.loads(text, object_pairs_hook=unique_object)
     except json.JSONDecodeError as error:
         raise ContractError(f"{source} is invalid JSON: {error}") from None
+
+
+def gh_json(*arguments):
+    result = subprocess.run(
+        ["gh", "api", "--hostname", "github.com", *arguments],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        raise ContractError(f"GitHub API request failed: {' '.join(arguments)}")
+    return load_json(result.stdout, f"GitHub API response for {' '.join(arguments)}")
+
+
+MUTABLE_FIELDS = ("name", "target", "enforcement", "bypass_actors", "conditions", "rules")
+
+
+def mutable_ruleset(value):
+    """The fields a ruleset create or update writes, as the API reads them back."""
+    require(isinstance(value, dict) and set(MUTABLE_FIELDS) <= set(value),
+            "live ruleset is missing required fields")
+    return {key: value[key] for key in MUTABLE_FIELDS}
+
+
+def list_organization_rulesets(organization):
+    listing = gh_json("--paginate", "--slurp", f"orgs/{organization}/rulesets?per_page=100")
+    require(isinstance(listing, list) and listing
+            and all(isinstance(page, list) for page in listing),
+            "organization ruleset listing is malformed")
+    entries = [entry for page in listing for entry in page]
+    require(entries and all(isinstance(entry, dict) for entry in entries),
+            "organization ruleset listing is empty or malformed")
+    return entries
