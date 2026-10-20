@@ -693,6 +693,319 @@ EOF
 # drift; the generated contract test asserts they are still identical.
 release_runner_expr="github.repository_owner == 'verJSON' && (vars.CI_RUNNER_DEFAULT || '[\"self-hosted\",\"general\"]') || '[\"ubuntu-24.04\"]'"
 
+# The whole snapshot job of every release caller mode, and nothing in it is
+# adopter-authored. The generated contract test pins it against this function
+# (#784, ADR 0099). It is the only job that reaches the release App: the suite
+# also pins the caller's job set and refuses a job-level environment.
+release_snapshot_job() {
+  local ref="$1"
+  # Computed before the here-document: a command substitution inside one
+  # cannot fail the generator, and a caller rendered from a failed one is
+  # truncated in silence.
+  local snapshot_with
+  snapshot_with="$(release_snapshot_with "$ref")" || return
+  cat <<EOF
+  snapshot:
+    # The irreversible act, and the only job that may not run first.
+    needs: verify
+    if: needs.verify.outputs.selected == 'true' && needs.verify.outputs.snapshot-exists != 'true'
+    uses: verJSON/.github/.github/workflows/changelog-release.yml@${ref}
+    secrets: inherit
+    permissions:
+      actions: read
+      # The reusable workflow pushes with its separately minted release App
+      # token. This caller grant caps only its read-only GITHUB_TOKEN (#784).
+      contents: read
+${snapshot_with}
+EOF
+}
+
+# The release-artifact build job. Its only generator inputs are the runner
+# matrix and whether approved private dependencies are restored; the contract
+# test renders this same function as its expectation and pins the job whole
+# (YAML comments, blank lines and one uniform reindent aside), with only the
+# grammar-checked matrix substituted (#975, ADR 0099).
+release_artifact_build_job() {
+  local needs="$1" condition="$2" matrix="$3" restore_step="$4"
+  cat <<EOF
+  build:
+    name: Build release artifacts (\${{ matrix.os }})
+    needs: ${needs}
+    if: ${condition}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+${matrix}
+    runs-on: \${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the tagged release tree
+        uses: ${release_checkout}
+        with:
+          ref: \${{ needs.verify.outputs.version }}
+          fetch-depth: 0
+          persist-credentials: false
+${restore_step}
+      - name: Require the release build hook
+        shell: bash
+        run: |
+          if [ -e scripts/release-build.sh ] && [ ! -x scripts/release-build.sh ]; then
+            echo "::error::scripts/release-build.sh exists but is not executable. Run: chmod +x scripts/release-build.sh && git update-index --chmod=+x scripts/release-build.sh"
+            exit 1
+          fi
+          if [ ! -x scripts/release-build.sh ]; then
+            echo "::error::release-artifact requires an executable scripts/release-build.sh. It receives the released version and an empty output directory and must leave every artifact for this runner inside that directory, or exit non-zero."
+            exit 1
+          fi
+      - name: Build this runner's release artifacts
+        shell: bash
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ''
+          ACTIONS_ID_TOKEN_REQUEST_URL: ''
+          AWS_ACCESS_KEY_ID: ''
+          AWS_SECRET_ACCESS_KEY: ''
+          AWS_SESSION_TOKEN: ''
+          AZURE_CREDENTIALS: ''
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+          GOOGLE_APPLICATION_CREDENTIALS: ''
+          NODE_AUTH_TOKEN: ''
+          NPM_TOKEN: ''
+          RELEASE_VERSION: \${{ needs.verify.outputs.version }}
+        run: |
+          mkdir -p release-artifacts
+          scripts/release-build.sh "\$RELEASE_VERSION" release-artifacts
+          if [ -z "\$(find release-artifacts -type f -print -quit)" ]; then
+            echo "::error::scripts/release-build.sh produced no files in release-artifacts/"
+            exit 1
+          fi
+      - name: Upload this runner's release artifacts
+        uses: ${release_upload_artifact}
+        with:
+          name: release-artifacts-\${{ strategy.job-index }}
+          path: release-artifacts/*
+          if-no-files-found: error
+          retention-days: 1
+      - name: Remove restored dependencies and build outputs
+        if: always()
+        shell: bash
+        run: rm -rf node_modules release-artifacts
+EOF
+}
+
+# The build job's gate and dependency restore follow from one generator input:
+# whether approved private dependencies were acquired for it.
+release_artifact_build_job_for() {
+  local private_dependencies="$1" matrix="$2"
+  local needs='[verify, snapshot]' restore_step=''
+  local condition="always() && needs.verify.result == 'success' && needs.verify.outputs.selected == 'true' && (needs.snapshot.result == 'success' || needs.snapshot.result == 'skipped')"
+  if [ "$private_dependencies" = true ]; then
+    needs='[verify, snapshot, acquire-private-dependencies]'
+    condition="$condition && needs.acquire-private-dependencies.result == 'success'"
+    restore_step="$(cat <<EOF
+      - name: Restore exact-attempt credentialless dependencies
+        uses: ${release_cache_restore}
+        with:
+          path: node_modules
+          key: release-dependencies-\${{ github.run_id }}-\${{ github.run_attempt }}-\${{ matrix.dependency-index }}
+          fail-on-cache-miss: true
+EOF
+)"
+  fi
+  release_artifact_build_job "$needs" "$condition" "$matrix" "$restore_step"
+}
+
+# The publish job of each release caller mode, generator-determined like the
+# snapshot and build jobs. The contract test renders these same functions as
+# its expectations and pins the job whole (YAML comments, blank lines and one
+# uniform reindent aside). release-node's package-dirs input is per caller, so
+# the contract test substitutes the caller's pinned selection (ADR 0099).
+release_node_publish_job() {
+  local ref="$1" release_node_version="$2" release_scope="$3" package_dirs_json="$4" release_assets_json="$5"
+  cat <<EOF
+  publish:
+    name: Publish the released snapshot
+    needs: [verify, snapshot]
+    if: always() && needs.verify.result == 'success' && needs.verify.outputs.selected == 'true' && (needs.snapshot.result == 'success' || needs.snapshot.result == 'skipped')
+    uses: verJSON/.github/.github/workflows/node-release.yml@${ref}
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+    with:
+      version: \${{ needs.verify.outputs.version }}
+      prefix: \${{ inputs.prefix }}
+      contract-ref: ${ref}
+      # Legacy compatibility input; all Node release jobs use fresh ubuntu-24.04 runners.
+      runner: \${{ ${release_runner_expr} }}
+      # Keep this byte-coupled input Renovate-inert for the same reason as the
+      # setup-node input in verify (#700).
+      node-version: \${{ '${release_node_version}' }}
+      scope: '${release_scope}'
+      package-dirs: '${package_dirs_json}'
+      release-assets: '${release_assets_json}'
+    secrets:
+      NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}
+EOF
+}
+
+release_artifact_publish_job() {
+  cat <<EOF
+  publish:
+    name: Publish the released snapshot
+    needs: [verify, snapshot, build]
+    if: always() && needs.verify.result == 'success' && needs.verify.outputs.selected == 'true' && (needs.snapshot.result == 'success' || needs.snapshot.result == 'skipped') && needs.build.result == 'success'
+    runs-on: \${{ fromJSON(${release_runner_expr}) }}
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: ${release_checkout}
+        with:
+          ref: \${{ needs.verify.outputs.version }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the checked-out tag and immutable release note
+        env:
+          VERSION: \${{ needs.verify.outputs.version }}
+        run: |
+          test "\$(git describe --tags --exact-match HEAD)" = "\$VERSION"
+          test -f "CHANGELOG/\$VERSION.md"
+      - name: Download every runner's release artifacts
+        uses: ${release_download_artifact}
+        with:
+          pattern: release-artifacts-*
+          path: release-artifacts
+          merge-multiple: true
+      - name: Require at least one produced artifact
+        run: |
+          [ -n "\$(find release-artifacts -type f -print -quit)" ] \\
+            || { echo "::error::no release artifacts were produced by the build matrix"; exit 1; }
+      - name: Publish the snapshot release and artifacts
+        env:
+          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          VERSION: \${{ needs.verify.outputs.version }}
+        run: |
+          # RESTART_SAFE_GH_RELEASE_BEGIN
+          snapshot="CHANGELOG/\$VERSION.md"
+          notes="\$snapshot"
+          notes_limit=125000
+          if [ "\$(wc -c <"\$snapshot")" -gt "\$notes_limit" ]; then
+            temp_root="\${RUNNER_TEMP:-/tmp}"
+            notes="\$(mktemp "\$temp_root/release-notes.XXXXXX")"
+            cleanup_release_notes() { rm -f -- "\$notes"; }
+            trap cleanup_release_notes EXIT
+            head -c 120000 "\$snapshot" | sed '\$d' >"\$notes"
+            {
+              printf "\n\n---\n\n"
+              printf "_These notes were truncated at GitHub's 125,000-character limit. "
+              printf "The complete and immutable snapshot for this release is "
+              printf "[\\\`%s\\\`](%s/%s/blob/%s/%s)._\n" \\
+                "\$snapshot" "\$GITHUB_SERVER_URL" "\$GITHUB_REPOSITORY" "\$VERSION" "\$snapshot"
+            } >>"\$notes"
+            [ "\$(wc -c <"\$notes")" -le "\$notes_limit" ] \\
+              || { echo "::error::Bounded GitHub Release notes exceed \$notes_limit bytes."; exit 1; }
+            echo "::notice::Release notes were truncated by bytes; the full immutable snapshot is \$snapshot."
+          fi
+          existing_tag="\$(gh release view "\$VERSION" --json tagName --jq .tagName 2>/dev/null || true)"
+          if [ -n "\$existing_tag" ]; then
+            [ "\$existing_tag" = "\$VERSION" ] \\
+              || { echo "::error::GitHub Release lookup returned unexpected tag '\$existing_tag'."; exit 1; }
+            gh release edit "\$VERSION" --notes-file "\$notes"
+          else
+            gh release create "\$VERSION" --verify-tag --notes-file "\$notes"
+          fi
+          gh release upload "\$VERSION" release-artifacts/* --clobber
+          # RESTART_SAFE_GH_RELEASE_END
+EOF
+}
+
+release_snapshot_publish_job() {
+  cat <<EOF
+  publish:
+    name: Publish the released snapshot
+    needs: [verify, snapshot]
+    if: always() && needs.verify.result == 'success' && needs.verify.outputs.selected == 'true' && (needs.snapshot.result == 'success' || needs.snapshot.result == 'skipped')
+    runs-on: \${{ fromJSON(${release_runner_expr}) }}
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: ${release_checkout}
+        with:
+          ref: \${{ needs.verify.outputs.version }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the checked-out tag and immutable release note
+        env:
+          VERSION: \${{ needs.verify.outputs.version }}
+        run: |
+          test "\$(git describe --tags --exact-match HEAD)" = "\$VERSION"
+          test -f "CHANGELOG/\$VERSION.md"
+      - name: Publish the snapshot release notes
+        env:
+          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          VERSION: \${{ needs.verify.outputs.version }}
+        run: |
+          # RESTART_SAFE_GH_RELEASE_BEGIN
+          snapshot="CHANGELOG/\$VERSION.md"
+          notes="\$snapshot"
+          notes_limit=125000
+          if [ "\$(wc -c <"\$snapshot")" -gt "\$notes_limit" ]; then
+            temp_root="\${RUNNER_TEMP:-/tmp}"
+            notes="\$(mktemp "\$temp_root/release-notes.XXXXXX")"
+            cleanup_release_notes() { rm -f -- "\$notes"; }
+            trap cleanup_release_notes EXIT
+            head -c 120000 "\$snapshot" | sed '\$d' >"\$notes"
+            {
+              printf "\n\n---\n\n"
+              printf "_These notes were truncated at GitHub's 125,000-character limit. "
+              printf "The complete and immutable snapshot for this release is "
+              printf "[\\\`%s\\\`](%s/%s/blob/%s/%s)._\n" \\
+                "\$snapshot" "\$GITHUB_SERVER_URL" "\$GITHUB_REPOSITORY" "\$VERSION" "\$snapshot"
+            } >>"\$notes"
+            [ "\$(wc -c <"\$notes")" -le "\$notes_limit" ] \\
+              || { echo "::error::Bounded GitHub Release notes exceed \$notes_limit bytes."; exit 1; }
+            echo "::notice::Release notes were truncated by bytes; the full immutable snapshot is \$snapshot."
+          fi
+          existing_tag="\$(gh release view "\$VERSION" --json tagName --jq .tagName 2>/dev/null || true)"
+          if [ -n "\$existing_tag" ]; then
+            [ "\$existing_tag" = "\$VERSION" ] \\
+              || { echo "::error::GitHub Release lookup returned unexpected tag '\$existing_tag'."; exit 1; }
+            gh release edit "\$VERSION" --notes-file "\$notes"
+          else
+            gh release create "\$VERSION" --verify-tag --notes-file "\$notes"
+          fi
+          # RESTART_SAFE_GH_RELEASE_END
+EOF
+}
+
+# The snapshot job's inputs to changelog-release.yml. An input value the
+# generator did not write is either a forwarded credential or an unverified
+# selection, so the contract test pins them as part of release_snapshot_job:
+# the snapshot receives its credential only through `secrets: inherit` and the
+# release-app environment (#784, ADR 0099).
+release_snapshot_with() {
+  local ref="$1"
+  cat <<EOF
+    with:
+      contract_ref: ${ref}
+      version: \${{ needs.verify.outputs.version }}
+      fragments: \${{ inputs.fragments }}
+      component: \${{ inputs.component }}
+      prefix: \${{ inputs.prefix }}
+      selection_digest: \${{ needs.verify.outputs.selection-digest }}
+      # v3 recommends the App client ID and deprecates its legacy numeric ID.
+      release_app_client_id: \${{ vars.RELEASE_APP_CLIENT_ID }}
+      release_environment: release-app
+      # Explicit, so both halves of one release share one pool (#465).
+      runner: \${{ ${release_runner_expr} }}
+EOF
+}
+
 # The package retention window, exactly as the post-publish retention jobs in
 # node-release.yml and container-release.yml read it. A release verification
 # hook that holds back a still-consumed version (verjson-ci#298) must protect
@@ -885,6 +1198,14 @@ emit_release_node() {
   release_assets_json="$release_assets_json]"
   printf -v package_dirs_shell '%q ' "${release_package_dirs[@]}"
   package_dirs_shell="${package_dirs_shell% }"
+  # Computed before the here-document: a command substitution inside one
+  # cannot fail the generator, and a caller rendered from a failed one is
+  # truncated in silence.
+  local verify_dependency_steps snapshot_job
+  verify_dependency_steps="$(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'")" || return
+  snapshot_job="$(release_snapshot_job "$ref")" || return
+  local publish_job
+  publish_job="$(release_node_publish_job "$ref" "$release_node_version" "$release_scope" "$package_dirs_json" "$release_assets_json")" || return
   cat <<EOF
 name: Release
 run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}
@@ -1187,7 +1508,7 @@ ${release_plan_step}
               exit 1
             fi
           done
-$(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'")
+${verify_dependency_steps}
       - name: Prepare release package metadata
         if: steps.release-version.outputs.selected == 'true'
         env:
@@ -1317,53 +1638,9 @@ $(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'
             exit "\$verification_status"
           fi
 
-  snapshot:
-    # The irreversible act, and the only job that may not run first.
-    needs: verify
-    if: needs.verify.outputs.selected == 'true' && needs.verify.outputs.snapshot-exists != 'true'
-    uses: verJSON/.github/.github/workflows/changelog-release.yml@${ref}
-    secrets: inherit
-    permissions:
-      actions: read
-      # The reusable workflow pushes with its separately minted release App
-      # token. This caller grant caps only its read-only GITHUB_TOKEN (#784).
-      contents: read
-    with:
-      contract_ref: ${ref}
-      version: \${{ needs.verify.outputs.version }}
-      fragments: \${{ inputs.fragments }}
-      component: \${{ inputs.component }}
-      prefix: \${{ inputs.prefix }}
-      selection_digest: \${{ needs.verify.outputs.selection-digest }}
-      # v3 recommends the App client ID and deprecates its legacy numeric ID.
-      release_app_client_id: \${{ vars.RELEASE_APP_CLIENT_ID }}
-      release_environment: release-app
-      # Explicit, so both halves of one release share one pool (#465).
-      runner: \${{ ${release_runner_expr} }}
+${snapshot_job}
 
-  publish:
-    name: Publish the released snapshot
-    needs: [verify, snapshot]
-    if: always() && needs.verify.result == 'success' && needs.verify.outputs.selected == 'true' && (needs.snapshot.result == 'success' || needs.snapshot.result == 'skipped')
-    uses: verJSON/.github/.github/workflows/node-release.yml@${ref}
-    permissions:
-      actions: read
-      contents: write
-      packages: write
-    with:
-      version: \${{ needs.verify.outputs.version }}
-      prefix: \${{ inputs.prefix }}
-      contract-ref: ${ref}
-      # Legacy compatibility input; all Node release jobs use fresh ubuntu-24.04 runners.
-      runner: \${{ ${release_runner_expr} }}
-      # Keep this byte-coupled input Renovate-inert for the same reason as the
-      # setup-node input in verify (#700).
-      node-version: \${{ '${release_node_version}' }}
-      scope: '${release_scope}'
-      package-dirs: '${package_dirs_json}'
-      release-assets: '${release_assets_json}'
-    secrets:
-      NODE_AUTH_TOKEN: \${{ secrets.NODE_AUTH_TOKEN }}
+${publish_job}
 EOF
 }
 
@@ -1400,9 +1677,8 @@ EOF
 emit_release_artifact() {
   local generation_command="release-artifact ${ref}"
   local package_dirs_shell=''
-  local build_runners_yaml='' approved_packages_csv='' private_acquisition_job='' restore_dependency_step=''
+  local build_runners_yaml='' approved_packages_csv='' private_acquisition_job='' private_dependencies=false
   local required_lane_names='' required_lane_env='' required_lane_validation_step='' runner_index=0
-  local build_needs='[verify, snapshot]' build_condition="always() && needs.verify.result == 'success' && needs.verify.outputs.selected == 'true' && (needs.snapshot.result == 'success' || needs.snapshot.result == 'skipped')"
   [ "$release_scope" = "@verjson" ] \
     || generation_command="$generation_command --scope $release_scope"
   [ "$release_node_version" = "24" ] \
@@ -1440,8 +1716,7 @@ emit_release_artifact() {
     required_lane_validation_step="$(emit_release_lane_preflight "$required_lane_names" "$required_lane_env")"
   fi
   if [ "${#release_approved_internal_packages[@]}" -gt 0 ]; then
-    build_needs='[verify, snapshot, acquire-private-dependencies]'
-    build_condition="$build_condition && needs.acquire-private-dependencies.result == 'success'"
+    private_dependencies=true
     private_acquisition_job="$(cat <<EOF
   acquire-private-dependencies:
     name: Acquire approved private dependencies (\${{ matrix.os }})
@@ -1567,16 +1842,16 @@ ${build_runners_yaml%$'\n'}
 
 EOF
 )"
-    restore_dependency_step="$(cat <<EOF
-      - name: Restore exact-attempt credentialless dependencies
-        uses: ${release_cache_restore}
-        with:
-          path: node_modules
-          key: release-dependencies-\${{ github.run_id }}-\${{ github.run_attempt }}-\${{ matrix.dependency-index }}
-          fail-on-cache-miss: true
-EOF
-)"
   fi
+  # Computed before the here-document: a command substitution inside one
+  # cannot fail the generator, and a caller rendered from a failed one is
+  # truncated in silence.
+  local verify_dependency_steps snapshot_job build_job
+  verify_dependency_steps="$(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'")" || return
+  snapshot_job="$(release_snapshot_job "$ref")" || return
+  local publish_job
+  publish_job="$(release_artifact_publish_job)" || return
+  build_job="$(release_artifact_build_job_for "$private_dependencies" "${build_runners_yaml%$'\n'}")" || return
   cat <<EOF
 name: Release
 run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}
@@ -1854,7 +2129,7 @@ ${required_lane_validation_step}
               output.write("path=" + path + chr(10))
               output.write("cache=" + cache + chr(10))
           PY
-$(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'")
+${verify_dependency_steps}
       - name: Prepare release package metadata
         if: steps.release-version.outputs.selected == 'true'
         env:
@@ -1983,163 +2258,12 @@ $(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'
             exit "\$verification_status"
           fi
 
-  snapshot:
-    # The irreversible act, and the only job that may not run first.
-    needs: verify
-    if: needs.verify.outputs.selected == 'true' && needs.verify.outputs.snapshot-exists != 'true'
-    uses: verJSON/.github/.github/workflows/changelog-release.yml@${ref}
-    secrets: inherit
-    permissions:
-      actions: read
-      # The reusable workflow pushes with its separately minted release App
-      # token. This caller grant caps only its read-only GITHUB_TOKEN (#784).
-      contents: read
-    with:
-      contract_ref: ${ref}
-      version: \${{ needs.verify.outputs.version }}
-      fragments: \${{ inputs.fragments }}
-      component: \${{ inputs.component }}
-      prefix: \${{ inputs.prefix }}
-      selection_digest: \${{ needs.verify.outputs.selection-digest }}
-      # v3 recommends the App client ID and deprecates its legacy numeric ID.
-      release_app_client_id: \${{ vars.RELEASE_APP_CLIENT_ID }}
-      release_environment: release-app
-      # Explicit, so both halves of one release share one pool (#465).
-      runner: \${{ ${release_runner_expr} }}
+${snapshot_job}
 
 ${private_acquisition_job}
-  build:
-    name: Build release artifacts (\${{ matrix.os }})
-    needs: ${build_needs}
-    if: ${build_condition}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-${build_runners_yaml%$'\n'}
-    runs-on: \${{ matrix.os }}
-    timeout-minutes: 45
-    permissions:
-      contents: read
-    steps:
-      - name: Check out the tagged release tree
-        uses: ${release_checkout}
-        with:
-          ref: \${{ needs.verify.outputs.version }}
-          fetch-depth: 0
-          persist-credentials: false
-${restore_dependency_step}
-      - name: Require the release build hook
-        shell: bash
-        run: |
-          if [ -e scripts/release-build.sh ] && [ ! -x scripts/release-build.sh ]; then
-            echo "::error::scripts/release-build.sh exists but is not executable. Run: chmod +x scripts/release-build.sh && git update-index --chmod=+x scripts/release-build.sh"
-            exit 1
-          fi
-          if [ ! -x scripts/release-build.sh ]; then
-            echo "::error::release-artifact requires an executable scripts/release-build.sh. It receives the released version and an empty output directory and must leave every artifact for this runner inside that directory, or exit non-zero."
-            exit 1
-          fi
-      - name: Build this runner's release artifacts
-        shell: bash
-        env:
-          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ''
-          ACTIONS_ID_TOKEN_REQUEST_URL: ''
-          AWS_ACCESS_KEY_ID: ''
-          AWS_SECRET_ACCESS_KEY: ''
-          AWS_SESSION_TOKEN: ''
-          AZURE_CREDENTIALS: ''
-          GH_TOKEN: ''
-          GITHUB_TOKEN: ''
-          GOOGLE_APPLICATION_CREDENTIALS: ''
-          NODE_AUTH_TOKEN: ''
-          NPM_TOKEN: ''
-          RELEASE_VERSION: \${{ needs.verify.outputs.version }}
-        run: |
-          mkdir -p release-artifacts
-          scripts/release-build.sh "\$RELEASE_VERSION" release-artifacts
-          if [ -z "\$(find release-artifacts -type f -print -quit)" ]; then
-            echo "::error::scripts/release-build.sh produced no files in release-artifacts/"
-            exit 1
-          fi
-      - name: Upload this runner's release artifacts
-        uses: ${release_upload_artifact}
-        with:
-          name: release-artifacts-\${{ strategy.job-index }}
-          path: release-artifacts/*
-          if-no-files-found: error
-          retention-days: 1
-      - name: Remove restored dependencies and build outputs
-        if: always()
-        shell: bash
-        run: rm -rf node_modules release-artifacts
+${build_job}
 
-  publish:
-    name: Publish the released snapshot
-    needs: [verify, snapshot, build]
-    if: always() && needs.verify.result == 'success' && needs.verify.outputs.selected == 'true' && (needs.snapshot.result == 'success' || needs.snapshot.result == 'skipped') && needs.build.result == 'success'
-    runs-on: \${{ fromJSON(${release_runner_expr}) }}
-    timeout-minutes: 15
-    permissions:
-      contents: write
-    steps:
-      - uses: ${release_checkout}
-        with:
-          ref: \${{ needs.verify.outputs.version }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Verify the checked-out tag and immutable release note
-        env:
-          VERSION: \${{ needs.verify.outputs.version }}
-        run: |
-          test "\$(git describe --tags --exact-match HEAD)" = "\$VERSION"
-          test -f "CHANGELOG/\$VERSION.md"
-      - name: Download every runner's release artifacts
-        uses: ${release_download_artifact}
-        with:
-          pattern: release-artifacts-*
-          path: release-artifacts
-          merge-multiple: true
-      - name: Require at least one produced artifact
-        run: |
-          [ -n "\$(find release-artifacts -type f -print -quit)" ] \\
-            || { echo "::error::no release artifacts were produced by the build matrix"; exit 1; }
-      - name: Publish the snapshot release and artifacts
-        env:
-          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
-          VERSION: \${{ needs.verify.outputs.version }}
-        run: |
-          # RESTART_SAFE_GH_RELEASE_BEGIN
-          snapshot="CHANGELOG/\$VERSION.md"
-          notes="\$snapshot"
-          notes_limit=125000
-          if [ "\$(wc -c <"\$snapshot")" -gt "\$notes_limit" ]; then
-            temp_root="\${RUNNER_TEMP:-/tmp}"
-            notes="\$(mktemp "\$temp_root/release-notes.XXXXXX")"
-            cleanup_release_notes() { rm -f -- "\$notes"; }
-            trap cleanup_release_notes EXIT
-            head -c 120000 "\$snapshot" | sed '\$d' >"\$notes"
-            {
-              printf "\n\n---\n\n"
-              printf "_These notes were truncated at GitHub's 125,000-character limit. "
-              printf "The complete and immutable snapshot for this release is "
-              printf "[\\\`%s\\\`](%s/%s/blob/%s/%s)._\n" \\
-                "\$snapshot" "\$GITHUB_SERVER_URL" "\$GITHUB_REPOSITORY" "\$VERSION" "\$snapshot"
-            } >>"\$notes"
-            [ "\$(wc -c <"\$notes")" -le "\$notes_limit" ] \\
-              || { echo "::error::Bounded GitHub Release notes exceed \$notes_limit bytes."; exit 1; }
-            echo "::notice::Release notes were truncated by bytes; the full immutable snapshot is \$snapshot."
-          fi
-          existing_tag="\$(gh release view "\$VERSION" --json tagName --jq .tagName 2>/dev/null || true)"
-          if [ -n "\$existing_tag" ]; then
-            [ "\$existing_tag" = "\$VERSION" ] \\
-              || { echo "::error::GitHub Release lookup returned unexpected tag '\$existing_tag'."; exit 1; }
-            gh release edit "\$VERSION" --notes-file "\$notes"
-          else
-            gh release create "\$VERSION" --verify-tag --notes-file "\$notes"
-          fi
-          gh release upload "\$VERSION" release-artifacts/* --clobber
-          # RESTART_SAFE_GH_RELEASE_END
+${publish_job}
 EOF
 }
 
@@ -2155,6 +2279,14 @@ emit_release_snapshot() {
   generation_command="$generation_command$selected_package_dir_args"
   printf -v package_dirs_shell '%q ' "${release_package_dirs[@]}"
   package_dirs_shell="${package_dirs_shell% }"
+  # Computed before the here-document: a command substitution inside one
+  # cannot fail the generator, and a caller rendered from a failed one is
+  # truncated in silence.
+  local verify_dependency_steps snapshot_job
+  verify_dependency_steps="$(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''")" || return
+  snapshot_job="$(release_snapshot_job "$ref")" || return
+  local publish_job
+  publish_job="$(release_snapshot_publish_job)" || return
   cat <<EOF
 name: Release
 run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}
@@ -2432,7 +2564,7 @@ ${release_plan_step}
               output.write("path=" + path + chr(10))
               output.write("cache=" + cache + chr(10))
           PY
-$(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''")
+${verify_dependency_steps}
       - name: Prepare release package metadata
         if: steps.release-version.outputs.selected == 'true'
         env:
@@ -2564,85 +2696,9 @@ $(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true'
             exit "\$verification_status"
           fi
 
-  snapshot:
-    # The irreversible act, and the only job that may not run first.
-    needs: verify
-    if: needs.verify.outputs.selected == 'true' && needs.verify.outputs.snapshot-exists != 'true'
-    uses: verJSON/.github/.github/workflows/changelog-release.yml@${ref}
-    secrets: inherit
-    permissions:
-      actions: read
-      # The reusable workflow pushes with its separately minted release App
-      # token. This caller grant caps only its read-only GITHUB_TOKEN (#784).
-      contents: read
-    with:
-      contract_ref: ${ref}
-      version: \${{ needs.verify.outputs.version }}
-      fragments: \${{ inputs.fragments }}
-      component: \${{ inputs.component }}
-      prefix: \${{ inputs.prefix }}
-      selection_digest: \${{ needs.verify.outputs.selection-digest }}
-      # v3 recommends the App client ID and deprecates its legacy numeric ID.
-      release_app_client_id: \${{ vars.RELEASE_APP_CLIENT_ID }}
-      release_environment: release-app
-      # Explicit, so both halves of one release share one pool (#465).
-      runner: \${{ ${release_runner_expr} }}
+${snapshot_job}
 
-  publish:
-    name: Publish the released snapshot
-    needs: [verify, snapshot]
-    if: always() && needs.verify.result == 'success' && needs.verify.outputs.selected == 'true' && (needs.snapshot.result == 'success' || needs.snapshot.result == 'skipped')
-    runs-on: \${{ fromJSON(${release_runner_expr}) }}
-    timeout-minutes: 15
-    permissions:
-      contents: write
-    steps:
-      - uses: ${release_checkout}
-        with:
-          ref: \${{ needs.verify.outputs.version }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Verify the checked-out tag and immutable release note
-        env:
-          VERSION: \${{ needs.verify.outputs.version }}
-        run: |
-          test "\$(git describe --tags --exact-match HEAD)" = "\$VERSION"
-          test -f "CHANGELOG/\$VERSION.md"
-      - name: Publish the snapshot release notes
-        env:
-          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
-          VERSION: \${{ needs.verify.outputs.version }}
-        run: |
-          # RESTART_SAFE_GH_RELEASE_BEGIN
-          snapshot="CHANGELOG/\$VERSION.md"
-          notes="\$snapshot"
-          notes_limit=125000
-          if [ "\$(wc -c <"\$snapshot")" -gt "\$notes_limit" ]; then
-            temp_root="\${RUNNER_TEMP:-/tmp}"
-            notes="\$(mktemp "\$temp_root/release-notes.XXXXXX")"
-            cleanup_release_notes() { rm -f -- "\$notes"; }
-            trap cleanup_release_notes EXIT
-            head -c 120000 "\$snapshot" | sed '\$d' >"\$notes"
-            {
-              printf "\n\n---\n\n"
-              printf "_These notes were truncated at GitHub's 125,000-character limit. "
-              printf "The complete and immutable snapshot for this release is "
-              printf "[\\\`%s\\\`](%s/%s/blob/%s/%s)._\n" \\
-                "\$snapshot" "\$GITHUB_SERVER_URL" "\$GITHUB_REPOSITORY" "\$VERSION" "\$snapshot"
-            } >>"\$notes"
-            [ "\$(wc -c <"\$notes")" -le "\$notes_limit" ] \\
-              || { echo "::error::Bounded GitHub Release notes exceed \$notes_limit bytes."; exit 1; }
-            echo "::notice::Release notes were truncated by bytes; the full immutable snapshot is \$snapshot."
-          fi
-          existing_tag="\$(gh release view "\$VERSION" --json tagName --jq .tagName 2>/dev/null || true)"
-          if [ -n "\$existing_tag" ]; then
-            [ "\$existing_tag" = "\$VERSION" ] \\
-              || { echo "::error::GitHub Release lookup returned unexpected tag '\$existing_tag'."; exit 1; }
-            gh release edit "\$VERSION" --notes-file "\$notes"
-          else
-            gh release create "\$VERSION" --verify-tag --notes-file "\$notes"
-          fi
-          # RESTART_SAFE_GH_RELEASE_END
+${publish_job}
 EOF
 }
 
@@ -2900,6 +2956,17 @@ emit_contract_test() {
     release_lane_preflight="$(emit_release_lane_preflight "$release_lane_names" "$release_lane_env")"
     release_lane_preflight_sha256="$(printf '%s' "$release_lane_preflight" | digest_of)"
   fi
+  # Computed before the here-document: a command substitution inside one
+  # cannot fail the generator, and a caller rendered from a failed one is
+  # truncated in silence.
+  local carried_snapshot_job carried_build_job carried_private_build_job
+  carried_snapshot_job="$(release_snapshot_job "$ref" | sed 's/^/|/')" || return
+  carried_build_job="$(release_artifact_build_job_for false '@@BUILD_MATRIX@@' | sed 's/^/|/')" || return
+  carried_private_build_job="$(release_artifact_build_job_for true '@@BUILD_MATRIX@@' | sed 's/^/|/')" || return
+  local carried_node_publish_job carried_artifact_publish_job carried_snapshot_publish_job
+  carried_node_publish_job="$(release_node_publish_job "$ref" "$release_node_version" "$release_scope" '@@PACKAGE_DIRS@@' "$release_assets_json" | sed 's/^/|/')" || return
+  carried_artifact_publish_job="$(release_artifact_publish_job | sed 's/^/|/')" || return
+  carried_snapshot_publish_job="$(release_snapshot_publish_job | sed 's/^/|/')" || return
   cat <<EOF
 #!/usr/bin/env bash
 # Asserts that this repository still satisfies the canonical verJSON changelog
@@ -2942,6 +3009,36 @@ EXPECTED_RELEASE_UPLOAD_ARTIFACT='${release_upload_artifact}'
 EXPECTED_RELEASE_DOWNLOAD_ARTIFACT='${release_download_artifact}'
 EXPECTED_RELEASE_CACHE_SAVE='${release_cache_save}'
 EXPECTED_RELEASE_CACHE_RESTORE='${release_cache_restore}'
+# Whole jobs the release caller modes write from one definition, pinned (ADR
+# 0099). The build job's runner matrix is the one substituted part. Every line
+# carries a leading pipe character so no dependency manager reads these copies
+# as workflow steps: they move only when this suite is regenerated.
+EXPECTED_RELEASE_SNAPSHOT_JOB="\$(cat <<'SNAPSHOT_JOB'
+${carried_snapshot_job}
+SNAPSHOT_JOB
+)"
+EXPECTED_RELEASE_BUILD_JOB="\$(cat <<'BUILD_JOB'
+${carried_build_job}
+BUILD_JOB
+)"
+EXPECTED_RELEASE_PRIVATE_BUILD_JOB="\$(cat <<'PRIVATE_BUILD_JOB'
+${carried_private_build_job}
+PRIVATE_BUILD_JOB
+)"
+# The publish job of each mode. release-node's package-dirs input is the one
+# substituted part: the caller's pinned package-directory selection.
+EXPECTED_RELEASE_NODE_PUBLISH_JOB="\$(cat <<'NODE_PUBLISH_JOB'
+${carried_node_publish_job}
+NODE_PUBLISH_JOB
+)"
+EXPECTED_RELEASE_ARTIFACT_PUBLISH_JOB="\$(cat <<'ARTIFACT_PUBLISH_JOB'
+${carried_artifact_publish_job}
+ARTIFACT_PUBLISH_JOB
+)"
+EXPECTED_RELEASE_SNAPSHOT_PUBLISH_JOB="\$(cat <<'SNAPSHOT_PUBLISH_JOB'
+${carried_snapshot_publish_job}
+SNAPSHOT_PUBLISH_JOB
+)"
 EOF
   cat <<'EOF'
 
@@ -3417,7 +3514,13 @@ RELEASE_SETUP_NODE = pinned_action("EXPECTED_RELEASE_SETUP_NODE", "actions/setup
 RELEASE_CACHE_SAVE = pinned_action("EXPECTED_RELEASE_CACHE_SAVE", "actions/cache/save")
 
 with open(path, encoding="utf-8") as handle:
-    raw_lines = handle.read().splitlines()
+    raw_text = handle.read()
+# str.splitlines() breaks lines at characters a YAML 1.2 parser reads as
+# content (NEL, LS, PS, and C0/C1 controls), so the lines below would not be
+# the lines Actions parses. None appears in a generated caller (ADR 0099).
+LINE_BREAK_DISAGREEMENT = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\ufeff]")
+line_break_disagreement = LINE_BREAK_DISAGREEMENT.search(raw_text)
+raw_lines = raw_text.splitlines()
 
 
 def strip_comment(line):
@@ -3441,6 +3544,182 @@ def strip_comment(line):
 
 
 lines = [strip_comment(line) for line in raw_lines]
+
+# The emitted suite runs on a bare python3 with no YAML parser (see the
+# release-shape docstring), so it cannot decode the caller the way Actions
+# does. Instead it reads the file with this scanner, which follows YAML's
+# node structure line by line, and refuses every construct after which its
+# reading could part from the parser's: a YAML escape (any backslash outside
+# block scalar bodies and comments), a quoted scalar or flow collection left
+# open at the end of a line, an escaped quote inside a single-quoted scalar, a
+# tag, anchor or alias, a document marker or directive, a tab in indentation, a
+# block scalar indentation indicator, a block scalar header with no key or
+# sequence entry on its line (its parent column is on an earlier line), a block
+# scalar line indented less than its first line, and (above) any character
+# splitlines() and YAML disagree on. A block scalar body is the lines indented
+# past the node the header follows on its line, quoted and flow keys included.
+# No generated caller uses any of them. In what remains, a decoded scalar
+# differs from its raw text only by its quote delimiters, its indentation, and
+# line folding, which replaces a line break and the whitespace around it with a
+# space or a newline and so never joins text across a break. Every `${{`, `}}`,
+# quote and context name a decoded value holds is therefore in the raw text
+# the context scan reads. This is not "decoded equals raw": folding and
+# indentation still differ, and the scan's patterns allow whitespace for that
+# reason (ADR 0099, 2026-10-19).
+PROPERTY_OR_ALIAS = "!&*"
+
+
+def scan_yaml_lines(source_lines):
+    """Read lines as YAML structure; refuse what this reading cannot follow.
+
+    Returns (full-line comment indices, refusals as (line number, reason),
+    the lines with every YAML comment blanked to spaces so offsets hold, and
+    the indices of block scalar body lines, which are content and stay raw).
+    """
+    comments = set()
+    refusals = []
+    blanked = list(source_lines)
+    block_lines = set()
+    block_parent = None
+    block_content = None
+    for number, line in enumerate(source_lines):
+        indentation = len(line) - len(line.lstrip(" "))
+        if block_parent is not None:
+            if not line.strip():
+                block_lines.add(number)
+                continue
+            if indentation > block_parent:
+                block_lines.add(number)
+                if block_content is None:
+                    block_content = indentation
+                elif indentation < block_content:
+                    refusals.append((number + 1, "a block scalar line indented less than its first line"))
+                continue
+            block_parent = None
+            block_content = None
+        if not line.strip():
+            continue
+        if line[indentation:indentation + 1] == "\t":
+            refusals.append((number + 1, "a tab in indentation"))
+            continue
+        if line.lstrip().startswith("#"):
+            comments.add(number)
+            blanked[number] = " " * len(line)
+            continue
+        if line.startswith("%") or (
+            line[:3] in ("---", "...") and line[3:4] in ("", " ", "\t")
+        ):
+            refusals.append((number + 1, "a YAML document marker or directive"))
+            continue
+        if "\\" in line:
+            refusals.append((number + 1, "a backslash, which YAML may decode as an escape"))
+        position = indentation
+        node_start = True
+        key_column = indentation
+        # A block scalar's body indents past its parent node. Only a key or
+        # sequence entry on the header's own line shows that parent's column.
+        parent_on_line = False
+        scalar_start = None
+        flow_depth = 0
+        length = len(line)
+        while position < length:
+            char = line[position]
+            if char in " \t":
+                position += 1
+                continue
+            if char == "#" and position > 0 and line[position - 1] in " \t":
+                blanked[number] = line[:position] + " " * (length - position)
+                break
+            if flow_depth and line.startswith("${{", position):
+                refusals.append((number + 1, "an expression inside a flow collection"))
+                break
+            if node_start:
+                scalar_start = position
+                following = line[position + 1:position + 2]
+                if flow_depth == 0 and char not in "|>":
+                    # Every block node, quoted and flow keys included, is the
+                    # parent a block scalar header after it indents past.
+                    key_column = position
+                if flow_depth == 0 and char in "-?:" and following in ("", " ", "\t"):
+                    parent_on_line = True
+                    position += 1
+                    continue
+                if char in PROPERTY_OR_ALIAS:
+                    refusals.append((number + 1, "a YAML tag, anchor or alias"))
+                    break
+                if char in "'\"":
+                    close = position + 1
+                    while close < length and line[close] != char:
+                        close += 1
+                    if close >= length:
+                        refusals.append((number + 1, "a quoted scalar left open at the end of a line"))
+                        break
+                    if char == "'" and line[close + 1:close + 2] == "'":
+                        refusals.append((number + 1, "an escaped quote inside a single-quoted scalar"))
+                        break
+                    if flow_depth and "${{" in line[position:close]:
+                        refusals.append((number + 1, "an expression inside a flow collection"))
+                        break
+                    position = close + 1
+                    node_start = False
+                    continue
+                if char in "[{":
+                    flow_depth += 1
+                    position += 1
+                    continue
+                if flow_depth == 0 and char in "|>":
+                    header, comment, _ = line[position + 1:].partition(" #")
+                    if not parent_on_line:
+                        refusals.append((number + 1, "a block scalar header with no key or sequence entry on its line"))
+                    elif header.rstrip() not in ("", "+", "-"):
+                        refusals.append((number + 1, "a block scalar indentation indicator"))
+                    else:
+                        block_parent = key_column
+                        if comment:
+                            comment_start = position + 1 + len(header)
+                            blanked[number] = line[:comment_start] + " " * (length - comment_start)
+                    break
+                node_start = False
+            if flow_depth and char in ",[{":
+                flow_depth += char in "[{"
+                node_start = True
+                position += 1
+                continue
+            if flow_depth and char in "]}":
+                flow_depth -= 1
+                position += 1
+                continue
+            if char == ":" and (flow_depth or line[position + 1:position + 2] in ("", " ", "\t")):
+                if scalar_start is not None and "${{" in line[scalar_start:position]:
+                    refusals.append((number + 1, "an expression in a mapping key"))
+                    break
+                parent_on_line = parent_on_line or flow_depth == 0
+                node_start = True
+                position += 1
+                continue
+            position += 1
+        if flow_depth > 0:
+            refusals.append((number + 1, "a flow collection left open at the end of a line"))
+    return comments, refusals, blanked, block_lines
+
+
+def yaml_comment_indices(source_lines):
+    """Indices of full-line YAML comments; a `#` line inside a block scalar is content."""
+    return scan_yaml_lines(source_lines)[0]
+
+
+_, unreadable_yaml, BLANKED_LINES, BLOCK_SCALAR_LINES = scan_yaml_lines(raw_lines)
+if line_break_disagreement is not None:
+    unreadable_yaml.insert(0, (
+        raw_text.count("\n", 0, line_break_disagreement.start()) + 1,
+        "a control, line-separator or byte-order-mark character",
+    ))
+if unreadable_yaml:
+    line_number, refusal = unreadable_yaml[0]
+    problems.append(
+        "uses YAML the release-shape check cannot read: %s at line %d (#1712)"
+        % (refusal, line_number)
+    )
 
 
 def mapping_entry(text):
@@ -3771,7 +4050,9 @@ GITHUB_TOKEN = re.compile(
     r"secrets\s*(?:\.|\[\s*['\"]?)\s*GITHUB_TOKEN)\b",
     re.IGNORECASE,
 )
-GITHUB_CONTEXT_OBJECT = re.compile(r"(?<![\w.])github\b(?!\s*\.)", re.IGNORECASE)
+# The bare context object, an index into it, or an object filter over it
+# (`github.*`): anything but a named property read.
+GITHUB_CONTEXT_OBJECT = re.compile(r"(?<![\w.])github\b(?!\s*\.\s*[A-Za-z_])", re.IGNORECASE)
 PRIVATE_NODE_TOKEN = re.compile(
     r"\bsecrets\s*(?:\.|\[\s*['\"]?)\s*NODE_AUTH_TOKEN\b",
     re.IGNORECASE,
@@ -4061,8 +4342,12 @@ def yaml_scalar_value(value):
         return None
 
 
-def action_expressions(text):
-    """Yield GitHub expressions, respecting braces inside quoted strings."""
+def action_expression_spans(text):
+    """Yield (offset, expression, closed), respecting braces inside quoted strings.
+
+    An expression still open at the end of the text runs to that end, and is
+    not closed even when the text ends in `}}` inside one of its strings.
+    """
     cursor = 0
     while True:
         start = text.find("${{", cursor)
@@ -4078,13 +4363,19 @@ def action_expressions(text):
                 in_string = not in_string
             elif not in_string and text.startswith("}}", position):
                 end = position + 2
-                yield start, text[start:end]
+                yield start, text[start:end], True
                 cursor = end
                 break
             position += 1
         else:
-            yield start, text[start:]
+            yield start, text[start:], False
             return
+
+
+def action_expressions(text):
+    """Yield GitHub expressions, respecting braces inside quoted strings."""
+    for start, expression, _ in action_expression_spans(text):
+        yield start, expression
 
 
 def expression_code(expression):
@@ -4108,13 +4399,100 @@ def expression_code(expression):
 
 
 def context_match_lines(pattern, start, end):
-    """Find source lines for sensitive contexts, including folded scalars."""
-    block = "\n".join(lines[start:end])
+    """Find source lines for sensitive contexts, including folded scalars.
+
+    Reads the scanner's copy of the lines: YAML comments blanked to spaces,
+    block scalar bodies raw. A line-wise comment strip cannot know when a `#`
+    is inside a block scalar or a quoted scalar, and a comment read as text
+    can open an expression string that hides the next line's value. With
+    comments blanked and every scalar closing the expressions it opens
+    (below), no text outside a value carries state into one.
+    """
+    block = "\n".join(BLANKED_LINES[start:end])
     matched_lines = set()
     for offset, expression in action_expressions(block):
         if pattern.search(expression_code(expression)):
             matched_lines.add(start + block.count("\n", 0, offset))
+    for index, condition in if_conditions(start, end):
+        if pattern.search(expression_code(condition)):
+            matched_lines.add(index)
     return matched_lines
+
+
+# A tab separates a value as a space does, and any case variant of the key is
+# read as a condition: refusing to recognize one would fail open.
+IF_KEY = re.compile(
+    r"^((?:[ ]*-[ \t]+)*[ ]*)(?:if|\"if\"|'if')[ \t]*:(?=[ \t]|$)", re.IGNORECASE
+)
+
+
+def if_conditions(start, end):
+    """Yield (key line, value) for every `if:` in [start, end).
+
+    Actions evaluates a job or step `if:` as an expression whether or not it
+    is wrapped in `${{ }}`, so its whole value is expression code. The value
+    is the rest of the key's line plus every following line indented past the
+    key: a plain continuation or a block scalar body. The scanner has already
+    refused quoted scalars left open and escapes, so stripping a quoted
+    value's delimiters leaves the text Actions evaluates, folding aside.
+    """
+    for index in range(start, end):
+        if index in BLOCK_SCALAR_LINES:
+            continue
+        line = BLANKED_LINES[index]
+        match = IF_KEY.match(line)
+        if match is None:
+            continue
+        key_column = len(match.group(1))
+        parts = [line[match.end():]]
+        following = index + 1
+        while following < end and (
+            not BLANKED_LINES[following].strip()
+            or len(BLANKED_LINES[following]) - len(BLANKED_LINES[following].lstrip(" ")) > key_column
+        ):
+            parts.append(BLANKED_LINES[following])
+            following += 1
+        value = "\n".join(parts).strip()
+        if value[:1] in ("|", ">"):
+            value = value[1:].lstrip("+-")
+        elif len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        yield index, value
+
+
+def expression_left_open(text):
+    """True if an expression, or a string inside one, is still open at the end."""
+    return any(not closed for _, _, closed in action_expression_spans(text))
+
+
+# Outside block scalars a line holds at most one value scalar (a mapping key
+# holding `${{` and an expression inside a flow collection are refused above),
+# and a block scalar body is one scalar. Actions evaluates each scalar on its
+# own, so an expression or expression string a scalar leaves open would let the
+# scan's reading run into the next value while Actions' does not.
+open_expression_line = None
+segment_start = None
+for index in range(len(BLANKED_LINES) + 1):
+    in_block = index in BLOCK_SCALAR_LINES
+    if segment_start is not None and (not in_block or index == len(BLANKED_LINES)):
+        if expression_left_open("\n".join(BLANKED_LINES[segment_start:index])):
+            open_expression_line = segment_start + 1
+            break
+        segment_start = None
+    if index == len(BLANKED_LINES):
+        break
+    if in_block:
+        if segment_start is None:
+            segment_start = index
+        continue
+    if expression_left_open(BLANKED_LINES[index]):
+        open_expression_line = index + 1
+        break
+if open_expression_line is not None:
+    problems.append(
+        "uses YAML the release-shape check cannot read: an expression left open "
+        "at the end of its scalar at line %d (#1712)" % open_expression_line
+    )
 
 
 def named_step(name, job_name=None):
@@ -4675,7 +5053,22 @@ jobs_index = next(
     (index for index, line in enumerate(lines) if line == "jobs:"),
     len(lines),
 )
-workflow_scope = "\n".join(lines[:jobs_index])
+# split, not splitlines: a file that ends inside a block scalar ends in blanked
+# lines, and splitlines() would drop them and end the last job early.
+workflow_structure_lines = workflow_structure.split("\n")
+jobs_end = len(workflow_structure_lines)
+for index in range(jobs_index + 1, len(workflow_structure_lines)):
+    line = workflow_structure_lines[index]
+    if line.strip() and len(line) == len(line.lstrip()):
+        jobs_end = index
+        break
+
+# Workflow scope is every line outside the jobs block, before `jobs:` and
+# after it: a top-level key placed after the jobs is still workflow-level.
+workflow_scope_segments = ((0, jobs_index), (jobs_end, len(lines)))
+workflow_scope = "\n".join(
+    "\n".join(lines[start:end]) for start, end in workflow_scope_segments
+)
 if re.search(r"(?m)^env\s*:", workflow_scope):
     problems.append("uses unapproved workflow-level environment (#1717)")
 if (
@@ -4684,18 +5077,11 @@ if (
         GITHUB_TOKEN.search(expression_code(expression))
         or GITHUB_CONTEXT_OBJECT.search(expression_code(expression))
         or SECRETS_CONTEXT.search(expression_code(expression))
-        for _, expression in action_expressions(workflow_scope)
+        for start, end in workflow_scope_segments
+        for _, expression in action_expressions("\n".join(BLANKED_LINES[start:end]))
     )
 ):
     problems.append("exposes a GitHub token at workflow scope (#1712)")
-
-workflow_structure_lines = workflow_structure.splitlines()
-jobs_end = len(workflow_structure_lines)
-for index in range(jobs_index + 1, len(workflow_structure_lines)):
-    line = workflow_structure_lines[index]
-    if line.strip() and len(line) == len(line.lstrip()):
-        jobs_end = index
-        break
 job_headers = []
 for index in range(jobs_index + 1, jobs_end):
     line = workflow_structure_lines[index]
@@ -4710,6 +5096,73 @@ for index in range(jobs_index + 1, jobs_end):
         continue
     job_headers.append((index, indentation, key, value))
 jobs_indent = min((entry[1] for entry in job_headers), default=None)
+
+# The release caller is generated whole and never hand-edited
+# (docs/changelog/README.md), so its job set is the generator's for its mode:
+# an extra job could select the release environment or read any secret, and a
+# duplicate key is resolved differently by different YAML parsers (ADR 0099).
+# Every generated release mode passes this check unmodified, which the caller
+# contract suite asserts, so a generator that adds a job must update this table.
+RELEASE_JOB_IDS = {
+    "release-node": ["verify", "snapshot", "publish"],
+    "release-snapshot": ["verify", "snapshot", "publish"],
+    "release-artifact": ["verify", "snapshot", "build", "publish"],
+}
+expected_job_ids = list(RELEASE_JOB_IDS.get(release_mode, []))
+if release_mode == "release-artifact" and os.environ.get("EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES", ""):
+    expected_job_ids.insert(2, "acquire-private-dependencies")
+top_level_keys = []
+for line in workflow_structure_lines:
+    if line.strip() and len(line) == len(line.lstrip()):
+        try:
+            top_level_keys.append(mapping_entry(line.strip())[0])
+        except ValueError:
+            top_level_keys.append(None)
+job_ids = [entry[2] for entry in job_headers if entry[1] == jobs_indent]
+if len(set(top_level_keys)) != len(top_level_keys) or len(set(job_ids)) != len(job_ids):
+    problems.append("declares a duplicate job or top-level key (ADR 0099)")
+# Every release mode writes these workflow keys and no others. A key read with
+# mapping_entry is compared decoded, so a quoted or spaced `env` is still env,
+# and one that cannot be read is refused rather than skipped. Every generated
+# release mode passes this check unmodified, which the caller contract suite
+# asserts, so a generator that adds a workflow key must update this list.
+RELEASE_WORKFLOW_KEYS = ("name", "run-name", "concurrency", "on", "permissions", "jobs")
+if set(top_level_keys) != set(RELEASE_WORKFLOW_KEYS):
+    problems.append(
+        "declares workflow keys other than the generated %s (ADR 0099)"
+        % ", ".join(RELEASE_WORKFLOW_KEYS)
+    )
+if not expected_job_ids:
+    problems.append("has no generated job set for its declared mode (ADR 0099)")
+elif sorted(job_ids) != sorted(expected_job_ids):
+    problems.append(
+        "declares jobs other than the generated %s jobs (%s) (ADR 0099)"
+        % (release_mode, ", ".join(expected_job_ids))
+    )
+for job_position, (job_start, job_indent, _key, _value) in enumerate(job_headers):
+    if job_indent != jobs_indent:
+        continue
+    job_end = next(
+        (entry[0] for entry in job_headers[job_position + 1:] if entry[1] == jobs_indent),
+        jobs_end,
+    )
+    field_indent = min(
+        (
+            len(line) - len(line.lstrip())
+            for line in workflow_structure_lines[job_start + 1:job_end]
+            if line.strip()
+        ),
+        default=None,
+    )
+    if field_indent is None:
+        continue
+    fields = mapping_keys_at_indent(workflow_structure_lines, job_start + 1, job_end, field_indent)
+    if fields is None or "environment" in fields:
+        # changelog-release.yml selects the release-app environment itself; a
+        # caller job that names one could receive its App credential.
+        problems.append("declares a job environment or an unreadable job mapping (ADR 0099)")
+        break
+
 verify_job_header = next(
     (entry for entry in job_headers if entry[1] == jobs_indent and entry[2] == "verify"),
     None,
@@ -4813,6 +5266,170 @@ if build_job_start is not None:
         problems.append(
             "build job references a secrets context or GitHub token context (#1712)"
         )
+
+# The job that calls changelog-release.yml receives its credential only through
+# `secrets: inherit` and the release-app environment (#784), and the
+# release-artifact build job runs adopter-owned build code (#975). Both are
+# generator-determined, so both are pinned whole against the generator's own
+# definitions, which the contract test carries.
+def expected_job(variable):
+    """A generated job the contract test carries line-prefixed with `|`."""
+    carried = os.environ.get(variable, "").splitlines()
+    if not carried or any(not line.startswith("|") for line in carried):
+        return []
+    return [line[1:] for line in carried]
+
+
+EXPECTED_SNAPSHOT_JOB = expected_job("EXPECTED_RELEASE_SNAPSHOT_JOB")
+EXPECTED_BUILD_JOB = expected_job("EXPECTED_RELEASE_BUILD_JOB")
+EXPECTED_PRIVATE_BUILD_JOB = expected_job("EXPECTED_RELEASE_PRIVATE_BUILD_JOB")
+BUILD_RUNNER = re.compile(
+    r"'(?!(?:vars|inputs|matrix|needs|github|env|secrets)\.)(?!(?:macos|windows)-)"
+    r"[A-Za-z0-9][A-Za-z0-9._-]*'"
+    r"|\$\{\{ fromJSON\(vars\.CI_LANE_TRUSTED_(?:MACOS|WINDOWS)\) \}\}"
+)
+
+
+def comment_or_blank(line):
+    text = line.strip()
+    return not text or text.startswith("#")
+
+
+YAML_COMMENT_INDICES = yaml_comment_indices(raw_lines)
+
+
+def job_body(source_lines, comments, start, end):
+    """A job's body lines without blank lines or full-line YAML comments."""
+    return [
+        source_lines[index] for index in range(start + 1, end)
+        if source_lines[index].strip() and index not in comments
+    ]
+
+
+def template_body(template):
+    """The generator's job, header dropped, normalized as job_body normalizes."""
+    return job_body(template, yaml_comment_indices(template), 0, len(template))
+
+
+def dedented_job_body(start, end, expected_first_indent):
+    """The job body shifted back by one uniform offset, or None.
+
+    Re-indenting every line of a job body by the same amount changes no YAML
+    value, block scalar content included; anything else is a different job.
+    """
+    body = job_body(raw_lines, YAML_COMMENT_INDICES, start, end)
+    if not body:
+        return None
+    offset = len(body[0]) - len(body[0].lstrip(" ")) - expected_first_indent
+    if offset < 0 or any(line[:offset].strip() for line in body):
+        return None
+    return [line[offset:] for line in body]
+
+
+def top_level_job_end(position):
+    return next(
+        (entry[0] for entry in job_headers[position + 1:] if entry[1] == jobs_indent),
+        jobs_end,
+    )
+
+
+def generated_build_job(body):
+    """The template body with this job's runner matrix substituted, if that
+    matrix has exactly the generator's shape; None otherwise."""
+    template = template_body(
+        EXPECTED_PRIVATE_BUILD_JOB if expected_allowlist_for_build else EXPECTED_BUILD_JOB
+    )
+    placeholder_line = "@@BUILD_MATRIX@@"
+    if template.count(placeholder_line) != 1:
+        return None
+    try:
+        first = body.index("        include:") + 1
+        last = body.index("    runs-on: ${{ matrix.os }}", first)
+    except ValueError:
+        return None
+    matrix = body[first:last]
+    if not matrix or len(matrix) % 2:
+        return None
+    for position in range(0, len(matrix), 2):
+        runner = matrix[position]
+        if not runner.startswith("          - os: ") or not BUILD_RUNNER.fullmatch(runner[len("          - os: "):]):
+            return None
+        if matrix[position + 1] != "            dependency-index: %d" % (position // 2):
+            return None
+    placeholder = template.index(placeholder_line)
+    return template[:placeholder] + matrix + template[placeholder + 1:]
+
+
+expected_allowlist_for_build = os.environ.get("EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES", "")
+if not EXPECTED_SNAPSHOT_JOB or not EXPECTED_BUILD_JOB or not EXPECTED_PRIVATE_BUILD_JOB:
+    problems.append("cannot read the generated snapshot and build jobs to pin them (ADR 0099)")
+for build_position, (build_start, header_indent, build_key, _value) in enumerate(job_headers):
+    if header_indent != jobs_indent or build_key != "build":
+        continue
+    build_body = dedented_job_body(build_start, top_level_job_end(build_position), 4)
+    if build_body is None or build_body != generated_build_job(build_body):
+        problems.append(
+            "build job is not the generated release-artifact build job (#975)"
+        )
+snapshot_jobs = 0
+for snapshot_index, (snapshot_job_start, header_indent, _key, _value) in enumerate(job_headers):
+    if header_indent != jobs_indent:
+        continue
+    snapshot_job_end = top_level_job_end(snapshot_index)
+    if not any(
+        "changelog-release.yml@" in raw_lines[index] and not comment_or_blank(raw_lines[index])
+        for index in range(snapshot_job_start + 1, snapshot_job_end)
+    ):
+        continue
+    snapshot_jobs += 1
+    # Pinned whole, so no separate context scan: the generated job reads no
+    # token or secrets context, and any job that differs is already refused.
+    if dedented_job_body(snapshot_job_start, snapshot_job_end, 4) != template_body(EXPECTED_SNAPSHOT_JOB):
+        problems.append("snapshot job is not the generated snapshot job (#784)")
+if not snapshot_jobs:
+    # This file was selected because it names changelog-release.yml@; a caller
+    # whose snapshot job cannot be found has inputs nothing pinned.
+    problems.append("has no readable job calling changelog-release.yml to pin (#784)")
+
+# The publish job holds publication credentials, so it is pinned whole like
+# the snapshot and build jobs: a substring check of each input accepted a
+# secret appended to a generated value. release-node's package-dirs input is
+# the caller's pinned package-directory selection (ADR 0099).
+PUBLISH_JOB_VARIABLES = {
+    "release-node": "EXPECTED_RELEASE_NODE_PUBLISH_JOB",
+    "release-artifact": "EXPECTED_RELEASE_ARTIFACT_PUBLISH_JOB",
+    "release-snapshot": "EXPECTED_RELEASE_SNAPSHOT_PUBLISH_JOB",
+}
+
+
+def generated_publish_job():
+    """The generator's publish job for this caller, or None if unreadable."""
+    template = template_body(expected_job(PUBLISH_JOB_VARIABLES.get(release_mode, "")))
+    if not template:
+        return None
+    placeholder = "'@@PACKAGE_DIRS@@'"
+    holders = [index for index, line in enumerate(template) if placeholder in line]
+    if release_mode != "release-node":
+        return None if holders else template
+    package_dirs = os.environ.get("RELEASE_CALLER_PACKAGE_DIRS_JSON", "")
+    if len(holders) != 1 or not package_dirs or "'" in package_dirs:
+        return None
+    template[holders[0]] = template[holders[0]].replace(placeholder, "'%s'" % package_dirs)
+    return template
+
+
+publish_jobs = 0
+expected_publish_job = generated_publish_job()
+for publish_position, (publish_start, header_indent, publish_key, _value) in enumerate(job_headers):
+    if header_indent != jobs_indent or publish_key != "publish":
+        continue
+    publish_jobs += 1
+    if expected_publish_job is None or dedented_job_body(
+        publish_start, top_level_job_end(publish_position), 4
+    ) != expected_publish_job:
+        problems.append("publish job is not the generated publish job (ADR 0099)")
+if publish_jobs != 1:
+    problems.append("publish job is not the generated publish job (ADR 0099)")
 
 acquisition_job_start = next(
     (index for index, line in enumerate(lines) if line == "  acquire-private-dependencies:"),
@@ -5497,8 +6114,11 @@ PY
     || fail "$release_workflow does not select the release-app environment"
   grep -qE '^[[:space:]]+secrets: inherit$' <<<"$snapshot_job" \
     || fail "$release_workflow snapshot lacks inherited environment context"
-  ! sed 's/#.*//' <<<"$snapshot_job" \
-    | grep -qE 'PRIVATE_KEY|ORG_ADMIN_TOKEN|push_token|github\.token' \
+  # Captured, never piped: under pipefail an early-exit `grep -q` that matches
+  # while sed is still writing kills sed with SIGPIPE, and the negated 141
+  # would accept the very reference this guard exists to reject.
+  snapshot_effective="$(sed 's/#.*//' <<<"$snapshot_job")"
+  ! grep -qE 'PRIVATE_KEY|ORG_ADMIN_TOKEN|push_token|github\.token' <<<"$snapshot_effective" \
     || fail "$release_workflow snapshot forwards credentials instead of selecting its environment"
   snapshot_permissions="$(awk '
     NR == 1 { job_indent = match($0, /[^ ]/) - 1; next }
@@ -5941,7 +6561,9 @@ PY
     # Match the bare word, not just the dot-accessor form: ${{ secrets['NAME'] }}
     # and ${{ toJSON(secrets) }} both expose secret material without the literal
     # substring "secrets." ever appearing, and both must be caught too.
-    ! sed 's/#.*//' <<<"$build_job" | grep -qE 'secrets\b' \
+    # Captured rather than piped into grep -q, as for the snapshot guard above.
+    build_job_effective="$(sed 's/#.*//' <<<"$build_job")"
+    ! grep -qE 'secrets\b' <<<"$build_job_effective" \
       || fail "$release_workflow build job references a secrets context; the build matrix runs adopter-owned scripts/release-build.sh on caller-chosen runners and must never receive any secret, especially not the release App credential that mints main-protection-bypass tokens (#975)"
     grep -qF 'needs: [verify, snapshot, build]' <<<"$publish_job" \
       || fail "$release_workflow does not gate publication on verification, snapshot, and build state"
@@ -6037,6 +6659,12 @@ PY
     EXPECTED_RELEASE_CHECKOUT="$EXPECTED_RELEASE_CHECKOUT" \
     EXPECTED_RELEASE_SETUP_NODE="$EXPECTED_RELEASE_SETUP_NODE" \
     EXPECTED_RELEASE_CACHE_SAVE="$EXPECTED_RELEASE_CACHE_SAVE" \
+    EXPECTED_RELEASE_SNAPSHOT_JOB="$EXPECTED_RELEASE_SNAPSHOT_JOB" \
+    EXPECTED_RELEASE_BUILD_JOB="$EXPECTED_RELEASE_BUILD_JOB" \
+    EXPECTED_RELEASE_PRIVATE_BUILD_JOB="$EXPECTED_RELEASE_PRIVATE_BUILD_JOB" \
+    EXPECTED_RELEASE_NODE_PUBLISH_JOB="$EXPECTED_RELEASE_NODE_PUBLISH_JOB" \
+    EXPECTED_RELEASE_ARTIFACT_PUBLISH_JOB="$EXPECTED_RELEASE_ARTIFACT_PUBLISH_JOB" \
+    EXPECTED_RELEASE_SNAPSHOT_PUBLISH_JOB="$EXPECTED_RELEASE_SNAPSHOT_PUBLISH_JOB" \
     EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES="$EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES" \
     RELEASE_CALLER_PACKAGE_DIRS_JSON="$workflow_package_dirs_json" \
     python3 "$work/release-shape.py" "$release_workflow" \
