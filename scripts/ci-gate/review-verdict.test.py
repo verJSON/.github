@@ -525,8 +525,10 @@ OPENAI_PROJECT_SHAPED = "sk" + "-proj-" + "Q1w_E2r-" * 15
 OPENAI_SERVICE_ACCOUNT_SHAPED = "sk" + "-svcacct-" + "a1B2_c3-" * 15
 OPENAI_ADMIN_SHAPED = "sk" + "-admin-" + "Zx9_Y8w-" * 15
 OPENAI_SERVICE_SHAPED = "sk" + "-service-" + "p0O_i9U-" * 15
-# A prefix this file does not name, recognized only through the marker.
-OPENAI_UNNAMED_PREFIX_SHAPED = "sk" + "-None-" + "k_9-" * 6 + OPENAI_MARKER + "m-4_" * 6
+# A prefix this file does not name, recognized only through the marker. The marker sits
+# 74 body characters in, as in the longest observed keys.
+OPENAI_UNNAMED_PREFIX_SHAPED = "sk" + "-None-" + "k_9-a" * 14 + "k_9-" + OPENAI_MARKER + "m-4_b" * 14 + "m-4_"
+OPENAI_PROJECT_MARKED_SHAPED = "sk" + "-proj-" + "a1_B-" * 15 + OPENAI_MARKER + "c2-D_" * 15
 DEEPSEEK_SHAPED = "sk" + "-" + "0123456789abcdef" * 2
 
 
@@ -570,6 +572,20 @@ class CredentialRefusalTest(unittest.TestCase):
                 with self.subTest(prefix=token[:11], text=text[:16]):
                     self.assert_refused(clean_verdict(summary=text))
 
+    def test_credential_glued_to_emphasis_or_a_separator_is_refused(self):
+        # Markdown emphasis and snake_case or flag-style glue sit directly before the
+        # prefix; only an alphanumeric, or an alphanumeric then "-", marks an identifier.
+        for text in (
+            f"Found _{OPENAI_PROJECT_MARKED_SHAPED}_ in the log.",
+            f"Found __{DEEPSEEK_SHAPED}__ in the log.",
+            f"Found -{DEEPSEEK_SHAPED} in the log.",
+            f"Found KEY_{OPENAI_LEGACY_SHAPED} in the log.",
+            f"Found x_{DEEPSEEK_SHAPED} in the log.",
+            f"Found **{OPENAI_ADMIN_SHAPED}** in the log.",
+        ):
+            with self.subTest(text=text[:12]):
+                self.assert_refused(clean_verdict(summary=text))
+
     def test_credential_used_as_a_field_name_is_refused_without_being_echoed(self):
         secret = self.secrets["ANTHROPIC_API_KEY"]
         for raw in (
@@ -604,9 +620,10 @@ class CredentialRefusalTest(unittest.TestCase):
                 self.assertTrue(review.confirm_output(raw, sensitive=False)["usable"], text)
 
     def test_credential_scan_stays_linear_on_adversarial_text(self):
-        # Each "_sk-" could start a token if the lookbehind admitted "_", and every start
-        # would rescan the rest of the run: about five seconds here instead of a millisecond.
-        text = "_sk-" * 50_000
+        # Every "_sk-" here may start a token, so an unbounded body would rescan the rest of
+        # the run from each start. 128 KiB is the largest single environment string Linux
+        # passes (MAX_ARG_STRLEN), so no VERDICT the workflow hands over can be longer.
+        text = "_sk-" * (128 * 1024 // 4)
         started = time.perf_counter()
         self.assertIsNone(review.CREDENTIAL_SHAPE.search(text))
         self.assertLess(time.perf_counter() - started, 1.0)
