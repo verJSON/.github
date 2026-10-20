@@ -138,6 +138,9 @@ def check(config):
         if not named:
             findings.append(f"{expected['name']}: absent; apply the reviewed config")
             continue
+        if len(named) > 1:
+            findings.append(f"{expected['name']}: {len(named)} live rulesets share the name")
+            continue
         live = live_ruleset(named[0]["id"])
         drifted = drifted_fields(live, expected)
         if drifted:
@@ -145,6 +148,11 @@ def check(config):
                             f"config in {', '.join(drifted)}")
         else:
             print(f"verified: {expected['name']} ({live['id']})")
+    declared = {ruleset["name"] for ruleset in config["rulesets"]}
+    for entry in entries:
+        name = entry.get("name")
+        if isinstance(name, str) and name.endswith(NAME_SUFFIX) and name not in declared:
+            findings.append(f"{name} ({entry.get('id')}): not declared in the reviewed config")
     for finding in findings:
         print(f"ERROR: {finding}", file=sys.stderr)
     return 1 if findings else 0

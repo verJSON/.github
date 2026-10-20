@@ -430,5 +430,34 @@ class CheckTest(unittest.TestCase):
                 self.assertNotIn("verified:", result.stdout)
 
 
+    def test_check_fails_on_a_managed_ruleset_the_config_no_longer_declares(self):
+        orphan = copy.deepcopy(desired_rulesets()[0])
+        orphan["name"] = "verjson-retired-sensitive-path-admin-review"
+        orphan["conditions"]["repository_name"]["include"] = ["verjson-retired"]
+        store = live_store()
+        store[26000000] = orphan
+        with tempfile.TemporaryDirectory() as directory:
+            result = FakeGitHub(directory, store).run("check")
+
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn(
+            "verjson-retired-sensitive-path-admin-review (26000000): "
+            "not declared in the reviewed config",
+            result.stderr,
+        )
+
+    def test_check_fails_when_two_live_rulesets_share_a_reviewed_name(self):
+        store = live_store()
+        store[26000001] = copy.deepcopy(desired_rulesets()[0])
+        with tempfile.TemporaryDirectory() as directory:
+            result = FakeGitHub(directory, store).run("check")
+
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn(
+            f"{desired_rulesets()[0]['name']}: 2 live rulesets share the name",
+            result.stderr,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
