@@ -1,3 +1,83 @@
+# v4.2.0
+
+## Refuse AI review verdicts that carry OpenAI or DeepSeek key shapes
+
+The gate's verdict validator already refused a verdict containing the exact model credentials or a GitHub- or Anthropic-shaped token, but the verdict steps also hold the OpenAI and DeepSeek keys, and their formats were not recognized. `scripts/ci-gate/review-verdict.py` now also refuses an `sk-` token with 32 or more alphanumerics (DeepSeek and legacy OpenAI keys), an OpenAI `proj`, `svcacct`, `admin`, or `service` key, or an OpenAI-marked key with any other prefix. A key in Markdown emphasis or glued after `_` or a leading `-` is refused too. A bare prefix, a commit SHA, an integrity digest, or an identifier such as `task-sk-…` stays usable, and bounded bodies keep the scan linear on adversarial text. ADR 0237 decision 10 records the amendment.
+
+_Date: 2026-10-19; issue #1854_
+
+## Manage per-repository sensitive-path admin approval as native required-reviewer rulesets
+
+`config/required-reviewer-rulesets.json` now holds the reviewed desired state for organization rulesets that require an `@verJSON/admins` approval on sensitive paths, and `scripts/required-reviewer-ruleset.py` renders, checks, and (with an explicit acknowledgement) applies it. Canonical CODEOWNERS stays the single `* @verJSON/devs` default-ownership rule; ADR 0210 is amended to record the decision. Nothing is applied by this change.
+
+_Date: 2026-10-19; issue #1816_
+
+## Update the pinned deployment CLI to @verjson/cli-cloud 1.3.0
+
+The container deployment contract now pins `@verjson/cli-cloud` 1.3.0, up from 1.1.1. The package lock also picks up patch updates to its Pulumi, execa, js-yaml and pretty-ms dependencies; no dependency is added or removed. The `runner update` and `runner-host-evidence` commands this repository calls are unchanged between the two versions.
+
+_Date: 2026-10-19; id:e4c1a730_
+
+## Split the release-caller credential-isolation test into three actions-ci rows
+
+The release-caller credential-isolation test now runs as three `platform` rows instead of one: the npm-free contract checks, then the npm 10 and npm 11 isolation cases. The single row had reached 56 seconds of its 60-second budget on hosted runners and then timed out. `RELEASE_CALLER_ISOLATION_PART` selects a part; unset, it still runs everything locally, and an unknown part exits 2 and runs nothing. Every part first runs the npm trace recorder guard that the isolation assertions rely on, and fails if the guard did not run or if its run tables and the case space name different cases. A new test, `scripts/release-caller-credential-isolation-parts.test.py`, derives the case space from the test itself, pins its expected checks and labels independently, and fails if the parts miss a case, overlap, or include an empty part, or if the manifest does not run each part exactly once.
+
+_Date: 2026-10-19; id:cfe42e71_
+
+## Keep actions-ci green on main after a release empties NEXT/
+
+The `docs` actions-ci row that smoke-renders `NEXT/` now passes when a dispatched release has consumed every fragment, instead of failing every release commit on `main` since v3.0.1 with `changelog: no unreleased fragments` and masking unrelated failures behind it. Every other renderer failure still fails the row with the renderer's stderr.
+
+_Date: 2026-10-19; id:cafee6fb_
+
+## Run actions-ci for every data input its registered tests read
+
+`actions-ci` now runs for pull requests and pushes that change `contracts/**`. The container deployment contract test reads the pinned deployment CLI package there, but a Renovate bump of that package never triggered the suite, so it could neither run the test nor report the required `shell-tests` check. The same gap existed for other tracked inputs that registered tests read: `config/`, the root `package.json`, `package-lock.json` and `bin/`, `renovate/`, `.github/required-check-contract.json`, `.github/CODEOWNERS`, and `.telemetry/`. A change to any of them alone was refused at admission for the same missing check. All are now path triggers. `trigger-scope.test.sh` fails if any tracked file under them is uncovered.
+
+_Date: 2026-10-19; id:c0a7d1e9_
+
+## Make the release-caller npm trace recorder detect the credential reliably
+
+The release-caller credential-isolation test's npm trace recorder no longer misrecords a credentialed npm call as credential-free. It checked the environment through a pipe into an early-exiting reader under `pipefail`; with a large environment the writer died of SIGPIPE, the check read false, and a real exposure could be undercounted. It now matches the environment without a pipe, and the test first proves the recorder reports the credential present, and absent, across repeated runs under a large environment.
+
+_Date: 2026-10-19; id:b9d18280_
+
+## Clear the full-tree ShellCheck warning in the mergeable-head test
+
+`scripts/assert-mergeable-head.test.sh` no longer trips ShellCheck SC2120 in the full-tree audit that runs on pushes to `main`. Its `fail_in` fixture defaulted an argument no caller passes; it now uses the fixed timestamp directly, which is the same behavior. Pull-request runs lint only changed files, so the warning reached `main` unnoticed.
+
+_Date: 2026-10-19; id:8171165d_
+
+## Record the authorization-arm ruleset rotation to the raised review floor
+
+ADR 0227 now records the 2026-10-19 rotation of organization ruleset 20722935 to `180b8dbb`, which carries the raised `MINIMUM_SAFE_REVIEW` floor. It also records the live arm run that confirms it.
+
+_Date: 2026-10-19; id:7d3e19a4_
+
+## Raise the review-caller bootstrap floor to the agent-config isolation fix
+
+The authorization arm's review-caller bootstrap now refuses to move a stale caller to any revision before `4d95c2ee` (#1850), the change that stops the review from loading pull-request agent configuration, confines its reads, and fails closed on an incomplete diff. The previous floor was `12098a0e`. The organization arm enforces it once ruleset 20722935 is rotated to this change's merge commit. Repositories that carry their own generated `gate-rearm.yml` caller (verjson-cli, verjson-cli-cloud, and verjson-agents) enforce it once those callers are regenerated at or after it (ADR 0227 amendment of 2026-10-19).
+
+_Date: 2026-10-19; id:5af3c1d2_
+
+## Pin the generated release snapshot, build and publish jobs, workflow keys and job set, and keep the credential guards closed for large job blocks
+
+The generated adopter contract test now pins the release callers' snapshot job, `release-artifact` build job, `publish` job, workflow keys and job set to the generator's own definitions. It refuses YAML that its parser-free scanner cannot read the way Actions would. A hand-edited caller can no longer change the snapshot, build or publish job, add a workflow key, or add a job. Outside the existing approved steps, a read of the token or `secrets` context at workflow scope or in the verify, build or acquisition jobs is refused, including one in a bare `if:` condition. YAML the scanner cannot follow is refused too, so a comment, an escape, a block scalar or an oversized job block can no longer hide such a read (ADR 0099's 2026-10-19 amendment).
+
+_Date: 2026-10-19; id:18810edd_
+
+## Refuse a planted symlink before every fixed-path checkout
+
+`changelog-validate.yml` and `generated-artifacts.yml` now refuse a symlink at `.changelog-contract` before checking the contract out, and the merge gate (`ai-review-merge.yml`) refuses one before each of its five fixed-path checkouts. `actions/checkout` follows a symlink at its `path:` and empties the target, so a pull request that committed one could aim that delete at runner state on a persistent runner, or, in the gate, at the immutable arm verifier (ADR 0236; ADR 0220's 2026-10-18 amendment).
+
+_Date: 2026-10-18; id:81666b48_
+
+## Keep pull-request and runner configuration out of the merge-gate review
+
+The merge-gate Claude review no longer loads agent configuration from the pull request or the runner. It loads only a fresh per-run user layer and only explicitly configured MCP servers. The gate also removes pull-request agent configuration (`.claude/`, `.mcp.json`, root `CLAUDE.md`, and the other paths the pinned action treats as sensitive) and keeps the job token out of the checkout the model can read. The review can now read only the checkout and its own inputs, never process state. Those inputs and the telemetry payload are written outside the checkout, and an empty or incomplete review diff for a real change fails closed. Lockfiles are elided by path rather than by parsing diff headers, submodule pointer changes are never hidden, binary changes outside images and fonts go to a human, and approval reuse requires a whitespace-exact match. A verdict that carries credential material is unusable. Review diffs ignore pull-request git attributes and conversion drivers, so attributes cannot make a changed text file render as binary. Content git itself detects as binary is never shown to the reviewer; it needs a human unless its name has an image or font extension. Adopters receive the fix when their generated caller is regenerated at or after this change.
+
+_Date: 2026-10-18; id:6678b45c_
+
 # v4.1.1
 
 ## Give generated release callers' package token only to exact private downloads
