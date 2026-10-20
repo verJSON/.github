@@ -525,5 +525,24 @@ class ApplyTest(unittest.TestCase):
             self.assertIn(f"unchanged: {ruleset['name']} ({900 + index})", second.stdout)
 
 
+    def test_apply_restores_disabled_when_the_activated_image_reads_back_differently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeGitHub(directory, live_store([]), normalize_active_away_patterns=True)
+            result = fake.run("apply", "--ack", ACK)
+            writes = fake.writes()
+            stored = fake.rulesets()
+
+        self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+        expected = desired_rulesets()[0]
+        staged = dict(expected, enforcement="disabled")
+        self.assertEqual([
+            ["POST", "orgs/Verjson/rulesets", staged],
+            ["PUT", "orgs/Verjson/rulesets/900", expected],
+            ["PUT", "orgs/Verjson/rulesets/900", staged],
+        ], writes)
+        self.assertEqual(staged, stored["900"])
+        self.assertIn("restored and verified disabled", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

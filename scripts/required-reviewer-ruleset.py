@@ -173,9 +173,23 @@ def create(expected):
     require(is_positive_integer(ruleset_id),
             f"{expected['name']}: create returned no positive ruleset id")
     require_live_image(ruleset_id, staged, "created ruleset reads back differently; left disabled")
-    gh_json_input("PUT", f"orgs/{ORGANIZATION}/rulesets/{ruleset_id}", expected)
-    require_live_image(ruleset_id, expected, "activated ruleset reads back differently")
+    path = f"orgs/{ORGANIZATION}/rulesets/{ruleset_id}"
+    try:
+        gh_json_input("PUT", path, expected)
+        require_live_image(ruleset_id, expected, "activated ruleset reads back differently")
+    except ContractError as error:
+        restore_disabled(ruleset_id, staged, error)
     print(f"created: {expected['name']} ({ruleset_id})")
+
+
+def restore_disabled(ruleset_id, staged, cause):
+    """Return a ruleset whose activation could not be verified to its verified disabled image."""
+    try:
+        gh_json_input("PUT", f"orgs/{ORGANIZATION}/rulesets/{ruleset_id}", staged)
+        require_live_image(ruleset_id, staged, "disabled image reads back differently")
+    except ContractError as error:
+        raise ContractError(f"{cause}; disable rollback could not be verified: {error}") from None
+    raise ContractError(f"{cause}; ruleset restored and verified disabled")
 
 
 def apply(config):
