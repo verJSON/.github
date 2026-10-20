@@ -492,5 +492,23 @@ class ApplyTest(unittest.TestCase):
         self.assertEqual(0, check.returncode, check.stdout + check.stderr)
 
 
+    def test_apply_updates_a_drifted_ruleset_in_place(self):
+        live = desired_rulesets()
+        live[0]["bypass_actors"].append(
+            {"actor_type": "OrganizationAdmin", "actor_id": None, "bypass_mode": "always"})
+        live[0]["rules"][0]["parameters"]["required_reviewers"][0]["file_patterns"] = [".github/**"]
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeGitHub(directory, live_store(live))
+            result = fake.run("apply", "--ack", ACK)
+            writes = fake.writes()
+            stored = fake.rulesets()
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        expected = desired_rulesets()[0]
+        self.assertEqual([["PUT", "orgs/Verjson/rulesets/25000000", expected]], writes)
+        self.assertEqual(expected, stored["25000000"])
+        self.assertIn(f"updated: {expected['name']} (25000000)", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

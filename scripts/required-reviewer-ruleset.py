@@ -182,8 +182,15 @@ def apply(config):
     entries = list_organization_rulesets(ORGANIZATION)
     for expected in config["rulesets"]:
         named = [entry for entry in entries if entry.get("name") == expected["name"]]
+        require(len(named) <= 1, f"{expected['name']}: {len(named)} live rulesets share the name")
         if not named:
             create(expected)
+            continue
+        ruleset_id = named[0].get("id")
+        if drifted_fields(live_ruleset(ruleset_id), expected):
+            gh_json_input("PUT", f"orgs/{ORGANIZATION}/rulesets/{ruleset_id}", expected)
+            require_live_image(ruleset_id, expected, "updated ruleset reads back differently")
+            print(f"updated: {expected['name']} ({ruleset_id})")
     return 0
 
 
