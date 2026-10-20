@@ -63,3 +63,20 @@ def list_organization_rulesets(organization):
     require(entries and all(isinstance(entry, dict) for entry in entries),
             "organization ruleset listing is empty or malformed")
     return entries
+
+
+def same_json(left, right):
+    """JSON equality without Python's `True == 1` and `1 == 1.0` coercions."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(same_json(left[key], right[key]) for key in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(map(same_json, left, right))
+    return left == right
+
+
+def drifted_fields(live, expected):
+    """The mutable top-level fields whose live value differs from the reviewed image."""
+    projected = mutable_ruleset(live)
+    return [field for field in MUTABLE_FIELDS if not same_json(projected[field], expected[field])]

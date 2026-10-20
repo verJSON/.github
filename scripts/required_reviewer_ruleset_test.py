@@ -361,5 +361,60 @@ class CheckTest(unittest.TestCase):
             self.assertIn(f"{ruleset['name']}: absent", result.stderr)
 
 
+    def test_check_fails_on_drift_in_any_reviewed_field(self):
+        def reviewer(ruleset):
+            return ruleset["rules"][0]["parameters"]["required_reviewers"][0]
+
+        drifts = {
+            "file pattern removed": (
+                lambda ruleset: reviewer(ruleset)["file_patterns"].pop(), "rules"),
+            "file pattern added": (
+                lambda ruleset: reviewer(ruleset)["file_patterns"].append("docs/**"), "rules"),
+            "team id": (
+                lambda ruleset: reviewer(ruleset)["reviewer"].update(id=1), "rules"),
+            "minimum approvals": (
+                lambda ruleset: reviewer(ruleset).update(minimum_approvals=2), "rules"),
+            "organization admin bypass": (
+                lambda ruleset: ruleset["bypass_actors"].append(
+                    {"actor_type": "OrganizationAdmin", "actor_id": None, "bypass_mode": "always"}),
+                "bypass_actors"),
+            "merge App bypass": (
+                lambda ruleset: ruleset["bypass_actors"].append(
+                    {"actor_type": "Integration", "actor_id": 4693283, "bypass_mode": "always"}),
+                "bypass_actors"),
+            "release bypass removed": (
+                lambda ruleset: ruleset.update(bypass_actors=[]), "bypass_actors"),
+            "code-owner review": (
+                lambda ruleset: ruleset["rules"][0]["parameters"].update(require_code_owner_review=True),
+                "rules"),
+            "approving review count": (
+                lambda ruleset: ruleset["rules"][0]["parameters"].update(required_approving_review_count=1),
+                "rules"),
+            "stale approvals kept": (
+                lambda ruleset: ruleset["rules"][0]["parameters"].update(dismiss_stale_reviews_on_push=False),
+                "rules"),
+            "boolean typed as integer": (
+                lambda ruleset: ruleset["rules"][0]["parameters"].update(require_last_push_approval=0),
+                "rules"),
+            "evaluate only": (lambda ruleset: ruleset.update(enforcement="evaluate"), "enforcement"),
+            "disabled": (lambda ruleset: ruleset.update(enforcement="disabled"), "enforcement"),
+            "renameable repository": (
+                lambda ruleset: ruleset["conditions"]["repository_name"].update(protected=False),
+                "conditions"),
+        }
+        for label, (drift, field) in drifts.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
+                live = desired_rulesets()
+                drift(live[0])
+                result = FakeGitHub(directory, live_store(live)).run("check")
+
+                self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+                self.assertIn(
+                    f"{live[0]['name']} (25000000): differs from the reviewed config in {field}",
+                    result.stderr,
+                )
+                self.assertNotIn(f"verified: {live[0]['name']}", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

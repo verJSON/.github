@@ -9,7 +9,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from github_identity import same_organization  # noqa: E402
 from org_ruleset_api import (  # noqa: E402
-    ContractError, gh_json, list_organization_rulesets, load_json, mutable_ruleset, require,
+    ContractError, drifted_fields, gh_json, list_organization_rulesets, load_json, require,
 )
 
 
@@ -139,7 +139,11 @@ def check(config):
             findings.append(f"{expected['name']}: absent; apply the reviewed config")
             continue
         live = live_ruleset(named[0]["id"])
-        if mutable_ruleset(live) == expected:
+        drifted = drifted_fields(live, expected)
+        if drifted:
+            findings.append(f"{expected['name']} ({live['id']}): differs from the reviewed "
+                            f"config in {', '.join(drifted)}")
+        else:
             print(f"verified: {expected['name']} ({live['id']})")
     for finding in findings:
         print(f"ERROR: {finding}", file=sys.stderr)
