@@ -124,6 +124,8 @@ elif method == "PUT" and path.startswith(prefix + "/"):
     key = path.removeprefix(prefix + "/")
     if key not in state["rulesets"]:
         print("Not Found", file=sys.stderr); sys.exit(1)
+    if state.get("fail_disabled_put") and payload.get("enforcement") == "disabled":
+        print("simulated HTTP failure", file=sys.stderr); sys.exit(1)
     stored = json.loads(json.dumps(payload))
     if state.get("normalize_active_away_patterns") and payload.get("enforcement") == "active":
         stored["rules"][0]["parameters"]["required_reviewers"][0]["file_patterns"] = []
@@ -696,6 +698,21 @@ class ApplyTest(unittest.TestCase):
         ], writes)
         self.assertEqual(expected, stored["25000000"])
         self.assertIn(f"activated: {expected['name']} (25000000)", result.stdout)
+
+
+    def test_failed_rollback_says_the_ruleset_may_still_be_active_and_unverified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeGitHub(directory, live_store([]),
+                              normalize_active_away_patterns=True, fail_disabled_put=True)
+            result = fake.run("apply", "--ack", ACK)
+            stored = fake.rulesets()
+
+        self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+        self.assertEqual("active", stored["900"]["enforcement"])
+        self.assertIn("may still be ACTIVE with an unverified image", result.stderr)
+        self.assertIn("run check", result.stderr)
+        self.assertIn("re-running apply rewrites it in place as an active drifted ruleset",
+                      result.stderr)
 
 
 class FailClosedTest(unittest.TestCase):

@@ -224,7 +224,11 @@ def restore_disabled(ruleset_id, staged, cause):
         gh_json_input("PUT", f"orgs/{ORGANIZATION}/rulesets/{ruleset_id}", staged)
         require_live_image(ruleset_id, staged, "disabled image reads back differently")
     except ContractError as error:
-        raise ContractError(f"{cause}; disable rollback could not be verified: {error}") from None
+        raise ContractError(
+            f"{cause}; disable rollback could not be verified ({error}). Ruleset "
+            f"{ruleset_id} may still be ACTIVE with an unverified image: run check to see "
+            "its live state; re-running apply rewrites it in place as an active drifted ruleset"
+        ) from None
     raise ContractError(f"{cause}; ruleset restored and verified disabled")
 
 

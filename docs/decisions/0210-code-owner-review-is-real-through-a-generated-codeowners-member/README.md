@@ -167,7 +167,13 @@ unaffected, and that an organization-owner token reads
   then activating and re-verifying it, restoring the verified disabled image if
   activation reads back differently. An already-active drifted ruleset is rewritten
   in place without rollback: its prior image is drifted, so it is not a state worth
-  restoring, and a failed read-back exits 2 for `check` to report. The config loader
+  restoring, and a failed read-back exits 2 for `check` to report. If activation reads
+  back wrong and the disabling restore also fails, the ruleset may be left active with
+  an unverified image; `apply` says so explicitly, names `check`, and a re-run takes
+  the active-drifted path above. The rulesets API has no conditional write, so `apply`
+  relies on full-image `PUT`s each followed by a read-back; two concurrent applies can
+  each create the same ruleset, and the identical, stricter-not-weaker duplicate makes
+  `check` and `apply` refuse the shared name until one is deleted. The config loader
   admits only the shape above, compared without JSON type coercion and with one
   literal repository name (no glob or `~ALL`), so weakening the bypass, neutrality,
   reviewer or target is a reviewed code change, not a data edit.
