@@ -90,3 +90,14 @@ fallback lookups already reject mixed-case aliases on case-insensitive filesyste
 A bounded case-insensitive adapter reproduces the old false positive and verifies
 canonical success, capitalization refusal and unchanged fallback behavior. This
 restores portable local conformance; no live enforcement bypass is claimed.
+
+## 2026-10-19 — Sensitive-path approval stays out of CODEOWNERS
+
+[Issue #1816](https://github.com/Verjson/.github/issues/1816) asked whether the
+generated file should carry path-scoped `@verJSON/admins` routes after adopters lost
+theirs on regeneration. It does not: the owner decided that CODEOWNERS states default
+ownership only, and that additional admin approval of sensitive paths is a native
+organization `required_reviewers` ruleset managed in
+`config/required-reviewer-rulesets.json`. The decision, its scope and its rollout are
+recorded in the 2026-10-19 amendment to
+[ADR 0210](../0210-code-owner-review-is-real-through-a-generated-codeowners-member/README.md).
