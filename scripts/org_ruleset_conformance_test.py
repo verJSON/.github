@@ -268,20 +268,51 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                             {"actor_type": "Integration", "actor_id": 4693283, "bypass_mode": "always"},
                         ],
                     },
+                    {
+                        "ruleset_id": None,
+                        "name": "verjson-cli-cloud-sensitive-path-admin-review",
+                        "bypass_actors": [
+                            {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"},
+                        ],
+                    },
+                    {
+                        "ruleset_id": None,
+                        "name": "verjson-cli-projects-sensitive-path-admin-review",
+                        "bypass_actors": [
+                            {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"},
+                        ],
+                    },
+                    {
+                        "ruleset_id": None,
+                        "name": "verjson-cli-sensitive-path-admin-review",
+                        "bypass_actors": [
+                            {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"},
+                        ],
+                    },
+                    {
+                        "ruleset_id": None,
+                        "name": "verjson-object-storage-sensitive-path-admin-review",
+                        "bypass_actors": [
+                            {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"},
+                        ],
+                    },
                 ],
             },
         )
 
     def test_inherited_policy_environment_cannot_redirect_production_policy(self):
         committed = json.loads(POLICY.read_text(encoding="utf-8"))
+        # A name-keyed contract (null id) is matched by name, so give its live
+        # ruleset any id that no id-keyed contract uses.
         details = {
-            contract["ruleset_id"]: ruleset(
-                contract["ruleset_id"],
+            ruleset_id: ruleset(
+                ruleset_id,
                 name=contract["name"],
                 include=["refs/heads/release/*"],
                 bypass_actors=contract["bypass_actors"],
             )
-            for contract in committed["bypass_actor_contracts"]
+            for index, contract in enumerate(committed["bypass_actor_contracts"])
+            for ruleset_id in [contract["ruleset_id"] or 90_000_000 + index]
         }
         details[13] = ruleset(
             13,

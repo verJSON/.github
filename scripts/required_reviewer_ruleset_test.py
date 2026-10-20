@@ -342,6 +342,19 @@ class ConfigTest(unittest.TestCase):
                 with self.assertRaisesRegex(module.ContractError, message):
                     module.read_config(path)
 
+    def test_every_ruleset_has_the_matching_name_keyed_conformance_contract(self):
+        policy = json.loads(
+            (ROOT / "config/org-ruleset-conformance-policy.json").read_text(encoding="utf-8"))
+        name_keyed = {
+            contract["name"]: contract["bypass_actors"]
+            for contract in policy["bypass_actor_contracts"]
+            if contract["ruleset_id"] is None
+        }
+        self.assertEqual(
+            {ruleset["name"]: ruleset["bypass_actors"] for ruleset in desired_rulesets()},
+            name_keyed,
+        )
+
     def test_config_rejects_a_duplicated_json_key(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
