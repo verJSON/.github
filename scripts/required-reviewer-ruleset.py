@@ -168,13 +168,26 @@ def create(expected):
     require(is_positive_integer(ruleset_id),
             f"{expected['name']}: create returned no positive ruleset id")
     require_live_image(ruleset_id, staged, "created ruleset reads back differently; left disabled")
-    path = f"orgs/{ORGANIZATION}/rulesets/{ruleset_id}"
+    activate_verified(ruleset_id, expected, staged)
+    print(f"created: {expected['name']} ({ruleset_id})")
+
+
+def activate_disabled(ruleset_id, expected):
+    """Bring a non-active ruleset (such as a failed create's leftover) to the reviewed image."""
+    staged = dict(expected, enforcement="disabled")
+    gh_json_input("PUT", f"orgs/{ORGANIZATION}/rulesets/{ruleset_id}", staged)
+    require_live_image(ruleset_id, staged, "staged ruleset reads back differently; left disabled")
+    activate_verified(ruleset_id, expected, staged)
+    print(f"activated: {expected['name']} ({ruleset_id})")
+
+
+def activate_verified(ruleset_id, expected, staged):
+    """Activate a verified disabled ruleset, restoring that image if activation reads back wrong."""
     try:
-        gh_json_input("PUT", path, expected)
+        gh_json_input("PUT", f"orgs/{ORGANIZATION}/rulesets/{ruleset_id}", expected)
         require_live_image(ruleset_id, expected, "activated ruleset reads back differently")
     except ContractError as error:
         restore_disabled(ruleset_id, staged, error)
-    print(f"created: {expected['name']} ({ruleset_id})")
 
 
 def restore_disabled(ruleset_id, staged, cause):
@@ -198,8 +211,15 @@ def plan(config):
             actions.append(("create", expected, None))
             continue
         ruleset_id = named[0]["id"]
-        drifted = drifted_fields(live_ruleset(ruleset_id), expected)
-        actions.append(("update" if drifted else "unchanged", expected, ruleset_id))
+        live = live_ruleset(ruleset_id)
+        if not drifted_fields(live, expected):
+            actions.append(("unchanged", expected, ruleset_id))
+        elif live.get("enforcement") != "active":
+            actions.append(("activate", expected, ruleset_id))
+        else:
+            # Already enforcing: rewritten in place, without rollback, because its
+            # prior image is drifted and so not a state worth restoring (ADR 0210).
+            actions.append(("update", expected, ruleset_id))
     return actions
 
 
@@ -207,6 +227,8 @@ def apply(config):
     for action, expected, ruleset_id in plan(config):
         if action == "create":
             create(expected)
+        elif action == "activate":
+            activate_disabled(ruleset_id, expected)
         elif action == "update":
             gh_json_input("PUT", f"orgs/{ORGANIZATION}/rulesets/{ruleset_id}", expected)
             require_live_image(ruleset_id, expected, "updated ruleset reads back differently")

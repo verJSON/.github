@@ -587,6 +587,44 @@ class ApplyTest(unittest.TestCase):
         self.assertIn("restored and verified disabled", result.stderr)
 
 
+    def test_apply_activates_a_disabled_leftover_through_the_verified_rollback_path(self):
+        # A failed create leaves its ruleset disabled; the next apply must not
+        # activate it unverified (#1859 review).
+        expected = desired_rulesets()[0]
+        staged = dict(copy.deepcopy(expected), enforcement="disabled")
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeGitHub(directory, live_store([staged]), normalize_active_away_patterns=True)
+            result = fake.run("apply", "--ack", ACK)
+            writes = fake.writes()
+            stored = fake.rulesets()
+
+        self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+        self.assertEqual([
+            ["PUT", "orgs/Verjson/rulesets/25000000", staged],
+            ["PUT", "orgs/Verjson/rulesets/25000000", expected],
+            ["PUT", "orgs/Verjson/rulesets/25000000", staged],
+        ], writes)
+        self.assertEqual(staged, stored["25000000"])
+        self.assertIn("restored and verified disabled", result.stderr)
+
+    def test_apply_activates_a_disabled_leftover_once_it_reads_back_exactly(self):
+        expected = desired_rulesets()[0]
+        staged = dict(copy.deepcopy(expected), enforcement="disabled")
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeGitHub(directory, live_store([staged]))
+            result = fake.run("apply", "--ack", ACK)
+            writes = fake.writes()[:2]
+            stored = fake.rulesets()
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual([
+            ["PUT", "orgs/Verjson/rulesets/25000000", staged],
+            ["PUT", "orgs/Verjson/rulesets/25000000", expected],
+        ], writes)
+        self.assertEqual(expected, stored["25000000"])
+        self.assertIn(f"activated: {expected['name']} (25000000)", result.stdout)
+
+
 class FailClosedTest(unittest.TestCase):
     """Every unanswerable question about live state is exit 2, never a verdict."""
 
@@ -677,8 +715,10 @@ class FailClosedTest(unittest.TestCase):
         self.assertEqual(["18098028"], list(stored))
 
     def test_apply_fails_when_an_update_reads_back_differently(self):
+        # An already-active drifted ruleset is rewritten in place (no rollback);
+        # a non-active one takes the verified activation path tested above.
         live = desired_rulesets()
-        live[0]["enforcement"] = "disabled"
+        live[0]["rules"][0]["parameters"]["required_reviewers"][0]["file_patterns"].pop()
         with tempfile.TemporaryDirectory() as directory:
             fake = FakeGitHub(directory, live_store(live), normalize_active_away_patterns=True)
             result = fake.run("apply", "--ack", ACK)
