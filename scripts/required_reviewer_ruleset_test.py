@@ -242,11 +242,11 @@ CONFIG_MUTATIONS = {
     ),
     "zero approvals": (
         mutate_reviewer(lambda reviewer: reviewer.update(minimum_approvals=0)),
-        "minimum_approvals must be a positive integer",
+        "minimum_approvals must be 1",
     ),
     "boolean approvals": (
         mutate_reviewer(lambda reviewer: reviewer.update(minimum_approvals=True)),
-        "minimum_approvals must be a positive integer",
+        "minimum_approvals must be 1",
     ),
     "no file patterns": (
         mutate_reviewer(lambda reviewer: reviewer.update(file_patterns=[])),
@@ -284,6 +284,36 @@ CONFIG_MUTATIONS = {
     "every branch": (
         lambda config: config["rulesets"][0]["conditions"]["ref_name"].update(include=["~ALL"]),
         "conditions must target exactly one protected repository's default branch",
+    ),
+    "rename protection typed as integer": (
+        lambda config: config["rulesets"][0]["conditions"]["repository_name"].update(protected=1),
+        "conditions must target exactly one protected repository's default branch",
+    ),
+    "bypass actor id typed as float": (
+        lambda config: config["rulesets"][0]["bypass_actors"][0].update(actor_id=4583107.0),
+        "bypass actors must be exactly the release-authorization App",
+    ),
+    "repository glob": (
+        lambda config: config["rulesets"][0].update(
+            name="verjson-*-sensitive-path-admin-review",
+            conditions={
+                "ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []},
+                "repository_name": {"include": ["verjson-*"], "exclude": [], "protected": True},
+            }),
+        "repository must be one literal repository name",
+    ),
+    "every repository": (
+        lambda config: config["rulesets"][0].update(
+            name="~ALL-sensitive-path-admin-review",
+            conditions={
+                "ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []},
+                "repository_name": {"include": ["~ALL"], "exclude": [], "protected": True},
+            }),
+        "repository must be one literal repository name",
+    ),
+    "two approvals": (
+        mutate_reviewer(lambda reviewer: reviewer.update(minimum_approvals=2)),
+        "minimum_approvals must be 1",
     ),
     "evaluate only": (
         lambda config: config["rulesets"][0].update(enforcement="evaluate"),

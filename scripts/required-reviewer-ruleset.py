@@ -3,6 +3,7 @@
 import argparse
 import json
 from pathlib import Path
+import re
 import sys
 
 # `python3 -I` does not put the script directory on sys.path.
@@ -10,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from github_identity import same_organization  # noqa: E402
 from org_ruleset_api import (  # noqa: E402
     ContractError, drifted_fields, gh_json, gh_json_input, is_positive_integer,
-    list_organization_rulesets, load_json, require,
+    list_organization_rulesets, load_json, require, same_json,
 )
 
 
@@ -20,6 +21,13 @@ ORGANIZATION = "Verjson"
 ISSUE = 1816
 APPLY_ACKNOWLEDGEMENT = f"APPLY-REQUIRED-REVIEWERS-{ISSUE}"
 NAME_SUFFIX = "-sensitive-path-admin-review"
+# One literal repository: `repository_name` also accepts fnmatch globs and `~ALL`,
+# either of which would put the admin requirement on repositories nobody reviewed.
+REPOSITORY_NAME = re.compile(r"[A-Za-z0-9._-]+")
+# @admins has three members and an author cannot approve their own pull request, so
+# requiring two approvals would leave an admin-authored change with exactly one
+# possible approver set and stall it whenever a member is unavailable.
+MINIMUM_APPROVALS = 1
 ADMINS_TEAM = {"type": "Team", "id": 17813010}
 # ADR 0210 (2026-10-19 amendment): only the release-authorization App may bypass. The
 # merge App, Renovate, and organization owners stay subject to the admin approval.
@@ -59,15 +67,17 @@ def validate_ruleset(ruleset, location):
     repositories = repository_name.get("include") if isinstance(repository_name, dict) else None
     repository = repositories[0] if isinstance(repositories, list) and len(repositories) == 1 else None
     require(
-        isinstance(repository, str) and ruleset["conditions"] == {
+        isinstance(repository, str) and same_json(ruleset["conditions"], {
             "ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []},
             "repository_name": {"include": [repository], "exclude": [], "protected": True},
-        },
+        }),
         f"{location}: conditions must target exactly one protected repository's default branch",
     )
+    require(REPOSITORY_NAME.fullmatch(repository) is not None,
+            f"{location}: repository must be one literal repository name")
     require(ruleset["name"] == f"{repository}{NAME_SUFFIX}",
             f"{location}: name must be <repository>{NAME_SUFFIX}")
-    require(ruleset["bypass_actors"] == RELEASE_BYPASS,
+    require(same_json(ruleset["bypass_actors"], RELEASE_BYPASS),
             f"{location}: bypass actors must be exactly the release-authorization App")
     rules = ruleset["rules"]
     require(isinstance(rules, list) and len(rules) == 1 and isinstance(rules[0], dict)
@@ -87,11 +97,10 @@ def validate_ruleset(ruleset, location):
             and set(reviewers[0]) == {"reviewer", "minimum_approvals", "file_patterns"},
             f"{location}: must declare exactly one required reviewer")
     reviewer = reviewers[0]
-    require(reviewer["reviewer"] == ADMINS_TEAM
-            and type(reviewer["reviewer"].get("id")) is int,
+    require(same_json(reviewer["reviewer"], ADMINS_TEAM),
             f"{location}: reviewer must be the admins team")
-    require(is_positive_integer(reviewer["minimum_approvals"]),
-            f"{location}: minimum_approvals must be a positive integer")
+    require(same_json(reviewer["minimum_approvals"], MINIMUM_APPROVALS),
+            f"{location}: minimum_approvals must be {MINIMUM_APPROVALS}")
     validate_file_patterns(reviewer["file_patterns"], location)
     return repository
 
