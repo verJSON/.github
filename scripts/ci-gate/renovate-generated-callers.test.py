@@ -283,6 +283,9 @@ def generated_job_expectations(contract_test: str) -> dict[str, str]:
         "EXPECTED_RELEASE_SNAPSHOT_JOB": extract_heredoc(contract_test, "SNAPSHOT_JOB"),
         "EXPECTED_RELEASE_BUILD_JOB": extract_heredoc(contract_test, "BUILD_JOB"),
         "EXPECTED_RELEASE_PRIVATE_BUILD_JOB": extract_heredoc(contract_test, "PRIVATE_BUILD_JOB"),
+        "EXPECTED_RELEASE_NODE_PUBLISH_JOB": extract_heredoc(contract_test, "NODE_PUBLISH_JOB"),
+        "EXPECTED_RELEASE_ARTIFACT_PUBLISH_JOB": extract_heredoc(contract_test, "ARTIFACT_PUBLISH_JOB"),
+        "EXPECTED_RELEASE_SNAPSHOT_PUBLISH_JOB": extract_heredoc(contract_test, "SNAPSHOT_PUBLISH_JOB"),
     }
 
 

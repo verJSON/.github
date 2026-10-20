@@ -272,8 +272,8 @@ of a quote, or a `#` inside a block or multi-line scalar could put an
 expression in front of Actions that the scan never saw. The release caller's
 job set was also unconstrained. The controls are now as follows.
 
-**Pinned whole (generator-determined).** Neither job below has
-adopter-authored content.
+**Pinned whole (generator-determined).** No job below has adopter-authored
+content.
 
 - **Snapshot job.** Written by `release_snapshot_job` in all three release
   caller modes. Every field is pinned: `needs`, `if`, `uses`,
@@ -283,6 +283,13 @@ adopter-authored content.
   sequence, `uses`, env values and run bodies are pinned. The one substituted
   part is the runner matrix, whose entries must match the generator's runner
   grammar and its `dependency-index` order.
+- **`publish` job.** Written by `release_node_publish_job`,
+  `release_snapshot_publish_job` or `release_artifact_publish_job` for the
+  caller's mode. Every field, `with:` input, step, env value and run body is
+  pinned. In `release-node` the `package-dirs` input is the one substituted
+  part, and it must equal the caller's pinned package-directory selection. A
+  substring check of each input had accepted a secret appended to a generated
+  value.
 
 The contract test carries these same definitions, so the generator and the
 check cannot disagree. The comparison skips blank lines and full-line YAML
@@ -299,7 +306,11 @@ generator's set for its declared mode:
 - `release-artifact`: `verify`, `snapshot`, `build`, `publish`, plus
   `acquire-private-dependencies` when private packages are approved.
 
-A duplicate job id or top-level key is refused, and so is a job-level
+The workflow-level keys must be exactly the generator's: `name`, `run-name`,
+`concurrency`, `on`, `permissions` and `jobs`, the same in every mode. Keys
+are compared decoded, so `"env":`, `'env':` and `env :` are each an `env` key
+and are refused. A key that cannot be read is refused rather than skipped. A
+duplicate job id or top-level key is refused, and so is a job-level
 `environment`. `changelog-release.yml` is therefore the only place that
 selects the release-app environment, and the snapshot job is the only caller
 job that reaches the release App.
@@ -349,10 +360,18 @@ so every `${{`, `}}`, quote and context name in a decoded value appears in the
 scanned text. Every expression closes inside its own scalar, and comments are
 blanked, so the scan's reading of one value cannot run into another.
 
-The expression scan covers workflow scope and the verify, build and acquisition
-jobs. It matches the token context, the `secrets` context, and the `github`
-object read whole, by index, or through an object filter. The verify and
-acquisition jobs allow only their existing approved reads (#1712).
+The expression scan covers workflow scope and the verify, build and
+acquisition jobs. Workflow scope is every line outside the jobs block, so a
+generated key moved after `jobs:` is still scanned. Actions evaluates a job or
+step `if:` as an expression with or without `${{ }}`, so the scan also reads
+every `if:` value as expression code. That value is the rest of the key's line
+and every line indented past the key, with a quoted value's delimiters
+stripped. The scan matches the token context, the `secrets` context, and the
+`github` object read whole, by index, or through an object filter. The verify
+and acquisition jobs allow only their existing approved reads (#1712). The
+verify steps after dependency acquisition are not pinned whole. Their reads
+are covered by this scan, and their identities and order by the step-sequence
+check.
 
 **Generator.** The generator now computes every value it interpolates into a
 here-document before writing that document, and returns on failure. Bash
@@ -372,12 +391,9 @@ to stderr.
   evidence, not proof.
 - The scanner is deliberately narrower than YAML, so a hand-written caller that
   uses a refused construct is rejected rather than read.
-- These controls cover token and `secrets` context reads, the job set, and the
-  pinned snapshot and build jobs. They do not show that a hand-edited caller
-  cannot forward a credential by every route.
-- The `publish` job holds publication credentials by design. It is neither
-  pinned whole nor scanned for contexts, and keeps its existing per-field
-  checks.
+- These controls cover token and `secrets` context reads, the workflow keys,
+  the job set, and the pinned snapshot, build and publish jobs. They do not
+  show that a hand-edited caller cannot forward a credential by every route.
 - Data passed between jobs through outputs is outside this amendment.
 - A generator function that exits silently inside a command substitution, as
   opposed to returning non-zero or writing to stderr, is not detected.
