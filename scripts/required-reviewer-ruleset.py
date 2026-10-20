@@ -9,8 +9,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from github_identity import same_organization  # noqa: E402
 from org_ruleset_api import (  # noqa: E402
-    ContractError, drifted_fields, gh_json, gh_json_input, list_organization_rulesets,
-    load_json, require,
+    ContractError, drifted_fields, gh_json, gh_json_input, is_positive_integer,
+    list_organization_rulesets, load_json, require,
 )
 
 
@@ -36,10 +36,6 @@ NEUTRAL_PARAMETERS = {
     "required_approving_review_count": 0,
     "required_review_thread_resolution": False,
 }
-
-
-def is_positive_integer(value):
-    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
 def validate_file_patterns(patterns, location):
@@ -135,7 +131,7 @@ def check(config):
     entries = list_organization_rulesets(ORGANIZATION)
     findings = []
     for expected in config["rulesets"]:
-        named = [entry for entry in entries if entry.get("name") == expected["name"]]
+        named = [entry for entry in entries if entry["name"] == expected["name"]]
         if not named:
             findings.append(f"{expected['name']}: absent; apply the reviewed config")
             continue
@@ -151,9 +147,8 @@ def check(config):
             print(f"verified: {expected['name']} ({live['id']})")
     declared = {ruleset["name"] for ruleset in config["rulesets"]}
     for entry in entries:
-        name = entry.get("name")
-        if isinstance(name, str) and name.endswith(NAME_SUFFIX) and name not in declared:
-            findings.append(f"{name} ({entry.get('id')}): not declared in the reviewed config")
+        if entry["name"].endswith(NAME_SUFFIX) and entry["name"] not in declared:
+            findings.append(f"{entry['name']} ({entry['id']}): not declared in the reviewed config")
     for finding in findings:
         print(f"ERROR: {finding}", file=sys.stderr)
     return 1 if findings else 0
@@ -192,16 +187,27 @@ def restore_disabled(ruleset_id, staged, cause):
     raise ContractError(f"{cause}; ruleset restored and verified disabled")
 
 
-def apply(config):
+def plan(config):
+    """Resolve every ruleset's action from live state before anything is written."""
     entries = list_organization_rulesets(ORGANIZATION)
+    actions = []
     for expected in config["rulesets"]:
-        named = [entry for entry in entries if entry.get("name") == expected["name"]]
+        named = [entry for entry in entries if entry["name"] == expected["name"]]
         require(len(named) <= 1, f"{expected['name']}: {len(named)} live rulesets share the name")
         if not named:
-            create(expected)
+            actions.append(("create", expected, None))
             continue
-        ruleset_id = named[0].get("id")
-        if drifted_fields(live_ruleset(ruleset_id), expected):
+        ruleset_id = named[0]["id"]
+        drifted = drifted_fields(live_ruleset(ruleset_id), expected)
+        actions.append(("update" if drifted else "unchanged", expected, ruleset_id))
+    return actions
+
+
+def apply(config):
+    for action, expected, ruleset_id in plan(config):
+        if action == "create":
+            create(expected)
+        elif action == "update":
             gh_json_input("PUT", f"orgs/{ORGANIZATION}/rulesets/{ruleset_id}", expected)
             require_live_image(ruleset_id, expected, "updated ruleset reads back differently")
             print(f"updated: {expected['name']} ({ruleset_id})")

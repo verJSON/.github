@@ -579,5 +579,106 @@ class ApplyTest(unittest.TestCase):
         self.assertIn("restored and verified disabled", result.stderr)
 
 
+class FailClosedTest(unittest.TestCase):
+    """Every unanswerable question about live state is exit 2, never a verdict."""
+
+    def run_with_listing(self, mode, listing, *arguments):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeGitHub(directory, live_store())
+            gh = Path(directory) / "gh"
+            gh.write_text(gh.read_text(encoding="utf-8").replace(
+                'print(json.dumps([[{"id": int(key), "name": value["name"]}\n'
+                '                       for key, value in state["rulesets"].items()]]))',
+                f"print({json.dumps(json.dumps(listing))})",
+            ), encoding="utf-8")
+            return fake.run(mode, *arguments), fake.writes()
+
+    def test_malformed_listing_fails_closed(self):
+        name = desired_rulesets()[0]["name"]
+        listings = {
+            "no pages": [],
+            "page is not a list": [{"id": 1}],
+            "empty page": [[]],
+            "entry is not an object": [["main-protection"]],
+            "named entry without id": [[{"name": name}]],
+            "named entry with string id": [[{"id": "25000000", "name": name}]],
+            "named entry with boolean id": [[{"id": True, "name": name}]],
+            "entry without name": [[{"id": 25000000}]],
+        }
+        for label, listing in listings.items():
+            for mode, arguments in (("check", ()), ("apply", ("--ack", ACK))):
+                with self.subTest(label=label, mode=mode):
+                    result, writes = self.run_with_listing(mode, listing, *arguments)
+
+                    self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("error:", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertEqual([], writes)
+
+    def test_live_detail_that_is_not_the_requested_org_ruleset_fails_closed(self):
+        overrides = {
+            "repository ruleset": {"source_type": "Repository"},
+            "another organization": {"source": "Attacker"},
+            "different id": {"id": 1},
+        }
+        for label, override in overrides.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
+                fake = FakeGitHub(directory, live_store())
+                gh = Path(directory) / "gh"
+                gh.write_text(gh.read_text(encoding="utf-8").replace(
+                    "    print(json.dumps(detail(int(key))))\nelif method == \"POST\"",
+                    f"    print(json.dumps(dict(detail(int(key)), **{override!r})))"
+                    "\nelif method == \"POST\"",
+                ), encoding="utf-8")
+                result = fake.run("check")
+
+                self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                self.assertNotIn("verified:", result.stdout)
+
+    def test_live_detail_missing_a_mutable_field_fails_closed(self):
+        live = desired_rulesets()
+        del live[0]["rules"]
+        with tempfile.TemporaryDirectory() as directory:
+            result = FakeGitHub(directory, live_store(live)).run("check")
+
+        self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+        self.assertIn("live ruleset is missing required fields", result.stderr)
+
+    def test_apply_plans_every_ruleset_before_writing_any(self):
+        live = desired_rulesets()[1:]
+        store = live_store(live)
+        store[26000002] = copy.deepcopy(live[0])
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeGitHub(directory, store)
+            result = fake.run("apply", "--ack", ACK)
+            writes = fake.writes()
+
+        self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+        self.assertIn(f"{live[0]['name']}: 2 live rulesets share the name", result.stderr)
+        self.assertEqual([], writes)
+
+    def test_apply_stops_when_the_create_request_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeGitHub(directory, live_store([]), fail=["POST orgs/Verjson/rulesets"])
+            result = fake.run("apply", "--ack", ACK)
+            writes = fake.writes()
+            stored = fake.rulesets()
+
+        self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+        self.assertEqual(["POST"], [write[0] for write in writes])
+        self.assertEqual(["18098028"], list(stored))
+
+    def test_apply_fails_when_an_update_reads_back_differently(self):
+        live = desired_rulesets()
+        live[0]["enforcement"] = "disabled"
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeGitHub(directory, live_store(live), normalize_active_away_patterns=True)
+            result = fake.run("apply", "--ack", ACK)
+
+        self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+        self.assertIn("updated ruleset reads back differently (rules)", result.stderr)
+        self.assertNotIn(f"updated: {live[0]['name']}", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

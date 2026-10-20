@@ -68,9 +68,17 @@ def list_organization_rulesets(organization):
             and all(isinstance(page, list) for page in listing),
             "organization ruleset listing is malformed")
     entries = [entry for page in listing for entry in page]
-    require(entries and all(isinstance(entry, dict) for entry in entries),
-            "organization ruleset listing is empty or malformed")
+    require(entries, "organization ruleset listing is empty")
+    for entry in entries:
+        # An entry this tool cannot identify could be the ruleset it is asked about.
+        require(isinstance(entry, dict) and is_positive_integer(entry.get("id"))
+                and isinstance(entry.get("name"), str) and entry["name"],
+                "organization ruleset listing contains an entry without an id and name")
     return entries
+
+
+def is_positive_integer(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
 def same_json(left, right):
