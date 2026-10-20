@@ -472,5 +472,25 @@ class ApplyTest(unittest.TestCase):
                 self.assertEqual([], fake.calls())
 
 
+    def test_apply_creates_an_absent_ruleset_disabled_then_activates_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeGitHub(directory, live_store([]))
+            result = fake.run("apply", "--ack", ACK)
+            writes = fake.writes()
+            check = fake.run("check")
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        expected_writes = []
+        for index, ruleset in enumerate(desired_rulesets()):
+            staged = dict(ruleset, enforcement="disabled")
+            expected_writes += [
+                ["POST", "orgs/Verjson/rulesets", staged],
+                ["PUT", f"orgs/Verjson/rulesets/{900 + index}", ruleset],
+            ]
+            self.assertIn(f"created: {ruleset['name']} ({900 + index})", result.stdout)
+        self.assertEqual(expected_writes, writes)
+        self.assertEqual(0, check.returncode, check.stdout + check.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

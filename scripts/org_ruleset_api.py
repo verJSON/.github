@@ -6,6 +6,7 @@ predate this module and still carry private copies of these helpers.
 """
 import json
 import subprocess
+import tempfile
 
 
 class ContractError(Exception):
@@ -42,6 +43,13 @@ def gh_json(*arguments):
     if result.returncode:
         raise ContractError(f"GitHub API request failed: {' '.join(arguments)}")
     return load_json(result.stdout, f"GitHub API response for {' '.join(arguments)}")
+
+
+def gh_json_input(method, path, payload):
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8") as stream:
+        json.dump(payload, stream)
+        stream.flush()
+        return gh_json("--method", method, path, "--input", stream.name)
 
 
 MUTABLE_FIELDS = ("name", "target", "enforcement", "bypass_actors", "conditions", "rules")

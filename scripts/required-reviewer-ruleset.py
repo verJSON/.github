@@ -9,7 +9,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from github_identity import same_organization  # noqa: E402
 from org_ruleset_api import (  # noqa: E402
-    ContractError, drifted_fields, gh_json, list_organization_rulesets, load_json, require,
+    ContractError, drifted_fields, gh_json, gh_json_input, list_organization_rulesets,
+    load_json, require,
 )
 
 
@@ -158,6 +159,34 @@ def check(config):
     return 1 if findings else 0
 
 
+def require_live_image(ruleset_id, expected, failure):
+    drifted = drifted_fields(live_ruleset(ruleset_id), expected)
+    require(not drifted, f"{expected['name']} ({ruleset_id}): {failure} ({', '.join(drifted)})")
+
+
+def create(expected):
+    # Created disabled and verified before it can block a merge, so a payload GitHub
+    # reads back differently never enforces an unreviewed image.
+    staged = dict(expected, enforcement="disabled")
+    created = gh_json_input("POST", f"orgs/{ORGANIZATION}/rulesets", staged)
+    ruleset_id = created.get("id") if isinstance(created, dict) else None
+    require(is_positive_integer(ruleset_id),
+            f"{expected['name']}: create returned no positive ruleset id")
+    require_live_image(ruleset_id, staged, "created ruleset reads back differently; left disabled")
+    gh_json_input("PUT", f"orgs/{ORGANIZATION}/rulesets/{ruleset_id}", expected)
+    require_live_image(ruleset_id, expected, "activated ruleset reads back differently")
+    print(f"created: {expected['name']} ({ruleset_id})")
+
+
+def apply(config):
+    entries = list_organization_rulesets(ORGANIZATION)
+    for expected in config["rulesets"]:
+        named = [entry for entry in entries if entry.get("name") == expected["name"]]
+        if not named:
+            create(expected)
+    return 0
+
+
 def parse_arguments(arguments):
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("render", "check", "apply"))
@@ -173,7 +202,7 @@ def main(arguments=None):
     if args.mode == "apply":
         require(args.ack == config["apply_acknowledgement"],
                 f"explicit acknowledgement {config['apply_acknowledgement']} is required")
-        return 0
+        return apply(config)
     print(json.dumps(config["rulesets"], indent=2, sort_keys=True))
     return 0
 
