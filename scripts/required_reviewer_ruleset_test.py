@@ -459,5 +459,18 @@ class CheckTest(unittest.TestCase):
         )
 
 
+class ApplyTest(unittest.TestCase):
+    def test_apply_refuses_before_any_api_call_without_the_acknowledgement(self):
+        for arguments in ((), ("--ack", ""), ("--ack", "APPLY-REQUIRED-REVIEWERS-1"),
+                          ("--ack", "apply-required-reviewers-1816")):
+            with self.subTest(arguments), tempfile.TemporaryDirectory() as directory:
+                fake = FakeGitHub(directory, live_store([]))
+                result = fake.run("apply", *arguments)
+
+                self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                self.assertIn(f"explicit acknowledgement {ACK} is required", result.stderr)
+                self.assertEqual([], fake.calls())
+
+
 if __name__ == "__main__":
     unittest.main()

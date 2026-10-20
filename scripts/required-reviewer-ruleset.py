@@ -160,7 +160,8 @@ def check(config):
 
 def parse_arguments(arguments):
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("render", "check"))
+    parser.add_argument("mode", choices=("render", "check", "apply"))
+    parser.add_argument("--ack", default="")
     return parser.parse_args(arguments)
 
 
@@ -169,6 +170,10 @@ def main(arguments=None):
     config = read_config()
     if args.mode == "check":
         return check(config)
+    if args.mode == "apply":
+        require(args.ack == config["apply_acknowledgement"],
+                f"explicit acknowledgement {config['apply_acknowledgement']} is required")
+        return 0
     print(json.dumps(config["rulesets"], indent=2, sort_keys=True))
     return 0
 
