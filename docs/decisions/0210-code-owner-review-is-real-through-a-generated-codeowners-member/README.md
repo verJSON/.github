@@ -121,8 +121,8 @@ path-scoped route. `verjson-cli` lost `/.github/` and `/.gitmodules` →
 `@Verjson/admins` in its #302 regeneration (`00800b0f` → `3275e8fc`), and on
 2026-10-19 `verjson-cli-cloud`, `verjson-cli-projects` and `verjson-object-storage`
 still carry admin routes on `main` that their next regeneration removes. A read-only
-sweep of all 106 non-archived organization repositories that day found admin routes
-in no others; `verjson-ci`, `verjson-compliance` and `verjson-compliance-schema`
+sweep that day of the current and historical CODEOWNERS of all 106 non-archived
+organization repositories found admin routes in no others; `verjson-ci`, `verjson-compliance` and `verjson-compliance-schema`
 adopted the canonical file without ever having one. Even where they existed, those
 routes never constrained the merge Apps or organization owners, which bypass
 `main-protection` (18098028) and with it its code-owner requirement.
