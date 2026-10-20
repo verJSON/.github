@@ -40,8 +40,27 @@ SECRET_ENVIRONMENT = (
 )
 # Credential-shaped text even when the value is unknown here: a prefix followed by a
 # token-length body. A bare prefix, as in "rotate any ghp_ tokens", is not material.
+#
+# The OpenAI and DeepSeek "sk-" family must start a token: the lookbehind excludes
+# identifiers such as "task-sk-..." and base64url runs that happen to contain "sk-".
+# Because the lookbehind class covers every body character, a match can start only at
+# the beginning of a maximal token run, so the scan stays linear in the verdict size.
+#   - "sk-" and 32+ alphanumerics: DeepSeek keys (32 hex) and OpenAI legacy user keys
+#     (48 alphanumerics); prose never runs that long without a separator.
+#   - OpenAI's named segment prefixes and a body far longer than kebab-case prose; real
+#     bodies are 124+ characters of [A-Za-z0-9_-].
+#   - OpenAI's base64 "OpenAI" marker between two bodies, for a prefix not named here.
+# None of these overlaps "sk-ant-", which keeps its own alternative.
+OPENAI_STYLE_SHAPE = (
+    r"(?<![A-Za-z0-9_-])sk-(?:"
+    r"[A-Za-z0-9]{32,}"
+    r"|(?:proj|svcacct|admin|service)-[A-Za-z0-9_-]{80,}"
+    r"|[A-Za-z0-9_-]{20,}T3BlbkFJ[A-Za-z0-9_-]{20,}"
+    r")"
+)
 CREDENTIAL_SHAPE = re.compile(
-    r"(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|sk-ant-[A-Za-z0-9_-]{20,})"
+    r"(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|sk-ant-[A-Za-z0-9_-]{20,}"
+    rf"|{OPENAI_STYLE_SHAPE})"
 )
 
 

@@ -2,6 +2,7 @@
 
 - **Date:** 2026-10-18
 - **Status:** Accepted
+- **Amended:** 2026-10-19 — decision 10 refuses OpenAI and DeepSeek key shapes (#1854)
 - **Category:** merge-gate behavior and secrets handling — **sensitive class**
 - **Related:** [ADR 0098](../0098-require-bounded-ai-review-for-code/README.md),
   which requires the bounded AI review this decision hardens;
@@ -216,6 +217,32 @@ that write access alone does not grant. The exposure is pre-existing on `main`
     existing fail-closed no-usable-verdict outcome. The validator's own git lookups
     run without those values in their environment.
 
+    **Amended 2026-10-19 ([#1854](https://github.com/Verjson/.github/issues/1854)).**
+    The verdict steps also hold `OPENAI_API_KEY` and `DEEPSEEK_API_KEY`, but the shape
+    check named only GitHub and Anthropic formats, so an OpenAI or DeepSeek key the
+    model saw anywhere other than the configured secret was publishable. The shape
+    check now also refuses an `sk-` token, when nothing in `[A-Za-z0-9_-]` precedes it,
+    that has any of these bodies:
+    - 32 or more alphanumerics, which covers DeepSeek's 32 lowercase hex characters and
+      OpenAI's 48-character legacy user keys;
+    - an OpenAI segment prefix (`proj`, `svcacct`, `admin`, `service`) followed by 80 or
+      more `[A-Za-z0-9_-]` characters;
+    - 20 or more `[A-Za-z0-9_-]` characters on each side of `T3BlbkFJ`, the base64 of
+      "OpenAI" that OpenAI keys carry, which covers a prefix not named above.
+
+    Neither provider publishes a key-format specification. The prefixes, lengths,
+    alphabets, and marker come from the public scanner rules that recognize these keys:
+    gitleaks' `openai-api-key` rule (`proj`, `svcacct`, `admin`; 58 or 74 characters on
+    each side of the marker; legacy keys of 20 alphanumerics on each side) and
+    TruffleHog's `openai` (`proj`, `svcacct`, `service`), `openaiadmin`, and `deepseek`
+    (`sk-` plus 32 `[a-z0-9]`) detectors. The minimums sit below
+    every observed key and above the longest unbroken run ordinary prose produces, so a
+    bare prefix ("rotate any `sk-proj-` keys"), a commit SHA, an npm integrity digest, or
+    an identifier such as `task-sk-…` stays usable. The leading boundary covers every
+    body character, so a match can start only at the beginning of a token run and the
+    scan stays linear in the verdict's size. None of these shapes overlaps `sk-ant-`,
+    which keeps its own alternative.
+
 `scripts/ci-gate/review-agent-config-isolation.test.py` enforces decisions 1–4 and
 6–9, and `scripts/ci-gate/review-verdict.test.py` enforces decision 10. Every
 deliberate removal of a protection turns them red:
@@ -268,6 +295,10 @@ deliberate removal of a protection turns them red:
   from being published in a transformed form, such as encoded or split. The job
   token's lifetime bounds only the token: the model credential stays valid until it is
   rotated, which is the remedy if exposure is ever suspected.
+  *Amended 2026-10-19 (#1854):* the shapes come from public scanner rules, not a
+  provider-documented format. A key format a provider introduces without an `sk-`
+  prefix, a named segment, or the OpenAI marker is refused only by its exact
+  configured value until the shape list is extended.
 - **Residual, persistent-runner class (ADR 0235):** on the persistent
   private-repository lane, the reused `.git` directory from an earlier job is not
   neutralized as a whole. Its configuration, hooks, object store, and refs persist.

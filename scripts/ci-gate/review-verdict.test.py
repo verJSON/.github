@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -515,6 +516,18 @@ def clean_verdict(**overrides):
 GITHUB_SHAPED = "gh" + "s_" + "Q7" * 18
 FINE_GRAINED_SHAPED = "github" + "_pat_" + "11AAAA" * 5
 ANTHROPIC_SHAPED = "sk" + "-ant-" + "api03-" + "x9" * 16
+OPENAI_MARKER = "T3Blbk" + "FJ"
+# Legacy user key: 20 alphanumerics, the marker, 20 alphanumerics.
+OPENAI_LEGACY_SHAPED = "sk" + "-" + "Ab3D" * 5 + OPENAI_MARKER + "x7Yz" * 5
+# Segment-prefixed keys carry "_" and "-" in their bodies. These omit the marker, so
+# each documented prefix is required on its own rather than through the marker shape.
+OPENAI_PROJECT_SHAPED = "sk" + "-proj-" + "Q1w_E2r-" * 15
+OPENAI_SERVICE_ACCOUNT_SHAPED = "sk" + "-svcacct-" + "a1B2_c3-" * 15
+OPENAI_ADMIN_SHAPED = "sk" + "-admin-" + "Zx9_Y8w-" * 15
+OPENAI_SERVICE_SHAPED = "sk" + "-service-" + "p0O_i9U-" * 15
+# A prefix this file does not name, recognized only through the marker.
+OPENAI_UNNAMED_PREFIX_SHAPED = "sk" + "-None-" + "k_9-" * 6 + OPENAI_MARKER + "m-4_" * 6
+DEEPSEEK_SHAPED = "sk" + "-" + "0123456789abcdef" * 2
 
 
 class CredentialRefusalTest(unittest.TestCase):
@@ -541,9 +554,21 @@ class CredentialRefusalTest(unittest.TestCase):
                 self.assertTrue(self.assert_refused(raw, values)["diagnostic"]["path"].startswith(field))
 
     def test_credential_shaped_tokens_are_refused_without_knowing_the_value(self):
-        for token in (GITHUB_SHAPED, FINE_GRAINED_SHAPED, ANTHROPIC_SHAPED):
-            with self.subTest(prefix=token[:7]):
-                self.assert_refused(clean_verdict(summary=f"Found {token} in the log."))
+        for token in (
+            GITHUB_SHAPED,
+            FINE_GRAINED_SHAPED,
+            ANTHROPIC_SHAPED,
+            OPENAI_LEGACY_SHAPED,
+            OPENAI_PROJECT_SHAPED,
+            OPENAI_SERVICE_ACCOUNT_SHAPED,
+            OPENAI_ADMIN_SHAPED,
+            OPENAI_SERVICE_SHAPED,
+            OPENAI_UNNAMED_PREFIX_SHAPED,
+            DEEPSEEK_SHAPED,
+        ):
+            for text in (f"Found {token} in the log.", f"OPENAI_API_KEY={token}", f"`{token}`"):
+                with self.subTest(prefix=token[:11], text=text[:16]):
+                    self.assert_refused(clean_verdict(summary=text))
 
     def test_credential_used_as_a_field_name_is_refused_without_being_echoed(self):
         secret = self.secrets["ANTHROPIC_API_KEY"]
@@ -557,8 +582,34 @@ class CredentialRefusalTest(unittest.TestCase):
                 self.assertNotIn(secret, json.dumps(result))
 
     def test_naming_a_token_prefix_is_not_credential_material(self):
-        raw = clean_verdict(summary="Rotate any ghp_ or github_pat_ tokens and sk-ant- keys this change logged.")
+        raw = clean_verdict(
+            summary="Rotate any ghp_ or github_pat_ tokens, sk-ant- keys, and sk-, sk-proj-, sk-svcacct-, "
+            "sk-admin-, or T3BlbkFJ-marked keys this change logged."
+        )
         self.assertTrue(review.confirm_output(raw, sensitive=False, secrets=tuple(self.secrets.values()))["usable"])
+
+    def test_review_prose_that_resembles_a_token_is_not_credential_material(self):
+        digest = "sha512-" + "z4PhNX7vuL3xVChQ1m+2HUOGNkn6bKZkRTq5I8oH/Gpw" * 2
+        for text in (
+            "Pin actions/checkout to 0123456789abcdef0123456789abcdef01234567.",
+            f'The lockfile entry has "integrity": "{digest}".',
+            # An identifier that merely contains "sk-": the prefix must start a token.
+            f"Rename the task-{DEEPSEEK_SHAPED} job.",
+            f"The cache key ask{DEEPSEEK_SHAPED[2:]} is stable.",
+            "The sk-proj-keys-should-be-rotated-before-release note is stale.",
+            f"The fixture skips {OPENAI_MARKER} handling.",
+        ):
+            with self.subTest(text=text[:24]):
+                raw = clean_verdict(summary=text)
+                self.assertTrue(review.confirm_output(raw, sensitive=False)["usable"], text)
+
+    def test_credential_scan_stays_linear_on_adversarial_text(self):
+        # Each "_sk-" could start a token if the lookbehind admitted "_", and every start
+        # would rescan the rest of the run: about five seconds here instead of a millisecond.
+        text = "_sk-" * 50_000
+        started = time.perf_counter()
+        self.assertIsNone(review.CREDENTIAL_SHAPE.search(text))
+        self.assertLess(time.perf_counter() - started, 1.0)
 
     def test_main_reads_secret_values_from_its_environment_and_keeps_them_out_of_output(self):
         with tempfile.TemporaryDirectory() as directory:
