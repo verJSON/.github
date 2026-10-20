@@ -304,9 +304,31 @@ CONFIG_MUTATIONS = {
 }
 
 
+# Every repository whose hand-written CODEOWNERS routed paths to @Verjson/admins and
+# whose canonical regeneration drops them (#1816), with the routes it carried.
+DROPPED_ADMIN_ROUTES = {
+    # main, 2026-10-19: /.github/ /src/pulumi/ /src/steps/ /src/dns/
+    "verjson-cli-cloud": [".github/**", "src/pulumi/**", "src/steps/**", "src/dns/**"],
+    # main, 2026-10-19: /.github/ /templates/
+    "verjson-cli-projects": [".github/**", "templates/**"],
+    # 00800b0f (before the #302 regeneration, 3275e8fc): /.github/ /.gitmodules
+    "verjson-cli": [".github/**", ".gitmodules"],
+    # main, 2026-10-19: /.github/ /scripts/ /docs/decisions/
+    "verjson-object-storage": [".github/**", "scripts/**", "docs/decisions/**"],
+}
+
+
 class ConfigTest(unittest.TestCase):
     def test_committed_config_is_admissible(self):
         load_module().read_config()
+
+    def test_committed_config_restores_each_dropped_codeowners_admin_route(self):
+        declared = {
+            ruleset["conditions"]["repository_name"]["include"][0]:
+                ruleset["rules"][0]["parameters"]["required_reviewers"][0]["file_patterns"]
+            for ruleset in desired_rulesets()
+        }
+        self.assertEqual(DROPPED_ADMIN_ROUTES, declared)
 
     def test_config_admits_only_the_reviewed_ruleset_shape(self):
         module = load_module()
