@@ -212,6 +212,14 @@ CONFIG_MUTATIONS = {
         mutate_parameters(lambda parameters: parameters.update(required_approving_review_count=1)),
         "pull_request parameters must stay neutral",
     ),
+    "approving review count typed as boolean": (
+        mutate_parameters(lambda parameters: parameters.update(required_approving_review_count=False)),
+        "pull_request parameters must stay neutral",
+    ),
+    "team id typed as float": (
+        mutate_reviewer(lambda reviewer: reviewer["reviewer"].update(id=17813010.0)),
+        "reviewer must be the admins team",
+    ),
     "last push approval": (
         mutate_parameters(lambda parameters: parameters.update(require_last_push_approval=True)),
         "pull_request parameters must stay neutral",
