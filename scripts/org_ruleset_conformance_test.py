@@ -694,6 +694,92 @@ class OrgRulesetConformanceTest(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stderr)
 
+    def name_keyed_policy(self, name, bypass_actors):
+        return {
+            "organization": "Verjson",
+            "release_authorization_bypass": {
+                "actor_type": "Integration",
+                "actor_id": 4583107,
+                "bypass_mode": "always",
+            },
+            "required_check_producer_app_id": 15368,
+            "bypassless_required_workflows": [],
+            "bypass_actor_contracts": [
+                {"ruleset_id": None, "name": name, "bypass_actors": bypass_actors}
+            ],
+        }
+
+    def test_name_keyed_contract_covers_the_live_ruleset_with_that_name(self):
+        # A ruleset applied from reviewed config (#1816) has no id until it is
+        # created, so its contract names it instead of pinning an id.
+        release_only = [
+            {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"}
+        ]
+        applied = ruleset(31, name="repo-sensitive-path-admin-review", bypass_actors=release_only)
+        policy = self.name_keyed_policy("repo-sensitive-path-admin-review", release_only)
+
+        result, _ = self.run_audit(
+            [[{"id": 31}]], {31: applied}, raw_policy=json.dumps(policy)
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_name_keyed_contract_rejects_bypass_drift_on_the_named_ruleset(self):
+        release_only = [
+            {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"}
+        ]
+        drifted = ruleset(31, name="repo-sensitive-path-admin-review")
+        policy = self.name_keyed_policy("repo-sensitive-path-admin-review", release_only)
+
+        result, _ = self.run_audit(
+            [[{"id": 31}]], {31: drifted}, raw_policy=json.dumps(policy)
+        )
+
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertIn(
+            "reviewed bypass contract repo-sensitive-path-admin-review (None): "
+            "bypass actors differ from the reviewed contract",
+            result.stderr,
+        )
+
+    def test_name_keyed_contract_for_a_not_yet_applied_ruleset_is_not_a_finding(self):
+        release_only = [
+            {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"}
+        ]
+        policy = self.name_keyed_policy("repo-sensitive-path-admin-review", release_only)
+        policy["bypass_actor_contracts"].append(
+            {"ruleset_id": 17, "name": "ruleset-17", "bypass_actors": ruleset(17)["bypass_actors"]}
+        )
+
+        result, _ = self.run_audit(
+            [[{"id": 17}]], {17: ruleset(17)}, raw_policy=json.dumps(policy)
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_name_keyed_contract_cannot_cover_two_live_rulesets_with_its_name(self):
+        release_only = [
+            {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"}
+        ]
+        policy = self.name_keyed_policy("repo-sensitive-path-admin-review", release_only)
+        details = {
+            ruleset_id: ruleset(
+                ruleset_id, name="repo-sensitive-path-admin-review", bypass_actors=release_only
+            )
+            for ruleset_id in (31, 32)
+        }
+
+        result, _ = self.run_audit(
+            [[{"id": 31}, {"id": 32}]], details, raw_policy=json.dumps(policy)
+        )
+
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertIn(
+            "reviewed bypass contract repo-sensitive-path-admin-review (None): "
+            "2 live rulesets share the name",
+            result.stderr,
+        )
+
     def test_uncontracted_bypassless_push_ruleset_without_ref_conditions_passes(self):
         detail = ruleset(19, target="push", bypass_actors=[])
         detail["conditions"] = {
