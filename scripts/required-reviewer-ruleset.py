@@ -191,6 +191,8 @@ def apply(config):
             gh_json_input("PUT", f"orgs/{ORGANIZATION}/rulesets/{ruleset_id}", expected)
             require_live_image(ruleset_id, expected, "updated ruleset reads back differently")
             print(f"updated: {expected['name']} ({ruleset_id})")
+        else:
+            print(f"unchanged: {expected['name']} ({ruleset_id})")
     return 0
 
 

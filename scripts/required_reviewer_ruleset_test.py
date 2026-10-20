@@ -510,5 +510,20 @@ class ApplyTest(unittest.TestCase):
         self.assertIn(f"updated: {expected['name']} (25000000)", result.stdout)
 
 
+    def test_apply_is_idempotent_and_writes_nothing_once_converged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeGitHub(directory, live_store([]))
+            first = fake.run("apply", "--ack", ACK)
+            converged = len(fake.writes())
+            second = fake.run("apply", "--ack", ACK)
+            writes_after_second = fake.writes()[converged:]
+
+        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertEqual(0, second.returncode, second.stderr)
+        self.assertEqual([], writes_after_second)
+        for index, ruleset in enumerate(desired_rulesets()):
+            self.assertIn(f"unchanged: {ruleset['name']} ({900 + index})", second.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
