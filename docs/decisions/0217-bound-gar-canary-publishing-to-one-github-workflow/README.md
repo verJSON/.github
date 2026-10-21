@@ -66,3 +66,82 @@ provider and service account, scoped to their numeric GitHub IDs and protected
 publication ref. No global cross-organization publisher identity is implied.
 The canary repository and identity incur a bounded operational surface; failed
 federation or missing registry evidence leaves promotion unavailable.
+
+## Amendment (2026-10-21) — every publisher repin needs a prior provider rotation
+
+The SHA in the Decision's condition, `f9b62501…`, is the canary-time value and is
+historical. The provider was rotated once already to
+`6fecc93adbb1aecd6ea3588c2e9f3b96b50b43a6`, but this ADR was not amended then.
+
+[Verjson/verjson-ci#303](https://github.com/Verjson/verjson-ci/pull/303) (merged as
+`b0749b81`) regenerated the adopter set at Verjson/.github v4.2.0,
+`a89fe1f090545c15cdd6987f20119327206e2c59`. That moved the reusable publisher pin
+before anyone rotated the provider. The GAR mirror then failed closed as intended.
+In verjson-ci run
+[39520892937](https://github.com/Verjson/verjson-ci/actions/runs/39520892937) attempt 1,
+`google-github-actions/auth` reported `unauthorized_client … rejected by the
+attribute condition`. Runs
+[39585702767](https://github.com/Verjson/verjson-ci/actions/runs/39585702767)
+(`b780194f`) and
+[39585901024](https://github.com/Verjson/verjson-ci/actions/runs/39585901024)
+(`8faee03b`) failed the same way because their `mirror-gar` jobs started before
+the rotation.
+
+The owner authorized rotating provider
+`projects/734515786459/locations/global/workloadIdentityPools/github-oci-candidates/providers/verjson-ci-main`
+in project `verjson-ci-640463`. The `update-oidc --attribute-condition` call
+changed only the three SHA occurrences: `job_workflow_sha` and both
+`job_workflow_ref` spellings (`Verjson/` and `verJSON/`). They moved from
+`6fecc93adbb1aecd6ea3588c2e9f3b96b50b43a6` to `a89fe1f090545c15cdd6987f20119327206e2c59`.
+The owner ID `279365001`, repository ID `1356313946`, ref `refs/heads/main`,
+event `push`, attribute mapping, and provider state did not change. After the
+update, a read-back diff against the expected condition was empty. The current
+condition is:
+
+```text
+assertion.repository_owner_id == '279365001' &&
+assertion.repository_id == '1356313946' &&
+assertion.ref == 'refs/heads/main' &&
+assertion.event_name == 'push' &&
+assertion.job_workflow_sha == 'a89fe1f090545c15cdd6987f20119327206e2c59' &&
+(assertion.job_workflow_ref == 'Verjson/.github/.github/workflows/container-candidate-publish.yml@a89fe1f090545c15cdd6987f20119327206e2c59' ||
+ assertion.job_workflow_ref == 'verJSON/.github/.github/workflows/container-candidate-publish.yml@a89fe1f090545c15cdd6987f20119327206e2c59')
+```
+
+Evidence after the rotation: run 39520892937 attempt 2 ran `mirror-gar`
+successfully, starting at 2026-10-21T10:53:03Z. Fresh `main` pushes `5df3d3fe`
+(run [39589082549](https://github.com/Verjson/verjson-ci/actions/runs/39589082549))
+and `d2215fcd` (run
+[39589228228](https://github.com/Verjson/verjson-ci/actions/runs/39589228228))
+completed both `mirror-gar` and `candidate-manifest` successfully.
+
+**Operational rule.** The provider condition is pinned to the publisher SHA on
+purpose. Pinning the reviewed workflow bytes is the authority this ADR grants.
+Every adopter publisher repin, meaning a regeneration at a new contract SHA,
+MUST be preceded by a reviewed rotation of that adopter's provider to the new
+SHA. If the rotation does not happen first, GAR publication fails closed for every
+`main` push until it does. A push still on the old pin also fails after the
+rotation, so rotate immediately before merging the regeneration and merge nothing
+else in between. The rotation substitutes the SHA only, and every other
+predicate stays as recorded above.
+[`docs/container-candidate-migration.md`](../../container-candidate-migration.md)
+has the read-only `describe`, the SHA-only `update-oidc`, and the read-back diff.
+Amend this ADR with the new SHA and evidence each time the provider rotates.
+
+**Rerun limits observed during recovery.** These do not change this decision and
+are recorded so operators do not mistake them for federation failures:
+
+- `gh run rerun --failed` cannot pass `candidate-manifest`. The `prepare` job
+  derived `candidateVersion` with run attempt 1 and is not re-run. The manifest
+  records the current attempt, and the validator requires
+  `candidateVersion == <nextStableVersion>-rc.<runId>.<runAttempt>`
+  (`scripts/container_release_manifest.py:169`). That is why attempt 2 failed
+  after its `mirror-gar` passed.
+- A full rerun (attempt 3) of the same commit failed `mirror-gar` with
+  `registry platform is missing one unique application/spdx+json referrer`.
+  The attestation jobs ran again on the unchanged digest and added a second SPDX
+  referrer.
+
+Both refusals are fail-closed. To re-prove a commit, push a new commit instead of
+rerunning. Use a full rerun only when no earlier attempt of that run reached the
+attestation jobs. Never use a partial rerun.
