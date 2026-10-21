@@ -619,12 +619,15 @@ class ScheduledCheckTest(unittest.TestCase):
         drifted[0]["rules"][0]["parameters"]["required_reviewers"][0]["minimum_approvals"] = 2
         orphan = copy.deepcopy(desired_rulesets()[0])
         orphan["name"] = "verjson-retired-sensitive-path-admin-review"
+        duplicated = live_store()
+        duplicated[26000001] = copy.deepcopy(desired_rulesets()[0])
         cases = {
             "conformant": (live_store(), None, 0, "verified: "),
             "every ruleset deleted": (live_store([]), None, 1, ": absent"),
             "one ruleset deleted": (live_store(desired_rulesets()[1:]), None, 1, ": absent"),
             "drifted": (live_store(drifted), None, 1, "differs from the reviewed config"),
             "undeclared": (live_store(desired_rulesets() + [orphan]), None, 1, "not declared"),
+            "duplicated name": (duplicated, None, 1, "2 live rulesets share the name"),
             "API error": (live_store(), ["GET orgs/Verjson/rulesets?per_page=100"], 2,
                           "GitHub API request failed"),
         }

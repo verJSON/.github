@@ -38,6 +38,9 @@ does not print API response bodies, credential data, secret values, or variable
 values. Exit `0` means the exact-token policy conforms, exit `1` is policy drift,
 and exit `2` means the audit could not establish trustworthy API or schema state.
 
+The package type-surface audit (`package-type-surface-ruleset.py audit`) runs
+even when the release-authorization audit fails.
+
 ## Sensitive-path required-reviewer rulesets
 
 The same `audit` job also runs, even after an earlier audit in it fails:

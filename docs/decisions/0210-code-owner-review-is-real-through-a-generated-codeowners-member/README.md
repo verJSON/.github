@@ -271,18 +271,27 @@ of waiting for someone to run `check` by hand.
 
 - **Same credential, read-only mode.** The step reuses the `ORG_ADMIN_TOKEN` binding
   the sibling audits already hold (`docs/ruleset-conformance.md` records it as the
-  reviewed residual). `check` only issues GETs; `apply` needs the acknowledgement token,
-  which the workflow does not have, and the scheduled-workflow contract pins the exact
-  `check` command.
+  reviewed residual). `check` only issues GETs. The acknowledgement token is not a
+  secret: it is a committed literal (`config/required-reviewer-rulesets.json`,
+  `scripts/required-reviewer-ruleset.py`), so it does not keep the step from writing.
+  What does is the hard-coded `check` mode, which
+  `scripts/ci-gate/privileged-scheduled-workflows.test.py` pins as the step's exact
+  command. That test rejects `apply`, an appended `|| true`, and any change to the
+  step's keys or token binding.
 - **Not masked by a sibling.** The step runs under `if: ${{ !cancelled() }}`, so a
   release-authorization or package-surface finding earlier in the job cannot hide a
-  deleted reviewer ruleset. Nothing on the step may turn its failure into success:
+  deleted reviewer ruleset. The package type-surface step gets the same guard: before
+  this amendment, a release-authorization failure skipped it. Nothing on the step may turn its failure into success:
   `continue-on-error`, an `|| true`, or a different mode fail the contract.
 - **Failure states.** Exit 1 means drift: an absent, drifted, duplicated or undeclared
   ruleset. Exit 2 means the audit could not read trustworthy state, such as an API
   error, a target repository that is not live, or an unreadable config. Both fail the
   job. `scripts/required_reviewer_ruleset_test.py` runs the workflow's own step, read
-  from the YAML, against a stubbed `gh` for each of those states and asserts no write.
+  from the YAML, against a stubbed `gh` and asserts that it never writes, for these
+  states: conformant, every ruleset absent, one absent, drifted, undeclared, duplicated
+  name, and an API error on the ruleset listing. Its `CheckTest` class covers the
+  remaining exit-2 causes (a detail-read error and a target that is not live) by running
+  `check` directly.
   `scripts/ci-gate/privileged-scheduled-workflows.test.py` rejects every weakening
   above.
 

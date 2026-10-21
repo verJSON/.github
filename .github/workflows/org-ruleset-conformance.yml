@@ -29,7 +29,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
         run: python3 -I scripts/org-ruleset-conformance.py
+      # Runs even when the release-authorization audit above failed, so that
+      # finding cannot mask a package type-surface ruleset finding.
       - name: Verify package type-surface rulesets
+        if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
         run: python3 -I scripts/package-type-surface-ruleset.py audit

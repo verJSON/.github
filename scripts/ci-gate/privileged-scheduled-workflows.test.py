@@ -476,7 +476,11 @@ def validate_ruleset_conformance(document: object) -> None:
         "ruleset-conformance command changed",
     )
     package_audit = require_keys(
-        steps[2], {"name", "env", "run"}, "package type-surface audit"
+        steps[2], {"name", "if", "env", "run"}, "package type-surface audit"
+    )
+    require(
+        package_audit["if"] == "${{ !cancelled() }}",
+        "package type-surface audit must not be masked by the release-authorization audit",
     )
     require(
         package_audit["name"] == "Verify package type-surface rulesets",
@@ -691,6 +695,19 @@ def main() -> int:
             "      - name: Audit the authn required-workflow revision\n"
             "        if: ${{ !cancelled() }}\n",
             "      - name: Audit the authn required-workflow revision\n",
+            1,
+        ),
+        "package type-surface audit masked by the release-authorization audit": ruleset_conformance_text.replace(
+            "      - name: Verify package type-surface rulesets\n"
+            "        if: ${{ !cancelled() }}\n",
+            "      - name: Verify package type-surface rulesets\n",
+            1,
+        ),
+        "package type-surface audit always run": ruleset_conformance_text.replace(
+            "      - name: Verify package type-surface rulesets\n"
+            "        if: ${{ !cancelled() }}\n",
+            "      - name: Verify package type-surface rulesets\n"
+            "        if: ${{ always() }}\n",
             1,
         ),
         "required-reviewer audit masked by an earlier audit": ruleset_conformance_text.replace(
