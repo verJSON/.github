@@ -14,9 +14,13 @@ import subprocess
 import tempfile
 import unittest
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/required-reviewer-ruleset.py"
+SCHEDULE = ROOT / ".github/workflows/org-ruleset-conformance.yml"
+SCHEDULED_STEP = "Verify sensitive-path required-reviewer rulesets"
 CONFIG = ROOT / "config/required-reviewer-rulesets.json"
 ACK = "APPLY-REQUIRED-REVIEWERS-1816"
 RELEASE_BYPASS = {"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"}
@@ -155,15 +159,27 @@ class FakeGitHub:
         gh.write_text(FAKE_GH, encoding="utf-8")
         gh.chmod(0o755)
 
-    def run(self, *arguments):
-        env = os.environ | {
+    def environment(self):
+        return os.environ | {
             "PATH": f"{self.directory}:{os.environ['PATH']}",
             "FAKE_GH_STATE": str(self.state),
             "FAKE_GH_CALLS": str(self.calls_file),
         }
+
+    def run(self, *arguments):
         return subprocess.run(
             ["python3", "-I", str(SCRIPT), *arguments],
-            env=env, capture_output=True, text=True, check=False,
+            env=self.environment(), capture_output=True, text=True, check=False,
+        )
+
+    def run_step(self, step):
+        """Run a workflow step the way the runner does: `bash -e` from the checkout root."""
+        script = self.directory / "step.sh"
+        script.write_text(step["run"], encoding="utf-8")
+        return subprocess.run(
+            ["bash", "--noprofile", "--norc", "-e", str(script)],
+            cwd=ROOT, env=self.environment() | {"GH_TOKEN": "stub-org-admin-token"},
+            capture_output=True, text=True, check=False,
         )
 
     def calls(self):
@@ -575,6 +591,54 @@ class CheckTest(unittest.TestCase):
                     self.assertIn("error:", result.stderr)
                     self.assertNotIn(f"verified: {desired_rulesets()[0]['name']}", result.stdout)
                     self.assertEqual([], fake.writes())
+
+
+def scheduled_step():
+    """The daily conformance audit's required-reviewer step, as the runner reads it."""
+    jobs = yaml.safe_load(SCHEDULE.read_text(encoding="utf-8"))["jobs"]
+    named = [step for job in jobs.values() for step in job["steps"]
+             if step.get("name") == SCHEDULED_STEP]
+    if len(named) != 1:
+        raise AssertionError(f"{SCHEDULE.name} must run exactly one {SCHEDULED_STEP!r} step")
+    return named[0]
+
+
+class ScheduledCheckTest(unittest.TestCase):
+    """ADR 0210 rollout step 4: the daily audit executes `check` and fails on drift."""
+
+    def test_the_step_is_read_only_ungated_by_earlier_findings_and_cannot_be_swallowed(self):
+        step = scheduled_step()
+
+        self.assertEqual({"name", "if", "env", "run"}, set(step))
+        self.assertEqual("${{ !cancelled() }}", step["if"])
+        self.assertEqual({"GH_TOKEN": "${{ secrets.ORG_ADMIN_TOKEN }}"}, step["env"])
+        self.assertEqual("python3 -I scripts/required-reviewer-ruleset.py check", step["run"])
+
+    def test_the_step_passes_only_while_every_reviewed_ruleset_is_live_and_unchanged(self):
+        drifted = desired_rulesets()
+        drifted[0]["rules"][0]["parameters"]["required_reviewers"][0]["minimum_approvals"] = 2
+        orphan = copy.deepcopy(desired_rulesets()[0])
+        orphan["name"] = "verjson-retired-sensitive-path-admin-review"
+        duplicated = live_store()
+        duplicated[26000001] = copy.deepcopy(desired_rulesets()[0])
+        cases = {
+            "conformant": (live_store(), None, 0, "verified: "),
+            "every ruleset deleted": (live_store([]), None, 1, ": absent"),
+            "one ruleset deleted": (live_store(desired_rulesets()[1:]), None, 1, ": absent"),
+            "drifted": (live_store(drifted), None, 1, "differs from the reviewed config"),
+            "undeclared": (live_store(desired_rulesets() + [orphan]), None, 1, "not declared"),
+            "duplicated name": (duplicated, None, 1, "2 live rulesets share the name"),
+            "API error": (live_store(), ["GET orgs/Verjson/rulesets?per_page=100"], 2,
+                          "GitHub API request failed"),
+        }
+        for label, (store, fail, status, evidence) in cases.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
+                fake = FakeGitHub(directory, store, fail=fail)
+                result = fake.run_step(scheduled_step())
+
+                self.assertEqual(status, result.returncode, result.stdout + result.stderr)
+                self.assertIn(evidence, result.stdout + result.stderr)
+                self.assertEqual([], fake.writes())
 
 
 class ApplyTest(unittest.TestCase):
