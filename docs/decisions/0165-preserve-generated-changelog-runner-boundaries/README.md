@@ -43,25 +43,35 @@ This repository changes no consumer checkout or release state. A future generato
 change to the safe PR-gate shape must update this recognizer and its generator-output
 regression together, so checkout pins and executable steps cannot drift silently.
 
-## 2026-10-20 amendment — The PR gate's runner is bound to its header
+## 2026-10-20 amendment — The PR gate is bound to its header, byte for byte
 
 The generated contract test checked the PR gate's header, job count and cache
-order, but not its `runs-on`. An adopter could hand-edit a persistent
-`[self-hosted, general]` runner under a bare header. That sends pull-request code to
-a persistent host, which is the boundary this decision preserves. An adopter could
-also record `--untrusted-runner x` in the header over a different body. The header
-now records `--untrusted-runner` when it is used, so the contract test derives the
-one admissible runner from it: `ubuntu-24.04` when the header records no option,
-and exactly the recorded labels, in order, when it does. The `changelog-contract`
-job must name that runner on its own `runs-on` line. The file may name no other
-runner and use no YAML merge key, and it must carry exactly one generator header.
+order, but not its `runs-on`. That let three kinds of edit pass:
 
-`--untrusted-runner` keeps admitting self-hosted labels. A dedicated ephemeral pool
-is a permitted target under [ADR 0235](../0235-public-pull-request-code-uses-ephemeral-runners/README.md),
-and this decision already records that labels are not an attestation of isolation.
-A generator-side refusal could not verify isolation either; it would only remove
-the reviewed exception that `generated-changelog-selector-policy.test.py` and
-adopters (for example verjson-ai-gguf ADR 0007) rely on. The selection is now
-bound instead. It is visible in the reviewed header, it cannot diverge from the
-body, and consumer selector policy still applies to it.
+- an adopter could hand-edit a persistent `[self-hosted, general]` runner under a
+  bare header, which sends pull-request code to a persistent host;
+- a header could record `--untrusted-runner x` over a different body;
+- a line-oriented runner check is bypassed by a second job that calls a reusable
+  workflow, a key spelled as a YAML escape (`"runs\x2Don"`), or a trigger changed
+  to `pull_request_target`.
 
+The header now records `--untrusted-runner` when it is used. The contract test
+carries the whole PR-gate document that `pr-gate` writes at its pin, with the
+runner and that header option as the only substituted parts. It rebuilds the file
+the header claims, using `ubuntu-24.04` when no option is recorded and exactly the
+recorded labels, in order, when one is. It then requires the committed file to
+match byte for byte. That single comparison replaces the header, job-count and
+cache-order line checks, and every edit above is a difference from it. A recorded
+label `pr-gate` itself would refuse is refused before the comparison.
+
+**Residual.** The comparison binds the runner selection; it does not prove the
+runner is ephemeral. [ADR 0235](../0235-public-pull-request-code-uses-ephemeral-runners/README.md)
+accepts only the `CI_LANE_UNTRUSTED` variable family or a literal GitHub-hosted
+image as ephemeral, and holds that a literal self-hosted label proves nothing.
+`--untrusted-runner` accepts only literal labels, so a PR gate generated with
+`--untrusted-runner self-hosted,…` passes this check while running on whatever
+host carries those labels. This decision already records that labels are not an
+attestation of isolation, and consumer selector policy still applies. Literal
+labels stay accepted for now. The follow-up is to either let `--untrusted-runner`
+take the `CI_LANE_UNTRUSTED` expression, or have the selector policy flag
+self-hosted PR-gate labels.

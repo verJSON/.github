@@ -7631,6 +7631,27 @@ pr_gate_merge_key() { # <dir>: a YAML merge key can inject job keys no line name
   sed -i 's/^    timeout-minutes: 10$/    timeout-minutes: 10\n    <<: {continue-on-error: true}/' \
     "$1/.github/workflows/changelog-contract.yml"
 }
+pr_gate_reusable_job() { # <dir>: a second job that routes through a reusable workflow
+  printf '%s\n' '  sibling:' '    uses: attacker/workflows/.github/workflows/run.yml@0123456789abcdef0123456789abcdef01234567' \
+    >>"$1/.github/workflows/changelog-contract.yml"
+}
+pr_gate_escaped_key_job() { # <dir>: a second job whose runs-on key is a YAML escape
+  printf '%s\n' '  sibling:' '    "runs\x2Don": [self-hosted, general]' '    steps:' '      - name: Run pull-request code' '        run: npm test' \
+    >>"$1/.github/workflows/changelog-contract.yml"
+}
+pr_gate_target_trigger() { # <dir>: pull_request_target runs with base-repository credentials
+  sed -i 's/^  pull_request:$/  pull_request_target:/' "$1/.github/workflows/changelog-contract.yml"
+}
+pr_gate_unaccepted_runner() { # <dir>: header and body agree on a runner pr-gate refuses
+  bash "$gen" pr-gate "$sha" --untrusted-runner self-hosted,isolated >"$1/.github/workflows/changelog-contract.yml"
+  sed -i -e 's/--untrusted-runner self-hosted,isolated$/--untrusted-runner Self-Hosted,isolated/' \
+    -e 's/^    runs-on: \[self-hosted, isolated\]$/    runs-on: [Self-Hosted, isolated]/' \
+    "$1/.github/workflows/changelog-contract.yml"
+}
+expect_rejection "a PR gate whose header and body agree on a runner pr-gate refuses" pr_gate_unaccepted_runner
+expect_rejection "a second PR gate job that routes through a reusable workflow" pr_gate_reusable_job
+expect_rejection "a second PR gate job whose runs-on key is a YAML escape" pr_gate_escaped_key_job
+expect_rejection "a PR gate trigger changed to pull_request_target" pr_gate_target_trigger
 expect_rejection "a persistent self-hosted runs-on hand-edited under a bare PR gate header" \
   pr_gate_runs_on '[self-hosted, general]'
 # A self-hosted runner can carry any label, so one that merely starts with the
