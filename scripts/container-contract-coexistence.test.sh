@@ -49,7 +49,10 @@ git -C "$contract" config user.email fixture@example.invalid
 git -C "$contract" add .github contracts scripts docs
 git -C "$contract" commit -qm fixture
 ref="$(git -C "$contract" rev-parse HEAD)"
-cp "$root/scripts/fixtures/container-candidate/single.json" "$consumer/container-candidate.json"
+# Every image declares the publisher its generated candidate contract requires.
+jq --arg publisher "Verjson/.github/.github/workflows/container-candidate-publish.yml@$ref" \
+  '.images[].provenance.builderIdentity = $publisher' \
+  "$root/scripts/fixtures/container-candidate/single.json" >"$consumer/container-candidate.json"
 
 candidate="$contract/scripts/gen-container-candidate.sh"
 release="$contract/scripts/gen-container-release.sh"

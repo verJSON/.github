@@ -21,11 +21,17 @@ git -C "$tmp/contract" add scripts
 git -C "$tmp/contract" commit -qm fixture
 ref="$(git -C "$tmp/contract" rev-parse HEAD)"
 generator="$tmp/contract/scripts/gen-container-candidate.sh"
+# What container-candidate-publish.yml derives for an adopter and what every
+# image's provenance.builderIdentity must therefore declare.
+publisher="Verjson/.github/.github/workflows/container-candidate-publish.yml@$ref"
+with_publisher() { # with_publisher <fixture> <output>
+  jq --arg publisher "$publisher" '.images[].provenance.builderIdentity = $publisher' "$1" >"$2"
+}
 
 for fixture in single multi; do
   consumer="$tmp/$fixture"
   mkdir -p "$consumer/.github/workflows" "$consumer/scripts"
-  cp "$root/scripts/fixtures/container-candidate/$fixture.json" "$consumer/container-candidate.json"
+  with_publisher "$root/scripts/fixtures/container-candidate/$fixture.json" "$consumer/container-candidate.json"
   (cd "$consumer" && "$generator" workflow "$ref" container-candidate.json) \
     > "$consumer/.github/workflows/container-candidate.yml"
   (cd "$consumer" && "$generator" validator "$ref" container-candidate.json) \
@@ -65,11 +71,31 @@ for fixture in single multi; do
     exit 1
   fi
   mv "$consumer/.github/workflows/container-candidate.yml.clean" "$consumer/.github/workflows/container-candidate.yml"
+  # The publisher refuses an identity other than its own entrypoint at this pin,
+  # but only after building and publishing. The generated contract catches a
+  # stale or wrong identity in pull-request CI instead.
+  cp "$consumer/container-candidate.json" "$consumer/container-candidate.json.clean"
+  for identity_case in \
+    "stale contract SHA|.images[-1].provenance.builderIdentity = \"Verjson/.github/.github/workflows/container-candidate-publish.yml@$(printf '%040d' 0)\"" \
+    "read-only entrypoint|.images[0].provenance.builderIdentity = \"Verjson/.github/.github/workflows/container-candidate.yml@$ref\"" \
+    "another owner|.images[0].provenance.builderIdentity = \"Attacker/.github/.github/workflows/container-candidate-publish.yml@$ref\"" \
+    "absent identity|del(.images[0].provenance.builderIdentity)" \
+    "no images|.images = []"; do
+    jq "${identity_case#*|}" "$consumer/container-candidate.json.clean" >"$consumer/container-candidate.json"
+    if bash "$consumer/scripts/container-candidate-contract.test.sh" >/dev/null 2>&1; then
+      echo "generated contract accepted a builderIdentity with a ${identity_case%%|*} ($fixture)" >&2
+      exit 1
+    fi
+  done
+  mv "$consumer/container-candidate.json.clean" "$consumer/container-candidate.json"
+  bash "$consumer/scripts/container-candidate-contract.test.sh" >/dev/null
 done
 
 private_consumer="$tmp/private-generated"
 mkdir -p "$private_consumer/.github/workflows" "$private_consumer/scripts"
-jq '.privateNodePackages = ["@verjson/private-package"] | .cleanupUnusedDockerImages = true' \
+jq --arg publisher "$publisher" \
+  '.privateNodePackages = ["@verjson/private-package"] | .cleanupUnusedDockerImages = true
+   | .images[].provenance.builderIdentity = $publisher' \
   "$root/scripts/fixtures/container-candidate/single.json" \
   > "$private_consumer/container-candidate.json"
 (cd "$private_consumer" && "$generator" workflow "$ref" container-candidate.json) \
