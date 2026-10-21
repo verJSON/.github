@@ -9,6 +9,7 @@ import re
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -183,6 +184,52 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
                     MODULE.ContractError, "differs from canonical generator output"
                 ):
                     MODULE.validate_workflow(Path(stream.name))
+
+    def test_workflow_rejects_a_generator_that_embeds_another_caller_digest(self):
+        # Byte equality with the generator cannot catch a widened generator: both
+        # sides move together. The admitted digest arrives only through the
+        # CONSUMER_WORKFLOW_SHA256 env value, and the rotation-only legacy digest
+        # never reaches the PR workflow at all (ADR 0212).
+        generator = (ROOT / "scripts/gen-node-required-workflow.py").read_text(encoding="utf-8")
+        comparison = '          [ "$candidate_sha256" = "$CONSUMER_WORKFLOW_SHA256" ]\n'
+        legacy = GENERATOR_MODULE.load_config(MODULE.GENERATOR_CONFIG)[
+            "rollout_legacy_consumer_workflow_sha256"
+        ]
+        previous = "9e4ca97c8fd980f37af2ef3cbbb47aea3c00b44f5a5ff336d25d95815aff3886"
+        mutations = {
+            "admission accepts the legacy digest": generator.replace(
+                comparison,
+                comparison[:-1] + f' || [ "$candidate_sha256" = "{legacy}" ]\n', 1,
+            ),
+            "admission accepts the previous caller digest": generator.replace(
+                comparison,
+                comparison[:-1] + f' || [ "$candidate_sha256" = "{previous}" ]\n', 1,
+            ),
+            "legacy digest outside admission": generator.replace(
+                "      - name: Verify and exercise the package surface\n",
+                f"      # {legacy}\n      - name: Verify and exercise the package surface\n", 1,
+            ),
+        }
+        for label, source in mutations.items():
+            self.assertNotEqual(generator, source, label)
+            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
+                scripts = Path(directory)
+                (scripts / "gen-node-required-workflow.py").write_text(source, encoding="utf-8")
+                (scripts / "cli_projects_required_node_config.py").write_bytes(
+                    (ROOT / "scripts/cli_projects_required_node_config.py").read_bytes()
+                )
+                rendered = subprocess.run(
+                    [sys.executable, str(scripts / "gen-node-required-workflow.py"),
+                     "config/cli-projects-required-node-ci.json"],
+                    cwd=ROOT, capture_output=True, text=True, check=True,
+                ).stdout
+                workflow = scripts / "workflow.yml"
+                workflow.write_text(rendered, encoding="utf-8")
+                with (
+                    mock.patch.object(MODULE, "GENERATOR", scripts / "gen-node-required-workflow.py"),
+                    self.assertRaisesRegex(MODULE.ContractError, "caller digest"),
+                ):
+                    MODULE.validate_workflow(workflow)
 
     def test_identity_admission_rejects_every_untrusted_identity_mutation(self):
         workflow = yaml.safe_load(MODULE.WORKFLOW.read_text(encoding="utf-8"))

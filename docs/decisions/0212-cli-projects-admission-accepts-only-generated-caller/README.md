@@ -47,8 +47,21 @@ and it accepts it only through `rollout_legacy_consumer_workflow_sha256`. Settin
 value to `null` now would make the rotation to this revision refuse
 (`consumer workflow is not the reviewed push-only generated image`, reproduced read-only
 against the live consumer). The value is unchanged and remains rotation-only. PR heads
-never see it. Set it to `null` in the first change after #159 merges, when `main` carries
-the generated v4.2.0 caller.
+never see it. `validate_workflow` now refuses any 64-hex literal in the admission step
+and the configured legacy digest anywhere in the required workflow. A test also runs the
+committed admission step against the callers generated at `1c7659b7…` (`9e4ca97c…`) and
+`4a08c756…` (`721856f9…`) and requires both to be refused. Before this change, a
+generator widened to accept either digest still passed both suites, because byte
+equality with the generator moves with the generator.
+
+**Retiring the digest takes a second rotation.** Once #159 merges and `main` carries the
+generated v4.2.0 caller, set the value to `null` in the next change. That change edits
+`config/cli-projects-required-node-ci.json`. The required workflow checks that file out
+at its own revision, so it is one of the rotation tool's runtime paths. The scheduled
+`audit` therefore reports `rotation pending` until ruleset 21830367 is rotated to that
+change's merge commit. Run the same `dry-run`, `snapshot`, and
+`apply --ack ROTATE-CLI-PROJECTS-REQUIRED-WORKFLOW-1187` sequence, then `audit` and
+`verify-run`. No caller digest moves in that rotation.
 
 **Transition.** The organization ruleset is active and has no bypass actor, so the
 consumer cannot land the new caller before the rotation. The order is: rotate ruleset

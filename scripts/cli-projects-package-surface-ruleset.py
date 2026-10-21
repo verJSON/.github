@@ -233,6 +233,15 @@ def validate_workflow(path=WORKFLOW):
         "REPOSITORY", "RUN_ID", "CONSUMER_WORKFLOW_SHA256", "GH_TOKEN",
     }, "identity admission inputs drifted")
     admission_run = admission_step.get("run", "")
+    # Generator equality cannot catch a widened generator; the admitted digest
+    # may arrive only through CONSUMER_WORKFLOW_SHA256 (ADR 0212).
+    require(not re.search(r"[0-9a-fA-F]{64}", admission_run),
+            "identity admission embeds a caller digest literal")
+    legacy = load_required_node_config(GENERATOR_CONFIG, require)[
+        "rollout_legacy_consumer_workflow_sha256"
+    ]
+    require(legacy is None or legacy not in path.read_text(encoding="utf-8").lower(),
+            "required workflow embeds the rotation-only legacy caller digest")
     for assertion in (
         "actions/runs/$RUN_ID",
         'event_name" = pull_request',

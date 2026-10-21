@@ -319,9 +319,12 @@ therefore also moves `protected_node_ci_sha` from v4.0.0 (`576707fe…`) to the 
 release commit, along with the rotation tool's reviewed `uses` identity in
 `scripts/cli-projects-package-surface-ruleset.py`. Between those revisions,
 `node-ci-protected.yml` gains [ADR 0234](../0234-route-secretless-trusted-ref-builds-to-the-hosted-lane/README.md)'s
-fail-closed check that a secretless build lane is one standard GitHub-hosted Linux image,
-and its numeric and hexadecimal regular expressions spell out their digits instead of
-relying on a collation-ordered range. Its bytes are identical at v4.1.0 and v4.2.0. The
+fail-closed check that a secretless build lane is one standard GitHub-hosted Linux image.
+Its numeric, hexadecimal, and letter character classes now list their members (for
+example `[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_]`) instead of relying on
+collation-ordered ranges. `build-test`'s `runs-on` also routes a `secretless-trusted-ref`
+call to the hosted untrusted lane. This required workflow only passes `secretless-pr`, so
+that routing change does not affect these lanes. Its bytes are identical at v4.1.0 and v4.2.0. The
 organization `CI_LANE_UNTRUSTED` value on 2026-10-20, `["ubuntu-24.04"]`, satisfies the
 new check. The security floor (`21eb48e7`) is unchanged and the target lies above it.
 
