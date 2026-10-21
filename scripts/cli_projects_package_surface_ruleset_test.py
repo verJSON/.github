@@ -9,6 +9,7 @@ import re
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -29,6 +30,130 @@ GENERATOR_SPEC.loader.exec_module(GENERATOR_MODULE)
 SHA = "a" * 40
 HEAD = "b" * 40
 PREVIOUS = "c" * 40
+
+# Admission mutants applied to the generator's rendered output: each is (anchor, replacement).
+# M: widened comparisons; N: reviewer bypasses of a reference-pattern denylist (indirect
+# name, a marker that overwrites the admitted digest, a function named `[`, a nameref);
+# P: weakened identity checks. The exact-text allowlist must refuse every one (ADR 0212).
+_I = " " * 10
+_COMPARE = _I + '[ "$candidate_sha256" = "$CONSUMER_WORKFLOW_SHA256" ]\n'
+_ASSIGN = _I + 'candidate_sha256="$(sha256sum "$candidate_workflow" | cut -d\' \' -f1)"\n'
+_LEGACY = "721856f97158be3619945eb1c2a265ca49e74788bda2bd9fec732d6d0c0bec4c"
+_PREVIOUS_CALLER = "9e4ca97c8fd980f37af2ef3cbbb47aea3c00b44f5a5ff336d25d95815aff3886"
+_NEW = "0123456789abcdef" * 4
+_OVERRIDE = (
+    _I + "target=CONSUMER_WORKFLOW\n"
+    + _I + "target+=_SHA256\n"
+    + _I + 'digest="$(sha256sum "$candidate_workflow" | cut -d\' \' -f1)"\n'
+    + _I + 'printf -v "$target" \'%s\' "$(awk -v current="${!target}" -v digest="$digest" '
+    "'index($0, \"# admit-me\") { hit = 1 } END { print hit ? digest : current }' "
+    '"$candidate_workflow")"\n'
+)
+
+
+def _widen(alternative):
+    return (_COMPARE, f"{_COMPARE[:-1]} || {alternative}\n")
+
+
+ADMISSION_MUTANTS = {
+    "M1 legacy literal": _widen(f'[ "$candidate_sha256" = "{_LEGACY}" ]'),
+    "M2 previous literal": _widen(f'[ "$candidate_sha256" = "{_PREVIOUS_CALLER}" ]'),
+    "M3 previous prefix glob": _widen('[[ "$candidate_sha256" == 9e4ca97c* ]]'),
+    "M4 new digest split by concatenation": _widen(
+        f'[ "$candidate_sha256" = "{_NEW[:32]}""{_NEW[32:]}" ]'),
+    "M5 new prefix glob": _widen('[[ "$candidate_sha256" == 0123abcd* ]]'),
+    "M6 case statement": (_COMPARE, _I + 'case "$candidate_sha256" in '
+                          '"$CONSUMER_WORKFLOW_SHA256"|0123abcd*) ;; *) false ;; esac\n'),
+    "N1 indirect name": (_COMPARE, _I + 'admitted=CONSUMER_WORKFLOW_SHA256\n'
+                         + _I + '[ "$candidate_sha256" = "${!admitted}" ] || [ -n "${!admitted}" ]\n'),
+    "N2 marker overwrites the admitted digest": (_ASSIGN, _OVERRIDE + _ASSIGN),
+    "N3 function named [": (_ASSIGN, _I + '[() { :; }\n' + _ASSIGN),
+    "N4 declare -n nameref": (_ASSIGN, _I + 'declare -n admitted=CONSUMER_WORKFLOW_SHA256\n'
+                              + _I + 'admitted="$(sha256sum "$candidate_workflow" | cut -d\' \' -f1)"\n'
+                              + _ASSIGN),
+    "P1 base-ref check removed": (_I + '[ "$live_base_ref" = main ]\n', ""),
+    "P2 head-SHA binding removed": (_I + '[ "$live_head_sha" = "$run_head_sha" ]\n', ""),
+    "P3 candidate read from main": ('ci.yml?ref=$live_head_sha"', 'ci.yml?ref=main"'),
+}
+# Mutants around the admission text: everything the run text alone does not pin.
+# A: shell and environment hooks that replace `sha256sum` or run code first (A1 step
+# shell, A2 job container, A3 workflow defaults shell, A4 exported bash function, A5
+# BASH_ENV); S: step keys that skip or soften the check; V: step env value swaps;
+# J/W: job- and workflow-level keys; L: the other jobs; D: a duplicate key whose last
+# value is the reviewed one. The reviewed structure must refuse every one (ADR 0212).
+_ADMISSION_RUNNER = "    runs-on: ubuntu-24.04\n    permissions:\n      actions: read\n"
+_SURFACE_RUNNER = "    runs-on: ubuntu-24.04\n    permissions:\n      contents: read\n"
+_STEP_ID = "        id: identity\n"
+_TOP_PERMISSIONS = "permissions:\n  contents: read\n\nconcurrency:"
+_FAKE_HASH = "sha256sum() { echo \"$CONSUMER_WORKFLOW_SHA256  -\"; }"
+WORKFLOW_MUTANTS = {
+    "A1 step shell overrides sha256sum": (
+        _STEP_ID, _STEP_ID + f"        shell: bash -c '{_FAKE_HASH}; export -f sha256sum; bash -e {{0}}'\n"),
+    "A2 job container": (
+        _ADMISSION_RUNNER,
+        _ADMISSION_RUNNER.replace("    permissions:", "    container: ghcr.io/attacker/sha256sum:latest\n    permissions:", 1)),
+    "A3 workflow defaults shell": (
+        _TOP_PERMISSIONS,
+        f"defaults:\n  run:\n    shell: bash -c '{_FAKE_HASH}; export -f sha256sum; bash -e {{0}}'\n\n"
+        + _TOP_PERMISSIONS),
+    "A4 job env exports a bash function": (
+        _ADMISSION_RUNNER,
+        _ADMISSION_RUNNER.replace(
+            "    permissions:",
+            "    env:\n      BASH_FUNC_sha256sum%%: () { echo \"$CONSUMER_WORKFLOW_SHA256  -\"; }\n    permissions:", 1)),
+    "A5 job env BASH_ENV": (
+        _ADMISSION_RUNNER,
+        _ADMISSION_RUNNER.replace("    permissions:", "    env:\n      BASH_ENV: /tmp/hook.sh\n    permissions:", 1)),
+    "S1 step if false": (_STEP_ID, _STEP_ID + "        if: false\n"),
+    "S2 step continue-on-error": (_STEP_ID, _STEP_ID + "        continue-on-error: true\n"),
+    "S3 step working-directory": (_STEP_ID, _STEP_ID + "        working-directory: /tmp\n"),
+    "V1 REPOSITORY from the head repository": (
+        "          REPOSITORY: ${{ github.repository }}\n",
+        "          REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}\n"),
+    "V2 RUN_ID pinned to an old run": (
+        "          RUN_ID: ${{ github.run_id }}\n", "          RUN_ID: 38918542699\n"),
+    "V3 GH_TOKEN from a secret": (
+        "          GH_TOKEN: ${{ github.token }}\n", "          GH_TOKEN: ${{ secrets.ADMISSION_TOKEN }}\n"),
+    "W1 workflow env": (_TOP_PERMISSIONS, "env:\n  BASH_ENV: /tmp/hook.sh\n\n" + _TOP_PERMISSIONS),
+    "J1 job services": (
+        _ADMISSION_RUNNER,
+        _ADMISSION_RUNNER.replace("    permissions:", "    services:\n      hook:\n        image: ghcr.io/attacker/hook:latest\n    permissions:", 1)),
+    "J2 job defaults": (
+        _ADMISSION_RUNNER,
+        _ADMISSION_RUNNER.replace("    permissions:", "    defaults:\n      run:\n        shell: sh {0}\n    permissions:", 1)),
+    "J3 job continue-on-error": (
+        _ADMISSION_RUNNER,
+        _ADMISSION_RUNNER.replace("    permissions:", "    continue-on-error: true\n    permissions:", 1)),
+    "L1 package-surface container": (
+        _SURFACE_RUNNER,
+        _SURFACE_RUNNER.replace("    permissions:", "    container: ghcr.io/attacker/verifier:latest\n    permissions:", 1)),
+    "L2 package-surface verifier continue-on-error": (
+        "      - name: Verify and exercise the package surface\n",
+        "      - name: Verify and exercise the package surface\n        continue-on-error: true\n"),
+    "L3 protected lane extra input": (
+        "      node-version: '26'\n", "      node-version: '26'\n      secretless-trusted-ref: true\n"),
+}
+DUPLICATE_KEY_MUTANT = (
+    "    if: github.repository == 'Verjson/verjson-cli-projects'\n",
+    "    if: always()\n    if: github.repository == 'Verjson/verjson-cli-projects'\n",
+)
+ADMITTED_DIGEST_MUTANT = ("CONSUMER_WORKFLOW_SHA256: 'd23be004f196ce321965bd07d3f4fa221374d61270215ed17ed5f228239bc117'",
+                          f"CONSUMER_WORKFLOW_SHA256: '{_LEGACY}'")
+# YAML 1.1 spellings that PyYAML reads as the reviewed values and GitHub Actions may read
+# differently. Parsed-structure equality accepted them; exact bytes must not (ADR 0212).
+YAML_SPELLING_MUTANTS = {
+    "Y1 on spelled yes": ("\non:\n", "\nyes:\n"),
+    "Y2 on spelled True": ("\non:\n", "\nTrue:\n"),
+    "Y3 secretless-pr spelled on": (
+        "      node-version: '26'\n      secretless-pr: true\n",
+        "      node-version: '26'\n      secretless-pr: on\n"),
+    "Y4 persist-credentials spelled no": (
+        "          persist-credentials: false\n          path: consumer\n",
+        "          persist-credentials: no\n          path: consumer\n"),
+    "Y5 secretless-pr as an explicit bool tag": (
+        "      node-version: '26'\n      secretless-pr: true\n",
+        "      node-version: '26'\n      secretless-pr: !!bool \"true\"\n"),
+}
 
 
 class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
@@ -183,6 +308,103 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
                     MODULE.ContractError, "differs from canonical generator output"
                 ):
                     MODULE.validate_workflow(Path(stream.name))
+
+    def render_with_mutated_generator(self, directory, anchor, replacement):
+        """Render through a generator whose output is rewritten, as a widened one would be."""
+        scripts = Path(directory)
+        source = (ROOT / "scripts/gen-node-required-workflow.py").read_text(encoding="utf-8")
+        wrapper = (
+            "_reviewed_render = render\n\n\n"
+            "def render(config, config_path):\n"
+            f"    return _reviewed_render(config, config_path).replace({anchor!r}, {replacement!r}, 1)\n\n\n"
+        )
+        self.assertEqual(1, source.count("def main("), "generator entry point drifted")
+        (scripts / "gen-node-required-workflow.py").write_text(
+            source.replace("def main(", wrapper + "def main(", 1), encoding="utf-8"
+        )
+        (scripts / "cli_projects_required_node_config.py").write_bytes(
+            (ROOT / "scripts/cli_projects_required_node_config.py").read_bytes()
+        )
+        rendered = subprocess.run(
+            [sys.executable, str(scripts / "gen-node-required-workflow.py"),
+             "config/cli-projects-required-node-ci.json"],
+            cwd=ROOT, capture_output=True, text=True, check=True,
+        ).stdout
+        workflow = scripts / "workflow.yml"
+        workflow.write_text(rendered, encoding="utf-8")
+        return scripts / "gen-node-required-workflow.py", workflow
+
+    def assert_workflow_mutant_refused(self, anchor, replacement, message):
+        committed = MODULE.WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(1, committed.count(anchor), "mutant anchor drifted")
+        with tempfile.TemporaryDirectory() as directory:
+            generator, workflow = self.render_with_mutated_generator(directory, anchor, replacement)
+            rendered = workflow.read_text(encoding="utf-8")
+            self.assertNotEqual(committed, rendered)
+            # GitHub must also be able to read the mutant, so the refusal is not a
+            # side effect of malformed YAML.
+            yaml.safe_load(rendered)
+            with (
+                mock.patch.object(MODULE, "GENERATOR", generator),
+                self.assertRaisesRegex(MODULE.ContractError, message),
+            ):
+                MODULE.validate_workflow(workflow)
+
+    def test_workflow_refuses_every_admission_text_but_the_reviewed_one(self):
+        # Byte equality with the generator cannot catch a widened generator: both sides
+        # move together. Only the reviewed constant can, and a denylist over bash cannot.
+        for label, (anchor, replacement) in ADMISSION_MUTANTS.items():
+            with self.subTest(label):
+                self.assert_workflow_mutant_refused(
+                    anchor, replacement, "required workflow is not the reviewed bytes"
+                )
+
+    def test_workflow_refuses_every_change_around_the_admission_text(self):
+        for label, (anchor, replacement) in WORKFLOW_MUTANTS.items():
+            with self.subTest(label):
+                self.assert_workflow_mutant_refused(
+                    anchor, replacement, "required workflow is not the reviewed bytes"
+                )
+
+    def test_workflow_refuses_an_admitted_digest_other_than_the_generated_caller(self):
+        self.assert_workflow_mutant_refused(
+            *ADMITTED_DIGEST_MUTANT, "required workflow is not the reviewed bytes"
+        )
+
+    def test_workflow_refuses_a_duplicate_key_that_hides_a_reviewed_value(self):
+        self.assert_workflow_mutant_refused(
+            *DUPLICATE_KEY_MUTANT, "required workflow is not the reviewed bytes"
+        )
+
+    def test_workflow_refuses_yaml_spellings_github_may_read_differently(self):
+        for label, (anchor, replacement) in YAML_SPELLING_MUTANTS.items():
+            with self.subTest(label):
+                self.assert_workflow_mutant_refused(
+                    anchor, replacement, "required workflow is not the reviewed bytes"
+                )
+
+    def test_admitted_digest_is_a_quoted_string(self):
+        # Unquoted, an all-decimal digest would load as an integer.
+        config = GENERATOR_MODULE.load_config(MODULE.GENERATOR_CONFIG)
+        path = "config/cli-projects-required-node-ci.json"
+        digest = hashlib.sha256(GENERATOR_MODULE.render_consumer(config, path).encode()).hexdigest()
+        self.assertIn(
+            f"          CONSUMER_WORKFLOW_SHA256: '{digest}'\n",
+            MODULE.WORKFLOW.read_text(encoding="utf-8"),
+        )
+        self.assertIn("CONSUMER_WORKFLOW_SHA256: '__CONSUMER_WORKFLOW_SHA256__'\n", MODULE.REVIEWED_WORKFLOW)
+
+    def test_reviewed_bytes_are_the_committed_workflow(self):
+        committed = MODULE.WORKFLOW.read_text(encoding="utf-8")
+        digest = yaml.safe_load(committed)["jobs"]["admission"]["steps"][0]["env"][
+            "CONSUMER_WORKFLOW_SHA256"
+        ]
+        self.assertEqual(MODULE.reviewed_workflow_text(digest), committed)
+        for malformed in (digest.upper(), digest[:-1], int("1" * 64), None):
+            with self.subTest(malformed=malformed), self.assertRaisesRegex(
+                MODULE.ContractError, "lowercase SHA-256"
+            ):
+                MODULE.reviewed_workflow_text(malformed)
 
     def test_identity_admission_rejects_every_untrusted_identity_mutation(self):
         workflow = yaml.safe_load(MODULE.WORKFLOW.read_text(encoding="utf-8"))
@@ -653,7 +875,7 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
             MODULE.discover_state(self.contract, SHA)
         compare.assert_called_once_with(
             "21eb48e713bd8304951fb7b26a900d08359af900",
-            "576707fe0be0dabe43ea57c504575f8cda88b0d2",
+            "a89fe1f090545c15cdd6987f20119327206e2c59",
         )
         consumer.assert_not_called()
 

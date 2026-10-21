@@ -21,3 +21,96 @@ The ruleset rotation remains behind the explicit acknowledgment in the rollout c
 ## Consequences
 
 PRs with the previous caller fail admission after the new workflow revision is activated and must update their caller. Existing successful checks from the old workflow revision do not satisfy the newly pinned required-workflow rule.
+
+## 2026-10-20 amendment: the admitted caller tracks the consumer's contract release
+
+**Invariant restored.** `Verjson/verjson-cli-projects` declares its contract release in
+`.github/verjson-contract.json`, and `contract-version.py verify` reports `PIN_MISMATCH`
+for any `Verjson/.github` reference that does not name that release's commit. Admission
+accepts exactly one caller, so its `consumer_node_ci_sha` must name the release the
+consumer adopts. The configuration still pinned the v3.0.2 commit `1c7659b7…` (admitted
+digest `9e4ca97c…`), so the consumer could not move to a current release: regenerating
+its adopter set at v4.2.0 in
+[Verjson/verjson-cli-projects#159](https://github.com/Verjson/verjson-cli-projects/pull/159)
+failed `contract-version.py verify` on `ci.yml`, and a caller that passed that check
+would fail admission. `consumer_node_ci_sha` now names the v4.2.0 release commit
+`a89fe1f090545c15cdd6987f20119327206e2c59`; the generated caller's sha256, and so the
+digest admission requires, is
+`d23be004f196ce321965bd07d3f4fa221374d61270215ed17ed5f228239bc117`. Admission is
+otherwise unchanged and still accepts only that byte-exact image.
+
+**The rollout-only digest stays until #159 lands.** The removal condition above (after
+#142 lands and the default branch matches the generator) is not met: #142 is still open
+and the consumer's `main` (`44a0dc49…` on 2026-10-20) carries the caller generated at
+`4a08c756…`, sha256 `721856f9…`. The rotation verifier reads that default-branch caller,
+and it accepts it only through `rollout_legacy_consumer_workflow_sha256`. Setting the
+value to `null` now would make the rotation to this revision refuse
+(`consumer workflow is not the reviewed push-only generated image`, reproduced read-only
+against the live consumer). The value is unchanged and remains rotation-only. PR heads
+never see it.
+
+**The required workflow is an exact reviewed constant.** Before this change, a generator
+widened to accept another caller could still pass both suites, because the required
+workflow was checked only for byte equality with that same generator. Each partial fix
+was bypassed in review:
+
+- A denylist over bash constructs fell to a variable name built in pieces and written
+  with `printf -v`, an indirect expansion, a function named `[`, and a `declare -n`
+  nameref.
+- Pinning only the admission `run` text fell to the keys around it. A step `shell`,
+  workflow or job `defaults`, a job `container`, an exported `BASH_FUNC_sha256sum%%`, or
+  `BASH_ENV` each replace `sha256sum` or run code before the comparison. Step `if` or
+  `continue-on-error`, and swapped step environment values, weaken the check outright.
+
+`REVIEWED_WORKFLOW` in `scripts/cli-projects-package-surface-ruleset.py` now holds the
+exact bytes of the reviewed required workflow, from the generator header through the last
+job. It is stated there and not read from the generator. `validate_workflow` requires the
+committed file's bytes to equal the constant exactly. The constant's only variable is the
+quoted admitted digest, which must be a lowercase 64-hex string equal to the sha256 of the
+generator's `--consumer` output. The generator now quotes that digest, because an
+all-decimal digest would otherwise load as an integer. Any generator change to this
+workflow requires a reviewed update of the constant in the same change.
+
+The comparison is on bytes, not on the parsed structure. A parser that understands YAML
+1.1 reads `yes:` or `True:` for `on:`, `on` for `true`, `no` for `false`, and an explicit
+`!!bool "true"` as the reviewed values, while GitHub Actions may not. Byte equality
+removes the need to know how either parser reads them.
+
+Exact bytes subsume the earlier 64-hex-literal, legacy-digest, admission-text,
+digest-binding, and duplicate- or merge-key checks, so those are removed. The existing
+per-field checks stay as documented invariants.
+
+Tests apply each mutant through a wrapped generator and require `validate_workflow` to
+refuse it. The mutants cover the widened comparisons, the reviewed bypasses, the
+surrounding keys, the other jobs, YAML 1.1 spellings, a swapped admitted digest, and a
+duplicate key.
+Execution tests run the committed step against the callers generated at `1c7659b7…`
+(`9e4ca97c…`) and `4a08c756…` (`721856f9…`). They also run it against an arbitrary
+caller that carries a marker and a `pull_request_target` trigger. Each must be refused.
+The stub serves the candidate only for the exact head ref.
+
+**Retiring the digest takes a second rotation.** Once #159 merges and `main` carries the
+generated v4.2.0 caller, set the value to `null` in the next change. That change edits
+`config/cli-projects-required-node-ci.json`. The required workflow checks that file out
+at its own revision, so it is one of the rotation tool's runtime paths. The scheduled
+`audit` therefore reports `rotation pending` until ruleset 21830367 is rotated to that
+change's merge commit. Run the same `dry-run`, `snapshot`, and
+`apply --ack ROTATE-CLI-PROJECTS-REQUIRED-WORKFLOW-1187` sequence, then `audit` and
+`verify-run`. No caller digest moves in that rotation.
+
+**Transition.** The organization ruleset is active and has no bypass actor, so the
+consumer cannot land the new caller before the rotation. The order is: rotate ruleset
+21830367 to this change's merge commit, then merge #159. Once rotated, #159 is the single
+bridging pull request. Every other open consumer pull request fails `admission` until it
+is updated from `main` after #159 merges. That includes #142, whose head carries the
+`9e4ca97c…` caller. These pull requests already fail today unless they carry that caller,
+so the rotation changes which caller they need, not whether they need one. The
+alternative was to accept two digests at the pull-request boundary during rollout. The
+2026-09-29 decision above rejects that: a head that already contains the commit that
+advances `main` keeps a stale success.
+
+**Recurrence.** Every consumer contract adoption moves this digest and needs a rotation
+first. This amendment records the dependency rather than removing it. Admission could
+instead derive the expected caller from the head's declared contract release, bounded
+below by a floor. That would widen what a pull request controls, so it would need its
+own decision.

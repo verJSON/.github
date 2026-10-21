@@ -30,7 +30,7 @@ jobs:
         env:
           REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
-          CONSUMER_WORKFLOW_SHA256: 9e4ca97c8fd980f37af2ef3cbbb47aea3c00b44f5a5ff336d25d95815aff3886
+          CONSUMER_WORKFLOW_SHA256: 'd23be004f196ce321965bd07d3f4fa221374d61270215ed17ed5f228239bc117'
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -74,7 +74,7 @@ jobs:
       packages: read
       pull-requests: read
       statuses: read
-    uses: Verjson/.github/.github/workflows/node-ci-protected.yml@576707fe0be0dabe43ea57c504575f8cda88b0d2
+    uses: Verjson/.github/.github/workflows/node-ci-protected.yml@a89fe1f090545c15cdd6987f20119327206e2c59
     secrets:
       NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     with:
@@ -97,7 +97,7 @@ jobs:
       packages: read
       pull-requests: read
       statuses: read
-    uses: Verjson/.github/.github/workflows/node-ci-protected.yml@576707fe0be0dabe43ea57c504575f8cda88b0d2
+    uses: Verjson/.github/.github/workflows/node-ci-protected.yml@a89fe1f090545c15cdd6987f20119327206e2c59
     secrets:
       NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     with:

@@ -114,7 +114,9 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
         self.assertEqual(MODULE.required_node_engine(), f">={floor_lane}")
 
     def test_required_workflow_uses_current_canonical_node_ci_pin(self):
-        expected_sha = "576707fe0be0dabe43ea57c504575f8cda88b0d2"
+        # v4.2.0: the protected lanes move with the consumer caller in one rotation and
+        # pick up ADR 0234's hosted-lane guard and spelled-out digit classes.
+        expected_sha = "a89fe1f090545c15cdd6987f20119327206e2c59"
         config = json.loads(MODULE.REQUIRED_NODE_CONFIG.read_text(encoding="utf-8"))
         self.assertEqual(config["protected_node_ci_sha"], expected_sha)
 
@@ -128,19 +130,39 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
             with self.subTest(job=job):
                 self.assertEqual(workflow["jobs"][job]["uses"], expected_uses)
 
-    def test_protected_lane_repin_leaves_the_consumer_caller_bytes_unchanged(self):
-        # The push-only consumer caller has its own pin, so hardening the protected
-        # pull-request lane never forces a consumer caller change (ADR 0153).
+    def test_admitted_consumer_caller_is_the_v4_2_0_generated_image(self):
+        # The consumer declares its contract release, and contract-version.py requires
+        # every Verjson/.github pin in it to name that release, so the admitted caller
+        # must track the release the consumer adopts (ADR 0212, 2026-10-20). Moving it
+        # changes the digest admission requires; pin both so a move is deliberate.
         config = json.loads(MODULE.REQUIRED_NODE_CONFIG.read_text(encoding="utf-8"))
         consumer = GENERATOR.render_consumer(
             config, "config/cli-projects-required-node-ci.json"
         )
         self.assertEqual(
-            config["consumer_node_ci_sha"], "1c7659b77e1c97743cdcfc0a1603141bfe25320d"
+            config["consumer_node_ci_sha"], "a89fe1f090545c15cdd6987f20119327206e2c59"
         )
         self.assertEqual(
             hashlib.sha256(consumer.encode()).hexdigest(),
-            "9e4ca97c8fd980f37af2ef3cbbb47aea3c00b44f5a5ff336d25d95815aff3886",
+            "d23be004f196ce321965bd07d3f4fa221374d61270215ed17ed5f228239bc117",
+        )
+        # Rotation-only: the caller on the consumer's main until #159 lands (ADR 0212).
+        self.assertEqual(
+            config["rollout_legacy_consumer_workflow_sha256"],
+            "721856f97158be3619945eb1c2a265ca49e74788bda2bd9fec732d6d0c0bec4c",
+        )
+
+    def test_protected_lane_repin_leaves_the_consumer_caller_bytes_unchanged(self):
+        # The push-only consumer caller has its own pin, so hardening the protected
+        # pull-request lane never forces a consumer caller change (ADR 0153).
+        config = json.loads(MODULE.REQUIRED_NODE_CONFIG.read_text(encoding="utf-8"))
+        path = "config/cli-projects-required-node-ci.json"
+        consumer = GENERATOR.render_consumer(config, path)
+        repinned = {**config, "protected_node_ci_sha": "f" * 40}
+        self.assertNotEqual(repinned["protected_node_ci_sha"], config["protected_node_ci_sha"])
+        self.assertEqual(GENERATOR.render_consumer(repinned, path), consumer)
+        self.assertNotEqual(
+            GENERATOR.render(repinned, path), GENERATOR.render(config, path)
         )
 
     def test_generated_admission_requires_exact_pinned_caller(self):
@@ -158,14 +180,23 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
         self.assertNotIn("LEGACY_CONSUMER_WORKFLOW_SHA256", workflow_text)
         self.assertNotIn("default_main_workflow_sha256", script)
 
-    def run_admission(self, repository, live_repository):
-        """Execute the committed admission step against a stubbed `gh`."""
+    def run_admission(self, repository, live_repository, candidate=None):
+        """Execute the committed admission step against a stubbed `gh`.
+
+        Without a candidate the admitted digest is stubbed to match a placeholder
+        caller; with one, the step runs with the digest the workflow itself embeds.
+        """
         workflow = MODULE.load_yaml(
             ROOT / ".github/workflows/cli-projects-package-surface-required.yml"
         )
-        script = workflow["jobs"]["admission"]["steps"][0]["run"]
+        step = workflow["jobs"]["admission"]["steps"][0]
+        script = step["run"]
         head = "f" * 40
-        candidate = "consumer workflow\n"
+        if candidate is None:
+            candidate = "consumer workflow\n"
+            admitted_sha256 = hashlib.sha256(candidate.encode()).hexdigest()
+        else:
+            admitted_sha256 = step["env"]["CONSUMER_WORKFLOW_SHA256"]
         bin_dir = self.root / "bin"
         bin_dir.mkdir(exist_ok=True)
         stub = bin_dir / "gh"
@@ -174,7 +205,8 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
             'case "$*" in\n'
             '  *"/actions/runs/"*) printf \'pull_request\\t%s\\t1\\t5\\n\' "$HEAD" ;;\n'
             '  *"/pulls/5 "*) printf \'5\\topen\\t%s\\t%s\\tmain\\n\' "$LIVE_REPOSITORY" "$HEAD" ;;\n'
-            '  *"/contents/.github/workflows/ci.yml?ref="*) printf \'%s\' "$CANDIDATE" ;;\n'
+            '  *"/contents/.github/workflows/ci.yml?ref=$HEAD") printf \'%s\' "$CANDIDATE" ;;\n'
+            '  *"/contents/.github/workflows/ci.yml?ref="*) echo "UNADMITTED ref $*" >&2; exit 72 ;;\n'
             '  *) echo "UNSTUBBED gh $*" >&2; exit 1 ;;\n'
             "esac\n",
             encoding="utf-8",
@@ -187,7 +219,7 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
             "LC_ALL": "C.UTF-8",  # the hosted runner locale
             "REPOSITORY": repository,
             "RUN_ID": "123",
-            "CONSUMER_WORKFLOW_SHA256": hashlib.sha256(candidate.encode()).hexdigest(),
+            "CONSUMER_WORKFLOW_SHA256": admitted_sha256,
             "GH_TOKEN": "stub-token",
             "GITHUB_OUTPUT": str(output),
             "HEAD": head,
@@ -233,6 +265,52 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
                     result, output = self.run_admission(repository, live_repository)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertEqual(output, "")
+
+    def test_committed_admission_rejects_every_caller_but_the_generated_one(self):
+        # The committed step with its own embedded digest, not a stubbed one: the
+        # caller rendered at the previous consumer pin (v3.0.2, sha256 9e4ca97c…) and
+        # the rotation-only legacy caller digest must both be refused at PR heads
+        # (ADR 0212), so a widened comparison cannot survive this suite.
+        config = json.loads(MODULE.REQUIRED_NODE_CONFIG.read_text(encoding="utf-8"))
+        path = "config/cli-projects-required-node-ci.json"
+        repository = "Verjson/verjson-cli-projects"
+        current = GENERATOR.render_consumer(config, path)
+        result, output = self.run_admission(repository, repository, current)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"head-repository={repository}\n", output)
+        # The caller at the previous pin, and the consumer main's caller that only
+        # the rotation verifier may accept through the legacy digest.
+        for pin, digest in (
+            ("1c7659b77e1c97743cdcfc0a1603141bfe25320d",
+             "9e4ca97c8fd980f37af2ef3cbbb47aea3c00b44f5a5ff336d25d95815aff3886"),
+            ("4a08c756547ccaf8977eda692e14eff56fddaf15",
+             config["rollout_legacy_consumer_workflow_sha256"]),
+        ):
+            with self.subTest(pin=pin):
+                stale = GENERATOR.render_consumer({**config, "consumer_node_ci_sha": pin}, path)
+                self.assertEqual(hashlib.sha256(stale.encode()).hexdigest(), digest)
+                result, output = self.run_admission(repository, repository, stale)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(output, "")
+
+    def test_committed_admission_refuses_an_arbitrary_caller_carrying_a_marker(self):
+        # A marker-triggered override of the admitted digest (reviewer bypass N2) would
+        # admit any caller that carries it, including one with a pull_request_target
+        # trigger; the committed step must refuse it on execution.
+        repository = "Verjson/verjson-cli-projects"
+        caller = (
+            "# admit-me\n"
+            "name: CI\n"
+            "on: pull_request_target\n"
+            "jobs:\n"
+            "  ci:\n"
+            "    runs-on: ubuntu-24.04\n"
+            "    steps:\n"
+            "      - run: env\n"
+        )
+        result, output = self.run_admission(repository, repository, caller)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(output, "")
 
     def test_rollout_legacy_consumer_workflow_digest_accepts_digest_or_null(self):
         config = json.loads(MODULE.REQUIRED_NODE_CONFIG.read_text(encoding="utf-8"))
