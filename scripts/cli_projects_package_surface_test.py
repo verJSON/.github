@@ -128,19 +128,34 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
             with self.subTest(job=job):
                 self.assertEqual(workflow["jobs"][job]["uses"], expected_uses)
 
-    def test_protected_lane_repin_leaves_the_consumer_caller_bytes_unchanged(self):
-        # The push-only consumer caller has its own pin, so hardening the protected
-        # pull-request lane never forces a consumer caller change (ADR 0153).
+    def test_admitted_consumer_caller_is_the_v4_2_0_generated_image(self):
+        # The consumer declares its contract release, and contract-version.py requires
+        # every Verjson/.github pin in it to name that release, so the admitted caller
+        # must track the release the consumer adopts (ADR 0212, 2026-10-20). Moving it
+        # changes the digest admission requires; pin both so a move is deliberate.
         config = json.loads(MODULE.REQUIRED_NODE_CONFIG.read_text(encoding="utf-8"))
         consumer = GENERATOR.render_consumer(
             config, "config/cli-projects-required-node-ci.json"
         )
         self.assertEqual(
-            config["consumer_node_ci_sha"], "1c7659b77e1c97743cdcfc0a1603141bfe25320d"
+            config["consumer_node_ci_sha"], "a89fe1f090545c15cdd6987f20119327206e2c59"
         )
         self.assertEqual(
             hashlib.sha256(consumer.encode()).hexdigest(),
-            "9e4ca97c8fd980f37af2ef3cbbb47aea3c00b44f5a5ff336d25d95815aff3886",
+            "d23be004f196ce321965bd07d3f4fa221374d61270215ed17ed5f228239bc117",
+        )
+
+    def test_protected_lane_repin_leaves_the_consumer_caller_bytes_unchanged(self):
+        # The push-only consumer caller has its own pin, so hardening the protected
+        # pull-request lane never forces a consumer caller change (ADR 0153).
+        config = json.loads(MODULE.REQUIRED_NODE_CONFIG.read_text(encoding="utf-8"))
+        path = "config/cli-projects-required-node-ci.json"
+        consumer = GENERATOR.render_consumer(config, path)
+        repinned = {**config, "protected_node_ci_sha": "f" * 40}
+        self.assertNotEqual(repinned["protected_node_ci_sha"], config["protected_node_ci_sha"])
+        self.assertEqual(GENERATOR.render_consumer(repinned, path), consumer)
+        self.assertNotEqual(
+            GENERATOR.render(repinned, path), GENERATOR.render(config, path)
         )
 
     def test_generated_admission_requires_exact_pinned_caller(self):
