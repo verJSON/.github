@@ -21,3 +21,48 @@ The ruleset rotation remains behind the explicit acknowledgment in the rollout c
 ## Consequences
 
 PRs with the previous caller fail admission after the new workflow revision is activated and must update their caller. Existing successful checks from the old workflow revision do not satisfy the newly pinned required-workflow rule.
+
+## 2026-10-20 amendment: the admitted caller tracks the consumer's contract release
+
+**Invariant restored.** `Verjson/verjson-cli-projects` declares its contract release in
+`.github/verjson-contract.json`, and `contract-version.py verify` reports `PIN_MISMATCH`
+for any `Verjson/.github` reference that does not name that release's commit. Admission
+accepts exactly one caller, so its `consumer_node_ci_sha` must name the release the
+consumer adopts. The configuration still pinned the v3.0.2 commit `1c7659b7…` (admitted
+digest `9e4ca97c…`), so the consumer could not move to a current release: regenerating
+its adopter set at v4.2.0 in
+[Verjson/verjson-cli-projects#159](https://github.com/Verjson/verjson-cli-projects/pull/159)
+failed `contract-version.py verify` on `ci.yml`, and a caller that passed that check
+would fail admission. `consumer_node_ci_sha` now names the v4.2.0 release commit
+`a89fe1f090545c15cdd6987f20119327206e2c59`; the generated caller's sha256, and so the
+digest admission requires, is
+`d23be004f196ce321965bd07d3f4fa221374d61270215ed17ed5f228239bc117`. Admission is
+otherwise unchanged and still accepts only that byte-exact image.
+
+**The rollout-only digest stays until #159 lands.** The removal condition above (after
+#142 lands and the default branch matches the generator) is not met: #142 is still open
+and the consumer's `main` (`44a0dc49…` on 2026-10-20) carries the caller generated at
+`4a08c756…`, sha256 `721856f9…`. The rotation verifier reads that default-branch caller,
+and it accepts it only through `rollout_legacy_consumer_workflow_sha256`. Setting the
+value to `null` now would make the rotation to this revision refuse
+(`consumer workflow is not the reviewed push-only generated image`, reproduced read-only
+against the live consumer). The value is unchanged and remains rotation-only. PR heads
+never see it. Set it to `null` in the first change after #159 merges, when `main` carries
+the generated v4.2.0 caller.
+
+**Transition.** The organization ruleset is active and has no bypass actor, so the
+consumer cannot land the new caller before the rotation. The order is: rotate ruleset
+21830367 to this change's merge commit, then merge #159. Once rotated, #159 is the single
+bridging pull request. Every other open consumer pull request fails `admission` until it
+is updated from `main` after #159 merges. That includes #142, whose head carries the
+`9e4ca97c…` caller. These pull requests already fail today unless they carry that caller,
+so the rotation changes which caller they need, not whether they need one. The
+alternative was to accept two digests at the pull-request boundary during rollout. The
+2026-09-29 decision above rejects that: a head that already contains the commit that
+advances `main` keeps a stale success.
+
+**Recurrence.** Every consumer contract adoption moves this digest and needs a rotation
+first. This amendment records the dependency rather than removing it. Admission could
+instead derive the expected caller from the head's declared contract release, bounded
+below by a floor. That would widen what a pull request controls, so it would need its
+own decision.

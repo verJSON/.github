@@ -653,7 +653,7 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
             MODULE.discover_state(self.contract, SHA)
         compare.assert_called_once_with(
             "21eb48e713bd8304951fb7b26a900d08359af900",
-            "576707fe0be0dabe43ea57c504575f8cda88b0d2",
+            "a89fe1f090545c15cdd6987f20119327206e2c59",
         )
         consumer.assert_not_called()
 

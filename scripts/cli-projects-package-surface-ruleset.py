@@ -267,7 +267,7 @@ def validate_workflow(path=WORKFLOW):
         }, f"{name} permissions drifted")
         require(job.get("uses") == (
             "Verjson/.github/.github/workflows/node-ci-protected.yml@"
-            "576707fe0be0dabe43ea57c504575f8cda88b0d2"
+            "a89fe1f090545c15cdd6987f20119327206e2c59"
         ), f"{name} reusable workflow identity drifted")
         require(job.get("secrets") == {
             "NODE_AUTH_TOKEN": "${{ secrets.GITHUB_TOKEN }}",

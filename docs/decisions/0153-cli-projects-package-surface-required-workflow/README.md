@@ -308,3 +308,28 @@ matches `rollout.freshness_status_check` in `config/cli-projects-package-surface
 and a test pins the two together. This also keeps the release-App bypass off this ruleset:
 adding one would widen who can land on the cli-projects default branch, which this ADR
 rejects.
+
+## 2026-10-20 amendment: both pins move to v4.2.0 in one rotation
+
+[ADR 0212's 2026-10-20 amendment](../0212-cli-projects-admission-accepts-only-generated-caller/README.md)
+moves `consumer_node_ci_sha` to the v4.2.0 release commit
+`a89fe1f090545c15cdd6987f20119327206e2c59`, so the consumer can adopt the current
+contract release. That move needs a rotation of ruleset 21830367 anyway. This change
+therefore also moves `protected_node_ci_sha` from v4.0.0 (`576707fe…`) to the same
+release commit, along with the rotation tool's reviewed `uses` identity in
+`scripts/cli-projects-package-surface-ruleset.py`. Between those revisions,
+`node-ci-protected.yml` gains [ADR 0234](../0234-route-secretless-trusted-ref-builds-to-the-hosted-lane/README.md)'s
+fail-closed check that a secretless build lane is one standard GitHub-hosted Linux image,
+and its numeric and hexadecimal regular expressions spell out their digits instead of
+relying on a collation-ordered range. Its bytes are identical at v4.1.0 and v4.2.0. The
+organization `CI_LANE_UNTRUSTED` value on 2026-10-20, `["ubuntu-24.04"]`, satisfies the
+new check. The security floor (`21eb48e7`) is unchanged and the target lies above it.
+
+The pins stay separate keys, and the 2026-10-15 separation still holds: a test now
+changes `protected_node_ci_sha` and asserts that the consumer caller bytes stay the same
+while the required workflow changes. Moving the pins together is a decision for this
+rotation, not a new coupling. The trade-off is that ruleset 21750617
+([ADR 0151](../0151-authn-type-surface-required-workflow/README.md)) still calls the
+protected lane at v4.0.0 until its own repin and rotation. The two required workflows
+therefore run different protected-lane revisions in the meantime. Both revisions are
+above the floor.

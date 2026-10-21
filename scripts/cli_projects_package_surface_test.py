@@ -114,7 +114,9 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
         self.assertEqual(MODULE.required_node_engine(), f">={floor_lane}")
 
     def test_required_workflow_uses_current_canonical_node_ci_pin(self):
-        expected_sha = "576707fe0be0dabe43ea57c504575f8cda88b0d2"
+        # v4.2.0: the protected lanes move with the consumer caller in one rotation and
+        # pick up ADR 0234's hosted-lane guard and spelled-out digit classes.
+        expected_sha = "a89fe1f090545c15cdd6987f20119327206e2c59"
         config = json.loads(MODULE.REQUIRED_NODE_CONFIG.read_text(encoding="utf-8"))
         self.assertEqual(config["protected_node_ci_sha"], expected_sha)
 
