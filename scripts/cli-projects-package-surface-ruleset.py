@@ -41,6 +41,17 @@ RUNTIME_PATHS = (
 )
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+# The reviewed digest flow of the PR admission step, stated here rather than read
+# from the generator so a widened generator cannot move it (ADR 0212).
+ADMISSION_DIGEST_FLOW = (
+    'candidate_sha256="$(sha256sum "$candidate_workflow" | cut -d\' \' -f1)"',
+    '[[ "$candidate_sha256" =~ ^[0123456789abcdef]{64}$ ]]',
+    '[ "$candidate_sha256" = "$CONSUMER_WORKFLOW_SHA256" ]',
+)
+ADMISSION_CONTROL_FLOW = re.compile(
+    r"\|\||&&|(?<![\w-])(?:if|then|elif|else|fi|case|esac|while|until|for|do|done"
+    r"|select|function|exit|return|eval|exec|source|set\s+\+\w*)(?![\w-])"
+)
 MUTABLE_FIELDS = (
     "name", "target", "enforcement", "bypass_actors", "conditions", "rules",
 )
@@ -164,6 +175,47 @@ def read_contract(path=CONTRACT):
     return contract
 
 
+def validate_admission_digest_flow(admission_run, workflow_text, legacy_sha256):
+    """Refuse any admission that could accept a caller other than the admitted digest.
+
+    Generator equality cannot catch a widened generator, because both sides move
+    together, so this is an independent statement of the reviewed shape (ADR 0212).
+    The step must be straight-line under `set -euo pipefail`, so every standalone
+    check is mandatory. The admitted digest may arrive only through
+    CONSUMER_WORKFLOW_SHA256, and the candidate digest may appear only in its
+    assignment, its format check, and one exact comparison, in that order, before
+    the single output write.
+    """
+    require(not re.search(r"[0-9a-fA-F]{64}", admission_run),
+            "identity admission embeds a caller digest literal")
+    require(legacy_sha256 is None or legacy_sha256 not in workflow_text.lower(),
+            "required workflow embeds the rotation-only legacy caller digest")
+    lines = [line.strip() for line in admission_run.splitlines()]
+    require(lines[:1] == ["set -euo pipefail"],
+            "identity admission must start with set -euo pipefail")
+    require(
+        not any(
+            ADMISSION_CONTROL_FLOW.search(line)
+            for line in lines if not line.startswith("#")
+        ),
+        "identity admission must be straight-line",
+    )
+    digest_lines = [
+        index for index, line in enumerate(lines)
+        if "candidate_sha256" in line or "CONSUMER_WORKFLOW_SHA256" in line
+    ]
+    require(
+        [lines[index] for index in digest_lines] == list(ADMISSION_DIGEST_FLOW)
+        and digest_lines == list(range(digest_lines[0], digest_lines[0] + 3)),
+        "identity admission digest flow drifted",
+    )
+    outputs = [index for index, line in enumerate(lines) if "GITHUB_OUTPUT" in line]
+    require(
+        len(outputs) == 1 and outputs[0] > digest_lines[-1],
+        "identity admission must write outputs only after the digest comparison",
+    )
+
+
 def validate_workflow(path=WORKFLOW):
     generated = subprocess.run(
         [sys.executable, str(GENERATOR), "config/cli-projects-required-node-ci.json"],
@@ -233,15 +285,13 @@ def validate_workflow(path=WORKFLOW):
         "REPOSITORY", "RUN_ID", "CONSUMER_WORKFLOW_SHA256", "GH_TOKEN",
     }, "identity admission inputs drifted")
     admission_run = admission_step.get("run", "")
-    # Generator equality cannot catch a widened generator; the admitted digest
-    # may arrive only through CONSUMER_WORKFLOW_SHA256 (ADR 0212).
-    require(not re.search(r"[0-9a-fA-F]{64}", admission_run),
-            "identity admission embeds a caller digest literal")
-    legacy = load_required_node_config(GENERATOR_CONFIG, require)[
-        "rollout_legacy_consumer_workflow_sha256"
-    ]
-    require(legacy is None or legacy not in path.read_text(encoding="utf-8").lower(),
-            "required workflow embeds the rotation-only legacy caller digest")
+    validate_admission_digest_flow(
+        admission_run,
+        path.read_text(encoding="utf-8"),
+        load_required_node_config(GENERATOR_CONFIG, require)[
+            "rollout_legacy_consumer_workflow_sha256"
+        ],
+    )
     for assertion in (
         "actions/runs/$RUN_ID",
         'event_name" = pull_request',

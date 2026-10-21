@@ -185,32 +185,49 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
                 ):
                     MODULE.validate_workflow(Path(stream.name))
 
-    def test_workflow_rejects_a_generator_that_embeds_another_caller_digest(self):
+    def test_workflow_rejects_a_generator_that_widens_the_digest_comparison(self):
         # Byte equality with the generator cannot catch a widened generator: both
-        # sides move together. The admitted digest arrives only through the
-        # CONSUMER_WORKFLOW_SHA256 env value, and the rotation-only legacy digest
-        # never reaches the PR workflow at all (ADR 0212).
+        # sides move together. The static admission guard must refuse each widening
+        # itself, with its own verdict (ADR 0212).
         generator = (ROOT / "scripts/gen-node-required-workflow.py").read_text(encoding="utf-8")
         comparison = '          [ "$candidate_sha256" = "$CONSUMER_WORKFLOW_SHA256" ]\n'
+        surface = "      - name: Verify and exercise the package surface\n"
+        self.assertEqual(1, generator.count(comparison), "mutation anchor drifted")
+        self.assertEqual(1, generator.count(surface), "mutation anchor drifted")
         legacy = GENERATOR_MODULE.load_config(MODULE.GENERATOR_CONFIG)[
             "rollout_legacy_consumer_workflow_sha256"
         ]
         previous = "9e4ca97c8fd980f37af2ef3cbbb47aea3c00b44f5a5ff336d25d95815aff3886"
+        new = "0123456789abcdef" * 4
+
+        def widen(alternative):
+            return generator.replace(comparison, f"{comparison[:-1]} || {alternative}\n", 1)
+
         mutations = {
-            "admission accepts the legacy digest": generator.replace(
-                comparison,
-                comparison[:-1] + f' || [ "$candidate_sha256" = "{legacy}" ]\n', 1,
+            "M1 legacy literal": (
+                widen(f'[ "$candidate_sha256" = "{legacy}" ]'), "caller digest literal"),
+            "M2 previous literal": (
+                widen(f'[ "$candidate_sha256" = "{previous}" ]'), "caller digest literal"),
+            "M3 previous prefix glob": (
+                widen('[[ "$candidate_sha256" == 9e4ca97c* ]]'), "straight-line"),
+            "M4 new digest split by concatenation": (
+                widen(f'[ "$candidate_sha256" = "{new[:32]}""{new[32:]}" ]'), "straight-line"),
+            "M5 new prefix glob": (
+                widen('[[ "$candidate_sha256" == 0123abcd* ]]'), "straight-line"),
+            "M6 case statement": (
+                generator.replace(
+                    comparison,
+                    '          case "$candidate_sha256" in "$CONSUMER_WORKFLOW_SHA256"|0123abcd*) ;;'
+                    ' *) false ;; esac\n', 1,
+                ),
+                "straight-line",
             ),
-            "admission accepts the previous caller digest": generator.replace(
-                comparison,
-                comparison[:-1] + f' || [ "$candidate_sha256" = "{previous}" ]\n', 1,
-            ),
-            "legacy digest outside admission": generator.replace(
-                "      - name: Verify and exercise the package surface\n",
-                f"      # {legacy}\n      - name: Verify and exercise the package surface\n", 1,
+            "M7 legacy digest outside admission": (
+                generator.replace(surface, f"      # {legacy}\n{surface}", 1),
+                "legacy caller digest",
             ),
         }
-        for label, source in mutations.items():
+        for label, (source, message) in mutations.items():
             self.assertNotEqual(generator, source, label)
             with self.subTest(label), tempfile.TemporaryDirectory() as directory:
                 scripts = Path(directory)
@@ -227,9 +244,47 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
                 workflow.write_text(rendered, encoding="utf-8")
                 with (
                     mock.patch.object(MODULE, "GENERATOR", scripts / "gen-node-required-workflow.py"),
-                    self.assertRaisesRegex(MODULE.ContractError, "caller digest"),
+                    self.assertRaisesRegex(MODULE.ContractError, message),
                 ):
                     MODULE.validate_workflow(workflow)
+
+    def test_admission_digest_flow_refuses_each_way_to_skip_or_widen_the_comparison(self):
+        text = MODULE.WORKFLOW.read_text(encoding="utf-8")
+        script = yaml.safe_load(text)["jobs"]["admission"]["steps"][0]["run"]
+        legacy = GENERATOR_MODULE.load_config(MODULE.GENERATOR_CONFIG)[
+            "rollout_legacy_consumer_workflow_sha256"
+        ]
+        MODULE.validate_admission_digest_flow(script, text, legacy)
+        compare = '[ "$candidate_sha256" = "$CONSUMER_WORKFLOW_SHA256" ]\n'
+        self.assertEqual(1, script.count(compare), "mutation anchor drifted")
+
+        def replace(lines):
+            return script.replace(compare, lines, 1)
+
+        mutations = {
+            "glob replaces the comparison": (
+                replace('[[ "$candidate_sha256" == 0123abcd* ]]\n'), "digest flow drifted"),
+            "second candidate reference": (
+                replace('[ -n "$candidate_sha256" ]\n' + compare), "digest flow drifted"),
+            "comparison removed": (replace(""), "digest flow drifted"),
+            "errexit disabled": (replace("set +e\n" + compare), "straight-line"),
+            "early exit": (replace("exit 0\n" + compare), "straight-line"),
+            "comparison inside if": (
+                replace("if false; then\n" + compare + "fi\n"), "straight-line"),
+            "output before comparison": (
+                script.replace(
+                    'candidate_sha256="$(',
+                    'echo "head-sha=$live_head_sha" >>"$GITHUB_OUTPUT"\ncandidate_sha256="$(', 1,
+                ),
+                "only after the digest comparison",
+            ),
+            "no errexit preamble": (
+                script.replace("set -euo pipefail\n", "", 1), "set -euo pipefail"),
+        }
+        for label, (candidate, message) in mutations.items():
+            self.assertNotEqual(script, candidate, label)
+            with self.subTest(label), self.assertRaisesRegex(MODULE.ContractError, message):
+                MODULE.validate_admission_digest_flow(candidate, text, legacy)
 
     def test_identity_admission_rejects_every_untrusted_identity_mutation(self):
         workflow = yaml.safe_load(MODULE.WORKFLOW.read_text(encoding="utf-8"))

@@ -47,12 +47,29 @@ and it accepts it only through `rollout_legacy_consumer_workflow_sha256`. Settin
 value to `null` now would make the rotation to this revision refuse
 (`consumer workflow is not the reviewed push-only generated image`, reproduced read-only
 against the live consumer). The value is unchanged and remains rotation-only. PR heads
-never see it. `validate_workflow` now refuses any 64-hex literal in the admission step
-and the configured legacy digest anywhere in the required workflow. A test also runs the
-committed admission step against the callers generated at `1c7659b7…` (`9e4ca97c…`) and
-`4a08c756…` (`721856f9…`) and requires both to be refused. Before this change, a
-generator widened to accept either digest still passed both suites, because byte
-equality with the generator moves with the generator.
+never see it.
+
+**The admission shape is checked independently of the generator.** Before this change, a
+generator widened to accept another digest still passed both suites. The required
+workflow is checked for byte equality with that same generator, so a change to the
+generator moves both sides. `validate_admission_digest_flow`, called from
+`validate_workflow`, now states the reviewed shape itself and does not read it from the
+generator. It refuses an admission step that:
+
+- does not start with `set -euo pipefail`;
+- uses any control flow (`||`, `&&`, `if`, `case`, loops, `exit`, `return`, `eval`, or
+  `set +…`), so every standalone check is mandatory;
+- references `candidate_sha256` or `CONSUMER_WORKFLOW_SHA256` anywhere except three exact,
+  consecutive lines: the hash assignment, the 64-hex format check, and
+  `[ "$candidate_sha256" = "$CONSUMER_WORKFLOW_SHA256" ]`;
+- writes `GITHUB_OUTPUT` anywhere except once, after that comparison;
+- carries any 64-hex literal;
+- or sits in a required workflow that contains the configured legacy digest anywhere.
+
+A digest split by shell concatenation, a prefix glob, a `case` arm, an early exit, and
+`set +e` are therefore each refused by the static guard, whatever digest they name. A test
+also runs the committed admission step against the callers generated at `1c7659b7…`
+(`9e4ca97c…`) and `4a08c756…` (`721856f9…`) and requires both to be refused.
 
 **Retiring the digest takes a second rotation.** Once #159 merges and `main` carries the
 generated v4.2.0 caller, set the value to `null` in the next change. That change edits
