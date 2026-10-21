@@ -32,6 +32,33 @@ def expectation(finding, *, issue=1401, reason="tracked", expires="2099-01-01"):
     }
 
 
+CALLERS = "armed adopters with an incomplete generated adopter caller set"
+RECORDED_ITEMS = ["Verjson/alpha:a.yml", "Verjson/beta:a.yml", "Verjson/gamma:b.yml"]
+
+
+def items_digest(items):
+    return hashlib.sha256(
+        json.dumps(sorted(items), ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def list_finding(finding_class, items):
+    """The text the arm audit renders for a list finding: a sample bound to every item."""
+    return f"{finding_class}: missing={len(items)} sample={items[:1]} items=sha256:{items_digest(items)}"
+
+
+def item_expectation(finding_class, items, **fields):
+    entry = expectation(list_finding(finding_class, items), **fields)
+    return {**entry, "finding_class": finding_class, "items": sorted(items)}
+
+
+def evidence(*classes):
+    """The structured report an item-set audit prints on stdout beside its findings."""
+    return json.dumps(
+        {"finding_classes": [{"class": name, "items": sorted(items)} for name, items in classes]}
+    )
+
+
 def emitter(*, findings=(), status=1, stdout=""):
     """A stand-in audit that prints the given findings the way the real one does."""
     program = (
@@ -146,6 +173,30 @@ class AuditFindingStateTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 2, completed.stdout)
         self.assertIn("does not describe", completed.stderr)
 
+    def test_a_recorded_item_set_that_its_finding_does_not_describe_fails_closed(self):
+        # The recorded list is what decides an improvement, so it must be the
+        # list the reviewed finding text commits to, not merely a plausible one.
+        recorded = item_expectation(CALLERS, RECORDED_ITEMS)
+        cases = {
+            "items differ from the finding's digest": {**recorded, "items": RECORDED_ITEMS[:2]},
+            "class is not the finding's prefix": {**recorded, "finding_class": "armed adopters"},
+            "class is empty": {**recorded, "finding_class": ""},
+            "items are unsorted": {**recorded, "items": RECORDED_ITEMS[::-1]},
+            # Self-consistent, so only the empty-set guard can reject it.
+            "items are empty": item_expectation(CALLERS, []),
+        }
+        for label, entry in cases.items():
+            with self.subTest(label):
+                completed = self.run_state(entries=[entry], command=emitter(status=0))
+                self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+                self.assertIn("audit-state-undetermined", completed.stderr)
+
+    def test_two_recorded_item_sets_for_one_class_fail_closed(self):
+        entries = [item_expectation(CALLERS, RECORDED_ITEMS), item_expectation(CALLERS, RECORDED_ITEMS[:2])]
+        completed = self.run_state(entries=entries, command=emitter(status=0))
+        self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+        self.assertIn("more than once", completed.stderr)
+
     def test_an_expectation_entry_missing_its_tracking_issue_fails_closed(self):
         entry = expectation("armed default branches: missing=1")
         del entry["issue"]
@@ -174,6 +225,149 @@ class AuditFindingStateTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 2, completed.stdout)
         self.assertIn("could not be started", completed.stderr)
 
+    def test_a_recorded_item_set_that_shrank_is_quiet_and_asks_to_be_re_recorded(self):
+        # The #1810 finding improved from 20 to 17 missing callers and the exact
+        # fingerprint read that as a new finding, reddening the schedule twice.
+        remaining = RECORDED_ITEMS[:2]
+        completed = self.run_state(
+            entries=[item_expectation(CALLERS, RECORDED_ITEMS)],
+            command=emitter(
+                findings=[list_finding(CALLERS, remaining)],
+                stdout=evidence((CALLERS, remaining)),
+            ),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        state = json.loads(completed.stdout)
+        self.assertEqual(state["verdict"], "match")
+        self.assertEqual((state["new"], state["stale"]), ([], []))
+        [improved] = state["improved"]
+        self.assertEqual(improved["fingerprint"], fingerprint(list_finding(CALLERS, RECORDED_ITEMS)))
+        self.assertEqual(improved["entry"]["items"], remaining)
+        self.assertEqual(improved["entry"]["finding"], list_finding(CALLERS, remaining))
+        self.assertIn("::notice", completed.stderr)
+        self.assertIn("re-record", completed.stderr)
+
+    def test_a_recorded_item_set_that_shrank_to_nothing_reads_as_no_finding(self):
+        entry = item_expectation(CALLERS, RECORDED_ITEMS)
+        completed = self.run_state(
+            entries=[entry],
+            command=emitter(status=0, stdout=evidence((CALLERS, []))),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        state = json.loads(completed.stdout)
+        self.assertEqual(state["verdict"], "match")
+        self.assertEqual((state["new"], state["stale"], state["improved"]), ([], [], []))
+        self.assertEqual(state["resolved"], [{"fingerprint": entry["fingerprint"], "issue": 1401}])
+        self.assertIn("remove", completed.stderr)
+
+    def test_a_recorded_item_set_that_gained_an_item_is_loud(self):
+        # Shrinking among the old items cannot hide a new one: one adopter
+        # regenerating while another loses a caller is still a regression.
+        observed = RECORDED_ITEMS[:1] + ["Verjson/delta:a.yml"]
+        completed = self.run_state(
+            entries=[item_expectation(CALLERS, RECORDED_ITEMS)],
+            command=emitter(findings=[list_finding(CALLERS, observed)], stdout=evidence((CALLERS, observed))),
+        )
+        self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+        state = json.loads(completed.stdout)
+        self.assertEqual(state["verdict"], "drift")
+        self.assertEqual(state["new"], [fingerprint(list_finding(CALLERS, observed))])
+        self.assertEqual(state["improved"], [])
+
+    def test_the_same_item_set_rendered_differently_is_loud(self):
+        # Only a strict subset is an improvement; an equal set whose text moved
+        # is a format change a reviewer must see.
+        rendered = list_finding(CALLERS, RECORDED_ITEMS).replace("missing=3", "missing=3 ", 1)
+        completed = self.run_state(
+            entries=[item_expectation(CALLERS, RECORDED_ITEMS)],
+            command=emitter(findings=[rendered], stdout=evidence((CALLERS, RECORDED_ITEMS))),
+        )
+        self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+        state = json.loads(completed.stdout)
+        self.assertEqual(state["new"], [fingerprint(rendered)])
+        self.assertEqual(state["improved"], [])
+
+    def test_a_recorded_item_set_cannot_quiet_a_different_finding_class(self):
+        other = "armed adopters that cannot satisfy the arm"
+        observed = RECORDED_ITEMS[:1]
+        completed = self.run_state(
+            entries=[item_expectation(CALLERS, RECORDED_ITEMS)],
+            command=emitter(
+                findings=[list_finding(other, observed)],
+                stdout=evidence((CALLERS, []), (other, observed)),
+            ),
+        )
+        self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+        state = json.loads(completed.stdout)
+        self.assertEqual(state["new"], [fingerprint(list_finding(other, observed))])
+
+    def test_an_expired_item_set_cannot_quiet_an_improvement(self):
+        remaining = RECORDED_ITEMS[:2]
+        entry = item_expectation(CALLERS, RECORDED_ITEMS, expires="2000-01-01")
+        completed = self.run_state(
+            entries=[entry],
+            command=emitter(findings=[list_finding(CALLERS, remaining)], stdout=evidence((CALLERS, remaining))),
+        )
+        self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+        state = json.loads(completed.stdout)
+        self.assertEqual(state["expired"], [entry["fingerprint"]])
+        self.assertEqual(state["new"], [fingerprint(list_finding(CALLERS, remaining))])
+        self.assertEqual(state["improved"], [])
+
+    def test_malformed_or_contradictory_structured_evidence_fails_closed(self):
+        remaining = RECORDED_ITEMS[:2]
+        reported = list_finding(CALLERS, remaining)
+        cases = {
+            "not a list": ([reported], json.dumps({"finding_classes": {}})),
+            "record is not an object": ([reported], json.dumps({"finding_classes": [CALLERS]})),
+            "record has extra keys": (
+                [reported],
+                json.dumps({"finding_classes": [{"class": CALLERS, "items": remaining, "x": 1}]}),
+            ),
+            "class is empty": ([reported], json.dumps({"finding_classes": [{"class": "", "items": []}]})),
+            "items are not strings": (
+                [reported],
+                json.dumps({"finding_classes": [{"class": CALLERS, "items": [1, 2]}]}),
+            ),
+            "items are unsorted": (
+                [reported],
+                json.dumps({"finding_classes": [{"class": CALLERS, "items": remaining[::-1]}]}),
+            ),
+            "items repeat": (
+                [reported],
+                json.dumps({"finding_classes": [{"class": CALLERS, "items": remaining[:1] * 2}]}),
+            ),
+            "an item carries a control character": (
+                [list_finding(CALLERS, ["Verjson/a\x1b:a.yml"])],
+                evidence((CALLERS, ["Verjson/a\x1b:a.yml"])),
+            ),
+            "a class is reported twice": ([reported], evidence((CALLERS, remaining), (CALLERS, remaining))),
+            "a non-empty class has no finding": (["unrelated: x"], evidence((CALLERS, remaining))),
+            "a finding's digest is not its class's items": (
+                [list_finding(CALLERS, RECORDED_ITEMS[1:])],
+                evidence((CALLERS, remaining)),
+            ),
+            "an empty class still has a finding": ([reported], evidence((CALLERS, []))),
+        }
+        for label, (findings, stdout) in cases.items():
+            with self.subTest(label):
+                completed = self.run_state(
+                    entries=[item_expectation(CALLERS, RECORDED_ITEMS)],
+                    command=emitter(findings=findings, stdout=stdout),
+                )
+                self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+                self.assertIn("audit-state-undetermined", completed.stderr)
+
+    def test_an_improvement_without_structured_evidence_is_loud(self):
+        # Without the item list the comparison is the exact text, as before.
+        remaining = RECORDED_ITEMS[:2]
+        completed = self.run_state(
+            entries=[item_expectation(CALLERS, RECORDED_ITEMS)],
+            command=emitter(findings=[list_finding(CALLERS, remaining)], stdout="not a report\n"),
+        )
+        self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["verdict"], "drift")
+
     def summary_of(self, *, entries, command, audit="arm"):
         summary = self.root / "summary.md"
         environment = dict(os.environ, GITHUB_STEP_SUMMARY=str(summary))
@@ -196,6 +390,28 @@ class AuditFindingStateTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("match", summary)
         self.assertIn(fingerprint(finding), summary)
+
+    def test_the_step_summary_carries_the_entry_that_re_records_an_improvement(self):
+        remaining = RECORDED_ITEMS[:2]
+        entry = item_expectation(CALLERS, RECORDED_ITEMS)
+        completed, summary = self.summary_of(
+            entries=[entry],
+            command=emitter(findings=[list_finding(CALLERS, remaining)], stdout=evidence((CALLERS, remaining))),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("re-record", summary)
+        self.assertIn(entry["fingerprint"], summary)
+        block = summary.split("```json\n", 1)[1].split("```", 1)[0]
+        self.assertEqual(json.loads(block), json.loads(completed.stdout)["improved"][0]["entry"])
+
+    def test_the_step_summary_asks_for_a_resolved_item_set_to_be_removed(self):
+        entry = item_expectation(CALLERS, RECORDED_ITEMS)
+        completed, summary = self.summary_of(
+            entries=[entry], command=emitter(status=0, stdout=evidence((CALLERS, [])))
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("remove", summary)
+        self.assertIn(entry["fingerprint"], summary)
 
     def test_a_finding_cannot_inject_an_actions_workflow_command(self):
         # Not \r: `splitlines()` already discards everything after it, so the
@@ -264,6 +480,13 @@ class ShippedExpectationTest(unittest.TestCase):
         today = datetime.now(timezone.utc).date()
         expired = [entry["fingerprint"] for entry in entries if entry["expires"] < today]
         self.assertEqual(expired, [], "a recorded acknowledgement has expired; resolve or re-review it")
+
+    def test_every_recorded_arm_list_finding_carries_its_item_set(self):
+        # Without the item set an improvement is drift again, and the schedule
+        # goes red each time an adopter regenerates (#1810, ADR 0189 2026-10-21).
+        entries = STATE.read_expectations(ROOT / "config/audit-expected-findings.json", "ai-review-arm")
+        bare = [entry["fingerprint"] for entry in entries if " items=sha256:" in entry["finding"] and "items" not in entry]
+        self.assertEqual(bare, [], "re-record list findings with finding_class and items")
 
     def test_the_workflow_adjudicates_the_audit_it_records(self):
         workflow = (ROOT / ".github/workflows/org-ruleset-conformance.yml").read_text(encoding="utf-8")
