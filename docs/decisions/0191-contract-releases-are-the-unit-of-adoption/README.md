@@ -388,3 +388,39 @@ recorded here rather than implied away.
 Not verified here, and deliberately so: no release has been cut, no adopter
 declares a version yet, and the required-check binding in §6 is decided rather
 than wired. The steps that implement them carry their own verification.
+
+## 2026-10-20 amendment — Header claims the hub name does not mark
+
+§3 requires every generated header claim to name the declared commit, and cites
+`CONTRACT_REF` on line 13 of the ADR index test as one. The header pass only
+recognized a comment that names `Verjson/.github` before the SHA on the same
+line, so that claim was never read. Neither were the other shapes the
+organization generators stamp without the hub name:
+
+- `# CONTRACT_REF=<sha>` (`gen-changelog-caller.sh adr-index-test`);
+- `# Contract: <sha>` (`gen-container-candidate.sh`, `gen-container-release.sh`,
+  `gen-container-deployment.sh`);
+- `# scripts/gen-<name>.sh [<mode>] <sha> …`, the regeneration line in the AI
+  review, label re-arm, gate re-arm, privileged merge and container candidate
+  callers.
+
+A stale SHA in one of those alone therefore passed `verify`. The observed case
+was line 3 of a generated `ai-review-label-rearm.yml`, which went unnoticed
+because the file's `uses:` pin was current. This amendment restores the
+invariant. `GENERATED_HEADER_RE` reads the three shapes. Each one is anchored to
+the full comment a generator stamps, because nothing on the line names the hub
+to key on. The regeneration shape keys on the hub's `scripts/gen-` convention
+rather than a list of names, so a new generator is read without an edit.
+
+`scripts/ci-gate/contract-version.test.py` gives each shape a stale-SHA finding
+and a current-SHA pass. It also refuses lookalikes: prose after the SHA, a 64-hex
+digest, an uncommented assignment, a mention of a generator, and a non-`scripts/`
+path. The test runs every mode of every SHA-stamping `scripts/gen-*` generator at
+a real commit and requires every comment line carrying that SHA to be read.
+Generators that stamp no adopter SHA are exempted by name with a reason, so a new
+generator has to be either exercised or exempted.
+
+Two related gaps are outside this repair. The generated contract test's own
+`CONTRACT_REF="<sha>"` assignment is not a comment, and the contract test already
+asserts that every generated member shares it. The fleet inventory's separate
+`HEADER_RE` reads only a six-line window of workflow files.

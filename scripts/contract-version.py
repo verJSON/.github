@@ -187,6 +187,24 @@ from contract_reference import SHA_RE, USES_RE  # noqa: E402
 # header pass that reads every comment line has no window keeping them apart.
 HEADER_RE = re.compile(
     r"Verjson/\.github[^\n]*?\b(?P<sha>[0-9a-f]{40})(?![0-9a-f])", re.IGNORECASE)
+# The generator header shapes that carry a contract SHA without naming the hub
+# on their line, so `HEADER_RE` cannot see them and a stale SHA in one of them
+# alone passed `verify`: `# CONTRACT_REF=<sha>` (the ADR index test),
+# `# Contract: <sha>` (the container generators), and a regeneration line
+# `# scripts/gen-<name>.sh [<mode>] <sha> ...` (the AI review, re-arm,
+# privileged merge and container callers). Having no hub name to key on, each is
+# anchored to the whole comment shape a generator stamps, so prose that merely
+# mentions a generator or a SHA stays prose. The regeneration form is keyed on
+# the hub's `scripts/gen-` convention rather than a list of names, so a new hub
+# generator is read without an edit here; contract-version.test.py runs every
+# generator and fails on a SHA-bearing comment this does not read.
+GENERATED_HEADER_RE = re.compile(
+    r"^[ \t]*#[ \t]*(?:"
+    r"CONTRACT_REF=(?P<assigned>[0-9a-f]{40})[ \t]*$"
+    r"|Contract:[ \t]+(?P<contract>[0-9a-f]{40})[ \t]*$"
+    r"|scripts/gen-[a-z0-9-]+\.(?:sh|py)[ \t]+(?:[a-z][a-z-]*[ \t]+)?"
+    r"(?P<regenerate>[0-9a-f]{40})(?![0-9a-f])"
+    r")")
 # The gap half of the recognizer. `USES_RE` reads a pin that is on its key's
 # line; a `uses:` key whose value is somewhere else is not a reference this scan
 # can resolve, and reporting it as no reference is the clean PASS on a real skew.
@@ -485,6 +503,11 @@ def references(root):
                 if any(low <= start < high for low, high in spans):
                     continue
                 found.append((relative, "header", match.group("sha")))
+            generated = GENERATED_HEADER_RE.match(line)
+            if generated is not None:
+                found.append((relative, "header", next(
+                    sha for sha in generated.group("assigned", "contract", "regenerate")
+                    if sha is not None)))
     return found, unscanned, unresolved
 
 
