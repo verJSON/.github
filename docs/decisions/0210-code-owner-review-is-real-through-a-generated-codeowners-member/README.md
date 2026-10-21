@@ -281,17 +281,18 @@ of waiting for someone to run `check` by hand.
 - **Not masked by a sibling.** The step runs under `if: ${{ !cancelled() }}`, so a
   release-authorization or package-surface finding earlier in the job cannot hide a
   deleted reviewer ruleset. The package type-surface step gets the same guard: before
-  this amendment, a release-authorization failure skipped it. Nothing on the step may turn its failure into success:
-  `continue-on-error`, an `|| true`, or a different mode fail the contract.
+  this amendment, a release-authorization failure skipped it. Nothing on either step
+  may turn its failure into success: `continue-on-error`, an `|| true`, or, for the
+  required-reviewer step, a different mode fail the contract.
 - **Failure states.** Exit 1 means drift: an absent, drifted, duplicated or undeclared
   ruleset. Exit 2 means the audit could not read trustworthy state, such as an API
   error, a target repository that is not live, or an unreadable config. Both fail the
   job. `scripts/required_reviewer_ruleset_test.py` runs the workflow's own step, read
   from the YAML, against a stubbed `gh` and asserts that it never writes, for these
   states: conformant, every ruleset absent, one absent, drifted, undeclared, duplicated
-  name, and an API error on the ruleset listing. Its `CheckTest` class covers the
-  remaining exit-2 causes (a detail-read error and a target that is not live) by running
-  `check` directly.
+  name, and an API error on the ruleset listing. Its `CheckTest` class covers a
+  detail-read error and a target that is not live by running `check` directly, and its
+  `read_config` tests cover an unreadable config.
   `scripts/ci-gate/privileged-scheduled-workflows.test.py` rejects every weakening
   above.
 
