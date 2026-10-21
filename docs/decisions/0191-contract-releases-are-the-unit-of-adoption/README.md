@@ -420,6 +420,12 @@ a real commit and requires every comment line carrying that SHA to be read.
 Generators that stamp no adopter SHA are exempted by name with a reason, so a new
 generator has to be either exercised or exempted.
 
+The hex in all three shapes reads case-insensitively, as the hub-named pass
+already did. Both passes report a claim in lowercase. A commit id names the same
+object in either case, so case alone neither hides a claim nor turns a current
+one into a `PIN_MISMATCH`. The words around the hex stay exact, because the
+generators stamp them exactly.
+
 Two related gaps are outside this repair. The generated contract test's own
 `CONTRACT_REF="<sha>"` assignment is not a comment, and the contract test already
 asserts that every generated member shares it. The fleet inventory's separate

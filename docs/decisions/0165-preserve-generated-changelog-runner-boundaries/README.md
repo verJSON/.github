@@ -42,3 +42,26 @@ Verjson/verjson-ci owns adoption of the newly merged policy SHA and generated ca
 This repository changes no consumer checkout or release state. A future generator
 change to the safe PR-gate shape must update this recognizer and its generator-output
 regression together, so checkout pins and executable steps cannot drift silently.
+
+## 2026-10-20 amendment — The PR gate's runner is bound to its header
+
+The generated contract test checked the PR gate's header, job count and cache
+order, but not its `runs-on`. An adopter could hand-edit a persistent
+`[self-hosted, general]` runner under a bare header. That sends pull-request code to
+a persistent host, which is the boundary this decision preserves. An adopter could
+also record `--untrusted-runner x` in the header over a different body. The header
+now records `--untrusted-runner` when it is used, so the contract test derives the
+one admissible runner from it: `ubuntu-24.04` when the header records no option,
+and exactly the recorded labels, in order, when it does. The `changelog-contract`
+job must name that runner on its own `runs-on` line. The file may name no other
+runner and use no YAML merge key, and it must carry exactly one generator header.
+
+`--untrusted-runner` keeps admitting self-hosted labels. A dedicated ephemeral pool
+is a permitted target under [ADR 0235](../0235-public-pull-request-code-uses-ephemeral-runners/README.md),
+and this decision already records that labels are not an attestation of isolation.
+A generator-side refusal could not verify isolation either; it would only remove
+the reviewed exception that `generated-changelog-selector-policy.test.py` and
+adopters (for example verjson-ai-gguf ADR 0007) rely on. The selection is now
+bound instead. It is visible in the reviewed header, it cannot diverge from the
+body, and consumer selector policy still applies to it.
+

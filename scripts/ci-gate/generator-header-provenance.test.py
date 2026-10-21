@@ -102,9 +102,25 @@ def usage_modes() -> set[str]:
     return set(match.group(1).split("|"))
 
 
+def usage_options() -> set[str]:
+    result = subprocess.run(["bash", str(GENERATOR)], capture_output=True, text=True, check=False)
+    first_line = result.stderr.splitlines()[0] if result.stderr else ""
+    options = set(re.findall(r"\[(--[a-z][a-z-]*)\b", first_line))
+    if not options:
+        raise AssertionError("generator usage no longer lists its options")
+    return options
+
+
 class HeaderRegeneratesItsFile(unittest.TestCase):
     def test_every_mode_is_covered(self):
         self.assertEqual(usage_modes(), set(CASES) | HEADERLESS)
+
+    def test_every_option_in_the_usage_line_is_exercised(self):
+        # CASES is hand-written, so an option added to the generator without a
+        # case here would never be checked for reaching the header.
+        exercised = {argument for option_sets in CASES.values() for options in option_sets
+                     for argument in options if argument.startswith("--")}
+        self.assertEqual(usage_options() - exercised, set())
 
     def test_the_header_alone_reproduces_every_mode_byte_for_byte(self):
         ref = head_commit()

@@ -330,6 +330,21 @@ class GeneratedHeaderFormats(unittest.TestCase):
                 root = self.repo_with(template.format(sha="a" * 40))
                 self.assertEqual(cv.verify(root, releases, today="2026-02-02"), [])
 
+    def test_bare_format_hex_case_matches_the_hub_named_formats(self):
+        # HEADER_RE reads hex case-insensitively; the bare formats must agree,
+        # and both report the claim in canonical lowercase so it compares with
+        # the release commit rather than becoming a PIN_MISMATCH on case alone.
+        releases = [rel("v3.2.0", commit_char="a", published="2026-02-01")]
+        for label, template in GENERATED_HEADER_FORMATS.items():
+            for sha, expected in (("A" * 40, []), ("C" * 40, ["PIN_MISMATCH"])):
+                with self.subTest(label=label, sha=sha[0]):
+                    root = self.repo_with(template.format(sha=sha))
+                    found = [ref for relative, _, ref in cv.references(root)[0]
+                             if relative == "generated.txt"]
+                    self.assertEqual(found, [sha.lower()])
+                    self.assertEqual(
+                        [f.kind for f in cv.verify(root, releases, today="2026-02-02")], expected)
+
     def test_lookalikes_of_the_bare_formats_are_not_claims(self):
         # The bare formats carry no hub name, so they are anchored to the exact
         # shape a generator stamps; prose that merely resembles one stays prose.
@@ -338,6 +353,7 @@ class GeneratedHeaderFormats(unittest.TestCase):
             "# Contract: " + "c" * 40 + " is what the vendor shipped",
             "# Contract: " + "c" * 64,
             "#   scripts/gen-container-candidate.sh workflow " + "c" * 64,
+            "#   scripts/gen-container-candidate.sh workflow " + "C" * 64,
             "# CONTRACT_REF=" + "c" * 40 + " (previous)",
             "CONTRACT_REF=" + "c" * 40,
             "# see scripts/gen-ai-review-caller.sh for how " + "c" * 40 + " was made",

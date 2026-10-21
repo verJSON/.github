@@ -78,6 +78,8 @@ for fixture in single multi; do
   for identity_case in \
     "stale contract SHA|.images[-1].provenance.builderIdentity = \"Verjson/.github/.github/workflows/container-candidate-publish.yml@$(printf '%040d' 0)\"" \
     "read-only entrypoint|.images[0].provenance.builderIdentity = \"Verjson/.github/.github/workflows/container-candidate.yml@$ref\"" \
+    "trailing suffix|.images[0].provenance.builderIdentity = \"$publisher\" + \"0\"" \
+    "leading prefix|.images[0].provenance.builderIdentity = \"x\" + \"$publisher\"" \
     "another owner|.images[0].provenance.builderIdentity = \"Attacker/.github/.github/workflows/container-candidate-publish.yml@$ref\"" \
     "absent identity|del(.images[0].provenance.builderIdentity)" \
     "no images|.images = []"; do

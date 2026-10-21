@@ -59,7 +59,7 @@ The publisher workflow authorizes one identity per run in its `prepare` job (`pu
 
 **Evidence.** An adopter's `container-candidate.json` declares each image's `provenance.builderIdentity`, which is the publisher identity that the amendment above authorizes. A stale contract SHA there was caught only after the image had been built, pushed, and signed. `container_release_manifest.py` refuses it at manifest validation (reviewer-confirmed on verjson-ci#303). Neither `contract-version.py verify` nor the generated `container-candidate-contract.test.sh` read the field.
 
-**Decision.** The generated candidate contract test owns this check. It requires every declared image to name exactly `Verjson/.github/.github/workflows/container-candidate-publish.yml@<CONTRACT>`. That is the string the publisher's `prepare` job authorizes for an adopter. The test refuses an empty image list, a missing or stale identity, the read-only `container-candidate.yml` entrypoint, and another owner.
+**Decision.** The generated candidate contract test owns this check. It requires every declared image to name exactly `Verjson/.github/.github/workflows/container-candidate-publish.yml@<CONTRACT>`. That is the string the publisher's `prepare` job authorizes for an adopter. The test refuses an empty image list, a missing or stale identity, the read-only `container-candidate.yml` entrypoint, another owner, and a trailing or leading addition to the exact identity, so the comparison is proven to be equality rather than a prefix or suffix match.
 
 It was chosen over teaching `contract-version.py` a `builderIdentity` key for three reasons:
 
