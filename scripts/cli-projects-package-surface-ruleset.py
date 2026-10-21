@@ -41,17 +41,42 @@ RUNTIME_PATHS = (
 )
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
-# The reviewed digest flow of the PR admission step, stated here rather than read
-# from the generator so a widened generator cannot move it (ADR 0212).
-ADMISSION_DIGEST_FLOW = (
-    'candidate_sha256="$(sha256sum "$candidate_workflow" | cut -d\' \' -f1)"',
-    '[[ "$candidate_sha256" =~ ^[0123456789abcdef]{64}$ ]]',
-    '[ "$candidate_sha256" = "$CONSUMER_WORKFLOW_SHA256" ]',
-)
-ADMISSION_CONTROL_FLOW = re.compile(
-    r"\|\||&&|(?<![\w-])(?:if|then|elif|else|fi|case|esac|while|until|for|do|done"
-    r"|select|function|exit|return|eval|exec|source|set\s+\+\w*)(?![\w-])"
-)
+# The reviewed text of the PR admission step, byte for byte. It is stated here, not read
+# from the generator, because a widened generator moves its own output; any generator
+# change to the admission step requires a reviewed update of this constant (ADR 0212).
+ADMISSION_RUN = r'''set -euo pipefail
+# Repository names are ASCII-case-insensitive identities (ADR 0213): the run
+# context and the API report the renamed display case `verJSON`.
+jq -en --arg observed "$REPOSITORY" --arg expected 'Verjson/verjson-cli-projects' \
+  '($observed | ascii_downcase) == ($expected | ascii_downcase)' >/dev/null
+[[ "$RUN_ID" =~ ^[123456789][0123456789]*$ ]]
+run_record="$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID" --jq '[.event,.head_sha,(.pull_requests|length),(.pull_requests[0].number//"")]|@tsv')"
+IFS=$'\t' read -r event_name run_head_sha pr_count pr_number <<<"$run_record"
+[ "$event_name" = pull_request ]
+[[ "$run_head_sha" =~ ^[0123456789abcdef]{40}$ ]]
+[ "$pr_count" = 1 ]
+[[ "$pr_number" =~ ^[123456789][0123456789]*$ ]]
+pr_record="$(gh api "repos/$REPOSITORY/pulls/$pr_number" --jq '[.number,.state,.head.repo.full_name,.head.sha,.base.ref]|@tsv')"
+IFS=$'\t' read -r live_number live_state live_repository live_head_sha live_base_ref <<<"$pr_record"
+[ "$live_number" = "$pr_number" ]
+[ "$live_state" = open ]
+jq -en --arg observed "$live_repository" --arg expected 'Verjson/verjson-cli-projects' \
+  '($observed | ascii_downcase) == ($expected | ascii_downcase)' >/dev/null
+[ "$live_head_sha" = "$run_head_sha" ]
+[[ "$live_head_sha" =~ ^[0123456789abcdef]{40}$ ]]
+[ "$live_base_ref" = main ]
+candidate_workflow="$(mktemp)"
+trap 'rm -f -- "$candidate_workflow"' EXIT INT TERM
+gh api -H 'Accept: application/vnd.github.raw+json' "repos/Verjson/verjson-cli-projects/contents/.github/workflows/ci.yml?ref=$live_head_sha" >"$candidate_workflow"
+candidate_sha256="$(sha256sum "$candidate_workflow" | cut -d' ' -f1)"
+[[ "$candidate_sha256" =~ ^[0123456789abcdef]{64}$ ]]
+[ "$candidate_sha256" = "$CONSUMER_WORKFLOW_SHA256" ]
+{
+  echo "event-name=$event_name"
+  echo "head-repository=$live_repository"
+  echo "head-sha=$live_head_sha"
+} >>"$GITHUB_OUTPUT"
+'''
 MUTABLE_FIELDS = (
     "name", "target", "enforcement", "bypass_actors", "conditions", "rules",
 )
@@ -175,47 +200,6 @@ def read_contract(path=CONTRACT):
     return contract
 
 
-def validate_admission_digest_flow(admission_run, workflow_text, legacy_sha256):
-    """Refuse any admission that could accept a caller other than the admitted digest.
-
-    Generator equality cannot catch a widened generator, because both sides move
-    together, so this is an independent statement of the reviewed shape (ADR 0212).
-    The step must be straight-line under `set -euo pipefail`, so every standalone
-    check is mandatory. The admitted digest may arrive only through
-    CONSUMER_WORKFLOW_SHA256, and the candidate digest may appear only in its
-    assignment, its format check, and one exact comparison, in that order, before
-    the single output write.
-    """
-    require(not re.search(r"[0-9a-fA-F]{64}", admission_run),
-            "identity admission embeds a caller digest literal")
-    require(legacy_sha256 is None or legacy_sha256 not in workflow_text.lower(),
-            "required workflow embeds the rotation-only legacy caller digest")
-    lines = [line.strip() for line in admission_run.splitlines()]
-    require(lines[:1] == ["set -euo pipefail"],
-            "identity admission must start with set -euo pipefail")
-    require(
-        not any(
-            ADMISSION_CONTROL_FLOW.search(line)
-            for line in lines if not line.startswith("#")
-        ),
-        "identity admission must be straight-line",
-    )
-    digest_lines = [
-        index for index, line in enumerate(lines)
-        if "candidate_sha256" in line or "CONSUMER_WORKFLOW_SHA256" in line
-    ]
-    require(
-        [lines[index] for index in digest_lines] == list(ADMISSION_DIGEST_FLOW)
-        and digest_lines == list(range(digest_lines[0], digest_lines[0] + 3)),
-        "identity admission digest flow drifted",
-    )
-    outputs = [index for index, line in enumerate(lines) if "GITHUB_OUTPUT" in line]
-    require(
-        len(outputs) == 1 and outputs[0] > digest_lines[-1],
-        "identity admission must write outputs only after the digest comparison",
-    )
-
-
 def validate_workflow(path=WORKFLOW):
     generated = subprocess.run(
         [sys.executable, str(GENERATOR), "config/cli-projects-required-node-ci.json"],
@@ -285,12 +269,16 @@ def validate_workflow(path=WORKFLOW):
         "REPOSITORY", "RUN_ID", "CONSUMER_WORKFLOW_SHA256", "GH_TOKEN",
     }, "identity admission inputs drifted")
     admission_run = admission_step.get("run", "")
-    validate_admission_digest_flow(
-        admission_run,
-        path.read_text(encoding="utf-8"),
-        load_required_node_config(GENERATOR_CONFIG, require)[
-            "rollout_legacy_consumer_workflow_sha256"
-        ],
+    require(admission_run == ADMISSION_RUN, "identity admission is not the reviewed text")
+    consumer = subprocess.run(
+        [sys.executable, str(GENERATOR), "--consumer", "config/cli-projects-required-node-ci.json"],
+        cwd=ROOT, capture_output=True, check=False,
+    )
+    require(consumer.returncode == 0, "consumer workflow generation failed")
+    require(
+        admission_step.get("env", {}).get("CONSUMER_WORKFLOW_SHA256")
+        == hashlib.sha256(consumer.stdout).hexdigest(),
+        "admitted digest is not the generated consumer caller",
     )
     for assertion in (
         "actions/runs/$RUN_ID",

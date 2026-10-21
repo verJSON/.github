@@ -205,7 +205,8 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
             'case "$*" in\n'
             '  *"/actions/runs/"*) printf \'pull_request\\t%s\\t1\\t5\\n\' "$HEAD" ;;\n'
             '  *"/pulls/5 "*) printf \'5\\topen\\t%s\\t%s\\tmain\\n\' "$LIVE_REPOSITORY" "$HEAD" ;;\n'
-            '  *"/contents/.github/workflows/ci.yml?ref="*) printf \'%s\' "$CANDIDATE" ;;\n'
+            '  *"/contents/.github/workflows/ci.yml?ref=$HEAD") printf \'%s\' "$CANDIDATE" ;;\n'
+            '  *"/contents/.github/workflows/ci.yml?ref="*) echo "UNADMITTED ref $*" >&2; exit 72 ;;\n'
             '  *) echo "UNSTUBBED gh $*" >&2; exit 1 ;;\n'
             "esac\n",
             encoding="utf-8",
@@ -291,6 +292,25 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
                 result, output = self.run_admission(repository, repository, stale)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(output, "")
+
+    def test_committed_admission_refuses_an_arbitrary_caller_carrying_a_marker(self):
+        # A marker-triggered override of the admitted digest (reviewer bypass N2) would
+        # admit any caller that carries it, including one with a pull_request_target
+        # trigger; the committed step must refuse it on execution.
+        repository = "Verjson/verjson-cli-projects"
+        caller = (
+            "# admit-me\n"
+            "name: CI\n"
+            "on: pull_request_target\n"
+            "jobs:\n"
+            "  ci:\n"
+            "    runs-on: ubuntu-24.04\n"
+            "    steps:\n"
+            "      - run: env\n"
+        )
+        result, output = self.run_admission(repository, repository, caller)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(output, "")
 
     def test_rollout_legacy_consumer_workflow_digest_accepts_digest_or_null(self):
         config = json.loads(MODULE.REQUIRED_NODE_CONFIG.read_text(encoding="utf-8"))
