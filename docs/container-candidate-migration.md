@@ -56,6 +56,8 @@ SHA. Do not collapse the two calls or grant publication permissions to validatio
 GitHub validates the complete reusable graph before evaluating runtime conditions.
 Each image's `provenance.builderIdentity` must name the publishing entrypoint,
 `Verjson/.github/.github/workflows/container-candidate-publish.yml@<contract-sha>`.
+The generated contract test refuses any other identity, so a stale SHA fails in
+pull-request CI rather than after publication (ADR 0216, 2026-10-20 amendment).
 Regenerate the workflow, validator, destination helper, and contract test together
 when changing the contract SHA, and run the generated test in CI.
 

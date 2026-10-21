@@ -128,10 +128,13 @@ contract-test)
   workflow_digest="$("$0" workflow "$ref" "$config_path" | sha256sum | cut -d' ' -f1)"
   validator_digest="$("$0" validator "$ref" "$config_path" | sha256sum | cut -d' ' -f1)"
   destination_helper_digest="$("$0" destination-helper "$ref" "$config_path" | sha256sum | cut -d' ' -f1)"
+  publisher="Verjson/.github/.github/workflows/container-candidate-publish.yml@$ref"
   cat <<TEST
 #!/usr/bin/env bash
 # GENERATED FILE — do not edit by hand.
 # Contract: $ref
+# Regenerate with:
+#   scripts/gen-container-candidate.sh contract-test $ref $config_path > scripts/container-candidate-contract.test.sh
 set -euo pipefail
 root="\$(cd "\$(dirname "\$0")/.." && pwd)"
 caller="\$root/.github/workflows/container-candidate.yml"
@@ -180,6 +183,20 @@ if grep -Eq 'packages: read|secrets:|NODE_AUTH_TOKEN' "\$validation_job"; then
 else
   ! grep -q 'NODE_AUTH_TOKEN\|packages: read' "\$caller" || fail "public-only caller exposes package credentials or read authority"
 fi
+# Publication signs as $publisher and refuses any other declared identity, but
+# only after building and publishing; a stale identity fails here first.
+[ -f "\$root/$config_path" ] || fail "candidate config $config_path is missing"
+python3 -I -c '
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    config = json.load(stream)
+images = config.get("images") if isinstance(config, dict) else None
+sys.exit(0 if isinstance(images, list) and images and all(
+    isinstance(image, dict) and isinstance(image.get("provenance"), dict)
+    and image["provenance"].get("builderIdentity") == sys.argv[2]
+    for image in images) else 1)
+' "\$root/$config_path" '$publisher' \
+  || fail "every image in $config_path must declare provenance.builderIdentity $publisher, the publishing entrypoint at this contract"
 python3 "\$validator" --help >/dev/null
 echo "container candidate generated contract passed"
 TEST
