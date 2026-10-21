@@ -63,21 +63,27 @@ was bypassed in review:
   `continue-on-error`, and swapped step environment values, weaken the check outright.
 
 `REVIEWED_WORKFLOW` in `scripts/cli-projects-package-surface-ruleset.py` now holds the
-reviewed required workflow. That covers the top-level keys `name`, `on`, `permissions`,
-`concurrency`, and `jobs`, and all four jobs, including the admission job. The constant is
-stated there and not read from the generator. `validate_workflow` parses the committed
-workflow with a loader that refuses duplicate and merge keys. It then requires the parsed
-structure to equal the constant exactly. The only variable is the admitted digest, which
-is the sha256 of the generator's `--consumer` output. Any generator change to this
+exact bytes of the reviewed required workflow, from the generator header through the last
+job. It is stated there and not read from the generator. `validate_workflow` requires the
+committed file's bytes to equal the constant exactly. The constant's only variable is the
+quoted admitted digest, which must be a lowercase 64-hex string equal to the sha256 of the
+generator's `--consumer` output. The generator now quotes that digest, because an
+all-decimal digest would otherwise load as an integer. Any generator change to this
 workflow requires a reviewed update of the constant in the same change.
 
-The earlier 64-hex-literal, legacy-digest, and admission-text checks are removed because
-the exact structure subsumes them. The existing per-field checks stay as documented
-invariants.
+The comparison is on bytes, not on the parsed structure. A parser that understands YAML
+1.1 reads `yes:` or `True:` for `on:`, `on` for `true`, `no` for `false`, and an explicit
+`!!bool "true"` as the reviewed values, while GitHub Actions may not. Byte equality
+removes the need to know how either parser reads them.
+
+Exact bytes subsume the earlier 64-hex-literal, legacy-digest, admission-text,
+digest-binding, and duplicate- or merge-key checks, so those are removed. The existing
+per-field checks stay as documented invariants.
 
 Tests apply each mutant through a wrapped generator and require `validate_workflow` to
 refuse it. The mutants cover the widened comparisons, the reviewed bypasses, the
-surrounding keys, the other jobs, a swapped admitted digest, and a duplicate key.
+surrounding keys, the other jobs, YAML 1.1 spellings, a swapped admitted digest, and a
+duplicate key.
 Execution tests run the committed step against the callers generated at `1c7659b7…`
 (`9e4ca97c…`) and `4a08c756…` (`721856f9…`). They also run it against an arbitrary
 caller that carries a marker and a `pull_request_target` trigger. Each must be refused.

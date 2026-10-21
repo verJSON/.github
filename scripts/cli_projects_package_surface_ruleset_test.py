@@ -137,8 +137,23 @@ DUPLICATE_KEY_MUTANT = (
     "    if: github.repository == 'Verjson/verjson-cli-projects'\n",
     "    if: always()\n    if: github.repository == 'Verjson/verjson-cli-projects'\n",
 )
-ADMITTED_DIGEST_MUTANT = ("CONSUMER_WORKFLOW_SHA256: d23be004f196ce321965bd07d3f4fa221374d61270215ed17ed5f228239bc117",
-              f"CONSUMER_WORKFLOW_SHA256: {_LEGACY}")
+ADMITTED_DIGEST_MUTANT = ("CONSUMER_WORKFLOW_SHA256: 'd23be004f196ce321965bd07d3f4fa221374d61270215ed17ed5f228239bc117'",
+                          f"CONSUMER_WORKFLOW_SHA256: '{_LEGACY}'")
+# YAML 1.1 spellings that PyYAML reads as the reviewed values and GitHub Actions may read
+# differently. Parsed-structure equality accepted them; exact bytes must not (ADR 0212).
+YAML_SPELLING_MUTANTS = {
+    "Y1 on spelled yes": ("\non:\n", "\nyes:\n"),
+    "Y2 on spelled True": ("\non:\n", "\nTrue:\n"),
+    "Y3 secretless-pr spelled on": (
+        "      node-version: '26'\n      secretless-pr: true\n",
+        "      node-version: '26'\n      secretless-pr: on\n"),
+    "Y4 persist-credentials spelled no": (
+        "          persist-credentials: false\n          path: consumer\n",
+        "          persist-credentials: no\n          path: consumer\n"),
+    "Y5 secretless-pr as an explicit bool tag": (
+        "      node-version: '26'\n      secretless-pr: true\n",
+        "      node-version: '26'\n      secretless-pr: !!bool \"true\"\n"),
+}
 
 
 class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
@@ -341,36 +356,55 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
         for label, (anchor, replacement) in ADMISSION_MUTANTS.items():
             with self.subTest(label):
                 self.assert_workflow_mutant_refused(
-                    anchor, replacement, "required workflow is not the reviewed structure"
+                    anchor, replacement, "required workflow is not the reviewed bytes"
                 )
 
     def test_workflow_refuses_every_change_around_the_admission_text(self):
         for label, (anchor, replacement) in WORKFLOW_MUTANTS.items():
             with self.subTest(label):
                 self.assert_workflow_mutant_refused(
-                    anchor, replacement, "required workflow is not the reviewed structure"
+                    anchor, replacement, "required workflow is not the reviewed bytes"
                 )
 
     def test_workflow_refuses_an_admitted_digest_other_than_the_generated_caller(self):
         self.assert_workflow_mutant_refused(
-            *ADMITTED_DIGEST_MUTANT, "required workflow is not the reviewed structure"
+            *ADMITTED_DIGEST_MUTANT, "required workflow is not the reviewed bytes"
         )
 
     def test_workflow_refuses_a_duplicate_key_that_hides_a_reviewed_value(self):
-        self.assert_workflow_mutant_refused(*DUPLICATE_KEY_MUTANT, "duplicate key")
+        self.assert_workflow_mutant_refused(
+            *DUPLICATE_KEY_MUTANT, "required workflow is not the reviewed bytes"
+        )
 
-    def test_workflow_loader_refuses_merge_keys_and_malformed_yaml(self):
-        # A merge key resolves differently across YAML parsers, so the structure the
-        # verifier compares might not be the one GitHub runs.
-        merged = "base: &base\n  shell: bash\njobs:\n  admission:\n    <<: *base\n"
-        for text, message in ((merged, "merge key"), ("jobs: [\n", "not valid YAML")):
-            with self.subTest(message), self.assertRaisesRegex(MODULE.ContractError, message):
-                MODULE.load_workflow_document(text)
+    def test_workflow_refuses_yaml_spellings_github_may_read_differently(self):
+        for label, (anchor, replacement) in YAML_SPELLING_MUTANTS.items():
+            with self.subTest(label):
+                self.assert_workflow_mutant_refused(
+                    anchor, replacement, "required workflow is not the reviewed bytes"
+                )
 
-    def test_reviewed_structure_is_the_committed_workflow(self):
-        document = yaml.safe_load(MODULE.WORKFLOW.read_text(encoding="utf-8"))
-        digest = document["jobs"]["admission"]["steps"][0]["env"]["CONSUMER_WORKFLOW_SHA256"]
-        self.assertEqual(MODULE.reviewed_workflow(digest), document)
+    def test_admitted_digest_is_a_quoted_string(self):
+        # Unquoted, an all-decimal digest would load as an integer.
+        config = GENERATOR_MODULE.load_config(MODULE.GENERATOR_CONFIG)
+        path = "config/cli-projects-required-node-ci.json"
+        digest = hashlib.sha256(GENERATOR_MODULE.render_consumer(config, path).encode()).hexdigest()
+        self.assertIn(
+            f"          CONSUMER_WORKFLOW_SHA256: '{digest}'\n",
+            MODULE.WORKFLOW.read_text(encoding="utf-8"),
+        )
+        self.assertIn("CONSUMER_WORKFLOW_SHA256: '__CONSUMER_WORKFLOW_SHA256__'\n", MODULE.REVIEWED_WORKFLOW)
+
+    def test_reviewed_bytes_are_the_committed_workflow(self):
+        committed = MODULE.WORKFLOW.read_text(encoding="utf-8")
+        digest = yaml.safe_load(committed)["jobs"]["admission"]["steps"][0]["env"][
+            "CONSUMER_WORKFLOW_SHA256"
+        ]
+        self.assertEqual(MODULE.reviewed_workflow_text(digest), committed)
+        for malformed in (digest.upper(), digest[:-1], int("1" * 64), None):
+            with self.subTest(malformed=malformed), self.assertRaisesRegex(
+                MODULE.ContractError, "lowercase SHA-256"
+            ):
+                MODULE.reviewed_workflow_text(malformed)
 
     def test_identity_admission_rejects_every_untrusted_identity_mutation(self):
         workflow = yaml.safe_load(MODULE.WORKFLOW.read_text(encoding="utf-8"))

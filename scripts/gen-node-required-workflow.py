@@ -60,7 +60,7 @@ jobs:
         env:
           REPOSITORY: ${{{{ github.repository }}}}
           RUN_ID: ${{{{ github.run_id }}}}
-          CONSUMER_WORKFLOW_SHA256: {consumer_sha256}
+          CONSUMER_WORKFLOW_SHA256: '{consumer_sha256}'
           GH_TOKEN: ${{{{ github.token }}}}
         run: |
           set -euo pipefail
