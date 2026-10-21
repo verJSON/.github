@@ -275,9 +275,9 @@ def parse_updates(body: str) -> tuple[Update, ...]:
     updates = tables[0]
     if len(updates) > MAX_UPDATES:
         raise AutomationError(f"Renovate update table exceeds {MAX_UPDATES} rows")
-    if len(updates) != len(set(updates)):
-        raise AutomationError("Renovate update table repeats a package transition")
-    return updates
+    # Renovate emits one row per file/manager, so one image bumped in two
+    # Dockerfiles repeats an identical transition; it is one release fact.
+    return tuple(dict.fromkeys(updates))
 
 
 def admit_pull_request(

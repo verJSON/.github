@@ -94,3 +94,28 @@ one Docker image remain distinct and both appear in the generated fragment.
 Exact duplicate transitions still fail, including equivalent linked and bare
 package spellings. This restores grouped-update attribution without changing
 author admission, table ambiguity checks or fragment publication authority.
+
+## Amendment (2026-10-21) — identical transition rows collapse
+
+Renovate writes one update-table row per file, manager, or build stage. When one
+image is bumped in two Dockerfiles, the same package/from/to transition appears
+in more than one row, and the rows differ only in columns such as `Type`.
+Verjson/verjson-ci#290 (job 118966588750) was refused for that reason, although
+it is a valid Renovate pull request. The 2026-09-10 rule refused exact duplicates
+as a fail-closed default. It gave no threat that a repeated row could carry, and
+none exists: a repeat adds no package, version, or text to the fragment.
+
+The parser now drops a row whose complete parsed transition is identical to an
+earlier one and keeps the first-seen order. Identity remains the exact parsed
+`(package, from, to)`, so equivalent linked and bare package spellings collapse,
+and so do rows that differ only in cell padding. Case is significant because
+ecosystems such as Go modules and Maven treat case-variant names as different
+packages. Rows for the same package with a different from or to version are
+distinct transitions and all appear in the fragment, as decided on 2026-09-10.
+Refusing them would also refuse #290, whose alpine and alpine3.23 tags both bump
+`node`. The 50-row bound counts every table row before collapsing, so repeating
+rows cannot raise the input bound. Every other row check still runs on each row.
+Author admission, the single-table requirement, credential scope, and fragment
+publication authority do not change. The trusted reusable workflow runs the
+parser from its pinned contract checkout. The generated caller is unchanged, and
+adopters receive the change when they move their contract SHA.

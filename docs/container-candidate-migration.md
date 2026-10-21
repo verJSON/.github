@@ -65,6 +65,52 @@ Default-branch pushes publish commit-addressed and
 `<nextStableVersion>-rc.<run_id>.<run_attempt>` identities and retain a complete
 candidate manifest. Downstream automation consumes its digests, never its tags.
 
+## Rotate the GAR provider before changing the contract SHA
+
+A GAR destination's Workload Identity provider pins `job_workflow_sha` and both
+`job_workflow_ref` spellings (`Verjson/` and `verJSON/`) to the publisher's
+contract SHA ([ADR 0217](decisions/0217-bound-gar-canary-publishing-to-one-github-workflow/README.md)).
+If you regenerate at a new SHA before rotating the provider, every `main` push
+fails `mirror-gar` closed with `unauthorized_client … rejected by the attribute
+condition`. Get the rotation reviewed and apply it immediately before merging
+the regeneration. Any `main` push still on the old pin also fails closed after
+the rotation, so merge nothing else in between. Change only the SHA. Do not touch the owner ID, repository ID, ref,
+event, attribute mapping, or provider state:
+
+```sh
+set -euo pipefail
+gcp_project=<project-id>; pool=<pool>; provider=<provider>
+old_sha=<currently-pinned-contract-sha>; new_sha=<new-contract-sha>
+where=(--project="$gcp_project" --location=global --workload-identity-pool="$pool")
+gcloud iam workload-identity-pools providers describe "$provider" "${where[@]}" --format=json > provider-before.json
+jq -er .attributeCondition provider-before.json > condition-before.txt
+[ "$(grep -o "$old_sha" condition-before.txt | wc -l)" -eq 3 ] || { echo "expected three $old_sha occurrences" >&2; exit 1; }
+sed "s/$old_sha/$new_sha/g" condition-before.txt > condition-after.txt
+diff condition-before.txt condition-after.txt || true   # review: only the three SHA occurrences differ
+gcloud iam workload-identity-pools providers update-oidc "$provider" "${where[@]}" \
+  --attribute-condition="$(cat condition-after.txt)"
+gcloud iam workload-identity-pools providers describe "$provider" "${where[@]}" --format=json > provider-after.json
+diff <(jq -er .attributeCondition provider-after.json) condition-after.txt
+diff <(jq -S 'del(.attributeCondition)' provider-before.json) <(jq -S 'del(.attributeCondition)' provider-after.json)
+```
+
+Run the first `describe` and review the condition diff before anyone authorizes
+the mutating `update-oidc`. Both read-back diffs must be empty. Record the new
+condition and the first green `mirror-gar` run in an ADR amendment.
+
+The candidate identity is bound to the run attempt that minted it, so reruns
+cannot repair a failed publication:
+
+- `gh run rerun --failed` never passes `candidate-manifest`. `prepare` is not
+  re-run, so `candidateVersion` keeps the earlier attempt number while the
+  manifest records the current one, and validation refuses the mismatch.
+- A full rerun of a commit whose images were already attested adds a second SPDX
+  referrer to the same digest, and `mirror-gar` refuses it with `registry platform
+  is missing one unique application/spdx+json referrer`.
+
+Use a full workflow rerun only when no earlier attempt reached the attestation
+jobs. To re-prove a commit after a rotation, push a new commit.
+
 ## Private Node packages
 
 List every exact private scoped package in `privateNodePackages`. The trusted
