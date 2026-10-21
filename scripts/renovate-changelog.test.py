@@ -56,6 +56,20 @@ NEO4J_DIGEST_BODY = """This PR contains the following updates:
 | neo4j | digest | `f79a46a` → `0ddfa71` |
 """
 
+# Update table of Verjson/verjson-ci#290 ("chore(deps): update node.js to v26.12.0"):
+# one image bumped in two Dockerfiles, so Renovate lists the alpine3.23 transition
+# once per file/stage and the rows differ only in the Type column.
+VERJSON_CI_290_BODY = """This PR contains the following updates:
+
+| Package | Type | Update | Change |
+|---|---|---|---|
+| [node](https://hub.docker.com/_/node) ([source](https://redirect.github.com/nodejs/node)) | final | minor | `26.10.0-alpine` → `26.12.0-alpine` |
+| [node](https://hub.docker.com/_/node) ([source](https://redirect.github.com/nodejs/node)) | final | minor | `26.10.0-alpine3.23` → `26.12.0-alpine3.23` |
+| [node](https://hub.docker.com/_/node) ([source](https://redirect.github.com/nodejs/node)) | stage | minor | `26.10.0-alpine3.23` → `26.12.0-alpine3.23` |
+
+---
+"""
+
 
 class FakeClient:
     def __init__(self, responses: dict[tuple[str, str], list[Any]], pages: list[Any] | None = None):
@@ -347,17 +361,31 @@ class RenovateTableTests(unittest.TestCase):
         for duplicate in (body.splitlines()[-1], body.splitlines()[-1].replace(
             "[node](https://hub.docker.com/_/node) ([source](https://redirect.github.com/nodejs/node))", "node"
         )):
-            with self.subTest(duplicate=duplicate), self.assertRaisesRegex(
-                renovate_changelog.AutomationError, "repeats a package transition"
-            ):
-                renovate_changelog.parse_updates(body + duplicate + "\n")
+            with self.subTest(duplicate=duplicate):
+                self.assertEqual(
+                    renovate_changelog.parse_updates(body + duplicate + "\n"), updates
+                )
 
-    def test_rejects_duplicate_package_rows(self) -> None:
+    def test_identical_rows_from_one_image_in_several_files_collapse_to_one_transition(
+        self,
+    ) -> None:
+        updates = renovate_changelog.parse_updates(VERJSON_CI_290_BODY)
+        self.assertEqual(updates, (
+            renovate_changelog.Update("node", "26.10.0-alpine", "26.12.0-alpine"),
+            renovate_changelog.Update("node", "26.10.0-alpine3.23", "26.12.0-alpine3.23"),
+        ))
+        _, fragment = renovate_changelog.fragment_for(290, updates, dt.date(2026, 10, 21))
+        self.assertEqual(fragment.count("from `26.10.0-alpine3.23` to `26.12.0-alpine3.23`"), 1)
+        self.assertEqual(fragment.count("from `26.10.0-alpine` to `26.12.0-alpine`"), 1)
+
+    def test_an_identical_package_row_collapses_into_the_single_update_fragment(self) -> None:
         row = BODY.splitlines()[-1]
-        with self.assertRaisesRegex(
-            renovate_changelog.AutomationError, "repeats a package"
-        ):
-            renovate_changelog.parse_updates(BODY + row + "\n")
+        updates = renovate_changelog.parse_updates(BODY + row + "\n")
+        self.assertEqual(updates, (
+            renovate_changelog.Update("ip-address", "10.4.0", "10.5.0"),
+        ))
+        _, fragment = renovate_changelog.fragment_for(PR_NUMBER, updates, dt.date(2026, 10, 21))
+        self.assertIn("title: Update dependency ip-address from 10.4.0 to 10.5.0\n", fragment)
 
     def test_rejects_version_text_that_could_inject_markdown(self) -> None:
         injected = BODY.replace(
