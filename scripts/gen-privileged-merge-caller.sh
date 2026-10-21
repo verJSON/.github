@@ -59,12 +59,17 @@ else
 fi
 
 command -v jq >/dev/null 2>&1 || { echo "jq is required to validate required checks" >&2; exit 2; }
+# An entry names a consumer workflow, or — with "workflow_repository":"Verjson/.github"
+# — an organization ruleset-required workflow whose workflow_id/workflow_path are the
+# run's reported identity in this repository (#1861, ADR 0081 2026-10-21 correction).
 required_checks="$(jq -ce '
   if type == "array" and length > 0 and
      ([.[].name] | unique | length) == length and
      all(.[];
        type == "object" and
-       (keys | sort) == ["app_id", "name", "workflow_id", "workflow_path"] and
+       ((keys | sort) == ["app_id", "name", "workflow_id", "workflow_path"] or
+        ((keys | sort) == ["app_id", "name", "workflow_id", "workflow_path", "workflow_repository"] and
+         .workflow_repository == "Verjson/.github")) and
        (.name | type == "string" and length > 0 and
         all(explode[]; . >= 32 and (. < 127 or . > 159) and . != 8232 and . != 8233) and
         (contains("${{") | not)) and

@@ -13,6 +13,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT
 readonly LOCAL_CANONICAL_WORKFLOW="$REPO_ROOT/$CALLER_PATH"
 readonly LOCAL_CANONICAL_RETRY="$REPO_ROOT/$RETRY_PATH"
+readonly REQUIRED_WORKFLOW_PROVENANCE="$REPO_ROOT/scripts/ci-gate/required-workflow-provenance.sh"
 readonly EVIDENCE_PAGE_SIZE=100
 readonly EVIDENCE_MAX_PAGES=5
 tmp="$(mktemp -d)"
@@ -109,6 +110,34 @@ find_latest_completed_run() { # find_latest_completed_run <repository> <workflow
   COMPLETED_RUN_IDENTITY="$(jq -r 'sort_by(.id) | last // {} | [.id // "", .head_sha // ""] | @tsv' <<<"$candidates")"
 }
 
+# A ruleset-required workflow has no per-workflow runs listing in the consumer (#1861),
+# so its evidence is selected from the repository's pull-request runs by workflow ID and
+# required-workflow URL. Runs are listed newest first: the first page holding a
+# completed match supplies the latest one, and a bound exhausted without any match fails
+# rather than proving absence.
+find_latest_completed_required_run() { # find_latest_completed_required_run <repository> <workflow-id>
+  local repository="$1" workflow_id="$2" page response page_count matches
+  local workflow_url="https://api.github.com/repos/$repository/actions/required_workflows/$workflow_id"
+  COMPLETED_RUN_IDENTITY=""
+  for ((page = 1; page <= EVIDENCE_MAX_PAGES; page++)); do
+    if ! response="$(gh api "repos/$repository/actions/runs?event=pull_request&per_page=$EVIDENCE_PAGE_SIZE&page=$page")" ||
+      ! json_satisfies '.workflow_runs | type == "array"' <<<"$response"; then
+      echo "::error title=Unreadable required-workflow run evidence::repository=$repository workflow_id=$workflow_id page=$page" >&2
+      return 1
+    fi
+    matches="$(jq -c --argjson workflow_id "$workflow_id" --arg url "$workflow_url" \
+      '[.workflow_runs[] | select(.workflow_id == $workflow_id and .workflow_url == $url and .status == "completed")]' <<<"$response")"
+    if [ "$(jq 'length' <<<"$matches")" -gt 0 ]; then
+      COMPLETED_RUN_IDENTITY="$(jq -r 'sort_by(.id) | last | [.id // "", .head_sha // ""] | @tsv' <<<"$matches")"
+      return 0
+    fi
+    page_count="$(jq '.workflow_runs | length' <<<"$response")"
+    [ "$page_count" -ge "$EVIDENCE_PAGE_SIZE" ] || return 0
+  done
+  echo "::error title=Required-workflow run evidence exceeded bound::repository=$repository workflow_id=$workflow_id pages=$EVIDENCE_MAX_PAGES page_size=$EVIDENCE_PAGE_SIZE reason='no completed required-workflow run within the bounded newest-first search'" >&2
+  return 1
+}
+
 validate_retry_workflow_names() { # validate_retry_workflow_names <repository> <names-json> <policy-json>
   local repository="$1" names="$2" policy="$3" workflow_id metadata workflow_name
   local expected_names='[]'
@@ -120,7 +149,9 @@ validate_retry_workflow_names() { # validate_retry_workflow_names <repository> <
       return 1
     fi
     expected_names="$(jq -cn --argjson prior "$expected_names" --arg name "$workflow_name" '$prior + [$name]')"
-  done < <(jq -r '[.[].workflow_id] | unique[]' <<<"$policy")
+  # Only consumer workflows have a repository workflow entity whose name `workflow_run`
+  # can select; a ruleset-required entry contributes no retry name (#1861).
+  done < <(jq -r '[.[] | select(has("workflow_repository") | not) | .workflow_id] | unique[]' <<<"$policy")
   expected_names="$(jq -c 'sort' <<<"$expected_names")"
   names="$(jq -c 'sort' <<<"$names")"
   if [ "$expected_names" != "$names" ]; then
@@ -165,15 +196,27 @@ validate_required_check_policy() { # validate_required_check_policy <repository>
     workflow_path="$(jq -r .workflow_path <<<"$required")"
     check_name="$(jq -r .name <<<"$required")"
     app_id="$(jq -r .app_id <<<"$required")"
-    # shellcheck disable=SC2016 # jq program text, expanded by jq rather than the shell
-    if ! metadata="$(gh api "repos/$repository/actions/workflows/$workflow_id")" ||
-      ! json_satisfies '.id == $id and .path == $path and .state == "active"' \
-        --arg path "$workflow_path" --argjson id "$workflow_id" <<<"$metadata"; then
-      echo "::error title=Invalid required-check workflow identity::repository=$repository check=$check_name workflow_id=$workflow_id path=$workflow_path reason='workflow is missing, renamed, inactive, or mismatched'"
-      return 1
-    fi
-    if ! find_latest_completed_run "$repository" "$workflow_id"; then
-      return 1
+    if jq -e 'has("workflow_repository")' <<<"$required" >/dev/null; then
+      # The organization ruleset, not a consumer workflow entity, is the identity of a
+      # ruleset-required workflow; the helper is the one the gate executes.
+      if ! bash "$REQUIRED_WORKFLOW_PROVENANCE" pinned-revision "$repository" "$default_branch" "$workflow_path" >/dev/null; then
+        echo "::error title=Invalid required-workflow identity::repository=$repository check=$check_name workflow_id=$workflow_id path=$workflow_path reason='no active organization ruleset pins exactly one revision of this path in $CANONICAL_REPOSITORY reachable from main'"
+        return 1
+      fi
+      if ! find_latest_completed_required_run "$repository" "$workflow_id"; then
+        return 1
+      fi
+    else
+      # shellcheck disable=SC2016 # jq program text, expanded by jq rather than the shell
+      if ! metadata="$(gh api "repos/$repository/actions/workflows/$workflow_id")" ||
+        ! json_satisfies '.id == $id and .path == $path and .state == "active"' \
+          --arg path "$workflow_path" --argjson id "$workflow_id" <<<"$metadata"; then
+        echo "::error title=Invalid required-check workflow identity::repository=$repository check=$check_name workflow_id=$workflow_id path=$workflow_path reason='workflow is missing, renamed, inactive, or mismatched'"
+        return 1
+      fi
+      if ! find_latest_completed_run "$repository" "$workflow_id"; then
+        return 1
+      fi
     fi
     run_identity="$COMPLETED_RUN_IDENTITY"
     IFS=$'\t' read -r run_id _ <<<"$run_identity"
@@ -479,7 +522,9 @@ while IFS= read -r repository; do
           type == "array" and length > 0 and
           ([.[].name] | unique | length) == length and all(.[];
             type == "object" and
-            (keys | sort) == ["app_id", "name", "workflow_id", "workflow_path"] and
+            ((keys | sort) == ["app_id", "name", "workflow_id", "workflow_path"] or
+             ((keys | sort) == ["app_id", "name", "workflow_id", "workflow_path", "workflow_repository"] and
+              .workflow_repository == "Verjson/.github")) and
             (.name | type == "string" and length > 0) and
             (.app_id | type == "number" and . > 0 and floor == .) and
             (.workflow_id | type == "number" and . > 0 and floor == .) and

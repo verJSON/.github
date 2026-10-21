@@ -157,8 +157,33 @@ case "$*" in
   "api repos/Verjson/.github --jq [.default_branch,.visibility] | @tsv")
     printf '%s\n' $'main\tpublic'
     ;;
+  # Ruleset-required workflow evidence (#1861), shaped like verjson-cli-projects#159.
+  "api repos/Verjson/.github")
+    printf '%s\n' '{"id":1269388380,"full_name":"verJSON/.github"}'
+    ;;
+  "api repos/Verjson/.github/commits/main --jq .sha // \"\"")
+    printf '%s\n' "${REQUIRED_PIN:-aa5644220469ed6263444c996179cb8f6d0aa168}"
+    ;;
+  api*"repos/"*"/actions/runs?event=pull_request&per_page=100&page="*)
+    case "${REQUIRED_RUN_MODE:-valid}" in
+      valid) printf '%s\n' '{"workflow_runs":[{"id":7003,"workflow_id":345626628,"workflow_url":"https://api.github.com/repos/Verjson/alpha/actions/required_workflows/345626628","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","status":"completed","conclusion":"success"}]}' ;;
+      consumer-url) printf '%s\n' '{"workflow_runs":[{"id":7003,"workflow_id":345626628,"workflow_url":"https://api.github.com/repos/Verjson/alpha/actions/workflows/345626628","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","status":"completed","conclusion":"success"}]}' ;;
+    esac
+    ;;
+  api*"repos/"*"/actions/runs/7003/jobs?per_page=100"*)
+    printf '%s\n' '{"jobs":[{"id":8003,"name":"admission","check_run_url":"https://api.github.com/repos/Verjson/alpha/check-runs/9003"}]}'
+    ;;
+  api*"https://api.github.com/repos/Verjson/alpha/check-runs/9003"*)
+    printf '%s\n' '{"name":"admission","app":{"id":15368}}'
+    ;;
   api*"repos/"*"/rules/branches/"*)
     case "${RULE_BINDING_MODE:-valid}" in
+      required-workflow)
+        jq -nc --arg sha "${REQUIRED_PIN:-aa5644220469ed6263444c996179cb8f6d0aa168}" --arg mode "${REQUIRED_RULE_MODE:-valid}" '[
+          {type:"required_status_checks",parameters:{required_status_checks:[{context:"shell-tests",integration_id:15368},{context:"admission",integration_id:15368}]}},
+          {type:"workflows",ruleset_source:"verJSON",ruleset_source_type:"Organization",
+           parameters:{workflows:[{path:".github/workflows/cli-projects-package-surface-required.yml",repository_id:1269388380,ref:"refs/heads/main"}
+             + (if $mode == "unpinned" then {} else {sha:$sha} end)]}}]' ;;
       valid) printf '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"shell-tests","integration_id":%s}]}}]\n' "${RULE_APP_ID:-15368}" ;;
       missing) printf '%s\n' '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"shell-tests"}]}}]' ;;
       ambiguous) printf '%s\n' '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"shell-tests","integration_id":15368},{"context":"shell-tests","integration_id":999}]}}]' ;;
@@ -275,6 +300,8 @@ run_audit() {
     RUN_SEARCH_MODE="${RUN_SEARCH_MODE-valid}" \
     RULE_BINDING_MODE="${RULE_BINDING_MODE-valid}" \
     RULE_APP_ID="${RULE_APP_ID-15368}" \
+    REQUIRED_RULE_MODE="${REQUIRED_RULE_MODE-valid}" \
+    REQUIRED_RUN_MODE="${REQUIRED_RUN_MODE-valid}" \
     WORKFLOW_ID="${WORKFLOW_ID-315894159}" \
     WORKFLOW_NAME="${WORKFLOW_NAME-actions-ci}" \
     WORKFLOW_PATH="${WORKFLOW_PATH-.github/workflows/actions-ci.yml}" \
@@ -361,6 +388,44 @@ RULE_BINDING_MODE=ambiguous run_audit \
     grep -q 'Ambiguous required-check rule identity' "$tmp/out" \
       && pass "conformance preserves multiplicity and rejects ambiguous same-name contexts" \
       || fail "ambiguous native App bindings were collapsed"
+  }
+
+# #1861: a policy may bind a check to an organization ruleset-required workflow. Its
+# identity is the live organization pin and its evidence a required-workflow run; it adds
+# no retry workflow name because it has no consumer workflow entity.
+required_workflow_checks='[{"name":"shell-tests","app_id":15368,"workflow_id":315894159,"workflow_path":".github/workflows/actions-ci.yml"},{"name":"admission","app_id":15368,"workflow_id":345626628,"workflow_path":".github/workflows/cli-projects-package-surface-required.yml","workflow_repository":"Verjson/.github"}]'
+required_workflow_caller="$(bash "$generator" "$contract_sha" "$required_workflow_checks" | base64 | tr -d '\n')"
+required_workflow_retry="$(bash "$generator" "$contract_sha" --retry "$retry_workflow_names" "$required_workflow_checks" | base64 | tr -d '\n')"
+RULE_BINDING_MODE=required-workflow ALPHA_CONTENT="$required_workflow_caller" ALPHA_RETRY_CONTENT="$required_workflow_retry" run_audit \
+  && grep -q 'result=conformant' "$tmp/out" \
+  && grep -q 'rules/branches' "$tmp/gh-calls" \
+  && ! grep -q 'actions/workflows/345626628' "$tmp/gh-calls" \
+  && pass "a check bound to a pinned organization required workflow conforms without a consumer workflow entity" \
+  || fail "required-workflow binding did not conform: $(<"$tmp/out") calls=$(tr '\n' ';' <"$tmp/gh-calls")"
+
+RULE_BINDING_MODE=required-workflow REQUIRED_RULE_MODE=unpinned ALPHA_CONTENT="$required_workflow_caller" ALPHA_RETRY_CONTENT="$required_workflow_retry" run_audit \
+  && fail "required-workflow binding without an exact ruleset pin reported green" \
+  || {
+    grep -q 'Invalid required-workflow identity' "$tmp/out" \
+      && pass "a required-workflow binding needs an exact live organization pin" \
+      || fail "unpinned required workflow lacks conformance evidence: $(<"$tmp/out")"
+  }
+
+RULE_BINDING_MODE=required-workflow REQUIRED_RUN_MODE=consumer-url ALPHA_CONTENT="$required_workflow_caller" ALPHA_RETRY_CONTENT="$required_workflow_retry" run_audit \
+  && fail "required-workflow binding evidenced by a non-required run reported green" \
+  || {
+    grep -q 'Missing required-check workflow evidence' "$tmp/out" \
+      && pass "required-workflow evidence must be a required-workflow run" \
+      || fail "non-required run satisfied required-workflow evidence: $(<"$tmp/out")"
+  }
+
+RULE_BINDING_MODE=required-workflow ALPHA_CONTENT="$required_workflow_caller" \
+  ALPHA_RETRY_CONTENT="$(bash "$generator" "$contract_sha" --retry '["actions-ci","CLI projects required package surface"]' "$required_workflow_checks" | base64 | tr -d '\n')" run_audit \
+  && fail "retry naming a required workflow reported green" \
+  || {
+    grep -q 'Retry workflow names do not match required-check workflow IDs' "$tmp/out" \
+      && pass "retry names stay bound to consumer workflow IDs only" \
+      || fail "retry name for a required workflow was not detected: $(<"$tmp/out")"
   }
 
 RUN_SEARCH_MODE=queued-then-completed run_audit \

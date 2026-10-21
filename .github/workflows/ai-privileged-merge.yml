@@ -206,6 +206,7 @@ jobs:
             scripts/ci-gate/terminal-merge.sh
             scripts/ci-gate/verify-arm-receipt.sh
             scripts/ci-gate/review-policy-envelope.py
+            scripts/ci-gate/required-workflow-provenance.sh
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -309,10 +310,15 @@ jobs:
             }
 
           required_checks="${REQUIRED_CHECK_POLICY:-}"
+          # A declaration names a consumer workflow (four keys) or, with
+          # workflow_repository, an organization ruleset-required workflow stored in
+          # Verjson/.github (#1861). No other source is expressible.
           jq -e 'type == "array" and length > 0 and
             ([.[].name] | unique | length) == length and all(.[];
             type == "object" and
-            (keys | sort) == ["app_id", "name", "workflow_id", "workflow_path"] and
+            ((keys | sort) == ["app_id", "name", "workflow_id", "workflow_path"] or
+             ((keys | sort) == ["app_id", "name", "workflow_id", "workflow_path", "workflow_repository"] and
+              .workflow_repository == "Verjson/.github")) and
             (.name | type == "string" and length > 0 and
              all(explode[]; . >= 32 and (. < 127 or . > 159) and . != 8232 and . != 8233) and
              (contains("$" + "{{") | not)) and
@@ -342,22 +348,47 @@ jobs:
             expected_app_id="$(jq -r .app_id <<<"$required")"
             expected_workflow_id="$(jq -r .workflow_id <<<"$required")"
             workflow_path="$(jq -r .workflow_path <<<"$required")"
-            workflow_metadata=""
-            if ! workflow_metadata="$(gh api "repos/$TARGET_REPO/actions/workflows/$expected_workflow_id")"; then
-              echo "::error::required check $name names a deleted or unreadable workflow ID $expected_workflow_id"
-              exit 1
+            workflow_repository="$(jq -r '.workflow_repository // ""' <<<"$required")"
+            pinned_revision=""
+            if [ -n "$workflow_repository" ]; then
+              # An organization ruleset-required workflow has no consumer workflow
+              # entity; its trust root is the exact revision the live organization
+              # ruleset pins (#1861, ADR 0081).
+              pinned_revision="$(bash .gate-trust/scripts/ci-gate/required-workflow-provenance.sh \
+                pinned-revision "$TARGET_REPO" "$default_branch" "$workflow_path")" &&
+                [[ "$pinned_revision" =~ ^[0123456789abcdef]{40}$ ]] || {
+                echo "::error::required check $name names a ruleset-required workflow the live organization ruleset does not pin exactly one trusted revision of"
+                exit 1
+              }
+              expected_workflow_url="$GITHUB_API_URL/repos/$TARGET_REPO/actions/required_workflows/$expected_workflow_id"
+            else
+              workflow_metadata=""
+              if ! workflow_metadata="$(gh api "repos/$TARGET_REPO/actions/workflows/$expected_workflow_id")"; then
+                echo "::error::required check $name names a deleted or unreadable workflow ID $expected_workflow_id"
+                exit 1
+              fi
+              jq -e --arg path "$workflow_path" --argjson workflow_id "$expected_workflow_id" '
+                .id == $workflow_id and .path == $path and .state == "active"
+              ' <<<"$workflow_metadata" >/dev/null || {
+                echo "::error::required check $name names a wrong, renamed, or inactive workflow"; exit 1;
+              }
+              expected_workflow_url="$GITHUB_API_URL/repos/$TARGET_REPO/actions/workflows/$expected_workflow_id"
             fi
-            jq -e --arg path "$workflow_path" --argjson workflow_id "$expected_workflow_id" '
-              .id == $workflow_id and .path == $path and .state == "active"
-            ' <<<"$workflow_metadata" >/dev/null || {
-              echo "::error::required check $name names a wrong, renamed, or inactive workflow"; exit 1;
-            }
             latest="$(jq -c --arg name "$name" '[.[] | select(.name == $name)] | sort_by(.id) | last // {}' <<<"$all_checks")"
             check_id="$(jq -r '.id // ""' <<<"$latest")"
             if ! [[ "$check_id" =~ ^[123456789][0123456789]*$ ]]; then
-              workflow_runs="$(gh api --paginate \
-                "repos/$TARGET_REPO/actions/workflows/$expected_workflow_id/runs?head_sha=$EXPECTED_HEAD_SHA&event=pull_request&per_page=100" \
-                | jq -s '[.[].workflow_runs[]]')"
+              if [ -n "$workflow_repository" ]; then
+                # The per-workflow runs listing 404s for a required workflow; select its
+                # exact-head runs by ID and required-workflow URL instead.
+                workflow_runs="$(gh api --paginate \
+                  "repos/$TARGET_REPO/actions/runs?head_sha=$EXPECTED_HEAD_SHA&event=pull_request&per_page=100" \
+                  | jq -s --argjson workflow_id "$expected_workflow_id" --arg url "$expected_workflow_url" \
+                    '[.[].workflow_runs[] | select(.workflow_id == $workflow_id and .workflow_url == $url)]')"
+              else
+                workflow_runs="$(gh api --paginate \
+                  "repos/$TARGET_REPO/actions/workflows/$expected_workflow_id/runs?head_sha=$EXPECTED_HEAD_SHA&event=pull_request&per_page=100" \
+                  | jq -s '[.[].workflow_runs[]]')"
+              fi
               latest_workflow_run="$(jq -c '[.[]] | sort_by(.id) | last // {}' <<<"$workflow_runs")"
               workflow_run_id="$(jq -r '.id // ""' <<<"$latest_workflow_run")"
               if ! [[ "$workflow_run_id" =~ ^[123456789][0123456789]*$ ]]; then
@@ -379,6 +410,9 @@ jobs:
             fi
             jq -e --argjson app_id "$expected_app_id" '.app.id == $app_id' <<<"$latest" >/dev/null || {
               echo "::error::latest required check $name is from the wrong App"; exit 1;
+            }
+            jq -e --arg head "$EXPECTED_HEAD_SHA" '.head_sha == $head' <<<"$latest" >/dev/null || {
+              echo "::error::latest required check $name is not on the exact authorized head"; exit 1;
             }
             status="$(jq -r '.status // "" | ascii_upcase' <<<"$latest")"
             conclusion="$(jq -r '.conclusion // "" | ascii_upcase' <<<"$latest")"
@@ -412,9 +446,14 @@ jobs:
             ' <<<"$ci_jobs" >/dev/null || {
               echo "::error::required check $name is not the exact job check run of its claimed trusted workflow run"; exit 1;
             }
+            # workflow_url binds the run's kind to the declaration: a required-workflow
+            # run reports /actions/required_workflows/<id>, a consumer run
+            # /actions/workflows/<id>, and neither can stand in for the other.
             jq -e --arg head "$EXPECTED_HEAD_SHA" --arg repo "$TARGET_REPO" \
-              --arg path "$workflow_path" --argjson workflow_id "$expected_workflow_id" '
+              --arg path "$workflow_path" --argjson workflow_id "$expected_workflow_id" \
+              --arg workflow_url "$expected_workflow_url" '
                 .workflow_id == $workflow_id and .path == $path and
+                .workflow_url == $workflow_url and
                 .event == "pull_request" and .head_sha == $head and
                 .head_repository.full_name == $repo
               ' <<<"$ci_run" >/dev/null || {
@@ -433,11 +472,19 @@ jobs:
             [ "$ci_run_conclusion" = SUCCESS ] || {
               echo "::error::workflow run $ci_run_id backing required check $name is terminally unsuccessful: $ci_run_conclusion"; exit 1;
             }
-            head_workflow_blob="$(gh api "repos/$TARGET_REPO/contents/$workflow_path?ref=$EXPECTED_HEAD_SHA" --jq '.sha // ""')"
-            trusted_workflow_blob="$(gh api "repos/$TARGET_REPO/contents/$workflow_path?ref=$branch_ref" --jq '.sha // ""')"
-            [[ "$head_workflow_blob" =~ ^[0123456789abcdef]{40}$ ]] && [ "$head_workflow_blob" = "$trusted_workflow_blob" ] || {
-              echo "::error::required check $name executed a workflow revision not equal to the trusted default branch"; exit 1;
-            }
+            if [ -n "$workflow_repository" ]; then
+              run_node_id="$(jq -r '.node_id // ""' <<<"$ci_run")"
+              bash .gate-trust/scripts/ci-gate/required-workflow-provenance.sh run-revision \
+                "$run_node_id" "$ci_run_id" "$expected_workflow_id" "$workflow_path" "$pinned_revision" || {
+                echo "::error::required check $name executed a required-workflow revision other than the exact live ruleset pin"; exit 1;
+              }
+            else
+              head_workflow_blob="$(gh api "repos/$TARGET_REPO/contents/$workflow_path?ref=$EXPECTED_HEAD_SHA" --jq '.sha // ""')"
+              trusted_workflow_blob="$(gh api "repos/$TARGET_REPO/contents/$workflow_path?ref=$branch_ref" --jq '.sha // ""')"
+              [[ "$head_workflow_blob" =~ ^[0123456789abcdef]{40}$ ]] && [ "$head_workflow_blob" = "$trusted_workflow_blob" ] || {
+                echo "::error::required check $name executed a workflow revision not equal to the trusted default branch"; exit 1;
+              }
+            fi
           done < <(jq -c '.[]' <<<"$required_checks")
 
           base_meta="$(gh api "repos/$TARGET_REPO/pulls/$PR_NUMBER")"

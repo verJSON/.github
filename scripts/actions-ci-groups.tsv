@@ -137,6 +137,7 @@ merge-gate	bash scripts/ci-gate/arm-authorization-terminal-state.test.sh
 merge-gate	bash scripts/ci-gate/complete-authorization.test.sh
 merge-gate	@budget=90 bash scripts/ci-gate/zero-provider-recovery.test.sh
 merge-gate	@budget=90 bash scripts/ci-gate/native-automerge.test.sh
+merge-gate	@budget=180 bash scripts/ci-gate/required-workflow-check-provenance.test.sh
 merge-gate	bash scripts/ci-gate/post-merge-reconcile.test.sh
 merge-gate	bash scripts/ci-gate/gate-dispatch.test.sh
 merge-gate	bash scripts/ci-gate/gate-hold-disable.test.sh

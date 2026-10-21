@@ -34,3 +34,28 @@ the policy and regenerate both callers in the same pull request as the workflow 
 ruleset adoption. Keep the existing path working until its replacement has produced
 conformance evidence. Never remove exact-head, receipt, hold, same-owner, or workflow
 provenance checks to make adoption pass.
+
+## Checks produced by an organization ruleset-required workflow
+
+A context produced by an organization ruleset-required workflow (for example the
+`verjson-cli-projects` package-surface workflow) has no workflow entity in the
+consumer repository: `repos/<repo>/actions/workflows/<id>` answers 404, and the
+workflow file lives in `Verjson/.github` at the revision the ruleset pins. Declare it
+with a fifth key, `"workflow_repository":"Verjson/.github"`; `workflow_id` and
+`workflow_path` are the identity the run itself reports in the consumer (`workflow_id`
+and `path` of a run whose `workflow_url` ends `/actions/required_workflows/<id>`):
+
+```json
+{"name":"admission","app_id":15368,"workflow_id":345626628,"workflow_path":".github/workflows/cli-projects-package-surface-required.yml","workflow_repository":"Verjson/.github"}
+```
+
+No other `workflow_repository` value is accepted. For such an entry, terminal promotion
+replaces the consumer-workflow metadata and default-branch blob checks with live
+provenance ([ADR 0081](decisions/0081-event-driven-terminal-ai-promotion/README.md),
+2026-10-21 correction): every active organization `workflows` rule on the default
+branch must pin exactly one 40-hex revision of that path in `Verjson/.github`,
+reachable from its `main`, and GitHub's GraphQL `WorkflowRun.file` must report that the
+run executed exactly that file at exactly that revision. A run produced under an older
+pin is refused after the ruleset rotates; re-run the required workflow on the head.
+Such an entry contributes no retry workflow name — list only the consumer workflows'
+names in the `--retry` argument.

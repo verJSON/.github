@@ -173,6 +173,58 @@ authorization, hold, provenance, workflow-blob, and post-merge protections are
 unchanged. The operator procedure is
 [`docs/privileged-merge-adoption.md`](../../privileged-merge-adoption.md).
 
+### 2026-10-21 correction ([#1861](https://github.com/Verjson/.github/issues/1861))
+
+The trusted-workflow invariant above assumed every required check comes from a workflow
+stored in the consumer repository. A check produced by an organization ruleset-required
+workflow does not: the consumer has no workflow entity for it (`actions/workflows/<id>`
+answers 404) and the executed file is stored in `Verjson/.github` at the revision the
+ruleset pins. Terminal promotion therefore could not verify `verjson-cli-projects`'
+`ci / build-test`, `ci / eligibility`, and `admission` (required-workflow ID 345626628)
+and AI terminal merge was unsatisfiable there. Binding those checks to the consumer's
+push-only `ci.yml` never reports on a PR head, and dropping them from the declaration
+would remove exact-head verification from the merge.
+
+The declaration gains one closed variant: an entry may add
+`"workflow_repository":"Verjson/.github"`, and no other value is expressible. Its
+`workflow_id` and `workflow_path` are the run's reported identity in the consumer. For
+such an entry the workflow-metadata and default-branch-blob checks are replaced, not
+relaxed, by provenance read live from GitHub:
+
+- the selected check is on the exact authorized head and is the exact job check of its
+  run, as for every entry;
+- the run's `workflow_url` is `<api>/repos/<target>/actions/required_workflows/<id>`,
+  and its `workflow_id`, `path`, event, head, and head repository match. Consumer
+  entries now also require `<api>/repos/<target>/actions/workflows/<id>`, so neither
+  kind of run can satisfy the other kind of declaration;
+- the trust root is the live organization ruleset, read from the default branch's
+  effective rules: every active `workflows` rule whose source is the organization and
+  whose entry names `Verjson/.github` (by repository ID) and the declared path must pin
+  one identical 40-hex SHA. Absent, ref-only, ambiguous, repository-level, malformed, or
+  unreadable rules refuse. The pin must be canonical `main` or an ancestor of it, the
+  reachability ADR 0043 already demands of the gate's own revision;
+- the REST run names no source revision, so the revision is read from GraphQL
+  `WorkflowRun.file` for that run's node: `databaseId`, `workflow.databaseId`, and
+  `path` must match, `repositoryName` must be `Verjson/.github` ASCII-case-insensitively
+  (ADR 0213), and `repositoryFileUrl` must equal
+  `<server>/<repositoryName>/blob/<pin>/<path>` byte for byte.
+
+The payload shapes were recorded from `verjson-cli-projects#159` on 2026-10-21: run
+39599385973 reports `workflow_url` `…/actions/required_workflows/345626628`, ruleset
+21830367 pins `aa564422…` for `.github/workflows/cli-projects-package-surface-required.yml`,
+and `WorkflowRun.file.repositoryFileUrl` names `verJSON/.github/blob/aa564422…/…`; the
+same workflow ID ran at three different pins (`ae70e4ef`, `c78fcd4e`, `aa564422`), so
+the ID is stable across ruleset rotation and the declaration need not be regenerated on
+each rotation. A run executed under a previous pin is refused after a rotation; that is
+the intended fail-closed cost, cured by re-running the required workflow on the head.
+The helper `scripts/ci-gate/required-workflow-provenance.sh` is checked out at the
+executing gate revision and is shared with fleet conformance, which verifies the pin and
+a completed required-workflow run instead of a consumer workflow entity. A
+required-workflow entry contributes no deterministic-completion retry name; whether a
+required-workflow completion delivers `workflow_run` to consumer workflows was not
+established, so such checks rely on the AI-completion dispatch and later consumer
+completions for liveness.
+
 ## Consequences
 
 - No job sleeps or polls while CI changes state, and CI completion cannot spend model
