@@ -387,6 +387,75 @@ class RenovateTableTests(unittest.TestCase):
         _, fragment = renovate_changelog.fragment_for(PR_NUMBER, updates, dt.date(2026, 10, 21))
         self.assertIn("title: Update dependency ip-address from 10.4.0 to 10.5.0\n", fragment)
 
+    def test_three_identical_rows_collapse_to_one_transition(self) -> None:
+        repeated = VERJSON_CI_290_BODY.replace(
+            "\n\n---", "\n" + VERJSON_CI_290_BODY.splitlines()[-3] + "\n\n---"
+        )
+        self.assertEqual(repeated.count("`26.10.0-alpine3.23` → `26.12.0-alpine3.23`"), 3)
+        self.assertEqual(
+            renovate_changelog.parse_updates(repeated),
+            renovate_changelog.parse_updates(VERJSON_CI_290_BODY),
+        )
+
+    def test_rows_differing_only_in_cell_padding_collapse(self) -> None:
+        padded = "|   ip-address   |   `10.4.0` → `10.5.0`   |"
+        self.assertEqual(
+            renovate_changelog.parse_updates(BODY + padded + "\n"),
+            (renovate_changelog.Update("ip-address", "10.4.0", "10.5.0"),),
+        )
+
+    def test_case_variant_packages_and_versions_stay_distinct_transitions(self) -> None:
+        body = """| Package | Change |
+|---|---|
+| github.com/sirupsen/logrus | `v1.9.0` → `v1.9.3` |
+| github.com/Sirupsen/logrus | `v1.9.0` → `v1.9.3` |
+| github.com/sirupsen/logrus | `V1.9.0` → `v1.9.3` |
+"""
+        self.assertEqual(renovate_changelog.parse_updates(body), (
+            renovate_changelog.Update("github.com/sirupsen/logrus", "v1.9.0", "v1.9.3"),
+            renovate_changelog.Update("github.com/Sirupsen/logrus", "v1.9.0", "v1.9.3"),
+            renovate_changelog.Update("github.com/sirupsen/logrus", "V1.9.0", "v1.9.3"),
+        ))
+
+    def test_same_package_with_a_different_from_or_to_is_never_collapsed(self) -> None:
+        body = """| Package | Change |
+|---|---|
+| node | `26.10.0-alpine` → `26.12.0-alpine` |
+| node | `26.10.0-alpine` → `27.0.0-alpine` |
+| node | `26.11.0-alpine` → `26.12.0-alpine` |
+| node | `26.10.0-alpine` → `26.12.0-alpine` |
+"""
+        updates = renovate_changelog.parse_updates(body)
+        self.assertEqual(updates, (
+            renovate_changelog.Update("node", "26.10.0-alpine", "26.12.0-alpine"),
+            renovate_changelog.Update("node", "26.10.0-alpine", "27.0.0-alpine"),
+            renovate_changelog.Update("node", "26.11.0-alpine", "26.12.0-alpine"),
+        ))
+        _, fragment = renovate_changelog.fragment_for(290, updates, dt.date(2026, 10, 21))
+        self.assertIn("title: Update 3 dependencies with Renovate\n", fragment)
+
+    def test_a_non_adjacent_repeat_keeps_other_packages_in_first_seen_order(self) -> None:
+        body = """| Package | Change |
+|---|---|
+| ip-address | `10.4.0` → `10.5.0` |
+| neo4j | `f79a46a` → `0ddfa71` |
+| ip-address | `10.4.0` → `10.5.0` |
+"""
+        self.assertEqual(renovate_changelog.parse_updates(body), (
+            renovate_changelog.Update("ip-address", "10.4.0", "10.5.0"),
+            renovate_changelog.Update("neo4j", "f79a46a", "0ddfa71"),
+        ))
+
+    def test_the_row_bound_counts_repeated_rows_before_collapsing(self) -> None:
+        row = BODY.splitlines()[-1]
+        limit = renovate_changelog.MAX_UPDATES
+        at_limit = BODY + (row + "\n") * (limit - 1)
+        self.assertEqual(len(renovate_changelog.parse_updates(at_limit)), 1)
+        with self.assertRaisesRegex(
+            renovate_changelog.AutomationError, f"exceeds {limit} rows"
+        ):
+            renovate_changelog.parse_updates(at_limit + row + "\n")
+
     def test_rejects_version_text_that_could_inject_markdown(self) -> None:
         injected = BODY.replace(
             "`10.5.0`", "`10.5.0](https://attacker.invalid)`", 1
