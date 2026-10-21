@@ -197,8 +197,9 @@ unaffected, and that an organization-owner token reads
   with no second human, which is the gap this amendment closes. The cost is that an
   owner cannot merge a sensitive-path change alone in an emergency: another
   `@admins` member must approve, or an owner must visibly edit the ruleset, which
-  `check` reports as drift until `apply` restores it — automatically once rollout
-  step 4 schedules `check`, and only when someone runs it before then.
+  `check` reports as drift until `apply` restores it. Since rollout step 4 (2026-10-20,
+  amendment below) the daily audit runs `check`, so that edit is reported the next day
+  without anyone running it.
 - **Conformance keys these contracts by name.** `config/org-ruleset-conformance-policy.json`
   carries a `bypass_actor_contracts` entry with `"ruleset_id": null` for each ruleset,
   and `scripts/org-ruleset-conformance.py` matches a null-id contract by name: an
@@ -240,6 +241,7 @@ asserted that review requirements are met.
    disabled with a read-back error rather than enforcing an unverified image.
 4. Then add `check` to the scheduled `org-ruleset-conformance.yml` audit, so it
    starts green rather than reporting the pre-apply absence daily.
+   Done 2026-10-20; see the amendment below.
 5. Only then regenerate the remaining adopters' CODEOWNERS (`verjson-cli-cloud#575`,
    `verjson-cli-projects`, `verjson-object-storage`), so no repository is without
    admin review in between. #1816 closes after steps 2–5.
@@ -257,3 +259,33 @@ asserted that review requirements are met.
 - A new repository that needs sensitive-path approval adds an entry to the config and
   is applied the same way; a fleet-wide `/.github/` requirement remains a separate
   policy decision that the same config can express later.
+
+## 2026-10-20 amendment — Rollout step 4: the daily audit runs `check`
+
+The four rulesets went live on 2026-10-20 (rollout steps 2 and 3, recorded on #1816):
+ids 25513484, 25513492, 25513495 and 25513503, and `check` exited 0 against them.
+Step 4 adds `python3 -I scripts/required-reviewer-ruleset.py check` to the `audit` job
+of `.github/workflows/org-ruleset-conformance.yml`, so a deleted, edited, duplicated
+or undeclared `*-sensitive-path-admin-review` ruleset now fails the daily run instead
+of waiting for someone to run `check` by hand.
+
+- **Same credential, read-only mode.** The step reuses the `ORG_ADMIN_TOKEN` binding
+  the sibling audits already hold (`docs/ruleset-conformance.md` records it as the
+  reviewed residual). `check` only issues GETs; `apply` needs the acknowledgement token,
+  which the workflow does not have, and the scheduled-workflow contract pins the exact
+  `check` command.
+- **Not masked by a sibling.** The step runs under `if: ${{ !cancelled() }}`, so a
+  release-authorization or package-surface finding earlier in the job cannot hide a
+  deleted reviewer ruleset. Nothing on the step may turn its failure into success:
+  `continue-on-error`, an `|| true`, or a different mode fail the contract.
+- **Failure states.** Exit 1 means drift: an absent, drifted, duplicated or undeclared
+  ruleset. Exit 2 means the audit could not read trustworthy state, such as an API
+  error, a target repository that is not live, or an unreadable config. Both fail the
+  job. `scripts/required_reviewer_ruleset_test.py` runs the workflow's own step, read
+  from the YAML, against a stubbed `gh` for each of those states and asserts no write.
+  `scripts/ci-gate/privileged-scheduled-workflows.test.py` rejects every weakening
+  above.
+
+#1816 stays open until rehearsal steps 2/3 (an eligible `@admins` approval satisfies
+the rule, and a later push dismisses it), steps 6/7 (the App bypass reads) and the
+dotfile-match check are evidenced, and step 5 lands.

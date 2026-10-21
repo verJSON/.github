@@ -453,7 +453,7 @@ def validate_ruleset_conformance(document: object) -> None:
         "ruleset-conformance runner route changed",
     )
     require(job["timeout-minutes"] == 10, "ruleset-conformance timeout changed")
-    require(len(steps) == 4, "ruleset-conformance audit must have exactly four steps")
+    require(len(steps) == 5, "ruleset-conformance audit must have exactly five steps")
     require(
         steps[0].get("name") == "Check out the ruleset conformance audit",
         "ruleset-conformance checkout name changed",
@@ -494,8 +494,32 @@ def validate_ruleset_conformance(document: object) -> None:
         == "python3 -I scripts/package-type-surface-ruleset.py audit",
         "package type-surface audit command changed",
     )
+    # ADR 0210 rollout step 4: the read-only `check` runs even after an earlier
+    # audit fails, and nothing on the step may turn its failure into success.
+    reviewer_audit = require_keys(
+        steps[3], {"name", "if", "env", "run"}, "required-reviewer ruleset audit"
+    )
+    require(
+        reviewer_audit["name"] == "Verify sensitive-path required-reviewer rulesets",
+        "required-reviewer ruleset audit name changed",
+    )
+    require(
+        reviewer_audit["if"] == "${{ !cancelled() }}",
+        "required-reviewer ruleset audit must not be masked by an earlier audit",
+    )
+    reviewer_env = require_keys(
+        reviewer_audit["env"], {"GH_TOKEN"}, "required-reviewer ruleset audit env"
+    )
+    require(
+        reviewer_env["GH_TOKEN"] == "${{ secrets.ORG_ADMIN_TOKEN }}",
+        "required-reviewer ruleset audit token binding changed",
+    )
+    require(
+        reviewer_audit["run"] == "python3 -I scripts/required-reviewer-ruleset.py check",
+        "required-reviewer ruleset audit must remain the read-only check command",
+    )
     validate_cleanup(
-        steps[3], "ruleset-conformance cleanup", RULESET_CONFORMANCE_SOURCE
+        steps[4], "ruleset-conformance cleanup", RULESET_CONFORMANCE_SOURCE
     )
 
 
@@ -664,8 +688,51 @@ def main() -> int:
             1,
         ),
         "required-workflow audit masked by its sibling": ruleset_conformance_text.replace(
-            "        if: ${{ !cancelled() }}\n        env:\n",
-            "        env:\n",
+            "      - name: Audit the authn required-workflow revision\n"
+            "        if: ${{ !cancelled() }}\n",
+            "      - name: Audit the authn required-workflow revision\n",
+            1,
+        ),
+        "required-reviewer audit masked by an earlier audit": ruleset_conformance_text.replace(
+            "      - name: Verify sensitive-path required-reviewer rulesets\n"
+            "        if: ${{ !cancelled() }}\n",
+            "      - name: Verify sensitive-path required-reviewer rulesets\n",
+            1,
+        ),
+        "required-reviewer audit always run": ruleset_conformance_text.replace(
+            "      - name: Verify sensitive-path required-reviewer rulesets\n"
+            "        if: ${{ !cancelled() }}\n",
+            "      - name: Verify sensitive-path required-reviewer rulesets\n"
+            "        if: ${{ always() }}\n",
+            1,
+        ),
+        "required-reviewer audit failure swallowed": ruleset_conformance_text.replace(
+            "      - name: Verify sensitive-path required-reviewer rulesets\n",
+            "      - name: Verify sensitive-path required-reviewer rulesets\n"
+            "        continue-on-error: true\n",
+            1,
+        ),
+        "required-reviewer audit exit masked": ruleset_conformance_text.replace(
+            "run: python3 -I scripts/required-reviewer-ruleset.py check",
+            "run: python3 -I scripts/required-reviewer-ruleset.py check || true",
+            1,
+        ),
+        "required-reviewer audit mutating mode": ruleset_conformance_text.replace(
+            "run: python3 -I scripts/required-reviewer-ruleset.py check",
+            "run: python3 -I scripts/required-reviewer-ruleset.py apply --ack APPLY-REQUIRED-REVIEWERS-1816",
+            1,
+        ),
+        "required-reviewer audit dropped": re.sub(
+            r"      - name: Verify sensitive-path required-reviewer rulesets\n(?:        .*\n)+?"
+            r"(?=      - name: Remove)",
+            "",
+            ruleset_conformance_text,
+            count=1,
+        ),
+        "required-reviewer audit extra token": ruleset_conformance_text.replace(
+            "        run: python3 -I scripts/required-reviewer-ruleset.py check",
+            "          GITHUB_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}\n"
+            "        run: python3 -I scripts/required-reviewer-ruleset.py check",
             1,
         ),
         "required-workflow audit dropped": ruleset_conformance_text.replace(

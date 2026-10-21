@@ -38,6 +38,20 @@ does not print API response bodies, credential data, secret values, or variable
 values. Exit `0` means the exact-token policy conforms, exit `1` is policy drift,
 and exit `2` means the audit could not establish trustworthy API or schema state.
 
+## Sensitive-path required-reviewer rulesets
+
+The same `audit` job also runs, even after an earlier audit in it fails:
+
+```bash
+python3 -I scripts/required-reviewer-ruleset.py check
+```
+
+It fails the job when a reviewed `*-sensitive-path-admin-review` ruleset
+(`config/required-reviewer-rulesets.json`) is absent, differs from the reviewed
+image, shares its name with another live ruleset, or when a live ruleset with
+that suffix is not declared (exit `1`), and when it cannot read trustworthy state
+(exit `2`). It issues only GETs. See ADR 0210's 2026-10-20 amendment.
+
 ## Credential boundary
 
 As of 2026-08-15, the organization Actions secret-name inventory contains no
