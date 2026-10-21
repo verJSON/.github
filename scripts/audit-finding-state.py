@@ -31,6 +31,9 @@ ITEM_SET_FIELDS = ("finding_class", "items")
 # compared, and rendered as literal text -- never executed, and never emitted at
 # the start of a line, so it cannot become an Actions workflow command.
 CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+# A finding line has already been split, but a structured item has not: it may
+# carry a line break, which must not reach a recorded entry or a rendered line.
+ITEM_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 
 MATCH = 0
 DRIFT = 1
@@ -207,7 +210,7 @@ def validated_items(items: object, where: str) -> list[str]:
         raise Undetermined(f"{where} items are not a list of names")
     if items != sorted(set(items)):
         raise Undetermined(f"{where} items are not sorted and unique")
-    if any(CONTROL_CHARACTERS.search(item) for item in items):
+    if any(ITEM_CONTROL_CHARACTERS.search(item) for item in items):
         raise Undetermined(f"{where} items carry a control character")
     return items
 

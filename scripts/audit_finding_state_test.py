@@ -341,6 +341,10 @@ class AuditFindingStateTest(unittest.TestCase):
                 [list_finding(CALLERS, ["Verjson/a\x1b:a.yml"])],
                 evidence((CALLERS, ["Verjson/a\x1b:a.yml"])),
             ),
+            "an item carries a line break": (
+                [list_finding(CALLERS, ["Verjson/a\n::error::x:a.yml"])],
+                evidence((CALLERS, ["Verjson/a\n::error::x:a.yml"])),
+            ),
             "a class is reported twice": ([reported], evidence((CALLERS, remaining), (CALLERS, remaining))),
             "a non-empty class has no finding": (["unrelated: x"], evidence((CALLERS, remaining))),
             "a finding's digest is not its class's items": (
@@ -357,6 +361,13 @@ class AuditFindingStateTest(unittest.TestCase):
                 )
                 self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
                 self.assertIn("audit-state-undetermined", completed.stderr)
+
+    def test_every_c0_control_and_del_is_rejected_in_a_structured_item(self):
+        # The line scrub spares tab and newline because a line is already split;
+        # an item is not, so no control character may reach an entry or a line.
+        for code in [*range(0x20), 0x7F]:
+            with self.subTest(code=hex(code)), self.assertRaisesRegex(STATE.Undetermined, "control character"):
+                STATE.validated_items([f"Verjson/a{chr(code)}:a.yml"], "item")
 
     def test_an_improvement_without_structured_evidence_is_loud(self):
         # Without the item list the comparison is the exact text, as before.
