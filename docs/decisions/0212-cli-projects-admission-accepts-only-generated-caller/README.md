@@ -49,31 +49,39 @@ value to `null` now would make the rotation to this revision refuse
 against the live consumer). The value is unchanged and remains rotation-only. PR heads
 never see it.
 
-**The admission step is an exact-text allowlist.** Before this change, a generator widened
-to accept another caller digest still passed both suites. The required workflow is checked
-for byte equality with that same generator, so a change to the generator moves both sides.
-A first fix tried to describe the forbidden constructs in bash: literal digests, control
-flow, and extra references to the digest variables. Review bypassed it. A variable name
-built in pieces and written with `printf -v`, an indirect expansion, a function named `[`,
-and a `declare -n` nameref each passed. A denylist over bash cannot hold.
+**The required workflow is an exact reviewed constant.** Before this change, a generator
+widened to accept another caller could still pass both suites, because the required
+workflow was checked only for byte equality with that same generator. Each partial fix
+was bypassed in review:
 
-`ADMISSION_RUN` in `scripts/cli-projects-package-surface-ruleset.py` therefore holds the
-reviewed `run` text of the admission step, byte for byte. It is stated there and not read
-from the generator. `validate_workflow` requires the committed admission step to equal it
-exactly. Its environment key set stays fixed. Its `CONSUMER_WORKFLOW_SHA256` value must be
-the sha256 of the generator's `--consumer` output, so the admitted digest cannot be
-swapped either. Any generator change to the admission step requires a reviewed update of
-that constant in the same change. The earlier 64-hex-literal and legacy-digest checks are
-removed: an exact text admits no literal, and the digest binding covers the environment
-value.
+- A denylist over bash constructs fell to a variable name built in pieces and written
+  with `printf -v`, an indirect expansion, a function named `[`, and a `declare -n`
+  nameref.
+- Pinning only the admission `run` text fell to the keys around it. A step `shell`,
+  workflow or job `defaults`, a job `container`, an exported `BASH_FUNC_sha256sum%%`, or
+  `BASH_ENV` each replace `sha256sum` or run code before the comparison. Step `if` or
+  `continue-on-error`, and swapped step environment values, weaken the check outright.
+
+`REVIEWED_WORKFLOW` in `scripts/cli-projects-package-surface-ruleset.py` now holds the
+reviewed required workflow. That covers the top-level keys `name`, `on`, `permissions`,
+`concurrency`, and `jobs`, and all four jobs, including the admission job. The constant is
+stated there and not read from the generator. `validate_workflow` parses the committed
+workflow with a loader that refuses duplicate and merge keys. It then requires the parsed
+structure to equal the constant exactly. The only variable is the admitted digest, which
+is the sha256 of the generator's `--consumer` output. Any generator change to this
+workflow requires a reviewed update of the constant in the same change.
+
+The earlier 64-hex-literal, legacy-digest, and admission-text checks are removed because
+the exact structure subsumes them. The existing per-field checks stay as documented
+invariants.
 
 Tests apply each mutant through a wrapped generator and require `validate_workflow` to
-refuse it. The mutants cover the widened comparisons, the four reviewed bypasses, removing
-the base-ref or head-SHA binding, and reading the candidate from `main`. Execution tests
-run the committed step against several callers and require each to be refused: the
-callers generated at `1c7659b7…` (`9e4ca97c…`) and `4a08c756…` (`721856f9…`), and an
-arbitrary caller that carries a marker and a `pull_request_target` trigger. The stub
-serves the candidate only for the exact head ref.
+refuse it. The mutants cover the widened comparisons, the reviewed bypasses, the
+surrounding keys, the other jobs, a swapped admitted digest, and a duplicate key.
+Execution tests run the committed step against the callers generated at `1c7659b7…`
+(`9e4ca97c…`) and `4a08c756…` (`721856f9…`). They also run it against an arbitrary
+caller that carries a marker and a `pull_request_target` trigger. Each must be refused.
+The stub serves the candidate only for the exact head ref.
 
 **Retiring the digest takes a second rotation.** Once #159 merges and `main` carries the
 generated v4.2.0 caller, set the value to `null` in the next change. That change edits

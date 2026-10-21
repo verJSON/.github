@@ -41,42 +41,151 @@ RUNTIME_PATHS = (
 )
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
-# The reviewed text of the PR admission step, byte for byte. It is stated here, not read
-# from the generator, because a widened generator moves its own output; any generator
-# change to the admission step requires a reviewed update of this constant (ADR 0212).
-ADMISSION_RUN = r'''set -euo pipefail
-# Repository names are ASCII-case-insensitive identities (ADR 0213): the run
-# context and the API report the renamed display case `verJSON`.
-jq -en --arg observed "$REPOSITORY" --arg expected 'Verjson/verjson-cli-projects' \
-  '($observed | ascii_downcase) == ($expected | ascii_downcase)' >/dev/null
-[[ "$RUN_ID" =~ ^[123456789][0123456789]*$ ]]
-run_record="$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID" --jq '[.event,.head_sha,(.pull_requests|length),(.pull_requests[0].number//"")]|@tsv')"
-IFS=$'\t' read -r event_name run_head_sha pr_count pr_number <<<"$run_record"
-[ "$event_name" = pull_request ]
-[[ "$run_head_sha" =~ ^[0123456789abcdef]{40}$ ]]
-[ "$pr_count" = 1 ]
-[[ "$pr_number" =~ ^[123456789][0123456789]*$ ]]
-pr_record="$(gh api "repos/$REPOSITORY/pulls/$pr_number" --jq '[.number,.state,.head.repo.full_name,.head.sha,.base.ref]|@tsv')"
-IFS=$'\t' read -r live_number live_state live_repository live_head_sha live_base_ref <<<"$pr_record"
-[ "$live_number" = "$pr_number" ]
-[ "$live_state" = open ]
-jq -en --arg observed "$live_repository" --arg expected 'Verjson/verjson-cli-projects' \
-  '($observed | ascii_downcase) == ($expected | ascii_downcase)' >/dev/null
-[ "$live_head_sha" = "$run_head_sha" ]
-[[ "$live_head_sha" =~ ^[0123456789abcdef]{40}$ ]]
-[ "$live_base_ref" = main ]
-candidate_workflow="$(mktemp)"
-trap 'rm -f -- "$candidate_workflow"' EXIT INT TERM
-gh api -H 'Accept: application/vnd.github.raw+json' "repos/Verjson/verjson-cli-projects/contents/.github/workflows/ci.yml?ref=$live_head_sha" >"$candidate_workflow"
-candidate_sha256="$(sha256sum "$candidate_workflow" | cut -d' ' -f1)"
-[[ "$candidate_sha256" =~ ^[0123456789abcdef]{64}$ ]]
-[ "$candidate_sha256" = "$CONSUMER_WORKFLOW_SHA256" ]
-{
-  echo "event-name=$event_name"
-  echo "head-repository=$live_repository"
-  echo "head-sha=$live_head_sha"
-} >>"$GITHUB_OUTPUT"
+# The reviewed required workflow, parsed and compared as a structure. It is stated here,
+# not read from the generator, because a widened generator moves its own output. It pins
+# every key around the admission text too: a step `shell`, a job `container` or `env`, or
+# workflow `defaults` can each replace `sha256sum` before the comparison runs. The admitted
+# consumer digest is its only variable. Any generator change to this workflow requires a
+# reviewed update of this constant in the same change (ADR 0212).
+CONSUMER_DIGEST_PLACEHOLDER = "__CONSUMER_WORKFLOW_SHA256__"
+REVIEWED_WORKFLOW = r'''name: CLI projects required package surface
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cli-projects-required-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  admission:
+    if: github.repository == 'Verjson/verjson-cli-projects'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      event-name: ${{ steps.identity.outputs.event-name }}
+      head-repository: ${{ steps.identity.outputs.head-repository }}
+      head-sha: ${{ steps.identity.outputs.head-sha }}
+    steps:
+      - name: Validate the exact pull-request identity
+        id: identity
+        env:
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          CONSUMER_WORKFLOW_SHA256: __CONSUMER_WORKFLOW_SHA256__
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Repository names are ASCII-case-insensitive identities (ADR 0213): the run
+          # context and the API report the renamed display case `verJSON`.
+          jq -en --arg observed "$REPOSITORY" --arg expected 'Verjson/verjson-cli-projects' \
+            '($observed | ascii_downcase) == ($expected | ascii_downcase)' >/dev/null
+          [[ "$RUN_ID" =~ ^[123456789][0123456789]*$ ]]
+          run_record="$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID" --jq '[.event,.head_sha,(.pull_requests|length),(.pull_requests[0].number//"")]|@tsv')"
+          IFS=$'\t' read -r event_name run_head_sha pr_count pr_number <<<"$run_record"
+          [ "$event_name" = pull_request ]
+          [[ "$run_head_sha" =~ ^[0123456789abcdef]{40}$ ]]
+          [ "$pr_count" = 1 ]
+          [[ "$pr_number" =~ ^[123456789][0123456789]*$ ]]
+          pr_record="$(gh api "repos/$REPOSITORY/pulls/$pr_number" --jq '[.number,.state,.head.repo.full_name,.head.sha,.base.ref]|@tsv')"
+          IFS=$'\t' read -r live_number live_state live_repository live_head_sha live_base_ref <<<"$pr_record"
+          [ "$live_number" = "$pr_number" ]
+          [ "$live_state" = open ]
+          jq -en --arg observed "$live_repository" --arg expected 'Verjson/verjson-cli-projects' \
+            '($observed | ascii_downcase) == ($expected | ascii_downcase)' >/dev/null
+          [ "$live_head_sha" = "$run_head_sha" ]
+          [[ "$live_head_sha" =~ ^[0123456789abcdef]{40}$ ]]
+          [ "$live_base_ref" = main ]
+          candidate_workflow="$(mktemp)"
+          trap 'rm -f -- "$candidate_workflow"' EXIT INT TERM
+          gh api -H 'Accept: application/vnd.github.raw+json' "repos/Verjson/verjson-cli-projects/contents/.github/workflows/ci.yml?ref=$live_head_sha" >"$candidate_workflow"
+          candidate_sha256="$(sha256sum "$candidate_workflow" | cut -d' ' -f1)"
+          [[ "$candidate_sha256" =~ ^[0123456789abcdef]{64}$ ]]
+          [ "$candidate_sha256" = "$CONSUMER_WORKFLOW_SHA256" ]
+          {
+            echo "event-name=$event_name"
+            echo "head-repository=$live_repository"
+            echo "head-sha=$live_head_sha"
+          } >>"$GITHUB_OUTPUT"
+  ci:
+    needs: admission
+    if: ${{ !github.event.pull_request.draft }}
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+      pull-requests: read
+      statuses: read
+    uses: Verjson/.github/.github/workflows/node-ci-protected.yml@a89fe1f090545c15cdd6987f20119327206e2c59
+    secrets:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    with:
+      node-version: '26'
+      secretless-pr: true
+      approved-internal-packages: |-
+        @verjson/eslint-config
+        @verjson/tsconfig
+      secretless-ci-script-plan: >-
+        ["build","lint","test","test:contract","test:npm-config","test:package-surface","test:public-docs","test:release"]
+      event-name: ${{ needs.admission.outputs.event-name }}
+      head-repository: ${{ needs.admission.outputs.head-repository }}
+      head-sha: ${{ needs.admission.outputs.head-sha }}
+  ci-node-floor:
+    needs: admission
+    if: ${{ !github.event.pull_request.draft }}
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+      pull-requests: read
+      statuses: read
+    uses: Verjson/.github/.github/workflows/node-ci-protected.yml@a89fe1f090545c15cdd6987f20119327206e2c59
+    secrets:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    with:
+      node-version: '24.19.0'
+      secretless-pr: true
+      approved-internal-packages: |-
+        @verjson/eslint-config
+        @verjson/tsconfig
+      event-name: ${{ needs.admission.outputs.event-name }}
+      head-repository: ${{ needs.admission.outputs.head-repository }}
+      head-sha: ${{ needs.admission.outputs.head-sha }}
+  package-surface:
+    needs: [admission, ci, ci-node-floor]
+    if: ${{ always() && !github.event.pull_request.draft && needs.admission.result == 'success' && needs.ci.result == 'success' && needs.ci-node-floor.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the untrusted candidate tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.admission.outputs.head-sha }}
+          persist-credentials: false
+          path: consumer
+      - name: Check out the protected verifier at the required-workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Verjson/.github
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          path: policy
+      - name: Verify and exercise the package surface
+        env:
+          HOME: ${{ runner.temp }}/credentialless-home
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/credentialless-npmrc
+        run: python3 -I policy/scripts/cli-projects-package-surface.py verify consumer
 '''
+
+
 MUTABLE_FIELDS = (
     "name", "target", "enforcement", "bypass_actors", "conditions", "rules",
 )
@@ -89,6 +198,39 @@ class ContractError(Exception):
 def require(condition, message):
     if not condition:
         raise ContractError(message)
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """SafeLoader that refuses duplicate and merge keys instead of resolving them."""
+
+
+def _construct_unique_mapping(loader, node, deep=False):
+    seen = set()
+    for key_node, _ in node.value:
+        require(key_node.tag != "tag:yaml.org,2002:merge",
+                "required workflow uses a YAML merge key")
+        key = loader.construct_object(key_node, deep=True)
+        require(key not in seen, f"required workflow repeats duplicate key {key!r}")
+        seen.add(key)
+    return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping
+)
+
+
+def load_workflow_document(text):
+    try:
+        return yaml.load(text, Loader=_UniqueKeyLoader)  # noqa: S506 - SafeLoader subclass
+    except yaml.YAMLError:
+        raise ContractError("required workflow is not valid YAML") from None
+
+
+def reviewed_workflow(consumer_sha256):
+    require(isinstance(consumer_sha256, str) and SHA256_PATTERN.fullmatch(consumer_sha256),
+            "admitted consumer digest is not a lowercase SHA-256")
+    return load_workflow_document(REVIEWED_WORKFLOW.replace(CONSUMER_DIGEST_PLACEHOLDER, consumer_sha256))
 
 
 def is_accepted_consumer_workflow_for_rollout(
@@ -208,7 +350,14 @@ def validate_workflow(path=WORKFLOW):
     require(generated.returncode == 0, "required workflow generator failed")
     require(path.read_text(encoding="utf-8") == generated.stdout,
             "required workflow differs from canonical generator output")
-    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    consumer = subprocess.run(
+        [sys.executable, str(GENERATOR), "--consumer", "config/cli-projects-required-node-ci.json"],
+        cwd=ROOT, capture_output=True, check=False,
+    )
+    require(consumer.returncode == 0, "consumer workflow generation failed")
+    document = load_workflow_document(path.read_text(encoding="utf-8"))
+    require(document == reviewed_workflow(hashlib.sha256(consumer.stdout).hexdigest()),
+            "required workflow is not the reviewed structure")
     pull_request_types = [
         "opened",
         "reopened",
@@ -269,17 +418,6 @@ def validate_workflow(path=WORKFLOW):
         "REPOSITORY", "RUN_ID", "CONSUMER_WORKFLOW_SHA256", "GH_TOKEN",
     }, "identity admission inputs drifted")
     admission_run = admission_step.get("run", "")
-    require(admission_run == ADMISSION_RUN, "identity admission is not the reviewed text")
-    consumer = subprocess.run(
-        [sys.executable, str(GENERATOR), "--consumer", "config/cli-projects-required-node-ci.json"],
-        cwd=ROOT, capture_output=True, check=False,
-    )
-    require(consumer.returncode == 0, "consumer workflow generation failed")
-    require(
-        admission_step.get("env", {}).get("CONSUMER_WORKFLOW_SHA256")
-        == hashlib.sha256(consumer.stdout).hexdigest(),
-        "admitted digest is not the generated consumer caller",
-    )
     for assertion in (
         "actions/runs/$RUN_ID",
         'event_name" = pull_request',

