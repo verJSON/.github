@@ -347,3 +347,73 @@ more specific trigger in the
 direct-human approval events with head-SHA and diff binding are verifiable. The
 `reenable_when` text in `config/required-reviewer-rulesets.json` is unchanged and is
 updated by the change that removes a suspension.
+
+## Amendment 2026-10-22 — bypass window ledger and restore checklist
+
+On 2026-10-22 the owner gave a standing authorization, recorded verbatim: "You have my
+ack and approval to bypass all rules until CI is optimized and working before
+restoring them." It permits merging past gates (Gate C, ruleset review requirements,
+admin-approval requirements) for work in service of optimizing and restoring the
+canonical CI. It does not permit irreversible destructive acts (deleting published
+package versions, force-push, data loss, secret exposure), and it never permits
+weakening a test or check; bypass means merging past a gate with evidence. This
+amendment is the ledger that makes every bypass restorable. It adds no new decision
+beyond the dated authorization; it extends the suspension recorded above.
+
+### Bypass ledger
+
+1. **Four `sensitive-path-admin-review` rulesets suspended** (`enforcement: disabled`,
+   declared in `config/required-reviewer-rulesets.json`): `25513484` verjson-cli-cloud,
+   `25513492` verjson-cli-projects, `25513495` verjson-cli, `25513503`
+   verjson-object-storage. Pre-change images (ruleset configs only; checked for
+   credentials, none present) are committed at
+   [`rollback/ruleset-<id>-before.json`](rollback/), so restoration does not depend on
+   `/tmp`. Each file records `enforcement: active`.
+2. **Gate C exception.** verjson-cli-projects#159 was admin-merged at head `9978df1e`
+   (merge commit `35fe7a9b`) while the `AI review authorization` check was orphaned: the
+   stale caller `63fc49c6` fails `arm run provenance mismatch`. The root cause is source
+   casing, fixed upstream in `65529002`. #159 is too large for the
+   [ADR 0227](../0227-arm-bootstraps-stale-review-callers/README.md) bootstrap (38 files
+   against a cap of 32), so the bootstrap could not carry it.
+3. **Docs PRs merged with `assert-mergeable-head` exit 3** (no required checks declared,
+   so Gate A has nothing to assert): verjson-docs#18 (`c6349dd5`),
+   verjson-agent-identity#3 (`3314afaa`), verjson-agent-identity-infra#3 (`445051bd`),
+   verjson-cli-identity#3 (`af1ecf5e`), all merged 2026-10-22 ~05:03Z.
+4. **Earlier admin merges in the same session window** (2026-10-22): Verjson/.github
+   #1870, #1871, #1872, #1873, #1876. Listed by merge window; the per-PR gate
+   outcome for each is in its own PR thread, and this entry does not re-derive it.
+5. **Authorization:** the verbatim text and date above.
+
+### Exit condition ("CI optimized and working"), measurable
+
+The window closes when all hold, each evidenced in the closing PR:
+
+- Changes 1-6 of the untrusted-PR isolation work on
+  [Verjson/.github#1869](https://github.com/Verjson/.github/issues/1869) have landed or
+  been explicitly dropped by recorded decision.
+- An adopter canary outside the Verjson organization runs the canonical CI green.
+- Runner minutes per run are measured for the canonical workflows and recorded, with
+  the figure compared against the pre-optimization baseline.
+
+### Restore checklist
+
+- [ ] Prerequisite: verifiable direct-human approval events bound to head SHA and diff
+  exist, per the
+  [ADR 0202 2026-10-22 amendment](../0202-bind-autonomous-merge-to-independent-review-receipt/README.md).
+  This amendment does not supersede that condition.
+- [ ] Delete the four `suspended` objects in `config/required-reviewer-rulesets.json`
+  and update the `reenable_when` text, in one change.
+- [ ] Re-enable through the audited path: `scripts/required-reviewer-ruleset.py apply`
+  with its acknowledgement, which verifies the full image while disabled and rolls back
+  if activation verification fails; then `check`, which must pass with all four active
+  and print no `SUSPENDED:` line.
+- [ ] Only if `apply` cannot be used, fall back to `PUT /orgs/Verjson/rulesets/<id>`
+  with the saved JSON from `rollback/` (strip read-only keys such as `id`, `source`,
+  `_links` if rejected), then diff the read-back against the saved image in full, not
+  only `enforcement`.
+- [ ] Verify the verjson-cli-projects caller on `main` is replaced (no stale `63fc49c6`
+  pin) and that `AI review authorization` succeeds on a fresh PR head; that check is
+  published against the PR head, not `main`.
+- [ ] Re-run `assert-mergeable-head` on each open PR that relied on exit-3 or Gate C
+  handling.
+- [ ] Add a dated line here recording the restoration and its evidence.
