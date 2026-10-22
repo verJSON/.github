@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Keep sensitive-path required-reviewer org rulesets equal to reviewed config (#1816)."""
 import argparse
+from datetime import date
 import json
 from pathlib import Path
 import re
@@ -33,6 +34,11 @@ ADMINS_TEAM = {"type": "Team", "id": 17813010}
 # merge App, Renovate, and organization owners stay subject to the admin approval.
 RELEASE_BYPASS = [{"actor_type": "Integration", "actor_id": 4583107, "bypass_mode": "always"}]
 RULESET_KEYS = {"name", "target", "enforcement", "conditions", "bypass_actors", "rules"}
+# ADR 0210 (2026-10-22 amendment): an explicit, dated suspension is the only way a
+# reviewed ruleset may be live-disabled. The declared `enforcement` stays "active" (the
+# state to return to); the declaration makes the audit expect "disabled" meanwhile.
+SUSPENSION_KEYS = {"reason", "since", "reenable_when"}
+SUSPENSION_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 # Everything but the reviewer requirement is neutral, so the ruleset adds the admin
 # approval and changes no other review behavior `main-protection` already sets.
 NEUTRAL_PARAMETERS = {
@@ -57,11 +63,43 @@ def validate_file_patterns(patterns, location):
     )
 
 
+def valid_suspension_date(value):
+    if SUSPENSION_DATE.fullmatch(value) is None:
+        return False
+    try:
+        return date.fromisoformat(value) <= date.today()
+    except ValueError:
+        return False
+
+
+def validate_suspension(suspension, location):
+    require(
+        isinstance(suspension, dict) and set(suspension) == SUSPENSION_KEYS
+        and all(isinstance(value, str) and value.strip() and value.isprintable()
+                for value in suspension.values())
+        and valid_suspension_date(suspension["since"]),
+        f"{location}: suspended must hold non-blank reason and reenable_when and a "
+        "YYYY-MM-DD since",
+    )
+
+
+def expected_image(ruleset):
+    """The image GitHub must hold: the declaration minus `suspended`, disabled if suspended."""
+    image = {key: value for key, value in ruleset.items() if key != "suspended"}
+    if "suspended" in ruleset:
+        image["enforcement"] = "disabled"
+    return image
+
+
 def validate_ruleset(ruleset, location):
-    require(isinstance(ruleset, dict) and set(ruleset) == RULESET_KEYS,
+    require(isinstance(ruleset, dict)
+            and set(ruleset) - {"suspended"} == RULESET_KEYS,
             f"{location}: ruleset keys drifted")
+    if "suspended" in ruleset:
+        validate_suspension(ruleset["suspended"], location)
     require(ruleset["target"] == "branch" and ruleset["enforcement"] == "active",
-            f"{location}: must be an active branch ruleset")
+            f"{location}: must be an active branch ruleset (declare a suspension instead "
+            "of disabling)")
     repository_name = ruleset["conditions"].get("repository_name") \
         if isinstance(ruleset["conditions"], dict) else None
     repositories = repository_name.get("include") if isinstance(repository_name, dict) else None
@@ -154,11 +192,21 @@ def verify_targets(config):
                 f"{ruleset['name']}: repository {repository} default branch is not main")
 
 
+def report_suspensions(config):
+    """Name every declared suspension on every run so a disabled control is not forgotten."""
+    for ruleset in config["rulesets"]:
+        suspension = ruleset.get("suspended")
+        if suspension:
+            print(f"SUSPENDED: {ruleset['name']} since {suspension['since']}: "
+                  f"{suspension['reason']} Re-enable when: {suspension['reenable_when']}")
+
+
 def check(config):
+    report_suspensions(config)
     verify_targets(config)
     entries = list_organization_rulesets(ORGANIZATION)
     findings = []
-    for expected in config["rulesets"]:
+    for expected in map(expected_image, config["rulesets"]):
         named = [entry for entry in entries if entry["name"] == expected["name"]]
         if not named:
             findings.append(f"{expected['name']}: absent; apply the reviewed config")
@@ -237,7 +285,7 @@ def plan(config):
     verify_targets(config)
     entries = list_organization_rulesets(ORGANIZATION)
     actions = []
-    for expected in config["rulesets"]:
+    for expected in map(expected_image, config["rulesets"]):
         named = [entry for entry in entries if entry["name"] == expected["name"]]
         require(len(named) <= 1, f"{expected['name']}: {len(named)} live rulesets share the name")
         if not named:
@@ -247,7 +295,7 @@ def plan(config):
         live = live_ruleset(ruleset_id)
         if not drifted_fields(live, expected):
             actions.append(("unchanged", expected, ruleset_id))
-        elif live.get("enforcement") != "active":
+        elif expected["enforcement"] == "active" and live.get("enforcement") != "active":
             actions.append(("activate", expected, ruleset_id))
         else:
             # Already enforcing: rewritten in place, without rollback, because its
@@ -287,7 +335,8 @@ def main(arguments=None):
         require(args.ack == config["apply_acknowledgement"],
                 f"explicit acknowledgement {config['apply_acknowledgement']} is required")
         return apply(config)
-    print(json.dumps(config["rulesets"], indent=2, sort_keys=True))
+    print(json.dumps([expected_image(ruleset) for ruleset in config["rulesets"]],
+                     indent=2, sort_keys=True))
     return 0
 
 
