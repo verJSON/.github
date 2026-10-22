@@ -530,13 +530,74 @@ for required in (
     assert required in evict_condition, f"eviction condition lacks {required}"
 assert "failure" not in evict_condition and "cancelled" not in evict_condition
 assert not any("secrets." in str(step) for step in evict["steps"]), "eviction must not touch secrets"
-delete_step = next(step for step in evict["steps"] if "gh cache delete" in step.get("run", ""))
+delete_step = next(step for step in evict["steps"] if "-X DELETE" in step.get("run", ""))
 assert delete_step["env"]["CACHE_KEY"] == (
     "${{ needs.acquire-private-node-dependencies.outputs.transfer-cache-key }}"
 )
-assert 'gh cache delete "$CACHE_KEY" --ref "$GITHUB_REF"' in delete_step["run"], (
-    "eviction must be bound to the publishing ref"
+assert "ref=$GITHUB_REF" in delete_step["run"] and "key=$CACHE_KEY" in delete_step["run"], (
+    "eviction must be bound to the exact key and the publishing ref"
 )
+assert delete_step["continue-on-error"] is True
+assert "actions" not in publisher["permissions"], "workflow-level permissions must not grant actions"
+
+import re, subprocess, tempfile
+
+def evict_runs(results):
+    expression = " ".join(evict["if"].split())
+    expression = expression.replace("always()", "True").replace("&&", " and ").replace("||", " or ")
+    expression = re.sub(
+        r"needs\.([a-z-]+)\.result == '([a-z]+)'",
+        lambda m: repr(results[m.group(1)] == m.group(2)),
+        expression,
+    )
+    return eval(expression, {"__builtins__": {}})
+
+consumers = ("acquire-private-node-dependencies", "publish-base", "publish-derived")
+assert evict_runs({n: "success" for n in consumers})
+assert evict_runs({**{n: "success" for n in consumers}, "publish-derived": "skipped"})
+for name in consumers:
+    for outcome in ("failure", "cancelled", "skipped"):
+        if name == "publish-derived" and outcome == "skipped":
+            continue
+        assert not evict_runs({**{n: "success" for n in consumers}, name: outcome}), (
+            f"{outcome} {name} must keep the transfer cache for re-run failed jobs"
+        )
+
+good_key = "container-node-modules-123-1-" + "ab" * 32
+
+def run_evict_step(key, stub_response):
+    with tempfile.TemporaryDirectory() as work:
+        bin_dir = Path(work, "bin")
+        bin_dir.mkdir()
+        gh = bin_dir / "gh"
+        gh.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$STUB_LOG"\nprintf "%b" "$STUB_RESPONSE"\nexit "${STUB_EXIT:-0}"\n')
+        gh.chmod(0o755)
+        script = Path(work, "step.sh")
+        script.write_text(delete_step["run"])
+        env = {
+            "PATH": f"{bin_dir}:/usr/bin:/bin", "CACHE_KEY": key, "GH_REPO": "o/r",
+            "GITHUB_REF": "refs/heads/main", "GITHUB_STEP_SUMMARY": str(Path(work, "summary")),
+            "STUB_LOG": str(Path(work, "log")), "STUB_RESPONSE": stub_response[0],
+            "STUB_EXIT": str(stub_response[1]),
+        }
+        done = subprocess.run(["bash", "-e", str(script)], env=env, capture_output=True, text=True)
+        log = Path(work, "log").read_text() if Path(work, "log").exists() else ""
+        summary = Path(work, "summary").read_text() if Path(work, "summary").exists() else ""
+        return done, log, summary
+
+done, log, _ = run_evict_step(good_key, ("HTTP/2.0 200 OK\n\n{}", 0))
+assert done.returncode == 0 and f"key={good_key}&ref=refs/heads/main" in log, done.stderr
+done, log, _ = run_evict_step(good_key, ("HTTP/2.0 404 Not Found\n\n{}", 1))
+assert done.returncode == 0 and "already absent" in done.stdout, "a missing cache is success"
+done, log, summary = run_evict_step(good_key, ("HTTP/2.0 403 Forbidden\n\n{}", 1))
+assert done.returncode != 0 and "::warning::" in done.stdout and good_key in summary, (
+    "a real delete failure must be visible in annotations and the step summary"
+)
+done, log, _ = run_evict_step(good_key, ("", 1))
+assert done.returncode != 0 and "status none" in done.stdout
+for bad_key in ("", "other-key", good_key + "&ref=x", "container-node-modules-0-1-" + "ab" * 32):
+    done, log, _ = run_evict_step(bad_key, ("HTTP/2.0 200 OK\n", 0))
+    assert done.returncode != 0 and log == "", f"invalid key {bad_key!r} reached gh"
 assert delete_step["env"]["GH_TOKEN"] == "${{ github.token }}"
 assert not any(s.get("uses", "").startswith("actions/checkout@") for s in evict["steps"]), (
     "eviction must not check out the repository"

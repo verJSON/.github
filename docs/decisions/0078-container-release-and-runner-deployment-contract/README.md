@@ -701,7 +701,7 @@ added a dead entry and an adopter's 10 GB quota filled, evicting its dependency 
 browser caches. Keying it for reuse was rejected: it would weaken the exact-attempt,
 unguessable-key boundary and the per-run encryption.
 
-A final `evict-node-modules-transfer` job deletes the entry with `gh cache delete` once
+A final `evict-node-modules-transfer` job deletes the entry (`gh api -X DELETE` by exact key and ref, branching on HTTP status; a failure emits a warning and a step-summary line) once
 the acquisition and both build jobs succeed (derived builds may be skipped). Failure or
 cancellation deliberately keeps the entry, because "re-run failed jobs" reuses the
 acquisition job's key output and would otherwise miss; that residue is bounded by the

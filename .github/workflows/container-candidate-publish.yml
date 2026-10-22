@@ -1168,7 +1168,9 @@ jobs:
     # The transfer cache is keyed by an unguessable per-attempt nonce and encrypted with a
     # per-run key, so it can never be reused; left alone it only crowds the consumer's 10 GB
     # Actions cache quota (#1869). Delete it once its consumers succeed. On failure it stays,
-    # because "re-run failed jobs" reuses the acquisition job's key output.
+    # because "re-run failed jobs" reuses the acquisition job's key output. The acquisition
+    # job's own `if` admits only trusted default-branch push/dispatch events, so requiring its
+    # result to be 'success' here is the only default-branch guard this job needs.
     if: >-
       always() &&
       needs.acquire-private-node-dependencies.result == 'success' &&
@@ -1193,12 +1195,18 @@ jobs:
             echo "::error::invalid container dependency cache key"
             exit 1
           }
-          if ! out="$(gh cache delete "$CACHE_KEY" --ref "$GITHUB_REF" 2>&1)"; then
-            case "$out" in
-              *"Could not find"*|*"HTTP 404"*) echo "transfer cache already absent" ;;
-              *) echo "::warning::could not delete transfer cache: $out"; exit 1 ;;
-            esac
-          fi
+          # Branch on the HTTP status of the delete-by-key endpoint, not on gh's prose.
+          out="$(gh api -i -X DELETE "repos/$GH_REPO/actions/caches?key=$CACHE_KEY&ref=$GITHUB_REF" 2>&1)" || true
+          status="$(printf '%s\n' "$out" | sed -n '1s/^HTTP\/[0123456789.]* \([0123456789]*\).*/\1/p')"
+          case "$status" in
+            2??) echo "transfer cache deleted" ;;
+            404) echo "transfer cache already absent" ;;
+            *)
+              echo "::warning::could not delete transfer cache ${CACHE_KEY} (status ${status:-none}); it will crowd the Actions cache quota until it ages out"
+              printf '%s\n' "Transfer cache ${CACHE_KEY} was not deleted (status ${status:-none})." >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+          esac
 
   attest-sbom:
     if: >-
