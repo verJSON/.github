@@ -76,3 +76,77 @@ stale-head, foreign-PR, fenced, surrounding-context, edited, dismissed, withdraw
 later-negative, later-created, App-authored, and permission-downgrade variants.
 It also injects a hold only after authorization and proves the terminal merge boundary
 rejects that late mutation.
+
+## 2026-10-22 amendment — Authorship identity is composite, approval identity is a direct human, and delegation-owner review is a named exception
+
+**What.** This amendment records the attribution policy for agent-authored work. It
+changes no gate code and no ruleset, and it does not alter the receipt contract above.
+
+**Why.** The decision above states that a non-App `User` with `maintain` or `admin` is
+not proof of human presence. The org requirement of at least one independent reviewer
+therefore cannot be shown to be satisfied by a human when the agent and the human share
+a GitHub account. The owner's requirement is that the agent identity may do and commit
+work as a combined user, model, and agent identity, while the human must prompt as
+themselves to sign off a review or admin-merge. The owner approved recording the
+delegating human as an acceptable approver as an explicit policy exception. The
+architecture review board converged on the policy below.
+
+### Policy
+
+1. **Authorship identity is composite.** An agent's work is attributed to
+   `{human subject, model, agent/run}`. It is carried on commits (trailers), on issued
+   credentials, and on evidence. It is modeled with the existing `Actor` of
+   [`@verjson/identity-contracts`](https://github.com/Verjson/verjson-identity-contracts)
+   (the RFC 8693 `act` chain): the principal `sub` is the human and `act` is the
+   agent-run. No new schema is introduced here. `Actor` has no field for the model
+   identifier today, so where the model id is recorded is **open** and owned by
+   `verjson-identity-contracts`; nothing in this record invents one.
+2. **Approval identity is a direct human session only.** Agent credentials structurally
+   cannot carry review, approve, or admin-merge scope, enforced at issuance and again at
+   the gate. An approval counts only when issuer-backed evidence shows a direct human
+   session. A missing `act` claim alone is insufficient evidence: this ADR already
+   records that a GitHub `User` account does not prove a human operator.
+3. **Delegation-owner review is an explicit named policy.** The human who delegated the
+   work may approve it. Records and gate output name it `delegation-owner-review` and
+   never call it plain "independent review". Safeguards:
+   - the approval binds the pull request, the head SHA, the base, and the diff digest;
+   - it goes stale on any push and is rechecked immediately before merge;
+   - the audit record keeps both the authoring composite identity and the direct human
+     approver, even when they are the same person;
+   - an agent can never obtain, refresh, or relay an approval or an admin-merge
+     credential.
+4. **Autonomous system actions are represented explicitly**, as a machine subject with
+   no human subject. A delegated action that lacks its human subject fails closed.
+
+### Interim state and re-enable trigger
+
+The four sensitive-path admin-review rulesets stay suspended as declared in
+[ADR 0210](../0210-code-owner-review-is-real-through-a-generated-codeowners-member/README.md)
+(2026-10-22 amendment). Their re-enable trigger is refined from "agent and human
+identity attribution exists" to: **direct-human approval events with head-SHA and diff
+binding are verifiable.** The `reenable_when` text in
+`config/required-reviewer-rulesets.json` predates this refinement and is deliberately
+left unchanged here; the change that removes a suspension updates it.
+
+Until then, the receipt above remains evidence for the autonomous merge path only. It is
+neither a direct-human approval nor a `delegation-owner-review`, and it is not evidence
+for any reviewer ruleset.
+
+### Ownership
+
+| Concern | Owner |
+| --- | --- |
+| Composite identity schema (`Actor`, `act` chain) | [verjson-identity-contracts](https://github.com/Verjson/verjson-identity-contracts) |
+| Agent admission, policy, credential issuance, and revocation execution | [verjson-agent-identity](https://github.com/Verjson/verjson-agent-identity) |
+| Human-session revocation | [verjson-identity-lifecycle](https://github.com/Verjson/verjson-identity-lifecycle) |
+| Customer workflows that call revocation | [verjson-cli-identity](https://github.com/Verjson/verjson-cli-identity) |
+| Issuer of the evidence that proves a direct human session | **Open: not yet decided** |
+
+The shared architecture is in
+[verjson-docs ADRs 0006–0008](https://github.com/Verjson/verjson-docs/pull/18), which
+exist only in that open pull request until it merges.
+
+### Not covered
+
+No gate verifies direct-human sessions or head and diff binding today, so this policy is
+not yet enforced by code. Enforcing it, and the issuer decision, are separate work.
