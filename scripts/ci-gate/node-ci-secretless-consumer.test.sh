@@ -932,7 +932,7 @@ other_lock_case "a skipped package bundled elsewhere is harmless when nothing is
   '' $'approved\nskipped' ''
 
 # Link and workspace nodes are selected by directory name; a bundle only matters
-# when its host is selected; a nested-only bundled copy is still a bundled copy.
+# when its host is selected, and scoped and workspace hosts keep their identity.
 mkdir -p "$tmp/link/node_modules/skipped" "$tmp/link/node_modules/approved" "$tmp/link/.git"
 printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"hasInstallScript":true},"node_modules/skipped":{"resolved":"packages/approved","link":true},"packages/approved":{"name":"skipped","hasInstallScript":true}}}' \
   > "$tmp/link/package-lock.json"
@@ -952,5 +952,18 @@ printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"
 cp "$tmp/commands/package.json" "$tmp/workspace/package.json"
 other_lock_case "a workspace directory whose name selects a skipped package fails (#1888)" workspace reject \
   approved skipped 'selects npm aliases, links, or workspace directories of skipped packages: approved'
+
+mkdir -p "$tmp/scoped/node_modules/@s/approved/node_modules/skipped" "$tmp/scoped/node_modules/skipped" "$tmp/scoped/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/@s/approved":{"hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true},"node_modules/@s/approved/node_modules/skipped":{"hasInstallScript":true,"inBundle":true}}}' \
+  > "$tmp/scoped/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/scoped/package.json"
+other_lock_case "a skipped package bundled in a selected scoped host fails (#1888)" scoped reject \
+  '@s/approved' skipped 'skipped packages are bundled inside another package'
+mkdir -p "$tmp/wsbundle/node_modules/approved" "$tmp/wsbundle/node_modules/skipped" "$tmp/wsbundle/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true},"packages/approved/node_modules/skipped":{"hasInstallScript":true,"inBundle":true}}}' \
+  > "$tmp/wsbundle/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/wsbundle/package.json"
+other_lock_case "a skipped package bundled in a selected workspace host fails (#1888)" wsbundle reject \
+  approved skipped 'skipped packages are bundled inside another package'
 
 exit "$failures"

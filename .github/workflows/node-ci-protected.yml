@@ -5456,7 +5456,6 @@ jobs:
               lock = json.loads(Path("package-lock.json").read_text(encoding="utf-8"))
               installed = set()
               lifecycle_scoped = set()
-              lock_nodes = []
               for path, package in lock.get("packages", {}).items():
                   if "node_modules/" not in path:
                       continue
@@ -5475,8 +5474,11 @@ jobs:
                   if path == "" or not isinstance(package, dict):
                       continue
                   segments = path.split("node_modules/")
+                  # Hosts keep their scope ("@scope/name"); a workspace host outside
+                  # node_modules is selected by its directory name.
                   ancestors = tuple(
-                      segment.rstrip("/").rsplit("/", 1)[-1] for segment in segments[1:-1]
+                      [segments[0].rstrip("/").rsplit("/", 1)[-1]] * bool(segments[0])
+                      + [segment.rstrip("/") for segment in segments[1:-1]]
                   ) if package.get("inBundle") is True else ()
                   if package.get("link") is True and isinstance(package.get("resolved"), str):
                       target = lock_packages.get(package["resolved"], {})
