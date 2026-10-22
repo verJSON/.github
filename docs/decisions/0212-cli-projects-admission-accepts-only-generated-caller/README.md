@@ -114,3 +114,25 @@ first. This amendment records the dependency rather than removing it. Admission 
 instead derive the expected caller from the head's declared contract release, bounded
 below by a floor. That would widen what a pull request controls, so it would need its
 own decision.
+
+## Amendment 2026-10-22 — second rotation receipt
+
+The legacy consumer caller digest was retired and ruleset 21830367 rotated after
+verjson-cli-projects#159 (merge `35fe7a9b`) put the generated v4.2.0 caller on its
+`main` (`ci.yml` sha256 `d23be004…`, verified on that main).
+
+- **Digest nulled:** Verjson/.github#1878, merge `f967b0b7`. `dry-run` reported "rotate
+  organization ruleset 21830367 from admitted revision `aa564422…` to `f967b0b7…`".
+- **Snapshot (rollback image):** `snapshot` returned `pre_trigger_max_run_id`
+  39728754453; the full pre-rotation ruleset (`GET /orgs/Verjson/rulesets/21830367`) was
+  saved to the operator's scratchpad. Rollback is `apply` at the prior sha
+  `aa5644220469ed6263444c996179cb8f6d0aa168`.
+- **Apply:** `apply --ack ROTATE-CLI-PROJECTS-REQUIRED-WORKFLOW-1187` reported "rotated
+  and verified active". Pre/post revision: `aa564422…` to `f967b0b7…`.
+- **Read-back diff** (pre vs post, `jq -S`): exactly two lines changed, the workflow
+  `sha` and `updated_at`; enforcement stayed `active`.
+- **Audit:** "organization ruleset 21830367 runs `f967b0b7…`, the reviewed required
+  workflow on protected main".
+- **verify-run:** run 39730529407 on verjson-cli-projects#142 head `07270146…` (above
+  the snapshot's max run id) succeeded; "verified: fresh exact-head required-workflow
+  run and strict admission check".
