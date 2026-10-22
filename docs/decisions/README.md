@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0240](0240-installation-policy-versus-contract-identity/README.md) | 2026-10-22 | Installation policy versus contract identity |
 | [0239](0239-unified-untrusted-execution-boundary/README.md) | 2026-10-22 | Unified untrusted-execution boundary for UI and Pulumi pull requests |
 | [0238](0238-node-ci-cost-levers/README.md) | 2026-10-22 | node-ci cost levers: larger hosted sizes, diff-classified plans, and what stays caller-side |
 | [0237](0237-gate-review-ignores-pull-request-agent-config/README.md) | 2026-10-18 | The gate review never loads agent configuration from the pull request |
