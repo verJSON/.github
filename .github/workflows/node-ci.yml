@@ -171,6 +171,21 @@ on:
         required: false
         type: string
         default: ''
+      secretless-skip-install-scripts:
+        description: >-
+          Newline-separated exact locked package names whose install scripts are
+          deliberately never run, such as a native addon that must download a
+          binary or compile against system libraries the network-denied rebuild
+          sandbox cannot provide. Every installed package whose lock marks an
+          install script (hasInstallScript, or requiresBuild for pnpm) must
+          appear in exactly one of secretless-rebuild-packages or this list. A
+          name on both lists, or one the lock does not mark as needing install
+          scripts, fails closed. Skipped packages stay as extracted under
+          --ignore-scripts and nothing executes them. The skipped set is printed
+          in the job log. Empty skips nothing.
+        required: false
+        type: string
+        default: ''
       secretless-rebuild-env:
         description: >-
           Optional JSON object containing only ONNXRUNTIME_NODE_INSTALL: skip
@@ -4764,10 +4779,11 @@ jobs:
           fi
 
       - name: Rebuild exact approved lifecycle packages without credentials
-        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && inputs.secretless-rebuild-packages != ''
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && (inputs.secretless-rebuild-packages != '' || inputs.secretless-skip-install-scripts != '')
         env:
           PACKAGE_MANAGER: ${{ inputs.package-manager }}
           REBUILD_PACKAGES: ${{ inputs.secretless-rebuild-packages }}
+          SKIP_INSTALL_SCRIPTS: ${{ inputs.secretless-skip-install-scripts }}
           REBUILD_ENV: ${{ inputs.secretless-rebuild-env }}
           BWRAP_BINARY: /usr/bin/bwrap
         run: |
@@ -4784,9 +4800,19 @@ jobs:
 
           requested = [line.strip() for line in os.environ["REBUILD_PACKAGES"].splitlines() if line.strip()]
           package_pattern = re.compile(r"(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*")
-          if not requested or len(requested) != len(set(requested)) \
+          skipped = [line.strip() for line in os.environ.get("SKIP_INSTALL_SCRIPTS", "").splitlines() if line.strip()]
+          if (not requested and not skipped) or len(requested) != len(set(requested)) \
                   or any(package_pattern.fullmatch(name) is None for name in requested):
               sys.exit("secretless-rebuild-packages accepts unique exact npm package names only")
+          if len(skipped) != len(set(skipped)) \
+                  or any(package_pattern.fullmatch(name) is None for name in skipped):
+              sys.exit("secretless-skip-install-scripts accepts unique exact npm package names only")
+          overlap = sorted(set(requested) & set(skipped))
+          if overlap:
+              sys.exit(
+                  "packages named in both secretless-rebuild-packages and "
+                  "secretless-skip-install-scripts: " + ", ".join(overlap)
+              )
           raw_rebuild_env = os.environ.get("REBUILD_ENV", "{}")
           if len(raw_rebuild_env) > 4096:
               sys.exit("secretless-rebuild-env must not exceed 4096 characters")
@@ -4866,19 +4892,22 @@ jobs:
               name for name in lifecycle_scoped
               if (Path("node_modules") / name).is_dir()
           }
-          missing = sorted(set(requested) - installed)
+          missing = sorted((set(requested) | set(skipped)) - installed)
           if missing:
-              sys.exit("approved rebuild packages absent from lock: " + ", ".join(missing))
+              sys.exit("approved rebuild or skipped packages absent from lock: " + ", ".join(missing))
           # secretless-rebuild-packages is the complete, reviewed set of packages
           # allowed to execute code at install time under --ignore-scripts (#932):
           # an exact match, not a hint, so a dependency update that silently adds
           # or drops a lifecycle script anywhere in the tree fails closed instead
-          # of passing unreviewed.
-          undeclared = sorted(lifecycle_scoped - set(requested))
+          # of passing unreviewed. secretless-skip-install-scripts is the reviewed
+          # set whose scripts are deliberately never run (#1888); it shares the
+          # accounting but never reaches the package manager.
+          undeclared = sorted(lifecycle_scoped - set(requested) - set(skipped))
           if undeclared:
               sys.exit(
                   "lock declares install scripts for packages absent from "
-                  "secretless-rebuild-packages: " + ", ".join(undeclared)
+                  "secretless-rebuild-packages and secretless-skip-install-scripts: "
+                  + ", ".join(undeclared)
               )
           unnecessary = sorted(set(requested) - lifecycle_scoped)
           if unnecessary:
@@ -4886,6 +4915,16 @@ jobs:
                   "secretless-rebuild-packages names packages the lock does not mark "
                   "as needing install scripts: " + ", ".join(unnecessary)
               )
+          stale_skips = sorted(set(skipped) - lifecycle_scoped)
+          if stale_skips:
+              sys.exit(
+                  "secretless-skip-install-scripts names packages the lock does not mark "
+                  "as needing install scripts: " + ", ".join(stale_skips)
+              )
+          if skipped:
+              print("install scripts deliberately skipped (never executed): " + ", ".join(sorted(skipped)), flush=True)
+          if not requested:
+              sys.exit(0)
           command = ["npm", "rebuild"] if package_manager == "npm" else ["corepack", "pnpm", "rebuild"]
           if os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
               sys.exit("secretless lifecycle rebuild requires a GitHub-hosted runner")

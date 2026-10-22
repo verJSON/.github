@@ -225,7 +225,18 @@ identical across the event split.
 Consumers that need a reviewed private auxiliary tree, selective lifecycle
 rebuilds, or a repository-specific command sequence keep those choices explicit.
 `secretless-rebuild-env` currently accepts only `ONNXRUNTIME_NODE_INSTALL=skip`
-for an approved `onnxruntime-node` rebuild. On GitHub-hosted runners, the
+for an approved `onnxruntime-node` rebuild.
+`secretless-skip-install-scripts` lists exact package names whose install scripts
+are deliberately never run, for dependencies that must download a binary or
+compile against system libraries the network-denied sandbox cannot provide (for
+example an optional `canvas`). Every installed package whose lock marks an
+install script (`hasInstallScript`, or `requiresBuild` for pnpm) must appear in
+exactly one of `secretless-rebuild-packages` or this list. A name on both lists,
+or one the lock does not mark as needing install scripts, fails closed. Skipped
+packages stay as extracted under `--ignore-scripts`, nothing executes them, and
+the job log prints the skipped set. A lane may skip every script-bearing package
+and leave `secretless-rebuild-packages` empty; it then runs the accounting but
+no rebuild. On GitHub-hosted runners, the
 workflow first provisions and verifies its bubblewrap/AppArmor boundary;
 the rebuild fails closed on other runner types. npm or Corepack runs in a
 Bubblewrap user, PID, and network namespace from a temporary root with only

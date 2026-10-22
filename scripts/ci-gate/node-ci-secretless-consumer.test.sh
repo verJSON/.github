@@ -39,6 +39,7 @@ inputs = doc[True]["workflow_call"]["inputs"]
 assert inputs["approved-internal-scopes"]["default"] == "@verjson"
 assert inputs["secretless-auxiliary-source"]["default"] == ""
 assert inputs["secretless-rebuild-packages"]["default"] == ""
+assert inputs["secretless-skip-install-scripts"]["default"] == ""
 assert inputs["secretless-ci-script-plan"]["default"] == ""
 
 acquire = doc["jobs"]["acquire-secretless-dependencies"]
@@ -842,5 +843,50 @@ if (cd "$tmp/commands" && PATH="$toolchain/bin:/usr/bin:/bin" NPM_STUB_LOG="$tmp
 else
   fail "a cross-platform lock entry incorrectly demanded allowlisting (#941)"
 fi
+
+# #1888: secretless-skip-install-scripts shares the exact accounting with
+# secretless-rebuild-packages but its names never reach the package manager.
+skip_case() {
+  local description=$1 expectation=$2 rebuild=$3 skip=$4 expected_log=$5 out
+  : > "$tmp/commands/node_modules/.npm-stub.log"
+  out=$(cd "$tmp/commands" && PATH="$toolchain/bin:/usr/bin:/bin" NPM_STUB_LOG="$tmp/skip-rebuild.log" \
+    REBUILD_PACKAGES="$rebuild" SKIP_INSTALL_SCRIPTS="$skip" bash "$tmp/rebuild.sh" 2>&1) && status=0 || status=$?
+  if [ "$expectation" = accept ]; then
+    if [ "$status" -eq 0 ] && [ "$(cat "$tmp/commands/node_modules/.npm-stub.log")" = "$expected_log" ]; then
+      pass "$description"
+    else
+      fail "$description (status $status, npm log: $(cat "$tmp/commands/node_modules/.npm-stub.log"))"
+    fi
+  elif [ "$status" -ne 0 ] && [ ! -s "$tmp/commands/node_modules/.npm-stub.log" ] \
+      && grep -qF -- "$expected_log" <<<"$out"; then
+    pass "$description"
+  else
+    fail "$description (status $status, npm log: $(cat "$tmp/commands/node_modules/.npm-stub.log"))"
+  fi
+  skip_output=$out
+}
+skip_case "a skipped package passes accounting and is never passed to npm rebuild (#1888)" \
+  accept argon2 esbuild 'rebuild argon2'
+if grep -qF 'install scripts deliberately skipped (never executed): esbuild' <<<"$skip_output"; then
+  pass "the skipped set is printed in the job log (#1888)"
+else
+  fail "the skipped set is missing from the job log: $skip_output"
+fi
+skip_case "skipping every lifecycle package runs no rebuild at all (#1888)" \
+  accept '' $'argon2\nesbuild' ''
+skip_case "a lifecycle package on neither list still fails when another is skipped (#1888)" \
+  reject '' argon2 'lock declares install scripts for packages absent from secretless-rebuild-packages and secretless-skip-install-scripts: esbuild'
+skip_case "a package on both lists fails (#1888)" \
+  reject $'argon2\nesbuild' esbuild 'packages named in both secretless-rebuild-packages and secretless-skip-install-scripts: esbuild'
+skip_case "a skip entry the lock does not mark as needing install scripts is stale (#1888)" \
+  reject $'argon2\nesbuild' leftpad 'secretless-skip-install-scripts names packages the lock does not mark as needing install scripts: leftpad'
+skip_case "a skip entry installed nowhere in the lock fails (#1888)" \
+  reject $'argon2\nesbuild' ghost-package 'absent from lock: ghost-package'
+skip_case "a skip entry for a lock package absent from node_modules/ is stale (#1888)" \
+  reject $'argon2\nesbuild' '@esbuild/linux-x64' 'names packages the lock does not mark as needing install scripts: @esbuild/linux-x64'
+skip_case "a duplicated skip entry fails (#1888)" \
+  reject argon2 $'esbuild\nesbuild' 'secretless-skip-install-scripts accepts unique exact npm package names only'
+skip_case "a skip entry that is not an exact package name fails (#1888)" \
+  reject argon2 $'esbuild\n--foreground-scripts' 'secretless-skip-install-scripts accepts unique exact npm package names only'
 
 exit "$failures"
