@@ -210,8 +210,8 @@ jobs:
           # default branch; or (b) a same-repository pull_request when the caller
           # supplied a preview environment whose reviewers gate the job. Everything
           # else, including unknown events and missing identity, is untrusted.
-          repository="${REPOSITORY,,}"
-          head_repository="${HEAD_REPOSITORY,,}"
+          repo_lower="${REPOSITORY,,}"
+          head_repo_lower="${HEAD_REPOSITORY,,}"
           trusted_ref=false
           reviewed_route=false
           case "$EVENT_NAME" in
@@ -223,8 +223,8 @@ jobs:
             pull_request)
               # The name is caller-workflow data a PR can edit: constrain it before
               # it reaches an output file or an API path, then require a real gate.
-              if [ -n "$PREVIEW_ENVIRONMENT" ] && [ -n "$head_repository" ] \
-                && [ "$head_repository" = "$repository" ] \
+              if [ -n "$PREVIEW_ENVIRONMENT" ] && [ -n "$head_repo_lower" ] \
+                && [ "$head_repo_lower" = "$repo_lower" ] \
                 && [[ "$PREVIEW_ENVIRONMENT" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$ ]]; then
                 if [ -z "${GH_TOKEN:-}" ]; then
                   echo "::warning title=Pulumi preview environment cannot be verified::environment-read-token was not provided; refusing credentialed PR preview."
