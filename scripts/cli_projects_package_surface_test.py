@@ -146,11 +146,8 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
             hashlib.sha256(consumer.encode()).hexdigest(),
             "d23be004f196ce321965bd07d3f4fa221374d61270215ed17ed5f228239bc117",
         )
-        # Rotation-only: the caller on the consumer's main until #159 lands (ADR 0212).
-        self.assertEqual(
-            config["rollout_legacy_consumer_workflow_sha256"],
-            "721856f97158be3619945eb1c2a265ca49e74788bda2bd9fec732d6d0c0bec4c",
-        )
+        # Retired by the second rotation after #159 landed the generated caller (ADR 0212).
+        self.assertIsNone(config["rollout_legacy_consumer_workflow_sha256"])
 
     def test_protected_lane_repin_leaves_the_consumer_caller_bytes_unchanged(self):
         # The push-only consumer caller has its own pin, so hardening the protected
@@ -284,7 +281,7 @@ class CliProjectsPackageSurfaceTest(unittest.TestCase):
             ("1c7659b77e1c97743cdcfc0a1603141bfe25320d",
              "9e4ca97c8fd980f37af2ef3cbbb47aea3c00b44f5a5ff336d25d95815aff3886"),
             ("4a08c756547ccaf8977eda692e14eff56fddaf15",
-             config["rollout_legacy_consumer_workflow_sha256"]),
+             "721856f97158be3619945eb1c2a265ca49e74788bda2bd9fec732d6d0c0bec4c"),
         ):
             with self.subTest(pin=pin):
                 stale = GENERATOR.render_consumer({**config, "consumer_node_ci_sha": pin}, path)
