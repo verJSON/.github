@@ -5769,8 +5769,12 @@ jobs:
             echo "::notice title=script plan::$2"
             exit 0
           }
-          [[ "$BASE_SHA" =~ ^[0123456789abcdef]{40}$ && "$HEAD_SHA" =~ ^[0123456789abcdef]{40}$ ]] \
-            || decide false "full plan: base or head is not a 40-hex object name"
+          # The event payload carries both SHAs; a value that is not a 40-hex object
+          # name is a malformed event, not a diff to guess about, so the job fails.
+          [[ "$BASE_SHA" =~ ^[0123456789abcdef]{40}$ ]] \
+            || { echo "::error::base-sha is not a 40-hex object name"; exit 1; }
+          [[ "$HEAD_SHA" =~ ^[0123456789abcdef]{40}$ ]] \
+            || { echo "::error::head-sha is not a 40-hex object name"; exit 1; }
           changed="$RUNNER_TEMP/verjson-changed-paths-$$.jsonl"
           gh api --paginate "repos/${REPOSITORY}/compare/${BASE_SHA}...${HEAD_SHA}?per_page=100" \
             --jq '.files[]? | (.filename, (.previous_filename // empty)) | @json' \

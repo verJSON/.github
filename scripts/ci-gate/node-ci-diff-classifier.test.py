@@ -45,7 +45,7 @@ def classify_step(document: dict) -> dict:
 
 def run_classifier(document: dict, *, files: list[str] | None, paths: str = "",
                    base: str = SHA_A, head: str = SHA_B, api_fails: bool = False,
-                   api_garbage: bool = False) -> str:
+                   api_garbage: bool = False, expect_failure: bool = False) -> str:
     """Return the `non-app` output the step wrote (empty string if none)."""
     step = classify_step(document)
     with tempfile.TemporaryDirectory() as tmp:
@@ -80,7 +80,10 @@ def run_classifier(document: dict, *, files: list[str] | None, paths: str = "",
             ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
             env=env, capture_output=True, text=True,
         )
-        assert result.returncode == 0, f"step must never fail the job: {result.stderr}"
+        if expect_failure:
+            assert result.returncode != 0, "a malformed SHA must fail the step"
+        else:
+            assert result.returncode == 0, f"step must never fail the job: {result.stderr}"
         written = output.read_text()
     values = [line.split("=", 1)[1] for line in written.splitlines() if line.startswith("non-app=")]
     assert len(values) <= 1, f"non-app written more than once: {values}"
@@ -114,8 +117,8 @@ SCENARIOS = (
     ("an API failure falls back to the full plan", {"files": None, "api_fails": True}, "false"),
     ("a non-JSON API reply falls back to the full plan", {"files": None, "api_garbage": True}, "false"),
     ("a truncated list at the API cap falls back to the full plan", {"files": [f"docs/{n}.md" for n in range(3000)]}, "false"),
-    ("a malformed base SHA falls back to the full plan", {"files": ["docs/a.md"], "base": "main"}, "false"),
-    ("a malformed head SHA falls back to the full plan", {"files": ["docs/a.md"], "head": SHA_B + "; id"}, "false"),
+    ("a malformed base SHA fails the step without selecting the light plan", {"files": ["docs/a.md"], "base": "main", "expect_failure": True}, ""),
+    ("a malformed head SHA fails the step without selecting the light plan", {"files": ["docs/a.md"], "head": SHA_B + "; id", "expect_failure": True}, ""),
     ("a non-JSON path list falls back to the full plan", {"files": ["docs/a.md"], "paths": "docker/"}, "false"),
     ("a path list with a traversal prefix falls back", {"files": ["docs/a.md"], "paths": '["../x/"]'}, "false"),
     ("a path list with a non-string falls back", {"files": ["docs/a.md"], "paths": "[1]"}, "false"),

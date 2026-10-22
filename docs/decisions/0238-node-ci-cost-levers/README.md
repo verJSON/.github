@@ -41,7 +41,8 @@ would rename the required `<lane> / build-test` context.
    the same `<lane> / build-test` context. The classifier reads the changed-file list
    from the GitHub compare API at the PR's admitted base and head, never from the
    checkout, and fails closed to the full plan on any API error, truncation, empty list,
-   or path outside the allowlist. Non-application means a path under `docs/`, `NEXT/` or
+   or path outside the allowlist; a base or head that is not a 40-hex object name is a
+   malformed event and fails the step. Non-application means a path under `docs/`, `NEXT/` or
    `CHANGELOG/`, a top-level Markdown file, or a caller-declared directory prefix; nested
    Markdown is application content until declared. Only `secretless-pr` on a
    `pull_request` event is eligible, never a trusted-ref push. Workflow files and Node package, lockfile,
