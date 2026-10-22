@@ -3,7 +3,7 @@
   "repository": "Verjson/verjson-cli-projects",
   "protected_node_ci_sha": "a89fe1f090545c15cdd6987f20119327206e2c59",
   "consumer_node_ci_sha": "a89fe1f090545c15cdd6987f20119327206e2c59",
-  "rollout_legacy_consumer_workflow_sha256": "721856f97158be3619945eb1c2a265ca49e74788bda2bd9fec732d6d0c0bec4c",
+  "rollout_legacy_consumer_workflow_sha256": null,
   "node_versions": ["26", "24.19.0"],
   "approved_internal_packages": [
     "@verjson/eslint-config",
