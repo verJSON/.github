@@ -349,7 +349,13 @@ name of a link or workspace source) resolves to a skipped canonical package, and
 skipped package is bundled (`inBundle`) beneath a requested host. Scoped hosts and
 workspace directories keep their `@scope/name` identity, and the project root cannot be
 requested (by its sandbox directory name or manifest name) next to a skip list. These checks are
-npm-only; pnpm keys that are aliases are already rejected.
+npm-only: pnpm rejects `npm:` alias keys already and its lock is not modeled for bundle or link
+selection, so the pnpm path gets only the shared accounting, overlap, and stale-entry rules.
+
+The bundle guard also reads each selectable host's installed `package.json`
+(`bundleDependencies`), because npm derives bundling from the host rather than from the
+lock's advisory `inBundle` flag, and `npm-shrinkwrap.json` beside a skip list is refused
+because npm prefers it over the `package-lock.json` the accounting reads.
 
 Known limits, inherited from the exact-match design (#941) rather than added by this
 amendment: presence is judged by `node_modules/<canonical name>` at the top level, so a

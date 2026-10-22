@@ -914,7 +914,7 @@ other_lock_case() {
   local description=$1 directory=$2 expectation=$3 rebuild=$4 skip=$5 expected=$6 out
   : > "$tmp/$directory/node_modules/.npm-stub.log"
   out=$(cd "$tmp/$directory" && PATH="$toolchain/bin:/usr/bin:/bin" NPM_STUB_LOG="$tmp/other-lock.log" \
-    REBUILD_PACKAGES="$rebuild" SKIP_INSTALL_SCRIPTS="$skip" bash "$tmp/rebuild.sh" 2>&1) && status=0 || status=$?
+    PACKAGE_MANAGER="${PACKAGE_MANAGER_OVERRIDE:-npm}" REBUILD_PACKAGES="$rebuild" SKIP_INSTALL_SCRIPTS="$skip" bash "$tmp/rebuild.sh" 2>&1) && status=0 || status=$?
   if [ "$expectation" = reject ] && [ "$status" -ne 0 ] && [ ! -s "$tmp/$directory/node_modules/.npm-stub.log" ] \
       && grep -qF -- "$expected" <<<"$out"; then
     pass "$description"
@@ -984,5 +984,44 @@ printf '%s\n' '{"lockfileVersion":3,"packages":{"":{"name":"root-app"},"node_mod
 cp "$tmp/commands/package.json" "$tmp/root/package.json"
 other_lock_case "the sandbox root cannot be requested next to a skip list (#1888)" root reject \
   $'approved\nverjson-secretless-workspace' skipped 'must not select the project root'
+
+mkdir -p "$tmp/linkbundle/node_modules/host" "$tmp/linkbundle/node_modules/skipped" "$tmp/linkbundle/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/host":{"resolved":"packages/approved","link":true},"packages/approved":{"name":"approved-pkg","hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true},"packages/approved/node_modules/skipped":{"hasInstallScript":true,"inBundle":true}}}' \
+  > "$tmp/linkbundle/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/linkbundle/package.json"
+other_lock_case "a skipped package bundled under a directory selected through a link name fails (#1888)" linkbundle reject \
+  host skipped 'skipped packages are bundled inside another package'
+mkdir -p "$tmp/scopedbundle/node_modules/skipped" "$tmp/scopedbundle/node_modules/approved" "$tmp/scopedbundle/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true},"packages/@s/approved":{"name":"approved","hasInstallScript":true},"packages/@s/approved/node_modules/skipped":{"hasInstallScript":true,"inBundle":true}}}' \
+  > "$tmp/scopedbundle/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/scopedbundle/package.json"
+other_lock_case "a skipped package bundled in a bare-named request is unaffected by a scoped workspace host (#1888)" scopedbundle accept \
+  approved skipped 'rebuild approved'
+
+mkdir -p "$tmp/manifestbundle/node_modules/approved" "$tmp/manifestbundle/node_modules/skipped" "$tmp/manifestbundle/.git"
+printf '%s\n' '{"name":"approved","bundleDependencies":["skipped"]}' > "$tmp/manifestbundle/node_modules/approved/package.json"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true}}}' \
+  > "$tmp/manifestbundle/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/manifestbundle/package.json"
+other_lock_case "a host manifest that bundles a skipped package fails even when the lock omits inBundle (#1888)" manifestbundle reject \
+  approved skipped 'skipped packages are bundled inside another package'
+mkdir -p "$tmp/shrinkwrap/node_modules/approved" "$tmp/shrinkwrap/node_modules/skipped" "$tmp/shrinkwrap/.git"
+cp "$tmp/bundle/package-lock.json" "$tmp/shrinkwrap/package-lock.json"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{}}}' > "$tmp/shrinkwrap/npm-shrinkwrap.json"
+cp "$tmp/commands/package.json" "$tmp/shrinkwrap/package.json"
+other_lock_case "npm-shrinkwrap.json beside a skip list fails closed (#1888)" shrinkwrap reject \
+  approved skipped 'npm-shrinkwrap.json takes precedence'
+for pnpm_case in pnpm-skip-only pnpm-undeclared pnpm-overlap; do
+  mkdir -p "$tmp/$pnpm_case/node_modules/approved" "$tmp/$pnpm_case/node_modules/skipped" "$tmp/$pnpm_case/.git"
+  printf '%s\n' "packages:" "  approved@1.0.0:" "    requiresBuild: true" "  skipped@1.0.0:" "    requiresBuild: true" "snapshots:" "  approved@1.0.0: {}" "  skipped@1.0.0: {}" \
+    > "$tmp/$pnpm_case/pnpm-lock.yaml"
+  cp "$tmp/commands/package.json" "$tmp/$pnpm_case/package.json"
+done
+PACKAGE_MANAGER_OVERRIDE=pnpm other_lock_case "pnpm: skipping every requiresBuild package runs nothing (#1888)" pnpm-skip-only accept \
+  '' $'approved\nskipped' ''
+PACKAGE_MANAGER_OVERRIDE=pnpm other_lock_case "pnpm: a requiresBuild package on neither list fails (#1888)" pnpm-undeclared reject \
+  '' skipped 'lock declares install scripts for packages absent from secretless-rebuild-packages and secretless-skip-install-scripts: approved'
+PACKAGE_MANAGER_OVERRIDE=pnpm other_lock_case "pnpm: a package on both lists fails (#1888)" pnpm-overlap reject \
+  $'approved\nskipped' skipped 'packages named in both secretless-rebuild-packages and secretless-skip-install-scripts: skipped'
 
 exit "$failures"

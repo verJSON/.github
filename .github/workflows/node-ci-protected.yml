@@ -5475,6 +5475,13 @@ jobs:
                   return "/".join(parts[-2:]) if len(parts) > 1 and parts[-2].startswith("@") else parts[-1]
               # The sandbox root is also selectable by its directory name, and by
               # its manifest name; neither may be requested next to a skip list.
+              link_names_by_target = {}
+              for link_path, link_package in lock_packages.items():
+                  if isinstance(link_package, dict) and link_package.get("link") is True \
+                          and isinstance(link_package.get("resolved"), str):
+                      link_names_by_target.setdefault(
+                          link_package["resolved"].rstrip("/"), []
+                      ).append(link_path.split("node_modules/")[-1])
               root_selectors = {"verjson-secretless-workspace"}
               root_name = lock_packages.get("", {}).get("name")
               if isinstance(root_name, str):
@@ -5485,23 +5492,25 @@ jobs:
                   segments = path.split("node_modules/")
                   # Hosts keep their scope ("@scope/name"); a workspace host outside
                   # node_modules is selected by its directory name.
+                  # A link to the host directory selects the host by the link's name too.
                   ancestors = tuple(
-                      [directory_selector(segments[0])] * bool(segments[0])
+                      ([directory_selector(segments[0])]
+                       + link_names_by_target.get(segments[0].rstrip("/"), [])) * bool(segments[0])
                       + [segment.rstrip("/") for segment in segments[1:-1]]
                   ) if package.get("inBundle") is True else ()
                   if package.get("link") is True and isinstance(package.get("resolved"), str):
                       target = lock_packages.get(package["resolved"], {})
                       target_directory = directory_selector(package["resolved"])
                       canonical_name = target.get("name") if isinstance(target.get("name"), str) else target_directory
-                      lock_nodes.append((segments[-1], canonical_name, ancestors))
-                      lock_nodes.append((target_directory, canonical_name, ancestors))
+                      lock_nodes.append((segments[-1], canonical_name, ancestors, path))
+                      lock_nodes.append((target_directory, canonical_name, ancestors, package["resolved"]))
                   elif "node_modules/" in path:
                       canonical_name = package.get("name") if isinstance(package.get("name"), str) else segments[-1]
-                      lock_nodes.append((segments[-1], canonical_name, ancestors))
+                      lock_nodes.append((segments[-1], canonical_name, ancestors, path))
                   else:
                       directory = directory_selector(path)
                       canonical_name = package.get("name") if isinstance(package.get("name"), str) else directory
-                      lock_nodes.append((directory, canonical_name, ()))
+                      lock_nodes.append((directory, canonical_name, (), path))
           else:
               lock_nodes = []
               root_selectors = set()
@@ -5557,7 +5566,8 @@ jobs:
           }
           missing = sorted((set(requested) | set(skipped)) - installed)
           if missing:
-              sys.exit("approved rebuild or skipped packages absent from lock: " + ", ".join(missing))
+              sys.exit(("approved rebuild or skipped packages" if skipped else "approved rebuild packages")
+                       + " absent from lock: " + ", ".join(missing))
           # npm rebuild selects nodes by their installed name and also rebuilds the
           # bundled dependencies of every selected node. A skipped identity must be
           # unreachable through either route, or the skip list would be a claim the
@@ -5569,7 +5579,7 @@ jobs:
                   + ", ".join(sorted(root_selectors & set(requested)))
               )
           aliased_into_skip = sorted({
-              selector for selector, canonical_name, _ in lock_nodes
+              selector for selector, canonical_name, _, _ in lock_nodes
               if selector in requested and canonical_name in skipped
           })
           if aliased_into_skip:
@@ -5578,9 +5588,25 @@ jobs:
                   "directories of skipped packages: " + ", ".join(aliased_into_skip)
               )
           bundled_skips = sorted({
-              canonical_name for _, canonical_name, ancestors in lock_nodes
+              canonical_name for _, canonical_name, ancestors, _ in lock_nodes
               if canonical_name in skipped and any(ancestor in requested for ancestor in ancestors)
           })
+          # The lock's inBundle flag is advisory; npm derives bundling from the
+          # host's own manifest, so read that too for every selectable host.
+          for selector, _, _, node_path in lock_nodes:
+              if not skipped or selector not in requested:
+                  continue
+              try:
+                  manifest = json.loads((Path(node_path) / "package.json").read_text(encoding="utf-8"))
+              except (OSError, ValueError):
+                  continue
+              declared = manifest.get("bundleDependencies", manifest.get("bundledDependencies"))
+              if declared is True:
+                  declared = list((manifest.get("dependencies") or {}).keys())
+              if isinstance(declared, list):
+                  bundled_skips = sorted(set(bundled_skips) | {name for name in declared if name in skipped})
+          if skipped and package_manager == "npm" and Path("npm-shrinkwrap.json").exists():
+              sys.exit("npm-shrinkwrap.json takes precedence over package-lock.json and is not validated; remove it or clear secretless-skip-install-scripts")
           if bundled_skips:
               sys.exit(
                   "skipped packages are bundled inside another package, so npm rebuild "
