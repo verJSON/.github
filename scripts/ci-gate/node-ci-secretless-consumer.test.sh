@@ -874,6 +874,17 @@ else
 fi
 skip_case "skipping every lifecycle package runs no rebuild at all (#1888)" \
   accept '' $'argon2\nesbuild' ''
+# The skip-only exit precedes the hosted-runner and Bubblewrap checks: nothing runs.
+: > "$tmp/commands/node_modules/.npm-stub.log"
+if (cd "$tmp/commands" && PATH="$toolchain/bin:/usr/bin:/bin" RUNNER_ENVIRONMENT=self-hosted \
+    REBUILD_PACKAGES='' SKIP_INSTALL_SCRIPTS=$'argon2\nesbuild' bash "$tmp/rebuild.sh") >/dev/null 2>&1 \
+    && [ ! -s "$tmp/commands/node_modules/.npm-stub.log" ]; then
+  pass "a skip-only run needs no hosted runner or sandbox and runs nothing (#1888)"
+else
+  fail "a skip-only run failed or ran a package manager on a non-hosted runner"
+fi
+skip_case "empty rebuild and skip lists fail with a dedicated message (#1888)" \
+  reject '' '' 'at least one of secretless-rebuild-packages or secretless-skip-install-scripts is required'
 skip_case "a lifecycle package on neither list still fails when another is skipped (#1888)" \
   reject '' argon2 'lock declares install scripts for packages absent from secretless-rebuild-packages and secretless-skip-install-scripts: esbuild'
 skip_case "a package on both lists fails (#1888)" \

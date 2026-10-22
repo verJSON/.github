@@ -1132,6 +1132,10 @@ def run_skipped_install_script_never_executes(step):
             (workspace / "package.json").write_text(json.dumps({
                 "name": "skip-consumer", "version": "1.0.0",
                 "dependencies": {n: "1.0.0" for n in names},
+                # npm 12 blocks unapproved install scripts on its own; approving
+                # both keeps the skip list the only thing standing between the
+                # skipped package and execution.
+                "allowScripts": {n: True for n in names},
             }), encoding="utf-8")
             (workspace / "package-lock.json").write_text(json.dumps({
                 "name": "skip-consumer", "lockfileVersion": 3, "packages": lock_packages,
@@ -1159,12 +1163,12 @@ def run_skipped_install_script_never_executes(step):
             skipped_marker = workspace / "node_modules/skipped-fixture/install-ran"
             assert not skipped_marker.exists(), "a skipped package's install script executed"
             rebuilt_marker = workspace / "node_modules/rebuilt-fixture/install-ran"
-            # npm 12 blocks every install script that allowScripts does not cover,
-            # which would make the control vacuous; assert it wherever npm runs it.
-            if "because they are not covered by allowScripts" not in result.stdout + result.stderr:
-                assert rebuilt_marker.exists() == bool(rebuilt), (
-                    "the rebuilt control package must run its script exactly when it is rebuilt"
-                )
+            assert "not covered by allowScripts" not in result.stdout + result.stderr, (
+                "npm blocked the fixtures itself, so this test proves nothing"
+            )
+            assert rebuilt_marker.exists() == bool(rebuilt), (
+                "the rebuilt control package must run its script exactly when it is rebuilt"
+            )
 
 
 def main():

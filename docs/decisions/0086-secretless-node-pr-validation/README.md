@@ -352,9 +352,10 @@ Regressions run the real rebuild step under real Bubblewrap and npm with a
 fixture whose install script writes a marker file, and require the marker to be
 absent for the skipped package. Stubbed-npm cases cover acceptance, an
 undeclared package, overlap, stale and absent skip entries, duplicates, and
-invalid names. npm 12 blocks unlisted install scripts itself, so the positive
-control (a rebuilt fixture runs its script) is asserted only where npm does not
-block it.
+invalid names. npm 12 blocks unapproved install scripts on its own, so the
+fixture approves both packages in `allowScripts` and the test fails if npm still
+blocks them; the rebuilt control package must run its script, so the skip list
+is the only thing keeping the other package from executing.
 
 `ONNXRUNTIME_NODE_INSTALL=skip` is unchanged and is not made sugar for the skip
 list: it still installs the CPU binding, whereas skipping `onnxruntime-node`

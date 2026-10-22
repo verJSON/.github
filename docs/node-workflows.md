@@ -234,7 +234,8 @@ install script (`hasInstallScript`, or `requiresBuild` for pnpm) must appear in
 exactly one of `secretless-rebuild-packages` or this list. A name on both lists,
 or one the lock does not mark as needing install scripts, fails closed. Skipped
 packages stay as extracted under `--ignore-scripts`, nothing executes them, and
-the job log prints the skipped set. A lane may skip every script-bearing package
+the job log prints the skipped set. Matching is by package name, so every installed
+copy of a skipped name, including nested versions, is skipped. A lane may skip every script-bearing package
 and leave `secretless-rebuild-packages` empty; it then runs the accounting but
 no rebuild. On GitHub-hosted runners, the
 workflow first provisions and verifies its bubblewrap/AppArmor boundary;

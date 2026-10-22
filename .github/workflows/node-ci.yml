@@ -4801,7 +4801,9 @@ jobs:
           requested = [line.strip() for line in os.environ["REBUILD_PACKAGES"].splitlines() if line.strip()]
           package_pattern = re.compile(r"(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*")
           skipped = [line.strip() for line in os.environ.get("SKIP_INSTALL_SCRIPTS", "").splitlines() if line.strip()]
-          if (not requested and not skipped) or len(requested) != len(set(requested)) \
+          if not requested and not skipped:
+              sys.exit("at least one of secretless-rebuild-packages or secretless-skip-install-scripts is required")
+          if len(requested) != len(set(requested)) \
                   or any(package_pattern.fullmatch(name) is None for name in requested):
               sys.exit("secretless-rebuild-packages accepts unique exact npm package names only")
           if len(skipped) != len(set(skipped)) \
