@@ -53,8 +53,17 @@ REASON_L = "the two legacy token names are fixed literals, split only to keep th
 REASON_GEN_REF = "ref is substituted at generation; the generator first requires it to be 40 lowercase hex. "
 REASON_GEN_SHA = "the value is substituted at generation from sha256sum output: 64 lowercase hex. "
 REASON_GEN_CLEANUP = "the value is substituted at generation from a jq boolean check: true or false. "
+REASON_H = "hosted_image is assigned two fixed literals, the standard image shape and the same shape with a closed core-count suffix; no variable data reaches it (ADR 0238). "
 CT = "<gen-changelog-caller contract-test>"
 REVIEWED_UNCLASSIFIABLE = {
+    '.github/workflows/node-ci-protected.yml regex "$SECRETLESS_BUILD_LANE" ^\\[${hosted_image}\\]$':
+        REASON_H,
+    '.github/workflows/node-ci-protected.yml regex "$SECRETLESS_BUILD_LANE" ^${hosted_image}$':
+        REASON_H,
+    '.github/workflows/node-ci.yml regex "$SECRETLESS_BUILD_LANE" ^\\[${hosted_image}\\]$':
+        REASON_H,
+    '.github/workflows/node-ci.yml regex "$SECRETLESS_BUILD_LANE" ^${hosted_image}$':
+        REASON_H,
     "scripts/gen-container-candidate.sh <heredoc> grep <grep> '# Contract: ⟦gen:ref⟧'":
         REASON_GEN_REF,
     "scripts/gen-container-candidate.sh <heredoc> grep <grep> '# Contract: ⟦gen:ref⟧'":
