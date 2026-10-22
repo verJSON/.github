@@ -5463,10 +5463,34 @@ jobs:
                   path_name = path.rsplit("node_modules/", 1)[1]
                   locked_name = package.get("name")
                   resolved_name = locked_name if isinstance(locked_name, str) else path_name
-                  lock_nodes.append((path_name, resolved_name, package.get("inBundle") is True))
                   installed.add(resolved_name)
                   if package.get("hasInstallScript") is True:
                       lifecycle_scoped.add(resolved_name)
+              # Every node npm rebuild can select, as (selector name, canonical
+              # name, bundling ancestors). A link or workspace source directory is
+              # selected by its directory name, not by its manifest name.
+              lock_nodes = []
+              lock_packages = lock.get("packages", {})
+              for path, package in lock_packages.items():
+                  if path == "" or not isinstance(package, dict):
+                      continue
+                  segments = path.split("node_modules/")
+                  ancestors = tuple(
+                      segment.rstrip("/").rsplit("/", 1)[-1] for segment in segments[1:-1]
+                  ) if package.get("inBundle") is True else ()
+                  if package.get("link") is True and isinstance(package.get("resolved"), str):
+                      target = lock_packages.get(package["resolved"], {})
+                      target_directory = package["resolved"].rstrip("/").rsplit("/", 1)[-1]
+                      canonical_name = target.get("name") if isinstance(target.get("name"), str) else target_directory
+                      lock_nodes.append((segments[-1], canonical_name, ancestors))
+                      lock_nodes.append((target_directory, canonical_name, ancestors))
+                  elif "node_modules/" in path:
+                      canonical_name = package.get("name") if isinstance(package.get("name"), str) else segments[-1]
+                      lock_nodes.append((segments[-1], canonical_name, ancestors))
+                  else:
+                      directory = path.rstrip("/").rsplit("/", 1)[-1]
+                      canonical_name = package.get("name") if isinstance(package.get("name"), str) else directory
+                      lock_nodes.append((directory, canonical_name, ()))
           else:
               lock_nodes = []
               import yaml
@@ -5527,17 +5551,17 @@ jobs:
           # unreachable through either route, or the skip list would be a claim the
           # package manager does not honor.
           aliased_into_skip = sorted({
-              installed_name for installed_name, canonical_name, _ in lock_nodes
-              if installed_name in requested and canonical_name in skipped
+              selector for selector, canonical_name, _ in lock_nodes
+              if selector in requested and canonical_name in skipped
           })
           if aliased_into_skip:
               sys.exit(
-                  "secretless-rebuild-packages selects npm aliases of skipped packages: "
-                  + ", ".join(aliased_into_skip)
+                  "secretless-rebuild-packages selects npm aliases, links, or workspace "
+                  "directories of skipped packages: " + ", ".join(aliased_into_skip)
               )
           bundled_skips = sorted({
-              canonical_name for _, canonical_name, in_bundle in lock_nodes
-              if requested and in_bundle and canonical_name in skipped
+              canonical_name for _, canonical_name, ancestors in lock_nodes
+              if canonical_name in skipped and any(ancestor in requested for ancestor in ancestors)
           })
           if bundled_skips:
               sys.exit(

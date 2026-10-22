@@ -344,10 +344,17 @@ invocation.
 Review hardening (same issue): `npm rebuild <name>` selects nodes by their installed
 name and also rebuilds the bundled dependencies of each selected node, so the lock's
 canonical `name` alone is not enough to keep a skipped identity unreachable. The step
-therefore also fails when a requested installed name is an npm alias whose canonical
-package is skipped (two aliases can swap identities), and when a skipped package is
-bundled (`inBundle`) while a rebuild is requested. Both checks are npm-only; pnpm keys
-that are aliases are already rejected.
+therefore also fails when a name selecting a node (its installed name, or the directory
+name of a link or workspace source) resolves to a skipped canonical package, and when a
+skipped package is bundled (`inBundle`) beneath a requested host. These checks are
+npm-only; pnpm keys that are aliases are already rejected.
+
+Known limits, inherited from the exact-match design (#941) rather than added by this
+amendment: presence is judged by `node_modules/<canonical name>` at the top level, so a
+script-bearing package that exists only nested is outside the accounting, and a skip
+entry for a nested-only package reads as stale. The pnpm rebuild step also does not set
+`PNPM_CONFIG_IGNORE_PNPMFILE`, so a repository pnpmfile can run inside the sandbox
+during a rebuild, which is the same trust as the rebuilt packages' own scripts.
 
 Threat model: strictly less code runs. Skipped names are never passed to
 `npm rebuild` or `pnpm rebuild`, so their scripts stay unexecuted as installed

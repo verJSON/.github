@@ -925,10 +925,32 @@ other_lock_case() {
   fi
 }
 other_lock_case "an npm alias that lets a rebuild selector reach a skipped package fails (#1888)" alias reject \
-  esbuild argon2 'selects npm aliases of skipped packages: esbuild'
+  esbuild argon2 'selects npm aliases, links, or workspace directories of skipped packages: esbuild'
 other_lock_case "a skipped package bundled inside a rebuilt package fails (#1888)" bundle reject \
   approved skipped 'skipped packages are bundled inside another package'
 other_lock_case "a skipped package bundled elsewhere is harmless when nothing is rebuilt (#1888)" bundle accept \
   '' $'approved\nskipped' ''
+
+# Link and workspace nodes are selected by directory name; a bundle only matters
+# when its host is selected; a nested-only bundled copy is still a bundled copy.
+mkdir -p "$tmp/link/node_modules/skipped" "$tmp/link/node_modules/approved" "$tmp/link/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"hasInstallScript":true},"node_modules/skipped":{"resolved":"packages/approved","link":true},"packages/approved":{"name":"skipped","hasInstallScript":true}}}' \
+  > "$tmp/link/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/link/package.json"
+mkdir -p "$tmp/nested/node_modules/approved/node_modules/skipped" "$tmp/nested/node_modules/other/node_modules/skipped" "$tmp/nested/node_modules/skipped" "$tmp/nested/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"hasInstallScript":true},"node_modules/other":{},"node_modules/skipped":{"hasInstallScript":true},"node_modules/other/node_modules/skipped":{"hasInstallScript":true,"inBundle":true}}}' \
+  > "$tmp/nested/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/nested/package.json"
+other_lock_case "a link whose directory name selects a skipped package's source fails (#1888)" link reject \
+  approved skipped 'selects npm aliases, links, or workspace directories of skipped packages: approved'
+other_lock_case "a skipped package bundled in an unselected host does not block the rebuild (#1888)" nested accept \
+  approved skipped 'rebuild approved'
+
+mkdir -p "$tmp/workspace/node_modules/skipped" "$tmp/workspace/node_modules/approved" "$tmp/workspace/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true},"packages/approved":{"name":"skipped","hasInstallScript":true}}}' \
+  > "$tmp/workspace/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/workspace/package.json"
+other_lock_case "a workspace directory whose name selects a skipped package fails (#1888)" workspace reject \
+  approved skipped 'selects npm aliases, links, or workspace directories of skipped packages: approved'
 
 exit "$failures"
