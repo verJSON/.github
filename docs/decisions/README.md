@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0238](0238-node-ci-cost-levers/README.md) | 2026-10-22 | node-ci cost levers: larger hosted sizes, diff-classified plans, and what stays caller-side |
 | [0237](0237-gate-review-ignores-pull-request-agent-config/README.md) | 2026-10-18 | The gate review never loads agent configuration from the pull request |
 | [0236](0236-refuse-a-symlink-at-every-fixed-path-checkout/README.md) | 2026-10-18 | Refuse a symlink at every fixed-path checkout |
 | [0235](0235-public-pull-request-code-uses-ephemeral-runners/README.md) | 2026-10-15 | Public pull-request code runs only on ephemeral runners |
