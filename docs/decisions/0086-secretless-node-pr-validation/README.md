@@ -352,9 +352,11 @@ requested (by its sandbox directory name or manifest name) next to a skip list. 
 npm-only: pnpm rejects `npm:` alias keys already and its lock is not modeled for bundle or link
 selection, so the pnpm path gets only the shared accounting, overlap, and stale-entry rules.
 
-The bundle guard also reads each selectable host's installed `package.json`
-(`bundleDependencies`), because npm derives bundling from the host rather than from the
-lock's advisory `inBundle` flag, and `npm-shrinkwrap.json` beside a skip list is refused
+The bundle guard also reads each selectable host's installed `package.json`, because
+npm derives bundling from the host rather than from the lock's advisory `inBundle` flag,
+and normalizes aliases, object forms, and transitive bundles. Reproducing that closure
+would be a second copy of npm's resolver, so any selected host that declares bundled
+dependencies at all is refused while a skip list is set. And `npm-shrinkwrap.json` beside a skip list is refused
 because npm prefers it over the `package-lock.json` the accounting reads.
 
 Known limits, inherited from the exact-match design (#941) rather than added by this

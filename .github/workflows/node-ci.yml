@@ -4974,7 +4974,9 @@ jobs:
               if canonical_name in skipped and any(ancestor in requested for ancestor in ancestors)
           })
           # The lock's inBundle flag is advisory; npm derives bundling from the
-          # host's own manifest, so read that too for every selectable host.
+          # host's own manifest, and normalizes aliases, object forms, and
+          # transitive bundles. Rather than reproduce that closure, refuse any
+          # selected host that declares bundled dependencies at all.
           for selector, _, _, node_path in lock_nodes:
               if not skipped or selector not in requested:
                   continue
@@ -4987,10 +4989,12 @@ jobs:
               except (OSError, ValueError):
                   sys.exit(f"cannot read the package manifest of {selector} to check its bundled dependencies")
               declared = manifest.get("bundleDependencies", manifest.get("bundledDependencies"))
-              if declared is True:
-                  declared = list((manifest.get("dependencies") or {}).keys())
-              if isinstance(declared, list):
-                  bundled_skips = sorted(set(bundled_skips) | {name for name in declared if name in skipped})
+              if declared:
+                  sys.exit(
+                      "a package selected by secretless-rebuild-packages declares bundled "
+                      "dependencies, which npm rebuild would rebuild as well, so it cannot "
+                      "be combined with secretless-skip-install-scripts: " + selector
+                  )
           if skipped and package_manager == "npm" and Path("npm-shrinkwrap.json").exists():
               sys.exit("npm-shrinkwrap.json takes precedence over package-lock.json and is not validated; remove it or clear secretless-skip-install-scripts")
           if bundled_skips:

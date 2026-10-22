@@ -1004,7 +1004,15 @@ printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"
   > "$tmp/manifestbundle/package-lock.json"
 cp "$tmp/commands/package.json" "$tmp/manifestbundle/package.json"
 other_lock_case "a host manifest that bundles a skipped package fails even when the lock omits inBundle (#1888)" manifestbundle reject \
-  approved skipped 'skipped packages are bundled inside another package'
+  approved skipped 'declares bundled dependencies'
+for bundle_form in '{"skipped":"1.0.0"}' '["some-alias"]' true; do
+  printf '%s\n' "{\"name\":\"approved\",\"bundledDependencies\":$bundle_form}" > "$tmp/manifestbundle/node_modules/approved/package.json"
+  other_lock_case "a bundled-dependency declaration of any form ($bundle_form) beside a skip list fails (#1888)" manifestbundle reject \
+    approved skipped 'declares bundled dependencies'
+done
+printf '%s\n' '{"name":"approved","bundleDependencies":["skipped"]}' > "$tmp/manifestbundle/node_modules/approved/package.json"
+other_lock_case "a host with bundled dependencies still rebuilds while the skip list is empty (#1888)" manifestbundle accept \
+  $'approved\nskipped' '' 'rebuild approved skipped'
 mkdir -p "$tmp/shrinkwrap/node_modules/approved" "$tmp/shrinkwrap/node_modules/skipped" "$tmp/shrinkwrap/.git"
 cp "$tmp/bundle/package-lock.json" "$tmp/shrinkwrap/package-lock.json"
 printf '%s\n' '{"lockfileVersion":3,"packages":{"":{}}}' > "$tmp/shrinkwrap/npm-shrinkwrap.json"
