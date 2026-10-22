@@ -98,14 +98,25 @@ workflow in one run, `workflow_dispatch`) established four facts:
   pending one is still replaced.
 - Callers with several lanes (the case #1869 measured) would hit exactly that.
 
-So a group declared in the reusable is either shared by sibling lanes, which serializes or
-cancels them, or needs a caller-supplied discriminator that still cannot be omitted when
-the feature is off. That breaks the requirement that an adopter that does not opt in keeps
-byte-identical behavior. **Decision: cancelling superseded pull-request runs stays at the
-caller's workflow level**, where one group covers all lanes. `docs/node-workflows.md` now
-carries the snippet (cancel only on `pull_request`; every other event gets a group unique to
-the run), and `scripts/ci-gate/reusable-ci-no-concurrency.test.py` pins that the reusable CI
-workflows and the protected twin declare none.
+So a group declared directly in the reusable is either shared by sibling lanes, which
+serializes or cancels them, or needs a caller-supplied lane key that still cannot be left
+empty when the feature is off. A job-level variant is conceivable (a preceding job exports a
+unique per-call value such as `job.check_run_id` through `needs` for the disabled path, and
+a caller-supplied lane key plus the pull-request number names the enabled path), but it adds
+a dependency to every call, cancels per job rather than per run, and its failure paths are
+undesigned; it is **not adopted here**, not proven impossible. **Decision: cancelling
+superseded pull-request runs stays at the caller's workflow level**, where one group covers
+all lanes. `docs/node-workflows.md` carries the snippet (cancel only `pull_request`; every
+other event, including `pull_request_target`, gets a disjoint `run-` group unique to the
+run), and `scripts/ci-gate/reusable-ci-no-concurrency.test.py` pins that the reusable CI
+workflows and the protected twin declare none and that the snippet is exact.
+
+Probe receipts: repository `pyousefi/ci-concurrency-probe-1869` (private, archived), commits
+`0089e5c`, `1cd28ad`, `dfba982`; runs 39749615522 (two same-group calls cancelled each
+other), 39750020363, 39750024475, 39750029020 (empty group at job level, workflow level and
+`fromJSON || null`: each completed `failure` with zero jobs), 39749867750 (`github.job` and
+`github.run_id` identical in both calls). The startup-failure message itself is not
+exposed through the API; the evidence is the zero-job failed run.
 
 A typed `test-levels` input is **not** part of this amendment. The script-plan engine is
 parsed in three separate Python blocks of `node-ci.yml` and rewritten by string replacement
@@ -113,4 +124,3 @@ into the protected twin; continue-after-failure semantics for a non-fail-fast le
 design of their own and a decision on what `cancel` means for a level once concurrency is
 caller-side. Until then the existing `secretless-ci-script-plan` is an ordered, fail-fast
 list.
-

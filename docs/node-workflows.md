@@ -437,16 +437,18 @@ startup failure with no jobs, verified on 2026-10-22 (ADR 0238 amendment). Any
 group the reusable declared would be shared by sibling lanes in the caller's run
 and would serialize or cancel them. Declare it once at the caller's workflow
 level, where one group covers every lane. This cancels a superseded pull-request
-run and never a push, merge-queue, tag or dispatch run, because those get a group
-unique to the run:
+run and never a push, merge-queue, tag or dispatch run, because those get a `run-` group
+unique to the run, disjoint from the `pr-` groups (a `pull_request_target` run
+never shares a group with a `pull_request` run):
 
 ```yaml
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 ```
 
-A caller whose workflow runs only on `pull_request` may write
+The group embeds the workflow name, so two workflows in one repository must not share
+a `name`. A caller whose workflow runs only on `pull_request` may write
 `cancel-in-progress: true` directly.
 
 Release cancellation is different: interrupting a run after publication starts

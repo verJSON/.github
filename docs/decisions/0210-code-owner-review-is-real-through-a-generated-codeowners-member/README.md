@@ -389,10 +389,7 @@ beyond the dated authorization; it extends the suspension recorded above.
 6. **Admin merge of a ledger-only PR.** Verjson/.github#1885 (records item 5) was
    admin-merged as `ee02ffd6`. It is a documentation-only change; it was not recorded
    when merged, and this entry corrects that.
-7. **Admin merge past the review requirement.** The pull request that adds this entry
-   (ARB change 3, concurrency decision) is recorded by the ledger update that follows its
-   merge, because its merge commit cannot be named before it exists.
-8. **Authorization:** the verbatim text and date above.
+7. **Authorization:** the verbatim text and date above.
 
 ### Exit condition ("CI optimized and working"), measurable
 
