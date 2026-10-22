@@ -341,6 +341,14 @@ the same reason). The step prints the sorted skipped set. When
 list, performs the accounting, and exits before any sandbox or package-manager
 invocation.
 
+Review hardening (same issue): `npm rebuild <name>` selects nodes by their installed
+name and also rebuilds the bundled dependencies of each selected node, so the lock's
+canonical `name` alone is not enough to keep a skipped identity unreachable. The step
+therefore also fails when a requested installed name is an npm alias whose canonical
+package is skipped (two aliases can swap identities), and when a skipped package is
+bundled (`inBundle`) while a rebuild is requested. Both checks are npm-only; pnpm keys
+that are aliases are already rejected.
+
 Threat model: strictly less code runs. Skipped names are never passed to
 `npm rebuild` or `pnpm rebuild`, so their scripts stay unexecuted as installed
 under `--ignore-scripts`; every other isolation property is unchanged. A skip

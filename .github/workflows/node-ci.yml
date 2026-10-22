@@ -4834,16 +4834,19 @@ jobs:
               lock = json.loads(Path("package-lock.json").read_text(encoding="utf-8"))
               installed = set()
               lifecycle_scoped = set()
+              lock_nodes = []
               for path, package in lock.get("packages", {}).items():
                   if "node_modules/" not in path:
                       continue
                   path_name = path.rsplit("node_modules/", 1)[1]
                   locked_name = package.get("name")
                   resolved_name = locked_name if isinstance(locked_name, str) else path_name
+                  lock_nodes.append((path_name, resolved_name, package.get("inBundle") is True))
                   installed.add(resolved_name)
                   if package.get("hasInstallScript") is True:
                       lifecycle_scoped.add(resolved_name)
           else:
+              lock_nodes = []
               import yaml
               lock = yaml.safe_load(Path("pnpm-lock.yaml").read_text(encoding="utf-8"))
               def pnpm_package_name(key):
@@ -4897,6 +4900,28 @@ jobs:
           missing = sorted((set(requested) | set(skipped)) - installed)
           if missing:
               sys.exit("approved rebuild or skipped packages absent from lock: " + ", ".join(missing))
+          # npm rebuild selects nodes by their installed name and also rebuilds the
+          # bundled dependencies of every selected node. A skipped identity must be
+          # unreachable through either route, or the skip list would be a claim the
+          # package manager does not honor.
+          aliased_into_skip = sorted({
+              installed_name for installed_name, canonical_name, _ in lock_nodes
+              if installed_name in requested and canonical_name in skipped
+          })
+          if aliased_into_skip:
+              sys.exit(
+                  "secretless-rebuild-packages selects npm aliases of skipped packages: "
+                  + ", ".join(aliased_into_skip)
+              )
+          bundled_skips = sorted({
+              canonical_name for _, canonical_name, in_bundle in lock_nodes
+              if requested and in_bundle and canonical_name in skipped
+          })
+          if bundled_skips:
+              sys.exit(
+                  "skipped packages are bundled inside another package, so npm rebuild "
+                  "would run their install scripts: " + ", ".join(bundled_skips)
+              )
           # secretless-rebuild-packages is the complete, reviewed set of packages
           # allowed to execute code at install time under --ignore-scripts (#932):
           # an exact match, not a hint, so a dependency update that silently adds

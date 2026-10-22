@@ -900,4 +900,35 @@ skip_case "a duplicated skip entry fails (#1888)" \
 skip_case "a skip entry that is not an exact package name fails (#1888)" \
   reject argon2 $'esbuild\n--foreground-scripts' 'secretless-skip-install-scripts accepts unique exact npm package names only'
 
+# Codex review of #1888: npm rebuild selects by installed name and rebuilds
+# bundled dependencies, so aliases and bundles must not reach a skipped package.
+mkdir -p "$tmp/alias/node_modules/esbuild" "$tmp/alias/node_modules/argon2" "$tmp/alias/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/esbuild":{"name":"argon2","hasInstallScript":true},"node_modules/argon2":{"name":"esbuild","hasInstallScript":true}}}' \
+  > "$tmp/alias/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/alias/package.json"
+mkdir -p "$tmp/bundle/node_modules/approved/node_modules/skipped" "$tmp/bundle/node_modules/skipped" "$tmp/bundle/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true},"node_modules/approved/node_modules/skipped":{"hasInstallScript":true,"inBundle":true}}}' \
+  > "$tmp/bundle/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/bundle/package.json"
+other_lock_case() {
+  local description=$1 directory=$2 expectation=$3 rebuild=$4 skip=$5 expected=$6 out
+  : > "$tmp/$directory/node_modules/.npm-stub.log"
+  out=$(cd "$tmp/$directory" && PATH="$toolchain/bin:/usr/bin:/bin" NPM_STUB_LOG="$tmp/other-lock.log" \
+    REBUILD_PACKAGES="$rebuild" SKIP_INSTALL_SCRIPTS="$skip" bash "$tmp/rebuild.sh" 2>&1) && status=0 || status=$?
+  if [ "$expectation" = reject ] && [ "$status" -ne 0 ] && [ ! -s "$tmp/$directory/node_modules/.npm-stub.log" ] \
+      && grep -qF -- "$expected" <<<"$out"; then
+    pass "$description"
+  elif [ "$expectation" = accept ] && [ "$status" -eq 0 ] && [ "$(cat "$tmp/$directory/node_modules/.npm-stub.log")" = "$expected" ]; then
+    pass "$description"
+  else
+    fail "$description (status $status: $out)"
+  fi
+}
+other_lock_case "an npm alias that lets a rebuild selector reach a skipped package fails (#1888)" alias reject \
+  esbuild argon2 'selects npm aliases of skipped packages: esbuild'
+other_lock_case "a skipped package bundled inside a rebuilt package fails (#1888)" bundle reject \
+  approved skipped 'skipped packages are bundled inside another package'
+other_lock_case "a skipped package bundled elsewhere is harmless when nothing is rebuilt (#1888)" bundle accept \
+  '' $'approved\nskipped' ''
+
 exit "$failures"
