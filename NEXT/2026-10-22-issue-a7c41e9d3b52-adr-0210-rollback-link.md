@@ -1,0 +1,8 @@
+---
+date: 2026-10-22
+id: a7c41e9d3b52
+impact: patch
+title: Point ADR 0210's rollback reference at a tracked file
+---
+
+ADR 0210 linked to the `rollback/` directory, which `scripts/adr-relative-links.test.py` rejects because the checker resolves tracked files only; the link now names one tracked rollback file. This restores the invariant the checker already enforced and unblocks pull requests whose heavy tier runs it; no ADR decision changes.

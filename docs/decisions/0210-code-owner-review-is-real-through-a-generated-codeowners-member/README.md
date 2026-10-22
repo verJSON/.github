@@ -367,7 +367,7 @@ beyond the dated authorization; it extends the suspension recorded above.
    `25513492` verjson-cli-projects, `25513495` verjson-cli, `25513503`
    verjson-object-storage. Pre-change images (ruleset configs only; checked for
    credentials, none present) are committed at
-   [`rollback/ruleset-<id>-before.json`](rollback/), so restoration does not depend on
+   [`rollback/ruleset-<id>-before.json`](rollback/ruleset-25513484-before.json), so restoration does not depend on
    `/tmp`. Each file records `enforcement: active`.
 2. **Gate C exception.** verjson-cli-projects#159 was admin-merged at head `9978df1e`
    (merge commit `35fe7a9b`) while the `AI review authorization` check was orphaned: the
