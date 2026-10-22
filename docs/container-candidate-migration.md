@@ -61,6 +61,13 @@ pull-request CI rather than after publication (ADR 0216, 2026-10-20 amendment).
 Regenerate the workflow, validator, destination helper, and contract test together
 when changing the contract SHA, and run the generated test in CI.
 
+Trusted publication grants `actions: write` (validation stays `actions: read`). The
+publisher uses it only in a final job that deletes the one-time private-dependency
+transfer cache after its consumers succeed, so the roughly 900 MB entry no longer
+accumulates against the repository's 10 GB Actions cache quota (ADR 0078, 2026-10-22
+amendment). A caller that still grants `actions: read` to publication fails workflow
+validation; regenerate it.
+
 Default-branch pushes publish commit-addressed and
 `<nextStableVersion>-rc.<run_id>.<run_attempt>` identities and retain a complete
 candidate manifest. Downstream automation consumes its digests, never its tags.

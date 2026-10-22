@@ -691,3 +691,25 @@ Two runner-disk measures now apply alongside the opt-in unused-image cleanup abo
 
 Neither measure changes consumer Dockerfiles, dependency selection, or runner topology.
 Implemented in Verjson/.github#1836 (part of terptechpub/self-publish-ai-app#1760).
+
+## Amendment (2026-10-22) — evict the one-time transfer cache (#1869)
+
+The 2026-08-15 handoff keys each cache entry by run, attempt, and a 256-bit nonce, and
+the tree is encrypted under a per-run key. Cross-run reuse is therefore impossible by
+design, yet the entry (about 904 MB in an adopter) was never removed, so every main push
+added a dead entry and an adopter's 10 GB quota filled, evicting its dependency and
+browser caches. Keying it for reuse was rejected: it would weaken the exact-attempt,
+unguessable-key boundary and the per-run encryption.
+
+A final `evict-node-modules-transfer` job deletes the entry (`gh api -X DELETE` by exact key and ref, branching on HTTP status; a failure emits a warning and a step-summary line) once
+the acquisition and both build jobs succeed (derived builds may be skipped). Failure or
+cancellation deliberately keeps the entry, because "re-run failed jobs" reuses the
+acquisition job's key output and would otherwise miss; that residue is bounded by the
+failed runs and GitHub's 7-day idle eviction. Eviction is best-effort (`continue-on-error`,
+an already-absent entry counts as success) and no manifest job depends on it. The key is
+validated against its exact shape before use.
+
+Deleting caches needs `actions: write`. The job holds only that permission, no
+checkout and no secrets; the generated publication caller now grants `actions: write`
+(validation stays read-only) and no other publisher job gains it. Existing callers must
+regenerate; a caller still granting `actions: read` fails workflow validation.
