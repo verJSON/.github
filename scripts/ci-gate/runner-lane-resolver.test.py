@@ -39,33 +39,41 @@ LEGACY_SECRETLESS_FIRST = (
 
 EVALUATOR = r"""
 const vm = require('node:vm');
-const [, , body, contextJson] = process.argv;
-const sandbox = vm.createContext(Object.assign(Object.create(null), JSON.parse(contextJson), {
-  fromJSON: (v) => JSON.parse(v),
-}));
-const out = vm.runInContext(`(${body.replace(/inputs\.([A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)+)/g, "inputs['$1']")})`, sandbox, { timeout: 5000 });
-process.stdout.write(JSON.stringify(out === undefined ? null : out));
+const cases = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const results = cases.map(([body, context]) => {
+  const sandbox = vm.createContext(Object.assign(Object.create(null), context, {
+    fromJSON: (v) => JSON.parse(v),
+  }));
+  const out = vm.runInContext(`(${body.replace(/inputs\.([A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)+)/g, "inputs['$1']")})`, sandbox, { timeout: 5000 });
+  return out === undefined ? null : out;
+});
+process.stdout.write(JSON.stringify(results));
 """
 _script = Path(tempfile.mkdtemp()) / "eval.js"
 _script.write_text(EVALUATOR)
-_cache: dict = {}
 
 
-def resolve(expression: str, **ctx) -> object:
-    context = {
+def context_for(**ctx) -> dict:
+    return {
         "github": {"repository_owner": ctx.get("owner", "Verjson"),
                    "event": {"repository": {"private": ctx.get("private")}}},
         "inputs": {"runner": ctx.get("runner", ""),
                    "secretless-pr": ctx.get("secretless_pr", False),
                    "secretless-trusted-ref": ctx.get("secretless_ref", False)},
-        "vars": {k: v for k, v in ctx.get("vars", {}).items()},
+        "vars": dict(ctx.get("vars", {})),
     }
-    key = (expression, json.dumps(context, sort_keys=True))
-    if key not in _cache:
-        _cache[key] = json.loads(subprocess.run(
-            ["node", str(_script), expression, key[1]],
-            capture_output=True, text=True, check=True).stdout)
-    return _cache[key]
+
+
+def resolve_many(cases: list[tuple[str, dict]]) -> list:
+    """Evaluate every (expression, context kwargs) pair in one node process."""
+    payload = json.dumps([[e, context_for(**c)] for e, c in cases])
+    done = subprocess.run(["node", str(_script)], input=payload,
+                          capture_output=True, text=True, check=True)
+    return json.loads(done.stdout)
+
+
+def resolve(expression: str, **ctx) -> object:
+    return resolve_many([(expression, ctx)])[0]
 
 
 def lane_variable_sets():
@@ -85,6 +93,7 @@ def check(name: str, got, want) -> None:
 
 def test_builtin_profile_is_identical_to_the_legacy_spelling() -> None:
     profiles = ({}, {"CI_PROFILE_OWNER": ""}, {"CI_PROFILE_OWNER": "Verjson"})
+    contexts = []
     for shape, legacy in (("caller-runner", LEGACY_CALLER_RUNNER),
                           ("secretless-first", LEGACY_SECRETLESS_FIRST)):
         for owner, private, runner, lanes, profile, sl_pr, sl_ref in itertools.product(
@@ -94,9 +103,13 @@ def test_builtin_profile_is_identical_to_the_legacy_spelling() -> None:
             if shape == "caller-runner" and (sl_pr or sl_ref):
                 continue
             # A non-Verjson owner under the default profile is the foreign case.
-            ctx = dict(owner=owner, private=private, runner=runner,
-                       secretless_pr=sl_pr, secretless_ref=sl_ref, vars={**lanes, **profile})
-            check(f"{shape} {ctx}", resolve(catalog.expression(shape), **ctx), resolve(legacy, **ctx))
+            contexts.append((shape, legacy, dict(
+                owner=owner, private=private, runner=runner, secretless_pr=sl_pr,
+                secretless_ref=sl_ref, vars={**lanes, **profile})))
+    new = resolve_many([(catalog.expression(s), c) for s, _, c in contexts])
+    old = resolve_many([(legacy, c) for _, legacy, c in contexts])
+    check(f"built-in profile equals legacy over {len(contexts)} cases",
+          [(s, c) for (s, _, c), n, o in zip(contexts, new, old) if n != o], [])
 
 
 def test_secretless_modes_beat_a_persistent_runner_input() -> None:
@@ -124,11 +137,22 @@ def test_custom_profile_uses_its_own_lanes() -> None:
 
 def test_custom_profile_never_sends_untrusted_events_to_the_fallback() -> None:
     # Adversarial finding (gpt-6-astra, gpt-6.1-sol): profile ownership is not
-    # evidence that a public or unclassified event is trusted.
+    # evidence that a public or unclassified event is trusted. Every shape.
     vars_ = {"CI_PROFILE_OWNER": "acme", "CI_LANE_FALLBACK": PERSISTENT}
-    for private in (False, None):
-        got = resolve(catalog.expression("caller-runner"), owner="acme", private=private, vars=vars_)
-        check(f"custom fallback private={private}", got, ["ubuntu-24.04"])
+    for shape in catalog.SHAPES:
+        for private, secretless in itertools.product((False, None), (False, True)):
+            got = resolve(catalog.expression(shape), owner="acme", private=private,
+                          secretless_pr=secretless, vars=vars_)
+            check(f"custom fallback {shape} private={private} secretless={secretless}",
+                  got, ["ubuntu-24.04"])
+
+
+def test_secretless_beats_a_runner_input_under_a_custom_profile_with_a_fallback() -> None:
+    vars_ = {"CI_PROFILE_OWNER": "acme", "CI_LANE_FALLBACK": PERSISTENT, "CI_LANE_TRUSTED": PERSISTENT}
+    for flag in ("secretless_pr", "secretless_ref"):
+        got = resolve(catalog.expression("secretless-first"), owner="acme", private=True,
+                      runner=PERSISTENT, vars=vars_, **{flag: True})
+        check(f"secretless custom {flag}", got, ["ubuntu-24.04"])
 
 
 def test_a_profile_that_does_not_match_the_owner_stays_hosted() -> None:
