@@ -55,6 +55,12 @@ image, shares its name with another live ruleset, or when a live ruleset with
 that suffix is not declared (exit `1`), and when it cannot read trustworthy state
 (exit `2`). It issues only GETs. See ADR 0210's 2026-10-20 amendment.
 
+A ruleset may be live-disabled only through a `suspended` object (`reason`, `since`,
+`reenable_when`) in that config; the audit then expects `disabled`, still verifies
+every other property, fails if it is live-active or if an undeclared ruleset is
+disabled, and prints a `SUSPENDED:` line on every run. See ADR 0210's 2026-10-22
+amendment.
+
 ## Credential boundary
 
 As of 2026-08-15, the organization Actions secret-name inventory contains no
