@@ -1024,4 +1024,15 @@ PACKAGE_MANAGER_OVERRIDE=pnpm other_lock_case "pnpm: a requiresBuild package on 
 PACKAGE_MANAGER_OVERRIDE=pnpm other_lock_case "pnpm: a package on both lists fails (#1888)" pnpm-overlap reject \
   $'approved\nskipped' skipped 'packages named in both secretless-rebuild-packages and secretless-skip-install-scripts: skipped'
 
+printf '%s\n' '{broken' > "$tmp/manifestbundle/node_modules/approved/package.json"
+other_lock_case "an unreadable host manifest beside a skip list fails closed (#1888)" manifestbundle reject \
+  approved skipped 'cannot read the package manifest of approved'
+cp "$tmp/bundle/package-lock.json" "$tmp/shrinkwrap/package-lock.json"
+skip_case "an empty skip list keeps the original absent-from-lock message (#1888)" \
+  reject $'argon2\nghost-package' '' 'approved rebuild packages absent from lock: ghost-package'
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{}}}' > "$tmp/commands/npm-shrinkwrap.json"
+skip_case "npm-shrinkwrap.json is ignored while the skip list is empty (#1888)" \
+  accept $'argon2\nesbuild' '' 'rebuild argon2 esbuild'
+rm -f "$tmp/commands/npm-shrinkwrap.json"
+
 exit "$failures"
