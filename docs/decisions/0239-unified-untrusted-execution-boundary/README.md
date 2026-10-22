@@ -69,7 +69,9 @@ A first step, `Classify event trust`, applies the same trusted-ref table as pulu
   typecheck, test, and build no token; it cannot stop install-time code from persisting one
   (`GITHUB_ENV`, files). The checkout no longer persists its token (the default ref
   already fetches the event commit by SHA). A trusted ref keeps the checkout and Git
-  configuration unchanged.
+  configuration unchanged; install-mode steps replace the global Git configuration for that
+  step (`GIT_CONFIG_GLOBAL=/dev/null`) so a runner-level proxy or `safe.directory` setting
+  does not apply to them.
 - `none` (opt-in `credentialless-untrusted: true`, and always for a fork, a pull request with
   no readable head repository, and `merge_group`, which can carry a fork PR): no package, Git,
   or submodule token at all; the submodule checkout uses the job token. Dependencies must be

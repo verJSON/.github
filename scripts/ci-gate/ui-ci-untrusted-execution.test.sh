@@ -97,6 +97,20 @@ else
   fail "could not extract pulumi-ci admission step for parity"
 fi
 
+# The classifier must read the REAL context; the harness above substitutes these by hand.
+classify_step="$(step_block "$wf" 'Classify event trust')"
+for binding in \
+  "EVENT_NAME: \${{ github.event_name }}" \
+  "REPOSITORY: \${{ github.repository }}" \
+  "HEAD_REPOSITORY: \${{ github.event.pull_request.head.repo.full_name }}" \
+  "REF: \${{ github.ref }}" \
+  "DEFAULT_BRANCH: \${{ github.event.repository.default_branch }}" \
+  "CREDENTIALLESS_UNTRUSTED: \${{ inputs.credentialless-untrusted }}"; do
+  grep -qF "$binding" <<<"$classify_step" \
+    && pass "classifier binds ${binding%%:*} to the real context" \
+    || fail "classifier does not bind: $binding"
+done
+
 # Wiring.
 job="$(awk '/^  build-test:/{f=1} f' "$wf")"
 checkout="$(step_block "$wf" 'Check out')"
@@ -152,6 +166,13 @@ git_global() { # <mode> <git token> -> GIT_CONFIG_GLOBAL as the install command 
 }
 [ "$(git_global job tok)" = unset ] && pass "a trusted ref leaves the runner's Git configuration alone" || fail "a trusted ref overrides Git configuration"
 [ "$(git_global install tok)" = /dev/null ] && pass "install mode wires a step-only Git credential helper" || fail "install mode does not wire Git credentials"
+git_wiring() { # <mode> <token> -> the effective count and helper
+  CREDENTIAL_MODE="$1" VERJSON_GIT_TOKEN="$2" \
+    INSTALL_COMMAND='printf "%s|%s" "${GIT_CONFIG_COUNT:-0}" "${GIT_CONFIG_KEY_2:-}"' bash -c "$install_run" 2>/dev/null
+}
+[ "$(git_wiring install tok)" = '3|credential.https://github.com.helper' ] \
+  && pass "install mode registers all three Git rewrites and the credential helper" \
+  || fail "install mode Git wiring is incomplete"
 [ "$(git_global install '')" = unset ] && pass "install mode without a Git token leaves Git configuration alone" || fail "an empty token still overrides Git configuration"
 [ "$(git_global none '')" = unset ] && pass "credentialless mode leaves Git configuration alone" || fail "credentialless mode overrides Git configuration"
 wrapper_of() { sed -n '/^set -euo pipefail$/,/^fi$/p' <<<"$1"; }
