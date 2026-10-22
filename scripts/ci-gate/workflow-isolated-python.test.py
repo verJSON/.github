@@ -120,6 +120,9 @@ NON_WORKFLOW_GENERATORS = {
         "contract scans; the fixture is test input and never runs as a workflow"
     ),
     "scripts/gen-type-surface-contract.sh": "renders a packing helper and a shell contract test",
+    "scripts/gen-runner-lane.py": (
+        "rewrites only the runs-on line of committed workflows, which this contract scans directly"
+    ),
 }
 # Reviewed exceptions: (source, step name, invocation text) -> written reason.
 # Keep it rare: an interpreter that cannot run isolated must be fixed, not

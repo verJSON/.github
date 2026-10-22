@@ -260,6 +260,7 @@ GENERATORS_WITHOUT_ADOPTER_SHA_HEADERS = {
     "gen-node-ci-protected.py": "writes the hub's own reusable workflow",
     "gen-node-ci-protected-move-step.test.py": "a test of gen-node-ci-protected.py, not a generator",
     "gen-node-required-workflow.py": "its header names a config path; its pins are `uses:` lines",
+    "gen-runner-lane.py": "rewrites a runs-on line in place; it stamps no contract SHA",
 }
 REQUIRED_CHECKS = json.dumps([{"name": "ci / build", "app_id": 15368, "workflow_id": 1,
                                "workflow_path": ".github/workflows/ci.yml"}])

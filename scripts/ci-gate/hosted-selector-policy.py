@@ -335,6 +335,11 @@ REVIEWED_SELECTOR_EXPRESSIONS = frozenset(
         # node-ci build-test: either secretless mode needs the ephemeral hosted
         # lane, so it precedes the caller's runner input (ADR 0234).
         "(inputs.secretless-pr || inputs.secretless-trusted-ref) && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') || inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')",
+        # Profile-aware spellings stamped by scripts/gen-runner-lane.py from
+        # scripts/runner_lane_catalog.py (ADR 0240). The test in
+        # runner-lane-resolver.test.py holds this list to the catalog.
+        "inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != (vars.CI_PROFILE_OWNER || 'Verjson') && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || (vars.CI_PROFILE_OWNER || 'Verjson') != 'Verjson' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')",
+        "(inputs.secretless-pr || inputs.secretless-trusted-ref) && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') || inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != (vars.CI_PROFILE_OWNER || 'Verjson') && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || (vars.CI_PROFILE_OWNER || 'Verjson') != 'Verjson' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')",
         # Known negative fixtures stay inside the grammar so R3/R4 can return a
         # definite policy violation instead of hiding behind undetermined.
         "fromJSON(vars.CI_LANE_TRUSTED)",
