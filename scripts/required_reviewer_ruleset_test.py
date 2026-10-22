@@ -1021,6 +1021,10 @@ class SuspensionTest(unittest.TestCase):
             "extra key": (index, lambda s: s.update(note="x")),
             "blank reason": (index, lambda s: s.update(reason="  ")),
             "non-date since": (index, lambda s: s.update(since="yesterday")),
+            "non-ASCII digits": (index, lambda s: s.update(since="٢٠٢٦-١٠-٢٢")),
+            "newline in reason": (index, lambda s: s.update(reason="x\n::error::y")),
+            "impossible date": (index, lambda s: s.update(since="2026-02-31")),
+            "future date": (index, lambda s: s.update(since="2999-01-01")),
             "non-object": (index, None),
         }
         for label, (target, change) in cases.items():
@@ -1041,6 +1045,21 @@ class SuspensionTest(unittest.TestCase):
             path.write_text(json.dumps(config), encoding="utf-8")
             with self.assertRaisesRegex(module.ContractError, "active"):
                 module.read_config(path)
+
+
+    def test_apply_rewrites_a_drifted_disabled_suspended_ruleset_as_an_update(self):
+        store = live_store()
+        for ruleset in store.values():
+            if ruleset["name"] == SUSPENDED_NAME:
+                ruleset["rules"][0]["parameters"]["required_reviewers"][0]["minimum_approvals"] = 2
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeGitHub(directory, store)
+            result = fake.run("apply", "--ack", ACK)
+            writes = fake.writes()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn(f"updated: {SUSPENDED_NAME}", result.stdout)
+        self.assertEqual(1, len(writes))
 
 
 if __name__ == "__main__":

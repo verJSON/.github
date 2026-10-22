@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Keep sensitive-path required-reviewer org rulesets equal to reviewed config (#1816)."""
 import argparse
+from datetime import date
 import json
 from pathlib import Path
 import re
@@ -37,7 +38,7 @@ RULESET_KEYS = {"name", "target", "enforcement", "conditions", "bypass_actors", 
 # reviewed ruleset may be live-disabled. The declared `enforcement` stays "active" (the
 # state to return to); the declaration makes the audit expect "disabled" meanwhile.
 SUSPENSION_KEYS = {"reason", "since", "reenable_when"}
-SUSPENSION_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+SUSPENSION_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 # Everything but the reviewer requirement is neutral, so the ruleset adds the admin
 # approval and changes no other review behavior `main-protection` already sets.
 NEUTRAL_PARAMETERS = {
@@ -62,11 +63,21 @@ def validate_file_patterns(patterns, location):
     )
 
 
+def valid_suspension_date(value):
+    if SUSPENSION_DATE.fullmatch(value) is None:
+        return False
+    try:
+        return date.fromisoformat(value) <= date.today()
+    except ValueError:
+        return False
+
+
 def validate_suspension(suspension, location):
     require(
         isinstance(suspension, dict) and set(suspension) == SUSPENSION_KEYS
-        and all(isinstance(value, str) and value.strip() for value in suspension.values())
-        and SUSPENSION_DATE.fullmatch(suspension["since"]) is not None,
+        and all(isinstance(value, str) and value.strip() and value.isprintable()
+                for value in suspension.values())
+        and valid_suspension_date(suspension["since"]),
         f"{location}: suspended must hold non-blank reason and reenable_when and a "
         "YYYY-MM-DD since",
     )
@@ -82,8 +93,7 @@ def expected_image(ruleset):
 
 def validate_ruleset(ruleset, location):
     require(isinstance(ruleset, dict)
-            and set(ruleset) - {"suspended"} == RULESET_KEYS
-            and RULESET_KEYS <= set(ruleset),
+            and set(ruleset) - {"suspended"} == RULESET_KEYS,
             f"{location}: ruleset keys drifted")
     if "suspended" in ruleset:
         validate_suspension(ruleset["suspended"], location)
@@ -285,7 +295,7 @@ def plan(config):
         live = live_ruleset(ruleset_id)
         if not drifted_fields(live, expected):
             actions.append(("unchanged", expected, ruleset_id))
-        elif live.get("enforcement") != "active":
+        elif expected["enforcement"] == "active" and live.get("enforcement") != "active":
             actions.append(("activate", expected, ruleset_id))
         else:
             # Already enforcing: rewritten in place, without rollback, because its
