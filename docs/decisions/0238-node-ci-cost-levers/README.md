@@ -35,14 +35,23 @@ would rename the required `<lane> / build-test` context.
    The runtime `RUNNER_ENVIRONMENT=github-hosted` checks in the lifecycle rebuild and
    candidate sandbox remain the backstop. Larger machines raise the resource ceiling of
    the sandboxed scripts but not their reach.
-2. **A diff classifier selects a lighter plan (follow-up PR).** Two new optional inputs,
+2. **A diff classifier selects a lighter plan (implemented).** Two new optional inputs,
    `secretless-ci-non-app-script-plan` and `secretless-ci-non-app-paths`, let a
    `secretless-pr` call run a reduced non-empty plan, still as the same job and so under
    the same `<lane> / build-test` context. The classifier reads the changed-file list
    from the GitHub compare API at the PR's admitted base and head, never from the
    checkout, and fails closed to the full plan on any API error, truncation, empty list,
-   or path outside the allowlist. Workflow, manifest, lockfile, registry-config and
-   toolchain-pin paths can never classify as non-app, whatever the caller declares.
+   or path outside the allowlist; a base or head that is not a 40-hex object name is a
+   malformed event and fails the step. Non-application means a path under `docs/`, `NEXT/` or
+   `CHANGELOG/`, a top-level Markdown file, or a caller-declared directory prefix; nested
+   Markdown is application content until declared. Only `secretless-pr` on a
+   `pull_request` event is eligible, never a trusted-ref push. Workflow files and Node package, lockfile,
+   registry-config, git and toolchain-pin files can never classify as non-app, whatever
+   the caller declares. A declared prefix asserts that nothing under it feeds the Node
+   build, so `python/requirements.txt` under a declared `python/` is non-app. The classifier
+   judges paths only: it does not see tree modes, so a changed symlink or gitlink under a
+   non-app prefix is non-app too. That is a coverage choice, not a security boundary: both
+   plans run in the same credentialless sandbox with the same token handling.
 3. **Optional-lane ordering stays caller-side (no change).** A reusable workflow cannot
    `needs:` a sibling caller job. An adopter orders an optional heavy lane by writing
    `needs: verify` and `if: needs.verify.result == 'success'` on that caller job. This is

@@ -122,6 +122,16 @@ true:
         required: false
         type: string
         default: ''
+      secretless-ci-non-app-script-plan:
+        description: 'Optional lighter script plan, in the secretless-ci-script-plan grammar, that a secretless-pr call runs instead of that plan when every file the pull request changes is non-application: under docs/, NEXT/ or CHANGELOG/, a top-level Markdown file, or a prefix listed in secretless-ci-non-app-paths. The job and its `<lane> / build-test` check name are unchanged. Anything unclassified (a workflow, manifest, lockfile, registry or toolchain pin, an unreadable diff, or any doubt) keeps the full plan. Empty disables the selection (ADR 0238).'
+        required: false
+        type: string
+        default: ''
+      secretless-ci-non-app-paths:
+        description: Optional JSON array of up to 32 repository-relative directory prefixes, each ending in a slash (for example ["docker/","python/"]), that also count as non-application for secretless-ci-non-app-script-plan. A declared prefix asserts that nothing under it feeds the Node build. .github/ and Node package, lockfile, registry, git and toolchain-pin files can never be non-application, whatever is declared. A malformed value keeps the full plan.
+        required: false
+        type: string
+        default: ''
       schema-dir:
         description: Path to a schema submodule to `npm ci` before the root install (a Node repo consuming its @verjson schema package as a `file:` submodule dep). Empty string skips it.
         required: false
@@ -716,10 +726,24 @@ jobs:
         )\nbind_source(workspace, sandbox_workspace)\nbind_source(node_modules, f\"{sandbox_workspace}/node_modules\", writable=True)\narguments.extend((\"--dev\", \"/dev\", \"--proc\", \"/proc\"))\narguments.extend((\"--chdir\", sandbox_workspace))\n\nrebuild_process_env = {\n    \"PATH\": f\"{toolchain_bin}:/usr/bin:/bin\",\n    \"HOME\": \"/tmp/home\",\n    \"TMPDIR\": \"/tmp\",\n    \"TMP\": \"/tmp\",\n    \"TEMP\": \"/tmp\",\n    \"RUNNER_TEMP\": \"/tmp\",\n    \"GITHUB_WORKSPACE\": sandbox_workspace,\n    \"CI\": \"true\",\n    \"NPM_CONFIG_CACHE\": \"/tmp/npm-cache\",\n    \"npm_config_cache\": \"/tmp/npm-cache\",\n    \"COREPACK_HOME\": \"/tmp/corepack\",\n    \"COREPACK_ENABLE_DOWNLOAD_PROMPT\": \"0\",\n    # Egress is denied, so node-gyp builds against the selected\n    # toolchain's own include/node headers instead of downloading\n    # them (#1798). Every node-gyp version reads npm_config_*.\n    \"npm_config_nodedir\": toolchain_destination,\n    **rebuild_env,\n}\nfor name,\
         \ value in sorted(rebuild_process_env.items()):\n    arguments.extend((\"--setenv\", name, value))\n# The bootstrap imports nothing beyond the already-loaded os and sys\n# before closing Bubblewrap's inherited host descriptors, and runs\n# isolated (-I) because its working directory is the untrusted checkout.\n# npm configs are created afterwards on the sandbox's fresh /tmp tmpfs.\nsandbox_entrypoint = (\n    \"import os, sys\\n\"\n    \"max_fd = os.sysconf('SC_OPEN_MAX')\\n\"\n    \"if max_fd < 3: raise SystemExit('invalid file descriptor limit')\\n\"\n    \"os.closerange(3, max_fd)\\n\"\n    \"config_directory = '/tmp/npm-config'\\n\"\n    \"os.mkdir(config_directory, 0o700)\\n\"\n    \"for config_role in ('user', 'global'):\\n\"\n    \"    config_path = f'{config_directory}/{config_role}.npmrc'\\n\"\n    \"    os.close(os.open(\\n\"\n    \"        config_path,\\n\"\n    \"        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,\\n\"\n    \"        0o600,\\\
         n\"\n    \"    ))\\n\"\n    \"    os.environ[f'NPM_CONFIG_{config_role.upper()}CONFIG'] = config_path\\n\"\n    \"    os.environ[f'npm_config_{config_role}config'] = config_path\\n\"\n    \"os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\\n\"\n)\narguments.extend((\n    \"--\",\n    \"/usr/bin/python3\",\n    \"-I\",\n    \"-c\",\n    sandbox_entrypoint,\n    *command,\n    *requested,\n))\nos.execve(str(bubblewrap), arguments, {\"PATH\": \"/usr/bin:/bin\", \"HOME\": \"/nonexistent\"})\nPY\n"
+    - id: classify-diff
+      name: Select the script plan for this diff
+      if: needs.eligibility.outputs.should-run != 'false' && inputs.secretless-pr && github.event_name == 'pull_request' && inputs.secretless-ci-non-app-script-plan != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPOSITORY: ${{ github.repository }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        NON_APP_PATHS: ${{ inputs.secretless-ci-non-app-paths }}
+      run: "set -euo pipefail\ndecide() {\n  echo \"non-app=$1\" >> \"$GITHUB_OUTPUT\"\n  echo \"::notice title=script plan::$2\"\n  exit 0\n}\n# The event payload carries both SHAs; a value that is not a 40-hex object\n# name is a malformed event, not a diff to guess about, so the job fails.\n[[ \"$BASE_SHA\" =~ ^[0123456789abcdef]{40}$ ]] \\\n  || { echo \"::error::base-sha is not a 40-hex object name\"; exit 1; }\n[[ \"$HEAD_SHA\" =~ ^[0123456789abcdef]{40}$ ]] \\\n  || { echo \"::error::head-sha is not a 40-hex object name\"; exit 1; }\nchanged=\"$RUNNER_TEMP/verjson-changed-paths-$$.jsonl\"\ngh api --paginate \"repos/${REPOSITORY}/compare/${BASE_SHA}...${HEAD_SHA}?per_page=100\" \\\n  --jq '.files[]? | (.filename, (.previous_filename // empty)) | @json' \\\n  > \"$changed\" 2>/dev/null \\\n  || decide false \"full plan: the changed files could not be read\"\nverdict=\"$(CHANGED=\"$changed\" python3 -I - <<'PY' || true\nimport json\nimport os\nimport re\n\ndenied_names = {\n    \"package.json\"\
+        , \"package-lock.json\", \"npm-shrinkwrap.json\",\n    \"pnpm-lock.yaml\", \"pnpm-workspace.yaml\", \"yarn.lock\", \"bun.lock\",\n    \"bun.lockb\", \".nvmrc\", \".node-version\", \".tool-versions\",\n    \".yarnrc\", \".yarnrc.yml\",\n}\nbuiltin_prefixes = (\"docs/\", \"NEXT/\", \"CHANGELOG/\")\nprefix_pattern = re.compile(r\"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*/\")\n# The compare API serves at most 3000 files; a list that long may be cut.\nfile_cap = 2900\n\ndef valid_prefix(value):\n    return (\n        isinstance(value, str)\n        and prefix_pattern.fullmatch(value) is not None\n        and not any(part in (\".\", \"..\") for part in value.split(\"/\"))\n        and value.lower() != \".github/\"\n        and not value.lower().startswith(\".github/\")\n    )\n\ndef non_app(path, prefixes):\n    if (not isinstance(path, str) or not path or len(path) > 1024\n            or path.startswith(\"/\") or \"\\\\\" in path\n            or any(ord(c) < 32 or ord(c) == 127 for c in path)):\n\
+        \        return False\n    parts = path.split(\"/\")\n    if any(part in (\"\", \".\", \"..\") for part in parts):\n        return False\n    lowered = [part.lower() for part in parts]\n    base = lowered[-1]\n    if (lowered[0] == \".github\" or base in denied_names\n            or base.startswith(\".npmrc\") or base.startswith(\".git\")):\n        return False\n    if len(parts) == 1:\n        return base.endswith(\".md\")\n    return path.startswith(prefixes)\n\nraw = os.environ.get(\"NON_APP_PATHS\", \"\").strip()\nextra = []\nif raw:\n    parsed = json.loads(raw)\n    if (not isinstance(parsed, list) or len(parsed) > 32\n            or not all(valid_prefix(item) for item in parsed)):\n        raise SystemExit(1)\n    extra = parsed\nprefixes = builtin_prefixes + tuple(extra)\nwith open(os.environ[\"CHANGED\"], encoding=\"utf-8\") as handle:\n    paths = [json.loads(line) for line in handle if line.strip()]\nif not paths or len(paths) >= file_cap:\n    raise SystemExit(1)\nprint(\"\
+        true\" if all(non_app(path, prefixes) for path in paths) else \"false\")\nPY\n)\"\nrm -f -- \"$changed\"\nif [ \"$verdict\" = \"true\" ]; then\n  decide true \"light plan: every changed path is non-application\"\nfi\ndecide false \"full plan: the diff is not provably non-application\"\n"
     - name: Run exact credentialless consumer script plan
       if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
       env:
-        CI_SCRIPT_PLAN: ${{ inputs.secretless-ci-script-plan }}
+        CI_SCRIPT_PLAN: ${{ steps.classify-diff.outputs.non-app == 'true' && inputs.secretless-ci-non-app-script-plan || inputs.secretless-ci-script-plan }}
         NESTED_MANIFESTS: ${{ inputs.secretless-nested-manifests }}
         DB_ENV: ${{ inputs.db-env }}
         CACHE_ENV: ${{ inputs.cache-env }}
