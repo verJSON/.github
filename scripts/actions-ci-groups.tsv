@@ -268,3 +268,4 @@ platform	python3 scripts/ci-gate/merge-gate-provenance-claims.test.py
 locale-collation	python3 scripts/ci-gate/settable-value-guards.test.py
 locale-collation	python3 scripts/ci-gate/release-verify-retention-keep.test.py
 platform	bash scripts/actions-ci-group-records.test.sh
+platform	python3 scripts/ci-gate/reusable-ci-no-concurrency.test.py
