@@ -83,13 +83,14 @@ rejects that late mutation.
 changes no gate code and no ruleset, and it does not alter the receipt contract above.
 
 **Why.** The decision above states that a non-App `User` with `maintain` or `admin` is
-not proof of human presence. The org requirement of at least one independent reviewer
-therefore cannot be shown to be satisfied by a human when the agent and the human share
-a GitHub account. The owner's requirement is that the agent identity may do and commit
+not proof of human presence. Approval therefore cannot yet be attributed to an
+agent-plus-human identity pair, which is why the four sensitive-path reviewer rulesets are
+suspended (ADR 0210). The owner's requirement is that the agent identity may do and commit
 work as a combined user, model, and agent identity, while the human must prompt as
-themselves to sign off a review or admin-merge. The owner approved recording the
-delegating human as an acceptable approver as an explicit policy exception. The
-architecture review board converged on the policy below.
+themselves to sign off a review or admin-merge to satisfy the org requirement of at least
+one independent reviewer. The owner approved recording the delegating human as an
+acceptable approver as an explicit policy exception. This amendment records that policy.
+ADR 0208 (live collaborator permission as the eligibility rule) is unaffected.
 
 ### Policy
 
@@ -100,7 +101,9 @@ architecture review board converged on the policy below.
    (the RFC 8693 `act` chain): the principal `sub` is the human and `act` is the
    agent-run. No new schema is introduced here. `Actor` has no field for the model
    identifier today, so where the model id is recorded is **open** and owned by
-   `verjson-identity-contracts`; nothing in this record invents one.
+   `verjson-identity-contracts`, as is how the agent and the run are told apart within `act`
+   (the composite has three parts, `Actor` carries `sub`, `iss`, `type`, and `act`); nothing in
+   this record invents either.
 2. **Approval identity is a direct human session only.** Agent credentials structurally
    cannot carry review, approve, or admin-merge scope, enforced at issuance and again at
    the gate. An approval counts only when issuer-backed evidence shows a direct human
@@ -110,11 +113,17 @@ architecture review board converged on the policy below.
    work may approve it. Records and gate output name it `delegation-owner-review` and
    never call it plain "independent review". Safeguards:
    - the approval binds the pull request, the head SHA, the base, and the diff digest;
-   - it goes stale on any push and is rechecked immediately before merge;
+   - it goes stale on any push or change of base and is rechecked immediately before
+     merge;
    - the audit record keeps both the authoring composite identity and the direct human
      approver, even when they are the same person;
    - an agent can never obtain, refresh, or relay an approval or an admin-merge
      credential.
+
+   `delegation-owner-review` is a distinct approval kind and is **not** independent review.
+   It counts toward the org requirement of one approving review only as this owner-approved
+   exception. No gate accepts it today; the change that re-enables the rulesets defines how
+   a gate recognizes it.
 4. **Autonomous system actions are represented explicitly**, as a machine subject with
    no human subject. A delegated action that lacks its human subject fails closed.
 
@@ -137,7 +146,7 @@ for any reviewer ruleset.
 | Concern | Owner |
 | --- | --- |
 | Composite identity schema (`Actor`, `act` chain) | [verjson-identity-contracts](https://github.com/Verjson/verjson-identity-contracts) |
-| Agent admission, policy, credential issuance, and revocation execution | [verjson-agent-identity](https://github.com/Verjson/verjson-agent-identity) |
+| Agent admission, policy, credential issuance, and revocation execution for agent and run credentials | [verjson-agent-identity](https://github.com/Verjson/verjson-agent-identity) |
 | Human-session revocation | [verjson-identity-lifecycle](https://github.com/Verjson/verjson-identity-lifecycle) |
 | Customer workflows that call revocation | [verjson-cli-identity](https://github.com/Verjson/verjson-cli-identity) |
 | Issuer of the evidence that proves a direct human session | **Open: not yet decided** |

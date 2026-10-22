@@ -340,3 +340,10 @@ active images).
 unchanged, so the name-keyed bypass contract in
 `config/org-ruleset-conformance-policy.json` needs no edit. No generated adopter artifact
 or digest depends on this config; it feeds only this script and its test.
+
+**Re-enable condition refined (2026-10-22).** The condition above is superseded by the
+more specific trigger in the
+[ADR 0202 2026-10-22 amendment](../0202-bind-autonomous-merge-to-independent-review-receipt/README.md):
+direct-human approval events with head-SHA and diff binding are verifiable. The
+`reenable_when` text in `config/required-reviewer-rulesets.json` is unchanged and is
+updated by the change that removes a suspension.
