@@ -1,6 +1,6 @@
 ---
 date: 2026-10-22
-id: 20261022T233000Z
+id: a7c41e9d3b52
 impact: patch
 title: Point ADR 0210's rollback reference at a tracked file
 ---
