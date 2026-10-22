@@ -395,7 +395,14 @@ beyond the dated authorization; it extends the suspension recorded above.
    the gate, every current check passed. Two Codex models and a `code-reviewer` pass were
    adjudicated before the push; the Codex pair was not re-run after the fixes.
    The merge of the PR that adds this entry is recorded by the next ledger update.
-8. **Authorization:** the verbatim text and date above.
+8. **Admin merge past the review requirement.** Verjson/.github#1890 (the
+   `secretless-skip-install-scripts` input, finishing #1888) was admin-merged at head
+   `ab7665b7` (merge commit `6781138a`) after `assert-mergeable-head.sh` exit 0 and every
+   check `SUCCESS`/`SKIPPED`; no gate was weakened. `gpt-6-astra` and `gpt-6.1-sol` ran six
+   review rounds to completion plus three `code-reviewer` rounds before the first push; the
+   last round's findings were adjudicated, and one test-pin commit (`ab7665b7`) followed it.
+   The merge of the PR that adds this entry is recorded by the next ledger update.
+9. **Authorization:** the verbatim text and date above.
 
 ### Exit condition ("CI optimized and working"), measurable
 
