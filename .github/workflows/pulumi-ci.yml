@@ -6,9 +6,12 @@ name: pulumi-ci (reusable)
 #   1. Credential-free validation runs on the caller's untrusted-workload lane with
 #      only `contents: read`. Caller-supplied install/validate commands never see
 #      package, Git, cloud, OIDC, or repository-write credentials.
-#   2. Live `pulumi preview` runs on the caller-selected runner only for a push
-#      or same-repository PR AND only when every cloud credential is present.
-#      Fork PRs, unknown events, and missing-secret runs fail closed to validation.
+#   2. Live `pulumi preview` runs on the caller-selected runner only for a trusted
+#      ref (push or workflow_dispatch on the repository's default branch), or for a
+#      same-repository PR a human gated behind the caller's `preview-environment`
+#      (ADR 0239). Same-repository is NOT reviewed code: without that environment a
+#      PR runs the credential-free validation gate only. Fork PRs, unknown events,
+#      and missing-secret runs fail closed to validation.
 #
 # Lifted from viager-infra's preview.yml so infra repos stop reinventing the
 # credential-gating dance; Node + the @verjson registry come from the org
@@ -86,7 +89,29 @@ on:
         required: false
         type: string
         default: ''
+      preview-environment:
+        description: >-
+          Name of a caller-owned GitHub environment with required reviewers. When
+          set, a same-repository pull_request runs the credentialed preview inside
+          it, so a reviewer approves before any credential reaches PR code. The
+          admission job verifies through the API (using `environment-read-token`) that
+          the environment exists with a required-reviewers rule that prevents
+          self-review, and fails closed otherwise (GitHub silently
+          creates unprotected environments on first use). Empty (default) means
+          such PRs get the credential-free validation gate only. This input is an
+          approval gate, not secret scoping: reusable-workflow secret aliases are
+          caller-mapped. Fork PRs and other events are never admitted by it.
+        required: false
+        type: string
+        default: ''
     secrets:
+      environment-read-token:
+        description: >-
+          Token able to read the preview environment's protection rules (fine-grained
+          "Actions: read" on the caller repository). Needed only with
+          `preview-environment`; without it the reviewed route fails closed. It is
+          used only by the credential-light admission job, never by PR code.
+        required: false
       node-auth-token:
         description: >-
           read:packages token used only by the admitted preview job's fixed
@@ -124,6 +149,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          # The event's immutable SHA (for a PR, the merge commit at trigger time),
+          # so validation and preview execute the same bytes.
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Set up credential-free Node
@@ -157,6 +185,7 @@ jobs:
       contents: read
     outputs:
       admitted: ${{ steps.admission.outputs.admitted }}
+      route: ${{ steps.admission.outputs.route }}
     steps:
       - name: Decide trusted preview admission
         id: admission
@@ -164,39 +193,85 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           REPOSITORY: ${{ github.repository }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          REF: ${{ github.ref }}
+          # Exposed only on the one route that needs it; empty otherwise.
+          GH_TOKEN: ${{ github.event_name == 'pull_request' && inputs.preview-environment != '' && secrets.environment-read-token || '' }}
+          EXECUTED_SHA: ${{ github.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PREVIEW_ENVIRONMENT: ${{ inputs.preview-environment }}
           HAS_GCP_WIP: ${{ secrets.gcp-wip != '' }}
           HAS_GCP_SA: ${{ secrets.gcp-sa != '' }}
           HAS_PULUMI_TOKEN: ${{ secrets.pulumi-access-token != '' }}
         run: |
           set -euo pipefail
-          trusted_event=false
+          # Unified untrusted-execution boundary (ADR 0239). A credentialed run is
+          # admitted only for (a) a trusted ref: push or workflow_dispatch on the
+          # default branch; or (b) a same-repository pull_request when the caller
+          # supplied a preview environment whose reviewers gate the job. Everything
+          # else, including unknown events and missing identity, is untrusted.
+          repo_lower="${REPOSITORY,,}"
+          head_repo_lower="${HEAD_REPOSITORY,,}"
+          trusted_ref=false
+          reviewed_route=false
           case "$EVENT_NAME" in
-            push)
-              trusted_event=true
+            push|workflow_dispatch)
+              if [ -n "$DEFAULT_BRANCH" ] && [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
+                trusted_ref=true
+              fi
               ;;
             pull_request)
-              if [ -n "$HEAD_REPOSITORY" ] && [ "$HEAD_REPOSITORY" = "$REPOSITORY" ]; then
-                trusted_event=true
+              # The name is caller-workflow data a PR can edit: constrain it before
+              # it reaches an output file or an API path, then require a real gate.
+              if [ -n "$PREVIEW_ENVIRONMENT" ] && [ -n "$head_repo_lower" ] \
+                && [ "$head_repo_lower" = "$repo_lower" ] \
+                && [[ "$PREVIEW_ENVIRONMENT" =~ ^[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_][abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-]{0,63}$ ]]; then
+                if [ -z "${GH_TOKEN:-}" ]; then
+                  echo "::warning title=Pulumi preview environment cannot be verified::environment-read-token was not provided; refusing credentialed PR preview."
+                fi
+                reviewers="$(gh api "repos/$REPOSITORY/environments/$PREVIEW_ENVIRONMENT" \
+                  --jq '[.protection_rules[]? | select(.type == "required_reviewers" and .prevent_self_review == true)] | length' 2>/dev/null || echo 0)"
+                if [ "$reviewers" -gt 0 ] 2>/dev/null; then
+                  reviewed_route=true
+                else
+                  echo "::warning title=Pulumi preview environment is not a gate::Environment '$PREVIEW_ENVIRONMENT' is missing, unreadable, or lacks a required-reviewers rule with self-review prevented; refusing credentialed PR preview."
+                fi
               fi
               ;;
           esac
 
           admitted=false
-          if [ "$trusted_event" = true ] \
+          route=none
+          if [ "$trusted_ref" = true ] \
             && [ "$HAS_GCP_WIP" = true ] \
             && [ "$HAS_GCP_SA" = true ] \
             && [ "$HAS_PULUMI_TOKEN" = true ]; then
             admitted=true
+            route=trusted
+          elif [ "$reviewed_route" = true ] \
+            && [ "$HAS_GCP_WIP" = true ] \
+            && [ "$HAS_GCP_SA" = true ] \
+            && [ "$HAS_PULUMI_TOKEN" = true ]; then
+            admitted=true
+            route=reviewed
           fi
+          echo "Event ${EVENT_NAME} executes ${EXECUTED_SHA} (pull request head: ${HEAD_SHA:-n/a})"
+
           echo "admitted=$admitted" >> "$GITHUB_OUTPUT"
+          echo "route=$route" >> "$GITHUB_OUTPUT"
 
           if [ "$admitted" != true ]; then
-            echo "::notice title=Pulumi preview skipped::Event is not trusted for live preview or required cloud credentials are unavailable; ran the credential-free validation gate only."
+            echo "::notice title=Pulumi preview skipped::Not a trusted ref and no reviewed-preview environment applies, or required cloud credentials are unavailable; ran the credential-free validation gate only."
           fi
 
   preview:
     needs: [validate, preview-admission]
     if: needs.preview-admission.outputs.admitted == 'true'
+    # Derived from the event, never from a step output: GitHub drops an output whose
+    # value equals a secret, and a PR author controls the caller's secret mapping, so
+    # an output-carried name could be redacted into "no environment". Under
+    # `admitted == 'true'` a pull_request can only have come through the reviewed route.
+    environment: ${{ github.event_name == 'pull_request' && inputs.preview-environment || '' }}
     runs-on: ${{ inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     strategy:
       fail-fast: false
@@ -209,6 +284,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Set up Node + @verjson registry
