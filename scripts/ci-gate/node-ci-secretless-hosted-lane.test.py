@@ -139,7 +139,7 @@ def run_eligibility_guards(document: dict, scenario: dict,
         },
         "runner": {"environment": scenario["eligibility_runner"]},
         "vars": {"CI_LANE_UNTRUSTED": scenario["untrusted_lane"]},
-        "github": {"repository_owner": "Verjson"},
+        "github": {"repository_owner": scenario.get("owner", "Verjson")},
     }
     for step in eligibility_guards(document):
         condition = step.get("if")
@@ -242,6 +242,84 @@ SCENARIOS = (
         "label": "a bare-dot version is refused",
         "mode": "trusted-ref",
         "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-."]',
+        "admitted": False,
+    },
+    {
+        "label": 'a vetted larger x64 hosted label (ubuntu-24.04-4-cores) proceeds so an adopter can trade rate for wall time',
+        "mode": "trusted-ref", "owner": "adopter",
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-24.04-4-cores"]',
+        "admitted": True,
+    },
+    {
+        "label": 'ubuntu-latest-8-cores, a vetted larger label on the latest image, proceeds',
+        "mode": "trusted-ref", "owner": "adopter",
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-latest-8-cores"]',
+        "admitted": True,
+    },
+    {
+        "label": 'a bare JSON string of a vetted larger label proceeds',
+        "mode": "trusted-ref", "owner": "adopter",
+        "eligibility_runner": "self-hosted", "untrusted_lane": '"ubuntu-22.04-64-cores"',
+        "admitted": True,
+    },
+    {
+        "label": 'an unvetted core count is refused',
+        "mode": "trusted-ref", "owner": "adopter",
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-24.04-3-cores"]',
+        "admitted": False,
+    },
+    {
+        "label": 'a zero-padded core count is refused',
+        "mode": "trusted-ref", "owner": "adopter",
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-24.04-04-cores"]',
+        "admitted": False,
+    },
+    {
+        "label": 'a larger label with the arm suffix is refused',
+        "mode": "trusted-ref", "owner": "adopter",
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-24.04-4-cores-arm"]',
+        "admitted": False,
+    },
+    {
+        "label": 'a larger label with an arbitrary suffix is refused',
+        "mode": "trusted-ref", "owner": "adopter",
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-24.04-4-cores-gpu"]',
+        "admitted": False,
+    },
+    {
+        "label": 'a larger label without the dash before cores is refused',
+        "mode": "trusted-ref",
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-24.04-4cores"]',
+        "admitted": False,
+    },
+    {
+        "label": 'a larger label mixed with a self-hosted label is refused',
+        "mode": "trusted-ref", "owner": "adopter",
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-24.04-4-cores","self-hosted"]',
+        "admitted": False,
+    },
+    {
+        "label": 'an adopter lane of 16 cores proceeds',
+        "mode": "trusted-ref", "owner": 'adopter',
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-24.04-16-cores"]',
+        "admitted": True,
+    },
+    {
+        "label": 'an adopter lane of 32 cores proceeds',
+        "mode": "trusted-ref", "owner": 'adopter',
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-latest-32-cores"]',
+        "admitted": True,
+    },
+    {
+        "label": "the organization's own lane refuses a larger label: a label cannot prove hosted origin and the reconciler pins the standard image",
+        "mode": "trusted-ref", "owner": 'Verjson',
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-24.04-4-cores"]',
+        "admitted": False,
+    },
+    {
+        "label": 'a self-hosted runner carrying only a larger-size label is refused for the organization',
+        "mode": "trusted-ref", "owner": 'Verjson',
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-latest-8-cores"]',
         "admitted": False,
     },
     {
