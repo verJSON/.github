@@ -62,6 +62,7 @@ platform	bash .github/actions/setup-verjson-node/configure-git.test.sh
 platform	bash scripts/ci-gate/pulumi-comment.test.sh
 platform	bash scripts/ci-gate/pulumi-comment-pipefail.test.sh
 platform	bash scripts/ci-gate/pulumi-untrusted-execution.test.sh
+platform	bash scripts/ci-gate/ui-ci-untrusted-execution.test.sh
 platform	bash scripts/ci-gate/generated-artifacts.test.sh
 platform	bash scripts/ci-gate/runner-routing-policy.test.sh
 platform	bash scripts/ci-gate/runner-routing-policy-cwd.test.sh
