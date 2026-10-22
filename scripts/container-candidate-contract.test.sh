@@ -172,7 +172,7 @@ transfer_digest = hashlib.sha256(transfer_helper.read_bytes()).hexdigest()
 
 validation_permissions = {"actions": "read", "contents": "read"}
 publication_permissions = {
-    "actions": "read",
+    "actions": "write",
     "contents": "read",
     "packages": "write",
     "id-token": "write",
@@ -254,7 +254,8 @@ def validate_authority(read_only, publication):
     }, "read-only entrypoint contains publication authority"
     assert set(publication["jobs"]) == {
         "prepare", "acquire-private-node-dependencies", "publish-base",
-        "publish-derived", "attest-sbom", "mirror-gar", "candidate-manifest"
+        "publish-derived", "attest-sbom", "mirror-gar", "candidate-manifest",
+        "evict-node-modules-transfer"
     }, "publication entrypoint has an unexpected static graph"
     for job_name in publication["jobs"]:
         assert publication["jobs"][job_name]["runs-on"] == "ubuntu-24.04", (
@@ -509,6 +510,45 @@ try:
     raise AssertionError("pull-request publication disjunction was accepted")
 except AssertionError as error:
     assert "authority predicate drifted" in str(error)
+
+# #1869: the ~900 MB transfer cache is a per-attempt handoff keyed by an unguessable nonce, so
+# it can never be reused; it must be deleted once its consumers succeed, and kept on failure so
+# "re-run failed jobs" (which reuses the acquisition job's key output) still restores it.
+evict = publisher["jobs"]["evict-node-modules-transfer"]
+assert set(evict["needs"]) == {
+    "acquire-private-node-dependencies", "publish-base", "publish-derived"
+}, "eviction must wait for every consumer of the transfer cache"
+assert evict["permissions"] == {"actions": "write"}, "eviction needs only cache deletion authority"
+assert evict["runs-on"] == "ubuntu-24.04"
+evict_condition = " ".join(evict["if"].split())
+for required in (
+    "always()",
+    "needs.acquire-private-node-dependencies.result == 'success'",
+    "needs.publish-base.result == 'success'",
+    "(needs.publish-derived.result == 'success' || needs.publish-derived.result == 'skipped')",
+):
+    assert required in evict_condition, f"eviction condition lacks {required}"
+assert "failure" not in evict_condition and "cancelled" not in evict_condition
+assert not any("secrets." in str(step) for step in evict["steps"]), "eviction must not touch secrets"
+delete_step = next(step for step in evict["steps"] if "gh cache delete" in step.get("run", ""))
+assert delete_step["env"]["CACHE_KEY"] == (
+    "${{ needs.acquire-private-node-dependencies.outputs.transfer-cache-key }}"
+)
+assert 'gh cache delete "$CACHE_KEY" --ref "$GITHUB_REF"' in delete_step["run"], (
+    "eviction must be bound to the publishing ref"
+)
+assert delete_step["env"]["GH_TOKEN"] == "${{ github.token }}"
+assert not any(s.get("uses", "").startswith("actions/checkout@") for s in evict["steps"]), (
+    "eviction must not check out the repository"
+)
+assert "evict-node-modules-transfer" not in publisher["jobs"]["candidate-manifest"]["needs"], (
+    "a cache-eviction failure must not block candidate manifests"
+)
+for job_name, job in publisher["jobs"].items():
+    if job_name != "evict-node-modules-transfer":
+        assert "actions" not in job.get("permissions", {}) or job["permissions"]["actions"] == "read", (
+            f"{job_name} must not gain cache write authority"
+        )
 assert canary["jobs"]["validate"]["permissions"] == validation_permissions
 assert canary["jobs"]["publish"]["permissions"] == publication_permissions
 assert canary["jobs"]["validate"]["uses"] == "./.github/workflows/container-candidate.yml"

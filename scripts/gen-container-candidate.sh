@@ -80,7 +80,7 @@ jobs:
   publish:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
-      actions: read
+      actions: write
       contents: read
       packages: write
       id-token: write
@@ -156,7 +156,8 @@ grep -qx '# Contract: $ref' "\$destination_helper" || fail "destination helper c
 [ "\$(grep -c 'transfer-sha256: $transfer_sha256' "\$caller")" -eq 1 ] || fail "trusted publication does not pin the dependency transfer implementation digest"
 [ "\$(grep -c 'disk-sha256: $disk_sha256' "\$caller")" -eq 1 ] || fail "trusted publication does not pin disk diagnostics implementation digest"
 [ "\$(grep -c 'retry-sha256: $retry_sha256' "\$caller")" -eq 2 ] || fail "both event paths do not pin the retry verifier digest"
-[ "\$(grep -c '^      actions: read$' "\$caller")" -eq 2 ] || fail "both event paths require Actions reads"
+[ "\$(grep -c '^      actions: read$' "\$caller")" -eq 1 ] || fail "pull-request validation requires Actions reads"
+[ "\$(grep -c '^      actions: write$' "\$caller")" -eq 1 ] || fail "only publication may delete its transfer cache"
 [ "\$(grep -c '^      contents: read$' "\$caller")" -eq 2 ] || fail "both event paths require source reads"
 [ "\$(grep -c 'provenance-sha256: $provenance_sha256' "\$caller")" -eq 1 ] || fail "publication does not pin provenance helper"
 [ "\$(grep -c 'promotionEligible:false' "\$caller")" -eq 0 ] || fail "caller may not assert candidate eligibility"

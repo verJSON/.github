@@ -1164,6 +1164,42 @@ jobs:
           path: image.json
           retention-days: 90
 
+  evict-node-modules-transfer:
+    # The transfer cache is keyed by an unguessable per-attempt nonce and encrypted with a
+    # per-run key, so it can never be reused; left alone it only crowds the consumer's 10 GB
+    # Actions cache quota (#1869). Delete it once its consumers succeed. On failure it stays,
+    # because "re-run failed jobs" reuses the acquisition job's key output.
+    if: >-
+      always() &&
+      needs.acquire-private-node-dependencies.result == 'success' &&
+      needs.publish-base.result == 'success' &&
+      (needs.publish-derived.result == 'success' || needs.publish-derived.result == 'skipped')
+    needs: [acquire-private-node-dependencies, publish-base, publish-derived]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Delete the one-time dependency transfer cache
+        # Eviction is hygiene: a failure here must not fail the release, and a miss is success.
+        continue-on-error: true
+        env:
+          CACHE_KEY: ${{ needs.acquire-private-node-dependencies.outputs.transfer-cache-key }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$CACHE_KEY" =~ ^container-node-modules-[123456789][0123456789]*-[123456789][0123456789]*-[0123456789abcdef]{64}$ ]] || {
+            echo "::error::invalid container dependency cache key"
+            exit 1
+          }
+          if ! out="$(gh cache delete "$CACHE_KEY" --ref "$GITHUB_REF" 2>&1)"; then
+            case "$out" in
+              *"Could not find"*|*"HTTP 404"*) echo "transfer cache already absent" ;;
+              *) echo "::warning::could not delete transfer cache: $out"; exit 1 ;;
+            esac
+          fi
+
   attest-sbom:
     if: >-
       always()
