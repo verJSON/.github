@@ -430,14 +430,24 @@ remain full-SHA or immutable-release pinned.
 
 ## Concurrency belongs to the caller
 
-The reusable workflows intentionally do not set `concurrency`. Pull-request CI
-usually should cancel a stale run when a newer commit arrives:
+The reusable CI workflows intentionally do not set `concurrency`. A called
+workflow cannot tell two calls in one run apart (`github.job` is the same in
+every call and no `github` field carries the caller's job id), and an empty group is a
+startup failure with no jobs, verified on 2026-10-22 (ADR 0238 amendment). Any
+group the reusable declared would be shared by sibling lanes in the caller's run
+and would serialize or cancel them. Declare it once at the caller's workflow
+level, where one group covers every lane. This cancels a superseded pull-request
+run and never a push, merge-queue, tag or dispatch run, because those get a group
+unique to the run:
 
 ```yaml
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 ```
+
+A caller whose workflow runs only on `pull_request` may write
+`cancel-in-progress: true` directly.
 
 Release cancellation is different: interrupting a run after publication starts
 can leave a partially completed release. Release callers should normally use a

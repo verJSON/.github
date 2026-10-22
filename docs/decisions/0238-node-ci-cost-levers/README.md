@@ -81,3 +81,36 @@ An external adopter can trade per-minute rate for wall time on a vetted size wit
 holding an old pin. The security posture of the secretless lane is unchanged: no input in this
 change touches credentials, network policy, or the sandbox. Items 5 and 6 above remain
 open and are reported on the issue.
+
+## Amendment 2026-10-22 — concurrency stays caller-side; test levels not yet designed in the engine
+
+ARB change 3 of #1869 proposed `concurrency` groups with `cancel-in-progress` inside the
+reusable CI workflows. A disposable private probe repository (two calls of one reusable
+workflow in one run, `workflow_dispatch`) established four facts:
+
+- A group that evaluates to the empty string is a **startup failure with no jobs**, at job
+  level, at workflow level, and through a `fromJSON(...) || null` object form. A reusable
+  workflow therefore cannot make its group conditional on an input.
+- `github.job` is `j` in both calls and `github.run_id` is shared, so nothing available to a
+  called workflow distinguishes two calls in one run.
+- Two calls that resolve the same group in one run cancel each other (`Canceling since a
+  higher priority waiting request for <group> exists`); without `cancel-in-progress` the
+  pending one is still replaced.
+- Callers with several lanes (the case #1869 measured) would hit exactly that.
+
+So a group declared in the reusable is either shared by sibling lanes, which serializes or
+cancels them, or needs a caller-supplied discriminator that still cannot be omitted when
+the feature is off. That breaks the requirement that an adopter that does not opt in keeps
+byte-identical behavior. **Decision: cancelling superseded pull-request runs stays at the
+caller's workflow level**, where one group covers all lanes. `docs/node-workflows.md` now
+carries the snippet (cancel only on `pull_request`; every other event gets a group unique to
+the run), and `scripts/ci-gate/reusable-ci-no-concurrency.test.py` pins that the reusable CI
+workflows and the protected twin declare none.
+
+A typed `test-levels` input is **not** part of this amendment. The script-plan engine is
+parsed in three separate Python blocks of `node-ci.yml` and rewritten by string replacement
+into the protected twin; continue-after-failure semantics for a non-fail-fast level need a
+design of their own and a decision on what `cancel` means for a level once concurrency is
+caller-side. Until then the existing `secretless-ci-script-plan` is an ordered, fail-fast
+list.
+
