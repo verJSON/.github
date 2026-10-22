@@ -211,6 +211,31 @@ on:
         required: false
         type: string
         default: ''
+      secretless-ci-non-app-script-plan:
+        description: >-
+          Optional lighter script plan, in the secretless-ci-script-plan grammar,
+          that a secretless-pr call runs instead of that plan when every file the
+          pull request changes is non-application: under docs/, NEXT/ or
+          CHANGELOG/, a top-level Markdown file, or a prefix listed in
+          secretless-ci-non-app-paths. The job and its `<lane> / build-test`
+          check name are unchanged. Anything unclassified (a workflow, manifest,
+          lockfile, registry or toolchain pin, an unreadable diff, or any
+          doubt) keeps the full plan. Empty disables the selection (ADR 0238).
+        required: false
+        type: string
+        default: ''
+      secretless-ci-non-app-paths:
+        description: >-
+          Optional JSON array of up to 32 repository-relative directory
+          prefixes, each ending in a slash (for example ["docker/","python/"]),
+          that also count as non-application for secretless-ci-non-app-script-plan.
+          A declared prefix asserts that nothing under it feeds the Node build.
+          .github/ and Node package, lockfile, registry, git and toolchain-pin
+          files can never be non-application, whatever is declared. A malformed
+          value keeps the full plan.
+        required: false
+        type: string
+        default: ''
       schema-dir:
         description: >-
           Path to a schema submodule to `npm ci` before the root install (a Node
@@ -5720,6 +5745,99 @@ jobs:
           ))
           os.execve(str(bubblewrap), arguments, {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"})
           PY
+      - id: classify-diff
+        name: Select the script plan for this diff
+        # Trusted workflow code only: the changed-file list comes from the GitHub
+        # compare API at the event's base and head, never from the checkout or the
+        # pull request, and file names are data (JSON lines), never interpolated
+        # into a command or a log line. The token exists in this step alone and
+        # cannot reach the sandbox. Every doubt leaves `non-app` false, which keeps
+        # the caller's full plan. ADR 0238.
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.secretless-pr && github.event_name == 'pull_request' && inputs.secretless-ci-non-app-script-plan != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          NON_APP_PATHS: ${{ inputs.secretless-ci-non-app-paths }}
+        run: |
+          set -euo pipefail
+          decide() {
+            echo "non-app=$1" >> "$GITHUB_OUTPUT"
+            echo "::notice title=script plan::$2"
+            exit 0
+          }
+          [[ "$BASE_SHA" =~ ^[0123456789abcdef]{40}$ && "$HEAD_SHA" =~ ^[0123456789abcdef]{40}$ ]] \
+            || decide false "full plan: base or head is not a 40-hex object name"
+          changed="$RUNNER_TEMP/verjson-changed-paths-$$.jsonl"
+          gh api --paginate "repos/${REPOSITORY}/compare/${BASE_SHA}...${HEAD_SHA}?per_page=100" \
+            --jq '.files[]? | (.filename, (.previous_filename // empty)) | @json' \
+            > "$changed" 2>/dev/null \
+            || decide false "full plan: the changed files could not be read"
+          verdict="$(CHANGED="$changed" python3 -I - <<'PY' || true
+          import json
+          import os
+          import re
+
+          denied_names = {
+              "package.json", "package-lock.json", "npm-shrinkwrap.json",
+              "pnpm-lock.yaml", "pnpm-workspace.yaml", "yarn.lock", "bun.lock",
+              "bun.lockb", ".nvmrc", ".node-version", ".tool-versions",
+              ".yarnrc", ".yarnrc.yml",
+          }
+          builtin_prefixes = ("docs/", "NEXT/", "CHANGELOG/")
+          prefix_pattern = re.compile(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*/")
+          # The compare API serves at most 3000 files; a list that long may be cut.
+          file_cap = 2900
+
+          def valid_prefix(value):
+              return (
+                  isinstance(value, str)
+                  and prefix_pattern.fullmatch(value) is not None
+                  and not any(part in (".", "..") for part in value.split("/"))
+                  and value.lower() != ".github/"
+                  and not value.lower().startswith(".github/")
+              )
+
+          def non_app(path, prefixes):
+              if (not isinstance(path, str) or not path or len(path) > 1024
+                      or path.startswith("/") or "\\" in path
+                      or any(ord(c) < 32 or ord(c) == 127 for c in path)):
+                  return False
+              parts = path.split("/")
+              if any(part in ("", ".", "..") for part in parts):
+                  return False
+              lowered = [part.lower() for part in parts]
+              base = lowered[-1]
+              if (lowered[0] == ".github" or base in denied_names
+                      or base.startswith(".npmrc") or base.startswith(".git")):
+                  return False
+              if len(parts) == 1:
+                  return base.endswith(".md")
+              return path.startswith(prefixes)
+
+          raw = os.environ.get("NON_APP_PATHS", "").strip()
+          extra = []
+          if raw:
+              parsed = json.loads(raw)
+              if (not isinstance(parsed, list) or len(parsed) > 32
+                      or not all(valid_prefix(item) for item in parsed)):
+                  raise SystemExit(1)
+              extra = parsed
+          prefixes = builtin_prefixes + tuple(extra)
+          with open(os.environ["CHANGED"], encoding="utf-8") as handle:
+              paths = [json.loads(line) for line in handle if line.strip()]
+          if not paths or len(paths) >= file_cap:
+              raise SystemExit(1)
+          print("true" if all(non_app(path, prefixes) for path in paths) else "false")
+          PY
+          )"
+          rm -f -- "$changed"
+          if [ "$verdict" = "true" ]; then
+            decide true "light plan: every changed path is non-application"
+          fi
+          decide false "full plan: the diff is not provably non-application"
       - name: Export protected type-surface base SHA
         if: needs.eligibility.outputs.should-run != 'false' && inputs.protected-type-surface-declaration-path != ''
         env:
@@ -5812,7 +5930,7 @@ jobs:
       - name: Run exact credentialless consumer script plan
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         env:
-          CI_SCRIPT_PLAN: ${{ inputs.secretless-ci-script-plan }}
+          CI_SCRIPT_PLAN: ${{ steps.classify-diff.outputs.non-app == 'true' && inputs.secretless-ci-non-app-script-plan || inputs.secretless-ci-script-plan }}
           CANDIDATE_CACHE_ROOT: ${{ runner.temp }}/verjson-candidate-caches-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
           VERJSON_CHANGELOG_CONTRACT_REF: ${{ steps.warm-changelog-contract.outputs.contract_ref }}
           VERJSON_CHANGELOG_CONTRACT_SHA256: ${{ steps.warm-changelog-contract.outputs.contract_sha256 }}

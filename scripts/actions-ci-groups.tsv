@@ -31,6 +31,7 @@ platform	bash scripts/ci-gate/node-ci-secretless-pnpm.test.sh
 platform	bash scripts/ci-gate/node-ci-secretless-pnpm-install.test.sh
 platform	bash scripts/ci-gate/node-ci-secretless-trusted-ref.test.sh
 platform	python3 scripts/ci-gate/node-ci-secretless-hosted-lane.test.py
+platform	python3 scripts/ci-gate/node-ci-diff-classifier.test.py
 platform	python3 scripts/ci-gate/workflow-isolated-python.test.py
 platform	bash scripts/ci-gate/node-ci-secretless-transfer.test.sh
 platform	bash scripts/immutable-release-docs.test.sh
