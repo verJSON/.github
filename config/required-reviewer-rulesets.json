@@ -8,6 +8,11 @@
       "name": "verjson-cli-cloud-sensitive-path-admin-review",
       "target": "branch",
       "enforcement": "active",
+      "suspended": {
+        "reason": "Disabled by the owner on 2026-10-22 until agent and human identity attribution exists (verjson-agent-identity work), so reviews can be attributed.",
+        "since": "2026-10-22",
+        "reenable_when": "Agent and human identity attribution exists (verjson-agent-identity work); then delete this suspended object, run apply, and confirm check passes with the ruleset active."
+      },
       "conditions": {
         "ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []},
         "repository_name": {"include": ["verjson-cli-cloud"], "exclude": [], "protected": true}
@@ -41,6 +46,11 @@
       "name": "verjson-cli-projects-sensitive-path-admin-review",
       "target": "branch",
       "enforcement": "active",
+      "suspended": {
+        "reason": "Disabled by the owner on 2026-10-22 until agent and human identity attribution exists (verjson-agent-identity work), so reviews can be attributed.",
+        "since": "2026-10-22",
+        "reenable_when": "Agent and human identity attribution exists (verjson-agent-identity work); then delete this suspended object, run apply, and confirm check passes with the ruleset active."
+      },
       "conditions": {
         "ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []},
         "repository_name": {"include": ["verjson-cli-projects"], "exclude": [], "protected": true}
@@ -77,7 +87,7 @@
       "suspended": {
         "reason": "Disabled by the owner on 2026-10-22 until agent and human identity attribution exists (verjson-agent-identity work), so reviews can be attributed.",
         "since": "2026-10-22",
-        "reenable_when": "verjson-agent-identity attribution lands; then delete this suspended object, run apply, and confirm check passes with the ruleset active."
+        "reenable_when": "Agent and human identity attribution exists (verjson-agent-identity work); then delete this suspended object, run apply, and confirm check passes with the ruleset active."
       },
       "conditions": {
         "ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []},
@@ -112,6 +122,11 @@
       "name": "verjson-object-storage-sensitive-path-admin-review",
       "target": "branch",
       "enforcement": "active",
+      "suspended": {
+        "reason": "Disabled by the owner on 2026-10-22 until agent and human identity attribution exists (verjson-agent-identity work), so reviews can be attributed.",
+        "since": "2026-10-22",
+        "reenable_when": "Agent and human identity attribution exists (verjson-agent-identity work); then delete this suspended object, run apply, and confirm check passes with the ruleset active."
+      },
       "conditions": {
         "ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []},
         "repository_name": {"include": ["verjson-object-storage"], "exclude": [], "protected": true}

@@ -300,41 +300,43 @@ of waiting for someone to run `check` by hand.
 the rule, and a later push dismisses it), steps 6/7 (the App bypass reads) and the
 dotfile-match check are evidenced, and step 5 lands.
 
-## 2026-10-22 amendment — A declared suspension of one reviewer ruleset
+## 2026-10-22 amendment — A declared suspension of the four reviewer rulesets
 
-**What.** On 2026-10-22 the owner set org ruleset 25513495
-`verjson-cli-sensitive-path-admin-review` to `enforcement: disabled`, because the
-admin approval cannot yet be attributed to an agent-plus-human identity pair. The
-daily `check` required `enforcement == "active"`, so it would have gone red until
-someone edited the config to match, which would also erase the fact that the control
-is off. `config/required-reviewer-rulesets.json` now carries an explicit
-`suspended` object (`reason`, `since`, `reenable_when`) on that ruleset only.
+**What.** On 2026-10-22 the owner set all four sensitive-path rulesets to
+`enforcement: disabled`: 25513484 `verjson-cli-cloud-`, 25513492 `verjson-cli-projects-`,
+25513495 `verjson-cli-` and 25513503 `verjson-object-storage-sensitive-path-admin-review`.
+The reason is that the admin approval cannot yet be attributed to an agent-plus-human
+identity pair. The daily `check` required `enforcement == "active"`, so it would have
+gone red until someone edited the config to match, which would also erase the fact that
+the controls are off. `config/required-reviewer-rulesets.json` now carries an explicit
+`suspended` object (`reason`, `since`, `reenable_when`) on each of the four.
 
 **How the audit reads it.** The declared `enforcement` stays `active`: it is the state
 to return to. A `suspended` object makes `scripts/required-reviewer-ruleset.py` expect
 `disabled` for that ruleset and still compare name, target, conditions, bypass actors
 and rules byte-for-byte. A live-active ruleset declared suspended fails, and a
 disabled ruleset not declared suspended fails. `read_config` rejects a malformed
-declaration and any declared `enforcement` other than `active`, so disabling
-cannot be done by editing the enforcement field. Every `check` prints a
-`SUSPENDED:` line with the reason, date and re-enable condition, even when another
-ruleset drifts. `render` and `apply` use the same expected image, and no declaration
-key is ever sent to GitHub. `check` remains GET-only.
+declaration (blank or multi-line text, an impossible or future `since`) and any
+declared `enforcement` other than `active`, so disabling cannot be done by editing the
+enforcement field. Every `check` prints one `SUSPENDED:` line per suspension with the
+reason, date and re-enable condition, even when another ruleset drifts. `render` and
+`apply` use the same expected image, and no declaration key is ever sent to GitHub.
+`check` remains GET-only. The audit does not expire a suspension: visibility on every
+run is the control, and a calendar ceiling would turn a deliberate owner decision red
+without any change in the system.
 
-**Re-enable condition.** When the verjson-agent-identity attribution work lands,
-delete the `suspended` object, run `apply` with the acknowledgement, and confirm
-`check` passes with the ruleset active. A suspension is a declaration to remove, not
-a state to leave in place.
+**Re-enable condition.** When agent and human identity attribution exists
+(verjson-agent-identity work), delete the `suspended` object from each ruleset, run
+`apply` with the acknowledgement, and confirm `check` passes with the rulesets active.
+A suspension is a declaration to remove, not a state to leave in place.
 
-**Rollback JSON.** The pre-change image of ruleset 25513495 was saved outside the
-repository at
-`/tmp/claude-1000/-home-dev-development--github/537ed082-3522-437a-9434-bf885c03497c/scratchpad/ruleset-25513495-before.json`
-(a temporary path on the owner's machine; the committed declaration is the durable
-record, and `render` reproduces the active image).
+**Rollback JSON.** The pre-change image of each ruleset was saved outside the repository
+at `/tmp/claude-1000/-home-dev-development--github/537ed082-3522-437a-9434-bf885c03497c/scratchpad/ruleset-<id>-before.json`
+for each id above (temporary paths on the owner's machine; the committed declaration is
+the durable record, and `render` with the `suspended` objects removed reproduces the
+active images).
 
-**Unchanged.** The sibling rulesets `verjson-cli-cloud-`, `verjson-cli-projects-` and
-`verjson-object-storage-sensitive-path-admin-review` remain active and untouched, and
-the audit still requires them to be. No generated adopter artifact or digest depends
-on this config (it feeds only this script, its test, and the name-keyed bypass
-contract in `config/org-ruleset-conformance-policy.json`, whose bypass actors are
-unchanged).
+**Unchanged.** Bypass actors and every other reviewed property of the four rulesets are
+unchanged, so the name-keyed bypass contract in
+`config/org-ruleset-conformance-policy.json` needs no edit. No generated adopter artifact
+or digest depends on this config; it feeds only this script and its test.

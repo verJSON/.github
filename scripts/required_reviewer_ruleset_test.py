@@ -195,6 +195,12 @@ class FakeGitHub:
 
 
 SUSPENDED_NAME = "verjson-cli-sensitive-path-admin-review"
+SUSPENDED_NAMES = {
+    "verjson-cli-cloud-sensitive-path-admin-review",
+    "verjson-cli-projects-sensitive-path-admin-review",
+    SUSPENDED_NAME,
+    "verjson-object-storage-sensitive-path-admin-review",
+}
 
 
 def declared_rulesets():
@@ -213,10 +219,58 @@ def desired_rulesets():
     return [effective_image(ruleset) for ruleset in declared_rulesets()]
 
 
+def active_rulesets():
+    """The declared images with every suspension lifted: the state `apply` activates."""
+    return [{key: value for key, value in ruleset.items() if key != "suspended"}
+            for ruleset in declared_rulesets()]
+
+
+def script_tree(directory, mutate):
+    """A copy of the repository layout holding an edited config; returns the script path."""
+    tree = Path(directory) / "tree"
+    (tree / "scripts").mkdir(parents=True, exist_ok=True)
+    (tree / "config").mkdir(exist_ok=True)
+    for name in ("required-reviewer-ruleset.py", "github_identity.py", "org_ruleset_api.py"):
+        (tree / "scripts" / name).write_text(
+            (ROOT / "scripts" / name).read_text(encoding="utf-8"), encoding="utf-8")
+    config = json.loads(CONFIG.read_text(encoding="utf-8"))
+    mutate(config)
+    (tree / "config/required-reviewer-rulesets.json").write_text(
+        json.dumps(config), encoding="utf-8")
+    return tree / "scripts/required-reviewer-ruleset.py"
+
+
+def run_with_config(fake, directory, mutate, *arguments):
+    return subprocess.run(
+        ["python3", "-I", str(script_tree(directory, mutate)), *arguments],
+        env=fake.environment(), capture_output=True, text=True, check=False,
+    )
+
+
+def unsuspend(name):
+    def mutate(config):
+        for ruleset in config["rulesets"]:
+            if ruleset["name"] == name:
+                del ruleset["suspended"]
+    return mutate
+
+
+def unsuspend_all(config):
+    for ruleset in config["rulesets"]:
+        ruleset.pop("suspended", None)
+
+
+class ActiveFakeGitHub(FakeGitHub):
+    """Runs the script against a config with no suspension, to exercise the activation paths."""
+
+    def run(self, *arguments):
+        return run_with_config(self, self.directory, unsuspend_all, *arguments)
+
+
 class RenderTest(unittest.TestCase):
     def test_render_prints_the_exact_reviewed_cli_cloud_payload(self):
         with tempfile.TemporaryDirectory() as directory:
-            result = FakeGitHub(directory).run("render")
+            result = ActiveFakeGitHub(directory).run("render")
 
         self.assertEqual(0, result.returncode, result.stderr)
         rendered = json.loads(result.stdout)
@@ -521,9 +575,9 @@ class CheckTest(unittest.TestCase):
         }
         for label, (drift, field) in drifts.items():
             with self.subTest(label), tempfile.TemporaryDirectory() as directory:
-                live = desired_rulesets()
+                live = active_rulesets()
                 drift(live[0])
-                result = FakeGitHub(directory, live_store(live)).run("check")
+                result = ActiveFakeGitHub(directory, live_store(live)).run("check")
 
                 self.assertEqual(1, result.returncode, result.stdout + result.stderr)
                 self.assertIn(
@@ -661,7 +715,7 @@ class ApplyTest(unittest.TestCase):
         for arguments in ((), ("--ack", ""), ("--ack", "APPLY-REQUIRED-REVIEWERS-1"),
                           ("--ack", "apply-required-reviewers-1816")):
             with self.subTest(arguments), tempfile.TemporaryDirectory() as directory:
-                fake = FakeGitHub(directory, live_store([]))
+                fake = ActiveFakeGitHub(directory, live_store([]))
                 result = fake.run("apply", *arguments)
 
                 self.assertEqual(2, result.returncode, result.stdout + result.stderr)
@@ -671,14 +725,14 @@ class ApplyTest(unittest.TestCase):
 
     def test_apply_creates_an_absent_ruleset_disabled_then_activates_it(self):
         with tempfile.TemporaryDirectory() as directory:
-            fake = FakeGitHub(directory, live_store([]))
+            fake = ActiveFakeGitHub(directory, live_store([]))
             result = fake.run("apply", "--ack", ACK)
             writes = fake.writes()
             check = fake.run("check")
 
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         expected_writes = []
-        for index, ruleset in enumerate(desired_rulesets()):
+        for index, ruleset in enumerate(active_rulesets()):
             staged = dict(ruleset, enforcement="disabled")
             expected_writes += [
                 ["POST", "orgs/Verjson/rulesets", staged],
@@ -690,18 +744,18 @@ class ApplyTest(unittest.TestCase):
 
 
     def test_apply_updates_a_drifted_ruleset_in_place(self):
-        live = desired_rulesets()
+        live = active_rulesets()
         live[0]["bypass_actors"].append(
             {"actor_type": "OrganizationAdmin", "actor_id": None, "bypass_mode": "always"})
         live[0]["rules"][0]["parameters"]["required_reviewers"][0]["file_patterns"] = [".github/**"]
         with tempfile.TemporaryDirectory() as directory:
-            fake = FakeGitHub(directory, live_store(live))
+            fake = ActiveFakeGitHub(directory, live_store(live))
             result = fake.run("apply", "--ack", ACK)
             writes = fake.writes()
             stored = fake.rulesets()
 
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        expected = desired_rulesets()[0]
+        expected = active_rulesets()[0]
         self.assertEqual([["PUT", "orgs/Verjson/rulesets/25000000", expected]], writes)
         self.assertEqual(expected, stored["25000000"])
         self.assertIn(f"updated: {expected['name']} (25000000)", result.stdout)
@@ -709,7 +763,7 @@ class ApplyTest(unittest.TestCase):
 
     def test_apply_is_idempotent_and_writes_nothing_once_converged(self):
         with tempfile.TemporaryDirectory() as directory:
-            fake = FakeGitHub(directory, live_store([]))
+            fake = ActiveFakeGitHub(directory, live_store([]))
             first = fake.run("apply", "--ack", ACK)
             converged = len(fake.writes())
             second = fake.run("apply", "--ack", ACK)
@@ -718,19 +772,19 @@ class ApplyTest(unittest.TestCase):
         self.assertEqual(0, first.returncode, first.stderr)
         self.assertEqual(0, second.returncode, second.stderr)
         self.assertEqual([], writes_after_second)
-        for index, ruleset in enumerate(desired_rulesets()):
+        for index, ruleset in enumerate(active_rulesets()):
             self.assertIn(f"unchanged: {ruleset['name']} ({900 + index})", second.stdout)
 
 
     def test_apply_restores_disabled_when_the_activated_image_reads_back_differently(self):
         with tempfile.TemporaryDirectory() as directory:
-            fake = FakeGitHub(directory, live_store([]), normalize_active_away_patterns=True)
+            fake = ActiveFakeGitHub(directory, live_store([]), normalize_active_away_patterns=True)
             result = fake.run("apply", "--ack", ACK)
             writes = fake.writes()
             stored = fake.rulesets()
 
         self.assertEqual(2, result.returncode, result.stdout + result.stderr)
-        expected = desired_rulesets()[0]
+        expected = active_rulesets()[0]
         staged = dict(expected, enforcement="disabled")
         self.assertEqual([
             ["POST", "orgs/Verjson/rulesets", staged],
@@ -744,10 +798,10 @@ class ApplyTest(unittest.TestCase):
     def test_apply_activates_a_disabled_leftover_through_the_verified_rollback_path(self):
         # A failed create leaves its ruleset disabled; the next apply must not
         # activate it unverified (#1859 review).
-        expected = desired_rulesets()[0]
+        expected = active_rulesets()[0]
         staged = dict(copy.deepcopy(expected), enforcement="disabled")
         with tempfile.TemporaryDirectory() as directory:
-            fake = FakeGitHub(directory, live_store([staged]), normalize_active_away_patterns=True)
+            fake = ActiveFakeGitHub(directory, live_store([staged]), normalize_active_away_patterns=True)
             result = fake.run("apply", "--ack", ACK)
             writes = fake.writes()
             stored = fake.rulesets()
@@ -762,10 +816,10 @@ class ApplyTest(unittest.TestCase):
         self.assertIn("restored and verified disabled", result.stderr)
 
     def test_apply_activates_a_disabled_leftover_once_it_reads_back_exactly(self):
-        expected = desired_rulesets()[0]
+        expected = active_rulesets()[0]
         staged = dict(copy.deepcopy(expected), enforcement="disabled")
         with tempfile.TemporaryDirectory() as directory:
-            fake = FakeGitHub(directory, live_store([staged]))
+            fake = ActiveFakeGitHub(directory, live_store([staged]))
             result = fake.run("apply", "--ack", ACK)
             writes = fake.writes()[:2]
             stored = fake.rulesets()
@@ -781,7 +835,7 @@ class ApplyTest(unittest.TestCase):
 
     def test_failed_rollback_says_the_ruleset_may_still_be_active_and_unverified(self):
         with tempfile.TemporaryDirectory() as directory:
-            fake = FakeGitHub(directory, live_store([]),
+            fake = ActiveFakeGitHub(directory, live_store([]),
                               normalize_active_away_patterns=True, fail_disabled_put=True)
             result = fake.run("apply", "--ack", ACK)
             stored = fake.rulesets()
@@ -886,10 +940,10 @@ class FailClosedTest(unittest.TestCase):
     def test_apply_fails_when_an_update_reads_back_differently(self):
         # An already-active drifted ruleset is rewritten in place (no rollback);
         # a non-active one takes the verified activation path tested above.
-        live = desired_rulesets()
+        live = active_rulesets()
         live[0]["rules"][0]["parameters"]["required_reviewers"][0]["file_patterns"].pop()
         with tempfile.TemporaryDirectory() as directory:
-            fake = FakeGitHub(directory, live_store(live), normalize_active_away_patterns=True)
+            fake = ActiveFakeGitHub(directory, live_store(live), normalize_active_away_patterns=True)
             result = fake.run("apply", "--ack", ACK)
 
         self.assertEqual(2, result.returncode, result.stdout + result.stderr)
@@ -899,21 +953,17 @@ class FailClosedTest(unittest.TestCase):
 
 
 
-def suspended_ruleset():
-    return next(r for r in desired_rulesets() if r["name"] == SUSPENDED_NAME)
-
-
 class SuspensionTest(unittest.TestCase):
     """A declared, explicit suspension (ADR 0210, 2026-10-22 amendment)."""
 
-    def test_only_the_verjson_cli_ruleset_is_declared_suspended(self):
+    def test_exactly_the_four_reviewed_rulesets_are_declared_suspended(self):
         suspended = {r["name"]: r["suspended"] for r in declared_rulesets() if "suspended" in r}
 
-        self.assertEqual({SUSPENDED_NAME}, set(suspended))
-        declaration = suspended[SUSPENDED_NAME]
-        self.assertEqual({"reason", "since", "reenable_when"}, set(declaration))
-        self.assertEqual("2026-10-22", declaration["since"])
-        self.assertTrue(all(declaration[key].strip() for key in declaration))
+        self.assertEqual(SUSPENDED_NAMES, set(suspended))
+        for declaration in suspended.values():
+            self.assertEqual({"reason", "since", "reenable_when"}, set(declaration))
+            self.assertEqual("2026-10-22", declaration["since"])
+            self.assertTrue(all(declaration[key].strip() for key in declaration))
         for ruleset in declared_rulesets():
             self.assertEqual("active", ruleset["enforcement"], ruleset["name"])
 
@@ -922,41 +972,55 @@ class SuspensionTest(unittest.TestCase):
             fake = FakeGitHub(directory, live_store())
             result = fake.run("check")
 
-        declaration = next(r["suspended"] for r in declared_rulesets() if "suspended" in r)
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn(f"verified: {SUSPENDED_NAME}", result.stdout)
         suspension_lines = [l for l in result.stdout.splitlines() if l.startswith("SUSPENDED:")]
-        self.assertEqual(1, len(suspension_lines))
-        for text in (SUSPENDED_NAME, declaration["since"], declaration["reason"],
-                     declaration["reenable_when"]):
-            self.assertIn(text, suspension_lines[0])
+        self.assertEqual(4, len(suspension_lines))
+        for ruleset in declared_rulesets():
+            self.assertIn(f"verified: {ruleset['name']}", result.stdout)
+            line = next(l for l in suspension_lines if ruleset["name"] in l)
+            for text in ruleset["suspended"].values():
+                self.assertIn(text, line)
         self.assertEqual([], fake.writes())
 
-    def test_check_fails_when_the_suspended_ruleset_is_live_active(self):
+    def test_check_fails_when_any_suspended_ruleset_is_live_active(self):
+        for name in sorted(SUSPENDED_NAMES):
+            store = live_store()
+            for ruleset in store.values():
+                if ruleset["name"] == name:
+                    ruleset["enforcement"] = "active"
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory:
+                fake = FakeGitHub(directory, store)
+                result = fake.run("check")
+                writes = fake.writes()
+
+                self.assertEqual(1, result.returncode, result.stdout)
+                self.assertIn(f"{name} (", result.stderr)
+                self.assertIn("enforcement", result.stderr)
+                self.assertEqual([], writes)
+
+    def test_check_fails_when_an_undeclared_ruleset_is_disabled(self):
+        name = "verjson-cli-cloud-sensitive-path-admin-review"
+        with tempfile.TemporaryDirectory() as directory:
+            fake = FakeGitHub(directory, live_store())
+            result = run_with_config(fake, directory, unsuspend(name), "check")
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn(f"{name} (", result.stderr)
+        self.assertIn("enforcement", result.stderr)
+        self.assertEqual(3, result.stdout.count("SUSPENDED:"))
+
+    def test_check_passes_a_ruleset_that_is_active_when_not_declared_suspended(self):
+        name = "verjson-cli-cloud-sensitive-path-admin-review"
         store = live_store()
         for ruleset in store.values():
-            if ruleset["name"] == SUSPENDED_NAME:
+            if ruleset["name"] == name:
                 ruleset["enforcement"] = "active"
         with tempfile.TemporaryDirectory() as directory:
             fake = FakeGitHub(directory, store)
-            result = fake.run("check")
+            result = run_with_config(fake, directory, unsuspend(name), "check")
 
-        self.assertEqual(1, result.returncode, result.stdout)
-        self.assertIn(f"{SUSPENDED_NAME} (", result.stderr)
-        self.assertIn("enforcement", result.stderr)
-        self.assertEqual([], fake.writes())
-
-    def test_check_fails_when_an_undeclared_ruleset_is_disabled(self):
-        store = live_store()
-        for ruleset in store.values():
-            if ruleset["name"] == "verjson-cli-cloud-sensitive-path-admin-review":
-                ruleset["enforcement"] = "disabled"
-        with tempfile.TemporaryDirectory() as directory:
-            result = FakeGitHub(directory, store).run("check")
-
-        self.assertEqual(1, result.returncode, result.stdout)
-        self.assertIn("verjson-cli-cloud-sensitive-path-admin-review (", result.stderr)
-        self.assertIn("enforcement", result.stderr)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn(f"verified: {name}", result.stdout)
 
     def test_check_still_verifies_every_other_property_of_the_suspended_ruleset(self):
         drifts = {
@@ -985,12 +1049,12 @@ class SuspensionTest(unittest.TestCase):
         self.assertEqual(1, result.returncode)
         self.assertIn("SUSPENDED:", result.stdout)
 
-    def test_siblings_stay_active_in_the_expected_image(self):
+    def test_a_declared_suspension_is_the_only_source_of_a_disabled_expectation(self):
         expected = {r["name"]: r["enforcement"] for r in desired_rulesets()}
 
-        self.assertEqual("disabled", expected.pop(SUSPENDED_NAME))
-        self.assertEqual({"active"}, set(expected.values()))
-        self.assertEqual(3, len(expected))
+        self.assertEqual({name: "disabled" for name in SUSPENDED_NAMES}, expected)
+        for ruleset in declared_rulesets():
+            self.assertEqual("active", ruleset["enforcement"])
 
     def test_render_prints_the_expected_github_image_without_the_declaration(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1006,16 +1070,15 @@ class SuspensionTest(unittest.TestCase):
 
             self.assertEqual(0, result.returncode, result.stderr)
             stored = {r["name"]: r for r in fake.rulesets().values()}
-        self.assertEqual("disabled", stored[SUSPENDED_NAME]["enforcement"])
+        managed = [r for r in stored.values() if r["name"] in SUSPENDED_NAMES]
+        self.assertEqual(4, len(managed))
+        self.assertEqual({"disabled"}, {r["enforcement"] for r in managed})
         self.assertTrue(all("suspended" not in r for r in stored.values()))
-        self.assertEqual(
-            {"active"}, {r["enforcement"] for n, r in stored.items() if n != SUSPENDED_NAME})
 
     def test_config_rejects_a_malformed_suspension(self):
         module = load_module()
         baseline = json.loads(CONFIG.read_text(encoding="utf-8"))
         index = next(i for i, r in enumerate(baseline["rulesets"]) if "suspended" in r)
-        other = next(i for i, r in enumerate(baseline["rulesets"]) if "suspended" not in r)
         cases = {
             "missing reenable condition": (index, lambda s: s.pop("reenable_when")),
             "extra key": (index, lambda s: s.update(note="x")),
@@ -1039,7 +1102,8 @@ class SuspensionTest(unittest.TestCase):
                 with self.assertRaisesRegex(module.ContractError, "suspended"):
                     module.read_config(path)
         config = copy.deepcopy(baseline)
-        config["rulesets"][other]["enforcement"] = "disabled"
+        config["rulesets"][0].pop("suspended")
+        config["rulesets"][0]["enforcement"] = "disabled"
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             path.write_text(json.dumps(config), encoding="utf-8")
