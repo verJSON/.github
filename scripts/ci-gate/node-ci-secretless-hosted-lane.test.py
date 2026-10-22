@@ -323,6 +323,18 @@ SCENARIOS = (
         "admitted": False,
     },
     {
+        "label": "the organization's canonical-case login (verJSON) still refuses a larger label",
+        "mode": "trusted-ref", "owner": "verJSON",
+        "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-24.04-4-cores"]',
+        "admitted": False,
+    },
+    {
+        "label": "an all-caps organization login still refuses a larger label",
+        "mode": "pr", "owner": "VERJSON",
+        "eligibility_runner": "github-hosted", "untrusted_lane": '["ubuntu-latest-8-cores"]',
+        "admitted": False,
+    },
+    {
         "label": "the arm64 image is refused: the sandbox provisioning is proven on the standard x64 image only",
         "mode": "trusted-ref",
         "eligibility_runner": "self-hosted", "untrusted_lane": '["ubuntu-24.04-arm"]',

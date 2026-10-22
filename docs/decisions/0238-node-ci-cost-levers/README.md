@@ -30,7 +30,8 @@ would rename the required `<lane> / build-test` context.
    ADR 0147, which pins `CI_LANE_UNTRUSTED` to `["ubuntu-24.04"]` and allowlists larger
    runners by identity); a Verjson repository needs a reviewed allowlist identity and a
    reconciler change before it may use a larger size. An external adopter selects the size
-   through its own `CI_LANE_UNTRUSTED` variable and owns the trust of its runner groups.
+   through its own `CI_LANE_UNTRUSTED` variable; the owner comparison folds case because the
+   canonical login is `verJSON`, and owns the trust of its runner groups.
    The runtime `RUNNER_ENVIRONMENT=github-hosted` checks in the lifecycle rebuild and
    candidate sandbox remain the backstop. Larger machines raise the resource ceiling of
    the sandboxed scripts but not their reach.
