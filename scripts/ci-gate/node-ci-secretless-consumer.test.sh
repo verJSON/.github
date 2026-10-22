@@ -39,6 +39,7 @@ inputs = doc[True]["workflow_call"]["inputs"]
 assert inputs["approved-internal-scopes"]["default"] == "@verjson"
 assert inputs["secretless-auxiliary-source"]["default"] == ""
 assert inputs["secretless-rebuild-packages"]["default"] == ""
+assert inputs["secretless-skip-install-scripts"]["default"] == ""
 assert inputs["secretless-ci-script-plan"]["default"] == ""
 
 acquire = doc["jobs"]["acquire-secretless-dependencies"]
@@ -842,5 +843,204 @@ if (cd "$tmp/commands" && PATH="$toolchain/bin:/usr/bin:/bin" NPM_STUB_LOG="$tmp
 else
   fail "a cross-platform lock entry incorrectly demanded allowlisting (#941)"
 fi
+
+# #1888: secretless-skip-install-scripts shares the exact accounting with
+# secretless-rebuild-packages but its names never reach the package manager.
+skip_case() {
+  local description=$1 expectation=$2 rebuild=$3 skip=$4 expected_log=$5 out
+  : > "$tmp/commands/node_modules/.npm-stub.log"
+  out=$(cd "$tmp/commands" && PATH="$toolchain/bin:/usr/bin:/bin" NPM_STUB_LOG="$tmp/skip-rebuild.log" \
+    REBUILD_PACKAGES="$rebuild" SKIP_INSTALL_SCRIPTS="$skip" bash "$tmp/rebuild.sh" 2>&1) && status=0 || status=$?
+  if [ "$expectation" = accept ]; then
+    if [ "$status" -eq 0 ] && [ "$(cat "$tmp/commands/node_modules/.npm-stub.log")" = "$expected_log" ]; then
+      pass "$description"
+    else
+      fail "$description (status $status, npm log: $(cat "$tmp/commands/node_modules/.npm-stub.log"))"
+    fi
+  elif [ "$status" -ne 0 ] && [ ! -s "$tmp/commands/node_modules/.npm-stub.log" ] \
+      && grep -qF -- "$expected_log" <<<"$out"; then
+    pass "$description"
+  else
+    fail "$description (status $status, npm log: $(cat "$tmp/commands/node_modules/.npm-stub.log"))"
+  fi
+  skip_output=$out
+}
+skip_case "a skipped package passes accounting and is never passed to npm rebuild (#1888)" \
+  accept argon2 esbuild 'rebuild argon2'
+if grep -qF 'install scripts deliberately skipped (never executed): esbuild' <<<"$skip_output"; then
+  pass "the skipped set is printed in the job log (#1888)"
+else
+  fail "the skipped set is missing from the job log: $skip_output"
+fi
+skip_case "skipping every lifecycle package runs no rebuild at all (#1888)" \
+  accept '' $'argon2\nesbuild' ''
+# The skip-only exit precedes the hosted-runner and Bubblewrap checks: nothing runs.
+: > "$tmp/commands/node_modules/.npm-stub.log"
+if (cd "$tmp/commands" && PATH="$toolchain/bin:/usr/bin:/bin" RUNNER_ENVIRONMENT=self-hosted \
+    REBUILD_PACKAGES='' SKIP_INSTALL_SCRIPTS=$'argon2\nesbuild' bash "$tmp/rebuild.sh") >/dev/null 2>&1 \
+    && [ ! -s "$tmp/commands/node_modules/.npm-stub.log" ]; then
+  pass "a skip-only run needs no hosted runner or sandbox and runs nothing (#1888)"
+else
+  fail "a skip-only run failed or ran a package manager on a non-hosted runner"
+fi
+skip_case "empty rebuild and skip lists fail with a dedicated message (#1888)" \
+  reject '' '' 'at least one of secretless-rebuild-packages or secretless-skip-install-scripts is required'
+skip_case "a lifecycle package on neither list still fails when another is skipped (#1888)" \
+  reject '' argon2 'lock declares install scripts for packages absent from secretless-rebuild-packages and secretless-skip-install-scripts: esbuild'
+skip_case "a package on both lists fails (#1888)" \
+  reject $'argon2\nesbuild' esbuild 'packages named in both secretless-rebuild-packages and secretless-skip-install-scripts: esbuild'
+skip_case "a skip entry the lock does not mark as needing install scripts is stale (#1888)" \
+  reject $'argon2\nesbuild' leftpad 'secretless-skip-install-scripts names packages the lock does not mark as needing install scripts: leftpad'
+skip_case "a skip entry installed nowhere in the lock fails (#1888)" \
+  reject $'argon2\nesbuild' ghost-package 'absent from lock: ghost-package'
+skip_case "a skip entry for a lock package absent from node_modules/ is stale (#1888)" \
+  reject $'argon2\nesbuild' '@esbuild/linux-x64' 'names packages the lock does not mark as needing install scripts: @esbuild/linux-x64'
+skip_case "a duplicated skip entry fails (#1888)" \
+  reject argon2 $'esbuild\nesbuild' 'secretless-skip-install-scripts accepts unique exact npm package names only'
+skip_case "a skip entry that is not an exact package name fails (#1888)" \
+  reject argon2 $'esbuild\n--foreground-scripts' 'secretless-skip-install-scripts accepts unique exact npm package names only'
+
+# Codex review of #1888: npm rebuild selects by installed name and rebuilds
+# bundled dependencies, so aliases and bundles must not reach a skipped package.
+mkdir -p "$tmp/alias/node_modules/esbuild" "$tmp/alias/node_modules/argon2" "$tmp/alias/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/esbuild":{"name":"argon2","hasInstallScript":true},"node_modules/argon2":{"name":"esbuild","hasInstallScript":true}}}' \
+  > "$tmp/alias/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/alias/package.json"
+mkdir -p "$tmp/bundle/node_modules/approved/node_modules/skipped" "$tmp/bundle/node_modules/skipped" "$tmp/bundle/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true},"node_modules/approved/node_modules/skipped":{"hasInstallScript":true,"inBundle":true}}}' \
+  > "$tmp/bundle/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/bundle/package.json"
+other_lock_case() {
+  local description=$1 directory=$2 expectation=$3 rebuild=$4 skip=$5 expected=$6 out
+  : > "$tmp/$directory/node_modules/.npm-stub.log"
+  out=$(cd "$tmp/$directory" && PATH="$toolchain/bin:/usr/bin:/bin" NPM_STUB_LOG="$tmp/other-lock.log" \
+    PACKAGE_MANAGER="${PACKAGE_MANAGER_OVERRIDE:-npm}" REBUILD_PACKAGES="$rebuild" SKIP_INSTALL_SCRIPTS="$skip" bash "$tmp/rebuild.sh" 2>&1) && status=0 || status=$?
+  if [ "$expectation" = reject ] && [ "$status" -ne 0 ] && [ ! -s "$tmp/$directory/node_modules/.npm-stub.log" ] \
+      && grep -qF -- "$expected" <<<"$out"; then
+    pass "$description"
+  elif [ "$expectation" = accept ] && [ "$status" -eq 0 ] && [ "$(cat "$tmp/$directory/node_modules/.npm-stub.log")" = "$expected" ]; then
+    pass "$description"
+  else
+    fail "$description (status $status: $out)"
+  fi
+}
+other_lock_case "an npm alias that lets a rebuild selector reach a skipped package fails (#1888)" alias reject \
+  esbuild argon2 'selects npm aliases, links, or workspace directories of skipped packages: esbuild'
+other_lock_case "a skipped package bundled inside a rebuilt package fails (#1888)" bundle reject \
+  approved skipped 'skipped packages are bundled inside another package'
+other_lock_case "a skipped package bundled elsewhere is harmless when nothing is rebuilt (#1888)" bundle accept \
+  '' $'approved\nskipped' ''
+
+# Link and workspace nodes are selected by directory name; a bundle only matters
+# when its host is selected, and scoped and workspace hosts keep their identity.
+mkdir -p "$tmp/link/node_modules/skipped" "$tmp/link/node_modules/approved" "$tmp/link/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"hasInstallScript":true},"node_modules/skipped":{"resolved":"packages/approved","link":true},"packages/approved":{"name":"skipped","hasInstallScript":true}}}' \
+  > "$tmp/link/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/link/package.json"
+mkdir -p "$tmp/nested/node_modules/approved/node_modules/skipped" "$tmp/nested/node_modules/other/node_modules/skipped" "$tmp/nested/node_modules/skipped" "$tmp/nested/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"hasInstallScript":true},"node_modules/other":{},"node_modules/skipped":{"hasInstallScript":true},"node_modules/other/node_modules/skipped":{"hasInstallScript":true,"inBundle":true}}}' \
+  > "$tmp/nested/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/nested/package.json"
+other_lock_case "a link whose directory name selects a skipped package's source fails (#1888)" link reject \
+  approved skipped 'selects npm aliases, links, or workspace directories of skipped packages: approved'
+other_lock_case "a skipped package bundled in an unselected host does not block the rebuild (#1888)" nested accept \
+  approved skipped 'rebuild approved'
+
+mkdir -p "$tmp/workspace/node_modules/skipped" "$tmp/workspace/node_modules/approved" "$tmp/workspace/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true},"packages/approved":{"name":"skipped","hasInstallScript":true}}}' \
+  > "$tmp/workspace/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/workspace/package.json"
+other_lock_case "a workspace directory whose name selects a skipped package fails (#1888)" workspace reject \
+  approved skipped 'selects npm aliases, links, or workspace directories of skipped packages: approved'
+
+mkdir -p "$tmp/scoped/node_modules/@s/approved/node_modules/skipped" "$tmp/scoped/node_modules/skipped" "$tmp/scoped/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/@s/approved":{"hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true},"node_modules/@s/approved/node_modules/skipped":{"hasInstallScript":true,"inBundle":true}}}' \
+  > "$tmp/scoped/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/scoped/package.json"
+other_lock_case "a skipped package bundled in a selected scoped host fails (#1888)" scoped reject \
+  '@s/approved' skipped 'skipped packages are bundled inside another package'
+mkdir -p "$tmp/wsbundle/node_modules/approved" "$tmp/wsbundle/node_modules/skipped" "$tmp/wsbundle/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true},"packages/approved/node_modules/skipped":{"hasInstallScript":true,"inBundle":true}}}' \
+  > "$tmp/wsbundle/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/wsbundle/package.json"
+other_lock_case "a skipped package bundled in a selected workspace host fails (#1888)" wsbundle reject \
+  approved skipped 'skipped packages are bundled inside another package'
+
+mkdir -p "$tmp/scopedws/node_modules/approved" "$tmp/scopedws/node_modules/skipped" "$tmp/scopedws/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true},"packages/@s/approved":{"name":"skipped","hasInstallScript":true}}}' \
+  > "$tmp/scopedws/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/scopedws/package.json"
+other_lock_case "a bare name does not select a scoped workspace directory (#1888)" scopedws accept \
+  approved skipped 'rebuild approved'
+mkdir -p "$tmp/scopedws2/node_modules/@s/approved" "$tmp/scopedws2/node_modules/skipped" "$tmp/scopedws2/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/@s/approved":{"hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true},"packages/@s/approved":{"name":"skipped","hasInstallScript":true}}}' \
+  > "$tmp/scopedws2/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/scopedws2/package.json"
+other_lock_case "a scoped workspace directory selected as @scope/name reaches a skipped package (#1888)" scopedws2 reject \
+  '@s/approved' skipped 'selects npm aliases, links, or workspace directories of skipped packages: @s/approved'
+mkdir -p "$tmp/root/node_modules/approved" "$tmp/root/node_modules/skipped" "$tmp/root/node_modules/verjson-secretless-workspace" "$tmp/root/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{"name":"root-app"},"node_modules/approved":{"hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true},"node_modules/verjson-secretless-workspace":{"hasInstallScript":true}}}' \
+  > "$tmp/root/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/root/package.json"
+other_lock_case "the sandbox root cannot be requested next to a skip list (#1888)" root reject \
+  $'approved\nverjson-secretless-workspace' skipped 'must not select the project root'
+
+mkdir -p "$tmp/linkbundle/node_modules/host" "$tmp/linkbundle/node_modules/skipped" "$tmp/linkbundle/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/host":{"resolved":"packages/approved","link":true},"packages/approved":{"name":"approved-pkg","hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true},"packages/approved/node_modules/skipped":{"hasInstallScript":true,"inBundle":true}}}' \
+  > "$tmp/linkbundle/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/linkbundle/package.json"
+other_lock_case "a skipped package bundled under a directory selected through a link name fails (#1888)" linkbundle reject \
+  host skipped 'skipped packages are bundled inside another package'
+mkdir -p "$tmp/scopedbundle/node_modules/skipped" "$tmp/scopedbundle/node_modules/approved" "$tmp/scopedbundle/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true},"packages/@s/approved":{"name":"approved","hasInstallScript":true},"packages/@s/approved/node_modules/skipped":{"hasInstallScript":true,"inBundle":true}}}' \
+  > "$tmp/scopedbundle/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/scopedbundle/package.json"
+other_lock_case "a skipped package bundled in a bare-named request is unaffected by a scoped workspace host (#1888)" scopedbundle accept \
+  approved skipped 'rebuild approved'
+
+mkdir -p "$tmp/manifestbundle/node_modules/approved" "$tmp/manifestbundle/node_modules/skipped" "$tmp/manifestbundle/.git"
+printf '%s\n' '{"name":"approved","bundleDependencies":["skipped"]}' > "$tmp/manifestbundle/node_modules/approved/package.json"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true}}}' \
+  > "$tmp/manifestbundle/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/manifestbundle/package.json"
+other_lock_case "a host manifest that bundles a skipped package fails even when the lock omits inBundle (#1888)" manifestbundle reject \
+  approved skipped 'declares bundled dependencies'
+for bundle_form in '{"skipped":"1.0.0"}' '["some-alias"]' true; do
+  printf '%s\n' "{\"name\":\"approved\",\"bundledDependencies\":$bundle_form}" > "$tmp/manifestbundle/node_modules/approved/package.json"
+  other_lock_case "a bundled-dependency declaration of any form ($bundle_form) beside a skip list fails (#1888)" manifestbundle reject \
+    approved skipped 'declares bundled dependencies'
+done
+printf '%s\n' '{"name":"approved","bundleDependencies":["skipped"]}' > "$tmp/manifestbundle/node_modules/approved/package.json"
+other_lock_case "a host with bundled dependencies still rebuilds while the skip list is empty (#1888)" manifestbundle accept \
+  $'approved\nskipped' '' 'rebuild approved skipped'
+mkdir -p "$tmp/shrinkwrap/node_modules/approved" "$tmp/shrinkwrap/node_modules/skipped" "$tmp/shrinkwrap/.git"
+cp "$tmp/bundle/package-lock.json" "$tmp/shrinkwrap/package-lock.json"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{}}}' > "$tmp/shrinkwrap/npm-shrinkwrap.json"
+cp "$tmp/commands/package.json" "$tmp/shrinkwrap/package.json"
+other_lock_case "npm-shrinkwrap.json beside a skip list fails closed (#1888)" shrinkwrap reject \
+  approved skipped 'npm-shrinkwrap.json takes precedence'
+for pnpm_case in pnpm-skip-only pnpm-undeclared pnpm-overlap; do
+  mkdir -p "$tmp/$pnpm_case/node_modules/approved" "$tmp/$pnpm_case/node_modules/skipped" "$tmp/$pnpm_case/.git"
+  printf '%s\n' "packages:" "  approved@1.0.0:" "    requiresBuild: true" "  skipped@1.0.0:" "    requiresBuild: true" "snapshots:" "  approved@1.0.0: {}" "  skipped@1.0.0: {}" \
+    > "$tmp/$pnpm_case/pnpm-lock.yaml"
+  cp "$tmp/commands/package.json" "$tmp/$pnpm_case/package.json"
+done
+PACKAGE_MANAGER_OVERRIDE=pnpm other_lock_case "pnpm: skipping every requiresBuild package runs nothing (#1888)" pnpm-skip-only accept \
+  '' $'approved\nskipped' ''
+PACKAGE_MANAGER_OVERRIDE=pnpm other_lock_case "pnpm: a requiresBuild package on neither list fails (#1888)" pnpm-undeclared reject \
+  '' skipped 'lock declares install scripts for packages absent from secretless-rebuild-packages and secretless-skip-install-scripts: approved'
+PACKAGE_MANAGER_OVERRIDE=pnpm other_lock_case "pnpm: a package on both lists fails (#1888)" pnpm-overlap reject \
+  $'approved\nskipped' skipped 'packages named in both secretless-rebuild-packages and secretless-skip-install-scripts: skipped'
+
+printf '%s\n' '{broken' > "$tmp/manifestbundle/node_modules/approved/package.json"
+other_lock_case "an unreadable host manifest beside a skip list fails closed (#1888)" manifestbundle reject \
+  approved skipped 'cannot read the package manifest of approved'
+cp "$tmp/bundle/package-lock.json" "$tmp/shrinkwrap/package-lock.json"
+skip_case "an empty skip list keeps the original absent-from-lock message (#1888)" \
+  reject $'argon2\nghost-package' '' 'approved rebuild packages absent from lock: ghost-package'
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{}}}' > "$tmp/commands/npm-shrinkwrap.json"
+skip_case "npm-shrinkwrap.json is ignored while the skip list is empty (#1888)" \
+  accept $'argon2\nesbuild' '' 'rebuild argon2 esbuild'
+rm -f "$tmp/commands/npm-shrinkwrap.json"
 
 exit "$failures"

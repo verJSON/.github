@@ -1100,6 +1100,77 @@ def assert_npm_config_paths_load_independently():
         )
 
 
+def run_skipped_install_script_never_executes(step):
+    """#1888: a skipped package's install script must never run, under real npm.
+
+    Both fixtures declare an install script that writes a marker. The rebuilt
+    package proves the sandbox does execute scripts it was told to; the skipped
+    package's marker must not exist afterwards.
+    """
+    marker_script = "node -e \"require('node:fs').writeFileSync('install-ran', 'yes')\""
+    for rebuilt in ("rebuilt-fixture", ""):
+        with tempfile.TemporaryDirectory(dir=str(Path.home())) as temporary:
+            fixture = Path(temporary)
+            home = fixture / "runner-home"
+            workspace = fixture / "workspace"
+            runner_temp = fixture / "runner-temp"
+            tool_cache = fixture / "tool-cache"
+            for directory in (home, workspace, runner_temp, tool_cache):
+                directory.mkdir()
+            toolchain = copy_real_node_toolchain(tool_cache)
+            names = ("rebuilt-fixture", "skipped-fixture")
+            lock_packages = {"": {"name": "skip-consumer", "dependencies": {n: "1.0.0" for n in names}}}
+            for name in names:
+                package = workspace / "node_modules" / name
+                package.mkdir(parents=True)
+                (package / "package.json").write_text(json.dumps({
+                    "name": name, "version": "1.0.0", "scripts": {"install": marker_script},
+                }), encoding="utf-8")
+                lock_packages[f"node_modules/{name}"] = {
+                    "name": name, "version": "1.0.0", "hasInstallScript": True,
+                }
+            (workspace / "package.json").write_text(json.dumps({
+                "name": "skip-consumer", "version": "1.0.0",
+                "dependencies": {n: "1.0.0" for n in names},
+                # npm 12 blocks unapproved install scripts on its own; approving
+                # both keeps the skip list the only thing standing between the
+                # skipped package and execution.
+                "allowScripts": {n: True for n in names},
+            }), encoding="utf-8")
+            (workspace / "package-lock.json").write_text(json.dumps({
+                "name": "skip-consumer", "lockfileVersion": 3, "packages": lock_packages,
+            }), encoding="utf-8")
+            skipped = "skipped-fixture" if rebuilt else "rebuilt-fixture\nskipped-fixture"
+            env = {
+                **{name: value for name, value in os.environ.items() if name not in SENSITIVE_ENV + ("BASH_ENV",)},
+                "PATH": f"{toolchain / 'bin'}:/usr/bin:/bin",
+                "HOME": str(home),
+                "RUNNER_TEMP": str(runner_temp),
+                "RUNNER_TOOL_CACHE": str(tool_cache),
+                "RUNNER_ENVIRONMENT": "github-hosted",
+                "PACKAGE_MANAGER": "npm",
+                "REBUILD_PACKAGES": rebuilt,
+                "SKIP_INSTALL_SCRIPTS": skipped,
+                "REBUILD_ENV": "{}",
+                "BWRAP_BINARY": "/usr/bin/bwrap",
+            }
+            result = subprocess.run(
+                ["bash", "-e", "-c", step["run"]],
+                cwd=workspace, env=env, capture_output=True, text=True, check=False,
+            )
+            assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-4000:]
+            assert "deliberately skipped" in result.stdout and "skipped-fixture" in result.stdout, result.stdout
+            skipped_marker = workspace / "node_modules/skipped-fixture/install-ran"
+            assert not skipped_marker.exists(), "a skipped package's install script executed"
+            rebuilt_marker = workspace / "node_modules/rebuilt-fixture/install-ran"
+            assert "not covered by allowScripts" not in result.stdout + result.stderr, (
+                "npm blocked the fixtures itself, so this test proves nothing"
+            )
+            assert rebuilt_marker.exists() == bool(rebuilt), (
+                "the rebuilt control package must run its script exactly when it is rebuilt"
+            )
+
+
 def main():
     assert_npm_config_paths_load_independently()
     invalid_values = (
@@ -1130,6 +1201,9 @@ def main():
         )
         assert inputs["secretless-rebuild-env"]["default"] == "{}"
         assert step["env"]["REBUILD_ENV"] == "${{ inputs.secretless-rebuild-env }}"
+        assert inputs["secretless-skip-install-scripts"]["default"] == ""
+        assert step["env"]["SKIP_INSTALL_SCRIPTS"] == "${{ inputs.secretless-skip-install-scripts }}"
+        assert "inputs.secretless-skip-install-scripts != ''" in step["if"]
         assert step["env"]["BWRAP_BINARY"] == "/usr/bin/bwrap"
         install = next(candidate for candidate in build["steps"] if candidate.get("name") == "Install from verified secretless npm cache")
         cleanup = next(candidate for candidate in build["steps"] if candidate.get("name") == "Remove local secretless transfer state")
@@ -1782,6 +1856,7 @@ def main():
                     assert_rebuild_capture(capture, package_manager, "skip", config_directory="/tmp/npm-config")
                     assert_no_lifecycle_command_file_access(command_files, marker)
             run_native_addon_rebuild(step)
+            run_skipped_install_script_never_executes(step)
         run_consumer_descriptor_probe()
     assert_runtime_cache_staging_unseal_survives_symlink_swap()
 

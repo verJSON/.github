@@ -317,3 +317,73 @@ Official Node distributions (`actions/setup-node`, the hosted runner image) ship
 `include/node` there. A distribution build installed under `/usr` may not, and a native
 rebuild against it still fails offline, because the sandbox cannot download headers in
 any configuration.
+
+## 2026-10-22 amendment — adopters may declare install scripts that are never run (#1888)
+
+The lifecycle rebuild requires `secretless-rebuild-packages` to match the lock's
+install-script surface exactly (#932). Some packages cannot rebuild in the
+network-denied sandbox at all: `canvas` downloads a prebuilt binary and then
+compiles against cairo and pixman, and `onnxruntime-node` downloads a CUDA
+provider. The only options were to fail the lane or to rewrite the consumer's
+dependency graph, which a container-publication contract then rejected.
+
+`secretless-skip-install-scripts` is a second newline-separated list of exact
+package names, available in `node-ci.yml` and the generated `node-ci-protected.yml`.
+Accounting becomes `lifecycle_scoped - requested - skipped`, where
+`lifecycle_scoped` is still the set the lock marks `hasInstallScript` (npm) or
+`requiresBuild` (pnpm) and that exists in `node_modules/`. The step fails closed
+when a name is on both lists, when a skipped name is not in the lock, or when a
+skipped name is not lifecycle-scoped (the stale-entry check mirrors the existing
+`unnecessary` check, so a dependency update that drops the script forces the
+entry out; a platform-variant package absent from `node_modules/` is stale for
+the same reason). The step prints the sorted skipped set. When
+`secretless-rebuild-packages` is empty the step now runs for a non-empty skip
+list, performs the accounting, and exits before any sandbox or package-manager
+invocation.
+
+Review hardening (same issue): `npm rebuild <name>` selects nodes by their installed
+name and also rebuilds the bundled dependencies of each selected node, so the lock's
+canonical `name` alone is not enough to keep a skipped identity unreachable. The step
+therefore also fails when a name selecting a node (its installed name, or the directory
+name of a link or workspace source) resolves to a skipped canonical package, and when a
+skipped package is bundled (`inBundle`) beneath a requested host. Scoped hosts and
+workspace directories keep their `@scope/name` identity, and the project root cannot be
+requested (by its sandbox directory name or manifest name) next to a skip list. These checks are
+npm-only: pnpm rejects `npm:` alias keys already and its lock is not modeled for bundle or link
+selection, so the pnpm path gets only the shared accounting, overlap, and stale-entry rules.
+
+The bundle guard also reads each selectable host's installed `package.json`, because
+npm derives bundling from the host rather than from the lock's advisory `inBundle` flag,
+and normalizes aliases, object forms, and transitive bundles. Reproducing that closure
+would be a second copy of npm's resolver, so any selected host that declares bundled
+dependencies at all is refused while a skip list is set. And `npm-shrinkwrap.json` beside a skip list is refused
+because npm prefers it over the `package-lock.json` the accounting reads.
+
+Known limits, inherited from the exact-match design (#941) rather than added by this
+amendment: presence is judged by `node_modules/<canonical name>` at the top level, so a
+script-bearing package that exists only nested is outside the accounting, and a skip
+entry for a nested-only package reads as stale. The pnpm rebuild step also does not set
+`PNPM_CONFIG_IGNORE_PNPMFILE`, so a repository pnpmfile can run inside the sandbox
+during a rebuild, which is the same trust as the rebuilt packages' own scripts.
+
+Threat model: strictly less code runs. Skipped names are never passed to
+`npm rebuild` or `pnpm rebuild`, so their scripts stay unexecuted as installed
+under `--ignore-scripts`; every other isolation property is unchanged. A skip
+entry is a reviewed claim that the consumer does not need that package's native
+build, not a way to run its script elsewhere. The skipped package's files are
+still present, so a consumer that imports it at runtime sees an unbuilt addon.
+
+Regressions run the real rebuild step under real Bubblewrap and npm with a
+fixture whose install script writes a marker file, and require the marker to be
+absent for the skipped package. Stubbed-npm cases cover acceptance, an
+undeclared package, overlap, stale and absent skip entries, duplicates, and
+invalid names. npm 12 blocks unapproved install scripts on its own, so the
+fixture approves both packages in `allowScripts` and the test fails if npm still
+blocks them; the rebuilt control package must run its script, so the skip list
+is the only thing keeping the other package from executing.
+
+`ONNXRUNTIME_NODE_INSTALL=skip` is unchanged and is not made sugar for the skip
+list: it still installs the CPU binding, whereas skipping `onnxruntime-node`
+leaves it entirely unbuilt, so folding one into the other would change behavior.
+Adopter repinning (terptechpub/self-publish-ai-app#2041) is a downstream
+consumer change outside this amendment.
