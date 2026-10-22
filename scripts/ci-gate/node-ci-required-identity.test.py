@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LEGACY = ROOT / ".github/workflows/node-ci.yml"
 PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 HEAD = "a" * 40
-LEGACY_SHA256 = "ed8c786cdf63c2d0c403b9eefbc22b0bc7beefdcd580c9c5763b6b5dededbbfd"
+LEGACY_SHA256 = "3d9895349eaf8c776d581179348389036fbc5ac7ff59692e1ea51a556cb28ada"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
