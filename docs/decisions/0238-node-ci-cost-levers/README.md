@@ -30,7 +30,8 @@ would rename the required `<lane> / build-test` context.
    ADR 0147, which pins `CI_LANE_UNTRUSTED` to `["ubuntu-24.04"]` and allowlists larger
    runners by identity); a Verjson repository needs a reviewed allowlist identity and a
    reconciler change before it may use a larger size. An external adopter selects the size
-   through its own `CI_LANE_UNTRUSTED` variable and owns the trust of its runner groups.
+   through its own `CI_LANE_UNTRUSTED` variable; the owner comparison folds case because the
+   canonical login is `verJSON`, and owns the trust of its runner groups.
    The runtime `RUNNER_ENVIRONMENT=github-hosted` checks in the lifecycle rebuild and
    candidate sandbox remain the backstop. Larger machines raise the resource ceiling of
    the sandboxed scripts but not their reach.
@@ -49,8 +50,7 @@ would rename the required `<lane> / build-test` context.
    build, so `python/requirements.txt` under a declared `python/` is non-app. The classifier
    judges paths only: it does not see tree modes, so a changed symlink or gitlink under a
    non-app prefix is non-app too. That is a coverage choice, not a security boundary: both
-   plans run in the same credentialless sandbox with the same token handling, and an
-   adversarial review (Codex, 2026-10-22) accepted this with the prefix assertion stated.
+   plans run in the same credentialless sandbox with the same token handling.
 3. **Optional-lane ordering stays caller-side (no change).** A reusable workflow cannot
    `needs:` a sibling caller job. An adopter orders an optional heavy lane by writing
    `needs: verify` and `if: needs.verify.result == 'success'` on that caller job. This is
