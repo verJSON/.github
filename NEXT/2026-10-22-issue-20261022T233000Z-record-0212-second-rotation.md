@@ -1,6 +1,6 @@
 ---
 date: 2026-10-22
-issue: 1423
+id: 20261022T233000Z
 impact: patch
 title: Record the ADR 0212 second rotation receipt for ruleset 21830367
 ---
