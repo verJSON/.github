@@ -152,8 +152,8 @@ for any reviewer ruleset.
 | Issuer of the evidence that proves a direct human session | **Open: not yet decided** |
 
 The shared architecture is in
-[verjson-docs ADRs 0006–0008](https://github.com/Verjson/verjson-docs/pull/18), which
-exist only in that open pull request until it merges.
+[verjson-docs ADRs 0006–0008](https://github.com/Verjson/verjson-docs/tree/main/decisions),
+merged in verjson-docs#18 on 2026-10-22.
 
 ### Not covered
 
