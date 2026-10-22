@@ -4,7 +4,7 @@
 - **Status:** Accepted
 - **Issue:** [Verjson/.github#1869](https://github.com/Verjson/.github/issues/1869)
 - **Category:** runner topology and required-check scope (sensitive class)
-- **Related:** [ADR 0222](../0222-docs-diffs-skip-heavy-actions-ci/README.md),
+- **Related:** [ADR 0222](../0222-documentation-diffs-skip-heavy-actions-ci/README.md),
   [ADR 0234](../0234-route-secretless-trusted-ref-builds-to-the-hosted-lane/README.md),
   [ADR 0147](../0147-route-untrusted-ci-to-ephemeral-hosted-runners/README.md)
 
