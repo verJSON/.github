@@ -397,15 +397,23 @@ The window closes when all hold, each evidenced in the closing PR:
 
 ### Restore checklist
 
-- [ ] For each of the four ids, re-enable by `PUT /orgs/Verjson/rulesets/<id>` with the
-  saved JSON from `rollback/` (strip read-only keys such as `id`, `source`, `_links`
-  if the API rejects them), then read the ruleset back and confirm `enforcement: active`.
+- [ ] Prerequisite: verifiable direct-human approval events bound to head SHA and diff
+  exist, per the
+  [ADR 0202 2026-10-22 amendment](../0202-bind-autonomous-merge-to-independent-review-receipt/README.md).
+  This amendment does not supersede that condition.
 - [ ] Delete the four `suspended` objects in `config/required-reviewer-rulesets.json`
-  and update the `reenable_when` text with the change.
-- [ ] Run `scripts/required-reviewer-ruleset.py apply` with its acknowledgement, then
-  `check`; `check` must pass with all four active and print no `SUSPENDED:` line.
+  and update the `reenable_when` text, in one change.
+- [ ] Re-enable through the audited path: `scripts/required-reviewer-ruleset.py apply`
+  with its acknowledgement, which verifies the full image while disabled and rolls back
+  if activation verification fails; then `check`, which must pass with all four active
+  and print no `SUSPENDED:` line.
+- [ ] Only if `apply` cannot be used, fall back to `PUT /orgs/Verjson/rulesets/<id>`
+  with the saved JSON from `rollback/` (strip read-only keys such as `id`, `source`,
+  `_links` if rejected), then diff the read-back against the saved image in full, not
+  only `enforcement`.
+- [ ] Verify the verjson-cli-projects caller on `main` is replaced (no stale `63fc49c6`
+  pin) and that `AI review authorization` succeeds on a fresh PR head; that check is
+  published against the PR head, not `main`.
 - [ ] Re-run `assert-mergeable-head` on each open PR that relied on exit-3 or Gate C
-  handling; confirm verjson-cli-projects `AI review authorization` is green on main
-  (stale caller replaced).
-- [ ] Remove the `suspended` rationale and this window from active guidance once the
-  above pass, with a dated line here recording the restoration.
+  handling.
+- [ ] Add a dated line here recording the restoration and its evidence.
