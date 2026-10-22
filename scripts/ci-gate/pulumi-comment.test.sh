@@ -83,6 +83,7 @@ run_admission() { # <event> <repository> <head-repository> <has-wip> <has-sa> <h
   local output
   output="$(mktemp)"
   EVENT_NAME="$1" REPOSITORY="$2" HEAD_REPOSITORY="$3" \
+    EXECUTED_SHA=abc HEAD_SHA=def GH_TOKEN=x REF="${ADMISSION_REF:-refs/heads/main}" DEFAULT_BRANCH=main PREVIEW_ENVIRONMENT='' \
     HAS_GCP_WIP="$4" HAS_GCP_SA="$5" HAS_PULUMI_TOKEN="$6" GITHUB_OUTPUT="$output" \
     bash -c "$admission_run" >/dev/null
   awk -F= '$1 == "admitted" { value = $2 } END { print value }' "$output"
@@ -101,8 +102,8 @@ check_admission() { # <expected> <event> <repository> <head> <wip> <sa> <token> 
 
 check_admission false pull_request Verjson/infra contributor/infra true true true \
   "fork PR with cloud secrets is rejected"
-check_admission true pull_request Verjson/infra Verjson/infra true true true \
-  "same-repository PR with every cloud secret is admitted"
+check_admission false pull_request Verjson/infra Verjson/infra true true true \
+  "same-repository PR is not trusted by repository identity (ADR 0239; reviewed route is pinned in pulumi-untrusted-execution.test.sh)"
 check_admission true push Verjson/infra '' true true true \
   "push with every cloud secret is admitted"
 check_admission false push Verjson/infra '' false true true \
@@ -111,7 +112,9 @@ check_admission false pull_request Verjson/infra Verjson/infra true false true \
   "same-repository PR missing a cloud secret fails closed"
 check_admission false pull_request_target Verjson/infra contributor/infra true true true \
   "secret-bearing pull_request_target event fails closed"
-check_admission false workflow_dispatch Verjson/infra '' true true true \
+check_admission true workflow_dispatch Verjson/infra '' true true true \
+  "workflow_dispatch on the default branch is a trusted ref (ADR 0239)"
+check_admission false merge_group Verjson/infra '' true true true \
   "unlisted secret-bearing event fails closed"
 
 contains_literal "$admission_job" 'needs: validate' \
