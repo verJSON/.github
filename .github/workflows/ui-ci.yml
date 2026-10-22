@@ -13,6 +13,15 @@ name: ui-ci (reusable)
 # own workflow — the reusable-caller rule is to preserve bespoke steps, not force
 # everything through here.
 #
+# Credentials follow the unified untrusted-execution boundary (ADR 0239). On a
+# trusted ref (push or workflow_dispatch on the default branch) the package and Git
+# tokens stay job-wide as before. On any other event they are scoped to the install
+# steps only, so the workflow gives lint/typecheck/test/build none; with
+# `credentialless-untrusted: true` they are withheld entirely. This is exposure
+# reduction, not isolation: install commands and package lifecycle scripts still run
+# with the token and could persist it (GITHUB_ENV, files) for later steps. For the
+# strongest guarantee move the repository to node-ci `secretless-pr` (ADR 0086).
+#
 # Caller (each UI repo's .github/workflows/ci.yml):
 #
 #   name: CI
@@ -84,6 +93,15 @@ on:
         required: false
         type: string
         default: 'ci-build-secret'
+      credentialless-untrusted:
+        description: >-
+          When true, events that are not a trusted ref (every pull request, branch
+          push, and fork) receive no package, Git, or submodule token at all; the
+          submodule checkout falls back to the job token. Dependencies must then be
+          public or already vendored. Default false keeps the install-scoped token.
+        required: false
+        type: boolean
+        default: false
       runner:
         description: Optional JSON runner labels; Verjson defaults general, external callers ubuntu-24.04.
         required: false
@@ -123,12 +141,53 @@ jobs:
       AUTH_SECRET: ${{ inputs.auth-secret }}
       NEXT_TELEMETRY_DISABLED: '1'
     steps:
+      - name: Classify event trust
+        id: trust
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          CREDENTIALLESS_UNTRUSTED: ${{ inputs.credentialless-untrusted }}
+        run: |
+          set -euo pipefail
+          # Credential mode (ADR 0239): job = tokens job-wide (trusted ref only);
+          # install = tokens scoped to the install steps; none = no tokens at all.
+          # Same trusted-ref table as pulumi-ci's admission; a fork never gets tokens.
+          mode=install
+          case "$EVENT_NAME" in
+            push|workflow_dispatch)
+              if [ -n "$DEFAULT_BRANCH" ] && [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
+                mode=job
+              fi
+              ;;
+            pull_request|pull_request_target)
+              # A pull request with no readable head repository (a deleted fork) is a fork.
+              if [ -z "$HEAD_REPOSITORY" ] || [ "${HEAD_REPOSITORY,,}" != "${REPOSITORY,,}" ]; then
+                mode=none
+              fi
+              ;;
+            merge_group)
+              # A queue entry can carry a fork PR and exposes no head repository to check.
+              mode=none
+              ;;
+          esac
+          if [ "$mode" != job ] && [ "$CREDENTIALLESS_UNTRUSTED" = true ]; then
+            mode=none
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Default ref: actions/checkout already fetches the event's commit by SHA. Outside
+          # a trusted ref no token is persisted for later steps.
+          persist-credentials: ${{ steps.trust.outputs.mode == 'job' }}
           submodules: recursive
-          token: ${{ secrets.submodules-token || github.token }}
+          token: ${{ steps.trust.outputs.mode != 'none' && secrets.submodules-token || github.token }}
 
-      - name: Set up Node + @verjson registry
+      - name: Set up Node + @verjson registry (trusted ref)
+        if: steps.trust.outputs.mode == 'job'
         uses: Verjson/.github/.github/actions/setup-verjson-node@9698815cc3b31b2bc66065535250eba55796c653 # org contract at 2026-08-09
         with:
           node-version: ${{ inputs.node-version }}
@@ -136,16 +195,51 @@ jobs:
           node-auth-token: ${{ secrets.node-auth-token }}
           git-token: ${{ secrets.git-token }}
 
+      - name: Set up Node + @verjson registry (credentials scoped to install)
+        if: steps.trust.outputs.mode != 'job'
+        uses: Verjson/.github/.github/actions/setup-verjson-node@9698815cc3b31b2bc66065535250eba55796c653 # org contract at 2026-08-09
+        with:
+          node-version: ${{ inputs.node-version }}
+          scope: ${{ inputs.scope }}
+
       - name: Install schema submodule deps
         if: inputs.schema-dir != ''
         working-directory: ${{ inputs.schema-dir }}
-        run: npm ci
+        env:
+          # Step-scoped: present for the install only, never exported to later steps.
+          NODE_AUTH_TOKEN: ${{ steps.trust.outputs.mode != 'none' && secrets.node-auth-token || '' }}
+          VERJSON_GIT_TOKEN: ${{ steps.trust.outputs.mode != 'none' && secrets.git-token || '' }}
+          CREDENTIAL_MODE: ${{ steps.trust.outputs.mode }}
+        run: |
+          set -euo pipefail
+          # Outside a trusted ref the Git token is wired for this step only, through
+          # the environment; a trusted ref keeps the composite's job-wide helper.
+          if [ "$CREDENTIAL_MODE" != job ] && [ -n "${VERJSON_GIT_TOKEN:-}" ]; then
+            export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=3
+            export GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=ssh://git@github.com/
+            export GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_1=git@github.com:
+            export GIT_CONFIG_KEY_2=credential.https://github.com.helper
+            export GIT_CONFIG_VALUE_2="!f() { echo \"username=x-access-token\"; echo \"password=\${VERJSON_GIT_TOKEN}\"; }; f"
+          fi
+          npm ci
 
       - name: Install deps
         env:
+          NODE_AUTH_TOKEN: ${{ steps.trust.outputs.mode != 'none' && secrets.node-auth-token || '' }}
+          VERJSON_GIT_TOKEN: ${{ steps.trust.outputs.mode != 'none' && secrets.git-token || '' }}
+          CREDENTIAL_MODE: ${{ steps.trust.outputs.mode }}
           INSTALL_COMMAND: ${{ inputs.install-command }}
         run: |
           set -euo pipefail
+          # Outside a trusted ref the Git token is wired for this step only, through
+          # the environment; a trusted ref keeps the composite's job-wide helper.
+          if [ "$CREDENTIAL_MODE" != job ] && [ -n "${VERJSON_GIT_TOKEN:-}" ]; then
+            export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=3
+            export GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=ssh://git@github.com/
+            export GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_1=git@github.com:
+            export GIT_CONFIG_KEY_2=credential.https://github.com.helper
+            export GIT_CONFIG_VALUE_2="!f() { echo \"username=x-access-token\"; echo \"password=\${VERJSON_GIT_TOKEN}\"; }; f"
+          fi
           eval "$INSTALL_COMMAND"
 
       - name: Lint
