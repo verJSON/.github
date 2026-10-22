@@ -225,7 +225,7 @@ jobs:
               # it reaches an output file or an API path, then require a real gate.
               if [ -n "$PREVIEW_ENVIRONMENT" ] && [ -n "$head_repo_lower" ] \
                 && [ "$head_repo_lower" = "$repo_lower" ] \
-                && [[ "$PREVIEW_ENVIRONMENT" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$ ]]; then
+                && [[ "$PREVIEW_ENVIRONMENT" =~ ^[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_][abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-]{0,63}$ ]]; then
                 if [ -z "${GH_TOKEN:-}" ]; then
                   echo "::warning title=Pulumi preview environment cannot be verified::environment-read-token was not provided; refusing credentialed PR preview."
                 fi
