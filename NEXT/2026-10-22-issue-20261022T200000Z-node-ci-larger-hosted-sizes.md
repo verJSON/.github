@@ -1,6 +1,6 @@
 ---
 date: 2026-10-22
-issue: 1869
+id: 20261022T200000Z
 impact: minor
 title: Admit vetted larger hosted runner sizes in the node-ci secretless lane guard
 ---
