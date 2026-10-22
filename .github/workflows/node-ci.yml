@@ -4848,6 +4848,15 @@ jobs:
               # selected by its directory name, not by its manifest name.
               lock_nodes = []
               lock_packages = lock.get("packages", {})
+              def directory_selector(directory):
+                  parts = directory.rstrip("/").split("/")
+                  return "/".join(parts[-2:]) if len(parts) > 1 and parts[-2].startswith("@") else parts[-1]
+              # The sandbox root is also selectable by its directory name, and by
+              # its manifest name; neither may be requested next to a skip list.
+              root_selectors = {"verjson-secretless-workspace"}
+              root_name = lock_packages.get("", {}).get("name")
+              if isinstance(root_name, str):
+                  root_selectors.add(root_name)
               for path, package in lock_packages.items():
                   if path == "" or not isinstance(package, dict):
                       continue
@@ -4855,12 +4864,12 @@ jobs:
                   # Hosts keep their scope ("@scope/name"); a workspace host outside
                   # node_modules is selected by its directory name.
                   ancestors = tuple(
-                      [segments[0].rstrip("/").rsplit("/", 1)[-1]] * bool(segments[0])
+                      [directory_selector(segments[0])] * bool(segments[0])
                       + [segment.rstrip("/") for segment in segments[1:-1]]
                   ) if package.get("inBundle") is True else ()
                   if package.get("link") is True and isinstance(package.get("resolved"), str):
                       target = lock_packages.get(package["resolved"], {})
-                      target_directory = package["resolved"].rstrip("/").rsplit("/", 1)[-1]
+                      target_directory = directory_selector(package["resolved"])
                       canonical_name = target.get("name") if isinstance(target.get("name"), str) else target_directory
                       lock_nodes.append((segments[-1], canonical_name, ancestors))
                       lock_nodes.append((target_directory, canonical_name, ancestors))
@@ -4868,11 +4877,12 @@ jobs:
                       canonical_name = package.get("name") if isinstance(package.get("name"), str) else segments[-1]
                       lock_nodes.append((segments[-1], canonical_name, ancestors))
                   else:
-                      directory = path.rstrip("/").rsplit("/", 1)[-1]
+                      directory = directory_selector(path)
                       canonical_name = package.get("name") if isinstance(package.get("name"), str) else directory
                       lock_nodes.append((directory, canonical_name, ()))
           else:
               lock_nodes = []
+              root_selectors = set()
               import yaml
               lock = yaml.safe_load(Path("pnpm-lock.yaml").read_text(encoding="utf-8"))
               def pnpm_package_name(key):
@@ -4930,6 +4940,12 @@ jobs:
           # bundled dependencies of every selected node. A skipped identity must be
           # unreachable through either route, or the skip list would be a claim the
           # package manager does not honor.
+          if skipped and root_selectors & set(requested):
+              sys.exit(
+                  "secretless-rebuild-packages must not select the project root "
+                  "when secretless-skip-install-scripts is set: "
+                  + ", ".join(sorted(root_selectors & set(requested)))
+              )
           aliased_into_skip = sorted({
               selector for selector, canonical_name, _ in lock_nodes
               if selector in requested and canonical_name in skipped

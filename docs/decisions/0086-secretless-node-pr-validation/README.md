@@ -346,7 +346,9 @@ name and also rebuilds the bundled dependencies of each selected node, so the lo
 canonical `name` alone is not enough to keep a skipped identity unreachable. The step
 therefore also fails when a name selecting a node (its installed name, or the directory
 name of a link or workspace source) resolves to a skipped canonical package, and when a
-skipped package is bundled (`inBundle`) beneath a requested host. These checks are
+skipped package is bundled (`inBundle`) beneath a requested host. Scoped hosts and
+workspace directories keep their `@scope/name` identity, and the project root cannot be
+requested (by its sandbox directory name or manifest name) next to a skip list. These checks are
 npm-only; pnpm keys that are aliases are already rejected.
 
 Known limits, inherited from the exact-match design (#941) rather than added by this

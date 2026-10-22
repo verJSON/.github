@@ -966,4 +966,23 @@ cp "$tmp/commands/package.json" "$tmp/wsbundle/package.json"
 other_lock_case "a skipped package bundled in a selected workspace host fails (#1888)" wsbundle reject \
   approved skipped 'skipped packages are bundled inside another package'
 
+mkdir -p "$tmp/scopedws/node_modules/approved" "$tmp/scopedws/node_modules/skipped" "$tmp/scopedws/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/approved":{"hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true},"packages/@s/approved":{"name":"skipped","hasInstallScript":true}}}' \
+  > "$tmp/scopedws/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/scopedws/package.json"
+other_lock_case "a bare name does not select a scoped workspace directory (#1888)" scopedws accept \
+  approved skipped 'rebuild approved'
+mkdir -p "$tmp/scopedws2/node_modules/@s/approved" "$tmp/scopedws2/node_modules/skipped" "$tmp/scopedws2/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/@s/approved":{"hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true},"packages/@s/approved":{"name":"skipped","hasInstallScript":true}}}' \
+  > "$tmp/scopedws2/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/scopedws2/package.json"
+other_lock_case "a scoped workspace directory selected as @scope/name reaches a skipped package (#1888)" scopedws2 reject \
+  '@s/approved' skipped 'selects npm aliases, links, or workspace directories of skipped packages: @s/approved'
+mkdir -p "$tmp/root/node_modules/approved" "$tmp/root/node_modules/skipped" "$tmp/root/node_modules/verjson-secretless-workspace" "$tmp/root/.git"
+printf '%s\n' '{"lockfileVersion":3,"packages":{"":{"name":"root-app"},"node_modules/approved":{"hasInstallScript":true},"node_modules/skipped":{"hasInstallScript":true},"node_modules/verjson-secretless-workspace":{"hasInstallScript":true}}}' \
+  > "$tmp/root/package-lock.json"
+cp "$tmp/commands/package.json" "$tmp/root/package.json"
+other_lock_case "the sandbox root cannot be requested next to a skip list (#1888)" root reject \
+  $'approved\nverjson-secretless-workspace' skipped 'must not select the project root'
+
 exit "$failures"
