@@ -170,6 +170,10 @@ git_wiring() { # <mode> <token> -> the effective count and helper
   CREDENTIAL_MODE="$1" VERJSON_GIT_TOKEN="$2" \
     INSTALL_COMMAND='printf "%s|%s" "${GIT_CONFIG_COUNT:-0}" "${GIT_CONFIG_KEY_2:-}"' bash -c "$install_run" 2>/dev/null
 }
+helper_value="$(CREDENTIAL_MODE=install VERJSON_GIT_TOKEN=tok INSTALL_COMMAND='printf "%s" "$GIT_CONFIG_VALUE_2"' bash -c "$install_run" 2>/dev/null)"
+[ "$helper_value" = '!f() { echo "username=x-access-token"; echo "password=${VERJSON_GIT_TOKEN}"; }; f' ] \
+  && pass "the credential helper reads the token from the environment at clone time" \
+  || fail "credential helper text changed: $helper_value"
 [ "$(git_wiring install tok)" = '3|credential.https://github.com.helper' ] \
   && pass "install mode registers all three Git rewrites and the credential helper" \
   || fail "install mode Git wiring is incomplete"

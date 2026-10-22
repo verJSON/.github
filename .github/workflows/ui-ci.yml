@@ -219,7 +219,7 @@ jobs:
             export GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=ssh://git@github.com/
             export GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_1=git@github.com:
             export GIT_CONFIG_KEY_2=credential.https://github.com.helper
-            export GIT_CONFIG_VALUE_2='!f() { echo "username=x-access-token"; echo "password=${VERJSON_GIT_TOKEN}"; }; f'
+            export GIT_CONFIG_VALUE_2="!f() { echo \"username=x-access-token\"; echo \"password=\${VERJSON_GIT_TOKEN}\"; }; f"
           fi
           npm ci
 
@@ -238,7 +238,7 @@ jobs:
             export GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=ssh://git@github.com/
             export GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_1=git@github.com:
             export GIT_CONFIG_KEY_2=credential.https://github.com.helper
-            export GIT_CONFIG_VALUE_2='!f() { echo "username=x-access-token"; echo "password=${VERJSON_GIT_TOKEN}"; }; f'
+            export GIT_CONFIG_VALUE_2="!f() { echo \"username=x-access-token\"; echo \"password=\${VERJSON_GIT_TOKEN}\"; }; f"
           fi
           eval "$INSTALL_COMMAND"
 
