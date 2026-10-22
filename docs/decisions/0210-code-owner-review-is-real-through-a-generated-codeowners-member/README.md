@@ -382,7 +382,11 @@ beyond the dated authorization; it extends the suspension recorded above.
 4. **Earlier admin merges in the same session window** (2026-10-22): Verjson/.github
    #1870, #1871, #1872, #1873, #1876. Listed by merge window; the per-PR gate
    outcome for each is in its own PR thread, and this entry does not re-derive it.
-5. **Authorization:** the verbatim text and date above.
+5. **Admin merge past the review requirement.** Verjson/.github#1884 (ARB change 2,
+   slice 1) was admin-merged at head `6f80be71` (merge commit `df3fd29f`) after
+   `assert-mergeable-head.sh` exit 0 and every check `SUCCESS`/`SKIPPED`; no gate was
+   weakened. Two Codex models and a `code-reviewer` pass were adjudicated before the push.
+6. **Authorization:** the verbatim text and date above.
 
 ### Exit condition ("CI optimized and working"), measurable
 
