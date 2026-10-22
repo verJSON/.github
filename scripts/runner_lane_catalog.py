@@ -13,7 +13,8 @@ line from `expression()`, and CI fails on any hand-edited or stale line.
 
 Security shape (ADR 0240, adversarial review of 2026-10-22): a profile other
 than the built-in one never lets a public or unclassified event reach
-`CI_LANE_FALLBACK`. The built-in profile keeps its legacy tail
+`CI_LANE_FALLBACK` through the lane variables. An explicit caller `runner`
+input still wins first, as in every tier of ADR 0033; that is caller policy. The built-in profile keeps its legacy tail
 (`CI_LANE_UNTRUSTED || CI_LANE_FALLBACK`) byte-for-byte, because Verjson's
 untrusted lane is reconciled as ephemeral (ADR 0147); an adopter's is not
 known to be, so it may only use a lane it named as untrusted.

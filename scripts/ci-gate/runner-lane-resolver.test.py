@@ -169,11 +169,22 @@ def test_generator_check_rejects_a_hand_edited_runs_on() -> None:
         for text, want in ((stamped, 0),
                            (stamped.replace("inputs.runner != ''", "inputs.runner == ''"), 1),
                            ("jobs:\n  a:\n    # runner-lane: nope\n    runs-on: x\n", 1),
-                           ("jobs:\n  a:\n    # runner-lane: caller-runner\n    steps: []\n", 1)):
+                           ("jobs:\n  a:\n    # runner-lane: caller-runner\n    steps: []\n", 1),
+                           ("jobs:\n  a:\n    # runner-lane:\n    runs-on: self-hosted\n", 1),
+                           ("jobs:\n  a:\n    # runner-lane: caller-runner # why\n    runs-on: self-hosted\n", 1)):
             workflow.write_text(text)
             code = subprocess.run([sys.executable, str(gen), "--check", tmp],
                                   capture_output=True, text=True).returncode
             check(f"generator --check on {text.splitlines()[-1][:40]!r}", code, want)
+
+
+def test_generator_checks_yaml_suffix_workflows() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "w.yaml").write_text(
+            "jobs:\n  a:\n    # runner-lane: caller-runner\n    runs-on: self-hosted\n")
+        code = subprocess.run([sys.executable, str(ROOT / "scripts/gen-runner-lane.py"), "--check", tmp],
+                              capture_output=True, text=True).returncode
+        check("generator --check sees .yaml", code, 1)
 
 
 def test_repository_workflows_are_stamped() -> None:

@@ -47,7 +47,10 @@ Two different things were fused:
    persistent one in an adopter that sets a self-hosted fallback and no untrusted lane.
    The built-in profile keeps the legacy tail (`CI_LANE_UNTRUSTED || CI_LANE_FALLBACK`)
    because Verjson reconciles its untrusted lane as ephemeral (ADR 0147). Any other
-   profile gets `CI_LANE_UNTRUSTED || ubuntu-24.04` and never the fallback.
+   profile gets `CI_LANE_UNTRUSTED || ubuntu-24.04` and never the fallback. The
+   guarantee covers the lane variables only: an explicit caller `runner` input still
+   wins first in `caller-runner` (ADR 0033), so a caller that passes a persistent
+   selector gets it. That input is caller policy, not a profile default.
 4. **The secretless term still precedes the caller's `runner` input** (ADR 0234, 0238)
    in every shape that has one. The catalog's `secretless-first` shape holds it.
 5. **Variable semantics.** A reusable workflow reads the caller's `vars`, so a fork of
@@ -81,6 +84,11 @@ Two different things were fused:
 - Rebinding the `public-pr-runner-isolation.pending.tsv` digests for `helm-ci.yml`,
   `actionlint.yml` and `release.yml` is mechanical: the latter two bind scanned-tree
   bytes that include `helm-ci.yml`. No pending row was added or widened.
+- Inherited, deliberately not fixed here because it would change built-in behavior:
+  `fromJSON` of a falsy `CI_LANE_UNTRUSTED` (`null`, `false`, `0`, `""`) is falsy, so
+  the secretless term can fall through to a caller `runner`. Both Codex reviewers
+  reproduced it on the pre-profile expression. Needs a separate decision (fail-closed
+  validation of the variable, owned by `runner-admission-reconcile`).
 - Not modeled: Actions compares strings case-insensitively; the test evaluator does
   not. Live cross-organization execution, and the documented rule that self-hosted
   reusable workflows are reachable by matching owner only, still need a canary outside

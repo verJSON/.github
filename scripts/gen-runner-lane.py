@@ -29,6 +29,8 @@ def stamp(text: str, name: str) -> tuple[str, list[str]]:
     for index, line in enumerate(lines):
         match = MARKER_LINE.match(line)
         if not match:
+            if catalog.MARKER in line and line.lstrip().startswith("#"):
+                problems.append(f"{name}:{index + 1}: malformed runner-lane marker")
             continue
         indent, shape = match.groups()
         target = lines[index + 1] if index + 1 < len(lines) else ""
@@ -46,7 +48,7 @@ def main(argv: list[str]) -> int:
     args = [arg for arg in argv if arg != "--check"]
     root = Path(args[0]) if args else Path(__file__).resolve().parents[1] / ".github/workflows"
     failed = False
-    for path in sorted(root.glob("*.yml")):
+    for path in sorted([*root.glob("*.yml"), *root.glob("*.yaml")]):
         original = path.read_text()
         if catalog.MARKER not in original:
             continue
