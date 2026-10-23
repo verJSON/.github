@@ -34,7 +34,7 @@ ALL_EVENTS = DEFAULT_EVENTS
 CONDITIONS = ("success", "completed")
 
 _ID = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
-_BRANCH = re.compile(r"^(?!.*((^|/)\.|\.\.|//|\.lock(/|$)|[./]$))[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
+_BRANCH = re.compile(r"^(?!HEAD$)(?!.*((^|/)\.|\.\.|//|\.lock(/|$)|[./]$))[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
 # Bare YAML scalars that would not stay strings as job keys, needs entries or env values.
 _YAML_SCALAR_IDS = frozenset({"null", "true", "false", "yes", "no", "on", "off", "y", "n"})
 MAX_DOCUMENT_BYTES = 1 << 20  # characters

@@ -347,7 +347,7 @@ class ValidatorTests(unittest.TestCase):
         self.assertEqual(codes(document), [])
 
     def test_branch_names_git_forbids_are_rejected(self):
-        for name in ("release..candidate", "foo//bar", "foo.lock", "foo/", "foo.", "release/.hidden", "release/./x"):
+        for name in ("release..candidate", "foo//bar", "foo.lock", "foo/", "foo.", "release/.hidden", "release/./x", "HEAD"):
             with self.subTest(name):
                 self.assertIn("bad_value", codes(levels({"id": "a", "branches": [name]})))
 
