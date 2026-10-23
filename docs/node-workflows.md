@@ -237,7 +237,16 @@ packages stay as extracted under `--ignore-scripts`, nothing executes them, and
 the job log prints the skipped set. Matching is by package name, so every installed
 copy of a skipped name, including nested versions, is skipped. A lane may skip every script-bearing package
 and leave `secretless-rebuild-packages` empty; it then runs the accounting but
-no rebuild. On GitHub-hosted runners, the
+no rebuild.
+Only a script-bearing package that sits at the top level of `node_modules/` is accounted
+for. One that exists only nested (for example under another package's own
+`node_modules/`) is outside the accounting: the lifecycle step neither requires it on
+either list nor rebuilds it, a skip entry for it reads as stale, and the install's
+`--ignore-scripts` leaves it unbuilt without a warning. If a consumer needs such a
+native addon at runtime, make it a top-level dependency (so the lock hoists it and the
+accounting sees it) or accept that it is absent; do not expect either list to cover it.
+A pnpm rebuild also does not set `PNPM_CONFIG_IGNORE_PNPMFILE`, so a repository
+`pnpmfile` can run inside the sandbox with the same trust as the rebuilt packages. On GitHub-hosted runners, the
 workflow first provisions and verifies its bubblewrap/AppArmor boundary;
 the rebuild fails closed on other runner types. npm or Corepack runs in a
 Bubblewrap user, PID, and network namespace from a temporary root with only
