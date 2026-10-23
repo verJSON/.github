@@ -1025,6 +1025,26 @@ def verify_dependency_code_never_sees_credential(npm_bin, version, acquisition_s
         assert any(
             authorization == f"Bearer {TOKEN}" for _, authorization in attacker_registry.requests
         ), f"npm {version}: baseline git dependency did not reach its own registry with the credential"
+        # The attacker registry is configured only by the git dependency's own
+        # .npmrc. Nothing at a higher precedence names it: the baseline project
+        # is copied before any project .npmrc exists, and neither the user nor the
+        # global config mentions it, so the request above can only have come from the dependency .npmrc
+        # path (#1845). Without this the baseline could pass through some other
+        # route and leave the dependency path unproven.
+        for config_variable in ("NPM_CONFIG_USERCONFIG", "NPM_CONFIG_GLOBALCONFIG"):
+            assert attacker_registry.origin not in Path(baseline_env[config_variable]).read_text(), (
+                f"{config_variable} must not name the dependency-controlled registry"
+            )
+        assert not any(key.lower() == "npm_config_registry" for key in baseline_env), (
+            "an exported registry would outrank the git dependency's .npmrc and hide the attack path"
+        )
+        assert any(
+            path == "/bait" and authorization == f"Bearer {TOKEN}"
+            for path, authorization in attacker_registry.requests
+        ), (
+            f"npm {version}: the credentialed request must be the git dependency's own devDependency "
+            f"resolution through its .npmrc: {attacker_registry.requests}"
+        )
         required_dependency_hooks = {
             f"{package_name}:dependency-{hook}"
             for package_name in ("fixture-dependency", "fixture-transitive-dependency", "git-dependency")
