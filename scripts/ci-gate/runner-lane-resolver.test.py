@@ -19,6 +19,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import runner_lane_catalog as catalog  # noqa: E402
@@ -244,19 +246,23 @@ def test_evaluator_rejects_unmodeled_comparison_operators() -> None:
             check(f"evaluator rejects unmodeled {label} comparison", False, True)
 
 
-def test_legacy_tail_shape_is_limited_to_node_ci_workflows() -> None:
+def test_legacy_tail_shape_is_limited_to_node_ci_build_test() -> None:
     workflow_dir = ROOT / ".github/workflows"
     workflows = {*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")}
-    legacy_runs_on = catalog.runs_on_line("secretless-first-legacy-tail", "").strip()
-    actual = {
-        path.name
-        for path in workflows
-        if any(line.strip() == legacy_runs_on for line in path.read_text().splitlines())
-    }
+    legacy_runs_on = "${{ " + catalog.expression("secretless-first-legacy-tail") + " }}"
+    actual = set()
+    for path in workflows:
+        document = yaml.safe_load(path.read_text()) or {}
+        jobs = document.get("jobs", {}) if isinstance(document, dict) else {}
+        if not isinstance(jobs, dict):
+            continue
+        for job_name, job in jobs.items():
+            if isinstance(job, dict) and job.get("runs-on") == legacy_runs_on:
+                actual.add((path.name, job_name))
     check(
-        "legacy-tail selector is used only by node-ci workflows",
+        "legacy-tail selector is limited to both node-ci build-test jobs",
         actual,
-        {"node-ci.yml", "node-ci-protected.yml"},
+        {("node-ci.yml", "build-test"), ("node-ci-protected.yml", "build-test")},
     )
 
 

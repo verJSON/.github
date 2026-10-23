@@ -105,27 +105,35 @@ Two different things were fused:
 
 ## 2026-10-23 amendment — fail-closed secretless runner selection
 
-Issue #1869 identified that `fromJSON` of `false`, zero, null, or an empty JSON
-string is falsy in a `runs-on` expression. Without a following secretless-only
-branch, the expression could continue to the caller-provided runner.
+The 2026-10-22 Consequences entry's secretless-first-legacy-tail reference
+describes the migration shape introduced here for node-ci; it preserves
+node-ci's existing non-secretless selector tail. Decision 4's profile-aware
+secretless-first shape is prospective and has no current workflow caller.
 
-The profile-aware `secretless-first` shape uses the untrusted lane only when
-either secretless input is true and `needs.eligibility.result` equals `success`.
-A second secretless-only branch returns literal `ubuntu-24.04` before its
-profile-aware tail. The `secretless-first-legacy-tail` shape wired to node-ci
-applies the same two branches before node-ci's exact existing non-secretless
-tail; profile-aware node-ci routing remains in rollout step 2. A failed or
-skipped eligibility job, a falsy or missing result, and a falsy parsed lane
-therefore stay on the hosted runner and cannot reach a caller's persistent
-runner. Unset or empty lane variables still resolve through the existing
-hosted JSON default.
+Issue #1869 identified that fromJSON of false, zero, null, or an empty JSON
+string is falsy in a runs-on expression. Without a following secretless-only
+branch, the expression could continue to caller-provided runner.
 
-The selected repair is selector-level instead of a new variable from
-`runner-admission-reconcile`: `build-test` gates the parsed lane on successful
-eligibility and returns literal `ubuntu-24.04` for every other secretless
-result. The existing eligibility job still validates the raw lane before
-dependency acquisition. `build-test` remains `always()` and retains its
-dependency-failure guard before checkout, so eligibility or acquisition failure
-is reported as a failed required check. The complete non-secretless tail
-remains byte-for-byte unchanged. ADR 0234 receives the same dated correction to
-its hosted-capacity invariant.
+The profile-aware secretless-first shape uses the untrusted lane only when
+either secretless input is true and needs.eligibility.result equals success.
+A second secretless-only branch returns literal ubuntu-24.04 before its
+profile-aware tail. The secretless-first-legacy-tail shape applies the same two
+branches before node-ci's exact existing non-secretless tail; the remaining
+profile-aware node-ci rollout is tracked by the original decision. Both shapes
+keep the secretless selector ahead of caller-provided runner.
+
+A new organization variable would still be mutable, string-valued caller
+configuration whose parsed value can be falsy or malformed. It would add a
+validation surface without removing the need for a fail-closed selector.
+Keeping the fallback at the runs-on boundary handles those values while the
+existing eligibility job remains responsible for validating the raw lane.
+The repair therefore adds no new variable.
+
+The selector-level repair does not move validation out of
+runner-admission-reconcile: successful eligibility still requires the
+configured lane to be a single standard hosted image. The existing eligibility
+job validates the raw lane before dependency acquisition. build-test remains
+always() and retains its dependency-failure guard before checkout, so
+eligibility or acquisition failure is reported as a failed required check. The
+complete non-secretless tail remains byte-for-byte unchanged. ADR 0234 receives
+the same dated correction to its hosted-capacity invariant.
