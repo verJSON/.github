@@ -1,3 +1,125 @@
+# v4.3.0
+
+## Record the #1893 admin merge in the ADR 0210 bypass ledger
+
+Adds the bypass-window ledger entry for the #1893 admin merge (ADR 0210).
+
+_Date: 2026-10-23; id:b7c41e92a05d_
+
+## node-ci accepts secretless-skip-install-scripts for packages whose install scripts are never run
+
+`node-ci.yml` and the generated `node-ci-protected.yml` accept `secretless-skip-install-scripts`, a newline-separated list of exact package names whose install scripts are deliberately not run in the offline secretless rebuild, such as an optional `canvas`. Every script-bearing installed package must be on exactly one of this list or `secretless-rebuild-packages`; overlap, stale, and absent entries fail closed, and the job log prints the skipped set.
+
+_Date: 2026-10-22; issue #1888_
+
+## Container candidate publication evicts its one-time dependency transfer cache
+
+The immutable container candidate publisher now deletes the roughly 900 MB private-dependency transfer cache after its build jobs succeed, so it stops filling an adopter's 10 GB Actions cache quota and evicting dependency and browser caches. Publication callers must grant `actions: write`; regenerate with `scripts/gen-container-candidate.sh`.
+
+_Date: 2026-10-22; issue #1869_
+
+## Retire the CLI Projects legacy consumer caller digest
+
+`config/cli-projects-required-node-ci.json` now sets `rollout_legacy_consumer_workflow_sha256` to `null`: verjson-cli-projects#159 landed the generated v4.2.0 caller on its default branch, so the rotation verifier accepts only the byte-exact generated caller. This is the second rotation described in ADR 0212; org ruleset 21830367 stays pointed at its prior revision (`audit` reports `rotation pending`) until it is rotated to this change's merge commit. Part of #1423.
+
+_Date: 2026-10-22; issue #1423_
+
+## Update ADR 0202 now that the verjson-docs identity ADRs have merged
+
+ADR 0202 still said verjson-docs ADRs 0006–0008 exist only in an open pull request; verjson-docs#18 merged on 2026-10-22 and the ADRs are on its main branch, so the link now points at them. Found by the verjson-cli#347 architecture review; no policy changes.
+
+_Date: 2026-10-22; id:c3e81f0a9d47_
+
+## Point ADR 0210's rollback reference at a tracked file
+
+ADR 0210 linked to the `rollback/` directory, which `scripts/adr-relative-links.test.py` rejects because the checker resolves tracked files only; the link now names one tracked rollback file. This restores the invariant the checker already enforced and unblocks pull requests whose heavy tier runs it; no ADR decision changes.
+
+_Date: 2026-10-22; id:a7c41e9d3b52_
+
+## Add a portable installation profile and one runner-lane catalog
+
+`CI_PROFILE_OWNER` (default `Verjson`) names the owner whose lane variables apply, replacing the hard-coded owner literal in `helm-ci.yml`'s `runs-on`. The expression is stamped from `scripts/runner_lane_catalog.py` by `scripts/gen-runner-lane.py` and held to the frozen legacy spelling for the built-in profile; any other profile never reaches `CI_LANE_FALLBACK` for untrusted events. ADR 0240. Part of #1869.
+
+_Date: 2026-10-22; id:9f3c2b7a41d8_
+
+## Record the #1886 admin merge in the ADR 0210 ledger
+
+ADR 0210's bypass ledger now records the admin merge of #1886 with its gate evidence and the review that was not re-run. Documentation only. Part of #1869.
+
+_Date: 2026-10-22; id:8a3f60c1d92e_
+
+## Opt-in typed test levels generate a staged Node CI caller
+
+`scripts/gen-node-ci-caller.py` renders a caller from an optional `ci-levels.json`: one `node-ci.yml` call per ordered level, `needs` edges that are `success` or `completed`, event and branch filters, and a fixed `test-levels` aggregate that fails on any failed, cancelled, or unexpectedly skipped level. Without the file the output is the single `ci` job, so `ci / build-test` is unchanged; `node-ci.yml`, the protected twin, and all digests are untouched.
+
+_Date: 2026-10-22; id:5e2b8c4a7d13_
+
+## Record the #1890 admin merge in the ADR 0210 bypass ledger
+
+ADR 0210's bypass ledger now records the admin merge of #1890 (`secretless-skip-install-scripts`), including the gate evidence and which review pass followed the last code change.
+
+_Date: 2026-10-22; id:5e1b7c90a3f4_
+
+## Scope ui-ci package and Git tokens to the install steps outside trusted refs
+
+`ui-ci` no longer exports its package and Git tokens job-wide on pull requests and non-default-branch events: the tokens are step-scoped to the install steps, the checkout no longer persists its token, and the new `credentialless-untrusted` input withholds every token (always so for forks and for `merge_group`). Push and `workflow_dispatch` on the default branch keep the previous job-wide behavior. This tightens prior behavior for lint, typecheck, test, and build commands that read the token; install commands and lifecycle scripts still see it. Recorded in ADR 0239; part of #1869. Callers whose build, test, or lint step fetches private packages must move that work into `install-command`; callers using a merge queue with private dependencies lose their token on queue runs and should adopt node-ci `secretless-pr`.
+
+_Date: 2026-10-22; id:5e0b7c2a91d4_
+
+## Record why concurrency stays caller-side and pin it
+
+A probe established that a reusable workflow cannot declare a per-call concurrency group: an empty group is a startup failure and nothing distinguishes two calls in one run, so sibling lanes would cancel each other. `docs/node-workflows.md` now carries the caller snippet that cancels only superseded `pull_request` runs, ADR 0238 is amended, and `reusable-ci-no-concurrency.test.py` pins that the reusable CI workflows declare none. No workflow behavior changes. Part of #1869.
+
+_Date: 2026-10-22; id:4d8e1b7c6a30_
+
+## Record the #1884 admin merge in the ADR 0210 bypass ledger
+
+ADR 0210's 2026-10-22 bypass ledger now lists Verjson/.github#1884. Part of #1869.
+
+_Date: 2026-10-22; id:4d1e8a07c6b3_
+
+## Record the ADR 0212 second rotation receipt for ruleset 21830367
+
+Ruleset 21830367 now runs `f967b0b7`, the commit that nulled the CLI Projects legacy caller digest. ADR 0212 records the dry-run, rollback sha, acknowledged apply, a two-line read-back diff, audit, and a fresh exact-head verify-run. Documentation only. Part of #1423.
+
+_Date: 2026-10-22; id:20261022T233000Z_
+
+## Record the 2026-10-22 bypass window ledger and restore checklist in ADR 0210
+
+ADR 0210 now carries the owner's 2026-10-22 standing bypass authorization, a ledger of every bypass (four suspended reviewer rulesets, the verjson-cli-projects#159 Gate C exception, docs PRs merged on `assert-mergeable-head` exit 3), a measurable exit condition, and a restore checklist. The four pre-change ruleset images are committed under the ADR's `rollback/` directory. Documentation only: no gate code or ruleset changes.
+
+_Date: 2026-10-22; id:20261022T231500Z_
+
+## Stop running credentialed Pulumi preview on unreviewed same-repository pull requests
+
+`pulumi-ci` now runs the credentialed preview only on a trusted ref (push or `workflow_dispatch` on the default branch) or, for a same-repository pull request, inside the caller's reviewed `preview-environment`; otherwise it runs the credential-free `validate` gate only. This changes prior behavior: `workflow_dispatch` on the default branch now gets a credentialed preview (a widening), and same-repository PRs and non-default-branch pushes no longer get a credentialed preview by default. Validation and preview check out the event's immutable SHA, and the reviewed-PR route needs the new optional `environment-read-token` secret so admission can verify the environment has required reviewers. Recorded in ADR 0239 with migration steps; part of #1869.
+
+_Date: 2026-10-22; id:20261022T230000Z_
+
+## Record the agent and human attribution policy in ADR 0202
+
+ADR 0202 now records that agent work carries a composite human, model, and agent identity, while review approval and admin-merge require a direct human session. The delegating human may approve as a named `delegation-owner-review` exception, bound to PR, head, base, and diff digest. Documentation only: no gate code or ruleset changes, and the four suspended reviewer rulesets stay suspended until direct-human approval events are verifiable.
+
+_Date: 2026-10-22; id:20261022T223000Z_
+
+## Add a fail-closed diff classifier that selects a lighter node-ci script plan
+
+`node-ci` accepts `secretless-ci-non-app-script-plan` and `secretless-ci-non-app-paths`. A secretless pull request whose every changed path is non-application runs the lighter plan inside the same job, so `<lane> / build-test` still reports; any unclassified path, API error, or malformed input keeps the full plan. Recorded in ADR 0238; part of #1869, which owns the issue-keyed fragment for the larger-runner change.
+
+_Date: 2026-10-22; id:20261022T210000Z_
+
+## Admit vetted larger hosted runner sizes in the node-ci secretless lane guard
+
+The secretless hosted-lane guard now accepts `ubuntu-<latest|YY.MM>-<4|8|16|32|64>-cores` in `CI_LANE_UNTRUSTED`, for callers outside Verjson, so an adopter can trade per-minute rate for wall time. Arm, gpu, and other suffixes stay refused. Recorded in ADR 0238, which also records what node-ci leaves caller-side. Part of #1869.
+
+_Date: 2026-10-22; id:20261022T200000Z_
+
+## Let the required-reviewer audit expect a declared, dated ruleset suspension
+
+The daily required-reviewer audit accepts a per-ruleset `suspended` declaration (`reason`, `since`, `reenable_when`) that makes it expect `disabled` for that ruleset, still verifies every other property, and prints a `SUSPENDED:` line on every run. Declared for all four sensitive-path-admin-review rulesets, which the owner disabled on 2026-10-22 until agent and human identity attribution exists; any undeclared ruleset is still required active. ADR 0210, 2026-10-22 amendment.
+
+_Date: 2026-10-22; id:20261022T170000Z_
+
 # v4.2.1
 
 ## Collapse identical Renovate transition rows instead of refusing the pull request
