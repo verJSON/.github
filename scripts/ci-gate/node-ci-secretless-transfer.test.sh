@@ -117,6 +117,13 @@ assert restore["with"]["key"] == "${{ needs.acquire-secretless-dependencies.outp
 assert restore["with"]["path"] == stable_transfer_path
 assert restore["with"]["fail-on-cache-miss"] is True
 assert "restore-keys" not in restore["with"]
+# #1830: a failed restore stays fail-closed and gains an actionable diagnostic.
+diagnostic = next(step for step in build["steps"] if step.get("name") == "Explain a failed secretless transfer restore")
+assert build["steps"].index(diagnostic) == build["steps"].index(restore) + 1
+assert diagnostic["if"] == "failure() && needs.eligibility.outputs.should-run != 'false' && steps.restore-secretless-transfer.outcome == 'failure'"
+assert "continue-on-error" not in restore and "continue-on-error" not in diagnostic
+assert "env" not in diagnostic and "${{" not in diagnostic["run"]
+assert "Re-run all jobs" in diagnostic["run"] and "#1251" in diagnostic["run"] and "6c4c694f" in diagnostic["run"]
 assert build["steps"].index(restore) < build["steps"].index(transfer_download)
 assert build["steps"].index(transfer_download) < build["steps"].index(transfer_decrypt)
 assert build["steps"].index(transfer_decrypt) < build["steps"].index(install)
@@ -1135,5 +1142,29 @@ elif [ -e "$tmp/traversal/npm.log" ] || [ -e "$tmp/traversal/escape" ] \
 else
   pass "a traversal member in a private payload fails before extraction and npm"
 fi
+
+# #1830: both generated workflows carry the same fail-closed restore and diagnostic, and
+# the diagnostic only explains: it prints one error, touches nothing, and never rescues the job.
+python3 - "$root/.github/workflows/node-ci.yml" "$root/.github/workflows/node-ci-protected.yml" "$tmp" <<'PY' \
+  && pass "a failed secretless transfer restore stays fail-closed and explains itself in both workflows" \
+  || fail "the secretless transfer restore diagnostic is missing, unguarded, or differs in the protected twin"
+import subprocess
+import sys
+import yaml
+
+for path in sys.argv[1:3]:
+    build = yaml.safe_load(open(path, encoding="utf-8"))["jobs"]["build-test"]
+    steps = build["steps"]
+    restore = next(step for step in steps if step.get("id") == "restore-secretless-transfer")
+    diagnostic = steps[steps.index(restore) + 1]
+    assert restore["with"]["fail-on-cache-miss"] is True, path
+    assert diagnostic["name"] == "Explain a failed secretless transfer restore", path
+    assert diagnostic["if"] == "failure() && needs.eligibility.outputs.should-run != 'false' && steps.restore-secretless-transfer.outcome == 'failure'", path
+    cleanup = next(step for step in steps if step.get("name") == "Remove local secretless transfer state")
+    assert cleanup["if"].startswith("always()") and steps.index(cleanup) > steps.index(diagnostic), path
+    done = subprocess.run(["bash", "-c", diagnostic["run"]], capture_output=True, text=True, cwd=sys.argv[3])
+    assert done.returncode == 0 and done.stdout.count("::error::") == 1, path
+    assert "secretless-npm-transfer" not in done.stdout and "key" not in done.stdout.lower().replace("keyed", ""), path
+PY
 
 exit "$failures"

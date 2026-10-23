@@ -1714,6 +1714,10 @@ jobs:
           path: .verjson-secretless-transfer-${{ github.run_id }}
           key: ${{ needs.acquire-secretless-dependencies.outputs.transfer-cache-key }}
           fail-on-cache-miss: true
+      - name: Explain a failed secretless transfer restore
+        if: failure() && needs.eligibility.outputs.should-run != 'false' && steps.restore-secretless-transfer.outcome == 'failure'
+        run: |
+          echo "::error::The run-bound secretless dependency transfer could not be restored. Possible causes: the cache entry was evicted or expired, or this run uses a canonical pin from before Verjson/.github#1251 (commit 6c4c694f, 2026-09-04), which keyed the entry's path on run_attempt so a failed-job rerun never matches it. Re-run all jobs of this workflow run so acquisition writes a fresh entry; a pin bump takes effect only on a new run. The build job is credentialless and cannot re-acquire private packages itself."
       - id: restore-secretless-public-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && inputs.cache && inputs.package-manager == 'npm' && hashFiles(inputs.cache-dependency-path) != ''

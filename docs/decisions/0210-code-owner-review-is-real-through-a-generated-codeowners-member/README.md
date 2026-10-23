@@ -438,7 +438,17 @@ beyond the dated authorization; it extends the suspension recorded above.
     `scripts/ci-gate/public-pr-runner-isolation.pending.tsv`, whose digest binds
     `scripts/gen-adr-index.sh`. The merge of the PR that adds this entry is recorded by
     the next ledger update.
-14. **Authorization:** the verbatim text and date above.
+14. **Admin merge past the review requirement.** Verjson/.github#1900 (matrix fail-fast on
+    pull requests and cheap gates first, `Part of #1817`; the cancel job is recorded as not
+    adopted in ADR 0238) was admin-merged as `e4cce4d6` at head `9e1568e0` after
+    `assert-mergeable-head.sh` exit 0 and every current check `SUCCESS`/`SKIPPED`, except the
+    advisory `AI review authorization` check, which concluded `neutral` (no verdict);
+    superseded cancelled runs were set aside by the gate. No gate was weakened. `gpt-6-astra` and
+    `gpt-6.1-sol` ran a design round and a review round, plus a `code-reviewer` pass, before
+    the first push; their estimator findings were fixed afterwards and that fix was not
+    re-reviewed. The merge of the PR that adds this entry is recorded by the next ledger
+    update.
+15. **Authorization:** the verbatim text and date above.
 
 ### Exit condition ("CI optimized and working"), measurable
 
