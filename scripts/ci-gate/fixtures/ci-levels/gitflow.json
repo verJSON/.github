@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "secrets": ["NODE_AUTH_TOKEN"],
+  "pushBranches": ["main", "develop"],
+  "levels": [
+    {"id": "lint", "events": ["pull_request"], "inputs": {"secretless-pr": true}},
+    {"id": "unit", "inputs": {"node-version": "22"}},
+    {"id": "integration", "needs": [{"level": "unit"}], "events": ["pull_request", "push"]},
+    {"id": "diagnostics", "needs": [{"level": "unit", "condition": "completed"}], "events": ["pull_request"]},
+    {"id": "release-gate", "needs": [{"level": "integration"}], "events": ["push"], "branches": ["main"]}
+  ]
+}

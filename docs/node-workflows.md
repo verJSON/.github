@@ -469,6 +469,53 @@ stable branch/ref group with `cancel-in-progress: false`, or omit concurrency
 when overlapping release triggers are already impossible. Choose at the caller,
 where the event and publication semantics are known.
 
+## Ordered test levels
+
+A caller that wants staged testing (lint, then unit, then integration, then a
+release gate) declares the stages in `ci-levels.json` and generates its workflow
+instead of hand-writing one job per stage:
+
+```bash
+python3 scripts/gen-node-ci-caller.py <40-hex-contract-sha> --levels ci-levels.json > .github/workflows/ci.yml
+```
+
+Without `--levels` the output is the single `ci` job, so the required context stays
+`ci / build-test`. The generator is opt-in; `node-ci.yml` is unchanged.
+
+```json
+{
+  "version": 1,
+  "secrets": ["NODE_AUTH_TOKEN"],
+  "pushBranches": ["main", "develop"],
+  "levels": [
+    {"id": "unit", "inputs": {"node-version": "22"}},
+    {"id": "integration", "needs": [{"level": "unit"}], "events": ["pull_request", "push"]},
+    {"id": "diagnostics", "needs": [{"level": "unit", "condition": "completed"}], "events": ["pull_request"]}
+  ]
+}
+```
+
+- **Order.** A level may only `needs` a level declared before it, so cycles cannot be
+  written. Unrelated levels run in parallel.
+- **Edges.** `success` (the default) runs the level only when the prerequisite
+  succeeded. `completed` also runs it after the prerequisite failed, for diagnostics,
+  but never after a cancel or skip; a `completed` edge to a level whose own prerequisite
+  failed is skipped, and the aggregate fails anyway. A level cannot need one that skips where it runs.
+- **Filters.** `events` and `branches` (the pull request's base branch, else the ref name: a
+  pushed or dispatched branch or tag) select where a level runs (`pull_request`, `push`, `workflow_dispatch`; `merge_group` is not supported yet). Branch comparison inherits GitHub expression semantics and ignores case, so avoid branches that differ only by case. A push-only level whose branches miss `pushBranches` is rejected as unreachable. `inputs` are `node-ci.yml` inputs, checked against
+  its declared names and types (required inputs are not enforced). `secretless-pr` needs
+  `events: ["pull_request"]` and `secretless-trusted-ref` needs push or dispatch events,
+  because `node-ci.yml` fails the other pairings.
+- **`failFast`.** `true` (the default) is the existing in-level behavior. `false` is
+  rejected until in-lane support lands; today `true` documents intent and renders nothing.
+- **No `cancel`.** Unknown fields are errors. Cancelling superseded pull-request runs is
+  the caller's workflow-level `concurrency` block above, which the generator emits.
+- **Aggregate.** The fixed `test-levels` job always runs with no permissions and fails
+  unless every level expected for the event and branch succeeded and every other level was
+  skipped; failed, cancelled, and unexpectedly skipped levels all fail it. Require
+  `test-levels` in rulesets, not the per-level contexts. No job uses `continue-on-error`.
+- **Errors.** Invalid files exit 1 with one `code path: message` line per error.
+
 ## Publishing a contract-selected release
 
 `node-release.yml` is publish-only. It requires an existing SemVer tag in the

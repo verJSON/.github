@@ -124,3 +124,43 @@ into the protected twin; continue-after-failure semantics for a non-fail-fast le
 design of their own and a decision on what `cancel` means for a level once concurrency is
 caller-side. Until then the existing `secretless-ci-script-plan` is an ordered, fail-fast
 list.
+
+## Amendment 2026-10-22 — typed test levels, generated not interpreted
+
+The ARB (four models) converged on ARB change 3's open question. A reusable workflow has
+a static job graph, so a dynamic DAG needs generation. **Decision:** a caller declares
+ordered levels in `ci-levels.json` and `scripts/gen-node-ci-caller.py` emits one
+`node-ci.yml` call per level; `scripts/ci_levels.py` is the single validator and renderer.
+`node-ci.yml`, the protected twin, and every digest are untouched, and with no levels file
+the generator emits the single `ci` job, so `ci / build-test` is unchanged.
+
+- **`failFast` is level-local**, with matrix semantics: it governs siblings inside a
+  level and never aborts an independent level. Slice 1 implements only `true`; `false`
+  needs the in-lane work of a later slice and is rejected with `fail_fast_unsupported`
+  rather than accepted as a silent no-op.
+- **Continue-after-failure belongs to the edge.** `needs` entries carry `condition`
+  `success` (default) or `completed`. A `completed` edge renders
+  `!cancelled() && (needs.x.result == 'success' || needs.x.result == 'failure')`, because
+  a bare `!cancelled()` would not enforce prerequisite success. Every level with `needs`
+  renders explicit direct-result predicates, so a success edge is not skipped because a
+  grandparent failed behind a `completed` edge.
+- **`cancel` is dropped.** Unknown fields are typed errors. In-run cancellation through
+  the Actions API needs `actions: write` and a privileged controller, which the
+  credentialless untrusted lane (above) forbids; job conditions cannot stop running
+  siblings. Superseded-run cancellation stays the caller workflow-level `concurrency`
+  block from the amendment above.
+- **No silent green.** The generated `test-levels` aggregate (fixed name, `always()`,
+  `permissions: {}`) fails unless each expected level succeeded and each other level was
+  skipped, so failure, cancellation, and unexpected skips all fail it. `continue-on-error`
+  is never used, because GitHub treats skipped required checks as passing.
+- **Validation is one pure function** producing an immutable plan or `{code, path,
+  message}` errors: duplicate keys and ids, unknown fields, malformed booleans, empty
+  work, unknown or non-preceding `needs` (cycles are unrepresentable), needs that skip
+  where the dependent runs, unknown `node-ci.yml` inputs, and bounded plan size.
+
+Not decided here: unifying the three embedded script-plan parsers, in-lane
+`failFast: false`, and the build-once artifact set, which still needs the owner's
+sandbox-egress decision above. Required-check enrollment of `test-levels` must be
+validated live against a ruleset before any adopter relies on it; this slice proves the
+rendered text and its truth tables, not a live Actions run.
+
