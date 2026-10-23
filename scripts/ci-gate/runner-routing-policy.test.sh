@@ -206,6 +206,10 @@ literal_hosted="$(
 #    queued run to the rollup assertion that reads it. It consumes none of the
 #    compute or credential reach this policy protects, so fixed hosted placement
 #    is the reviewed route. Job identity is bound by the exact inventory above.
+# * node-ci `build-test`'s secretless fallback (ADR 0234 amendment) — the
+#   literal hosted term is used only on non-success eligibility or a falsy
+#   parsed lane. The configured lane remains authoritative on success; an
+#   exact-site check below binds the exception to both node-ci twins.
 # Exact raw hosted selectors are governed by the file/job inventory above;
 # this expression sweep handles portable fallbacks and other embedded routes.
 # The generated release callers' selector (gen-changelog-caller.sh
@@ -213,6 +217,39 @@ literal_hosted="$(
 # reachable only outside verJSON; it is governed by
 # generated-changelog-selector-policy.test.py and appears here since this
 # repository adopted its own generated release-snapshot caller (#1374).
+# node-ci build-test's literal secretless fallback is an exact-site exception.
+# Bind it to jobs.build-test in both twins and reject every other job/workflow.
+if python3 - "$workflows" <<'PY'
+from pathlib import Path
+import sys
+
+import yaml
+
+workflow_dir = Path(sys.argv[1])
+secretless_fallback = "(inputs.secretless-pr || inputs.secretless-trusted-ref) && 'ubuntu-24.04'"
+actual = []
+for path in sorted((*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml"))):
+    document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    jobs = document.get("jobs", {}) if isinstance(document, dict) else {}
+    if not isinstance(jobs, dict):
+        continue
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        runs_on = job.get("runs-on", "")
+        if isinstance(runs_on, str) and secretless_fallback in runs_on:
+            actual.extend((path.name, job_name) for _ in range(runs_on.count(secretless_fallback)))
+expected = [("node-ci-protected.yml", "build-test"), ("node-ci.yml", "build-test")]
+if sorted(actual) != expected:
+    print(f"secretless literal fallback sites: {sorted(actual)!r}")
+    raise SystemExit(1)
+PY
+then
+  pass "the literal secretless hosted fallback is confined to both node-ci build-test jobs"
+else
+  fail "the literal secretless hosted fallback is not confined to both node-ci build-test jobs"
+fi
+
 unsafe_portable="$(
   grep -HnE "^    runs-on:.*ubuntu-(24\\.04|latest)" "${workflow_files[@]}" \
     | grep -v "github.repository_owner != 'Verjson' && 'ubuntu-24.04'" \
@@ -399,7 +436,8 @@ extract_runs_on() {
 
 evaluator="$(mktemp)"
 mutated_workflow="$(mktemp)"
-trap 'rm -f "$evaluator" "$mutated_workflow"' EXIT
+mutated_workflow_second="$(mktemp)"
+trap 'rm -f "$evaluator" "$mutated_workflow" "$mutated_workflow_second"' EXIT
 cat >"$evaluator" <<'JS'
 // Evaluate the GitHub Actions expression subset used by `runs-on:`. The
 // operators (&&, ||, ==, !=), single-quoted strings and value-returning
@@ -469,6 +507,9 @@ const inputs = {
 // on that rather than on `github.event.repository`, because on the dispatch path
 // the event repository is the dispatcher, not the target.
   const needs = {
+    // Secretless build-test evaluates this dependency before its configured
+    // untrusted lane; other expressions do not read this fixture.
+    eligibility: { result: process.env.ELIGIBILITY_RESULT ?? 'success' },
     // TARGET_PRIVATE separates preflight's API lookup from the event payload.
     preflight: { outputs: { target_private: process.env.TARGET_PRIVATE ?? priv } },
     resolve_privileged_route: { outputs: { selector: '' } },
@@ -1169,12 +1210,22 @@ for wf_name in node-ci.yml node-ci-protected.yml; do
   assert_secretless_route trusted-ref "$wf" build-test Verjson/verjson-cli \
     '' true '["self-hosted","general"]' '["ubuntu-24.04"]' \
     '["ubuntu-24.04"]' "$name build-test — secretless trusted-ref without a runner input skips the self-hosted trusted lane"
+  ELIGIBILITY_RESULT=success assert_secretless_route trusted-ref "$wf" build-test Verjson/verjson-cli \
+    '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-22.04"]' \
+    '["ubuntu-22.04"]' "$name build-test — trusted-ref uses the eligible configured untrusted lane"
   assert_secretless_route trusted-ref "$wf" build-test Verjson/verjson-cli \
     '["self-hosted","general"]' true '["self-hosted","general"]' '' \
     "$UNSET_LANDING" "$name build-test — secretless trusted-ref with no untrusted lane lands on the portable hosted default"
   assert_secretless_route pr "$wf" build-test Verjson/verjson-cli \
     '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' \
     '["ubuntu-24.04"]' "$name build-test — secretless PR keeps the hosted untrusted lane"
+  for secretless_mode in pr trusted-ref; do
+    for eligibility_result in failure skipped; do
+      ELIGIBILITY_RESULT="$eligibility_result" assert_secretless_route "$secretless_mode" "$wf" build-test Verjson/verjson-cli \
+        '["self-hosted","general"]' true '["self-hosted","general"]' '["self-hosted","general"]' \
+        'ubuntu-24.04' "$name build-test — secretless $secretless_mode with $eligibility_result eligibility uses literal hosted fallback"
+    done
+  done
   assert_secretless_route trusted-ref "$wf" build-test Acme/widgets \
     '["self-hosted","acme"]' true '' '' \
     "$UNSET_LANDING" "$name build-test — an external secretless trusted-ref caller also gets hosted capacity"
@@ -1189,17 +1240,31 @@ for wf_name in node-ci.yml node-ci-protected.yml; do
     '["self-hosted","general"]' "$name eligibility — secretless PR keeps the caller's self-hosted runner"
 done
 
-# Mutation probe: the cases above must notice the trusted-ref term going missing.
-mutate_job_expression "$workflows/node-ci.yml" build-test \
-  '(inputs.secretless-pr || inputs.secretless-trusted-ref) &&' 'inputs.secretless-pr &&' \
-  "$mutated_workflow"
-if [ "$(SECRETLESS_MODE=trusted-ref resolve_route "$mutated_workflow" build-test Verjson/verjson-cli \
-    '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' '' '' '')" \
-    = '["self-hosted","general"]' ]; then
-  pass "routing cases detect a build-test that routes only secretless-pr to the hosted lane"
-else
-  fail "dropping the trusted-ref term from build-test was not observable by the routing evaluator"
-fi
+# Mutation probes ensure both secretless selector terms independently keep trusted-ref.
+for wf in node-ci.yml node-ci-protected.yml; do
+  mutate_job_expression "$workflows/$wf" build-test \
+    "(inputs.secretless-pr || inputs.secretless-trusted-ref) && needs.eligibility.result == 'success' &&" \
+    "inputs.secretless-pr && needs.eligibility.result == 'success' &&" \
+    "$mutated_workflow"
+  route="$(SECRETLESS_MODE=trusted-ref ELIGIBILITY_RESULT=success resolve_route "$mutated_workflow" build-test Verjson/verjson-cli \
+      '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-22.04"]' '' '' '')"
+  if [ "$route" = 'ubuntu-24.04' ]; then
+    pass "$wf routing checks detect removing trusted-ref from the eligible secretless term"
+  else
+    fail "$wf routing checks expected the literal hosted fallback after mutation (route=$route)"
+  fi
+
+  mutate_job_expression "$workflows/$wf" build-test \
+    "(inputs.secretless-pr || inputs.secretless-trusted-ref) && 'ubuntu-24.04'" \
+    "inputs.secretless-pr && 'ubuntu-24.04'" \
+    "$mutated_workflow_second"
+  if [ "$(SECRETLESS_MODE=trusted-ref ELIGIBILITY_RESULT=failure resolve_route "$mutated_workflow_second" build-test Verjson/verjson-cli \
+      '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' '' '' '')" = '["self-hosted","general"]' ]; then
+    pass "$wf routing checks detect removing trusted-ref from the hosted fallback term"
+  else
+    fail "$wf routing checks did not detect removing trusted-ref from the hosted fallback term"
+  fi
+done
 
 for job in publish-base publish-derived candidate-manifest; do
   assert_route "$workflows/container-candidate-publish.yml" "$job" Verjson/.github '' false \

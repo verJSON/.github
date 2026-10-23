@@ -158,21 +158,23 @@ do not replace `pull_request` with `pull_request_target` to obtain them. Existin
 the original single-job install path because the mode defaults off.
 
 Trusted post-merge or direct-ref validation uses a separate caller job with
-`secretless-trusted-ref: true`. The credentialed acquisition job still runs on
+`secretless-trusted-ref`: true. The credentialed acquisition job still runs on
 the isolated lane and still executes no repository lifecycle or consumer script.
-The credentialless build job runs on the same isolated untrusted lane as the PR
-build, ahead of any caller runner input, because its lifecycle rebuild and
-candidate sandbox require a GitHub-hosted Linux runner; it runs after checkout
-credentials and package, Git, cloud, and OIDC paths are scrubbed. Only that job
-moves: `eligibility` keeps the caller's route and, in either secretless mode,
-fails before acquisition unless `CI_LANE_UNTRUSTED` selects a single standard
-GitHub-hosted Linux image
-([ADR 0234](decisions/0234-route-secretless-trusted-ref-builds-to-the-hosted-lane/README.md)). Admission accepts only `push` and an explicit
-`workflow_dispatch`; `pull_request`, `pull_request_target`, schedules, and every
-other event fail before token use. The two booleans are mutually exclusive.
-A trusted push bypasses a stale `renovate/stability-days` status. Existing
-eligibility behavior stays intact for other events, while explicit dispatch
-retains its established manual override.
+When eligibility succeeds, the credentialless build job uses the configured
+`CI_LANE_UNTRUSTED` lane ahead of any caller runner input, because its lifecycle
+rebuild and candidate sandbox require a GitHub-hosted Linux runner. A non-success
+eligibility result or falsy parsed lane uses literal `ubuntu-24.04`; the
+pre-checkout guard fails the required job if eligibility or acquisition does not
+complete. The build runs after checkout credentials and package, Git, cloud, and
+OIDC paths are scrubbed. Only that job moves: eligibility keeps the caller's
+route and, in either secretless mode, fails before acquisition unless
+`CI_LANE_UNTRUSTED` selects a single standard GitHub-hosted Linux image
+([ADR 0234](decisions/0234-route-secretless-trusted-ref-builds-to-the-hosted-lane/README.md)). Admission accepts only `push` and an explicit `workflow_dispatch`;
+`pull_request`, `pull_request_target`, schedules, and every other event fail before
+token use. The two booleans are mutually exclusive. A trusted push bypasses a
+stale `renovate/stability-days` status. Existing eligibility behavior stays
+intact for other events, while explicit dispatch retains its established
+manual override.
 
 Keep event admission and permissions visible in the caller. Do not use
 `secrets: inherit`; map only `NODE_AUTH_TOKEN` into each reusable invocation:

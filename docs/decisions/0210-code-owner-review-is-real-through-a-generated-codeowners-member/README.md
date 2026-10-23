@@ -448,7 +448,18 @@ beyond the dated authorization; it extends the suspension recorded above.
     the first push; their estimator findings were fixed afterwards and that fix was not
     re-reviewed. The merge of the PR that adds this entry is recorded by the next ledger
     update.
-15. **Admin merge past the review requirement.** Verjson/.github#1902 (the secretless
+15. **Docs-only ledger PR.** Verjson/.github#1901 ("docs(adr): record the
+    #1896 through #1899 admin merges in the ADR 0210 ledger") merged
+    2026-10-23 with head `530319e0cf8df851ae6e8e45f564434da2b00dd7` and
+    merge commit `6469b7a16419a4f0e48b73c983d4c9362cf0943a`. GitHub reports
+    it was merged by `pyousefi`; its only changed paths were its NEXT fragment
+    and this ADR. The PR body says it had no model review; its check rollup
+    had SUCCESS and SKIPPED conclusions except the advisory AI review
+    authorization check, which was NEUTRAL. GitHub's PR metadata does not show
+    whether `--admin` was used or retain the local assertion output, so this
+    entry records neither as verified.
+    The merge of the PR adding this entry is recorded by the next ledger update.
+16. **Admin merge past the review requirement.** Verjson/.github#1902 (the secretless
     transfer-restore diagnostic and troubleshooting docs, `Part of #1830`) was admin-merged
     as `dd614b2e` at head `3d4b8422` after `assert-mergeable-head.sh` exit 0 and every
     current check `SUCCESS`/`SKIPPED`; superseded cancelled runs were set aside by the gate.
@@ -456,7 +467,17 @@ beyond the dated authorization; it extends the suspension recorded above.
     `gpt-6.1-sol` ran a design round and a review round, plus a `code-reviewer` pass, before
     the first push; their findings were fixed afterwards and those fixes were not re-reviewed.
     The merge of the PR that adds this entry is recorded by the next ledger update.
-16. **Authorization:** the verbatim text and date above.
+17. **Docs-only ledger PR.** Verjson/.github#1904 ("docs(adr): record the
+    #1902 admin merge in the ADR 0210 ledger") merged 2026-10-23 with head
+    `5c8f419dab6f5f32cd628ab155fa5f4a6c9138d4` and merge commit
+    `6ef749effddaa83f45de4b2cba7869955c10c30b`. GitHub reports it was merged
+    by `pyousefi`; its only changed paths were its NEXT fragment and this ADR.
+    Its review list was empty; its check rollup had SUCCESS and SKIPPED
+    conclusions except the advisory AI review authorization check, which was
+    NEUTRAL. GitHub's PR metadata does not show whether `--admin` was used or
+    retain the local assertion output, so this entry records neither as verified.
+    The merge of the PR adding this entry is recorded by the next ledger update.
+18. **Authorization:** the verbatim text and date above.
 
 ### Exit condition ("CI optimized and working"), measurable
 

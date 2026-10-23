@@ -93,3 +93,27 @@ Two different things were fused:
   not. Live cross-organization execution, and the documented rule that self-hosted
   reusable workflows are reachable by matching owner only, still need a canary outside
   the organization (ADR 0210 exit condition).
+
+## 2026-10-23 amendment — fail-closed secretless runner selection
+
+Issue #1869 resolves the inherited falsy-lane fall-through recorded above.
+For a secretless invocation, the selector first uses `CI_LANE_UNTRUSTED`
+only when eligibility succeeds, then selects literal `ubuntu-24.04` before any
+caller-supplied runner tail. This handles missing, failed, skipped, or falsy
+parsed values at `runs-on`; eligibility continues to validate the raw lane
+before dependency acquisition.
+
+The profile-aware `secretless-first` catalog shape remains prospective. The
+`secretless-first-legacy-tail` migration shape adds the same gate and fallback
+to node-ci while preserving its exact existing non-secretless selector tail.
+The resolver evaluator now models case-insensitive Actions string comparisons
+and JSON parsing/truthiness. Exact-site checks and independent mutations bind
+the fallback to the node-ci build-test job and its generated twin.
+
+Existing pending isolation entries were rebound for node-ci, its protected
+twin, actionlint, and release verification closure; no row was added or widened.
+A new organization variable was unnecessary because it would still be mutable
+caller input and retain the same need for selector-level fallback. Eligibility
+or acquisition failures continue to fail required build-test before checkout.
+ADR 0234 receives the corresponding dated correction to the hosted-capacity
+invariant.

@@ -396,7 +396,7 @@ jobs:
     - eligibility
     - acquire-secretless-dependencies
     if: always()
-    runs-on: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && needs.eligibility.result == 'success' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'ubuntu-24.04' || inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -407,8 +407,9 @@ jobs:
     - name: Require completed secretless dependency acquisition
       if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && needs.acquire-secretless-dependencies.result != 'success'
       env:
+        ELIGIBILITY_RESULT: ${{ needs.eligibility.result }}
         ACQUISITION_RESULT: ${{ needs.acquire-secretless-dependencies.result }}
-      run: 'echo "::error::secretless dependency acquisition did not succeed (result=${ACQUISITION_RESULT}); eligibility likely did not complete. Re-run the workflow." >&2
+      run: 'echo "::error::secretless build prerequisites did not succeed (eligibility=${ELIGIBILITY_RESULT}, acquisition=${ACQUISITION_RESULT}); inspect both job results before retrying." >&2
 
         exit 1
 

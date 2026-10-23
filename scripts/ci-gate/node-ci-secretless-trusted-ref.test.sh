@@ -31,9 +31,19 @@ assert acquire["if"] == "(inputs.secretless-pr || inputs.secretless-trusted-ref)
 assert acquire["permissions"] == {"contents": "read", "packages": "read"}
 assert acquire["runs-on"] == "${{ fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}"
 assert build["permissions"] == {"contents": "read"}
-# Both secretless builds need a GitHub-hosted runner, so trusted-ref takes the
-# hosted untrusted lane ahead of the caller's runner input (ADR 0234).
-assert build["runs-on"].startswith("${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && fromJSON(vars.CI_LANE_UNTRUSTED")
+# Both secretless builds need hosted capacity. Successful eligibility may
+# use the configured untrusted lane; all other results use the hosted fallback.
+assert build["runs-on"].startswith("${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && needs.eligibility.result == 'success' && fromJSON(vars.CI_LANE_UNTRUSTED")
+assert "eligibility" in build["needs"]
+assert "|| (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'ubuntu-24.04' || " in build["runs-on"]
+assert build["runs-on"].endswith(
+    "inputs.runner != '' && fromJSON(inputs.runner) || "
+    "github.repository_owner != 'Verjson' && 'ubuntu-24.04' || "
+    "github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || "
+    "vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || "
+    "fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || "
+    "'[\"ubuntu-24.04\"]') }}"
+)
 assert "cleanup-secretless-transfer" not in jobs
 assert docs.count("permissions:\n      contents: read\n      packages: read\n      statuses: read") == 4
 

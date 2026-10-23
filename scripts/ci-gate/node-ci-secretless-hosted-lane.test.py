@@ -197,6 +197,30 @@ SCENARIOS = (
         "admitted": True,
     },
     {
+        "label": "a false JSON lane is rejected before dependency acquisition",
+        "mode": "trusted-ref",
+        "eligibility_runner": "self-hosted", "untrusted_lane": "false",
+        "admitted": False,
+    },
+    {
+        "label": "a zero JSON lane is rejected before dependency acquisition",
+        "mode": "trusted-ref",
+        "eligibility_runner": "self-hosted", "untrusted_lane": "0",
+        "admitted": False,
+    },
+    {
+        "label": "a null JSON lane is rejected before dependency acquisition",
+        "mode": "trusted-ref",
+        "eligibility_runner": "self-hosted", "untrusted_lane": "null",
+        "admitted": False,
+    },
+    {
+        "label": "an empty JSON string lane is rejected before dependency acquisition",
+        "mode": "trusted-ref",
+        "eligibility_runner": "self-hosted", "untrusted_lane": '""',
+        "admitted": False,
+    },
+    {
         "label": "a lane given as a bare JSON string of a hosted image proceeds",
         "mode": "trusted-ref",
         "eligibility_runner": "self-hosted", "untrusted_lane": '"ubuntu-24.04"',
@@ -427,15 +451,14 @@ def binding_violations(document: dict) -> list[str]:
         return [f"guard lane is not an expression: {lane!r}"]
     lane_expression = lane[3:-2].strip()
     expected_prefix = (
-        f"${{{{ ({SECRETLESS_CONDITION}) && fromJSON({lane_expression}) || "
+        f"${{{{ ({SECRETLESS_CONDITION}) && needs.eligibility.result == 'success' "
+        f"&& fromJSON({lane_expression}) || ({SECRETLESS_CONDITION}) && 'ubuntu-24.04' || "
     )
     problems = []
     if not str(document["jobs"]["build-test"]["runs-on"]).startswith(expected_prefix):
         problems.append("build-test does not route secretless calls on the guarded lane first")
     if guard.get("if") != SECRETLESS_CONDITION:
         problems.append(f"guard condition drifted: {guard.get('if')!r}")
-    if "inputs.runner" in str(document["jobs"]["build-test"]["runs-on"]).split(" || ")[0]:
-        problems.append("the secretless term consults the caller's runner input")
     # Bracket ranges such as [0-9] follow the locale's collation (under
     # en_US.UTF-8 they match fullwidth digits), and pinning a locale inside the
     # step is itself locale-dependent. Classes are spelled out instead.

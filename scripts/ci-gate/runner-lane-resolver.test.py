@@ -6,9 +6,8 @@ independent oracle: the catalog and the analyzer allowlist are generated from on
 source, so agreement between them proves consistency, not safety. Equivalence to
 these literals, and the negative scenarios, are what prove behavior.
 
-The evaluator is Node's `vm`, the subset the existing hosted-lane tests use. It
-compares strings case-sensitively where Actions does not, so every context here
-spells the owner exactly as the expression does.
+The evaluator uses Node's `vm` with Actions-compatible case-insensitive string
+comparisons and JSON truthiness for this catalog's expression subset.
 """
 
 from __future__ import annotations
@@ -19,6 +18,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -32,19 +33,44 @@ LEGACY_CALLER_RUNNER = (
     "fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || "
     "fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')"
 )
+# Pre-#1869 selector retained only to prove migration-tail equivalence when
+# both secretless inputs are false. The new fail-closed prefix has its own oracle.
 LEGACY_SECRETLESS_FIRST = (
     "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
     "fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') || " + LEGACY_CALLER_RUNNER
+)
+FAIL_CLOSED_SECRETLESS_PREFIX = (
+    "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
+    "needs.eligibility.result == 'success' && "
+    "fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') || "
+    "(inputs.secretless-pr || inputs.secretless-trusted-ref) && 'ubuntu-24.04'"
 )
 
 EVALUATOR = r"""
 const vm = require('node:vm');
 const cases = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const actionsEqual = (left, right) => typeof left === 'string' && typeof right === 'string'
+  ? left.toLowerCase() === right.toLowerCase()
+  : left === right;
+const actionsNotEqual = (left, right) => !actionsEqual(left, right);
 const results = cases.map(([body, context]) => {
   const sandbox = vm.createContext(Object.assign(Object.create(null), context, {
-    fromJSON: (v) => JSON.parse(v),
+    fromJSON: (value) => JSON.parse(value),
+    actionsEqual,
+    actionsNotEqual,
   }));
-  const out = vm.runInContext(`(${body.replace(/inputs\.([A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)+)/g, "inputs['$1']")})`, sandbox, { timeout: 5000 });
+  const expression = body
+    .replace(/inputs\.runner != ''/g, "actionsNotEqual(inputs.runner, '')")
+    .replace(/github\.repository_owner != 'Verjson'/g, "actionsNotEqual(github.repository_owner, 'Verjson')")
+    .replace(/github\.repository_owner != \(vars\.CI_PROFILE_OWNER \|\| 'Verjson'\)/g, "actionsNotEqual(github.repository_owner, (vars.CI_PROFILE_OWNER || 'Verjson'))")
+    .replace(/\(vars\.CI_PROFILE_OWNER \|\| 'Verjson'\) != 'Verjson'/g, "actionsNotEqual((vars.CI_PROFILE_OWNER || 'Verjson'), 'Verjson')")
+    .replace(/github\.event\.repository\.private == true/g, "actionsEqual(github.event.repository.private, true)")
+    .replace(/needs\.eligibility\.result == 'success'/g, "actionsEqual(needs.eligibility.result, 'success')")
+    .replace(/inputs\.([A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)+)/g, "inputs['$1']");
+  if (/(?:==|!=|[<>])/.test(expression)) {
+    throw new Error('unmodeled comparison operator in runner expression');
+  }
+  const out = vm.runInContext(`(${expression})`, sandbox, { timeout: 5000 });
   return out === undefined ? null : out;
 });
 process.stdout.write(JSON.stringify(results));
@@ -54,12 +80,16 @@ _script.write_text(EVALUATOR)
 
 
 def context_for(**ctx) -> dict:
+    eligibility = {}
+    if "eligibility_result" in ctx:
+        eligibility["result"] = ctx["eligibility_result"]
     return {
         "github": {"repository_owner": ctx.get("owner", "Verjson"),
                    "event": {"repository": {"private": ctx.get("private")}}},
         "inputs": {"runner": ctx.get("runner", ""),
                    "secretless-pr": ctx.get("secretless_pr", False),
                    "secretless-trusted-ref": ctx.get("secretless_ref", False)},
+        "needs": {"eligibility": eligibility},
         "vars": dict(ctx.get("vars", {})),
     }
 
@@ -92,15 +122,19 @@ def check(name: str, got, want) -> None:
 
 
 def test_builtin_profile_is_identical_to_the_legacy_spelling() -> None:
-    profiles = ({}, {"CI_PROFILE_OWNER": ""}, {"CI_PROFILE_OWNER": "Verjson"})
+    profiles = ({}, {"CI_PROFILE_OWNER": ""}, {"CI_PROFILE_OWNER": "Verjson"},
+                {"CI_PROFILE_OWNER": "verjson"})
     contexts = []
-    for shape, legacy in (("caller-runner", LEGACY_CALLER_RUNNER),
-                          ("secretless-first", LEGACY_SECRETLESS_FIRST)):
+    for shape, legacy in (
+        ("caller-runner", LEGACY_CALLER_RUNNER),
+        ("secretless-first", LEGACY_SECRETLESS_FIRST),
+        ("secretless-first-legacy-tail", LEGACY_SECRETLESS_FIRST),
+    ):
         for owner, private, runner, lanes, profile, sl_pr, sl_ref in itertools.product(
-            ("Verjson", "acme"), (True, False, None), ("", PERSISTENT, EPHEMERAL),
+            ("Verjson", "VERJSON", "acme"), (True, False, None), ("", PERSISTENT, EPHEMERAL),
             list(lane_variable_sets()), profiles, (False, True), (False, True),
         ):
-            if shape == "caller-runner" and (sl_pr or sl_ref):
+            if sl_pr or sl_ref:
                 continue
             # A non-Verjson owner under the default profile is the foreign case.
             contexts.append((shape, legacy, dict(
@@ -112,13 +146,124 @@ def test_builtin_profile_is_identical_to_the_legacy_spelling() -> None:
           [(s, c) for (s, _, c), n, o in zip(contexts, new, old) if n != o], [])
 
 
-def test_secretless_modes_beat_a_persistent_runner_input() -> None:
-    for sl in ({"secretless_pr": True}, {"secretless_ref": True}):
-        for profile in ({}, {"CI_PROFILE_OWNER": "acme"}):
-            owner = "acme" if profile else "Verjson"
-            got = resolve(catalog.expression("secretless-first"), owner=owner, private=True,
-                          runner=PERSISTENT, vars={"CI_LANE_TRUSTED": PERSISTENT, **profile}, **sl)
-            check(f"secretless precedence {sl} {profile}", got, ["ubuntu-24.04"])
+def test_secretless_routes_fail_closed_for_falsy_lanes_and_ineligible_results() -> None:
+    shapes = (
+        ("secretless-first", catalog.expression("caller-runner")),
+        ("secretless-first-legacy-tail", LEGACY_CALLER_RUNNER),
+    )
+    cases = (
+        ("unset lane", {}, "success", ["ubuntu-24.04"]),
+        ("empty lane", {"CI_LANE_UNTRUSTED": ""}, "success", ["ubuntu-24.04"]),
+        ("configured lane", {"CI_LANE_UNTRUSTED": '["ubuntu-22.04"]'},
+         "success", ["ubuntu-22.04"]),
+        ("JSON false lane", {"CI_LANE_UNTRUSTED": "false"}, "success", "ubuntu-24.04"),
+        ("JSON zero lane", {"CI_LANE_UNTRUSTED": "0"}, "success", "ubuntu-24.04"),
+        ("JSON null lane", {"CI_LANE_UNTRUSTED": "null"}, "success", "ubuntu-24.04"),
+        ('JSON empty-string lane', {"CI_LANE_UNTRUSTED": '\"\"'},
+         "success", "ubuntu-24.04"),
+        ("malformed lane with failed eligibility", {"CI_LANE_UNTRUSTED": "not-json"},
+         "failure", "ubuntu-24.04"),
+        ("failed eligibility", {"CI_LANE_UNTRUSTED": EPHEMERAL},
+         "failure", "ubuntu-24.04"),
+        ("skipped eligibility", {"CI_LANE_UNTRUSTED": EPHEMERAL},
+         "skipped", "ubuntu-24.04"),
+        ("null eligibility result", {"CI_LANE_UNTRUSTED": EPHEMERAL},
+         None, "ubuntu-24.04"),
+        ("case-insensitive success", {"CI_LANE_UNTRUSTED": EPHEMERAL},
+         "SUCCESS", ["ubuntu-24.04"]),
+    )
+
+    for shape, tail in shapes:
+        expression = catalog.expression(shape)
+        expected = f"{FAIL_CLOSED_SECRETLESS_PREFIX} || {tail}"
+        check(f"{shape} keeps the frozen fail-closed prefix and expected tail",
+              expression, expected)
+        for secretless_flag in ("secretless_pr", "secretless_ref"):
+            for name, variables, eligibility_result, want in cases:
+                got = resolve(
+                    expression,
+                    runner=PERSISTENT,
+                    eligibility_result=eligibility_result,
+                    vars=variables,
+                    **{secretless_flag: True},
+                )
+                check(f"{shape} {secretless_flag} {name}", got, want)
+
+            missing_result = resolve(
+                expression,
+                runner=PERSISTENT,
+                vars={"CI_LANE_UNTRUSTED": EPHEMERAL},
+                **{secretless_flag: True},
+            )
+            check(f"{shape} {secretless_flag} missing eligibility result",
+                  missing_result, "ubuntu-24.04")
+
+        non_secretless = resolve(
+            expression,
+            runner=PERSISTENT,
+            vars={"CI_LANE_UNTRUSTED": EPHEMERAL},
+        )
+        check(f"{shape} leaves the non-secretless runner unchanged",
+              non_secretless, ["self-hosted", "general"])
+
+
+def test_custom_profile_secretless_failures_stay_hosted() -> None:
+    variables = {
+        "CI_PROFILE_OWNER": "acme",
+        "CI_LANE_UNTRUSTED": PERSISTENT,
+        "CI_LANE_FALLBACK": PERSISTENT,
+    }
+    for eligibility_result in ("failure", "skipped"):
+        got = resolve(
+            catalog.expression("secretless-first"),
+            owner="acme",
+            private=False,
+            runner=PERSISTENT,
+            secretless_pr=True,
+            eligibility_result=eligibility_result,
+            vars=variables,
+        )
+        check(f"custom profile {eligibility_result} eligibility stays hosted",
+              got, "ubuntu-24.04")
+
+
+def test_evaluator_rejects_unmodeled_comparison_operators() -> None:
+    cases = (
+        ("equality", "github.event.repository.visibility == 'public'"),
+        ("inequality", "inputs.timeout-minutes != '10'"),
+        ("less than", "inputs.timeout-minutes < 10"),
+        ("less than or equal", "inputs.timeout-minutes <= 10"),
+        ("greater than", "inputs.timeout-minutes > 10"),
+        ("greater than or equal", "inputs.timeout-minutes >= 10"),
+    )
+    for label, expression in cases:
+        try:
+            resolve(expression)
+        except subprocess.CalledProcessError as error:
+            check(f"evaluator rejects unmodeled {label} comparison",
+                  "unmodeled comparison operator" in (error.stderr or ""), True)
+        else:
+            check(f"evaluator rejects unmodeled {label} comparison", False, True)
+
+
+def test_legacy_tail_shape_is_limited_to_node_ci_build_test() -> None:
+    workflow_dir = ROOT / ".github/workflows"
+    workflows = {*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")}
+    legacy_runs_on = "${{ " + catalog.expression("secretless-first-legacy-tail") + " }}"
+    actual = set()
+    for path in workflows:
+        document = yaml.safe_load(path.read_text()) or {}
+        jobs = document.get("jobs", {}) if isinstance(document, dict) else {}
+        if not isinstance(jobs, dict):
+            continue
+        for job_name, job in jobs.items():
+            if isinstance(job, dict) and job.get("runs-on") == legacy_runs_on:
+                actual.add((path.name, job_name))
+    check(
+        "legacy-tail selector is limited to both node-ci build-test jobs",
+        actual,
+        {("node-ci.yml", "build-test"), ("node-ci-protected.yml", "build-test")},
+    )
 
 
 def test_foreign_owner_without_a_profile_is_hosted() -> None:
@@ -135,23 +280,29 @@ def test_custom_profile_uses_its_own_lanes() -> None:
     check("custom public", resolve(expr, owner="acme", private=False, vars=vars_), ["acme-ephemeral"])
 
 
-def test_custom_profile_never_sends_untrusted_events_to_the_fallback() -> None:
-    # Adversarial finding (gpt-6-astra, gpt-6.1-sol): profile ownership is not
-    # evidence that a public or unclassified event is trusted. Every shape.
+def test_custom_profile_shapes_do_not_send_untrusted_events_to_the_fallback() -> None:
+    # The legacy-tail shape is deliberately excluded until node-ci's profile
+    # rollout. The profile-aware shapes must use their strict untrusted lane.
     vars_ = {"CI_PROFILE_OWNER": "acme", "CI_LANE_FALLBACK": PERSISTENT}
-    for shape in catalog.SHAPES:
-        for private, secretless in itertools.product((False, None), (False, True)):
-            got = resolve(catalog.expression(shape), owner="acme", private=private,
-                          secretless_pr=secretless, vars=vars_)
-            check(f"custom fallback {shape} private={private} secretless={secretless}",
-                  got, ["ubuntu-24.04"])
+    for shape in ("caller-runner", "secretless-first"):
+        for private in (False, None):
+            got = resolve(
+                catalog.expression(shape),
+                owner="acme",
+                private=private,
+                secretless_pr=False,
+                eligibility_result="success",
+                vars=vars_,
+            )
+            check(f"custom fallback {shape} private={private}", got, ["ubuntu-24.04"])
 
 
 def test_secretless_beats_a_runner_input_under_a_custom_profile_with_a_fallback() -> None:
     vars_ = {"CI_PROFILE_OWNER": "acme", "CI_LANE_FALLBACK": PERSISTENT, "CI_LANE_TRUSTED": PERSISTENT}
     for flag in ("secretless_pr", "secretless_ref"):
         got = resolve(catalog.expression("secretless-first"), owner="acme", private=True,
-                      runner=PERSISTENT, vars=vars_, **{flag: True})
+                      runner=PERSISTENT, vars=vars_, eligibility_result="success",
+                      **{flag: True})
         check(f"secretless custom {flag}", got, ["ubuntu-24.04"])
 
 
