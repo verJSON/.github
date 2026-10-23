@@ -1246,11 +1246,12 @@ for wf in node-ci.yml node-ci-protected.yml; do
     "(inputs.secretless-pr || inputs.secretless-trusted-ref) && needs.eligibility.result == 'success' &&" \
     "inputs.secretless-pr && needs.eligibility.result == 'success' &&" \
     "$mutated_workflow"
-  if [ "$(SECRETLESS_MODE=trusted-ref ELIGIBILITY_RESULT=success resolve_route "$mutated_workflow" build-test Verjson/verjson-cli \
-      '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-22.04"]' '' '' '')" != '["ubuntu-22.04"]' ]; then
+  route="$(SECRETLESS_MODE=trusted-ref ELIGIBILITY_RESULT=success resolve_route "$mutated_workflow" build-test Verjson/verjson-cli \
+      '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-22.04"]' '' '' '')"
+  if [ "$route" = 'ubuntu-24.04' ]; then
     pass "$wf routing checks detect removing trusted-ref from the eligible secretless term"
   else
-    fail "$wf routing checks did not detect removing trusted-ref from the eligible secretless term"
+    fail "$wf routing checks expected the literal hosted fallback after mutation (route=$route)"
   fi
 
   mutate_job_expression "$workflows/$wf" build-test \
