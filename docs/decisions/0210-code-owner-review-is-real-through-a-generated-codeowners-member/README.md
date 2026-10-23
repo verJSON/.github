@@ -553,7 +553,7 @@ request.
    through `apply`, then satisfy the evidence the earlier amendments left open before
    any route is removed or #1816 closes: an eligible `@admins` approval satisfies the
    rule, a later push dismisses it, the merge and release Apps' bypass reads, and the
-   `.github/**` dotfile match. `apply` verifies the ruleset image, not those behaviors.
+   `.github/**` dotfile match and the bare `.gitmodules` root-file match. `apply` verifies the ruleset image, not those behaviors.
 4. Only then regenerate `verjson-object-storage`.
 5. A fleet-wide CODEOWNERS sensitive path is reconsidered only as a separate policy
    decision after step 4, with measured `admins` review volume, and then as a new
