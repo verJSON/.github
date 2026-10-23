@@ -206,6 +206,10 @@ literal_hosted="$(
 #    queued run to the rollup assertion that reads it. It consumes none of the
 #    compute or credential reach this policy protects, so fixed hosted placement
 #    is the reviewed route. Job identity is bound by the exact inventory above.
+# * node-ci `build-test`'s secretless fallback (ADR 0234 amendment) — the
+#   literal hosted term is used only on non-success eligibility or a falsy
+#   parsed lane. The configured lane remains authoritative on success; an
+#   exact-site check below binds the exception to both node-ci twins.
 # Exact raw hosted selectors are governed by the file/job inventory above;
 # this expression sweep handles portable fallbacks and other embedded routes.
 # The generated release callers' selector (gen-changelog-caller.sh
@@ -213,6 +217,24 @@ literal_hosted="$(
 # reachable only outside verJSON; it is governed by
 # generated-changelog-selector-policy.test.py and appears here since this
 # repository adopted its own generated release-snapshot caller (#1374).
+# node-ci build-test's literal secretless fallback is an exact-site exception.
+# Keep that selector limited to the source and protected workflow twins.
+secretless_fallback_sites="$(
+  grep -HnF "(inputs.secretless-pr || inputs.secretless-trusted-ref) && 'ubuntu-24.04' || inputs.runner" "${workflow_files[@]}" || true
+)"
+actual_secretless_fallback_files="$(
+  printf '%s\n' "$secretless_fallback_sites" | awk -F: 'NF { print $1 }' | sort
+)"
+expected_secretless_fallback_files="$(
+  printf '%s\n' "$workflows/node-ci.yml" "$workflows/node-ci-protected.yml" | sort
+)"
+if [ "$actual_secretless_fallback_files" = "$expected_secretless_fallback_files" ] \
+  && printf '%s\n' "$secretless_fallback_sites" | awk -F: 'NF && $3 !~ /^[[:space:]]+runs-on$/ { exit 1 }'; then
+  pass "the literal secretless hosted fallback is confined to both node-ci build-test twins"
+else
+  fail "the literal secretless hosted fallback is not confined to both node-ci build-test twins"
+fi
+
 unsafe_portable="$(
   grep -HnE "^    runs-on:.*ubuntu-(24\\.04|latest)" "${workflow_files[@]}" \
     | grep -v "github.repository_owner != 'Verjson' && 'ubuntu-24.04'" \

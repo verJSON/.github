@@ -1670,9 +1670,10 @@ jobs:
       - name: Require completed secretless dependency acquisition
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && needs.acquire-secretless-dependencies.result != 'success'
         env:
+          ELIGIBILITY_RESULT: ${{ needs.eligibility.result }}
           ACQUISITION_RESULT: ${{ needs.acquire-secretless-dependencies.result }}
         run: |
-          echo "::error::secretless build prerequisites did not succeed (acquisition=${ACQUISITION_RESULT}); inspect the eligibility and acquisition job results before retrying." >&2
+          echo "::error::secretless build prerequisites did not succeed (eligibility=${ELIGIBILITY_RESULT}, acquisition=${ACQUISITION_RESULT}); inspect both job results before retrying." >&2
           exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: needs.eligibility.outputs.should-run != 'false'

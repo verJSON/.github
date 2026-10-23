@@ -155,21 +155,27 @@ spend a job slot but execute no repository code.
 ## 2026-10-23 amendment — falsy lane fail-closed
 
 Decision item 1 and the rollback paragraph above record pre-amendment runner
-placement. For failed or falsy eligibility, this amendment supersedes that
-outcome: `build-test` now uses literal `ubuntu-24.04`, where the pre-checkout
-guard fails. The persistent-runner-slot consequence no longer applies.
+placement. Successful eligibility continues to use the configured
+`CI_LANE_UNTRUSTED`. Any non-success eligibility result, or a falsy parsed
+lane, uses literal `ubuntu-24.04` before the caller-runner tail. The
+pre-checkout guard fails the required job when eligibility or acquisition does
+not complete. This limits the literal fallback to failure handling and
+preserves the variable-controlled successful route. The routing-policy
+inventory records the exact-site exception for the node-ci `build-test` twins.
 
 Issue #1869 found that `fromJSON` can return `false`, `0`, `null`, or an empty
-string for `CI_LANE_UNTRUSTED`. In those cases the original secretless selector
-could continue to the caller-provided `runner`, contrary to this ADR's hosted
-capacity invariant.
+string for `CI_LANE_UNTRUSTED`. In those cases the original secretless
+selector could continue to the caller-provided `runner`, contrary to this
+ADR's hosted-capacity invariant.
 
 `node-ci.yml` now requires successful eligibility before selecting the parsed
-untrusted lane, then has a second secretless-only `ubuntu-24.04` branch before
-the caller-runner tail. Failed, skipped, missing, or falsy lane results stay on
-the hosted runner. The dependency-acquisition guard fails the required build
-job before checkout when eligibility or acquisition does not complete. The
-protected workflow twin is generated from the updated caller contract, and the
-non-secretless selector tail remains unchanged. ADR 0240's 2026-10-23 amendment
-records the profile-aware catalog shape and the remaining node-ci profile
+untrusted lane, then uses a second secretless-only `ubuntu-24.04` branch before
+the caller-runner tail. Failed, skipped, or missing eligibility and falsy
+parsed lane results stay on the hosted runner. The dependency-acquisition
+guard fails the required job before checkout when eligibility or acquisition
+does not complete. `scripts/runner_lane_catalog.py` and
+`scripts/gen-runner-lane.py` stamp the canonical selector;
+`scripts/gen-node-ci-protected.py` produces the protected twin. The
+non-secretless selector tail remains unchanged. ADR 0240's 2026-10-23
+amendment records the profile-aware catalog shape and remaining node-ci profile
 rollout.
