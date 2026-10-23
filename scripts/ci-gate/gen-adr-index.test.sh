@@ -45,6 +45,23 @@ grep -qF '| Second |' "$idx" \
   || fail "plain hyphen H1 separator was not stripped (#79)"
 gen "$d" --check && pass "--check passes when the table is current" || fail "--check should pass when current"
 
+# 1a. Only the directory's own ADR number is the heading prefix. A title that
+# itself starts with digits and a hyphen keeps them under either separator, and
+# a different leading number is content, not a prefix (#1889).
+d2="$(new_fixture)"
+adr "$d2" "0001-notice" "0001 — 24-hour notice" "2026-07-01"
+adr "$d2" "0002-plain"  "0002 - 24-hour notice" "2026-07-02"
+adr "$d2" "0003-other"  "0099 — Mismatched number" "2026-07-03"
+gen "$d2"
+idx2="$d2/docs/decisions/README.md"
+{ grep -qF '| [0001](0001-notice/README.md) | 2026-07-01 | 24-hour notice |' "$idx2" \
+  && grep -qF '| [0002](0002-plain/README.md) | 2026-07-02 | 24-hour notice |' "$idx2"; } \
+  && pass "a title that begins with digits and a hyphen keeps them (#1889)" \
+  || fail "a numeric-hyphen title lost its leading digits (#1889)"
+grep -qF '| 0099 — Mismatched number |' "$idx2" \
+  && pass "a leading number other than the directory's is title content (#1889)" \
+  || fail "a non-matching leading number was stripped as if it were the ADR prefix (#1889)"
+
 # 1b. The generated table does not depend on the ambient collation. The zero-
 # padded number prefix dominates the sort today, so this guards the invariant
 # rather than reproducing a break: it is what stops a later numbering or slug

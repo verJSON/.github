@@ -106,12 +106,16 @@ gen_table() {
     num="${slug%%-*}"
     readme="$d/README.md"
     [ -f "$readme" ] || { echo "gen-adr-index: $slug/ has no README.md — an ADR directory must contain one" >&2; exit 1; }
-    # H1 title, stripped of the leading "NNNN — " / "NNNN - " prefix.
-    title="$(awk '
+    # H1 title, stripped of the leading "NNNN — " / "NNNN - " prefix. Only the
+    # directory's own ADR number counts as the prefix: a title that itself begins
+    # with digits and a hyphen ("24-hour notice") must survive intact (#1889).
+    title="$(awk -v num="$num" '
       /^# / && !seen {
         sub(/^# */, "")
-        sub(/^[0-9]+ *— */, "")
-        sub(/^[0-9]+ *- */, "")
+        if (substr($0, 1, length(num)) == num) {
+          rest = substr($0, length(num) + 1)
+          if (sub(/^ *— */, "", rest) || sub(/^ *- */, "", rest)) $0 = rest
+        }
         print; seen = 1
       }' "$readme")"
     # "- **Date:** YYYY-MM-DD" → the value.
