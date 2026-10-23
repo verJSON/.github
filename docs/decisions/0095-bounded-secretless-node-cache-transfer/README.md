@@ -194,3 +194,19 @@ contract test, and release caller—must be regenerated at the same immutable SH
 Callers may disable `secretless-pr` and return to the existing credentialed
 single-job route. Restoring full `node_modules` artifacts is not an acceptable
 rollback because it reintroduces the quota failure this decision removes.
+
+**2026-10-23 extension ([#1830](https://github.com/Verjson/.github/issues/1830)).**
+Managed consumers on a pre-v3.0.0 pin failed `build-test` with `fail-on-cache-miss` on the
+transfer key after "re-run failed jobs". Cause: the saved path included `run_attempt`, and
+the cache version hashes the path, so an unchanged key still missed from attempt 2 on (runs
+38814171337 and 38841542707). #1251 (commit `6c4c694f`, 2026-09-04) already moved the path to one run-stable value; the key
+still carries the producer attempt and a nonce, which keeps the entry unguessable and
+exactly bound to the acquisition that wrote it, and the build job validates the producer
+attempt against its own. Decision: the restore stays `fail-on-cache-miss: true`. A missing
+envelope after genuine eviction cannot be cold-started inside the credentialless build job
+without moving credentials into it, so the fail-closed behavior is kept and the build job
+adds a static diagnostic step (no key, output or environment echoed) naming the two known
+causes and the remedy. Automatic recovery would need a separate trusted re-acquisition
+controller with its own authorization design and is not decided here. This also reconciles
+the older "no rerun attempt may restore another attempt's input" wording: an earlier
+attempt of the same run is accepted, a later attempt or another run is not.

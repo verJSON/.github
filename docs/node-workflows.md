@@ -449,6 +449,40 @@ boundary. Public repositories must not receive the persistent GCP group merely
 because a workflow names its labels. Third-party actions and reusable workflows
 remain full-SHA or immutable-release pinned.
 
+## Troubleshooting secretless dependency failures
+
+**`Failed to restore cache entry. Exiting as fail-on-cache-miss is set` on the transfer
+key.** The run-bound encrypted envelope written by acquisition could not be restored.
+This is deliberately a failure and not a cold start: the build job is credentialless and
+cannot re-acquire private packages. Two causes have been seen, and the build job now prints
+both before cleanup runs.
+
+- A canonical pin from before #1251 (commit `6c4c694f`, 2026-09-04) saved the envelope under a path that included
+  `run_attempt`. Actions folds the cache path into the entry's version, so a failed-job
+  rerun (attempt 2 or later, with acquisition not re-run) used a different version and
+  always missed, whatever the key. Current pins use one path per run. Bump the pin and
+  start a **new** run; re-running an old run keeps its original pin.
+- The entry was evicted or expired. Re-run **all** jobs so acquisition writes a fresh
+  envelope.
+
+The separate public-npm cache (`cache: true`) is unrelated: a miss there only costs a
+download.
+
+**`getaddrinfo EAI_AGAIN` for a binary download during "Rebuild exact approved lifecycle
+packages without credentials".** The rebuild sandbox has no network by design (both workflows), so a
+package whose install script downloads a binary (for example `@playwright/browser-chromium`)
+cannot be listed in `secretless-rebuild-packages`. Put it in `secretless-skip-install-scripts`
+(needs a pin that contains #1888) and provision the browser in an ordered script-plan entry
+before the tests, with `browser-cache: true` set: each script gets its own throwaway home,
+so the download survives to the test script only through the cache directory that input
+exports as `PLAYWRIGHT_BROWSERS_PATH`. Under the protected workflow a script gets egress
+only when its plan entry sets `requiresServices: true` (the standard `test`, `test:*` and
+`*:test` names have it by default, so omitting the flag does not guarantee network denial;
+the unprotected reusable keeps the caller's network policy). `browser-cache: true` stores the provisioned browsers
+but does not provision them, and `playwright install --with-deps` does not work inside the
+sandbox. This route follows the documented script-plan semantics; it has not been
+exercised in a live run.
+
 ## Concurrency belongs to the caller
 
 The reusable CI workflows intentionally do not set `concurrency`. A called
