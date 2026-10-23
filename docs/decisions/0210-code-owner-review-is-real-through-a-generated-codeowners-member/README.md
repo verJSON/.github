@@ -245,6 +245,8 @@ asserted that review requirements are met.
 5. Only then regenerate the remaining adopters' CODEOWNERS (`verjson-cli-cloud#575`,
    `verjson-cli-projects`, `verjson-object-storage`), so no repository is without
    admin review in between. #1816 closes after steps 2–5.
+   *Annotation 2026-10-23: step 5 is held while the rulesets stay suspended; see the
+   2026-10-23 amendment's rollout order.*
 
 ### Consequences
 
@@ -418,7 +420,11 @@ beyond the dated authorization; it extends the suspension recorded above.
     final one-line change rejecting `HEAD` as a level branch name was reviewed by the PM
     only, with no Codex pass after it.
     The merge of the PR that adds this entry is recorded by the next ledger update.
-12. **Authorization:** the verbatim text and date above.
+12. **Docs-only admin merges.** Verjson/.github#1894 (records item 11) was admin-merged as
+    `d90caf0a` and #1895 (documents the nested-only install-script limit for adopters,
+    #1891) as `100397e5`. Both are documentation-only changes and were not recorded when
+    merged; this entry corrects that. #1895 received no model review.
+13. **Authorization:** the verbatim text and date above.
 
 ### Exit condition ("CI optimized and working"), measurable
 
@@ -453,3 +459,102 @@ The window closes when all hold, each evidenced in the closing PR:
 - [ ] Re-run `assert-mergeable-head` on each open PR that relied on exit-3 or Gate C
   handling.
 - [ ] Add a dated line here recording the restoration and its evidence.
+
+## 2026-10-23 amendment — Review routing: the canonical CODEOWNERS stays default-only
+
+- **Issue:** [#1816](https://github.com/Verjson/.github/issues/1816) (the merit question it
+  left open); this amendment is `Part of #1816`, which stays open for the restore checklist.
+- **Category:** review routing (sensitive class)
+
+### Context
+
+#1816 asks whether the canonical generated `.github/CODEOWNERS` should carry a
+sensitive-path rule such as `/.github/ @verJSON/admins` and `/.gitmodules` beyond
+`* @verJSON/devs`, because any of nine `devs` can satisfy the code-owner review that
+`main-protection` (18098028) requires for a workflow change (the issue counts nine). The
+[2026-10-19 amendment](#2026-10-19-amendment--per-repository-sensitive-path-approval-is-a-native-required-reviewer-rule)
+answered by moving additional approval to native per-repository rulesets; this
+amendment records the merit decision on the CODEOWNERS option itself, because the
+owner has since suspended those rulesets (the 2026-10-22 amendment "A declared
+suspension of the four reviewer rulesets") and the question of
+whether CODEOWNERS should carry the route in the meantime is a live one. The option set
+below was put to two read-only reviewers (`gpt-6-astra`, `gpt-6.1-sol`) independently,
+before this text was written; their conclusions matched and are summarized on the pull
+request.
+
+### Options considered
+
+| Option | Verdict |
+| --- | --- |
+| Do nothing and say nothing | Rejected: leaves the exposure unrecorded. |
+| Keep `* @verJSON/devs`, record the decision, the residual risk and the restoration prerequisites | **Chosen.** |
+| Fleet-wide `/.github/` and `/.gitmodules` (or workflows only, or all paths) to `@verJSON/admins` | Rejected, see below. |
+| List `devs` and `admins` on the sensitive paths | Rejected: either team satisfies the review, so admin approval is not required. |
+| Opt-in generated admin variant (a second pinned digest) | Rejected for now: dormant machinery whose only purpose is enforcement the owner has suspended; it also needs downgrade protection. |
+| Variants by repository class | Rejected: needs a reviewed classification and does not supply approval identity. |
+| Local appended rules or overlays | Rejected: CODEOWNERS applies the last matching pattern, so a local line can override an inherited one; the digest test exists to refuse exactly this. |
+| Drop `require_code_owner_review` from `main-protection` | Rejected: removes the `devs` review that is real today. |
+| Native per-repository `required_reviewers` rulesets | Retained as the eventual mechanism (2026-10-19 amendment); suspended. |
+
+### Decision
+
+- **No generator change.** The canonical bytes remain the single rule
+  `* @verJSON/devs`. `config/codeowners/CODEOWNERS`, the copy embedded in
+  `scripts/gen-changelog-caller.sh`, `EXPECTED_CODEOWNERS_SHA256` in the generated
+  contract test and this repository's own `.github/CODEOWNERS` are untouched, so no
+  golden file or digest moves. `scripts/codeowners_test.py` already pins the rule set to
+  exactly `['* @verJSON/devs']`; that assertion is the executable form of this decision.
+- **Why a fleet-wide admin route is wrong now.** `main-protection` is active on every
+  repository, so a generated `/.github/ @verJSON/admins` line would take effect in every
+  adopter on regeneration. That re-enables, at fleet scale and without the per-repository
+  scoping the rulesets have, the admin approval the owner suspended because it cannot yet
+  be attributed to an agent-plus-human identity pair. Three `admins` would become the
+  reviewers of every Renovate action-pin bump and every contract regeneration, all of
+  which touch `.github/workflows/`. It also would not constrain the actors that carry the
+  autonomous path: the merge and release Apps and organization owners bypass
+  `main-protection`, and with them its code-owner requirement.
+- **Why the rulesets, not CODEOWNERS, are the right mechanism.** Ownership (who is
+  asked) and authorization (whose approval is required) have different lifecycles. A
+  ruleset is additive, scoped to named paths in one repository, and has no
+  organization-owner bypass; CODEOWNERS routes into a shared review requirement that
+  other rules also satisfy.
+- **Accepted residual risk.** While the suspension holds, a change to a workflow file
+  that no generated contract guards (for example a hand-written `ci.yml` with no digest
+  pin) can be approved by two `devs` in any adopter whose CODEOWNERS is default-only.
+  A live read on 2026-10-23 found that to be `verjson-cli` (since #302),
+  `verjson-cli-cloud` and `verjson-cli-projects` (since their regenerations on
+  2026-10-22); `verjson-object-storage` alone still routes `/.github/`, `/scripts/` and
+  `/docs/decisions/` to `@Verjson/admins` in CODEOWNERS, and keeps it only until it
+  regenerates, which the rollout order below holds. This is the exposure #1816
+  describes; it is accepted by the owner's standing direction, not resolved. Execution
+  hardening, such as the release credential isolation, limits what such a change can
+  reach and is the complementary control, but it is not mandatory admin approval.
+
+### How it composes
+
+- **With the suspension.** No ruleset is edited, enabled or re-declared, and
+  `config/required-reviewer-rulesets.json` is unchanged. The decision to add a
+  CODEOWNERS route is deferred behind the same condition as the rulesets (verifiable
+  direct-human approval bound to head SHA and diff, ADR 0202 2026-10-22 amendment).
+- **With the generated-contract test.** The test still refuses any local edit. A future
+  change to the bytes is one reviewed change that moves the source file, the embedded
+  copy, the digest, this repository's self-adoption and the drift test together
+  (ADR 0191), and adopters then regenerate the whole pinned set at one contract SHA,
+  never a subset.
+
+### Rollout order
+
+1. Merge this amendment; nothing live changes and no adopter regenerates for it.
+2. Hold the 2026-10-19 rollout step 5 for the one repository still carrying admin routes:
+   do not regenerate `verjson-object-storage`'s CODEOWNERS while its ruleset is
+   suspended, because regeneration would drop the routes it still carries on `main` with
+   nothing replacing them.
+3. When the restore checklist's prerequisite is met, re-enable the four rulesets
+   through `apply`, then satisfy the evidence the earlier amendments left open before
+   any route is removed or #1816 closes: an eligible `@admins` approval satisfies the
+   rule, a later push dismisses it, the merge and release Apps' bypass reads, and the
+   `.github/**` dotfile match and the bare `.gitmodules` root-file match. `apply` verifies the ruleset image, not those behaviors.
+4. Only then regenerate `verjson-object-storage`.
+5. A fleet-wide CODEOWNERS sensitive path is reconsidered only as a separate policy
+   decision after step 4, with measured `admins` review volume, and then as a new
+   generator version under the full-set regeneration rule.
