@@ -245,6 +245,8 @@ asserted that review requirements are met.
 5. Only then regenerate the remaining adopters' CODEOWNERS (`verjson-cli-cloud#575`,
    `verjson-cli-projects`, `verjson-object-storage`), so no repository is without
    admin review in between. #1816 closes after steps 2–5.
+   *Annotation 2026-10-23: step 5 is held while the rulesets stay suspended; see the
+   2026-10-23 amendment's rollout order.*
 
 ### Consequences
 
@@ -469,14 +471,16 @@ The window closes when all hold, each evidenced in the closing PR:
 #1816 asks whether the canonical generated `.github/CODEOWNERS` should carry a
 sensitive-path rule such as `/.github/ @verJSON/admins` and `/.gitmodules` beyond
 `* @verJSON/devs`, because any of nine `devs` can satisfy the code-owner review that
-`main-protection` (18098028) requires for a workflow change. The
+`main-protection` (18098028) requires for a workflow change (the issue counts nine). The
 [2026-10-19 amendment](#2026-10-19-amendment--per-repository-sensitive-path-approval-is-a-native-required-reviewer-rule)
 answered by moving additional approval to native per-repository rulesets; this
 amendment records the merit decision on the CODEOWNERS option itself, because the
-owner has since suspended those rulesets (2026-10-22 amendment) and the question of
-whether CODEOWNERS should carry the route in the meantime is a live one. Two reviewers
-(`gpt-6-astra`, `gpt-6.1-sol`, read-only, run independently on the same record)
-considered the option set below and agreed.
+owner has since suspended those rulesets (the 2026-10-22 amendment "A declared
+suspension of the four reviewer rulesets") and the question of
+whether CODEOWNERS should carry the route in the meantime is a live one. The option set
+below was put to two read-only reviewers (`gpt-6-astra`, `gpt-6.1-sol`) independently,
+before this text was written; their conclusions matched and are summarized on the pull
+request.
 
 ### Options considered
 
@@ -516,11 +520,15 @@ considered the option set below and agreed.
   other rules also satisfy.
 - **Accepted residual risk.** While the suspension holds, a change to a workflow file
   that no generated contract guards (for example a hand-written `ci.yml` with no digest
-  pin) can be approved by two `devs` in any repository, and in the four suspended
-  repositories the former admin route is gone. This is the exposure #1816 describes; it
-  is accepted by the owner's standing direction, not resolved. Execution hardening, such as
-  the release credential isolation, limits what such a change can reach and is the
-  complementary control, but it is not mandatory admin approval.
+  pin) can be approved by two `devs` in any adopter whose CODEOWNERS is default-only.
+  A live read on 2026-10-23 found that to be `verjson-cli` (since #302),
+  `verjson-cli-cloud` and `verjson-cli-projects` (since their regenerations on
+  2026-10-22); `verjson-object-storage` alone still routes `/.github/`, `/scripts/` and
+  `/docs/decisions/` to `@Verjson/admins` in CODEOWNERS, and keeps it only until it
+  regenerates, which the rollout order below holds. This is the exposure #1816
+  describes; it is accepted by the owner's standing direction, not resolved. Execution
+  hardening, such as the release credential isolation, limits what such a change can
+  reach and is the complementary control, but it is not mandatory admin approval.
 
 ### How it composes
 
@@ -537,13 +545,16 @@ considered the option set below and agreed.
 ### Rollout order
 
 1. Merge this amendment; nothing live changes and no adopter regenerates for it.
-2. Hold the 2026-10-19 rollout step 5: do not regenerate `verjson-cli-cloud`,
-   `verjson-cli-projects` or `verjson-object-storage` for CODEOWNERS while their
-   rulesets are suspended, because regeneration would drop the admin routes they still
-   carry on `main` with nothing replacing them. `verjson-cli` already lost its routes in
-   #302.
-3. When the restore checklist's prerequisite is met, re-enable the four rulesets through
-   `apply`, then regenerate those adopters.
-4. A fleet-wide CODEOWNERS sensitive path is reconsidered only as a separate policy
-   decision after step 3, with measured `admins` review volume, and then as a new
+2. Hold the 2026-10-19 rollout step 5 for the one repository still carrying admin routes:
+   do not regenerate `verjson-object-storage`'s CODEOWNERS while its ruleset is
+   suspended, because regeneration would drop the routes it still carries on `main` with
+   nothing replacing them.
+3. When the restore checklist's prerequisite is met, re-enable the four rulesets
+   through `apply`, then satisfy the evidence the earlier amendments left open before
+   any route is removed or #1816 closes: an eligible `@admins` approval satisfies the
+   rule, a later push dismisses it, the merge and release Apps' bypass reads, and the
+   `.github/**` dotfile match. `apply` verifies the ruleset image, not those behaviors.
+4. Only then regenerate `verjson-object-storage`.
+5. A fleet-wide CODEOWNERS sensitive path is reconsidered only as a separate policy
+   decision after step 4, with measured `admins` review volume, and then as a new
    generator version under the full-set regeneration rule.
