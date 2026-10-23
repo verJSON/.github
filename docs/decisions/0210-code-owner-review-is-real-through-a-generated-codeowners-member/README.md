@@ -448,7 +448,15 @@ beyond the dated authorization; it extends the suspension recorded above.
     the first push; their estimator findings were fixed afterwards and that fix was not
     re-reviewed. The merge of the PR that adds this entry is recorded by the next ledger
     update.
-15. **Authorization:** the verbatim text and date above.
+15. **Admin merge past the review requirement.** Verjson/.github#1902 (the secretless
+    transfer-restore diagnostic and troubleshooting docs, `Part of #1830`) was admin-merged
+    as `dd614b2e` at head `3d4b8422` after `assert-mergeable-head.sh` exit 0 and every
+    current check `SUCCESS`/`SKIPPED`; superseded cancelled runs were set aside by the gate.
+    No gate was weakened; the restore keeps `fail-on-cache-miss: true`. `gpt-6-astra` and
+    `gpt-6.1-sol` ran a design round and a review round, plus a `code-reviewer` pass, before
+    the first push; their findings were fixed afterwards and those fixes were not re-reviewed.
+    The merge of the PR that adds this entry is recorded by the next ledger update.
+16. **Authorization:** the verbatim text and date above.
 
 ### Exit condition ("CI optimized and working"), measurable
 
