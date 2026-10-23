@@ -366,6 +366,13 @@ entry for a nested-only package reads as stale. The pnpm rebuild step also does 
 `PNPM_CONFIG_IGNORE_PNPMFILE`, so a repository pnpmfile can run inside the sandbox
 during a rebuild, which is the same trust as the rebuilt packages' own scripts.
 
+Operational impact (#1891): a consumer with a nested-only script-bearing package gets no
+signal. The package is unbuilt, neither list can name it, and the lane stays green. The
+adopter guidance in [`docs/node-workflows.md`](../../node-workflows.md) says to make such a
+package a top-level dependency if the consumer needs its native build. The accounting itself
+is unchanged; extending it to nested copies would alter the exact-match contract (#941) and is
+not part of this amendment.
+
 Threat model: strictly less code runs. Skipped names are never passed to
 `npm rebuild` or `pnpm rebuild`, so their scripts stay unexecuted as installed
 under `--ignore-scripts`; every other isolation property is unchanged. A skip
