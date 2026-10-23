@@ -74,22 +74,58 @@ Two different things were fused:
 
 ## Consequences
 
-- Behavior for the built-in profile is held equal to the frozen legacy spelling over
-  the full input matrix in `scripts/ci-gate/runner-lane-resolver.test.py`.
-- The analyzer allowlist in `hosted-selector-policy.py` carries the new literals by
-  hand because the actionlint job sparse-checks out only the analyzer, so it cannot
-  import the catalog. The test holds the two to each other. Agreement between a
-  generated file and its allowlist is consistency, not safety; the frozen legacy
-  strings and the negative scenarios are the independent oracle.
-- Rebinding the `public-pr-runner-isolation.pending.tsv` digests for `helm-ci.yml`,
-  `actionlint.yml` and `release.yml` is mechanical: the latter two bind scanned-tree
-  bytes that include `helm-ci.yml`. No pending row was added or widened.
-- Inherited, deliberately not fixed here because it would change built-in behavior:
-  `fromJSON` of a falsy `CI_LANE_UNTRUSTED` (`null`, `false`, `0`, `""`) is falsy, so
-  the secretless term can fall through to a caller `runner`. Both Codex reviewers
-  reproduced it on the pre-profile expression. Needs a separate decision (fail-closed
-  validation of the variable, owned by `runner-admission-reconcile`).
-- Not modeled: Actions compares strings case-insensitively; the test evaluator does
-  not. Live cross-organization execution, and the documented rule that self-hosted
-  reusable workflows are reachable by matching owner only, still need a canary outside
-  the organization (ADR 0210 exit condition).
+- The built-in caller-runner selector remains equivalent to its frozen legacy
+  spelling over the input matrix in `scripts/ci-gate/runner-lane-resolver.test.py`.
+  The profile-aware `secretless-first` shape keeps its profile tail. The
+  `secretless-first-legacy-tail` migration shape wired to node-ci is tested for
+  its eligibility gate, hosted fallback, and unchanged non-secretless tail.
+- `hosted-selector-policy.py` keeps exact expression literals because
+  actionlint sparse-checks out the analyzer and cannot import the catalog. The
+  resolver test checks catalog-to-allowlist consistency; agreement proves
+  consistency, not safety. Frozen legacy strings and negative scenarios remain
+  an independent behavior oracle.
+- The 2026-10-22 rebinds of the `helm-ci.yml`, `actionlint.yml`, and
+  `release.yml` `verify` digests were mechanical: the latter two bind
+  scanned-tree bytes that include `helm-ci.yml`. The #1869 amendment rebinds
+  existing node-ci, protected node-ci, actionlint, and release verify rows for
+  changed workflow or scanned-tree bytes. No pending row was added or widened.
+- Inherited, deliberately not fixed in the 2026-10-22 change because that
+  change preserved built-in behavior: a falsy parsed `CI_LANE_UNTRUSTED`
+  (`null`, `false`, `0`, or `""`) could make a secretless term fall through to
+  caller `runner`. Both Codex reviewers reproduced this on the pre-profile
+  expression. This needed a separate decision about fail-closed validation
+  owned by `runner-admission-reconcile`; the 2026-10-23 amendment below records
+  the selected selector-level repair and why it does not add a new variable.
+- Previously not modeled: Actions compares strings case-insensitively while
+  the resolver evaluator did not. The evaluator now models case-insensitive
+  string comparison and JSON parsing/truthiness. A live cross-organization
+  execution still needs the canary described by ADR 0210's exit condition; the
+  documented rule that self-hosted reusable workflows require a matching owner
+  remains.
+
+## 2026-10-23 amendment — fail-closed secretless runner selection
+
+Issue #1869 identified that `fromJSON` of `false`, zero, null, or an empty JSON
+string is falsy in a `runs-on` expression. Without a following secretless-only
+branch, the expression could continue to the caller-provided runner.
+
+The profile-aware `secretless-first` shape uses the untrusted lane only when
+either secretless input is true and `needs.eligibility.result` equals `success`.
+A second secretless-only branch returns literal `ubuntu-24.04` before its
+profile-aware tail. The `secretless-first-legacy-tail` shape wired to node-ci
+applies the same two branches before node-ci's exact existing non-secretless
+tail; profile-aware node-ci routing remains in rollout step 2. A failed or
+skipped eligibility job, a falsy or missing result, and a falsy parsed lane
+therefore stay on the hosted runner and cannot reach a caller's persistent
+runner. Unset or empty lane variables still resolve through the existing
+hosted JSON default.
+
+The selected repair is selector-level instead of a new variable from
+`runner-admission-reconcile`: `build-test` gates the parsed lane on successful
+eligibility and returns literal `ubuntu-24.04` for every other secretless
+result. The existing eligibility job still validates the raw lane before
+dependency acquisition. `build-test` remains `always()` and retains its
+dependency-failure guard before checkout, so eligibility or acquisition failure
+is reported as a failed required check. The complete non-secretless tail
+remains byte-for-byte unchanged. ADR 0234 receives the same dated correction to
+its hosted-capacity invariant.

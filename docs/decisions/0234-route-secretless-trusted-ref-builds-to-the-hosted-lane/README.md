@@ -151,3 +151,20 @@ is `if: always()` so that the required `ci / build-test` context always reports.
 persistent runner would therefore still pick the job up, and it would then fail at
 `Require completed secretless dependency acquisition`, before checkout. That runner would
 spend a job slot but execute no repository code.
+
+## 2026-10-23 amendment — falsy lane fail-closed
+
+Issue #1869 found that `fromJSON` can return `false`, `0`, `null`, or an empty
+string for `CI_LANE_UNTRUSTED`. In those cases the original secretless selector
+could continue to the caller-provided `runner`, contrary to this ADR's hosted
+capacity invariant.
+
+`node-ci.yml` now requires successful eligibility before selecting the parsed
+untrusted lane, then has a second secretless-only `ubuntu-24.04` branch before
+the caller-runner tail. Failed, skipped, missing, or falsy lane results stay on
+the hosted runner. The dependency-acquisition guard fails the required build
+job before checkout when eligibility or acquisition does not complete. The
+protected workflow twin is generated from the updated caller contract, and the
+non-secretless selector tail remains unchanged. ADR 0240's 2026-10-23 amendment
+records the profile-aware catalog shape and the remaining node-ci profile
+rollout.

@@ -396,7 +396,7 @@ jobs:
     - eligibility
     - acquire-secretless-dependencies
     if: always()
-    runs-on: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && needs.eligibility.result == 'success' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'ubuntu-24.04' || inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read

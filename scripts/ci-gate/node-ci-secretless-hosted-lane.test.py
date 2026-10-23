@@ -427,7 +427,8 @@ def binding_violations(document: dict) -> list[str]:
         return [f"guard lane is not an expression: {lane!r}"]
     lane_expression = lane[3:-2].strip()
     expected_prefix = (
-        f"${{{{ ({SECRETLESS_CONDITION}) && fromJSON({lane_expression}) || "
+        f"${{{{ ({SECRETLESS_CONDITION}) && needs.eligibility.result == 'success' "
+        f"&& fromJSON({lane_expression}) || ({SECRETLESS_CONDITION}) && 'ubuntu-24.04' || "
     )
     problems = []
     if not str(document["jobs"]["build-test"]["runs-on"]).startswith(expected_prefix):

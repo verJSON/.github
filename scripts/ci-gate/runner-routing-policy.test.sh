@@ -399,7 +399,8 @@ extract_runs_on() {
 
 evaluator="$(mktemp)"
 mutated_workflow="$(mktemp)"
-trap 'rm -f "$evaluator" "$mutated_workflow"' EXIT
+mutated_workflow_second="$(mktemp)"
+trap 'rm -f "$evaluator" "$mutated_workflow" "$mutated_workflow_second"' EXIT
 cat >"$evaluator" <<'JS'
 // Evaluate the GitHub Actions expression subset used by `runs-on:`. The
 // operators (&&, ||, ==, !=), single-quoted strings and value-returning
@@ -469,6 +470,9 @@ const inputs = {
 // on that rather than on `github.event.repository`, because on the dispatch path
 // the event repository is the dispatcher, not the target.
   const needs = {
+    // Secretless build-test evaluates this dependency before its configured
+    // untrusted lane; other expressions do not read this fixture.
+    eligibility: { result: process.env.ELIGIBILITY_RESULT ?? 'success' },
     // TARGET_PRIVATE separates preflight's API lookup from the event payload.
     preflight: { outputs: { target_private: process.env.TARGET_PRIVATE ?? priv } },
     resolve_privileged_route: { outputs: { selector: '' } },
@@ -1169,12 +1173,22 @@ for wf_name in node-ci.yml node-ci-protected.yml; do
   assert_secretless_route trusted-ref "$wf" build-test Verjson/verjson-cli \
     '' true '["self-hosted","general"]' '["ubuntu-24.04"]' \
     '["ubuntu-24.04"]' "$name build-test — secretless trusted-ref without a runner input skips the self-hosted trusted lane"
+  ELIGIBILITY_RESULT=success assert_secretless_route trusted-ref "$wf" build-test Verjson/verjson-cli \
+    '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-22.04"]' \
+    '["ubuntu-22.04"]' "$name build-test — trusted-ref uses the eligible configured untrusted lane"
   assert_secretless_route trusted-ref "$wf" build-test Verjson/verjson-cli \
     '["self-hosted","general"]' true '["self-hosted","general"]' '' \
     "$UNSET_LANDING" "$name build-test — secretless trusted-ref with no untrusted lane lands on the portable hosted default"
   assert_secretless_route pr "$wf" build-test Verjson/verjson-cli \
     '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' \
     '["ubuntu-24.04"]' "$name build-test — secretless PR keeps the hosted untrusted lane"
+  for secretless_mode in pr trusted-ref; do
+    for eligibility_result in failure skipped; do
+      ELIGIBILITY_RESULT="$eligibility_result" assert_secretless_route "$secretless_mode" "$wf" build-test Verjson/verjson-cli \
+        '["self-hosted","general"]' true '["self-hosted","general"]' '["self-hosted","general"]' \
+        'ubuntu-24.04' "$name build-test — secretless $secretless_mode with $eligibility_result eligibility uses literal hosted fallback"
+    done
+  done
   assert_secretless_route trusted-ref "$wf" build-test Acme/widgets \
     '["self-hosted","acme"]' true '' '' \
     "$UNSET_LANDING" "$name build-test — an external secretless trusted-ref caller also gets hosted capacity"
@@ -1189,16 +1203,29 @@ for wf_name in node-ci.yml node-ci-protected.yml; do
     '["self-hosted","general"]' "$name eligibility — secretless PR keeps the caller's self-hosted runner"
 done
 
-# Mutation probe: the cases above must notice the trusted-ref term going missing.
+# Mutation probes ensure both secretless selector terms independently keep trusted-ref.
 mutate_job_expression "$workflows/node-ci.yml" build-test \
-  '(inputs.secretless-pr || inputs.secretless-trusted-ref) &&' 'inputs.secretless-pr &&' \
+  "(inputs.secretless-pr || inputs.secretless-trusted-ref) && needs.eligibility.result == 'success' &&" \
+  "inputs.secretless-pr && needs.eligibility.result == 'success' &&" \
   "$mutated_workflow"
-if [ "$(SECRETLESS_MODE=trusted-ref resolve_route "$mutated_workflow" build-test Verjson/verjson-cli \
+if [ "$(SECRETLESS_MODE=trusted-ref ELIGIBILITY_RESULT=success resolve_route "$mutated_workflow" build-test Verjson/verjson-cli \
+    '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-22.04"]' '' '' '')" \
+    = 'ubuntu-24.04' ]; then
+  pass "routing cases detect removing trusted-ref from the eligible secretless term"
+else
+  fail "dropping trusted-ref from the eligible secretless term was not observable by routing evaluator"
+fi
+
+mutate_job_expression "$workflows/node-ci.yml" build-test \
+  "(inputs.secretless-pr || inputs.secretless-trusted-ref) && 'ubuntu-24.04'" \
+  "inputs.secretless-pr && 'ubuntu-24.04'" \
+  "$mutated_workflow_second"
+if [ "$(SECRETLESS_MODE=trusted-ref ELIGIBILITY_RESULT=failure resolve_route "$mutated_workflow_second" build-test Verjson/verjson-cli \
     '["self-hosted","general"]' true '["self-hosted","general"]' '["ubuntu-24.04"]' '' '' '')" \
     = '["self-hosted","general"]' ]; then
-  pass "routing cases detect a build-test that routes only secretless-pr to the hosted lane"
+  pass "routing cases detect removing trusted-ref from the hosted fallback term"
 else
-  fail "dropping the trusted-ref term from build-test was not observable by the routing evaluator"
+  fail "dropping trusted-ref from the hosted fallback term was not observable by routing evaluator"
 fi
 
 for job in publish-base publish-derived candidate-manifest; do
