@@ -1027,8 +1027,8 @@ def verify_dependency_code_never_sees_credential(npm_bin, version, acquisition_s
         ), f"npm {version}: baseline git dependency did not reach its own registry with the credential"
         # The attacker registry is configured only by the git dependency's own
         # .npmrc. Nothing at a higher precedence names it: the baseline project
-        # has no .npmrc and neither the user nor the global config mentions it,
-        # so the request above can only have come from the dependency .npmrc
+        # is copied before any project .npmrc exists, and neither the user nor the
+        # global config mentions it, so the request above can only have come from the dependency .npmrc
         # path (#1845). Without this the baseline could pass through some other
         # route and leave the dependency path unproven.
         for config_variable in ("NPM_CONFIG_USERCONFIG", "NPM_CONFIG_GLOBALCONFIG"):
