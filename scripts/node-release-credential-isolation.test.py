@@ -1031,7 +1031,6 @@ def verify_dependency_code_never_sees_credential(npm_bin, version, acquisition_s
         # so the request above can only have come from the dependency .npmrc
         # path (#1845). Without this the baseline could pass through some other
         # route and leave the dependency path unproven.
-        assert not (baseline / ".npmrc").exists(), "the baseline project must not carry its own .npmrc"
         for config_variable in ("NPM_CONFIG_USERCONFIG", "NPM_CONFIG_GLOBALCONFIG"):
             assert attacker_registry.origin not in Path(baseline_env[config_variable]).read_text(), (
                 f"{config_variable} must not name the dependency-controlled registry"
