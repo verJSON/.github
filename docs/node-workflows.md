@@ -170,7 +170,7 @@ OIDC paths are scrubbed. Only that job moves: eligibility keeps the caller's
 route and, in either secretless mode, fails before acquisition unless
 `CI_LANE_UNTRUSTED` selects a single standard GitHub-hosted Linux image
 ([ADR 0234](decisions/0234-route-secretless-trusted-ref-builds-to-the-hosted-lane/README.md)). Admission accepts only `push` and an explicit `workflow_dispatch`;
-`pull_request`, `pull_request`_target, schedules, and every other event fail before
+`pull_request`, `pull_request_target`, schedules, and every other event fail before
 token use. The two booleans are mutually exclusive. A trusted push bypasses a
 stale `renovate/stability-days` status. Existing eligibility behavior stays
 intact for other events, while explicit dispatch retains its established
