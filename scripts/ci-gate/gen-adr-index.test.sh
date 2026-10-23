@@ -52,13 +52,15 @@ d2="$(new_fixture)"
 adr "$d2" "0001-notice" "0001 — 24-hour notice" "2026-07-01"
 adr "$d2" "0002-plain"  "0002 - 24-hour notice" "2026-07-02"
 adr "$d2" "0003-other"  "0099 — Mismatched number" "2026-07-03"
+adr "$d2" "0004-long"   "00045 — Longer number" "2026-07-04"
 gen "$d2"
 idx2="$d2/docs/decisions/README.md"
 { grep -qF '| [0001](0001-notice/README.md) | 2026-07-01 | 24-hour notice |' "$idx2" \
   && grep -qF '| [0002](0002-plain/README.md) | 2026-07-02 | 24-hour notice |' "$idx2"; } \
   && pass "a title that begins with digits and a hyphen keeps them (#1889)" \
   || fail "a numeric-hyphen title lost its leading digits (#1889)"
-grep -qF '| 0099 — Mismatched number |' "$idx2" \
+{ grep -qF '| 0099 — Mismatched number |' "$idx2" \
+  && grep -qF '| 00045 — Longer number |' "$idx2"; } \
   && pass "a leading number other than the directory's is title content (#1889)" \
   || fail "a non-matching leading number was stripped as if it were the ADR prefix (#1889)"
 
