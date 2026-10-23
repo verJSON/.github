@@ -34,8 +34,8 @@ assert "needs.eligibility.outputs.should-run != 'false'" in acquisition_guard["i
 assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in acquisition_guard["if"]
 assert "needs.acquire-secretless-dependencies.result != 'success'" in acquisition_guard["if"]
 assert acquisition_guard["env"]["ACQUISITION_RESULT"] == "${{ needs.acquire-secretless-dependencies.result }}"
-assert "eligibility likely did not complete" in acquisition_guard["run"]
-assert "Re-run the workflow" in acquisition_guard["run"]
+assert "secretless build prerequisites did not succeed" in acquisition_guard["run"]
+assert "inspect the eligibility and acquisition job results before retrying" in acquisition_guard["run"]
 assert build["steps"].index(acquisition_guard) < next(
     index for index, step in enumerate(build["steps"])
     if str(step.get("uses", "")).startswith("actions/checkout@")

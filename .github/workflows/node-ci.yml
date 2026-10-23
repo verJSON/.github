@@ -1672,7 +1672,7 @@ jobs:
         env:
           ACQUISITION_RESULT: ${{ needs.acquire-secretless-dependencies.result }}
         run: |
-          echo "::error::secretless dependency acquisition did not succeed (result=${ACQUISITION_RESULT}); eligibility likely did not complete. Re-run the workflow." >&2
+          echo "::error::secretless build prerequisites did not succeed (acquisition=${ACQUISITION_RESULT}); inspect the eligibility and acquisition job results before retrying." >&2
           exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: needs.eligibility.outputs.should-run != 'false'
