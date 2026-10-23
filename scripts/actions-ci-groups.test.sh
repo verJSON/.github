@@ -43,15 +43,21 @@ assert set(jobs) == {
     "runner-isolation",
     "shell-tests",
 }
-assert jobs["shell-test-groups"]["needs"] == "change-scope"
+assert jobs["shell-test-groups"]["needs"] == ["change-scope", "docs-contracts", "runner-isolation"]
 assert jobs["shell-test-groups"]["if"] == (
-    "${{ needs.change-scope.outputs.heavy == 'true' && "
-    "(github.event_name != 'pull_request' || !github.event.pull_request.draft) }}"
+    "${{ !cancelled() && needs.change-scope.result == 'success' && "
+    "needs.change-scope.outputs.heavy == 'true' && "
+    "(github.event_name != 'pull_request' || (!github.event.pull_request.draft && "
+    "needs.docs-contracts.result == 'success' && "
+    "needs.runner-isolation.result == 'success')) }}"
 )
-assert jobs["hosted-compatibility-tests"]["needs"] == "change-scope"
+assert jobs["hosted-compatibility-tests"]["needs"] == ["change-scope", "docs-contracts", "runner-isolation"]
 assert jobs["hosted-compatibility-tests"]["if"] == (
-    "${{ needs.change-scope.outputs.heavy == 'true' && "
-    "(github.event_name != 'pull_request' || !github.event.pull_request.draft) }}"
+    "${{ !cancelled() && needs.change-scope.result == 'success' && "
+    "needs.change-scope.outputs.heavy == 'true' && "
+    "(github.event_name != 'pull_request' || (!github.event.pull_request.draft && "
+    "needs.docs-contracts.result == 'success' && "
+    "needs.runner-isolation.result == 'success')) }}"
 )
 assert "if" not in jobs["change-scope"]
 assert "if" not in jobs["docs-contracts"]
@@ -91,7 +97,7 @@ assert any(
 
 groups = jobs["shell-test-groups"]
 assert groups["timeout-minutes"] == 30
-assert groups["strategy"]["fail-fast"] is False
+assert groups["strategy"]["fail-fast"] == "${{ github.event_name == 'pull_request' }}"
 assert groups["strategy"]["max-parallel"] == 6
 assert groups["strategy"]["matrix"]["group"] == [
     "platform",

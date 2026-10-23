@@ -126,15 +126,21 @@ jobs:
           bash scripts/actions-ci-change-scope.sh <"$files" >>"$GITHUB_OUTPUT"
 
   shell-test-groups:
-    needs: change-scope
-    if: ${{ needs.change-scope.outputs.heavy == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    # ADR 0238 (2026-10-23 amendment): on a pull request the cheap gates (about 20 seconds
+    # each) must pass before the heavy groups spend runner minutes. Every other event
+    # still runs the groups after a failed gate, so a trunk run keeps the full failure
+    # inventory; `!cancelled()` alone would also admit a failed prerequisite, hence the
+    # explicit results.
+    needs: [change-scope, docs-contracts, runner-isolation]
+    if: ${{ !cancelled() && needs.change-scope.result == 'success' && needs.change-scope.outputs.heavy == 'true' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.docs-contracts.result == 'success' && needs.runner-isolation.result == 'success')) }}
     # Thirty minutes still bounds one cell, including runner variance and cleanup.
     # Caller-contract shards run within the four matrix cells so they use
     # command-level parallelism without multiplying runner setup.
     runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     timeout-minutes: 30
     strategy:
-      fail-fast: false
+      # Stop the remaining cells of a red pull request; keep every cell on trunk.
+      fail-fast: ${{ github.event_name == 'pull_request' }}
       max-parallel: 6
       matrix:
         group:
@@ -243,8 +249,8 @@ jobs:
           bash scripts/actions-ci-group.sh docs
 
   hosted-compatibility-tests:
-    needs: change-scope
-    if: ${{ needs.change-scope.outputs.heavy == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    needs: [change-scope, docs-contracts, runner-isolation]
+    if: ${{ !cancelled() && needs.change-scope.result == 'success' && needs.change-scope.outputs.heavy == 'true' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.docs-contracts.result == 'success' && needs.runner-isolation.result == 'success')) }}
     # The compatibility consumer is intentionally isolated with bubblewrap.
     # Persistent fleet images are not required to carry that host dependency;
     # keep this security contract on the explicit hosted Ubuntu image instead.

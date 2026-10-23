@@ -270,3 +270,5 @@ locale-collation	python3 scripts/ci-gate/settable-value-guards.test.py
 locale-collation	python3 scripts/ci-gate/release-verify-retention-keep.test.py
 platform	bash scripts/actions-ci-group-records.test.sh
 platform	python3 scripts/ci-gate/reusable-ci-no-concurrency.test.py
+platform	python3 scripts/ci-gate/ci-fail-fast.test.py
+platform	python3 scripts/ci-gate/ci-runner-minutes.test.py
