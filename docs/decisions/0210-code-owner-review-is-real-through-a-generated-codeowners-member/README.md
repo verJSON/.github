@@ -402,7 +402,15 @@ beyond the dated authorization; it extends the suspension recorded above.
    review rounds to completion plus three `code-reviewer` rounds before the first push; the
    last round's findings were adjudicated, and one test-pin commit (`ab7665b7`) followed it.
    The merge of the PR that adds this entry is recorded by the next ledger update.
-9. **Authorization:** the verbatim text and date above.
+9. **Ledger-only admin merges.** Verjson/.github#1887 (records item 7) was admin-merged as
+   `43808054` and #1892 (records item 8) as `3a425c25`; both are documentation-only changes,
+   recorded here because they were not recorded when merged.
+10. **Admin merge past the review requirement.** Verjson/verjson-cli#347 ("docs: add
+    customer identity deployment to CLI family") was admin-squash-merged on 2026-10-22 as
+    `8e963a03` at head `0c73bbb`. Fable approved the final head `0c73bbb`; Codex
+    (gpt-6-astra and gpt-6.1-sol) approved the earlier head `9627289`, so the final head
+    was not reviewed by the Codex pair.
+11. **Authorization:** the verbatim text and date above.
 
 ### Exit condition ("CI optimized and working"), measurable
 

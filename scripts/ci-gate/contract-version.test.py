@@ -257,6 +257,7 @@ GENERATORS_WITHOUT_ADOPTER_SHA_HEADERS = {
     "gen-ai-review-lifecycle-rearm-caller.sh": "accepts only --local, so it has no contract SHA",
     "gen-authn-type-surface-required-workflow.py": "writes the hub's own required workflow",
     "gen-conformance-regression-fixture.py": "writes a hub test fixture",
+    "gen-node-ci-caller.py": "its pins are `uses:` lines; the header names no SHA",
     "gen-node-ci-protected.py": "writes the hub's own reusable workflow",
     "gen-node-ci-protected-move-step.test.py": "a test of gen-node-ci-protected.py, not a generator",
     "gen-node-required-workflow.py": "its header names a config path; its pins are `uses:` lines",

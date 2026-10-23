@@ -86,6 +86,10 @@ RENDERED_WORKFLOWS = {
         ("--consumer", "config/cli-projects-required-node-ci.json"),
     ),
     "scripts/gen-node-ci-protected.py": ((),),
+    "scripts/gen-node-ci-caller.py": (
+        (CONTRACT_REF,),
+        (CONTRACT_REF, "--levels", "scripts/ci-gate/fixtures/ci-levels/gitflow.json"),
+    ),
     "scripts/gen-authn-type-surface-required-workflow.py": ((CONTRACT_REF,),),
     "scripts/gen-container-candidate.sh": (("workflow", CONTRACT_REF),),
     "scripts/gen-container-release.sh": (("workflow", CONTRACT_REF),),
