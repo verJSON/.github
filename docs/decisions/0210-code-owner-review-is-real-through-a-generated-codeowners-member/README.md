@@ -410,7 +410,15 @@ beyond the dated authorization; it extends the suspension recorded above.
     `8e963a03` at head `0c73bbb`. Fable approved the final head `0c73bbb`; Codex
     (gpt-6-astra and gpt-6.1-sol) approved the earlier head `9627289`, so the final head
     was not reviewed by the Codex pair.
-11. **Authorization:** the verbatim text and date above.
+11. **Admin merge past the review requirement.** Verjson/.github#1893 (typed `test-levels`
+    generator, slice 1 of ARB change 3, `Part of #1869`) was admin-merged at head
+    `ba88dd9f` (merge commit `a451a763`) after `assert-mergeable-head.sh` exit 0 and every
+    check `SUCCESS`/`SKIPPED`; no gate was weakened. Four Codex rounds (`gpt-6-astra`,
+    `gpt-6.1-sol`) and three `code-reviewer` rounds ran to completion before the push; the
+    final one-line change rejecting `HEAD` as a level branch name was reviewed by the PM
+    only, with no Codex pass after it.
+    The merge of the PR that adds this entry is recorded by the next ledger update.
+12. **Authorization:** the verbatim text and date above.
 
 ### Exit condition ("CI optimized and working"), measurable
 
