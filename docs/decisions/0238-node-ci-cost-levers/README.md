@@ -164,3 +164,44 @@ sandbox-egress decision above. Required-check enrollment of `test-levels` must b
 validated live against a ruleset before any adopter relies on it; this slice proves the
 rendered text and its truth tables, not a live Actions run.
 
+
+## Amendment 2026-10-23 — fail fast on pull requests; the cancel job is not adopted
+
+Issue [#1817](https://github.com/Verjson/.github/issues/1817) asked for a stop-on-first-red
+build. The ARB (two Codex models plus the author) decided each of its four items.
+
+- **Cancel-on-failure job: not adopted.** A reusable's `github.run_id` is the caller's
+  run, so "cancel its own run" cancels every sibling lane and unrelated job in the caller
+  workflow, including required contexts that then read `cancelled` (assert-mergeable-head
+  Gate C) and jobs that spend a per-head AI review pass. The job also cannot save anything
+  inside a call: `needs: [every expensive job]` runs only after they all finish, and
+  `node-ci`, `helm-ci` and `ui-ci` have one expensive job each. Reusable job permissions
+  can only narrow the caller's, so the caller job would have to grant `actions: write` to
+  every adopter, and the cancelling job itself bills a hosted runner. This follows the
+  2026-10-22 decision above that in-run cancellation needs a privileged controller the
+  credentialless lane forbids. Ordering and levels prevent downstream work but do not stop
+  independent running lanes; that remains an accepted cost.
+- **Matrix `fail-fast` on pull requests only (implemented).** `pulumi-ci.yml` `preview` and
+  `actions-ci.yml` `shell-test-groups` set `fail-fast: ${{ github.event_name ==
+  'pull_request' }}` (the Pulumi job additionally requires `pulumi-command == 'preview'`,
+  because the same job also runs `up` and `refresh`), so trunk, `schedule`, `workflow_dispatch` and `merge_group` keep the
+  full failure inventory and `pull_request_target` is never fail-fast. The container
+  candidate publish matrices are release paths and are unchanged.
+- **Cheap gates first (implemented where a gate exists).** On a pull request,
+  `shell-test-groups` and `hosted-compatibility-tests` need `docs-contracts` and
+  `runner-isolation` (about 20 seconds each in recent runs) to succeed. Every other event
+  still runs them after a failed gate; `!cancelled()` plus explicit `success` results
+  express that, because `!cancelled()` alone would also admit a failed prerequisite. The
+  `shell-tests` aggregate is unchanged and still fails when a gate fails or a heavy job is
+  skipped without a documentation-only classification. Cost: roughly the gate duration is
+  added to wall time before the heavy jobs start, on every event. `adr-number-collision`
+  was left out because it is about 5 seconds and rarely the first failure.
+- **Same-ref supersession (verified, no generator change).** The default generated caller
+  already carries the documented `concurrency` block exactly once; a test pins it.
+
+**Accounting.** `scripts/ci_runner_minutes.py` estimates rounded runner-minutes per
+workflow over a date window from the jobs API (`filter=all`), counting reruns and
+started-then-cancelled jobs and flagging bad timestamps. It is an estimate, not the invoice.
+Compare equal windows and event mix before and after the first adopter regenerates its
+caller, and report wall time and retry frequency beside the minutes. No saving is claimed
+here because none has been measured.

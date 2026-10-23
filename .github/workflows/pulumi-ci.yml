@@ -274,7 +274,10 @@ jobs:
     environment: ${{ github.event_name == 'pull_request' && inputs.preview-environment || '' }}
     runs-on: ${{ inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     strategy:
-      fail-fast: false
+      # ADR 0238 (2026-10-23 amendment): stop sibling stack previews once one fails on a
+      # pull request; trunk, schedule, and dispatch runs keep the full inventory, and an
+      # `up` or `refresh` is never cut short by a sibling stack's failure.
+      fail-fast: ${{ github.event_name == 'pull_request' && inputs.pulumi-command == 'preview' }}
       matrix:
         stack: ${{ fromJSON(inputs.stacks) }}
     permissions:
