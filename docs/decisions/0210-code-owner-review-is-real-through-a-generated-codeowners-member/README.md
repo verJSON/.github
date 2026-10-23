@@ -424,7 +424,21 @@ beyond the dated authorization; it extends the suspension recorded above.
     `d90caf0a` and #1895 (documents the nested-only install-script limit for adopters,
     #1891) as `100397e5`. Both are documentation-only changes and were not recorded when
     merged; this entry corrects that. #1895 received no model review.
-13. **Authorization:** the verbatim text and date above.
+13. **Admin merges past the review requirement.** Verjson/.github#1896 (the ADR 0210
+    CODEOWNERS routing decision, `Part of #1816`) as `2d067ee6` at head `aa9027f1`, #1897
+    (#1889, ADR-index title fix) as `65c71314`, #1898 (#1845, baseline `.npmrc` assertion)
+    as `07538d82` and #1899 (ADR 0238 annotation, `Part of #1875`) as `1eb0e477`. Each
+    followed `assert-mergeable-head.sh` exit 0 and green checks; no gate was weakened.
+    #1896 had `gpt-6-astra` and `gpt-6.1-sol` design and review rounds plus a
+    `code-reviewer` pass, adjudicated before it was marked ready. #1897 and #1898 had a
+    `code-reviewer` pass only, and #1899 (docs-only) had no model review. #1897 needed a
+    merge of `main` into its branch (no force-push) to clear a stale `AI review
+    authorization` failure ("Arm receipt verification failed") that a reopen did not,
+    and a re-key of the `release.yml` `verify` row in
+    `scripts/ci-gate/public-pr-runner-isolation.pending.tsv`, whose digest binds
+    `scripts/gen-adr-index.sh`. The merge of the PR that adds this entry is recorded by
+    the next ledger update.
+14. **Authorization:** the verbatim text and date above.
 
 ### Exit condition ("CI optimized and working"), measurable
 
