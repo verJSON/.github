@@ -82,6 +82,13 @@ holding an old pin. The security posture of the secretless lane is unchanged: no
 change touches credentials, network policy, or the sandbox. Items 5 and 6 above remain
 open and are reported on the issue.
 
+*Annotation 2026-10-23 (#1875).* Items 5 and 6 here are this ADR's own numbering
+(build-once artifacts; sandbox system packages). They are not changes 5 and 6 of the
+[#1869](https://github.com/Verjson/.github/issues/1869) cost list (larger hosted runners;
+the unbounded container cache), which landed as #1871 and #1870, and #1872 added the diff
+classifier. None of those three delivered either deferred decision, so both remain open
+and need the owner's decision before any code.
+
 ## Amendment 2026-10-22 — concurrency stays caller-side; test levels not yet designed in the engine
 
 ARB change 3 of #1869 proposed `concurrency` groups with `cancel-in-progress` inside the
