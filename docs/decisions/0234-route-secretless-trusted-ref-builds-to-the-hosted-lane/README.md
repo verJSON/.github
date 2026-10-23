@@ -154,6 +154,11 @@ spend a job slot but execute no repository code.
 
 ## 2026-10-23 amendment — falsy lane fail-closed
 
+The rollback paragraph above records the prior runner placement: after this
+amendment, rejected eligibility sends `build-test` to literal `ubuntu-24.04`,
+where the pre-checkout guard fails. Its previous persistent-runner-slot
+consequence no longer applies.
+
 Issue #1869 found that `fromJSON` can return `false`, `0`, `null`, or an empty
 string for `CI_LANE_UNTRUSTED`. In those cases the original secretless selector
 could continue to the caller-provided `runner`, contrary to this ADR's hosted
