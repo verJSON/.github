@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+
 ROOT = Path(__file__).resolve().parents[2]
 ACTION = ROOT / ".github/actions/node-ci-script-plan"
 MODULE_PATH = ACTION / "script_plan.py"
@@ -104,6 +105,13 @@ class GoldenPlanTests(unittest.TestCase):
         self.assertTrue(script_plan.requires_services_for_script("unit:test", " \n "))
         self.assertFalse(script_plan.requires_services_for_script("build", ""))
 
+    def test_compatibility_grant_rejects_surrounding_unicode_whitespace(self) -> None:
+        with self.assertRaises(script_plan.ScriptPlanError):
+            script_plan.requires_services_for_script(
+                "unit:test",
+                ' ["unit:test"] ',
+            )
+
     def test_duplicate_json_members_keep_python_json_last_value_behavior(self) -> None:
         source = '{"script":"build","requiresServices":false,"requiresServices":true}'
 
@@ -136,30 +144,37 @@ class GoldenPlanTests(unittest.TestCase):
         )
         self.assertEqual(nested[0].entries, ())
 
-    def test_malformed_json_and_valid_oversized_json_fail_before_output(self) -> None:
+    def test_malformed_json_is_rejected(self) -> None:
         with self.assertRaises(script_plan.ScriptPlanError):
             script_plan.parse_script_plan("[")
 
-        self.assertEqual(script_plan.MAX_JSON_BYTES, 8 * 1024)
-        oversized_source = encoded(["x" * (script_plan.MAX_JSON_BYTES - 3)])
-        self.assertEqual(len(oversized_source.encode("utf-8")), script_plan.MAX_JSON_BYTES + 1)
-        with self.assertRaisesRegex(
-            script_plan.ScriptPlanError,
-            f"exceeds {script_plan.MAX_JSON_BYTES} UTF-8 bytes",
-        ):
-            script_plan.parse_script_plan(oversized_source)
+    def test_root_and_nested_plans_trim_unicode_whitespace_before_json_parsing(self) -> None:
+        root_entries = script_plan.parse_script_plan("\u00a0[\"build\"]\u00a0")
+        self.assertEqual(["build"], [entry.script for entry in root_entries or ()])
 
-    def test_normalized_output_is_deterministic_bounded_utf8_json(self) -> None:
+        nested = script_plan.parse_nested_manifests(
+            "\u00a0"
+            + encoded(
+                [
+                    {
+                        "path": "packages/db",
+                        "approvedPackages": [],
+                        "scriptPlan": ["test"],
+                    }
+                ]
+            )
+            + "\u00a0"
+        )
+        self.assertEqual("packages/db", nested[0].path)
+        self.assertEqual(["test"], [entry.script for entry in nested[0].entries])
+
+    def test_normalized_output_is_deterministic_utf8_json(self) -> None:
         first, _ = script_plan.normalize_outputs(encoded(["test"]), "")
         second, _ = script_plan.normalize_outputs(encoded(["test"]), "")
 
-        self.assertEqual(script_plan.encode_json_output(first), script_plan.encode_json_output(second))
-        self.assertLessEqual(
-            len(script_plan.encode_json_output(first).encode("utf-8")),
-            script_plan.MAX_OUTPUT_BYTES,
-        )
-        with self.assertRaises(script_plan.ScriptPlanError):
-            script_plan.encode_json_output("x" * (script_plan.MAX_OUTPUT_BYTES + 1))
+        encoded_first = script_plan.encode_json_output(first)
+        self.assertEqual(encoded_first, script_plan.encode_json_output(second))
+        self.assertEqual(json.loads(encoded_first), first)
 
     def test_composite_action_cli_emits_private_file_output(self) -> None:
         with tempfile.TemporaryDirectory() as runner_temp:
@@ -195,14 +210,20 @@ class GoldenPlanTests(unittest.TestCase):
             )
             self.assertEqual(output_lines[1], "default-plan=false")
 
-    def test_largest_json_input_fits_action_environment_and_file_transport(self) -> None:
-        plan_source = encoded(["x" * (script_plan.MAX_JSON_BYTES - 4)])
-        self.assertEqual(len(plan_source.encode()), script_plan.MAX_JSON_BYTES)
+    def test_valid_plan_over_8_kib_remains_accepted(self) -> None:
+        plan = [
+            {
+                "script": f"verify:{script_index:02d}",
+                "unsetEnv": [
+                    f"CI_TEST_{script_index:02d}_{env_index:02d}_{'X' * 32}"
+                    for env_index in range(16)
+                ],
+            }
+            for script_index in range(32)
+        ]
+        plan_source = encoded(plan)
+        self.assertGreater(len(plan_source.encode("utf-8")), 8 * 1024)
         normalized, _ = script_plan.normalize_outputs(plan_source, "")
-        normalized_json = script_plan.encode_json_output(normalized)
-        self.assertGreater(len(normalized_json.encode()), script_plan.MAX_JSON_BYTES)
-        self.assertLessEqual(len(normalized_json.encode()), script_plan.MAX_OUTPUT_BYTES)
-
         with tempfile.TemporaryDirectory() as runner_temp:
             result = subprocess.run(
                 [sys.executable, "-I", str(MODULE_PATH)],
@@ -219,8 +240,13 @@ class GoldenPlanTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            output_path = Path(result.stdout.splitlines()[0].partition("=")[2])
+            output_lines = result.stdout.splitlines()
+            self.assertEqual(len(output_lines), 2)
+            output_path = Path(output_lines[0].partition("=")[2])
             self.assertEqual(json.loads(output_path.read_text(encoding="utf-8")), normalized)
+            self.assertEqual(len(normalized), 32)
+            self.assertEqual(len(normalized[0]["unsetEnv"]), 16)
+            self.assertEqual(output_lines[1], "default-plan=false")
 
     def test_compatibility_cli_emits_service_grant(self) -> None:
         env = {
