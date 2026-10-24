@@ -131,7 +131,7 @@ def structural_problems(document: dict) -> list[str]:
     problems = []
     step = classify_step(document)
     plan_steps = [s for s in build_test_steps(document)
-                  if s.get("name") == "Run exact credentialless consumer script plan"]
+                  if s.get("id") == "node-ci-script-plan"]
     if len(plan_steps) != 1:
         return [f"expected one plan step, found {len(plan_steps)}"]
     steps = build_test_steps(document)
@@ -139,8 +139,9 @@ def structural_problems(document: dict) -> list[str]:
         problems.append("the classifier runs after the plan step")
     expected = ("${{ steps.classify-diff.outputs.non-app == 'true' && "
                 "inputs.secretless-ci-non-app-script-plan || inputs.secretless-ci-script-plan }}")
-    if plan_steps[0]["env"].get("CI_SCRIPT_PLAN") != expected:
-        problems.append(f"plan step does not select via the classifier: {plan_steps[0]['env'].get('CI_SCRIPT_PLAN')!r}")
+    plan_input = (plan_steps[0].get("with") or {}).get("script-plan")
+    if plan_input != expected:
+        problems.append(f"plan step does not select via the classifier: {plan_input!r}")
     condition = str(step.get("if", ""))
     for required in ("inputs.secretless-pr", "github.event_name == 'pull_request'",
                      "inputs.secretless-ci-non-app-script-plan != ''"):

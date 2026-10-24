@@ -5376,16 +5376,25 @@ jobs:
             decide true "light plan: every changed path is non-application"
           fi
           decide false "full plan: the diff is not provably non-application"
+      - name: Parse Node CI script plan
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        id: node-ci-script-plan
+        uses: Verjson/.github/.github/actions/node-ci-script-plan@3b95498a2b59401c95986a1fec539a2aa4cef2b8
+        with:
+          mode: normalize
+          script-plan: ${{ steps.classify-diff.outputs.non-app == 'true' && inputs.secretless-ci-non-app-script-plan || inputs.secretless-ci-script-plan }}
+          nested-manifests: ${{ inputs.secretless-nested-manifests }}
       - name: Run exact credentialless consumer script plan
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         env:
-          CI_SCRIPT_PLAN: ${{ steps.classify-diff.outputs.non-app == 'true' && inputs.secretless-ci-non-app-script-plan || inputs.secretless-ci-script-plan }}
           NESTED_MANIFESTS: ${{ inputs.secretless-nested-manifests }}
           DB_ENV: ${{ inputs.db-env }}
           CACHE_ENV: ${{ inputs.cache-env }}
           VERJSON_CI_TRUSTED_DB_HOST: ${{ steps.db-service.outputs.host }}
           RESTORE_PERSISTED_PUBLIC_CACHE: ${{ inputs.cache && inputs.package-manager == 'npm' }}
           RUNTIME_CACHE_DIR: ${{ runner.temp }}/secretless-runtime-cache-${{ github.run_id }}-${{ github.run_attempt }}
+          SCRIPT_PLAN_DEFAULT_PLAN: ${{ steps.node-ci-script-plan.outputs.default-plan }}
+          SCRIPT_PLAN_ENTRIES_FILE: ${{ steps.node-ci-script-plan.outputs.entries-file }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_ID: ${{ github.run_id }}
           SECRETLESS_RUNTIME_PUBLIC_CACHE: ${{ inputs.secretless-runtime-public-cache }}
@@ -5411,76 +5420,28 @@ jobs:
           from pathlib import Path
           from urllib.parse import parse_qsl, unquote, urlsplit
 
-          script_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._-]*")
-          env_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-          protected_env = {
-              "GH_TOKEN", "GITHUB_TOKEN", "NODE_AUTH_TOKEN", "NPM_TOKEN",
-              "NPM_CONFIG_CACHE", "NPM_CONFIG_GLOBALCONFIG", "NPM_CONFIG_USERCONFIG",
-              "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
-              "GOOGLE_APPLICATION_CREDENTIALS", "AZURE_CREDENTIALS",
-              "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL",
-          }
-          def normalize_plan(plan, directory, label, manifest_label):
-              if not isinstance(plan, list) or not plan or len(plan) > 32:
-                  sys.exit(f"{label} accepts 1-32 unique exact npm script entries")
-              entries = []
-              for entry in plan:
-                  if isinstance(entry, str):
-                      script = entry
-                      unset_env = []
-                      requires_services = None
-                      requires_services_specified = False
-                  elif (
-                      isinstance(entry, dict)
-                      and "script" in entry
-                      and set(entry).issubset({"script", "unsetEnv", "requiresServices"})
-                  ):
-                      script = entry["script"]
-                      unset_env = entry.get("unsetEnv", [])
-                      requires_services = entry.get("requiresServices")
-                      requires_services_specified = "requiresServices" in entry
-                  else:
-                      sys.exit(f"{label} entries must be script names or script objects with supported fields")
-                  if not isinstance(script, str) or script_pattern.fullmatch(script) is None:
-                      sys.exit(f"{label} contains an invalid script name")
-                  if not requires_services_specified:
-                      requires_services = (
-                          script == "test" or script.startswith("test:") or script.endswith(":test")
-                      )
-                  elif type(requires_services) is not bool:
-                      sys.exit(f"{label} requiresServices must be a JSON boolean")
-                  if (not isinstance(unset_env, list) or len(unset_env) > 16
-                          or len(unset_env) != len(set(unset_env))
-                          or any(not isinstance(name, str) or env_pattern.fullmatch(name) is None
-                                 or name in protected_env for name in unset_env)):
-                      sys.exit(f"{label} unsetEnv accepts up to 16 unique non-credential environment names")
-                  entries.append((directory, script, unset_env, requires_services))
-              scripts_in_plan = [script for _, script, _, _ in entries]
-              if len(scripts_in_plan) != len(set(scripts_in_plan)):
-                  sys.exit(f"{label} accepts unique script names")
-              # Script existence is proved against the manifest that will run the
-              # script, so a nested plan can never reach a root-only script.
-              package = json.loads((directory / "package.json").read_text(encoding="utf-8"))
-              scripts = package.get("scripts")
-              if not isinstance(scripts, dict):
-                  sys.exit(f"{manifest_label} has no scripts object")
-              missing = [name for name in scripts_in_plan if name not in scripts]
-              if missing:
-                  sys.exit(f"planned npm scripts absent from {manifest_label}: " + ", ".join(missing))
-              return entries
-
           checkout_root = Path.cwd().resolve()
           normalized = []
-          plan_source = os.environ.get("CI_SCRIPT_PLAN", "").strip()
-          run_defaults = not plan_source
-          if plan_source:
-              try:
-                  plan = json.loads(plan_source)
-              except json.JSONDecodeError as error:
-                  sys.exit(f"secretless-ci-script-plan must be valid JSON: {error}")
-              normalized.extend(normalize_plan(
-                  plan, checkout_root, "secretless-ci-script-plan", "package.json"))
+          run_defaults = os.environ.get("SCRIPT_PLAN_DEFAULT_PLAN") == "true"
+          env_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+          entries_path = Path(os.environ["SCRIPT_PLAN_ENTRIES_FILE"])
+          runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve()
+          if (
+              entries_path.is_symlink()
+              or entries_path.parent.resolve() != runner_temp
+              or not entries_path.is_file()
+          ):
+              sys.exit("normalized script-plan entries file is unavailable")
+          try:
+              normalized_entries = json.loads(entries_path.read_text(encoding="utf-8"))
+          except (OSError, json.JSONDecodeError) as error:
+              sys.exit(f"normalized script-plan entries file is invalid: {error}")
+          if not isinstance(normalized_entries, list):
+              sys.exit("normalized script-plan entries must be a JSON array")
+
           nested_source = os.environ.get("NESTED_MANIFESTS", "").strip()
+          nested_manifests = []
+          nested_directories = []
           if nested_source:
               try:
                   nested_manifests = json.loads(nested_source)
@@ -5498,18 +5459,44 @@ jobs:
                           or any(segment_pattern.fullmatch(segment) is None
                                  for segment in nested_path.split("/"))):
                       sys.exit("each nested manifest path must be a relative checkout directory")
-                  # The checkout is PR-authored here, so containment is proved
-                  # again before this job reads anything below the declared path.
-                  nested_directory = Path(nested_path).resolve()
-                  if not nested_directory.is_dir() or checkout_root not in nested_directory.parents:
-                      sys.exit(f"{nested_path} must resolve to a directory inside the checkout")
                   nested_plan = nested["scriptPlan"]
                   if not isinstance(nested_plan, list) or len(nested_plan) > 8:
                       sys.exit(f"{nested_path} scriptPlan accepts at most 8 entries")
-                  if nested_plan:
-                      normalized.extend(normalize_plan(
-                          nested_plan, nested_directory, f"{nested_path} scriptPlan",
-                          f"{nested_path}/package.json"))
+                  nested_directory = (checkout_root / nested_path).resolve()
+                  if not nested_directory.is_dir() or checkout_root not in nested_directory.parents:
+                      sys.exit(f"{nested_path} must resolve to a directory inside the checkout")
+                  nested_directories.append(nested_directory)
+
+          for entry in normalized_entries:
+              if not isinstance(entry, dict):
+                  sys.exit("normalized script-plan entries must be objects")
+              manifest_path = entry.get("manifestPath")
+              manifest_index = entry.get("manifestIndex")
+              if manifest_index is None:
+                  if manifest_path is not None:
+                      sys.exit("root script-plan entries cannot declare a manifest path")
+                  directory = checkout_root
+                  manifest_label = "package.json"
+              else:
+                  if (type(manifest_index) is not int
+                          or manifest_index < 0
+                          or manifest_index >= len(nested_manifests)
+                          or manifest_path != nested_manifests[manifest_index]["path"]):
+                      sys.exit("normalized nested script-plan entry has an invalid manifest")
+                  directory = nested_directories[manifest_index]
+                  manifest_label = f"{manifest_path}/package.json"
+              script = entry.get("script")
+              unset_env = entry.get("unsetEnv")
+              requires_services = entry.get("requiresServices")
+              if not isinstance(script, str) or not isinstance(unset_env, list) or type(requires_services) is not bool:
+                  sys.exit("normalized script-plan entry has invalid fields")
+              package = json.loads((directory / "package.json").read_text(encoding="utf-8"))
+              scripts = package.get("scripts")
+              if not isinstance(scripts, dict):
+                  sys.exit(f"{manifest_label} has no scripts object")
+              if script not in scripts:
+                  sys.exit(f"planned npm script absent from {manifest_label}: {script}")
+              normalized.append((directory, script, unset_env, requires_services))
           if run_defaults:
               root_scripts = json.loads(
                   (checkout_root / "package.json").read_text(encoding="utf-8")
@@ -6250,6 +6237,14 @@ jobs:
         if: needs.eligibility.outputs.should-run != 'false' && !(inputs.secretless-pr || inputs.secretless-trusted-ref)
       - run: npm run lint --if-present
         if: needs.eligibility.outputs.should-run != 'false' && !(inputs.secretless-pr || inputs.secretless-trusted-ref)
+      - name: Parse compatibility script service grant
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && inputs.secretless-compatibility-ranges != ''
+        id: compatibility-script-plan
+        uses: Verjson/.github/.github/actions/node-ci-script-plan@3b95498a2b59401c95986a1fec539a2aa4cef2b8
+        with:
+          mode: compatibility
+          script-plan: ${{ inputs.secretless-ci-script-plan }}
+          compatibility-request: ${{ inputs.secretless-compatibility-ranges }}
       - name: Run runtime-resolved compatibility lanes without credentials
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && inputs.secretless-compatibility-ranges != ''
         env:
@@ -6260,9 +6255,9 @@ jobs:
           AWS_SESSION_TOKEN: ''
           AZURE_CREDENTIALS: ''
           CACHE_ENV: ${{ inputs.cache-env }}
-          CI_SCRIPT_PLAN: ${{ inputs.secretless-ci-script-plan }}
           COMPATIBILITY_ARTIFACT_DIR: ${{ runner.temp }}/secretless-compatibility-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
           COMPATIBILITY_RANGES: ${{ inputs.secretless-compatibility-ranges }}
+          COMPATIBILITY_REQUIRES_SERVICES: ${{ steps.compatibility-script-plan.outputs.requires-services }}
           DB_ENV: ${{ inputs.db-env }}
           EXPECTED_COMPATIBILITY_PROVENANCE_SHA256: ${{ needs.acquire-secretless-dependencies.outputs.compatibility-provenance-sha256 }}
           GH_TOKEN: ''
@@ -6321,48 +6316,6 @@ jobs:
           scripts = package_json.get("scripts")
           if not isinstance(scripts, dict) or request["script"] not in scripts:
               sys.exit("compatibility script is absent from package.json")
-
-          def compatibility_service_script_requires_services(script_name, plan_source):
-              is_test_script = (
-                  script_name == "test"
-                  or script_name.startswith("test:")
-                  or script_name.endswith(":test")
-              )
-              if not plan_source.strip():
-                  return is_test_script
-              try:
-                  plan = json.loads(plan_source)
-              except json.JSONDecodeError as error:
-                  sys.exit(f"secretless-ci-script-plan must be valid JSON: {error}")
-              if not isinstance(plan, list):
-                  sys.exit("secretless-ci-script-plan must be a JSON array")
-              matches = []
-              for entry in plan:
-                  if isinstance(entry, str):
-                      planned_script = entry
-                      requires_services = is_test_script if entry else False
-                  elif isinstance(entry, dict):
-                      planned_script = entry.get("script")
-                      planned_script_is_test = (
-                          isinstance(planned_script, str)
-                          and (
-                              planned_script == "test"
-                              or planned_script.startswith("test:")
-                              or planned_script.endswith(":test")
-                          )
-                      )
-                      requires_services = entry.get(
-                          "requiresServices", planned_script_is_test,
-                      )
-                      if not isinstance(requires_services, bool):
-                          sys.exit("secretless-ci-script-plan requiresServices must be a JSON boolean")
-                  else:
-                      sys.exit("secretless-ci-script-plan entries must be strings or objects")
-                  if planned_script == script_name:
-                      matches.append(requires_services)
-              if len(matches) > 1:
-                  sys.exit("secretless-ci-script-plan accepts unique script names")
-              return bool(matches and matches[0])
 
           blocked_service_env = {
               "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
@@ -6553,9 +6506,9 @@ jobs:
               return names
 
           def compatibility_service_environment(
-              script_name, plan_source, db_env, cache_env, environment,
+              requires_services, db_env, cache_env, environment,
           ):
-              if not compatibility_service_script_requires_services(script_name, plan_source):
+              if not requires_services:
                   return {}
               service_environment = {}
               for name in sorted(configured_compatibility_service_names(db_env, cache_env)):
@@ -6578,8 +6531,7 @@ jobs:
               os.environ.get("DB_ENV", ""), os.environ.get("CACHE_ENV", ""),
           )
           compatibility_service_env = compatibility_service_environment(
-              request["script"],
-              os.environ.get("CI_SCRIPT_PLAN", ""),
+              os.environ.get("COMPATIBILITY_REQUIRES_SERVICES") == "true",
               os.environ.get("DB_ENV", ""),
               os.environ.get("CACHE_ENV", ""),
               os.environ,
