@@ -1,0 +1,63 @@
+{
+  "blank": {
+    "entries": [],
+    "defaultPlan": true
+  },
+  "strings": {
+    "entries": [
+      {
+        "manifestPath": null,
+        "manifestIndex": null,
+        "script": "build",
+        "unsetEnv": [],
+        "requiresServices": false
+      },
+      {
+        "manifestPath": null,
+        "manifestIndex": null,
+        "script": "test",
+        "unsetEnv": [],
+        "requiresServices": true
+      }
+    ],
+    "defaultPlan": false
+  },
+  "objects": {
+    "entries": [
+      {
+        "manifestPath": null,
+        "manifestIndex": null,
+        "script": "integration:test",
+        "unsetEnv": ["PUBLIC_FLAG"],
+        "requiresServices": false
+      },
+      {
+        "manifestPath": null,
+        "manifestIndex": null,
+        "script": "db:test",
+        "unsetEnv": [],
+        "requiresServices": true
+      }
+    ],
+    "defaultPlan": false
+  },
+  "nested": {
+    "entries": [
+      {
+        "manifestPath": null,
+        "manifestIndex": null,
+        "script": "build",
+        "unsetEnv": [],
+        "requiresServices": false
+      },
+      {
+        "manifestPath": "packages/db",
+        "manifestIndex": 0,
+        "script": "test:db",
+        "unsetEnv": ["CACHE_DEBUG"],
+        "requiresServices": true
+      }
+    ],
+    "defaultPlan": false
+  }
+}
