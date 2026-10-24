@@ -11,8 +11,6 @@ import tempfile
 from dataclasses import dataclass
 from typing import Any
 
-MAX_JSON_BYTES = 8 * 1024
-MAX_OUTPUT_BYTES = 256 * 1024
 MAX_PLAN_ENTRIES = 32
 MAX_NESTED_MANIFESTS = 8
 MAX_UNSET_ENV = 16
@@ -75,19 +73,17 @@ def is_test_script(script: str) -> bool:
     return script == "test" or script.startswith("test:") or script.endswith(":test")
 
 
-def _check_size(source: str, label: str) -> None:
+def _validate_utf8(source: str, label: str) -> None:
     try:
-        size = len(source.encode("utf-8", errors="strict"))
+        source.encode("utf-8", errors="strict")
     except UnicodeEncodeError as exc:
         raise ScriptPlanError(f"{label} must be valid UTF-8") from exc
-    if size > MAX_JSON_BYTES:
-        raise ScriptPlanError(f"{label} exceeds {MAX_JSON_BYTES} UTF-8 bytes")
 
 
 def _load_json(source: str, label: str) -> Any:
     if not isinstance(source, str):
         raise ScriptPlanError(f"{label} must be a JSON string")
-    _check_size(source, label)
+    _validate_utf8(source, label)
     try:
         return json.loads(source)
     except json.JSONDecodeError as exc:
@@ -159,11 +155,20 @@ def parse_plan_value(
     return tuple(entries)
 
 
-def parse_script_plan(source: str, label: str = "secretless-ci-script-plan") -> tuple[ScriptPlanEntry, ...] | None:
+def parse_script_plan(
+    source: str,
+    label: str = "secretless-ci-script-plan",
+    *,
+    trim_source: bool = True,
+) -> tuple[ScriptPlanEntry, ...] | None:
     if not isinstance(source, str):
         raise ScriptPlanError(f"{label} must be a JSON string")
-    _check_size(source, label)
-    if not source.strip():
+    _validate_utf8(source, label)
+    if trim_source:
+        source = source.strip()
+    elif not source.strip():
+        return None
+    if not source:
         return None
     return parse_plan_value(_load_json(source, label), label)
 
@@ -171,8 +176,9 @@ def parse_script_plan(source: str, label: str = "secretless-ci-script-plan") -> 
 def parse_nested_manifests(source: str) -> tuple[NestedScriptPlan, ...]:
     if not isinstance(source, str):
         raise ScriptPlanError("secretless-nested-manifests must be a JSON string")
-    _check_size(source, "secretless-nested-manifests")
-    if not source.strip():
+    _validate_utf8(source, "secretless-nested-manifests")
+    source = source.strip()
+    if not source:
         return ()
     nested = _load_json(source, "secretless-nested-manifests")
     if not isinstance(nested, list) or not 1 <= len(nested) <= MAX_NESTED_MANIFESTS:
@@ -214,7 +220,7 @@ def requires_services_for_script(
 ) -> bool:
     if not isinstance(script_name, str) or SCRIPT_PATTERN.fullmatch(script_name) is None:
         raise ScriptPlanError("compatibility request requires a valid script name")
-    plan = parse_script_plan(plan_source)
+    plan = parse_script_plan(plan_source, trim_source=False)
     if plan is None:
         return is_test_script(script_name)
     for entry in plan:
@@ -226,11 +232,9 @@ def requires_services_for_script(
 def encode_json_output(value: Any) -> str:
     encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     try:
-        size = len(encoded.encode("utf-8", errors="strict"))
+        encoded.encode("utf-8", errors="strict")
     except UnicodeEncodeError as exc:
         raise ScriptPlanError("normalized script-plan output must be valid UTF-8") from exc
-    if size > MAX_OUTPUT_BYTES:
-        raise ScriptPlanError(f"normalized script-plan output exceeds {MAX_OUTPUT_BYTES} UTF-8 bytes")
     return encoded
 
 

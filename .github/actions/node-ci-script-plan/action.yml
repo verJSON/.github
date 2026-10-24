@@ -1,5 +1,5 @@
 name: Parse canonical Node CI script plans
-description: Validate script plans and derive their service grants. Each JSON input is limited to 8 KiB.
+description: Validate script plans and derive compatibility service grants.
 inputs:
   mode:
     description: normalize or compatibility
