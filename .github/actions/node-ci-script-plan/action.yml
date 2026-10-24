@@ -1,0 +1,39 @@
+name: Parse canonical Node CI script plans
+description: Validate script plans and derive their service grants. Each JSON input is limited to 8 KiB.
+inputs:
+  mode:
+    description: normalize or compatibility
+    required: true
+  script-plan:
+    description: JSON array of script names or script objects; blank selects workflow defaults
+    required: false
+    default: ""
+  nested-manifests:
+    description: Optional JSON array of nested manifest plans
+    required: false
+    default: ""
+  compatibility-request:
+    description: Optional JSON compatibility request whose script needs a service grant
+    required: false
+    default: ""
+outputs:
+  entries-file:
+    description: Private runner-temp file containing canonical normalized entries
+    value: ${{ steps.parse.outputs.entries-file }}
+  default-plan:
+    description: Whether the root plan is blank and workflow defaults apply
+    value: ${{ steps.parse.outputs.default-plan }}
+  requires-services:
+    description: Whether the compatibility request's script requires configured services
+    value: ${{ steps.parse.outputs.requires-services }}
+runs:
+  using: composite
+  steps:
+    - id: parse
+      shell: bash
+      env:
+        SCRIPT_PLAN_MODE: ${{ inputs.mode }}
+        SCRIPT_PLAN_SOURCE: ${{ inputs.script-plan }}
+        NESTED_MANIFESTS_SOURCE: ${{ inputs.mode == 'normalize' && inputs.nested-manifests || '' }}
+        COMPATIBILITY_REQUEST_SOURCE: ${{ inputs.mode == 'compatibility' && inputs.compatibility-request || '' }}
+      run: python3 -I "$GITHUB_ACTION_PATH/script_plan.py" >> "$GITHUB_OUTPUT"
