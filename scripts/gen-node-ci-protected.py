@@ -681,17 +681,17 @@ def isolate_candidate_runtime_cache(document: str) -> str:
     if step_end == -1:
         raise SystemExit(f"protected candidate step {step_name!r} must not be last")
     step = document[step_start:step_end]
-    plan_env_lines = [
+    plan_entries_env_lines = [
         line
         for line in step.splitlines(keepends=True)
-        if line.startswith("          CI_SCRIPT_PLAN:")
+        if line.startswith("          SCRIPT_PLAN_ENTRIES_FILE:")
     ]
-    if len(plan_env_lines) != 1:
+    if len(plan_entries_env_lines) != 1:
         raise SystemExit(
-            f"protected candidate script plan environment changed: {len(plan_env_lines)}"
+            f"protected candidate script-plan entries environment changed: {len(plan_entries_env_lines)}"
         )
-    plan_env = plan_env_lines[0]
-    isolated_plan_env = plan_env + (
+    plan_entries_env = plan_entries_env_lines[0]
+    isolated_plan_env = plan_entries_env + (
         "          CANDIDATE_CACHE_ROOT: "
         "${{ runner.temp }}/verjson-candidate-caches-${{ github.run_id }}-"
         "${{ github.run_attempt }}-${{ github.job }}\n"
@@ -700,7 +700,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
         "          VERJSON_CHANGELOG_CONTRACT_SHA256: "
         "${{ steps.warm-changelog-contract.outputs.contract_sha256 }}\n"
     )
-    step = step.replace(plan_env, isolated_plan_env, 1)
+    step = step.replace(plan_entries_env, isolated_plan_env, 1)
     # Only the source execution region reads these: it stages the verified
     # runtime cache into its sandbox (#1798). The protected runner below
     # copies its baseline from npm_config_cache instead.
@@ -1816,6 +1816,16 @@ def configure_protected_baseline(document: str) -> str:
         "COMPATIBILITY_RANGES: ${{ inputs.secretless-compatibility-ranges }}",
         build_request,
     )
+    compatibility_action_request = (
+        "compatibility-request: ${{ needs.acquire-secretless-dependencies.outputs.protected-baseline-request "
+        "|| inputs.secretless-compatibility-ranges }}"
+    )
+    if "compatibility-request: ${{ inputs.secretless-compatibility-ranges }}" not in build:
+        raise SystemExit("protected node-ci compatibility action input boundary drifted")
+    build = build.replace(
+        "compatibility-request: ${{ inputs.secretless-compatibility-ranges }}",
+        compatibility_action_request,
+    )
     expected_provenance = (
         "          EXPECTED_COMPATIBILITY_PROVENANCE_SHA256: ${{ needs.acquire-secretless-dependencies.outputs.compatibility-provenance-sha256 }}\n"
     )
@@ -1913,7 +1923,7 @@ def render() -> str:
         + "      - name: Run exact credentialless consumer script plan\n",
     )
     default_step_start = "      - run: npm run build\n"
-    default_step_end = "      - name: Run runtime-resolved compatibility lanes without credentials\n"
+    default_step_end = "      - name: Parse compatibility script service grant\n"
     grouped_default = """      - name: Run default build, typecheck, test, and lint plan
         if: needs.eligibility.outputs.should-run != 'false' && !(inputs.secretless-pr || inputs.secretless-trusted-ref)
         run: |
@@ -1938,7 +1948,7 @@ def render() -> str:
         "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
         "inputs.secretless-compatibility-ranges != ''"
     )
-    if document.count(legacy_compatibility_if) != 1:
+    if document.count(legacy_compatibility_if) != 2:
         raise SystemExit("protected node-ci compatibility runtime gate drifted")
     document = document.replace(legacy_compatibility_if, compatibility_if)
     document = replace_once(

@@ -17,6 +17,8 @@ from unittest.mock import patch
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / ".github/actions/node-ci-script-plan"))
+import script_plan
 WORKFLOW = ROOT / ".github/workflows/node-ci.yml"
 PROTECTED_WORKFLOW = ROOT / ".github/workflows/node-ci-protected.yml"
 COMMAND_FILE_ENV = (
@@ -96,7 +98,7 @@ def candidate_service_env_from_script(script, environment):
 def compatibility_service_env_from_script(
     script, script_name, plan_source, db_env, cache_env, environment,
 ):
-    start = script.index("def compatibility_service_script_requires_services(")
+    start = script.index("blocked_service_env = {")
     end = script.index(
         "compatibility_service_names = configured_compatibility_service_names(", start
     )
@@ -110,9 +112,17 @@ def compatibility_service_env_from_script(
         "urlsplit": urlsplit,
     }
     exec(textwrap.dedent(script[start:end]), namespace)
-    with patch.dict(os.environ, environment, clear=True):
+    requires_services = script_plan.requires_services_for_script(script_name, plan_source)
+    action_environment = environment.copy()
+    action_environment["COMPATIBILITY_REQUIRES_SERVICES"] = (
+        "true" if requires_services else "false"
+    )
+    with patch.dict(os.environ, action_environment, clear=True):
         return namespace["compatibility_service_environment"](
-            script_name, plan_source, db_env, cache_env, environment,
+            os.environ["COMPATIBILITY_REQUIRES_SERVICES"] == "true",
+            db_env,
+            cache_env,
+            environment,
         )
 
 
@@ -187,12 +197,37 @@ def candidate_child_environment_from_script(script, environment):
 
 
 def candidate_plan_normalizer(script):
-    start = script.index("script_pattern = re.compile")
-    end = script.index("checkout_root = Path.cwd().resolve()", start)
-    source = textwrap.dedent(script[start:end])
-    namespace = {"json": json, "os": os, "re": re, "sys": sys, "Path": Path}
-    exec(source, namespace)
-    return namespace["normalize_plan"]
+    def normalize(plan, _checkout_root, _workflow_name, _package_file):
+        try:
+            entries, default_plan = script_plan.normalize_outputs(json.dumps(plan), "")
+        except script_plan.ScriptPlanError as error:
+            raise SystemExit(str(error)) from error
+
+        with tempfile.TemporaryDirectory() as runner_temp:
+            entries_file = script_plan.write_normalized_entries(entries, runner_temp)
+            action_environment = {
+                "SCRIPT_PLAN_DEFAULT_PLAN": str(default_plan).lower(),
+                "SCRIPT_PLAN_ENTRIES_FILE": entries_file,
+            }
+            assert action_environment["SCRIPT_PLAN_DEFAULT_PLAN"] == "false"
+            assert Path(entries_file).parent == Path(runner_temp)
+            normalized_entries = json.loads(
+                Path(action_environment["SCRIPT_PLAN_ENTRIES_FILE"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        return [
+            (
+                entry["manifestPath"],
+                entry["script"],
+                entry["unsetEnv"],
+                entry["requiresServices"],
+            )
+            for entry in normalized_entries
+        ]
+
+    return normalize
 
 
 def candidate_service_validation_source(script, end_marker):
@@ -1257,7 +1292,10 @@ def main():
         ) == candidate_service_validation_source(
             compatibility_step["run"], "def configured_compatibility_service_names("
         )
-        assert compatibility_step["env"]["CI_SCRIPT_PLAN"] == "${{ inputs.secretless-ci-script-plan }}"
+        assert "CI_SCRIPT_PLAN" not in compatibility_step["env"]
+        assert compatibility_step["env"]["COMPATIBILITY_REQUIRES_SERVICES"] == (
+            "${{ steps.compatibility-script-plan.outputs.requires-services }}"
+        )
         assert compatibility_step["env"]["DB_ENV"] == "${{ inputs.db-env }}"
         assert compatibility_step["env"]["CACHE_ENV"] == "${{ inputs.cache-env }}"
         assert compatibility_step["env"]["VERJSON_CI_TRUSTED_DB_HOST"] == (
@@ -1346,7 +1384,13 @@ def main():
             assert '"COREPACK_ENABLE_NETWORK": "0"' in script_plan["run"]
             assert '"COREPACK_HOME": str(corepack_home) if corepack_home is not None' in script_plan["run"]
             assert "RUN_DEFAULTS" not in script_plan["env"]
-            assert "run_defaults = not plan_source" in script_plan["run"]
+            assert 'run_defaults = os.environ.get("SCRIPT_PLAN_DEFAULT_PLAN") == "true"' in script_plan["run"]
+            assert script_plan["env"]["SCRIPT_PLAN_DEFAULT_PLAN"] == (
+                "${{ steps.node-ci-script-plan.outputs.default-plan }}"
+            )
+            assert script_plan["env"]["SCRIPT_PLAN_ENTRIES_FILE"] == (
+                "${{ steps.node-ci-script-plan.outputs.entries-file }}"
+            )
             assert "if run_defaults:" in script_plan["run"]
             assert candidate_variables_for_script(script_plan["run"], False) == {"CI": "true"}
             assert candidate_variables_for_script(script_plan["run"], True) == {

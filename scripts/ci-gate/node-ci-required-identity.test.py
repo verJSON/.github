@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -14,10 +15,14 @@ import uuid
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+SCRIPT_PLAN_ACTION = ROOT / ".github/actions/node-ci-script-plan"
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(SCRIPT_PLAN_ACTION))
+import script_plan as shared_script_plan
 LEGACY = ROOT / ".github/workflows/node-ci.yml"
 PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 HEAD = "a" * 40
-LEGACY_SHA256 = "7a9364572cfbb55e7e20fac2dd5a67accfde5dce447dfd9a2bb263d9300f868f"
+LEGACY_SHA256 = "9d779cc7ee2bbfb301e15fa7099ab56fc159244d6a811527e2f49293b565d34e"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
@@ -87,7 +92,8 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         self.assertLess(steps.index(warm), steps.index(plan))
         self.assertIn("inputs.secretless-pr || inputs.secretless-trusted-ref", warm["if"])
         self.assertNotIn("RUN_DEFAULTS", plan["env"])
-        self.assertIn("run_defaults = not plan_source", plan["run"])
+        self.assertIn('run_defaults = os.environ.get("SCRIPT_PLAN_DEFAULT_PLAN") == "true"', plan["run"])
+        self.assertIn("SCRIPT_PLAN_ENTRIES_FILE", plan["env"])
         self.assertIn('"$RUNNER_TEMP/', cache_setup["run"])
         self.assertNotIn("$GITHUB_WORKSPACE", cache_setup["run"])
         self.assertEqual(plan["if"], warm["if"])
@@ -533,6 +539,14 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         contract.chmod(0o400)
         return cache_root, reference, contract_bytes
 
+    def script_plan_environment(self, runner_temp, plan_source):
+        entries, default_plan = shared_script_plan.normalize_outputs(plan_source, "")
+        entries_path = shared_script_plan.write_normalized_entries(entries, str(runner_temp))
+        return {
+            "SCRIPT_PLAN_DEFAULT_PLAN": "true" if default_plan else "false",
+            "SCRIPT_PLAN_ENTRIES_FILE": entries_path,
+        }
+
     def run_candidate_plan(
         self,
         cache_setup,
@@ -723,6 +737,8 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                 shadow_npm.write_text("#!/usr/bin/env bash\nexit 91\n", encoding="utf-8")
                 shadow_npm.chmod(0o755)
                 path = f"{shadow_bin}:{path}"
+            plan_value = ["first", "second"] if script_plan is None else script_plan
+            plan_environment = self.script_plan_environment(runner_temp, json.dumps(plan_value))
             env = {
                 **os.environ,
                 "PATH": path,
@@ -730,9 +746,7 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                 "RUNNER_ENVIRONMENT": "github-hosted",
                 "RUNNER_OS": "Linux",
                 "GITHUB_ENV": str(command_file),
-                "CI_SCRIPT_PLAN": json.dumps(
-                    ["first", "second"] if script_plan is None else script_plan
-                ),
+                **plan_environment,
                 "CANDIDATE_CACHE_ROOT": str(runner_temp / "verjson-candidate-caches-test"),
                 "npm_config_cache": str(baseline),
                 "RUNNER_TOOL_CACHE": str(tool_bin.parent),
@@ -872,7 +886,7 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                             "RUNNER_ENVIRONMENT": "github-hosted",
                             "RUNNER_OS": "Linux",
                             "GITHUB_ENV": str(command_file),
-                            "CI_SCRIPT_PLAN": '["first"]',
+                            **self.script_plan_environment(runner_temp, '["first"]'),
                             "CANDIDATE_CACHE_ROOT": str(baseline),
                             "npm_config_cache": str(baseline),
                             "VERJSON_CHANGELOG_TOOL_CACHE": str(changelog_cache_root),
@@ -1372,7 +1386,7 @@ PY
                     "RUNNER_ENVIRONMENT": "github-hosted",
                     "RUNNER_OS": "Linux",
                     "GITHUB_ENV": str(command_file),
-                    "CI_SCRIPT_PLAN": '["first"]',
+                    **self.script_plan_environment(runner_temp, '["first"]'),
                     "CANDIDATE_CACHE_ROOT": str(runner_temp / "verjson-candidate-caches-test"),
                     "npm_config_cache": str(baseline),
                     "RUNNER_TOOL_CACHE": str(tool_bin.parent),

@@ -100,7 +100,9 @@ assert jobs["acquire-secretless-dependencies"]["outputs"]["transfer-encryption-k
 # plan is supplied, so it runs for every admitted secretless lane.
 assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in plan["if"]
 assert "RUN_DEFAULTS" not in plan["env"]
-assert "run_defaults = not plan_source" in plan["run"]
+assert 'run_defaults = os.environ.get("SCRIPT_PLAN_DEFAULT_PLAN") == "true"' in plan["run"]
+assert "SCRIPT_PLAN_DEFAULT_PLAN" in plan["env"]
+assert "SCRIPT_PLAN_ENTRIES_FILE" in plan["env"]
 assert "if run_defaults:" in plan["run"]
 
 # The credentialless job still receives no package-read credential.
@@ -412,14 +414,34 @@ else
   fail "the tamper fixture could not be packaged"
 fi
 
-python3 - "$workflow" "$tmp/plan.sh" <<'PY'
+python3 - "$workflow" "$tmp" "$root" <<'PY'
+import shlex
 import sys
+from pathlib import Path
 import yaml
 
 doc = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 step = next(step for job in doc["jobs"].values() for step in job.get("steps", [])
             if step.get("name") == "Run exact credentialless consumer script plan")
-open(sys.argv[2], "w", encoding="utf-8").write(step["run"])
+temporary = sys.argv[2]
+parser = shlex.quote(str(Path(sys.argv[3]) / ".github/actions/node-ci-script-plan/script_plan.py"))
+executor = shlex.quote(str(Path(temporary) / "plan-executor.sh"))
+Path(temporary, "plan-executor.sh").write_text(step["run"], encoding="utf-8")
+wrapper = f'''set -euo pipefail
+plan_output="$(SCRIPT_PLAN_MODE=normalize SCRIPT_PLAN_SOURCE="${{CI_SCRIPT_PLAN:-}}" \\
+  NESTED_MANIFESTS_SOURCE="${{NESTED_MANIFESTS:-}}" RUNNER_TEMP="${{RUNNER_TEMP:?}}" \\
+  python3 -I {parser})"
+mapfile -t plan_outputs <<< "$plan_output"
+[[ "${{#plan_outputs[@]}}" -eq 2 ]] || exit 1
+[[ "${{plan_outputs[0]}}" == entries-file=* && "${{plan_outputs[1]}}" == default-plan=* ]] || exit 1
+SCRIPT_PLAN_ENTRIES_FILE="${{plan_outputs[0]#entries-file=}}"
+SCRIPT_PLAN_DEFAULT_PLAN="${{plan_outputs[1]#default-plan=}}"
+case "$SCRIPT_PLAN_ENTRIES_FILE" in "$RUNNER_TEMP"/*) ;; *) exit 1 ;; esac
+export SCRIPT_PLAN_ENTRIES_FILE SCRIPT_PLAN_DEFAULT_PLAN
+unset CI_SCRIPT_PLAN
+exec bash {executor}
+'''
+Path(temporary, "plan.sh").write_text(wrapper, encoding="utf-8")
 PY
 
 plan_fixture="$tmp/plan-fixture"

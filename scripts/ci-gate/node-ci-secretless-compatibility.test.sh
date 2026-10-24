@@ -38,6 +38,11 @@ chmod +x "$toolchain_root/real-npm-exec" "$tool_bin/node" "$tool_bin/npm"
 export PATH="$tool_bin:$PATH" RUNNER_TOOL_CACHE="$tool_cache" RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; failures=$((failures + 1)); }
+copy_node_ci_script_plan_action() {
+  local destination="$1"
+  mkdir -p "$destination/.github/actions"
+  cp -a "$root/.github/actions/node-ci-script-plan" "$destination/.github/actions/"
+}
 
 if grep -qF 'Each top-level checkout entry other than `node_modules` is a bind mountpoint' "$documentation" \
     && grep -qF 'Linux reports that operation as `EBUSY`' "$documentation"; then
@@ -148,9 +153,10 @@ else
   fail "positive-failure diagnostics expose unknown stderr or lose exact cause categories"
 fi
 
-python3 - "$workflow" "$tmp" "$protected_workflow" <<'PY'
+python3 - "$workflow" "$tmp" "$protected_workflow" "$root" <<'PY'
 import sys
 import os
+import shlex
 import subprocess
 from pathlib import Path
 import yaml
@@ -268,9 +274,32 @@ for name, filename in {
     "Package bounded credential-free npm cache": "package.sh",
     "Decrypt run-scoped secretless dependency payload": "decrypt.sh",
     "Install from verified secretless npm cache": "install.sh",
-    "Run runtime-resolved compatibility lanes without credentials": "run-lanes.sh",
+    "Run runtime-resolved compatibility lanes without credentials": "run-lanes-executor.sh",
 }.items():
     Path(sys.argv[2], filename).write_text(steps[name]["run"], encoding="utf-8")
+parser = shlex.quote(str(Path(sys.argv[4]) / ".github/actions/node-ci-script-plan/script_plan.py"))
+def compatibility_wrapper(executor_name):
+    executor = shlex.quote(str(Path(sys.argv[2]) / executor_name))
+    return f'''set -euo pipefail
+if [[ -n "${{COMPATIBILITY_RANGES:-}}" ]]; then
+  action_output="$(SCRIPT_PLAN_MODE=compatibility SCRIPT_PLAN_SOURCE="${{CI_SCRIPT_PLAN:-}}" \\
+    COMPATIBILITY_REQUEST_SOURCE="$COMPATIBILITY_RANGES" RUNNER_TEMP="${{RUNNER_TEMP:-/tmp}}" \\
+    python3 -I {parser})"
+  mapfile -t action_outputs <<< "$action_output"
+  [[ "${{#action_outputs[@]}}" -eq 1 && "${{action_outputs[0]}}" == requires-services=* ]] || exit 1
+  COMPATIBILITY_REQUIRES_SERVICES="${{action_outputs[0]#requires-services=}}"
+else
+  COMPATIBILITY_REQUIRES_SERVICES=false
+fi
+[[ "$COMPATIBILITY_REQUIRES_SERVICES" == true || "$COMPATIBILITY_REQUIRES_SERVICES" == false ]] || exit 1
+export COMPATIBILITY_REQUIRES_SERVICES
+unset CI_SCRIPT_PLAN
+exec bash {executor}
+'''
+
+Path(sys.argv[2], "run-lanes.sh").write_text(
+    compatibility_wrapper("run-lanes-executor.sh"), encoding="utf-8"
+)
 assert jobs["acquire-secretless-dependencies"]["permissions"] == {"contents": "read", "packages": "read"}
 assert jobs["build-test"]["permissions"] == {"contents": "read"}
 # The hosted-lane eligibility guard is executed against stubbed inputs by
@@ -286,8 +315,11 @@ protected_steps = {
 protected_runner = protected_steps[
     "Run runtime-resolved compatibility lanes without credentials"
 ]
-Path(sys.argv[2], "protected-run-lanes.sh").write_text(
+Path(sys.argv[2], "protected-run-lanes-executor.sh").write_text(
     protected_runner["run"], encoding="utf-8"
+)
+Path(sys.argv[2], "protected-run-lanes.sh").write_text(
+    compatibility_wrapper("protected-run-lanes-executor.sh"), encoding="utf-8"
 )
 for name in ("GH_TOKEN", "GITHUB_TOKEN", "NODE_AUTH_TOKEN", "NPM_TOKEN",
              "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL"):
@@ -1277,7 +1309,7 @@ fi
 # arity re-indexes the slice onto a source path or a flag, and the guard stops
 # covering the real target without failing. Exercise the derivation directly
 # with a differently-shaped list rather than trusting the comment.
-python3 - "$tmp/run-lanes.sh" "$tmp/protected-run-lanes.sh" <<'PY'
+python3 - "$tmp/run-lanes-executor.sh" "$tmp/protected-run-lanes-executor.sh" <<'PY'
 import ast
 import re
 import subprocess
@@ -1455,7 +1487,8 @@ if [ "${VERJSON_DIAGNOSTIC_MUTATION_CHILD:-false}" != true ]; then
   mutation_root="$tmp/missing-bwrap-mutation"
   mkdir -p "$mutation_root/.github/workflows" "$mutation_root/scripts/ci-gate" \
     "$mutation_root/docs"
-  cp "$0" "$mutation_root/scripts/ci-gate/node-ci-secretless-compatibility.test.sh"
+  copy_node_ci_script_plan_action "$mutation_root"
+cp "$0" "$mutation_root/scripts/ci-gate/node-ci-secretless-compatibility.test.sh"
   cp "$root/scripts/container_dependency_transfer.py" "$mutation_root/scripts/container_dependency_transfer.py"
   cp "$protected_workflow" "$mutation_root/.github/workflows/node-ci-protected.yml"
   cp "$documentation" "$mutation_root/docs/node-workflows.md"
@@ -1500,7 +1533,8 @@ PY
   cache_mutation_root="$tmp/ambient-cache-mutation"
   mkdir -p "$cache_mutation_root/.github/workflows" "$cache_mutation_root/scripts/ci-gate" \
     "$cache_mutation_root/docs"
-  cp "$0" "$cache_mutation_root/scripts/ci-gate/node-ci-secretless-compatibility.test.sh"
+  copy_node_ci_script_plan_action "$cache_mutation_root"
+cp "$0" "$cache_mutation_root/scripts/ci-gate/node-ci-secretless-compatibility.test.sh"
   cp "$root/scripts/container_dependency_transfer.py" "$cache_mutation_root/scripts/container_dependency_transfer.py"
   cp "$protected_workflow" "$cache_mutation_root/.github/workflows/node-ci-protected.yml"
   cp "$documentation" "$cache_mutation_root/docs/node-workflows.md"
@@ -1544,7 +1578,8 @@ PY
   mask_mutation_root="$tmp/ambient-mask-mutation"
   mkdir -p "$mask_mutation_root/.github/workflows" "$mask_mutation_root/scripts/ci-gate" \
     "$mask_mutation_root/docs"
-  cp "$0" "$mask_mutation_root/scripts/ci-gate/node-ci-secretless-compatibility.test.sh"
+  copy_node_ci_script_plan_action "$mask_mutation_root"
+cp "$0" "$mask_mutation_root/scripts/ci-gate/node-ci-secretless-compatibility.test.sh"
   cp "$root/scripts/container_dependency_transfer.py" "$mask_mutation_root/scripts/container_dependency_transfer.py"
   cp "$protected_workflow" "$mask_mutation_root/.github/workflows/node-ci-protected.yml"
   cp "$documentation" "$mask_mutation_root/docs/node-workflows.md"
@@ -1578,7 +1613,8 @@ PY
   symlink_mutation_root="$tmp/workspace-symlink-mutation"
   mkdir -p "$symlink_mutation_root/.github/workflows" \
     "$symlink_mutation_root/scripts/ci-gate" "$symlink_mutation_root/docs"
-  cp "$0" "$symlink_mutation_root/scripts/ci-gate/node-ci-secretless-compatibility.test.sh"
+  copy_node_ci_script_plan_action "$symlink_mutation_root"
+cp "$0" "$symlink_mutation_root/scripts/ci-gate/node-ci-secretless-compatibility.test.sh"
   cp "$root/scripts/container_dependency_transfer.py" "$symlink_mutation_root/scripts/container_dependency_transfer.py"
   cp "$protected_workflow" "$symlink_mutation_root/.github/workflows/node-ci-protected.yml"
   cp "$documentation" "$symlink_mutation_root/docs/node-workflows.md"
@@ -1610,7 +1646,8 @@ PY
   public_cache_link_mutation_root="$tmp/public-cache-file-link-mutation"
   mkdir -p "$public_cache_link_mutation_root/.github/workflows" \
     "$public_cache_link_mutation_root/scripts/ci-gate" "$public_cache_link_mutation_root/docs"
-  cp "$0" "$public_cache_link_mutation_root/scripts/ci-gate/node-ci-secretless-compatibility.test.sh"
+  copy_node_ci_script_plan_action "$public_cache_link_mutation_root"
+cp "$0" "$public_cache_link_mutation_root/scripts/ci-gate/node-ci-secretless-compatibility.test.sh"
   cp "$root/scripts/container_dependency_transfer.py" "$public_cache_link_mutation_root/scripts/container_dependency_transfer.py"
   cp "$protected_workflow" "$public_cache_link_mutation_root/.github/workflows/node-ci-protected.yml"
   cp "$documentation" "$public_cache_link_mutation_root/docs/node-workflows.md"
@@ -1645,7 +1682,8 @@ PY
   absent_cache_mutation_root="$tmp/absent-public-cache-mutation"
   mkdir -p "$absent_cache_mutation_root/.github/workflows" \
     "$absent_cache_mutation_root/scripts/ci-gate" "$absent_cache_mutation_root/docs"
-  cp "$0" "$absent_cache_mutation_root/scripts/ci-gate/node-ci-secretless-compatibility.test.sh"
+  copy_node_ci_script_plan_action "$absent_cache_mutation_root"
+cp "$0" "$absent_cache_mutation_root/scripts/ci-gate/node-ci-secretless-compatibility.test.sh"
   cp "$root/scripts/container_dependency_transfer.py" "$absent_cache_mutation_root/scripts/container_dependency_transfer.py"
   cp "$protected_workflow" "$absent_cache_mutation_root/.github/workflows/node-ci-protected.yml"
   cp "$documentation" "$absent_cache_mutation_root/docs/node-workflows.md"

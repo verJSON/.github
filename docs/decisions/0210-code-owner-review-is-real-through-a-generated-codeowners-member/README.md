@@ -488,7 +488,15 @@ beyond the dated authorization; it extends the suspension recorded above.
     record confirms `--admin` was used. No local `assert-mergeable-head.sh` output is retained, so
     this entry makes no claim about that command's result. The merge of the PR adding this entry is
     recorded by the next ledger update.
-19. **Authorization:** the verbatim text and date above.
+19. **Admin merge of Node CI script-plan workflow adoption.** Verjson/.github#1909
+("fix(ci): preserve script-plan parser compatibility," `Part #1869`) merged
+2026-10-24 at head `cf03e525521d0349f9cafb428342aa5302f33ec3` and merge commit
+`3b95498a2b59401c95986a1fec539a2aa4cef2b8`. From fetched, clean `origin/main`,
+`assert-mergeable-head.sh` exited 0 and printed `true`; the check rollup had 20
+SUCCESS and 5 SKIPPED conclusions. GitHub reports merged by `pyousefi`, and the
+operator campaign record confirms `--admin` was used. `gpt-6-astra`, `gpt-6.1-sol`,
+and `code-reviewer` reviewed the final head and reported no findings.
+20. **Authorization:** the verbatim text and date above.
 
 ### Exit condition ("CI optimized and working"), measurable
 

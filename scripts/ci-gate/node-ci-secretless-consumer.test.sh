@@ -24,10 +24,11 @@ trap 'chmod -R u+rwx "$tmp" 2>/dev/null; rm -rf "$tmp"' EXIT
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; failures=$((failures + 1)); }
 
-python3 - "$workflow" "$tmp" <<'PY' \
+python3 - "$workflow" "$tmp" "$root" <<'PY' \
   && pass "consumer extensions remain validated, credentialless, and canonical" \
   || fail "consumer extension workflow structure violates the secretless contract"
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -64,6 +65,23 @@ assert 'find "$AUXILIARY_CHECKOUT_PATH" -depth -delete' in cleanup["run"]
 build = doc["jobs"]["build-test"]
 rebuild = next(step for step in build["steps"] if step.get("name") == "Rebuild exact approved lifecycle packages without credentials")
 plan = next(step for step in build["steps"] if step.get("name") == "Run exact credentialless consumer script plan")
+def run_with_action_plan(run_script: str) -> str:
+    parser = shlex.quote(str(Path(sys.argv[3]) / ".github/actions/node-ci-script-plan/script_plan.py"))
+    return f'''set -euo pipefail
+plan_output="$(SCRIPT_PLAN_MODE=normalize SCRIPT_PLAN_SOURCE="${{CI_SCRIPT_PLAN:-}}" \\
+  NESTED_MANIFESTS_SOURCE="${{NESTED_MANIFESTS:-}}" RUNNER_TEMP="${{RUNNER_TEMP:?}}" \\
+  python3 -I {parser})"
+mapfile -t plan_outputs <<< "$plan_output"
+[[ "${{#plan_outputs[@]}}" -eq 2 ]] || exit 1
+[[ "${{plan_outputs[0]}}" == entries-file=* && "${{plan_outputs[1]}}" == default-plan=* ]] || exit 1
+SCRIPT_PLAN_ENTRIES_FILE="${{plan_outputs[0]#entries-file=}}"
+SCRIPT_PLAN_DEFAULT_PLAN="${{plan_outputs[1]#default-plan=}}"
+case "$SCRIPT_PLAN_ENTRIES_FILE" in "$RUNNER_TEMP"/*) ;; *) exit 1 ;; esac
+export SCRIPT_PLAN_ENTRIES_FILE SCRIPT_PLAN_DEFAULT_PLAN
+unset CI_SCRIPT_PLAN
+{run_script}'''
+
+plan_runner = run_with_action_plan(plan["run"])
 assert "inputs.secretless-pr" in rebuild["if"] and "secrets." not in str(rebuild.get("env", {}))
 assert "inputs.secretless-pr" in plan["if"] and "secrets." not in str(plan.get("env", {}))
 assert '"--tmpfs", "/"' in plan["run"]
@@ -97,7 +115,9 @@ assert "exec /usr/bin/python3 -I - <<'PY'" in compatibility["run"]
 for command_file in ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"):
     assert f'"{command_file}"' in compatibility["run"]
 assert "RUN_DEFAULTS" not in plan["env"]
-assert "run_defaults = not plan_source" in plan["run"]
+assert 'run_defaults = os.environ.get("SCRIPT_PLAN_DEFAULT_PLAN") == "true"' in plan["run"]
+assert plan["env"]["SCRIPT_PLAN_DEFAULT_PLAN"] == "${{ steps.node-ci-script-plan.outputs.default-plan }}"
+assert plan["env"]["SCRIPT_PLAN_ENTRIES_FILE"] == "${{ steps.node-ci-script-plan.outputs.entries-file }}"
 assert "if run_defaults:" in plan["run"]
 assert "inputs.secretless-pr" in plan["if"] and "inputs.secretless-trusted-ref" in plan["if"]
 assert "subprocess.run(" in plan["run"]
@@ -217,7 +237,6 @@ runner_environment.update({
     "HOST_PATH_PROBE_LOG": "/workspace/node_modules/.host-path-probes",
     "CI_SCRIPT_PLAN": "",
     "NESTED_MANIFESTS": "",
-    "RUN_DEFAULTS": "true",
     "RUNNER_ENVIRONMENT": "github-hosted",
     "RUNNER_OS": "Linux",
     "GITHUB_WORKSPACE": str(fixture),
@@ -245,7 +264,7 @@ assert control.returncode == 0 and startup_marker.exists(), "hostile BASH_ENV co
 startup_marker.unlink()
 runner_environment["BASH_ENV"] = plan["env"]["BASH_ENV"]
 result = subprocess.run(
-    ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", plan["run"]],
+    ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", plan_runner],
     cwd=fixture,
     env=runner_environment,
     check=False,
@@ -270,9 +289,8 @@ command_log.write_text("", encoding="utf-8")
 service_log.write_text("", encoding="utf-8")
 host_path_probe_log.write_text("", encoding="utf-8")
 runner_environment["CI_SCRIPT_PLAN"] = " \t "
-runner_environment["RUN_DEFAULTS"] = "false"
 result = subprocess.run(
-    ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", plan["run"]],
+    ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", plan_runner],
     cwd=fixture,
     env=runner_environment,
     check=False,
@@ -292,7 +310,6 @@ assert service_log.read_text(encoding="utf-8").splitlines() == [
 command_log.write_text("", encoding="utf-8")
 service_log.write_text("", encoding="utf-8")
 runner_environment["CI_SCRIPT_PLAN"] = ""
-runner_environment["RUN_DEFAULTS"] = "true"
 assert (fixture / "node_modules/.host-path-probes").read_text(encoding="utf-8").splitlines() == [
     "hidden",
     "hidden",
@@ -314,7 +331,8 @@ names = {
 for job in doc["jobs"].values():
     for step in job.get("steps", []):
         if step.get("name") in names:
-            Path(sys.argv[2], names[step["name"]]).write_text(step["run"], encoding="utf-8")
+            run_script = plan_runner if step["name"] == "Run exact credentialless consumer script plan" else step["run"]
+            Path(sys.argv[2], names[step["name"]]).write_text(run_script, encoding="utf-8")
 PY
 
 commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import yaml
 from pathlib import Path
 
 
@@ -17,6 +19,11 @@ ROOT = Path(__file__).resolve().parents[2]
 ACTION = ROOT / ".github/actions/node-ci-script-plan"
 MODULE_PATH = ACTION / "script_plan.py"
 GOLDEN = ROOT / "scripts/ci-gate/fixtures/node-ci-script-plan/normalized.golden.json"
+SCRIPT_PLAN_ACTION_SHA = "3b95498a2b59401c95986a1fec539a2aa4cef2b8"
+PINNED_ACTION_FILE_HASHES = {
+    "action.yml": "d71afdb3454ed36ea55a2d617d34b61a42ad341ea86d5caeba77710c4a90b93a",
+    "script_plan.py": "063edbc0e05c5ca369b5590c8049873a07b34f349953c7b3343f9eac602c2d6a",
+}
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(ACTION))
 import script_plan  # noqa: E402
@@ -111,6 +118,44 @@ class GoldenPlanTests(unittest.TestCase):
                 "unit:test",
                 ' ["unit:test"] ',
             )
+
+    def test_blank_action_plan_expands_default_script_entries(self) -> None:
+        entries, default_plan = script_plan.normalize_outputs("", "")
+        self.assertEqual([], entries)
+        self.assertTrue(default_plan)
+        workflow = yaml.safe_load(
+            (ROOT / ".github/workflows/node-ci.yml").read_text(encoding="utf-8")
+        )
+        run = next(
+            step["run"]
+            for step in workflow["jobs"]["build-test"]["steps"]
+            if step.get("name") == "Run exact credentialless consumer script plan"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            checkout_root = Path(directory)
+            (checkout_root / "package.json").write_text(
+                json.dumps({"scripts": {
+                    "build": "true",
+                    "typecheck": "true",
+                    "test": "true",
+                    "lint": "true",
+                }}),
+                encoding="utf-8",
+            )
+            normalized = []
+            start = run.index("if run_defaults:\n")
+            end = run.index("if any(requires_services", start)
+            exec(run[start:end], {
+                "run_defaults": default_plan,
+                "checkout_root": checkout_root,
+                "normalized": normalized,
+                "json": json,
+                "sys": sys,
+            })
+        self.assertEqual(
+            ["build", "typecheck", "test", "lint"],
+            [name for _directory, name, _unset_env, _requires_services in normalized],
+        )
 
     def test_duplicate_json_members_keep_python_json_last_value_behavior(self) -> None:
         source = '{"script":"build","requiresServices":false,"requiresServices":true}'
@@ -303,6 +348,34 @@ class GoldenPlanTests(unittest.TestCase):
             ['run: python3 -I "$GITHUB_ACTION_PATH/script_plan.py" >> "$GITHUB_OUTPUT"'],
         )
         self.assertNotIn("${{ inputs.", run_lines[0])
+
+
+
+class WorkflowAdoptionTests(unittest.TestCase):
+    def test_both_node_ci_workflows_use_the_pinned_shared_parser(self) -> None:
+        action_ref = (
+            "Verjson/.github/.github/actions/node-ci-script-plan@"
+            f"{SCRIPT_PLAN_ACTION_SHA}"
+        )
+        for workflow_path in (
+            ROOT / ".github/workflows/node-ci.yml",
+            ROOT / ".github/workflows/node-ci-protected.yml",
+        ):
+            with self.subTest(workflow=workflow_path.name):
+                workflow = workflow_path.read_text(encoding="utf-8")
+                self.assertEqual(workflow.count(f"uses: {action_ref}"), 2)
+                self.assertNotIn("def normalize_plan(plan, directory", workflow)
+                self.assertNotIn("compatibility_service_script_requires_services", workflow)
+                self.assertIn(
+                    "COMPATIBILITY_REQUIRES_SERVICES: ${{ steps.compatibility-script-plan.outputs.requires-services }}",
+                    workflow,
+                )
+
+    def test_checked_in_action_files_match_the_immutable_workflow_pin(self) -> None:
+        for filename, expected_sha256 in PINNED_ACTION_FILE_HASHES.items():
+            with self.subTest(filename=filename):
+                actual_sha256 = hashlib.sha256((ACTION / filename).read_bytes()).hexdigest()
+                self.assertEqual(expected_sha256, actual_sha256)
 
 
 if __name__ == "__main__":
