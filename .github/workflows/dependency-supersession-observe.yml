@@ -50,7 +50,7 @@ jobs:
         run: |
           # Generated from scripts/app_client_id_contract.py.
           set -euo pipefail
-          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[A-Za-z0-9.]{8,126}$ ]]; then
+          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$ ]]; then
             printf '%s\n' '::error::GitHub App client ID is not accepted by the configured App policy' >&2
             exit 1
           fi

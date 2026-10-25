@@ -126,7 +126,7 @@ def main() -> int:
     mutations.append(("the temporary push_token secret", mutant, raw + "\nsecrets.push_token"))
 
     guardless = raw.replace(
-        'if [[ ! "$APP_CLIENT_ID" =~ ^Iv[A-Za-z0-9.]{8,126}$ ]]; then',
+        'if [[ ! "$APP_CLIENT_ID" =~ ^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$ ]]; then',
         "if true; then",
         1,
     )

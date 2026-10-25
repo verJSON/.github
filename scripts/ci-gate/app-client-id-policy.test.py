@@ -597,7 +597,11 @@ jobs:
         missing_adjacent_guard = source.replace(guard_id_line, guard_id_line.replace(guard["id"], "wrong_guard_id"), 1)
         self.assertTrue(any("not preceded" in item for item in gen_app_client_id_guards._guard_problems(path, missing_adjacent_guard)))
 
-        mutated_body = source.replace("Iv[A-Za-z0-9.]{8,126}", "Iv[A-Za-z0-9.]{8,125}", 1)
+        mutated_body = source.replace(
+            "Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}",
+            "Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,125}",
+            1,
+        )
         self.assertTrue(any("body drifted" in item for item in gen_app_client_id_guards._guard_problems(path, mutated_body)))
 
         self.assertEqual(mint["if"], "${{ inputs.enforce }}")

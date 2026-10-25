@@ -104,7 +104,7 @@ found { print }
 ' "$workflow")"
 grep -qF 'APP_CLIENT_ID: "${{ inputs.release_app_client_id }}"' <<<"$client_id_guard" \
   && grep -qF 'LC_ALL: C' <<<"$client_id_guard" \
-  && grep -qF 'if [[ ! "$APP_CLIENT_ID" =~ ^Iv[A-Za-z0-9.]{8,126}$ ]]; then' <<<"$client_id_guard" \
+  && grep -qF 'if [[ ! "$APP_CLIENT_ID" =~ ^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$ ]]; then' <<<"$client_id_guard" \
   && pass "the release workflow uses the configured App client-ID policy before mint" \
   || fail "the release workflow does not use the shared client-ID guard"
 

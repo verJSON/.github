@@ -16,13 +16,13 @@ write token mint used only the writer ID.
 
 ADR 0099 leaves the complete client-ID grammar to the pinned token action and
 explicitly avoids assuming a character or length set. ADR 0201 later selected
-`^Iv[A-Za-z0-9.]{8,126}$` for the fleet-report inventory boundary. This ADR
+`^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$` for the fleet-report inventory boundary. This ADR
 resolves the conflict for canonical preflight checks without claiming that the
 pattern is GitHub's complete or permanent grammar.
 
 ## Decision
 
-1. Apply `^Iv[A-Za-z0-9.]{8,126}$` to the organization's currently configured
+1. Apply `^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$` to the organization's currently configured
    GitHub App client IDs. It preserves documented dotted `Iv1` IDs, rejects
    numeric App IDs, empty values, whitespace, shell metacharacters, non-ASCII
    characters, and values outside the configured length bounds. A future ID
