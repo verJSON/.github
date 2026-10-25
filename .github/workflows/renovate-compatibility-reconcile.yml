@@ -26,12 +26,17 @@ jobs:
       - name: Create the isolated observer directory
         working-directory: ${{ github.workspace }}
         run: mkdir -- ".renovate-compatibility-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}"
-      - name: Require the compatibility App client ID
+      - name: Validate GitHub App client ID
+        id: generated_app_client_id_renovate-compatibility-reconcile_observe_1
+        shell: bash
         env:
-          RENOVATE_COMPATIBILITY_CLIENT_ID: ${{ vars.RENOVATE_COMPATIBILITY_CLIENT_ID }}
+          APP_CLIENT_ID: "${{ vars.RENOVATE_COMPATIBILITY_CLIENT_ID }}"
+          LC_ALL: C
         run: |
-          if [[ -z "$RENOVATE_COMPATIBILITY_CLIENT_ID" || "$RENOVATE_COMPATIBILITY_CLIENT_ID" =~ ^[0123456789]+$ ]]; then
-            echo "::error::RENOVATE_COMPATIBILITY_CLIENT_ID must be the GitHub App client ID, not an empty or numeric legacy App ID."
+          # Generated from scripts/app_client_id_contract.py.
+          set -euo pipefail
+          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$ ]]; then
+            printf '%s\n' '::error::GitHub App client ID is not accepted by the configured App policy' >&2
             exit 1
           fi
       - name: Mint managed-repository compatibility App token

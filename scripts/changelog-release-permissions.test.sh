@@ -98,35 +98,36 @@ else
 fi
 
 client_id_guard="$(awk '
-  /^      - name: Require the release App client ID$/ { found = 1; next }
-  found && /^      - name:/ { exit }
-  found { print }
+/^[[:space:]]*- name: Validate GitHub App client ID$/ { found = 1; next }
+found && /^[[:space:]]*- name:/ { exit }
+found { print }
 ' "$workflow")"
-grep -qF '[[ -z "$RELEASE_APP_CLIENT_ID" || "$RELEASE_APP_CLIENT_ID" =~ ^[0123456789]+$ ]]' <<<"$client_id_guard" \
-  && pass "the release workflow rejects only empty and numeric legacy App IDs locally" \
-  || fail "the release workflow does not defer full client-ID validation to the pinned action"
+grep -qF 'APP_CLIENT_ID: "${{ inputs.release_app_client_id }}"' <<<"$client_id_guard" \
+  && grep -qF 'LC_ALL: C' <<<"$client_id_guard" \
+  && grep -qF 'if [[ ! "$APP_CLIENT_ID" =~ ^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$ ]]; then' <<<"$client_id_guard" \
+  && pass "the release workflow uses the configured App client-ID policy before mint" \
+  || fail "the release workflow does not use the shared client-ID guard"
 
 client_id_run="$(awk '
-  /^      - name: Require the release App client ID$/ { found = 1; next }
-  found && /^        run: \|$/ { run = 1; next }
-  run && /^      - name:/ { exit }
-  run { sub(/^          /, ""); print }
+/^[[:space:]]*- name: Validate GitHub App client ID$/ { found = 1; next }
+found && /^[[:space:]]*- name:/ { exit }
+found && /^[[:space:]]*run: \|$/ { run = 1; next }
+run { sub(/^          /, ""); print }
 ' "$workflow")"
 for valid_client_id in Iv23liIrniWY27YJKYDP Iv1.0123456789abcdef; do
-  if RELEASE_APP_CLIENT_ID="$valid_client_id" bash -c "$client_id_run" >/dev/null; then
-    pass "the release workflow delegates supported client ID '$valid_client_id' to the pinned action"
+  if APP_CLIENT_ID="$valid_client_id" LC_ALL=C bash -c "$client_id_run" >/dev/null 2>&1; then
+    pass "the release workflow accepts supported client ID '$valid_client_id'"
   else
     fail "the release workflow rejects supported client ID '$valid_client_id'"
   fi
 done
-for invalid_client_id in '' 4583107; do
-  if RELEASE_APP_CLIENT_ID="$invalid_client_id" bash -c "$client_id_run" >/dev/null 2>&1; then
-    fail "the release workflow accepts an empty or numeric legacy App ID"
+for invalid_client_id in '' 4583107 'Iv23liIrniWY27YJKYDP ' 'Ivabcdefgh$()' 'Iv23liÅbCdEfGh12'; do
+  if APP_CLIENT_ID="$invalid_client_id" LC_ALL=C bash -c "$client_id_run" >/dev/null 2>&1; then
+    fail "the release workflow accepts malformed App client ID '${invalid_client_id:-<empty>}'"
   else
-    pass "the release workflow rejects legacy App ID '${invalid_client_id:-<empty>}'"
+    pass "the release workflow rejects malformed App client ID '${invalid_client_id:-<empty>}'"
   fi
 done
-
 grep -qF 'git push --atomic origin \' "$workflow" \
   && grep -qF '"$release_commit:refs/heads/$DEFAULT_BRANCH" \' "$workflow" \
   && grep -qF '"refs/tags/$VERSION"' "$workflow" \

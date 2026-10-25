@@ -91,12 +91,17 @@ jobs:
             exit 1
           fi
           echo "Dispatched from $DEFAULT_BRANCH; proceeding."
-      - name: Require the release App client ID
+      - name: Validate GitHub App client ID
+        id: generated_app_client_id_changelog-release_release_1
+        shell: bash
         env:
-          RELEASE_APP_CLIENT_ID: ${{ inputs.release_app_client_id }}
+          APP_CLIENT_ID: "${{ inputs.release_app_client_id }}"
+          LC_ALL: C
         run: |
-          if [[ -z "$RELEASE_APP_CLIENT_ID" || "$RELEASE_APP_CLIENT_ID" =~ ^[0123456789]+$ ]]; then
-            echo "::error::RELEASE_APP_CLIENT_ID must be the GitHub App client ID, not an empty or numeric legacy App ID."
+          # Generated from scripts/app_client_id_contract.py.
+          set -euo pipefail
+          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$ ]]; then
+            printf '%s\n' '::error::GitHub App client ID is not accepted by the configured App policy' >&2
             exit 1
           fi
       - name: Mint repository-scoped release App token

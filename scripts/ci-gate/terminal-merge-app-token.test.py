@@ -5,11 +5,14 @@ from __future__ import annotations
 import copy
 import json
 import pathlib
+import sys
 
 import yaml
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+import app_client_id_contract
 WORKFLOW = ROOT / ".github/workflows/ai-privileged-merge.yml"
 TERMINAL = ROOT / "scripts/ci-gate/terminal-merge.sh"
 ROLE_INVENTORY = ROOT / "config/app-role-custody-inventory.json"
@@ -32,7 +35,7 @@ def validate(document: dict, raw: str) -> list[str]:
     secrets = call.get("secrets") or {}
     job = document["jobs"]["privileged_merge"]
     steps = job["steps"]
-    preflight = named_step(job, "Validate terminal merge App and target repository")
+    preflight = named_step(job, "Validate terminal merge target repository")
     authorize = named_step(job, "Authorize terminal merge from trusted metadata")
     receipt = named_step(job, "Revalidate independent review receipt")
     capture = named_step(job, "Capture closing issue references")
@@ -61,7 +64,7 @@ def validate(document: dict, raw: str) -> list[str]:
         problems.append("authorization repository token is not exactly read-only")
     preflight_run = preflight.get("run", "")
     for required in (
-        '[[ ! "$MERGE_APP_CLIENT_ID" =~ ^Iv[0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz]{18}$ ]]',
+        '[[ "$TARGET_REPO" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+$ ]]',
         '"$TARGET_REPO" = "$REPOSITORY_CONTEXT"',
         'owner="${TARGET_REPO%%/*}"',
         'repository="${TARGET_REPO#*/}"',
@@ -78,6 +81,19 @@ def validate(document: dict, raw: str) -> list[str]:
     }
     if mint.get("uses") != ACTION or mint.get("with") != expected_mint:
         problems.append("mint is not pinned to exact repository and merge permissions")
+    mint_index = steps.index(mint)
+    client_guard = steps[mint_index - 1] if mint_index else {}
+    guard_env = client_guard.get("env", {})
+    if (
+        client_guard.get("name") != "Validate GitHub App client ID"
+        or not str(client_guard.get("id", "")).startswith("generated_app_client_id_")
+        or client_guard.get("shell") != "bash"
+        or client_guard.get("run") != app_client_id_contract.CLIENT_ID_GUARD_RUN
+        or guard_env.get("APP_CLIENT_ID") != expected_mint["client-id"]
+        or guard_env.get("LC_ALL") != "C"
+        or client_guard.get("if") != mint.get("if")
+    ):
+        problems.append("generated client-ID guard is missing or misbound")
     terminal_condition = (
         "steps.authorize-merge.outputs.authorized == 'true' && "
         "steps.independent-review.outputs.authorized == 'true'"

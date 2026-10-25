@@ -519,6 +519,17 @@ was weakened. GitHub's review decision was REVIEW_REQUIRED; the owner's standing
 admin authority was used after adversarial review. `gpt-6-astra`,
 `gpt-6.1-sol`, and `code-reviewer` returned GO on the final test head; Fable
 and Opus review tools were unavailable in the runtime.
+23. **Admin merge of the #1911 bypass-ledger record.** Verjson/.github#1912
+(`docs(adr): record #1911 admin merge,` `Part of #1869`) was admin-squash-merged
+2026-10-25 at head `e67a7c9bf0053703d9f68ca0427d73bae1772c1e` (merge commit
+`fdb2bef12ea7a1edb278a25bc7f95beef993983b`). Its base was the fetched clean
+`origin/main` at `098a9c0336e81100b4b2f6e9c80853e25aa50ec7`. The PM run log
+records `bash scripts/assert-mergeable-head.sh Verjson/.github 1912` exited 0;
+the original stdout is not retained. GitHub reports 12 SUCCESS, 7 SKIPPED, and
+1 NEUTRAL check conclusions. The `shell-tests` check succeeded. GitHub's
+review decision was `REVIEW_REQUIRED`; the owner's standing admin authority
+was used. This documentation-only ledger update had no ARB or independent
+code-reviewer result recorded.
 
 ### Exit condition ("CI optimized and working"), measurable
 

@@ -28,7 +28,7 @@ def manifest():
         }},
         "apps": [{
             "role": "MERGE_APP", "slug": "acme-merge-authorization", "app_id": 101,
-            "client_id": "Iv123abc", "installation_id": 202, "repository_selection": "all",
+            "client_id": "Iv123abcde", "installation_id": 202, "repository_selection": "all",
             "permissions": {"contents": "write", "pull_requests": "write", "metadata": "read"},
             "events": [],
         }],
@@ -65,7 +65,7 @@ class FakeGitHub:
             return {"total_count": len(values), "secrets": values}
         if endpoint.startswith("/orgs/acme/installations"):
             installation = {
-                "id": 202, "app_id": 101, "app_slug": "acme-merge-authorization", "client_id": "Iv123abc",
+                "id": 202, "app_id": 101, "app_slug": "acme-merge-authorization", "client_id": "Iv123abcde",
                 "suspended_at": None, "repository_selection": "all",
                 "permissions": {"contents": "write", "pull_requests": "write", "metadata": "read"}, "events": [],
             }
@@ -191,6 +191,29 @@ class BootstrapTests(unittest.TestCase):
                         bootstrap.validate_manifest(manifest()), FakeGitHub(app_overrides=override),
                         self.workspace, self.contract, "dry-run",
                     )
+
+    def test_client_id_bounds_match_the_shared_policy(self):
+        valid_ids = ("Iv" + "a" * 8, "Iv" + "b" * 126, "Iv1.0123456789abcdef")
+        invalid_ids = (
+            "123456789",
+            "Iv" + "a" * 7,
+            "Iv" + "a" * 127,
+            " Iv" + "a" * 8,
+            "Iv" + "a" * 7 + " ",
+            "Iv" + "a" * 7 + "$",
+            "Iv" + "a" * 7 + "é",
+        )
+        for client_id in valid_ids:
+            with self.subTest(client_id=client_id):
+                value = manifest()
+                value["apps"][0]["client_id"] = client_id
+                bootstrap.validate_manifest(value)
+        for client_id in invalid_ids:
+            with self.subTest(client_id=client_id):
+                value = manifest()
+                value["apps"][0]["client_id"] = client_id
+                with self.assertRaisesRegex(bootstrap.BootstrapError, "invalid client ID"):
+                    bootstrap.validate_manifest(value)
 
     def test_malformed_ids_mutable_sha_and_branded_names_are_rejected(self):
         mutations = []

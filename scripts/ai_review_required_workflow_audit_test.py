@@ -74,6 +74,50 @@ class ConciseFindingTest(unittest.TestCase):
 
 
 class AiReviewRequiredWorkflowAuditTest(unittest.TestCase):
+    def test_authorization_client_id_uses_the_shared_configured_app_policy(self):
+        authorization = {
+            "private_key_secret": "AI_REVIEW_APP_PRIVATE_KEY",
+            "variables": ["AI_REVIEW_APP_ID", "AI_REVIEW_APP_SLUG", "AI_REVIEW_CLIENT_ID"],
+            "app_permissions": {},
+            "app_events": [],
+        }
+        contract = {"organization": "Verjson", "authorization": authorization}
+
+        def verify(client_id):
+            values = {
+                "AI_REVIEW_APP_ID": "101",
+                "AI_REVIEW_APP_SLUG": "ai-review-authorization",
+                "AI_REVIEW_CLIENT_ID": client_id,
+            }
+            read = lambda *_args, **_kwargs: []
+            with (
+                mock.patch.object(AUDIT, "verify_private_key_custody", return_value=False),
+                mock.patch.object(
+                    AUDIT,
+                    "require_scope",
+                    side_effect=lambda _read, _org, _kind, name, _governed: {"value": values[name]},
+                ),
+                mock.patch.object(
+                    AUDIT,
+                    "paginated_items",
+                    return_value=[{
+                        "app_id": 101,
+                        "app_slug": "ai-review-authorization",
+                        "suspended_at": None,
+                        "repository_selection": "all",
+                        "permissions": {},
+                        "events": [],
+                    }],
+                ),
+            ):
+                return AUDIT.verify_authorization(contract, read, {})
+
+        self.assertFalse(verify("Iv1.0123456789abcdef"))
+        for client_id in ("101", "Iv" + "a" * 127, "Iv" + "a" * 7 + "é"):
+            with self.subTest(client_id=client_id):
+                with self.assertRaisesRegex(AUDIT.AuditError, "AI_REVIEW_CLIENT_ID is invalid"):
+                    verify(client_id)
+
     def setUp(self):
         self.contract = AUDIT.read_contract()
         self.contract["arm_property_migration"]["repositories"] = [

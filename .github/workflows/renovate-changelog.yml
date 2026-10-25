@@ -83,16 +83,20 @@ jobs:
             --output "$PLAN_PATH" \
             --github-output "$GITHUB_OUTPUT"
 
-      - name: Require the release App client ID
-        if: steps.plan.outputs.required == 'true'
+      - name: Validate GitHub App client ID
+        id: generated_app_client_id_renovate-changelog_attribute_1
+        if: "steps.plan.outputs.required == 'true'"
+        shell: bash
         env:
-          RELEASE_APP_CLIENT_ID: ${{ inputs.release_app_client_id }}
+          APP_CLIENT_ID: "${{ inputs.release_app_client_id }}"
+          LC_ALL: C
         run: |
-          if [[ -z "$RELEASE_APP_CLIENT_ID" || "$RELEASE_APP_CLIENT_ID" =~ ^[0123456789]+$ ]]; then
-            echo "::error::release_app_client_id must be a GitHub App client ID"
+          # Generated from scripts/app_client_id_contract.py.
+          set -euo pipefail
+          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$ ]]; then
+            printf '%s\n' '::error::GitHub App client ID is not accepted by the configured App policy' >&2
             exit 1
           fi
-
       - name: Mint current-repository Contents-write token
         if: steps.plan.outputs.required == 'true'
         id: release-app-token

@@ -939,13 +939,20 @@ jobs:
           install -m 0555 .gate-trust/scripts/ci-gate/review-verdict.py "$RUNNER_TEMP/review-verdict.py"
           install -m 0555 .gate-trust/scripts/ci-gate/review-attempt-count.py "$RUNNER_TEMP/review-attempt-count.py"
 
-      - name: Validate review-reservation App client ID
-        if: needs.preflight.outputs.lane == 'ai'
+      - name: Validate GitHub App client ID
+        id: generated_app_client_id_ai-review-merge_gate_1
+        if: "needs.preflight.outputs.lane == 'ai'"
+        shell: bash
+        env:
+          APP_CLIENT_ID: "${{ vars.AI_REVIEW_CLIENT_ID }}"
+          LC_ALL: C
         run: |
-          [[ "$APP_CLIENT_ID" =~ ^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$ ]] || {
-            echo "::error::AI_REVIEW_CLIENT_ID is unavailable or malformed"; exit 1;
-          }
-
+          # Generated from scripts/app_client_id_contract.py.
+          set -euo pipefail
+          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$ ]]; then
+            printf '%s\n' '::error::GitHub App client ID is not accepted by the configured App policy' >&2
+            exit 1
+          fi
       - name: Mint review-reservation App token
         if: needs.preflight.outputs.lane == 'ai'
         id: reservation-app-token
@@ -2299,12 +2306,6 @@ jobs:
       TARGET_REPO: ${{ github.repository }}
       REVIEW_RUN_ID: ${{ github.run_id }}
     steps:
-      - name: Validate authorization App client ID
-        run: |
-          [[ "$APP_CLIENT_ID" =~ ^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$ ]] || {
-            echo "::error::AI_REVIEW_CLIENT_ID is unavailable or malformed"; exit 1;
-          }
-
       - name: Resolve executing trusted workflow revision
         id: trusted-revision
         env:
@@ -2335,6 +2336,20 @@ jobs:
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
+      - name: Validate GitHub App client ID
+        id: generated_app_client_id_ai-review-merge_complete-authorization_1
+        if: "${{ needs.app-key-policy.result == 'success' }}"
+        shell: bash
+        env:
+          APP_CLIENT_ID: "${{ vars.AI_REVIEW_CLIENT_ID }}"
+          LC_ALL: C
+        run: |
+          # Generated from scripts/app_client_id_contract.py.
+          set -euo pipefail
+          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$ ]]; then
+            printf '%s\n' '::error::GitHub App client ID is not accepted by the configured App policy' >&2
+            exit 1
+          fi
       - name: Mint dedicated authorization App token
         id: app-token
         if: ${{ needs.app-key-policy.result == 'success' }}
