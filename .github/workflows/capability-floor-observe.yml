@@ -42,14 +42,6 @@ jobs:
             scripts/gen-gate-rearm-caller.sh
             scripts/gen-privileged-merge-caller.sh
           sparse-checkout-cone-mode: false
-      - name: Validate the observer App client ID
-        env:
-          RENOVATE_COMPATIBILITY_CLIENT_ID: ${{ vars.RENOVATE_COMPATIBILITY_CLIENT_ID }}
-        run: |
-          if [[ -z "$RENOVATE_COMPATIBILITY_CLIENT_ID" || "$RENOVATE_COMPATIBILITY_CLIENT_ID" =~ ^[0123456789]+$ ]]; then
-            echo "::error::RENOVATE_COMPATIBILITY_CLIENT_ID must be the GitHub App client ID, not an empty or numeric legacy App ID."
-            exit 1
-          fi
       - name: Derive exact reviewed repository scope
         id: scope
         run: |
@@ -60,6 +52,19 @@ jobs:
             exit 1
           fi
           echo "repositories=$repositories" >> "$GITHUB_OUTPUT"
+      - name: Validate GitHub App client ID
+        id: generated_app_client_id_capability-floor-observe_observe_1
+        shell: bash
+        env:
+          APP_CLIENT_ID: "${{ vars.RENOVATE_COMPATIBILITY_CLIENT_ID }}"
+          LC_ALL: C
+        run: |
+          # Generated from scripts/app_client_id_contract.py.
+          set -euo pipefail
+          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[A-Za-z0-9.]{8,126}$ ]]; then
+            printf '%s\n' '::error::GitHub App client ID is not accepted by the configured App policy' >&2
+            exit 1
+          fi
       - name: Mint exact-scope compatibility observer token
         id: observer-app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3

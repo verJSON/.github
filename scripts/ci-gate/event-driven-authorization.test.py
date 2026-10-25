@@ -13,6 +13,8 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from app_client_id_contract import CLIENT_ID_GUARD_RUN
 REVIEW = ROOT / ".github/workflows/ai-review-merge.yml"
 REARM = ROOT / ".github/workflows/gate-rearm.yml"
 PROMOTE = ROOT / ".github/workflows/ai-privileged-merge.yml"
@@ -540,14 +542,16 @@ def validate_authorization_app_token_inputs(workflow: dict, job_name: str) -> No
             f"{job_name} must mint with the dedicated App client ID")
     require("app-id" not in inputs,
             f"{job_name} token minting must reject the deprecated app-id input")
-    env = workflow["jobs"][job_name].get("env", {})
-    validation_indexes = [index for index, step in enumerate(steps)
-                          if step.get("name") == "Validate authorization App client ID" and
-                          '[[ "$APP_CLIENT_ID" =~ ^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$ ]]' in step.get("run", "") and
-                          "AI_REVIEW_CLIENT_ID is unavailable or malformed" in step.get("run", "")]
-    require(env.get("APP_CLIENT_ID") == "${{ vars.AI_REVIEW_CLIENT_ID }}" and
-            len(validation_indexes) == 1 and validation_indexes[0] < token_index,
-            f"{job_name} must fail closed before minting with an absent or malformed client ID")
+    guard = steps[token_index - 1] if token_index else {}
+    guard_env = guard.get("env", {})
+    require(guard.get("name") == "Validate GitHub App client ID" and
+            str(guard.get("id", "")).startswith("generated_app_client_id_") and
+            guard.get("shell") == "bash" and
+            guard.get("run") == CLIENT_ID_GUARD_RUN and
+            guard_env.get("APP_CLIENT_ID") == inputs.get("client-id") and
+            guard_env.get("LC_ALL") == "C" and
+            guard.get("if") == token.get("if"),
+            f"{job_name} must bind the generated fail-closed guard to its token mint")
 
 
 def validate_authorization_app_token_pins(uses_values: list[str]) -> None:

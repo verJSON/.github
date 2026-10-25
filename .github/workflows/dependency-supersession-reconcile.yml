@@ -96,14 +96,20 @@ jobs:
             echo '::error::terminal writes remain disabled pending the disposable canary'
             exit 1
           }
-      - name: Require the selected App client ID
+      - name: Validate GitHub App client ID
+        id: generated_app_client_id_dependency-supersession-reconcile_reconcile_1
+        if: "${{ inputs.enforce }}"
+        shell: bash
         env:
-          APP_CLIENT_ID: ${{ inputs.enforce && vars.DEPENDENCY_SUPERSESSION_APP_CLIENT_ID || vars.RENOVATE_COMPATIBILITY_CLIENT_ID }}
+          APP_CLIENT_ID: "${{ vars.DEPENDENCY_SUPERSESSION_APP_CLIENT_ID }}"
+          LC_ALL: C
         run: |
-          [[ -n "$APP_CLIENT_ID" && ! "$APP_CLIENT_ID" =~ ^[0123456789]+$ ]] || {
-            echo '::error::the selected GitHub App client ID must be nonempty and nonnumeric'
+          # Generated from scripts/app_client_id_contract.py.
+          set -euo pipefail
+          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[A-Za-z0-9.]{8,126}$ ]]; then
+            printf '%s\n' '::error::GitHub App client ID is not accepted by the configured App policy' >&2
             exit 1
-          }
+          fi
       - name: Mint exact-repository terminal reconciliation token
         if: ${{ inputs.enforce }}
         id: supersession-token
@@ -115,6 +121,20 @@ jobs:
           repositories: ${{ steps.target.outputs.name }}
           permission-contents: read
           permission-pull-requests: write
+      - name: Validate GitHub App client ID
+        id: generated_app_client_id_dependency-supersession-reconcile_reconcile_2
+        if: "${{ !inputs.enforce }}"
+        shell: bash
+        env:
+          APP_CLIENT_ID: "${{ vars.RENOVATE_COMPATIBILITY_CLIENT_ID }}"
+          LC_ALL: C
+        run: |
+          # Generated from scripts/app_client_id_contract.py.
+          set -euo pipefail
+          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[A-Za-z0-9.]{8,126}$ ]]; then
+            printf '%s\n' '::error::GitHub App client ID is not accepted by the configured App policy' >&2
+            exit 1
+          fi
       - name: Mint exact-repository observe-only reconciliation token
         if: ${{ !inputs.enforce }}
         id: observer-token

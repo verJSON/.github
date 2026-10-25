@@ -16,6 +16,7 @@ import yaml
 # `python3 -I` does not put the script directory on sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from github_identity import repository_identity  # noqa: E402
+from app_client_id_contract import is_valid_client_id  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -933,7 +934,7 @@ def verify_authorization(contract: dict, read, governed: dict[str, bool]) -> boo
     client_id = variables["AI_REVIEW_CLIENT_ID"].get("value")
     require(isinstance(app_id, str) and app_id.isdigit() and int(app_id) > 0, "AI_REVIEW_APP_ID is invalid")
     require(isinstance(app_slug, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]*", app_slug), "AI_REVIEW_APP_SLUG is invalid")
-    require(isinstance(client_id, str) and re.fullmatch(r"Iv[A-Za-z0-9.]{8,126}", client_id), "AI_REVIEW_CLIENT_ID is invalid")
+    require(is_valid_client_id(client_id), "AI_REVIEW_CLIENT_ID is invalid")
     installations = paginated_items(read, f"orgs/{organization}/installations", "installations")
     matching = [
         installation

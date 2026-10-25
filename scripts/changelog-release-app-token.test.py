@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import copy
 import pathlib
-import re
 import sys
 
 import yaml
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+import gen_app_client_id_guards
 WORKFLOW = ROOT / ".github/workflows/changelog-release.yml"
 TOKEN_ACTION = (
     "actions/create-github-app-token@"
@@ -58,10 +59,10 @@ def validate(document: dict, raw: str) -> list[str]:
         problems.append("checkout does not persist the minted token")
     if "ORG_ADMIN_TOKEN" in raw or "secrets.push_token" in raw:
         problems.append("temporary broad release credential remains")
-    if not re.search(
-        r'\[\[ -z "\$RELEASE_APP_CLIENT_ID" \|\| "\$RELEASE_APP_CLIENT_ID" =~ \^\[0123456789\]\+\$ \]\]', raw
-    ):
-        problems.append("App client ID guard is absent")
+    try:
+        problems.extend(gen_app_client_id_guards._guard_problems(WORKFLOW, raw))
+    except gen_app_client_id_guards.GuardGenerationError as error:
+        problems.append(str(error))
     return problems
 
 
@@ -125,8 +126,9 @@ def main() -> int:
     mutations.append(("the temporary push_token secret", mutant, raw + "\nsecrets.push_token"))
 
     guardless = raw.replace(
-        '[[ -z "$RELEASE_APP_CLIENT_ID" || "$RELEASE_APP_CLIENT_ID" =~ ^[0123456789]+$ ]]',
-        "true",
+        'if [[ ! "$APP_CLIENT_ID" =~ ^Iv[A-Za-z0-9.]{8,126}$ ]]; then',
+        "if true; then",
+        1,
     )
     mutations.append(("a missing App client ID guard", copy.deepcopy(document), guardless))
 

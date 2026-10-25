@@ -718,11 +718,7 @@ class ContractFleetReport(unittest.TestCase):
 
 
 class ReportCallerClientIdValidation(unittest.TestCase):
-    """Executes the report workflow's own input guard -- Verjson/.github#1792.
-
-    The guard once demanded a numeric value, which is the App ID; every real
-    client ID (`Iv23li...`) was refused, so the scheduled report never ran.
-    """
+    """Executes the report workflow's adjacent pre-mint ID guard -- #1800."""
 
     WORKFLOW = _root / ".github/workflows/changelog-contract-fleet-report.yml"
     # A runner whose ambient locale is en_US.UTF-8 makes bash's `[A-Za-z]`
@@ -735,7 +731,8 @@ class ReportCallerClientIdValidation(unittest.TestCase):
         cls.document = yaml.safe_load(cls.WORKFLOW.read_text())
         cls.job = cls.document["jobs"]["report"]
         cls.steps = cls.job["steps"]
-        cls.guard = next(s for s in cls.steps if s.get("name") == "Validate caller inputs")
+        mint = next(s for s in cls.steps if s.get("id") == "inventory-token")
+        cls.guard = cls.steps[cls.steps.index(mint) - 1]
 
     def run_guard(self, client_id):
         step_env = dict(self.guard["env"])
@@ -792,9 +789,9 @@ class ReportCallerClientIdValidation(unittest.TestCase):
     def test_a_numeric_legacy_app_id_is_refused_naming_the_client_id_format(self):
         result = self.run_guard("4717539")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("::error::", result.stdout)
-        self.assertIn("numeric", result.stdout)
-        self.assertIn("Iv", result.stdout)
+        self.assertIn("::error::", result.stderr)
+        self.assertIn("not accepted", result.stderr)
+        self.assertIn("configured App policy", result.stderr)
 
     def test_empty_whitespace_and_injection_shaped_values_are_refused(self):
         for client_id in (
@@ -818,7 +815,7 @@ class ReportCallerClientIdValidation(unittest.TestCase):
             with self.subTest(client_id=client_id):
                 result = self.run_guard(client_id)
                 self.assertNotEqual(result.returncode, 0, result.stdout)
-                self.assertIn("::error::", result.stdout)
+            self.assertIn("::error::", result.stderr)
 
 
 if __name__ == "__main__":

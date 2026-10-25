@@ -13,11 +13,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from app_client_id_contract import is_valid_client_id  # noqa: E402
+
 
 SHA = re.compile(r"[0-9a-f]{40}")
 NAME = re.compile(r"[A-Z][A-Z0-9_]*")
 SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
-CLIENT_ID = re.compile(r"Iv[0-9A-Za-z.]+")
 MODES = {"check", "dry-run", "apply"}
 GENERATORS = {
     "privileged-merge": "gen-privileged-merge-caller.sh",
@@ -156,7 +158,7 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
             raise BootstrapError(f"App {role} has an invalid slug")
         if type(app["app_id"]) is not int or app["app_id"] <= 0 or type(app["installation_id"]) is not int or app["installation_id"] <= 0:
             raise BootstrapError(f"App {role} IDs must be positive integers")
-        if not isinstance(app["client_id"], str) or CLIENT_ID.fullmatch(app["client_id"]) is None:
+        if not is_valid_client_id(app["client_id"]):
             raise BootstrapError(f"App {role} has an invalid client ID")
         if app["repository_selection"] != "all":
             raise BootstrapError(f"App {role} must use exact all-repository selection")

@@ -5,11 +5,14 @@ from __future__ import annotations
 import copy
 import pathlib
 import re
+import sys
 
 import yaml
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+import gen_app_client_id_guards
 ACTION = "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"
 CLIENT_ID = "${{ vars.RENOVATE_COMPATIBILITY_CLIENT_ID }}"
 PRIVATE_KEY = "${{ secrets.RENOVATE_COMPATIBILITY_APP_PRIVATE_KEY }}"
@@ -50,7 +53,7 @@ def validate_planner(document: dict, raw: str) -> list[str]:
         problems.append("planner checkout does not receive only the minted token")
     if (checkout.get("with") or {}).get("persist-credentials") is not False:
         problems.append("planner persists the minted token")
-    problems.extend(validate_common(raw))
+    problems.extend(validate_common(raw, "renovate-grouping-plan.yml"))
     return problems
 
 
@@ -85,22 +88,18 @@ def validate_reconciler(document: dict, raw: str) -> list[str]:
         problems.append("reconciler token delivery escaped the two read-only calls")
     if 'mode:"observe-only"' not in raw:
         problems.append("observe-only receipt is absent")
-    problems.extend(validate_common(raw))
+    problems.extend(validate_common(raw, "renovate-compatibility-reconcile.yml"))
     return problems
 
 
-def validate_common(raw: str) -> list[str]:
+def validate_common(raw: str, workflow_name: str) -> list[str]:
     problems: list[str] = []
     if "RENOVATE_COMPATIBILITY_PAT" in raw or "ORG_ADMIN_TOKEN" in raw:
         problems.append("a broad credential path remains")
-    if not re.search(
-        r'\[\[ -z "\$RENOVATE_COMPATIBILITY_CLIENT_ID" \|\| '
-        r'"\$RENOVATE_COMPATIBILITY_CLIENT_ID" =~ \^\[0123456789\]\+\$ \]\]',
-        raw,
-    ):
-        problems.append("missing or numeric client IDs do not fail closed")
+    problems.extend(
+        gen_app_client_id_guards._guard_problems(ROOT / ".github/workflows" / workflow_name, raw)
+    )
     return problems
-
 
 def require_rejected(label: str, validator, document: dict, raw: str) -> None:
     if not validator(document, raw):

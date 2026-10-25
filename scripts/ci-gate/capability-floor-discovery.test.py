@@ -16,6 +16,8 @@ import yaml
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+import gen_app_client_id_guards
 SCRIPT = ROOT / "scripts/capability-floor-discovery.py"
 WORKFLOW = ROOT / ".github/workflows/capability-floor-observe.yml"
 ACTION = "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"
@@ -46,12 +48,7 @@ def workflow_problems(document: dict, raw: str) -> list[str]:
         problems.append("secret-bearing observer is not on the privileged lane")
     if mint.get("uses") != ACTION or mint.get("with") != expected_mint:
         problems.append("App mint is not exact-scope contents-read only")
-    if not re.search(
-        r'\[\[ -z "\$RENOVATE_COMPATIBILITY_CLIENT_ID" \|\| '
-        r'"\$RENOVATE_COMPATIBILITY_CLIENT_ID" =~ \^\[0123456789\]\+\$ \]\]',
-        raw,
-    ):
-        problems.append("missing or numeric App client IDs do not fail closed")
+    problems.extend(gen_app_client_id_guards._guard_problems(WORKFLOW, raw))
     if raw.count(PRIVATE_KEY) != 1:
         problems.append("App private key escaped the mint step")
     token_consumers = [

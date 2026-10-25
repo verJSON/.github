@@ -163,17 +163,12 @@ jobs:
       TARGET_REPO: ${{ github.repository }}
       REQUIRED_CHECK_POLICY: ${{ github.repository == 'Verjson/.github' && '[{"name":"shell-tests","app_id":15368,"workflow_id":315894159,"workflow_path":".github/workflows/actions-ci.yml"}]' || inputs.required_checks }}
     steps:
-      - name: Validate terminal merge App and target repository
+      - name: Validate terminal merge target repository
         id: merge-target
         env:
-          MERGE_APP_CLIENT_ID: ${{ inputs.merge_app_client_id || vars.MERGE_APP_CLIENT_ID }}
           REPOSITORY_CONTEXT: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [[ ! "$MERGE_APP_CLIENT_ID" =~ ^Iv[0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz]{18}$ ]]; then
-            echo "::error::MERGE_APP_CLIENT_ID must be a canonical GitHub App client ID, not an empty, malformed, or numeric legacy App ID."
-            exit 1
-          fi
           [[ "$TARGET_REPO" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+$ ]] || {
             echo "::error::target repository identity is malformed"; exit 1;
           }
@@ -562,6 +557,20 @@ jobs:
           python3 -I .gate-trust/scripts/ci-gate/closing-issue-visibility.py capture \
             --output "$RUNNER_TEMP/closing-issues.json"
 
+      - name: Validate GitHub App client ID
+        id: generated_app_client_id_ai-privileged-merge_privileged_merge_1
+        if: "steps.authorize-merge.outputs.authorized == 'true' && steps.independent-review.outputs.authorized == 'true'"
+        shell: bash
+        env:
+          APP_CLIENT_ID: "${{ inputs.merge_app_client_id || vars.MERGE_APP_CLIENT_ID }}"
+          LC_ALL: C
+        run: |
+          # Generated from scripts/app_client_id_contract.py.
+          set -euo pipefail
+          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[A-Za-z0-9.]{8,126}$ ]]; then
+            printf '%s\n' '::error::GitHub App client ID is not accepted by the configured App policy' >&2
+            exit 1
+          fi
       - name: Mint exact-repository terminal merge App token
         if: steps.authorize-merge.outputs.authorized == 'true' && steps.independent-review.outputs.authorized == 'true'
         id: merge-app-token

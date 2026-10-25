@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 import copy
 import pathlib
+import sys
 import unittest
 
 import yaml
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import app_client_id_contract
 WORKFLOW = ROOT / ".github/workflows/container-release.yml"
 ACTION = "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"
 
@@ -55,12 +58,17 @@ def validate(workflow):
     if mint.get("continue-on-error") is not None:
         errors.append("mint failure is tolerated")
 
-    client_guard = named_step(promote, "Require the release App client ID")
-    guard_script = client_guard.get("run", "")
-    if "-z \"$RELEASE_APP_CLIENT_ID\"" not in guard_script or "^[0123456789]+$" not in guard_script:
-        errors.append("client ID guard does not reject missing or numeric IDs")
-
     mint_index = promote["steps"].index(mint)
+    client_guard = promote["steps"][mint_index - 1] if mint_index else {}
+    if (
+        client_guard.get("name") != "Validate GitHub App client ID"
+        or client_guard.get("shell") != "bash"
+        or client_guard.get("run") != app_client_id_contract.CLIENT_ID_GUARD_RUN
+        or client_guard.get("env", {}).get("APP_CLIENT_ID") != mint.get("with", {}).get("client-id")
+        or client_guard.get("env", {}).get("LC_ALL") != "C"
+        or client_guard.get("if") != mint.get("if")
+    ):
+        errors.append("generated client-ID guard is missing or misbound")
     promotion_index = next(
         index
         for index, step in enumerate(promote["steps"])
@@ -141,8 +149,10 @@ class ContainerReleaseAppTokenContractTest(unittest.TestCase):
 
     def test_rejects_removed_malformed_client_id_guard(self):
         mutant = copy.deepcopy(self.workflow)
-        named_step(mutant["jobs"]["promote"], "Require the release App client ID")["run"] = "true"
-        self.assertIn("client ID guard does not reject missing or numeric IDs", validate(mutant))
+        mutant_steps = mutant["jobs"]["promote"]["steps"]
+        mutant_mint = named_step(mutant["jobs"]["promote"], "Mint exact-repository release App token")
+        mutant_steps[mutant_steps.index(mutant_mint) - 1]["run"] = "true"
+        self.assertIn("generated client-ID guard is missing or misbound", validate(mutant))
 
     def test_rejects_app_token_delivery_to_registry(self):
         mutant = copy.deepcopy(self.workflow)

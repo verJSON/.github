@@ -117,6 +117,19 @@ jobs:
         with: {repository: '${{ needs.environment-preflight.outputs.workflow-repository }}', ref: '${{ needs.environment-preflight.outputs.workflow-sha }}', persist-credentials: false}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: {name: 'runner-deploy-${{ inputs.kind }}-review-${{ github.run_id }}-${{ github.run_attempt }}'}
+      - name: Validate GitHub App client ID
+        id: generated_app_client_id_container-deployment-review-producer_publish-code_1
+        shell: bash
+        env:
+          APP_CLIENT_ID: "${{ vars.RUNNER_DEPLOY_CODE_REVIEW_APP_CLIENT_ID }}"
+          LC_ALL: C
+        run: |
+          # Generated from scripts/app_client_id_contract.py.
+          set -euo pipefail
+          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[A-Za-z0-9.]{8,126}$ ]]; then
+            printf '%s\n' '::error::GitHub App client ID is not accepted by the configured App policy' >&2
+            exit 1
+          fi
       - id: publisher
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:
@@ -154,6 +167,19 @@ jobs:
         with: {repository: '${{ needs.environment-preflight.outputs.workflow-repository }}', ref: '${{ needs.environment-preflight.outputs.workflow-sha }}', persist-credentials: false}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: {name: 'runner-deploy-${{ inputs.kind }}-review-${{ github.run_id }}-${{ github.run_attempt }}'}
+      - name: Validate GitHub App client ID
+        id: generated_app_client_id_container-deployment-review-producer_publish-security_1
+        shell: bash
+        env:
+          APP_CLIENT_ID: "${{ vars.RUNNER_DEPLOY_SECURITY_REVIEW_APP_CLIENT_ID }}"
+          LC_ALL: C
+        run: |
+          # Generated from scripts/app_client_id_contract.py.
+          set -euo pipefail
+          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[A-Za-z0-9.]{8,126}$ ]]; then
+            printf '%s\n' '::error::GitHub App client ID is not accepted by the configured App policy' >&2
+            exit 1
+          fi
       - id: publisher
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:
@@ -191,6 +217,19 @@ jobs:
         with: {repository: '${{ needs.environment-preflight.outputs.workflow-repository }}', ref: '${{ needs.environment-preflight.outputs.workflow-sha }}', persist-credentials: false}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: {name: 'runner-deploy-${{ inputs.kind }}-review-${{ github.run_id }}-${{ github.run_attempt }}'}
+      - name: Validate GitHub App client ID
+        id: generated_app_client_id_container-deployment-review-producer_publish-ai_1
+        shell: bash
+        env:
+          APP_CLIENT_ID: "${{ vars.RUNNER_DEPLOY_AI_REVIEW_APP_CLIENT_ID }}"
+          LC_ALL: C
+        run: |
+          # Generated from scripts/app_client_id_contract.py.
+          set -euo pipefail
+          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[A-Za-z0-9.]{8,126}$ ]]; then
+            printf '%s\n' '::error::GitHub App client ID is not accepted by the configured App policy' >&2
+            exit 1
+          fi
       - id: publisher
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:

@@ -23,21 +23,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - name: Validate caller inputs
-        env:
-          APP_CLIENT_ID: ${{ inputs.app_client_id }}
-          # Bracket ranges are locale-collated; en_US.UTF-8 lets [A-Za-z] match accented letters.
-          LC_ALL: C
-        run: |
-          if [[ "$APP_CLIENT_ID" =~ ^[0123456789]+$ ]]; then
-            echo "::error::app_client_id is a numeric legacy App ID; pass the App's client ID (Iv23li..., or legacy Iv1.<hex>) instead."
-            exit 1
-          fi
-          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$ ]]; then
-            echo "::error::app_client_id must be a GitHub App client ID matching ^Iv[A-Za-z0-9.]{8,126}\$."
-            exit 1
-          fi
-
       # actions/checkout follows a symlink at its path and empties the target;
       # refuse one before it reaches runner state (ADR 0236).
       - name: Refuse a symlink at the contract-source checkout path
@@ -51,6 +36,19 @@ jobs:
           path: contract-source
           persist-credentials: false
 
+      - name: Validate GitHub App client ID
+        id: generated_app_client_id_changelog-contract-fleet-report_report_1
+        shell: bash
+        env:
+          APP_CLIENT_ID: "${{ inputs.app_client_id }}"
+          LC_ALL: C
+        run: |
+          # Generated from scripts/app_client_id_contract.py.
+          set -euo pipefail
+          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[A-Za-z0-9.]{8,126}$ ]]; then
+            printf '%s\n' '::error::GitHub App client ID is not accepted by the configured App policy' >&2
+            exit 1
+          fi
       - name: Mint read-only organization inventory token
         id: inventory-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3

@@ -517,6 +517,19 @@ jobs:
           path: deployment-receipts/
           if-no-files-found: error
           retention-days: 90
+      - name: Validate GitHub App client ID
+        id: generated_app_client_id_container-deployment_deploy_1
+        shell: bash
+        env:
+          APP_CLIENT_ID: "${{ vars.GH_RUNNER_REGISTRATION_APP_CLIENT_ID }}"
+          LC_ALL: C
+        run: |
+          # Generated from scripts/app_client_id_contract.py.
+          set -euo pipefail
+          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[A-Za-z0-9.]{8,126}$ ]]; then
+            printf '%s\n' '::error::GitHub App client ID is not accepted by the configured App policy' >&2
+            exit 1
+          fi
       - name: Mint runner control-plane token
         id: runner-app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
