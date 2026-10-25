@@ -30,7 +30,7 @@ PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 GENERATOR = ROOT / "scripts/gen-node-ci-protected.py"
 TRUSTED_HELPER = ROOT / "scripts/ci_build_artifacts.py"
 HEAD = "a" * 40
-LEGACY_SHA256 = "d5f1ea1be3d48ef9120288e448f6941d2dc57be381029e26decf8a8ee3aa7e41"
+LEGACY_SHA256 = "91da3b19f70304eefaa8036b2b240bf601c7f6c40b3920bef26dcefd632ee2cf"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
@@ -187,6 +187,84 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         )
         self.assertNotIn("python3 -I - <<'PY'", run_step["run"])
 
+    def test_protected_helper_is_staged_once_and_reused_read_only_by_runner_uid(self):
+        steps = self.workflow["jobs"]["build-test"]["steps"]
+        fetch_step = next(
+            step for step in steps
+            if step.get("name") == "Download pinned protected candidate helper"
+        )
+        reuse_step = next(
+            step for step in steps
+            if step.get("name") == "Download trusted script-plan receipt supervisor"
+        )
+        self.assertEqual(fetch_step.get("id"), "protected-candidate-helper")
+        self.assertIn("sha256sum", fetch_step["run"])
+        self.assertNotIn("curl ", reuse_step["run"])
+        with tempfile.TemporaryDirectory(prefix="protected-helper-stage-") as temporary:
+            root = Path(temporary)
+            runner_temp = root / "runner temp"
+            runner_temp.mkdir(mode=0o700)
+            output_file = root / "fetch-output"
+            fixture = root / "helper-fixture.py"
+            fixture.write_bytes(TRUSTED_HELPER.read_bytes())
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            curl_log = root / "curl-calls"
+            fake_curl = fake_bin / "curl"
+            fake_curl.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "destination=''\n"
+                "while (($#)); do\n"
+                "  if [[ $1 == -o ]]; then destination=$2; shift 2; else shift; fi\n"
+                "done\n"
+                "[[ -n $destination ]]\n"
+                "cp -- \"$CI_HELPER_FIXTURE\" \"$destination\"\n"
+                "printf 'called\\n' >> \"$CI_HELPER_CURL_LOG\"\n",
+                encoding="utf-8",
+            )
+            fake_curl.chmod(0o700)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "CI_HELPER_FIXTURE": str(fixture),
+                    "CI_HELPER_CURL_LOG": str(curl_log),
+                    "GITHUB_OUTPUT": str(output_file),
+                    "JOB_WORKFLOW_SHA": "a" * 40,
+                    "PATH": f"{fake_bin}:{environment['PATH']}",
+                    "RUNNER_TEMP": str(runner_temp),
+                }
+            )
+            subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", fetch_step["run"]],
+                env=environment,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            helper = runner_temp / "ci_build_artifacts.py"
+            metadata = helper.stat(follow_symlinks=False)
+            self.assertTrue(helper.is_file())
+            self.assertEqual(metadata.st_uid, os.geteuid())
+            self.assertEqual(metadata.st_nlink, 1)
+            self.assertEqual(metadata.st_mode & 0o777, 0o400)
+            with self.assertRaises(PermissionError):
+                os.open(helper, os.O_WRONLY)
+            staged_digest = output_file.read_text(encoding="utf-8").strip().split("=", 1)[1]
+            self.assertEqual(staged_digest, hashlib.sha256(helper.read_bytes()).hexdigest())
+            reuse_environment = environment.copy()
+            reuse_environment["PROTECTED_CANDIDATE_HELPER_SHA256"] = staged_digest
+            subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", reuse_step["run"]],
+                env=reuse_environment,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(curl_log.read_text(encoding="utf-8").splitlines(), ["called"])
+            self.assertEqual(helper.stat().st_mode & 0o777, 0o400)
+            self.assertEqual(hashlib.sha256(helper.read_bytes()).hexdigest(), staged_digest)
+
     def test_candidate_plan_executes_successfully_through_the_staged_trusted_helper(self):
         result, remaining = self.run_candidate_plan(
             lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
@@ -194,7 +272,7 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             script_plan=["first"],
         )
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("trusted helper candidate ran", result.stdout)
+        self.assertIn("trusted helper candidate ran", result.stderr)
         self.assertEqual([], remaining)
 
     def test_protected_bubblewrap_continues_after_failure_and_extinguishes_detached_child(self):
@@ -205,10 +283,14 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                 "case \" $* \" in\n"
                 "  *' run first '*)\n"
                 "    /usr/bin/setsid /bin/bash -c 'sleep 1; touch \"$1\"' detached \"$GITHUB_WORKSPACE/late-marker\" </dev/null >/dev/null 2>&1 &\n"
+                "    /usr/bin/setsid /bin/bash -c 'trap \"\" TERM; kill -STOP $$; sleep 1; touch \"$1\"' detached \"$GITHUB_WORKSPACE/stopped-late\" </dev/null >/dev/null 2>&1 &\n"
+                "    /usr/bin/python3 -c 'import os,signal,sys,time\np=os.fork()\nif p == 0:\n q=os.fork()\n if q: os._exit(0)\n os.setsid()\n signal.signal(signal.SIGTERM, signal.SIG_IGN)\n time.sleep(1)\n open(sys.argv[1],\"w\").close()\n os._exit(0)\nos.waitpid(p,0)' \"$GITHUB_WORKSPACE/double-fork-late\" </dev/null >/dev/null 2>&1 &\n"
                 "    printf started > \"$GITHUB_WORKSPACE/first-started\"\n"
                 "    exit 23 ;;\n"
                 "  *' run second '*)\n"
                 "    sleep 2\n"
+                "    test ! -e \"$GITHUB_WORKSPACE/stopped-late\" || exit 31\n"
+                "    test ! -e \"$GITHUB_WORKSPACE/double-fork-late\" || exit 32\n"
                 "    test -f \"$GITHUB_WORKSPACE/first-started\" || exit 30\n"
                 "    test ! -e \"$GITHUB_WORKSPACE/late-marker\" || exit 29\n"
                 "    printf ran > \"$GITHUB_WORKSPACE/second-ran\" ;;\n"
@@ -275,6 +357,59 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                 ["completed", "infrastructure-failure"],
             )
             self.assertEqual(receipts[0]["exitCode"], 23)
+
+    def test_protected_bubblewrap_cancellation_during_cleanup_invalidates_plan(self):
+        with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
+            receipt_capture = Path(capture_dir) / "receipts.json"
+            result, remaining = self.run_candidate_plan(
+                lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+                "case \"$2\" in\n"
+                " first)\n"
+                "  /usr/bin/setsid /bin/bash -c 'trap \"\" TERM; while :; do sleep 0.02; done' detached </dev/null >/dev/null 2>&1 &\n"
+                "  exit 0 ;;\n"
+                " second) touch \"$GITHUB_WORKSPACE/second-ran\" ;;\n"
+                "esac\n",
+                script_plan=["first", "second"],
+                environment_updates={"CI_LEVEL_FAIL_FAST": "false"},
+                receipt_capture=receipt_capture,
+                plan_receipt_capture=Path(capture_dir) / "plan.json",
+                post_run_absent="second-ran",
+                cancel_cleanup_probe=True,
+            )
+            self.assertNotEqual(0, result.returncode, result.stderr)
+            self.assertEqual([], remaining)
+            receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual([item["state"] for item in receipts], ["infrastructure-failure", "not-run-aborted"])
+            self.assertEqual(receipts[0]["cleanup"], "verified")
+            plan = json.loads((Path(capture_dir) / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(plan["state"], "interrupted")
+            self.assertEqual(plan["signal"], signal.SIGTERM)
+
+    def test_protected_candidate_cannot_access_or_forge_the_supervisor_channel(self):
+        with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
+            receipt_capture = Path(capture_dir) / "receipts.json"
+            result, remaining = self.run_candidate_plan(
+                lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+                "case \"$2\" in\n"
+                " first)\n"
+                "  /usr/bin/python3 -I -c 'import os,sys; p=\"/proc/1/fd/1\";\n"
+                "for flags in (os.O_RDONLY, os.O_WRONLY):\n"
+                " try:\n  fd=os.open(p, flags)\n"
+                " except PermissionError:\n  continue\n"
+                " else:\n  os.close(fd); sys.exit(91)\n"
+                "print(\"{\\\"version\\\":1,\\\"pid\\\":1,\\\"state\\\":\\\"candidate-exit\\\"}\")'\n"
+                "  ;;\n"
+                "esac\n",
+                script_plan=["first"],
+                receipt_capture=receipt_capture,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual([], remaining)
+            receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual(len(receipts), 1)
+            self.assertEqual(receipts[0]["state"], "completed")
+            self.assertEqual(receipts[0]["exitCode"], 0)
+            self.assertIn('"state":"candidate-exit"', result.stderr)
 
     def test_consumer_mounts_verified_artifact_read_only_with_live_fd_at_launch(self):
         result, remaining = self.run_candidate_plan(
@@ -783,7 +918,9 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         fixture += "\n# END TRUSTED_HELPER_BODY_FIXTURE\n"
         return {**step, "run": step["run"] + fixture}
 
-    def stage_candidate_helper(self, runner_temp, candidate_run, *, bwrap_probe=False):
+    def stage_candidate_helper(
+        self, runner_temp, candidate_run, *, bwrap_probe=False, cancel_cleanup_probe=False
+    ):
         helper_source = TRUSTED_HELPER.read_text(encoding="utf-8")
         start = "# BEGIN TRUSTED_HELPER_BODY_FIXTURE\n"
         end = "# END TRUSTED_HELPER_BODY_FIXTURE"
@@ -808,26 +945,25 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                     + helper_source[function_end:]
                 )
         if bwrap_probe:
-            marker = "active_process = subprocess.Popen(\n"
+            marker = "candidate_result = ci_build_artifacts.run_supervised_bubblewrap(\n"
             self.assertEqual(1, helper_source.count(marker))
-            probe = r'''_d1_original_popen = subprocess.Popen
-def _d1_probe_popen(argv, **kwargs):
-    status_fd = int(argv[argv.index("--json-status-fd") + 1])
-    os.write(status_fd, b'{"child-pid":123}\n{"exit-code":0}\n')
+            probe = r'''_d1_original_supervisor = ci_build_artifacts.run_supervised_bubblewrap
+def _d1_probe_supervisor(arguments, *, environment, pass_fds, cancellation_signal, cwd=None, test_hook=None):
     import fcntl
     import stat
 
     workspace_bind = ["--bind", str(workspace), str(workspace)]
     workspace_index = next(
-        index for index in range(len(argv))
-        if argv[index:index + len(workspace_bind)] == workspace_bind
+        index
+        for index in range(len(arguments))
+        if arguments[index:index + len(workspace_bind)] == workspace_bind
     )
     artifact_mounts = []
-    for index, argument in enumerate(argv[:-2]):
+    for index, argument in enumerate(arguments[:-2]):
         if argument != "--ro-bind":
             continue
-        source = argv[index + 1]
-        target = Path(argv[index + 2])
+        source = arguments[index + 1]
+        target = Path(arguments[index + 2])
         if source.startswith("/proc/self/fd/") and target == workspace / "app.js":
             artifact_mounts.append((index, int(source.rsplit("/", 1)[1])))
     if len(artifact_mounts) != 1:
@@ -835,8 +971,8 @@ def _d1_probe_popen(argv, **kwargs):
     mount_index, descriptor = artifact_mounts[0]
     if workspace_index >= mount_index:
         raise AssertionError("workspace bind must precede ArtifactSet mounts")
-    if descriptor not in kwargs.get("pass_fds", ()):
-        raise AssertionError("ArtifactSet descriptor is not retained for process launch")
+    if descriptor not in pass_fds:
+        raise AssertionError("ArtifactSet descriptor not retained at process launch")
     metadata = os.fstat(descriptor)
     if not stat.S_ISREG(metadata.st_mode):
         raise AssertionError("ArtifactSet descriptor is not a regular file")
@@ -851,7 +987,6 @@ def _d1_probe_popen(argv, **kwargs):
         pass
     else:
         raise AssertionError("ArtifactSet descriptor accepted a write")
-
     child_check = (
         "import os,sys\n"
         "fd=int(sys.argv[1])\n"
@@ -861,7 +996,7 @@ def _d1_probe_popen(argv, **kwargs):
         "except OSError:\n pass\n"
         "else:\n raise AssertionError('inherited ArtifactSet FD is writable')\n"
     )
-    child = _d1_original_popen(
+    child = subprocess.Popen(
         [sys.executable, "-c", child_check, str(descriptor)],
         pass_fds=(descriptor,),
         stdout=subprocess.PIPE,
@@ -873,19 +1008,45 @@ def _d1_probe_popen(argv, **kwargs):
         raise AssertionError(
             f"ArtifactSet descriptor was not usable at child launch: {child_stdout}{child_stderr}"
         )
+    return _d1_original_supervisor(
+        arguments,
+        environment=environment,
+        pass_fds=pass_fds,
+        cancellation_signal=cancellation_signal,
+        cwd=cwd,
+        test_hook=test_hook,
+    )
+ci_build_artifacts.run_supervised_bubblewrap = _d1_probe_supervisor
+'''
+            source_line = helper_source.index(marker)
+            line_start = helper_source.rfind("\n", 0, source_line) + 1
+            indent = helper_source[line_start:source_line]
+            helper_source = (
+                helper_source[:line_start]
+                + textwrap.indent(probe, indent)
+                + helper_source[line_start:]
+            )
+        if cancel_cleanup_probe:
+            marker = "candidate_result = ci_build_artifacts.run_supervised_bubblewrap(\n"
+            self.assertEqual(1, helper_source.count(marker))
+            probe = r'''_d1_original_supervisor = ci_build_artifacts.run_supervised_bubblewrap
+def _d1_cancel_cleanup(arguments, *, environment, pass_fds, cancellation_signal, cwd=None, test_hook=None):
+    def _inject_cleanup_cancellation(event):
+        nonlocal received_signal
+        if test_hook is not None:
+            test_hook(event)
+        if event == "cleanup-start" and received_signal is None:
+            received_signal = int(signal.SIGTERM)
 
-    class _D1ProbeProcess:
-        args = argv
-        pid = 2_147_483_647
-        returncode = 0
-
-        @staticmethod
-        def poll():
-            return 0
-
-    return _D1ProbeProcess()
-
-subprocess.Popen = _d1_probe_popen
+    return _d1_original_supervisor(
+        arguments,
+        environment=environment,
+        pass_fds=pass_fds,
+        cancellation_signal=cancellation_signal,
+        cwd=cwd,
+        test_hook=_inject_cleanup_cancellation,
+    )
+ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_cleanup
 '''
             source_line = helper_source.index(marker)
             line_start = helper_source.rfind("\n", 0, source_line) + 1
@@ -950,7 +1111,9 @@ subprocess.Popen = _d1_probe_popen
         script_plan=None,
         verified_artifact=False,
         bwrap_probe=False,
+        cancel_cleanup_probe=False,
         receipt_capture=None,
+        plan_receipt_capture=None,
         post_run_absent=None,
         nested_manifests=None,
     ):
@@ -1283,7 +1446,10 @@ subprocess.Popen = _d1_probe_popen
                     f'is_relative_to("{fixture_opt / "microsoft" / "powershell"}")',
                 )
             helper_path = self.stage_candidate_helper(
-                runner_temp, candidate_run, bwrap_probe=bwrap_probe
+                runner_temp,
+                candidate_run,
+                bwrap_probe=bwrap_probe,
+                cancel_cleanup_probe=cancel_cleanup_probe,
             )
             self.assertTrue(
                 workspace.is_dir(),
@@ -1298,16 +1464,21 @@ subprocess.Popen = _d1_probe_popen
             )
             if post_run_absent is not None:
                 self.assertFalse((workspace / post_run_absent).exists())
-            if receipt_capture is not None:
+            if receipt_capture is not None or plan_receipt_capture is not None:
                 receipt_directories = list(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
                 self.assertEqual(len(receipt_directories), 1, result.stderr)
-                receipt_records = sorted(receipt_directories[0].glob("entry-*.json"))
-                Path(receipt_capture).write_text(
-                    json.dumps(
-                        [json.loads(record.read_text(encoding="utf-8")) for record in receipt_records]
-                    ),
-                    encoding="utf-8",
-                )
+                if receipt_capture is not None:
+                    receipt_records = sorted(receipt_directories[0].glob("entry-*.json"))
+                    Path(receipt_capture).write_text(
+                        json.dumps(
+                            [json.loads(record.read_text(encoding="utf-8")) for record in receipt_records]
+                        ),
+                        encoding="utf-8",
+                    )
+                if plan_receipt_capture is not None:
+                    plan_receipt = receipt_directories[0] / "plan.json"
+                    self.assertTrue(plan_receipt.is_file(), result.stderr)
+                    Path(plan_receipt_capture).write_bytes(plan_receipt.read_bytes())
             self.assertNotIn(f"can't open file '{helper_path}'", result.stderr)
             if swap_thread is not None:
                 swap_thread.join(timeout=5)
@@ -1448,7 +1619,7 @@ subprocess.Popen = _d1_probe_popen
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("service variables reached candidate npm script", result.stdout)
+        self.assertIn("service variables reached candidate npm script", result.stderr)
         plan_run = self.candidate_plan_step()["run"]
         self.assertIn('legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]', plan_run)
         self.assertIn("*legacy_network_args,", plan_run)
@@ -1469,7 +1640,7 @@ subprocess.Popen = _d1_probe_popen
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("alternatives-managed awk ran in the candidate sandbox", result.stdout)
+        self.assertIn("alternatives-managed awk ran in the candidate sandbox", result.stderr)
         self.assertEqual([], remaining)
 
     def test_candidate_path_shadow_cannot_replace_setup_node_tools(self):
@@ -1489,7 +1660,7 @@ subprocess.Popen = _d1_probe_popen
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("trusted npm CLI fixture invoked", result.stdout)
+        self.assertIn("trusted npm CLI fixture invoked", result.stderr)
         self.assertEqual([], remaining)
 
     def test_node_26_npm_cli_is_selected_from_its_own_tool_prefix(self):
@@ -1502,8 +1673,8 @@ subprocess.Popen = _d1_probe_popen
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("trusted npm CLI fixture invoked", result.stdout)
-        self.assertNotIn("decoy npm CLI", result.stdout)
+        self.assertIn("trusted npm CLI fixture invoked", result.stderr)
+        self.assertNotIn("decoy npm CLI", result.stderr)
         self.assertEqual([], remaining)
 
     def test_identical_npm_cli_candidates_from_symlink_layout_are_deduplicated(self):
@@ -1515,7 +1686,7 @@ subprocess.Popen = _d1_probe_popen
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("trusted npm CLI fixture invoked", result.stdout)
+        self.assertIn("trusted npm CLI fixture invoked", result.stderr)
         self.assertEqual([], remaining)
 
     def test_distinct_npm_cli_candidates_fail_closed(self):

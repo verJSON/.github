@@ -6379,18 +6379,7 @@ jobs:
           global_config_file = tempfile.TemporaryFile(dir=runner_temp)
           sandbox_workspace = "/workspace"
           shared_artifact = os.environ.get("BUILD_ARTIFACT_ROLE") in {"producer", "consumer"}
-          sandbox_entrypoint = (
-              "import os, sys\n"
-              "max_fd = os.sysconf('SC_OPEN_MAX')\n"
-              "if max_fd < 3: raise SystemExit('invalid file descriptor limit')\n"
-              "os.closerange(3, max_fd)\n"
-              "if os.environ.get('BUILD_ARTIFACT_ROLE') in ('producer', 'consumer'):\n"
-              "    sys.path.insert(0, '/tmp')\n"
-              "    from ci_build_artifacts import enforce_shared_sandbox_process_state\n"
-              "    enforce_shared_sandbox_process_state()\n"
-              "    os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
-              "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
-          )
+          sandbox_entrypoint = ci_build_artifacts.SANDBOX_SUPERVISOR_ENTRYPOINT
           system_mounts = (
               (Path("/usr"), "/usr"),
               (Path("/bin").resolve(strict=True), "/bin"),
@@ -6581,18 +6570,15 @@ jobs:
 
           runtime_cache_content = verified_runtime_cache_content()
 
-          supervisor_state = {"process": None}
+          supervisor_state = {"signal": None}
 
           def stop_on_termination(signum, _frame):
-              active_process = supervisor_state["process"]
-              if active_process is not None and active_process.poll() is None:
-                  try:
-                      os.killpg(active_process.pid, signal.SIGTERM)
-                  except ProcessLookupError:
-                      pass
-              raise ci_build_artifacts.ScriptPlanInterrupted(signum)
+              if supervisor_state["signal"] is None:
+                  supervisor_state["signal"] = signum
 
-          signal.signal(signal.SIGTERM, stop_on_termination)
+          for caught_signal in (signal.SIGINT, signal.SIGTERM):
+              signal.signal(caught_signal, stop_on_termination)
+
           def execute_candidate_entry(index, _entry):
               directory, name, unset_env, requires_services = normalized[index]
               script_env = os.environ.copy()
@@ -6669,6 +6655,7 @@ jobs:
                   str(bubblewrap),
                   "--unshare-user",
                   "--unshare-pid",
+              "--as-pid-1",
                   "--unshare-ipc",
                   "--unshare-uts",
                   "--unshare-cgroup-try",
@@ -6767,8 +6754,6 @@ jobs:
                   ))
                   script_env["PLAYWRIGHT_BROWSERS_PATH"] = "/dev/shm/playwright-browsers"
               runtime_cache_staging = None
-              status_read_fd = None
-              status_write_fd = None
               try:
                   if runtime_cache_content is not None:
                       runtime_cache_staging = stage_runtime_cache(runtime_cache_content)
@@ -6778,59 +6763,27 @@ jobs:
                           "/dev/shm/npm-cache/_cacache/content-v2",
                           writable=True,
                       )
-                  status_read_fd, status_write_fd = os.pipe()
-                  arguments.extend(("--json-status-fd", str(status_write_fd)))
                   arguments.extend((
                       "--chdir", str(sandbox_directory), "--",
                       "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
                       *npm_command, "run", name,
                   ))
-                  process = subprocess.Popen(
+                  candidate_result = ci_build_artifacts.run_supervised_bubblewrap(
                       arguments,
-                      env=script_env,
-                      cwd="/",
+                      environment=script_env,
                       pass_fds=tuple(
                           mount_fds
-                          + [
-                              fd for fd in (browser_cache_fd, global_config_file.fileno())
-                              if fd is not None
-                          ]
-                          + [status_write_fd]
+                          + [fd for fd in (browser_cache_fd, global_config_file.fileno()) if fd is not None]
                       ),
-                      start_new_session=True,
+                      cancellation_signal=lambda: supervisor_state["signal"],
+                      cwd="/",
                   )
-                  os.close(status_write_fd)
-                  status_write_fd = None
-                  supervisor_state["process"] = process
-                  try:
-                      candidate_status = process.wait()
-                      status_descriptor = status_read_fd
-                      status_read_fd = None
-                      candidate_status = ci_build_artifacts.read_bubblewrap_json_status(
-                          status_descriptor, candidate_status
+                  candidate_status = candidate_result.return_code
+                  if candidate_status is None:
+                      raise ci_build_artifacts.IntegrityError(
+                          "trusted Bubblewrap supervisor omitted the candidate exit code"
                       )
-                  except BaseException as execution_error:
-                      try:
-                          ci_build_artifacts.extinguish_supervised_process_group(process)
-                          process.wait()
-                      except BaseException as cleanup_error:
-                          execution_error.cleanup_status = "failed"
-                          raise execution_error from cleanup_error
-                      execution_error.cleanup_status = "verified"
-                      raise
-                  else:
-                      try:
-                          ci_build_artifacts.extinguish_supervised_process_group(process)
-                          process.wait()
-                      except BaseException as cleanup_error:
-                          cleanup_error.cleanup_status = "failed"
-                          raise
-                  finally:
-                      supervisor_state["process"] = None
               finally:
-                  for descriptor in (status_read_fd, status_write_fd):
-                      if descriptor is not None:
-                          os.close(descriptor)
                   for descriptor in mount_fds:
                       os.close(descriptor)
                   mount_fds.clear()
@@ -6879,6 +6832,7 @@ jobs:
               fail_fast_value == "true",
               runner_temp,
               execute_candidate_entry,
+              cancellation_signal=lambda: supervisor_state["signal"],
           )
           if receipt_result.exit_code != 0:
               sys.exit("candidate script plan failed; see trusted per-entry receipts in RUNNER_TEMP")

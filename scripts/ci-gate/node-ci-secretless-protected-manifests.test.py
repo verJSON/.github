@@ -213,7 +213,8 @@ class ProtectedCandidateManifestTests(unittest.TestCase):
         ]
         self.assertFalse(command_record_mutations, "the frozen expanded entry list cannot be mutated")
 
-        supervisor = ast.parse(inspect.getsource(artifacts.run_script_plan_with_receipts)).body[0]
+        supervisor_source = inspect.getsource(artifacts.run_script_plan_with_receipts)
+        supervisor = ast.parse(supervisor_source).body[0]
         supervisor_loops = [
             node
             for node in ast.walk(supervisor)
@@ -243,40 +244,39 @@ class ProtectedCandidateManifestTests(unittest.TestCase):
             for node in ast.walk(self.helper)
             if isinstance(node, ast.FunctionDef) and node.name == "execute_candidate_entry"
         )
-        launch_assignments = [
+        argument_assignments = [
             node
             for node in ast.walk(callback)
             if isinstance(node, ast.Assign)
-            and any(isinstance(target, ast.Name) and target.id == "active_process" for target in node.targets)
-            and isinstance(node.value, ast.Call)
-            and isinstance(node.value.func, ast.Attribute)
-            and isinstance(node.value.func.value, ast.Name)
-            and node.value.func.value.id == "subprocess"
-            and node.value.func.attr == "Popen"
+            and any(isinstance(target, ast.Name) and target.id == "arguments" for target in node.targets)
+            and isinstance(node.value, ast.List)
         ]
-        self.assertEqual(len(launch_assignments), 1)
-        launch = launch_assignments[0]
+        self.assertEqual(len(argument_assignments), 1, "one frozen Bubblewrap argv must be built per entry")
+        arguments_assignment = argument_assignments[0]
+        supervisor_calls = [
+            node
+            for node in ast.walk(callback)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "run_supervised_bubblewrap"
+        ]
+        self.assertEqual(len(supervisor_calls), 1, "each entry must use the trusted sandbox supervisor")
+        supervisor_call = supervisor_calls[0]
+        self.assertTrue(supervisor_call.args)
+        self.assertIsInstance(supervisor_call.args[0], ast.Name)
+        self.assertEqual(supervisor_call.args[0].id, "arguments")
+        self.assertIn("--unshare-pid", ast.unparse(arguments_assignment.value))
+        self.assertIn("--as-pid-1", ast.unparse(arguments_assignment.value))
+
         cleanup_tries = [
             node
             for node in ast.walk(callback)
             if isinstance(node, ast.Try)
             and node.finalbody
-            and launch in ast.walk(node)
+            and supervisor_call in ast.walk(node)
         ]
-        self.assertEqual(len(cleanup_tries), 1, "candidate launch must remain in unconditional cleanup scope")
-        finalbody = cleanup_tries[0].finalbody
-        final_calls = [child for statement in finalbody for child in ast.walk(statement) if isinstance(child, ast.Call)]
-        self.assertTrue(
-            any(
-                isinstance(call.func, ast.Name)
-                and call.func.id == "extinguish_process_group"
-                and call.args
-                and isinstance(call.args[0], ast.Name)
-                and call.args[0].id == "active_process"
-                for call in final_calls
-            ),
-            "candidate cleanup must verify process-group extinction before callback return",
-        )
+        self.assertEqual(len(cleanup_tries), 1, "candidate execution must remain in unconditional cleanup scope")
+        final_calls = [child for statement in cleanup_tries[0].finalbody for child in ast.walk(statement) if isinstance(child, ast.Call)]
         removed_cache_roots = {
             call.args[0].id
             for call in final_calls
@@ -292,9 +292,27 @@ class ProtectedCandidateManifestTests(unittest.TestCase):
             "candidate cleanup must remove every private script cache root",
         )
 
-        command = launch.value.args[0]
+        host_supervisor = inspect.getsource(artifacts.run_supervised_bubblewrap)
+        host_supervisor_tree = ast.parse(host_supervisor)
+        popen_calls = [
+            node
+            for node in ast.walk(host_supervisor_tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "subprocess"
+            and node.func.attr == "Popen"
+        ]
+        self.assertEqual(len(popen_calls), 1, "the host supervisor owns Bubblewrap launch")
+        trusted_wrapper = artifacts.SANDBOX_SUPERVISOR_ENTRYPOINT
+        self.assertIn("close_fds=True", trusted_wrapper)
+        self.assertIn("libc.prctl(4, 0", trusted_wrapper)
+        self.assertIn("os.waitpid(-1", trusted_wrapper)
+        self.assertIn("cleanup-complete", trusted_wrapper)
+
+        command = arguments_assignment.value
         self.assertIsInstance(command, ast.List)
-        return callback, command, launch
+        return callback, command, arguments_assignment
 
     def _assert_plan_lists_are_not_mutated(self) -> None:
         allowed_methods = {"append", "clear", "extend", "insert", "pop", "remove", "reverse", "sort"}

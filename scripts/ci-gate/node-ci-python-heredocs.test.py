@@ -101,15 +101,45 @@ class NodeCiPythonHeredocsTest(unittest.TestCase):
                 callback_source = ast.get_source_segment(candidate_source, callback)
                 self.assertIsNotNone(callback_source)
                 callback_tree = ast.parse(callback_source)
-                self.assertTrue(
-                    any(
-                        isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Attribute)
-                        and node.func.attr == "Popen"
-                        for node in ast.walk(callback_tree)
-                    ),
-                    "candidate process launch must stay inside the executor callback",
+                sandbox_calls = [
+                    node
+                    for node in ast.walk(callback_tree)
+                    if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "run_supervised_bubblewrap"
+                ]
+                self.assertEqual(
+                    len(sandbox_calls),
+                    1,
+                    "each candidate entry must enter the trusted Bubblewrap supervisor",
                 )
+                helper_tree = ast.parse(TRUSTED_HELPER.read_text(encoding="utf-8"))
+                sandbox_function = next(
+                    node
+                    for node in helper_tree.body
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "run_supervised_bubblewrap"
+                )
+                sandbox_source = ast.get_source_segment(
+                    TRUSTED_HELPER.read_text(encoding="utf-8"), sandbox_function
+                )
+                self.assertIsNotNone(sandbox_source)
+                self.assertIn("subprocess.Popen(", sandbox_source)
+                self.assertIn("cancellation_signal", sandbox_source)
+                wrapper_assignment = next(
+                    node
+                    for node in helper_tree.body
+                    if isinstance(node, ast.Assign)
+                    and any(
+                        isinstance(target, ast.Name)
+                        and target.id == "SANDBOX_SUPERVISOR_ENTRYPOINT"
+                        for target in node.targets
+                    )
+                )
+                wrapper = wrapper_assignment.value.value
+                self.assertIn("close_fds=True", wrapper)
+                self.assertIn("libc.prctl(4, 0", wrapper)
+                self.assertIn("os.waitpid(-1", wrapper)
                 supervisor_calls = [
                     node
                     for node in ast.walk(tree)

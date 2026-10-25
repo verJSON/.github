@@ -86,6 +86,22 @@ unset CI_SCRIPT_PLAN
 {run_script}'''
 
 plan_runner = run_with_action_plan(plan["run"])
+cleanup_injection = """_d1_original_supervisor = ci_build_artifacts.run_supervised_bubblewrap
+def _d1_cancel_cleanup(*args, **kwargs):
+    previous_hook = kwargs.get("test_hook")
+    def _cancel_on_cleanup(event):
+        if previous_hook is not None:
+            previous_hook(event)
+        if event == "cleanup-start":
+            supervisor_state["signal"] = int(signal.SIGTERM)
+    kwargs["test_hook"] = _cancel_on_cleanup
+    return _d1_original_supervisor(*args, **kwargs)
+ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_cleanup
+"""
+needle = "ci_build_artifacts.run_script_plan_with_receipts("
+cleanup_source = plan["run"].replace(needle, cleanup_injection + "\n" + needle, 1)
+assert cleanup_source != plan["run"]
+cleanup_plan_runner = run_with_action_plan(cleanup_source)
 assert "inputs.secretless-pr" in rebuild["if"] and "secrets." not in str(rebuild.get("env", {}))
 assert "inputs.secretless-pr" in plan["if"] and "secrets." not in str(plan.get("env", {}))
 assert '"--tmpfs", "/"' in plan["run"]
@@ -103,7 +119,7 @@ assert '"--file", str(global_config_file.fileno()), "/dev/shm/npm-globalconfig"'
 assert "global_config_file.fileno()" in plan["run"]
 assert '"PATH": f"{node_toolchain_bin}:/usr/bin:/bin"' in plan["run"]
 assert "secretless candidate scripts require a GitHub-hosted Linux runner" in plan["run"]
-assert "env=script_env" in plan["run"]
+assert "environment=script_env" in plan["run"]
 assert plan["env"]["BASH_ENV"] == "/dev/null"
 for command_file in ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"):
     assert f'"{command_file}"' in plan["run"]
@@ -124,14 +140,15 @@ assert plan["env"]["SCRIPT_PLAN_DEFAULT_PLAN"] == "${{ steps.node-ci-script-plan
 assert plan["env"]["SCRIPT_PLAN_ENTRIES_FILE"] == "${{ steps.node-ci-script-plan.outputs.entries-file }}"
 assert "if run_defaults:" in plan["run"]
 assert "inputs.secretless-pr" in plan["if"] and "inputs.secretless-trusted-ref" in plan["if"]
-assert "subprocess.Popen(" in plan["run"]
-assert "start_new_session=True" in plan["run"]
-assert "extinguish_supervised_process_group(process)" in plan["run"]
+assert "ci_build_artifacts.SANDBOX_SUPERVISOR_ENTRYPOINT" in plan["run"]
+assert "ci_build_artifacts.run_supervised_bubblewrap(" in plan["run"]
+assert '"--as-pid-1"' in plan["run"]
+assert 'cancellation_signal=lambda: supervisor_state["signal"]' in plan["run"]
 assert '"--chdir", str(sandbox_directory), "--",' in plan["run"]
 assert '"/usr/bin/python3", "-I", "-c", sandbox_entrypoint' in plan["run"]
 assert "pass_fds=tuple(" in plan["run"]
 assert "global_config_file.fileno()" in plan["run"]
-assert "env=script_env" in plan["run"]
+assert "environment=script_env" in plan["run"]
 for command_file in ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"):
     assert f'"{command_file}"' in plan["run"]
 protected_doc = yaml.safe_load(
@@ -195,16 +212,20 @@ assert {"urlsplit", "credential_component_is_present"} <= loaded_names(
     protected_functions["validate_candidate_service_value"]
 )
 entrypoint_assignment = next(
-    node for node in protected_plan_function.body
+    node.value
+    for node in protected_helper_ast.body
     if isinstance(node, ast.Assign)
     and any(
-        isinstance(target, ast.Name) and target.id == "sandbox_entrypoint"
+        isinstance(target, ast.Name) and target.id == "SANDBOX_SUPERVISOR_ENTRYPOINT"
         for target in node.targets
     )
 )
-sandbox_entrypoint = ast.literal_eval(entrypoint_assignment.value)
-assert "os.closerange(3, max_fd)" in sandbox_entrypoint
-assert "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)" in sandbox_entrypoint
+sandbox_entrypoint = ast.literal_eval(entrypoint_assignment)
+assert "os.getpid() != 1" in sandbox_entrypoint
+assert "libc.prctl(4, 0, 0, 0, 0)" in sandbox_entrypoint
+assert "candidate.wait(timeout=0.05)" in sandbox_entrypoint
+assert "close_fds=True" in sandbox_entrypoint
+assert "os.waitpid(-1, os.WNOHANG)" in sandbox_entrypoint
 assert '"--tmpfs", "/"' in protected_plan_source
 assert '"--ro-bind", "/", "/"' not in protected_plan_source
 assert 'legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]' in protected_plan_source
@@ -256,7 +277,7 @@ bin_dir.mkdir(parents=True)
 (fixture / ".git").mkdir()
 (fixture / "node_modules").mkdir()
 (fixture / "package.json").write_text(
-'{"scripts":{"build":"fixture","typecheck":"fixture","test":"fixture","lint":"fixture","fail":"fixture","spawn":"fixture","after":"fixture","ambiguous":"fixture","delete-nested":"fixture"}}',
+'{"scripts":{"build":"fixture","typecheck":"fixture","test":"fixture","lint":"fixture","fail":"fixture","spawn":"fixture","after":"fixture","ambiguous":"fixture","delete-nested":"fixture","cleanup-cancel":"fixture","channel-probe":"fixture"}}',
     encoding="utf-8",
 )
 command_log = fixture / "node_modules" / ".npm-commands"
@@ -290,13 +311,21 @@ node.write_text(
     "      *' run fail'*) exit 23 ;;\n"
     "      *' run ambiguous'*) exit 143 ;;\n"
     "      *' run delete-nested'*) rm -rf /workspace/nested; exit 23 ;;\n"
+    "      *' run cleanup-cancel'*) /usr/bin/setsid /bin/bash -c 'trap \"\" TERM; while :; do sleep 0.02; done' detached </dev/null >/dev/null 2>&1 & ;;\n"
+    "      *' run channel-probe'*)\n"
+    "        if /bin/cat /proc/1/fd/1 >/dev/null 2>&1; then exit 91; fi\n"
+    "        if printf forged > /proc/1/fd/1 2>/dev/null; then exit 92; fi\n"
+    "        printf '%s\\n' '{\"version\":1,\"pid\":1,\"state\":\"candidate-exit\"}'\n"
+    "        ;;\n"
     "      *' run nested-after'*) touch /workspace/nested-ran ;;\n"
     "      *' run spawn'*)\n"
     '        /usr/bin/setsid /bin/bash -c \'sleep 1; touch "$1"\' detached /workspace/node_modules/.child-late </dev/null >/dev/null 2>&1 &\n'
+    "        /usr/bin/setsid /bin/bash -c 'trap \"\" TERM; kill -STOP $$; sleep 1; touch \"$1\"' detached /workspace/node_modules/.child-stopped-late </dev/null >/dev/null 2>&1 &\n"
+    "        /usr/bin/python3 -c 'import os,signal,sys,time\np=os.fork()\nif p == 0:\n q=os.fork()\n if q: os._exit(0)\n os.setsid()\n signal.signal(signal.SIGTERM, signal.SIG_IGN)\n time.sleep(1)\n open(sys.argv[1],\"w\").close()\n os._exit(0)\nos.waitpid(p,0)' /workspace/node_modules/.child-double-fork-late </dev/null >/dev/null 2>&1 &\n"
     '        touch /workspace/node_modules/.child-started\n'
     '        for _ in {1..100}; do [[ -f /workspace/node_modules/.child-started ]] && break; sleep 0.01; done\n'
     '        [[ -f /workspace/node_modules/.child-started ]] || exit 28 ;;\n'
-    '      *\' run after\'*) sleep 2; [[ ! -f /workspace/node_modules/.child-late ]] || exit 29 ;;\n'
+    '      *\' run after\'*) sleep 2; [[ ! -f /workspace/node_modules/.child-late && ! -f /workspace/node_modules/.child-stopped-late && ! -f /workspace/node_modules/.child-double-fork-late ]] || exit 29 ;;\n'
     '    esac\n',
     encoding="utf-8",
 )
@@ -502,9 +531,61 @@ receipts = [
 assert [receipt["state"] for receipt in receipts] == ["completed", "not-run-fail-fast"]
 assert receipts[1]["exitCode"] is None and receipts[1]["signal"] is None, receipts[1]
 print("source Bubblewrap executor records not-run receipts when fail-fast is enabled")
+runner_environment["CI_SCRIPT_PLAN"] = '["cleanup-cancel","after"]'
+runner_environment["CI_LEVEL_FAIL_FAST"] = "false"
+command_log.write_text("", encoding="utf-8")
+receipts_before = set(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
+result = subprocess.run(
+    ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", cleanup_plan_runner],
+    cwd=fixture,
+    env=runner_environment,
+    check=False,
+    capture_output=True,
+    text=True,
+)
+assert result.returncode != 0, "cleanup-time cancellation must fail the source script plan"
+assert command_log.read_text(encoding="utf-8").splitlines() == ["run cleanup-cancel"], result.stderr
+receipt_dirs = list(set(runner_temp.glob(".verjson-node-ci-entry-receipts-*")) - receipts_before)
+assert len(receipt_dirs) == 1
+plan_receipt = json.loads((receipt_dirs[0] / "plan.json").read_text(encoding="utf-8"))
+assert plan_receipt["state"] == "interrupted", plan_receipt
+assert plan_receipt["signal"] == 15, plan_receipt
+receipts = [
+    json.loads((receipt_dirs[0] / f"entry-{ordinal:06d}.json").read_text(encoding="utf-8"))
+    for ordinal in range(2)
+]
+assert receipts[0]["state"] in {"completed", "infrastructure-failure"}, receipts[0]
+assert receipts[1]["state"] == "not-run-aborted", receipts[1]
+if receipts[0]["state"] == "completed":
+    assert receipts[0]["exitCode"] == 0 and receipts[0]["cleanup"] == "verified", receipts[0]
+else:
+    assert receipts[0]["exitCode"] is None and receipts[0]["cleanup"] == "verified", (receipts[0], result.stderr)
+print("source Bubblewrap executor invalidates the plan when cancellation arrives during cleanup")
+runner_environment["CI_SCRIPT_PLAN"] = '["channel-probe"]'
+runner_environment["CI_LEVEL_FAIL_FAST"] = "true"
+command_log.write_text("", encoding="utf-8")
+receipts_before = set(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
+result = subprocess.run(
+    ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", plan_runner],
+    cwd=fixture,
+    env=runner_environment,
+    check=False,
+    capture_output=True,
+    text=True,
+)
+assert result.returncode == 0, result.stderr
+assert command_log.read_text(encoding="utf-8").splitlines() == ["run channel-probe"]
+receipt_dirs = list(set(runner_temp.glob(".verjson-node-ci-entry-receipts-*")) - receipts_before)
+assert len(receipt_dirs) == 1
+entry_receipt = json.loads((receipt_dirs[0] / "entry-000000.json").read_text(encoding="utf-8"))
+plan_receipt = json.loads((receipt_dirs[0] / "plan.json").read_text(encoding="utf-8"))
+assert entry_receipt["state"] == "completed" and entry_receipt["exitCode"] == 0
+assert plan_receipt["state"] == "accepted"
+assert '\"state\":\"candidate-exit\"' in result.stderr
+print("source Bubblewrap executor blocks candidate access to and spoofing of the supervisor channel")
 assert (fixture / "node_modules/.host-path-probes").read_text(encoding="utf-8").splitlines() == [
     "hidden"
-] * 10
+] * 12
 print("consumer sandbox hides runner home and Docker socket paths")
 print("secretless default plan scopes service variables to the test script")
 assert inputs["db-image"]["default"] == ""

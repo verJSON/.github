@@ -349,69 +349,28 @@ ordinary CI may build once and share that build among checks in the same workflo
 
 ## 2026-10-25 amendment — Level-local fail-fast records every planned script entry
 
-- **Issue:** [Verjson/.github#1869](https://github.com/Verjson/.github/issues/1869); this is a `Part of #1869` implementation slice.
+- **Issue:** [Verjson/.github#1869](https://github.com/Verjson/.github/issues/1869); implementation is part of that issue.
 
 ### Decision
 
-A typed `test-levels` entry may declare `failFast` as a strict boolean. Omission means
-`true`. The immutable parsed level carries that value through generated callers,
-authorization, and both the source `node-ci.yml` and generated
-`node-ci-protected.yml` executors. This is per-level ordered script execution; it does
-not change GitHub matrix `fail-fast`.
+A typed `test-levels` entry may declare strict boolean `failFast`; omission defaults to `true`. The immutable parsed level carries this value through generated callers, authorization, and both `node-ci.yml` executors. This is per-level ordered script behavior and does not change GitHub matrix `fail-fast`.
 
-Entries execute sequentially in the existing shared workspace. With `failFast: true`,
-an ordinary nonzero candidate exit prevents later launches. With `false`, an ordinary
-nonzero exit is recorded and the next planned entry runs, but the failure remains
-latched and the level ultimately fails. Later outputs are diagnostic: an earlier
-failure may have changed shared workspace state, so later successes are not independent
-attestations. The workflow does not use `continue-on-error`.
+Entries execute sequentially in the existing shared workspace. With `failFast: true`, an ordinary nonzero candidate exit prevents later launches and receives `not-run-fail-fast` receipts. With `false`, an ordinary nonzero exit is recorded and later entries run for diagnostics, while the failure remains latched and the level ultimately fails. Later outputs do not attest independently because earlier scripts can change shared workspace state. The workflow does not use `continue-on-error`.
 
-A trusted host supervisor writes one versioned JSON receipt for each expanded plan
-entry beneath a fresh private directory in host `RUNNER_TEMP`, outside candidate mounts.
-Receipts bind repository, event, ref, candidate commit, workflow SHA, run and attempt,
-job and level, the complete ordered plan digest, ordinal and entry identity, actual
-return code or signal, and process cleanup status. Exclusive no-follow creation and
-atomic finalization keep receipts under supervisor ownership; stdout and candidate
-workspace contents are not receipt sources. The verifier rejects duplicate JSON keys,
-identity or plan mismatches, contradictory status fields, duplicate or extra entries,
-and missing entries.
-
-Cancellation, timeout, launch, sandbox or boundary failure, cleanup failure, receipt
-failure, and unexpected supervisor errors are terminal and prevent later launches.
-Signals do not receive fabricated exit codes. If a hard kill or runner loss prevents
-the supervisor from completing receipts, missing evidence fails the level. Both
-executors must prove the preceding candidate process tree is gone before advancing.
+The trusted host supervisor writes one versioned JSON receipt per planned entry beneath a fresh private directory in host `RUNNER_TEMP`, outside candidate mounts. Receipts bind the repository, event, ref, admitted candidate commit, workflow SHA, run and attempt, job and level, complete ordered plan digest, ordinal and entry identity, actual candidate return code or signal when distinguishable, and cleanup state. Creation uses exclusive no-follow files and atomic finalization. A hard kill or runner loss may prevent receipt completion; missing evidence fails the level.
 
 ### Security and acceptance gates
 
-This change keeps the existing credential, permission, egress, service, cache, workspace,
-and matrix behavior. It adds no candidate permission to write actions. The false path
-remains fail-closed unless the registered behavior tests, generated protected-twin
-parity, source and protected Bubblewrap cleanup tests, and canonical GitHub-hosted
-checks pass. Local Bubblewrap evidence is not a claim that a GitHub-hosted run or the
-outside-Verjson adopter canary has passed. Runner-minute savings remain unclaimed until
-equal before-and-after windows are measured, as required by this ADR's exit condition.
-## 2026-10-25 follow-up amendment — Reject unsupported and ambiguous fail-fast execution
-### Decision
-`ci-level-fail-fast=false` is supported only by the secretless script-plan executors.
-The ordinary credentialed npm route rejects `false` in a workflow guard before checkout
-or candidate-controlled commands. Every source secretless execution downloads the
-pinned trusted receipt supervisor, including the level role. Protected per-entry
-identity binds the admitted checkout SHA (`inputs.head-sha`).
+Cancellation, timeout, launch, sandbox or boundary failure, cleanup failure, receipt failure, and unexpected supervisor errors are terminal and prevent later launches. Ordinary candidate failures alone may continue when `failFast` is `false`. Existing credential, permission, egress, service, cache, workspace, and matrix behavior remains unchanged. The false path stays fail-closed unless registered behavior tests, generated protected-twin parity, source and protected Bubblewrap tests, and canonical CI pass. Local Bubblewrap evidence does not establish GitHub-hosted acceptance or an outside-Verjson adopter canary. Runner-minute savings remain unclaimed until equal before-and-after windows are measured.
 
-Both Bubblewrap executors pass a private supervisor status pipe with
-`--json-status-fd` and require a complete `child-pid` event followed by an `exit-code`
-event that matches the process status. Missing, malformed, duplicate-key, incomplete,
-or contradictory status evidence is terminal, so a sandbox startup or boundary failure
-cannot be treated as an ordinary candidate failure and continued. Bubblewrap encodes
-signal termination as `128 + signal`, indistinguishable from an explicit candidate exit
-with that value; therefore every reported code from 128 through 255 is terminal and its
-receipt omits both exit code and signal. No ambiguous value is presented as observed
-candidate status. The supervisor reaps its direct child during bounded process-group
-cleanup before it decides whether the group is gone.
+## 2026-10-25 follow-up amendment — PID 1 supervision and cancellation acceptance
 
-The hosted compatibility probe runs Bubblewrap with `--json-status-fd` and validates
-both status events before the candidate plan starts. The local verification host used
-Bubblewrap 0.11.1; that does not prove hosted acceptance. GitHub-hosted acceptance still
-requires the canonical job to pass on its pinned Ubuntu runner and the runtime probe to
-accept the runner's installed Bubblewrap version.
+The ordinary credentialed npm route rejects `ci-level-fail-fast=false` before checkout or candidate-controlled commands. Every source secretless execution stages the pinned trusted helper, including the ordinary source consumer path. Protected receipts bind the admitted checkout SHA from `inputs.head-sha`.
+
+Both executors run the trusted helper as Bubblewrap PID 1 using `--as-pid-1`. The wrapper verifies PID 1 and successfully sets and reads back `PR_SET_DUMPABLE=0` before starting a candidate. It launches the candidate with `Popen(close_fds=True)` and exclusively waits for that direct child. Candidate output is kept off the wrapper's trusted result stream. The non-dumpable PID 1 boundary prevents candidate access to its file descriptors through `/proc/1/fd` or tracing.
+
+Bubblewrap's separate `--json-status-fd` stream must contain one ordered `child-pid` event and one matching `exit-code` event; strict JSON parsing rejects duplicate keys, non-finite values, malformed records, and contradictory known events while ignoring valid unknown event objects and fields. The trusted wrapper protocol separately requires exactly one final status record and an ordered cleanup-start/cleanup-complete sequence when cleanup succeeds. It distinguishes candidate exits and signals from bootstrap, exec, interruption, and cleanup failures. Bubblewrap's 128–255 exit codes are ambiguous between explicit exits and signal mapping; they remain terminal, and receipts leave both return code and signal null rather than inventing one.
+
+After waiting for the direct candidate, PID 1 sends bounded TERM and KILL to remaining namespace processes, reaps adopted children, and reports cleanup complete only after no non-init process remains. The host validates this evidence before advancing. Cleanup failure is terminal. Cancellation is checked throughout execution, receipt writes and validation, and immediately before acceptance. The atomic success boundary is the accepted plan-receipt hardlink while SIGINT/SIGTERM are blocked and pending signals are checked. If cancellation wins, the accepted receipt is removed and an interrupted plan receipt is finalized; already committed entry receipts remain factual but cannot imply job success. The host pins the reported wrapper PID with a pidfd before signaling it.
+
+Local registered tests exercise status-parser rejection, signal injection during entry and plan receipt writes/finalization, validation, cleanup, and the acceptance boundary. Both real Bubblewrap executor paths cover detached and double-forked descendants, stopped and TERM-resistant children, failure continuation, channel access denial, candidate stdout forgery, and cancellation during cleanup. Local verification used Bubblewrap 0.11.1. GitHub-hosted acceptance on the pinned Ubuntu runner remains required; this local evidence does not claim that gate has passed.

@@ -120,34 +120,39 @@ class SharedNetworkBoundaryTests(unittest.TestCase):
                     if filename == "node-ci-protected.yml"
                     else candidate["run"]
                 )
+
                 self.assertIn("--unshare-net", probe["run"])
                 self.assertIn("--disable-userns", probe["run"])
                 self.assertIn("network-probe", probe["run"])
                 self.assertNotIn("--cap-add", probe["run"])
                 self.assertIn("inputs.build-artifact-role == 'producer' || inputs.build-artifact-role == 'consumer'", probe["if"])
+
                 self.assertIn("*network_args", candidate_runtime)
                 self.assertIn("bubblewrap_network_args(shared_artifact=True)", candidate_runtime)
-                bootstrap = candidate_runtime
-                self.assertIn("enforce_shared_sandbox_process_state()", bootstrap)
-                self.assertIn("artifact_helper_args", bootstrap)
-                self.assertIn("*artifact_helper_args", bootstrap)
-                self.assertIn("artifact_mount_roots", bootstrap)
-                self.assertIn('"NPM_CONFIG_SCRIPT_SHELL": "/bin/sh"', bootstrap)
-                self.assertIn('"npm_config_script_shell": "/bin/sh"', bootstrap)
-                unset_position = bootstrap.index("for env_name in unset_env:")
-                shell_pin_position = bootstrap.index('"NPM_CONFIG_SCRIPT_SHELL": "/bin/sh"', unset_position)
-                self.assertLess(unset_position, shell_pin_position)
-                self.assertNotIn("CAP_NET_ADMIN", bootstrap)
-                self.assertNotIn("CAP_SETPCAP", bootstrap)
-                self.assertNotIn("/usr/sbin/ip", bootstrap)
-                self.assertNotIn("--bounding-set=-all", bootstrap)
+                self.assertIn("run_supervised_bubblewrap", candidate_runtime)
+                self.assertIn("artifact_helper_args", candidate_runtime)
+                self.assertIn("*artifact_helper_args", candidate_runtime)
+                self.assertIn("artifact_mount_roots", candidate_runtime)
+                self.assertIn('"NPM_CONFIG_SCRIPT_SHELL": "/bin/sh"', candidate_runtime)
+                self.assertIn('"npm_config_script_shell": "/bin/sh"', candidate_runtime)
+                self.assertLess(
+                    candidate_runtime.index("for env_name in unset_env:"),
+                    candidate_runtime.index('"NPM_CONFIG_SCRIPT_SHELL": "/bin/sh"'),
+                )
+                self.assertNotIn("CAP_NET_ADMIN", candidate_runtime)
+                self.assertNotIn("CAP_SETPCAP", candidate_runtime)
+                self.assertNotIn("/usr/sbin/ip", candidate_runtime)
+                self.assertNotIn("--bounding-set=-all", candidate_runtime)
+
+                network_probe_source = __import__("inspect").getsource(artifacts.network_probe)
+                self.assertIn("enforce_shared_sandbox_process_state()", network_probe_source)
+                self.assertIn('listener.bind(("127.0.0.1", 0))', network_probe_source)
+                self.assertIn('external.connect(("1.1.1.1", 443))', network_probe_source)
+
                 if filename == "node-ci.yml":
-                    self.assertIn("consume_artifact = os.environ.get(\"BUILD_ARTIFACT_ROLE\") == \"consumer\"", candidate_runtime)
+                    self.assertIn('consume_artifact = os.environ.get("BUILD_ARTIFACT_ROLE") == "consumer"', candidate_runtime)
                     self.assertIn("if consume_artifact:", candidate_runtime)
                     self.assertIn('bind_source(arguments, source, f"{sandbox_workspace}/{relative}")', candidate_runtime)
-                    network_position = candidate_runtime.index("*network_args")
-                    self.assertLess(candidate_runtime.rfind("arguments = [", 0, network_position), network_position)
-                    self.assertLess(network_position, candidate_runtime.index("subprocess.Popen(", network_position))
                 else:
                     self.assertIn("verified_artifact_mounts()", candidate_runtime)
                     self.assertIn('roots = artifact_mount_roots(manifest["exportPolicy"]["paths"])', candidate_runtime)
@@ -157,8 +162,10 @@ class SharedNetworkBoundaryTests(unittest.TestCase):
                     self.assertIn('"--ro-bind"', candidate_runtime)
                     self.assertIn("if not consume_artifact:", candidate_runtime)
                     self.assertIn("return [], []", candidate_runtime)
-                    self.assertLess(candidate_runtime.index("active_process = subprocess.Popen("), candidate_runtime.index("*network_args"))
-                    self.assertLess(candidate_runtime.index("*network_args"), candidate_runtime.index("*artifact_mount_args"))
+
+                self.assertLess(candidate_runtime.index("*network_args"), candidate_runtime.index("run_supervised_bubblewrap"))
+                if filename == "node-ci-protected.yml":
+                    self.assertLess(candidate_runtime.index("*artifact_mount_args"), candidate_runtime.index("run_supervised_bubblewrap"))
 
     def test_shared_bubblewrap_initializes_loopback_without_candidate_capabilities(self) -> None:
         args = artifacts.bubblewrap_network_args(shared_artifact=True)

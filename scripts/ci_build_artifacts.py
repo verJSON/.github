@@ -12,6 +12,7 @@ import io
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -38,6 +39,9 @@ MAX_POLICY_BYTES = 64 * 1024
 MAX_AGGREGATE_NEEDS_BYTES = 64 * 1024
 MAX_RECEIPT_BYTES = 2 * 1024
 MAX_BWRAP_STATUS_BYTES = 16 * 1024
+MAX_BWRAP_STATUS_LINE_BYTES = 4096
+MAX_BWRAP_STATUS_RECORDS = 64
+MAX_TRUSTED_WRAPPER_STATUS_BYTES = 4096
 RUNTIME_INPUT_DEFAULTS: dict[str, Any] = {
     "ci-level-id": "ci",
     "ci-level-fail-fast": True,
@@ -147,6 +151,14 @@ _SCRIPT_ENTRY_RECEIPT_FIELDS = {
     "signal",
     "cleanup",
 }
+_SCRIPT_PLAN_RECEIPT_FIELDS = {
+    "version",
+    "identity",
+    "planDigest",
+    "entryCount",
+    "state",
+    "signal",
+}
 
 
 @dataclass(frozen=True)
@@ -181,7 +193,197 @@ class ScriptPlanInterrupted(Exception):
         super().__init__(f"script plan interrupted by signal {signum}")
 
 
-def parse_bubblewrap_json_status(data: bytes, process_returncode: int) -> int:
+class ScriptCandidateTerminal(ArtifactError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        return_code: int | None = None,
+        signum: int | None = None,
+        cleanup_status: str = "unverified",
+    ):
+        self.return_code = return_code
+        self.signum = signum
+        self.cleanup_status = cleanup_status
+        super().__init__(message)
+
+
+@dataclass(frozen=True)
+class TrustedCandidateStatus:
+    state: str
+    return_code: int | None
+    signum: int | None
+    cleanup: str
+    reaped_count: int
+
+
+SANDBOX_SUPERVISOR_ENTRYPOINT = r'''import ctypes, json, os, signal, subprocess, sys, time
+received_signal = None
+candidate = None
+candidate_started = False
+reaped_count = 0
+cleanup_state = "not-started"
+
+def on_signal(signum, _frame):
+    global received_signal
+    if received_signal is None:
+        received_signal = signum
+    if candidate is not None and candidate.poll() is None:
+        try:
+            os.kill(candidate.pid, signum)
+        except ProcessLookupError:
+            pass
+
+def emit(state, exit_code=None, signum=None, cleanup=None):
+    record = {
+        "version": 1,
+        "pid": os.getpid(),
+        "state": state,
+        "exitCode": exit_code,
+        "signal": signum,
+        "cleanup": cleanup or cleanup_state,
+        "reaped": reaped_count,
+    }
+    sys.stdout.buffer.write(json.dumps(record, separators=(",", ":")).encode("ascii") + b"\n")
+    sys.stdout.buffer.flush()
+
+def emit_event(event):
+    record = {"version": 1, "pid": os.getpid(), "event": event}
+    sys.stdout.buffer.write(json.dumps(record, separators=(",", ":")).encode("ascii") + b"\n")
+    sys.stdout.buffer.flush()
+
+def namespace_pids():
+    return sorted(
+        int(name) for name in os.listdir("/proc")
+        if name.isdigit() and int(name) != 1
+    )
+
+def reap_adopted_children():
+    global reaped_count
+    while True:
+        try:
+            pid, _status = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            return
+        reaped_count += 1
+
+def terminate_namespace_children():
+    global cleanup_state
+    cleanup_state = "terminating"
+    emit_event("cleanup-start")
+    term_deadline = time.monotonic() + 0.5
+    kill_deadline = None
+    while True:
+        pids = namespace_pids()
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM if kill_deadline is None else signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        reap_adopted_children()
+        if not namespace_pids():
+            cleanup_state = "complete"
+            emit_event("cleanup-complete")
+            return
+        now = time.monotonic()
+        if kill_deadline is None and now >= term_deadline:
+            kill_deadline = now + 3.0
+        elif kill_deadline is not None and now >= kill_deadline:
+            raise RuntimeError("namespace descendants survived bounded SIGKILL cleanup")
+        time.sleep(0.02)
+
+try:
+    if os.getpid() != 1:
+        raise RuntimeError("trusted sandbox supervisor is not PID 1")
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(4, 0, 0, 0, 0) != 0 or libc.prctl(3, 0, 0, 0, 0) != 0:
+        raise RuntimeError("cannot make trusted sandbox supervisor non-dumpable")
+    maximum_fd = os.sysconf("SC_OPEN_MAX")
+    if maximum_fd < 3:
+        raise RuntimeError("invalid file descriptor limit")
+    os.closerange(3, maximum_fd)
+    if os.environ.get("BUILD_ARTIFACT_ROLE") in ("producer", "consumer"):
+        sys.path.insert(0, "/tmp")
+        from ci_build_artifacts import enforce_shared_sandbox_process_state
+        enforce_shared_sandbox_process_state()
+    previous_handlers = {}
+    for caught_signal in (signal.SIGINT, signal.SIGTERM):
+        previous_handlers[caught_signal] = signal.getsignal(caught_signal)
+        signal.signal(caught_signal, on_signal)
+    if received_signal is None:
+        try:
+            candidate = subprocess.Popen(
+                sys.argv[1:], env=os.environ, stdout=sys.stderr, stderr=sys.stderr,
+                close_fds=True, restore_signals=True,
+            )
+            candidate_started = True
+        except OSError:
+            terminate_namespace_children()
+            emit("exec-failure", cleanup=cleanup_state)
+            raise SystemExit(125)
+        while True:
+            try:
+                return_code = candidate.wait(timeout=0.05)
+                reaped_count += 1
+                break
+            except subprocess.TimeoutExpired:
+                if received_signal is not None:
+                    try:
+                        os.kill(candidate.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+    else:
+        return_code = None
+    terminate_namespace_children()
+    for caught_signal, previous_handler in previous_handlers.items():
+        signal.signal(caught_signal, previous_handler)
+    if received_signal is not None:
+        emit("interrupted", signum=received_signal, cleanup=cleanup_state)
+        raise SystemExit(128 + received_signal)
+    if return_code is None:
+        emit("bootstrap-failure", cleanup=cleanup_state)
+        raise SystemExit(125)
+    if return_code < 0:
+        emit("candidate-signal", signum=-return_code, cleanup=cleanup_state)
+        raise SystemExit(128 - return_code)
+    if return_code >= 128:
+        emit("candidate-ambiguous-exit", exit_code=return_code, cleanup=cleanup_state)
+        raise SystemExit(return_code)
+    emit("candidate-exit", exit_code=return_code, cleanup=cleanup_state)
+    raise SystemExit(return_code)
+except SystemExit:
+    raise
+except BaseException:
+    if candidate_started and candidate is not None and candidate.poll() is None:
+        try:
+            os.kill(candidate.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            candidate.wait()
+            reaped_count += 1
+        except BaseException:
+            pass
+    try:
+        terminate_namespace_children()
+    except BaseException:
+        cleanup_state = "failed"
+        emit("cleanup-failure", signum=received_signal, cleanup=cleanup_state)
+        raise SystemExit(125)
+    emit("bootstrap-failure" if not candidate_started else "cleanup-failure",
+         signum=received_signal, cleanup=cleanup_state)
+    raise SystemExit(125)
+'''
+
+
+def parse_bubblewrap_json_status(
+    data: bytes,
+    process_returncode: int,
+    *,
+    allow_terminal_status: bool = False,
+) -> int:
     if not isinstance(data, bytes) or len(data) > MAX_BWRAP_STATUS_BYTES:
         raise IntegrityError("Bubblewrap status receipt is missing or oversized")
 
@@ -193,31 +395,57 @@ def parse_bubblewrap_json_status(data: bytes, process_returncode: int) -> int:
             result[key] = value
         return result
 
+    def reject_nonfinite_number(_value: str) -> None:
+        raise IntegrityError("Bubblewrap status receipt contains a non-JSON number")
+
     try:
-        records = [
-            json.loads(line, object_pairs_hook=reject_duplicate_keys)
-            for line in data.decode("utf-8", errors="strict").splitlines()
-            if line
-        ]
+        lines = data.splitlines()
+        if not lines or len(lines) > MAX_BWRAP_STATUS_RECORDS:
+            raise IntegrityError("Bubblewrap status receipt has an invalid record count")
+        records = []
+        for line in lines:
+            if not line or len(line) > MAX_BWRAP_STATUS_LINE_BYTES:
+                raise IntegrityError("Bubblewrap status receipt contains an empty or oversized line")
+            records.append(
+                json.loads(
+                    line.decode("utf-8", errors="strict"),
+                    object_pairs_hook=reject_duplicate_keys,
+                    parse_constant=reject_nonfinite_number,
+                )
+            )
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise IntegrityError("Bubblewrap status receipt is not valid JSON Lines") from error
-    if (
-        len(records) != 2
-        or not isinstance(records[0], dict)
-        or type(records[0].get("child-pid")) is not int
-        or records[0]["child-pid"] <= 0
-        or not isinstance(records[1], dict)
-        or set(records[1]) != {"exit-code"}
-        or type(records[1]["exit-code"]) is not int
-        or type(process_returncode) is not int
-        or records[1]["exit-code"] != process_returncode
-    ):
+    if type(process_returncode) is not int or not 0 <= process_returncode <= 255:
+        raise IntegrityError("Bubblewrap process returned an invalid status")
+
+    child_pid: int | None = None
+    exit_code: int | None = None
+    for record in records:
+        if not isinstance(record, dict):
+            raise IntegrityError("Bubblewrap status receipt contains a non-object event")
+        known = [name for name in ("child-pid", "exit-code") if name in record]
+        if len(known) > 1:
+            raise IntegrityError("Bubblewrap status event combines ordered lifecycle events")
+        if not known:
+            continue
+        if known[0] == "child-pid":
+            value = record["child-pid"]
+            if child_pid is not None or exit_code is not None or type(value) is not int or value <= 0:
+                raise IntegrityError("Bubblewrap child-pid event is duplicate, reversed, or invalid")
+            child_pid = value
+            continue
+        value = record["exit-code"]
+        if child_pid is None or exit_code is not None or type(value) is not int or not 0 <= value <= 255:
+            raise IntegrityError("Bubblewrap exit-code event is duplicate, reversed, or invalid")
+        exit_code = value
+
+    if child_pid is None or exit_code is None or exit_code != process_returncode:
         raise IntegrityError(
             "Bubblewrap status receipt is incomplete or contradicts its process status "
-            f"(records={records!r}, process return code={process_returncode!r})"
+            f"(child-pid={child_pid!r}, exit-code={exit_code!r}, "
+            f"process return code={process_returncode!r})"
         )
-    exit_code = records[1]["exit-code"]
-    if 128 <= exit_code <= 255:
+    if 128 <= exit_code <= 255 and not allow_terminal_status:
         raise IntegrityError("Bubblewrap status cannot distinguish a candidate signal from exit code")
     return exit_code
 
@@ -235,6 +463,335 @@ def read_bubblewrap_json_status(status_fd: int, process_returncode: int) -> int:
         return parse_bubblewrap_json_status(bytes(data), process_returncode)
     finally:
         os.close(status_fd)
+
+
+def _strict_json_object(encoded: bytes, label: str) -> dict[str, Any]:
+    def reject_nonfinite_number(_value: str) -> None:
+        raise IntegrityError(f"{label} contains a non-JSON number")
+
+    try:
+        value = json.loads(
+            encoded.decode("utf-8", errors="strict"),
+            object_pairs_hook=_reject_duplicate_receipt_keys,
+            parse_constant=reject_nonfinite_number,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise IntegrityError(f"{label} is not strict UTF-8 JSON") from error
+    if not isinstance(value, dict):
+        raise IntegrityError(f"{label} is not a JSON object")
+    return value
+
+
+def _bubblewrap_child_identity(data: bytes) -> tuple[int | None, int | None, bool]:
+    child_pid: int | None = None
+    pid_namespace: int | None = None
+    exited = False
+    complete_lines = data.splitlines(keepends=True)
+    for raw_line in complete_lines:
+        if not raw_line.endswith(b"\n"):
+            break
+        line = raw_line[:-1]
+        if not line or len(line) > MAX_BWRAP_STATUS_LINE_BYTES:
+            raise IntegrityError("Bubblewrap status stream has an invalid event line")
+        if len(complete_lines) > MAX_BWRAP_STATUS_RECORDS:
+            raise IntegrityError("Bubblewrap status stream has too many events")
+        record = _strict_json_object(line, "Bubblewrap status event")
+        known = [name for name in ("child-pid", "exit-code") if name in record]
+        if len(known) > 1:
+            raise IntegrityError("Bubblewrap status event combines lifecycle events")
+        if not known:
+            continue
+        if known[0] == "child-pid":
+            if child_pid is not None or exited:
+                raise IntegrityError("Bubblewrap child-pid event is duplicate or reversed")
+            value = record["child-pid"]
+            namespace_value = record.get("pid-namespace")
+            if type(value) is not int or value <= 0:
+                raise IntegrityError("Bubblewrap child-pid event has an invalid PID")
+            if namespace_value is not None and (type(namespace_value) is not int or namespace_value <= 0):
+                raise IntegrityError("Bubblewrap child-pid event has an invalid PID namespace identity")
+            child_pid = value
+            pid_namespace = namespace_value
+        else:
+            if child_pid is None or exited:
+                raise IntegrityError("Bubblewrap exit-code event is reversed or duplicate")
+            code = record["exit-code"]
+            if type(code) is not int or not 0 <= code <= 255:
+                raise IntegrityError("Bubblewrap exit-code event is invalid")
+            exited = True
+    return child_pid if not exited else None, pid_namespace, exited
+
+
+def _trusted_wrapper_event(line: bytes) -> str | None:
+    record = _strict_json_object(line, "trusted sandbox event")
+    if "event" not in record:
+        return None
+    if (
+        set(record) != {"version", "pid", "event"}
+        or type(record["version"]) is not int
+        or record["version"] != 1
+        or type(record["pid"]) is not int
+        or record["pid"] != 1
+        or record["event"] not in {"cleanup-start", "cleanup-complete"}
+    ):
+        raise IntegrityError("trusted sandbox event has an invalid schema")
+    return record["event"]
+
+
+def _parse_trusted_candidate_status(data: bytes, process_returncode: int) -> TrustedCandidateStatus:
+    if not isinstance(data, bytes) or len(data) > MAX_TRUSTED_WRAPPER_STATUS_BYTES:
+        raise IntegrityError("trusted sandbox status is missing or oversized")
+    if not data.endswith(b"\n"):
+        raise IntegrityError("trusted sandbox status is missing its final newline")
+    lines = data.splitlines()
+    if not lines or len(lines) > 4 or any(not line for line in lines):
+        raise IntegrityError("trusted sandbox status has an invalid record count")
+    events: list[str] = []
+    for line in lines[:-1]:
+        event = _trusted_wrapper_event(line)
+        if event is None:
+            raise IntegrityError("trusted sandbox status has a non-event record before final status")
+        events.append(event)
+    if events not in ([], ["cleanup-start"], ["cleanup-start", "cleanup-complete"]):
+        raise IntegrityError("trusted sandbox events are duplicate or out of order")
+    record = _strict_json_object(lines[-1], "trusted sandbox status")
+    expected_fields = {"version", "pid", "state", "exitCode", "signal", "cleanup", "reaped"}
+    if set(record) != expected_fields:
+        raise IntegrityError("trusted sandbox status has an invalid schema")
+    state = record["state"]
+    exit_code = record["exitCode"]
+    signum = record["signal"]
+    cleanup = record["cleanup"]
+    reaped = record["reaped"]
+    if (
+        type(record["version"]) is not int
+        or record["version"] != 1
+        or type(record["pid"]) is not int
+        or record["pid"] != 1
+        or type(reaped) is not int
+        or reaped < 0
+        or type(process_returncode) is not int
+        or not 0 <= process_returncode <= 255
+    ):
+        raise IntegrityError("trusted sandbox status has invalid identity or count")
+    if cleanup not in {"complete", "failed", "not-started"}:
+        raise IntegrityError("trusted sandbox status has an unknown cleanup state")
+    if state == "candidate-exit":
+        if (
+            type(exit_code) is not int or not 0 <= exit_code < 128
+            or signum is not None or cleanup != "complete" or process_returncode != exit_code
+            or events != ["cleanup-start", "cleanup-complete"]
+        ):
+            raise IntegrityError("trusted candidate exit status is contradictory")
+    elif state == "candidate-ambiguous-exit":
+        if (
+            type(exit_code) is not int or not 128 <= exit_code <= 255
+            or signum is not None or cleanup != "complete" or process_returncode != exit_code
+            or events != ["cleanup-start", "cleanup-complete"]
+        ):
+            raise IntegrityError("trusted ambiguous candidate exit status is contradictory")
+    elif state in {"candidate-signal", "interrupted"}:
+        if (
+            exit_code is not None or type(signum) is not int or not 1 <= signum <= 127
+            or cleanup != "complete" or process_returncode != 128 + signum
+            or events != ["cleanup-start", "cleanup-complete"]
+        ):
+            raise IntegrityError("trusted candidate signal status is contradictory")
+    elif state in {"bootstrap-failure", "exec-failure"}:
+        if (
+            exit_code is not None or signum is not None or cleanup != "complete"
+            or process_returncode != 125 or events != ["cleanup-start", "cleanup-complete"]
+        ):
+            raise IntegrityError("trusted sandbox startup status is contradictory")
+    elif state == "cleanup-failure":
+        if exit_code is not None or cleanup != "failed" or process_returncode != 125 or events != ["cleanup-start"]:
+            raise IntegrityError("trusted sandbox cleanup status is contradictory")
+        if signum is not None and (type(signum) is not int or not 1 <= signum <= 127):
+            raise IntegrityError("trusted sandbox cleanup signal is invalid")
+    else:
+        raise IntegrityError("trusted sandbox status has an unknown state")
+    return TrustedCandidateStatus(
+        state,
+        None if state == "candidate-ambiguous-exit" else exit_code,
+        signum,
+        cleanup,
+        reaped,
+    )
+
+
+def run_supervised_bubblewrap(
+    arguments: list[str],
+    *,
+    environment: dict[str, str],
+    pass_fds: tuple[int, ...],
+    cancellation_signal: Callable[[], int | None],
+    cwd: str | None = None,
+    test_hook: Callable[[str], None] | None = None,
+) -> TrustedCandidateStatus:
+    if not arguments or not callable(cancellation_signal):
+        raise IntegrityError("trusted sandbox launcher inputs are invalid")
+    status_read_fd, status_write_fd = os.pipe()
+    process: subprocess.Popen[bytes] | None = None
+    pidfd: int | None = None
+    status_data = bytearray()
+    wrapper_data = bytearray()
+    wrapper_offset = 0
+    wrapper_events: list[str] = []
+    sent_signal: int | None = None
+    start_time = time.monotonic()
+    try:
+        os.set_blocking(status_read_fd, False)
+        process = subprocess.Popen(
+            [arguments[0], "--json-status-fd", str(status_write_fd), *arguments[1:]],
+            env=environment,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=None,
+            start_new_session=True,
+            pass_fds=tuple([*pass_fds, status_write_fd]),
+        )
+        os.close(status_write_fd)
+        status_write_fd = -1
+        if process.stdout is None:
+            raise IntegrityError("trusted sandbox result channel was not created")
+        os.set_blocking(process.stdout.fileno(), False)
+        while process.poll() is None:
+            try:
+                readable, _writable, _exceptional = select.select(
+                    [status_read_fd, process.stdout.fileno()], [], [], 0.05
+                )
+            except InterruptedError:
+                readable = []
+            if status_read_fd in readable:
+                while True:
+                    try:
+                        chunk = os.read(status_read_fd, 4096)
+                    except BlockingIOError:
+                        break
+                    if not chunk:
+                        break
+                    status_data.extend(chunk)
+                    if len(status_data) > MAX_BWRAP_STATUS_BYTES:
+                        raise IntegrityError("Bubblewrap status stream is oversized")
+            if process.stdout.fileno() in readable:
+                while True:
+                    try:
+                        chunk = os.read(process.stdout.fileno(), 4096)
+                    except BlockingIOError:
+                        break
+                    if not chunk:
+                        break
+                    wrapper_data.extend(chunk)
+                    if len(wrapper_data) > MAX_TRUSTED_WRAPPER_STATUS_BYTES:
+                        raise IntegrityError("trusted sandbox result channel is oversized")
+                while b"\n" in wrapper_data[wrapper_offset:]:
+                    line_end = wrapper_data.index(b"\n", wrapper_offset)
+                    line = bytes(wrapper_data[wrapper_offset:line_end])
+                    wrapper_offset = line_end + 1
+                    event = _trusted_wrapper_event(line)
+                    if event is not None:
+                        if event == "cleanup-start":
+                            if wrapper_events:
+                                raise IntegrityError("trusted sandbox cleanup start event is duplicated")
+                        elif wrapper_events != ["cleanup-start"]:
+                            raise IntegrityError("trusted sandbox cleanup completion is reversed or duplicated")
+                        wrapper_events.append(event)
+                        if test_hook is not None:
+                            test_hook(event)
+            child_pid, pid_namespace, exited = _bubblewrap_child_identity(bytes(status_data))
+            requested_signal = cancellation_signal()
+            if requested_signal is not None and sent_signal is None:
+                if type(requested_signal) is not int or not 1 <= requested_signal <= 127:
+                    raise IntegrityError("trusted sandbox cancellation signal is invalid")
+                if child_pid is None and not exited:
+                    if time.monotonic() - start_time < 2.0:
+                        continue
+                    raise ScriptPlanInterrupted(requested_signal)
+                if child_pid is not None:
+                    if pid_namespace is None or not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+                        raise IntegrityError("cannot safely pin the Bubblewrap-reported supervisor PID")
+                    try:
+                        pidfd = os.pidfd_open(child_pid)
+                        if os.stat(f"/proc/{child_pid}/ns/pid").st_ino != pid_namespace:
+                            raise IntegrityError("Bubblewrap supervisor PID namespace identity changed")
+                        signal.pidfd_send_signal(pidfd, requested_signal)
+                    except OSError as error:
+                        raise IntegrityError("cannot safely signal the pinned sandbox supervisor") from error
+                    sent_signal = requested_signal
+            time.sleep(0.01)
+        while True:
+            if process.stdout is None:
+                break
+            try:
+                chunk = os.read(process.stdout.fileno(), 4096)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+            wrapper_data.extend(chunk)
+            if len(wrapper_data) > MAX_TRUSTED_WRAPPER_STATUS_BYTES:
+                raise IntegrityError("trusted sandbox result channel is oversized")
+        while True:
+            try:
+                chunk = os.read(status_read_fd, 4096)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+            status_data.extend(chunk)
+            if len(status_data) > MAX_BWRAP_STATUS_BYTES:
+                raise IntegrityError("Bubblewrap status stream is oversized")
+        process_returncode = process.returncode
+        if process_returncode is None:
+            raise IntegrityError("Bubblewrap supervisor process was not reaped")
+        parse_bubblewrap_json_status(
+            bytes(status_data), process_returncode, allow_terminal_status=True
+        )
+        status = _parse_trusted_candidate_status(bytes(wrapper_data), process_returncode)
+        if status.state == "interrupted":
+            interrupted = ScriptPlanInterrupted(status.signum or signal.SIGTERM)
+            interrupted.cleanup_status = "verified" if status.cleanup == "complete" else status.cleanup
+            raise interrupted
+        if status.state in {"bootstrap-failure", "exec-failure", "cleanup-failure"}:
+            raise ScriptCandidateTerminal(
+                f"trusted sandbox ended in {status.state}",
+                cleanup_status="verified" if status.cleanup == "complete" else status.cleanup,
+            )
+        if status.state in {"candidate-signal", "candidate-ambiguous-exit"}:
+            raise ScriptCandidateTerminal(
+                f"candidate ended in terminal state {status.state}",
+                return_code=status.return_code,
+                signum=status.signum,
+                cleanup_status="verified" if status.cleanup == "complete" else status.cleanup,
+            )
+        return status
+    except ScriptPlanInterrupted:
+        raise
+    except BaseException as error:
+        if isinstance(error, ScriptCandidateTerminal):
+            raise
+        raise ScriptCandidateTerminal(
+            f"trusted Bubblewrap boundary failed: {type(error).__name__}: {error}",
+            cleanup_status="unverified",
+        ) from error
+    finally:
+        if process is not None and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except (subprocess.TimeoutExpired, ChildProcessError):
+                pass
+        if process is not None and process.stdout is not None:
+            process.stdout.close()
+        for descriptor in (status_read_fd, status_write_fd, pidfd):
+            if descriptor is not None and descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
 
 
 def _validate_script_entry_identity(identity: Any) -> dict[str, str]:
@@ -293,8 +850,12 @@ def _validate_script_entry_plan(entries: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-def _script_entry_plan_digest(entries: list[dict[str, Any]]) -> str:
-    return sha256_bytes(canonical_json({"version": SCRIPT_ENTRY_RECEIPT_VERSION, "entries": entries}))
+def _script_entry_plan_digest(entries: list[dict[str, Any]], fail_fast: bool) -> str:
+    return sha256_bytes(
+        canonical_json(
+            {"version": SCRIPT_ENTRY_RECEIPT_VERSION, "failFast": fail_fast, "entries": entries}
+        )
+    )
 
 
 def _create_script_entry_receipt_store(runner_temp: str | Path) -> tuple[Path, int]:
@@ -320,9 +881,14 @@ def _create_script_entry_receipt_store(runner_temp: str | Path) -> tuple[Path, i
     return directory, descriptor
 
 
-def _write_script_entry_receipt(directory_fd: int, receipt: dict[str, Any]) -> None:
-    ordinal = receipt["ordinal"]
-    final_name = f"entry-{ordinal:06d}.json"
+def _write_script_receipt_atomic(
+    directory_fd: int,
+    final_name: str,
+    receipt: dict[str, Any],
+    *,
+    checkpoint: Callable[[str], None] | None = None,
+    checkpoint_prefix: str,
+) -> None:
     temporary_name = f".{final_name}.{os.urandom(16).hex()}.tmp"
     encoded = canonical_json(receipt)
     if len(encoded) > MAX_SCRIPT_ENTRY_RECEIPT_BYTES:
@@ -341,6 +907,8 @@ def _write_script_entry_receipt(directory_fd: int, receipt: dict[str, Any]) -> N
         offset = 0
         while offset < len(encoded):
             offset += os.write(descriptor, encoded[offset:])
+        if checkpoint is not None:
+            checkpoint(f"{checkpoint_prefix}-write")
         os.fsync(descriptor)
     except BaseException:
         os.close(descriptor)
@@ -352,6 +920,8 @@ def _write_script_entry_receipt(directory_fd: int, receipt: dict[str, Any]) -> N
     else:
         os.close(descriptor)
     try:
+        if checkpoint is not None:
+            checkpoint(f"{checkpoint_prefix}-finalize")
         os.link(
             temporary_name,
             final_name,
@@ -362,6 +932,94 @@ def _write_script_entry_receipt(directory_fd: int, receipt: dict[str, Any]) -> N
     finally:
         os.unlink(temporary_name, dir_fd=directory_fd)
     os.fsync(directory_fd)
+    if checkpoint is not None:
+        checkpoint(f"{checkpoint_prefix}-committed")
+
+
+def _write_script_entry_receipt(
+    directory_fd: int,
+    receipt: dict[str, Any],
+    *,
+    checkpoint: Callable[[str], None] | None = None,
+) -> None:
+    ordinal = receipt["ordinal"]
+    _write_script_receipt_atomic(
+        directory_fd,
+        f"entry-{ordinal:06d}.json",
+        receipt,
+        checkpoint=checkpoint,
+        checkpoint_prefix="entry-receipt",
+    )
+
+
+def _write_script_plan_receipt(
+    directory_fd: int,
+    receipt: dict[str, Any],
+    *,
+    cancellation_signal: Callable[[], int | None],
+    checkpoint: Callable[[str], None] | None = None,
+) -> bool:
+    encoded = canonical_json(receipt)
+    if len(encoded) > MAX_SCRIPT_ENTRY_RECEIPT_BYTES:
+        raise IntegrityError("script-plan receipt exceeds its size limit")
+    temporary_name = f".plan.json.{os.urandom(16).hex()}.tmp"
+    descriptor = os.open(
+        temporary_name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+        dir_fd=directory_fd,
+    )
+    try:
+        offset = 0
+        while offset < len(encoded):
+            offset += os.write(descriptor, encoded[offset:])
+        if checkpoint is not None:
+            checkpoint("plan-receipt-write")
+        os.fsync(descriptor)
+    except BaseException:
+        os.close(descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        raise
+    else:
+        os.close(descriptor)
+    if checkpoint is not None:
+        checkpoint("plan-receipt-finalize")
+
+    if receipt["state"] != "accepted":
+        try:
+            os.link(temporary_name, "plan.json", src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        finally:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+        return True
+
+    watched_signals = {signal.SIGINT, signal.SIGTERM}
+    if not hasattr(signal, "pthread_sigmask") or not hasattr(signal, "sigpending"):
+        os.unlink(temporary_name, dir_fd=directory_fd)
+        raise IntegrityError("cannot establish the atomic script-plan acceptance boundary")
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, watched_signals)
+    accepted = False
+    try:
+        if cancellation_signal() is not None or signal.sigpending() & watched_signals:
+            return False
+        os.link(temporary_name, "plan.json", src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        os.fsync(directory_fd)
+        if signal.sigpending() & watched_signals:
+            os.unlink("plan.json", dir_fd=directory_fd)
+            os.fsync(directory_fd)
+            return False
+        accepted = True
+        return True
+    finally:
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 def _reject_duplicate_receipt_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -373,11 +1031,72 @@ def _reject_duplicate_receipt_keys(pairs: list[tuple[str, Any]]) -> dict[str, An
     return result
 
 
+def _read_script_plan_receipt(
+    directory_fd: int,
+    expected_entries: list[dict[str, Any]],
+    expected_identity: dict[str, str],
+    expected_digest: str,
+) -> tuple[str, int | None]:
+    try:
+        descriptor = os.open(
+            "plan.json",
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=directory_fd,
+        )
+    except OSError as error:
+        raise IntegrityError("script-plan receipt cannot be opened safely") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != 1
+            or metadata.st_size > MAX_SCRIPT_ENTRY_RECEIPT_BYTES
+        ):
+            raise IntegrityError("script-plan receipt metadata is unsafe")
+        chunks: list[bytes] = []
+        remaining = MAX_SCRIPT_ENTRY_RECEIPT_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(remaining, 4096))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        encoded = b"".join(chunks)
+        if len(encoded) > MAX_SCRIPT_ENTRY_RECEIPT_BYTES:
+            raise IntegrityError("script-plan receipt exceeds its size limit")
+    finally:
+        os.close(descriptor)
+    record = _strict_json_object(encoded, "script-plan receipt")
+    if not isinstance(record, dict) or set(record) != _SCRIPT_PLAN_RECEIPT_FIELDS:
+        raise IntegrityError("script-plan receipt has an invalid schema")
+    state = record["state"]
+    signum = record["signal"]
+    if (
+        type(record["version"]) is not int
+        or record["version"] != SCRIPT_ENTRY_RECEIPT_VERSION
+        or record["identity"] != expected_identity
+        or record["planDigest"] != expected_digest
+        or type(record["entryCount"]) is not int
+        or record["entryCount"] != len(expected_entries)
+        or not isinstance(state, str)
+        or state not in {"accepted", "candidate-failure", "infrastructure-failure", "interrupted"}
+        or (state == "interrupted" and (type(signum) is not int or signum <= 0))
+        or (state != "interrupted" and signum is not None)
+    ):
+        raise IntegrityError("script-plan receipt identity or outcome is contradictory")
+    return state, signum
+
+
 def validate_script_entry_receipts(
     receipt_directory: str | Path,
     entries: Any,
     identity: Any,
     fail_fast: bool,
+    *,
+    require_plan_receipt: bool = True,
+    checkpoint: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
     expected_entries = _validate_script_entry_plan(entries)
     expected_identity = _validate_script_entry_identity(identity)
@@ -399,9 +1118,18 @@ def validate_script_entry_receipts(
     )
     try:
         expected_names = [f"entry-{index:06d}.json" for index in range(len(expected_entries))]
-        if sorted(os.listdir(directory_fd)) != expected_names:
+        expected_names_with_plan = expected_names + (["plan.json"] if require_plan_receipt else [])
+        if sorted(os.listdir(directory_fd)) != expected_names_with_plan:
             raise IntegrityError("script-entry receipt set is missing or has extra records")
-        plan_digest = _script_entry_plan_digest(expected_entries)
+        plan_digest = _script_entry_plan_digest(expected_entries, fail_fast)
+        plan_state: str | None = None
+        plan_signal: int | None = None
+        if checkpoint is not None:
+            checkpoint("validation")
+        if require_plan_receipt:
+            plan_state, plan_signal = _read_script_plan_receipt(
+                directory_fd, expected_entries, expected_identity, plan_digest
+            )
         receipts: list[dict[str, Any]] = []
         failure_latched = False
         terminal_state: str | None = None
@@ -494,6 +1222,11 @@ def validate_script_entry_receipts(
                 failure_latched = True
                 terminal_state = "aborted"
             elif state == "not-run-aborted":
+                if terminal_state is None and ordinal > 0 and (
+                    plan_state == "interrupted" or not require_plan_receipt
+                ):
+                    terminal_state = "aborted"
+                    failure_latched = True
                 if (
                     terminal_state != "aborted"
                     or exit_code is not None
@@ -504,8 +1237,28 @@ def validate_script_entry_receipts(
             else:
                 raise IntegrityError("script-entry receipt has an unknown state")
             receipts.append(receipt)
+            if checkpoint is not None:
+                checkpoint("validation-entry")
         if not failure_latched and any(receipt["state"] != "completed" for receipt in receipts):
             raise IntegrityError("successful script-entry receipt set contains an unexecuted entry")
+        if require_plan_receipt:
+            if plan_state == "accepted" and (
+                failure_latched
+                or any(receipt["state"] != "completed" or receipt["exitCode"] != 0 for receipt in receipts)
+            ):
+                raise IntegrityError("accepted script-plan receipt contains an unsuccessful entry")
+            if plan_state == "candidate-failure" and (
+                not failure_latched
+                or not any(receipt["state"] == "completed" and receipt["exitCode"] != 0 for receipt in receipts)
+                or any(receipt["state"] == "infrastructure-failure" for receipt in receipts)
+            ):
+                raise IntegrityError("candidate-failure plan receipt lacks an ordinary candidate failure")
+            if plan_state == "infrastructure-failure" and not any(
+                receipt["state"] == "infrastructure-failure" for receipt in receipts
+            ):
+                raise IntegrityError("infrastructure plan receipt lacks an infrastructure failure")
+            if plan_state == "interrupted" and plan_signal is None:
+                raise IntegrityError("interrupted plan receipt lacks its signal")
         return receipts
     finally:
         os.close(directory_fd)
@@ -517,123 +1270,209 @@ def run_script_plan_with_receipts(
     fail_fast: bool,
     runner_temp: str | Path,
     execute_entry: Callable[[int, dict[str, Any]], ScriptEntryExecutionResult],
+    *,
+    cancellation_signal: Callable[[], int | None] | None = None,
+    test_hook: Callable[[str], None] | None = None,
 ) -> ScriptPlanRunResult:
     normalized_entries = _validate_script_entry_plan(entries)
     normalized_identity = _validate_script_entry_identity(identity)
     if type(fail_fast) is not bool:
         raise IntegrityError("script-plan failFast value must be a boolean")
-    plan_digest = _script_entry_plan_digest(normalized_entries)
+    if cancellation_signal is not None and not callable(cancellation_signal):
+        raise IntegrityError("script-plan cancellation state is not callable")
+    plan_digest = _script_entry_plan_digest(normalized_entries, fail_fast)
     receipt_directory, directory_fd = _create_script_entry_receipt_store(runner_temp)
     failure_latched = False
+    plan_state: str | None = None
+    interruption_signal: int | None = None
+    terminal_error: BaseException | None = None
+    terminal_ordinal: int | None = None
+
+    def checkpoint(name: str) -> None:
+        if test_hook is not None:
+            test_hook(name)
+
+    def current_signal() -> int | None:
+        value = cancellation_signal() if cancellation_signal is not None else None
+        if value is not None and (type(value) is not int or not 1 <= value <= 127):
+            raise IntegrityError("script-plan cancellation signal is invalid")
+        return value
+
+    def write_entry(ordinal: int, entry: dict[str, Any], state: str, exit_code: int | None, signum: int | None, cleanup: str) -> None:
+        _write_script_entry_receipt(
+            directory_fd,
+            {
+                "version": SCRIPT_ENTRY_RECEIPT_VERSION,
+                "identity": normalized_identity,
+                "planDigest": plan_digest,
+                "ordinal": ordinal,
+                "entry": entry,
+                "state": state,
+                "exitCode": exit_code,
+                "signal": signum,
+                "cleanup": cleanup,
+            },
+            checkpoint=checkpoint,
+        )
+
+    def write_skipped(start: int, state: str) -> None:
+        for skipped_ordinal, skipped_entry in enumerate(normalized_entries[start:], start):
+            write_entry(
+                skipped_ordinal,
+                skipped_entry,
+                state,
+                None,
+                None,
+                "not-started",
+            )
+
     try:
         for ordinal, entry in enumerate(normalized_entries):
+            signum = current_signal()
+            if signum is not None:
+                write_entry(ordinal, entry, "infrastructure-failure", None, signum, "not-started")
+                write_skipped(ordinal + 1, "not-run-aborted")
+                plan_state = "interrupted"
+                interruption_signal = signum
+                terminal_error = ScriptPlanInterrupted(signum)
+                terminal_error.cleanup_status = "not-started"
+                terminal_ordinal = ordinal
+                failure_latched = True
+                break
             try:
                 execution = execute_entry(ordinal, dict(entry))
                 if not isinstance(execution, ScriptEntryExecutionResult) or type(execution.return_code) is not int:
                     raise IntegrityError("script executor returned an invalid status record")
             except BaseException as error:
-                _write_script_entry_receipt(
-                    directory_fd,
-                    {
-                        "version": SCRIPT_ENTRY_RECEIPT_VERSION,
-                        "identity": normalized_identity,
-                        "planDigest": plan_digest,
-                        "ordinal": ordinal,
-                        "entry": entry,
-                        "state": "infrastructure-failure",
-                        "exitCode": None,
-                        "signal": error.signum if isinstance(error, ScriptPlanInterrupted) else None,
-                        "cleanup": getattr(error, "cleanup_status", "unverified"),
-                    },
+                error_signal = getattr(error, "signum", None)
+                error_return_code = getattr(error, "return_code", None)
+                error_cleanup = getattr(error, "cleanup_status", "unverified")
+                write_entry(
+                    ordinal,
+                    entry,
+                    "infrastructure-failure",
+                    error_return_code,
+                    error_signal if type(error_signal) is int else None,
+                    error_cleanup,
                 )
-                for skipped_ordinal, skipped_entry in enumerate(normalized_entries[ordinal + 1 :], ordinal + 1):
-                    _write_script_entry_receipt(
-                        directory_fd,
-                        {
-                            "version": SCRIPT_ENTRY_RECEIPT_VERSION,
-                            "identity": normalized_identity,
-                            "planDigest": plan_digest,
-                            "ordinal": skipped_ordinal,
-                            "entry": skipped_entry,
-                            "state": "not-run-aborted",
-                            "exitCode": None,
-                            "signal": None,
-                            "cleanup": "not-started",
-                        },
-                    )
-                validate_script_entry_receipts(receipt_directory, normalized_entries, normalized_identity, fail_fast)
-                raise ScriptPlanExecutionError(ordinal, receipt_directory, error) from error
-            if execution.return_code < 0:
-                receipt_state = "infrastructure-failure"
-                exit_code = None
-                signum = -execution.return_code
-                cleanup = execution.cleanup_status
-            elif execution.cleanup_status != "verified":
-                receipt_state = "infrastructure-failure"
-                exit_code = execution.return_code
-                signum = None
-                cleanup = execution.cleanup_status
-            else:
-                receipt_state = "completed"
-                exit_code = execution.return_code
-                signum = None
-                cleanup = "verified"
-            _write_script_entry_receipt(
-                directory_fd,
-                {
-                    "version": SCRIPT_ENTRY_RECEIPT_VERSION,
-                    "identity": normalized_identity,
-                    "planDigest": plan_digest,
-                    "ordinal": ordinal,
-                    "entry": entry,
-                    "state": receipt_state,
-                    "exitCode": exit_code,
-                    "signal": signum,
-                    "cleanup": cleanup,
-                },
+                write_skipped(ordinal + 1, "not-run-aborted")
+                failure_latched = True
+                terminal_error = error
+                terminal_ordinal = ordinal
+                if isinstance(error, ScriptPlanInterrupted) or error_signal is not None:
+                    plan_state = "interrupted"
+                    interruption_signal = error_signal if type(error_signal) is int else current_signal()
+                else:
+                    plan_state = "infrastructure-failure"
+                break
+
+            write_entry(
+                ordinal,
+                entry,
+                "completed",
+                execution.return_code,
+                None,
+                execution.cleanup_status,
             )
-            if receipt_state == "infrastructure-failure":
-                for skipped_ordinal, skipped_entry in enumerate(normalized_entries[ordinal + 1 :], ordinal + 1):
-                    _write_script_entry_receipt(
-                        directory_fd,
-                        {
-                            "version": SCRIPT_ENTRY_RECEIPT_VERSION,
-                            "identity": normalized_identity,
-                            "planDigest": plan_digest,
-                            "ordinal": skipped_ordinal,
-                            "entry": skipped_entry,
-                            "state": "not-run-aborted",
-                            "exitCode": None,
-                            "signal": None,
-                            "cleanup": "not-started",
-                        },
-                    )
-                validate_script_entry_receipts(receipt_directory, normalized_entries, normalized_identity, fail_fast)
-                return ScriptPlanRunResult(1, receipt_directory, plan_digest)
             if execution.return_code != 0:
                 failure_latched = True
-                if fail_fast:
-                    for skipped_ordinal, skipped_entry in enumerate(normalized_entries[ordinal + 1 :], ordinal + 1):
-                        _write_script_entry_receipt(
-                            directory_fd,
-                            {
-                                "version": SCRIPT_ENTRY_RECEIPT_VERSION,
-                                "identity": normalized_identity,
-                                "planDigest": plan_digest,
-                                "ordinal": skipped_ordinal,
-                                "entry": skipped_entry,
-                                "state": "not-run-fail-fast",
-                                "exitCode": None,
-                                "signal": None,
-                                "cleanup": "not-started",
-                            },
-                        )
-                    break
-        validate_script_entry_receipts(receipt_directory, normalized_entries, normalized_identity, fail_fast)
-        return ScriptPlanRunResult(1 if failure_latched else 0, receipt_directory, plan_digest)
+
+            signum = current_signal()
+            if signum is not None:
+                write_skipped(ordinal + 1, "not-run-aborted")
+                plan_state = "interrupted"
+                interruption_signal = signum
+                terminal_error = ScriptPlanInterrupted(signum)
+                terminal_error.cleanup_status = "verified"
+                terminal_ordinal = ordinal
+                break
+            if execution.return_code != 0 and fail_fast:
+                write_skipped(ordinal + 1, "not-run-fail-fast")
+                plan_state = "candidate-failure"
+                break
+        else:
+            plan_state = "candidate-failure" if failure_latched else "accepted"
+
+        signum = current_signal()
+        if signum is not None:
+            plan_state = "interrupted"
+            interruption_signal = signum
+            if terminal_error is None:
+                terminal_error = ScriptPlanInterrupted(signum)
+                terminal_error.cleanup_status = "verified"
+                terminal_ordinal = len(normalized_entries) - 1
+        validate_script_entry_receipts(
+            receipt_directory,
+            normalized_entries,
+            normalized_identity,
+            fail_fast,
+            require_plan_receipt=False,
+            checkpoint=checkpoint,
+        )
+        signum = current_signal()
+        if signum is not None:
+            plan_state = "interrupted"
+            interruption_signal = signum
+            if terminal_error is None:
+                terminal_error = ScriptPlanInterrupted(signum)
+                terminal_error.cleanup_status = "verified"
+                terminal_ordinal = len(normalized_entries) - 1
+        if plan_state is None:
+            raise IntegrityError("script-plan supervisor did not determine a terminal outcome")
+
+        plan_receipt = {
+            "version": SCRIPT_ENTRY_RECEIPT_VERSION,
+            "identity": normalized_identity,
+            "planDigest": plan_digest,
+            "entryCount": len(normalized_entries),
+            "state": plan_state,
+            "signal": interruption_signal if plan_state == "interrupted" else None,
+        }
+        if plan_state == "accepted":
+            checkpoint("before-acceptance")
+            if current_signal() is not None:
+                signum = current_signal()
+                plan_receipt["state"] = "interrupted"
+                plan_receipt["signal"] = signum
+                plan_state = "interrupted"
+                terminal_error = ScriptPlanInterrupted(signum)
+                terminal_error.cleanup_status = "verified"
+                terminal_ordinal = len(normalized_entries) - 1
+            else:
+                committed = _write_script_plan_receipt(
+                    directory_fd,
+                    plan_receipt,
+                    cancellation_signal=current_signal,
+                    checkpoint=checkpoint,
+                )
+                if committed:
+                    return ScriptPlanRunResult(0, receipt_directory, plan_digest)
+                signum = current_signal()
+                if signum is None:
+                    pending = signal.sigpending() if hasattr(signal, "sigpending") else set()
+                    signum = min((int(value) for value in pending), default=None)
+                if signum is None:
+                    raise IntegrityError("script-plan acceptance was interrupted without a signal")
+                plan_receipt["state"] = "interrupted"
+                plan_receipt["signal"] = signum
+                plan_state = "interrupted"
+                terminal_error = ScriptPlanInterrupted(signum)
+                terminal_error.cleanup_status = "verified"
+                terminal_ordinal = len(normalized_entries) - 1
+
+        _write_script_plan_receipt(
+            directory_fd,
+            plan_receipt,
+            cancellation_signal=current_signal,
+            checkpoint=checkpoint,
+        )
+        if plan_state in {"interrupted", "infrastructure-failure"}:
+            if terminal_error is None or terminal_ordinal is None:
+                raise IntegrityError("terminal script-plan result lacks its supervisor failure")
+            raise ScriptPlanExecutionError(terminal_ordinal, receipt_directory, terminal_error)
+        return ScriptPlanRunResult(1, receipt_directory, plan_digest)
     finally:
         os.close(directory_fd)
-
 
 def extinguish_supervised_process_group(process: subprocess.Popen[Any]) -> None:
     try:
@@ -2710,7 +3549,7 @@ def run_protected_candidate_plan() -> None:
     # BEGIN source candidate script execution
     max_cache_files = 4096
     max_cache_bytes = 268435456
-    sandbox_entrypoint = "import os, sys\nmax_fd = os.sysconf('SC_OPEN_MAX')\nif max_fd < 3: raise SystemExit('invalid file descriptor limit')\nos.closerange(3, max_fd)\nif os.environ.get('BUILD_ARTIFACT_ROLE') in ('producer', 'consumer'):\n sys.path.insert(0, '/tmp')\n from ci_build_artifacts import enforce_shared_sandbox_process_state\n enforce_shared_sandbox_process_state()\n os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\nos.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
+    sandbox_entrypoint = ci_build_artifacts.SANDBOX_SUPERVISOR_ENTRYPOINT
     runner_temp_input = Path(os.environ["RUNNER_TEMP"])
     if (
         not runner_temp_input.is_absolute()
@@ -3399,43 +4238,26 @@ def run_protected_candidate_plan() -> None:
       else [str(npm_executable)]
     )
     cache_root.mkdir(mode=0o700)
-    active_process = None
     received_signal = None
 
     def cleanup_cache_root(*_args):
-        nonlocal active_process
-        if active_process is not None and active_process.poll() is None:
-            try:
-                os.killpg(active_process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
         shutil.rmtree(cache_root, ignore_errors=True)
-
-    def extinguish_process_group(process):
-        extinguish_supervised_process_group(process)
 
     previous_handlers = {}
     def handle_signal(signum, _frame):
         nonlocal received_signal
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        received_signal = signum
-        if active_process is not None and active_process.poll() is None:
-            try:
-                os.killpg(active_process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+        if received_signal is None:
+            received_signal = signum
 
     for caught_signal in (signal.SIGINT, signal.SIGTERM):
         previous_handlers[caught_signal] = signal.getsignal(caught_signal)
         signal.signal(caught_signal, handle_signal)
     try:
         def execute_candidate_entry(index, _entry):
-            nonlocal active_process
             script_directory, name, unset_env, requires_services = normalized[index]
             if received_signal is not None:
                 interruption = ScriptPlanInterrupted(received_signal)
-                interruption.cleanup_status = "verified"
+                interruption.cleanup_status = "not-started"
                 raise interruption
             if baseline is not None and inventory(baseline) != baseline_inventory:
                 sys.exit("verified runtime cache changed before candidate script")
@@ -3601,21 +4423,16 @@ def run_protected_candidate_plan() -> None:
                 else []
             )
             legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]
-            status_read_fd = None
-            status_write_fd = None
             try:
                 if received_signal is not None:
                     interruption = ScriptPlanInterrupted(received_signal)
-                    interruption.cleanup_status = "verified"
+                    interruption.cleanup_status = "not-started"
                     raise interruption
-                status_read_fd, status_write_fd = os.pipe()
-                active_process = subprocess.Popen(
-                          [
+                arguments = [
                               str(bubblewrap),
-                              "--json-status-fd",
-                              str(status_write_fd),
                               "--unshare-user",
                               "--unshare-pid",
+                              "--as-pid-1",
                               "--unshare-ipc",
                               "--unshare-uts",
                               "--unshare-cgroup-try",
@@ -3655,47 +4472,22 @@ def run_protected_candidate_plan() -> None:
                               "--",
                               "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
                               *npm_command, "run", name,
-                          ],
-                          env=script_env,
-                          start_new_session=True,
-                          pass_fds=tuple([*tool_prefix_fds, status_write_fd]),
-                        )
-                os.close(status_write_fd)
-                status_write_fd = None
-                if received_signal is not None:
-                    try:
-                        os.killpg(active_process.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
+                          ]
+                candidate_result = ci_build_artifacts.run_supervised_bubblewrap(
+                    arguments,
+                    environment=script_env,
+                    pass_fds=tuple(tool_prefix_fds),
+                    cancellation_signal=lambda: received_signal,
+                )
+                candidate_status = candidate_result.return_code
+                if candidate_status is None:
+                    raise IntegrityError("trusted Bubblewrap supervisor omitted the candidate exit code")
                 for descriptor in tool_prefix_fds:
                   os.close(descriptor)
                 tool_prefix_fds = []
-                while active_process.poll() is None:
-                  time.sleep(0.05)
-                candidate_status = active_process.returncode
-                extinguish_process_group(active_process)
-                if received_signal is not None:
-                    interruption = ScriptPlanInterrupted(received_signal)
-                    interruption.cleanup_status = "verified"
-                    raise interruption
-                status_descriptor = status_read_fd
-                status_read_fd = None
-                try:
-                    candidate_status = read_bubblewrap_json_status(
-                        status_descriptor, candidate_status
-                    )
-                except BaseException as status_error:
-                    status_error.cleanup_status = "verified"
-                    raise
             finally:
-              for descriptor in (status_read_fd, status_write_fd):
-                if descriptor is not None:
-                  os.close(descriptor)
               for descriptor in tool_prefix_fds:
                 os.close(descriptor)
-              if active_process is not None:
-                extinguish_process_group(active_process)
-              active_process = None
               shutil.rmtree(script_cache, ignore_errors=True)
               shutil.rmtree(script_tmp, ignore_errors=True)
               shutil.rmtree(script_home, ignore_errors=True)
@@ -3744,6 +4536,7 @@ def run_protected_candidate_plan() -> None:
             fail_fast_value == "true",
             runner_temp,
             execute_candidate_entry,
+            cancellation_signal=lambda: received_signal,
         )
         if receipt_result.exit_code != 0:
             sys.exit("candidate script plan failed; see trusted per-entry receipts in RUNNER_TEMP")

@@ -2545,6 +2545,7 @@ jobs:
             exit 1
           }
       - name: Download pinned protected candidate helper
+        id: protected-candidate-helper
         if: needs.eligibility.outputs.should-run != 'false'
         env:
           JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
@@ -2562,6 +2563,10 @@ jobs:
           [[ -f "$temporary" && ! -L "$temporary" ]]
           chmod 0400 "$temporary"
           mv -- "$temporary" "$helper"
+          [[ "$(stat -c '%u:%a:%h' -- "$helper")" == "$(id -u):400:1" ]]
+          digest="$(sha256sum -- "$helper" | cut -d' ' -f1)"
+          [[ "$digest" =~ ^[0123456789abcdef]{64}$ ]]
+          printf 'sha256=%s\n' "$digest" >> "$GITHUB_OUTPUT"
           trap - EXIT
       - name: Authorize producer or consumer from immutable policy
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.build-artifact-role == 'producer' || inputs.build-artifact-role == 'consumer')
@@ -6496,11 +6501,15 @@ jobs:
       - name: Download trusted script-plan receipt supervisor
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         env:
-          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          PROTECTED_CANDIDATE_HELPER_SHA256: ${{ steps.protected-candidate-helper.outputs.sha256 }}
         run: |
           set -euo pipefail
-          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
-          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_build_artifacts.py" -o "$RUNNER_TEMP/ci_build_artifacts.py"
+          [[ "$PROTECTED_CANDIDATE_HELPER_SHA256" =~ ^[0123456789abcdef]{64}$ ]]
+          [[ -n "$RUNNER_TEMP" && "$RUNNER_TEMP" = /* && ! -L "$RUNNER_TEMP" ]]
+          helper="$RUNNER_TEMP/ci_build_artifacts.py"
+          [[ -f "$helper" && ! -L "$helper" ]]
+          [[ "$(stat -c '%u:%a:%h' -- "$helper")" == "$(id -u):400:1" ]]
+          [[ "$(sha256sum -- "$helper" | cut -d' ' -f1)" == "$PROTECTED_CANDIDATE_HELPER_SHA256" ]]
       - name: Parse Node CI script plan
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         id: node-ci-script-plan
