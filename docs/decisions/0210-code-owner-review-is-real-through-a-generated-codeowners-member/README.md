@@ -506,6 +506,19 @@ reports merged by `pyousefi`; the operator campaign confirms `--admin` was used.
 `gpt-6-astra`, `gpt-6.1-sol`, and `code-reviewer` reviewed the final head and reported
 no findings. Fable and Opus review tools were unavailable in this runtime.
 21. **Authorization:** the verbatim text and date above.
+22. **Admin merge of constrained build-once ArtifactSet.** Verjson/.github#1911
+(`feat(ci): add constrained build-once artifact sharing,` `Part #1869`) was
+admin-squash-merged 2026-10-25 at head
+`f42e228b2ffd76168c4f32fed5d5468031f68dab` (merge commit
+`098a9c0336e81100b4b2f6e9c80853e25aa50ec7`). From fetched clean `origin/main`
+at `c5b4c753623e7e7888964fbcd5305297ae1c4238`,
+`bash scripts/assert-mergeable-head.sh Verjson/.github 1911` exited 0 and printed
+`true`. The rollup had 20 SUCCESS and 5 SKIPPED conclusions plus the advisory
+`AI review authorization` NEUTRAL; required `shell-tests` was SUCCESS. No gate
+was weakened. GitHub's review decision was REVIEW_REQUIRED; the owner's standing
+admin authority was used after adversarial review. `gpt-6-astra`,
+`gpt-6.1-sol`, and `code-reviewer` returned GO on the final test head; Fable
+and Opus review tools were unavailable in the runtime.
 
 ### Exit condition ("CI optimized and working"), measurable
 
