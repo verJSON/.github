@@ -110,6 +110,7 @@ class Level:
     events: tuple[str, ...] | None
     branches: tuple[str, ...] | None
     inputs: tuple[tuple[str, str | bool | int], ...]
+    fail_fast: bool
 
 
 @dataclass(frozen=True)
@@ -129,7 +130,7 @@ class Plan:
 
 
 DEFAULT_PLAN = Plan(
-    levels=(Level("ci", (), None, None, ()),),
+    levels=(Level("ci", (), None, None, (), True),),
     secrets=(),
     push_branches=("main",),
     explicit=False,
@@ -273,14 +274,10 @@ def _parse_level(
         errors.append(PlanError("reserved_id", f"{path}.id", f"{level_id!r} is reserved (aggregate job or YAML scalar)"))
     elif level_id in preceding:
         errors.append(PlanError("duplicate_id", f"{path}.id", f"level {level_id!r} is declared twice"))
-    if "failFast" in raw:
-        fail_fast = raw["failFast"]
-        if not isinstance(fail_fast, bool):
-            errors.append(PlanError("bad_type", f"{path}.failFast", "expected a boolean"))
-        elif not fail_fast:
-            errors.append(
-                PlanError("fail_fast_unsupported", f"{path}.failFast", "failFast:false needs in-lane support; not available yet")
-            )
+    fail_fast = raw.get("failFast", True)
+    if not isinstance(fail_fast, bool):
+        errors.append(PlanError("bad_type", f"{path}.failFast", "expected a boolean"))
+        fail_fast = True
     needs = _parse_needs(raw.get("needs", []), f"{path}.needs", preceding, declared, level_id, errors)
     events = branches = None
     if "events" in raw:
@@ -294,7 +291,7 @@ def _parse_level(
     inputs = _parse_inputs(raw.get("inputs", {}), f"{path}.inputs", known_inputs, errors)
     if level_id is None:
         return None
-    return Level(level_id, needs, events, branches, inputs)
+    return Level(level_id, needs, events, branches, inputs, fail_fast)
 
 
 def _check_input_events(levels: tuple[Level, ...], errors: list[PlanError]) -> None:
@@ -452,6 +449,14 @@ def _parse_levels(text: str, known_inputs: dict[str, str], known_secrets: frozen
                             "buildArtifact generator inputs are reserved and cannot be caller supplied",
                         )
                     )
+                if input_name in {"ci-level-id", "ci-level-fail-fast"}:
+                    errors.append(
+                        PlanError(
+                            "ci_level_internal_input",
+                            f"$.levels[{index}].inputs.{input_name}",
+                            "typed level identity and failFast inputs are generator-owned",
+                        )
+                    )
     declared = {item["id"] for item in raw_levels if isinstance(item, dict) and isinstance(item.get("id"), str)}
     preceding: dict[str, Level] = {}
     for index, raw in enumerate(raw_levels):
@@ -536,9 +541,12 @@ def _render_level(level: Level, plan: Plan, sha: str) -> list[str]:
         "      statuses: read",
         f"    uses: Verjson/.github/.github/workflows/node-ci.yml@{sha}",
     ]
-    if level.inputs:
-        lines.append("    with:")
-        lines += [f"      {key}: {_scalar(value)}" for key, value in level.inputs]
+    lines.append("    with:")
+    lines += [
+        f"      ci-level-id: {_scalar(level.id)}",
+        f"      ci-level-fail-fast: {_scalar(level.fail_fast)}",
+        *[f"      {key}: {_scalar(value)}" for key, value in level.inputs],
+    ]
     if plan.secrets:
         lines.append("    secrets:")
         lines += [f"      {name}: ${{{{ secrets.{name} }}}}" for name in plan.secrets]
@@ -558,6 +566,7 @@ def _artifact_plan_json(plan: Plan) -> str:
                     "events": list(level.events) if level.events is not None else None,
                     "branches": list(level.branches) if level.branches is not None else None,
                     "inputs": dict(level.inputs),
+                    "failFast": level.fail_fast,
                 }
                 for level in plan.levels
             ],
@@ -623,7 +632,11 @@ def _artifact_level_inputs(
     participant_count: int,
     authorization_plan_json: str = "{}",
 ) -> list[str]:
-    lines = [f"      {key}: {_scalar(value)}" for key, value in level.inputs]
+    lines = [
+        f"      ci-level-id: {_scalar(level.id)}",
+        f"      ci-level-fail-fast: {_scalar(level.fail_fast)}",
+        *(f"      {key}: {_scalar(value)}" for key, value in level.inputs),
+    ]
     lines += [
         "      secretless-pr: ${{ github.event_name == 'pull_request' }}",
         "      secretless-trusted-ref: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}",
@@ -885,6 +898,8 @@ def _render_artifact_jobs(plan: Plan, sha: str) -> list[list[str]]:
     ]
     producer_inputs.extend(
         [
+            ("ci-level-id", json.dumps(producer_level.id)),
+            ("ci-level-fail-fast", _scalar(producer_level.fail_fast)),
             ("secretless-pr", "${{ github.event_name == 'pull_request' }}"),
             (
                 "secretless-trusted-ref",

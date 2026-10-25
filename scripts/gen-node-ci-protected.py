@@ -732,18 +732,18 @@ def externalize_protected_candidate_plan(step: str) -> str:
         raise SystemExit("protected candidate heredoc indentation changed")
     candidate_body = textwrap.dedent(raw_candidate_body).rstrip("\n")
     normalized_lines = candidate_body.splitlines()
-    for declaration in ("active_process", "received_signal"):
+    for declaration, expected_count in (("active_process", 2), ("received_signal", 1)):
         old = f"global {declaration}"
         new = f"nonlocal {declaration}"
         matches = [
             index for index, line in enumerate(normalized_lines)
             if line.strip() == old
         ]
-        if len(matches) != 1:
+        if len(matches) != expected_count:
             raise SystemExit("protected candidate signal-state transformation changed")
-        index = matches[0]
-        indentation = normalized_lines[index][: len(normalized_lines[index]) - len(normalized_lines[index].lstrip())]
-        normalized_lines[index] = indentation + new
+        for index in matches:
+            indentation = normalized_lines[index][: len(normalized_lines[index]) - len(normalized_lines[index].lstrip())]
+            normalized_lines[index] = indentation + new
     normalized_candidate_body = "\n".join(normalized_lines)
     if normalized_candidate_body != protected_candidate_helper_body():
         raise SystemExit("protected candidate helper source no longer matches generator output")
@@ -1581,26 +1581,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
               shutil.rmtree(cache_root, ignore_errors=True)
 
           def extinguish_process_group(process):
-              graceful_deadline = time.monotonic() + 1
-              while time.monotonic() < graceful_deadline:
-                  try:
-                      os.killpg(process.pid, 0)
-                  except ProcessLookupError:
-                      return
-                  time.sleep(0.05)
-              try:
-                  os.killpg(process.pid, signal.SIGKILL)
-              except ProcessLookupError:
-                  return
-              deadline = time.monotonic() + 5
-              while True:
-                  try:
-                      os.killpg(process.pid, 0)
-                  except ProcessLookupError:
-                      return
-                  if time.monotonic() >= deadline:
-                      sys.exit("candidate process group survived bounded SIGKILL cleanup")
-                  time.sleep(0.05)
+              extinguish_supervised_process_group(process)
 
           previous_handlers = {{}}
           def handle_signal(signum, _frame):
@@ -1618,7 +1599,13 @@ def isolate_candidate_runtime_cache(document: str) -> str:
               previous_handlers[caught_signal] = signal.getsignal(caught_signal)
               signal.signal(caught_signal, handle_signal)
           try:
-              for index, (script_directory, name, unset_env, requires_services) in enumerate(normalized):
+              def execute_candidate_entry(index, _entry):
+                  global active_process
+                  script_directory, name, unset_env, requires_services = normalized[index]
+                  if received_signal is not None:
+                      interruption = ScriptPlanInterrupted(received_signal)
+                      interruption.cleanup_status = "verified"
+                      raise interruption
                   if baseline is not None and inventory(baseline) != baseline_inventory:
                       sys.exit("verified runtime cache changed before candidate script")
                   script_cache = cache_root / str(index)
@@ -1784,66 +1771,75 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                   )
                   legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]
                   try:
-                    active_process = subprocess.Popen(
-                              [
-                                  str(bubblewrap),
-                                  "--unshare-user",
-                                  "--unshare-pid",
-                                  "--unshare-ipc",
-                                  "--unshare-uts",
-                                  "--unshare-cgroup-try",
-                                  "--disable-userns",
-                                  "--die-with-parent",
-                                  "--new-session",
-                                  *network_args,
-                                  "--tmpfs", "/",
-                                  "--tmpfs", "/tmp",
-                                  *artifact_helper_args,
-                                  *legacy_network_args,
-                                  *directory_args,
-                                  *chmod_args,
-                                  "--ro-bind", "/usr", "/usr",
-                                  "--ro-bind", "/bin", "/bin",
-                                  "--ro-bind", "/lib", "/lib",
-                                  "--ro-bind", "/lib64", "/lib64",
-                                  # Present on every dpkg host; optional because this runner
-                                  # may be self-hosted (#1782).
-                                  "--ro-bind-try", "/etc/alternatives", "/etc/alternatives",
-                                  "--ro-bind", "/etc/ssl", "/etc/ssl",
-                                  "--ro-bind", "/etc/hosts", "/etc/hosts",
-                                  "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
-                                  "--ro-bind", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
-                                  "--ro-bind", "/etc/passwd", "/etc/passwd",
-                                  "--ro-bind", "/etc/group", "/etc/group",
-                                  *tool_mount_args,
-                                  "--bind", str(workspace), str(workspace),
-                                  *artifact_mount_args,
-                                  *git_mount_args,
-                                  "--bind", str(script_cache), str(script_cache),
-                                  "--bind", str(script_home), str(script_home),
-                                  "--bind", str(script_tmp), str(script_tmp),
-                                  "--proc", "/proc",
-                                  "--dev", "/dev",
-                                  "--chdir", str(script_directory),
-                                  "--",
-                                  "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
-                                  *npm_command, "run", name,
-                              ],
-                              env=script_env,
-                              start_new_session=True,
-                              pass_fds=tuple(tool_prefix_fds),
-                            )
-                    for descriptor in tool_prefix_fds:
-                      os.close(descriptor)
-                    tool_prefix_fds = []
-                    while active_process.poll() is None:
-                      time.sleep(0.05)
-                    candidate_status = active_process.returncode
-                    extinguish_process_group(active_process)
-                    if received_signal is not None:
-                      raise SystemExit(128 + received_signal)
-                    if candidate_status != 0:
-                      raise subprocess.CalledProcessError(candidate_status, active_process.args)
+                      if received_signal is not None:
+                          interruption = ScriptPlanInterrupted(received_signal)
+                          interruption.cleanup_status = "verified"
+                          raise interruption
+                      active_process = subprocess.Popen(
+                                [
+                                    str(bubblewrap),
+                                    "--unshare-user",
+                                    "--unshare-pid",
+                                    "--unshare-ipc",
+                                    "--unshare-uts",
+                                    "--unshare-cgroup-try",
+                                    "--disable-userns",
+                                    "--die-with-parent",
+                                    "--new-session",
+                                    *network_args,
+                                    "--tmpfs", "/",
+                                    "--tmpfs", "/tmp",
+                                    *artifact_helper_args,
+                                    *legacy_network_args,
+                                    *directory_args,
+                                    *chmod_args,
+                                    "--ro-bind", "/usr", "/usr",
+                                    "--ro-bind", "/bin", "/bin",
+                                    "--ro-bind", "/lib", "/lib",
+                                    "--ro-bind", "/lib64", "/lib64",
+                                    # Present on every dpkg host; optional because this runner
+                                    # may be self-hosted (#1782).
+                                    "--ro-bind-try", "/etc/alternatives", "/etc/alternatives",
+                                    "--ro-bind", "/etc/ssl", "/etc/ssl",
+                                    "--ro-bind", "/etc/hosts", "/etc/hosts",
+                                    "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
+                                    "--ro-bind", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
+                                    "--ro-bind", "/etc/passwd", "/etc/passwd",
+                                    "--ro-bind", "/etc/group", "/etc/group",
+                                    *tool_mount_args,
+                                    "--bind", str(workspace), str(workspace),
+                                    *artifact_mount_args,
+                                    *git_mount_args,
+                                    "--bind", str(script_cache), str(script_cache),
+                                    "--bind", str(script_home), str(script_home),
+                                    "--bind", str(script_tmp), str(script_tmp),
+                                    "--proc", "/proc",
+                                    "--dev", "/dev",
+                                    "--chdir", str(script_directory),
+                                    "--",
+                                    "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
+                                    *npm_command, "run", name,
+                                ],
+                                env=script_env,
+                                start_new_session=True,
+                                pass_fds=tuple(tool_prefix_fds),
+                              )
+                      if received_signal is not None:
+                          try:
+                              os.killpg(active_process.pid, signal.SIGTERM)
+                          except ProcessLookupError:
+                              pass
+                      for descriptor in tool_prefix_fds:
+                        os.close(descriptor)
+                      tool_prefix_fds = []
+                      while active_process.poll() is None:
+                        time.sleep(0.05)
+                      candidate_status = active_process.returncode
+                      extinguish_process_group(active_process)
+                      if received_signal is not None:
+                          interruption = ScriptPlanInterrupted(received_signal)
+                          interruption.cleanup_status = "verified"
+                          raise interruption
                   finally:
                     for descriptor in tool_prefix_fds:
                       os.close(descriptor)
@@ -1859,7 +1855,11 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                       or script_home.exists()
                       or (baseline is not None and inventory(baseline) != baseline_inventory)
                     ):
-                      sys.exit("candidate script cache cleanup or baseline integrity check failed")
+                      cleanup_error = IntegrityError("candidate script cache cleanup or baseline integrity check failed")
+                      cleanup_error.cleanup_status = "failed"
+                      raise cleanup_error
+                  return ScriptEntryExecutionResult(candidate_status)
+
               command_records = [
                   {{
                       "directory": script_directory.relative_to(workspace).as_posix(),
@@ -1874,6 +1874,29 @@ def isolate_candidate_runtime_cache(document: str) -> str:
               ).hexdigest()
               with open(os.environ["VERJSON_CI_OUTPUT_FILE"], "a", encoding="utf-8") as output:
                   output.write(f"command-digest={{command_digest}}\\n")
+              fail_fast_value = os.environ.get("CI_LEVEL_FAIL_FAST")
+              if fail_fast_value not in {{"true", "false"}}:
+                  raise IntegrityError("typed CI level failFast value must be true or false")
+              receipt_identity = {{
+                  "repository": os.environ["CI_ENTRY_REPOSITORY"],
+                  "event": os.environ["CI_ENTRY_EVENT"],
+                  "ref": os.environ["CI_ENTRY_REF"],
+                  "commit": os.environ["CI_ENTRY_COMMIT"],
+                  "workflowSha": os.environ["CI_ENTRY_WORKFLOW_SHA"],
+                  "runId": os.environ["CI_ENTRY_RUN_ID"],
+                  "runAttempt": os.environ["CI_ENTRY_RUN_ATTEMPT"],
+                  "jobId": os.environ["CI_ENTRY_JOB_ID"],
+                  "levelId": os.environ["CI_LEVEL_ID"],
+              }}
+              receipt_result = run_script_plan_with_receipts(
+                  command_records,
+                  receipt_identity,
+                  fail_fast_value == "true",
+                  runner_temp,
+                  execute_candidate_entry,
+              )
+              if receipt_result.exit_code != 0:
+                  sys.exit("candidate script plan failed; see trusted per-entry receipts in RUNNER_TEMP")
           finally:
               cleanup_cache_root()
               for caught_signal, previous_handler in previous_handlers.items():

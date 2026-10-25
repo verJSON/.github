@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+from dataclasses import dataclass
 import errno
 import hashlib
 import io
@@ -13,14 +14,16 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 MAX_EXPANDED_BYTES = 1024 * 1024 * 1024
@@ -35,6 +38,8 @@ MAX_POLICY_BYTES = 64 * 1024
 MAX_AGGREGATE_NEEDS_BYTES = 64 * 1024
 MAX_RECEIPT_BYTES = 2 * 1024
 RUNTIME_INPUT_DEFAULTS: dict[str, Any] = {
+    "ci-level-id": "ci",
+    "ci-level-fail-fast": True,
     "node-version": "24",
     "timeout-minutes": 30,
     "cache": False,
@@ -113,6 +118,489 @@ def canonical_json(value: Any) -> bytes:
 
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+SCRIPT_ENTRY_RECEIPT_VERSION = 1
+MAX_SCRIPT_PLAN_ENTRIES = 256
+MAX_SCRIPT_ENTRY_RECEIPT_BYTES = 16 * 1024
+_SCRIPT_ENTRY_IDENTITY_FIELDS = {
+    "repository",
+    "event",
+    "ref",
+    "commit",
+    "workflowSha",
+    "runId",
+    "runAttempt",
+    "jobId",
+    "levelId",
+}
+_SCRIPT_ENTRY_FIELDS = {"directory", "script", "unsetEnv", "requiresServices"}
+_SCRIPT_ENTRY_RECEIPT_FIELDS = {
+    "version",
+    "identity",
+    "planDigest",
+    "ordinal",
+    "entry",
+    "state",
+    "exitCode",
+    "signal",
+    "cleanup",
+}
+
+
+@dataclass(frozen=True)
+class ScriptEntryExecutionResult:
+    return_code: int
+    cleanup_status: str = "verified"
+
+
+@dataclass(frozen=True)
+class ScriptPlanRunResult:
+    exit_code: int
+    receipt_directory: Path
+    plan_digest: str
+
+
+class ScriptPlanExecutionError(ArtifactError):
+    def __init__(self, ordinal: int, receipt_directory: Path):
+        self.ordinal = ordinal
+        self.receipt_directory = receipt_directory
+        super().__init__(f"trusted script supervisor failed at entry {ordinal}")
+
+
+class ScriptPlanInterrupted(Exception):
+    def __init__(self, signum: int):
+        if type(signum) is not int or signum <= 0:
+            raise ValueError("script-plan interruption requires a positive signal number")
+        self.signum = signum
+        self.cleanup_status = "unverified"
+        super().__init__(f"script plan interrupted by signal {signum}")
+
+
+def _validate_script_entry_identity(identity: Any) -> dict[str, str]:
+    if not isinstance(identity, dict) or set(identity) != _SCRIPT_ENTRY_IDENTITY_FIELDS:
+        raise IntegrityError("script-entry receipt identity is incomplete or has unknown fields")
+    if any(
+        not isinstance(value, str)
+        or not value
+        or len(value) > 1024
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+        for value in identity.values()
+    ):
+        raise IntegrityError("script-entry receipt identity contains an invalid value")
+    return dict(identity)
+
+
+def _validate_script_entry_plan(entries: Any) -> list[dict[str, Any]]:
+    if not isinstance(entries, list) or not entries or len(entries) > MAX_SCRIPT_PLAN_ENTRIES:
+        raise IntegrityError("script-entry receipt plan must contain 1-256 entries")
+    normalized: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != _SCRIPT_ENTRY_FIELDS:
+            raise IntegrityError("script-entry receipt plan contains an invalid entry shape")
+        directory = entry["directory"]
+        script = entry["script"]
+        unset_env = entry["unsetEnv"]
+        requires_services = entry["requiresServices"]
+        if (
+            not isinstance(directory, str)
+            or not directory
+            or (
+                directory != "."
+                and (
+                    directory.startswith("/")
+                    or "\\" in directory
+                    or any(part in {"", ".", ".."} for part in directory.split("/"))
+                )
+            )
+            or not isinstance(script, str)
+            or not script
+            or len(script) > 256
+            or not isinstance(unset_env, list)
+            or any(not isinstance(name, str) or not name for name in unset_env)
+            or len(set(unset_env)) != len(unset_env)
+            or type(requires_services) is not bool
+        ):
+            raise IntegrityError("script-entry receipt plan contains an invalid entry value")
+        normalized.append(
+            {
+                "directory": directory,
+                "script": script,
+                "unsetEnv": list(unset_env),
+                "requiresServices": requires_services,
+            }
+        )
+    return normalized
+
+
+def _script_entry_plan_digest(entries: list[dict[str, Any]]) -> str:
+    return sha256_bytes(canonical_json({"version": SCRIPT_ENTRY_RECEIPT_VERSION, "entries": entries}))
+
+
+def _create_script_entry_receipt_store(runner_temp: str | Path) -> tuple[Path, int]:
+    root = Path(runner_temp)
+    if not root.is_absolute() or root.is_symlink() or not root.is_dir():
+        raise IntegrityError("script-entry receipt store requires a real host RUNNER_TEMP directory")
+    resolved_root = root.resolve(strict=True)
+    if resolved_root != root:
+        raise IntegrityError("script-entry receipt store RUNNER_TEMP path traverses a symlink")
+    directory = Path(tempfile.mkdtemp(prefix=".verjson-node-ci-entry-receipts-", dir=str(root)))
+    metadata = directory.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise IntegrityError("script-entry receipt store is not a private directory")
+    try:
+        descriptor = os.open(
+            directory,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as error:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise IntegrityError("script-entry receipt store cannot be opened safely") from error
+    return directory, descriptor
+
+
+def _write_script_entry_receipt(directory_fd: int, receipt: dict[str, Any]) -> None:
+    ordinal = receipt["ordinal"]
+    final_name = f"entry-{ordinal:06d}.json"
+    temporary_name = f".{final_name}.{os.urandom(16).hex()}.tmp"
+    encoded = canonical_json(receipt)
+    if len(encoded) > MAX_SCRIPT_ENTRY_RECEIPT_BYTES:
+        raise IntegrityError("script-entry receipt exceeds its size limit")
+    descriptor = os.open(
+        temporary_name,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+        dir_fd=directory_fd,
+    )
+    try:
+        offset = 0
+        while offset < len(encoded):
+            offset += os.write(descriptor, encoded[offset:])
+        os.fsync(descriptor)
+    except BaseException:
+        os.close(descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        raise
+    else:
+        os.close(descriptor)
+    try:
+        os.link(
+            temporary_name,
+            final_name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    finally:
+        os.unlink(temporary_name, dir_fd=directory_fd)
+    os.fsync(directory_fd)
+
+
+def _reject_duplicate_receipt_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise IntegrityError("script-entry receipt contains a duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def validate_script_entry_receipts(
+    receipt_directory: str | Path,
+    entries: Any,
+    identity: Any,
+    fail_fast: bool,
+) -> list[dict[str, Any]]:
+    expected_entries = _validate_script_entry_plan(entries)
+    expected_identity = _validate_script_entry_identity(identity)
+    if type(fail_fast) is not bool:
+        raise IntegrityError("script-entry receipt failFast value must be a boolean")
+    directory = Path(receipt_directory)
+    if directory.is_symlink() or not directory.is_dir():
+        raise IntegrityError("script-entry receipt store is missing or unsafe")
+    directory_metadata = directory.lstat()
+    if (
+        not stat.S_ISDIR(directory_metadata.st_mode)
+        or stat.S_IMODE(directory_metadata.st_mode) != 0o700
+        or directory_metadata.st_uid != os.geteuid()
+    ):
+        raise IntegrityError("script-entry receipt store ownership or permissions changed")
+    directory_fd = os.open(
+        directory,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        expected_names = [f"entry-{index:06d}.json" for index in range(len(expected_entries))]
+        if sorted(os.listdir(directory_fd)) != expected_names:
+            raise IntegrityError("script-entry receipt set is missing or has extra records")
+        plan_digest = _script_entry_plan_digest(expected_entries)
+        receipts: list[dict[str, Any]] = []
+        failure_latched = False
+        terminal_state: str | None = None
+        for ordinal, name in enumerate(expected_names):
+            try:
+                descriptor = os.open(
+                    name,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=directory_fd,
+                )
+            except OSError as error:
+                raise IntegrityError("script-entry receipt record cannot be opened safely") from error
+            try:
+                metadata = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or stat.S_IMODE(metadata.st_mode) != 0o600
+                    or metadata.st_uid != os.geteuid()
+                    or metadata.st_nlink != 1
+                    or metadata.st_size > MAX_SCRIPT_ENTRY_RECEIPT_BYTES
+                ):
+                    raise IntegrityError("script-entry receipt record metadata is unsafe")
+                chunks: list[bytes] = []
+                remaining = MAX_SCRIPT_ENTRY_RECEIPT_BYTES + 1
+                while remaining > 0:
+                    chunk = os.read(descriptor, min(remaining, 4096))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                encoded = b"".join(chunks)
+                if len(encoded) > MAX_SCRIPT_ENTRY_RECEIPT_BYTES:
+                    raise IntegrityError("script-entry receipt exceeds its size limit")
+            finally:
+                os.close(descriptor)
+            try:
+                receipt = json.loads(
+                    encoded.decode("utf-8", errors="strict"),
+                    object_pairs_hook=_reject_duplicate_receipt_keys,
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise IntegrityError("script-entry receipt is not valid UTF-8 JSON") from error
+            if not isinstance(receipt, dict) or set(receipt) != _SCRIPT_ENTRY_RECEIPT_FIELDS:
+                raise IntegrityError("script-entry receipt has an invalid schema")
+            if (
+                type(receipt["version"]) is not int
+                or receipt["version"] != SCRIPT_ENTRY_RECEIPT_VERSION
+                or type(receipt["ordinal"]) is not int
+                or receipt["ordinal"] != ordinal
+                or receipt["identity"] != expected_identity
+                or receipt["planDigest"] != plan_digest
+                or canonical_json(receipt["entry"]) != canonical_json(expected_entries[ordinal])
+            ):
+                raise IntegrityError("script-entry receipt identity or plan binding mismatch")
+            state = receipt["state"]
+            exit_code = receipt["exitCode"]
+            signum = receipt["signal"]
+            cleanup = receipt["cleanup"]
+            if state == "completed":
+                if (
+                    terminal_state is not None
+                    or type(exit_code) is not int
+                    or exit_code < 0
+                    or signum is not None
+                    or cleanup != "verified"
+                ):
+                    raise IntegrityError("completed script-entry receipt has contradictory status fields")
+                if exit_code != 0:
+                    failure_latched = True
+                    if fail_fast:
+                        terminal_state = "fail-fast"
+            elif state == "not-run-fail-fast":
+                if (
+                    not fail_fast
+                    or terminal_state != "fail-fast"
+                    or exit_code is not None
+                    or signum is not None
+                    or cleanup != "not-started"
+                ):
+                    raise IntegrityError("fail-fast receipt is unexpected or contradictory")
+            elif state == "infrastructure-failure":
+                if (
+                    terminal_state is not None
+                    or cleanup not in {"verified", "not-started", "unverified", "failed"}
+                    or (exit_code is not None and (type(exit_code) is not int or exit_code < 0))
+                    or (signum is not None and (type(signum) is not int or signum <= 0))
+                    or (exit_code is not None and signum is not None)
+                    or (exit_code is None and signum is None and cleanup == "verified")
+                ):
+                    raise IntegrityError("infrastructure receipt has contradictory status fields")
+                failure_latched = True
+                terminal_state = "aborted"
+            elif state == "not-run-aborted":
+                if (
+                    terminal_state != "aborted"
+                    or exit_code is not None
+                    or signum is not None
+                    or cleanup != "not-started"
+                ):
+                    raise IntegrityError("aborted receipt is unexpected or contradictory")
+            else:
+                raise IntegrityError("script-entry receipt has an unknown state")
+            receipts.append(receipt)
+        if not failure_latched and any(receipt["state"] != "completed" for receipt in receipts):
+            raise IntegrityError("successful script-entry receipt set contains an unexecuted entry")
+        return receipts
+    finally:
+        os.close(directory_fd)
+
+
+def run_script_plan_with_receipts(
+    entries: Any,
+    identity: Any,
+    fail_fast: bool,
+    runner_temp: str | Path,
+    execute_entry: Callable[[int, dict[str, Any]], ScriptEntryExecutionResult],
+) -> ScriptPlanRunResult:
+    normalized_entries = _validate_script_entry_plan(entries)
+    normalized_identity = _validate_script_entry_identity(identity)
+    if type(fail_fast) is not bool:
+        raise IntegrityError("script-plan failFast value must be a boolean")
+    plan_digest = _script_entry_plan_digest(normalized_entries)
+    receipt_directory, directory_fd = _create_script_entry_receipt_store(runner_temp)
+    failure_latched = False
+    try:
+        for ordinal, entry in enumerate(normalized_entries):
+            try:
+                execution = execute_entry(ordinal, dict(entry))
+                if not isinstance(execution, ScriptEntryExecutionResult) or type(execution.return_code) is not int:
+                    raise IntegrityError("script executor returned an invalid status record")
+            except BaseException as error:
+                _write_script_entry_receipt(
+                    directory_fd,
+                    {
+                        "version": SCRIPT_ENTRY_RECEIPT_VERSION,
+                        "identity": normalized_identity,
+                        "planDigest": plan_digest,
+                        "ordinal": ordinal,
+                        "entry": entry,
+                        "state": "infrastructure-failure",
+                        "exitCode": None,
+                        "signal": error.signum if isinstance(error, ScriptPlanInterrupted) else None,
+                        "cleanup": getattr(error, "cleanup_status", "unverified"),
+                    },
+                )
+                for skipped_ordinal, skipped_entry in enumerate(normalized_entries[ordinal + 1 :], ordinal + 1):
+                    _write_script_entry_receipt(
+                        directory_fd,
+                        {
+                            "version": SCRIPT_ENTRY_RECEIPT_VERSION,
+                            "identity": normalized_identity,
+                            "planDigest": plan_digest,
+                            "ordinal": skipped_ordinal,
+                            "entry": skipped_entry,
+                            "state": "not-run-aborted",
+                            "exitCode": None,
+                            "signal": None,
+                            "cleanup": "not-started",
+                        },
+                    )
+                validate_script_entry_receipts(receipt_directory, normalized_entries, normalized_identity, fail_fast)
+                raise ScriptPlanExecutionError(ordinal, receipt_directory) from error
+            if execution.return_code < 0:
+                receipt_state = "infrastructure-failure"
+                exit_code = None
+                signum = -execution.return_code
+                cleanup = execution.cleanup_status
+            elif execution.cleanup_status != "verified":
+                receipt_state = "infrastructure-failure"
+                exit_code = execution.return_code
+                signum = None
+                cleanup = execution.cleanup_status
+            else:
+                receipt_state = "completed"
+                exit_code = execution.return_code
+                signum = None
+                cleanup = "verified"
+            _write_script_entry_receipt(
+                directory_fd,
+                {
+                    "version": SCRIPT_ENTRY_RECEIPT_VERSION,
+                    "identity": normalized_identity,
+                    "planDigest": plan_digest,
+                    "ordinal": ordinal,
+                    "entry": entry,
+                    "state": receipt_state,
+                    "exitCode": exit_code,
+                    "signal": signum,
+                    "cleanup": cleanup,
+                },
+            )
+            if receipt_state == "infrastructure-failure":
+                for skipped_ordinal, skipped_entry in enumerate(normalized_entries[ordinal + 1 :], ordinal + 1):
+                    _write_script_entry_receipt(
+                        directory_fd,
+                        {
+                            "version": SCRIPT_ENTRY_RECEIPT_VERSION,
+                            "identity": normalized_identity,
+                            "planDigest": plan_digest,
+                            "ordinal": skipped_ordinal,
+                            "entry": skipped_entry,
+                            "state": "not-run-aborted",
+                            "exitCode": None,
+                            "signal": None,
+                            "cleanup": "not-started",
+                        },
+                    )
+                validate_script_entry_receipts(receipt_directory, normalized_entries, normalized_identity, fail_fast)
+                return ScriptPlanRunResult(1, receipt_directory, plan_digest)
+            if execution.return_code != 0:
+                failure_latched = True
+                if fail_fast:
+                    for skipped_ordinal, skipped_entry in enumerate(normalized_entries[ordinal + 1 :], ordinal + 1):
+                        _write_script_entry_receipt(
+                            directory_fd,
+                            {
+                                "version": SCRIPT_ENTRY_RECEIPT_VERSION,
+                                "identity": normalized_identity,
+                                "planDigest": plan_digest,
+                                "ordinal": skipped_ordinal,
+                                "entry": skipped_entry,
+                                "state": "not-run-fail-fast",
+                                "exitCode": None,
+                                "signal": None,
+                                "cleanup": "not-started",
+                            },
+                        )
+                    break
+        validate_script_entry_receipts(receipt_directory, normalized_entries, normalized_identity, fail_fast)
+        return ScriptPlanRunResult(1 if failure_latched else 0, receipt_directory, plan_digest)
+    finally:
+        os.close(directory_fd)
+
+
+def extinguish_supervised_process_group(process: subprocess.Popen[Any]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    graceful_deadline = time.monotonic() + 1
+    while time.monotonic() < graceful_deadline:
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return
+        if time.monotonic() >= deadline:
+            raise IntegrityError("candidate process group survived bounded SIGKILL cleanup")
+        time.sleep(0.05)
 
 
 def bubblewrap_network_args(*, shared_artifact: bool, legacy_unshare: bool = False) -> list[str]:
@@ -1678,10 +2166,17 @@ def _runtime_input_environment_name(name: str) -> str:
 
 def effective_runtime_inputs(level: dict[str, Any], event_name: str) -> dict[str, Any]:
     inputs = level.get("inputs")
-    if not isinstance(inputs, dict) or any(name not in RUNTIME_INPUT_DEFAULTS for name in inputs):
+    if (
+        not isinstance(inputs, dict)
+        or any(name not in RUNTIME_INPUT_DEFAULTS for name in inputs)
+        or not isinstance(level.get("id"), str)
+        or type(level.get("failFast", True)) is not bool
+    ):
         raise IntegrityError("authorization plan contains an unsupported runtime input")
     expected = dict(RUNTIME_INPUT_DEFAULTS)
     expected.update(inputs)
+    expected["ci-level-id"] = level["id"]
+    expected["ci-level-fail-fast"] = level.get("failFast", True)
     expected["secretless-pr"] = event_name == "pull_request"
     expected["secretless-trusted-ref"] = event_name in {"push", "workflow_dispatch"}
     return expected
@@ -1861,6 +2356,11 @@ def run_protected_candidate_plan() -> None:
     env_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
     entries_path = Path(os.environ["SCRIPT_PLAN_ENTRIES_FILE"])
     runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve()
+    if "run_script_plan_with_receipts" in globals():
+        ci_build_artifacts = sys.modules[__name__]
+    else:
+        sys.path.insert(0, str(runner_temp))
+        import ci_build_artifacts
     if (
         entries_path.is_symlink()
         or entries_path.parent.resolve() != runner_temp
@@ -2851,26 +3351,7 @@ def run_protected_candidate_plan() -> None:
         shutil.rmtree(cache_root, ignore_errors=True)
 
     def extinguish_process_group(process):
-        graceful_deadline = time.monotonic() + 1
-        while time.monotonic() < graceful_deadline:
-            try:
-                os.killpg(process.pid, 0)
-            except ProcessLookupError:
-                return
-            time.sleep(0.05)
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            return
-        deadline = time.monotonic() + 5
-        while True:
-            try:
-                os.killpg(process.pid, 0)
-            except ProcessLookupError:
-                return
-            if time.monotonic() >= deadline:
-                sys.exit("candidate process group survived bounded SIGKILL cleanup")
-            time.sleep(0.05)
+        extinguish_supervised_process_group(process)
 
     previous_handlers = {}
     def handle_signal(signum, _frame):
@@ -2888,7 +3369,13 @@ def run_protected_candidate_plan() -> None:
         previous_handlers[caught_signal] = signal.getsignal(caught_signal)
         signal.signal(caught_signal, handle_signal)
     try:
-        for index, (script_directory, name, unset_env, requires_services) in enumerate(normalized):
+        def execute_candidate_entry(index, _entry):
+            nonlocal active_process
+            script_directory, name, unset_env, requires_services = normalized[index]
+            if received_signal is not None:
+                interruption = ScriptPlanInterrupted(received_signal)
+                interruption.cleanup_status = "verified"
+                raise interruption
             if baseline is not None and inventory(baseline) != baseline_inventory:
                 sys.exit("verified runtime cache changed before candidate script")
             script_cache = cache_root / str(index)
@@ -3054,66 +3541,75 @@ def run_protected_candidate_plan() -> None:
             )
             legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]
             try:
-              active_process = subprocess.Popen(
-                        [
-                            str(bubblewrap),
-                            "--unshare-user",
-                            "--unshare-pid",
-                            "--unshare-ipc",
-                            "--unshare-uts",
-                            "--unshare-cgroup-try",
-                            "--disable-userns",
-                            "--die-with-parent",
-                            "--new-session",
-                            *network_args,
-                            "--tmpfs", "/",
-                            "--tmpfs", "/tmp",
-                            *artifact_helper_args,
-                            *legacy_network_args,
-                            *directory_args,
-                            *chmod_args,
-                            "--ro-bind", "/usr", "/usr",
-                            "--ro-bind", "/bin", "/bin",
-                            "--ro-bind", "/lib", "/lib",
-                            "--ro-bind", "/lib64", "/lib64",
-                            # Present on every dpkg host; optional because this runner
-                            # may be self-hosted (#1782).
-                            "--ro-bind-try", "/etc/alternatives", "/etc/alternatives",
-                            "--ro-bind", "/etc/ssl", "/etc/ssl",
-                            "--ro-bind", "/etc/hosts", "/etc/hosts",
-                            "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
-                            "--ro-bind", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
-                            "--ro-bind", "/etc/passwd", "/etc/passwd",
-                            "--ro-bind", "/etc/group", "/etc/group",
-                            *tool_mount_args,
-                            "--bind", str(workspace), str(workspace),
-                            *artifact_mount_args,
-                            *git_mount_args,
-                            "--bind", str(script_cache), str(script_cache),
-                            "--bind", str(script_home), str(script_home),
-                            "--bind", str(script_tmp), str(script_tmp),
-                            "--proc", "/proc",
-                            "--dev", "/dev",
-                            "--chdir", str(script_directory),
-                            "--",
-                            "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
-                            *npm_command, "run", name,
-                        ],
-                        env=script_env,
-                        start_new_session=True,
-                        pass_fds=tuple(tool_prefix_fds),
-                      )
-              for descriptor in tool_prefix_fds:
-                os.close(descriptor)
-              tool_prefix_fds = []
-              while active_process.poll() is None:
-                time.sleep(0.05)
-              candidate_status = active_process.returncode
-              extinguish_process_group(active_process)
-              if received_signal is not None:
-                raise SystemExit(128 + received_signal)
-              if candidate_status != 0:
-                raise subprocess.CalledProcessError(candidate_status, active_process.args)
+                if received_signal is not None:
+                    interruption = ScriptPlanInterrupted(received_signal)
+                    interruption.cleanup_status = "verified"
+                    raise interruption
+                active_process = subprocess.Popen(
+                          [
+                              str(bubblewrap),
+                              "--unshare-user",
+                              "--unshare-pid",
+                              "--unshare-ipc",
+                              "--unshare-uts",
+                              "--unshare-cgroup-try",
+                              "--disable-userns",
+                              "--die-with-parent",
+                              "--new-session",
+                              *network_args,
+                              "--tmpfs", "/",
+                              "--tmpfs", "/tmp",
+                              *artifact_helper_args,
+                              *legacy_network_args,
+                              *directory_args,
+                              *chmod_args,
+                              "--ro-bind", "/usr", "/usr",
+                              "--ro-bind", "/bin", "/bin",
+                              "--ro-bind", "/lib", "/lib",
+                              "--ro-bind", "/lib64", "/lib64",
+                              # Present on every dpkg host; optional because this runner
+                              # may be self-hosted (#1782).
+                              "--ro-bind-try", "/etc/alternatives", "/etc/alternatives",
+                              "--ro-bind", "/etc/ssl", "/etc/ssl",
+                              "--ro-bind", "/etc/hosts", "/etc/hosts",
+                              "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
+                              "--ro-bind", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
+                              "--ro-bind", "/etc/passwd", "/etc/passwd",
+                              "--ro-bind", "/etc/group", "/etc/group",
+                              *tool_mount_args,
+                              "--bind", str(workspace), str(workspace),
+                              *artifact_mount_args,
+                              *git_mount_args,
+                              "--bind", str(script_cache), str(script_cache),
+                              "--bind", str(script_home), str(script_home),
+                              "--bind", str(script_tmp), str(script_tmp),
+                              "--proc", "/proc",
+                              "--dev", "/dev",
+                              "--chdir", str(script_directory),
+                              "--",
+                              "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
+                              *npm_command, "run", name,
+                          ],
+                          env=script_env,
+                          start_new_session=True,
+                          pass_fds=tuple(tool_prefix_fds),
+                        )
+                if received_signal is not None:
+                    try:
+                        os.killpg(active_process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                for descriptor in tool_prefix_fds:
+                  os.close(descriptor)
+                tool_prefix_fds = []
+                while active_process.poll() is None:
+                  time.sleep(0.05)
+                candidate_status = active_process.returncode
+                extinguish_process_group(active_process)
+                if received_signal is not None:
+                    interruption = ScriptPlanInterrupted(received_signal)
+                    interruption.cleanup_status = "verified"
+                    raise interruption
             finally:
               for descriptor in tool_prefix_fds:
                 os.close(descriptor)
@@ -3129,7 +3625,11 @@ def run_protected_candidate_plan() -> None:
                 or script_home.exists()
                 or (baseline is not None and inventory(baseline) != baseline_inventory)
               ):
-                sys.exit("candidate script cache cleanup or baseline integrity check failed")
+                cleanup_error = IntegrityError("candidate script cache cleanup or baseline integrity check failed")
+                cleanup_error.cleanup_status = "failed"
+                raise cleanup_error
+            return ScriptEntryExecutionResult(candidate_status)
+
         command_records = [
             {
                 "directory": script_directory.relative_to(workspace).as_posix(),
@@ -3144,6 +3644,29 @@ def run_protected_candidate_plan() -> None:
         ).hexdigest()
         with open(os.environ["VERJSON_CI_OUTPUT_FILE"], "a", encoding="utf-8") as output:
             output.write(f"command-digest={command_digest}\n")
+        fail_fast_value = os.environ.get("CI_LEVEL_FAIL_FAST")
+        if fail_fast_value not in {"true", "false"}:
+            raise IntegrityError("typed CI level failFast value must be true or false")
+        receipt_identity = {
+            "repository": os.environ["CI_ENTRY_REPOSITORY"],
+            "event": os.environ["CI_ENTRY_EVENT"],
+            "ref": os.environ["CI_ENTRY_REF"],
+            "commit": os.environ["CI_ENTRY_COMMIT"],
+            "workflowSha": os.environ["CI_ENTRY_WORKFLOW_SHA"],
+            "runId": os.environ["CI_ENTRY_RUN_ID"],
+            "runAttempt": os.environ["CI_ENTRY_RUN_ATTEMPT"],
+            "jobId": os.environ["CI_ENTRY_JOB_ID"],
+            "levelId": os.environ["CI_LEVEL_ID"],
+        }
+        receipt_result = run_script_plan_with_receipts(
+            command_records,
+            receipt_identity,
+            fail_fast_value == "true",
+            runner_temp,
+            execute_candidate_entry,
+        )
+        if receipt_result.exit_code != 0:
+            sys.exit("candidate script plan failed; see trusted per-entry receipts in RUNNER_TEMP")
     finally:
         cleanup_cache_root()
         for caught_signal, previous_handler in previous_handlers.items():

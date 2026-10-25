@@ -346,3 +346,48 @@ ordinary CI may build once and share that build among checks in the same workflo
   compiled at build time, so a cross-environment image also requires runtime
   configuration or separate environment-specific artifacts
   ([official Next.js guidance](https://nextjs.org/docs/pages/guides/environment-variables#bundling-environment-variables-for-the-browser)).
+
+## 2026-10-25 amendment — Level-local fail-fast records every planned script entry
+
+- **Issue:** [Verjson/.github#1869](https://github.com/Verjson/.github/issues/1869); this is a `Part of #1869` implementation slice.
+
+### Decision
+
+A typed `test-levels` entry may declare `failFast` as a strict boolean. Omission means
+`true`. The immutable parsed level carries that value through generated callers,
+authorization, and both the source `node-ci.yml` and generated
+`node-ci-protected.yml` executors. This is per-level ordered script execution; it does
+not change GitHub matrix `fail-fast`.
+
+Entries execute sequentially in the existing shared workspace. With `failFast: true`,
+an ordinary nonzero candidate exit prevents later launches. With `false`, an ordinary
+nonzero exit is recorded and the next planned entry runs, but the failure remains
+latched and the level ultimately fails. Later outputs are diagnostic: an earlier
+failure may have changed shared workspace state, so later successes are not independent
+attestations. The workflow does not use `continue-on-error`.
+
+A trusted host supervisor writes one versioned JSON receipt for each expanded plan
+entry beneath a fresh private directory in host `RUNNER_TEMP`, outside candidate mounts.
+Receipts bind repository, event, ref, candidate commit, workflow SHA, run and attempt,
+job and level, the complete ordered plan digest, ordinal and entry identity, actual
+return code or signal, and process cleanup status. Exclusive no-follow creation and
+atomic finalization keep receipts under supervisor ownership; stdout and candidate
+workspace contents are not receipt sources. The verifier rejects duplicate JSON keys,
+identity or plan mismatches, contradictory status fields, duplicate or extra entries,
+and missing entries.
+
+Cancellation, timeout, launch, sandbox or boundary failure, cleanup failure, receipt
+failure, and unexpected supervisor errors are terminal and prevent later launches.
+Signals do not receive fabricated exit codes. If a hard kill or runner loss prevents
+the supervisor from completing receipts, missing evidence fails the level. Both
+executors must prove the preceding candidate process tree is gone before advancing.
+
+### Security and acceptance gates
+
+This change keeps the existing credential, permission, egress, service, cache, workspace,
+and matrix behavior. It adds no candidate permission to write actions. The false path
+remains fail-closed unless the registered behavior tests, generated protected-twin
+parity, source and protected Bubblewrap cleanup tests, and canonical GitHub-hosted
+checks pass. Local Bubblewrap evidence is not a claim that a GitHub-hosted run or the
+outside-Verjson adopter canary has passed. Runner-minute savings remain unclaimed until
+equal before-and-after windows are measured, as required by this ADR's exit condition.

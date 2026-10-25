@@ -103,7 +103,7 @@ assert 'npm_command = [str(node_command), npm_cli_command]' in plan["run"]
 assert 'npm_command = [str(resolved_npm_executable)]' in plan["run"]
 assert '"--chdir", str(sandbox_directory), "--",' in plan["run"]
 assert '*npm_command, "run", name,' in plan["run"]
-assert "subprocess.run(" in plan["run"] and "pass_fds=tuple(" in plan["run"]
+assert "run_script_plan_with_receipts(" in plan["run"] and "pass_fds=tuple(" in plan["run"]
 assert "global_config_file.fileno()" in plan["run"]
 
 for command in ("npm run build", "npm run typecheck --if-present", "npm test", "npm run lint --if-present"):

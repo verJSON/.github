@@ -98,6 +98,16 @@ on:
         description: Digest of the exact trusted per-lane script entries executed.
         value: ${{ jobs.build-test.outputs.command-digest }}
     inputs:
+      ci-level-id:
+        description: Internal typed-level identity used to bind script execution receipts.
+        required: false
+        type: string
+        default: ci
+      ci-level-fail-fast:
+        description: Stop this level after the first candidate script failure and record unstarted entries.
+        required: false
+        type: boolean
+        default: true
       build-artifact-role:
         description: Internal role for the typed same-run buildArtifact plan.
         required: false
@@ -1978,6 +1988,8 @@ jobs:
           BUILD_ARTIFACT_PARTICIPANT_COUNT: ${{ inputs.build-artifact-participant-count }}
           BUILD_ARTIFACT_AUTHORIZATION_PLAN_JSON: ${{ inputs.build-artifact-authorization-plan-json }}
           BUILD_ARTIFACT_RUNTIME_INPUT_NODE_VERSION: ${{ toJSON(inputs.node-version) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_CI_LEVEL_ID: ${{ toJSON(inputs.ci-level-id) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_CI_LEVEL_FAIL_FAST: ${{ toJSON(inputs.ci-level-fail-fast) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_TIMEOUT_MINUTES: ${{ toJSON(inputs.timeout-minutes) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_CACHE: ${{ toJSON(inputs.cache) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_CACHE_MAX_MB: ${{ toJSON(inputs.cache-max-mb) }}
@@ -5812,6 +5824,17 @@ jobs:
         env:
           NESTED_MANIFESTS: ${{ inputs.secretless-nested-manifests }}
           BUILD_ARTIFACT_ROLE: ${{ inputs.build-artifact-role }}
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          CI_ENTRY_EVENT: ${{ github.event_name }}
+          CI_ENTRY_REF: ${{ github.ref }}
+          CI_ENTRY_COMMIT: ${{ github.sha }}
+          CI_ENTRY_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          CI_ENTRY_REPOSITORY: ${{ github.repository }}
+          CI_ENTRY_RUN_ID: ${{ github.run_id }}
+          CI_ENTRY_RUN_ATTEMPT: ${{ github.run_attempt }}
+          CI_ENTRY_JOB_ID: ${{ github.job }}
+          CI_LEVEL_ID: ${{ inputs.ci-level-id }}
+          CI_LEVEL_FAIL_FAST: ${{ inputs.ci-level-fail-fast }}
           VERJSON_CI_BUILD_ARTIFACT_ROOT: ${{ runner.temp }}/ci-build-artifact-verified
           VERJSON_CI_BUILD_ARTIFACT_MANIFEST: ${{ runner.temp }}/ci-build-artifact-manifest.json
           DB_ENV: ${{ inputs.db-env }}
@@ -5854,6 +5877,11 @@ jobs:
           env_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
           entries_path = Path(os.environ["SCRIPT_PLAN_ENTRIES_FILE"])
           runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve()
+          if "run_script_plan_with_receipts" in globals():
+              ci_build_artifacts = sys.modules[__name__]
+          else:
+              sys.path.insert(0, str(runner_temp))
+              import ci_build_artifacts
           if (
               entries_path.is_symlink()
               or entries_path.parent.resolve() != runner_temp
@@ -6341,7 +6369,7 @@ jobs:
           namespace_directories.discard(Path("/"))
           mount_fds = []
 
-          def bind_source(source, destination, *, writable=False):
+          def bind_source(arguments, source, destination, *, writable=False):
               source = Path(source).resolve(strict=True)
               expected = source.stat()
               if not (source.is_dir() or source.is_file()):
@@ -6500,14 +6528,20 @@ jobs:
 
           runtime_cache_content = verified_runtime_cache_content()
 
+          supervisor_state = {"process": None}
+
           def stop_on_termination(signum, _frame):
-              # SIGTERM to the interpreter raises here, so every finally below
-              # stops the sandbox and removes its staging copy. A runner cancel
-              # signals the step's bash, not this child, so this is best effort.
-              raise SystemExit(128 + signum)
+              active_process = supervisor_state["process"]
+              if active_process is not None and active_process.poll() is None:
+                  try:
+                      os.killpg(active_process.pid, signal.SIGTERM)
+                  except ProcessLookupError:
+                      pass
+              raise ci_build_artifacts.ScriptPlanInterrupted(signum)
 
           signal.signal(signal.SIGTERM, stop_on_termination)
-          for directory, name, unset_env, requires_services in normalized:
+          def execute_candidate_entry(index, _entry):
+              directory, name, unset_env, requires_services = normalized[index]
               script_env = os.environ.copy()
               service_env_names = {"DB_HOST", "DB_PORT", "CACHE_PORT"}
               for source_name in ("DB_ENV", "CACHE_ENV"):
@@ -6621,10 +6655,10 @@ jobs:
                   "--file", str(global_config_file.fileno()), "/dev/shm/npm-globalconfig",
               ]
               for source, destination in system_mounts:
-                  bind_source(source, destination)
+                  bind_source(arguments, source, destination)
               if node_toolchain_root is not None:
-                  bind_source(node_toolchain_root, node_toolchain_destination)
-              bind_source(workspace, sandbox_workspace, writable=True)
+                  bind_source(arguments, node_toolchain_root, node_toolchain_destination)
+              bind_source(arguments, workspace, sandbox_workspace, writable=True)
               consume_artifact = os.environ.get("BUILD_ARTIFACT_ROLE") == "consumer"
               if consume_artifact:
                   manifest = json.loads(Path(os.environ["VERJSON_CI_BUILD_ARTIFACT_MANIFEST"]).read_text(encoding="utf-8"))
@@ -6667,12 +6701,12 @@ jobs:
                               os.close(target_fd)
                           finally:
                               os.close(parent_fd)
-                          bind_source(source, f"{sandbox_workspace}/{relative}")
+                          bind_source(arguments, source, f"{sandbox_workspace}/{relative}")
                   finally:
                       os.close(workspace_fd)
-              bind_source(git_metadata, f"{sandbox_workspace}/.git")
+              bind_source(arguments, git_metadata, f"{sandbox_workspace}/.git")
               if corepack_home is not None:
-                  bind_source(corepack_home, "/dev/shm/home/.cache/node/corepack")
+                  bind_source(arguments, corepack_home, "/dev/shm/home/.cache/node/corepack")
               if browser_cache is not None and browser_cache_fd is not None:
                   arguments.extend((
                       "--bind", f"/proc/self/fd/{browser_cache_fd}",
@@ -6684,6 +6718,7 @@ jobs:
                   if runtime_cache_content is not None:
                       runtime_cache_staging = stage_runtime_cache(runtime_cache_content)
                       bind_source(
+                          arguments,
                           runtime_cache_staging,
                           "/dev/shm/npm-cache/_cacache/content-v2",
                           writable=True,
@@ -6693,9 +6728,8 @@ jobs:
                       "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
                       *npm_command, "run", name,
                   ))
-                  subprocess.run(
+                  process = subprocess.Popen(
                       arguments,
-                      check=True,
                       env=script_env,
                       cwd="/",
                       pass_fds=tuple(
@@ -6705,7 +6739,29 @@ jobs:
                               if fd is not None
                           ]
                       ),
+                      start_new_session=True,
                   )
+                  supervisor_state["process"] = process
+                  try:
+                      candidate_status = process.wait()
+                  except BaseException as execution_error:
+                      try:
+                          ci_build_artifacts.extinguish_supervised_process_group(process)
+                          process.wait()
+                      except BaseException as cleanup_error:
+                          execution_error.cleanup_status = "failed"
+                          raise execution_error from cleanup_error
+                      execution_error.cleanup_status = "verified"
+                      raise
+                  else:
+                      try:
+                          ci_build_artifacts.extinguish_supervised_process_group(process)
+                          process.wait()
+                      except BaseException as cleanup_error:
+                          cleanup_error.cleanup_status = "failed"
+                          raise
+                  finally:
+                      supervisor_state["process"] = None
               finally:
                   for descriptor in mount_fds:
                       os.close(descriptor)
@@ -6714,11 +6770,13 @@ jobs:
                       remove_runtime_cache_staging(runtime_cache_staging)
                       if os.path.lexists(runtime_cache_staging):
                           # Name only this step's own path.
-                          print(
-                              "::warning::consumer runtime cache staging was not removed: "
-                              f"{runtime_cache_staging}",
-                              file=sys.stderr,
+                          cleanup_error = ci_build_artifacts.IntegrityError(
+                              "consumer runtime cache staging was not removed"
                           )
+                          cleanup_error.cleanup_status = "failed"
+                          raise cleanup_error
+              return ci_build_artifacts.ScriptEntryExecutionResult(candidate_status)
+
           command_records = [
               {
                   "directory": directory.relative_to(checkout_root).as_posix(),
@@ -6733,6 +6791,29 @@ jobs:
           ).hexdigest()
           with open(os.environ["VERJSON_CI_OUTPUT_FILE"], "a", encoding="utf-8") as output:
               output.write(f"command-digest={command_digest}\n")
+          fail_fast_value = os.environ.get("CI_LEVEL_FAIL_FAST")
+          if fail_fast_value not in {"true", "false"}:
+              sys.exit("typed CI level failFast value must be true or false")
+          receipt_identity = {
+              "repository": os.environ["CI_ENTRY_REPOSITORY"],
+              "event": os.environ["CI_ENTRY_EVENT"],
+              "ref": os.environ["CI_ENTRY_REF"],
+              "commit": os.environ["CI_ENTRY_COMMIT"],
+              "workflowSha": os.environ["CI_ENTRY_WORKFLOW_SHA"],
+              "runId": os.environ["CI_ENTRY_RUN_ID"],
+              "runAttempt": os.environ["CI_ENTRY_RUN_ATTEMPT"],
+              "jobId": os.environ["CI_ENTRY_JOB_ID"],
+              "levelId": os.environ["CI_LEVEL_ID"],
+          }
+          receipt_result = ci_build_artifacts.run_script_plan_with_receipts(
+              command_records,
+              receipt_identity,
+              fail_fast_value == "true",
+              runner_temp,
+              execute_candidate_entry,
+          )
+          if receipt_result.exit_code != 0:
+              sys.exit("candidate script plan failed; see trusted per-entry receipts in RUNNER_TEMP")
           if browser_cache_fd is not None:
               os.close(browser_cache_fd)
           global_config_file.close()

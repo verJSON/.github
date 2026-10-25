@@ -99,6 +99,16 @@ on:
         description: Digest of the exact trusted per-lane script entries executed.
         value: ${{ jobs.build-test.outputs.command-digest }}
     inputs:
+      ci-level-id:
+        description: Internal typed-level identity used to bind script execution receipts.
+        required: false
+        type: string
+        default: ci
+      ci-level-fail-fast:
+        description: Stop this level after the first candidate script failure and record unstarted entries.
+        required: false
+        type: boolean
+        default: true
       build-artifact-role:
         description: Internal role for the typed same-run buildArtifact plan.
         required: false
@@ -2552,6 +2562,8 @@ jobs:
           BUILD_ARTIFACT_PARTICIPANT_COUNT: ${{ inputs.build-artifact-participant-count }}
           BUILD_ARTIFACT_AUTHORIZATION_PLAN_JSON: ${{ inputs.build-artifact-authorization-plan-json }}
           BUILD_ARTIFACT_RUNTIME_INPUT_NODE_VERSION: ${{ toJSON(inputs.node-version) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_CI_LEVEL_ID: ${{ toJSON(inputs.ci-level-id) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_CI_LEVEL_FAIL_FAST: ${{ toJSON(inputs.ci-level-fail-fast) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_TIMEOUT_MINUTES: ${{ toJSON(inputs.timeout-minutes) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_CACHE: ${{ toJSON(inputs.cache) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_CACHE_MAX_MB: ${{ toJSON(inputs.cache-max-mb) }}
@@ -6539,6 +6551,17 @@ jobs:
         env:
           NESTED_MANIFESTS: ${{ inputs.secretless-nested-manifests }}
           BUILD_ARTIFACT_ROLE: ${{ inputs.build-artifact-role }}
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          CI_ENTRY_EVENT: ${{ github.event_name }}
+          CI_ENTRY_REF: ${{ github.ref }}
+          CI_ENTRY_COMMIT: ${{ github.sha }}
+          CI_ENTRY_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          CI_ENTRY_REPOSITORY: ${{ github.repository }}
+          CI_ENTRY_RUN_ID: ${{ github.run_id }}
+          CI_ENTRY_RUN_ATTEMPT: ${{ github.run_attempt }}
+          CI_ENTRY_JOB_ID: ${{ github.job }}
+          CI_LEVEL_ID: ${{ inputs.ci-level-id }}
+          CI_LEVEL_FAIL_FAST: ${{ inputs.ci-level-fail-fast }}
           VERJSON_CI_BUILD_ARTIFACT_ROOT: ${{ runner.temp }}/ci-build-artifact-verified
           VERJSON_CI_BUILD_ARTIFACT_MANIFEST: ${{ runner.temp }}/ci-build-artifact-manifest.json
           DB_ENV: ${{ inputs.db-env }}

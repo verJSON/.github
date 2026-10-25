@@ -77,42 +77,60 @@ class NodeCiPythonHeredocsTest(unittest.TestCase):
                     with self.subTest(job=job, step=step, snippet=index):
                         compile(source, f"{workflow}:{job}:step-{step}:heredoc-{index}", "exec")
 
-    def test_every_candidate_entry_contains_its_process_launch_inside_the_loop(self):
+    def test_each_executor_uses_the_receipt_supervisor_for_candidate_entries(self):
         for workflow in WORKFLOWS:
             with self.subTest(workflow=workflow.name):
                 if workflow == PROTECTED:
-                    helper_source = TRUSTED_HELPER.read_text(encoding="utf-8")
-                    helper_tree = ast.parse(helper_source)
-                    helper = next(
-                        node
-                        for node in helper_tree.body
-                        if isinstance(node, ast.FunctionDef)
-                        and node.name == "run_protected_candidate_plan"
-                    )
-                    candidate = ast.get_source_segment(helper_source, helper)
-                    self.assertIsNotNone(candidate)
+                    candidate_source = TRUSTED_HELPER.read_text(encoding="utf-8")
                 else:
                     snippets = python_heredocs(workflow)
-                    candidate = next(
-                        source for _job, _step, source in snippets
-                        if "for index, (script_directory" in source or "for directory, name, unset_env" in source
+                    candidate_source = next(
+                        source
+                        for _job, _step, source in snippets
+                        if "def execute_candidate_entry(" in source
+                        and "run_script_plan_with_receipts(" in source
                     )
-                tree = ast.parse(candidate)
-                launches_inside_plan_loop = []
-                for node in ast.walk(tree):
-                    if not isinstance(node, (ast.For, ast.AsyncFor)):
-                        continue
-                    target_names = {
-                        child.id for child in ast.walk(node.target) if isinstance(child, ast.Name)
-                    }
-                    if not {"name", "unset_env", "requires_services"}.issubset(target_names):
-                        continue
-                    for child in ast.walk(node):
-                        if not isinstance(child, ast.Call) or not isinstance(child.func, ast.Attribute):
-                            continue
-                        if child.func.attr in {"Popen", "run"}:
-                            launches_inside_plan_loop.append(child)
-                self.assertTrue(launches_inside_plan_loop, "planned candidate process launch escaped its per-entry loop")
+
+                tree = ast.parse(candidate_source)
+                callback = next(
+                    node
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "execute_candidate_entry"
+                )
+                callback_source = ast.get_source_segment(candidate_source, callback)
+                self.assertIsNotNone(callback_source)
+                callback_tree = ast.parse(callback_source)
+                self.assertTrue(
+                    any(
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "Popen"
+                        for node in ast.walk(callback_tree)
+                    ),
+                    "candidate process launch must stay inside the executor callback",
+                )
+                supervisor_calls = [
+                    node
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Call)
+                    and (
+                        (isinstance(node.func, ast.Attribute) and node.func.attr == "run_script_plan_with_receipts")
+                        or (isinstance(node.func, ast.Name) and node.func.id == "run_script_plan_with_receipts")
+                    )
+                ]
+                self.assertTrue(supervisor_calls, "executor must use the receipt supervisor")
+                self.assertTrue(
+                    any(
+                        any(
+                            isinstance(argument, ast.Name)
+                            and argument.id == "execute_candidate_entry"
+                            for argument in call.args
+                        )
+                        for call in supervisor_calls
+                    ),
+                    "receipt supervisor must invoke the executor callback per entry",
+                )
 
     def test_protected_candidate_runtime_uses_the_pinned_trusted_helper(self):
         workflow = yaml.safe_load(PROTECTED.read_text(encoding="utf-8"))

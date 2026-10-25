@@ -144,10 +144,10 @@ class SharedNetworkBoundaryTests(unittest.TestCase):
                 if filename == "node-ci.yml":
                     self.assertIn("consume_artifact = os.environ.get(\"BUILD_ARTIFACT_ROLE\") == \"consumer\"", candidate_runtime)
                     self.assertIn("if consume_artifact:", candidate_runtime)
-                    self.assertIn('bind_source(source, f"{sandbox_workspace}/{relative}")', candidate_runtime)
+                    self.assertIn('bind_source(arguments, source, f"{sandbox_workspace}/{relative}")', candidate_runtime)
                     network_position = candidate_runtime.index("*network_args")
                     self.assertLess(candidate_runtime.rfind("arguments = [", 0, network_position), network_position)
-                    self.assertLess(network_position, candidate_runtime.index("subprocess.run(", network_position))
+                    self.assertLess(network_position, candidate_runtime.index("subprocess.Popen(", network_position))
                 else:
                     self.assertIn("verified_artifact_mounts()", candidate_runtime)
                     self.assertIn('roots = artifact_mount_roots(manifest["exportPolicy"]["paths"])', candidate_runtime)
@@ -1677,8 +1677,23 @@ class RoleAuthorizationTests(unittest.TestCase):
 
         with patch("ci_build_artifacts.subprocess.run", side_effect=run_with_fixed_versions):
             for role, lane in (("producer", "build"), ("consumer", "test")):
+                participant_level = next(
+                    item for item in plan["levels"] if item.get("id") == lane
+                )
+                role_runtime_inputs = {
+                    artifacts._runtime_input_environment_name(input_name): json.dumps(value)
+                    for input_name, value in artifacts.effective_runtime_inputs(
+                        participant_level, "pull_request"
+                    ).items()
+                }
                 with self.subTest(role=role), patch.dict(
-                    os.environ, {**base, "BUILD_ARTIFACT_ROLE": role, "BUILD_ARTIFACT_LEVEL_ID": lane}
+                    os.environ,
+                    {
+                        **base,
+                        **role_runtime_inputs,
+                        "BUILD_ARTIFACT_ROLE": role,
+                        "BUILD_ARTIFACT_LEVEL_ID": lane,
+                    },
                 ), self.assertRaisesRegex(artifacts.IntegrityError, "lacks trusted policy selection"):
                     artifacts._authorize_role_from_environment()
 

@@ -19,3 +19,6 @@ jobs:
       packages: read
       statuses: read
     uses: Verjson/.github/.github/workflows/node-ci.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    with:
+      ci-level-id: "ci"
+      ci-level-fail-fast: true

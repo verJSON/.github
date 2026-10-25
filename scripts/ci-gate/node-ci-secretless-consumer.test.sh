@@ -9,7 +9,7 @@ runner_temp="$tmp/runner-temp"
 tool_cache="$tmp/tool-cache"
 toolchain="$tool_cache/node/24.19.0"
 mkdir -p "$tmp/home" "$runner_temp" "$toolchain/bin"
-export RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux BWRAP_BINARY="${BWRAP_BINARY:-/usr/bin/bwrap}" HOME="$tmp/home" RUNNER_TEMP="$runner_temp" RUNNER_TOOL_CACHE="$tool_cache" GITHUB_ENV="$runner_temp/_runner_file_commands/GITHUB_ENV"
+export RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux BWRAP_BINARY="${BWRAP_BINARY:-/usr/bin/bwrap}" HOME="$tmp/home" RUNNER_TEMP="$runner_temp" RUNNER_TOOL_CACHE="$tool_cache" GITHUB_ENV="$runner_temp/_runner_file_commands/GITHUB_ENV" GITHUB_OUTPUT="$runner_temp/GITHUB_OUTPUT" CI_ENTRY_REPOSITORY=Verjson/fixture CI_ENTRY_EVENT=pull_request CI_ENTRY_REF=refs/pull/7/merge CI_ENTRY_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa CI_ENTRY_WORKFLOW_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb CI_ENTRY_RUN_ID=42 CI_ENTRY_RUN_ATTEMPT=1 CI_ENTRY_JOB_ID=build-test CI_LEVEL_ID=fixture CI_LEVEL_FAIL_FAST=true
 cat > "$toolchain/bin/node" <<'NODE'
 #!/usr/bin/env bash
 exit 0
@@ -28,8 +28,10 @@ python3 - "$workflow" "$tmp" "$root" <<'PY' \
   && pass "consumer extensions remain validated, credentialless, and canonical" \
   || fail "consumer extension workflow structure violates the secretless contract"
 import ast
+import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -95,8 +97,8 @@ assert 'os.execve(str(bubblewrap), arguments,' in rebuild["run"]
 assert 'str(bubblewrap)' in plan["run"]
 assert '"GITHUB_WORKSPACE": sandbox_workspace' in plan["run"]
 assert '"RUNNER_TEMP": "/tmp"' in plan["run"]
-assert 'bind_source(workspace, sandbox_workspace, writable=True)' in plan["run"]
-assert 'bind_source(git_metadata, f"{sandbox_workspace}/.git")' in plan["run"]
+assert 'bind_source(arguments, workspace, sandbox_workspace, writable=True)' in plan["run"]
+assert 'bind_source(arguments, git_metadata, f"{sandbox_workspace}/.git")' in plan["run"]
 assert '"--file", str(global_config_file.fileno()), "/dev/shm/npm-globalconfig"' in plan["run"]
 assert "global_config_file.fileno()" in plan["run"]
 assert '"PATH": f"{node_toolchain_bin}:/usr/bin:/bin"' in plan["run"]
@@ -122,7 +124,9 @@ assert plan["env"]["SCRIPT_PLAN_DEFAULT_PLAN"] == "${{ steps.node-ci-script-plan
 assert plan["env"]["SCRIPT_PLAN_ENTRIES_FILE"] == "${{ steps.node-ci-script-plan.outputs.entries-file }}"
 assert "if run_defaults:" in plan["run"]
 assert "inputs.secretless-pr" in plan["if"] and "inputs.secretless-trusted-ref" in plan["if"]
-assert "subprocess.run(" in plan["run"]
+assert "subprocess.Popen(" in plan["run"]
+assert "start_new_session=True" in plan["run"]
+assert "extinguish_supervised_process_group(process)" in plan["run"]
 assert '"--chdir", str(sandbox_directory), "--",' in plan["run"]
 assert '"/usr/bin/python3", "-I", "-c", sandbox_entrypoint' in plan["run"]
 assert "pass_fds=tuple(" in plan["run"]
@@ -252,7 +256,7 @@ bin_dir.mkdir(parents=True)
 (fixture / ".git").mkdir()
 (fixture / "node_modules").mkdir()
 (fixture / "package.json").write_text(
-    '{"scripts":{"build":"fixture","typecheck":"fixture","test":"fixture","lint":"fixture"}}',
+    '{"scripts":{"build":"fixture","typecheck":"fixture","test":"fixture","lint":"fixture","fail":"fixture","spawn":"fixture","after":"fixture"}}',
     encoding="utf-8",
 )
 command_log = fixture / "node_modules" / ".npm-commands"
@@ -281,7 +285,16 @@ node.write_text(
     '  if [[ -v "$name" ]]; then exit 9; fi\n'
     "done\n"
     'mkdir -p "$RUNNER_TEMP/_runner_file_commands"\n'
-    'printf "BASH_ENV=/tmp/hostile-candidate.sh\\n" >> "$RUNNER_TEMP/_runner_file_commands/set_env_probe"\n',
+    'printf "BASH_ENV=/tmp/hostile-candidate.sh\\n" >> "$RUNNER_TEMP/_runner_file_commands/set_env_probe"\n'
+    "    case \" $* \" in\n"
+    "      *' run fail'*) exit 23 ;;\n"
+    "      *' run spawn'*)\n"
+    '        (sleep 1; touch /workspace/node_modules/.child-late) &\n'
+    '        touch /workspace/node_modules/.child-started\n'
+    '        for _ in {1..100}; do [[ -f /workspace/node_modules/.child-started ]] && break; sleep 0.01; done\n'
+    '        [[ -f /workspace/node_modules/.child-started ]] || exit 28 ;;\n'
+    '      *\' run after\'*) sleep 2; [[ ! -f /workspace/node_modules/.child-late ]] || exit 29 ;;\n'
+    '    esac\n',
     encoding="utf-8",
 )
 node.chmod(0o755)
@@ -307,11 +320,24 @@ runner_environment.update({
     "GITHUB_WORKSPACE": str(fixture),
     "GITHUB_ENV": str(command_file),
     "GITHUB_OUTPUT": str(fixture / "runner-output"),
+    "VERJSON_CI_OUTPUT_FILE": str(fixture / "runner-output"),
+    "CI_ENTRY_REPOSITORY": "Verjson/fixture",
+    "CI_ENTRY_EVENT": "pull_request",
+    "CI_ENTRY_REF": "refs/pull/7/merge",
+    "CI_ENTRY_COMMIT": "a" * 40,
+    "CI_ENTRY_WORKFLOW_SHA": "b" * 40,
+    "CI_ENTRY_RUN_ID": "42",
+    "CI_ENTRY_RUN_ATTEMPT": "2",
+    "CI_ENTRY_JOB_ID": "build-test",
+    "CI_LEVEL_ID": "test-levels",
+    "CI_LEVEL_FAIL_FAST": "true",
     "DB_ENV": "POSTGRES_PASSWORD=postgres\nDATABASE_URL=postgres://app:pw@127.0.0.1:5432/app\nOPENAI_API_KEY=ci-dummy-key",
     "POSTGRES_PASSWORD": "postgres",
     "DATABASE_URL": "postgres://app:pw@127.0.0.1:5432/app",
     "OPENAI_API_KEY": "ci-dummy-key",
 })
+runner_temp = Path(runner_environment["RUNNER_TEMP"])
+shutil.copyfile(Path(sys.argv[3]) / "scripts/ci_build_artifacts.py", runner_temp / "ci_build_artifacts.py")
 hostile_bash_env = fixture / "hostile-bash-env"
 startup_marker = fixture / "bash-env-sourced"
 hostile_bash_env.write_text(f"printf sourced > {startup_marker}\n", encoding="utf-8")
@@ -375,12 +401,59 @@ assert service_log.read_text(encoding="utf-8").splitlines() == [
 command_log.write_text("", encoding="utf-8")
 service_log.write_text("", encoding="utf-8")
 runner_environment["CI_SCRIPT_PLAN"] = ""
-assert (fixture / "node_modules/.host-path-probes").read_text(encoding="utf-8").splitlines() == [
-    "hidden",
-    "hidden",
-    "hidden",
-    "hidden",
+runner_environment["CI_LEVEL_FAIL_FAST"] = "false"
+runner_environment["CI_SCRIPT_PLAN"] = '["fail","spawn","after"]'
+receipts_before = set(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
+result = subprocess.run(
+    ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", plan_runner],
+    cwd=fixture,
+    env=runner_environment,
+    check=False,
+    capture_output=True,
+    text=True,
+)
+assert result.returncode != 0, "failFast=false must fail the level after ordinary entry failures"
+assert command_log.read_text(encoding="utf-8").splitlines() == [
+    "run fail", "run spawn", "run after"
+], f"failFast=false did not continue through every candidate script: {command_log.read_text(encoding='utf-8')} {result.stderr}"
+assert not (fixture / "node_modules/.child-late").exists(), (
+    "source executor advanced while a detached candidate process could still run"
+)
+receipt_dirs = list(set(runner_temp.glob(".verjson-node-ci-entry-receipts-*")) - receipts_before)
+assert len(receipt_dirs) == 1, "source executor did not leave one trusted receipt directory"
+receipts = [
+    json.loads((receipt_dirs[0] / f"entry-{ordinal:06d}.json").read_text(encoding="utf-8"))
+    for ordinal in range(3)
 ]
+assert [receipt["exitCode"] for receipt in receipts] == [23, 0, 0]
+assert all(receipt["cleanup"] == "verified" for receipt in receipts)
+print("source Bubblewrap executor continued after exit 23 and extinguished the detached child before the next entry")
+runner_environment["CI_SCRIPT_PLAN"] = '["fail","after"]'
+runner_environment["CI_LEVEL_FAIL_FAST"] = "true"
+command_log.write_text("", encoding="utf-8")
+receipts_before = set(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
+result = subprocess.run(
+    ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", plan_runner],
+    cwd=fixture,
+    env=runner_environment,
+    check=False,
+    capture_output=True,
+    text=True,
+)
+assert result.returncode != 0, "failFast=true must fail after an ordinary entry failure"
+assert command_log.read_text(encoding="utf-8").splitlines() == ["run fail"]
+receipt_dirs = list(set(runner_temp.glob(".verjson-node-ci-entry-receipts-*")) - receipts_before)
+assert len(receipt_dirs) == 1
+receipts = [
+    json.loads((receipt_dirs[0] / f"entry-{ordinal:06d}.json").read_text(encoding="utf-8"))
+    for ordinal in range(2)
+]
+assert [receipt["state"] for receipt in receipts] == ["completed", "not-run-fail-fast"]
+assert receipts[1]["exitCode"] is None and receipts[1]["signal"] is None
+print("source Bubblewrap executor records not-run receipts when fail-fast is enabled")
+assert (fixture / "node_modules/.host-path-probes").read_text(encoding="utf-8").splitlines() == [
+    "hidden"
+] * 8
 print("consumer sandbox hides runner home and Docker socket paths")
 print("secretless default plan scopes service variables to the test script")
 assert inputs["db-image"]["default"] == ""

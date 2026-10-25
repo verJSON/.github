@@ -158,137 +158,143 @@ class ProtectedCandidateManifestTests(unittest.TestCase):
             "requiresServices": requires_services,
         }
 
-    def _candidate_launch(self) -> tuple[ast.For, ast.List, ast.Assign]:
-        cleanup_tries = [
-            node for node in self.helper.body
+    def _candidate_launch(self) -> tuple[ast.FunctionDef, ast.List, ast.Assign]:
+        runner_calls = [
+            node
+            for node in ast.walk(self.helper)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "run_script_plan_with_receipts"
+        ]
+        self.assertEqual(len(runner_calls), 1, "the explicit plan must use one receipt supervisor")
+        runner_call = runner_calls[0]
+        self.assertEqual(len(runner_call.args), 5)
+        self.assertIsInstance(runner_call.args[0], ast.Name)
+        self.assertEqual(runner_call.args[0].id, "command_records")
+        self.assertIsInstance(runner_call.args[4], ast.Name)
+        self.assertEqual(runner_call.args[4].id, "execute_candidate_entry")
+
+        cleanup_scopes = [
+            node
+            for node in self.helper.body
             if isinstance(node, ast.Try)
+            and runner_call in ast.walk(node)
             and node.finalbody
             and any(
-                isinstance(statement, ast.For)
-                and isinstance(statement.iter, ast.Call)
-                and isinstance(statement.iter.func, ast.Name)
-                and statement.iter.func.id == "enumerate"
-                and statement.iter.args
-                and isinstance(statement.iter.args[0], ast.Name)
-                and statement.iter.args[0].id == "normalized"
-                for statement in node.body
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id == "cleanup_cache_root"
+                for statement in node.finalbody
+                for child in ast.walk(statement)
             )
         ]
-        self.assertEqual(len(cleanup_tries), 1, "the explicit-plan loop must remain in cleanup scope")
-        loops = [
-            statement for statement in cleanup_tries[0].body
-            if isinstance(statement, ast.For)
-            and isinstance(statement.iter, ast.Call)
-            and isinstance(statement.iter.func, ast.Name)
-            and statement.iter.func.id == "enumerate"
-            and statement.iter.args
-            and isinstance(statement.iter.args[0], ast.Name)
-            and statement.iter.args[0].id == "normalized"
-        ]
-        self.assertEqual(len(loops), 1)
-        loop = loops[0]
         self.assertEqual(
-            ast.unparse(loop.target),
-            "(index, (script_directory, name, unset_env, requires_services))",
+            len(cleanup_scopes),
+            1,
+            "the explicit plan runner must remain inside the outer cache cleanup scope",
         )
-        parents = {
-            child: parent
-            for parent in ast.walk(loop)
-            for child in ast.iter_child_nodes(parent)
-        }
-        candidate_loop_aborts = []
-        for node in ast.walk(loop):
-            if not isinstance(node, (ast.Continue, ast.Break)):
-                continue
-            parent = parents[node]
-            while parent is not loop:
-                if isinstance(parent, (ast.For, ast.While)):
-                    in_loop_else = any(
-                        node in ast.walk(statement) for statement in parent.orelse
-                    )
-                    if not in_loop_else:
-                        break
-                parent = parents[parent]
-            if parent is loop:
-                candidate_loop_aborts.append(node)
-        self.assertFalse(candidate_loop_aborts, "an explicit plan entry cannot be skipped")
 
-        successful_process_exits = []
-        for node in ast.walk(loop):
-            if isinstance(node, ast.Call):
-                exits_process = (
-                    isinstance(node.func, ast.Attribute)
-                    and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id == "sys"
-                    and node.func.attr == "exit"
-                )
-                unconditionally_exits_process = (
-                    isinstance(node.func, ast.Attribute)
-                    and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id == "os"
-                    and node.func.attr == "_exit"
-                )
-                status = node.args[0] if len(node.args) == 1 else None
-                if unconditionally_exits_process or (
-                    exits_process and not _provably_nonzero_exit_status(status)
-                ):
-                    successful_process_exits.append(node)
-            if isinstance(node, ast.Raise):
-                exception = node.exc
-                if isinstance(exception, ast.Name) and exception.id == "SystemExit":
-                    successful_process_exits.append(node)
-                elif (
-                    isinstance(exception, ast.Call)
-                    and isinstance(exception.func, ast.Name)
-                    and exception.func.id == "SystemExit"
-                ):
-                    status = exception.args[0] if len(exception.args) == 1 else None
-                    if not _provably_nonzero_exit_status(status):
-                        successful_process_exits.append(node)
-        self.assertFalse(
-            successful_process_exits,
-            "candidate entries cannot exit the helper successfully",
+        command_records_stores = [
+            node
+            for node in ast.walk(self.helper)
+            if isinstance(node, ast.Name)
+            and node.id == "command_records"
+            and isinstance(node.ctx, ast.Store)
+        ]
+        self.assertEqual(len(command_records_stores), 1, "the frozen expanded entry list cannot be rebound")
+        command_record_mutations = [
+            node
+            for node in ast.walk(self.helper)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "command_records"
+            and node.func.attr in {"append", "clear", "extend", "insert", "pop", "remove", "reverse", "sort"}
+        ]
+        self.assertFalse(command_record_mutations, "the frozen expanded entry list cannot be mutated")
+
+        supervisor = ast.parse(inspect.getsource(artifacts.run_script_plan_with_receipts)).body[0]
+        supervisor_loops = [
+            node
+            for node in ast.walk(supervisor)
+            if isinstance(node, ast.For)
+            and isinstance(node.iter, ast.Call)
+            and isinstance(node.iter.func, ast.Name)
+            and node.iter.func.id == "enumerate"
+            and node.iter.args
+            and isinstance(node.iter.args[0], ast.Name)
+            and node.iter.args[0].id == "normalized_entries"
+        ]
+        self.assertEqual(len(supervisor_loops), 1, "the receipt supervisor must cover every frozen entry")
+        loop = supervisor_loops[0]
+        self.assertEqual(ast.unparse(loop.target), "(ordinal, entry)")
+        execute_calls = [
+            node
+            for node in ast.walk(loop)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "execute_entry"
+        ]
+        self.assertEqual(len(execute_calls), 1, "each plan entry must reach the executor exactly once")
+        self.assertEqual(ast.unparse(execute_calls[0]), "execute_entry(ordinal, dict(entry))")
+
+        callback = next(
+            node
+            for node in ast.walk(self.helper)
+            if isinstance(node, ast.FunctionDef) and node.name == "execute_candidate_entry"
         )
-        candidate_returns = []
-        for node in ast.walk(loop):
-            if not isinstance(node, ast.Return):
-                continue
-            parent = parents[node]
-            while parent is not loop and not isinstance(
-                parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
-            ):
-                parent = parents[parent]
-            if parent is loop:
-                candidate_returns.append(node)
-        self.assertFalse(candidate_returns, "an explicit plan entry cannot return from the helper")
-        for variable in ("script_directory", "name"):
-            stores = [
-                node for node in ast.walk(loop)
-                if isinstance(node, ast.Name)
-                and node.id == variable
-                and isinstance(node.ctx, ast.Store)
-            ]
-            self.assertEqual(len(stores), 1, f"{variable} must stay bound to the plan tuple")
         launch_assignments = [
-            statement
-            for node in loop.body
-            if isinstance(node, ast.Try)
-            for statement in node.body
-            if isinstance(statement, ast.Assign)
-            and len(statement.targets) == 1
-            and isinstance(statement.targets[0], ast.Name)
-            and statement.targets[0].id == "active_process"
-            and isinstance(statement.value, ast.Call)
-            and isinstance(statement.value.func, ast.Attribute)
-            and isinstance(statement.value.func.value, ast.Name)
-            and statement.value.func.value.id == "subprocess"
-            and statement.value.func.attr == "Popen"
+            node
+            for node in ast.walk(callback)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "active_process" for target in node.targets)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and isinstance(node.value.func.value, ast.Name)
+            and node.value.func.value.id == "subprocess"
+            and node.value.func.attr == "Popen"
         ]
         self.assertEqual(len(launch_assignments), 1)
-        self.assertTrue(launch_assignments[0].value.args)
-        command = launch_assignments[0].value.args[0]
+        launch = launch_assignments[0]
+        cleanup_tries = [
+            node
+            for node in ast.walk(callback)
+            if isinstance(node, ast.Try)
+            and node.finalbody
+            and launch in ast.walk(node)
+        ]
+        self.assertEqual(len(cleanup_tries), 1, "candidate launch must remain in unconditional cleanup scope")
+        finalbody = cleanup_tries[0].finalbody
+        final_calls = [child for statement in finalbody for child in ast.walk(statement) if isinstance(child, ast.Call)]
+        self.assertTrue(
+            any(
+                isinstance(call.func, ast.Name)
+                and call.func.id == "extinguish_process_group"
+                and call.args
+                and isinstance(call.args[0], ast.Name)
+                and call.args[0].id == "active_process"
+                for call in final_calls
+            ),
+            "candidate cleanup must verify process-group extinction before callback return",
+        )
+        removed_cache_roots = {
+            call.args[0].id
+            for call in final_calls
+            if isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "shutil"
+            and call.func.attr == "rmtree"
+            and call.args
+            and isinstance(call.args[0], ast.Name)
+        }
+        self.assertTrue(
+            {"script_cache", "script_tmp", "script_home"}.issubset(removed_cache_roots),
+            "candidate cleanup must remove every private script cache root",
+        )
+
+        command = launch.value.args[0]
         self.assertIsInstance(command, ast.List)
-        return loop, command, launch_assignments[0]
+        return callback, command, launch
 
     def _assert_plan_lists_are_not_mutated(self) -> None:
         allowed_methods = {"append", "clear", "extend", "insert", "pop", "remove", "reverse", "sort"}
@@ -425,7 +431,7 @@ class ProtectedCandidateManifestTests(unittest.TestCase):
             self.assertEqual(result["normalized"], expected)
             self._assert_plan_lists_are_not_mutated()
 
-            loop, command, _launch = self._candidate_launch()
+            _callback, command, _launch = self._candidate_launch()
             npm_assignment = self._body_assignment(self.helper, "npm_command")
             npm_launchers = (
                 (

@@ -30,7 +30,7 @@ PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 GENERATOR = ROOT / "scripts/gen-node-ci-protected.py"
 TRUSTED_HELPER = ROOT / "scripts/ci_build_artifacts.py"
 HEAD = "a" * 40
-LEGACY_SHA256 = "9ecd8a30e94752f054fb28e0657e67005c1cd381c78b26e4c7cf1371a8beef4e"
+LEGACY_SHA256 = "f5ea0cd281a2a52e1c0fd017129bcaa386d927a43fb02f1698e05dea2e2d235e"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
@@ -196,6 +196,34 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("trusted helper candidate ran", result.stdout)
         self.assertEqual([], remaining)
+
+    def test_protected_bubblewrap_continues_after_failure_and_extinguishes_detached_child(self):
+        with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
+            receipt_capture = Path(capture_dir) / "receipts.json"
+            result, remaining = self.run_candidate_plan(
+                lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+                "case \" $* \" in\n"
+                "  *' run first '*)\n"
+                "    (sleep 1; touch \"$GITHUB_WORKSPACE/late-marker\") >/dev/null 2>&1 &\n"
+                "    printf started > \"$GITHUB_WORKSPACE/first-started\"\n"
+                "    exit 23 ;;\n"
+                "  *' run second '*)\n"
+                "    sleep 2\n"
+                "    test -f \"$GITHUB_WORKSPACE/first-started\" || exit 30\n"
+                "    test ! -e \"$GITHUB_WORKSPACE/late-marker\" || exit 29\n"
+                "    printf ran > \"$GITHUB_WORKSPACE/second-ran\" ;;\n"
+                "esac\n",
+                script_plan=["first", "second"],
+                environment_updates={"CI_LEVEL_FAIL_FAST": "false"},
+                receipt_capture=receipt_capture,
+            )
+            self.assertNotEqual(0, result.returncode, result.stderr)
+            self.assertEqual([], remaining)
+            receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual([receipt["state"] for receipt in receipts], ["completed", "completed"])
+            self.assertEqual([receipt["exitCode"] for receipt in receipts], [23, 0])
+            self.assertEqual([receipt["identity"]["jobId"] for receipt in receipts], ["build-test"] * 2)
+            self.assertEqual([receipt["identity"]["levelId"] for receipt in receipts], ["test-levels"] * 2)
 
     def test_consumer_mounts_verified_artifact_read_only_with_live_fd_at_launch(self):
         result, remaining = self.run_candidate_plan(
@@ -858,6 +886,7 @@ subprocess.Popen = _d1_probe_popen
         script_plan=None,
         verified_artifact=False,
         bwrap_probe=False,
+        receipt_capture=None,
     ):
         with tempfile.TemporaryDirectory() as directory, ExitStack() as cleanup_stack:
             root = Path(directory)
@@ -1047,8 +1076,19 @@ subprocess.Popen = _d1_probe_popen
                 "RUNNER_ENVIRONMENT": "github-hosted",
                 "RUNNER_OS": "Linux",
             "GITHUB_ENV": str(command_file),
-            "GITHUB_OUTPUT": str(runner_temp / "GITHUB_OUTPUT"),
+                "GITHUB_OUTPUT": str(runner_temp / "GITHUB_OUTPUT"),
+                "VERJSON_CI_OUTPUT_FILE": str(runner_temp / "GITHUB_OUTPUT"),
                 **plan_environment,
+                "CI_ENTRY_REPOSITORY": "Verjson/fixture",
+                "CI_ENTRY_EVENT": "pull_request",
+                "CI_ENTRY_REF": "refs/pull/7/merge",
+                "CI_ENTRY_COMMIT": "a" * 40,
+                "CI_ENTRY_WORKFLOW_SHA": "b" * 40,
+                "CI_ENTRY_RUN_ID": "123",
+                "CI_ENTRY_RUN_ATTEMPT": "1",
+                "CI_ENTRY_JOB_ID": "build-test",
+                "CI_LEVEL_ID": "test-levels",
+                "CI_LEVEL_FAIL_FAST": "true",
                 "CANDIDATE_CACHE_ROOT": str(runner_temp / "verjson-candidate-caches-test"),
                 "npm_config_cache": str(baseline),
                 "RUNNER_TOOL_CACHE": str(tool_bin.parent),
@@ -1180,6 +1220,16 @@ subprocess.Popen = _d1_probe_popen
                 capture_output=True,
                 text=True,
             )
+            if receipt_capture is not None:
+                receipt_directories = list(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
+                self.assertEqual(len(receipt_directories), 1)
+                receipt_records = sorted(receipt_directories[0].glob("entry-*.json"))
+                Path(receipt_capture).write_text(
+                    json.dumps(
+                        [json.loads(record.read_text(encoding="utf-8")) for record in receipt_records]
+                    ),
+                    encoding="utf-8",
+                )
             self.assertNotIn(f"can't open file '{helper_path}'", result.stderr)
             if swap_thread is not None:
                 swap_thread.join(timeout=5)
@@ -1247,6 +1297,18 @@ subprocess.Popen = _d1_probe_popen
                             "RUNNER_OS": "Linux",
                             "GITHUB_ENV": str(command_file),
                             "GITHUB_OUTPUT": str(runner_temp / "GITHUB_OUTPUT"),
+                        "VERJSON_CI_OUTPUT_FILE": str(runner_temp / "GITHUB_OUTPUT"),
+                        "CI_ENTRY_REPOSITORY": "Verjson/fixture",
+                        "CI_ENTRY_EVENT": "pull_request",
+                        "CI_ENTRY_REF": "refs/pull/7/merge",
+                        "CI_ENTRY_COMMIT": "a" * 40,
+                        "CI_ENTRY_WORKFLOW_SHA": "b" * 40,
+                        "CI_ENTRY_RUN_ID": "123",
+                        "CI_ENTRY_RUN_ATTEMPT": "1",
+                        "CI_ENTRY_JOB_ID": "build-test",
+                        "CI_LEVEL_ID": "test-levels",
+                        "CI_LEVEL_FAIL_FAST": "true",
+                        "PWD": str(workspace),
                             **self.script_plan_environment(runner_temp, '["first"]'),
                             "CANDIDATE_CACHE_ROOT": str(baseline),
                             "npm_config_cache": str(baseline),
@@ -1755,6 +1817,18 @@ PY
                     "RUNNER_OS": "Linux",
                     "GITHUB_ENV": str(command_file),
                     "GITHUB_OUTPUT": str(runner_temp / "GITHUB_OUTPUT"),
+                    "VERJSON_CI_OUTPUT_FILE": str(runner_temp / "GITHUB_OUTPUT"),
+                    "CI_ENTRY_REPOSITORY": "Verjson/fixture",
+                    "CI_ENTRY_EVENT": "pull_request",
+                    "CI_ENTRY_REF": "refs/pull/7/merge",
+                    "CI_ENTRY_COMMIT": "a" * 40,
+                    "CI_ENTRY_WORKFLOW_SHA": "b" * 40,
+                    "CI_ENTRY_RUN_ID": "123",
+                    "CI_ENTRY_RUN_ATTEMPT": "1",
+                    "CI_ENTRY_JOB_ID": "build-test",
+                    "CI_LEVEL_ID": "test-levels",
+                    "CI_LEVEL_FAIL_FAST": "true",
+                    "PWD": str(workspace),
                     **self.script_plan_environment(runner_temp, '["first"]'),
                     "CANDIDATE_CACHE_ROOT": str(runner_temp / "verjson-candidate-caches-test"),
                     "npm_config_cache": str(baseline),
