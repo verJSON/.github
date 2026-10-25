@@ -1839,10 +1839,14 @@ jobs:
           initial_sandbox_receipt="$(verify_sandbox_files)" || exit 1
 
           probe_bubblewrap() {
+            local status_file status_code
+            status_file="$(mktemp "$RUNNER_TEMP/bwrap-json-status.XXXXXX")" || return 1
+            status_code=0
             /usr/bin/env -i \
               PATH=/usr/sbin:/usr/bin:/sbin:/bin \
               HOME=/nonexistent \
               /usr/bin/bwrap \
+              --json-status-fd 3 \
               --unshare-user \
               --unshare-pid \
               --unshare-ipc \
@@ -1856,7 +1860,34 @@ jobs:
               --dev /dev \
               --proc /proc \
               --tmpfs /dev/shm \
-              -- /usr/bin/true >/dev/null 2>&1
+              -- /usr/bin/true 3>"$status_file" >/dev/null 2>&1 || status_code=$?
+            if [ "$status_code" -ne 0 ] || ! python3 -I - "$status_file" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          def reject_duplicate_keys(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError("duplicate JSON key")
+                  result[key] = value
+              return result
+
+          records = [
+              json.loads(line, object_pairs_hook=reject_duplicate_keys)
+              for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+          ]
+          if (len(records) != 2 or type(records[0].get("child-pid")) is not int
+                  or records[0]["child-pid"] <= 0
+                  or records[1] != {"exit-code": 0}):
+              raise SystemExit("Bubblewrap JSON status feature probe failed")
+          PY
+            then
+              rm -f -- "$status_file"
+              return 1
+            fi
+            rm -f -- "$status_file"
           }
           if ! probe_bubblewrap; then
             current_sandbox_receipt="$(verify_sandbox_files)" || exit 1

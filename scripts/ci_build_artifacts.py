@@ -37,6 +37,7 @@ MAX_PLAN_BYTES = 48 * 1024
 MAX_POLICY_BYTES = 64 * 1024
 MAX_AGGREGATE_NEEDS_BYTES = 64 * 1024
 MAX_RECEIPT_BYTES = 2 * 1024
+MAX_BWRAP_STATUS_BYTES = 16 * 1024
 RUNTIME_INPUT_DEFAULTS: dict[str, Any] = {
     "ci-level-id": "ci",
     "ci-level-fail-fast": True,
@@ -162,10 +163,13 @@ class ScriptPlanRunResult:
 
 
 class ScriptPlanExecutionError(ArtifactError):
-    def __init__(self, ordinal: int, receipt_directory: Path):
+    def __init__(self, ordinal: int, receipt_directory: Path, failure: BaseException):
         self.ordinal = ordinal
         self.receipt_directory = receipt_directory
-        super().__init__(f"trusted script supervisor failed at entry {ordinal}")
+        super().__init__(
+            f"trusted script supervisor failed at entry {ordinal}: "
+            f"{type(failure).__name__}: {failure}"
+        )
 
 
 class ScriptPlanInterrupted(Exception):
@@ -175,6 +179,62 @@ class ScriptPlanInterrupted(Exception):
         self.signum = signum
         self.cleanup_status = "unverified"
         super().__init__(f"script plan interrupted by signal {signum}")
+
+
+def parse_bubblewrap_json_status(data: bytes, process_returncode: int) -> int:
+    if not isinstance(data, bytes) or len(data) > MAX_BWRAP_STATUS_BYTES:
+        raise IntegrityError("Bubblewrap status receipt is missing or oversized")
+
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise IntegrityError("Bubblewrap status receipt contains a duplicate JSON key")
+            result[key] = value
+        return result
+
+    try:
+        records = [
+            json.loads(line, object_pairs_hook=reject_duplicate_keys)
+            for line in data.decode("utf-8", errors="strict").splitlines()
+            if line
+        ]
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise IntegrityError("Bubblewrap status receipt is not valid JSON Lines") from error
+    if (
+        len(records) != 2
+        or not isinstance(records[0], dict)
+        or type(records[0].get("child-pid")) is not int
+        or records[0]["child-pid"] <= 0
+        or not isinstance(records[1], dict)
+        or set(records[1]) != {"exit-code"}
+        or type(records[1]["exit-code"]) is not int
+        or type(process_returncode) is not int
+        or records[1]["exit-code"] != process_returncode
+    ):
+        raise IntegrityError(
+            "Bubblewrap status receipt is incomplete or contradicts its process status "
+            f"(records={records!r}, process return code={process_returncode!r})"
+        )
+    exit_code = records[1]["exit-code"]
+    if 128 <= exit_code <= 255:
+        raise IntegrityError("Bubblewrap status cannot distinguish a candidate signal from exit code")
+    return exit_code
+
+
+def read_bubblewrap_json_status(status_fd: int, process_returncode: int) -> int:
+    try:
+        data = bytearray()
+        while True:
+            chunk = os.read(status_fd, min(4096, MAX_BWRAP_STATUS_BYTES + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+            if len(data) > MAX_BWRAP_STATUS_BYTES:
+                raise IntegrityError("Bubblewrap status receipt is oversized")
+        return parse_bubblewrap_json_status(bytes(data), process_returncode)
+    finally:
+        os.close(status_fd)
 
 
 def _validate_script_entry_identity(identity: Any) -> dict[str, str]:
@@ -429,7 +489,6 @@ def validate_script_entry_receipts(
                     or (exit_code is not None and (type(exit_code) is not int or exit_code < 0))
                     or (signum is not None and (type(signum) is not int or signum <= 0))
                     or (exit_code is not None and signum is not None)
-                    or (exit_code is None and signum is None and cleanup == "verified")
                 ):
                     raise IntegrityError("infrastructure receipt has contradictory status fields")
                 failure_latched = True
@@ -503,7 +562,7 @@ def run_script_plan_with_receipts(
                         },
                     )
                 validate_script_entry_receipts(receipt_directory, normalized_entries, normalized_identity, fail_fast)
-                raise ScriptPlanExecutionError(ordinal, receipt_directory) from error
+                raise ScriptPlanExecutionError(ordinal, receipt_directory, error) from error
             if execution.return_code < 0:
                 receipt_state = "infrastructure-failure"
                 exit_code = None
@@ -583,6 +642,7 @@ def extinguish_supervised_process_group(process: subprocess.Popen[Any]) -> None:
         return
     graceful_deadline = time.monotonic() + 1
     while time.monotonic() < graceful_deadline:
+        process.poll()
         try:
             os.killpg(process.pid, 0)
         except ProcessLookupError:
@@ -594,6 +654,7 @@ def extinguish_supervised_process_group(process: subprocess.Popen[Any]) -> None:
         return
     deadline = time.monotonic() + 5
     while True:
+        process.poll()
         try:
             os.killpg(process.pid, 0)
         except ProcessLookupError:
@@ -3540,14 +3601,19 @@ def run_protected_candidate_plan() -> None:
                 else []
             )
             legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]
+            status_read_fd = None
+            status_write_fd = None
             try:
                 if received_signal is not None:
                     interruption = ScriptPlanInterrupted(received_signal)
                     interruption.cleanup_status = "verified"
                     raise interruption
+                status_read_fd, status_write_fd = os.pipe()
                 active_process = subprocess.Popen(
                           [
                               str(bubblewrap),
+                              "--json-status-fd",
+                              str(status_write_fd),
                               "--unshare-user",
                               "--unshare-pid",
                               "--unshare-ipc",
@@ -3592,8 +3658,10 @@ def run_protected_candidate_plan() -> None:
                           ],
                           env=script_env,
                           start_new_session=True,
-                          pass_fds=tuple(tool_prefix_fds),
+                          pass_fds=tuple([*tool_prefix_fds, status_write_fd]),
                         )
+                os.close(status_write_fd)
+                status_write_fd = None
                 if received_signal is not None:
                     try:
                         os.killpg(active_process.pid, signal.SIGTERM)
@@ -3610,7 +3678,19 @@ def run_protected_candidate_plan() -> None:
                     interruption = ScriptPlanInterrupted(received_signal)
                     interruption.cleanup_status = "verified"
                     raise interruption
+                status_descriptor = status_read_fd
+                status_read_fd = None
+                try:
+                    candidate_status = read_bubblewrap_json_status(
+                        status_descriptor, candidate_status
+                    )
+                except BaseException as status_error:
+                    status_error.cleanup_status = "verified"
+                    raise
             finally:
+              for descriptor in (status_read_fd, status_write_fd):
+                if descriptor is not None:
+                  os.close(descriptor)
               for descriptor in tool_prefix_fds:
                 os.close(descriptor)
               if active_process is not None:

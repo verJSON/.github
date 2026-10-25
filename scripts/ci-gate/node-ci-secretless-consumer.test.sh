@@ -256,7 +256,7 @@ bin_dir.mkdir(parents=True)
 (fixture / ".git").mkdir()
 (fixture / "node_modules").mkdir()
 (fixture / "package.json").write_text(
-    '{"scripts":{"build":"fixture","typecheck":"fixture","test":"fixture","lint":"fixture","fail":"fixture","spawn":"fixture","after":"fixture"}}',
+'{"scripts":{"build":"fixture","typecheck":"fixture","test":"fixture","lint":"fixture","fail":"fixture","spawn":"fixture","after":"fixture","ambiguous":"fixture","delete-nested":"fixture"}}',
     encoding="utf-8",
 )
 command_log = fixture / "node_modules" / ".npm-commands"
@@ -288,8 +288,11 @@ node.write_text(
     'printf "BASH_ENV=/tmp/hostile-candidate.sh\\n" >> "$RUNNER_TEMP/_runner_file_commands/set_env_probe"\n'
     "    case \" $* \" in\n"
     "      *' run fail'*) exit 23 ;;\n"
+    "      *' run ambiguous'*) exit 143 ;;\n"
+    "      *' run delete-nested'*) rm -rf /workspace/nested; exit 23 ;;\n"
+    "      *' run nested-after'*) touch /workspace/nested-ran ;;\n"
     "      *' run spawn'*)\n"
-    '        (sleep 1; touch /workspace/node_modules/.child-late) &\n'
+    '        /usr/bin/setsid /bin/bash -c \'sleep 1; touch "$1"\' detached /workspace/node_modules/.child-late </dev/null >/dev/null 2>&1 &\n'
     '        touch /workspace/node_modules/.child-started\n'
     '        for _ in {1..100}; do [[ -f /workspace/node_modules/.child-started ]] && break; sleep 0.01; done\n'
     '        [[ -f /workspace/node_modules/.child-started ]] || exit 28 ;;\n'
@@ -428,6 +431,54 @@ receipts = [
 assert [receipt["exitCode"] for receipt in receipts] == [23, 0, 0]
 assert all(receipt["cleanup"] == "verified" for receipt in receipts)
 print("source Bubblewrap executor continued after exit 23 and extinguished the detached child before the next entry")
+runner_environment["CI_SCRIPT_PLAN"] = '["ambiguous","after"]'
+receipts_before = set(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
+command_log.write_text("", encoding="utf-8")
+result = subprocess.run(
+    ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", plan_runner],
+    cwd=fixture, env=runner_environment, check=False, capture_output=True, text=True,
+)
+assert result.returncode != 0
+assert command_log.read_text(encoding="utf-8").splitlines() == ["run ambiguous"]
+receipt_dirs = list(set(runner_temp.glob(".verjson-node-ci-entry-receipts-*")) - receipts_before)
+assert len(receipt_dirs) == 1
+receipts = [
+    json.loads((receipt_dirs[0] / f"entry-{ordinal:06d}.json").read_text(encoding="utf-8"))
+    for ordinal in range(2)
+]
+assert [receipt["state"] for receipt in receipts] == ["infrastructure-failure", "not-run-aborted"]
+assert receipts[0]["exitCode"] is None
+assert receipts[0]["signal"] is None
+print("source Bubblewrap executor treats ambiguous signal-style exits as terminal")
+
+nested_manifest = fixture / "nested"
+nested_manifest.mkdir()
+(nested_manifest / "package.json").write_text(
+    json.dumps({"scripts": {"nested-after": "true"}}), encoding="utf-8"
+)
+runner_environment["CI_SCRIPT_PLAN"] = '["delete-nested"]'
+runner_environment["NESTED_MANIFESTS"] = json.dumps([
+    {"path": "nested", "approvedPackages": [], "scriptPlan": ["nested-after"]}
+])
+receipts_before = set(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
+command_log.write_text("", encoding="utf-8")
+result = subprocess.run(
+    ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", plan_runner],
+    cwd=fixture, env=runner_environment, check=False, capture_output=True, text=True,
+)
+assert result.returncode != 0
+assert command_log.read_text(encoding="utf-8").splitlines() == ["run delete-nested"]
+assert not (fixture / "nested-ran").exists()
+receipt_dirs = list(set(runner_temp.glob(".verjson-node-ci-entry-receipts-*")) - receipts_before)
+assert len(receipt_dirs) == 1
+receipts = [
+    json.loads((receipt_dirs[0] / f"entry-{ordinal:06d}.json").read_text(encoding="utf-8"))
+    for ordinal in range(2)
+]
+assert [receipt["state"] for receipt in receipts] == ["completed", "infrastructure-failure"]
+assert not (fixture / "nested").exists()
+print("source Bubblewrap executor stops after deleted-cwd startup failure")
+runner_environment["NESTED_MANIFESTS"] = ""
 runner_environment["CI_SCRIPT_PLAN"] = '["fail","after"]'
 runner_environment["CI_LEVEL_FAIL_FAST"] = "true"
 command_log.write_text("", encoding="utf-8")
@@ -440,8 +491,8 @@ result = subprocess.run(
     capture_output=True,
     text=True,
 )
-assert result.returncode != 0, "failFast=true must fail after an ordinary entry failure"
-assert command_log.read_text(encoding="utf-8").splitlines() == ["run fail"]
+assert result.returncode != 0, f"failFast=true must fail after an ordinary entry failure: {result.stderr}"
+assert command_log.read_text(encoding="utf-8").splitlines() == ["run fail"], result.stderr
 receipt_dirs = list(set(runner_temp.glob(".verjson-node-ci-entry-receipts-*")) - receipts_before)
 assert len(receipt_dirs) == 1
 receipts = [
@@ -449,11 +500,11 @@ receipts = [
     for ordinal in range(2)
 ]
 assert [receipt["state"] for receipt in receipts] == ["completed", "not-run-fail-fast"]
-assert receipts[1]["exitCode"] is None and receipts[1]["signal"] is None
+assert receipts[1]["exitCode"] is None and receipts[1]["signal"] is None, receipts[1]
 print("source Bubblewrap executor records not-run receipts when fail-fast is enabled")
 assert (fixture / "node_modules/.host-path-probes").read_text(encoding="utf-8").splitlines() == [
     "hidden"
-] * 8
+] * 10
 print("consumer sandbox hides runner home and Docker socket paths")
 print("secretless default plan scopes service variables to the test script")
 assert inputs["db-image"]["default"] == ""

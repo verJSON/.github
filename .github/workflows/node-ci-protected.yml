@@ -2288,6 +2288,20 @@ jobs:
         # annotations, distinguishing this from a real pass.
         if: needs.eligibility.outputs.should-run == 'false'
         run: echo "::notice title=CI deferred::CI is deferred until renovate/stability-days clears and Renovate rebases."
+      - name: Reject unsupported level-local fail-fast mode
+        if: needs.eligibility.outputs.should-run != 'false'
+        env:
+          CI_LEVEL_FAIL_FAST_JSON: ${{ toJSON(inputs.ci-level-fail-fast) }}
+          CI_LEVEL_SECRETLESS_PR_JSON: ${{ toJSON(inputs.secretless-pr) }}
+          CI_LEVEL_SECRETLESS_TRUSTED_REF_JSON: ${{ toJSON(inputs.secretless-trusted-ref) }}
+        run: |
+          set -euo pipefail
+          if [[ "$CI_LEVEL_FAIL_FAST_JSON" == false \
+              && "$CI_LEVEL_SECRETLESS_PR_JSON" != true \
+              && "$CI_LEVEL_SECRETLESS_TRUSTED_REF_JSON" != true ]]; then
+            echo '::error::ci-level-fail-fast=false requires a supported secretless script-plan executor' >&2
+            exit 1
+          fi
       - name: Require completed secretless dependency acquisition
         if: needs.eligibility.outputs.should-run != 'false' && needs.acquire-secretless-dependencies.result != 'success'
         env:
@@ -2403,7 +2417,7 @@ jobs:
           finally:
               for descriptor in (renderer_fd, scripts_fd, workspace_fd):
                   if descriptor is not None:
-                      os.close(descriptor)
+                        os.close(descriptor)
 
           def declaration(name, pattern):
               matches = re.findall(rf'(?m)^{name}="([^"\n]*)"$', renderer)
@@ -5707,10 +5721,14 @@ jobs:
           initial_sandbox_receipt="$(verify_sandbox_files)" || exit 1
 
           probe_bubblewrap() {
+            local status_file status_code
+            status_file="$(mktemp "$RUNNER_TEMP/bwrap-json-status.XXXXXX")" || return 1
+            status_code=0
             /usr/bin/env -i \
               PATH=/usr/sbin:/usr/bin:/sbin:/bin \
               HOME=/nonexistent \
               /usr/bin/bwrap \
+              --json-status-fd 3 \
               --unshare-user \
               --unshare-pid \
               --unshare-ipc \
@@ -5724,7 +5742,34 @@ jobs:
               --dev /dev \
               --proc /proc \
               --tmpfs /dev/shm \
-              -- /usr/bin/true >/dev/null 2>&1
+              -- /usr/bin/true 3>"$status_file" >/dev/null 2>&1 || status_code=$?
+            if [ "$status_code" -ne 0 ] || ! python3 -I - "$status_file" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          def reject_duplicate_keys(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError("duplicate JSON key")
+                  result[key] = value
+              return result
+
+          records = [
+              json.loads(line, object_pairs_hook=reject_duplicate_keys)
+              for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+          ]
+          if (len(records) != 2 or type(records[0].get("child-pid")) is not int
+                  or records[0]["child-pid"] <= 0
+                  or records[1] != {"exit-code": 0}):
+              raise SystemExit("Bubblewrap JSON status feature probe failed")
+          PY
+            then
+              rm -f -- "$status_file"
+              return 1
+            fi
+            rm -f -- "$status_file"
           }
           if ! probe_bubblewrap; then
             current_sandbox_receipt="$(verify_sandbox_files)" || exit 1
@@ -6448,6 +6493,14 @@ jobs:
             --ro-bind /etc /etc --proc /proc --dev /dev --tmpfs /tmp \
             --ro-bind "$RUNNER_TEMP/ci_build_artifacts.py" /tmp/ci_build_artifacts.py \
             -- /usr/bin/python3 -I /tmp/ci_build_artifacts.py network-probe
+      - name: Download trusted script-plan receipt supervisor
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_build_artifacts.py" -o "$RUNNER_TEMP/ci_build_artifacts.py"
       - name: Parse Node CI script plan
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         id: node-ci-script-plan
@@ -6554,7 +6607,7 @@ jobs:
           JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
           CI_ENTRY_EVENT: ${{ github.event_name }}
           CI_ENTRY_REF: ${{ github.ref }}
-          CI_ENTRY_COMMIT: ${{ github.sha }}
+          CI_ENTRY_COMMIT: ${{ inputs.head-sha }}
           CI_ENTRY_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
           CI_ENTRY_REPOSITORY: ${{ github.repository }}
           CI_ENTRY_RUN_ID: ${{ github.run_id }}

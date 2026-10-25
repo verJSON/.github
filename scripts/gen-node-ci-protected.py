@@ -569,7 +569,7 @@ def configure_changelog_tool_cache(document: str) -> str:
           finally:
               for descriptor in (renderer_fd, scripts_fd, workspace_fd):
                   if descriptor is not None:
-                      os.close(descriptor)
+                        os.close(descriptor)
 
           def declaration(name, pattern):
               matches = re.findall(rf'(?m)^{{name}}="([^"\\n]*)"$', renderer)
@@ -1770,14 +1770,19 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                       else []
                   )
                   legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]
+                  status_read_fd = None
+                  status_write_fd = None
                   try:
                       if received_signal is not None:
                           interruption = ScriptPlanInterrupted(received_signal)
                           interruption.cleanup_status = "verified"
                           raise interruption
+                      status_read_fd, status_write_fd = os.pipe()
                       active_process = subprocess.Popen(
                                 [
                                     str(bubblewrap),
+                                    "--json-status-fd",
+                                    str(status_write_fd),
                                     "--unshare-user",
                                     "--unshare-pid",
                                     "--unshare-ipc",
@@ -1822,8 +1827,10 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                                 ],
                                 env=script_env,
                                 start_new_session=True,
-                                pass_fds=tuple(tool_prefix_fds),
+                                pass_fds=tuple([*tool_prefix_fds, status_write_fd]),
                               )
+                      os.close(status_write_fd)
+                      status_write_fd = None
                       if received_signal is not None:
                           try:
                               os.killpg(active_process.pid, signal.SIGTERM)
@@ -1840,7 +1847,19 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                           interruption = ScriptPlanInterrupted(received_signal)
                           interruption.cleanup_status = "verified"
                           raise interruption
+                      status_descriptor = status_read_fd
+                      status_read_fd = None
+                      try:
+                          candidate_status = read_bubblewrap_json_status(
+                              status_descriptor, candidate_status
+                          )
+                      except BaseException as status_error:
+                          status_error.cleanup_status = "verified"
+                          raise
                   finally:
+                    for descriptor in (status_read_fd, status_write_fd):
+                      if descriptor is not None:
+                        os.close(descriptor)
                     for descriptor in tool_prefix_fds:
                       os.close(descriptor)
                     if active_process is not None:
@@ -2180,6 +2199,14 @@ def render() -> str:
     if document.count(caller_commit_identity) != 6:
         raise SystemExit("protected ArtifactSet commit identity inputs drifted")
     document = document.replace(caller_commit_identity, "CALLER_COMMIT: ${{ inputs.head-sha }}")
+    entry_receipt_commit = "          CI_ENTRY_COMMIT: ${{ github.sha }}\n"
+    if document.count(entry_receipt_commit) != 1:
+        raise SystemExit("protected script receipt commit identity input drifted")
+    document = document.replace(
+        entry_receipt_commit,
+        "          CI_ENTRY_COMMIT: ${{ inputs.head-sha }}\n",
+        1,
+    )
     acquisition_end = document.index("  build-test:\n")
     acquisition = document[:acquisition_end]
     build = document[acquisition_end:]

@@ -30,7 +30,7 @@ PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 GENERATOR = ROOT / "scripts/gen-node-ci-protected.py"
 TRUSTED_HELPER = ROOT / "scripts/ci_build_artifacts.py"
 HEAD = "a" * 40
-LEGACY_SHA256 = "f5ea0cd281a2a52e1c0fd017129bcaa386d927a43fb02f1698e05dea2e2d235e"
+LEGACY_SHA256 = "d5f1ea1be3d48ef9120288e448f6941d2dc57be381029e26decf8a8ee3aa7e41"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
@@ -204,7 +204,7 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                 lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
                 "case \" $* \" in\n"
                 "  *' run first '*)\n"
-                "    (sleep 1; touch \"$GITHUB_WORKSPACE/late-marker\") >/dev/null 2>&1 &\n"
+                "    /usr/bin/setsid /bin/bash -c 'sleep 1; touch \"$1\"' detached \"$GITHUB_WORKSPACE/late-marker\" </dev/null >/dev/null 2>&1 &\n"
                 "    printf started > \"$GITHUB_WORKSPACE/first-started\"\n"
                 "    exit 23 ;;\n"
                 "  *' run second '*)\n"
@@ -216,6 +216,7 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                 script_plan=["first", "second"],
                 environment_updates={"CI_LEVEL_FAIL_FAST": "false"},
                 receipt_capture=receipt_capture,
+                post_run_absent="late-marker",
             )
             self.assertNotEqual(0, result.returncode, result.stderr)
             self.assertEqual([], remaining)
@@ -224,6 +225,56 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             self.assertEqual([receipt["exitCode"] for receipt in receipts], [23, 0])
             self.assertEqual([receipt["identity"]["jobId"] for receipt in receipts], ["build-test"] * 2)
             self.assertEqual([receipt["identity"]["levelId"] for receipt in receipts], ["test-levels"] * 2)
+
+    def test_protected_bubblewrap_signal_style_exit_does_not_continue(self):
+        with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
+            receipt_capture = Path(capture_dir) / "receipts.json"
+            result, remaining = self.run_candidate_plan(
+                lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+                "case \" $* \" in\n"
+                "  *' run first '*) exit 143 ;;\n"
+                "  *' run second '*) touch \"$GITHUB_WORKSPACE/second-ran\" ;;\n"
+                "esac\n",
+                script_plan=["first", "second"],
+                environment_updates={"CI_LEVEL_FAIL_FAST": "false"},
+                receipt_capture=receipt_capture,
+                post_run_absent="second-ran",
+            )
+            self.assertNotEqual(0, result.returncode, result.stderr)
+            self.assertEqual([], remaining)
+            receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [receipt["state"] for receipt in receipts],
+                ["infrastructure-failure", "not-run-aborted"],
+            )
+            self.assertIsNone(receipts[0]["exitCode"])
+            self.assertIsNone(receipts[0]["signal"])
+
+    def test_protected_bubblewrap_startup_failure_does_not_continue_after_deleted_cwd(self):
+        with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
+            receipt_capture = Path(capture_dir) / "receipts.json"
+            result, remaining = self.run_candidate_plan(
+                lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+                "case \" $* \" in\n"
+                "  *' run first '*) rm -rf \"$GITHUB_WORKSPACE/nested\"; exit 23 ;;\n"
+                "  *' run nested-after '*) touch \"$GITHUB_WORKSPACE/nested-ran\" ;;\n"
+                "esac\n",
+                script_plan=["first"],
+                nested_manifests=[
+                    {"path": "nested", "approvedPackages": [], "scriptPlan": ["nested-after"]}
+                ],
+                environment_updates={"CI_LEVEL_FAIL_FAST": "false"},
+                receipt_capture=receipt_capture,
+                post_run_absent="nested-ran",
+            )
+            self.assertNotEqual(0, result.returncode, result.stderr)
+            self.assertEqual([], remaining)
+            receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [receipt["state"] for receipt in receipts],
+                ["completed", "infrastructure-failure"],
+            )
+            self.assertEqual(receipts[0]["exitCode"], 23)
 
     def test_consumer_mounts_verified_artifact_read_only_with_live_fd_at_launch(self):
         result, remaining = self.run_candidate_plan(
@@ -709,6 +760,16 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                     ).returncode,
                 )
 
+    def test_protected_entry_receipts_bind_the_admitted_checkout_head_sha(self):
+        step = self.candidate_plan_step()
+        self.assertEqual(step["env"]["CI_ENTRY_COMMIT"], "${{ inputs.head-sha }}")
+        checkout = next(
+            step
+            for step in self.workflow["jobs"]["build-test"]["steps"]
+            if str(step.get("uses", "")).startswith("actions/checkout@")
+        )
+        self.assertEqual(checkout["with"]["ref"], "${{ inputs.head-sha }}")
+
 
     def candidate_plan_step(self):
         step = next(
@@ -751,6 +812,8 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             self.assertEqual(1, helper_source.count(marker))
             probe = r'''_d1_original_popen = subprocess.Popen
 def _d1_probe_popen(argv, **kwargs):
+    status_fd = int(argv[argv.index("--json-status-fd") + 1])
+    os.write(status_fd, b'{"child-pid":123}\n{"exit-code":0}\n')
     import fcntl
     import stat
 
@@ -851,12 +914,13 @@ subprocess.Popen = _d1_probe_popen
         contract.chmod(0o400)
         return cache_root, reference, contract_bytes
 
-    def script_plan_environment(self, runner_temp, plan_source):
-        entries, default_plan = shared_script_plan.normalize_outputs(plan_source, "")
+    def script_plan_environment(self, runner_temp, plan_source, nested_source=""):
+        entries, default_plan = shared_script_plan.normalize_outputs(plan_source, nested_source)
         entries_path = shared_script_plan.write_normalized_entries(entries, str(runner_temp))
         return {
             "SCRIPT_PLAN_DEFAULT_PLAN": "true" if default_plan else "false",
             "SCRIPT_PLAN_ENTRIES_FILE": entries_path,
+            "NESTED_MANIFESTS": nested_source,
         }
 
     def run_candidate_plan(
@@ -887,6 +951,8 @@ subprocess.Popen = _d1_probe_popen
         verified_artifact=False,
         bwrap_probe=False,
         receipt_capture=None,
+        post_run_absent=None,
+        nested_manifests=None,
     ):
         with tempfile.TemporaryDirectory() as directory, ExitStack() as cleanup_stack:
             root = Path(directory)
@@ -916,6 +982,13 @@ subprocess.Popen = _d1_probe_popen
                 json.dumps({"scripts": {"first": "true", "second": "true"}}),
                 encoding="utf-8",
             )
+            for manifest in nested_manifests or []:
+                nested_workspace = workspace / manifest["path"]
+                nested_workspace.mkdir(parents=True)
+                (nested_workspace / "package.json").write_text(
+                    json.dumps({"scripts": {name: "true" for name in manifest["scriptPlan"]}}),
+                    encoding="utf-8",
+                )
             tool_bin = root / "tool" / "bin"
             tool_bin.mkdir(parents=True)
             tool_bin.parent.chmod(tool_root_mode)
@@ -1068,7 +1141,10 @@ subprocess.Popen = _d1_probe_popen
                 shadow_npm.chmod(0o755)
                 path = f"{shadow_bin}:{path}"
             plan_value = ["first", "second"] if script_plan is None else script_plan
-            plan_environment = self.script_plan_environment(runner_temp, json.dumps(plan_value))
+            nested_source = json.dumps(nested_manifests) if nested_manifests else ""
+            plan_environment = self.script_plan_environment(
+                runner_temp, json.dumps(plan_value), nested_source
+            )
             env = {
                 **os.environ,
                 "PATH": path,
@@ -1220,9 +1296,11 @@ subprocess.Popen = _d1_probe_popen
                 capture_output=True,
                 text=True,
             )
+            if post_run_absent is not None:
+                self.assertFalse((workspace / post_run_absent).exists())
             if receipt_capture is not None:
                 receipt_directories = list(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
-                self.assertEqual(len(receipt_directories), 1)
+                self.assertEqual(len(receipt_directories), 1, result.stderr)
                 receipt_records = sorted(receipt_directories[0].glob("entry-*.json"))
                 Path(receipt_capture).write_text(
                     json.dumps(

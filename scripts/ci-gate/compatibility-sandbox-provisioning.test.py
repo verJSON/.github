@@ -1207,7 +1207,7 @@ def validate_source(source):
         if forbidden_path in source[supervisor_start:supervisor_end]:
             raise ContractError("root supervisor filesystem path introduced")
     for forbidden_path in ("RUNNER_TEMP", "mktemp", "unlink", "rmdir"):
-        if forbidden_path in source:
+        if forbidden_path in source[supervisor_start:supervisor_end]:
             raise ContractError("runner-owned verifier capture path remains")
     validate_isolated_python(source)
     validate_root_supervisor_boundary(source)
@@ -1419,11 +1419,15 @@ def validate_source(source):
         "--die-with-parent": "probe parent lifetime binding missing",
         "--new-session": "probe session isolation missing",
         "--cap-drop ALL": "probe capability drop missing",
+        "--json-status-fd 3": "Bubblewrap JSON status feature probe missing",
+        'status_file="$(mktemp "$RUNNER_TEMP/bwrap-json-status.XXXXXX")"': "private JSON status file missing",
         "--ro-bind / /": "probe read-only root missing",
         "--dev /dev": "probe device isolation missing",
         "--proc /proc": "probe proc isolation missing",
         "--tmpfs /dev/shm": "probe shared-memory isolation missing",
-        "-- /usr/bin/true >/dev/null 2>&1": "probe fixed diagnostic boundary missing",
+        '-- /usr/bin/true 3>"$status_file" >/dev/null 2>&1': "probe fixed diagnostic boundary missing",
+        'records[0].get("child-pid")': "Bubblewrap child status validation missing",
+        'records[1] != {"exit-code": 0}': "Bubblewrap exit status validation missing",
     }
     for needle, reason in probe_requirements.items():
         require(probe, needle, reason)

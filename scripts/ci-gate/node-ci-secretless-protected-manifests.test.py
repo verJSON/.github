@@ -525,6 +525,7 @@ class ProtectedCandidateManifestTests(unittest.TestCase):
         namespace: dict[str, object] = {
             **starred,
             "bubblewrap": Path("/usr/bin/bwrap"),
+            "status_write_fd": 3,
             "workspace": checkout_root,
             "script_cache": checkout_root / ".cache",
             "script_home": checkout_root / ".home",

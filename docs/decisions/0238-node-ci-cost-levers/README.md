@@ -391,3 +391,27 @@ parity, source and protected Bubblewrap cleanup tests, and canonical GitHub-host
 checks pass. Local Bubblewrap evidence is not a claim that a GitHub-hosted run or the
 outside-Verjson adopter canary has passed. Runner-minute savings remain unclaimed until
 equal before-and-after windows are measured, as required by this ADR's exit condition.
+## 2026-10-25 follow-up amendment — Reject unsupported and ambiguous fail-fast execution
+### Decision
+`ci-level-fail-fast=false` is supported only by the secretless script-plan executors.
+The ordinary credentialed npm route rejects `false` in a workflow guard before checkout
+or candidate-controlled commands. Every source secretless execution downloads the
+pinned trusted receipt supervisor, including the level role. Protected per-entry
+identity binds the admitted checkout SHA (`inputs.head-sha`).
+
+Both Bubblewrap executors pass a private supervisor status pipe with
+`--json-status-fd` and require a complete `child-pid` event followed by an `exit-code`
+event that matches the process status. Missing, malformed, duplicate-key, incomplete,
+or contradictory status evidence is terminal, so a sandbox startup or boundary failure
+cannot be treated as an ordinary candidate failure and continued. Bubblewrap encodes
+signal termination as `128 + signal`, indistinguishable from an explicit candidate exit
+with that value; therefore every reported code from 128 through 255 is terminal and its
+receipt omits both exit code and signal. No ambiguous value is presented as observed
+candidate status. The supervisor reaps its direct child during bounded process-group
+cleanup before it decides whether the group is gone.
+
+The hosted compatibility probe runs Bubblewrap with `--json-status-fd` and validates
+both status events before the candidate plan starts. The local verification host used
+Bubblewrap 0.11.1; that does not prove hosted acceptance. GitHub-hosted acceptance still
+requires the canonical job to pass on its pinned Ubuntu runner and the runtime probe to
+accept the runner's installed Bubblewrap version.

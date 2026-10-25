@@ -161,6 +161,28 @@ class EntryReceiptSupervisorTests(unittest.TestCase):
         self.assertEqual(receipts[0]["cleanup"], "verified")
         self.assertEqual([entry["state"] for entry in receipts[1:]], ["not-run-aborted"] * 2)
 
+    def test_terminal_status_failure_can_record_verified_cleanup_without_fabricated_status(self) -> None:
+        calls: list[str] = []
+
+        def execute(_ordinal: int, entry: dict[str, object]):
+            calls.append(str(entry["script"]))
+            error = artifacts.IntegrityError("Bubblewrap status receipt is incomplete")
+            error.cleanup_status = "verified"
+            raise error
+
+        with self.assertRaises(artifacts.ScriptPlanExecutionError) as caught:
+            artifacts.run_script_plan_with_receipts(
+                ENTRIES, IDENTITY, False, self.runner_temp, execute
+            )
+        receipts = load_receipts(caught.exception.receipt_directory)
+        self.assertEqual(calls, ["first"])
+        self.assertEqual(receipts[0]["state"], "infrastructure-failure")
+        self.assertIsNone(receipts[0]["exitCode"])
+        self.assertIsNone(receipts[0]["signal"])
+        self.assertEqual(receipts[0]["cleanup"], "verified")
+        self.assertEqual([entry["state"] for entry in receipts[1:]], ["not-run-aborted"] * 2)
+
+
     def test_launch_or_supervisor_failure_is_terminal_and_records_abort(self) -> None:
         def execute(_ordinal: int, _entry: dict[str, object]):
             error = OSError("sandbox launch failed")
@@ -269,6 +291,33 @@ class EntryReceiptSupervisorTests(unittest.TestCase):
         artifacts.extinguish_supervised_process_group(process)
         with self.assertRaises(ProcessLookupError):
             os.killpg(process.pid, 0)
+
+
+class BubblewrapJsonStatusTests(unittest.TestCase):
+    def test_valid_child_and_exit_events_match_the_supervised_status(self) -> None:
+        data = b'{"child-pid":123}\n{"exit-code":23}\n'
+        self.assertEqual(23, artifacts.parse_bubblewrap_json_status(data, 23))
+
+    def test_missing_startup_and_mismatched_status_fail_closed(self) -> None:
+        invalid_receipts = (
+            b"",
+            b'{"child-pid":123}\n',
+            b'{"child-pid":123}\n{"exit-code":0}\n',
+            b'{"child-pid":123}\n{"exit-code":23}\n',
+        )
+        for receipt in invalid_receipts:
+            with self.subTest(receipt=receipt), self.assertRaises(artifacts.IntegrityError):
+                artifacts.parse_bubblewrap_json_status(receipt, 1 if receipt != b"" else 0)
+
+    def test_duplicate_json_keys_and_ambiguous_signal_exit_codes_fail_closed(self) -> None:
+        with self.assertRaises(artifacts.IntegrityError):
+            artifacts.parse_bubblewrap_json_status(
+                b'{"child-pid":123,"child-pid":124}\n{"exit-code":0}\n', 0
+            )
+        with self.assertRaises(artifacts.IntegrityError):
+            artifacts.parse_bubblewrap_json_status(
+                b'{"child-pid":123}\n{"exit-code":143}\n', 143
+            )
 
 
 class ExecutorParityTests(unittest.TestCase):
