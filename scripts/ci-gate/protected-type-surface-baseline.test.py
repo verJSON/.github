@@ -182,7 +182,7 @@ class ProtectedBaselineTest(unittest.TestCase):
         self.assertGreater(stable, prerelease)
 
     def test_generated_candidate_plan_allows_no_optional_runtime_cache(self):
-        run = step("Run exact credentialless consumer script plan")["run"]
+        run = load_generator().protected_candidate_helper_body()
         self.assertIn(
             'baseline_value = os.environ.get("npm_config_cache", "").strip()',
             run,

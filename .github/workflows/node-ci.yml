@@ -40,7 +40,149 @@ on:
       should-run:
         description: Whether the lane executed or deferred on the release-age gate.
         value: ${{ jobs.eligibility.outputs.should-run }}
+      build-artifact-share-selected:
+        description: Whether trusted preflight selected same-run artifact sharing.
+        value: ${{ jobs.artifact-preflight.outputs.share-selected }}
+      build-artifact-mode-share-eligible:
+        description: Whether the trusted mode gate permits same-run sharing for this event.
+        value: ${{ jobs.artifact-mode-gate.outputs.share-eligible }}
+      build-artifact-needs-results:
+        description: Compact prerequisite results validated by trusted preflight.
+        value: ${{ jobs.artifact-preflight.outputs.needs-results }}
+      build-artifact-producer-plan:
+        description: Trusted producer script plan selected by preflight.
+        value: ${{ jobs.artifact-preflight.outputs.producer-plan }}
+      build-artifact-consumer-plans:
+        description: Trusted shared plans for each participant lane.
+        value: ${{ jobs.artifact-preflight.outputs.consumer-plans }}
+      build-artifact-profile:
+        description: Aggregate profile digest for the selected ArtifactSet.
+        value: ${{ jobs.artifact-preflight.outputs.profile }}
+      build-artifact-export-paths:
+        description: Trusted export roots selected by same-run preflight.
+        value: ${{ jobs.artifact-preflight.outputs.export-paths }}
+      build-artifact-runner-image:
+        description: Trusted runner image identity selected by same-run preflight.
+        value: ${{ jobs.artifact-preflight.outputs.runner-image }}
+      build-artifact-participants:
+        description: All participant lanes declared by trusted ArtifactSet policy.
+        value: ${{ jobs.artifact-preflight.outputs.participants }}
+      build-artifact-aggregate-lanes:
+        description: Participant lanes scheduled for this event, branch, and prerequisite state.
+        value: ${{ jobs.artifact-preflight.outputs.aggregate-lanes }}
+      build-artifact-package-manager-version:
+        description: Exact package-manager version bound by trusted preflight.
+        value: ${{ jobs.artifact-preflight.outputs.package-manager-version }}
+      build-artifact-id:
+        description: Exact same-run ArtifactSet ID from the trusted producer.
+        value: ${{ jobs.build-test.outputs.artifact-id }}
+      build-artifact-digest:
+        description: Exact same-run ArtifactSet digest from the trusted producer.
+        value: ${{ jobs.build-test.outputs.artifact-digest }}
+      build-artifact-share-available:
+        description: Whether producer export and upload completed for this run attempt.
+        value: ${{ jobs.build-test.outputs.share-available }}
+      build-artifact-upload-result:
+        description: Trusted producer upload step outcome.
+        value: ${{ jobs.build-test.outputs.upload-result }}
+      build-artifact-receipt:
+        description: Trusted per-lane TestReceipt bytes.
+        value: ${{ jobs.build-test.outputs.receipt }}
+      build-artifact-receipt-id:
+        description: Trusted per-lane TestReceipt ID.
+        value: ${{ jobs.build-test.outputs.receipt-id }}
+      build-artifact-receipt-digest:
+        description: Trusted per-lane TestReceipt digest.
+        value: ${{ jobs.build-test.outputs.receipt-digest }}
+      build-artifact-command-digest:
+        description: Digest of the exact trusted per-lane script entries executed.
+        value: ${{ jobs.build-test.outputs.command-digest }}
     inputs:
+      build-artifact-role:
+        description: Internal role for the typed same-run buildArtifact plan.
+        required: false
+        type: string
+        default: level
+      build-artifact-mode-share-eligible:
+        description: Trusted mode-gate output passed only to artifact preflight.
+        required: false
+        type: boolean
+        default: false
+      build-artifact-mode-plan:
+        description: Caller event and branch filters checked by the trusted mode gate.
+        required: false
+        type: string
+        default: '[]'
+      build-artifact-plan-json:
+        description: Typed caller plan checked by trusted preflight or executed by the producer.
+        required: false
+        type: string
+        default: '{}'
+      build-artifact-authorization-plan-json:
+        description: Complete typed caller plan independently reauthorized for producer and consumer roles.
+        required: false
+        type: string
+        default: '{}'
+      build-artifact-needs-results:
+        description: Direct prerequisite results visible to trusted selection preflight.
+        required: false
+        type: string
+        default: '{}'
+      build-artifact-consumer-plans:
+        description: Trusted full and non-app shared plans for consumer lanes.
+        required: false
+        type: string
+        default: '{}'
+      build-artifact-level-id:
+        description: Declared participant lane ID receiving an ArtifactSet.
+        required: false
+        type: string
+        default: ''
+      build-artifact-id:
+        description: Exact same-run ArtifactSet ID to download by ID.
+        required: false
+        type: string
+        default: ''
+      build-artifact-digest:
+        description: Exact same-run ArtifactSet digest to verify after download.
+        required: false
+        type: string
+        default: ''
+      build-artifact-profile:
+        description: Expected build-profile digest for the selected ArtifactSet.
+        required: false
+        type: string
+        default: ''
+      build-artifact-producer-plan:
+        description: Trusted build-only plan used to bind ArtifactSet receipts.
+        required: false
+        type: string
+        default: '{}'
+      build-artifact-paths:
+        description: Trusted normalized export roots selected by preflight.
+        required: false
+        type: string
+        default: '[]'
+      build-artifact-participant-count:
+        description: Bounded participant count used for expanded-byte accounting.
+        required: false
+        type: number
+        default: 1
+      build-artifact-runner-image:
+        description: Expected hosted runner image identity selected by preflight.
+        required: false
+        type: string
+        default: '{}'
+      build-artifact-node-version:
+        description: Exact Node version used by trusted ArtifactSet preflight.
+        required: false
+        type: string
+        default: ''
+      build-artifact-package-manager-version:
+        description: Exact package-manager version bound by trusted preflight.
+        required: false
+        type: string
+        default: ''
       node-version:
         description: Node.js version for actions/setup-node
         required: false
@@ -424,6 +566,34 @@ on:
         required: false
 
 jobs:
+  artifact-mode-gate:
+    if: inputs.build-artifact-role == 'mode-gate'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      passed: ${{ steps.mode.outputs.passed }}
+      share-eligible: ${{ steps.mode.outputs.share-eligible }}
+    steps:
+      - name: Download trusted ArtifactSet policy helper
+        id: helper
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_build_artifacts.py" -o "$RUNNER_TEMP/ci_build_artifacts.py"
+      - name: Require event-specific secretless execution modes
+        id: mode
+        env:
+          BUILD_ARTIFACT_MODE_PLAN: ${{ inputs.build-artifact-mode-plan }}
+          SECRETLESS_PR: ${{ inputs.secretless-pr }}
+          SECRETLESS_TRUSTED_REF: ${{ inputs.secretless-trusted-ref }}
+          BUILD_ARTIFACT_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+        run: |
+          set -euo pipefail
+          python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" mode-gate
+
   # Defer CI while a Renovate PR is held by its release-age gate: running the
   # suite now is pure waste — the PR cannot merge until `renovate/stability-days`
   # clears, and Renovate then rebases onto a drifted `main`, re-running
@@ -450,6 +620,15 @@ jobs:
     outputs:
       should-run: ${{ steps.check.outputs.should-run }}
     steps:
+      - name: Reject unknown reusable build-artifact roles
+        env:
+          BUILD_ARTIFACT_ROLE: ${{ inputs.build-artifact-role }}
+        run: |
+          set -euo pipefail
+          case "$BUILD_ARTIFACT_ROLE" in
+            level|mode-gate|preflight|producer|consumer) ;;
+            *) echo "::error::unknown internal build-artifact role" >&2; exit 1 ;;
+          esac
       - name: Require a GitHub-hosted secretless build lane
         # build-test runs a secretless call on this lane, ahead of the caller's
         # runner, and its lifecycle rebuild and candidate sandbox exit unless the
@@ -557,7 +736,7 @@ jobs:
   # nothing re-fires this run until Renovate rebases onto a new head.
   deferred-ci:
     needs: eligibility
-    if: needs.eligibility.outputs.should-run == 'false'
+    if: needs.eligibility.outputs.should-run == 'false' && (inputs.build-artifact-role == 'level' || inputs.build-artifact-role == 'consumer' || inputs.build-artifact-role == 'producer')
     # Pinned to GitHub-hosted capacity, unlike every other job here. ADR 0033's
     # runner routing exists to keep real CI work on org capacity; this job checks
     # out nothing, holds no permissions, and runs one `echo && exit 1`, so it
@@ -574,9 +753,70 @@ jobs:
           echo "::error title=CI deferred::org CI is deferred on this head: renovate/stability-days is pending, so build-test reported success without executing a single verification step. Nothing on this head has been verified — no test, lint, type check, or repository-local contract guard has run (Verjson/verjson-cli#251). CI executes for real once the release-age gate clears and Renovate rebases." >&2
           exit 1
 
+  artifact-preflight:
+    needs: [eligibility]
+    if: inputs.build-artifact-role == 'preflight' && needs.eligibility.outputs.should-run != 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      share-selected: ${{ steps.select.outputs.share-selected }}
+      reason: ${{ steps.select.outputs.reason }}
+      producer-plan: ${{ steps.select.outputs.producer-plan }}
+      consumer-plans: ${{ steps.select.outputs.consumer-plans }}
+      profile: ${{ steps.select.outputs.profile }}
+      export-paths: ${{ steps.select.outputs.export-paths }}
+      runner-image: ${{ steps.select.outputs.runner-image }}
+      participants: ${{ steps.select.outputs.participants }}
+      aggregate-lanes: ${{ steps.select.outputs.aggregate-lanes }}
+      package-manager-version: ${{ steps.select.outputs.package-manager-version }}
+      needs-results: ${{ steps.select.outputs.needs-results }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: ${{ inputs.build-artifact-node-version }}
+      - id: package-manager-version
+        run: echo "value=$(npm --version)" >> "$GITHUB_OUTPUT"
+      - name: Download immutable ArtifactSet policy and helpers
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          trusted_root="$RUNNER_TEMP/ci-build-artifact-trusted"
+          mkdir -m 700 "$trusted_root"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_build_artifacts.py" -o "$trusted_root/ci_build_artifacts.py"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/.github/actions/node-ci-script-plan/script_plan.py" -o "$trusted_root/script_plan.py"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/config/ci-build-artifact-policy.json" -o "$trusted_root/policy.json"
+          echo "CI_BUILD_ARTIFACT_TRUSTED_ROOT=$trusted_root" >> "$GITHUB_ENV"
+      - name: Select sharing only from trusted policy and validated inputs
+        id: select
+        env:
+          NODE_CI_SCRIPT_PLAN_DIR: ${{ runner.temp }}/ci-build-artifact-trusted
+          BUILD_ARTIFACT_POLICY_FILE: ${{ runner.temp }}/ci-build-artifact-trusted/policy.json
+          BUILD_ARTIFACT_PLAN_JSON: ${{ inputs.build-artifact-plan-json }}
+          BUILD_ARTIFACT_MODE_SHARE_ELIGIBLE: ${{ inputs.build-artifact-mode-share-eligible }}
+          BUILD_ARTIFACT_NEEDS_RESULTS: ${{ inputs.build-artifact-needs-results }}
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private == true && 'true' || 'false' }}
+          CALLER_COMMIT: ${{ github.sha }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          CALLER_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          REUSABLE_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          BUILD_ARTIFACT_PACKAGE_MANAGER_VERSION: ${{ steps.package-manager-version.outputs.value }}
+          RUNNER_POLICY: ${{ vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]' }}
+        run: |
+          set -euo pipefail
+          python3 -I "$RUNNER_TEMP/ci-build-artifact-trusted/ci_build_artifacts.py" preflight
+
   acquire-secretless-dependencies:
     needs: eligibility
-    if: (inputs.secretless-pr || inputs.secretless-trusted-ref) && needs.eligibility.outputs.should-run != 'false'
+    if: (inputs.build-artifact-role == 'level' || inputs.build-artifact-role == 'consumer' || inputs.build-artifact-role == 'producer') && ((inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.build-artifact-role == 'producer' || inputs.build-artifact-role == 'consumer') && needs.eligibility.outputs.should-run != 'false'
     runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -1638,7 +1878,16 @@ jobs:
     # Skipping the JOB left that required context unsatisfied on held Renovate
     # PRs (#191). Only the execution steps skip on an explicit defer; an errored
     # eligibility job has an empty output and therefore still runs the suite.
-    if: always()
+    if: always() && (inputs.build-artifact-role == 'level' || inputs.build-artifact-role == 'consumer' || inputs.build-artifact-role == 'producer')
+    outputs:
+      artifact-id: ${{ steps.upload-build-artifact.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload-build-artifact.outputs.artifact-digest }}
+      upload-result: ${{ steps.upload-build-artifact.outcome }}
+      share-available: ${{ steps.upload-build-artifact.outputs.artifact-id != '' && steps.export-build-artifact.outputs.share-available == 'true' && steps.upload-build-artifact.outcome == 'success' }}
+      receipt: ${{ steps.create-build-artifact-receipt.outputs.receipt }}
+      receipt-id: ${{ steps.create-build-artifact-receipt.outputs.receipt-id }}
+      receipt-digest: ${{ steps.create-build-artifact-receipt.outputs.receipt-digest }}
+      command-digest: ${{ steps.run-script-plan.outputs.command-digest }}
     # Runner routing is policy, not preference — see ADR 0033. In tier order:
     # an explicit `runner` input wins; a caller outside Verjson gets hosted
     # (portable, their billing); a Verjson PRIVATE repo gets the general
@@ -1670,7 +1919,7 @@ jobs:
         if: needs.eligibility.outputs.should-run == 'false'
         run: echo "::notice title=CI deferred::CI is deferred until renovate/stability-days clears and Renovate rebases."
       - name: Require completed secretless dependency acquisition
-        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && needs.acquire-secretless-dependencies.result != 'success'
+        if: needs.eligibility.outputs.should-run != 'false' && ((inputs.secretless-pr || inputs.secretless-trusted-ref) || inputs.build-artifact-role == 'producer' || inputs.build-artifact-role == 'consumer') && needs.acquire-secretless-dependencies.result != 'success'
         env:
           ELIGIBILITY_RESULT: ${{ needs.eligibility.result }}
           ACQUISITION_RESULT: ${{ needs.acquire-secretless-dependencies.result }}
@@ -1680,6 +1929,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: needs.eligibility.outputs.should-run != 'false'
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
           submodules: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'false' || 'recursive' }}
           token: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && github.token || secrets.submodules-token || github.token }}
           persist-credentials: ${{ !(inputs.secretless-pr || inputs.secretless-trusted-ref) }}
@@ -1703,6 +1954,108 @@ jobs:
           package-manager-cache: false
           registry-url: ${{ inputs.scope != '' && 'https://npm.pkg.github.com' || '' }}
           scope: ${{ inputs.scope }}
+      - name: Verify selected ArtifactSet caller commit checkout
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.build-artifact-role == 'producer' || inputs.build-artifact-role == 'consumer')
+        env:
+          CALLER_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CALLER_COMMIT" =~ ^[0123456789abcdef]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" = "$CALLER_COMMIT" ]] || {
+            echo "::error::ArtifactSet execution checkout differs from trusted preflight commit" >&2
+            exit 1
+          }
+      - name: Authorize producer or consumer from immutable policy
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.build-artifact-role == 'producer' || inputs.build-artifact-role == 'consumer')
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          REUSABLE_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          CALLER_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          CALLER_COMMIT: ${{ github.sha }}
+          BUILD_ARTIFACT_ROLE: ${{ inputs.build-artifact-role }}
+          BUILD_ARTIFACT_LEVEL_ID: ${{ inputs.build-artifact-level-id }}
+          BUILD_ARTIFACT_PARTICIPANT_COUNT: ${{ inputs.build-artifact-participant-count }}
+          BUILD_ARTIFACT_AUTHORIZATION_PLAN_JSON: ${{ inputs.build-artifact-authorization-plan-json }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_NODE_VERSION: ${{ toJSON(inputs.node-version) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_TIMEOUT_MINUTES: ${{ toJSON(inputs.timeout-minutes) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_CACHE: ${{ toJSON(inputs.cache) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_CACHE_MAX_MB: ${{ toJSON(inputs.cache-max-mb) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_CACHE_DEPENDENCY_PATH: ${{ toJSON(inputs.cache-dependency-path) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_BROWSER_CACHE: ${{ toJSON(inputs.browser-cache) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_PACKAGE_MANAGER: ${{ toJSON(inputs.package-manager) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SCOPE: ${{ toJSON(inputs.scope) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_PR: ${{ toJSON(inputs.secretless-pr) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_TRUSTED_REF: ${{ toJSON(inputs.secretless-trusted-ref) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_RUNTIME_PUBLIC_CACHE: ${{ toJSON(inputs.secretless-runtime-public-cache) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_APPROVED_INTERNAL_PACKAGES: ${{ toJSON(inputs.approved-internal-packages) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_APPROVED_INTERNAL_SCOPES: ${{ toJSON(inputs.approved-internal-scopes) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_COMPATIBILITY_RANGES: ${{ toJSON(inputs.secretless-compatibility-ranges) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_AUXILIARY_SOURCE: ${{ toJSON(inputs.secretless-auxiliary-source) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_REBUILD_PACKAGES: ${{ toJSON(inputs.secretless-rebuild-packages) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_SKIP_INSTALL_SCRIPTS: ${{ toJSON(inputs.secretless-skip-install-scripts) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_REBUILD_ENV: ${{ toJSON(inputs.secretless-rebuild-env) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_NESTED_MANIFESTS: ${{ toJSON(inputs.secretless-nested-manifests) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_CI_SCRIPT_PLAN: ${{ toJSON(inputs.secretless-ci-script-plan) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_CI_NON_APP_SCRIPT_PLAN: ${{ toJSON(inputs.secretless-ci-non-app-script-plan) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_CI_NON_APP_PATHS: ${{ toJSON(inputs.secretless-ci-non-app-paths) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SCHEMA_DIR: ${{ toJSON(inputs.schema-dir) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_RUNNER: ${{ toJSON(inputs.runner) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_DB_IMAGE: ${{ toJSON(inputs.db-image) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_DB_PORT: ${{ toJSON(inputs.db-port) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_DB_HEALTH_CMD: ${{ toJSON(inputs.db-health-cmd) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_DB_HOST: ${{ toJSON(inputs.db-host) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_DB_ENV: ${{ toJSON(inputs.db-env) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_CACHE_IMAGE: ${{ toJSON(inputs.cache-image) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_CACHE_HEALTH_CMD: ${{ toJSON(inputs.cache-health-cmd) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_CACHE_ENV: ${{ toJSON(inputs.cache-env) }}
+          BUILD_ARTIFACT_PLAN_JSON: ${{ inputs.build-artifact-plan-json }}
+          BUILD_ARTIFACT_CONSUMER_PLANS: ${{ inputs.build-artifact-consumer-plans }}
+          BUILD_ARTIFACT_NEEDS_RESULTS: ${{ inputs.build-artifact-needs-results }}
+          BUILD_ARTIFACT_PATHS_JSON: ${{ inputs.build-artifact-paths }}
+          BUILD_ARTIFACT_RUNNER_IMAGE_JSON: ${{ inputs.build-artifact-runner-image }}
+          BUILD_ARTIFACT_PROFILE: ${{ inputs.build-artifact-profile }}
+          BUILD_ARTIFACT_NODE_VERSION: ${{ inputs.node-version }}
+          BUILD_ARTIFACT_PACKAGE_MANAGER: ${{ inputs.package-manager }}
+          BUILD_ARTIFACT_PACKAGE_MANAGER_VERSION: ${{ inputs.build-artifact-package-manager-version }}
+          BUILD_ARTIFACT_ID: ${{ inputs.build-artifact-id }}
+          BUILD_ARTIFACT_DIGEST: ${{ inputs.build-artifact-digest }}
+          BUILD_ARTIFACT_POLICY_FILE: ${{ runner.temp }}/ci-build-artifact-policy.json
+          NODE_CI_SCRIPT_PLAN_DIR: ${{ runner.temp }}
+          SECRETLESS_PR: ${{ inputs.secretless-pr }}
+          SECRETLESS_TRUSTED_REF: ${{ inputs.secretless-trusted-ref }}
+          BUILD_ARTIFACT_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private == true && 'true' || 'false' }}
+          RUNNER_POLICY: ${{ vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]' }}
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_build_artifacts.py" -o "$RUNNER_TEMP/ci_build_artifacts.py"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/.github/actions/node-ci-script-plan/script_plan.py" -o "$RUNNER_TEMP/script_plan.py"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/config/ci-build-artifact-policy.json" -o "$RUNNER_TEMP/ci-build-artifact-policy.json"
+          python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" authorize-role
+      - name: Require exact selected runner image and Node version
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.build-artifact-role == 'producer' || inputs.build-artifact-role == 'consumer')
+        env:
+          BUILD_ARTIFACT_RUNNER_IMAGE_JSON: ${{ inputs.build-artifact-runner-image }}
+          EXPECTED_NODE_VERSION: ${{ inputs.node-version }}
+          EXPECTED_PACKAGE_MANAGER_VERSION: ${{ inputs.build-artifact-package-manager-version }}
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          import json
+          import os
+          import subprocess
+          expected = json.loads(os.environ["BUILD_ARTIFACT_RUNNER_IMAGE_JSON"])
+          if expected != {"os": os.environ.get("ImageOS"), "version": os.environ.get("ImageVersion")}:
+              raise SystemExit("selected ArtifactSet runner image differs from producer profile")
+          actual_node = subprocess.check_output(["node", "--version"], text=True).strip().removeprefix("v")
+          if actual_node != os.environ["EXPECTED_NODE_VERSION"].removeprefix("v"):
+              raise SystemExit("selected ArtifactSet Node version differs from producer profile")
+          actual_package_manager = subprocess.check_output(["npm", "--version"], text=True).strip()
+          if actual_package_manager != os.environ["EXPECTED_PACKAGE_MANAGER_VERSION"].removeprefix("v"):
+            raise SystemExit("selected ArtifactSet package-manager version differs from trusted profile")
+          PY
       - name: Require an unused secretless restore path
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         env:
@@ -5376,18 +5729,91 @@ jobs:
             decide true "light plan: every changed path is non-application"
           fi
           decide false "full plan: the diff is not provably non-application"
+      - name: Download exact same-run ArtifactSet
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.build-artifact-role == 'consumer'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ inputs.build-artifact-id }}
+          path: ${{ runner.temp }}/ci-build-artifact-download
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Verify and safely extract read-only ArtifactSet
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.build-artifact-role == 'consumer'
+        env:
+          ARTIFACT_ID: ${{ inputs.build-artifact-id }}
+          ARTIFACT_DIGEST: ${{ inputs.build-artifact-digest }}
+          BUILD_ARTIFACT_COMMANDS_JSON: ${{ inputs.build-artifact-producer-plan }}
+          BUILD_ARTIFACT_PATHS_JSON: ${{ inputs.build-artifact-paths }}
+          BUILD_ARTIFACT_RUNNER_IMAGE_JSON: ${{ inputs.build-artifact-runner-image }}
+          BUILD_ARTIFACT_PROFILE: ${{ inputs.build-artifact-profile }}
+          BUILD_ARTIFACT_NODE_VERSION: ${{ inputs.node-version }}
+          BUILD_ARTIFACT_PACKAGE_MANAGER: ${{ inputs.package-manager }}
+          BUILD_ARTIFACT_PACKAGE_MANAGER_VERSION: ${{ inputs.build-artifact-package-manager-version }}
+          CALLER_COMMIT: ${{ github.sha }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          REUSABLE_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" verify-extract \
+            --artifact "$RUNNER_TEMP/ci-build-artifact-download/ci-build-artifact.tar.gz" \
+            --destination "$RUNNER_TEMP/ci-build-artifact-verified" \
+            --artifact-id "$ARTIFACT_ID" --digest "$ARTIFACT_DIGEST" \
+            --consumers '${{ inputs.build-artifact-participant-count }}'
+      - name: Select trusted shared script plan
+        id: select-build-artifact-plan
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.build-artifact-role == 'producer' || inputs.build-artifact-role == 'consumer')
+        env:
+          BUILD_ARTIFACT_ROLE: ${{ inputs.build-artifact-role }}
+          BUILD_ARTIFACT_LEVEL_ID: ${{ inputs.build-artifact-level-id }}
+          BUILD_ARTIFACT_PRODUCER_PLAN: ${{ inputs.build-artifact-plan-json }}
+          BUILD_ARTIFACT_CONSUMER_PLANS: ${{ inputs.build-artifact-consumer-plans }}
+          BUILD_ARTIFACT_NONAPP: ${{ steps.classify-diff.outputs.non-app == 'true' }}
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          import json
+          import os
+          role = os.environ["BUILD_ARTIFACT_ROLE"]
+          if role == "producer":
+              plans = json.loads(os.environ["BUILD_ARTIFACT_PRODUCER_PLAN"])
+          else:
+              plan_map = json.loads(os.environ["BUILD_ARTIFACT_CONSUMER_PLANS"])
+              plans = plan_map[os.environ["BUILD_ARTIFACT_LEVEL_ID"]]
+          variant = "nonapp" if os.environ.get("BUILD_ARTIFACT_NONAPP") == "true" else "full"
+          selected = plans.get(variant)
+          if not isinstance(selected, str) or not selected:
+              raise SystemExit("trusted shared script plan is missing")
+          plan = json.loads(selected)
+          if not isinstance(plan, list) or not plan:
+              raise SystemExit("trusted shared script plan is empty or invalid")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("plan<<artifact_plan\n" + selected + "\nartifact_plan\n")
+          PY
+      - name: Prove shared sandbox network boundary
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.build-artifact-role == 'producer' || inputs.build-artifact-role == 'consumer')
+        run: |
+          set -euo pipefail
+          /usr/bin/bwrap --unshare-user --unshare-net --disable-userns --cap-drop ALL \
+            --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+            --ro-bind /etc /etc --proc /proc --dev /dev --tmpfs /tmp \
+            --ro-bind "$RUNNER_TEMP/ci_build_artifacts.py" /tmp/ci_build_artifacts.py \
+            -- /usr/bin/python3 -I /tmp/ci_build_artifacts.py network-probe
       - name: Parse Node CI script plan
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         id: node-ci-script-plan
         uses: Verjson/.github/.github/actions/node-ci-script-plan@3b95498a2b59401c95986a1fec539a2aa4cef2b8
         with:
           mode: normalize
-          script-plan: ${{ steps.classify-diff.outputs.non-app == 'true' && inputs.secretless-ci-non-app-script-plan || inputs.secretless-ci-script-plan }}
+          script-plan: ${{ steps.select-build-artifact-plan.outputs.plan || (steps.classify-diff.outputs.non-app == 'true' && inputs.secretless-ci-non-app-script-plan || inputs.secretless-ci-script-plan) }}
           nested-manifests: ${{ inputs.secretless-nested-manifests }}
       - name: Run exact credentialless consumer script plan
+        id: run-script-plan
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         env:
           NESTED_MANIFESTS: ${{ inputs.secretless-nested-manifests }}
+          BUILD_ARTIFACT_ROLE: ${{ inputs.build-artifact-role }}
+          VERJSON_CI_BUILD_ARTIFACT_ROOT: ${{ runner.temp }}/ci-build-artifact-verified
+          VERJSON_CI_BUILD_ARTIFACT_MANIFEST: ${{ runner.temp }}/ci-build-artifact-manifest.json
           DB_ENV: ${{ inputs.db-env }}
           CACHE_ENV: ${{ inputs.cache-env }}
           VERJSON_CI_TRUSTED_DB_HOST: ${{ steps.db-service.outputs.host }}
@@ -5406,8 +5832,10 @@ jobs:
             exit 1
           fi
           export VERJSON_CI_COMMAND_FILES_DIR="${GITHUB_ENV%/*}"
+          export VERJSON_CI_OUTPUT_FILE="$GITHUB_OUTPUT"
           unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY
           python3 -I - <<'PY'
+          import hashlib
           import json
           import os
           import re
@@ -5869,11 +6297,17 @@ jobs:
                   ]
           global_config_file = tempfile.TemporaryFile(dir=runner_temp)
           sandbox_workspace = "/workspace"
+          shared_artifact = os.environ.get("BUILD_ARTIFACT_ROLE") in {"producer", "consumer"}
           sandbox_entrypoint = (
               "import os, sys\n"
               "max_fd = os.sysconf('SC_OPEN_MAX')\n"
               "if max_fd < 3: raise SystemExit('invalid file descriptor limit')\n"
               "os.closerange(3, max_fd)\n"
+              "if os.environ.get('BUILD_ARTIFACT_ROLE') in ('producer', 'consumer'):\n"
+              "    sys.path.insert(0, '/tmp')\n"
+              "    from ci_build_artifacts import enforce_shared_sandbox_process_state\n"
+              "    enforce_shared_sandbox_process_state()\n"
+              "    os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
               "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
           )
           system_mounts = (
@@ -6084,7 +6518,7 @@ jobs:
               for env_name in (
                   "DB_ENV", "CACHE_ENV", "CI_SCRIPT_PLAN", "NESTED_MANIFESTS",
                   "RUN_DEFAULTS", "VERJSON_CI_TRUSTED_DB_HOST",
-                  "VERJSON_CI_COMMAND_FILES_DIR", "RUNNER_TOOL_CACHE",
+              "VERJSON_CI_COMMAND_FILES_DIR", "VERJSON_CI_OUTPUT_FILE", "RUNNER_TOOL_CACHE",
                   "RUNTIME_CACHE_DIR", "RESTORE_PERSISTED_PUBLIC_CACHE",
                   "SECRETLESS_RUNTIME_PUBLIC_CACHE", "RUN_ID", "RUN_ATTEMPT",
               ):
@@ -6118,17 +6552,32 @@ jobs:
                   "NPM_CONFIG_CACHE": "/dev/shm/npm-cache",
                   "NPM_CONFIG_GLOBALCONFIG": "/dev/shm/npm-globalconfig",
                   "NPM_CONFIG_USERCONFIG": "/dev/null",
+                  "NPM_CONFIG_SCRIPT_SHELL": "/bin/sh",
                   "PATH": f"{node_toolchain_bin}:/usr/bin:/bin",
                   "RUNNER_TEMP": "/tmp",
                   "TEMP": "/tmp",
                   "TMP": "/tmp",
                   "TMPDIR": "/tmp",
                   "GITHUB_WORKSPACE": sandbox_workspace,
+                  "BUILD_ARTIFACT_ROLE": os.environ.get("BUILD_ARTIFACT_ROLE", ""),
                   "npm_config_cache": "/dev/shm/npm-cache",
                   "npm_config_globalconfig": "/dev/shm/npm-globalconfig",
                   "npm_config_userconfig": "/dev/null",
+                  "npm_config_script_shell": "/bin/sh",
               })
               sandbox_directory = Path(sandbox_workspace) / directory.relative_to(workspace)
+              network_args = ["--cap-drop", "ALL"]
+              artifact_helper_args = []
+              if shared_artifact:
+                  sys.path.insert(0, os.environ["RUNNER_TEMP"])
+                  from ci_build_artifacts import artifact_mount_roots, bubblewrap_network_args
+                  network_args = bubblewrap_network_args(shared_artifact=True)
+                  artifact_helper_args = [
+                      "--ro-bind",
+                      str(Path(os.environ["RUNNER_TEMP"]) / "ci_build_artifacts.py"),
+                      "/tmp/ci_build_artifacts.py",
+                  ]
+
               arguments = [
                   str(bubblewrap),
                   "--unshare-user",
@@ -6139,9 +6588,10 @@ jobs:
                   "--disable-userns",
                   "--die-with-parent",
                   "--new-session",
-                  "--cap-drop", "ALL",
+              *network_args,
                   "--tmpfs", "/",
                   "--tmpfs", "/tmp",
+                  *artifact_helper_args,
                   "--dev", "/dev",
                   "--tmpfs", "/dev/shm",
                   "--proc", "/proc",
@@ -6175,6 +6625,51 @@ jobs:
               if node_toolchain_root is not None:
                   bind_source(node_toolchain_root, node_toolchain_destination)
               bind_source(workspace, sandbox_workspace, writable=True)
+              consume_artifact = os.environ.get("BUILD_ARTIFACT_ROLE") == "consumer"
+              if consume_artifact:
+                  manifest = json.loads(Path(os.environ["VERJSON_CI_BUILD_ARTIFACT_MANIFEST"]).read_text(encoding="utf-8"))
+                  artifact_root = Path(os.environ["VERJSON_CI_BUILD_ARTIFACT_ROOT"]).resolve(strict=True)
+                  workspace_fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                  try:
+                      for relative in artifact_mount_roots(manifest["exportPolicy"]["paths"]):
+                          components = relative.split("/")
+                          if len(components) > 32 or any(part in {"", ".", ".."} or not re.fullmatch(r"[A-Za-z0-9._-]+", part) for part in components):
+                              sys.exit("verified ArtifactSet contains an unsafe mount path")
+                          source = artifact_root.joinpath(*components)
+                          source_stat = source.lstat()
+                          if stat.S_ISLNK(source_stat.st_mode) or not (stat.S_ISREG(source_stat.st_mode) or stat.S_ISDIR(source_stat.st_mode)):
+                              sys.exit("verified ArtifactSet root is not a regular file or directory")
+                          is_directory = stat.S_ISDIR(source_stat.st_mode)
+                          parent_fd = os.dup(workspace_fd)
+                          try:
+                              for component in components[:-1]:
+                                  try:
+                                      next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+                                  except FileNotFoundError:
+                                      os.mkdir(component, mode=0o700, dir_fd=parent_fd)
+                                      next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+                                  os.close(parent_fd)
+                                  parent_fd = next_fd
+                              try:
+                                  flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                                  if is_directory:
+                                      flags |= os.O_DIRECTORY
+                                  target_fd = os.open(components[-1], flags, dir_fd=parent_fd)
+                              except FileNotFoundError:
+                                  if is_directory:
+                                      os.mkdir(components[-1], mode=0o700, dir_fd=parent_fd)
+                                      target_fd = os.open(components[-1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+                                  else:
+                                      target_fd = os.open(components[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
+                              metadata = os.fstat(target_fd)
+                              if (is_directory and not stat.S_ISDIR(metadata.st_mode)) or (not is_directory and not stat.S_ISREG(metadata.st_mode)):
+                                  sys.exit("ArtifactSet mount target has an incompatible type")
+                              os.close(target_fd)
+                          finally:
+                              os.close(parent_fd)
+                          bind_source(source, f"{sandbox_workspace}/{relative}")
+                  finally:
+                      os.close(workspace_fd)
               bind_source(git_metadata, f"{sandbox_workspace}/.git")
               if corepack_home is not None:
                   bind_source(corepack_home, "/dev/shm/home/.cache/node/corepack")
@@ -6224,11 +6719,58 @@ jobs:
                               f"{runtime_cache_staging}",
                               file=sys.stderr,
                           )
+          command_records = [
+              {
+                  "directory": directory.relative_to(checkout_root).as_posix(),
+                  "script": name,
+                  "unsetEnv": sorted(unset_env),
+                  "requiresServices": requires_services,
+              }
+              for directory, name, unset_env, requires_services in normalized
+          ]
+          command_digest = hashlib.sha256(
+              json.dumps(command_records, sort_keys=True, separators=(",", ":")).encode("utf-8")
+          ).hexdigest()
+          with open(os.environ["VERJSON_CI_OUTPUT_FILE"], "a", encoding="utf-8") as output:
+              output.write(f"command-digest={command_digest}\n")
           if browser_cache_fd is not None:
               os.close(browser_cache_fd)
           global_config_file.close()
           # END source candidate script execution
           PY
+      - name: Export build outputs after producer process is reaped
+        id: export-build-artifact
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.build-artifact-role == 'producer' && steps.run-script-plan.outcome == 'success'
+        env:
+          BUILD_ARTIFACT_PATHS: ${{ inputs.build-artifact-paths }}
+          BUILD_ARTIFACT_PATHS_JSON: ${{ inputs.build-artifact-paths }}
+          BUILD_ARTIFACT_RUNNER_IMAGE_JSON: ${{ inputs.build-artifact-runner-image }}
+          BUILD_ARTIFACT_PARTICIPANT_COUNT: ${{ inputs.build-artifact-participant-count }}
+          BUILD_ARTIFACT_LEVEL_ID: ${{ inputs.build-artifact-level-id }}
+          BUILD_ARTIFACT_COMMANDS_JSON: ${{ inputs.build-artifact-plan-json }}
+          BUILD_ARTIFACT_PROFILE: ${{ inputs.build-artifact-profile }}
+          BUILD_ARTIFACT_NODE_VERSION: ${{ inputs.node-version }}
+          BUILD_ARTIFACT_PACKAGE_MANAGER: ${{ inputs.package-manager }}
+          BUILD_ARTIFACT_PACKAGE_MANAGER_VERSION: ${{ inputs.build-artifact-package-manager-version }}
+          CALLER_COMMIT: ${{ github.sha }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          REUSABLE_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" export \
+            --workspace "$GITHUB_WORKSPACE" \
+            --output "$RUNNER_TEMP/ci-build-artifact.tar.gz" \
+            --roots-json "$BUILD_ARTIFACT_PATHS" \
+            --consumers "$BUILD_ARTIFACT_PARTICIPANT_COUNT"
+      - name: Upload one-day same-run ArtifactSet
+        id: upload-build-artifact
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.build-artifact-role == 'producer' && steps.export-build-artifact.outputs.share-available == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ runner.temp }}/ci-build-artifact.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          archive: false
       - run: npm run build
         if: needs.eligibility.outputs.should-run != 'false' && !(inputs.secretless-pr || inputs.secretless-trusted-ref)
       - run: npm run typecheck --if-present
@@ -7821,6 +8363,29 @@ jobs:
             echo "::warning::npm cache is ${size_mb} MB; clearing it instead of uploading more than ${CACHE_MAX_MB} MB"
             find "$cache_dir" -mindepth 1 -delete
           fi
+      - name: Create trusted per-lane TestReceipt
+        id: create-build-artifact-receipt
+        if: needs.eligibility.outputs.should-run != 'false' && success() && inputs.build-artifact-role == 'consumer'
+        env:
+          BUILD_ARTIFACT_LEVEL_ID: ${{ inputs.build-artifact-level-id }}
+          CALLER_COMMIT: ${{ github.sha }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          REUSABLE_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          RECEIPT_PROFILE: ${{ inputs.build-artifact-profile }}
+          RECEIPT_COMMAND_DIGEST: ${{ steps.run-script-plan.outputs.command-digest }}
+          RECEIPT_ARTIFACT_ID: ${{ inputs.build-artifact-role == 'consumer' && inputs.build-artifact-id || '' }}
+          RECEIPT_ARTIFACT_DIGEST: ${{ inputs.build-artifact-role == 'consumer' && inputs.build-artifact-digest || '' }}
+        run: |
+          set -euo pipefail
+          receipt_args=()
+          if [[ -n "$RECEIPT_ARTIFACT_ID" || -n "$RECEIPT_ARTIFACT_DIGEST" ]]; then
+            [[ -n "$RECEIPT_ARTIFACT_ID" && -n "$RECEIPT_ARTIFACT_DIGEST" ]]
+            receipt_args+=(--manifest-file "$RUNNER_TEMP/ci-build-artifact-manifest.json" \
+              --artifact-id "$RECEIPT_ARTIFACT_ID" --artifact-digest "$RECEIPT_ARTIFACT_DIGEST")
+          fi
+          python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" receipt \
+            --lane "$BUILD_ARTIFACT_LEVEL_ID" --profile "$RECEIPT_PROFILE" \
+            --command-digest "$RECEIPT_COMMAND_DIGEST" "${receipt_args[@]}"
       - name: Stop cache service
         if: always() && needs.eligibility.outputs.should-run != 'false' && inputs.cache-image != ''
         env:

@@ -72,6 +72,7 @@ expected_literal_hosted_sites="$(printf '%s\n' \
   $'changelog-contract-fleet-report.yml:report:    runs-on: ubuntu-24.04' \
   $'cli-projects-package-surface-required.yml:admission:    runs-on: ubuntu-24.04\ncli-projects-package-surface-required.yml:package-surface:    runs-on: ubuntu-24.04' \
   $'node-release.yml:prepare:    runs-on: ubuntu-24.04\nnode-release.yml:release:    runs-on: ubuntu-24.04\nnode-release.yml:retention:    runs-on: ubuntu-24.04' \
+  $'node-ci.yml:artifact-mode-gate:    runs-on: ubuntu-24.04\nnode-ci.yml:artifact-preflight:    runs-on: ubuntu-24.04\nnode-ci-protected.yml:artifact-mode-gate:    runs-on: ubuntu-24.04\nnode-ci-protected.yml:artifact-preflight:    runs-on: ubuntu-24.04' \
   $'node-ci.yml:deferred-ci:    runs-on: ubuntu-24.04\nnode-ci-protected.yml:deferred-ci:    runs-on: ubuntu-24.04' \
   | sort)"
 

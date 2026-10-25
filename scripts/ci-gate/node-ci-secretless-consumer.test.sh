@@ -27,10 +27,12 @@ fail() { printf 'not ok - %s\n' "$1" >&2; failures=$((failures + 1)); }
 python3 - "$workflow" "$tmp" "$root" <<'PY' \
   && pass "consumer extensions remain validated, credentialless, and canonical" \
   || fail "consumer extension workflow structure violates the secretless contract"
+import ast
 import os
 import shlex
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import yaml
@@ -136,31 +138,94 @@ protected_plan = next(
     step for step in protected_build["steps"]
     if step.get("name") == "Run exact credentialless consumer script plan"
 )
-assert '"--tmpfs", "/"' in protected_plan["run"]
-assert '"--ro-bind", "/", "/"' not in protected_plan["run"]
-assert '*([] if requires_services else ["--unshare-net"])' in protected_plan["run"]
-assert "if requires_services:" in protected_plan["run"]
-assert "script_env.update(candidate_service_env)" in protected_plan["run"]
-assert "candidate scripts requiring services need an isolated GitHub-hosted runner" in protected_plan["run"]
-assert '"--unshare-net"' in protected_plan["run"]
-assert 'script_env = {' in protected_plan["run"]
-assert "candidate_service_env" in protected_plan["run"]
-assert "credential_environment_name_pattern" in protected_plan["run"]
-assert "credential_parameter_name_pattern" in protected_plan["run"]
-assert "candidate service URL contains credential-bearing data" in protected_plan["run"]
-assert "credentialed candidate service URLs must target the local service" in protected_plan["run"]
-assert '"COREPACK_"' in protected_plan["run"]
-assert "git_metadata" in protected_plan["run"] and "git_mount_args" in protected_plan["run"]
-assert '"COREPACK_HOME": str(corepack_home) if corepack_home is not None' in protected_plan["run"]
-assert '"COREPACK_ENABLE_NETWORK": "0"' in protected_plan["run"]
-assert '"--bind" if tool_prefix == browser_cache else "--ro-bind"' in protected_plan["run"]
-assert 'from urllib.parse import parse_qsl, unquote, urlsplit' in protected_plan["run"]
+assert 'python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" run-protected-candidate-plan' in protected_plan["run"]
+protected_helper_source = Path(sys.argv[3], "scripts/ci_build_artifacts.py").read_text(encoding="utf-8")
+protected_helper_lines = protected_helper_source.splitlines()
+protected_helper_ast = ast.parse(protected_helper_source)
+protected_plan_function = next(
+    node for node in protected_helper_ast.body
+    if isinstance(node, ast.FunctionDef) and node.name == "run_protected_candidate_plan"
+)
+body_start = protected_plan_function.body[0].lineno
+body_end = protected_plan_function.end_lineno
+protected_plan_source = textwrap.dedent(
+    "\n".join(protected_helper_lines[body_start - 1:body_end])
+)
+protected_functions = {
+    node.name: node for node in protected_plan_function.body
+    if isinstance(node, ast.FunctionDef)
+}
+
+def loaded_names(node):
+    names = set()
+
+    def visit(child):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            return
+        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
+            names.add(child.id)
+        for descendant in ast.iter_child_nodes(child):
+            visit(descendant)
+
+    for statement in node.body:
+        visit(statement)
+    return names
+
+parser_imports = {
+    alias.name
+    for node in protected_plan_function.body
+    if isinstance(node, ast.ImportFrom) and node.module == "urllib.parse"
+    for alias in node.names
+}
+assert {"parse_qsl", "unquote", "urlsplit"} <= parser_imports
+assert {"parse_qsl", "unquote"} <= loaded_names(
+    protected_functions["credential_component_is_present"]
+)
+assert {"urlsplit", "credential_component_is_present"} <= loaded_names(
+    protected_functions["credential_environment_value_is_sensitive"]
+)
+assert {"unquote"} <= loaded_names(
+    protected_functions["opaque_service_value_contains_userinfo"]
+)
+assert {"urlsplit", "credential_component_is_present"} <= loaded_names(
+    protected_functions["validate_candidate_service_value"]
+)
+entrypoint_assignment = next(
+    node for node in protected_plan_function.body
+    if isinstance(node, ast.Assign)
+    and any(
+        isinstance(target, ast.Name) and target.id == "sandbox_entrypoint"
+        for target in node.targets
+    )
+)
+sandbox_entrypoint = ast.literal_eval(entrypoint_assignment.value)
+assert "os.closerange(3, max_fd)" in sandbox_entrypoint
+assert "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)" in sandbox_entrypoint
+assert '"--tmpfs", "/"' in protected_plan_source
+assert '"--ro-bind", "/", "/"' not in protected_plan_source
+assert 'legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]' in protected_plan_source
+assert 'bubblewrap_network_args(shared_artifact=True)' in protected_plan_source
+assert "*legacy_network_args," in protected_plan_source
+assert "if requires_services:" in protected_plan_source
+assert "script_env.update(candidate_service_env)" in protected_plan_source
+assert "candidate scripts requiring services need an isolated GitHub-hosted runner" in protected_plan_source
+assert '"--unshare-net"' in protected_plan_source
+assert 'script_env = {' in protected_plan_source
+assert "candidate_service_env" in protected_plan_source
+assert "credential_environment_name_pattern" in protected_plan_source
+assert "credential_parameter_name_pattern" in protected_plan_source
+assert "candidate service URL contains credential-bearing data" in protected_plan_source
+assert "credentialed candidate service URLs must target the local service" in protected_plan_source
+assert '"COREPACK_"' in protected_plan_source
+assert "git_metadata" in protected_plan_source and "git_mount_args" in protected_plan_source
+assert '"COREPACK_HOME": str(corepack_home) if corepack_home is not None' in protected_plan_source
+assert '"COREPACK_ENABLE_NETWORK": "0"' in protected_plan_source
+assert '"--bind" if tool_prefix == browser_cache else "--ro-bind"' in protected_plan_source
 assert 'from urllib.parse import parse_qsl, unquote, urlsplit' in compatibility["run"]
-assert '"/usr/bin/python3", "-I", "-c", sandbox_entrypoint' in protected_plan["run"]
-assert "os.closerange(3, max_fd)" in protected_plan["run"]
-assert "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)" in protected_plan["run"]
-assert "BASH_ENV" in protected_plan["run"]
-assert "env.BASH_ENV" not in protected_plan["run"]
+assert '"/usr/bin/python3", "-I", "-c", sandbox_entrypoint' in protected_plan_source
+assert "BASH_ENV" in protected_plan_source
+assert "env.BASH_ENV" not in protected_plan_source
+assert "BASH_ENV" not in protected_plan["run"]
 assert '"--unshare-net"' in rebuild["run"]
 source_defaults = [
     step for step in build["steps"]

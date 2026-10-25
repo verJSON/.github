@@ -27,7 +27,12 @@ assert inputs["secretless-rebuild-env"]["default"] == "{}"
 
 acquire = jobs["acquire-secretless-dependencies"]
 build = jobs["build-test"]
-assert acquire["if"] == "(inputs.secretless-pr || inputs.secretless-trusted-ref) && needs.eligibility.outputs.should-run != 'false'"
+assert "inputs.build-artifact-role == 'level'" in acquire["if"]
+assert "inputs.build-artifact-role == 'consumer'" in acquire["if"]
+assert "inputs.build-artifact-role == 'producer'" in acquire["if"]
+assert "inputs.secretless-pr" in acquire["if"]
+assert "inputs.secretless-trusted-ref" in acquire["if"]
+assert "needs.eligibility.outputs.should-run != 'false'" in acquire["if"]
 assert acquire["permissions"] == {"contents": "read", "packages": "read"}
 assert acquire["runs-on"] == "${{ fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}"
 assert build["permissions"] == {"contents": "read"}

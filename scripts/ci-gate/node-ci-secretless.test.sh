@@ -31,7 +31,10 @@ assert "inputs.secretless-pr" in acquire["if"]
 assert acquire["runs-on"] == "${{ fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}"
 assert {"eligibility", "acquire-secretless-dependencies"} <= set(build["needs"])
 assert build["permissions"] == {"contents": "read"}
-assert build["if"] == "always()"
+assert build["if"] == (
+    "always() && (inputs.build-artifact-role == 'level' || "
+    "inputs.build-artifact-role == 'consumer' || inputs.build-artifact-role == 'producer')"
+)
 assert build["runs-on"].startswith(
     "${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && "
     "needs.eligibility.result == 'success' && "
@@ -312,27 +315,35 @@ fi
 # alternatives farm, or /usr/bin/awk, cc, and similar links dangle. The real
 # Bubblewrap regressions run only on the hosted compatibility lane; this keeps
 # every sandbox step honest on every runner.
-python3 - "$workflow" "${workflow%/*}/node-ci-protected.yml" <<'PY' \
-  && pass "every temporary-root Node CI sandbox binds /etc/alternatives read-only (#1782)" \
-  || fail "a temporary-root Node CI sandbox omits /etc/alternatives (#1782)"
+python3 - "$workflow" "${workflow%/*}/node-ci-protected.yml" "$root/scripts/gen-node-ci-protected.py" <<'PY' \
+&& pass "every temporary-root Node CI sandbox binds /etc/alternatives read-only (#1782)" \
+|| fail "a temporary-root Node CI sandbox omits /etc/alternatives (#1782)"
+import importlib.util
 import sys
 import yaml
 
+spec = importlib.util.spec_from_file_location("gen_node_ci_protected", sys.argv[3])
+generator = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(generator)
+protected_runtime = generator.protected_candidate_helper_body()
 expected = {
     "Rebuild exact approved lifecycle packages without credentials",
     "Run exact credentialless consumer script plan",
     "Run runtime-resolved compatibility lanes without credentials",
 }
-for path in sys.argv[1:]:
+for path in sys.argv[1:3]:
     steps = yaml.safe_load(open(path, encoding="utf-8"))["jobs"]["build-test"]["steps"]
-    sandboxed = {
-        step["name"]: step["run"]
-        for step in steps
-        if '"--tmpfs", "/",' in step.get("run", "")
-    }
+    sandboxed = {}
+    for step in steps:
+        name = step.get("name")
+        run = step.get("run", "")
+        if path.endswith("node-ci-protected.yml") and name == "Run exact credentialless consumer script plan":
+            run = protected_runtime
+        if '"--tmpfs", "/",' in run:
+            sandboxed[name] = run
     assert expected <= set(sandboxed), (path, sorted(sandboxed))
     for name, run in sandboxed.items():
-        # A commented-out bind must not satisfy the check.
+        # A commented-out bind must not satisfy this check.
         run = "\n".join(
             line for line in run.splitlines() if not line.lstrip().startswith("#")
         )
@@ -389,8 +400,27 @@ wired = (
 for name in wired:
     assert plan["env"].get(name) == compatibility["env"][name], name
 code = [line.strip() for line in plan["run"].splitlines() if not line.lstrip().startswith("#")]
-assert not any("--unshare-net" in line for line in code)
+assert any('network_args = ["--cap-drop", "ALL"]' in line for line in code)
+assert any('bubblewrap_network_args(shared_artifact=True)' in line for line in code)
 assert "runtime_cache_content = verified_runtime_cache_content()" in code
+PY
+
+python3 - "${workflow%/*}/node-ci-protected.yml" <<'PY' \
+&& pass "protected Node CI rejects invalid secretless mode before candidate execution" \
+|| fail "protected Node CI can report success without its required secretless mode"
+import subprocess
+import sys
+import yaml
+workflow = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+jobs = workflow["jobs"]
+acquire = jobs["acquire-secretless-dependencies"]
+assert "inputs.secretless-pr" not in acquire["if"]
+assert "inputs.secretless-trusted-ref" not in acquire["if"]
+mode = next(step for step in jobs["build-test"]["steps"] if step.get("name") == "Require protected secretless execution mode")
+assert "!(inputs.secretless-pr || inputs.secretless-trusted-ref)" in mode["if"]
+result = subprocess.run(["bash", "-c", mode["run"]], capture_output=True, text=True)
+assert result.returncode != 0
+assert "requires generated event-specific secretless mode" in result.stderr
 PY
 
 grep -qF 'ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL' "$workflow" \

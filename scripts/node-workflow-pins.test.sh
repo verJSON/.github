@@ -22,8 +22,8 @@ for wf in "$ci" "$release" "$actions_ci"; do
   expected_checkouts=1
   expected_setups=0
   if [ "$wf" = "$ci" ]; then
-    expected_checkouts=3
-    expected_setups=2
+  expected_checkouts=4
+    expected_setups=3
   elif [ "$wf" = "$release" ]; then
     # Prepare checks out the release and its dependency acquisition contract
     # (ADR 0220); publication checks out the release and contract; retention

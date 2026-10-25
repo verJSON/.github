@@ -540,23 +540,6 @@ else
   fail "a rejected nested plan still reached npm"
 fi
 
-# The protected candidate variant re-implements the same loop inside a
-# bubblewrap namespace, so its chdir must track the per-manifest directory too.
-python3 - "$root/.github/workflows/node-ci-protected.yml" <<'PY' \
-  && pass "the protected candidate loop chdirs into each script's own manifest directory" \
-  || fail "the protected candidate loop does not chdir per manifest"
-import sys
-import yaml
-
-doc = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
-step = next(step for job in doc["jobs"].values() for step in job.get("steps", [])
-            if step.get("name") == "Run exact credentialless consumer script plan")
-body = step["run"]
-assert "for index, (script_directory, name, unset_env, requires_services) in enumerate(normalized):" in body
-assert '"--chdir", str(script_directory),' in body
-assert '"--chdir", str(workspace),' not in body
-PY
-
 python3 - "$validator" "$tmp" <<'PYTEST' \
   && pass "contained npm workspace links and empty approvals preserve the registry boundary" \
   || fail "npm workspace link admission or empty-approval boundary regressed"

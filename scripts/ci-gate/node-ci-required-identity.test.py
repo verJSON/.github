@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 import hashlib
+import importlib.util
 import json
 import os
+from contextlib import ExitStack, redirect_stderr
+from io import StringIO
 from pathlib import Path
+import textwrap
 import signal
 import subprocess
 import sys
@@ -17,15 +21,26 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PLAN_ACTION = ROOT / ".github/actions/node-ci-script-plan"
 sys.dont_write_bytecode = True
+sys.path.insert(0, str(ROOT / "scripts"))
+import ci_build_artifacts as artifact_helper
 sys.path.insert(0, str(SCRIPT_PLAN_ACTION))
 import script_plan as shared_script_plan
 LEGACY = ROOT / ".github/workflows/node-ci.yml"
 PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
+GENERATOR = ROOT / "scripts/gen-node-ci-protected.py"
+TRUSTED_HELPER = ROOT / "scripts/ci_build_artifacts.py"
 HEAD = "a" * 40
-LEGACY_SHA256 = "9d779cc7ee2bbfb301e15fa7099ab56fc159244d6a811527e2f49293b565d34e"
+LEGACY_SHA256 = "9ecd8a30e94752f054fb28e0657e67005c1cd381c78b26e4c7cf1371a8beef4e"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
+    def load_generator(self):
+        spec = importlib.util.spec_from_file_location("gen_node_ci_protected", GENERATOR)
+        self.assertIsNotNone(spec)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
     credential_keys = (
         "GH_TOKEN",
         "GITHUB_TOKEN",
@@ -69,8 +84,148 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
     def test_generator_is_exact_and_node_ci_workflow_is_pinned(self):
         self.assertEqual(LEGACY_SHA256, hashlib.sha256(LEGACY.read_bytes()).hexdigest())
         before = PROTECTED.read_bytes()
-        subprocess.run(["python3", "scripts/gen-node-ci-protected.py"], cwd=ROOT, check=True)
+        before_mtime = PROTECTED.stat().st_mtime_ns
+        subprocess.run(["python3", "scripts/gen-node-ci-protected.py", "--check"], cwd=ROOT, check=True)
         self.assertEqual(before, PROTECTED.read_bytes())
+        self.assertEqual(before_mtime, PROTECTED.stat().st_mtime_ns)
+
+    def test_protected_generator_check_compares_exact_bytes_without_writing(self):
+        generator = self.load_generator()
+        expected = generator.render().encode("utf-8")
+        self.assertLessEqual(len(LEGACY.read_bytes()), generator.MAX_SOURCE_BYTES)
+        self.assertLessEqual(len(expected), generator.MAX_OUTPUT_BYTES)
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "node-ci-protected.yml"
+            stale = bytearray(expected)
+            stale[-1] ^= 1
+            target.write_bytes(stale)
+            before_mtime = target.stat().st_mtime_ns
+            generator.TARGET = target
+            with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+                generator.main(["--check"])
+            self.assertEqual(bytes(stale), target.read_bytes())
+            self.assertEqual(before_mtime, target.stat().st_mtime_ns)
+
+    def test_protected_generator_byte_guards_reject_utf8_overflow_without_writing(self):
+        generator = self.load_generator()
+        sentinel = b"existing protected workflow\n"
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "node-ci.yml"
+            target = root / "node-ci-protected.yml"
+            target.write_bytes(sentinel)
+            generator.SOURCE = source
+            generator.TARGET = target
+
+            source.write_bytes(("é" * (generator.MAX_SOURCE_BYTES // 2 + 1)).encode("utf-8"))
+            before_source_guard = target.stat().st_mtime_ns
+            source_error = StringIO()
+            with redirect_stderr(source_error), self.assertRaises(SystemExit):
+                generator.main(["--check"])
+            self.assertIn("source workflow exceeds 480000 UTF-8 bytes", source_error.getvalue())
+            self.assertEqual(sentinel, target.read_bytes())
+            self.assertEqual(before_source_guard, target.stat().st_mtime_ns)
+
+            source.write_text("valid source\n", encoding="utf-8")
+            generator.render = lambda: "é" * (generator.MAX_OUTPUT_BYTES // 2 + 1)
+            before_output_guard = target.stat().st_mtime_ns
+            output_error = StringIO()
+            with redirect_stderr(output_error), self.assertRaises(SystemExit):
+                generator.main(["--check"])
+            self.assertIn("generated protected workflow exceeds 480000 UTF-8 bytes", output_error.getvalue())
+            self.assertEqual(sentinel, target.read_bytes())
+            self.assertEqual(before_output_guard, target.stat().st_mtime_ns)
+
+    def test_protected_generator_rejects_decorated_async_or_parameterized_helper(self):
+        generator = self.load_generator()
+        helper = (ROOT / "scripts/ci_build_artifacts.py").read_text(encoding="utf-8")
+        mutations = (
+            helper.replace(
+                "def run_protected_candidate_plan() -> None:",
+                "@staticmethod\ndef run_protected_candidate_plan() -> None:",
+                1,
+            ),
+            helper.replace(
+                "def run_protected_candidate_plan() -> None:",
+                "async def run_protected_candidate_plan() -> None:",
+                1,
+            ),
+            helper.replace(
+                "def run_protected_candidate_plan() -> None:",
+                "def run_protected_candidate_plan(untrusted=None) -> None:",
+                1,
+            ),
+        )
+        for mutated in mutations:
+            with self.assertRaises(SystemExit):
+                generator.protected_candidate_helper_body(mutated)
+
+    def test_protected_candidate_runtime_uses_the_pinned_helper_command(self):
+        steps = self.workflow["jobs"]["build-test"]["steps"]
+        fetch_index = next(
+            index for index, step in enumerate(steps)
+            if step.get("name") == "Download pinned protected candidate helper"
+        )
+        authorization_index = next(
+            index for index, step in enumerate(steps)
+            if step.get("name") == "Authorize producer or consumer from immutable policy"
+        )
+        runner_index = next(
+            index for index, step in enumerate(steps)
+            if step.get("name") == "Run exact credentialless consumer script plan"
+        )
+        fetch_step = steps[fetch_index]
+        run_step = steps[runner_index]
+        self.assertLess(fetch_index, authorization_index)
+        self.assertLess(authorization_index, runner_index)
+        self.assertIn("JOB_WORKFLOW_SHA", fetch_step["env"])
+        self.assertIn("${JOB_WORKFLOW_SHA}", fetch_step["run"])
+        self.assertIn(
+            'python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" run-protected-candidate-plan &',
+            run_step["run"],
+        )
+        self.assertNotIn("python3 -I - <<'PY'", run_step["run"])
+
+    def test_candidate_plan_executes_successfully_through_the_staged_trusted_helper(self):
+        result, remaining = self.run_candidate_plan(
+            lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+            "printf 'trusted helper candidate ran\\n'\n",
+            script_plan=["first"],
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("trusted helper candidate ran", result.stdout)
+        self.assertEqual([], remaining)
+
+    def test_consumer_mounts_verified_artifact_read_only_with_live_fd_at_launch(self):
+        result, remaining = self.run_candidate_plan(
+            lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+            "printf 'consumer candidate ran\\n'\n",
+            script_plan=["first"],
+            verified_artifact=True,
+            bwrap_probe=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([], remaining)
+
+    def test_workflow_mappings_have_no_duplicate_keys(self):
+        for path in (LEGACY, PROTECTED):
+            with self.subTest(workflow=path.name):
+                root = yaml.compose(path.read_text(encoding="utf-8"))
+
+                def visit(node, location="$"):
+                    if isinstance(node, yaml.MappingNode):
+                        seen = set()
+                        for key, value in node.value:
+                            key_value = key.value if isinstance(key, yaml.ScalarNode) else str(key)
+                            self.assertNotIn(key_value, seen, f"duplicate key {key_value!r} at {location}")
+                            seen.add(key_value)
+                            visit(value, f"{location}.{key_value}")
+                    elif isinstance(node, yaml.SequenceNode):
+                        for index, value in enumerate(node.value):
+                            visit(value, f"{location}[{index}]")
+
+                visit(root)
 
     def test_changelog_cache_is_verified_before_the_networkless_sandbox(self):
         steps = self.workflow["jobs"]["build-test"]["steps"]
@@ -92,7 +247,10 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         self.assertLess(steps.index(warm), steps.index(plan))
         self.assertIn("inputs.secretless-pr || inputs.secretless-trusted-ref", warm["if"])
         self.assertNotIn("RUN_DEFAULTS", plan["env"])
-        self.assertIn('run_defaults = os.environ.get("SCRIPT_PLAN_DEFAULT_PLAN") == "true"', plan["run"])
+        self.assertIn(
+            'run_defaults = os.environ.get("SCRIPT_PLAN_DEFAULT_PLAN") == "true"',
+            self.candidate_plan_step()["run"],
+        )
         self.assertIn("SCRIPT_PLAN_ENTRIES_FILE", plan["env"])
         self.assertIn('"$RUNNER_TEMP/', cache_setup["run"])
         self.assertNotIn("$GITHUB_WORKSPACE", cache_setup["run"])
@@ -106,9 +264,9 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         self.assertIn("CONTRACT_SHA256", warm["run"])
         self.assertIn("hashlib.sha256", warm["run"])
         self.assertNotIn("bash scripts/render-next.sh", warm["run"])
-        self.assertIn("VERJSON_CHANGELOG_TOOL_CACHE", plan["run"])
-        self.assertIn('"--unshare-net"', plan["run"])
-        self.assertIn('"--ro-bind"', plan["run"])
+        self.assertIn("VERJSON_CHANGELOG_TOOL_CACHE", self.candidate_plan_step()["run"])
+        self.assertIn('"--unshare-net"', self.candidate_plan_step()["run"])
+        self.assertIn('"--ro-bind"', self.candidate_plan_step()["run"])
 
     def changelog_cache_warm_step(self):
         return next(
@@ -325,7 +483,11 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
 
     def test_protected_variant_rejects_every_non_pr_secretless_mode(self):
         acquisition = self.workflow["jobs"]["acquire-secretless-dependencies"]
-        self.assertEqual("needs.eligibility.outputs.should-run != 'false'", acquisition["if"])
+        self.assertEqual(
+            "(inputs.build-artifact-role == 'level' || inputs.build-artifact-role == 'consumer' "
+            "|| inputs.build-artifact-role == 'producer') && needs.eligibility.outputs.should-run != 'false'",
+            acquisition["if"],
+        )
         boundary = next(step for step in acquisition["steps"]
                         if step.get("name") == "Enforce the secretless event boundary")
         base = {**os.environ, "APPROVED_INTERNAL_PACKAGES": "@verjson/package",
@@ -521,11 +683,133 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
 
 
     def candidate_plan_step(self):
-        return next(
+        step = next(
             step
             for step in self.workflow["jobs"]["build-test"]["steps"]
             if step.get("name") == "Run exact credentialless consumer script plan"
         )
+        body = self.load_generator().protected_candidate_helper_body()
+        fixture = "\n# BEGIN TRUSTED_HELPER_BODY_FIXTURE\n"
+        fixture += "\n".join(f"#{line}" for line in body.splitlines())
+        fixture += "\n# END TRUSTED_HELPER_BODY_FIXTURE\n"
+        return {**step, "run": step["run"] + fixture}
+
+    def stage_candidate_helper(self, runner_temp, candidate_run, *, bwrap_probe=False):
+        helper_source = TRUSTED_HELPER.read_text(encoding="utf-8")
+        start = "# BEGIN TRUSTED_HELPER_BODY_FIXTURE\n"
+        end = "# END TRUSTED_HELPER_BODY_FIXTURE"
+        if start in candidate_run:
+            if candidate_run.count(start) != 1 or candidate_run.count(end) != 1:
+                self.fail("candidate helper test fixture boundaries are malformed")
+            fixture = candidate_run.split(start, 1)[1].split(end, 1)[0]
+            fixture_lines = fixture.splitlines()
+            if any(not line.startswith("#") for line in fixture_lines):
+                self.fail("candidate helper fixture contains non-comment data")
+            candidate_body = "\n".join(line[1:] for line in fixture_lines)
+            generator = self.load_generator()
+            original_body = generator.protected_candidate_helper_body(helper_source)
+            if candidate_body != original_body:
+                function_marker = "def run_protected_candidate_plan() -> None:\n"
+                function_start = helper_source.index(function_marker) + len(function_marker)
+                function_end = helper_source.index("\ndef main(", function_start)
+                helper_source = (
+                    helper_source[:function_start]
+                    + textwrap.indent(candidate_body, "    ")
+                    + "\n\n"
+                    + helper_source[function_end:]
+                )
+        if bwrap_probe:
+            marker = "active_process = subprocess.Popen(\n"
+            self.assertEqual(1, helper_source.count(marker))
+            probe = r'''_d1_original_popen = subprocess.Popen
+def _d1_probe_popen(argv, **kwargs):
+    import fcntl
+    import stat
+
+    workspace_bind = ["--bind", str(workspace), str(workspace)]
+    workspace_index = next(
+        index for index in range(len(argv))
+        if argv[index:index + len(workspace_bind)] == workspace_bind
+    )
+    artifact_mounts = []
+    for index, argument in enumerate(argv[:-2]):
+        if argument != "--ro-bind":
+            continue
+        source = argv[index + 1]
+        target = Path(argv[index + 2])
+        if source.startswith("/proc/self/fd/") and target == workspace / "app.js":
+            artifact_mounts.append((index, int(source.rsplit("/", 1)[1])))
+    if len(artifact_mounts) != 1:
+        raise AssertionError("consumer did not create exactly one read-only ArtifactSet mount")
+    mount_index, descriptor = artifact_mounts[0]
+    if workspace_index >= mount_index:
+        raise AssertionError("workspace bind must precede ArtifactSet mounts")
+    if descriptor not in kwargs.get("pass_fds", ()):
+        raise AssertionError("ArtifactSet descriptor is not retained for process launch")
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise AssertionError("ArtifactSet descriptor is not a regular file")
+    if fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY:
+        raise AssertionError("ArtifactSet descriptor is not open read-only")
+    if os.read(descriptor, 4096) != b"verified ArtifactSet bytes":
+        raise AssertionError("ArtifactSet descriptor did not read verified bytes")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    try:
+        os.write(descriptor, b"x")
+    except OSError:
+        pass
+    else:
+        raise AssertionError("ArtifactSet descriptor accepted a write")
+
+    child_check = (
+        "import os,sys\n"
+        "fd=int(sys.argv[1])\n"
+        "data=os.read(fd,4096)\n"
+        "assert data == b'verified ArtifactSet bytes', data\n"
+        "try:\n os.write(fd,b'x')\n"
+        "except OSError:\n pass\n"
+        "else:\n raise AssertionError('inherited ArtifactSet FD is writable')\n"
+    )
+    child = _d1_original_popen(
+        [sys.executable, "-c", child_check, str(descriptor)],
+        pass_fds=(descriptor,),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    child_stdout, child_stderr = child.communicate()
+    if child.returncode != 0:
+        raise AssertionError(
+            f"ArtifactSet descriptor was not usable at child launch: {child_stdout}{child_stderr}"
+        )
+
+    class _D1ProbeProcess:
+        args = argv
+        pid = 2_147_483_647
+        returncode = 0
+
+        @staticmethod
+        def poll():
+            return 0
+
+    return _D1ProbeProcess()
+
+subprocess.Popen = _d1_probe_popen
+'''
+            source_line = helper_source.index(marker)
+            line_start = helper_source.rfind("\n", 0, source_line) + 1
+            indent = helper_source[line_start:source_line]
+            helper_source = (
+                helper_source[:line_start]
+                + textwrap.indent(probe, indent)
+                + helper_source[line_start:]
+            )
+        helper_path = runner_temp / "ci_build_artifacts.py"
+        helper_path.write_text(helper_source, encoding="utf-8")
+        helper_path.chmod(0o400)
+        self.assertTrue(helper_path.is_file())
+        self.assertFalse(helper_path.is_symlink())
+        return helper_path
 
     def create_changelog_cache_fixture(self, runner_temp):
         cache_root = runner_temp / "verjson-changelog-tools-test"
@@ -572,8 +856,10 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         symlink_npm_cli_layout=False,
         extra_npm_cli=False,
         script_plan=None,
+        verified_artifact=False,
+        bwrap_probe=False,
     ):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as cleanup_stack:
             root = Path(directory)
             runner_temp = root / "runner-temp"
             runner_temp.mkdir()
@@ -697,6 +983,21 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                     ],
                     check=True,
                 )
+            def restore_tool_tree_owner():
+                if root_owned_tools or tool_root_uid is not None or foreign_entry is not None:
+                    subprocess.run(
+                        [
+                            "sudo",
+                            "-n",
+                            "chown",
+                            "-R",
+                            f"{os.getuid()}:{os.getgid()}",
+                            str(tool_bin.parent),
+                        ],
+                        check=True,
+                    )
+
+            cleanup_stack.callback(restore_tool_tree_owner)
             fixture_roots = []
             if pwsh_fixture is not None:
                 fixture_usr = root / "usr"
@@ -745,7 +1046,8 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                 "RUNNER_TEMP": str(runner_temp),
                 "RUNNER_ENVIRONMENT": "github-hosted",
                 "RUNNER_OS": "Linux",
-                "GITHUB_ENV": str(command_file),
+            "GITHUB_ENV": str(command_file),
+            "GITHUB_OUTPUT": str(runner_temp / "GITHUB_OUTPUT"),
                 **plan_environment,
                 "CANDIDATE_CACHE_ROOT": str(runner_temp / "verjson-candidate-caches-test"),
                 "npm_config_cache": str(baseline),
@@ -757,6 +1059,55 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                 "PWD": str(workspace),
             }
             env.update(environment_updates or {})
+            if verified_artifact:
+                artifact_source = runner_temp / "artifact-source"
+                artifact_source.mkdir()
+                (artifact_source / "app.js").write_bytes(b"verified ArtifactSet bytes")
+                identity = {
+                    "repository": "Verjson/app",
+                    "ref": "refs/heads/main",
+                    "commit": "a" * 40,
+                    "callerWorkflowSha": "b" * 40,
+                    "reusableWorkflowSha": "c" * 40,
+                    "runId": "123",
+                    "runAttempt": "1",
+                    "lane": "unit",
+                    "profile": "d" * 64,
+                    "commands": {"full": ["build"]},
+                    "inputs": {"node-version": "24"},
+                    "toolchain": {"node": "24.1.0"},
+                }
+                archive = runner_temp / "artifact-set.tar.gz"
+                exported = artifact_helper.export_artifact(
+                    artifact_source,
+                    archive,
+                    identity=identity,
+                    roots=["app.js"],
+                    consumers=1,
+                )
+                artifact_digest = artifact_helper._file_digest(archive)
+                verified_root = runner_temp / "ci-build-artifact-verified"
+                verified_result = artifact_helper.verify_and_extract(
+                    archive,
+                    verified_root,
+                    expected_digest=artifact_digest,
+                    expected_identity=identity,
+                    artifact_id="101",
+                    consumers=1,
+                )
+                manifest_path = runner_temp / "ci-build-artifact-manifest.json"
+                manifest_path.write_text(
+                    json.dumps(verified_result["manifest"], sort_keys=True, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+                manifest_path.chmod(0o400)
+                env.update(
+                    {
+                        "BUILD_ARTIFACT_ROLE": "consumer",
+                        "BUILD_ARTIFACT_ID": "101",
+                        "BUILD_ARTIFACT_DIGEST": artifact_digest,
+                    }
+                )
             env = {
                 name: (
                     str(workspace)
@@ -815,6 +1166,13 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                     'is_relative_to("/opt/microsoft/powershell")',
                     f'is_relative_to("{fixture_opt / "microsoft" / "powershell"}")',
                 )
+            helper_path = self.stage_candidate_helper(
+                runner_temp, candidate_run, bwrap_probe=bwrap_probe
+            )
+            self.assertTrue(
+                workspace.is_dir(),
+                f"candidate workspace disappeared before helper invocation: {workspace}; root={list(root.iterdir())}",
+            )
             result = subprocess.run(
                 ["/usr/bin/bash", "-c", candidate_run],
                 cwd=workspace,
@@ -822,6 +1180,7 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
+            self.assertNotIn(f"can't open file '{helper_path}'", result.stderr)
             if swap_thread is not None:
                 swap_thread.join(timeout=5)
                 self.assertFalse(swap_thread.is_alive())
@@ -877,6 +1236,7 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                         json.dumps({"scripts": {"first": "true"}}), encoding="utf-8"
                     )
                     run = self.candidate_plan_step()["run"]
+                    self.stage_candidate_helper(runner_temp, run)
                     result = subprocess.run(
                         ["/usr/bin/bash", "-c", run],
                         cwd=workspace,
@@ -886,6 +1246,7 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                             "RUNNER_ENVIRONMENT": "github-hosted",
                             "RUNNER_OS": "Linux",
                             "GITHUB_ENV": str(command_file),
+                            "GITHUB_OUTPUT": str(runner_temp / "GITHUB_OUTPUT"),
                             **self.script_plan_environment(runner_temp, '["first"]'),
                             "CANDIDATE_CACHE_ROOT": str(baseline),
                             "npm_config_cache": str(baseline),
@@ -949,7 +1310,8 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("service variables reached candidate npm script", result.stdout)
         plan_run = self.candidate_plan_step()["run"]
-        self.assertIn('*([] if requires_services else ["--unshare-net"])', plan_run)
+        self.assertIn('legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]', plan_run)
+        self.assertIn("*legacy_network_args,", plan_run)
         self.assertIn(
             "if any(requires_services for _directory, _name, _unset_env, requires_services in normalized):",
             plan_run,
@@ -1263,7 +1625,11 @@ PY
                 self.assertEqual([], remaining)
 
         steps = self.workflow["jobs"]["build-test"]["steps"]
-        plan_index = steps.index(self.candidate_plan_step())
+        plan_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step.get("name") == "Run exact credentialless consumer script plan"
+        )
         cleanup = steps[plan_index + 1]
         self.assertEqual("Remove isolated candidate runtime caches", cleanup["name"])
         self.assertTrue(cleanup["if"].startswith("always() && "))
@@ -1376,8 +1742,10 @@ PY
             subprocess.run(
                 ["sudo", "-n", "chown", "-R", "0:0", str(tool_bin.parent)], check=True
             )
+            candidate_run = self.candidate_plan_step()["run"]
+            helper_path = self.stage_candidate_helper(runner_temp, candidate_run)
             process = subprocess.Popen(
-                ["/usr/bin/bash", "-c", self.candidate_plan_step()["run"]],
+                ["/usr/bin/bash", "-c", candidate_run],
                 cwd=workspace,
                 env={
                     **os.environ,
@@ -1386,6 +1754,7 @@ PY
                     "RUNNER_ENVIRONMENT": "github-hosted",
                     "RUNNER_OS": "Linux",
                     "GITHUB_ENV": str(command_file),
+                    "GITHUB_OUTPUT": str(runner_temp / "GITHUB_OUTPUT"),
                     **self.script_plan_environment(runner_temp, '["first"]'),
                     "CANDIDATE_CACHE_ROOT": str(runner_temp / "verjson-candidate-caches-test"),
                     "npm_config_cache": str(baseline),

@@ -25,6 +25,9 @@ platform	bash scripts/ci-gate/node-ci-secretless.test.sh
 platform	python3 scripts/ci-gate/protected-type-surface-baseline.test.py
 platform	python3 scripts/gen-node-ci-protected-move-step.test.py
 platform	python3 scripts/ci-gate/ci-levels.test.py
+platform	python3 scripts/ci-gate/ci-build-artifacts.test.py
+platform	python3 -I scripts/ci-gate/node-ci-secretless-protected-manifests.test.py
+platform	python3 scripts/ci-gate/node-ci-python-heredocs.test.py
 platform	python3 scripts/ci-gate/node-ci-script-plan.test.py
 platform	python3 scripts/ci-gate/node-ci-secretless-range-resolution.test.py
 platform	@budget=90 python3 scripts/ci-gate/compatibility-sandbox-provisioning.test.py

@@ -41,7 +41,149 @@ on:
       should-run:
         description: Whether the lane executed or deferred on the release-age gate.
         value: ${{ jobs.eligibility.outputs.should-run }}
+      build-artifact-share-selected:
+        description: Whether trusted preflight selected same-run artifact sharing.
+        value: ${{ jobs.artifact-preflight.outputs.share-selected }}
+      build-artifact-mode-share-eligible:
+        description: Whether the trusted mode gate permits same-run sharing for this event.
+        value: ${{ jobs.artifact-mode-gate.outputs.share-eligible }}
+      build-artifact-needs-results:
+        description: Compact prerequisite results validated by trusted preflight.
+        value: ${{ jobs.artifact-preflight.outputs.needs-results }}
+      build-artifact-producer-plan:
+        description: Trusted producer script plan selected by preflight.
+        value: ${{ jobs.artifact-preflight.outputs.producer-plan }}
+      build-artifact-consumer-plans:
+        description: Trusted shared plans for each participant lane.
+        value: ${{ jobs.artifact-preflight.outputs.consumer-plans }}
+      build-artifact-profile:
+        description: Aggregate profile digest for the selected ArtifactSet.
+        value: ${{ jobs.artifact-preflight.outputs.profile }}
+      build-artifact-export-paths:
+        description: Trusted export roots selected by same-run preflight.
+        value: ${{ jobs.artifact-preflight.outputs.export-paths }}
+      build-artifact-runner-image:
+        description: Trusted runner image identity selected by same-run preflight.
+        value: ${{ jobs.artifact-preflight.outputs.runner-image }}
+      build-artifact-participants:
+        description: All participant lanes declared by trusted ArtifactSet policy.
+        value: ${{ jobs.artifact-preflight.outputs.participants }}
+      build-artifact-aggregate-lanes:
+        description: Participant lanes scheduled for this event, branch, and prerequisite state.
+        value: ${{ jobs.artifact-preflight.outputs.aggregate-lanes }}
+      build-artifact-package-manager-version:
+        description: Exact package-manager version bound by trusted preflight.
+        value: ${{ jobs.artifact-preflight.outputs.package-manager-version }}
+      build-artifact-id:
+        description: Exact same-run ArtifactSet ID from the trusted producer.
+        value: ${{ jobs.build-test.outputs.artifact-id }}
+      build-artifact-digest:
+        description: Exact same-run ArtifactSet digest from the trusted producer.
+        value: ${{ jobs.build-test.outputs.artifact-digest }}
+      build-artifact-share-available:
+        description: Whether producer export and upload completed for this run attempt.
+        value: ${{ jobs.build-test.outputs.share-available }}
+      build-artifact-upload-result:
+        description: Trusted producer upload step outcome.
+        value: ${{ jobs.build-test.outputs.upload-result }}
+      build-artifact-receipt:
+        description: Trusted per-lane TestReceipt bytes.
+        value: ${{ jobs.build-test.outputs.receipt }}
+      build-artifact-receipt-id:
+        description: Trusted per-lane TestReceipt ID.
+        value: ${{ jobs.build-test.outputs.receipt-id }}
+      build-artifact-receipt-digest:
+        description: Trusted per-lane TestReceipt digest.
+        value: ${{ jobs.build-test.outputs.receipt-digest }}
+      build-artifact-command-digest:
+        description: Digest of the exact trusted per-lane script entries executed.
+        value: ${{ jobs.build-test.outputs.command-digest }}
     inputs:
+      build-artifact-role:
+        description: Internal role for the typed same-run buildArtifact plan.
+        required: false
+        type: string
+        default: level
+      build-artifact-mode-share-eligible:
+        description: Trusted mode-gate output passed only to artifact preflight.
+        required: false
+        type: boolean
+        default: false
+      build-artifact-mode-plan:
+        description: Caller event and branch filters checked by the trusted mode gate.
+        required: false
+        type: string
+        default: '[]'
+      build-artifact-plan-json:
+        description: Typed caller plan checked by trusted preflight or executed by the producer.
+        required: false
+        type: string
+        default: '{}'
+      build-artifact-authorization-plan-json:
+        description: Complete typed caller plan independently reauthorized for producer and consumer roles.
+        required: false
+        type: string
+        default: '{}'
+      build-artifact-needs-results:
+        description: Direct prerequisite results visible to trusted selection preflight.
+        required: false
+        type: string
+        default: '{}'
+      build-artifact-consumer-plans:
+        description: Trusted full and non-app shared plans for consumer lanes.
+        required: false
+        type: string
+        default: '{}'
+      build-artifact-level-id:
+        description: Declared participant lane ID receiving an ArtifactSet.
+        required: false
+        type: string
+        default: ''
+      build-artifact-id:
+        description: Exact same-run ArtifactSet ID to download by ID.
+        required: false
+        type: string
+        default: ''
+      build-artifact-digest:
+        description: Exact same-run ArtifactSet digest to verify after download.
+        required: false
+        type: string
+        default: ''
+      build-artifact-profile:
+        description: Expected build-profile digest for the selected ArtifactSet.
+        required: false
+        type: string
+        default: ''
+      build-artifact-producer-plan:
+        description: Trusted build-only plan used to bind ArtifactSet receipts.
+        required: false
+        type: string
+        default: '{}'
+      build-artifact-paths:
+        description: Trusted normalized export roots selected by preflight.
+        required: false
+        type: string
+        default: '[]'
+      build-artifact-participant-count:
+        description: Bounded participant count used for expanded-byte accounting.
+        required: false
+        type: number
+        default: 1
+      build-artifact-runner-image:
+        description: Expected hosted runner image identity selected by preflight.
+        required: false
+        type: string
+        default: '{}'
+      build-artifact-node-version:
+        description: Exact Node version used by trusted ArtifactSet preflight.
+        required: false
+        type: string
+        default: ''
+      build-artifact-package-manager-version:
+        description: Exact package-manager version bound by trusted preflight.
+        required: false
+        type: string
+        default: ''
       node-version:
         description: Node.js version for actions/setup-node
         required: false
@@ -457,6 +599,34 @@ on:
         required: false
 
 jobs:
+  artifact-mode-gate:
+    if: inputs.build-artifact-role == 'mode-gate'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      passed: ${{ steps.mode.outputs.passed }}
+      share-eligible: ${{ steps.mode.outputs.share-eligible }}
+    steps:
+      - name: Download trusted ArtifactSet policy helper
+        id: helper
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_build_artifacts.py" -o "$RUNNER_TEMP/ci_build_artifacts.py"
+      - name: Require event-specific secretless execution modes
+        id: mode
+        env:
+          BUILD_ARTIFACT_MODE_PLAN: ${{ inputs.build-artifact-mode-plan }}
+          SECRETLESS_PR: ${{ inputs.secretless-pr }}
+          SECRETLESS_TRUSTED_REF: ${{ inputs.secretless-trusted-ref }}
+          BUILD_ARTIFACT_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+        run: |
+          set -euo pipefail
+          python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" mode-gate
+
   # Defer CI while a Renovate PR is held by its release-age gate: running the
   # suite now is pure waste — the PR cannot merge until `renovate/stability-days`
   # clears, and Renovate then rebases onto a drifted `main`, re-running
@@ -483,6 +653,15 @@ jobs:
     outputs:
       should-run: ${{ steps.check.outputs.should-run }}
     steps:
+      - name: Reject unknown reusable build-artifact roles
+        env:
+          BUILD_ARTIFACT_ROLE: ${{ inputs.build-artifact-role }}
+        run: |
+          set -euo pipefail
+          case "$BUILD_ARTIFACT_ROLE" in
+            level|mode-gate|preflight|producer|consumer) ;;
+            *) echo "::error::unknown internal build-artifact role" >&2; exit 1 ;;
+          esac
       - name: Require a GitHub-hosted secretless build lane
         # build-test runs a secretless call on this lane, ahead of the caller's
         # runner, and its lifecycle rebuild and candidate sandbox exit unless the
@@ -590,7 +769,7 @@ jobs:
   # nothing re-fires this run until Renovate rebases onto a new head.
   deferred-ci:
     needs: eligibility
-    if: needs.eligibility.outputs.should-run == 'false'
+    if: needs.eligibility.outputs.should-run == 'false' && (inputs.build-artifact-role == 'level' || inputs.build-artifact-role == 'consumer' || inputs.build-artifact-role == 'producer')
     # Pinned to GitHub-hosted capacity, unlike every other job here. ADR 0033's
     # runner routing exists to keep real CI work on org capacity; this job checks
     # out nothing, holds no permissions, and runs one `echo && exit 1`, so it
@@ -607,9 +786,70 @@ jobs:
           echo "::error title=CI deferred::org CI is deferred on this head: renovate/stability-days is pending, so build-test reported success without executing a single verification step. Nothing on this head has been verified — no test, lint, type check, or repository-local contract guard has run (Verjson/verjson-cli#251). CI executes for real once the release-age gate clears and Renovate rebases." >&2
           exit 1
 
+  artifact-preflight:
+    needs: [eligibility]
+    if: inputs.build-artifact-role == 'preflight' && needs.eligibility.outputs.should-run != 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      share-selected: ${{ steps.select.outputs.share-selected }}
+      reason: ${{ steps.select.outputs.reason }}
+      producer-plan: ${{ steps.select.outputs.producer-plan }}
+      consumer-plans: ${{ steps.select.outputs.consumer-plans }}
+      profile: ${{ steps.select.outputs.profile }}
+      export-paths: ${{ steps.select.outputs.export-paths }}
+      runner-image: ${{ steps.select.outputs.runner-image }}
+      participants: ${{ steps.select.outputs.participants }}
+      aggregate-lanes: ${{ steps.select.outputs.aggregate-lanes }}
+      package-manager-version: ${{ steps.select.outputs.package-manager-version }}
+      needs-results: ${{ steps.select.outputs.needs-results }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.head-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: ${{ inputs.build-artifact-node-version }}
+      - id: package-manager-version
+        run: echo "value=$(npm --version)" >> "$GITHUB_OUTPUT"
+      - name: Download immutable ArtifactSet policy and helpers
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          trusted_root="$RUNNER_TEMP/ci-build-artifact-trusted"
+          mkdir -m 700 "$trusted_root"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_build_artifacts.py" -o "$trusted_root/ci_build_artifacts.py"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/.github/actions/node-ci-script-plan/script_plan.py" -o "$trusted_root/script_plan.py"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/config/ci-build-artifact-policy.json" -o "$trusted_root/policy.json"
+          echo "CI_BUILD_ARTIFACT_TRUSTED_ROOT=$trusted_root" >> "$GITHUB_ENV"
+      - name: Select sharing only from trusted policy and validated inputs
+        id: select
+        env:
+          NODE_CI_SCRIPT_PLAN_DIR: ${{ runner.temp }}/ci-build-artifact-trusted
+          BUILD_ARTIFACT_POLICY_FILE: ${{ runner.temp }}/ci-build-artifact-trusted/policy.json
+          BUILD_ARTIFACT_PLAN_JSON: ${{ inputs.build-artifact-plan-json }}
+          BUILD_ARTIFACT_MODE_SHARE_ELIGIBLE: ${{ inputs.build-artifact-mode-share-eligible }}
+          BUILD_ARTIFACT_NEEDS_RESULTS: ${{ inputs.build-artifact-needs-results }}
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private == true && 'true' || 'false' }}
+          CALLER_COMMIT: ${{ inputs.head-sha }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          CALLER_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          REUSABLE_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          BUILD_ARTIFACT_PACKAGE_MANAGER_VERSION: ${{ steps.package-manager-version.outputs.value }}
+          RUNNER_POLICY: ${{ vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]' }}
+        run: |
+          set -euo pipefail
+          python3 -I "$RUNNER_TEMP/ci-build-artifact-trusted/ci_build_artifacts.py" preflight
+
   acquire-secretless-dependencies:
     needs: eligibility
-    if: needs.eligibility.outputs.should-run != 'false'
+    if: (inputs.build-artifact-role == 'level' || inputs.build-artifact-role == 'consumer' || inputs.build-artifact-role == 'producer') && needs.eligibility.outputs.should-run != 'false'
     runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -826,7 +1066,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.head-sha }}
-          fetch-depth: 0
           persist-credentials: false
       - name: Revalidate protected pull-request identity
         env:
@@ -1997,7 +2236,16 @@ jobs:
     # Skipping the JOB left that required context unsatisfied on held Renovate
     # PRs (#191). Only the execution steps skip on an explicit defer; an errored
     # eligibility job has an empty output and therefore still runs the suite.
-    if: always()
+    if: always() && (inputs.build-artifact-role == 'level' || inputs.build-artifact-role == 'consumer' || inputs.build-artifact-role == 'producer')
+    outputs:
+      artifact-id: ${{ steps.upload-build-artifact.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload-build-artifact.outputs.artifact-digest }}
+      upload-result: ${{ steps.upload-build-artifact.outcome }}
+      share-available: ${{ steps.upload-build-artifact.outputs.artifact-id != '' && steps.export-build-artifact.outputs.share-available == 'true' && steps.upload-build-artifact.outcome == 'success' }}
+      receipt: ${{ steps.create-build-artifact-receipt.outputs.receipt }}
+      receipt-id: ${{ steps.create-build-artifact-receipt.outputs.receipt-id }}
+      receipt-digest: ${{ steps.create-build-artifact-receipt.outputs.receipt-digest }}
+      command-digest: ${{ steps.run-script-plan.outputs.command-digest }}
     # Runner routing is policy, not preference — see ADR 0033. In tier order:
     # an explicit `runner` input wins; a caller outside Verjson gets hosted
     # (portable, their billing); a Verjson PRIVATE repo gets the general
@@ -2031,7 +2279,7 @@ jobs:
         if: needs.eligibility.outputs.should-run == 'false'
         run: echo "::notice title=CI deferred::CI is deferred until renovate/stability-days clears and Renovate rebases."
       - name: Require completed secretless dependency acquisition
-        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && needs.acquire-secretless-dependencies.result != 'success'
+        if: needs.eligibility.outputs.should-run != 'false' && needs.acquire-secretless-dependencies.result != 'success'
         env:
           ELIGIBILITY_RESULT: ${{ needs.eligibility.result }}
           ACQUISITION_RESULT: ${{ needs.acquire-secretless-dependencies.result }}
@@ -2261,6 +2509,127 @@ jobs:
           package-manager-cache: false
           registry-url: ${{ inputs.scope != '' && 'https://npm.pkg.github.com' || '' }}
           scope: ${{ inputs.scope }}
+      - name: Verify selected ArtifactSet caller commit checkout
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.build-artifact-role == 'producer' || inputs.build-artifact-role == 'consumer')
+        env:
+          CALLER_COMMIT: ${{ inputs.head-sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CALLER_COMMIT" =~ ^[0123456789abcdef]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" = "$CALLER_COMMIT" ]] || {
+            echo "::error::ArtifactSet execution checkout differs from trusted preflight commit" >&2
+            exit 1
+          }
+      - name: Download pinned protected candidate helper
+        if: needs.eligibility.outputs.should-run != 'false'
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          [[ -n "$RUNNER_TEMP" && "$RUNNER_TEMP" = /* && ! -L "$RUNNER_TEMP" ]]
+          helper="$RUNNER_TEMP/ci_build_artifacts.py"
+          [[ ! -e "$helper" && ! -L "$helper" ]]
+          temporary="$(mktemp "$RUNNER_TEMP/.ci-build-artifacts.XXXXXX")"
+          trap 'rm -f -- "$temporary"' EXIT
+          curl -fsSL --proto "=https" --proto-redir "=https" --max-filesize 16777216 \
+            -o "$temporary" \
+            "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_build_artifacts.py"
+          [[ -f "$temporary" && ! -L "$temporary" ]]
+          chmod 0400 "$temporary"
+          mv -- "$temporary" "$helper"
+          trap - EXIT
+      - name: Authorize producer or consumer from immutable policy
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.build-artifact-role == 'producer' || inputs.build-artifact-role == 'consumer')
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          REUSABLE_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          CALLER_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          CALLER_COMMIT: ${{ inputs.head-sha }}
+          BUILD_ARTIFACT_ROLE: ${{ inputs.build-artifact-role }}
+          BUILD_ARTIFACT_LEVEL_ID: ${{ inputs.build-artifact-level-id }}
+          BUILD_ARTIFACT_PARTICIPANT_COUNT: ${{ inputs.build-artifact-participant-count }}
+          BUILD_ARTIFACT_AUTHORIZATION_PLAN_JSON: ${{ inputs.build-artifact-authorization-plan-json }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_NODE_VERSION: ${{ toJSON(inputs.node-version) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_TIMEOUT_MINUTES: ${{ toJSON(inputs.timeout-minutes) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_CACHE: ${{ toJSON(inputs.cache) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_CACHE_MAX_MB: ${{ toJSON(inputs.cache-max-mb) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_CACHE_DEPENDENCY_PATH: ${{ toJSON(inputs.cache-dependency-path) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_BROWSER_CACHE: ${{ toJSON(inputs.browser-cache) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_PACKAGE_MANAGER: ${{ toJSON(inputs.package-manager) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SCOPE: ${{ toJSON(inputs.scope) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_PR: ${{ toJSON(inputs.secretless-pr) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_TRUSTED_REF: ${{ toJSON(inputs.secretless-trusted-ref) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_RUNTIME_PUBLIC_CACHE: ${{ toJSON(inputs.secretless-runtime-public-cache) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_APPROVED_INTERNAL_PACKAGES: ${{ toJSON(inputs.approved-internal-packages) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_APPROVED_INTERNAL_SCOPES: ${{ toJSON(inputs.approved-internal-scopes) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_COMPATIBILITY_RANGES: ${{ toJSON(inputs.secretless-compatibility-ranges) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_AUXILIARY_SOURCE: ${{ toJSON(inputs.secretless-auxiliary-source) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_REBUILD_PACKAGES: ${{ toJSON(inputs.secretless-rebuild-packages) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_SKIP_INSTALL_SCRIPTS: ${{ toJSON(inputs.secretless-skip-install-scripts) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_REBUILD_ENV: ${{ toJSON(inputs.secretless-rebuild-env) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_NESTED_MANIFESTS: ${{ toJSON(inputs.secretless-nested-manifests) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_CI_SCRIPT_PLAN: ${{ toJSON(inputs.secretless-ci-script-plan) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_CI_NON_APP_SCRIPT_PLAN: ${{ toJSON(inputs.secretless-ci-non-app-script-plan) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_CI_NON_APP_PATHS: ${{ toJSON(inputs.secretless-ci-non-app-paths) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_SCHEMA_DIR: ${{ toJSON(inputs.schema-dir) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_RUNNER: ${{ toJSON(inputs.runner) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_DB_IMAGE: ${{ toJSON(inputs.db-image) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_DB_PORT: ${{ toJSON(inputs.db-port) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_DB_HEALTH_CMD: ${{ toJSON(inputs.db-health-cmd) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_DB_HOST: ${{ toJSON(inputs.db-host) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_DB_ENV: ${{ toJSON(inputs.db-env) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_CACHE_IMAGE: ${{ toJSON(inputs.cache-image) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_CACHE_HEALTH_CMD: ${{ toJSON(inputs.cache-health-cmd) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_CACHE_ENV: ${{ toJSON(inputs.cache-env) }}
+          BUILD_ARTIFACT_PLAN_JSON: ${{ inputs.build-artifact-plan-json }}
+          BUILD_ARTIFACT_CONSUMER_PLANS: ${{ inputs.build-artifact-consumer-plans }}
+          BUILD_ARTIFACT_NEEDS_RESULTS: ${{ inputs.build-artifact-needs-results }}
+          BUILD_ARTIFACT_PATHS_JSON: ${{ inputs.build-artifact-paths }}
+          BUILD_ARTIFACT_RUNNER_IMAGE_JSON: ${{ inputs.build-artifact-runner-image }}
+          BUILD_ARTIFACT_PROFILE: ${{ inputs.build-artifact-profile }}
+          BUILD_ARTIFACT_NODE_VERSION: ${{ inputs.node-version }}
+          BUILD_ARTIFACT_PACKAGE_MANAGER: ${{ inputs.package-manager }}
+          BUILD_ARTIFACT_PACKAGE_MANAGER_VERSION: ${{ inputs.build-artifact-package-manager-version }}
+          BUILD_ARTIFACT_ID: ${{ inputs.build-artifact-id }}
+          BUILD_ARTIFACT_DIGEST: ${{ inputs.build-artifact-digest }}
+          BUILD_ARTIFACT_POLICY_FILE: ${{ runner.temp }}/ci-build-artifact-policy.json
+          NODE_CI_SCRIPT_PLAN_DIR: ${{ runner.temp }}
+          SECRETLESS_PR: ${{ inputs.secretless-pr }}
+          SECRETLESS_TRUSTED_REF: ${{ inputs.secretless-trusted-ref }}
+          BUILD_ARTIFACT_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private == true && 'true' || 'false' }}
+          RUNNER_POLICY: ${{ vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]' }}
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          [[ -f "$RUNNER_TEMP/ci_build_artifacts.py" && ! -L "$RUNNER_TEMP/ci_build_artifacts.py" ]]
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/.github/actions/node-ci-script-plan/script_plan.py" -o "$RUNNER_TEMP/script_plan.py"
+          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/config/ci-build-artifact-policy.json" -o "$RUNNER_TEMP/ci-build-artifact-policy.json"
+          python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" authorize-role
+      - name: Require exact selected runner image and Node version
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.build-artifact-role == 'producer' || inputs.build-artifact-role == 'consumer')
+        env:
+          BUILD_ARTIFACT_RUNNER_IMAGE_JSON: ${{ inputs.build-artifact-runner-image }}
+          EXPECTED_NODE_VERSION: ${{ inputs.node-version }}
+          EXPECTED_PACKAGE_MANAGER_VERSION: ${{ inputs.build-artifact-package-manager-version }}
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          import json
+          import os
+          import subprocess
+          expected = json.loads(os.environ["BUILD_ARTIFACT_RUNNER_IMAGE_JSON"])
+          if expected != {"os": os.environ.get("ImageOS"), "version": os.environ.get("ImageVersion")}:
+              raise SystemExit("selected ArtifactSet runner image differs from producer profile")
+          actual_node = subprocess.check_output(["node", "--version"], text=True).strip().removeprefix("v")
+          if actual_node != os.environ["EXPECTED_NODE_VERSION"].removeprefix("v"):
+              raise SystemExit("selected ArtifactSet Node version differs from producer profile")
+          actual_package_manager = subprocess.check_output(["npm", "--version"], text=True).strip()
+          if actual_package_manager != os.environ["EXPECTED_PACKAGE_MANAGER_VERSION"].removeprefix("v"):
+            raise SystemExit("selected ArtifactSet package-manager version differs from trusted profile")
+          PY
       - name: Require an unused secretless restore path
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         env:
@@ -5998,13 +6367,82 @@ jobs:
             decide true "light plan: every changed path is non-application"
           fi
           decide false "full plan: the diff is not provably non-application"
+      - name: Download exact same-run ArtifactSet
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.build-artifact-role == 'consumer'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ inputs.build-artifact-id }}
+          path: ${{ runner.temp }}/ci-build-artifact-download
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Verify and safely extract read-only ArtifactSet
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.build-artifact-role == 'consumer'
+        env:
+          ARTIFACT_ID: ${{ inputs.build-artifact-id }}
+          ARTIFACT_DIGEST: ${{ inputs.build-artifact-digest }}
+          BUILD_ARTIFACT_COMMANDS_JSON: ${{ inputs.build-artifact-producer-plan }}
+          BUILD_ARTIFACT_PATHS_JSON: ${{ inputs.build-artifact-paths }}
+          BUILD_ARTIFACT_RUNNER_IMAGE_JSON: ${{ inputs.build-artifact-runner-image }}
+          BUILD_ARTIFACT_PROFILE: ${{ inputs.build-artifact-profile }}
+          BUILD_ARTIFACT_NODE_VERSION: ${{ inputs.node-version }}
+          BUILD_ARTIFACT_PACKAGE_MANAGER: ${{ inputs.package-manager }}
+          BUILD_ARTIFACT_PACKAGE_MANAGER_VERSION: ${{ inputs.build-artifact-package-manager-version }}
+          CALLER_COMMIT: ${{ inputs.head-sha }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          REUSABLE_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" verify-extract \
+            --artifact "$RUNNER_TEMP/ci-build-artifact-download/ci-build-artifact.tar.gz" \
+            --destination "$RUNNER_TEMP/ci-build-artifact-verified" \
+            --artifact-id "$ARTIFACT_ID" --digest "$ARTIFACT_DIGEST" \
+            --consumers '${{ inputs.build-artifact-participant-count }}'
+      - name: Select trusted shared script plan
+        id: select-build-artifact-plan
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.build-artifact-role == 'producer' || inputs.build-artifact-role == 'consumer')
+        env:
+          BUILD_ARTIFACT_ROLE: ${{ inputs.build-artifact-role }}
+          BUILD_ARTIFACT_LEVEL_ID: ${{ inputs.build-artifact-level-id }}
+          BUILD_ARTIFACT_PRODUCER_PLAN: ${{ inputs.build-artifact-plan-json }}
+          BUILD_ARTIFACT_CONSUMER_PLANS: ${{ inputs.build-artifact-consumer-plans }}
+          BUILD_ARTIFACT_NONAPP: ${{ steps.classify-diff.outputs.non-app == 'true' }}
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          import json
+          import os
+          role = os.environ["BUILD_ARTIFACT_ROLE"]
+          if role == "producer":
+              plans = json.loads(os.environ["BUILD_ARTIFACT_PRODUCER_PLAN"])
+          else:
+              plan_map = json.loads(os.environ["BUILD_ARTIFACT_CONSUMER_PLANS"])
+              plans = plan_map[os.environ["BUILD_ARTIFACT_LEVEL_ID"]]
+          variant = "nonapp" if os.environ.get("BUILD_ARTIFACT_NONAPP") == "true" else "full"
+          selected = plans.get(variant)
+          if not isinstance(selected, str) or not selected:
+              raise SystemExit("trusted shared script plan is missing")
+          plan = json.loads(selected)
+          if not isinstance(plan, list) or not plan:
+              raise SystemExit("trusted shared script plan is empty or invalid")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("plan<<artifact_plan\n" + selected + "\nartifact_plan\n")
+          PY
+      - name: Prove shared sandbox network boundary
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.build-artifact-role == 'producer' || inputs.build-artifact-role == 'consumer')
+        run: |
+          set -euo pipefail
+          /usr/bin/bwrap --unshare-user --unshare-net --disable-userns --cap-drop ALL \
+            --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+            --ro-bind /etc /etc --proc /proc --dev /dev --tmpfs /tmp \
+            --ro-bind "$RUNNER_TEMP/ci_build_artifacts.py" /tmp/ci_build_artifacts.py \
+            -- /usr/bin/python3 -I /tmp/ci_build_artifacts.py network-probe
       - name: Parse Node CI script plan
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         id: node-ci-script-plan
         uses: Verjson/.github/.github/actions/node-ci-script-plan@3b95498a2b59401c95986a1fec539a2aa4cef2b8
         with:
           mode: normalize
-          script-plan: ${{ steps.classify-diff.outputs.non-app == 'true' && inputs.secretless-ci-non-app-script-plan || inputs.secretless-ci-script-plan }}
+          script-plan: ${{ steps.select-build-artifact-plan.outputs.plan || (steps.classify-diff.outputs.non-app == 'true' && inputs.secretless-ci-non-app-script-plan || inputs.secretless-ci-script-plan) }}
           nested-manifests: ${{ inputs.secretless-nested-manifests }}
       - name: Export protected type-surface base SHA
         if: needs.eligibility.outputs.should-run != 'false' && inputs.protected-type-surface-declaration-path != ''
@@ -6096,9 +6534,13 @@ jobs:
           [ "$pr_head_repository" = "$ADMITTED_HEAD_REPOSITORY" ]
           [ "$pr_head_sha" = "$ADMITTED_HEAD_SHA" ]
       - name: Run exact credentialless consumer script plan
+        id: run-script-plan
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         env:
           NESTED_MANIFESTS: ${{ inputs.secretless-nested-manifests }}
+          BUILD_ARTIFACT_ROLE: ${{ inputs.build-artifact-role }}
+          VERJSON_CI_BUILD_ARTIFACT_ROOT: ${{ runner.temp }}/ci-build-artifact-verified
+          VERJSON_CI_BUILD_ARTIFACT_MANIFEST: ${{ runner.temp }}/ci-build-artifact-manifest.json
           DB_ENV: ${{ inputs.db-env }}
           CACHE_ENV: ${{ inputs.cache-env }}
           VERJSON_CI_TRUSTED_DB_HOST: ${{ steps.db-service.outputs.host }}
@@ -6116,6 +6558,7 @@ jobs:
             exit 1
           fi
           export VERJSON_CI_COMMAND_FILES_DIR="${GITHUB_ENV%/*}"
+          export VERJSON_CI_OUTPUT_FILE="$GITHUB_OUTPUT"
           unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY
           candidate_cache_supervisor_pid=''
           # shellcheck disable=SC2329 # invoked indirectly by the INT/TERM traps below.
@@ -6128,1173 +6571,7 @@ jobs:
           }
           trap 'forward_candidate_signal INT 130' INT
           trap 'forward_candidate_signal TERM 143' TERM
-          python3 -I - <<'PY' &
-          import hashlib
-          import json
-          import os
-          import re
-          import shutil
-          import signal
-          import stat
-          import subprocess
-          import sys
-          import time
-          from pathlib import Path
-          from urllib.parse import parse_qsl, unquote, urlsplit
-
-          checkout_root = Path.cwd().resolve()
-          normalized = []
-          run_defaults = os.environ.get("SCRIPT_PLAN_DEFAULT_PLAN") == "true"
-          env_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-          entries_path = Path(os.environ["SCRIPT_PLAN_ENTRIES_FILE"])
-          runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve()
-          if (
-              entries_path.is_symlink()
-              or entries_path.parent.resolve() != runner_temp
-              or not entries_path.is_file()
-          ):
-              sys.exit("normalized script-plan entries file is unavailable")
-          try:
-              normalized_entries = json.loads(entries_path.read_text(encoding="utf-8"))
-          except (OSError, json.JSONDecodeError) as error:
-              sys.exit(f"normalized script-plan entries file is invalid: {error}")
-          if not isinstance(normalized_entries, list):
-              sys.exit("normalized script-plan entries must be a JSON array")
-
-          nested_source = os.environ.get("NESTED_MANIFESTS", "").strip()
-          nested_manifests = []
-          nested_directories = []
-          if nested_source:
-              try:
-                  nested_manifests = json.loads(nested_source)
-              except json.JSONDecodeError as error:
-                  sys.exit(f"secretless-nested-manifests must be valid JSON: {error}")
-              if not isinstance(nested_manifests, list) or not 1 <= len(nested_manifests) <= 8:
-                  sys.exit("secretless-nested-manifests accepts 1-8 nested manifest objects")
-              segment_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-              for nested in nested_manifests:
-                  if (not isinstance(nested, dict)
-                          or set(nested) != {"path", "approvedPackages", "scriptPlan"}):
-                      sys.exit("each nested manifest requires exactly path, approvedPackages, and scriptPlan")
-                  nested_path = nested["path"]
-                  if (not isinstance(nested_path, str) or not nested_path
-                          or any(segment_pattern.fullmatch(segment) is None
-                                 for segment in nested_path.split("/"))):
-                      sys.exit("each nested manifest path must be a relative checkout directory")
-                  nested_plan = nested["scriptPlan"]
-                  if not isinstance(nested_plan, list) or len(nested_plan) > 8:
-                      sys.exit(f"{nested_path} scriptPlan accepts at most 8 entries")
-                  nested_directory = (checkout_root / nested_path).resolve()
-                  if not nested_directory.is_dir() or checkout_root not in nested_directory.parents:
-                      sys.exit(f"{nested_path} must resolve to a directory inside the checkout")
-                  nested_directories.append(nested_directory)
-
-          for entry in normalized_entries:
-              if not isinstance(entry, dict):
-                  sys.exit("normalized script-plan entries must be objects")
-              manifest_path = entry.get("manifestPath")
-              manifest_index = entry.get("manifestIndex")
-              if manifest_index is None:
-                  if manifest_path is not None:
-                      sys.exit("root script-plan entries cannot declare a manifest path")
-                  directory = checkout_root
-                  manifest_label = "package.json"
-              else:
-                  if (type(manifest_index) is not int
-                          or manifest_index < 0
-                          or manifest_index >= len(nested_manifests)
-                          or manifest_path != nested_manifests[manifest_index]["path"]):
-                      sys.exit("normalized nested script-plan entry has an invalid manifest")
-                  directory = nested_directories[manifest_index]
-                  manifest_label = f"{manifest_path}/package.json"
-              script = entry.get("script")
-              unset_env = entry.get("unsetEnv")
-              requires_services = entry.get("requiresServices")
-              if not isinstance(script, str) or not isinstance(unset_env, list) or type(requires_services) is not bool:
-                  sys.exit("normalized script-plan entry has invalid fields")
-              package = json.loads((directory / "package.json").read_text(encoding="utf-8"))
-              scripts = package.get("scripts")
-              if not isinstance(scripts, dict):
-                  sys.exit(f"{manifest_label} has no scripts object")
-              if script not in scripts:
-                  sys.exit(f"planned npm script absent from {manifest_label}: {script}")
-              normalized.append((directory, script, unset_env, requires_services))
-          if run_defaults:
-              root_scripts = json.loads(
-                  (checkout_root / "package.json").read_text(encoding="utf-8")
-              ).get("scripts", {})
-              if not isinstance(root_scripts, dict):
-                  sys.exit("package.json scripts must be an object")
-              for name in ("build", "typecheck", "test", "lint"):
-                  if name in ("build", "test") or name in root_scripts:
-                      normalized.append((checkout_root, name, [], name == "test"))
-          if any(requires_services for _directory, _name, _unset_env, requires_services in normalized):
-              if os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
-                  sys.exit(
-                      "candidate scripts requiring services need an isolated GitHub-hosted runner"
-                  )
-          candidate_service_env = {}
-          blocked_service_env = {
-              "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
-              "GITHUB_STEP_SUMMARY", "VERJSON_CI_TRUSTED_DB_HOST",
-              "VERJSON_CI_COMMAND_FILES_DIR", "GH_TOKEN",
-              "GITHUB_TOKEN", "NODE_AUTH_TOKEN",
-              "NPM_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "FTP_PROXY",
-              "AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS",
-              "AZURE_CREDENTIALS", "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
-              "ACTIONS_ID_TOKEN_REQUEST_URL", "BASH_ENV", "BASH_XTRACEFD", "ENV",
-              "PS4", "SHELLOPTS", "BASHOPTS", "PATH", "NODE_OPTIONS", "NODE_PATH",
-              "NODE_EXTRA_CA_CERTS", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
-              "PYTHONUSERBASE", "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
-              "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS",
-              "GIT_ASKPASS", "SSH_ASKPASS", "GIT_SSL_CAINFO", "GIT_SSL_CAPATH",
-              "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE",
-              "GCONV_PATH", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-              "http_proxy", "https_proxy", "all_proxy", "no_proxy",
-          }
-          blocked_service_prefixes = (
-              "GITHUB_", "RUNNER_", "ACTIONS_", "GH_", "DOCKER_", "AWS_", "GOOGLE_",
-              "AZURE_", "GCP_", "COREPACK_", "NPM_CONFIG_", "GIT_CONFIG_",
-              "LD_", "DYLD_", "POSTGRES_",
-          )
-          credential_environment_name_pattern = re.compile(
-              r"(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|PRIVATE[_-]?KEY|"
-              r"API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|BEARER|COOKIE|SESSION|JWT|AUTH)",
-              re.IGNORECASE,
-          )
-          credential_environment_ambiguous_name_pattern = re.compile(
-              r"(?<![A-Z0-9])(?:KEY|CODE|SIG)(?![A-Z0-9])",
-              re.IGNORECASE,
-          )
-
-          def credential_environment_name_is_sensitive(name):
-              normalized_name = name.upper()
-              if normalized_name.startswith("NPM_CONFIG_") and normalized_name != "NPM_CONFIG_CACHE":
-                  return True
-              if normalized_name == "PWD":
-                  return False
-              if credential_environment_name_pattern.search(name) is not None:
-                  return True
-              if normalized_name in {"EXIT_CODE", "CACHE_KEY", "PUBLIC_KEY"}:
-                  return False
-              return credential_environment_ambiguous_name_pattern.search(name) is not None
-
-          credential_parameter_name_pattern = re.compile(
-              r"(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|PRIVATE[_-]?KEY|"
-              r"API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|"
-              r"(?<![A-Z0-9])KEY(?![A-Z0-9])|(?<![A-Z0-9])CODE(?![A-Z0-9])|"
-              r"(?<![A-Z0-9])SIG(?![A-Z0-9])|BEARER|COOKIE|SESSION|JWT|"
-              r"(?<![A-Z0-9])AUTH(?:ORIZATION|ENTICATION)?(?![A-Z0-9]))",
-              re.IGNORECASE,
-          )
-          credential_parameter_pattern = re.compile(
-              r"(?:^|[;?&#=\s])(?:[A-Z0-9]+[_-])*(?:PASS(?:WORD|WD)?|PWD|SECRET|TOKEN|CREDENTIAL|"
-              r"PRIVATE[_-]?KEY|API[_-]?KEY|ACCESS[_-]?KEY|SIGNATURE|"
-              r"(?<![A-Z0-9])KEY(?![A-Z0-9])|(?<![A-Z0-9])CODE(?![A-Z0-9])|"
-              r"(?<![A-Z0-9])SIG(?![A-Z0-9])|"
-              r"BEARER|COOKIE|SESSION|JWT|"
-              r"(?<![A-Z0-9])AUTH(?:ORIZATION|ENTICATION)?(?![A-Z0-9]))\s*=",
-              re.IGNORECASE,
-          )
-
-          def credential_component_is_present(component):
-              for _ in range(8):
-                  if credential_parameter_pattern.search(component):
-                      return True
-                  if "=" in component and any(
-                      credential_parameter_name_pattern.search(key)
-                      for key, _value in parse_qsl(
-                          component, keep_blank_values=True, max_num_fields=128
-                      )
-                  ):
-                      return True
-                  decoded = unquote(component)
-                  if decoded == component:
-                      return False
-                  component = decoded
-              return True
-
-          def credential_environment_value_is_sensitive(name, value):
-              if name.upper() not in {"HTTP_PROXY", "HTTPS_PROXY", "FTP_PROXY", "ALL_PROXY"}:
-                  return False
-              try:
-                  parsed = urlsplit(value if "://" in value else f"//{value}")
-              except ValueError:
-                  return True
-              if parsed.username is not None or parsed.password is not None:
-                  return True
-              return any(
-                  credential_component_is_present(component)
-                  for component in (parsed.query, parsed.fragment)
-              )
-
-          def opaque_service_value_contains_userinfo(name, value):
-              normalized_name = name.upper()
-              connection_name_suffixes = (
-            "_URL", "_URI", "_DSN", "_CONNECTION_STRING", "_CONN_STRING", "_CONNSTR", "_CONN_STR",
-              )
-              is_connection_value = normalized_name in {
-            "URL", "URI", "DSN", "CONNECTION_STRING", "CONN_STRING", "CONNSTR", "CONN_STR",
-              } or normalized_name.endswith(connection_name_suffixes)
-              for _ in range(8):
-                  at_index = -1
-                  while True:
-                      at_index = value.find("@", at_index + 1)
-                      if at_index < 0:
-                          break
-                      userinfo = value[:at_index].rsplit("=", 1)[-1].rsplit(";", 1)[-1].rsplit("&", 1)[-1].rsplit(None, 1)[-1]
-                      endpoint = value[at_index + 1:]
-                      if userinfo.lower().startswith("mailto:"):
-                          mailto_local_part = userinfo[len("mailto:"):]
-                          if (
-                              re.fullmatch(r"[A-Za-z0-9_+-]+(?:\.[A-Za-z0-9_+-]+)*", mailto_local_part)
-                              and re.fullmatch(
-                                  r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
-                                  r"[A-Za-z]{2,63}",
-                                  endpoint,
-                              )
-                          ):
-                              continue
-                      if (
-                          is_connection_value
-                          or ":" in userinfo
-                          or
-                          re.match(r"(?:tcp|unix)\(", endpoint, re.IGNORECASE)
-                          or endpoint.startswith("/")
-                          or re.match(r"[A-Za-z0-9.-]+:\d+(?:/|$)", endpoint)
-                          or re.match(r"\[[^]]+\]:\d+(?:/|$)", endpoint)
-                          or re.match(r"[A-Za-z0-9.-]+/", endpoint)
-                          or re.fullmatch(r"(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])", endpoint, re.IGNORECASE)
-                      ):
-                          return True
-                  decoded = unquote(value)
-                  if decoded == value:
-                      return False
-                  value = decoded
-              return True
-
-          def validate_candidate_service_value(name, value):
-              if credential_environment_name_is_sensitive(name) and not (
-                  name.upper() == "OPENAI_API_KEY" and value == "ci-dummy-key"
-              ):
-                  sys.exit("candidate service environment includes a credential-bearing variable")
-              if "://" not in value:
-                  if (
-                      credential_component_is_present(value)
-                      or opaque_service_value_contains_userinfo(name, value)
-                  ):
-                      sys.exit("candidate service value contains credential-bearing data")
-                  return
-              if credential_parameter_pattern.search(value):
-                  sys.exit("candidate service value contains credential-bearing data")
-              try:
-                  parsed = urlsplit(value)
-                  has_credential_fields = any(
-                      credential_component_is_present(component)
-                      for component in (parsed.query, parsed.fragment)
-                  )
-              except ValueError:
-                  sys.exit("candidate service URL is malformed")
-              if has_credential_fields:
-                  sys.exit("candidate service URL contains credential-bearing data")
-              if parsed.username is not None or parsed.password is not None:
-                  local_service_hosts = {"localhost", "127.0.0.1", "::1"}
-                  trusted_db_host = os.environ.get(
-                      "VERJSON_CI_TRUSTED_DB_HOST", ""
-                  ).strip().strip("[]").lower()
-                  if trusted_db_host:
-                      local_service_hosts.add(trusted_db_host)
-                  if parsed.hostname is None or parsed.hostname.lower() not in local_service_hosts:
-                      sys.exit("credentialed candidate service URLs must target the local service")
-
-          if any(requires_services for _directory, _name, _unset_env, requires_services in normalized):
-              for service_name in ("DB_HOST", "DB_PORT", "CACHE_PORT"):
-                  if service_name in os.environ:
-                      service_value = os.environ[service_name]
-                      validate_candidate_service_value(service_name, service_value)
-                      candidate_service_env[service_name] = service_value
-              for source_name in ("DB_ENV", "CACHE_ENV"):
-                  for service_line in os.environ.get(source_name, "").splitlines():
-                      stripped_line = service_line.strip()
-                      if not stripped_line or stripped_line.startswith("#"):
-                          continue
-                      service_name, separator, _service_value = stripped_line.partition("=")
-                      if not separator or env_pattern.fullmatch(service_name) is None:
-                          sys.exit("candidate service environment is malformed")
-                      normalized_service_name = service_name.upper()
-                      if normalized_service_name.startswith("POSTGRES_"):
-                          continue
-                      if normalized_service_name in blocked_service_env or any(
-                          normalized_service_name.startswith(prefix)
-                          for prefix in blocked_service_prefixes
-                      ):
-                          sys.exit("candidate service environment includes a protected variable")
-                      if service_name in os.environ:
-                          service_value = os.environ[service_name]
-                          validate_candidate_service_value(service_name, service_value)
-                          candidate_service_env[service_name] = service_value
-          # BEGIN source candidate script execution
-          max_cache_files = 4096
-          max_cache_bytes = 268435456
-          sandbox_entrypoint = "import os, sys\nmax_fd = os.sysconf('SC_OPEN_MAX')\nif max_fd < 3: raise SystemExit('invalid file descriptor limit')\nos.closerange(3, max_fd)\nos.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
-          runner_temp_input = Path(os.environ["RUNNER_TEMP"])
-          if (
-              not runner_temp_input.is_absolute()
-              or runner_temp_input.is_symlink()
-              or not runner_temp_input.is_dir()
-              or runner_temp_input.resolve() != runner_temp_input
-          ):
-              sys.exit("RUNNER_TEMP is not a canonical directory")
-          runner_temp = runner_temp_input
-          corepack_default = Path.home() / ".cache/node/corepack"
-          configured_corepack_home = os.environ.get("COREPACK_HOME")
-          corepack_home_input = (
-              Path(configured_corepack_home) if configured_corepack_home else corepack_default
-          )
-          corepack_home = None
-          if corepack_home_input.exists() or corepack_home_input.is_symlink():
-              if (
-                  not corepack_home_input.is_absolute()
-                  or corepack_home_input.is_symlink()
-                  or not corepack_home_input.is_dir()
-                  or corepack_home_input.resolve() != corepack_home_input
-              ):
-                  sys.exit("Corepack cache is not a canonical directory")
-              expected_corepack_home = corepack_default.resolve()
-              if corepack_home_input != expected_corepack_home:
-                  sys.exit("Corepack cache is outside the runner's canonical cache path")
-              corepack_home = corepack_home_input
-          browser_cache = None
-          browser_cache_value = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
-          if browser_cache_value:
-              expected_browser_cache = runner_temp / (
-                  "verjson-playwright-browsers-"
-                  + os.environ.get("GITHUB_RUN_ID", "")
-                  + "-"
-                  + os.environ.get("GITHUB_RUN_ATTEMPT", "")
-              )
-              browser_cache = Path(browser_cache_value)
-              if (
-                  browser_cache != expected_browser_cache
-                  or browser_cache.is_symlink()
-                  or not browser_cache.is_dir()
-                  or browser_cache.resolve() != browser_cache
-                  or browser_cache.parent != runner_temp
-              ):
-                  sys.exit("Playwright browser cache is not the validated job-scoped RUNNER_TEMP directory")
-          changelog_ref = os.environ.get("VERJSON_CHANGELOG_CONTRACT_REF", "")
-          changelog_sha256 = os.environ.get("VERJSON_CHANGELOG_CONTRACT_SHA256", "")
-          if (
-              re.fullmatch(r"[0-9a-f]{40}", changelog_ref) is None
-              or re.fullmatch(r"[0-9a-f]{64}", changelog_sha256) is None
-          ):
-              sys.exit("pinned changelog contract identity is malformed")
-          changelog_cache_root = Path(os.environ.get("VERJSON_CHANGELOG_TOOL_CACHE", ""))
-          if (
-              not changelog_cache_root.is_absolute()
-              or changelog_cache_root.is_symlink()
-              or not changelog_cache_root.is_dir()
-              or changelog_cache_root.resolve() != changelog_cache_root
-              or changelog_cache_root.parent != runner_temp
-          ):
-              sys.exit("verified changelog cache is not a canonical RUNNER_TEMP child")
-          changelog_cache_root_metadata = changelog_cache_root.stat(follow_symlinks=False)
-          if (
-              not stat.S_ISDIR(changelog_cache_root_metadata.st_mode)
-              or changelog_cache_root_metadata.st_uid != os.getuid()
-              or changelog_cache_root_metadata.st_mode & 0o022
-          ):
-              sys.exit("verified changelog cache root has unsafe ownership or mode")
-          changelog_cache_entries = list(os.scandir(changelog_cache_root))
-          if len(changelog_cache_entries) != 1 or changelog_cache_entries[0].name != changelog_ref:
-              sys.exit("verified changelog cache contains unexpected entries")
-          changelog_cache_dir = changelog_cache_root / changelog_ref
-          changelog_cache_dir_metadata = changelog_cache_dir.stat(follow_symlinks=False)
-          if (
-              not stat.S_ISDIR(changelog_cache_dir_metadata.st_mode)
-              or changelog_cache_dir_metadata.st_uid != os.getuid()
-              or changelog_cache_dir_metadata.st_mode & 0o022
-          ):
-              sys.exit("verified changelog cache entry has unsafe ownership or mode")
-          changelog_cache_files = list(os.scandir(changelog_cache_dir))
-          if len(changelog_cache_files) != 1 or changelog_cache_files[0].name != "changelog.py":
-              sys.exit("verified changelog cache entry is incomplete")
-          changelog_contract_path = changelog_cache_dir / "changelog.py"
-          changelog_contract_metadata = changelog_contract_path.stat(follow_symlinks=False)
-          if (
-              not stat.S_ISREG(changelog_contract_metadata.st_mode)
-              or changelog_contract_metadata.st_uid != os.getuid()
-              or changelog_contract_metadata.st_nlink != 1
-              or changelog_contract_metadata.st_mode & 0o222
-              or changelog_contract_metadata.st_size > 16777216
-          ):
-              sys.exit("verified changelog contract file has unsafe ownership or mode")
-          try:
-              changelog_contract_fd = os.open(
-                  changelog_contract_path,
-                  os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-              )
-          except OSError:
-              sys.exit("verified changelog contract changed during validation")
-          opened_contract_metadata = os.fstat(changelog_contract_fd)
-          if (
-              opened_contract_metadata.st_dev != changelog_contract_metadata.st_dev
-              or opened_contract_metadata.st_ino != changelog_contract_metadata.st_ino
-              or opened_contract_metadata.st_uid != changelog_contract_metadata.st_uid
-              or opened_contract_metadata.st_size != changelog_contract_metadata.st_size
-          ):
-              os.close(changelog_contract_fd)
-              sys.exit("verified changelog contract changed during validation")
-          changelog_digest = hashlib.sha256()
-          with os.fdopen(changelog_contract_fd, "rb") as changelog_stream:
-              for chunk in iter(lambda: changelog_stream.read(1024 * 1024), b""):
-                  changelog_digest.update(chunk)
-          if changelog_digest.hexdigest() != changelog_sha256:
-              sys.exit("verified changelog contract does not match its pinned SHA-256")
-          changelog_cache_root_identity = (
-              changelog_cache_root_metadata.st_dev,
-              changelog_cache_root_metadata.st_ino,
-              changelog_cache_root_metadata.st_uid,
-              stat.S_IMODE(changelog_cache_root_metadata.st_mode),
-          )
-          baseline_value = os.environ.get("npm_config_cache", "").strip()
-          baseline = None
-          if baseline_value:
-              candidate_baseline = Path(os.path.abspath(baseline_value))
-              if candidate_baseline.exists() or candidate_baseline.is_symlink():
-                baseline = candidate_baseline
-                if not baseline.is_absolute() or baseline.is_symlink() or not baseline.is_dir():
-                  sys.exit("verified runtime cache is not an absolute regular directory")
-                if baseline.resolve() != baseline:
-                  sys.exit("verified runtime cache path contains a symlink")
-                try:
-                  baseline.resolve().relative_to(runner_temp)
-                except ValueError:
-                  sys.exit("verified runtime cache escapes RUNNER_TEMP")
-
-          bubblewrap = Path("/usr/bin/bwrap")
-          try:
-              bubblewrap_metadata = bubblewrap.stat(follow_symlinks=False)
-          except OSError:
-              sys.exit("verified bubblewrap namespace boundary is unavailable")
-          if (
-              not stat.S_ISREG(bubblewrap_metadata.st_mode)
-              or bubblewrap_metadata.st_uid != 0
-              or bubblewrap_metadata.st_mode & 0o022
-          ):
-              sys.exit("bubblewrap namespace boundary has unsafe ownership or mode")
-          bubblewrap_version = subprocess.run(
-              [str(bubblewrap), "--version"],
-              check=True,
-              capture_output=True,
-              text=True,
-          ).stdout
-          version_match = re.fullmatch(r"bubblewrap (\d+)\.(\d+)\.(\d+)\n?", bubblewrap_version)
-          if version_match is None or tuple(map(int, version_match.groups())) < (0, 9, 0):
-              sys.exit("bubblewrap namespace boundary is below version 0.9.0")
-
-          def inventory(root):
-              files = []
-              total_bytes = 0
-              pending = [root]
-              while pending:
-                  directory = pending.pop()
-                  for entry in os.scandir(directory):
-                      entry_path = Path(entry.path)
-                      mode = entry.stat(follow_symlinks=False).st_mode
-                      if stat.S_ISLNK(mode):
-                          sys.exit("verified runtime cache contains a symlink")
-                      if stat.S_ISDIR(mode):
-                          pending.append(entry_path)
-                          continue
-                      if not stat.S_ISREG(mode):
-                          sys.exit("verified runtime cache contains a special file")
-                      try:
-                          relative = entry_path.relative_to(root).as_posix()
-                      except ValueError:
-                          sys.exit("verified runtime cache entry escapes its root")
-                      try:
-                          descriptor = os.open(entry_path, os.O_RDONLY | os.O_NOFOLLOW)
-                      except OSError:
-                          sys.exit("verified runtime cache file changed during validation")
-                      descriptor_stat = os.fstat(descriptor)
-                      if not stat.S_ISREG(descriptor_stat.st_mode):
-                          os.close(descriptor)
-                          sys.exit("verified runtime cache file changed type during validation")
-                      size = descriptor_stat.st_size
-                      total_bytes += size
-                      if len(files) + 1 > max_cache_files or total_bytes > max_cache_bytes:
-                          sys.exit("verified runtime cache exceeds its file or byte bound")
-                      digest = hashlib.sha256()
-                      with os.fdopen(descriptor, "rb") as stream:
-                          for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                              digest.update(chunk)
-                      files.append((relative, size, digest.hexdigest()))
-              return tuple(sorted(files))
-
-          baseline_inventory = inventory(baseline) if baseline is not None else ()
-          cache_root = Path(os.environ["CANDIDATE_CACHE_ROOT"])
-          if (
-              not cache_root.is_absolute()
-              or Path(os.path.abspath(cache_root)) != cache_root
-              or cache_root.parent.resolve() != runner_temp
-          ):
-              sys.exit("candidate cache root escapes RUNNER_TEMP")
-          if cache_root.exists() or cache_root.is_symlink():
-              sys.exit("candidate cache root exists before script execution")
-          workspace_lexical = Path(os.environ.get("PWD", ""))
-          workspace = Path.cwd().resolve()
-          if (
-            not workspace_lexical.is_absolute()
-            or workspace_lexical != workspace
-            or workspace_lexical.resolve() != workspace_lexical
-            or workspace_lexical.is_symlink()
-            or not workspace.is_dir()
-          ):
-            sys.exit("candidate workspace is not a canonical directory")
-          git_metadata = workspace / ".git"
-          if (
-              git_metadata.is_symlink()
-              or not git_metadata.is_dir()
-              or git_metadata.resolve() != git_metadata
-          ):
-              sys.exit("candidate workspace Git metadata is not a canonical directory")
-          git_metadata_stat = git_metadata.stat(follow_symlinks=False)
-          if not stat.S_ISDIR(git_metadata_stat.st_mode) or git_metadata_stat.st_uid != os.getuid():
-              sys.exit("candidate workspace Git metadata has unexpected type or ownership")
-          git_metadata_identity = (
-              git_metadata_stat.st_dev,
-              git_metadata_stat.st_ino,
-              git_metadata_stat.st_uid,
-              stat.S_IMODE(git_metadata_stat.st_mode),
-          )
-          if workspace == runner_temp or workspace in runner_temp.parents or runner_temp in workspace.parents:
-              sys.exit("candidate workspace and RUNNER_TEMP overlap")
-          if (baseline is not None and baseline.parent != runner_temp) or cache_root.parent != runner_temp:
-              sys.exit("candidate cache roots are not exact RUNNER_TEMP children")
-          if baseline is not None and (baseline == cache_root or baseline in cache_root.parents or cache_root in baseline.parents):
-              sys.exit("candidate cache baseline and isolation root overlap")
-          trusted_tool_root_input = Path(os.environ.get("RUNNER_TOOL_CACHE", ""))
-          if (
-              not trusted_tool_root_input.is_absolute()
-              or trusted_tool_root_input.is_symlink()
-              or not trusted_tool_root_input.is_dir()
-              or trusted_tool_root_input.resolve() != trusted_tool_root_input
-          ):
-              sys.exit("trusted setup-node tool root unavailable or noncanonical")
-          trusted_tool_root = trusted_tool_root_input
-          hosted_tool_cache_root = Path("/opt/hostedtoolcache")
-          # uid 0 is root; uid 1001 is the "runner" account GitHub-hosted
-          # images provision and run Actions steps as.
-          hosted_tool_cache_uids = (0, 1001)
-
-          def paths_overlap(left, right):
-            return left == right or left in right.parents or right in left.parents
-
-          if paths_overlap(changelog_cache_root, cache_root) or (
-              baseline is not None and paths_overlap(changelog_cache_root, baseline)
-          ):
-              sys.exit("verified changelog cache overlaps a candidate cache")
-
-          def validate_trusted_ancestry(
-            root,
-            target,
-            allowed_uids,
-            label,
-            include_target=True,
-            require_unwritable=True,
-          ):
-            try:
-              relative = target.relative_to(root)
-            except ValueError:
-              sys.exit(f"{label} escapes its trusted root")
-            components = (root,)
-            current = root
-            for part in relative.parts:
-              current = current / part
-              components += (current,)
-            if not include_target:
-              components = components[:-1]
-            for component in components:
-              try:
-                metadata = component.stat(follow_symlinks=False)
-              except OSError:
-                sys.exit(f"{label} ancestry is unreadable")
-              if component != target or not include_target:
-                if not stat.S_ISDIR(metadata.st_mode):
-                  sys.exit(f"{label} ancestry is not canonical directories")
-              if metadata.st_uid not in allowed_uids or (
-                require_unwritable and metadata.st_mode & 0o022
-              ):
-                sys.exit(f"{label} ancestry has unsafe ownership mode")
-
-          candidate_controlled_roots = tuple(
-              root for root in (workspace, runner_temp, baseline, cache_root, changelog_cache_root)
-              if root is not None
-          )
-          if any(paths_overlap(trusted_tool_root, path) for path in candidate_controlled_roots):
-              sys.exit("trusted setup-node tool root overlaps candidate-controlled paths")
-          trusted_root_metadata = trusted_tool_root.stat(follow_symlinks=False)
-          allow_hosted_tool_cache_root = (
-            trusted_tool_root == hosted_tool_cache_root
-            and stat.S_IMODE(trusted_root_metadata.st_mode) == 0o777
-            and trusted_root_metadata.st_uid in hosted_tool_cache_uids
-            and trusted_root_metadata.st_gid == 0
-          )
-          if (
-            not stat.S_ISDIR(trusted_root_metadata.st_mode)
-            or trusted_root_metadata.st_uid not in (
-              hosted_tool_cache_uids if allow_hosted_tool_cache_root else (0,)
-            )
-            or (
-              trusted_root_metadata.st_mode & 0o022
-              and not allow_hosted_tool_cache_root
-            )
-          ):
-            sys.exit("trusted setup-node tool root has unsafe ownership mode")
-          trusted_tool_uids = hosted_tool_cache_uids if allow_hosted_tool_cache_root else (0,)
-          # GitHub-hosted images provision every entry under /opt/hostedtoolcache
-          # (directories, files, and symlinks alike) as uid 1001 mode 0777 -- the
-          # same convention as the root, measured on ubuntu-latest for #1599 -- so
-          # an unwritable requirement on any descendant can never pass there. The
-          # trust anchor for that tree is the owner allowlist plus the fact that
-          # nothing PR-controlled runs before this check (npm ci uses
-          # --ignore-scripts): the write bit is unexploited capability, not
-          # evidence of tampering. Every other tool root stays strict.
-          trusted_tool_tree_requires_unwritable = not allow_hosted_tool_cache_root
-
-          trusted_search_directories = []
-          for entry in os.environ.get("PATH", "").split(os.pathsep):
-            if not entry:
-              continue
-            lexical_directory = Path(entry)
-            if not lexical_directory.is_absolute():
-              continue
-            try:
-              lexical_directory.relative_to(trusted_tool_root)
-            except ValueError:
-              continue
-            resolved_directory = lexical_directory.resolve()
-            try:
-              resolved_directory.relative_to(trusted_tool_root)
-            except ValueError:
-              sys.exit("setup-node PATH entry escapes trusted tool root")
-            validate_trusted_ancestry(
-              trusted_tool_root,
-              lexical_directory,
-              trusted_tool_uids,
-              "setup-node lexical PATH",
-              require_unwritable=trusted_tool_tree_requires_unwritable,
-            )
-            validate_trusted_ancestry(
-              trusted_tool_root,
-              resolved_directory,
-              trusted_tool_uids,
-              "setup-node resolved PATH",
-              require_unwritable=trusted_tool_tree_requires_unwritable,
-            )
-            if resolved_directory not in trusted_search_directories:
-              trusted_search_directories.append(resolved_directory)
-
-          tool_executables = {}
-          for tool_name in ("npm", "node", "pwsh"):
-            candidates = []
-            if tool_name == "pwsh":
-              system_candidate = Path("/usr/bin/pwsh")
-              if system_candidate.exists():
-                resolved_system_candidate = system_candidate.resolve()
-                microsoft_root = Path("/opt/microsoft/powershell")
-                if (
-                  not resolved_system_candidate.is_relative_to(microsoft_root)
-                  or resolved_system_candidate.name != "pwsh"
-                  or not re.fullmatch(r"[0-9]+(?:[.][0-9]+)*", resolved_system_candidate.parent.name)
-                ):
-                  sys.exit("trusted pwsh executable escapes Microsoft runtime contract")
-                validate_trusted_ancestry(
-                  Path("/usr"), system_candidate, (0,), "pwsh lexical path", include_target=False
-                )
-                validate_trusted_ancestry(
-                  # GitHub-hosted runner images ship /opt root-owned but world-writable
-                  # (mode 777, matching /opt/hostedtoolcache's convention), so an
-                  # unwritable-ancestry requirement can never pass there. Root ownership
-                  # alone still holds: nothing PR-controlled runs outside this sandbox
-                  # before this check (npm ci uses --ignore-scripts), so the write bit is
-                  # unexploited capability, not evidence of tampering.
-                  Path("/opt"),
-                  resolved_system_candidate.parent,
-                  (0,),
-                  "pwsh resolved runtime",
-                  require_unwritable=False,
-                )
-                system_metadata = resolved_system_candidate.stat(follow_symlinks=False)
-                if not stat.S_ISREG(system_metadata.st_mode) or system_metadata.st_uid != 0:
-                  sys.exit("trusted pwsh executable has unsafe ownership mode")
-                candidates.append(resolved_system_candidate)
-            for directory in trusted_search_directories:
-              lexical_candidate = directory / tool_name
-              if not lexical_candidate.exists():
-                continue
-              resolved_candidate = lexical_candidate.resolve()
-              validate_trusted_ancestry(
-                trusted_tool_root,
-                lexical_candidate,
-                trusted_tool_uids,
-                f"trusted {tool_name} lexical path",
-                include_target=False,
-                require_unwritable=trusted_tool_tree_requires_unwritable,
-              )
-              try:
-                resolved_candidate.relative_to(trusted_tool_root)
-              except ValueError:
-                sys.exit(f"trusted {tool_name} executable escapes setup-node tool root")
-              validate_trusted_ancestry(
-                trusted_tool_root,
-                resolved_candidate,
-                trusted_tool_uids,
-                f"trusted {tool_name} resolved path",
-                require_unwritable=trusted_tool_tree_requires_unwritable,
-              )
-              if resolved_candidate.is_file() and os.access(resolved_candidate, os.X_OK):
-                candidates.append(resolved_candidate)
-            candidates = list(dict.fromkeys(candidates))
-            if not candidates:
-              if tool_name in ("npm", "node"):
-                sys.exit(f"trusted {tool_name} executable is unavailable")
-              continue
-            if len(candidates) != 1:
-              sys.exit(f"trusted {tool_name} executable is ambiguous")
-            tool_executable = candidates[0]
-            executable_metadata = tool_executable.stat(follow_symlinks=False)
-            # The Microsoft-shipped pwsh binary under GitHub-hosted /opt is root-owned
-            # but world-writable (mode 777, matching /opt/hostedtoolcache's convention),
-            # so the write-bit requirement below can never pass against a real,
-            # untampered system pwsh there. Root ownership alone still holds for that
-            # one location: nothing PR-controlled runs outside this sandbox before this
-            # check (npm ci uses --ignore-scripts), so the write bit is unexploited
-            # capability, not evidence of tampering. npm/node under an admitted hosted
-            # tool cache carry the same image convention (see
-            # trusted_tool_tree_requires_unwritable); every other root stays strict.
-            executable_in_hosted_tool_cache = tool_executable.is_relative_to(hosted_tool_cache_root)
-            executable_requires_unwritable = not (
-              (tool_name == "pwsh" and tool_executable.is_relative_to("/opt/microsoft/powershell"))
-              or (executable_in_hosted_tool_cache and not trusted_tool_tree_requires_unwritable)
-            )
-            executable_uids = trusted_tool_uids if executable_in_hosted_tool_cache else (0,)
-            if executable_metadata.st_uid not in executable_uids or (
-              executable_requires_unwritable and executable_metadata.st_mode & 0o022
-            ):
-              sys.exit(f"trusted {tool_name} executable has unsafe ownership mode")
-            tool_executables[tool_name] = tool_executable
-          npm_executable = tool_executables["npm"]
-          tool_prefix_candidates = {
-            (executable.parent if executable.is_relative_to("/opt/microsoft/powershell") else executable.parent.parent)
-            for executable in tool_executables.values()
-            if not executable.is_relative_to("/usr")
-          }
-          if corepack_home is not None:
-            tool_prefix_candidates.add(corepack_home)
-          tool_prefixes = []
-          tool_prefix_identities = {}
-
-          def validate_trusted_tool_tree(root, allowed_uids=(0,), require_unwritable=True):
-            for directory, directory_names, file_names in os.walk(root, followlinks=False):
-              directory_path = Path(directory)
-              directory_metadata = directory_path.stat(follow_symlinks=False)
-              if (
-                not stat.S_ISDIR(directory_metadata.st_mode)
-                or directory_metadata.st_uid not in allowed_uids
-                or (require_unwritable and directory_metadata.st_mode & 0o022)
-              ):
-                sys.exit("trusted tool tree directory has unsafe ownership mode")
-              for name in (*directory_names, *file_names):
-                entry = directory_path / name
-                entry_metadata = entry.stat(follow_symlinks=False)
-                if entry_metadata.st_uid not in allowed_uids:
-                  sys.exit("trusted tool tree entry has unapproved ownership")
-                if stat.S_ISLNK(entry_metadata.st_mode):
-                  resolved_entry = entry.resolve()
-                  if resolved_entry.is_relative_to(root):
-                    continue
-                  if not resolved_entry.exists():
-                    # The Microsoft-shipped pwsh tree ships legacy OpenSSL 1.0
-                    # compatibility shims that name host library paths distros
-                    # dropped long ago (e.g. Ubuntu 24.04 carries no OpenSSL 1.0);
-                    # a dangling symlink cannot be read or executed by anything
-                    # that mounts this tree, so it carries no trust to verify.
-                    continue
-                  # The Microsoft-shipped pwsh tree symlinks its bundled OpenSSL 1.0
-                  # compatibility shims to the real system libraries under /usr on
-                  # distros that still carry them; re-validate the escape target
-                  # against /usr's own strict, unconditional trust instead of
-                  # blanket-rejecting every symlink that leaves the tool prefix.
-                  if resolved_entry.is_relative_to("/usr"):
-                    validate_trusted_ancestry(
-                      Path("/usr"),
-                      resolved_entry,
-                      (0,),
-                      "trusted tool tree external symlink target",
-                    )
-                    continue
-                  sys.exit("trusted tool tree symlink escapes mounted prefix")
-                if require_unwritable and entry_metadata.st_mode & 0o022:
-                  sys.exit("trusted tool tree entry has unsafe writable mode")
-                if not (stat.S_ISDIR(entry_metadata.st_mode) or stat.S_ISREG(entry_metadata.st_mode)):
-                  sys.exit("trusted tool tree contains special file")
-
-          for tool_prefix in sorted(tool_prefix_candidates, key=lambda path: (len(path.parts), str(path))):
-            if (
-                tool_prefix == Path("/")
-                or any(paths_overlap(tool_prefix, path) for path in candidate_controlled_roots)
-            ):
-              sys.exit("trusted tool prefix overlaps candidate-controlled paths")
-            if tool_prefix.is_relative_to(trusted_tool_root):
-              validate_trusted_ancestry(
-                trusted_tool_root,
-                tool_prefix,
-                trusted_tool_uids,
-                "trusted tool prefix",
-                require_unwritable=trusted_tool_tree_requires_unwritable,
-              )
-            elif tool_prefix == corepack_home:
-              validate_trusted_ancestry(
-                Path.home(),
-                tool_prefix,
-                (os.getuid(),),
-                "trusted Corepack cache",
-                require_unwritable=True,
-              )
-            prefix_metadata = tool_prefix.stat(follow_symlinks=False)
-            if not stat.S_ISDIR(prefix_metadata.st_mode):
-              sys.exit("trusted tool prefix is not a directory")
-            # See the pwsh discovery comment above: the Microsoft-shipped runtime tree
-            # under GitHub-hosted /opt is root-owned but world-writable throughout, and
-            # the admitted hosted tool cache is world-writable throughout by the same
-            # image convention; only those prefixes relax the write-bit requirement.
-            prefix_in_hosted_tool_cache = tool_prefix.is_relative_to(hosted_tool_cache_root)
-            prefix_in_corepack_cache = tool_prefix == corepack_home
-            validate_trusted_tool_tree(
-              tool_prefix,
-              allowed_uids=(
-                (os.getuid(),) if prefix_in_corepack_cache
-                else trusted_tool_uids if prefix_in_hosted_tool_cache
-                else (0,)
-              ),
-              require_unwritable=not (
-                tool_prefix.is_relative_to("/opt/microsoft/powershell")
-                or (prefix_in_hosted_tool_cache and not trusted_tool_tree_requires_unwritable)
-              ),
-            )
-            tool_prefix_identities[tool_prefix] = (
-              prefix_metadata.st_dev,
-              prefix_metadata.st_ino,
-              prefix_metadata.st_uid,
-              stat.S_IMODE(prefix_metadata.st_mode),
-            )
-            if not any(existing == tool_prefix or existing in tool_prefix.parents for existing in tool_prefixes):
-              tool_prefixes.append(tool_prefix)
-          npm_cli_candidates = set()
-          for npm_cli_candidate in (
-            npm_executable.parent.parent / "lib/node_modules/npm/bin/npm-cli.js",
-            npm_executable.parent / "node_modules/npm/bin/npm-cli.js",
-            npm_executable.resolve().parent.parent / "bin/npm-cli.js",
-          ):
-            if not npm_cli_candidate.is_file():
-              continue
-            if not any(npm_cli_candidate.is_relative_to(prefix) for prefix in tool_prefixes):
-              sys.exit("trusted npm CLI is outside validated tool prefixes")
-            resolved_npm_cli_candidate = npm_cli_candidate.resolve(strict=True)
-            if not any(resolved_npm_cli_candidate.is_relative_to(prefix) for prefix in tool_prefixes):
-              sys.exit("trusted npm CLI escapes validated tool prefixes")
-            npm_cli_candidates.add(resolved_npm_cli_candidate)
-          if len(npm_cli_candidates) > 1:
-              sys.exit("trusted npm CLI is ambiguous")
-          npm_cli_executable = next(iter(npm_cli_candidates), None)
-          npm_command = (
-            [str(tool_executables["node"]), str(npm_cli_executable)]
-            if npm_cli_executable is not None
-            else [str(npm_executable)]
-          )
-          cache_root.mkdir(mode=0o700)
-          active_process = None
-          received_signal = None
-
-          def cleanup_cache_root(*_args):
-              global active_process
-              if active_process is not None and active_process.poll() is None:
-                  try:
-                      os.killpg(active_process.pid, signal.SIGTERM)
-                  except ProcessLookupError:
-                      pass
-              shutil.rmtree(cache_root, ignore_errors=True)
-
-          def extinguish_process_group(process):
-              graceful_deadline = time.monotonic() + 1
-              while time.monotonic() < graceful_deadline:
-                  try:
-                      os.killpg(process.pid, 0)
-                  except ProcessLookupError:
-                      return
-                  time.sleep(0.05)
-              try:
-                  os.killpg(process.pid, signal.SIGKILL)
-              except ProcessLookupError:
-                  return
-              deadline = time.monotonic() + 5
-              while True:
-                  try:
-                      os.killpg(process.pid, 0)
-                  except ProcessLookupError:
-                      return
-                  if time.monotonic() >= deadline:
-                      sys.exit("candidate process group survived bounded SIGKILL cleanup")
-                  time.sleep(0.05)
-
-          previous_handlers = {}
-          def handle_signal(signum, _frame):
-              global received_signal
-              signal.signal(signal.SIGINT, signal.SIG_IGN)
-              signal.signal(signal.SIGTERM, signal.SIG_IGN)
-              received_signal = signum
-              if active_process is not None and active_process.poll() is None:
-                  try:
-                      os.killpg(active_process.pid, signal.SIGTERM)
-                  except ProcessLookupError:
-                      pass
-
-          for caught_signal in (signal.SIGINT, signal.SIGTERM):
-              previous_handlers[caught_signal] = signal.getsignal(caught_signal)
-              signal.signal(caught_signal, handle_signal)
-          try:
-              for index, (script_directory, name, unset_env, requires_services) in enumerate(normalized):
-                  if baseline is not None and inventory(baseline) != baseline_inventory:
-                      sys.exit("verified runtime cache changed before candidate script")
-                  script_cache = cache_root / str(index)
-                  script_cache.mkdir(mode=0o700)
-                  script_tmp = cache_root / f"tmp-{index}"
-                  script_home = cache_root / f"home-{index}"
-                  script_tmp.mkdir(mode=0o700)
-                  script_home.mkdir(mode=0o700)
-                  if baseline is not None:
-                      for relative, _size, _digest in baseline_inventory:
-                          source = baseline / relative
-                          target = script_cache / relative
-                          target.parent.mkdir(parents=True, exist_ok=True)
-                          try:
-                              source_descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
-                          except OSError:
-                              sys.exit("verified runtime cache changed during isolated copy")
-                          if not stat.S_ISREG(os.fstat(source_descriptor).st_mode):
-                              os.close(source_descriptor)
-                              sys.exit("verified runtime cache copy source is not a regular file")
-                          with (
-                              os.fdopen(source_descriptor, "rb") as source_stream,
-                              target.open("xb") as target_stream,
-                          ):
-                              shutil.copyfileobj(source_stream, target_stream, length=1024 * 1024)
-                  if (baseline is not None and inventory(baseline) != baseline_inventory) or (
-                      inventory(script_cache) != baseline_inventory
-                  ):
-                      sys.exit("isolated candidate cache copy failed integrity verification")
-                  script_env = {
-                      "CI": "true",
-                      "GITHUB_ACTIONS": "true",
-                      "GITHUB_WORKSPACE": str(workspace),
-                      "RUNNER_TEMP": str(script_tmp),
-                      "HOME": str(script_home),
-                      "TMPDIR": str(script_tmp),
-                      "COREPACK_HOME": str(corepack_home) if corepack_home is not None else str(
-                          script_home / ".cache/node/corepack"
-                      ),
-                      "COREPACK_ENABLE_NETWORK": "0",
-                      "NPM_CONFIG_CACHE": str(script_cache),
-                      "npm_config_cache": str(script_cache),
-                      "VERJSON_CHANGELOG_TOOL_CACHE": str(changelog_cache_root),
-                      "VERJSON_CHANGELOG_CONTRACT_REF": changelog_ref,
-                      "VERJSON_CHANGELOG_CONTRACT_SHA256": changelog_sha256,
-                  }
-                  for env_name in (
-                      "GITHUB_REF", "GITHUB_REF_NAME", "GITHUB_SHA", "GITHUB_REPOSITORY",
-                      "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_JOB",
-                      "GITHUB_WORKFLOW", "GITHUB_EVENT_NAME", "RUNNER_OS", "RUNNER_ARCH",
-                  ):
-                      if env_name in os.environ:
-                          script_env[env_name] = os.environ[env_name]
-                  if browser_cache is not None:
-                      script_env["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_cache)
-                  if requires_services:
-                      script_env.update(candidate_service_env)
-                  for env_name in unset_env:
-                      script_env.pop(env_name, None)
-                  tool_path_entries = [
-                      *(str(executable.parent) for executable in tool_executables.values()),
-                      "/usr/local/bin",
-                      "/usr/bin",
-                      "/bin",
-                  ]
-                  script_env["PATH"] = ":".join(dict.fromkeys(tool_path_entries))
-                  isolated_paths = (script_cache, script_tmp, script_home)
-                  if len(set(isolated_paths)) != len(isolated_paths):
-                      sys.exit("candidate writable mount paths are not distinct")
-                  if any(
-                      left == right or left in right.parents or right in left.parents
-                      for position, left in enumerate(isolated_paths)
-                      for right in isolated_paths[position + 1:]
-                  ):
-                      sys.exit("candidate writable mount paths overlap")
-                  mount_targets = (
-                      workspace,
-                      git_metadata,
-                      cache_root,
-                      changelog_cache_root,
-                      *isolated_paths,
-                      *tool_prefixes,
-                      *((browser_cache,) if browser_cache is not None else ()),
-                  )
-                  namespace_directories = set()
-                  for target in mount_targets:
-                      namespace_directories.add(target)
-                      namespace_directories.update(target.parents)
-                  namespace_directories.discard(Path("/"))
-                  directory_args = []
-                  for directory in sorted(namespace_directories, key=lambda path: (len(path.parts), str(path))):
-                      if directory == Path("/usr") or directory.is_relative_to("/usr"):
-                          continue
-                      directory_args.extend(("--dir", str(directory)))
-                  protected_parents = {workspace.parent, runner_temp, cache_root}
-                  chmod_args = []
-                  for directory in sorted(protected_parents, key=str):
-                      chmod_args.extend(("--chmod", "0555", str(directory)))
-              tool_mount_args = []
-              git_mount_args = []
-              tool_prefix_fds = []
-              readonly_mount_identities = dict(tool_prefix_identities)
-              readonly_mount_identities[changelog_cache_root] = changelog_cache_root_identity
-              readonly_mount_identities[git_metadata] = git_metadata_identity
-              if browser_cache is not None:
-                  browser_cache_metadata = browser_cache.stat(follow_symlinks=False)
-                  if not stat.S_ISDIR(browser_cache_metadata.st_mode):
-                      sys.exit("validated Playwright browser cache changed type before namespace bind")
-                  readonly_mount_identities[browser_cache] = (
-                      browser_cache_metadata.st_dev,
-                      browser_cache_metadata.st_ino,
-                      browser_cache_metadata.st_uid,
-                      stat.S_IMODE(browser_cache_metadata.st_mode),
-                  )
-              try:
-                for tool_prefix in (
-                    *tool_prefixes,
-                    changelog_cache_root,
-                    git_metadata,
-                    *((browser_cache,) if browser_cache is not None else ()),
-                ):
-                  descriptor = os.open(
-                    tool_prefix,
-                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-                  )
-                  descriptor_metadata = os.fstat(descriptor)
-                  descriptor_identity = (
-                    descriptor_metadata.st_dev,
-                    descriptor_metadata.st_ino,
-                    descriptor_metadata.st_uid,
-                    stat.S_IMODE(descriptor_metadata.st_mode),
-                  )
-                  if descriptor_identity != readonly_mount_identities[tool_prefix]:
-                    os.close(descriptor)
-                    sys.exit("verified read-only mount changed before namespace bind")
-                  tool_prefix_fds.append(descriptor)
-                  mount_flag = "--bind" if tool_prefix == browser_cache else "--ro-bind"
-                  mount_args = (mount_flag, f"/proc/self/fd/{descriptor}", str(tool_prefix))
-                  if tool_prefix == git_metadata:
-                    git_mount_args.extend(mount_args)
-                  else:
-                    tool_mount_args.extend(mount_args)
-              except BaseException:
-                for descriptor in tool_prefix_fds:
-                  os.close(descriptor)
-                raise
-              try:
-                active_process = subprocess.Popen(
-                          [
-                              str(bubblewrap),
-                              "--unshare-user",
-                              "--unshare-pid",
-                              "--unshare-ipc",
-                              "--unshare-uts",
-                              "--unshare-cgroup-try",
-                              "--disable-userns",
-                              "--die-with-parent",
-                              "--new-session",
-                              "--cap-drop", "ALL",
-                              "--tmpfs", "/",
-                              "--tmpfs", "/tmp",
-                              *([] if requires_services else ["--unshare-net"]),
-                              *directory_args,
-                              *chmod_args,
-                              "--ro-bind", "/usr", "/usr",
-                              "--ro-bind", "/bin", "/bin",
-                              "--ro-bind", "/lib", "/lib",
-                              "--ro-bind", "/lib64", "/lib64",
-                              # Present on every dpkg host; optional because this runner
-                              # may be self-hosted (#1782).
-                              "--ro-bind-try", "/etc/alternatives", "/etc/alternatives",
-                              "--ro-bind", "/etc/ssl", "/etc/ssl",
-                              "--ro-bind", "/etc/hosts", "/etc/hosts",
-                              "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
-                              "--ro-bind", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
-                              "--ro-bind", "/etc/passwd", "/etc/passwd",
-                              "--ro-bind", "/etc/group", "/etc/group",
-                              *tool_mount_args,
-                              "--bind", str(workspace), str(workspace),
-                              *git_mount_args,
-                              "--bind", str(script_cache), str(script_cache),
-                              "--bind", str(script_home), str(script_home),
-                              "--bind", str(script_tmp), str(script_tmp),
-                              "--proc", "/proc",
-                              "--dev", "/dev",
-                              "--chdir", str(script_directory),
-                              "--",
-                              "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
-                              *npm_command, "run", name,
-                          ],
-                          env=script_env,
-                          start_new_session=True,
-                          pass_fds=tuple(tool_prefix_fds),
-                        )
-                for descriptor in tool_prefix_fds:
-                  os.close(descriptor)
-                tool_prefix_fds = []
-                while active_process.poll() is None:
-                  time.sleep(0.05)
-                candidate_status = active_process.returncode
-                extinguish_process_group(active_process)
-                if received_signal is not None:
-                  raise SystemExit(128 + received_signal)
-                if candidate_status != 0:
-                  raise subprocess.CalledProcessError(candidate_status, active_process.args)
-              finally:
-                for descriptor in tool_prefix_fds:
-                  os.close(descriptor)
-                if active_process is not None:
-                  extinguish_process_group(active_process)
-                active_process = None
-                shutil.rmtree(script_cache, ignore_errors=True)
-                shutil.rmtree(script_tmp, ignore_errors=True)
-                shutil.rmtree(script_home, ignore_errors=True)
-                if (
-                  script_cache.exists()
-                  or script_tmp.exists()
-                  or script_home.exists()
-                  or (baseline is not None and inventory(baseline) != baseline_inventory)
-                ):
-                  sys.exit("candidate script cache cleanup or baseline integrity check failed")
-          finally:
-              cleanup_cache_root()
-              for caught_signal, previous_handler in previous_handlers.items():
-                  signal.signal(caught_signal, previous_handler)
-          if cache_root.exists() or (baseline is not None and inventory(baseline) != baseline_inventory):
-              sys.exit("candidate cache root cleanup or final baseline integrity check failed")
-          # END source candidate script execution
-          PY
+          python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" run-protected-candidate-plan &
           candidate_cache_supervisor_pid=$!
           candidate_cache_status=0
           wait "$candidate_cache_supervisor_pid" || candidate_cache_status=$?
@@ -7316,6 +6593,44 @@ jobs:
           rm -rf -- "$CANDIDATE_CACHE_ROOT"
           [ ! -e "$CANDIDATE_CACHE_ROOT" ] && [ ! -L "$CANDIDATE_CACHE_ROOT" ]
 
+      - name: Export build outputs after producer process is reaped
+        id: export-build-artifact
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.build-artifact-role == 'producer' && steps.run-script-plan.outcome == 'success'
+        env:
+          BUILD_ARTIFACT_PATHS: ${{ inputs.build-artifact-paths }}
+          BUILD_ARTIFACT_PATHS_JSON: ${{ inputs.build-artifact-paths }}
+          BUILD_ARTIFACT_RUNNER_IMAGE_JSON: ${{ inputs.build-artifact-runner-image }}
+          BUILD_ARTIFACT_PARTICIPANT_COUNT: ${{ inputs.build-artifact-participant-count }}
+          BUILD_ARTIFACT_LEVEL_ID: ${{ inputs.build-artifact-level-id }}
+          BUILD_ARTIFACT_COMMANDS_JSON: ${{ inputs.build-artifact-plan-json }}
+          BUILD_ARTIFACT_PROFILE: ${{ inputs.build-artifact-profile }}
+          BUILD_ARTIFACT_NODE_VERSION: ${{ inputs.node-version }}
+          BUILD_ARTIFACT_PACKAGE_MANAGER: ${{ inputs.package-manager }}
+          BUILD_ARTIFACT_PACKAGE_MANAGER_VERSION: ${{ inputs.build-artifact-package-manager-version }}
+          CALLER_COMMIT: ${{ inputs.head-sha }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          REUSABLE_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" export \
+            --workspace "$GITHUB_WORKSPACE" \
+            --output "$RUNNER_TEMP/ci-build-artifact.tar.gz" \
+            --roots-json "$BUILD_ARTIFACT_PATHS" \
+            --consumers "$BUILD_ARTIFACT_PARTICIPANT_COUNT"
+      - name: Upload one-day same-run ArtifactSet
+        id: upload-build-artifact
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.build-artifact-role == 'producer' && steps.export-build-artifact.outputs.share-available == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ runner.temp }}/ci-build-artifact.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          archive: false
+      - name: Require protected secretless execution mode
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.build-artifact-role == 'level' || inputs.build-artifact-role == 'consumer' || inputs.build-artifact-role == 'producer') && !(inputs.secretless-pr || inputs.secretless-trusted-ref)
+        run: |
+          echo "::error::protected node-ci requires generated event-specific secretless mode before candidate execution" >&2
+          exit 1
       - name: Run default build, typecheck, test, and lint plan
         if: needs.eligibility.outputs.should-run != 'false' && !(inputs.secretless-pr || inputs.secretless-trusted-ref)
         run: |
@@ -8909,6 +8224,29 @@ jobs:
             echo "::warning::npm cache is ${size_mb} MB; clearing it instead of uploading more than ${CACHE_MAX_MB} MB"
             find "$cache_dir" -mindepth 1 -delete
           fi
+      - name: Create trusted per-lane TestReceipt
+        id: create-build-artifact-receipt
+        if: needs.eligibility.outputs.should-run != 'false' && success() && inputs.build-artifact-role == 'consumer'
+        env:
+          BUILD_ARTIFACT_LEVEL_ID: ${{ inputs.build-artifact-level-id }}
+          CALLER_COMMIT: ${{ inputs.head-sha }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          REUSABLE_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          RECEIPT_PROFILE: ${{ inputs.build-artifact-profile }}
+          RECEIPT_COMMAND_DIGEST: ${{ steps.run-script-plan.outputs.command-digest }}
+          RECEIPT_ARTIFACT_ID: ${{ inputs.build-artifact-role == 'consumer' && inputs.build-artifact-id || '' }}
+          RECEIPT_ARTIFACT_DIGEST: ${{ inputs.build-artifact-role == 'consumer' && inputs.build-artifact-digest || '' }}
+        run: |
+          set -euo pipefail
+          receipt_args=()
+          if [[ -n "$RECEIPT_ARTIFACT_ID" || -n "$RECEIPT_ARTIFACT_DIGEST" ]]; then
+            [[ -n "$RECEIPT_ARTIFACT_ID" && -n "$RECEIPT_ARTIFACT_DIGEST" ]]
+            receipt_args+=(--manifest-file "$RUNNER_TEMP/ci-build-artifact-manifest.json" \
+              --artifact-id "$RECEIPT_ARTIFACT_ID" --artifact-digest "$RECEIPT_ARTIFACT_DIGEST")
+          fi
+          python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" receipt \
+            --lane "$BUILD_ARTIFACT_LEVEL_ID" --profile "$RECEIPT_PROFILE" \
+            --command-digest "$RECEIPT_COMMAND_DIGEST" "${receipt_args[@]}"
       - name: Stop cache service
         if: always() && needs.eligibility.outputs.should-run != 'false' && inputs.cache-image != ''
         env:
