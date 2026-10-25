@@ -170,6 +170,7 @@ class GoldenPlanTests(unittest.TestCase):
         with self.assertRaises(script_plan.ScriptPlanError):
             script_plan.parse_plan_value([{"script": "build", "unsetEnv": ["PUBLIC_FLAG", "PUBLIC_FLAG"]}])
 
+
     def test_unknown_fields_wrong_flags_and_scriptless_level_objects_are_rejected(self) -> None:
         invalid_plans = [
             [{"script": "test", "typo": True}],

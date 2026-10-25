@@ -489,14 +489,23 @@ beyond the dated authorization; it extends the suspension recorded above.
     this entry makes no claim about that command's result. The merge of the PR adding this entry is
     recorded by the next ledger update.
 19. **Admin merge of Node CI script-plan workflow adoption.** Verjson/.github#1909
-("fix(ci): preserve script-plan parser compatibility," `Part #1869`) merged
+ ("fix(ci): preserve script-plan parser compatibility," `Part of #1869`) merged
 2026-10-24 at head `cf03e525521d0349f9cafb428342aa5302f33ec3` and merge commit
 `3b95498a2b59401c95986a1fec539a2aa4cef2b8`. From fetched, clean `origin/main`,
 `assert-mergeable-head.sh` exited 0 and printed `true`; the check rollup had 20
 SUCCESS and 5 SKIPPED conclusions. GitHub reports merged by `pyousefi`, and the
 operator campaign record confirms `--admin` was used. `gpt-6-astra`, `gpt-6.1-sol`,
 and `code-reviewer` reviewed the final head and reported no findings.
-20. **Authorization:** the verbatim text and date above.
+20. **Admin merge of Node CI script-plan workflow adoption.** Verjson/.github#1910
+ ("refactor(ci): adopt shared Node script-plan parser," `Part of #1869`) merged
+2026-10-24 at head `6f9ff13c0536bbea11b1af0e03e75d128567785b` and merge commit
+`c5b4c753623e7e7888964fbcd5305297ae1c4238`. From fetched, clean `origin/main`,
+`assert-mergeable-head.sh` exited 0 and printed `true`; the terminal check rollup had
+20 SUCCESS, 5 SKIPPED, and 1 advisory AI review authorization check NEUTRAL. GitHub
+reports merged by `pyousefi`; the operator campaign confirms `--admin` was used.
+`gpt-6-astra`, `gpt-6.1-sol`, and `code-reviewer` reviewed the final head and reported
+no findings. Fable and Opus review tools were unavailable in this runtime.
+21. **Authorization:** the verbatim text and date above.
 
 ### Exit condition ("CI optimized and working"), measurable
 

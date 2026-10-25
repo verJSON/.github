@@ -136,6 +136,7 @@ def run_eligibility_guards(document: dict, scenario: dict,
             "secretless-pr": scenario["mode"] == "pr",
             "secretless-trusted-ref": scenario["mode"] == "trusted-ref",
             "secretless-compatibility-ranges": scenario.get("ranges", ""),
+            "build-artifact-role": document[True]["workflow_call"]["inputs"]["build-artifact-role"]["default"],
         },
         "runner": {"environment": scenario["eligibility_runner"]},
         "vars": {"CI_LANE_UNTRUSTED": scenario["untrusted_lane"]},
@@ -146,6 +147,8 @@ def run_eligibility_guards(document: dict, scenario: dict,
         if condition is not None and not evaluate(str(condition), context):
             continue
         env = {"PATH": os.environ["PATH"], **locale}
+        for name, value in (document["jobs"]["build-test"].get("env") or {}).items():
+            env[name] = interpolate(value, context)
         for name, value in (step.get("env") or {}).items():
             env[name] = interpolate(value, context)
         result = subprocess.run(

@@ -79,8 +79,9 @@ would rename the required `<lane> / build-test` context.
 
 An external adopter can trade per-minute rate for wall time on a vetted size without
 holding an old pin. The security posture of the secretless lane is unchanged: no input in this
-change touches credentials, network policy, or the sandbox. Items 5 and 6 above remain
-open and are reported on the issue.
+change touches credentials, network policy, or the sandbox. Item 5's direction is recorded
+in the 2026-10-24 amendment below; implementation remains subject to its security gates.
+Item 6 remains open and is reported on the issue.
 
 *Annotation 2026-10-23 (#1875).* Items 5 and 6 here are this ADR's own numbering
 (build-once artifacts; sandbox system packages). They are not changes 5 and 6 of the
@@ -212,3 +213,136 @@ started-then-cancelled jobs and flagging bad timestamps. It is an estimate, not 
 Compare equal windows and event mix before and after the first adopter regenerates its
 caller, and report wall time and retry frequency beside the minutes. No saving is claimed
 here because none has been measured.
+
+## Amendment 2026-10-24 — constrained same-run build-once artifacts
+
+Issue [#1692](https://github.com/Verjson/.github/issues/1692) tracks the broader
+ArtifactSet/TestReceipt/PromotionReceipt chain. This amendment decides only whether
+ordinary CI may build once and share that build among checks in the same workflow run.
+
+- **Scope and fallback.** Sharing is opt-in through a typed `buildArtifact` request
+  and a trusted policy row. A shared ArtifactSet is limited to one repository, run,
+  and attempt. Before selection, any unsupported or unverified condition chooses the
+  original per-lane plans. After selection, producer, upload, artifact-integrity, or
+  required-receipt failures make the aggregate fail; they never turn a failed shared
+  run into a passing per-lane run.
+- **Trusted selection and caller changes.** A reusable workflow pinned by immutable
+  `job.workflow_sha` loads the authoritative policy and helper from its own revision.
+  Repository and organization variables, caller JSON, and caller-controlled artifacts
+  cannot authorize sharing. For a pull request, preflight compares the candidate
+  checkout's `.github` tree with the event's base commit. Sharing is eligible only
+  when those trees match. Preflight and each direct producer or consumer authorization
+  repeat this check. A pull request that changes workflows, local actions, policy, or
+  other `.github` content uses per-lane builds until the change is merged. The caller
+  workflow revision remains bound into artifact identity and the build profile, but
+  is not a digest allowlist that callers must regenerate against.
+- **Export boundary.** The producer runs in an isolated, writable workspace. After its
+  process tree has stopped and been reaped, trusted host-side code copies only declared,
+  allowlisted output roots into host-owned staging using descriptor-relative,
+  no-follow traversal. Reject traversal, symlinks, hard links, special files, duplicate
+  paths, unexpected entries, and count, depth, file-size, total-size, or archive-size
+  excesses. Hash and upload the exact staged bytes. Candidate code cannot write the
+  exporter, receipt store, or artifact-service token. Only top-level export roots are
+  admitted; nested roots use per-lane builds because mounting a nested output over its
+  ancestor could hide sibling sources, manifests, or tests.
+- **Artifact identity and consumption.** A trusted supervisor derives the manifest and
+  receipt from GitHub context and observed execution, not candidate-supplied JSON.
+  Bind repository, ref, checked-out commit, caller and reusable-workflow revisions,
+  run and attempt, producer job and lane, build command and inputs, lockfiles,
+  toolchain, export-policy revision, and every path, size, mode, and digest. The
+  producer uploads with `retention-days: 1`. Each consumer selects the exact artifact
+  ID and digest for the same run and attempt, downloads it, verifies the bounded
+  archive with no-follow extraction, and executes from read-only verified bytes in an
+  isolated, credentialless sandbox. Limit each ArtifactSet to 512 MiB compressed and
+  1 GiB aggregate expanded files across consumers. Export size is measured after
+  sharing is selected, so an export that exceeds either limit fails closed.
+- **Plan compatibility.** A canonical build-profile digest covers every modeled
+  build-affecting input and environment value, including lockfiles, runner and OS
+  identity, Node and package-manager names and versions, rebuild settings, build
+  configuration, lifecycle hooks, and build script. Each consumer independently
+  derives the profile from effective inputs. Different or unmodeled build-affecting
+  inputs, service requirements, broader egress, or an incompatible plan choose
+  per-lane builds before selection. Direct build tools, task runners, local executable
+  paths, unsupported wrappers, and commands outside the explicit check-tool allowlist
+  remain per-lane. Package-manager calls must resolve recursively to tracked package
+  scripts. Nested pnpm and Yarn invocations remain per-lane because project
+  configuration can select a different script shell. Workspace-selection flags,
+  alternate npm user or global config paths, and tracked `.npmrc` workspace selections
+  also remain per-lane. For admitted credentialless npm checks, force
+  `script-shell=/bin/sh` after caller-requested environment removals. Treat newlines
+  as shell command boundaries. Reject shell grouping, redirection, carriage returns, pathname expansion, and non-ASCII or unsupported control whitespace in admitted commands. Only explicitly supported read-only command forms and options are admitted; unknown flags, output and cache destinations, snapshot updates, formatter writes, linter fixes, and positional mutating subcommands use per-lane fallback. Vitest admission is limited to a bare CI-mode invocation or explicit `run`, with no extra options. Whitespace-only script plans use a static per-lane fallback. Direct TypeScript checks remain per-lane because configurable incremental build metadata may write under exported roots; positional mutators such as `mocha init` and `tap plugin add` are not admitted.
+- **Typed request and policy.** The optional `buildArtifact` request names a declared
+  producer level, one or more declared consumer levels, and repository-relative output
+  paths. The generator reserves synthetic job IDs `artifact-mode-gate`,
+  `artifact-preflight`, and `artifact-producer`, rejecting collisions. The trusted
+  policy row controls repository visibility, audience approval, producer and consumer
+  levels, build script, allowed and required output roots, and exact profile-file paths.
+  Profile files must be tracked regular files at the caller commit; reject symlinks and
+  other file types, and hash Git blob bytes rather than the candidate working tree.
+  Emit the aggregate profile digest, not individual file hashes. Caller paths must be
+  nonempty, normalized, slash-separated repository-relative file or directory roots
+  without globs, absolute paths, empty components, or `.`/`..` components. Compare
+  roots by whole path components. Invalid requests or absent policy rows choose
+  per-lane builds. The adopter policy table is currently empty, so no repository is
+  authorized to share artifacts.
+- **Credentialless mode gate.** A generated `artifact-mode-gate` independently
+  evaluates each level's original event and branch filters from GitHub context and
+  requires the event-appropriate `secretless-pr` or `secretless-trusted-ref` mode,
+  even when a later `needs` condition skips that level. Missing or incorrect mode is
+  a red configuration error: candidate code does not run in per-lane fallback. Only
+  after this mandatory gate passes may a sharing-specific eligibility miss select
+  the original per-lane plans. When `buildArtifact` is declared, `Plan.secrets` must
+  be exactly `NODE_AUTH_TOKEN`, used only by the dependency-acquisition job. No other
+  secret mapping is accepted, and the token never reaches producer or consumer
+  candidate steps. Verify credentials are absent before producer execution, before
+  artifact use, and again before consumer scripts. Any credential found after sharing
+  selection fails closed without retrying per-lane.
+- **Eligibility DAG and results.** Trusted preflight checks out the exact caller commit
+  without executing candidate code, resolves effective full and non-app script plans
+  through the same classifier and normalizer as `node-ci`, and evaluates the original
+  event, branch, and prerequisite predicates. It selects sharing only when the
+  producer and every consumer are scheduled, their effective profiles match, and the
+  unique policy build script is first in each participant plan. Removing that entry
+  must leave every consumer plan nonempty; remaining lifecycle hooks must not invoke
+  the shared build.
+
+  The generated DAG has a mode gate, selection preflight, synthetic producer, original
+  level jobs, and the existing aggregate. The mode gate has no level-job dependency.
+  Nonparticipant jobs gain only its dependency. In a share-eligible graph, preflight
+  depends on the mode gate and the external prerequisite closure needed to evaluate
+  participant predicates. The producer depends on its original prerequisite closure
+  and runs only after successful selection and its original predicate. In a statically
+  ineligible graph, the producer has no participant-derived prerequisite edges and is
+  skipped. The generator validates the complete rendered DAG for cycles. In per-lane
+  fallback, original levels run their original plans and the skipped producer is
+  ignored. In selected sharing, every scheduled participant consumes the same
+  ArtifactSet and emits a supervisor-generated TestReceipt through caller-owned
+  `needs` outputs. The aggregate verifies each receipt's own bytes and its binding to
+  the exact ArtifactSet ID and digest. Missing, skipped, cancelled, or mismatched
+  required evidence fails the aggregate.
+- **Sandbox and network boundary.** Candidate producer and consumer steps run in the
+  credentialless Bubblewrap/AppArmor profile with capabilities dropped. Verify the
+  Bubblewrap binary and enforcing child profile, set `no_new_privs`, and fail closed
+  if host-isolation checks fail. Service-required plans remain per-lane; artifact mode
+  does not add `actions: write` or give candidate code artifact-service credentials.
+  Before enabling any policy row, an outside-Verjson adopter canary must verify
+  loopback and external egress behavior and that every artifact reader is authorized
+  to read the build inputs. Hashing or secret-scanning outputs does not establish
+  confidentiality: valid build outputs can encode private source or dependencies.
+- **Validation and rollout.** Before first upload or consumption, adversarial tests must
+  reject exporter races, archive traversal, artifact substitution or replay,
+  incompatible profiles, missing receipts, skips, cancellation, and credential access.
+  Keep sharing disabled until an outside-Verjson adopter canary is green and equal
+  before-and-after runner-minute windows have been measured. No savings are claimed
+  until measured.
+- **Promotion remains separate.** Same-run CI artifacts and test receipts do not
+  satisfy deployment or promotion evidence. Issue #1692 covers a separate protected
+  candidate ArtifactSet and fail-closed TestReceipt and PromotionReceipt chain bound
+  to source repository, ref, commit, immutable caller and contract revisions, run and
+  attempt, final image digests, provenance, and SBOMs. Promotion uses
+  environment-specific credentials and explicit approvals only after verification.
+  Scoped read-only credentials used to acquire dependencies stay outside the candidate
+  sandbox and never reach candidate code. For Next.js, `NEXT_PUBLIC_*` values are
+  compiled at build time, so a cross-environment image also requires runtime
+  configuration or separate environment-specific artifacts
+  ([official Next.js guidance](https://nextjs.org/docs/pages/guides/environment-variables#bundling-environment-variables-for-the-browser)).

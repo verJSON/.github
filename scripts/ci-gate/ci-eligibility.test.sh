@@ -223,7 +223,10 @@ assert "executed" in should_run["description"]
 assert "deferred" in should_run["description"]
 
 job = workflow["jobs"]["build-test"]
-assert job["if"] == "always()"
+assert job["if"] == (
+    "always() && (inputs.build-artifact-role == 'level' || "
+    "inputs.build-artifact-role == 'consumer' || inputs.build-artifact-role == 'producer')"
+)
 steps = job["steps"]
 deferred = [step for step in steps if step.get("name") == "Report deferred CI"]
 assert len(deferred) == 1

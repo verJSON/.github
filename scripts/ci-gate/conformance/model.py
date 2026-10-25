@@ -175,10 +175,23 @@ def model_workflow(path: Path, scenario: Scenario) -> dict[str, JobOutcome]:
                 runs = evaluator.evaluate(guard) and (
                     not outcome.terminates_unsuccessfully
                     or bool(guard and _RUNS_AFTER_FAILURE.search(str(guard))))
+                step_id = step.get('id')
+                step_failed = runs and _terminates_unsuccessfully(step)
+                continue_on_error = (
+                    evaluator.evaluate(step.get('continue-on-error'))
+                    if step_failed and step.get('continue-on-error') is not None
+                    else False
+                )
+                if step_id:
+                    step_outcome = 'failure' if step_failed else 'success' if runs else 'skipped'
+                    bindings[f'steps.{step_id}.outcome'] = step_outcome
+                    bindings[f'steps.{step_id}.conclusion'] = (
+                        'success' if step_failed and continue_on_error else step_outcome
+                    )
                 if runs:
                     outcome.executed_steps.append(_step_label(step))
                     outcome.executed_step_definitions.append(step)
-                    if _terminates_unsuccessfully(step):
+                    if step_failed and not continue_on_error:
                         outcome.terminates_unsuccessfully = True
                 else:
                     outcome.skipped_steps.append(_step_label(step))

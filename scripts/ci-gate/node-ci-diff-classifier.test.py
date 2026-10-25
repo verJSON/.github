@@ -137,11 +137,15 @@ def structural_problems(document: dict) -> list[str]:
     steps = build_test_steps(document)
     if steps.index(step) > steps.index(plan_steps[0]):
         problems.append("the classifier runs after the plan step")
-    expected = ("${{ steps.classify-diff.outputs.non-app == 'true' && "
-                "inputs.secretless-ci-non-app-script-plan || inputs.secretless-ci-script-plan }}")
+    expected = ("${{ steps.select-build-artifact-plan.outputs.plan || "
+                "(steps.classify-diff.outputs.non-app == 'true' && "
+                "inputs.secretless-ci-non-app-script-plan || inputs.secretless-ci-script-plan) }}")
     plan_input = (plan_steps[0].get("with") or {}).get("script-plan")
     if plan_input != expected:
         problems.append(f"plan step does not select via the classifier: {plan_input!r}")
+    artifact_plan = next((candidate for candidate in steps if candidate.get("id") == "select-build-artifact-plan"), None)
+    if artifact_plan is None or "inputs.build-artifact-role == 'producer'" not in str(artifact_plan.get("if", "")):
+        problems.append("ArtifactSet plan selection is not restricted to producer/consumer roles")
     condition = str(step.get("if", ""))
     for required in ("inputs.secretless-pr", "github.event_name == 'pull_request'",
                      "inputs.secretless-ci-non-app-script-plan != ''"):

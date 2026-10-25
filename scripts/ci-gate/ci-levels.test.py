@@ -90,6 +90,185 @@ class GoldenTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", rendered)
 
 
+class BuildArtifactSchemaTests(unittest.TestCase):
+    def artifact_document(self, **overrides):
+        document = levels(
+            {"id": "build"},
+            {"id": "test"},
+            secrets=["NODE_AUTH_TOKEN"],
+            buildArtifact={"producer": "build", "consumers": ["test"], "paths": [".next"]},
+        )
+        document.update(overrides)
+        return document
+
+    def test_build_artifact_accepts_the_typed_request_and_resolves_declared_levels(self):
+        plan = parse(self.artifact_document())
+        self.assertEqual(plan.build_artifact.producer, "build")
+        self.assertEqual(plan.build_artifact.consumers, ("test",))
+        self.assertEqual(plan.build_artifact.paths, (".next",))
+
+    def test_build_artifact_rejects_extra_fields_and_unsafe_roots(self):
+        for request in (
+            {"producer": "build", "consumers": ["test"], "paths": ["dist/*"]},
+            {"producer": "build", "consumers": ["test"], "paths": ["dist/../secret"]},
+            {"producer": "build", "consumers": ["test"], "paths": ["/tmp/output"]},
+            {"producer": "build", "consumers": ["test"], "paths": [".next"], "profileFiles": ["package.json"]},
+        ):
+            with self.subTest(request=request):
+                self.assertNotEqual(codes(self.artifact_document(buildArtifact=request)), [])
+
+    def test_build_artifact_requires_exact_acquisition_secret_and_reserved_job_ids(self):
+        self.assertIn("build_artifact_secrets", codes(self.artifact_document(secrets=[])))
+        document = self.artifact_document()
+        document["levels"].append({"id": "artifact-preflight"})
+        self.assertIn("reserved_job_id", codes(document))
+
+    def test_build_artifact_rejects_caller_secretless_mode_overrides(self):
+        document = self.artifact_document()
+        document["levels"][0]["inputs"] = {"secretless-pr": True}
+        self.assertIn("managed_secretless_mode", codes(document))
+
+    def test_build_artifact_rejects_caller_internal_role_and_duplicate_yaml_inputs(self):
+        document = self.artifact_document()
+        document["levels"][0]["inputs"] = {"build-artifact-role": "producer"}
+        self.assertIn("build_artifact_internal_input", codes(document))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ci-levels.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            result = run_generator(SHA, "--levels", str(path))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("build_artifact_internal_input", result.stderr)
+
+    def test_internal_build_artifact_inputs_are_rejected_without_feature_request(self):
+        document = levels({"id": "test", "inputs": {"build-artifact-role": "unknown"}})
+        self.assertIn("build_artifact_internal_input", codes(document))
+
+    def render(self, document):
+        return ci_levels.render_caller(parse(document), SHA, " --levels ci-levels.json")
+
+    def test_share_eligible_artifact_dag_matches_golden_and_gates_every_level(self):
+        document = levels(
+            {"id": "setup"},
+            {"id": "build", "needs": [{"level": "setup"}]},
+            {"id": "test", "needs": [{"level": "setup"}]},
+            secrets=["NODE_AUTH_TOKEN"],
+            buildArtifact={"producer": "build", "consumers": ["test"], "paths": [".next"]},
+        )
+        rendered = self.render(document)
+        self.assertEqual(rendered, (FIXTURES / "build-artifact-share.golden.yml").read_text())
+        jobs = yaml.safe_load(rendered)["jobs"]
+        self.assertEqual(jobs["artifact-mode-gate"].get("needs"), None)
+        self.assertEqual(jobs["artifact-preflight"]["needs"], ["artifact-mode-gate", "setup"])
+        self.assertEqual(
+            jobs["artifact-preflight"]["with"]["build-artifact-mode-share-eligible"],
+            "${{ fromJSON(needs.artifact-mode-gate.outputs.build-artifact-mode-share-eligible) }}",
+        )
+        self.assertEqual(
+            jobs["artifact-preflight"]["with"]["build-artifact-needs-results"],
+            '{"setup":{"result":${{ toJSON(needs.setup.result) }}}}',
+        )
+        self.assertEqual(jobs["setup"]["needs"], ["artifact-mode-gate"])
+        self.assertNotIn("artifact-preflight", jobs["setup"]["needs"])
+        self.assertIn("github.run_attempt == '1'", jobs["artifact-producer"]["if"])
+        self.assertIn("github.run_attempt == '1'", jobs["test"]["with"]["build-artifact-role"])
+        self.assertIn("needs.artifact-producer.outputs.build-artifact-share-available == 'true'", jobs["test"]["with"]["build-artifact-role"])
+        self.assertIn("|| 'level'", jobs["test"]["with"]["build-artifact-role"])
+        self.assertNotIn("needs.artifact-producer.result == 'success'", jobs["test"]["if"])
+        self.assertIn("github.run_attempt == '1'", jobs["test-levels"]["steps"][1]["with"]["share-selected"])
+        aggregate_projection = jobs["test-levels"]["steps"][1]["with"]["needs-json"]
+        self.assertIn('"build-artifact-receipt":${{ toJSON(needs.build.outputs.build-artifact-receipt) }}', aggregate_projection)
+        self.assertIn('needs.test.outputs.build-artifact-receipt', aggregate_projection)
+        self.assertIn('needs.test.outputs.build-artifact-command-digest', aggregate_projection)
+        self.assertNotIn('"setup"', aggregate_projection)
+        self.assertEqual(
+            jobs["test-levels"]["steps"][1]["with"]["expected-lanes"],
+            "${{ needs.artifact-preflight.outputs.build-artifact-aggregate-lanes }}",
+        )
+        self.assertEqual(
+            jobs["test-levels"]["steps"][1]["with"]["upload-result"],
+            "${{ needs.artifact-producer.outputs.build-artifact-upload-result }}",
+        )
+        self.assertIn("policy-selected", jobs["test-levels"]["steps"][1]["with"])
+        self.assertNotIn("receipts", jobs["test-levels"]["steps"][1]["with"])
+
+    def test_producer_keeps_runtime_script_plans_while_execution_uses_preflight_plan(self):
+        document = levels(
+            {"id": "build", "inputs": {
+                "secretless-ci-script-plan": '["build","test"]',
+                "secretless-ci-non-app-script-plan": '["build","lint"]',
+            }},
+            {"id": "test"},
+            secrets=["NODE_AUTH_TOKEN"],
+            buildArtifact={"producer": "build", "consumers": ["test"], "paths": [".next"]},
+        )
+        jobs = yaml.safe_load(self.render(document))["jobs"]
+        producer = jobs["artifact-producer"]["with"]
+        self.assertEqual(producer["secretless-ci-script-plan"], '["build","test"]')
+        self.assertEqual(producer["secretless-ci-non-app-script-plan"], '["build","lint"]')
+        self.assertIn("needs.artifact-preflight.outputs.build-artifact-producer-plan", producer["build-artifact-plan-json"])
+        authorization_plan = json.loads(producer["build-artifact-authorization-plan-json"])
+        self.assertEqual(
+            authorization_plan["levels"][0]["inputs"]["secretless-ci-script-plan"],
+            '["build","test"]',
+        )
+
+    def test_participant_prerequisite_cycle_selects_static_fallback_dag(self):
+        document = levels(
+            {"id": "build"},
+            {"id": "test", "events": ["push"], "needs": [{"level": "build"}]},
+            secrets=["NODE_AUTH_TOKEN"],
+            buildArtifact={"producer": "build", "consumers": ["test"], "paths": [".next"]},
+        )
+        rendered = self.render(document)
+        self.assertEqual(rendered, (FIXTURES / "build-artifact-static-fallback.golden.yml").read_text())
+        jobs = yaml.safe_load(rendered)["jobs"]
+        self.assertEqual(jobs["artifact-preflight"]["needs"], ["artifact-mode-gate"])
+        self.assertNotIn("uses", jobs["artifact-preflight"])
+        self.assertIn("share-selected=false", jobs["artifact-preflight"]["steps"][0]["run"])
+        self.assertEqual(jobs["artifact-preflight"]["outputs"]["build-artifact-aggregate-lanes"], "${{ steps.fallback.outputs.aggregate-lanes }}")
+        self.assertIn("aggregate-lanes=[]", jobs["artifact-preflight"]["steps"][0]["run"])
+        self.assertNotIn("checkout", json.dumps(jobs["artifact-preflight"]))
+        self.assertEqual(jobs["artifact-producer"]["needs"], ["artifact-preflight"])
+        self.assertNotIn("artifact-producer", jobs["artifact-producer"]["needs"])
+        self.assertEqual(
+            jobs["test-levels"]["steps"][0]["env"]["EXPECTED_1"],
+            "${{ github.event_name == 'push' }}",
+        )
+
+    def test_static_eligibility_uses_canonical_parser_for_string_shorthand(self):
+        document = self.artifact_document()
+        document["levels"][0]["inputs"] = {
+            "secretless-ci-script-plan": json.dumps(["build", "lint"]),
+        }
+        document["levels"][1]["inputs"] = {
+            "secretless-ci-script-plan": json.dumps(["lint"]),
+        }
+        plan = parse(document)
+        self.assertIsNone(ci_levels._artifact_static_fallback_reason(plan))
+
+    def test_whitespace_only_script_plans_render_static_per_lane_fallback(self):
+        for field in ("secretless-ci-script-plan", "secretless-ci-non-app-script-plan"):
+            for source in (" ", "\t", "\n", "\u00a0", "\u2003"):
+                with self.subTest(field=field, source=source):
+                    document = self.artifact_document()
+                    document["levels"][0]["inputs"] = {field: source}
+                    plan = parse(document)
+                    self.assertEqual(
+                        ci_levels._artifact_static_fallback_reason(plan),
+                        "participant-script-plan-not-static",
+                    )
+                    rendered = self.render(document)
+                    self.assertIn(
+                        "Static per-lane fallback: participant-script-plan-not-static.",
+                        rendered,
+                    )
+                    workflow = yaml.safe_load(rendered)
+                    self.assertIn(
+                        "share-selected=false",
+                        workflow["jobs"]["artifact-preflight"]["steps"][0]["run"],
+                    )
+
+
 class AggregateTruthTableTests(unittest.TestCase):
     def setUp(self):
         self.script = aggregate_script((FIXTURES / "gitflow.golden.yml").read_text())

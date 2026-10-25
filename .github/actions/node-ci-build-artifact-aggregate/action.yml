@@ -1,0 +1,80 @@
+name: Verify same-run build ArtifactSet receipts
+description: Validate caller-owned ArtifactSet and per-lane receipt outputs.
+inputs:
+  share-selected:
+    required: true
+  policy-selected:
+    required: true
+  mode-gate-result:
+    required: true
+  preflight-result:
+    required: true
+  producer-result:
+    required: true
+  upload-result:
+    required: true
+  artifact-id:
+    required: false
+  artifact-digest:
+    required: false
+  expected-lanes:
+    required: true
+  needs-json:
+    required: true
+  expected-profile:
+    required: false
+  attempt:
+    required: true
+  reusable-workflow-sha:
+    required: true
+  producer-plan:
+    required: false
+  export-paths:
+    required: false
+  runner-image:
+    required: false
+  node-version:
+    required: true
+  package-manager:
+    required: true
+  package-manager-version:
+    required: true
+runs:
+  using: composite
+  steps:
+  - name: Download immutable ArtifactSet verifier
+    shell: bash
+    env:
+      REUSABLE_WORKFLOW_SHA: ${{ inputs.reusable-workflow-sha }}
+    run: |
+      set -euo pipefail
+      [[ "$REUSABLE_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+      curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${REUSABLE_WORKFLOW_SHA}/scripts/ci_build_artifacts.py" -o "$RUNNER_TEMP/ci_build_artifacts.py"
+  - name: Verify all expected lane receipts and artifact identity
+    shell: bash
+    env:
+      SHARE_SELECTED: ${{ inputs.share-selected }}
+      POLICY_SELECTED: ${{ inputs.policy-selected }}
+      MODE_GATE_RESULT: ${{ inputs.mode-gate-result }}
+      PREFLIGHT_RESULT: ${{ inputs.preflight-result }}
+      PRODUCER_RESULT: ${{ inputs.producer-result }}
+      UPLOAD_RESULT: ${{ inputs.upload-result }}
+      ARTIFACT_ID: ${{ inputs.artifact-id }}
+      ARTIFACT_DIGEST: ${{ inputs.artifact-digest }}
+      EXPECTED_LANES_JSON: ${{ inputs.expected-lanes }}
+      NEEDS_JSON: ${{ inputs.needs-json }}
+      EXPECTED_PROFILE: ${{ inputs.expected-profile }}
+      EXPECTED_ATTEMPT: ${{ inputs.attempt }}
+      BUILD_ARTIFACT_COMMANDS_JSON: ${{ inputs.producer-plan }}
+      BUILD_ARTIFACT_PATHS_JSON: ${{ inputs.export-paths }}
+      BUILD_ARTIFACT_RUNNER_IMAGE_JSON: ${{ inputs.runner-image }}
+      BUILD_ARTIFACT_PROFILE: ${{ inputs.expected-profile }}
+      BUILD_ARTIFACT_NODE_VERSION: ${{ inputs.node-version }}
+      BUILD_ARTIFACT_PACKAGE_MANAGER: ${{ inputs.package-manager }}
+      BUILD_ARTIFACT_PACKAGE_MANAGER_VERSION: ${{ inputs.package-manager-version }}
+      CALLER_COMMIT: ${{ github.sha }}
+      CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      REUSABLE_WORKFLOW_SHA: ${{ inputs.reusable-workflow-sha }}
+    run: |
+      set -euo pipefail
+      python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" aggregate

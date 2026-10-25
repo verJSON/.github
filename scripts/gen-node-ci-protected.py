@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
+import argparse
+import ast
+import textwrap
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / ".github/workflows/node-ci.yml"
 TARGET = ROOT / ".github/workflows/node-ci-protected.yml"
+MAX_SOURCE_BYTES = 480_000
+MAX_OUTPUT_BYTES = 480_000
 
 CREDENTIAL_ENV_KEYS = (
     "GH_TOKEN",
@@ -669,6 +674,108 @@ def configure_changelog_tool_cache(document: str) -> str:
     return document[:step_start] + step + "\n" + warm_step.rstrip("\n") + document[step_end:]
 
 
+def protected_candidate_helper_body(helper_source: str | None = None) -> str:
+    # Compare the renderer's protected script with the trusted runtime helper
+    # before replacing the heredoc; the protected variant intentionally differs
+    # from node-ci's source executor because it adds its own cache supervisor.
+    helper_path = ROOT / "scripts/ci_build_artifacts.py"
+    if helper_source is None:
+        helper_source = helper_path.read_text(encoding="utf-8")
+    helper_tree = ast.parse(helper_source, filename=str(helper_path))
+    matches = [
+        node
+        for node in helper_tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "run_protected_candidate_plan"
+    ]
+    if len(matches) != 1 or not isinstance(matches[0], ast.FunctionDef) or not matches[0].body:
+        raise SystemExit("trusted candidate runner helper boundary drifted")
+    function = matches[0]
+    arguments = function.args
+    if (
+        function.decorator_list
+        or arguments.posonlyargs
+        or arguments.args
+        or arguments.vararg is not None
+        or arguments.kwonlyargs
+        or arguments.kwarg is not None
+        or arguments.defaults
+        or any(default is not None for default in arguments.kw_defaults)
+        or not isinstance(function.returns, ast.Constant)
+        or function.returns.value is not None
+    ):
+        raise SystemExit("trusted candidate runner helper signature or decorators changed")
+    helper_lines = helper_source.splitlines(keepends=True)
+    following_nodes = [node.lineno for node in helper_tree.body if node.lineno > function.lineno]
+    end_line = min(following_nodes) - 1 if following_nodes else len(helper_lines)
+    raw_body_lines = helper_lines[function.body[0].lineno - 1 : end_line]
+    if any(
+        line.strip()
+        and ("\t" in line[: len(line) - len(line.lstrip())] or not line.startswith("    "))
+        for line in raw_body_lines
+    ):
+        raise SystemExit("trusted candidate runner helper indentation changed")
+    body = "".join(raw_body_lines)
+    return textwrap.dedent(body).rstrip("\n")
+
+
+def externalize_protected_candidate_plan(step: str) -> str:
+    python_start = "          python3 -I - <<'PY' &\n"
+    python_terminator = "          PY\n"
+    if step.count(python_start) != 1:
+        raise SystemExit("protected candidate helper invocation boundary drifted")
+    start = step.index(python_start)
+    body_start = start + len(python_start)
+    end = step.index(python_terminator, body_start)
+    raw_candidate_body = step[body_start:end]
+    if any(line.strip() and not line.startswith("          ") for line in raw_candidate_body.splitlines()):
+        raise SystemExit("protected candidate heredoc indentation changed")
+    candidate_body = textwrap.dedent(raw_candidate_body).rstrip("\n")
+    normalized_lines = candidate_body.splitlines()
+    for declaration in ("active_process", "received_signal"):
+        old = f"global {declaration}"
+        new = f"nonlocal {declaration}"
+        matches = [
+            index for index, line in enumerate(normalized_lines)
+            if line.strip() == old
+        ]
+        if len(matches) != 1:
+            raise SystemExit("protected candidate signal-state transformation changed")
+        index = matches[0]
+        indentation = normalized_lines[index][: len(normalized_lines[index]) - len(normalized_lines[index].lstrip())]
+        normalized_lines[index] = indentation + new
+    normalized_candidate_body = "\n".join(normalized_lines)
+    if normalized_candidate_body != protected_candidate_helper_body():
+        raise SystemExit("protected candidate helper source no longer matches generator output")
+    helper_invocation = (
+        '          python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" '
+        "run-protected-candidate-plan &\n"
+    )
+    return step[:start] + helper_invocation + step[end + len(python_terminator) :]
+
+
+PROTECTED_CANDIDATE_HELPER_FETCH_STEP = """      - name: Download pinned protected candidate helper
+        if: needs.eligibility.outputs.should-run != 'false'
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          [[ -n "$RUNNER_TEMP" && "$RUNNER_TEMP" = /* && ! -L "$RUNNER_TEMP" ]]
+          helper="$RUNNER_TEMP/ci_build_artifacts.py"
+          [[ ! -e "$helper" && ! -L "$helper" ]]
+          temporary="$(mktemp "$RUNNER_TEMP/.ci-build-artifacts.XXXXXX")"
+          trap 'rm -f -- "$temporary"' EXIT
+          curl -fsSL --proto "=https" --proto-redir "=https" --max-filesize 16777216 \\
+            -o "$temporary" \\
+            "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_build_artifacts.py"
+          [[ -f "$temporary" && ! -L "$temporary" ]]
+          chmod 0400 "$temporary"
+          mv -- "$temporary" "$helper"
+          trap - EXIT
+"""
+
+
 def isolate_candidate_runtime_cache(document: str) -> str:
     step_name = "Run exact credentialless consumer script plan"
     plan_if = (
@@ -763,6 +870,11 @@ def isolate_candidate_runtime_cache(document: str) -> str:
         "max_fd = os.sysconf('SC_OPEN_MAX')\n"
         "if max_fd < 3: raise SystemExit('invalid file descriptor limit')\n"
         "os.closerange(3, max_fd)\n"
+        "if os.environ.get('BUILD_ARTIFACT_ROLE') in ('producer', 'consumer'):\n"
+        " sys.path.insert(0, '/tmp')\n"
+        " from ci_build_artifacts import enforce_shared_sandbox_process_state\n"
+        " enforce_shared_sandbox_process_state()\n"
+        " os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
         "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
     )
     isolated_execution = f"""          max_cache_files = {CANDIDATE_CACHE_MAX_FILES}
@@ -777,6 +889,116 @@ def isolate_candidate_runtime_cache(document: str) -> str:
           ):
               sys.exit("RUNNER_TEMP is not a canonical directory")
           runner_temp = runner_temp_input
+          shared_artifact = os.environ.get("BUILD_ARTIFACT_ROLE") in {"producer", "consumer"}
+          consume_artifact = os.environ.get("BUILD_ARTIFACT_ROLE") == "consumer"
+          if shared_artifact:
+              sys.path.insert(0, str(runner_temp))
+              from ci_build_artifacts import artifact_mount_roots, bubblewrap_network_args
+          else:
+              bubblewrap_network_args = None
+
+          def verified_artifact_mounts():
+              if not consume_artifact:
+                  return [], []
+              artifact_root = runner_temp / "ci-build-artifact-verified"
+              manifest_path = runner_temp / "ci-build-artifact-manifest.json"
+              if artifact_root.is_symlink() or artifact_root.resolve() != artifact_root:
+                  sys.exit("verified ArtifactSet root is not canonical")
+              root_metadata = artifact_root.stat(follow_symlinks=False)
+              if not stat.S_ISDIR(root_metadata.st_mode) or root_metadata.st_mode & 0o222:
+                  sys.exit("verified ArtifactSet root is not a sealed directory")
+              manifest_metadata = manifest_path.stat(follow_symlinks=False)
+              if (
+                  not stat.S_ISREG(manifest_metadata.st_mode)
+                  or manifest_path.is_symlink()
+                  or manifest_metadata.st_nlink != 1
+                  or manifest_metadata.st_size > 4 * 1024 * 1024
+                  or manifest_metadata.st_mode & 0o222
+              ):
+                  sys.exit("verified ArtifactSet manifest is not a sealed regular file")
+              try:
+                  manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                  roots = artifact_mount_roots(manifest["exportPolicy"]["paths"])
+              except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError):
+                  sys.exit("verified ArtifactSet manifest is malformed")
+              if not isinstance(roots, tuple) or not roots or len(roots) > 64:
+                  sys.exit("verified ArtifactSet export roots are malformed")
+              root_fd = os.open(artifact_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+              workspace_fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+              mount_args = []
+              mount_fds = []
+              try:
+                  for relative in roots:
+                      if (
+                          not isinstance(relative, str)
+                          or relative.startswith("/")
+                          or "\\\\" in relative
+                          or any(ord(char) < 32 or char in "*?[]{{}}" for char in relative)
+                      ):
+                          sys.exit("verified ArtifactSet contains an unsafe mount path")
+                      parts = relative.split("/")
+                      if len(parts) > 32 or any(
+                          part in {{"", ".", ".."}} or re.fullmatch(r"[A-Za-z0-9._-]+", part) is None
+                          for part in parts
+                      ):
+                          sys.exit("verified ArtifactSet contains an unsafe mount path")
+                      source_fd = os.dup(root_fd)
+                      for part in parts[:-1]:
+                          next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=source_fd)
+                          os.close(source_fd)
+                          source_fd = next_fd
+                      source_lstat = os.stat(parts[-1], dir_fd=source_fd, follow_symlinks=False)
+                      source_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                      if stat.S_ISDIR(source_lstat.st_mode):
+                          source_flags |= os.O_DIRECTORY
+                      source_final_fd = os.open(parts[-1], source_flags, dir_fd=source_fd)
+                      os.close(source_fd)
+                      source_fd = source_final_fd
+                      source_metadata = os.fstat(source_fd)
+                      is_directory = stat.S_ISDIR(source_metadata.st_mode)
+                      if not is_directory and (
+                          not stat.S_ISREG(source_metadata.st_mode)
+                          or source_metadata.st_nlink != 1
+                          or source_metadata.st_mode & 0o222
+                      ):
+                          os.close(source_fd)
+                          sys.exit("verified ArtifactSet mount source is unsafe")
+                      if is_directory and source_metadata.st_mode & 0o222:
+                          os.close(source_fd)
+                          sys.exit("verified ArtifactSet mount source is writable")
+                      parent_fd = os.dup(workspace_fd)
+                      try:
+                          for part in parts[:-1]:
+                              try:
+                                  next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+                              except FileNotFoundError:
+                                  os.mkdir(part, mode=0o700, dir_fd=parent_fd)
+                                  next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+                              os.close(parent_fd)
+                              parent_fd = next_fd
+                          try:
+                              target_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+                          except FileNotFoundError:
+                              if is_directory:
+                                  os.mkdir(parts[-1], mode=0o700, dir_fd=parent_fd)
+                                  target_fd = os.open(parts[-1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+                              else:
+                                  target_fd = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
+                          target_metadata = os.fstat(target_fd)
+                          compatible = stat.S_ISDIR(target_metadata.st_mode) if is_directory else stat.S_ISREG(target_metadata.st_mode)
+                          os.close(target_fd)
+                          if not compatible:
+                              os.close(source_fd)
+                              sys.exit("ArtifactSet mount target has an incompatible type")
+                      finally:
+                          os.close(parent_fd)
+                      mount_args.extend(("--ro-bind", f"/proc/self/fd/{{source_fd}}", str(workspace.joinpath(*parts))))
+                      mount_fds.append(source_fd)
+              finally:
+                  os.close(root_fd)
+                  os.close(workspace_fd)
+              return mount_args, mount_fds
+
           corepack_default = Path.home() / ".cache/node/corepack"
           configured_corepack_home = os.environ.get("COREPACK_HOME")
           corepack_home_input = (
@@ -1456,6 +1678,11 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                       script_env.update(candidate_service_env)
                   for env_name in unset_env:
                       script_env.pop(env_name, None)
+                  script_env["BUILD_ARTIFACT_ROLE"] = os.environ.get("BUILD_ARTIFACT_ROLE", "")
+                  script_env.update({{
+                      "NPM_CONFIG_SCRIPT_SHELL": "/bin/sh",
+                      "npm_config_script_shell": "/bin/sh",
+                  }})
                   tool_path_entries = [
                       *(str(executable.parent) for executable in tool_executables.values()),
                       "/usr/local/bin",
@@ -1495,129 +1722,158 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                   chmod_args = []
                   for directory in sorted(protected_parents, key=str):
                       chmod_args.extend(("--chmod", "0555", str(directory)))
-              tool_mount_args = []
-              git_mount_args = []
-              tool_prefix_fds = []
-              readonly_mount_identities = dict(tool_prefix_identities)
-              readonly_mount_identities[changelog_cache_root] = changelog_cache_root_identity
-              readonly_mount_identities[git_metadata] = git_metadata_identity
-              if browser_cache is not None:
-                  browser_cache_metadata = browser_cache.stat(follow_symlinks=False)
-                  if not stat.S_ISDIR(browser_cache_metadata.st_mode):
-                      sys.exit("validated Playwright browser cache changed type before namespace bind")
-                  readonly_mount_identities[browser_cache] = (
-                      browser_cache_metadata.st_dev,
-                      browser_cache_metadata.st_ino,
-                      browser_cache_metadata.st_uid,
-                      stat.S_IMODE(browser_cache_metadata.st_mode),
+                  tool_mount_args = []
+                  git_mount_args = []
+                  tool_prefix_fds = []
+                  readonly_mount_identities = dict(tool_prefix_identities)
+                  readonly_mount_identities[changelog_cache_root] = changelog_cache_root_identity
+                  readonly_mount_identities[git_metadata] = git_metadata_identity
+                  if browser_cache is not None:
+                      browser_cache_metadata = browser_cache.stat(follow_symlinks=False)
+                      if not stat.S_ISDIR(browser_cache_metadata.st_mode):
+                          sys.exit("validated Playwright browser cache changed type before namespace bind")
+                      readonly_mount_identities[browser_cache] = (
+                          browser_cache_metadata.st_dev,
+                          browser_cache_metadata.st_ino,
+                          browser_cache_metadata.st_uid,
+                          stat.S_IMODE(browser_cache_metadata.st_mode),
+                      )
+                  try:
+                    for tool_prefix in (
+                        *tool_prefixes,
+                        changelog_cache_root,
+                        git_metadata,
+                        *((browser_cache,) if browser_cache is not None else ()),
+                    ):
+                      descriptor = os.open(
+                        tool_prefix,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                      )
+                      descriptor_metadata = os.fstat(descriptor)
+                      descriptor_identity = (
+                        descriptor_metadata.st_dev,
+                        descriptor_metadata.st_ino,
+                        descriptor_metadata.st_uid,
+                        stat.S_IMODE(descriptor_metadata.st_mode),
+                      )
+                      if descriptor_identity != readonly_mount_identities[tool_prefix]:
+                        os.close(descriptor)
+                        sys.exit("verified read-only mount changed before namespace bind")
+                      tool_prefix_fds.append(descriptor)
+                      mount_flag = "--bind" if tool_prefix == browser_cache else "--ro-bind"
+                      mount_args = (mount_flag, f"/proc/self/fd/{{descriptor}}", str(tool_prefix))
+                      if tool_prefix == git_metadata:
+                        git_mount_args.extend(mount_args)
+                      else:
+                        tool_mount_args.extend(mount_args)
+                  except BaseException:
+                    for descriptor in tool_prefix_fds:
+                      os.close(descriptor)
+                    raise
+                  artifact_mount_args, artifact_mount_fds = verified_artifact_mounts()
+                  tool_prefix_fds.extend(artifact_mount_fds)
+                  network_args = (
+                      bubblewrap_network_args(shared_artifact=True)
+                      if shared_artifact
+                      else ["--cap-drop", "ALL"]
                   )
-              try:
-                for tool_prefix in (
-                    *tool_prefixes,
-                    changelog_cache_root,
-                    git_metadata,
-                    *((browser_cache,) if browser_cache is not None else ()),
-                ):
-                  descriptor = os.open(
-                    tool_prefix,
-                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                  artifact_helper_args = (
+                      ["--ro-bind", str(runner_temp / "ci_build_artifacts.py"), "/tmp/ci_build_artifacts.py"]
+                      if shared_artifact
+                      else []
                   )
-                  descriptor_metadata = os.fstat(descriptor)
-                  descriptor_identity = (
-                    descriptor_metadata.st_dev,
-                    descriptor_metadata.st_ino,
-                    descriptor_metadata.st_uid,
-                    stat.S_IMODE(descriptor_metadata.st_mode),
-                  )
-                  if descriptor_identity != readonly_mount_identities[tool_prefix]:
-                    os.close(descriptor)
-                    sys.exit("verified read-only mount changed before namespace bind")
-                  tool_prefix_fds.append(descriptor)
-                  mount_flag = "--bind" if tool_prefix == browser_cache else "--ro-bind"
-                  mount_args = (mount_flag, f"/proc/self/fd/{{descriptor}}", str(tool_prefix))
-                  if tool_prefix == git_metadata:
-                    git_mount_args.extend(mount_args)
-                  else:
-                    tool_mount_args.extend(mount_args)
-              except BaseException:
-                for descriptor in tool_prefix_fds:
-                  os.close(descriptor)
-                raise
-              try:
-                active_process = subprocess.Popen(
-                          [
-                              str(bubblewrap),
-                              "--unshare-user",
-                              "--unshare-pid",
-                              "--unshare-ipc",
-                              "--unshare-uts",
-                              "--unshare-cgroup-try",
-                              "--disable-userns",
-                              "--die-with-parent",
-                              "--new-session",
-                              "--cap-drop", "ALL",
-                              "--tmpfs", "/",
-                              "--tmpfs", "/tmp",
-                              *([] if requires_services else ["--unshare-net"]),
-                              *directory_args,
-                              *chmod_args,
-                              "--ro-bind", "/usr", "/usr",
-                              "--ro-bind", "/bin", "/bin",
-                              "--ro-bind", "/lib", "/lib",
-                              "--ro-bind", "/lib64", "/lib64",
-                              # Present on every dpkg host; optional because this runner
-                              # may be self-hosted (#1782).
-                              "--ro-bind-try", "/etc/alternatives", "/etc/alternatives",
-                              "--ro-bind", "/etc/ssl", "/etc/ssl",
-                              "--ro-bind", "/etc/hosts", "/etc/hosts",
-                              "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
-                              "--ro-bind", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
-                              "--ro-bind", "/etc/passwd", "/etc/passwd",
-                              "--ro-bind", "/etc/group", "/etc/group",
-                              *tool_mount_args,
-                              "--bind", str(workspace), str(workspace),
-                              *git_mount_args,
-                              "--bind", str(script_cache), str(script_cache),
-                              "--bind", str(script_home), str(script_home),
-                              "--bind", str(script_tmp), str(script_tmp),
-                              "--proc", "/proc",
-                              "--dev", "/dev",
-                              "--chdir", str(script_directory),
-                              "--",
-                              "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
-                              *npm_command, "run", name,
-                          ],
-                          env=script_env,
-                          start_new_session=True,
-                          pass_fds=tuple(tool_prefix_fds),
-                        )
-                for descriptor in tool_prefix_fds:
-                  os.close(descriptor)
-                tool_prefix_fds = []
-                while active_process.poll() is None:
-                  time.sleep(0.05)
-                candidate_status = active_process.returncode
-                extinguish_process_group(active_process)
-                if received_signal is not None:
-                  raise SystemExit(128 + received_signal)
-                if candidate_status != 0:
-                  raise subprocess.CalledProcessError(candidate_status, active_process.args)
-              finally:
-                for descriptor in tool_prefix_fds:
-                  os.close(descriptor)
-                if active_process is not None:
-                  extinguish_process_group(active_process)
-                active_process = None
-                shutil.rmtree(script_cache, ignore_errors=True)
-                shutil.rmtree(script_tmp, ignore_errors=True)
-                shutil.rmtree(script_home, ignore_errors=True)
-                if (
-                  script_cache.exists()
-                  or script_tmp.exists()
-                  or script_home.exists()
-                  or (baseline is not None and inventory(baseline) != baseline_inventory)
-                ):
-                  sys.exit("candidate script cache cleanup or baseline integrity check failed")
+                  legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]
+                  try:
+                    active_process = subprocess.Popen(
+                              [
+                                  str(bubblewrap),
+                                  "--unshare-user",
+                                  "--unshare-pid",
+                                  "--unshare-ipc",
+                                  "--unshare-uts",
+                                  "--unshare-cgroup-try",
+                                  "--disable-userns",
+                                  "--die-with-parent",
+                                  "--new-session",
+                                  *network_args,
+                                  "--tmpfs", "/",
+                                  "--tmpfs", "/tmp",
+                                  *artifact_helper_args,
+                                  *legacy_network_args,
+                                  *directory_args,
+                                  *chmod_args,
+                                  "--ro-bind", "/usr", "/usr",
+                                  "--ro-bind", "/bin", "/bin",
+                                  "--ro-bind", "/lib", "/lib",
+                                  "--ro-bind", "/lib64", "/lib64",
+                                  # Present on every dpkg host; optional because this runner
+                                  # may be self-hosted (#1782).
+                                  "--ro-bind-try", "/etc/alternatives", "/etc/alternatives",
+                                  "--ro-bind", "/etc/ssl", "/etc/ssl",
+                                  "--ro-bind", "/etc/hosts", "/etc/hosts",
+                                  "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
+                                  "--ro-bind", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
+                                  "--ro-bind", "/etc/passwd", "/etc/passwd",
+                                  "--ro-bind", "/etc/group", "/etc/group",
+                                  *tool_mount_args,
+                                  "--bind", str(workspace), str(workspace),
+                                  *artifact_mount_args,
+                                  *git_mount_args,
+                                  "--bind", str(script_cache), str(script_cache),
+                                  "--bind", str(script_home), str(script_home),
+                                  "--bind", str(script_tmp), str(script_tmp),
+                                  "--proc", "/proc",
+                                  "--dev", "/dev",
+                                  "--chdir", str(script_directory),
+                                  "--",
+                                  "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
+                                  *npm_command, "run", name,
+                              ],
+                              env=script_env,
+                              start_new_session=True,
+                              pass_fds=tuple(tool_prefix_fds),
+                            )
+                    for descriptor in tool_prefix_fds:
+                      os.close(descriptor)
+                    tool_prefix_fds = []
+                    while active_process.poll() is None:
+                      time.sleep(0.05)
+                    candidate_status = active_process.returncode
+                    extinguish_process_group(active_process)
+                    if received_signal is not None:
+                      raise SystemExit(128 + received_signal)
+                    if candidate_status != 0:
+                      raise subprocess.CalledProcessError(candidate_status, active_process.args)
+                  finally:
+                    for descriptor in tool_prefix_fds:
+                      os.close(descriptor)
+                    if active_process is not None:
+                      extinguish_process_group(active_process)
+                    active_process = None
+                    shutil.rmtree(script_cache, ignore_errors=True)
+                    shutil.rmtree(script_tmp, ignore_errors=True)
+                    shutil.rmtree(script_home, ignore_errors=True)
+                    if (
+                      script_cache.exists()
+                      or script_tmp.exists()
+                      or script_home.exists()
+                      or (baseline is not None and inventory(baseline) != baseline_inventory)
+                    ):
+                      sys.exit("candidate script cache cleanup or baseline integrity check failed")
+              command_records = [
+                  {{
+                      "directory": script_directory.relative_to(workspace).as_posix(),
+                      "script": name,
+                      "unsetEnv": sorted(unset_env),
+                      "requiresServices": requires_services,
+                  }}
+                  for script_directory, name, unset_env, requires_services in normalized
+              ]
+              command_digest = hashlib.sha256(
+                  json.dumps(command_records, sort_keys=True, separators=(",", ":")).encode("utf-8")
+              ).hexdigest()
+              with open(os.environ["VERJSON_CI_OUTPUT_FILE"], "a", encoding="utf-8") as output:
+                  output.write(f"command-digest={{command_digest}}\\n")
           finally:
               cleanup_cache_root()
               for caught_signal, previous_handler in previous_handlers.items():
@@ -1662,6 +1918,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
 '''
     step = step.replace(python_start, supervised_start, 1)
     step = step.replace(python_end, supervised_end, 1)
+    step = externalize_protected_candidate_plan(step)
     cleanup_step = f"""
       - name: Remove isolated candidate runtime caches
         if: always() && {plan_if}
@@ -1885,7 +2142,6 @@ def render() -> str:
     document = replace_once(document, "          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}", "          HEAD_SHA: ${{ inputs.head-sha }}")
     document = replace_once(document, "    permissions:\n      contents: read\n      packages: read\n", "    permissions:\n      actions: read\n      contents: read\n      packages: read\n      pull-requests: read\n")
     document = replace_once(document, "          EVENT_NAME: ${{ github.event_name }}\n          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}", "          EVENT_NAME: ${{ inputs.event-name }}\n          HEAD_REPOSITORY: ${{ inputs.head-repository }}")
-    document = replace_once(document, "    if: (inputs.secretless-pr || inputs.secretless-trusted-ref) && needs.eligibility.outputs.should-run != 'false'\n", "    if: needs.eligibility.outputs.should-run != 'false'\n")
     document = replace_once(document, "          [ \"$SECRETLESS_PR\" != \"$SECRETLESS_TRUSTED_REF\" ] || {\n", "          [ \"$SECRETLESS_PR\" = true ] && [ \"$SECRETLESS_TRUSTED_REF\" = false ] || {\n            echo \"::error::protected node-ci requires secretless-pr=true and secretless-trusted-ref=false\"\n            exit 1\n          }\n          [ \"$SECRETLESS_PR\" != \"$SECRETLESS_TRUSTED_REF\" ] || {\n")
     document = replace_once(
         document,
@@ -1893,9 +2149,34 @@ def render() -> str:
         "          [ -z \"$SCHEMA_DIR\" ] || {\n            echo \"::error::protected node-ci does not support schema-dir\"\n            exit 1\n          }\n",
     )
     document = replace_once(document, "        with:\n          persist-credentials: false\n", "        with:\n          ref: ${{ inputs.head-sha }}\n          persist-credentials: false\n")
+    caller_commit_checkout = "          ref: ${{ github.sha }}\n"
+    if document.count(caller_commit_checkout) != 2:
+        raise SystemExit("protected ArtifactSet checkout commit inputs drifted")
+    document = document.replace(caller_commit_checkout, "          ref: ${{ inputs.head-sha }}\n", 2)
+    caller_commit_identity = "CALLER_COMMIT: ${{ github.sha }}"
+    if document.count(caller_commit_identity) != 6:
+        raise SystemExit("protected ArtifactSet commit identity inputs drifted")
+    document = document.replace(caller_commit_identity, "CALLER_COMMIT: ${{ inputs.head-sha }}")
     acquisition_end = document.index("  build-test:\n")
     acquisition = document[:acquisition_end]
     build = document[acquisition_end:]
+    authorize_marker = "      - name: Authorize producer or consumer from immutable policy\n"
+    build = replace_once(
+        build,
+        authorize_marker,
+        PROTECTED_CANDIDATE_HELPER_FETCH_STEP + authorize_marker,
+    )
+    role_helper_download = (
+        '          curl -fsSL "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_build_artifacts.py" '
+        '-o "$RUNNER_TEMP/ci_build_artifacts.py"\n'
+    )
+    if build.count(role_helper_download) != 1:
+        raise SystemExit("protected role authorization helper download boundary drifted")
+    build = build.replace(
+        role_helper_download,
+        '          [[ -f "$RUNNER_TEMP/ci_build_artifacts.py" && ! -L "$RUNNER_TEMP/ci_build_artifacts.py" ]]\n',
+        1,
+    )
     transfer_download = "      - name: Download pinned secretless dependency transfer implementation\n"
     if acquisition.count(transfer_download) != 1:
         raise SystemExit("protected node-ci acquisition transfer download boundary drifted")
@@ -1909,8 +2190,35 @@ def render() -> str:
     document = replace_once(document, "      - name: Acquire immutable auxiliary source\n", verifier_step(auxiliary_if) + "      - name: Acquire immutable auxiliary source\n")
     document = replace_once(document, "      - name: Populate verified private dependency cache\n", verifier_step() + "      - name: Populate verified private dependency cache\n")
     document = replace_once(document, "    permissions:\n      contents: read\n    steps:\n", "    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n    steps:\n")
-    checkout = "        with:\n          submodules: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'false' || 'recursive' }}\n"
-    document = replace_once(document, checkout, "        with:\n          ref: ${{ inputs.head-sha }}\n          submodules: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'false' || 'recursive' }}\n")
+    checkout = "        with:\n          ref: ${{ inputs.head-sha }}\n          fetch-depth: 2\n          submodules: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'false' || 'recursive' }}\n"
+    document = replace_once(document, checkout, checkout)
+    protected_acquisition_if = (
+        "if: (inputs.build-artifact-role == 'level' || inputs.build-artifact-role == 'consumer' "
+        "|| inputs.build-artifact-role == 'producer') && ((inputs.secretless-pr || inputs.secretless-trusted-ref) "
+        "|| inputs.build-artifact-role == 'producer' || inputs.build-artifact-role == 'consumer') "
+        "&& needs.eligibility.outputs.should-run != 'false'\n"
+    )
+    if document.count(protected_acquisition_if) != 1:
+        raise SystemExit("protected node-ci acquisition fail-closed gate drifted")
+    document = document.replace(
+        protected_acquisition_if,
+        "if: (inputs.build-artifact-role == 'level' || inputs.build-artifact-role == 'consumer' "
+        "|| inputs.build-artifact-role == 'producer') && needs.eligibility.outputs.should-run != 'false'\n",
+        1,
+    )
+    require_acquisition_guard = (
+        "if: needs.eligibility.outputs.should-run != 'false' && "
+        "((inputs.secretless-pr || inputs.secretless-trusted-ref) || "
+        "inputs.build-artifact-role == 'producer' || inputs.build-artifact-role == 'consumer') && "
+        "needs.acquire-secretless-dependencies.result != 'success'\n"
+    )
+    if document.count(require_acquisition_guard) != 1:
+        raise SystemExit("protected node-ci pre-checkout acquisition guard drifted")
+    document = document.replace(
+        require_acquisition_guard,
+        "if: needs.eligibility.outputs.should-run != 'false' && needs.acquire-secretless-dependencies.result != 'success'\n",
+        1,
+    )
     rebuild_if = "needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref) && (inputs.secretless-rebuild-packages != '' || inputs.secretless-skip-install-scripts != '')"
     plan_if = "needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)"
     default_if = "needs.eligibility.outputs.should-run != 'false' && !(inputs.secretless-pr || inputs.secretless-trusted-ref)"
@@ -1924,7 +2232,12 @@ def render() -> str:
     )
     default_step_start = "      - run: npm run build\n"
     default_step_end = "      - name: Parse compatibility script service grant\n"
-    grouped_default = """      - name: Run default build, typecheck, test, and lint plan
+    grouped_default = """      - name: Require protected secretless execution mode
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.build-artifact-role == 'level' || inputs.build-artifact-role == 'consumer' || inputs.build-artifact-role == 'producer') && !(inputs.secretless-pr || inputs.secretless-trusted-ref)
+        run: |
+          echo "::error::protected node-ci requires generated event-specific secretless mode before candidate execution" >&2
+          exit 1
+      - name: Run default build, typecheck, test, and lint plan
         if: needs.eligibility.outputs.should-run != 'false' && !(inputs.secretless-pr || inputs.secretless-trusted-ref)
         run: |
           npm run build
@@ -1975,15 +2288,15 @@ def render() -> str:
         "runner.environment == 'github-hosted'",
     )
     document = remove_step(document, "Install schema submodule deps")
-    document = document.replace(
-        "          ref: ${{ inputs.head-sha }}\n          persist-credentials: false\n",
+    document = replace_once(
+        document,
+        "          ref: ${{ inputs.head-sha }}\n          fetch-depth: 2\n          persist-credentials: false\n",
         "          ref: ${{ inputs.head-sha }}\n          fetch-depth: 0\n          persist-credentials: false\n",
-        1,
     )
-    document = document.replace(
-        "          ref: ${{ inputs.head-sha }}\n          submodules: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'false' || 'recursive' }}\n",
+    document = replace_once(
+        document,
+        "          ref: ${{ inputs.head-sha }}\n          fetch-depth: 2\n          submodules: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'false' || 'recursive' }}\n",
         "          ref: ${{ inputs.head-sha }}\n          fetch-depth: 0\n          submodules: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'false' || 'recursive' }}\n",
-        1,
     )
     for step_name in (
         "Rebuild exact approved lifecycle packages without credentials",
@@ -2003,5 +2316,30 @@ def render() -> str:
     return document
 
 
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check", action="store_true", help="check exact generated bytes without writing")
+    args = parser.parse_args(argv)
+
+    source_bytes = SOURCE.read_bytes()
+    if len(source_bytes) > MAX_SOURCE_BYTES:
+        parser.error(f"source workflow exceeds {MAX_SOURCE_BYTES} UTF-8 bytes")
+    output_bytes = render().encode("utf-8")
+    if len(output_bytes) > MAX_OUTPUT_BYTES:
+        parser.error(f"generated protected workflow exceeds {MAX_OUTPUT_BYTES} UTF-8 bytes")
+
+    if args.check:
+        try:
+            current_bytes = TARGET.read_bytes()
+        except OSError as error:
+            parser.error(f"cannot read generated protected workflow: {error}")
+        if current_bytes != output_bytes:
+            parser.error("generated protected workflow is stale; run scripts/gen-node-ci-protected.py")
+        return 0
+
+    TARGET.write_bytes(output_bytes)
+    return 0
+
+
 if __name__ == "__main__":
-    TARGET.write_text(render(), encoding="utf-8")
+    raise SystemExit(main())

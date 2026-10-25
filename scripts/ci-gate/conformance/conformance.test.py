@@ -112,6 +112,7 @@ def scenario_bindings(*, should_run, event_name='pull_request',
         'needs.eligibility.outputs.should-run': should_run,
         'needs.acquire-secretless-dependencies.outputs.auxiliary-content-path': auxiliary_path,
         'steps.restore-secretless-transfer.outcome': 'success',
+        'steps.export-build-artifact.outputs.share-available': '',
         'steps.restore-secretless-public-cache.outputs.cache-hit': 'true' if cache_hits else '',
         'steps.restore-playwright-browser-cache.outputs.cache-hit': 'true' if cache_hits else '',
         'steps.prepare-playwright-browser-cache.outputs.owned': 'true',
@@ -411,6 +412,54 @@ class TheHarnessFailsClosed(unittest.TestCase):
         scenario = Scenario('unbound', 'missing a binding the contract reads', {})
         with self.assertRaises(UnknownContext):
             model_workflow(CONTRACT, scenario)
+
+    def test_step_outcome_context_tracks_executed_skipped_and_continued_failure(self):
+        workflow = {
+            'jobs': {
+                'outcome-contract': {
+                    'steps': [
+                        {'id': 'success', 'name': 'succeeds', 'run': 'true'},
+                        {
+                            'id': 'run-on-success',
+                            'if': "steps.success.outcome == 'success'",
+                            'name': 'runs after success',
+                            'run': 'true',
+                        },
+                        {'id': 'skipped', 'if': 'false', 'name': 'skips', 'run': 'true'},
+                        {
+                            'id': 'run-on-skipped',
+                            'if': "steps.skipped.outcome == 'skipped'",
+                            'name': 'runs after skipped step',
+                            'run': 'true',
+                        },
+                        {
+                            'id': 'continued-failure',
+                            'name': 'continues after failure',
+                            'run': 'exit 1',
+                            'continue-on-error': True,
+                        },
+                        {
+                            'id': 'observe-continued-failure',
+                            'if': "steps.continued-failure.outcome == 'failure' && steps.continued-failure.conclusion == 'success'",
+                            'name': 'observes continued failure',
+                            'run': 'true',
+                        },
+                    ],
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'workflow.yml'
+            path.write_text(yaml.safe_dump(workflow, sort_keys=False), encoding='utf-8')
+            outcome = model_workflow(path, Scenario('step-outcomes', 'step status context', {}))[
+                'outcome-contract'
+            ]
+
+        self.assertEqual('success', outcome.conclusion)
+        self.assertIn('runs after success', outcome.executed_steps)
+        self.assertIn('runs after skipped step', outcome.executed_steps)
+        self.assertIn('observes continued failure', outcome.executed_steps)
+        self.assertIn('skips', outcome.skipped_steps)
 
     def test_an_unsupported_construct_raises_rather_than_evaluating_false(self):
         with self.assertRaises(UnsupportedExpression):

@@ -234,7 +234,17 @@ assert "inputs.secretless-pr" in runtime_cleanup["if"]
 
 assert "cleanup-secretless-transfer" not in jobs
 assert "actions/upload-artifact@" not in str(acquire)
-assert "actions/download-artifact@" not in str(build)
+artifact_downloads = [
+    step for step in build["steps"]
+    if str(step.get("uses", "")).startswith("actions/download-artifact@")
+]
+assert len(artifact_downloads) == 1
+artifact_download = artifact_downloads[0]
+assert artifact_download["uses"] == "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"
+assert artifact_download["with"]["artifact-ids"] == "${{ inputs.build-artifact-id }}"
+assert artifact_download["with"]["skip-decompress"] is True
+assert artifact_download["with"]["digest-mismatch"] == "error"
+assert "inputs.build-artifact-role == 'consumer'" in artifact_download["if"]
 assert "actions: write" not in open(sys.argv[1], encoding="utf-8").read()
 
 for command in ("npm run build", "npm run typecheck --if-present", "npm test", "npm run lint --if-present"):

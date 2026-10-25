@@ -26,7 +26,11 @@ WORKFLOWS = (
     ROOT / ".github/workflows/node-ci.yml",
     ROOT / ".github/workflows/node-ci-protected.yml",
 )
-DEFER_CONDITION = "needs.eligibility.outputs.should-run == 'false'"
+DEFER_CONDITION = (
+    "needs.eligibility.outputs.should-run == 'false' && "
+    "(inputs.build-artifact-role == 'level' || inputs.build-artifact-role == 'consumer' "
+    "|| inputs.build-artifact-role == 'producer')"
+)
 EXECUTION_GUARD = "needs.eligibility.outputs.should-run != 'false'"
 
 
@@ -39,7 +43,11 @@ class DeferredCiVisibilityTest(unittest.TestCase):
         for path in WORKFLOWS:
             with self.subTest(workflow=path.name):
                 build_test = load(path)["jobs"]["build-test"]
-                self.assertEqual("always()", build_test["if"])
+                self.assertEqual(
+                    "always() && (inputs.build-artifact-role == 'level' || "
+                    "inputs.build-artifact-role == 'consumer' || inputs.build-artifact-role == 'producer')",
+                    build_test["if"],
+                )
                 self.assertNotIn("if", load(path)["jobs"]["eligibility"])
 
     def test_a_deferred_run_executes_nothing_but_the_deferral_report(self):
