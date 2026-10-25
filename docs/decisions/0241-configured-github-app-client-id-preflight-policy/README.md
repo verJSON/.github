@@ -35,7 +35,12 @@ pattern is GitHub's complete or permanent grammar.
    that mint's exact `with.client-id`, copies the mint's `if` condition, sets
    `LC_ALL=C`, and fails on an active mint with a missing or malformed ID.
    Optional token paths may skip both guard and mint only when that exact mint
-   is skipped by its condition.
+   is skipped by its condition. Mint conditions cannot use explicit status
+   check functions, which suppress GitHub Actions' implicit `success()` gate
+   ([status check functions](https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions))
+   and could otherwise let a mint run after its guard fails. A future path that
+   needs one must add an explicit guard-success condition and pass architecture
+   review.
 3. `scripts/bootstrap-canonical-ci.py` and
    `scripts/ai-review-required-workflow-audit.py` use the same acceptance
    function at their configuration boundaries.

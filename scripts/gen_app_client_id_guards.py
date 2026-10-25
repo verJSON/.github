@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github/workflows"
 TOKEN_ACTION = "actions/create-github-app-token@"
 GENERATED_ID_PREFIX = "generated_app_client_id_"
+STATUS_CHECK_FUNCTIONS = {"success", "always", "failure", "cancelled"}
 LEGACY_GUARD_NAMES = {
     "Require the compatibility App client ID",
     "Require the read-only compatibility App client ID",
@@ -85,6 +86,121 @@ def _is_old_guard(step: Node) -> bool:
     return _step_name(step) in LEGACY_GUARD_NAMES
 
 
+def _template_markers(expression: str) -> tuple[list[int], list[int]]:
+    openings: list[int] = []
+    closings: list[int] = []
+    index = 0
+    while index < len(expression):
+        if expression[index] == "'":
+            index += 1
+            while index < len(expression):
+                if expression[index] == "'":
+                    if index + 1 < len(expression) and expression[index + 1] == "'":
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+            continue
+        if expression.startswith("${{", index):
+            openings.append(index)
+            index += 3
+            continue
+        if expression.startswith("}}", index):
+            closings.append(index)
+            index += 2
+            continue
+        index += 1
+    return openings, closings
+
+
+def _single_quoted_literal_value(expression: str) -> str | None:
+    expression = expression.strip()
+    if len(expression) < 2 or expression[0] != "'" or expression[-1] != "'":
+        return None
+    value: list[str] = []
+    index = 1
+    while index < len(expression) - 1:
+        if expression[index] == "'":
+            if index + 1 < len(expression) - 1 and expression[index + 1] == "'":
+                value.append("'")
+                index += 2
+                continue
+            return None
+        value.append(expression[index])
+        index += 1
+    return "".join(value)
+
+
+def _has_status_check_function(expression: str) -> bool:
+    index = 0
+    while index < len(expression):
+        if expression[index] == "'":
+            index += 1
+            while index < len(expression):
+                if expression[index] == "'":
+                    if index + 1 < len(expression) and expression[index + 1] == "'":
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+            continue
+        if expression[index].isalpha() or expression[index] == "_":
+            start = index
+            while index < len(expression) and (expression[index].isalnum() or expression[index] in "_-"):
+                index += 1
+            name = expression[start:index].lower()
+            after_name = index
+            while after_name < len(expression) and expression[after_name].isspace():
+                after_name += 1
+            if name in STATUS_CHECK_FUNCTIONS and after_name < len(expression) and expression[after_name] == "(":
+                return True
+            continue
+        index += 1
+    return False
+
+
+def _status_check_problem(expression: str | None) -> str | None:
+    if expression is None:
+        return None
+    normalized = expression.strip()
+    if "${{" in normalized and not normalized.startswith("${{"):
+        return "token mint condition uses embedded expression templates; only one outer expression is supported"
+    openings, closings = _template_markers(normalized)
+    if openings or closings:
+        if openings != [0] or closings != [len(normalized) - 2]:
+            return "token mint condition uses embedded expression templates; only one outer expression is supported"
+        expression = normalized[3:-2]
+        literal_value = _single_quoted_literal_value(expression)
+        if literal_value is not None and _has_status_check_function(literal_value):
+            return "token mint condition uses an explicit status-check function; the implicit success gate must remain active"
+    if _has_status_check_function(expression):
+        return "token mint condition uses an explicit status-check function; the implicit success gate must remain active"
+    return None
+
+
+def _terminal_step_end(text: str, step: Node) -> int:
+    end = step.end_mark.index
+    if end >= len(text):
+        return end
+    line_start = _line_start(text, end)
+    if not text[line_start:end].strip():
+        return line_start
+    newline = text.find("\n", end)
+    return len(text) if newline == -1 else newline + 1
+
+
+def _step_starts_on_own_line(text: str, step: Node, steps_node: Node | None = None) -> bool:
+    if isinstance(steps_node, SequenceNode) and steps_node.flow_style:
+        return False
+    if not isinstance(step, MappingNode) or step.flow_style:
+        return False
+    start = _line_start(text, step.start_mark.index)
+    prefix = text[start : step.start_mark.index]
+    return re.fullmatch(r" *- +", prefix) is not None
+
+
 def _guard_id(workflow: Path, job_id: str, ordinal: int) -> str:
     stem = f"{workflow.stem}_{job_id}_{ordinal}"
     safe = re.sub(r"[^A-Za-z0-9_-]", "_", stem)
@@ -133,9 +249,15 @@ def _workflow_nodes(path: Path, text: str) -> tuple[Node, list[tuple[str, Node]]
     return root, jobs
 
 
-def _collect_edits(path: Path, text: str) -> tuple[list[Edit], int]:
+def _collect_edits(
+    path: Path,
+    text: str,
+    *,
+    require_editable: bool = False,
+) -> tuple[list[Edit], int, list[str]]:
     _, jobs = _workflow_nodes(path, text)
     edits: list[Edit] = []
+    errors: list[str] = []
     mint_count = 0
     for job_id, job in jobs:
         steps_node = _get(job, "steps")
@@ -150,13 +272,26 @@ def _collect_edits(path: Path, text: str) -> tuple[list[Edit], int]:
         consumed_old_guards: set[int] = set()
         consumed_generated_guards: set[int] = set()
         for ordinal, index in enumerate(token_indexes, start=1):
+            mint_count += 1
             step = steps[index]
+            if require_editable and not _step_starts_on_own_line(text, step, steps_node):
+                errors.append(
+                f"{path.relative_to(ROOT)}:{step.start_mark.line + 1}: token mint step layout cannot be rewritten safely"
+                )
+                continue
             client_id_expression = _value(_get(_get(step, "with"), "client-id"))
             if not client_id_expression:
-                raise GuardGenerationError(
+                errors.append(
                     f"{path.relative_to(ROOT)}:{step.start_mark.line + 1}: token mint lacks string client-id"
                 )
+                continue
             if_expression = _value(_get(step, "if"))
+            condition_problem = _status_check_problem(if_expression)
+            if condition_problem:
+                errors.append(
+                    f"{path.relative_to(ROOT)}:{step.start_mark.line + 1}: {condition_problem}"
+                )
+                continue
             guard_id = _guard_id(path, job_id, ordinal)
             token_line_start = _line_start(text, step.start_mark.index)
             indent = _indent_at(text, token_line_start)
@@ -167,6 +302,17 @@ def _collect_edits(path: Path, text: str) -> tuple[list[Edit], int]:
                 (_step_id(previous) or "").startswith(GENERATED_ID_PREFIX)
                 or _is_old_guard(previous)
             ):
+                if require_editable and not _step_starts_on_own_line(text, previous, steps_node):
+                    guard_type = (
+                        "generated"
+                        if (_step_id(previous) or "").startswith(GENERATED_ID_PREFIX)
+                        else "legacy"
+                    )
+                    errors.append(
+                        f"{path.relative_to(ROOT)}:{previous.start_mark.line + 1}: "
+                        f"{guard_type} guard step layout cannot be rewritten safely"
+                    )
+                    continue
                 previous_line_start = _line_start(text, previous.start_mark.index)
                 edits.append(Edit(previous_line_start, token_line_start, replacement))
                 if (_step_id(previous) or "").startswith(GENERATED_ID_PREFIX):
@@ -175,36 +321,49 @@ def _collect_edits(path: Path, text: str) -> tuple[list[Edit], int]:
                     consumed_old_guards.add(previous_index)
             else:
                 edits.append(Edit(token_line_start, token_line_start, replacement))
-            mint_count += 1
         for index, step in enumerate(steps):
             if _is_old_guard(step) and index not in consumed_old_guards:
+                if require_editable and not _step_starts_on_own_line(text, step, steps_node):
+                    errors.append(
+                    f"{path.relative_to(ROOT)}:{step.start_mark.line + 1}: legacy guard step layout cannot be rewritten safely"
+                    )
+                    continue
+                if require_editable and index + 1 < len(steps) and not _step_starts_on_own_line(
+                    text, steps[index + 1], steps_node
+                ):
+                    errors.append(
+                        f"{path.relative_to(ROOT)}:{step.start_mark.line + 1}: "
+                        "following step layout cannot be preserved while removing a legacy guard"
+                    )
+                    continue
                 start = _line_start(text, step.start_mark.index)
                 if index + 1 < len(steps):
                     end = _line_start(text, steps[index + 1].start_mark.index)
                 else:
-                    end = step.end_mark.index
-                    if end < len(text) and text[end] != "\n":
-                        end = text.find("\n", end)
-                        if end == -1:
-                            end = len(text)
-                    elif end < len(text):
-                        end += 1
+                    end = _terminal_step_end(text, step)
                 edits.append(Edit(start, end, ""))
             step_id = _step_id(step) or ""
             if step_id.startswith(GENERATED_ID_PREFIX) and index not in consumed_generated_guards:
+                if require_editable and not _step_starts_on_own_line(text, step, steps_node):
+                    errors.append(
+                    f"{path.relative_to(ROOT)}:{step.start_mark.line + 1}: generated guard step layout cannot be rewritten safely"
+                    )
+                    continue
+                if require_editable and index + 1 < len(steps) and not _step_starts_on_own_line(
+                    text, steps[index + 1], steps_node
+                ):
+                    errors.append(
+                        f"{path.relative_to(ROOT)}:{step.start_mark.line + 1}: "
+                        "following step layout cannot be preserved while removing a generated guard"
+                    )
+                    continue
                 start = _line_start(text, step.start_mark.index)
                 if index + 1 < len(steps):
                     end = _line_start(text, steps[index + 1].start_mark.index)
                 else:
-                    end = step.end_mark.index
-                    if end < len(text):
-                        end = text.find("\n", end)
-                        if end == -1:
-                            end = len(text)
-                        else:
-                            end += 1
+                    end = _terminal_step_end(text, step)
                 edits.append(Edit(start, end, ""))
-    return edits, mint_count
+    return edits, mint_count, errors
 
 
 def _apply_edits(text: str, edits: list[Edit]) -> str:
@@ -223,7 +382,10 @@ def _guard_problems(path: Path, text: str) -> list[str]:
     problems: list[str] = []
     for job_id, job in jobs:
         steps_node = _get(job, "steps")
+        if steps_node is None:
+            continue
         if not isinstance(steps_node, SequenceNode):
+            problems.append(f"{path.relative_to(ROOT)}: job {job_id} steps is not a sequence")
             continue
         steps = list(steps_node.value)
         for index, step in enumerate(steps):
@@ -234,6 +396,9 @@ def _guard_problems(path: Path, text: str) -> list[str]:
                 continue
             guard = steps[index - 1]
             prefix = f"{path.relative_to(ROOT)}:{step.start_mark.line + 1}"
+            condition_problem = _status_check_problem(_value(_get(step, "if")))
+            if condition_problem:
+                problems.append(f"{prefix}: {condition_problem}")
             if not (_step_id(guard) or "").startswith(GENERATED_ID_PREFIX):
                 problems.append(f"{prefix}: mint is not preceded by generated client-ID guard")
                 continue
@@ -273,27 +438,38 @@ def main(argv: list[str] | None = None) -> int:
     files = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
     errors: list[str] = []
     total_mints = 0
+    generated_files: dict[Path, str] = {}
     for path in files:
         text = path.read_text(encoding="utf-8")
         try:
-            edits, mint_count = _collect_edits(path, text)
+            edits, mint_count, generation_errors = _collect_edits(
+                path,
+                text,
+                require_editable=args.write,
+            )
             total_mints += mint_count
+            errors.extend(generation_errors)
+            if generation_errors:
+                errors.extend(_guard_problems(path, text))
+                continue
             if args.write:
                 generated = _apply_edits(text, edits)
+                errors.extend(_guard_problems(path, generated))
                 if generated != text:
-                    path.write_text(generated, encoding="utf-8")
-                    text = generated
+                    generated_files[path] = generated
             else:
                 errors.extend(_guard_problems(path, text))
         except GuardGenerationError as exc:
             errors.append(str(exc))
-    if args.write:
-        print(f"generated guards for {total_mints} GitHub App token mints")
-        return 0
     if errors:
-        for error in errors:
+        for error in dict.fromkeys(errors):
             print(f"FAIL - {error}", file=sys.stderr)
         return 1
+    if args.write:
+        for path, generated in generated_files.items():
+            path.write_text(generated, encoding="utf-8")
+        print(f"generated guards for {total_mints} GitHub App token mints")
+        return 0
     print(f"ok - generated guards cover {total_mints} GitHub App token mints")
     return 0
 
