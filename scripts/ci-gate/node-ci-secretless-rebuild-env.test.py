@@ -95,6 +95,14 @@ def candidate_service_env_from_script(script, environment):
     return namespace["candidate_service_env"]
 
 
+def protected_candidate_plan_source():
+    script = (ROOT / "scripts/ci_build_artifacts.py").read_text(encoding="utf-8")
+    function = script.index("def run_protected_candidate_plan(")
+    start = script.index("\n", function) + 1
+    end = script.index("\ndef main(", start)
+    return textwrap.dedent(script[start:end])
+
+
 def compatibility_service_env_from_script(
     script, script_name, plan_source, db_env, cache_env, environment,
 ):
@@ -232,7 +240,9 @@ def candidate_plan_normalizer(script):
 
 def candidate_service_validation_source(script, end_marker):
     start = script.index("blocked_service_env = {")
+    start = script.rfind("\n", 0, start) + 1
     end = script.index(end_marker, start)
+    end = script.rfind("\n", 0, end) + 1
     return textwrap.dedent(script[start:end]).strip()
 
 
@@ -1287,8 +1297,13 @@ def main():
             for candidate in build["steps"]
             if candidate.get("name") == "Run runtime-resolved compatibility lanes without credentials"
         )
+        service_plan_source = service_plan_step["run"]
+        if "blocked_service_env = {" not in service_plan_source:
+            assert 'python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" run-protected-candidate-plan' in service_plan_source
+            service_plan_source = protected_candidate_plan_source()
+            service_plan_step = {**service_plan_step, "run": service_plan_source}
         assert candidate_service_validation_source(
-            service_plan_step["run"], "if any(requires_services for _directory"
+            service_plan_source, "if any(requires_services for _directory"
         ) == candidate_service_validation_source(
             compatibility_step["run"], "def configured_compatibility_service_names("
         )
@@ -1302,7 +1317,7 @@ def main():
             "${{ steps.db-service.outputs.host }}"
         )
         accepted_service_env = candidate_service_env_from_script(
-            service_plan_step["run"],
+            service_plan_source,
             {
                 "DB_HOST": "127.0.0.1",
                 "DB_PORT": "5432",
@@ -1335,7 +1350,7 @@ def main():
         ):
             try:
                 candidate_service_env_from_script(
-                    service_plan_step["run"],
+                service_plan_source,
                     {
                         "DB_HOST": "127.0.0.1",
                         "DB_ENV": f"{name}=configured",
@@ -1366,7 +1381,9 @@ def main():
             assert "for index, (script_directory, name, unset_env, requires_services) in enumerate(normalized):" in script_plan["run"]
             assert "if requires_services:" in script_plan["run"]
             assert "script_env.update(candidate_service_env)" in script_plan["run"]
-            assert '*([] if requires_services else ["--unshare-net"])' in script_plan["run"]
+            assert 'legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]' in script_plan["run"]
+            assert 'bubblewrap_network_args(shared_artifact=True)' in script_plan["run"]
+            assert "*legacy_network_args," in script_plan["run"]
             assert '"--unshare-net"' in script_plan["run"]
             assert '"--ro-bind"' in script_plan["run"]
             assert '"--bind" if tool_prefix == browser_cache else "--ro-bind"' in script_plan["run"]
