@@ -482,8 +482,11 @@ only when its plan entry sets `requiresServices: true` (the standard `test`, `te
 `*:test` names have it by default, so omitting the flag does not guarantee network denial;
 the unprotected reusable keeps the caller's network policy). `browser-cache: true` stores the provisioned browsers
 but does not provision them, and `playwright install --with-deps` does not work inside the
-sandbox. This route follows the documented script-plan semantics; it has not been
-exercised in a live run.
+sandbox. An external adopter run on 2026-10-26 passed `e2e-full / build-test` after a
+Playwright browser-cache miss and downloaded the browsers from `cdn.playwright.dev`
+([run 40380731114](https://github.com/terptechpub/self-publish-ai-app/actions/runs/40380731114)).
+That single run confirms this route can work; it does not guarantee CDN availability,
+so transient DNS failures such as `EAI_AGAIN` can still fail a cold browser install.
 
 ## Concurrency belongs to the caller
 
