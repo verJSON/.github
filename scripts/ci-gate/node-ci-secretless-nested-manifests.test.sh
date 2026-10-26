@@ -448,6 +448,10 @@ plan_fixture="$tmp/plan-fixture"
 mkdir -p "$plan_fixture/examples/nested" "$plan_fixture/.git" "$plan_fixture/node_modules" \
   "$plan_fixture/runner-temp/_runner_file_commands"
 cp "$root/scripts/ci_build_artifacts.py" "$plan_fixture/runner-temp/ci_build_artifacts.py"
+for script_plan_module in script_plan.py normalized_entries.py; do
+  cp "$root/.github/actions/node-ci-script-plan/$script_plan_module" \
+    "$plan_fixture/runner-temp/$script_plan_module"
+done
 plan_toolchain="$tmp/plan-tool-cache/node/22.0.0/x64"
 mkdir -p "$plan_toolchain/bin"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$plan_toolchain/bin/node"

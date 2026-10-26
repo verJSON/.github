@@ -6607,6 +6607,15 @@ jobs:
           [[ -f "$helper" && ! -L "$helper" ]]
           [[ "$(stat -c '%u:%a:%h' -- "$helper")" == "$(id -u):400:1" ]]
           [[ "$(sha256sum -- "$helper" | cut -d' ' -f1)" == "$PROTECTED_CANDIDATE_HELPER_SHA256" ]]
+      - name: Download trusted script-plan parser modules
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/.github/actions/node-ci-script-plan/script_plan.py" -o "$RUNNER_TEMP/script_plan.py"
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/.github/actions/node-ci-script-plan/normalized_entries.py" -o "$RUNNER_TEMP/normalized_entries.py"
       - name: Download Postgres sandbox acceptance fixture
         if: needs.eligibility.outputs.should-run != 'false' && inputs.postgres-sandbox-profile != ''
         env:

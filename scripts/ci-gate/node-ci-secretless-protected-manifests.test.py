@@ -18,10 +18,12 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / ".github/actions/node-ci-script-plan"))
 
 import yaml
 
 import ci_build_artifacts as artifacts
+import normalized_entries as shared_normalized_entries
 
 
 def _target_names(node: ast.AST) -> set[str]:
@@ -81,25 +83,29 @@ class ProtectedCandidateManifestTests(unittest.TestCase):
                 status = ast.parse(expression, mode="eval").body
                 self.assertTrue(_provably_nonzero_exit_status(status))
 
-    def _plan_nodes(self) -> tuple[ast.If, ast.For, ast.If]:
-        nested_source = [
+    def _plan_nodes(self) -> tuple[ast.For, ast.For, ast.If]:
+        nested_loops = [
             node for node in self.helper.body
-            if isinstance(node, ast.If) and ast.unparse(node.test) == "nested_source"
+            if isinstance(node, ast.For)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "nested"
+            and isinstance(node.iter, ast.Name)
+            and node.iter.id == "nested_manifests"
         ]
         normalizers = [
             node for node in self.helper.body
             if isinstance(node, ast.For)
             and isinstance(node.target, ast.Name)
             and node.target.id == "entry"
-            and isinstance(node.iter, ast.Name)
-            and node.iter.id == "normalized_entries"
+            and isinstance(node.iter, ast.Attribute)
+            and ast.unparse(node.iter) == "validated_plan.entries"
         ]
         defaults = [
             node for node in self.helper.body
             if isinstance(node, ast.If) and ast.unparse(node.test) == "run_defaults"
         ]
-        self.assertEqual((len(nested_source), len(normalizers), len(defaults)), (1, 1, 1))
-        return nested_source[0], normalizers[0], defaults[0]
+        self.assertEqual((len(nested_loops), len(normalizers), len(defaults)), (1, 1, 1))
+        return nested_loops[0], normalizers[0], defaults[0]
 
     def _run_plan_fragments(
         self,
@@ -113,6 +119,13 @@ class ProtectedCandidateManifestTests(unittest.TestCase):
             "SCRIPT_PLAN_DEFAULT_PLAN": "true" if default_plan else "false",
             "NESTED_MANIFESTS": json.dumps(nested_manifests) if nested_manifests else "",
         }
+        try:
+            validated_plan = shared_normalized_entries.validate_normalized_entries(
+                normalized_entries,
+                test_environment["NESTED_MANIFESTS"],
+            )
+        except shared_normalized_entries.ScriptPlanError as error:
+            raise SystemExit(str(error)) from error
         namespace: dict[str, object] = {
             "os": SimpleNamespace(environ=test_environment),
             "json": json,
@@ -121,13 +134,14 @@ class ProtectedCandidateManifestTests(unittest.TestCase):
             "Path": Path,
             "checkout_root": checkout_root.resolve(),
             "normalized_entries": normalized_entries,
+            "validated_plan": validated_plan,
         }
         initializers = [
             self._body_assignment(self.helper, name)
-            for name in ("normalized", "run_defaults", "nested_manifests", "nested_directories", "nested_source")
+                for name in ("normalized", "run_defaults", "nested_manifests", "nested_directories")
         ]
-        nested_source, normalizer, defaults = self._plan_nodes()
-        for node in sorted([*initializers, nested_source, normalizer, defaults], key=lambda item: item.lineno):
+        nested_loop, normalizer, defaults = self._plan_nodes()
+        for node in sorted([*initializers, nested_loop, normalizer, defaults], key=lambda item: item.lineno):
             self._execute(node, namespace)
         return namespace
 
@@ -138,8 +152,14 @@ class ProtectedCandidateManifestTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def _nested_manifest(self, path: str) -> dict[str, object]:
-        return {"path": path, "approvedPackages": [], "scriptPlan": []}
+    def _nested_manifest(
+        self, path: str, script_plan: list[dict[str, object]] | None = None
+    ) -> dict[str, object]:
+        return {
+            "path": path,
+            "approvedPackages": [],
+            "scriptPlan": [] if script_plan is None else script_plan,
+        }
 
     def _normalized_entry(
         self,
@@ -422,7 +442,16 @@ class ProtectedCandidateManifestTests(unittest.TestCase):
             nested_paths = ["examples/one", "examples/two"]
             self._write_package(checkout_root / nested_paths[0], {"verify": "true"})
             self._write_package(checkout_root / nested_paths[1], {"build": "true"})
-            manifests = [self._nested_manifest(path) for path in nested_paths]
+            manifests = [
+            self._nested_manifest(
+                nested_paths[0],
+                [{"script": "verify", "unsetEnv": ["NESTED_ONE"], "requiresServices": True}],
+            ),
+            self._nested_manifest(
+                nested_paths[1],
+                [{"script": "build", "unsetEnv": ["NESTED_TWO"], "requiresServices": False}],
+            ),
+        ]
             entries = [
                 self._normalized_entry("verify", unset_env=["ROOT_ONLY"]),
                 self._normalized_entry(

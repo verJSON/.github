@@ -31,7 +31,7 @@ PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 GENERATOR = ROOT / "scripts/gen-node-ci-protected.py"
 TRUSTED_HELPER = ROOT / "scripts/ci_build_artifacts.py"
 HEAD = "a" * 40
-LEGACY_SHA256 = "90d5cc31b9a0dfa5fadf84d01e67ef0d8d4a02a9b9a7593e21eda30df508de95"
+LEGACY_SHA256 = "d145da1d7cf5948c79c70ba3bf82c821fe0db8a17e27960ea7354550a60bdb47"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
@@ -1562,6 +1562,10 @@ ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_cleanup
         helper_path = runner_temp / "ci_build_artifacts.py"
         helper_path.write_text(helper_source, encoding="utf-8")
         helper_path.chmod(0o400)
+        for module_name in ("script_plan.py", "normalized_entries.py"):
+            staged_module = runner_temp / module_name
+            staged_module.write_bytes((SCRIPT_PLAN_ACTION / module_name).read_bytes())
+            staged_module.chmod(0o400)
         self.assertTrue(helper_path.is_file())
         self.assertFalse(helper_path.is_symlink())
         return helper_path

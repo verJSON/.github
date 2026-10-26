@@ -5959,6 +5959,15 @@ jobs:
           set -euo pipefail
           [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
           curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_build_artifacts.py" -o "$RUNNER_TEMP/ci_build_artifacts.py"
+      - name: Download trusted script-plan parser modules
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/.github/actions/node-ci-script-plan/script_plan.py" -o "$RUNNER_TEMP/script_plan.py"
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/.github/actions/node-ci-script-plan/normalized_entries.py" -o "$RUNNER_TEMP/normalized_entries.py"
       - name: Download Postgres sandbox acceptance fixture
         if: needs.eligibility.outputs.should-run != 'false' && inputs.postgres-sandbox-profile != ''
         env:
@@ -6078,6 +6087,8 @@ jobs:
           runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve()
           if str(runner_temp) not in sys.path:
               sys.path.insert(0, str(runner_temp))
+          import normalized_entries as normalized_script_plan
+
           if "run_script_plan_with_receipts" in globals():
               ci_build_artifacts = sys.modules[__name__]
           else:
@@ -6117,60 +6128,33 @@ jobs:
               normalized_entries = json.loads(entries_path.read_text(encoding="utf-8"))
           except (OSError, json.JSONDecodeError) as error:
               sys.exit(f"normalized script-plan entries file is invalid: {error}")
-          if not isinstance(normalized_entries, list):
-              sys.exit("normalized script-plan entries must be a JSON array")
-
-          nested_source = os.environ.get("NESTED_MANIFESTS", "").strip()
-          nested_manifests = []
+          nested_source = os.environ.get("NESTED_MANIFESTS", "")
+          try:
+              validated_plan = normalized_script_plan.validate_normalized_entries(
+                  normalized_entries,
+                  nested_source,
+              )
+          except normalized_script_plan.ScriptPlanError as error:
+              sys.exit(str(error))
+          nested_manifests = validated_plan.nested_manifests
           nested_directories = []
-          if nested_source:
-              try:
-                  nested_manifests = json.loads(nested_source)
-              except json.JSONDecodeError as error:
-                  sys.exit(f"secretless-nested-manifests must be valid JSON: {error}")
-              if not isinstance(nested_manifests, list) or not 1 <= len(nested_manifests) <= 8:
-                  sys.exit("secretless-nested-manifests accepts 1-8 nested manifest objects")
-              segment_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-              for nested in nested_manifests:
-                  if (not isinstance(nested, dict)
-                          or set(nested) != {"path", "approvedPackages", "scriptPlan"}):
-                      sys.exit("each nested manifest requires exactly path, approvedPackages, and scriptPlan")
-                  nested_path = nested["path"]
-                  if (not isinstance(nested_path, str) or not nested_path
-                          or any(segment_pattern.fullmatch(segment) is None
-                                 for segment in nested_path.split("/"))):
-                      sys.exit("each nested manifest path must be a relative checkout directory")
-                  nested_plan = nested["scriptPlan"]
-                  if not isinstance(nested_plan, list) or len(nested_plan) > 8:
-                      sys.exit(f"{nested_path} scriptPlan accepts at most 8 entries")
-                  nested_directory = (checkout_root / nested_path).resolve()
-                  if not nested_directory.is_dir() or checkout_root not in nested_directory.parents:
-                      sys.exit(f"{nested_path} must resolve to a directory inside the checkout")
-                  nested_directories.append(nested_directory)
+          for nested in nested_manifests:
+              nested_path = nested.path
+              nested_directory = (checkout_root / nested_path).resolve()
+              if not nested_directory.is_dir() or checkout_root not in nested_directory.parents:
+                  sys.exit(f"{nested_path} must resolve to a directory inside the checkout")
+              nested_directories.append(nested_directory)
 
-          for entry in normalized_entries:
-              if not isinstance(entry, dict):
-                  sys.exit("normalized script-plan entries must be objects")
-              manifest_path = entry.get("manifestPath")
-              manifest_index = entry.get("manifestIndex")
-              if manifest_index is None:
-                  if manifest_path is not None:
-                      sys.exit("root script-plan entries cannot declare a manifest path")
+          for entry in validated_plan.entries:
+              if entry.manifest_index is None:
                   directory = checkout_root
                   manifest_label = "package.json"
               else:
-                  if (type(manifest_index) is not int
-                          or manifest_index < 0
-                          or manifest_index >= len(nested_manifests)
-                          or manifest_path != nested_manifests[manifest_index]["path"]):
-                      sys.exit("normalized nested script-plan entry has an invalid manifest")
-                  directory = nested_directories[manifest_index]
-                  manifest_label = f"{manifest_path}/package.json"
-              script = entry.get("script")
-              unset_env = entry.get("unsetEnv")
-              requires_services = entry.get("requiresServices")
-              if not isinstance(script, str) or not isinstance(unset_env, list) or type(requires_services) is not bool:
-                  sys.exit("normalized script-plan entry has invalid fields")
+                  directory = nested_directories[entry.manifest_index]
+                  manifest_label = f"{entry.manifest_path}/package.json"
+              script = entry.script
+              unset_env = list(entry.unset_env)
+              requires_services = entry.requires_services
               package = json.loads((directory / "package.json").read_text(encoding="utf-8"))
               scripts = package.get("scripts")
               if not isinstance(scripts, dict):
