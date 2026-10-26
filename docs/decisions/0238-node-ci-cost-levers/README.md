@@ -389,3 +389,18 @@ The provisioner verifies that `psql` and `pg_dump` are 17.11 from the same pinne
 The GitHub-hosted acceptance fixture checks the real Bubblewrap/AppArmor path, Drizzle Kit schema push, migration routines, normalized `pg_dump --schema-only` comparison between two fresh databases, network/metadata/Docker denial, database-mediated egress denial, least privilege, boundary failure receipts, and timeout/cancellation cleanup. Local Docker and Bubblewrap runs are useful development evidence only; they do not establish hosted AppArmor acceptance. The remaining general system-package and Playwright profiles stay deferred pending their own constrained design and hosted evidence.
 
 The external canary's `scripts/generate-schema-sql.mjs` still uses the legacy `postgres:17.6` tag. That is adopter drift to update at the canary; it does not change the canonical profile's reviewed 17.11 digest.
+
+## Amendment 2026-10-26 — harden same-run ArtifactSet parsing and selection
+
+- **Issue:** [Verjson/.github#1869](https://github.com/Verjson/.github/issues/1869), D1 hardening.
+- **ARB:** Conditional GO from Astra, Sol, and `code-reviewer` for hardening only. Fable and Opus Agent review tools were unavailable. Enrollment remains NO-GO.
+
+### Decision
+
+The canonical ArtifactSet reader now rejects direct GNU sparse members and rejects every `GNU.sparse.*` key and PAX `size` override in local, global, and Solaris extended headers before delegating to Python's tar parser. It inspects the full padded extension block, requires valid record framing and zero padding, and replays the bounded bytes to the standard parser exactly once. It also rejects a parsed member with sparse metadata before either manifest or payload extraction. Ordinary bounded PAX path headers remain supported.
+
+Extension accounting is owned by the archive and initialized before its first header. Each extension payload is limited to 16 KiB; at most 513 extension headers, 8,667,648 cumulative padded header and data bytes, and 16 consecutive extension headers are accepted. The count and byte totals persist across ordinary members. Zero-length extensions count, and chain depth resets after a normal member. Quota checks happen before extension payload reads or parser delegation; the parser does not depend on catching recursion failure.
+
+Caller routing uses the raw preflight selection as a case-exact JSON boolean. Only `false` from a successful preflight permits the original per-lane plan. A consumer plan requires exact `true`, attempt 1, a successful producer, and exact `true` share availability. Missing or malformed values authorize neither route. A retry uses per-lane execution only when successful preflight explicitly returns `false`; the attempt number alone does not select fallback. The always-run aggregate verifies its raw selection booleans and producer, upload, artifact, and receipt evidence even when an earlier level fails. Consumer TestReceipts are emitted only after artifact verification and candidate script-plan execution both succeed, in standard and protected workflows.
+
+These controls do not enroll an adopter. `config/ci-build-artifact-policy.json` remains integer version `1` with an empty `repositories` object. Enrollment first requires runtime enforcement over the actual executing caller graph, including immutable pins, roles, prerequisites, outputs, and aggregate requirements. Only after that enforcement lands may a candidate immutable canonical revision carry one unmerged canary-only policy row and a generated external caller pinned to that revision. The outside-Verjson canary must pass before that row is merged. No broader sandbox egress or artifact-consumption exception is authorized here.

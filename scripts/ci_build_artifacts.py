@@ -35,6 +35,11 @@ MAX_PARTICIPANTS = 16
 MAX_DEPTH = 32
 MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_TAR_EXTENSION_BYTES = 16 * 1024
+MAX_TAR_EXTENSION_HEADERS = MAX_FILES + 1
+MAX_TAR_EXTENSION_CHAIN_DEPTH = 16
+MAX_TAR_EXTENSION_TOTAL_BYTES = MAX_TAR_EXTENSION_HEADERS * (
+    tarfile.BLOCKSIZE + MAX_TAR_EXTENSION_BYTES
+)
 MAX_PLAN_BYTES = 48 * 1024
 MAX_POLICY_BYTES = 64 * 1024
 MAX_AGGREGATE_NEEDS_BYTES = 64 * 1024
@@ -105,18 +110,142 @@ class IntegrityError(ArtifactError):
     """Trusted input or authenticated workflow result failed integrity checks."""
 
 
+_TAR_EXTENSION_TYPES = frozenset(
+    {
+        tarfile.XHDTYPE,
+        tarfile.XGLTYPE,
+        tarfile.SOLARIS_XHDTYPE,
+        tarfile.GNUTYPE_LONGNAME,
+        tarfile.GNUTYPE_LONGLINK,
+    }
+)
+
+
+class _ReplayReader:
+    def __init__(self, prefix: bytes, source: Any) -> None:
+        self._prefix = prefix
+        self._offset = 0
+        self._source = source
+
+    def read(self, size: int) -> bytes:
+        remaining = len(self._prefix) - self._offset
+        if size <= remaining:
+            result = self._prefix[self._offset:self._offset + size]
+            self._offset += len(result)
+            return result
+        result = self._prefix[self._offset:]
+        self._offset = len(self._prefix)
+        return result + self._source.read(size - len(result))
+
+    def tell(self) -> int:
+        return self._source.tell() - (len(self._prefix) - self._offset)
+
+
+def _validate_pax_extension_block(block: bytes, payload_size: int) -> None:
+    payload = block[:payload_size]
+    padding = block[payload_size:]
+    if any(padding):
+        raise ArtifactError("ArtifactSet PAX extension has nonzero padding")
+    if b"\x00" in payload:
+        raise ArtifactError("ArtifactSet PAX extension contains a NUL byte")
+
+    offset = 0
+    while offset < len(payload):
+        separator = payload.find(b" ", offset)
+        if separator <= offset:
+            raise ArtifactError("ArtifactSet PAX extension record framing is invalid")
+        length_bytes = payload[offset:separator]
+        if not length_bytes.isdigit() or len(length_bytes) > 10:
+            raise ArtifactError("ArtifactSet PAX extension record length is invalid")
+        try:
+            record_length = int(length_bytes)
+        except ValueError as exc:
+            raise ArtifactError("ArtifactSet PAX extension record length is invalid") from exc
+        if record_length < separator - offset + 4:
+            raise ArtifactError("ArtifactSet PAX extension record is too short")
+        end = offset + record_length
+        if end > len(payload) or payload[end - 1] != 0x0A:
+            raise ArtifactError("ArtifactSet PAX extension record is truncated")
+        field = payload[separator + 1:end - 1]
+        key, equals, _value = field.partition(b"=")
+        if not equals or not key:
+            raise ArtifactError("ArtifactSet PAX extension record is malformed")
+        if key == b"size" or key.startswith(b"GNU.sparse"):
+            raise ArtifactError("ArtifactSet PAX extension contains a forbidden key")
+        offset = end
+
+
 class _BoundedTarInfo(tarfile.TarInfo):
-    def _require_bounded_extension(self) -> None:
+    def _require_bounded_extension(self) -> int:
         if type(self.size) is not int or self.size < 0 or self.size > MAX_TAR_EXTENSION_BYTES:
             raise ArtifactError("ArtifactSet tar extension header exceeds its size limit")
+        return self._block(self.size)
+
+    def _guarded_process(
+        self,
+        archive: _BoundedTarFile,
+        process: Callable[[_BoundedTarFile], tarfile.TarInfo],
+    ) -> tarfile.TarInfo:
+        if self.type == tarfile.GNUTYPE_SPARSE:
+            raise ArtifactError("ArtifactSet archive contains a GNU sparse member")
+
+        previous_depth = archive._artifact_extension_chain_depth
+        if self.type in _TAR_EXTENSION_TYPES:
+            padded_size = self._require_bounded_extension()
+            extension_count = archive._artifact_extension_count + 1
+            extension_bytes = archive._artifact_extension_bytes + tarfile.BLOCKSIZE + padded_size
+            extension_depth = previous_depth + 1
+            if extension_count > MAX_TAR_EXTENSION_HEADERS:
+                raise ArtifactError("ArtifactSet archive exceeds extension header count limit")
+            if extension_bytes > MAX_TAR_EXTENSION_TOTAL_BYTES:
+                raise ArtifactError("ArtifactSet archive exceeds cumulative extension byte limit")
+            if extension_depth > MAX_TAR_EXTENSION_CHAIN_DEPTH:
+                raise ArtifactError("ArtifactSet archive exceeds consecutive extension depth limit")
+            archive._artifact_extension_count = extension_count
+            archive._artifact_extension_bytes = extension_bytes
+            archive._artifact_extension_chain_depth = extension_depth
+        else:
+            archive._artifact_extension_chain_depth = 0
+
+        try:
+            return process(archive)
+        finally:
+            archive._artifact_extension_chain_depth = previous_depth
+
+    if hasattr(tarfile.TarInfo, "_proc_member"):
+        def _proc_member(self, archive: tarfile.TarFile) -> tarfile.TarInfo:
+            return self._guarded_process(archive, super()._proc_member)
+    else:
+        def _proc(self, archive: tarfile.TarFile) -> tarfile.TarInfo:
+            return self._guarded_process(archive, super()._proc)
 
     def _proc_pax(self, archive: tarfile.TarFile) -> tarfile.TarInfo:
-        self._require_bounded_extension()
-        return super()._proc_pax(archive)
+        padded_size = self._require_bounded_extension()
+        source = archive.fileobj
+        block = source.read(padded_size)
+        if len(block) != padded_size:
+            raise ArtifactError("ArtifactSet PAX extension block is truncated")
+        _validate_pax_extension_block(block, self.size)
+
+        # The tar stream cannot seek backward, so replay the bounded block to the
+        # standard parser after validating every byte it will inspect.
+        archive.fileobj = _ReplayReader(block, source)
+        try:
+            return super()._proc_pax(archive)
+        finally:
+            archive.fileobj = source
 
     def _proc_gnulong(self, archive: tarfile.TarFile) -> tarfile.TarInfo:
         self._require_bounded_extension()
         return super()._proc_gnulong(archive)
+
+
+class _BoundedTarFile(tarfile.TarFile):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self._artifact_extension_count = 0
+        self._artifact_extension_bytes = 0
+        self._artifact_extension_chain_depth = 0
+        super().__init__(*args, **kwargs)
 
 
 def canonical_json(value: Any) -> bytes:
@@ -3991,7 +4120,7 @@ def verify_and_extract(
     expanded = 0
     manifest = None
     try:
-        with tarfile.open(artifact_file, mode="r|gz", tarinfo=_BoundedTarInfo) as archive:
+        with _BoundedTarFile.open(artifact_file, mode="r|gz", tarinfo=_BoundedTarInfo) as archive:
             member_count = 0
             for member in archive:
                 member_count += 1
@@ -4000,6 +4129,8 @@ def verify_and_extract(
                 if member.name in seen:
                     raise ArtifactError("ArtifactSet archive has duplicate members")
                 seen.add(member.name)
+                if member.sparse is not None:
+                    raise ArtifactError("ArtifactSet archive contains a sparse member")
                 if member.name == "manifest.json":
                     if member_count != 1 or not member.isfile() or member.size > MAX_MANIFEST_BYTES:
                         raise ArtifactError("ArtifactSet manifest member is invalid")
@@ -4216,6 +4347,12 @@ def identity_from_environment(*, include_lane: bool = False) -> dict[str, Any]:
     if include_lane:
         identity["lane"] = os.environ["BUILD_ARTIFACT_LEVEL_ID"]
     return identity
+
+
+def _parse_exact_json_boolean(value: str | None, field: str) -> bool:
+    if value not in {"true", "false"}:
+        raise IntegrityError(f"aggregate {field} is missing or not an exact JSON boolean")
+    return value == "true"
 
 
 def verify_aggregate(
@@ -6112,7 +6249,10 @@ def main(argv: list[str] | None = None) -> int:
                 mode_share_eligible=os.environ.get("BUILD_ARTIFACT_MODE_SHARE_ELIGIBLE") == "true",
                 run_attempt=os.environ["GITHUB_RUN_ATTEMPT"],
             )
-            _write_output("share-selected", str(bool(decision["share-selected"])).lower())
+            share_selected = decision.get("share-selected")
+            if type(share_selected) is not bool:
+                raise IntegrityError("preflight share selection is not a JSON boolean")
+            _write_output("share-selected", "true" if share_selected else "false")
             _write_output("reason", decision["reason"])
             _write_output("needs-results", json.dumps(prerequisite_results, separators=(",", ":")))
             for key in (
@@ -6170,7 +6310,9 @@ def main(argv: list[str] | None = None) -> int:
             _write_output("receipt-digest", digest, args.output)
             return 0
         if args.command == "aggregate":
-            share_selected = os.environ.get("SHARE_SELECTED") == "true"
+            share_selected = _parse_exact_json_boolean(
+                os.environ.get("SHARE_SELECTED"), "SHARE_SELECTED"
+            )
             needs_json = os.environ.get("NEEDS_JSON", "")
             if len(needs_json.encode("utf-8")) > MAX_AGGREGATE_NEEDS_BYTES:
                 raise IntegrityError("compact caller-owned needs projection exceeds size limit")
@@ -6178,7 +6320,9 @@ def main(argv: list[str] | None = None) -> int:
             expected_lanes = _env_json("EXPECTED_LANES_JSON")
             verify_aggregate(
                 share_selected=share_selected,
-                policy_selected=os.environ.get("POLICY_SELECTED") == "true",
+                policy_selected=_parse_exact_json_boolean(
+                    os.environ.get("POLICY_SELECTED"), "POLICY_SELECTED"
+                ),
                 mode_gate_result=os.environ["MODE_GATE_RESULT"],
                 preflight_result=os.environ["PREFLIGHT_RESULT"],
                 producer_result=os.environ["PRODUCER_RESULT"],

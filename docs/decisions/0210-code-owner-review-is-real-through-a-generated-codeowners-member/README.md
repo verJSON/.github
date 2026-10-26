@@ -552,6 +552,18 @@ the rollup has 23 SUCCESS and 11 SKIPPED conclusions, including SUCCESS for
 `bash scripts/assert-mergeable-head.sh Verjson/.github 1914` was not retained;
 this entry makes no claim that the assertion passed.
 
+26. **Admin merge PostgreSQL 17.11 sandbox profile.** Verjson/.github#1915
+("feat(ci): add constrained Postgres sandbox profile", `Part #1869`) merged
+2026-10-26 at head `9ab08b0dc6fceb600deaf54ea3d783b025748382` and merge commit
+`29a2e79e75ca11c6054c9027bf10ec9544f7d366`. Its base was `a79d11c1d54c77eb0bd7a930961ca0f8b8aaf0eb`;
+GitHub reports merged by `pyousefi`. The check rollup had 21 SUCCESS and 5
+SKIPPED conclusions. GitHub's review decision was `REVIEW_REQUIRED`; the AI
+review-authorization app approved the exact final head, but this is not a
+direct-human approval. From fetched, clean `origin/main`,
+`bash scripts/assert-mergeable-head.sh Verjson/.github 1915` exited 0 and
+printed `true`. The owner's standing admin authority was used; no gate was
+weakened.
+
 ### Exit condition ("CI optimized and working"), measurable
 
 The window closes when all hold, each evidenced in the closing PR:
