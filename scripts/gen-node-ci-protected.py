@@ -1708,6 +1708,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                       script_env = postgres_profile_module.candidate_environment(
                           script_env,
                           script_env["PATH"],
+                          profile_name=postgres_profile["name"],
                       )
                   for env_name in unset_env:
                       script_env.pop(env_name, None)

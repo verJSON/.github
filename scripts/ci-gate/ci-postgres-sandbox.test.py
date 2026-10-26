@@ -32,6 +32,7 @@ class PostgresSandboxProfileTests(unittest.TestCase):
             "ci-postgres-sandbox-state.json",
             "ci-postgres-sandbox-acceptance-state.json",
             "ci-postgres-sandbox-fresh-state.json",
+            "ci-postgres-schema-validation-state.json",
         )
 
         for workflow_path in workflow_paths:
@@ -104,6 +105,26 @@ class PostgresSandboxProfileTests(unittest.TestCase):
                 "host all all ::/0 reject",
             ],
         )
+
+    def test_schema_validation_auth_policy_allows_only_its_fixed_databases(self) -> None:
+        policy = ci_postgres_sandbox.local_auth_policy(
+            ci_postgres_sandbox.SCHEMA_VALIDATION_PROFILE_NAME
+        )
+
+        self.assertEqual(
+            policy.splitlines(),
+            [
+                "local all postgres peer",
+                "local schema_snapshot verjson_ci trust",
+                "local schema_migrations verjson_ci trust",
+                "local schema_reference verjson_ci trust",
+                "local all all reject",
+                "host all all 0.0.0.0/0 reject",
+                "host all all ::/0 reject",
+            ],
+        )
+        with self.assertRaises(ci_postgres_sandbox.PostgresSandboxError):
+            ci_postgres_sandbox.local_auth_policy("unreviewed")
 
     def test_local_auth_policy_is_staged_read_only_for_postgres(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_root:
@@ -206,6 +227,20 @@ class PostgresSandboxProfileTests(unittest.TestCase):
 
         profile = ci_postgres_sandbox.resolve_profile("postgres-17.11")
 
+        self.assertEqual(
+            profile["image"],
+            "docker.io/library/postgres@sha256:3518071376d0b6156b02e1db2747a78511b5b9dc3763cc79c506ebe2dc2ee71c",
+        )
+        self.assertEqual(profile["platform"], "linux/amd64")
+        self.assertEqual(profile["serverVersion"], "17.11")
+        self.assertEqual(profile["clientVersion"], "17.11")
+        self.assertEqual(profile["networkMode"], "none")
+        self.assertEqual(profile["publishedPorts"], [])
+
+    def test_schema_validation_profile_resolves_the_same_reviewed_image(self) -> None:
+        profile = ci_postgres_sandbox.resolve_profile("postgres-schema-validation-17.11")
+
+        self.assertEqual(profile["name"], "postgres-schema-validation-17.11")
         self.assertEqual(
             profile["image"],
             "docker.io/library/postgres@sha256:3518071376d0b6156b02e1db2747a78511b5b9dc3763cc79c506ebe2dc2ee71c",
@@ -431,6 +466,70 @@ class PostgresSandboxProfileTests(unittest.TestCase):
         self.assertNotIn("PGPASSWORD", candidate)
         self.assertNotIn("database_url", candidate)
 
+    def test_schema_validation_environment_uses_only_fixed_socket_urls(self) -> None:
+        profile_name = ci_postgres_sandbox.SCHEMA_VALIDATION_PROFILE_NAME
+        environment = ci_postgres_sandbox.profile_environment(
+            "/usr/bin:/bin",
+            profile_name=profile_name,
+        )
+        socket_host = "%2Frun%2Fverjson-postgres"
+        expected = {
+            "DATABASE_URL_SCHEMA_SNAPSHOT": (
+                f"postgresql://verjson_ci@{socket_host}/schema_snapshot?port=5432"
+            ),
+            "DATABASE_URL_SCHEMA_MIGRATIONS": (
+                f"postgresql://verjson_ci@{socket_host}/schema_migrations?port=5432"
+            ),
+            "DATABASE_URL_SCHEMA_REFERENCE": (
+                f"postgresql://verjson_ci@{socket_host}/schema_reference?port=5432"
+            ),
+            "PGHOST": "/run/verjson-postgres",
+            "PGPORT": "5432",
+            "PGUSER": "verjson_ci",
+            "PATH": "/opt/verjson/postgres-client/bin:/usr/bin:/bin",
+        }
+        self.assertEqual(environment, expected)
+
+        inherited = {
+            **expected,
+            "DATABASE_URL": "postgresql://127.0.0.1/untrusted",
+            "DATABASE_URL_UNREVIEWED": "postgresql://127.0.0.1/untrusted",
+            "DATABASE_URL_SCHEMA_SNAPSHOT": "postgresql://127.0.0.1/untrusted",
+            "PGHOSTADDR": "127.0.0.1",
+            "PGSERVICE": "untrusted-service",
+            "PGPASSWORD": "untrusted-password",
+            "SAFE_VALUE": "preserved",
+        }
+        candidate = ci_postgres_sandbox.candidate_environment(
+            inherited,
+            "/usr/bin:/bin",
+            profile_name=profile_name,
+        )
+        self.assertEqual(candidate, {**expected, "SAFE_VALUE": "preserved"})
+
+    def test_schema_validation_bootstrap_limits_database_capabilities_and_seeds_prelude(self) -> None:
+        bootstrap = ci_postgres_sandbox.database_bootstrap_sql(
+            profile_name=ci_postgres_sandbox.SCHEMA_VALIDATION_PROFILE_NAME
+        )
+
+        for database in ("schema_snapshot", "schema_migrations", "schema_reference"):
+            self.assertIn(f"CREATE DATABASE {database} OWNER postgres", bootstrap)
+            self.assertIn(f"GRANT CONNECT ON DATABASE {database} TO verjson_ci", bootstrap)
+            self.assertIn(f"GRANT USAGE, CREATE ON SCHEMA public TO verjson_ci", bootstrap)
+        self.assertIn("GRANT TEMP ON DATABASE schema_migrations TO verjson_ci", bootstrap)
+        self.assertNotIn("GRANT TEMP ON DATABASE schema_snapshot", bootstrap)
+        self.assertNotIn("GRANT TEMP ON DATABASE schema_reference", bootstrap)
+        self.assertIn("CREATE ROLE authenticated NOLOGIN", bootstrap)
+        self.assertIn("CREATE SCHEMA auth AUTHORIZATION verjson_ci", bootstrap)
+        self.assertIn("CREATE SCHEMA storage AUTHORIZATION verjson_ci", bootstrap)
+        self.assertIn("CREATE TABLE IF NOT EXISTS auth.users", bootstrap)
+        self.assertIn("CREATE TABLE IF NOT EXISTS auth.identities", bootstrap)
+        self.assertIn("CREATE TABLE IF NOT EXISTS storage.objects", bootstrap)
+        self.assertIn("CREATE OR REPLACE FUNCTION auth.uid()", bootstrap)
+        self.assertIn("CREATE OR REPLACE FUNCTION storage.foldername(name text)", bootstrap)
+        self.assertIn("NOCREATEDB NOCREATEROLE", bootstrap)
+        self.assertNotIn("GRANT CREATE ON DATABASE", bootstrap)
+
     def test_schema_acceptance_fixture_pins_drizzle_kit_and_carries_a_migration(self) -> None:
         fixture = Path(__file__).parent / "fixtures/postgres-sandbox-drizzle"
         package = json.loads((fixture / "package.json").read_text(encoding="utf-8"))
@@ -525,6 +624,8 @@ class PostgresSandboxProfileTests(unittest.TestCase):
                 "status": "starting",
             }
             ci_postgres_sandbox.validate_profile_state(state, temporary_root)
+            schema_state = {**state, "profileName": ci_postgres_sandbox.SCHEMA_VALIDATION_PROFILE_NAME}
+            ci_postgres_sandbox.validate_profile_state(schema_state, temporary_root)
 
             state["socketDirectory"] = str(Path(temporary_root) / "other")
             with self.assertRaises(ci_postgres_sandbox.PostgresSandboxError):
@@ -581,6 +682,41 @@ class PostgresSandboxProfileTests(unittest.TestCase):
             side_effect=("false:false:false:false", "t", "t"),
         ):
             ci_postgres_sandbox._assert_postgres_privileges("a" * 64)
+
+    def test_schema_privilege_check_requires_temp_only_on_migration_database(self) -> None:
+        responses = (
+            "false:false:false:false",
+            "t",
+            "true:false:false",
+            "t",
+            "t",
+            "true:true:false",
+            "t",
+            "t",
+            "true:false:false",
+            "t",
+            "t",
+        )
+        with patch.object(ci_postgres_sandbox, "_run_docker", side_effect=responses) as run_docker:
+            ci_postgres_sandbox._assert_postgres_privileges(
+                "a" * 64,
+                profile_name=ci_postgres_sandbox.SCHEMA_VALIDATION_PROFILE_NAME,
+            )
+
+        commands = [call.args[0] for call in run_docker.call_args_list]
+        privilege_queries = [
+            next(argument for argument in command if argument.startswith("--command=SELECT has_database_privilege"))
+            for command in commands
+            if any(argument.startswith("--command=SELECT has_database_privilege") for argument in command)
+        ]
+        self.assertEqual(
+            privilege_queries,
+            [
+                "--command=SELECT has_database_privilege('verjson_ci', 'schema_snapshot', 'CONNECT') || ':' || has_database_privilege('verjson_ci', 'schema_snapshot', 'TEMP') || ':' || has_database_privilege('verjson_ci', 'schema_snapshot', 'CREATE');",
+                "--command=SELECT has_database_privilege('verjson_ci', 'schema_migrations', 'CONNECT') || ':' || has_database_privilege('verjson_ci', 'schema_migrations', 'TEMP') || ':' || has_database_privilege('verjson_ci', 'schema_migrations', 'CREATE');",
+                "--command=SELECT has_database_privilege('verjson_ci', 'schema_reference', 'CONNECT') || ':' || has_database_privilege('verjson_ci', 'schema_reference', 'TEMP') || ':' || has_database_privilege('verjson_ci', 'schema_reference', 'CREATE');",
+            ],
+        )
 
     def test_pre_receipt_staging_failures_remove_temp_tree_and_partial_state(self) -> None:
         original_mkdir = Path.mkdir

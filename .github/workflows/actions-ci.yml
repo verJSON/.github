@@ -2000,7 +2000,8 @@ jobs:
           cleanup_script="scripts/ci_postgres_sandbox.py"
           for state_file in \
             "$RUNNER_TEMP/ci-postgres-sandbox-acceptance-state.json" \
-            "$RUNNER_TEMP/ci-postgres-sandbox-fresh-state.json"; do
+            "$RUNNER_TEMP/ci-postgres-sandbox-fresh-state.json" \
+            "$RUNNER_TEMP/ci-postgres-schema-validation-state.json"; do
             [[ -e "$state_file" || -L "$state_file" ]] || continue
             if [[ ! -f "$cleanup_script" ]]; then
               echo "::error::Postgres sandbox cleanup helper missing" >&2
