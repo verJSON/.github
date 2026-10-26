@@ -449,6 +449,14 @@ class SharedNetworkBoundaryTests(unittest.TestCase):
         self.assertIn('listener.bind(("127.0.0.1", 0))', probe_source)
         self.assertIn('external.connect(("1.1.1.1", 443))', probe_source)
 
+    def test_legacy_service_lanes_keep_network_access(self) -> None:
+        args = artifacts.bubblewrap_network_args(
+            shared_artifact=False,
+            legacy_unshare=False,
+            postgres_profile=False,
+        )
+        self.assertNotIn("--unshare-net", args)
+
     def test_shared_sandbox_rejects_capabilities_and_requires_enforcing_profile(self) -> None:
         status = "\n".join(
             [*(f"{name}:\t0000000000000000" for name in artifacts._SANDBOX_CAPABILITY_FIELDS), "NoNewPrivs:\t0"]

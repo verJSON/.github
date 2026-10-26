@@ -311,13 +311,14 @@ assert "close_fds=True" in sandbox_entrypoint
 assert "os.waitpid(-1, os.WNOHANG)" in sandbox_entrypoint
 assert '"--tmpfs", "/"' in protected_plan_source
 assert '"--ro-bind", "/", "/"' not in protected_plan_source
-assert 'legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]' in protected_plan_source
-assert 'bubblewrap_network_args(shared_artifact=True)' in protected_plan_source
-assert "*legacy_network_args," in protected_plan_source
+assert "network_args = ci_build_artifacts.bubblewrap_network_args(" in protected_plan_source
+assert "shared_artifact=shared_artifact," in protected_plan_source
+assert "legacy_unshare=not requires_services," in protected_plan_source
+assert "postgres_profile=postgres_profile is not None," in protected_plan_source
+assert "*network_args," in protected_plan_source
 assert "if requires_services:" in protected_plan_source
 assert "script_env.update(candidate_service_env)" in protected_plan_source
 assert "candidate scripts requiring services need an isolated GitHub-hosted runner" in protected_plan_source
-assert '"--unshare-net"' in protected_plan_source
 assert 'script_env = {' in protected_plan_source
 assert "candidate_service_env" in protected_plan_source
 assert "credential_environment_name_pattern" in protected_plan_source
