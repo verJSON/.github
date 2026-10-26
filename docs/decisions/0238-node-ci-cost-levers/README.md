@@ -399,6 +399,15 @@ The schema-validation profile creates only `schema_snapshot`, `schema_migrations
 
 Schema generation and reference push use `schema_snapshot` and `schema_reference`; migration replay uses `schema_migrations`. The hosted acceptance compares normalized outputs across these three independent clean databases, checks their privilege and prelude boundaries, and exercises the Bubblewrap/AppArmor runner. Candidate scripts must call `/opt/verjson/postgres-client/bin/psql` and `/opt/verjson/postgres-client/bin/pg_dump` by absolute path: npm may put a workspace `.bin` directory ahead of inherited `PATH`. The hosted acceptance places failing workspace shims first on `PATH` and verifies that the pinned absolute clients still run. Local Docker/Bubblewrap tests do not establish GitHub-hosted AppArmor acceptance.
 
+## Amendment 2026-10-26 — preserve non-executable PostgreSQL client payloads
+
+- **Issue:** [Verjson/.github#1817](https://github.com/Verjson/.github/issues/1817), external schema-validation canary.
+- **ARB:** GO for passing the fixed wrapper path as `argv[0]` to the pinned loader; keep the copied client ELF files `0444`. Astra, Sol, and `code-reviewer` agreed after reviewing the exact pinned PostgreSQL image. Fable and Opus review tools were unavailable.
+
+Normal `psql` startup calls PostgreSQL's executable-path validation after connecting. The staged ELF has no execute bit, so passing its `.elf` path as `argv[0]` fails `X_OK` even though the trusted loader can read and run it. Each `bin/psql` and `bin/pg_dump` wrapper now passes its fixed absolute wrapper path with glibc `--argv0`; the wrapper is `0555`, while the client ELF and shared libraries remain non-writable and the ELF remains non-executable. Staging's version probe uses the copied loader with `--argv0` and fails closed if unsupported. There is no fallback that broadens ELF permissions.
+
+Hosted acceptance now runs a connected `psql` query without `-X` and checks its command name, and the existing schema normalization runs real `pg_dump --schema-only`. The PostgreSQL profile's database grants, Unix-socket-only connection, network isolation, and read-only client mount do not change. The canonical PR's hosted acceptance and the external adopter canary remain the rollout evidence.
+
 ## Amendment 2026-10-26 — harden same-run ArtifactSet parsing and selection
 
 - **Issue:** [Verjson/.github#1869](https://github.com/Verjson/.github/issues/1869), D1 hardening.

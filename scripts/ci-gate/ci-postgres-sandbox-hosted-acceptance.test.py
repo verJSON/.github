@@ -902,6 +902,22 @@ print(json.dumps(observed))
         profile_name = ci_postgres_sandbox.SCHEMA_VALIDATION_PROFILE_NAME
 
         self.assertEqual(state["profileName"], profile_name)
+        startup = self._candidate(
+            state,
+            [
+                "/usr/bin/env",
+                "PSQLRC=/dev/null",
+                "/opt/verjson/postgres-client/bin/psql",
+                "--no-align",
+                "--tuples-only",
+                "--username=verjson_ci",
+                "--dbname=schema_snapshot",
+                "--command=SELECT current_user || '|' || current_setting('application_name');",
+            ],
+        )
+        self.assertEqual(startup.stdout.strip(), "verjson_ci|psql")
+        self.assertNotIn("invalid binary", startup.stderr.lower())
+        self.assertNotIn("could not find own program executable", startup.stderr.lower())
         self.assertEqual(
             ci_postgres_sandbox.local_auth_policy(profile_name).splitlines(),
             [

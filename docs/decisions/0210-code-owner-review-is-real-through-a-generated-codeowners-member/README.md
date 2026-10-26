@@ -575,6 +575,40 @@ decision `REVIEW_REQUIRED`. From the fetched clean base,
 printed `true`. The owner's standing admin authority was used after review;
 no gate was weakened.
 
+28. **Backfilled admin merge of the #1901 ledger PR.** Verjson/.github#1901
+("docs(adr): record the #1896 through #1899 admin merges in the ADR 0210
+ledger") merged 2026-10-23 at head
+`530319e0cf8df851ae6e8e45f564434da2b00dd7` and merge commit
+`6469b7a16419a4f0e48b73c983d4c9362cf0943a`; its base was
+`65c713149497792fb4bb7ad27345b4f8cc5e1c06`. GitHub reports merged by
+`pyousefi`, 12 SUCCESS, 7 SKIPPED, and 1 NEUTRAL check conclusions, with
+review decision `REVIEW_REQUIRED`. The available PR body and comments do not
+retain the required pre-merge assertion result; this backfill does not claim
+that assertion passed. No gate was weakened.
+
+29. **Backfilled admin merge of the #1904 ledger PR.** Verjson/.github#1904
+("docs(adr): record the #1902 admin merge in the ADR 0210 ledger") merged
+2026-10-23 at head `5c8f419dab6f5f32cd628ab155fa5f4a6c9138d4` and merge
+commit `6ef749effddaa83f45de4b2cba7869955c10c30b`; its base was
+`dd614b2ed80c868144a3502baebc2ece849ed3e7`. GitHub reports merged by
+`pyousefi`, 12 SUCCESS, 7 SKIPPED, and 1 NEUTRAL check conclusions, with
+review decision `REVIEW_REQUIRED`. The available PR body and comments do not
+retain the required pre-merge assertion result; this backfill does not claim
+that assertion passed. No gate was weakened.
+
+30. **Admin merge isolated schema-validation PostgreSQL profile.**
+Verjson/.github#1920 ("feat(ci): add isolated schema validation PostgreSQL
+profile") admin-squash-merged 2026-10-26 at head
+`5dc6a4c8ae178c7b5d8ce487f1e169e893aa0e7b` and merge commit
+`1eaec44cb0ab8e25c8dd279ae6dc65df25c41b3`. Its base was fetched clean
+`origin/main` at `e7fa9e87429eff3a1ab501b9c158cf088dd2505a`. GitHub reports
+21 SUCCESS and 5 SKIPPED check conclusions; hosted PostgreSQL acceptance and
+AI review authorization succeeded, while the review decision remained
+`REVIEW_REQUIRED`. From the fetched clean base,
+`bash scripts/assert-mergeable-head.sh VerJSON/.github 1920` exited 0 and
+printed `true`. The owner's standing admin authority was used after review;
+no gate was weakened.
+
 ### Exit condition ("CI optimized and working"), measurable
 
 The window closes when all hold, each evidenced in the closing PR:

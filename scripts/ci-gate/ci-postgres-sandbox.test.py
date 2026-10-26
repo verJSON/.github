@@ -565,10 +565,19 @@ class PostgresSandboxProfileTests(unittest.TestCase):
                 executable = bundle / "bin" / name
                 executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
                 executable.chmod(0o555)
+                payload = bundle / "lib" / f"{name}.elf"
+                payload.write_bytes(f"{name} payload".encode())
+                payload.chmod(0o444)
             (bundle / "lib" / "ld-linux-x86-64.so.2").write_bytes(b"loader")
             (bundle / "lib" / "ld-linux-x86-64.so.2").chmod(0o555)
             ci_postgres_sandbox.write_client_manifest(bundle, profile)
             ci_postgres_sandbox.verify_client_bundle(bundle, profile)
+
+            payload = bundle / "lib" / "psql.elf"
+            payload.chmod(0o555)
+            with self.assertRaises(ci_postgres_sandbox.PostgresSandboxError):
+                ci_postgres_sandbox.verify_client_bundle(bundle, profile)
+            payload.chmod(0o444)
 
             executable = bundle / "bin" / "psql"
             executable.chmod(0o755)
@@ -605,6 +614,127 @@ class PostgresSandboxProfileTests(unittest.TestCase):
                         "a" * 64, profile=profile, bundle=bundle
                     )
         copy.assert_not_called()
+
+    def test_staged_client_probe_passes_the_wrapper_as_argv0(self) -> None:
+        loader = Path("/tmp/postgres-client/lib/ld-linux-x86-64.so.2")
+        library_directory = loader.parent
+        executable = library_directory / "psql.elf"
+        wrapper = Path("/tmp/postgres-client/bin/psql")
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="psql (PostgreSQL) 17.11", stderr=""
+        )
+
+        with patch.object(
+            ci_postgres_sandbox.subprocess, "run", return_value=completed
+        ) as run:
+            output = ci_postgres_sandbox._run_staged_client(
+                loader, library_directory, executable, wrapper
+            )
+
+        self.assertEqual(output, "psql (PostgreSQL) 17.11")
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                str(loader),
+                "--argv0",
+                str(wrapper),
+                "--library-path",
+                str(library_directory),
+                str(executable),
+                "--version",
+            ],
+        )
+
+        rejected = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="unrecognized option"
+        )
+        with patch.object(
+            ci_postgres_sandbox.subprocess, "run", return_value=rejected
+        ):
+            with self.assertRaisesRegex(
+                ci_postgres_sandbox.PostgresSandboxError, "could not be executed"
+            ):
+                ci_postgres_sandbox._run_staged_client(
+                    loader, library_directory, executable, wrapper
+                )
+
+    def test_client_staging_keeps_payloads_read_only_and_generates_fixed_argv0(
+        self,
+    ) -> None:
+        profile = ci_postgres_sandbox.resolve_profile("postgres-17.11")
+        ldd_output = (
+            "\tlibpq.so.5 => /usr/lib/x86_64-linux-gnu/libpq.so.5 (0x1234)\n"
+            "\t/lib64/ld-linux-x86-64.so.2 (0x5678)\n"
+            "\tlinux-vdso.so.1 (0x9abc)\n"
+        )
+        staged_clients: list[tuple[Path, Path]] = []
+
+        def run_docker(command: list[str]) -> str:
+            if command[1] == "inspect":
+                return profile["image"]
+            if command[-1] == "--version":
+                executable = Path(command[-2]).name
+                return f"{executable} (PostgreSQL) 17.11 (Debian build)"
+            if command[-2] == "ldd":
+                return ldd_output
+            if command[-2] == "-f":
+                path = command[-1]
+                if path == "/lib64/ld-linux-x86-64.so.2":
+                    return "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+                return path
+            self.fail(f"unexpected Docker command: {command!r}")
+
+        def copy_from_container(
+            _container_id: str, source: str, destination: Path
+        ) -> None:
+            destination.write_bytes(f"copied {Path(source).name}".encode())
+
+        def run_staged(
+            _loader: Path,
+            _library_directory: Path,
+            executable: Path,
+            argv0: Path,
+        ) -> str:
+            staged_clients.append((executable, argv0))
+            return f"{executable.stem} (PostgreSQL) 17.11"
+
+        with tempfile.TemporaryDirectory() as temporary_root:
+            bundle = Path(temporary_root) / "client"
+            bundle.mkdir()
+            with (
+                patch.object(
+                    ci_postgres_sandbox, "_run_docker", side_effect=run_docker
+                ),
+                patch.object(
+                    ci_postgres_sandbox,
+                    "_copy_from_container",
+                    side_effect=copy_from_container,
+                ),
+                patch.object(
+                    ci_postgres_sandbox,
+                    "_run_staged_client",
+                    side_effect=run_staged,
+                ),
+            ):
+                ci_postgres_sandbox.stage_client_bundle(
+                    "a" * 64, profile=profile, bundle=bundle
+                )
+
+            ci_postgres_sandbox.verify_client_bundle(bundle, profile)
+            self.assertEqual(
+                [argv0.name for _, argv0 in staged_clients], ["psql", "pg_dump"]
+            )
+            for name in ("psql", "pg_dump"):
+                self.assertEqual(
+                    (bundle / "lib" / f"{name}.elf").stat().st_mode & 0o777,
+                    0o444,
+                )
+                wrapper = bundle / "bin" / name
+                self.assertEqual(wrapper.stat().st_mode & 0o777, 0o555)
+                self.assertIn(
+                    f'--argv0 "{ci_postgres_sandbox.CLIENT_SANDBOX_PATH}/bin/{name}"',
+                    wrapper.read_text(encoding="utf-8"),
+                )
 
     def test_profile_state_rejects_paths_outside_the_per_run_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_root:
