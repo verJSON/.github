@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 from contextlib import ExitStack, redirect_stderr
 from io import StringIO
 from pathlib import Path
@@ -30,7 +31,7 @@ PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 GENERATOR = ROOT / "scripts/gen-node-ci-protected.py"
 TRUSTED_HELPER = ROOT / "scripts/ci_build_artifacts.py"
 HEAD = "a" * 40
-LEGACY_SHA256 = "91da3b19f70304eefaa8036b2b240bf601c7f6c40b3920bef26dcefd632ee2cf"
+LEGACY_SHA256 = "c6c19852726435fd0ca7504dfb9a64bdb86232e18a37069b60cf84343ea3d83c"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
@@ -327,10 +328,43 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
             self.assertEqual(
                 [receipt["state"] for receipt in receipts],
-                ["infrastructure-failure", "not-run-aborted"],
+                ["candidate-terminal", "not-run-aborted"],
             )
-            self.assertIsNone(receipts[0]["exitCode"])
+            self.assertEqual(receipts[0]["exitCode"], 143)
             self.assertIsNone(receipts[0]["signal"])
+            self.assertTrue(receipts[0]["candidateStarted"])
+
+    def test_protected_candidate_self_sigint_and_sigterm_are_terminal_without_host_cancellation(self):
+        for self_signal, expected_signal in (("sigint", signal.SIGINT), ("sigterm", signal.SIGTERM)):
+            with self.subTest(self_signal=self_signal), tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
+                receipt_capture = Path(capture_dir) / "receipts.json"
+                plan_receipt_capture = Path(capture_dir) / "plan.json"
+                result, remaining = self.run_candidate_plan(
+                    lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+                    "case \"$*\" in\n"
+                    f"  *self-{self_signal}*) exec /usr/bin/python3 -c 'import os,signal; signal.signal(signal.{expected_signal.name}, signal.SIG_DFL); os.kill(os.getpid(), signal.{expected_signal.name})' ;;\n"
+                    "  *second*) touch \"$GITHUB_WORKSPACE/second-ran\" ;;\n"
+                    "esac\n",
+                    script_plan=[f"self-{self_signal}", "second"],
+                    environment_updates={"CI_LEVEL_FAIL_FAST": "false"},
+                    receipt_capture=receipt_capture,
+                    plan_receipt_capture=plan_receipt_capture,
+                    post_run_absent="second-ran",
+                )
+                self.assertNotEqual(0, result.returncode, result.stderr + result.stdout)
+                self.assertEqual([], remaining)
+                receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    [item["state"] for item in receipts],
+                    ["candidate-terminal", "not-run-aborted"],
+                )
+                self.assertTrue(receipts[0]["candidateStarted"])
+                self.assertEqual(receipts[0]["signal"], int(expected_signal))
+                self.assertIsNone(receipts[0]["hostCancellationSignal"])
+                self.assertIsNone(receipts[0]["supervisorSignal"])
+                plan = json.loads(plan_receipt_capture.read_text(encoding="utf-8"))
+                self.assertEqual(plan["state"], "infrastructure-failure")
+                self.assertIsNone(plan["hostCancellationSignal"])
 
     def test_protected_bubblewrap_startup_failure_does_not_continue_after_deleted_cwd(self):
         with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
@@ -358,6 +392,41 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             )
             self.assertEqual(receipts[0]["exitCode"], 23)
 
+    def test_protected_bubblewrap_cancellation_after_ack_prevents_candidate_start(self):
+        with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
+            receipt_capture = Path(capture_dir) / "receipts.json"
+            plan_receipt_capture = Path(capture_dir) / "plan.json"
+            result, remaining = self.run_candidate_plan(
+                lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+                "case \"$2\" in\n"
+                " first) touch \"$GITHUB_WORKSPACE/first-ran\" ;;\n"
+                " second) touch \"$GITHUB_WORKSPACE/second-ran\" ;;\n"
+                "esac\n",
+                script_plan=["first", "second"],
+                environment_updates={"CI_LEVEL_FAIL_FAST": "false"},
+                receipt_capture=receipt_capture,
+                plan_receipt_capture=plan_receipt_capture,
+                post_run_absent=["first-ran", "second-ran", ".after-ack-ready"],
+                cancel_after_ack_probe=True,
+                block_host_signal_mask=True,
+            )
+
+            self.assertNotEqual(0, result.returncode, result.stderr)
+            self.assertEqual([], remaining)
+            receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [receipt["state"] for receipt in receipts], ["interrupted", "not-run-aborted"]
+            )
+            self.assertFalse(receipts[0]["candidateStarted"], receipts[0])
+            self.assertIsNone(receipts[0]["exitCode"], receipts[0])
+            self.assertIsNone(receipts[0]["signal"], receipts[0])
+            self.assertEqual(receipts[0]["hostCancellationSignal"], signal.SIGTERM)
+            self.assertEqual(receipts[0]["supervisorSignal"], signal.SIGTERM)
+            self.assertEqual(receipts[0]["cleanup"], "verified")
+            plan = json.loads(plan_receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual(plan["state"], "interrupted")
+            self.assertEqual(plan["hostCancellationSignal"], signal.SIGTERM)
+
     def test_protected_bubblewrap_cancellation_during_cleanup_invalidates_plan(self):
         with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
             receipt_capture = Path(capture_dir) / "receipts.json"
@@ -379,11 +448,100 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             self.assertNotEqual(0, result.returncode, result.stderr)
             self.assertEqual([], remaining)
             receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
-            self.assertEqual([item["state"] for item in receipts], ["infrastructure-failure", "not-run-aborted"])
+            self.assertEqual([item["state"] for item in receipts], ["interrupted", "not-run-aborted"], receipts)
+            self.assertTrue(receipts[0]["candidateStarted"])
+            self.assertEqual(receipts[0]["exitCode"], 0)
+            self.assertIsNone(receipts[0]["signal"])
+            self.assertEqual(receipts[0]["hostCancellationSignal"], signal.SIGTERM)
             self.assertEqual(receipts[0]["cleanup"], "verified")
             plan = json.loads((Path(capture_dir) / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(plan["state"], "interrupted")
-            self.assertEqual(plan["signal"], signal.SIGTERM)
+            self.assertEqual(plan["hostCancellationSignal"], signal.SIGTERM)
+
+    def test_protected_host_captures_pending_sigterm_before_handler_unblock(self):
+        with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
+            receipt_capture = Path(capture_dir) / "receipts.json"
+            plan_receipt_capture = Path(capture_dir) / "plan.json"
+            result, remaining = self.run_candidate_plan(
+                lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+                "case \"$2\" in\n"
+                " first) touch \"$GITHUB_WORKSPACE/first-ran\" ;;\n"
+                " second) touch \"$GITHUB_WORKSPACE/second-ran\" ;;\n"
+                "esac\n",
+                script_plan=["first", "second"],
+                environment_updates={"CI_LEVEL_FAIL_FAST": "false", "VERJSON_CI_TEST_PENDING_HOST_SIGNAL": "1"},
+                receipt_capture=receipt_capture,
+                plan_receipt_capture=plan_receipt_capture,
+                post_run_absent=["first-ran", "second-ran"],
+            )
+            self.assertNotEqual(0, result.returncode, result.stderr)
+            self.assertEqual([], remaining)
+            self.assertTrue(receipt_capture.is_file(), result.stderr)
+            receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
+            plan = json.loads(plan_receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual(plan["state"], "interrupted")
+            self.assertEqual(plan["hostCancellationSignal"], signal.SIGTERM)
+            self.assertEqual(
+                [receipt["state"] for receipt in receipts],
+                ["interrupted", "not-run-aborted"],
+            )
+            self.assertFalse(receipts[0]["candidateStarted"])
+            self.assertIsNone(receipts[0]["exitCode"])
+            self.assertEqual(receipts[0]["hostCancellationSignal"], signal.SIGTERM)
+
+    def test_protected_bubblewrap_cancels_live_term_resistant_candidate_and_descendants(self):
+        with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
+            receipt_capture = Path(capture_dir) / "receipts.json"
+            plan_receipt_capture = Path(capture_dir) / "plan.json"
+            candidate_script = """count_file="$GITHUB_WORKSPACE/.live-cancel-count"
+count=0
+[[ -f "$count_file" ]] && read -r count < "$count_file"
+count=$((count + 1))
+/usr/bin/python3 -c 'import signal; assert signal.SIGTERM not in signal.pthread_sigmask(signal.SIG_BLOCK, set())'
+printf '%s\\n' "$count" > "$count_file"
+if (( count == 1 )); then
+ /usr/bin/setsid /bin/bash -c 'trap "" TERM; touch "$1"; for _ in {1..1000}; do [[ -f "$3" ]] && break; sleep 0.01; done; [[ -f "$3" ]] || exit 91; sleep 4; touch "$2"; while :; do :; done' detached "$GITHUB_WORKSPACE/.term-resistant-started" "$GITHUB_WORKSPACE/.term-resistant-late" "$GITHUB_WORKSPACE/.cancel-sent" </dev/null >/dev/null 2>&1 &
+ for _ in {1..200}; do [[ -f "$GITHUB_WORKSPACE/.term-resistant-started" ]] && break; sleep 0.01; done
+ [[ -f "$GITHUB_WORKSPACE/.term-resistant-started" ]] || exit 90
+ trap "" TERM
+ touch "$GITHUB_WORKSPACE/.candidate-ready"
+ while :; do sleep 0.02; done
+else
+ touch "$GITHUB_WORKSPACE/second-ran"
+fi
+"""
+            result, remaining = self.run_candidate_plan(
+                lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+                candidate_script,
+                script_plan=["live-cancel", "second"],
+                environment_updates={"CI_LEVEL_FAIL_FAST": "false"},
+                receipt_capture=receipt_capture,
+                plan_receipt_capture=plan_receipt_capture,
+                post_run_absent=["second-ran", ".term-resistant-late"],
+                post_run_absent_delay=2.3,
+                cancel_live_candidate_probe=True,
+                block_host_signal_mask=True,
+            )
+
+            self.assertNotEqual(0, result.returncode, result.stderr)
+            self.assertEqual([], remaining)
+            elapsed_match = re.search(r"LIVE_CANDIDATE_CANCEL_SECONDS=([0-9.]+)", result.stderr)
+            self.assertIsNotNone(elapsed_match, result.stderr)
+            self.assertGreaterEqual(float(elapsed_match.group(1)), 0.45, result.stderr)
+            self.assertTrue(receipt_capture.is_file(), result.stderr)
+            receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [item["state"] for item in receipts],
+                ["interrupted", "not-run-aborted"],
+            )
+            self.assertIsNone(receipts[0]["exitCode"])
+            self.assertEqual(receipts[0]["signal"], signal.SIGKILL)
+            self.assertEqual(receipts[0]["hostCancellationSignal"], signal.SIGTERM)
+            self.assertEqual(receipts[0]["supervisorSignal"], signal.SIGTERM)
+            self.assertEqual(receipts[0]["cleanup"], "verified")
+            plan = json.loads(plan_receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual(plan["state"], "interrupted")
+            self.assertEqual(plan["hostCancellationSignal"], signal.SIGTERM)
 
     def test_protected_candidate_cannot_access_or_forge_the_supervisor_channel(self):
         with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
@@ -919,7 +1077,14 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         return {**step, "run": step["run"] + fixture}
 
     def stage_candidate_helper(
-        self, runner_temp, candidate_run, *, bwrap_probe=False, cancel_cleanup_probe=False
+        self,
+        runner_temp,
+        candidate_run,
+        *,
+        bwrap_probe=False,
+        cancel_cleanup_probe=False,
+        cancel_live_candidate_probe=False,
+        cancel_after_ack_probe=False,
     ):
         helper_source = TRUSTED_HELPER.read_text(encoding="utf-8")
         start = "# BEGIN TRUSTED_HELPER_BODY_FIXTURE\n"
@@ -948,7 +1113,7 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             marker = "candidate_result = ci_build_artifacts.run_supervised_bubblewrap(\n"
             self.assertEqual(1, helper_source.count(marker))
             probe = r'''_d1_original_supervisor = ci_build_artifacts.run_supervised_bubblewrap
-def _d1_probe_supervisor(arguments, *, environment, pass_fds, cancellation_signal, cwd=None, test_hook=None):
+def _d1_probe_supervisor(arguments, *, environment, pass_fds, host_signals, cwd=None, test_hook=None):
     import fcntl
     import stat
 
@@ -1012,7 +1177,7 @@ def _d1_probe_supervisor(arguments, *, environment, pass_fds, cancellation_signa
         arguments,
         environment=environment,
         pass_fds=pass_fds,
-        cancellation_signal=cancellation_signal,
+        host_signals=host_signals,
         cwd=cwd,
         test_hook=test_hook,
     )
@@ -1026,23 +1191,134 @@ ci_build_artifacts.run_supervised_bubblewrap = _d1_probe_supervisor
                 + textwrap.indent(probe, indent)
                 + helper_source[line_start:]
             )
+
+        if cancel_live_candidate_probe:
+            marker = "candidate_result = ci_build_artifacts.run_supervised_bubblewrap(\n"
+            self.assertEqual(1, helper_source.count(marker))
+            probe = r'''_d1_original_live_supervisor = ci_build_artifacts.run_supervised_bubblewrap
+def _d1_cancel_live_candidate(arguments, *, environment, pass_fds, host_signals, cwd=None, test_hook=None):
+    import threading
+    ready_marker = Path(environment["GITHUB_WORKSPACE"]) / ".candidate-ready"
+    cancel_marker = Path(environment["GITHUB_WORKSPACE"]) / ".cancel-sent"
+    watcher_stopped = threading.Event()
+    signalled_at = None
+    def _watch_candidate():
+        nonlocal signalled_at
+        deadline = time.monotonic() + 20
+        while not watcher_stopped.is_set() and time.monotonic() < deadline:
+            if ready_marker.is_file():
+                signalled_at = time.monotonic()
+                cancel_marker.touch(exist_ok=True)
+                host_signals.capture(int(signal.SIGTERM))
+                return
+            time.sleep(0.01)
+    watcher = threading.Thread(target=_watch_candidate, daemon=True)
+    watcher.start()
+    try:
+        return _d1_original_live_supervisor(
+            arguments,
+            environment=environment,
+            pass_fds=pass_fds,
+            host_signals=host_signals,
+            cwd=cwd,
+            test_hook=test_hook,
+        )
+    finally:
+        watcher_stopped.set()
+        watcher.join(timeout=1)
+        if watcher.is_alive():
+            raise AssertionError("host-signal watcher did not stop")
+        if signalled_at is not None:
+            print(
+                f"LIVE_CANDIDATE_CANCEL_SECONDS={time.monotonic() - signalled_at:.3f}",
+                file=sys.stderr,
+            )
+ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_live_candidate'''
+            source_line = helper_source.index(marker)
+            line_start = helper_source.rfind("\n", 0, source_line) + 1
+            indent = helper_source[line_start:source_line]
+            helper_source = (
+                helper_source[:line_start]
+                + textwrap.indent(probe, indent)
+                + "\n"
+                + helper_source[line_start:]
+            )
+        if cancel_after_ack_probe:
+            marker = "candidate_result = ci_build_artifacts.run_supervised_bubblewrap(\n"
+            self.assertEqual(1, helper_source.count(marker))
+            probe = r'''_d1_original_after_ack_supervisor = ci_build_artifacts.run_supervised_bubblewrap
+def _d1_cancel_after_ack(arguments, *, environment, pass_fds, host_signals, cwd=None, test_hook=None):
+    import os
+    import signal
+    import threading
+    import time
+
+    marker = Path(environment["GITHUB_WORKSPACE"]) / ".after-ack-ready"
+    stopped = threading.Event()
+    observed = threading.Event()
+    shim = Path(os.environ["RUNNER_TEMP"]) / "bwrap-blocked-signal-mask"
+    shim.write_text(
+        "#!/usr/bin/python3" + chr(10)
+        + "import os,signal,sys" + chr(10)
+        + "signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGINT,signal.SIGTERM})" + chr(10)
+        + "os.execvpe('/usr/bin/bwrap',['/usr/bin/bwrap',*sys.argv[1:]],os.environ)" + chr(10),
+        encoding="utf-8",
+    )
+    shim.chmod(0o700)
+
+    def _signal_after_ack():
+        deadline = time.monotonic() + 10
+        while not stopped.is_set() and time.monotonic() < deadline:
+            if marker.is_file():
+                observed.set()
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
+            time.sleep(0.01)
+
+    watcher = threading.Thread(target=_signal_after_ack, daemon=True)
+    watcher.start()
+    arguments = [str(shim), *arguments[1:]]
+    try:
+        return _d1_original_after_ack_supervisor(
+            arguments,
+            environment=environment,
+            pass_fds=pass_fds,
+            host_signals=host_signals,
+            cwd=cwd,
+            test_hook=test_hook,
+            test_after_ack_marker=str(marker),
+        )
+    finally:
+        stopped.set()
+        watcher.join(timeout=1)
+        if watcher.is_alive() or not observed.is_set():
+            raise AssertionError("host cancellation did not arrive after the launch ACK")
+ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_after_ack
+'''
+            source_line = helper_source.index(marker)
+            line_start = helper_source.rfind("\n", 0, source_line) + 1
+            indent = helper_source[line_start:source_line]
+            helper_source = (
+                helper_source[:line_start]
+                + textwrap.indent(probe, indent)
+                + helper_source[line_start:]
+            )
         if cancel_cleanup_probe:
             marker = "candidate_result = ci_build_artifacts.run_supervised_bubblewrap(\n"
             self.assertEqual(1, helper_source.count(marker))
             probe = r'''_d1_original_supervisor = ci_build_artifacts.run_supervised_bubblewrap
-def _d1_cancel_cleanup(arguments, *, environment, pass_fds, cancellation_signal, cwd=None, test_hook=None):
+def _d1_cancel_cleanup(arguments, *, environment, pass_fds, host_signals, cwd=None, test_hook=None):
     def _inject_cleanup_cancellation(event):
-        nonlocal received_signal
         if test_hook is not None:
             test_hook(event)
-        if event == "cleanup-start" and received_signal is None:
-            received_signal = int(signal.SIGTERM)
+        if event == "cleanup-start":
+            host_signals.capture(int(signal.SIGTERM))
 
     return _d1_original_supervisor(
         arguments,
         environment=environment,
         pass_fds=pass_fds,
-        cancellation_signal=cancellation_signal,
+        host_signals=host_signals,
         cwd=cwd,
         test_hook=_inject_cleanup_cancellation,
     )
@@ -1115,7 +1391,11 @@ ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_cleanup
         receipt_capture=None,
         plan_receipt_capture=None,
         post_run_absent=None,
+        post_run_absent_delay=0,
         nested_manifests=None,
+        cancel_live_candidate_probe=False,
+        cancel_after_ack_probe=False,
+        block_host_signal_mask=False,
     ):
         with tempfile.TemporaryDirectory() as directory, ExitStack() as cleanup_stack:
             root = Path(directory)
@@ -1142,7 +1422,7 @@ ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_cleanup
                 (workspace / ".git").mkdir()
             cache_setup(baseline)
             (workspace / "package.json").write_text(
-                json.dumps({"scripts": {"first": "true", "second": "true"}}),
+                json.dumps({"scripts": {"first": "true", "second": "true", "live-cancel": "true", "self-sigint": "true", "self-sigterm": "true"}}),
                 encoding="utf-8",
             )
             for manifest in nested_manifests or []:
@@ -1450,20 +1730,50 @@ ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_cleanup
                 candidate_run,
                 bwrap_probe=bwrap_probe,
                 cancel_cleanup_probe=cancel_cleanup_probe,
+                cancel_live_candidate_probe=cancel_live_candidate_probe,
+                cancel_after_ack_probe=cancel_after_ack_probe,
             )
             self.assertTrue(
                 workspace.is_dir(),
                 f"candidate workspace disappeared before helper invocation: {workspace}; root={list(root.iterdir())}",
             )
+            command = ["/usr/bin/bash", "-c", candidate_run]
+            if block_host_signal_mask:
+                blocked_mask_exec = (
+                    "import os,signal,sys; "
+                    "signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGINT,signal.SIGTERM}); "
+                    "os.execvpe(sys.argv[1],sys.argv[1:],os.environ)"
+                )
+                command = [sys.executable, "-c", blocked_mask_exec, *command]
             result = subprocess.run(
-                ["/usr/bin/bash", "-c", candidate_run],
+                command,
                 cwd=workspace,
                 env=env,
                 capture_output=True,
                 text=True,
             )
             if post_run_absent is not None:
-                self.assertFalse((workspace / post_run_absent).exists())
+                absent_markers = (
+                    (post_run_absent,)
+                    if isinstance(post_run_absent, str)
+                    else post_run_absent
+                )
+                for marker in absent_markers:
+                    self.assertFalse(
+                        (workspace / marker).exists(),
+                    f"candidate wrote forbidden marker {marker}; stdout={result.stdout!r}; stderr={result.stderr!r}",
+                    )
+            if post_run_absent_delay:
+                if not isinstance(post_run_absent_delay, (int, float)) or not 0 < post_run_absent_delay <= 3.0:
+                    raise AssertionError("delayed marker verification exceeded its bound")
+                deadline = time.monotonic() + post_run_absent_delay
+                while time.monotonic() < deadline:
+                    time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+                for marker in absent_markers:
+                    self.assertFalse(
+                        (workspace / marker).exists(),
+                        f"candidate wrote delayed forbidden marker {marker}",
+                    )
             if receipt_capture is not None or plan_receipt_capture is not None:
                 receipt_directories = list(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
                 self.assertEqual(len(receipt_directories), 1, result.stderr)

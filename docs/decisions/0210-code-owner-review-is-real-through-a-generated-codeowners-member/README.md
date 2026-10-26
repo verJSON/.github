@@ -533,7 +533,7 @@ code-reviewer result recorded.
 
 24. **Admin merge of the GitHub App client-ID preflight.** Verjson/.github#1913
 ("fix(security): validate GitHub App client IDs before minting") merged on 2026-10-25
-at head `392f1202558faf05af155ff4660998a9070e76` and merge commit
+at head `392f1202558faf05afac155ff4660998a9070e76` and merge commit
 `c9cfdbc09e9caebe094908ab7c6adf178f29613f`. GitHub reports merged by `pyousefi`;
 the rollup has 23 SUCCESS and 11 SKIPPED conclusions, including SUCCESS for
 `AI review authorization`. The PM campaign record says

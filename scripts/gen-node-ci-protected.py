@@ -732,18 +732,7 @@ def externalize_protected_candidate_plan(step: str) -> str:
         raise SystemExit("protected candidate heredoc indentation changed")
     candidate_body = textwrap.dedent(raw_candidate_body).rstrip("\n")
     normalized_lines = candidate_body.splitlines()
-    for declaration, expected_count in (("received_signal", 1),):
-        old = f"global {declaration}"
-        new = f"nonlocal {declaration}"
-        matches = [
-            index for index, line in enumerate(normalized_lines)
-            if line.strip() == old
-        ]
-        if len(matches) != expected_count:
-            raise SystemExit("protected candidate signal-state transformation changed")
-        for index in matches:
-            indentation = normalized_lines[index][: len(normalized_lines[index]) - len(normalized_lines[index].lstrip())]
-            normalized_lines[index] = indentation + new
+    # HostSignalQueue capture uses a closure, so generated execution needs no scalar rewrite.
     normalized_candidate_body = "\n".join(normalized_lines)
     if normalized_candidate_body != protected_candidate_helper_body():
         raise SystemExit("protected candidate helper source no longer matches generator output")
@@ -1601,23 +1590,20 @@ def isolate_candidate_runtime_cache(document: str) -> str:
             else [str(npm_executable)]
           )
           cache_root.mkdir(mode=0o700)
-          received_signal = None
+          if os.environ.pop("VERJSON_CI_TEST_PENDING_HOST_SIGNAL", None) == "1":
+              signal.pthread_sigmask(signal.SIG_BLOCK, {{signal.SIGINT, signal.SIGTERM}})
+              os.kill(os.getpid(), signal.SIGTERM)
 
           def cleanup_cache_root(*_args):
               shutil.rmtree(cache_root, ignore_errors=True)
 
-          previous_handlers = {{}}
-          def handle_signal(signum, _frame):
-              global received_signal
-              if received_signal is None:
-                  received_signal = signum
-
-          for caught_signal in (signal.SIGINT, signal.SIGTERM):
-              previous_handlers[caught_signal] = signal.getsignal(caught_signal)
-              signal.signal(caught_signal, handle_signal)
+          signal.pthread_sigmask(signal.SIG_UNBLOCK, {{signal.SIGINT, signal.SIGTERM}})
           try:
               def execute_candidate_entry(index, _entry):
+                  candidate_result = None
+                  candidate_failure = None
                   script_directory, name, unset_env, requires_services = normalized[index]
+                  received_signal = host_signals.poll()
                   if received_signal is not None:
                       interruption = ScriptPlanInterrupted(received_signal)
                       interruption.cleanup_status = "not-started"
@@ -1787,6 +1773,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                   )
                   legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]
                   try:
+                      received_signal = host_signals.poll()
                       if received_signal is not None:
                           interruption = ScriptPlanInterrupted(received_signal)
                           interruption.cleanup_status = "not-started"
@@ -1840,7 +1827,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                           arguments,
                           environment=script_env,
                           pass_fds=tuple(tool_prefix_fds),
-                          cancellation_signal=lambda: received_signal,
+                          host_signals=host_signals,
                       )
                       candidate_status = candidate_result.return_code
                       if candidate_status is None:
@@ -1848,21 +1835,25 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                       for descriptor in tool_prefix_fds:
                         os.close(descriptor)
                       tool_prefix_fds = []
+                  except (ci_build_artifacts.ScriptCandidateTerminal, ci_build_artifacts.ScriptPlanInterrupted) as failure:
+                      candidate_failure = failure
+                      raise
                   finally:
                     for descriptor in tool_prefix_fds:
                       os.close(descriptor)
                     shutil.rmtree(script_cache, ignore_errors=True)
                     shutil.rmtree(script_tmp, ignore_errors=True)
                     shutil.rmtree(script_home, ignore_errors=True)
-                    if (
-                      script_cache.exists()
-                      or script_tmp.exists()
-                      or script_home.exists()
-                      or (baseline is not None and inventory(baseline) != baseline_inventory)
-                    ):
-                      cleanup_error = IntegrityError("candidate script cache cleanup or baseline integrity check failed")
-                      cleanup_error.cleanup_status = "failed"
-                      raise cleanup_error
+                    ci_build_artifacts._verify_script_candidate_cleanup(
+                        candidate_result,
+                        candidate_failure,
+                        lambda: (
+                            script_cache.exists()
+                            or script_tmp.exists()
+                            or script_home.exists()
+                            or (baseline is not None and inventory(baseline) != baseline_inventory)
+                        ),
+                    )
                   return ScriptEntryExecutionResult(candidate_status)
 
               command_records = [
@@ -1899,14 +1890,12 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                   fail_fast_value == "true",
                   runner_temp,
                   execute_candidate_entry,
-                  cancellation_signal=lambda: received_signal,
+                  host_signals=host_signals,
               )
               if receipt_result.exit_code != 0:
                   sys.exit("candidate script plan failed; see trusted per-entry receipts in RUNNER_TEMP")
           finally:
               cleanup_cache_root()
-              for caught_signal, previous_handler in previous_handlers.items():
-                  signal.signal(caught_signal, previous_handler)
           if cache_root.exists() or (baseline is not None and inventory(baseline) != baseline_inventory):
               sys.exit("candidate cache root cleanup or final baseline integrity check failed")
 """.rstrip("\n") + "\n"
@@ -1921,7 +1910,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
         + execution_markers[1]
         + step[execution_end:]
     )
-    python_start = "          python3 -I - <<'PY'\n"
+    python_start = "          exec python3 -I - <<'PY'\n"
     python_end = "          PY"
     if step.count(python_start) != 1 or step.count(python_end) != 1:
         raise SystemExit("protected candidate script Python boundary changed")

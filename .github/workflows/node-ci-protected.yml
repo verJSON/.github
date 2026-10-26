@@ -5748,10 +5748,14 @@ jobs:
               --proc /proc \
               --tmpfs /dev/shm \
               -- /usr/bin/true 3>"$status_file" >/dev/null 2>&1 || status_code=$?
-            if [ "$status_code" -ne 0 ] || ! python3 -I - "$status_file" <<'PY'
+            if [ "$status_code" -ne 0 ] || ! python3 -I - "$status_file" "$status_code" <<'PY'
           import json
           import sys
           from pathlib import Path
+
+          MAX_STATUS_BYTES = 16 * 1024
+          MAX_STATUS_LINE_BYTES = 4096
+          MAX_STATUS_RECORDS = 64
 
           def reject_duplicate_keys(pairs):
               result = {}
@@ -5761,14 +5765,49 @@ jobs:
                   result[key] = value
               return result
 
-          records = [
-              json.loads(line, object_pairs_hook=reject_duplicate_keys)
-              for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
-          ]
-          if (len(records) != 2 or type(records[0].get("child-pid")) is not int
-                  or records[0]["child-pid"] <= 0
-                  or records[1] != {"exit-code": 0}):
-              raise SystemExit("Bubblewrap JSON status feature probe failed")
+          def reject_nonfinite(value):
+              raise ValueError(f"non-finite JSON constant: {value}")
+
+          expected_status = int(sys.argv[2])
+          raw = Path(sys.argv[1]).read_bytes()
+          if not raw or len(raw) > MAX_STATUS_BYTES or not raw.endswith(b"\n"):
+              raise SystemExit("Bubblewrap JSON status file is empty, oversized, or unterminated")
+          lines = raw[:-1].split(b"\n")
+          if not lines or len(lines) > MAX_STATUS_RECORDS:
+              raise SystemExit("Bubblewrap JSON status record count is invalid")
+          events = []
+          child_pid = None
+          exit_code = None
+          for line in lines:
+              if not line or len(line) > MAX_STATUS_LINE_BYTES:
+                  raise SystemExit("Bubblewrap JSON status line is empty or oversized")
+              try:
+                  record = json.loads(
+                      line.decode("utf-8", errors="strict"),
+                      object_pairs_hook=reject_duplicate_keys,
+                      parse_constant=reject_nonfinite,
+                  )
+              except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+                  raise SystemExit(f"Bubblewrap JSON status is malformed: {error}") from error
+              if not isinstance(record, dict):
+                  raise SystemExit("Bubblewrap JSON status event must be an object")
+              known_events = {"child-pid", "exit-code"}.intersection(record)
+              if len(known_events) > 1:
+                  raise SystemExit("Bubblewrap JSON status event is contradictory")
+              if "child-pid" in record:
+                  value = record["child-pid"]
+                  if type(value) is not int or value <= 0 or child_pid is not None:
+                      raise SystemExit("Bubblewrap child-pid event is malformed or duplicated")
+                  child_pid = value
+                  events.append("child-pid")
+              elif "exit-code" in record:
+                  value = record["exit-code"]
+                  if type(value) is not int or value < 0 or exit_code is not None:
+                      raise SystemExit("Bubblewrap exit-code event is malformed or duplicated")
+                  exit_code = value
+                  events.append("exit-code")
+          if events != ["child-pid", "exit-code"] or exit_code != expected_status:
+              raise SystemExit("Bubblewrap JSON status events are incomplete, unordered, or disagree with process status")
           PY
             then
               rm -f -- "$status_file"

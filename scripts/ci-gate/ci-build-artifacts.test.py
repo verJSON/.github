@@ -224,6 +224,17 @@ class SharedNetworkBoundaryTests(unittest.TestCase):
             )
 
 
+    def test_pid1_rechecks_security_state_immediately_before_each_candidate_launch(self) -> None:
+        supervisor = artifacts.SANDBOX_SUPERVISOR_ENTRYPOINT
+        call = supervisor.rindex("enforce_candidate_security_state()")
+        launch = supervisor.index("candidate = subprocess.Popen(")
+        self.assertLess(call, launch)
+        launch_gate = supervisor[call:launch]
+        self.assertIn("candidate_environment = os.environ.copy()", launch_gate)
+        self.assertIn("CapBnd", supervisor)
+        self.assertIn("bwrap//&unpriv_bwrap", supervisor)
+
+
 class ArtifactPolicyTests(unittest.TestCase):
     def test_missing_exact_repository_policy_row_selects_fallback(self) -> None:
         table = artifacts.load_policy_table(b'{"version":1,"repositories":{}}')

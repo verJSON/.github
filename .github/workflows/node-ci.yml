@@ -5131,10 +5131,14 @@ jobs:
               --proc /proc \
               --tmpfs /dev/shm \
               -- /usr/bin/true 3>"$status_file" >/dev/null 2>&1 || status_code=$?
-            if [ "$status_code" -ne 0 ] || ! python3 -I - "$status_file" <<'PY'
+            if [ "$status_code" -ne 0 ] || ! python3 -I - "$status_file" "$status_code" <<'PY'
           import json
           import sys
           from pathlib import Path
+
+          MAX_STATUS_BYTES = 16 * 1024
+          MAX_STATUS_LINE_BYTES = 4096
+          MAX_STATUS_RECORDS = 64
 
           def reject_duplicate_keys(pairs):
               result = {}
@@ -5144,14 +5148,49 @@ jobs:
                   result[key] = value
               return result
 
-          records = [
-              json.loads(line, object_pairs_hook=reject_duplicate_keys)
-              for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
-          ]
-          if (len(records) != 2 or type(records[0].get("child-pid")) is not int
-                  or records[0]["child-pid"] <= 0
-                  or records[1] != {"exit-code": 0}):
-              raise SystemExit("Bubblewrap JSON status feature probe failed")
+          def reject_nonfinite(value):
+              raise ValueError(f"non-finite JSON constant: {value}")
+
+          expected_status = int(sys.argv[2])
+          raw = Path(sys.argv[1]).read_bytes()
+          if not raw or len(raw) > MAX_STATUS_BYTES or not raw.endswith(b"\n"):
+              raise SystemExit("Bubblewrap JSON status file is empty, oversized, or unterminated")
+          lines = raw[:-1].split(b"\n")
+          if not lines or len(lines) > MAX_STATUS_RECORDS:
+              raise SystemExit("Bubblewrap JSON status record count is invalid")
+          events = []
+          child_pid = None
+          exit_code = None
+          for line in lines:
+              if not line or len(line) > MAX_STATUS_LINE_BYTES:
+                  raise SystemExit("Bubblewrap JSON status line is empty or oversized")
+              try:
+                  record = json.loads(
+                      line.decode("utf-8", errors="strict"),
+                      object_pairs_hook=reject_duplicate_keys,
+                      parse_constant=reject_nonfinite,
+                  )
+              except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+                  raise SystemExit(f"Bubblewrap JSON status is malformed: {error}") from error
+              if not isinstance(record, dict):
+                  raise SystemExit("Bubblewrap JSON status event must be an object")
+              known_events = {"child-pid", "exit-code"}.intersection(record)
+              if len(known_events) > 1:
+                  raise SystemExit("Bubblewrap JSON status event is contradictory")
+              if "child-pid" in record:
+                  value = record["child-pid"]
+                  if type(value) is not int or value <= 0 or child_pid is not None:
+                      raise SystemExit("Bubblewrap child-pid event is malformed or duplicated")
+                  child_pid = value
+                  events.append("child-pid")
+              elif "exit-code" in record:
+                  value = record["exit-code"]
+                  if type(value) is not int or value < 0 or exit_code is not None:
+                      raise SystemExit("Bubblewrap exit-code event is malformed or duplicated")
+                  exit_code = value
+                  events.append("exit-code")
+          if events != ["child-pid", "exit-code"] or exit_code != expected_status:
+              raise SystemExit("Bubblewrap JSON status events are incomplete, unordered, or disagree with process status")
           PY
             then
               rm -f -- "$status_file"
@@ -5910,7 +5949,7 @@ jobs:
           export VERJSON_CI_COMMAND_FILES_DIR="${GITHUB_ENV%/*}"
           export VERJSON_CI_OUTPUT_FILE="$GITHUB_OUTPUT"
           unset -v GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY
-          python3 -I - <<'PY'
+          exec python3 -I - <<'PY'
           import hashlib
           import json
           import os
@@ -5935,6 +5974,14 @@ jobs:
           else:
               sys.path.insert(0, str(runner_temp))
               import ci_build_artifacts
+
+          host_signals = ci_build_artifacts.HostSignalQueue()
+          signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+          def stop_on_termination(signum, _frame):
+              host_signals.capture(signum)
+          for caught_signal in (signal.SIGINT, signal.SIGTERM):
+              signal.signal(caught_signal, stop_on_termination)
+          signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT, signal.SIGTERM})
           if (
               entries_path.is_symlink()
               or entries_path.parent.resolve() != runner_temp
@@ -6570,16 +6617,14 @@ jobs:
 
           runtime_cache_content = verified_runtime_cache_content()
 
-          supervisor_state = {"signal": None}
-
-          def stop_on_termination(signum, _frame):
-              if supervisor_state["signal"] is None:
-                  supervisor_state["signal"] = signum
-
-          for caught_signal in (signal.SIGINT, signal.SIGTERM):
-              signal.signal(caught_signal, stop_on_termination)
+          if os.environ.pop("VERJSON_CI_TEST_PENDING_HOST_SIGNAL", None) == "1":
+              signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+              os.kill(os.getpid(), signal.SIGTERM)
+          signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT, signal.SIGTERM})
 
           def execute_candidate_entry(index, _entry):
+              candidate_result = None
+              candidate_failure = None
               directory, name, unset_env, requires_services = normalized[index]
               script_env = os.environ.copy()
               service_env_names = {"DB_HOST", "DB_PORT", "CACHE_PORT"}
@@ -6754,6 +6799,8 @@ jobs:
                   ))
                   script_env["PLAYWRIGHT_BROWSERS_PATH"] = "/dev/shm/playwright-browsers"
               runtime_cache_staging = None
+              candidate_result = None
+              candidate_failure = None
               try:
                   if runtime_cache_content is not None:
                       runtime_cache_staging = stage_runtime_cache(runtime_cache_content)
@@ -6768,34 +6815,46 @@ jobs:
                       "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
                       *npm_command, "run", name,
                   ))
-                  candidate_result = ci_build_artifacts.run_supervised_bubblewrap(
-                      arguments,
-                      environment=script_env,
-                      pass_fds=tuple(
-                          mount_fds
-                          + [fd for fd in (browser_cache_fd, global_config_file.fileno()) if fd is not None]
-                      ),
-                      cancellation_signal=lambda: supervisor_state["signal"],
-                      cwd="/",
-                  )
+                  try:
+                      candidate_result = ci_build_artifacts.run_supervised_bubblewrap(
+                          arguments,
+                          environment=script_env,
+                          pass_fds=tuple(
+                              mount_fds
+                              + [fd for fd in (browser_cache_fd, global_config_file.fileno()) if fd is not None]
+                          ),
+                          host_signals=host_signals,
+                          cwd="/",
+                      )
+                  except (ci_build_artifacts.ScriptCandidateTerminal, ci_build_artifacts.ScriptPlanInterrupted) as failure:
+                      candidate_failure = failure
+                      raise
                   candidate_status = candidate_result.return_code
                   if candidate_status is None:
                       raise ci_build_artifacts.IntegrityError(
-                          "trusted Bubblewrap supervisor omitted the candidate exit code"
+                          "trusted Bubblewrap supervisor omitted candidate exit code"
                       )
               finally:
                   for descriptor in mount_fds:
                       os.close(descriptor)
                   mount_fds.clear()
-                  if runtime_cache_staging is not None:
-                      remove_runtime_cache_staging(runtime_cache_staging)
-                      if os.path.lexists(runtime_cache_staging):
-                          # Name only this step's own path.
-                          cleanup_error = ci_build_artifacts.IntegrityError(
-                              "consumer runtime cache staging was not removed"
-                          )
-                          cleanup_error.cleanup_status = "failed"
-                          raise cleanup_error
+                  try:
+                      if runtime_cache_staging is not None:
+                          remove_runtime_cache_staging(runtime_cache_staging)
+                  except BaseException as cleanup_error:
+                      raise ci_build_artifacts._script_candidate_cleanup_failure(
+                          candidate_result,
+                          candidate_failure,
+                          cleanup_status="unverified",
+                      ) from cleanup_error
+                  ci_build_artifacts._verify_script_candidate_cleanup(
+                      candidate_result,
+                      candidate_failure,
+                      lambda: (
+                          runtime_cache_staging is not None
+                          and os.path.lexists(runtime_cache_staging)
+                      ),
+                  )
               return ci_build_artifacts.ScriptEntryExecutionResult(candidate_status)
 
           command_records = [
@@ -6832,7 +6891,7 @@ jobs:
               fail_fast_value == "true",
               runner_temp,
               execute_candidate_entry,
-              cancellation_signal=lambda: supervisor_state["signal"],
+              host_signals=host_signals,
           )
           if receipt_result.exit_code != 0:
               sys.exit("candidate script plan failed; see trusted per-entry receipts in RUNNER_TEMP")
