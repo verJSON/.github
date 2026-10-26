@@ -13,12 +13,14 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import yaml
 import ci_build_artifacts as artifacts
+import ci_postgres_sandbox as postgres_profile
 
 
 class SharedNetworkBoundaryTests(unittest.TestCase):
@@ -107,6 +109,245 @@ class SharedNetworkBoundaryTests(unittest.TestCase):
                     "${{ inputs.build-artifact-mode-share-eligible }}",
                 )
 
+    def test_post_candidate_profile_failure_keeps_execution_in_infrastructure_receipt(self) -> None:
+        candidate = SimpleNamespace(
+            return_code=23,
+            signum=None,
+            candidate_started=True,
+            supervisor_signal=None,
+            host_cancellation_signal=None,
+        )
+        failure = RuntimeError("profile boundary changed after candidate exit")
+
+        def reject_runtime_boundary() -> None:
+            raise failure
+
+        with self.assertRaises(artifacts.ScriptCandidateTerminal) as raised:
+            artifacts._verify_candidate_runtime_boundary(
+                candidate, reject_runtime_boundary
+            )
+
+        terminal = raised.exception
+        self.assertEqual(23, terminal.return_code)
+        self.assertTrue(terminal.candidate_started)
+        self.assertEqual("unverified", terminal.cleanup_status)
+        self.assertTrue(terminal.infrastructure_failure)
+        self.assertIs(failure, terminal.__cause__)
+
+        with tempfile.TemporaryDirectory() as runner_temp:
+            def execute_candidate(_ordinal, _entry):
+                artifacts._verify_candidate_runtime_boundary(
+                    candidate, reject_runtime_boundary
+                )
+
+            with self.assertRaises(artifacts.ScriptPlanExecutionError) as plan_failure:
+                artifacts.run_script_plan_with_receipts(
+                    [
+                        {
+                            "directory": "packages/api",
+                            "script": "test",
+                            "unsetEnv": [],
+                            "requiresServices": True,
+                        }
+                    ],
+                    {
+                        "repository": "Verjson/example",
+                        "event": "pull_request",
+                        "ref": "refs/pull/1/merge",
+                        "commit": "a" * 40,
+                        "workflowSha": "b" * 40,
+                        "runId": "123",
+                        "runAttempt": "1",
+                        "jobId": "build-test",
+                        "levelId": "unit",
+                    },
+                    True,
+                    runner_temp,
+                    execute_candidate,
+                )
+            receipt = json.loads(
+                (
+                    plan_failure.exception.receipt_directory
+                    / "entry-000000.json"
+                ).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(0, plan_failure.exception.ordinal)
+        self.assertEqual("infrastructure-failure", receipt["state"])
+        self.assertTrue(receipt["candidateStarted"])
+        self.assertEqual(23, receipt["exitCode"])
+        self.assertEqual("unverified", receipt["cleanup"])
+
+    def test_both_candidate_runtimes_record_post_execution_profile_failure(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        protected_runtime = __import__("inspect").getsource(
+            artifacts.run_protected_candidate_plan
+        )
+        for filename in ("node-ci.yml", "node-ci-protected.yml"):
+            with self.subTest(workflow=filename):
+                if filename == "node-ci-protected.yml":
+                    runtime = protected_runtime
+                else:
+                    workflow = yaml.safe_load(
+                        (root / ".github/workflows" / filename).read_text()
+                    )
+                    runtime = next(
+                        step["run"]
+                        for step in workflow["jobs"]["build-test"]["steps"]
+                        if step.get("name") == "Run exact credentialless consumer script plan"
+                    )
+                self.assertLess(
+                    runtime.index("run_supervised_bubblewrap("),
+                    runtime.index("_verify_candidate_runtime_boundary("),
+                )
+                self.assertIn("candidate_result", runtime)
+
+    def test_postgres_profile_runtime_input_reaches_producer_and_consumer(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        runtime_env_name = artifacts._runtime_input_environment_name(
+            "postgres-sandbox-profile"
+        )
+        for filename in ("node-ci.yml", "node-ci-protected.yml"):
+            with self.subTest(workflow=filename):
+                workflow = yaml.safe_load(
+                    (root / ".github/workflows" / filename).read_text()
+                )
+                steps = workflow["jobs"]["build-test"]["steps"]
+                authorize = next(
+                    step for step in steps
+                    if step.get("name") == "Authorize producer or consumer from immutable policy"
+                )
+                self.assertIn(
+                    runtime_env_name,
+                    authorize["env"],
+                )
+
+        defaults = {
+            artifacts._runtime_input_environment_name(name): json.dumps(value)
+            for name, value in artifacts.RUNTIME_INPUT_DEFAULTS.items()
+        }
+        for role in ("producer", "consumer"):
+            for profile in ("", "postgres-17.11"):
+                with self.subTest(role=role, profile=profile):
+                    environment = dict(defaults)
+                    environment["BUILD_ARTIFACT_ROLE"] = role
+                    environment[runtime_env_name] = json.dumps(profile)
+                    with patch.dict(os.environ, environment, clear=True):
+                        runtime_inputs = artifacts.runtime_inputs_from_environment()
+                    self.assertEqual(runtime_inputs["postgres-sandbox-profile"], profile)
+
+    def test_postgres_fixture_uses_distinct_npm_configs_that_npm_can_load(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        candidate_helper = (root / "scripts/ci_build_artifacts.py").read_text(encoding="utf-8")
+        for filename in ("node-ci.yml", "node-ci-protected.yml"):
+            with self.subTest(workflow=filename):
+                workflow = yaml.safe_load(
+                    (root / ".github/workflows" / filename).read_text()
+                )
+                step = next(
+                    item
+                    for item in workflow["jobs"]["build-test"]["steps"]
+                    if item.get("name")
+                    == "Install pinned Postgres sandbox Drizzle acceptance client"
+                )
+                run = step["run"]
+                self.assertIn('NPM_USER_CONFIG="$(mktemp ', run)
+                self.assertIn('NPM_GLOBAL_CONFIG="$(mktemp ', run)
+                self.assertIn('--userconfig="$NPM_USER_CONFIG"', run)
+                self.assertIn('--globalconfig="$NPM_GLOBAL_CONFIG"', run)
+                self.assertNotIn("--userconfig=/dev/null --globalconfig=/dev/null", run)
+                self.assertIn('npm_user_config = script_tmp / "npm-userconfig"', candidate_helper)
+                self.assertIn('npm_global_config = script_tmp / "npm-globalconfig"', candidate_helper)
+                self.assertIn('"NPM_CONFIG_USERCONFIG": str(npm_user_config)', candidate_helper)
+                self.assertIn('"NPM_CONFIG_GLOBALCONFIG": str(npm_global_config)', candidate_helper)
+                self.assertIn('"--ro-bind", str(npm_user_config), str(npm_user_config)', candidate_helper)
+                self.assertIn('"--ro-bind", str(npm_global_config), str(npm_global_config)', candidate_helper)
+                self.assertIn('os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW', candidate_helper)
+
+                source_workflow = yaml.safe_load((root / ".github/workflows/node-ci.yml").read_text())
+                source_plan = next(
+                    item
+                    for item in source_workflow["jobs"]["build-test"]["steps"]
+                    if item.get("name") == "Run exact credentialless consumer script plan"
+                )["run"]
+                self.assertIn('user_config_file = tempfile.TemporaryFile(dir=runner_temp)', source_plan)
+                self.assertIn('"--file", str(global_config_file.fileno()), "/dev/shm/npm-globalconfig"', source_plan)
+                self.assertIn('"--file", str(user_config_file.fileno()), "/dev/shm/npm-userconfig"', source_plan)
+                self.assertNotIn('"--ro-bind", "/dev/null", "/dev/shm/npm-globalconfig"', source_plan)
+                self.assertNotIn('"--ro-bind", "/dev/null", "/dev/shm/npm-userconfig"', source_plan)
+
+        with tempfile.TemporaryDirectory() as temporary_root:
+            user_config = Path(temporary_root) / "user.npmrc"
+            global_config = Path(temporary_root) / "global.npmrc"
+            user_config.write_text("", encoding="utf-8")
+            global_config.write_text("", encoding="utf-8")
+            for key, config_path in (
+                ("userconfig", user_config),
+                ("globalconfig", global_config),
+            ):
+                with self.subTest(config=key):
+                    result = subprocess.run(
+                        [
+                            "npm",
+                            "config",
+                            "get",
+                            key,
+                            f"--userconfig={user_config}",
+                            f"--globalconfig={global_config}",
+                        ],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                        env={"PATH": os.environ["PATH"], "HOME": temporary_root},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), str(config_path))
+
+    def test_postgres_profile_environment_precedes_unset_env_exclusions(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        unset_env = (
+            "DATABASE_URL",
+            "PGHOST",
+            "PGPORT",
+            "PGUSER",
+            "PGDATABASE",
+            "DB_HOST",
+            "DB_PORT",
+        )
+        for filename in ("node-ci.yml", "node-ci-protected.yml"):
+            with self.subTest(workflow=filename):
+                workflow = yaml.safe_load(
+                    (root / ".github/workflows" / filename).read_text()
+                )
+                step = next(
+                    item
+                    for item in workflow["jobs"]["build-test"]["steps"]
+                    if item.get("name")
+                    == "Run exact credentialless consumer script plan"
+                )
+                runtime = (
+                    __import__("inspect").getsource(artifacts.run_protected_candidate_plan)
+                    if filename == "node-ci-protected.yml"
+                    else step["run"]
+                )
+                self.assertLess(
+                    runtime.index("postgres_profile_module.candidate_environment("),
+                    runtime.index("for env_name in unset_env:"),
+                )
+                self.assertIn(
+                    "if postgres_profile is not None and requires_services:",
+                    runtime,
+                )
+
+        inherited = {"PATH": "/usr/bin:/bin"}
+        script_env = postgres_profile.candidate_environment(inherited, inherited["PATH"])
+        for env_name in unset_env:
+            script_env.pop(env_name, None)
+        for env_name in unset_env:
+            with self.subTest(unset_env=env_name):
+                self.assertNotIn(env_name, script_env)
+
     def test_both_workflow_variants_probe_egress_and_unshare_candidate_networks(self) -> None:
         root = Path(__file__).resolve().parents[2]
         for filename in ("node-ci.yml", "node-ci-protected.yml"):
@@ -128,16 +369,42 @@ class SharedNetworkBoundaryTests(unittest.TestCase):
                 self.assertIn("inputs.build-artifact-role == 'producer' || inputs.build-artifact-role == 'consumer'", probe["if"])
 
                 self.assertIn("*network_args", candidate_runtime)
-                self.assertIn("bubblewrap_network_args(shared_artifact=True)", candidate_runtime)
+                network_call = (
+                    "network_args = ci_build_artifacts.bubblewrap_network_args("
+                    if filename == "node-ci-protected.yml"
+                    else "network_args = bubblewrap_network_args("
+                )
+                self.assertIn(network_call, candidate_runtime)
+                self.assertIn("shared_artifact=shared_artifact,", candidate_runtime)
+                self.assertIn("postgres_profile=postgres_profile is not None,", candidate_runtime)
+                self.assertRegex(
+                    candidate_runtime,
+                    r"if postgres_profile is not None and requires_services:\s+"
+                    r"script_env = postgres_profile_module\.candidate_environment",
+                )
+                if filename == "node-ci.yml":
+                    self.assertRegex(
+                        candidate_runtime,
+                        r"if postgres_profile is not None and requires_services:\s+"
+                        r"postgres_mount_args = postgres_profile_module\.profile_mount_args\(\s*"
+                        r"postgres_profile_state\s*\)",
+                    )
+                else:
+                    self.assertRegex(
+                        candidate_runtime,
+                        r"postgres_mount_args\s*=\s*\(\s*"
+                        r"postgres_profile_module\.profile_mount_args\(postgres_profile_state\)\s*"
+                        r"if postgres_profile is not None and requires_services\s*else \[\]\s*\)",
+                    )
                 self.assertIn("run_supervised_bubblewrap", candidate_runtime)
                 self.assertIn("artifact_helper_args", candidate_runtime)
                 self.assertIn("*artifact_helper_args", candidate_runtime)
                 self.assertIn("artifact_mount_roots", candidate_runtime)
-                self.assertIn('"NPM_CONFIG_SCRIPT_SHELL": "/bin/sh"', candidate_runtime)
-                self.assertIn('"npm_config_script_shell": "/bin/sh"', candidate_runtime)
+                self.assertIn('script_env["NPM_CONFIG_SCRIPT_SHELL"] = "/bin/sh"', candidate_runtime)
+                self.assertIn('script_env["npm_config_script_shell"] = "/bin/sh"', candidate_runtime)
                 self.assertLess(
                     candidate_runtime.index("for env_name in unset_env:"),
-                    candidate_runtime.index('"NPM_CONFIG_SCRIPT_SHELL": "/bin/sh"'),
+                    candidate_runtime.index('script_env["NPM_CONFIG_SCRIPT_SHELL"] = "/bin/sh"'),
                 )
                 self.assertNotIn("CAP_NET_ADMIN", candidate_runtime)
                 self.assertNotIn("CAP_SETPCAP", candidate_runtime)

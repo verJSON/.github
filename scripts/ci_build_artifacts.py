@@ -69,6 +69,7 @@ RUNTIME_INPUT_DEFAULTS: dict[str, Any] = {
     "secretless-ci-non-app-script-plan": "",
     "secretless-ci-non-app-paths": "",
     "schema-dir": "",
+    "postgres-sandbox-profile": "",
     "runner": "",
     "db-image": "",
     "db-port": "5432",
@@ -347,6 +348,27 @@ class ScriptCandidateTerminal(ArtifactError):
         self.host_cancellation_signal = host_cancellation_signal
         self.infrastructure_failure = infrastructure_failure
         super().__init__(message)
+
+
+def _verify_candidate_runtime_boundary(
+    candidate_result: Any,
+    verify_boundary: Callable[[], None],
+) -> None:
+    try:
+        verify_boundary()
+    except Exception as failure:
+        raise ScriptCandidateTerminal(
+            "candidate runtime boundary verification failed",
+            return_code=getattr(candidate_result, "return_code", None),
+            signum=getattr(candidate_result, "signum", None),
+            cleanup_status="unverified",
+            candidate_started=bool(getattr(candidate_result, "candidate_started", False)),
+            supervisor_signal=getattr(candidate_result, "supervisor_signal", None),
+            host_cancellation_signal=getattr(
+                candidate_result, "host_cancellation_signal", None
+            ),
+            infrastructure_failure=True,
+        ) from failure
 
 
 def _script_candidate_cleanup_failure(
@@ -2885,11 +2907,14 @@ def extinguish_supervised_process_group(process: subprocess.Popen[Any]) -> None:
         time.sleep(0.05)
 
 
-def bubblewrap_network_args(*, shared_artifact: bool, legacy_unshare: bool = False) -> list[str]:
+def bubblewrap_network_args(
+    *,
+    shared_artifact: bool,
+    legacy_unshare: bool = False,
+    postgres_profile: bool = False,
+) -> list[str]:
     args = ["--cap-drop", "ALL"]
-    if shared_artifact:
-        args.append("--unshare-net")
-    elif legacy_unshare:
+    if shared_artifact or legacy_unshare or postgres_profile:
         args.append("--unshare-net")
     return args
 
@@ -4638,11 +4663,29 @@ def run_protected_candidate_plan() -> None:
     env_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
     entries_path = Path(os.environ["SCRIPT_PLAN_ENTRIES_FILE"])
     runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve()
+    if str(runner_temp) not in sys.path:
+        sys.path.insert(0, str(runner_temp))
     if "run_script_plan_with_receipts" in globals():
         ci_build_artifacts = sys.modules[__name__]
     else:
-        sys.path.insert(0, str(runner_temp))
         import ci_build_artifacts
+
+    postgres_profile_name = os.environ.get("VERJSON_CI_POSTGRES_PROFILE", "")
+    postgres_profile_module = None
+    postgres_profile = None
+    postgres_state_file = None
+    postgres_profile_state = None
+    if postgres_profile_name:
+        import ci_postgres_sandbox as postgres_profile_module
+
+        postgres_profile = postgres_profile_module.validate_profile_request(
+            postgres_profile_name,
+            db_image=os.environ.get("VERJSON_CI_LEGACY_DB_IMAGE", ""),
+            cache_image=os.environ.get("VERJSON_CI_LEGACY_CACHE_IMAGE", ""),
+            artifact_role=os.environ.get("BUILD_ARTIFACT_ROLE", ""),
+            secretless_mode=os.environ.get("VERJSON_CI_POSTGRES_SECRETLESS_MODE") == "true",
+        )
+        postgres_state_file = Path(os.environ["VERJSON_CI_POSTGRES_SANDBOX_STATE"])
 
     host_signals = ci_build_artifacts.HostSignalQueue()
     signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
@@ -4953,9 +4996,7 @@ def run_protected_candidate_plan() -> None:
     consume_artifact = os.environ.get("BUILD_ARTIFACT_ROLE") == "consumer"
     if shared_artifact:
         sys.path.insert(0, str(runner_temp))
-        from ci_build_artifacts import artifact_mount_roots, bubblewrap_network_args
-    else:
-        bubblewrap_network_args = None
+        from ci_build_artifacts import artifact_mount_roots
 
     def verified_artifact_mounts():
         if not consume_artifact:
@@ -5654,6 +5695,15 @@ def run_protected_candidate_plan() -> None:
             script_home = cache_root / f"home-{index}"
             script_tmp.mkdir(mode=0o700)
             script_home.mkdir(mode=0o700)
+            npm_user_config = script_tmp / "npm-userconfig"
+            npm_global_config = script_tmp / "npm-globalconfig"
+            for config_path in (npm_user_config, npm_global_config):
+                config_descriptor = os.open(
+                    config_path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o400,
+                )
+                os.close(config_descriptor)
             if baseline is not None:
                 for relative, _size, _digest in baseline_inventory:
                     source = baseline / relative
@@ -5687,7 +5737,11 @@ def run_protected_candidate_plan() -> None:
                 ),
                 "COREPACK_ENABLE_NETWORK": "0",
                 "NPM_CONFIG_CACHE": str(script_cache),
+            "NPM_CONFIG_USERCONFIG": str(npm_user_config),
+            "NPM_CONFIG_GLOBALCONFIG": str(npm_global_config),
                 "npm_config_cache": str(script_cache),
+            "npm_config_userconfig": str(npm_user_config),
+            "npm_config_globalconfig": str(npm_global_config),
                 "VERJSON_CHANGELOG_TOOL_CACHE": str(changelog_cache_root),
                 "VERJSON_CHANGELOG_CONTRACT_REF": changelog_ref,
                 "VERJSON_CHANGELOG_CONTRACT_SHA256": changelog_sha256,
@@ -5703,13 +5757,6 @@ def run_protected_candidate_plan() -> None:
                 script_env["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_cache)
             if requires_services:
                 script_env.update(candidate_service_env)
-            for env_name in unset_env:
-                script_env.pop(env_name, None)
-            script_env["BUILD_ARTIFACT_ROLE"] = os.environ.get("BUILD_ARTIFACT_ROLE", "")
-            script_env.update({
-                "NPM_CONFIG_SCRIPT_SHELL": "/bin/sh",
-                "npm_config_script_shell": "/bin/sh",
-            })
             tool_path_entries = [
                 *(str(executable.parent) for executable in tool_executables.values()),
                 "/usr/local/bin",
@@ -5717,6 +5764,16 @@ def run_protected_candidate_plan() -> None:
                 "/bin",
             ]
             script_env["PATH"] = ":".join(dict.fromkeys(tool_path_entries))
+            if postgres_profile is not None and requires_services:
+                script_env = postgres_profile_module.candidate_environment(
+                    script_env,
+                    script_env["PATH"],
+                )
+            for env_name in unset_env:
+                script_env.pop(env_name, None)
+            script_env["BUILD_ARTIFACT_ROLE"] = os.environ.get("BUILD_ARTIFACT_ROLE", "")
+            script_env["NPM_CONFIG_SCRIPT_SHELL"] = "/bin/sh"
+            script_env["npm_config_script_shell"] = "/bin/sh"
             isolated_paths = (script_cache, script_tmp, script_home)
             if len(set(isolated_paths)) != len(isolated_paths):
                 sys.exit("candidate writable mount paths are not distinct")
@@ -5799,17 +5856,27 @@ def run_protected_candidate_plan() -> None:
               raise
             artifact_mount_args, artifact_mount_fds = verified_artifact_mounts()
             tool_prefix_fds.extend(artifact_mount_fds)
-            network_args = (
-                bubblewrap_network_args(shared_artifact=True)
-                if shared_artifact
-                else ["--cap-drop", "ALL"]
+            network_args = ci_build_artifacts.bubblewrap_network_args(
+                shared_artifact=shared_artifact,
+                legacy_unshare=not requires_services,
+                postgres_profile=postgres_profile is not None,
             )
             artifact_helper_args = (
                 ["--ro-bind", str(runner_temp / "ci_build_artifacts.py"), "/tmp/ci_build_artifacts.py"]
                 if shared_artifact
                 else []
             )
-            legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]
+            legacy_network_args = []
+            postgres_mount_args = (
+                postgres_profile_module.profile_mount_args(postgres_profile_state)
+                if postgres_profile is not None and requires_services
+                else []
+            )
+            if postgres_profile is not None:
+                postgres_profile_module.verify_profile_runtime(
+                    postgres_state_file,
+                    runner_temp=runner_temp,
+                )
             try:
                 received_signal = host_signals.poll()
                 if received_signal is not None:
@@ -5832,6 +5899,7 @@ def run_protected_candidate_plan() -> None:
                               "--tmpfs", "/tmp",
                               *artifact_helper_args,
                               *legacy_network_args,
+                              *postgres_mount_args,
                               *directory_args,
                               *chmod_args,
                               "--ro-bind", "/usr", "/usr",
@@ -5854,6 +5922,8 @@ def run_protected_candidate_plan() -> None:
                               "--bind", str(script_cache), str(script_cache),
                               "--bind", str(script_home), str(script_home),
                               "--bind", str(script_tmp), str(script_tmp),
+            "--ro-bind", str(npm_user_config), str(npm_user_config),
+            "--ro-bind", str(npm_global_config), str(npm_global_config),
                               "--proc", "/proc",
                               "--dev", "/dev",
                               "--chdir", str(script_directory),
@@ -5867,6 +5937,20 @@ def run_protected_candidate_plan() -> None:
                     pass_fds=tuple(tool_prefix_fds),
                     host_signals=host_signals,
                 )
+                if postgres_profile is not None:
+                    def verify_postgres_runtime():
+                        postgres_profile_module.verify_profile_runtime(
+                            postgres_state_file,
+                            runner_temp=runner_temp,
+                        )
+                        if candidate_result.return_code is None:
+                            raise IntegrityError(
+                                "trusted Bubblewrap supervisor omitted the candidate exit code"
+                            )
+
+                    ci_build_artifacts._verify_candidate_runtime_boundary(
+                        candidate_result, verify_postgres_runtime
+                    )
                 candidate_status = candidate_result.return_code
                 if candidate_status is None:
                     raise IntegrityError("trusted Bubblewrap supervisor omitted the candidate exit code")
@@ -5922,6 +6006,11 @@ def run_protected_candidate_plan() -> None:
             "jobId": os.environ["CI_ENTRY_JOB_ID"],
             "levelId": os.environ["CI_LEVEL_ID"],
         }
+        if postgres_profile is not None:
+            postgres_profile_state = postgres_profile_module.prepare_profile_for_candidate(
+                postgres_state_file,
+                runner_temp=runner_temp,
+            )
         receipt_result = run_script_plan_with_receipts(
             command_records,
             receipt_identity,

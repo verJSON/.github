@@ -415,6 +415,13 @@ on:
         required: false
         type: string
         default: ''
+      postgres-sandbox-profile:
+        description: >-
+          Explicit opt-in constrained Postgres sandbox profile for secretless script plans.
+          Empty (the default) leaves PostgreSQL disabled; only reviewed profile IDs are accepted.
+        required: false
+        type: string
+        default: ''
       db-image:
         description: >-
           Optional database image (e.g. pgvector/pgvector:pg16) to run as a
@@ -639,6 +646,30 @@ jobs:
             level|mode-gate|preflight|producer|consumer) ;;
             *) echo "::error::unknown internal build-artifact role" >&2; exit 1 ;;
           esac
+      - name: Reject Postgres compatibility profile conflicts
+        env:
+          POSTGRES_SANDBOX_PROFILE: ${{ inputs.postgres-sandbox-profile }}
+          POSTGRES_PROFILE_COMPATIBILITY_INPUT: ${{ inputs.secretless-compatibility-ranges }}
+          BUILD_ARTIFACT_ROLE: ${{ inputs.build-artifact-role }}
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          import os
+          import sys
+
+          postgres_profile = os.environ["POSTGRES_SANDBOX_PROFILE"]
+          compatibility_ranges = os.environ["POSTGRES_PROFILE_COMPATIBILITY_INPUT"]
+          build_artifact_role = os.environ["BUILD_ARTIFACT_ROLE"]
+          protected_baseline = os.environ.get("PROTECTED_BASELINE_DECLARATION_PATH", "")
+          if postgres_profile and (
+              compatibility_ranges.strip() not in {"", "{}"}
+              or protected_baseline
+              or build_artifact_role in {"producer", "consumer"}
+          ):
+              sys.exit(
+                  "Postgres sandbox profile cannot be combined with compatibility requests or artifact sharing"
+              )
+          PY
       - name: Require a GitHub-hosted secretless build lane
         # build-test runs a secretless call on this lane, ahead of the caller's
         # runner, and its lifecycle rebuild and candidate sandbox exit unless the
@@ -1958,6 +1989,30 @@ jobs:
           submodules: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'false' || 'recursive' }}
           token: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && github.token || secrets.submodules-token || github.token }}
           persist-credentials: ${{ !(inputs.secretless-pr || inputs.secretless-trusted-ref) }}
+      - name: Validate Postgres sandbox profile request
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.postgres-sandbox-profile != ''
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          POSTGRES_PROFILE: ${{ inputs.postgres-sandbox-profile }}
+          POSTGRES_DB_IMAGE: ${{ inputs.db-image }}
+          POSTGRES_CACHE_IMAGE: ${{ inputs.cache-image }}
+          POSTGRES_ARTIFACT_ROLE: ${{ inputs.build-artifact-role }}
+          POSTGRES_COMPATIBILITY_RANGES: ${{ inputs.secretless-compatibility-ranges }}
+          POSTGRES_SECRETLESS_MODE: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'true' || 'false' }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          [[ "$RUNNER_ENVIRONMENT" == "github-hosted" ]]
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_postgres_sandbox.py" -o "$RUNNER_TEMP/ci_postgres_sandbox.py"
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/config/ci-sandbox-profiles.json" -o "$RUNNER_TEMP/ci-sandbox-profiles.json"
+          python3 -I "$RUNNER_TEMP/ci_postgres_sandbox.py" validate \
+            --profile "$POSTGRES_PROFILE" \
+            --db-image "$POSTGRES_DB_IMAGE" \
+            --cache-image "$POSTGRES_CACHE_IMAGE" \
+            --artifact-role "$POSTGRES_ARTIFACT_ROLE" \
+            --compatibility-ranges "$POSTGRES_COMPATIBILITY_RANGES" \
+            --secretless-mode "$POSTGRES_SECRETLESS_MODE"
       - name: Prepare job-scoped changelog tool cache
         if: needs.eligibility.outputs.should-run != 'false'
         run: |
@@ -2027,6 +2082,7 @@ jobs:
           BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_CI_NON_APP_PATHS: ${{ toJSON(inputs.secretless-ci-non-app-paths) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_SCHEMA_DIR: ${{ toJSON(inputs.schema-dir) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_RUNNER: ${{ toJSON(inputs.runner) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_POSTGRES_SANDBOX_PROFILE: ${{ toJSON(inputs.postgres-sandbox-profile) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_DB_IMAGE: ${{ toJSON(inputs.db-image) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_DB_PORT: ${{ toJSON(inputs.db-port) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_DB_HEALTH_CMD: ${{ toJSON(inputs.db-health-cmd) }}
@@ -5895,13 +5951,58 @@ jobs:
             --ro-bind "$RUNNER_TEMP/ci_build_artifacts.py" /tmp/ci_build_artifacts.py \
             -- /usr/bin/python3 -I /tmp/ci_build_artifacts.py network-probe
       - name: Download trusted script-plan receipt supervisor
-        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref || inputs.postgres-sandbox-profile != '')
         env:
           JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
         run: |
           set -euo pipefail
           [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
           curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_build_artifacts.py" -o "$RUNNER_TEMP/ci_build_artifacts.py"
+      - name: Download Postgres sandbox acceptance fixture
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.postgres-sandbox-profile != ''
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci-gate/ci-postgres-sandbox-hosted-acceptance.test.py" -o "$RUNNER_TEMP/ci-postgres-sandbox-hosted-acceptance.test.py"
+          mkdir -p "$RUNNER_TEMP/postgres-sandbox-drizzle"
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci-gate/fixtures/postgres-sandbox-drizzle/package.json" -o "$RUNNER_TEMP/postgres-sandbox-drizzle/package.json"
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci-gate/fixtures/postgres-sandbox-drizzle/package-lock.json" -o "$RUNNER_TEMP/postgres-sandbox-drizzle/package-lock.json"
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci-gate/fixtures/postgres-sandbox-drizzle/query.mjs" -o "$RUNNER_TEMP/postgres-sandbox-drizzle/query.mjs"
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci-gate/fixtures/postgres-sandbox-drizzle/schema.ts" -o "$RUNNER_TEMP/postgres-sandbox-drizzle/schema.ts"
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci-gate/fixtures/postgres-sandbox-drizzle/migration.sql" -o "$RUNNER_TEMP/postgres-sandbox-drizzle/migration.sql"
+      - name: Provision Postgres sandbox profile
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.postgres-sandbox-profile != '' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        env:
+          POSTGRES_PROFILE: ${{ inputs.postgres-sandbox-profile }}
+          POSTGRES_STATE_FILE: ${{ runner.temp }}/ci-postgres-sandbox-state.json
+        run: |
+          set -euo pipefail
+          python3 -I "$RUNNER_TEMP/ci_postgres_sandbox.py" provision \
+            --profile "$POSTGRES_PROFILE" \
+            --runner-temp "$RUNNER_TEMP" \
+            --state-file "$POSTGRES_STATE_FILE"
+      - name: Install pinned Postgres sandbox Drizzle acceptance client
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.postgres-sandbox-profile != '' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        run: |
+          set -euo pipefail
+          NPM_USER_CONFIG="$(mktemp "$RUNNER_TEMP/postgres-sandbox-npm-user.XXXXXX")"
+          NPM_GLOBAL_CONFIG="$(mktemp "$RUNNER_TEMP/postgres-sandbox-npm-global.XXXXXX")"
+          trap 'rm -f -- "$NPM_USER_CONFIG" "$NPM_GLOBAL_CONFIG"' EXIT
+          npm ci --prefix "$RUNNER_TEMP/postgres-sandbox-drizzle" \
+            --registry=https://registry.npmjs.org \
+            --userconfig="$NPM_USER_CONFIG" --globalconfig="$NPM_GLOBAL_CONFIG" \
+            --ignore-scripts --no-audit --no-fund
+      - name: Verify Postgres sandbox hosted acceptance boundary
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.postgres-sandbox-profile != '' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          VERJSON_CI_POSTGRES_HOSTED_ACCEPTANCE: '1'
+          VERJSON_CI_POSTGRES_CANDIDATE_STATE: ${{ runner.temp }}/ci-postgres-sandbox-state.json
+        run: |
+          set -euo pipefail
+          python3 -I "$RUNNER_TEMP/ci-postgres-sandbox-hosted-acceptance.test.py"
       - name: Parse Node CI script plan
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         id: node-ci-script-plan
@@ -5932,6 +6033,11 @@ jobs:
           DB_ENV: ${{ inputs.db-env }}
           CACHE_ENV: ${{ inputs.cache-env }}
           VERJSON_CI_TRUSTED_DB_HOST: ${{ steps.db-service.outputs.host }}
+          VERJSON_CI_POSTGRES_PROFILE: ${{ inputs.postgres-sandbox-profile }}
+          VERJSON_CI_POSTGRES_SANDBOX_STATE: ${{ runner.temp }}/ci-postgres-sandbox-state.json
+          VERJSON_CI_LEGACY_DB_IMAGE: ${{ inputs.db-image }}
+          VERJSON_CI_LEGACY_CACHE_IMAGE: ${{ inputs.cache-image }}
+          VERJSON_CI_POSTGRES_SECRETLESS_MODE: 'true'
           RESTORE_PERSISTED_PUBLIC_CACHE: ${{ inputs.cache && inputs.package-manager == 'npm' }}
           RUNTIME_CACHE_DIR: ${{ runner.temp }}/secretless-runtime-cache-${{ github.run_id }}-${{ github.run_attempt }}
           SCRIPT_PLAN_DEFAULT_PLAN: ${{ steps.node-ci-script-plan.outputs.default-plan }}
@@ -5969,11 +6075,29 @@ jobs:
           env_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
           entries_path = Path(os.environ["SCRIPT_PLAN_ENTRIES_FILE"])
           runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve()
+          if str(runner_temp) not in sys.path:
+              sys.path.insert(0, str(runner_temp))
           if "run_script_plan_with_receipts" in globals():
               ci_build_artifacts = sys.modules[__name__]
           else:
-              sys.path.insert(0, str(runner_temp))
               import ci_build_artifacts
+
+          postgres_profile_name = os.environ.get("VERJSON_CI_POSTGRES_PROFILE", "")
+          postgres_profile_module = None
+          postgres_profile = None
+          postgres_state_file = None
+          postgres_profile_state = None
+          if postgres_profile_name:
+              import ci_postgres_sandbox as postgres_profile_module
+
+              postgres_profile = postgres_profile_module.validate_profile_request(
+                  postgres_profile_name,
+                  db_image=os.environ.get("VERJSON_CI_LEGACY_DB_IMAGE", ""),
+                  cache_image=os.environ.get("VERJSON_CI_LEGACY_CACHE_IMAGE", ""),
+                  artifact_role=os.environ.get("BUILD_ARTIFACT_ROLE", ""),
+                  secretless_mode=os.environ.get("VERJSON_CI_POSTGRES_SECRETLESS_MODE") == "true",
+              )
+              postgres_state_file = Path(os.environ["VERJSON_CI_POSTGRES_SANDBOX_STATE"])
 
           host_signals = ci_build_artifacts.HostSignalQueue()
           signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
@@ -6424,6 +6548,7 @@ jobs:
                       )
                   ]
           global_config_file = tempfile.TemporaryFile(dir=runner_temp)
+          user_config_file = tempfile.TemporaryFile(dir=runner_temp)
           sandbox_workspace = "/workspace"
           shared_artifact = os.environ.get("BUILD_ARTIFACT_ROLE") in {"producer", "consumer"}
           sandbox_entrypoint = ci_build_artifacts.SANDBOX_SUPERVISOR_ENTRYPOINT
@@ -6639,6 +6764,9 @@ jobs:
               "VERJSON_CI_COMMAND_FILES_DIR", "VERJSON_CI_OUTPUT_FILE", "RUNNER_TOOL_CACHE",
                   "RUNTIME_CACHE_DIR", "RESTORE_PERSISTED_PUBLIC_CACHE",
                   "SECRETLESS_RUNTIME_PUBLIC_CACHE", "RUN_ID", "RUN_ATTEMPT",
+                  "VERJSON_CI_POSTGRES_PROFILE", "VERJSON_CI_POSTGRES_SANDBOX_STATE",
+                  "VERJSON_CI_LEGACY_DB_IMAGE", "VERJSON_CI_LEGACY_CACHE_IMAGE",
+                  "VERJSON_CI_POSTGRES_SECRETLESS_MODE",
               ):
                   script_env.pop(env_name, None)
               for env_name in service_env_names:
@@ -6662,40 +6790,57 @@ jobs:
                   "GITHUB_STEP_SUMMARY",
               ):
                   script_env.pop(env_name, None)
-              for env_name in unset_env:
-                  script_env.pop(env_name, None)
               script_env.update({
                   "COREPACK_HOME": "/dev/shm/home/.cache/node/corepack",
                   "HOME": "/dev/shm/home",
                   "NPM_CONFIG_CACHE": "/dev/shm/npm-cache",
                   "NPM_CONFIG_GLOBALCONFIG": "/dev/shm/npm-globalconfig",
-                  "NPM_CONFIG_USERCONFIG": "/dev/null",
-                  "NPM_CONFIG_SCRIPT_SHELL": "/bin/sh",
+                  "NPM_CONFIG_USERCONFIG": "/dev/shm/npm-userconfig",
                   "PATH": f"{node_toolchain_bin}:/usr/bin:/bin",
                   "RUNNER_TEMP": "/tmp",
                   "TEMP": "/tmp",
                   "TMP": "/tmp",
                   "TMPDIR": "/tmp",
                   "GITHUB_WORKSPACE": sandbox_workspace,
-                  "BUILD_ARTIFACT_ROLE": os.environ.get("BUILD_ARTIFACT_ROLE", ""),
                   "npm_config_cache": "/dev/shm/npm-cache",
                   "npm_config_globalconfig": "/dev/shm/npm-globalconfig",
-                  "npm_config_userconfig": "/dev/null",
-                  "npm_config_script_shell": "/bin/sh",
+                  "npm_config_userconfig": "/dev/shm/npm-userconfig",
               })
+              if postgres_profile is not None and requires_services:
+                  script_env = postgres_profile_module.candidate_environment(
+                      script_env,
+                      script_env["PATH"],
+                  )
+              for env_name in unset_env:
+                  script_env.pop(env_name, None)
+              script_env["BUILD_ARTIFACT_ROLE"] = os.environ.get("BUILD_ARTIFACT_ROLE", "")
+              script_env["NPM_CONFIG_SCRIPT_SHELL"] = "/bin/sh"
+              script_env["npm_config_script_shell"] = "/bin/sh"
               sandbox_directory = Path(sandbox_workspace) / directory.relative_to(workspace)
               network_args = ["--cap-drop", "ALL"]
               artifact_helper_args = []
-              if shared_artifact:
+              postgres_mount_args = []
+              if shared_artifact or postgres_profile is not None:
                   sys.path.insert(0, os.environ["RUNNER_TEMP"])
                   from ci_build_artifacts import artifact_mount_roots, bubblewrap_network_args
-                  network_args = bubblewrap_network_args(shared_artifact=True)
-                  artifact_helper_args = [
-                      "--ro-bind",
-                      str(Path(os.environ["RUNNER_TEMP"]) / "ci_build_artifacts.py"),
-                      "/tmp/ci_build_artifacts.py",
-                  ]
-
+                  network_args = bubblewrap_network_args(
+                      shared_artifact=shared_artifact,
+                      postgres_profile=postgres_profile is not None,
+                  )
+                  if shared_artifact:
+                      artifact_helper_args = [
+                          "--ro-bind",
+                          str(Path(os.environ["RUNNER_TEMP"]) / "ci_build_artifacts.py"),
+                          "/tmp/ci_build_artifacts.py",
+                      ]
+              if postgres_profile is not None and requires_services:
+                  postgres_mount_args = postgres_profile_module.profile_mount_args(
+                      postgres_profile_state
+                  )
+                  postgres_profile_module.verify_profile_runtime(
+                      postgres_state_file,
+                      runner_temp=runner_temp,
+                  )
               arguments = [
                   str(bubblewrap),
                   "--unshare-user",
@@ -6711,6 +6856,7 @@ jobs:
                   "--tmpfs", "/",
                   "--tmpfs", "/tmp",
                   *artifact_helper_args,
+                  *postgres_mount_args,
                   "--dev", "/dev",
                   "--tmpfs", "/dev/shm",
                   "--proc", "/proc",
@@ -6738,6 +6884,7 @@ jobs:
                       for option in ("--dir", str(directory_path))
                   ),
                   "--file", str(global_config_file.fileno()), "/dev/shm/npm-globalconfig",
+                  "--file", str(user_config_file.fileno()), "/dev/shm/npm-userconfig",
               ]
               for source, destination in system_mounts:
                   bind_source(arguments, source, destination)
@@ -6815,17 +6962,44 @@ jobs:
                       "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
                       *npm_command, "run", name,
                   ))
+                  if postgres_profile is not None:
+                      postgres_profile_module.verify_profile_runtime(
+                          postgres_state_file,
+                          runner_temp=runner_temp,
+                      )
                   try:
                       candidate_result = ci_build_artifacts.run_supervised_bubblewrap(
                           arguments,
                           environment=script_env,
                           pass_fds=tuple(
                               mount_fds
-                              + [fd for fd in (browser_cache_fd, global_config_file.fileno()) if fd is not None]
+                              + [
+                                  fd
+                                  for fd in (
+                                      browser_cache_fd,
+                                      global_config_file.fileno(),
+                                      user_config_file.fileno(),
+                                  )
+                                  if fd is not None
+                              ]
                           ),
                           host_signals=host_signals,
                           cwd="/",
                       )
+                      if postgres_profile is not None:
+                          def verify_postgres_runtime():
+                              postgres_profile_module.verify_profile_runtime(
+                                  postgres_state_file,
+                                  runner_temp=runner_temp,
+                              )
+                              if candidate_result.return_code is None:
+                                  raise ci_build_artifacts.IntegrityError(
+                                      "trusted Bubblewrap supervisor omitted the candidate exit code"
+                                  )
+
+                          ci_build_artifacts._verify_candidate_runtime_boundary(
+                              candidate_result, verify_postgres_runtime
+                          )
                   except (ci_build_artifacts.ScriptCandidateTerminal, ci_build_artifacts.ScriptPlanInterrupted) as failure:
                       candidate_failure = failure
                       raise
@@ -6885,6 +7059,11 @@ jobs:
               "jobId": os.environ["CI_ENTRY_JOB_ID"],
               "levelId": os.environ["CI_LEVEL_ID"],
           }
+          if postgres_profile is not None:
+              postgres_profile_state = postgres_profile_module.prepare_profile_for_candidate(
+                  postgres_state_file,
+                  runner_temp=runner_temp,
+              )
           receipt_result = ci_build_artifacts.run_script_plan_with_receipts(
               command_records,
               receipt_identity,
@@ -6898,6 +7077,7 @@ jobs:
           if browser_cache_fd is not None:
               os.close(browser_cache_fd)
           global_config_file.close()
+          user_config_file.close()
           # END source candidate script execution
           PY
       - name: Export build outputs after producer process is reaped
@@ -8123,8 +8303,6 @@ jobs:
                       if node_toolchain_root is not None
                       else []
                   ),
-                  "--ro-bind", "/dev/null", "/dev/shm/npm-globalconfig",
-                  "--ro-bind", "/dev/null", "/dev/shm/npm-userconfig",
                   "--dir", "/dev/shm/tmp",
                   "--dir", "/dev/shm/npm-cache",
                   "--dir", sandbox_workspace,
@@ -8548,6 +8726,30 @@ jobs:
           python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" receipt \
             --lane "$BUILD_ARTIFACT_LEVEL_ID" --profile "$RECEIPT_PROFILE" \
             --command-digest "$RECEIPT_COMMAND_DIGEST" "${receipt_args[@]}"
+      - name: Stop Postgres sandbox profile
+        if: always() && needs.eligibility.outputs.should-run != 'false' && inputs.postgres-sandbox-profile != '' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        env:
+          POSTGRES_STATE_FILE: ${{ runner.temp }}/ci-postgres-sandbox-state.json
+        run: |
+          set -uo pipefail
+          cleanup_status=0
+          cleanup_script="$RUNNER_TEMP/ci_postgres_sandbox.py"
+          for state_file in \
+            "$POSTGRES_STATE_FILE" \
+            "$RUNNER_TEMP/ci-postgres-sandbox-acceptance-state.json" \
+            "$RUNNER_TEMP/ci-postgres-sandbox-fresh-state.json"; do
+            if [[ -e "$state_file" || -L "$state_file" ]]; then
+              if [[ ! -f "$cleanup_script" ]]; then
+                echo "::error::Postgres sandbox cleanup helper is missing" >&2
+                cleanup_status=1
+                continue
+              fi
+              python3 -I "$cleanup_script" cleanup \
+                --runner-temp "$RUNNER_TEMP" \
+                --state-file "$state_file" || cleanup_status=1
+            fi
+          done
+          exit "$cleanup_status"
       - name: Stop cache service
         if: always() && needs.eligibility.outputs.should-run != 'false' && inputs.cache-image != ''
         env:

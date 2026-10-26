@@ -27,6 +27,8 @@ platform	python3 scripts/ci-gate/protected-type-surface-baseline.test.py
 platform	python3 scripts/gen-node-ci-protected-move-step.test.py
 platform	python3 scripts/ci-gate/ci-levels.test.py
 platform	python3 scripts/ci-gate/ci-build-artifacts.test.py
+platform	python3 scripts/ci-gate/ci-postgres-sandbox.test.py
+platform	python3 scripts/ci-gate/ci-postgres-sandbox-hosted-acceptance.test.py
 platform	python3 scripts/ci-gate/ci-entry-receipts.test.py
 platform	python3 -I scripts/ci-gate/node-ci-secretless-protected-manifests.test.py
 platform	python3 scripts/ci-gate/node-ci-python-heredocs.test.py

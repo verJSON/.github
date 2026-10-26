@@ -35,24 +35,56 @@ assert document[True]["pull_request"]["types"] == [
     "opened", "reopened", "synchronize", "ready_for_review", "converted_to_draft",
 ]
 assert set(jobs) == {
-    "change-scope",
-    "shell-test-groups",
-    "docs-contracts",
-    "hosted-compatibility-tests",
-    "adr-number-collision",
-    "runner-isolation",
-    "shell-tests",
+ "change-scope",
+ "shell-test-groups",
+ "docs-contracts",
+ "hosted-compatibility-tests",
+ "adr-number-collision",
+ "runner-isolation",
+ "shell-tests",
 }
-assert jobs["shell-test-groups"]["needs"] == ["change-scope", "docs-contracts", "runner-isolation"]
+assert "postgres-sandbox-hosted-acceptance" not in jobs
+assert jobs["shell-test-groups"]["needs"] == [
+"change-scope", "docs-contracts", "runner-isolation",
+]
 assert jobs["shell-test-groups"]["if"] == (
-    "${{ !cancelled() && needs.change-scope.result == 'success' && "
-    "needs.change-scope.outputs.heavy == 'true' && "
-    "(github.event_name != 'pull_request' || (!github.event.pull_request.draft && "
-    "needs.docs-contracts.result == 'success' && "
-    "needs.runner-isolation.result == 'success')) }}"
+ "${{ !cancelled() && needs.change-scope.result == 'success' && "
+ "needs.change-scope.outputs.heavy == 'true' && "
+ "(github.event_name != 'pull_request' || (!github.event.pull_request.draft && "
+ "needs.docs-contracts.result == 'success' && "
+ "needs.runner-isolation.result == 'success')) }}"
 )
-assert jobs["hosted-compatibility-tests"]["needs"] == ["change-scope", "docs-contracts", "runner-isolation"]
-assert jobs["hosted-compatibility-tests"]["if"] == (
+compatibility = jobs["hosted-compatibility-tests"]
+assert compatibility["needs"] == ["change-scope", "docs-contracts", "runner-isolation"]
+assert compatibility["runs-on"] == "ubuntu-24.04"
+steps = compatibility["steps"]
+provision_index = next(
+ index for index, step in enumerate(steps)
+ if step.get("name") == "Provision trusted compatibility sandbox"
+)
+acceptance_step = next(
+ step for step in steps
+ if "scripts/ci-gate/ci-postgres-sandbox-hosted-acceptance.test.py"
+ in step.get("run", "")
+)
+acceptance_index = steps.index(acceptance_step)
+assert acceptance_index > provision_index
+assert acceptance_step["env"]["VERJSON_CI_POSTGRES_HOSTED_ACCEPTANCE"] == "1"
+assert acceptance_step["env"]["RUNNER_ENVIRONMENT"] == "${{ runner.environment }}"
+cleanup = next(
+ step for step in steps
+ if step.get("name") == "Clean up Postgres sandbox containers"
+)
+assert steps.index(cleanup) > acceptance_index
+assert cleanup.get("if") == "always()"
+assert "ci-postgres-sandbox-acceptance-state.json" in cleanup["run"]
+assert "ci-postgres-sandbox-fresh-state.json" in cleanup["run"]
+assert not any(
+step.get("name") == "Require hosted compatibility acceptance"
+for step in jobs["shell-test-groups"]["steps"]
+)
+assert jobs["shell-test-groups"]["if"] == compatibility["if"]
+jobs["hosted-compatibility-tests"]["if"] == (
     "${{ !cancelled() && needs.change-scope.result == 'success' && "
     "needs.change-scope.outputs.heavy == 'true' && "
     "(github.event_name != 'pull_request' || (!github.event.pull_request.draft && "
@@ -228,7 +260,7 @@ def validate_hosted_compatibility(candidate, candidate_manifest):
                 f"{step.get('name', step.get('uses'))}"
             )
     assert hosted["runs-on"] == "ubuntu-24.04"
-    assert hosted["timeout-minutes"] == 8
+    assert hosted["timeout-minutes"] == 25
     assert hosted["steps"][0]["uses"] == (
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
     )

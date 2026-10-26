@@ -416,6 +416,13 @@ on:
         required: false
         type: string
         default: ''
+      postgres-sandbox-profile:
+        description: >-
+          Explicit opt-in constrained Postgres sandbox profile for secretless script plans.
+          Empty (the default) leaves PostgreSQL disabled; only reviewed profile IDs are accepted.
+        required: false
+        type: string
+        default: ''
       event-name:
         description: Authenticated pull-request event identity.
         required: true
@@ -672,6 +679,31 @@ jobs:
             level|mode-gate|preflight|producer|consumer) ;;
             *) echo "::error::unknown internal build-artifact role" >&2; exit 1 ;;
           esac
+      - name: Reject Postgres compatibility profile conflicts
+        env:
+          POSTGRES_SANDBOX_PROFILE: ${{ inputs.postgres-sandbox-profile }}
+          POSTGRES_PROFILE_COMPATIBILITY_INPUT: ${{ inputs.secretless-compatibility-ranges }}
+          PROTECTED_BASELINE_DECLARATION_PATH: ${{ inputs.protected-type-surface-declaration-path }}
+          BUILD_ARTIFACT_ROLE: ${{ inputs.build-artifact-role }}
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          import os
+          import sys
+
+          postgres_profile = os.environ["POSTGRES_SANDBOX_PROFILE"]
+          compatibility_ranges = os.environ["POSTGRES_PROFILE_COMPATIBILITY_INPUT"]
+          build_artifact_role = os.environ["BUILD_ARTIFACT_ROLE"]
+          protected_baseline = os.environ.get("PROTECTED_BASELINE_DECLARATION_PATH", "")
+          if postgres_profile and (
+              compatibility_ranges.strip() not in {"", "{}"}
+              or protected_baseline
+              or build_artifact_role in {"producer", "consumer"}
+          ):
+              sys.exit(
+                  "Postgres sandbox profile cannot be combined with compatibility requests or artifact sharing"
+              )
+          PY
       - name: Require a GitHub-hosted secretless build lane
         # build-test runs a secretless call on this lane, ahead of the caller's
         # runner, and its lifecycle rebuild and candidate sandbox exit unless the
@@ -2318,6 +2350,30 @@ jobs:
           submodules: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'false' || 'recursive' }}
           token: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && github.token || secrets.submodules-token || github.token }}
           persist-credentials: ${{ !(inputs.secretless-pr || inputs.secretless-trusted-ref) }}
+      - name: Validate Postgres sandbox profile request
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.postgres-sandbox-profile != ''
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          POSTGRES_PROFILE: ${{ inputs.postgres-sandbox-profile }}
+          POSTGRES_DB_IMAGE: ${{ inputs.db-image }}
+          POSTGRES_CACHE_IMAGE: ${{ inputs.cache-image }}
+          POSTGRES_ARTIFACT_ROLE: ${{ inputs.build-artifact-role }}
+          POSTGRES_COMPATIBILITY_RANGES: ${{ needs.acquire-secretless-dependencies.outputs.protected-baseline-request || inputs.secretless-compatibility-ranges }}
+          POSTGRES_SECRETLESS_MODE: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'true' || 'false' }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          [[ "$RUNNER_ENVIRONMENT" == "github-hosted" ]]
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_postgres_sandbox.py" -o "$RUNNER_TEMP/ci_postgres_sandbox.py"
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/config/ci-sandbox-profiles.json" -o "$RUNNER_TEMP/ci-sandbox-profiles.json"
+          python3 -I "$RUNNER_TEMP/ci_postgres_sandbox.py" validate \
+            --profile "$POSTGRES_PROFILE" \
+            --db-image "$POSTGRES_DB_IMAGE" \
+            --cache-image "$POSTGRES_CACHE_IMAGE" \
+            --artifact-role "$POSTGRES_ARTIFACT_ROLE" \
+            --compatibility-ranges "$POSTGRES_COMPATIBILITY_RANGES" \
+            --secretless-mode "$POSTGRES_SECRETLESS_MODE"
       - name: Prepare job-scoped changelog tool cache
         if: needs.eligibility.outputs.should-run != 'false'
         run: |
@@ -2606,6 +2662,7 @@ jobs:
           BUILD_ARTIFACT_RUNTIME_INPUT_SECRETLESS_CI_NON_APP_PATHS: ${{ toJSON(inputs.secretless-ci-non-app-paths) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_SCHEMA_DIR: ${{ toJSON(inputs.schema-dir) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_RUNNER: ${{ toJSON(inputs.runner) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_POSTGRES_SANDBOX_PROFILE: ${{ toJSON(inputs.postgres-sandbox-profile) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_DB_IMAGE: ${{ toJSON(inputs.db-image) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_DB_PORT: ${{ toJSON(inputs.db-port) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_DB_HEALTH_CMD: ${{ toJSON(inputs.db-health-cmd) }}
@@ -6538,7 +6595,7 @@ jobs:
             --ro-bind "$RUNNER_TEMP/ci_build_artifacts.py" /tmp/ci_build_artifacts.py \
             -- /usr/bin/python3 -I /tmp/ci_build_artifacts.py network-probe
       - name: Download trusted script-plan receipt supervisor
-        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref || inputs.postgres-sandbox-profile != '')
         env:
           PROTECTED_CANDIDATE_HELPER_SHA256: ${{ steps.protected-candidate-helper.outputs.sha256 }}
         run: |
@@ -6549,6 +6606,51 @@ jobs:
           [[ -f "$helper" && ! -L "$helper" ]]
           [[ "$(stat -c '%u:%a:%h' -- "$helper")" == "$(id -u):400:1" ]]
           [[ "$(sha256sum -- "$helper" | cut -d' ' -f1)" == "$PROTECTED_CANDIDATE_HELPER_SHA256" ]]
+      - name: Download Postgres sandbox acceptance fixture
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.postgres-sandbox-profile != ''
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci-gate/ci-postgres-sandbox-hosted-acceptance.test.py" -o "$RUNNER_TEMP/ci-postgres-sandbox-hosted-acceptance.test.py"
+          mkdir -p "$RUNNER_TEMP/postgres-sandbox-drizzle"
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci-gate/fixtures/postgres-sandbox-drizzle/package.json" -o "$RUNNER_TEMP/postgres-sandbox-drizzle/package.json"
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci-gate/fixtures/postgres-sandbox-drizzle/package-lock.json" -o "$RUNNER_TEMP/postgres-sandbox-drizzle/package-lock.json"
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci-gate/fixtures/postgres-sandbox-drizzle/query.mjs" -o "$RUNNER_TEMP/postgres-sandbox-drizzle/query.mjs"
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci-gate/fixtures/postgres-sandbox-drizzle/schema.ts" -o "$RUNNER_TEMP/postgres-sandbox-drizzle/schema.ts"
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci-gate/fixtures/postgres-sandbox-drizzle/migration.sql" -o "$RUNNER_TEMP/postgres-sandbox-drizzle/migration.sql"
+      - name: Provision Postgres sandbox profile
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.postgres-sandbox-profile != '' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        env:
+          POSTGRES_PROFILE: ${{ inputs.postgres-sandbox-profile }}
+          POSTGRES_STATE_FILE: ${{ runner.temp }}/ci-postgres-sandbox-state.json
+        run: |
+          set -euo pipefail
+          python3 -I "$RUNNER_TEMP/ci_postgres_sandbox.py" provision \
+            --profile "$POSTGRES_PROFILE" \
+            --runner-temp "$RUNNER_TEMP" \
+            --state-file "$POSTGRES_STATE_FILE"
+      - name: Install pinned Postgres sandbox Drizzle acceptance client
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.postgres-sandbox-profile != '' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        run: |
+          set -euo pipefail
+          NPM_USER_CONFIG="$(mktemp "$RUNNER_TEMP/postgres-sandbox-npm-user.XXXXXX")"
+          NPM_GLOBAL_CONFIG="$(mktemp "$RUNNER_TEMP/postgres-sandbox-npm-global.XXXXXX")"
+          trap 'rm -f -- "$NPM_USER_CONFIG" "$NPM_GLOBAL_CONFIG"' EXIT
+          npm ci --prefix "$RUNNER_TEMP/postgres-sandbox-drizzle" \
+            --registry=https://registry.npmjs.org \
+            --userconfig="$NPM_USER_CONFIG" --globalconfig="$NPM_GLOBAL_CONFIG" \
+            --ignore-scripts --no-audit --no-fund
+      - name: Verify Postgres sandbox hosted acceptance boundary
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.postgres-sandbox-profile != '' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          VERJSON_CI_POSTGRES_HOSTED_ACCEPTANCE: '1'
+          VERJSON_CI_POSTGRES_CANDIDATE_STATE: ${{ runner.temp }}/ci-postgres-sandbox-state.json
+        run: |
+          set -euo pipefail
+          python3 -I "$RUNNER_TEMP/ci-postgres-sandbox-hosted-acceptance.test.py"
       - name: Parse Node CI script plan
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         id: node-ci-script-plan
@@ -6668,6 +6770,11 @@ jobs:
           DB_ENV: ${{ inputs.db-env }}
           CACHE_ENV: ${{ inputs.cache-env }}
           VERJSON_CI_TRUSTED_DB_HOST: ${{ steps.db-service.outputs.host }}
+          VERJSON_CI_POSTGRES_PROFILE: ${{ inputs.postgres-sandbox-profile }}
+          VERJSON_CI_POSTGRES_SANDBOX_STATE: ${{ runner.temp }}/ci-postgres-sandbox-state.json
+          VERJSON_CI_LEGACY_DB_IMAGE: ${{ inputs.db-image }}
+          VERJSON_CI_LEGACY_CACHE_IMAGE: ${{ inputs.cache-image }}
+          VERJSON_CI_POSTGRES_SECRETLESS_MODE: 'true'
           SCRIPT_PLAN_DEFAULT_PLAN: ${{ steps.node-ci-script-plan.outputs.default-plan }}
           SCRIPT_PLAN_ENTRIES_FILE: ${{ steps.node-ci-script-plan.outputs.entries-file }}
           CANDIDATE_CACHE_ROOT: ${{ runner.temp }}/verjson-candidate-caches-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
@@ -7946,8 +8053,6 @@ jobs:
                       if node_toolchain_root is not None
                       else []
                   ),
-                  "--ro-bind", "/dev/null", "/dev/shm/npm-globalconfig",
-                  "--ro-bind", "/dev/null", "/dev/shm/npm-userconfig",
                   "--dir", "/dev/shm/tmp",
                   "--dir", "/dev/shm/npm-cache",
                   "--dir", sandbox_workspace,
@@ -8371,6 +8476,30 @@ jobs:
           python3 -I "$RUNNER_TEMP/ci_build_artifacts.py" receipt \
             --lane "$BUILD_ARTIFACT_LEVEL_ID" --profile "$RECEIPT_PROFILE" \
             --command-digest "$RECEIPT_COMMAND_DIGEST" "${receipt_args[@]}"
+      - name: Stop Postgres sandbox profile
+        if: always() && needs.eligibility.outputs.should-run != 'false' && inputs.postgres-sandbox-profile != '' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        env:
+          POSTGRES_STATE_FILE: ${{ runner.temp }}/ci-postgres-sandbox-state.json
+        run: |
+          set -uo pipefail
+          cleanup_status=0
+          cleanup_script="$RUNNER_TEMP/ci_postgres_sandbox.py"
+          for state_file in \
+            "$POSTGRES_STATE_FILE" \
+            "$RUNNER_TEMP/ci-postgres-sandbox-acceptance-state.json" \
+            "$RUNNER_TEMP/ci-postgres-sandbox-fresh-state.json"; do
+            if [[ -e "$state_file" || -L "$state_file" ]]; then
+              if [[ ! -f "$cleanup_script" ]]; then
+                echo "::error::Postgres sandbox cleanup helper is missing" >&2
+                cleanup_status=1
+                continue
+              fi
+              python3 -I "$cleanup_script" cleanup \
+                --runner-temp "$RUNNER_TEMP" \
+                --state-file "$state_file" || cleanup_status=1
+            fi
+          done
+          exit "$cleanup_status"
       - name: Stop cache service
         if: always() && needs.eligibility.outputs.should-run != 'false' && inputs.cache-image != ''
         env:

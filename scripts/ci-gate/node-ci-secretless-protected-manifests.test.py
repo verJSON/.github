@@ -548,6 +548,8 @@ class ProtectedCandidateManifestTests(unittest.TestCase):
             "script_cache": checkout_root / ".cache",
             "script_home": checkout_root / ".home",
             "script_tmp": checkout_root / ".tmp",
+            "npm_user_config": checkout_root / ".tmp/npm-userconfig",
+            "npm_global_config": checkout_root / ".tmp/npm-globalconfig",
             "script_directory": script_directory,
             "name": script,
             "npm_command": npm_command,
