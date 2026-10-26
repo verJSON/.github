@@ -569,7 +569,7 @@ def configure_changelog_tool_cache(document: str) -> str:
           finally:
               for descriptor in (renderer_fd, scripts_fd, workspace_fd):
                   if descriptor is not None:
-                      os.close(descriptor)
+                        os.close(descriptor)
 
           def declaration(name, pattern):
               matches = re.findall(rf'(?m)^{{name}}="([^"\\n]*)"$', renderer)
@@ -732,18 +732,7 @@ def externalize_protected_candidate_plan(step: str) -> str:
         raise SystemExit("protected candidate heredoc indentation changed")
     candidate_body = textwrap.dedent(raw_candidate_body).rstrip("\n")
     normalized_lines = candidate_body.splitlines()
-    for declaration in ("active_process", "received_signal"):
-        old = f"global {declaration}"
-        new = f"nonlocal {declaration}"
-        matches = [
-            index for index, line in enumerate(normalized_lines)
-            if line.strip() == old
-        ]
-        if len(matches) != 1:
-            raise SystemExit("protected candidate signal-state transformation changed")
-        index = matches[0]
-        indentation = normalized_lines[index][: len(normalized_lines[index]) - len(normalized_lines[index].lstrip())]
-        normalized_lines[index] = indentation + new
+    # HostSignalQueue capture uses a closure, so generated execution needs no scalar rewrite.
     normalized_candidate_body = "\n".join(normalized_lines)
     if normalized_candidate_body != protected_candidate_helper_body():
         raise SystemExit("protected candidate helper source no longer matches generator output")
@@ -755,6 +744,7 @@ def externalize_protected_candidate_plan(step: str) -> str:
 
 
 PROTECTED_CANDIDATE_HELPER_FETCH_STEP = """      - name: Download pinned protected candidate helper
+        id: protected-candidate-helper
         if: needs.eligibility.outputs.should-run != 'false'
         env:
           JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
@@ -772,8 +762,52 @@ PROTECTED_CANDIDATE_HELPER_FETCH_STEP = """      - name: Download pinned protect
           [[ -f "$temporary" && ! -L "$temporary" ]]
           chmod 0400 "$temporary"
           mv -- "$temporary" "$helper"
+          [[ "$(stat -c '%u:%a:%h' -- "$helper")" == "$(id -u):400:1" ]]
+          digest="$(sha256sum -- "$helper" | cut -d' ' -f1)"
+          [[ "$digest" =~ ^[0123456789abcdef]{64}$ ]]
+          printf 'sha256=%s\\n' "$digest" >> "$GITHUB_OUTPUT"
           trap - EXIT
 """
+
+
+def reuse_staged_protected_candidate_helper(document: str) -> str:
+    step_marker = "      - name: Download trusted script-plan receipt supervisor\n"
+    step_start = document.index(step_marker)
+    step_end = document.find("\n      - ", step_start + len(step_marker))
+    if step_end == -1:
+        raise SystemExit("protected receipt supervisor helper step must not be last")
+    step = document[step_start:step_end]
+    old_env = "          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}\n"
+    new_env = (
+        "          PROTECTED_CANDIDATE_HELPER_SHA256: "
+        "${{ steps.protected-candidate-helper.outputs.sha256 }}\n"
+    )
+    if step.count(old_env) != 1:
+        raise SystemExit("protected receipt supervisor helper identity input drifted")
+    step = step.replace(old_env, new_env, 1)
+    old_run = "\n".join(
+        (
+            "        run: |",
+            "          set -euo pipefail",
+            '          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]',
+            '          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_build_artifacts.py" -o "$RUNNER_TEMP/ci_build_artifacts.py"',
+        )
+    )
+    new_run = "\n".join(
+        (
+            "        run: |",
+            "          set -euo pipefail",
+            '          [[ "$PROTECTED_CANDIDATE_HELPER_SHA256" =~ ^[0123456789abcdef]{64}$ ]]',
+            '          [[ -n "$RUNNER_TEMP" && "$RUNNER_TEMP" = /* && ! -L "$RUNNER_TEMP" ]]',
+            '          helper="$RUNNER_TEMP/ci_build_artifacts.py"',
+            '          [[ -f "$helper" && ! -L "$helper" ]]',
+            '          [[ "$(stat -c \'%u:%a:%h\' -- "$helper")" == "$(id -u):400:1" ]]',
+            '          [[ "$(sha256sum -- "$helper" | cut -d\' \' -f1)" == "$PROTECTED_CANDIDATE_HELPER_SHA256" ]]',
+        )
+    )
+    if step.count(old_run) != 1:
+        raise SystemExit("protected receipt supervisor helper reuse boundary drifted")
+    return document[:step_start] + step.replace(old_run, new_run, 1) + document[step_end:]
 
 
 def isolate_candidate_runtime_cache(document: str) -> str:
@@ -865,21 +899,9 @@ def isolate_candidate_runtime_cache(document: str) -> str:
         "          # BEGIN source candidate script execution\n",
         "          # END source candidate script execution\n",
     )
-    candidate_sandbox_entrypoint = (
-        "import os, sys\n"
-        "max_fd = os.sysconf('SC_OPEN_MAX')\n"
-        "if max_fd < 3: raise SystemExit('invalid file descriptor limit')\n"
-        "os.closerange(3, max_fd)\n"
-        "if os.environ.get('BUILD_ARTIFACT_ROLE') in ('producer', 'consumer'):\n"
-        " sys.path.insert(0, '/tmp')\n"
-        " from ci_build_artifacts import enforce_shared_sandbox_process_state\n"
-        " enforce_shared_sandbox_process_state()\n"
-        " os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
-        "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)\n"
-    )
     isolated_execution = f"""          max_cache_files = {CANDIDATE_CACHE_MAX_FILES}
           max_cache_bytes = {CANDIDATE_CACHE_MAX_BYTES}
-          sandbox_entrypoint = {candidate_sandbox_entrypoint!r}
+          sandbox_entrypoint = ci_build_artifacts.SANDBOX_SUPERVISOR_ENTRYPOINT
           runner_temp_input = Path(os.environ["RUNNER_TEMP"])
           if (
               not runner_temp_input.is_absolute()
@@ -1568,57 +1590,24 @@ def isolate_candidate_runtime_cache(document: str) -> str:
             else [str(npm_executable)]
           )
           cache_root.mkdir(mode=0o700)
-          active_process = None
-          received_signal = None
+          if os.environ.pop("VERJSON_CI_TEST_PENDING_HOST_SIGNAL", None) == "1":
+              signal.pthread_sigmask(signal.SIG_BLOCK, {{signal.SIGINT, signal.SIGTERM}})
+              os.kill(os.getpid(), signal.SIGTERM)
 
           def cleanup_cache_root(*_args):
-              global active_process
-              if active_process is not None and active_process.poll() is None:
-                  try:
-                      os.killpg(active_process.pid, signal.SIGTERM)
-                  except ProcessLookupError:
-                      pass
               shutil.rmtree(cache_root, ignore_errors=True)
 
-          def extinguish_process_group(process):
-              graceful_deadline = time.monotonic() + 1
-              while time.monotonic() < graceful_deadline:
-                  try:
-                      os.killpg(process.pid, 0)
-                  except ProcessLookupError:
-                      return
-                  time.sleep(0.05)
-              try:
-                  os.killpg(process.pid, signal.SIGKILL)
-              except ProcessLookupError:
-                  return
-              deadline = time.monotonic() + 5
-              while True:
-                  try:
-                      os.killpg(process.pid, 0)
-                  except ProcessLookupError:
-                      return
-                  if time.monotonic() >= deadline:
-                      sys.exit("candidate process group survived bounded SIGKILL cleanup")
-                  time.sleep(0.05)
-
-          previous_handlers = {{}}
-          def handle_signal(signum, _frame):
-              global received_signal
-              signal.signal(signal.SIGINT, signal.SIG_IGN)
-              signal.signal(signal.SIGTERM, signal.SIG_IGN)
-              received_signal = signum
-              if active_process is not None and active_process.poll() is None:
-                  try:
-                      os.killpg(active_process.pid, signal.SIGTERM)
-                  except ProcessLookupError:
-                      pass
-
-          for caught_signal in (signal.SIGINT, signal.SIGTERM):
-              previous_handlers[caught_signal] = signal.getsignal(caught_signal)
-              signal.signal(caught_signal, handle_signal)
+          signal.pthread_sigmask(signal.SIG_UNBLOCK, {{signal.SIGINT, signal.SIGTERM}})
           try:
-              for index, (script_directory, name, unset_env, requires_services) in enumerate(normalized):
+              def execute_candidate_entry(index, _entry):
+                  candidate_result = None
+                  candidate_failure = None
+                  script_directory, name, unset_env, requires_services = normalized[index]
+                  received_signal = host_signals.poll()
+                  if received_signal is not None:
+                      interruption = ScriptPlanInterrupted(received_signal)
+                      interruption.cleanup_status = "not-started"
+                      raise interruption
                   if baseline is not None and inventory(baseline) != baseline_inventory:
                       sys.exit("verified runtime cache changed before candidate script")
                   script_cache = cache_root / str(index)
@@ -1784,82 +1773,89 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                   )
                   legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]
                   try:
-                    active_process = subprocess.Popen(
-                              [
-                                  str(bubblewrap),
-                                  "--unshare-user",
-                                  "--unshare-pid",
-                                  "--unshare-ipc",
-                                  "--unshare-uts",
-                                  "--unshare-cgroup-try",
-                                  "--disable-userns",
-                                  "--die-with-parent",
-                                  "--new-session",
-                                  *network_args,
-                                  "--tmpfs", "/",
-                                  "--tmpfs", "/tmp",
-                                  *artifact_helper_args,
-                                  *legacy_network_args,
-                                  *directory_args,
-                                  *chmod_args,
-                                  "--ro-bind", "/usr", "/usr",
-                                  "--ro-bind", "/bin", "/bin",
-                                  "--ro-bind", "/lib", "/lib",
-                                  "--ro-bind", "/lib64", "/lib64",
-                                  # Present on every dpkg host; optional because this runner
-                                  # may be self-hosted (#1782).
-                                  "--ro-bind-try", "/etc/alternatives", "/etc/alternatives",
-                                  "--ro-bind", "/etc/ssl", "/etc/ssl",
-                                  "--ro-bind", "/etc/hosts", "/etc/hosts",
-                                  "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
-                                  "--ro-bind", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
-                                  "--ro-bind", "/etc/passwd", "/etc/passwd",
-                                  "--ro-bind", "/etc/group", "/etc/group",
-                                  *tool_mount_args,
-                                  "--bind", str(workspace), str(workspace),
-                                  *artifact_mount_args,
-                                  *git_mount_args,
-                                  "--bind", str(script_cache), str(script_cache),
-                                  "--bind", str(script_home), str(script_home),
-                                  "--bind", str(script_tmp), str(script_tmp),
-                                  "--proc", "/proc",
-                                  "--dev", "/dev",
-                                  "--chdir", str(script_directory),
-                                  "--",
-                                  "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
-                                  *npm_command, "run", name,
-                              ],
-                              env=script_env,
-                              start_new_session=True,
-                              pass_fds=tuple(tool_prefix_fds),
-                            )
-                    for descriptor in tool_prefix_fds:
-                      os.close(descriptor)
-                    tool_prefix_fds = []
-                    while active_process.poll() is None:
-                      time.sleep(0.05)
-                    candidate_status = active_process.returncode
-                    extinguish_process_group(active_process)
-                    if received_signal is not None:
-                      raise SystemExit(128 + received_signal)
-                    if candidate_status != 0:
-                      raise subprocess.CalledProcessError(candidate_status, active_process.args)
+                      received_signal = host_signals.poll()
+                      if received_signal is not None:
+                          interruption = ScriptPlanInterrupted(received_signal)
+                          interruption.cleanup_status = "not-started"
+                          raise interruption
+                      arguments = [
+                                    str(bubblewrap),
+                                    "--unshare-user",
+                                    "--unshare-pid",
+                                    "--as-pid-1",
+                                    "--unshare-ipc",
+                                    "--unshare-uts",
+                                    "--unshare-cgroup-try",
+                                    "--disable-userns",
+                                    "--die-with-parent",
+                                    "--new-session",
+                                    *network_args,
+                                    "--tmpfs", "/",
+                                    "--tmpfs", "/tmp",
+                                    *artifact_helper_args,
+                                    *legacy_network_args,
+                                    *directory_args,
+                                    *chmod_args,
+                                    "--ro-bind", "/usr", "/usr",
+                                    "--ro-bind", "/bin", "/bin",
+                                    "--ro-bind", "/lib", "/lib",
+                                    "--ro-bind", "/lib64", "/lib64",
+                                    # Present on every dpkg host; optional because this runner
+                                    # may be self-hosted (#1782).
+                                    "--ro-bind-try", "/etc/alternatives", "/etc/alternatives",
+                                    "--ro-bind", "/etc/ssl", "/etc/ssl",
+                                    "--ro-bind", "/etc/hosts", "/etc/hosts",
+                                    "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
+                                    "--ro-bind", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
+                                    "--ro-bind", "/etc/passwd", "/etc/passwd",
+                                    "--ro-bind", "/etc/group", "/etc/group",
+                                    *tool_mount_args,
+                                    "--bind", str(workspace), str(workspace),
+                                    *artifact_mount_args,
+                                    *git_mount_args,
+                                    "--bind", str(script_cache), str(script_cache),
+                                    "--bind", str(script_home), str(script_home),
+                                    "--bind", str(script_tmp), str(script_tmp),
+                                    "--proc", "/proc",
+                                    "--dev", "/dev",
+                                    "--chdir", str(script_directory),
+                                    "--",
+                                    "/usr/bin/python3", "-I", "-c", sandbox_entrypoint,
+                                    *npm_command, "run", name,
+                                ]
+                      candidate_result = ci_build_artifacts.run_supervised_bubblewrap(
+                          arguments,
+                          environment=script_env,
+                          pass_fds=tuple(tool_prefix_fds),
+                          host_signals=host_signals,
+                      )
+                      candidate_status = candidate_result.return_code
+                      if candidate_status is None:
+                          raise IntegrityError("trusted Bubblewrap supervisor omitted the candidate exit code")
+                      for descriptor in tool_prefix_fds:
+                        os.close(descriptor)
+                      tool_prefix_fds = []
+                  except (ci_build_artifacts.ScriptCandidateTerminal, ci_build_artifacts.ScriptPlanInterrupted) as failure:
+                      candidate_failure = failure
+                      raise
                   finally:
                     for descriptor in tool_prefix_fds:
                       os.close(descriptor)
-                    if active_process is not None:
-                      extinguish_process_group(active_process)
-                    active_process = None
                     shutil.rmtree(script_cache, ignore_errors=True)
                     shutil.rmtree(script_tmp, ignore_errors=True)
                     shutil.rmtree(script_home, ignore_errors=True)
-                    if (
-                      script_cache.exists()
-                      or script_tmp.exists()
-                      or script_home.exists()
-                      or (baseline is not None and inventory(baseline) != baseline_inventory)
-                    ):
-                      sys.exit("candidate script cache cleanup or baseline integrity check failed")
+                    ci_build_artifacts._verify_script_candidate_cleanup(
+                        candidate_result,
+                        candidate_failure,
+                        lambda: (
+                            script_cache.exists()
+                            or script_tmp.exists()
+                            or script_home.exists()
+                            or (baseline is not None and inventory(baseline) != baseline_inventory)
+                        ),
+                    )
+                  return ScriptEntryExecutionResult(candidate_status)
+
               command_records = [
                   {{
                       "directory": script_directory.relative_to(workspace).as_posix(),
@@ -1874,13 +1870,35 @@ def isolate_candidate_runtime_cache(document: str) -> str:
               ).hexdigest()
               with open(os.environ["VERJSON_CI_OUTPUT_FILE"], "a", encoding="utf-8") as output:
                   output.write(f"command-digest={{command_digest}}\\n")
+              fail_fast_value = os.environ.get("CI_LEVEL_FAIL_FAST")
+              if fail_fast_value not in {{"true", "false"}}:
+                  raise IntegrityError("typed CI level failFast value must be true or false")
+              receipt_identity = {{
+                  "repository": os.environ["CI_ENTRY_REPOSITORY"],
+                  "event": os.environ["CI_ENTRY_EVENT"],
+                  "ref": os.environ["CI_ENTRY_REF"],
+                  "commit": os.environ["CI_ENTRY_COMMIT"],
+                  "workflowSha": os.environ["CI_ENTRY_WORKFLOW_SHA"],
+                  "runId": os.environ["CI_ENTRY_RUN_ID"],
+                  "runAttempt": os.environ["CI_ENTRY_RUN_ATTEMPT"],
+                  "jobId": os.environ["CI_ENTRY_JOB_ID"],
+                  "levelId": os.environ["CI_LEVEL_ID"],
+              }}
+              receipt_result = run_script_plan_with_receipts(
+                  command_records,
+                  receipt_identity,
+                  fail_fast_value == "true",
+                  runner_temp,
+                  execute_candidate_entry,
+                  host_signals=host_signals,
+              )
+              if receipt_result.exit_code != 0:
+                  sys.exit("candidate script plan failed; see trusted per-entry receipts in RUNNER_TEMP")
           finally:
               cleanup_cache_root()
-              for caught_signal, previous_handler in previous_handlers.items():
-                  signal.signal(caught_signal, previous_handler)
           if cache_root.exists() or (baseline is not None and inventory(baseline) != baseline_inventory):
               sys.exit("candidate cache root cleanup or final baseline integrity check failed")
-"""
+""".rstrip("\n") + "\n"
     if any(step.count(marker) != 1 for marker in execution_markers):
         raise SystemExit("protected candidate script execution markers changed")
     execution_start = step.index(execution_markers[0])
@@ -1892,7 +1910,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
         + execution_markers[1]
         + step[execution_end:]
     )
-    python_start = "          python3 -I - <<'PY'\n"
+    python_start = "          exec python3 -I - <<'PY'\n"
     python_end = "          PY"
     if step.count(python_start) != 1 or step.count(python_end) != 1:
         raise SystemExit("protected candidate script Python boundary changed")
@@ -2157,6 +2175,14 @@ def render() -> str:
     if document.count(caller_commit_identity) != 6:
         raise SystemExit("protected ArtifactSet commit identity inputs drifted")
     document = document.replace(caller_commit_identity, "CALLER_COMMIT: ${{ inputs.head-sha }}")
+    entry_receipt_commit = "          CI_ENTRY_COMMIT: ${{ github.sha }}\n"
+    if document.count(entry_receipt_commit) != 1:
+        raise SystemExit("protected script receipt commit identity input drifted")
+    document = document.replace(
+        entry_receipt_commit,
+        "          CI_ENTRY_COMMIT: ${{ inputs.head-sha }}\n",
+        1,
+    )
     acquisition_end = document.index("  build-test:\n")
     acquisition = document[:acquisition_end]
     build = document[acquisition_end:]
@@ -2307,6 +2333,7 @@ def render() -> str:
         document = remove_candidate_credentials(document, step_name)
     document = configure_changelog_tool_cache(document)
     document = isolate_candidate_runtime_cache(document)
+    document = reuse_staged_protected_candidate_helper(document)
     document = move_step_before_guard(
         document,
         "Provision trusted compatibility sandbox",

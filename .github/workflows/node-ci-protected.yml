@@ -99,6 +99,16 @@ on:
         description: Digest of the exact trusted per-lane script entries executed.
         value: ${{ jobs.build-test.outputs.command-digest }}
     inputs:
+      ci-level-id:
+        description: Internal typed-level identity used to bind script execution receipts.
+        required: false
+        type: string
+        default: ci
+      ci-level-fail-fast:
+        description: Stop this level after the first candidate script failure and record unstarted entries.
+        required: false
+        type: boolean
+        default: true
       build-artifact-role:
         description: Internal role for the typed same-run buildArtifact plan.
         required: false
@@ -2278,6 +2288,20 @@ jobs:
         # annotations, distinguishing this from a real pass.
         if: needs.eligibility.outputs.should-run == 'false'
         run: echo "::notice title=CI deferred::CI is deferred until renovate/stability-days clears and Renovate rebases."
+      - name: Reject unsupported level-local fail-fast mode
+        if: needs.eligibility.outputs.should-run != 'false'
+        env:
+          CI_LEVEL_FAIL_FAST_JSON: ${{ toJSON(inputs.ci-level-fail-fast) }}
+          CI_LEVEL_SECRETLESS_PR_JSON: ${{ toJSON(inputs.secretless-pr) }}
+          CI_LEVEL_SECRETLESS_TRUSTED_REF_JSON: ${{ toJSON(inputs.secretless-trusted-ref) }}
+        run: |
+          set -euo pipefail
+          if [[ "$CI_LEVEL_FAIL_FAST_JSON" == false \
+              && "$CI_LEVEL_SECRETLESS_PR_JSON" != true \
+              && "$CI_LEVEL_SECRETLESS_TRUSTED_REF_JSON" != true ]]; then
+            echo '::error::ci-level-fail-fast=false requires a supported secretless script-plan executor' >&2
+            exit 1
+          fi
       - name: Require completed secretless dependency acquisition
         if: needs.eligibility.outputs.should-run != 'false' && needs.acquire-secretless-dependencies.result != 'success'
         env:
@@ -2393,7 +2417,7 @@ jobs:
           finally:
               for descriptor in (renderer_fd, scripts_fd, workspace_fd):
                   if descriptor is not None:
-                      os.close(descriptor)
+                        os.close(descriptor)
 
           def declaration(name, pattern):
               matches = re.findall(rf'(?m)^{name}="([^"\n]*)"$', renderer)
@@ -2521,6 +2545,7 @@ jobs:
             exit 1
           }
       - name: Download pinned protected candidate helper
+        id: protected-candidate-helper
         if: needs.eligibility.outputs.should-run != 'false'
         env:
           JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
@@ -2538,6 +2563,10 @@ jobs:
           [[ -f "$temporary" && ! -L "$temporary" ]]
           chmod 0400 "$temporary"
           mv -- "$temporary" "$helper"
+          [[ "$(stat -c '%u:%a:%h' -- "$helper")" == "$(id -u):400:1" ]]
+          digest="$(sha256sum -- "$helper" | cut -d' ' -f1)"
+          [[ "$digest" =~ ^[0123456789abcdef]{64}$ ]]
+          printf 'sha256=%s\n' "$digest" >> "$GITHUB_OUTPUT"
           trap - EXIT
       - name: Authorize producer or consumer from immutable policy
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.build-artifact-role == 'producer' || inputs.build-artifact-role == 'consumer')
@@ -2552,6 +2581,8 @@ jobs:
           BUILD_ARTIFACT_PARTICIPANT_COUNT: ${{ inputs.build-artifact-participant-count }}
           BUILD_ARTIFACT_AUTHORIZATION_PLAN_JSON: ${{ inputs.build-artifact-authorization-plan-json }}
           BUILD_ARTIFACT_RUNTIME_INPUT_NODE_VERSION: ${{ toJSON(inputs.node-version) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_CI_LEVEL_ID: ${{ toJSON(inputs.ci-level-id) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_CI_LEVEL_FAIL_FAST: ${{ toJSON(inputs.ci-level-fail-fast) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_TIMEOUT_MINUTES: ${{ toJSON(inputs.timeout-minutes) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_CACHE: ${{ toJSON(inputs.cache) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_CACHE_MAX_MB: ${{ toJSON(inputs.cache-max-mb) }}
@@ -5695,10 +5726,14 @@ jobs:
           initial_sandbox_receipt="$(verify_sandbox_files)" || exit 1
 
           probe_bubblewrap() {
+            local status_file status_code
+            status_file="$(mktemp "$RUNNER_TEMP/bwrap-json-status.XXXXXX")" || return 1
+            status_code=0
             /usr/bin/env -i \
               PATH=/usr/sbin:/usr/bin:/sbin:/bin \
               HOME=/nonexistent \
               /usr/bin/bwrap \
+              --json-status-fd 3 \
               --unshare-user \
               --unshare-pid \
               --unshare-ipc \
@@ -5712,7 +5747,73 @@ jobs:
               --dev /dev \
               --proc /proc \
               --tmpfs /dev/shm \
-              -- /usr/bin/true >/dev/null 2>&1
+              -- /usr/bin/true 3>"$status_file" >/dev/null 2>&1 || status_code=$?
+            if [ "$status_code" -ne 0 ] || ! python3 -I - "$status_file" "$status_code" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          MAX_STATUS_BYTES = 16 * 1024
+          MAX_STATUS_LINE_BYTES = 4096
+          MAX_STATUS_RECORDS = 64
+
+          def reject_duplicate_keys(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError("duplicate JSON key")
+                  result[key] = value
+              return result
+
+          def reject_nonfinite(value):
+              raise ValueError(f"non-finite JSON constant: {value}")
+
+          expected_status = int(sys.argv[2])
+          raw = Path(sys.argv[1]).read_bytes()
+          if not raw or len(raw) > MAX_STATUS_BYTES or not raw.endswith(b"\n"):
+              raise SystemExit("Bubblewrap JSON status file is empty, oversized, or unterminated")
+          lines = raw[:-1].split(b"\n")
+          if not lines or len(lines) > MAX_STATUS_RECORDS:
+              raise SystemExit("Bubblewrap JSON status record count is invalid")
+          events = []
+          child_pid = None
+          exit_code = None
+          for line in lines:
+              if not line or len(line) > MAX_STATUS_LINE_BYTES:
+                  raise SystemExit("Bubblewrap JSON status line is empty or oversized")
+              try:
+                  record = json.loads(
+                      line.decode("utf-8", errors="strict"),
+                      object_pairs_hook=reject_duplicate_keys,
+                      parse_constant=reject_nonfinite,
+                  )
+              except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+                  raise SystemExit(f"Bubblewrap JSON status is malformed: {error}") from error
+              if not isinstance(record, dict):
+                  raise SystemExit("Bubblewrap JSON status event must be an object")
+              known_events = {"child-pid", "exit-code"}.intersection(record)
+              if len(known_events) > 1:
+                  raise SystemExit("Bubblewrap JSON status event is contradictory")
+              if "child-pid" in record:
+                  value = record["child-pid"]
+                  if type(value) is not int or value <= 0 or child_pid is not None:
+                      raise SystemExit("Bubblewrap child-pid event is malformed or duplicated")
+                  child_pid = value
+                  events.append("child-pid")
+              elif "exit-code" in record:
+                  value = record["exit-code"]
+                  if type(value) is not int or value < 0 or exit_code is not None:
+                      raise SystemExit("Bubblewrap exit-code event is malformed or duplicated")
+                  exit_code = value
+                  events.append("exit-code")
+          if events != ["child-pid", "exit-code"] or exit_code != expected_status:
+              raise SystemExit("Bubblewrap JSON status events are incomplete, unordered, or disagree with process status")
+          PY
+            then
+              rm -f -- "$status_file"
+              return 1
+            fi
+            rm -f -- "$status_file"
           }
           if ! probe_bubblewrap; then
             current_sandbox_receipt="$(verify_sandbox_files)" || exit 1
@@ -6436,6 +6537,18 @@ jobs:
             --ro-bind /etc /etc --proc /proc --dev /dev --tmpfs /tmp \
             --ro-bind "$RUNNER_TEMP/ci_build_artifacts.py" /tmp/ci_build_artifacts.py \
             -- /usr/bin/python3 -I /tmp/ci_build_artifacts.py network-probe
+      - name: Download trusted script-plan receipt supervisor
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        env:
+          PROTECTED_CANDIDATE_HELPER_SHA256: ${{ steps.protected-candidate-helper.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$PROTECTED_CANDIDATE_HELPER_SHA256" =~ ^[0123456789abcdef]{64}$ ]]
+          [[ -n "$RUNNER_TEMP" && "$RUNNER_TEMP" = /* && ! -L "$RUNNER_TEMP" ]]
+          helper="$RUNNER_TEMP/ci_build_artifacts.py"
+          [[ -f "$helper" && ! -L "$helper" ]]
+          [[ "$(stat -c '%u:%a:%h' -- "$helper")" == "$(id -u):400:1" ]]
+          [[ "$(sha256sum -- "$helper" | cut -d' ' -f1)" == "$PROTECTED_CANDIDATE_HELPER_SHA256" ]]
       - name: Parse Node CI script plan
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         id: node-ci-script-plan
@@ -6539,6 +6652,17 @@ jobs:
         env:
           NESTED_MANIFESTS: ${{ inputs.secretless-nested-manifests }}
           BUILD_ARTIFACT_ROLE: ${{ inputs.build-artifact-role }}
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          CI_ENTRY_EVENT: ${{ github.event_name }}
+          CI_ENTRY_REF: ${{ github.ref }}
+          CI_ENTRY_COMMIT: ${{ inputs.head-sha }}
+          CI_ENTRY_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          CI_ENTRY_REPOSITORY: ${{ github.repository }}
+          CI_ENTRY_RUN_ID: ${{ github.run_id }}
+          CI_ENTRY_RUN_ATTEMPT: ${{ github.run_attempt }}
+          CI_ENTRY_JOB_ID: ${{ github.job }}
+          CI_LEVEL_ID: ${{ inputs.ci-level-id }}
+          CI_LEVEL_FAIL_FAST: ${{ inputs.ci-level-fail-fast }}
           VERJSON_CI_BUILD_ARTIFACT_ROOT: ${{ runner.temp }}/ci-build-artifact-verified
           VERJSON_CI_BUILD_ARTIFACT_MANIFEST: ${{ runner.temp }}/ci-build-artifact-manifest.json
           DB_ENV: ${{ inputs.db-env }}

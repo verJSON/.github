@@ -346,3 +346,33 @@ ordinary CI may build once and share that build among checks in the same workflo
   compiled at build time, so a cross-environment image also requires runtime
   configuration or separate environment-specific artifacts
   ([official Next.js guidance](https://nextjs.org/docs/pages/guides/environment-variables#bundling-environment-variables-for-the-browser)).
+
+## 2026-10-25 amendment — Level-local fail-fast and trusted entry receipts
+
+- **Issue:** [Verjson/.github#1869](https://github.com/Verjson/.github/issues/1869); this implementation is part of the issue.
+
+### Decision
+
+A typed `test-levels` entry may declare strict boolean `failFast`; omission defaults to `true`. The immutable parsed level carries this value through generated callers, authorization, and both `node-ci.yml` executors. It controls the ordered scripts within a level and does not change GitHub matrix `fail-fast`.
+
+Entries run sequentially in the existing shared workspace. With `failFast: true`, an ordinary candidate nonzero exit prevents later launches and records the remaining entries as `not-run-fail-fast`. With `false`, an ordinary nonzero exit is recorded and later entries run for diagnostics, while the failure remains latched and the level ultimately fails. Later outputs do not attest that earlier scripts passed because entries can change shared workspace state. The workflow does not use `continue-on-error`.
+
+A trusted host supervisor writes versioned JSON receipts for every planned entry and for the plan beneath a fresh private directory in host `RUNNER_TEMP`, outside candidate mounts. Receipts bind repository, event, ref, admitted candidate commit, workflow SHA, run and attempt, job and level, complete ordered plan digest, ordinal, and entry identity. Candidate outcome, host cancellation, supervisor signal, and cleanup are recorded separately. Exclusive no-follow creation and atomic finalization prevent candidate processes from spoofing receipts. Hard kill or runner loss may prevent receipt completion; missing evidence fails the level.
+
+### Trusted execution and cancellation
+
+Both executors run a trusted helper as Bubblewrap PID 1 using `--as-pid-1`. The wrapper verifies PID 1 and successfully sets and reads back `PR_SET_DUMPABLE=0` before starting a candidate. It launches the candidate with `Popen(close_fds=True)` and exclusively waits for that direct child. Candidate output is kept off the wrapper's trusted result stream. The non-dumpable PID 1 boundary prevents the candidate from accessing its file descriptors through `/proc/1/fd` or tracing it.
+
+Bubblewrap's separate `--json-status-fd` stream must contain one ordered `child-pid` event and one matching `exit-code` event. Strict JSON parsing rejects duplicate keys, non-finite values, malformed records, and contradictory or duplicate known events; valid unknown event objects and extra fields are ignored. PID 1 sends bounded TERM and KILL to remaining namespace processes, reaps adopted children, and reports cleanup complete only when no non-init process remains. Cleanup failure is terminal.
+
+The host and PID 1 install SIGINT and SIGTERM handlers while those signals are blocked, then explicitly unblock them; candidates inherit an unblocked mask. Handlers enqueue signals, and every dequeued event passes through one latch helper. The first dequeued signal stays latched even after the queue empties. Candidate self-signals remain candidate outcomes and cannot set host-cancellation or supervisor-signal fields.
+
+Before readiness, PID 1 verifies its PID namespace and enforces the AppArmor profile, zero process capabilities, and `no_new_privs`; it also prepares the candidate environment. The host pins the reported supervisor with a pidfd, sends one launch or abort frame, closes the control pipe to establish EOF, and requires a matching acknowledgement. A final host-signal poll immediately before `Popen` is the launch commit: cancellation during security validation or after ACK but before that poll produces `candidate-not-started`; a signal after the commit is forwarded to the live candidate. If pidfd signaling reports `ESRCH`, the supervisor has exited; the host does not claim forwarding and continues draining status while preserving observed outcome and cleanup evidence.
+
+### Receipt and acceptance rules
+
+The host stages the plan receipt privately, validates one-to-one entry coverage, takes a final host-signal queue cutoff, and publishes acceptance atomically. If cancellation wins before that boundary, the plan is interrupted even when completed entry receipts remain factual, so receipts cannot imply job success. Host interruption, including cancellation before the first entry, marks the remaining suffix `not-run-aborted`, regardless of `failFast`. At most one `interrupted` entry is allowed; it requires no prior terminal receipt and begins the terminal suffix, which may contain only `not-run-aborted` entries. An interrupted plan rejects candidate-terminal and infrastructure-failure entries, preserving infrastructure-failure precedence. `not-run-fail-fast` is reserved for entries skipped after an ordinary nonzero candidate exit with `failFast: true`; if cancellation wins final acceptance, that skipped suffix is reclassified before the interrupted plan receipt is published.
+
+If candidate cleanup fails after a candidate ran, the infrastructure receipt retains `candidateStarted`, its factual return code or signal, the supervisor signal, and failed cleanup. Prelaunch cancellation followed by cleanup failure retains `candidateStarted: false`, no candidate outcome, and host/supervisor provenance. Cleanup-verification exceptions record `cleanup=unverified` and preserve the known candidate outcome and exception cause. An infrastructure plan carries `hostCancellationSignal` only when a matching infrastructure-failure entry with cleanup `failed` or `unverified` carries the same signal; a signal first observed at final cutoff cannot add plan provenance. Candidate `signal` records only candidate-originated signals, and `supervisorSignal` must match host provenance.
+
+Cancellation, timeout, launch, sandbox or boundary failure, cleanup failure, receipt failure, and unexpected supervisor errors are terminal and prevent later launches. Ordinary candidate failures alone may continue with `failFast: false`. Existing credentials, permissions, egress, service, cache, workspace, and matrix behavior remains unchanged. The `false` path stays fail-closed until protected-twin parity, registered tests, independent receipt validation, and GitHub-hosted Bubblewrap acceptance pass. Local source and protected tests do not establish the hosted acceptance gate.

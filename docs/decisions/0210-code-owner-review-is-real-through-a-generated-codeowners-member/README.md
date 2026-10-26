@@ -531,6 +531,17 @@ review decision was `REVIEW_REQUIRED`; the owner's standing admin authority
 was used. This documentation-only ledger update had no ARB or independent
 code-reviewer result recorded.
 
+24. **Admin merge of the GitHub App client-ID preflight.** Verjson/.github#1913
+("fix(security): validate GitHub App client IDs before minting") merged on 2026-10-25
+at head `392f1202558faf05afac155ff4660998a9070e76` and merge commit
+`c9cfdbc09e9caebe094908ab7c6adf178f29613f`. GitHub reports merged by `pyousefi`;
+the rollup has 23 SUCCESS and 11 SKIPPED conclusions, including SUCCESS for
+`AI review authorization`. The PM campaign record says
+`bash scripts/assert-mergeable-head.sh Verjson/.github 1913` ran from fetched clean
+`origin/main` and exited 0; its raw stdout was not retained. Campaign record confirms
+`--admin` was used under the owner's standing authority. GitHub still reports
+`REVIEW_REQUIRED`; no gate was weakened.
+
 ### Exit condition ("CI optimized and working"), measurable
 
 The window closes when all hold, each evidenced in the closing PR:

@@ -9,7 +9,7 @@ runner_temp="$tmp/runner-temp"
 tool_cache="$tmp/tool-cache"
 toolchain="$tool_cache/node/24.19.0"
 mkdir -p "$tmp/home" "$runner_temp" "$toolchain/bin"
-export RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux BWRAP_BINARY="${BWRAP_BINARY:-/usr/bin/bwrap}" HOME="$tmp/home" RUNNER_TEMP="$runner_temp" RUNNER_TOOL_CACHE="$tool_cache" GITHUB_ENV="$runner_temp/_runner_file_commands/GITHUB_ENV"
+export RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux BWRAP_BINARY="${BWRAP_BINARY:-/usr/bin/bwrap}" HOME="$tmp/home" RUNNER_TEMP="$runner_temp" RUNNER_TOOL_CACHE="$tool_cache" GITHUB_ENV="$runner_temp/_runner_file_commands/GITHUB_ENV" GITHUB_OUTPUT="$runner_temp/GITHUB_OUTPUT" CI_ENTRY_REPOSITORY=Verjson/fixture CI_ENTRY_EVENT=pull_request CI_ENTRY_REF=refs/pull/7/merge CI_ENTRY_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa CI_ENTRY_WORKFLOW_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb CI_ENTRY_RUN_ID=42 CI_ENTRY_RUN_ATTEMPT=1 CI_ENTRY_JOB_ID=build-test CI_LEVEL_ID=fixture CI_LEVEL_FAIL_FAST=true
 cat > "$toolchain/bin/node" <<'NODE'
 #!/usr/bin/env bash
 exit 0
@@ -28,11 +28,17 @@ python3 - "$workflow" "$tmp" "$root" <<'PY' \
   && pass "consumer extensions remain validated, credentialless, and canonical" \
   || fail "consumer extension workflow structure violates the secretless contract"
 import ast
+import json
 import os
+import re
+import signal
 import shlex
+import threading
+import shutil
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import yaml
@@ -84,6 +90,95 @@ unset CI_SCRIPT_PLAN
 {run_script}'''
 
 plan_runner = run_with_action_plan(plan["run"])
+after_ack_injection = """_d1_original_after_ack_supervisor = ci_build_artifacts.run_supervised_bubblewrap
+def _d1_cancel_after_ack(*args, **kwargs):
+    import os, signal, threading, time
+    from pathlib import Path
+
+    host_marker = Path(os.environ["GITHUB_WORKSPACE"]) / ".after-ack-ready"
+    sandbox_marker = Path(kwargs["environment"]["GITHUB_WORKSPACE"]) / ".after-ack-ready"
+    stopped = threading.Event()
+    observed = threading.Event()
+    shim = Path(os.environ["RUNNER_TEMP"]) / "bwrap-blocked-signal-mask"
+    shim.write_text(
+        "#!/usr/bin/python3" + chr(10)
+        + "import os,signal,sys" + chr(10)
+        + "signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGINT,signal.SIGTERM})" + chr(10)
+        + "os.execvpe('/usr/bin/bwrap',['/usr/bin/bwrap',*sys.argv[1:]],os.environ)" + chr(10),
+        encoding="utf-8",
+    )
+    shim.chmod(0o700)
+
+    def _signal_after_ack():
+        deadline = time.monotonic() + 10
+        while not stopped.is_set() and time.monotonic() < deadline:
+            if host_marker.is_file():
+                observed.set()
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
+            time.sleep(0.01)
+
+    watcher = threading.Thread(target=_signal_after_ack, daemon=True)
+    watcher.start()
+    kwargs["test_after_ack_marker"] = str(sandbox_marker)
+    arguments = list(args[0])
+    arguments[0] = str(shim)
+    try:
+        return _d1_original_after_ack_supervisor(arguments, *args[1:], **kwargs)
+    finally:
+        stopped.set()
+        watcher.join(timeout=1)
+        if watcher.is_alive() or not observed.is_set():
+            raise AssertionError("host cancellation did not arrive after the launch ACK")
+ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_after_ack"""
+after_ack_source = plan["run"].replace(
+    "ci_build_artifacts.run_script_plan_with_receipts(",
+    after_ack_injection + "\nci_build_artifacts.run_script_plan_with_receipts(",
+    1,
+)
+after_ack_plan_runner = run_with_action_plan(after_ack_source)
+cleanup_injection = """_d1_original_supervisor = ci_build_artifacts.run_supervised_bubblewrap
+def _d1_cancel_cleanup(*args, **kwargs):
+    import os, signal, threading, time
+    from pathlib import Path
+    previous_hook = kwargs.get("test_hook")
+    ready_marker = Path(os.environ["GITHUB_WORKSPACE"]) / ".candidate-ready"
+    cancel_marker = Path(os.environ["GITHUB_WORKSPACE"]) / ".cancel-sent"
+    cancellation_started = None
+    watcher_stopped = threading.Event()
+    def _signal_when_candidate_ready():
+        nonlocal cancellation_started
+        deadline = time.monotonic() + 20
+        while not watcher_stopped.is_set() and time.monotonic() < deadline:
+            if ready_marker.is_file():
+                cancellation_started = time.monotonic()
+                cancel_marker.touch(exist_ok=True)
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
+            time.sleep(0.01)
+    watcher = threading.Thread(target=_signal_when_candidate_ready, daemon=True)
+    watcher.start()
+    def _cancel_on_cleanup(event):
+        if previous_hook is not None:
+            previous_hook(event)
+        if event == "cleanup-start":
+            kwargs["host_signals"].capture(int(signal.SIGTERM))
+    kwargs["test_hook"] = _cancel_on_cleanup
+    try:
+        return _d1_original_supervisor(*args, **kwargs)
+    finally:
+        watcher_stopped.set()
+        watcher.join(timeout=1)
+        if cancellation_started is not None:
+            print(
+                f"LIVE_CANDIDATE_CANCEL_SECONDS={time.monotonic() - cancellation_started:.3f}",
+                file=sys.stderr,
+            )
+ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_cleanup"""
+needle = "ci_build_artifacts.run_script_plan_with_receipts("
+cleanup_source = plan["run"].replace(needle, cleanup_injection + "\n" + needle, 1)
+assert cleanup_source != plan["run"]
+cleanup_plan_runner = run_with_action_plan(cleanup_source)
 assert "inputs.secretless-pr" in rebuild["if"] and "secrets." not in str(rebuild.get("env", {}))
 assert "inputs.secretless-pr" in plan["if"] and "secrets." not in str(plan.get("env", {}))
 assert '"--tmpfs", "/"' in plan["run"]
@@ -95,13 +190,13 @@ assert 'os.execve(str(bubblewrap), arguments,' in rebuild["run"]
 assert 'str(bubblewrap)' in plan["run"]
 assert '"GITHUB_WORKSPACE": sandbox_workspace' in plan["run"]
 assert '"RUNNER_TEMP": "/tmp"' in plan["run"]
-assert 'bind_source(workspace, sandbox_workspace, writable=True)' in plan["run"]
-assert 'bind_source(git_metadata, f"{sandbox_workspace}/.git")' in plan["run"]
+assert 'bind_source(arguments, workspace, sandbox_workspace, writable=True)' in plan["run"]
+assert 'bind_source(arguments, git_metadata, f"{sandbox_workspace}/.git")' in plan["run"]
 assert '"--file", str(global_config_file.fileno()), "/dev/shm/npm-globalconfig"' in plan["run"]
 assert "global_config_file.fileno()" in plan["run"]
 assert '"PATH": f"{node_toolchain_bin}:/usr/bin:/bin"' in plan["run"]
 assert "secretless candidate scripts require a GitHub-hosted Linux runner" in plan["run"]
-assert "env=script_env" in plan["run"]
+assert "environment=script_env" in plan["run"]
 assert plan["env"]["BASH_ENV"] == "/dev/null"
 for command_file in ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"):
     assert f'"{command_file}"' in plan["run"]
@@ -122,12 +217,21 @@ assert plan["env"]["SCRIPT_PLAN_DEFAULT_PLAN"] == "${{ steps.node-ci-script-plan
 assert plan["env"]["SCRIPT_PLAN_ENTRIES_FILE"] == "${{ steps.node-ci-script-plan.outputs.entries-file }}"
 assert "if run_defaults:" in plan["run"]
 assert "inputs.secretless-pr" in plan["if"] and "inputs.secretless-trusted-ref" in plan["if"]
-assert "subprocess.run(" in plan["run"]
+assert "ci_build_artifacts.SANDBOX_SUPERVISOR_ENTRYPOINT" in plan["run"]
+assert "ci_build_artifacts.run_supervised_bubblewrap(" in plan["run"]
+assert '"--as-pid-1"' in plan["run"]
+assert "host_signals = ci_build_artifacts.HostSignalQueue()" in plan["run"]
+assert "\nexec python3 -I - <<'PY'\n" in plan["run"]
+assert "signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT, signal.SIGTERM})" in plan["run"]
+handler_install = plan["run"].index("signal.signal(caught_signal, stop_on_termination)")
+signal_unblock = plan["run"].index("signal.pthread_sigmask(signal.SIG_UNBLOCK")
+assert handler_install < signal_unblock, "source host must install handlers before unblocking signals"
+assert "host_signals.capture(signum)" in plan["run"]
 assert '"--chdir", str(sandbox_directory), "--",' in plan["run"]
 assert '"/usr/bin/python3", "-I", "-c", sandbox_entrypoint' in plan["run"]
 assert "pass_fds=tuple(" in plan["run"]
 assert "global_config_file.fileno()" in plan["run"]
-assert "env=script_env" in plan["run"]
+assert "environment=script_env" in plan["run"]
 for command_file in ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"):
     assert f'"{command_file}"' in plan["run"]
 protected_doc = yaml.safe_load(
@@ -191,16 +295,20 @@ assert {"urlsplit", "credential_component_is_present"} <= loaded_names(
     protected_functions["validate_candidate_service_value"]
 )
 entrypoint_assignment = next(
-    node for node in protected_plan_function.body
+    node.value
+    for node in protected_helper_ast.body
     if isinstance(node, ast.Assign)
     and any(
-        isinstance(target, ast.Name) and target.id == "sandbox_entrypoint"
+        isinstance(target, ast.Name) and target.id == "SANDBOX_SUPERVISOR_ENTRYPOINT"
         for target in node.targets
     )
 )
-sandbox_entrypoint = ast.literal_eval(entrypoint_assignment.value)
-assert "os.closerange(3, max_fd)" in sandbox_entrypoint
-assert "os.execvpe(sys.argv[1], sys.argv[1:], os.environ)" in sandbox_entrypoint
+sandbox_entrypoint = ast.literal_eval(entrypoint_assignment)
+assert "os.getpid() != 1" in sandbox_entrypoint
+assert "libc.prctl(4, 0, 0, 0, 0)" in sandbox_entrypoint
+assert "candidate.wait()" in sandbox_entrypoint
+assert "close_fds=True" in sandbox_entrypoint
+assert "os.waitpid(-1, os.WNOHANG)" in sandbox_entrypoint
 assert '"--tmpfs", "/"' in protected_plan_source
 assert '"--ro-bind", "/", "/"' not in protected_plan_source
 assert 'legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]' in protected_plan_source
@@ -252,7 +360,7 @@ bin_dir.mkdir(parents=True)
 (fixture / ".git").mkdir()
 (fixture / "node_modules").mkdir()
 (fixture / "package.json").write_text(
-    '{"scripts":{"build":"fixture","typecheck":"fixture","test":"fixture","lint":"fixture"}}',
+'{"scripts":{"build":"fixture","typecheck":"fixture","test":"fixture","lint":"fixture","fail":"fixture","spawn":"fixture","after":"fixture","ambiguous":"fixture","self-sigint":"fixture","self-sigterm":"fixture","delete-nested":"fixture","cleanup-cancel":"fixture","live-cancel":"fixture","channel-probe":"fixture"}}',
     encoding="utf-8",
 )
 command_log = fixture / "node_modules" / ".npm-commands"
@@ -281,7 +389,35 @@ node.write_text(
     '  if [[ -v "$name" ]]; then exit 9; fi\n'
     "done\n"
     'mkdir -p "$RUNNER_TEMP/_runner_file_commands"\n'
-    'printf "BASH_ENV=/tmp/hostile-candidate.sh\\n" >> "$RUNNER_TEMP/_runner_file_commands/set_env_probe"\n',
+    'printf "BASH_ENV=/tmp/hostile-candidate.sh\\n" >> "$RUNNER_TEMP/_runner_file_commands/set_env_probe"\n'
+    "    case \" $* \" in\n"
+    "      *' run fail'*) exit 23 ;;\n"
+    "      *' run ambiguous'*) exit 143 ;;\n"
+    "      *self-sigint*) exec /usr/bin/python3 -c 'import os,signal; signal.signal(signal.SIGINT, signal.SIG_DFL); os.kill(os.getpid(), signal.SIGINT)' ;;\n"
+    "      *self-sigterm*) exec /usr/bin/python3 -c 'import os,signal; signal.signal(signal.SIGTERM, signal.SIG_DFL); os.kill(os.getpid(), signal.SIGTERM)' ;;\n"
+    "      *' run delete-nested'*) rm -rf /workspace/nested; exit 23 ;;\n"
+    "      *' run cleanup-cancel'*) /usr/bin/setsid /bin/bash -c 'trap \"\" TERM; while :; do sleep 0.02; done' detached </dev/null >/dev/null 2>&1 & ;;\n"
+    " *' run live-cancel'*)\n"
+    " /usr/bin/python3 -c 'import signal; assert signal.SIGTERM not in signal.pthread_sigmask(signal.SIG_BLOCK, set())' || exit 89\n"
+    "  /usr/bin/setsid /bin/bash -c 'trap \"\" TERM; touch \"$1\"; for _ in {1..1000}; do [[ -f \"$3\" ]] && break; sleep 0.01; done; [[ -f \"$3\" ]] || exit 91; sleep 4; touch \"$2\"; while :; do :; done' detached /workspace/.term-resistant-started /workspace/.term-resistant-late /workspace/.cancel-sent </dev/null >/dev/null 2>&1 &\n"
+    "  for _ in {1..200}; do [[ -f /workspace/.term-resistant-started ]] && break; sleep 0.01; done\n"
+    "  [[ -f /workspace/.term-resistant-started ]] || exit 90\n"
+    "  trap \"\" TERM; touch /workspace/.candidate-ready; while :; do sleep 0.02; done ;;\n"
+    "      *' run channel-probe'*)\n"
+    "        if /bin/cat /proc/1/fd/1 >/dev/null 2>&1; then exit 91; fi\n"
+    "        if printf forged > /proc/1/fd/1 2>/dev/null; then exit 92; fi\n"
+    "        printf '%s\\n' '{\"version\":1,\"pid\":1,\"state\":\"candidate-exit\"}'\n"
+    "        ;;\n"
+    "      *' run nested-after'*) touch /workspace/nested-ran ;;\n"
+    "      *' run spawn'*)\n"
+    '        /usr/bin/setsid /bin/bash -c \'sleep 1; touch "$1"\' detached /workspace/node_modules/.child-late </dev/null >/dev/null 2>&1 &\n'
+    "        /usr/bin/setsid /bin/bash -c 'trap \"\" TERM; kill -STOP $$; sleep 1; touch \"$1\"' detached /workspace/node_modules/.child-stopped-late </dev/null >/dev/null 2>&1 &\n"
+    "        /usr/bin/python3 -c 'import os,signal,sys,time\np=os.fork()\nif p == 0:\n q=os.fork()\n if q: os._exit(0)\n os.setsid()\n signal.signal(signal.SIGTERM, signal.SIG_IGN)\n time.sleep(1)\n open(sys.argv[1],\"w\").close()\n os._exit(0)\nos.waitpid(p,0)' /workspace/node_modules/.child-double-fork-late </dev/null >/dev/null 2>&1 &\n"
+    '        touch /workspace/node_modules/.child-started\n'
+    '        for _ in {1..100}; do [[ -f /workspace/node_modules/.child-started ]] && break; sleep 0.01; done\n'
+    '        [[ -f /workspace/node_modules/.child-started ]] || exit 28 ;;\n'
+    '      *\' run after\'*) sleep 2; [[ ! -f /workspace/node_modules/.child-late && ! -f /workspace/node_modules/.child-stopped-late && ! -f /workspace/node_modules/.child-double-fork-late ]] || exit 29 ;;\n'
+    '    esac\n',
     encoding="utf-8",
 )
 node.chmod(0o755)
@@ -307,11 +443,24 @@ runner_environment.update({
     "GITHUB_WORKSPACE": str(fixture),
     "GITHUB_ENV": str(command_file),
     "GITHUB_OUTPUT": str(fixture / "runner-output"),
+    "VERJSON_CI_OUTPUT_FILE": str(fixture / "runner-output"),
+    "CI_ENTRY_REPOSITORY": "Verjson/fixture",
+    "CI_ENTRY_EVENT": "pull_request",
+    "CI_ENTRY_REF": "refs/pull/7/merge",
+    "CI_ENTRY_COMMIT": "a" * 40,
+    "CI_ENTRY_WORKFLOW_SHA": "b" * 40,
+    "CI_ENTRY_RUN_ID": "42",
+    "CI_ENTRY_RUN_ATTEMPT": "2",
+    "CI_ENTRY_JOB_ID": "build-test",
+    "CI_LEVEL_ID": "test-levels",
+    "CI_LEVEL_FAIL_FAST": "true",
     "DB_ENV": "POSTGRES_PASSWORD=postgres\nDATABASE_URL=postgres://app:pw@127.0.0.1:5432/app\nOPENAI_API_KEY=ci-dummy-key",
     "POSTGRES_PASSWORD": "postgres",
     "DATABASE_URL": "postgres://app:pw@127.0.0.1:5432/app",
     "OPENAI_API_KEY": "ci-dummy-key",
 })
+runner_temp = Path(runner_environment["RUNNER_TEMP"])
+shutil.copyfile(Path(sys.argv[3]) / "scripts/ci_build_artifacts.py", runner_temp / "ci_build_artifacts.py")
 hostile_bash_env = fixture / "hostile-bash-env"
 startup_marker = fixture / "bash-env-sourced"
 hostile_bash_env.write_text(f"printf sourced > {startup_marker}\n", encoding="utf-8")
@@ -375,12 +524,299 @@ assert service_log.read_text(encoding="utf-8").splitlines() == [
 command_log.write_text("", encoding="utf-8")
 service_log.write_text("", encoding="utf-8")
 runner_environment["CI_SCRIPT_PLAN"] = ""
-assert (fixture / "node_modules/.host-path-probes").read_text(encoding="utf-8").splitlines() == [
-    "hidden",
-    "hidden",
-    "hidden",
-    "hidden",
+runner_environment["CI_LEVEL_FAIL_FAST"] = "false"
+runner_environment["CI_SCRIPT_PLAN"] = '["fail","spawn","after"]'
+receipts_before = set(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
+result = subprocess.run(
+    ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", plan_runner],
+    cwd=fixture,
+    env=runner_environment,
+    check=False,
+    capture_output=True,
+    text=True,
+)
+assert result.returncode != 0, "failFast=false must fail the level after ordinary entry failures"
+assert command_log.read_text(encoding="utf-8").splitlines() == [
+    "run fail", "run spawn", "run after"
+], f"failFast=false did not continue through every candidate script: {command_log.read_text(encoding='utf-8')} {result.stderr}"
+assert not (fixture / "node_modules/.child-late").exists(), (
+    "source executor advanced while a detached candidate process could still run"
+)
+receipt_dirs = list(set(runner_temp.glob(".verjson-node-ci-entry-receipts-*")) - receipts_before)
+assert len(receipt_dirs) == 1, "source executor did not leave one trusted receipt directory"
+receipts = [
+    json.loads((receipt_dirs[0] / f"entry-{ordinal:06d}.json").read_text(encoding="utf-8"))
+    for ordinal in range(3)
 ]
+assert [receipt["exitCode"] for receipt in receipts] == [23, 0, 0]
+assert all(receipt["cleanup"] == "verified" for receipt in receipts)
+print("source Bubblewrap executor continued after exit 23 and extinguished the detached child before the next entry")
+runner_environment["CI_SCRIPT_PLAN"] = '["ambiguous","after"]'
+receipts_before = set(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
+command_log.write_text("", encoding="utf-8")
+result = subprocess.run(
+    ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", plan_runner],
+    cwd=fixture, env=runner_environment, check=False, capture_output=True, text=True,
+)
+assert result.returncode != 0
+assert command_log.read_text(encoding="utf-8").splitlines() == ["run ambiguous"]
+receipt_dirs = list(set(runner_temp.glob(".verjson-node-ci-entry-receipts-*")) - receipts_before)
+assert len(receipt_dirs) == 1
+receipts = [
+    json.loads((receipt_dirs[0] / f"entry-{ordinal:06d}.json").read_text(encoding="utf-8"))
+    for ordinal in range(2)
+]
+assert [receipt["state"] for receipt in receipts] == ["candidate-terminal", "not-run-aborted"]
+assert receipts[0]["exitCode"] == 143
+assert receipts[0]["signal"] is None
+assert receipts[0]["candidateStarted"] is True
+print("source Bubblewrap executor treats ambiguous signal-style exits as terminal")
+
+for self_signal, expected_signal in (("sigint", 2), ("sigterm", 15)):
+    runner_environment["CI_SCRIPT_PLAN"] = json.dumps([f"self-{self_signal}", "after"])
+    runner_environment["CI_LEVEL_FAIL_FAST"] = "false"
+    receipts_before = set(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
+    command_log.write_text("", encoding="utf-8")
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", plan_runner],
+        cwd=fixture, env=runner_environment, check=False, capture_output=True, text=True,
+    )
+    assert result.returncode != 0, result.stderr
+    assert command_log.read_text(encoding="utf-8").splitlines() == [f"run self-{self_signal}"]
+    receipt_dirs = list(set(runner_temp.glob(".verjson-node-ci-entry-receipts-*")) - receipts_before)
+    assert len(receipt_dirs) == 1
+    receipts = [
+        json.loads((receipt_dirs[0] / f"entry-{ordinal:06d}.json").read_text(encoding="utf-8"))
+        for ordinal in range(2)
+    ]
+    assert [receipt["state"] for receipt in receipts] == ["candidate-terminal", "not-run-aborted"]
+    assert receipts[0]["candidateStarted"] is True
+    assert receipts[0]["signal"] == expected_signal
+    assert receipts[0]["hostCancellationSignal"] is None
+    assert receipts[0]["supervisorSignal"] is None
+    plan_receipt = json.loads((receipt_dirs[0] / "plan.json").read_text(encoding="utf-8"))
+    assert plan_receipt["state"] == "infrastructure-failure"
+    print(f"source Bubblewrap executor treats candidate self-{self_signal} as terminal without host cancellation")
+
+nested_manifest = fixture / "nested"
+nested_manifest.mkdir()
+(nested_manifest / "package.json").write_text(
+    json.dumps({"scripts": {"nested-after": "true"}}), encoding="utf-8"
+)
+runner_environment["CI_SCRIPT_PLAN"] = '["delete-nested"]'
+runner_environment["NESTED_MANIFESTS"] = json.dumps([
+    {"path": "nested", "approvedPackages": [], "scriptPlan": ["nested-after"]}
+])
+receipts_before = set(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
+command_log.write_text("", encoding="utf-8")
+result = subprocess.run(
+    ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", plan_runner],
+    cwd=fixture, env=runner_environment, check=False, capture_output=True, text=True,
+)
+assert result.returncode != 0
+assert command_log.read_text(encoding="utf-8").splitlines() == ["run delete-nested"]
+assert not (fixture / "nested-ran").exists()
+receipt_dirs = list(set(runner_temp.glob(".verjson-node-ci-entry-receipts-*")) - receipts_before)
+assert len(receipt_dirs) == 1
+receipts = [
+    json.loads((receipt_dirs[0] / f"entry-{ordinal:06d}.json").read_text(encoding="utf-8"))
+    for ordinal in range(2)
+]
+assert [receipt["state"] for receipt in receipts] == ["completed", "infrastructure-failure"]
+assert not (fixture / "nested").exists()
+print("source Bubblewrap executor stops after deleted-cwd startup failure")
+runner_environment["NESTED_MANIFESTS"] = ""
+runner_environment["CI_SCRIPT_PLAN"] = '["fail","after"]'
+runner_environment["CI_LEVEL_FAIL_FAST"] = "true"
+command_log.write_text("", encoding="utf-8")
+receipts_before = set(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
+result = subprocess.run(
+    ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", plan_runner],
+    cwd=fixture,
+    env=runner_environment,
+    check=False,
+    capture_output=True,
+    text=True,
+)
+assert result.returncode != 0, f"failFast=true must fail after an ordinary entry failure: {result.stderr}"
+assert command_log.read_text(encoding="utf-8").splitlines() == ["run fail"], result.stderr
+receipt_dirs = list(set(runner_temp.glob(".verjson-node-ci-entry-receipts-*")) - receipts_before)
+assert len(receipt_dirs) == 1
+receipts = [
+    json.loads((receipt_dirs[0] / f"entry-{ordinal:06d}.json").read_text(encoding="utf-8"))
+    for ordinal in range(2)
+]
+assert [receipt["state"] for receipt in receipts] == ["completed", "not-run-fail-fast"]
+assert receipts[1]["exitCode"] is None and receipts[1]["signal"] is None, receipts[1]
+print("source Bubblewrap executor records not-run receipts when fail-fast is enabled")
+runner_environment["CI_SCRIPT_PLAN"] = '["cleanup-cancel","after"]'
+runner_environment["CI_LEVEL_FAIL_FAST"] = "false"
+command_log.write_text("", encoding="utf-8")
+receipts_before = set(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
+result = subprocess.run(
+    ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", cleanup_plan_runner],
+    cwd=fixture,
+    env=runner_environment,
+    check=False,
+    capture_output=True,
+    text=True,
+)
+assert result.returncode != 0, "cleanup-time cancellation must fail the source script plan"
+assert command_log.read_text(encoding="utf-8").splitlines() == ["run cleanup-cancel"], result.stderr
+receipt_dirs = list(set(runner_temp.glob(".verjson-node-ci-entry-receipts-*")) - receipts_before)
+assert len(receipt_dirs) == 1
+plan_receipt = json.loads((receipt_dirs[0] / "plan.json").read_text(encoding="utf-8"))
+assert plan_receipt["state"] == "interrupted", (plan_receipt, receipts)
+assert plan_receipt["hostCancellationSignal"] == 15, plan_receipt
+receipts = [
+    json.loads((receipt_dirs[0] / f"entry-{ordinal:06d}.json").read_text(encoding="utf-8"))
+    for ordinal in range(2)
+]
+assert receipts[0]["state"] == "interrupted", receipts[0]
+assert receipts[1]["state"] == "not-run-aborted", receipts[1]
+assert receipts[0]["candidateStarted"] is True, receipts[0]
+assert receipts[0]["exitCode"] == 0 and receipts[0]["cleanup"] == "verified", receipts[0]
+assert receipts[0]["hostCancellationSignal"] == 15, receipts[0]
+assert receipts[0]["signal"] is None and receipts[0]["supervisorSignal"] == 15, receipts[0]
+print("source Bubblewrap executor invalidates the plan when cancellation arrives during cleanup")
+runner_environment["CI_SCRIPT_PLAN"] = '["cleanup-cancel","after"]'
+runner_environment["CI_LEVEL_FAIL_FAST"] = "false"
+command_log.write_text("", encoding="utf-8")
+receipts_before = set(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
+blocked_mask_exec = (
+    "import os,signal,sys; "
+    "signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGINT,signal.SIGTERM}); "
+    "os.execvpe(sys.argv[1],sys.argv[1:],os.environ)"
+)
+result = subprocess.run(
+
+    [sys.executable, "-c", blocked_mask_exec, "bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", after_ack_plan_runner],
+
+    cwd=fixture,
+    env=runner_environment,
+    check=False,
+    capture_output=True,
+    text=True,
+)
+assert result.returncode != 0, "after-ACK host cancellation must fail the source script plan"
+assert command_log.read_text(encoding="utf-8").splitlines() == [], result.stderr
+assert not (fixture / ".after-ack-ready").exists(), result.stderr
+receipt_dirs = list(set(runner_temp.glob(".verjson-node-ci-entry-receipts-*")) - receipts_before)
+assert len(receipt_dirs) == 1, (result.stdout, result.stderr, list(runner_temp.iterdir()))
+plan_receipt = json.loads((receipt_dirs[0] / "plan.json").read_text(encoding="utf-8"))
+assert plan_receipt["state"] == "interrupted", (plan_receipt, receipts)
+assert plan_receipt["hostCancellationSignal"] == 15, plan_receipt
+receipts = [
+    json.loads((receipt_dirs[0] / f"entry-{ordinal:06d}.json").read_text(encoding="utf-8"))
+    for ordinal in range(2)
+]
+assert [receipt["state"] for receipt in receipts] == ["interrupted", "not-run-aborted"], receipts
+assert receipts[0]["candidateStarted"] is False, receipts[0]
+assert receipts[0]["exitCode"] is None and receipts[0]["signal"] is None, receipts[0]
+assert receipts[0]["hostCancellationSignal"] == 15, receipts[0]
+assert receipts[0]["supervisorSignal"] == 15, receipts[0]
+assert receipts[0]["cleanup"] == "verified", receipts[0]
+print("source Bubblewrap executor aborts after ACK without starting the candidate")
+pending_mask_exec = (
+    "import os,signal,sys; "
+    "signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGINT,signal.SIGTERM}); "
+    "os.kill(os.getpid(),signal.SIGTERM); "
+    "os.execvpe(sys.argv[1],sys.argv[1:],os.environ)"
+)
+runner_environment["CI_SCRIPT_PLAN"] = '["build","typecheck"]'
+runner_environment["VERJSON_CI_TEST_PENDING_HOST_SIGNAL"] = "1"
+command_log.write_text("", encoding="utf-8")
+receipts_before = set(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
+result = subprocess.run(
+    [sys.executable, "-c", pending_mask_exec, "bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", plan_runner],
+    cwd=fixture,
+    env=runner_environment,
+    check=False,
+    capture_output=True,
+    text=True,
+)
+assert result.returncode != 0, result.stderr
+assert command_log.read_text(encoding="utf-8").splitlines() == [], result.stderr
+receipt_dirs = list(set(runner_temp.glob(".verjson-node-ci-entry-receipts-*")) - receipts_before)
+assert len(receipt_dirs) == 1, (result.stdout, result.stderr)
+plan_receipt = json.loads((receipt_dirs[0] / "plan.json").read_text(encoding="utf-8"))
+receipts = [json.loads((receipt_dirs[0] / f"entry-{ordinal:06d}.json").read_text(encoding="utf-8")) for ordinal in range(2)]
+assert plan_receipt["state"] == "interrupted", (plan_receipt, receipts)
+assert plan_receipt["hostCancellationSignal"] == 15, plan_receipt
+assert [receipt["state"] for receipt in receipts] == ["interrupted", "not-run-aborted"], receipts
+assert not receipts[0]["candidateStarted"], receipts[0]
+print("source host captures pending SIGTERM after installing its handler")
+runner_environment.pop("VERJSON_CI_TEST_PENDING_HOST_SIGNAL", None)
+runner_environment["CI_SCRIPT_PLAN"] = '["live-cancel","after"]'
+runner_environment["CI_LEVEL_FAIL_FAST"] = "false"
+command_log.write_text("", encoding="utf-8")
+receipts_before = set(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
+result = subprocess.run(
+    [sys.executable, "-c", blocked_mask_exec, "bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", cleanup_plan_runner],
+    cwd=fixture,
+    env=runner_environment,
+    check=False,
+    capture_output=True,
+    text=True,
+)
+try:
+    assert result.returncode != 0, result.stderr
+    assert command_log.read_text(encoding="utf-8").splitlines() == ["run live-cancel"], result.stderr
+    assert (fixture / ".candidate-ready").is_file(), result.stderr
+    assert (fixture / ".term-resistant-started").is_file(), result.stderr
+    elapsed_match = re.search(r"LIVE_CANDIDATE_CANCEL_SECONDS=([0-9.]+)", result.stderr)
+    assert elapsed_match is not None, result.stderr
+    assert float(elapsed_match.group(1)) >= 0.45, result.stderr
+    receipt_dirs = list(set(runner_temp.glob(".verjson-node-ci-entry-receipts-*")) - receipts_before)
+    assert len(receipt_dirs) == 1
+    plan_receipt = json.loads((receipt_dirs[0] / "plan.json").read_text(encoding="utf-8"))
+    assert plan_receipt["state"] == "interrupted", plan_receipt
+    assert plan_receipt["hostCancellationSignal"] == 15, plan_receipt
+    receipts = [
+        json.loads((receipt_dirs[0] / f"entry-{ordinal:06d}.json").read_text(encoding="utf-8"))
+        for ordinal in range(2)
+    ]
+    assert [receipt["state"] for receipt in receipts] == ["interrupted", "not-run-aborted"], receipts
+    assert receipts[0]["candidateStarted"] is True, receipts[0]
+    assert receipts[0]["exitCode"] is None and receipts[0]["signal"] == 9, receipts[0]
+    assert receipts[0]["hostCancellationSignal"] == 15, receipts[0]
+    assert receipts[0]["supervisorSignal"] == 15, receipts[0]
+    assert receipts[0]["cleanup"] == "verified", receipts[0]
+finally:
+    time.sleep(2.2)
+    late_descendant_survived = (fixture / ".term-resistant-late").exists()
+    second_entry_ran = (fixture / "second-ran").exists()
+    (fixture / ".candidate-ready").unlink(missing_ok=True)
+    (fixture / ".cancel-sent").unlink(missing_ok=True)
+    assert not late_descendant_survived, "TERM-resistant descendant wrote after supervisor return"
+    assert not second_entry_ran, "plan launched the next entry after cancellation"
+print("source Bubblewrap executor interrupts live candidate and extinguishes descendants")
+runner_environment["CI_SCRIPT_PLAN"] = '["channel-probe"]'
+runner_environment["CI_LEVEL_FAIL_FAST"] = "true"
+command_log.write_text("", encoding="utf-8")
+receipts_before = set(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
+result = subprocess.run(
+    ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", plan_runner],
+    cwd=fixture,
+    env=runner_environment,
+    check=False,
+    capture_output=True,
+    text=True,
+)
+assert result.returncode == 0, result.stderr
+assert command_log.read_text(encoding="utf-8").splitlines() == ["run channel-probe"]
+receipt_dirs = list(set(runner_temp.glob(".verjson-node-ci-entry-receipts-*")) - receipts_before)
+assert len(receipt_dirs) == 1
+entry_receipt = json.loads((receipt_dirs[0] / "entry-000000.json").read_text(encoding="utf-8"))
+plan_receipt = json.loads((receipt_dirs[0] / "plan.json").read_text(encoding="utf-8"))
+assert entry_receipt["state"] == "completed" and entry_receipt["exitCode"] == 0
+assert plan_receipt["state"] == "accepted"
+# The PID 1 sandbox redirects candidate stdout to host stderr; receipt assertions below
+# verify this untrusted JSON never becomes the supervisor's result record.
+assert '\"state\":\"candidate-exit\"' in result.stderr, (result.stdout, result.stderr)
+print("source Bubblewrap executor blocks candidate access to and spoofing of the supervisor channel")
+host_path_probes = (fixture / "node_modules/.host-path-probes").read_text(encoding="utf-8").splitlines()
+assert host_path_probes == ["hidden"] * 15, host_path_probes
 print("consumer sandbox hides runner home and Docker socket paths")
 print("secretless default plan scopes service variables to the test script")
 assert inputs["db-image"]["default"] == ""
@@ -783,7 +1219,7 @@ rm -f "$rehearsal/started"
     CI_SCRIPT_PLAN='["linger"]' exec bash "$tmp/plan.sh") > "$tmp/linger-output.log" 2>&1 &
 linger_shell=$!
 for _ in $(seq 1 300); do [ -e "$rehearsal/started" ] && break; sleep 0.1; done
-# The step's interpreter is the plan shell's python3 child.
+# The step interpreter either remains a shell child or replaces the plan shell.
 linger_step="$(python3 -I - "$linger_shell" <<'PY'
 import sys
 from pathlib import Path
@@ -797,7 +1233,7 @@ for entry in Path("/proc").iterdir():
         command = (entry / "comm").read_text().strip()
     except (OSError, IndexError):
         continue
-    if parent == shell and command.startswith("python3"):
+    if (parent == shell or entry.name == shell) and command.startswith("python3"):
         print(entry.name)
 PY
 )"

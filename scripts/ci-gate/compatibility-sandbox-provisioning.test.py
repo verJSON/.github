@@ -8,8 +8,10 @@ import pathlib
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
+import textwrap
 import types
 import warnings
 
@@ -104,6 +106,87 @@ def extract_probe(source):
     if match is None:
         raise ContractError("unprivileged namespace probe missing")
     return match.group("body")
+
+
+def bubblewrap_status_parser(source):
+    match = re.search(
+        r"python3 -I - \"\$status_file\" \"\$status_code\" <<'PY'\n(?P<body>.*?)\n\s*PY(?:\n|$)",
+        extract_probe(source),
+        re.S,
+    )
+    if match is None:
+        raise ContractError("extensible Bubblewrap status parser missing")
+    return textwrap.dedent(match.group("body")).strip() + "\n"
+
+
+def validate_bubblewrap_status_probe_behavior(node, actions):
+    protected = load(ROOT / ".github/workflows/node-ci-protected.yml")
+    protected_step = next(
+        step
+        for step in protected["jobs"]["build-test"]["steps"]
+        if step.get("name") == PROVISION
+    )
+    parsers = {
+        "node-ci.yml": bubblewrap_status_parser(provision_step(node, "node")["run"]),
+        "node-ci-protected.yml": bubblewrap_status_parser(protected_step["run"]),
+        "actions-ci.yml": bubblewrap_status_parser(provision_step(actions, "actions")["run"]),
+    }
+    if len(set(parsers.values())) != 1:
+        raise ContractError("Bubblewrap status parser drifted across workflow executors")
+    parser = next(iter(parsers.values()))
+
+    def accepts(data, expected_status=0):
+        with tempfile.TemporaryDirectory(prefix="bwrap status probe ") as temporary:
+            status_path = pathlib.Path(temporary) / "status.jsonl"
+            status_path.write_bytes(data)
+            result = subprocess.run(
+                [sys.executable, "-I", "-", str(status_path), str(expected_status)],
+                input=parser,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
+            return result.returncode == 0
+
+    valid = (
+        b'{"future-before":{"enabled":true}}\n'
+        b'{"child-pid":123,"namespace-pid":7}\n'
+        b'{"future-middle":null}\n'
+        b'{"exit-code":0,"namespace-status":"ok"}\n'
+        b'{"future-after":[]}\n'
+    )
+    if not accepts(valid):
+        raise ContractError("Bubblewrap status parser rejected unknown valid events or fields")
+
+    invalid = {
+        "missing child-pid": b'{"exit-code":0}\n',
+        "missing exit-code": b'{"child-pid":123}\n',
+        "duplicate child-pid": b'{"child-pid":123}\n{"child-pid":124}\n{"exit-code":0}\n',
+        "duplicate exit-code": b'{"child-pid":123}\n{"exit-code":0}\n{"exit-code":0}\n',
+        "reversed events": b'{"exit-code":0}\n{"child-pid":123}\n',
+        "contradictory event": b'{"child-pid":123,"exit-code":0}\n',
+        "boolean child-pid": b'{"child-pid":true}\n{"exit-code":0}\n',
+        "fractional exit-code": b'{"child-pid":123}\n{"exit-code":0.0}\n',
+        "duplicate JSON key": b'{"child-pid":123,"child-pid":124}\n{"exit-code":0}\n',
+        "nested duplicate JSON key": b'{"future":{"x":1,"x":2}}\n{"child-pid":123}\n{"exit-code":0}\n',
+        "NaN": b'{"future":NaN}\n{"child-pid":123}\n{"exit-code":0}\n',
+        "Infinity": b'{"future":Infinity}\n{"child-pid":123}\n{"exit-code":0}\n',
+        "malformed JSON": b'{"child-pid":123}\nnot-json\n{"exit-code":0}\n',
+        "blank record": b'{"child-pid":123}\n\n{"exit-code":0}\n',
+        "missing final newline": b'{"child-pid":123}\n{"exit-code":0}',
+        "invalid UTF-8": b'{"child-pid":123}\n\xff\n{"exit-code":0}\n',
+        "oversized file": b"x" * (16 * 1024 + 1),
+        "oversized line": b'{"future":"' + b"x" * 4096 + b'"}\n{"child-pid":123}\n{"exit-code":0}\n',
+        "too many records": b'{}\n' * 65 + b'{"child-pid":123}\n{"exit-code":0}\n',
+        "receipt/process mismatch": b'{"child-pid":123}\n{"exit-code":0}\n',
+        "nonzero probe status": b'{"child-pid":123}\n{"exit-code":23}\n',
+    }
+    for reason, data in invalid.items():
+        expected_status = 1 if reason == "receipt/process mismatch" else 0
+        if accepts(data, expected_status):
+            raise ContractError(f"Bubblewrap status parser accepted {reason}")
+    print("ok - extensible Bubblewrap JSON status probes reject malformed or contradictory evidence")
 
 
 def extract_shell_function(source, name):
@@ -1207,7 +1290,7 @@ def validate_source(source):
         if forbidden_path in source[supervisor_start:supervisor_end]:
             raise ContractError("root supervisor filesystem path introduced")
     for forbidden_path in ("RUNNER_TEMP", "mktemp", "unlink", "rmdir"):
-        if forbidden_path in source:
+        if forbidden_path in source[supervisor_start:supervisor_end]:
             raise ContractError("runner-owned verifier capture path remains")
     validate_isolated_python(source)
     validate_root_supervisor_boundary(source)
@@ -1419,11 +1502,22 @@ def validate_source(source):
         "--die-with-parent": "probe parent lifetime binding missing",
         "--new-session": "probe session isolation missing",
         "--cap-drop ALL": "probe capability drop missing",
+        "--json-status-fd 3": "Bubblewrap JSON status feature probe missing",
+        'status_file="$(mktemp "$RUNNER_TEMP/bwrap-json-status.XXXXXX")"': "private JSON status file missing",
         "--ro-bind / /": "probe read-only root missing",
         "--dev /dev": "probe device isolation missing",
         "--proc /proc": "probe proc isolation missing",
         "--tmpfs /dev/shm": "probe shared-memory isolation missing",
-        "-- /usr/bin/true >/dev/null 2>&1": "probe fixed diagnostic boundary missing",
+        '-- /usr/bin/true 3>"$status_file" >/dev/null 2>&1': "probe fixed diagnostic boundary missing",
+        '"$status_code" <<\'PY\'': "probe must bind the process exit status",
+        "MAX_STATUS_BYTES": "Bubblewrap status byte bound missing",
+        "MAX_STATUS_LINE_BYTES": "Bubblewrap status line bound missing",
+        "MAX_STATUS_RECORDS": "Bubblewrap status record bound missing",
+        "object_pairs_hook=reject_duplicate_keys": "Bubblewrap duplicate-key rejection missing",
+        "parse_constant=reject_nonfinite": "Bubblewrap non-finite JSON rejection missing",
+        'known_events = {"child-pid", "exit-code"}.intersection(record)': "Bubblewrap known-event validation missing",
+        'events != ["child-pid", "exit-code"]': "Bubblewrap event order or cardinality validation missing",
+        "exit_code != expected_status": "Bubblewrap process-status match missing",
     }
     for needle, reason in probe_requirements.items():
         require(probe, needle, reason)
@@ -1630,6 +1724,7 @@ def replace_mirrored_nth(node, actions, old, new, occurrence):
 
 node_document = load(ROOT / ".github/workflows/node-ci.yml")
 actions_document = load(ROOT / ".github/workflows/actions-ci.yml")
+validate_bubblewrap_status_probe_behavior(node_document, actions_document)
 validate(node_document, actions_document)
 
 

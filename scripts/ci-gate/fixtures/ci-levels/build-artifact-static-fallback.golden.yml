@@ -54,10 +54,12 @@ jobs:
     uses: Verjson/.github/.github/workflows/node-ci.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     with:
       build-artifact-role: "producer"
+      ci-level-id: "build"
+      ci-level-fail-fast: true
       secretless-pr: ${{ github.event_name == 'pull_request' }}
       secretless-trusted-ref: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
       build-artifact-plan-json: ${{ needs.artifact-preflight.outputs.build-artifact-producer-plan }}
-      build-artifact-authorization-plan-json: "{\"version\":1,\"pushBranches\":[\"main\"],\"secrets\":[\"NODE_AUTH_TOKEN\"],\"levels\":[{\"id\":\"build\",\"needs\":[],\"events\":null,\"branches\":null,\"inputs\":{}},{\"id\":\"test\",\"needs\":[{\"level\":\"build\",\"condition\":\"success\"}],\"events\":[\"push\"],\"branches\":null,\"inputs\":{}}],\"buildArtifact\":{\"producer\":\"build\",\"consumers\":[\"test\"],\"paths\":[\".next\"]}}"
+      build-artifact-authorization-plan-json: "{\"version\":1,\"pushBranches\":[\"main\"],\"secrets\":[\"NODE_AUTH_TOKEN\"],\"levels\":[{\"id\":\"build\",\"needs\":[],\"events\":null,\"branches\":null,\"inputs\":{},\"failFast\":true},{\"id\":\"test\",\"needs\":[{\"level\":\"build\",\"condition\":\"success\"}],\"events\":[\"push\"],\"branches\":null,\"inputs\":{},\"failFast\":true}],\"buildArtifact\":{\"producer\":\"build\",\"consumers\":[\"test\"],\"paths\":[\".next\"]}}"
       build-artifact-needs-results: ${{ needs.artifact-preflight.outputs.build-artifact-needs-results }}
       build-artifact-profile: ${{ needs.artifact-preflight.outputs.build-artifact-profile }}
       build-artifact-paths: ${{ needs.artifact-preflight.outputs.build-artifact-export-paths }}
@@ -77,10 +79,12 @@ jobs:
       statuses: read
     uses: Verjson/.github/.github/workflows/node-ci.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     with:
+      ci-level-id: "build"
+      ci-level-fail-fast: true
       secretless-pr: ${{ github.event_name == 'pull_request' }}
       secretless-trusted-ref: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
       build-artifact-role: ${{ github.run_attempt == '1' && needs.artifact-preflight.outputs.build-artifact-share-selected == 'true' && needs.artifact-producer.result == 'success' && needs.artifact-producer.outputs.build-artifact-share-available == 'true' && 'consumer' || 'level' }}
-      build-artifact-authorization-plan-json: "{\"version\":1,\"pushBranches\":[\"main\"],\"secrets\":[\"NODE_AUTH_TOKEN\"],\"levels\":[{\"id\":\"build\",\"needs\":[],\"events\":null,\"branches\":null,\"inputs\":{}},{\"id\":\"test\",\"needs\":[{\"level\":\"build\",\"condition\":\"success\"}],\"events\":[\"push\"],\"branches\":null,\"inputs\":{}}],\"buildArtifact\":{\"producer\":\"build\",\"consumers\":[\"test\"],\"paths\":[\".next\"]}}"
+      build-artifact-authorization-plan-json: "{\"version\":1,\"pushBranches\":[\"main\"],\"secrets\":[\"NODE_AUTH_TOKEN\"],\"levels\":[{\"id\":\"build\",\"needs\":[],\"events\":null,\"branches\":null,\"inputs\":{},\"failFast\":true},{\"id\":\"test\",\"needs\":[{\"level\":\"build\",\"condition\":\"success\"}],\"events\":[\"push\"],\"branches\":null,\"inputs\":{},\"failFast\":true}],\"buildArtifact\":{\"producer\":\"build\",\"consumers\":[\"test\"],\"paths\":[\".next\"]}}"
       build-artifact-needs-results: ${{ needs.artifact-preflight.outputs.build-artifact-needs-results }}
       build-artifact-level-id: "build"
       build-artifact-consumer-plans: ${{ needs.artifact-preflight.outputs.build-artifact-consumer-plans }}
@@ -104,10 +108,12 @@ jobs:
       statuses: read
     uses: Verjson/.github/.github/workflows/node-ci.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     with:
+      ci-level-id: "test"
+      ci-level-fail-fast: true
       secretless-pr: ${{ github.event_name == 'pull_request' }}
       secretless-trusted-ref: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
       build-artifact-role: ${{ github.run_attempt == '1' && needs.artifact-preflight.outputs.build-artifact-share-selected == 'true' && needs.artifact-producer.result == 'success' && needs.artifact-producer.outputs.build-artifact-share-available == 'true' && 'consumer' || 'level' }}
-      build-artifact-authorization-plan-json: "{\"version\":1,\"pushBranches\":[\"main\"],\"secrets\":[\"NODE_AUTH_TOKEN\"],\"levels\":[{\"id\":\"build\",\"needs\":[],\"events\":null,\"branches\":null,\"inputs\":{}},{\"id\":\"test\",\"needs\":[{\"level\":\"build\",\"condition\":\"success\"}],\"events\":[\"push\"],\"branches\":null,\"inputs\":{}}],\"buildArtifact\":{\"producer\":\"build\",\"consumers\":[\"test\"],\"paths\":[\".next\"]}}"
+      build-artifact-authorization-plan-json: "{\"version\":1,\"pushBranches\":[\"main\"],\"secrets\":[\"NODE_AUTH_TOKEN\"],\"levels\":[{\"id\":\"build\",\"needs\":[],\"events\":null,\"branches\":null,\"inputs\":{},\"failFast\":true},{\"id\":\"test\",\"needs\":[{\"level\":\"build\",\"condition\":\"success\"}],\"events\":[\"push\"],\"branches\":null,\"inputs\":{},\"failFast\":true}],\"buildArtifact\":{\"producer\":\"build\",\"consumers\":[\"test\"],\"paths\":[\".next\"]}}"
       build-artifact-needs-results: ${{ needs.artifact-preflight.outputs.build-artifact-needs-results }}
       build-artifact-level-id: "test"
       build-artifact-consumer-plans: ${{ needs.artifact-preflight.outputs.build-artifact-consumer-plans }}

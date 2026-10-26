@@ -21,6 +21,8 @@ jobs:
       statuses: read
     uses: Verjson/.github/.github/workflows/node-ci.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     with:
+      ci-level-id: "lint"
+      ci-level-fail-fast: true
       secretless-pr: true
     secrets:
       NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
@@ -32,6 +34,8 @@ jobs:
       statuses: read
     uses: Verjson/.github/.github/workflows/node-ci.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     with:
+      ci-level-id: "unit"
+      ci-level-fail-fast: true
       node-version: "22"
     secrets:
       NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
@@ -44,6 +48,9 @@ jobs:
       packages: read
       statuses: read
     uses: Verjson/.github/.github/workflows/node-ci.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    with:
+      ci-level-id: "integration"
+      ci-level-fail-fast: true
     secrets:
       NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
 
@@ -55,6 +62,9 @@ jobs:
       packages: read
       statuses: read
     uses: Verjson/.github/.github/workflows/node-ci.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    with:
+      ci-level-id: "diagnostics"
+      ci-level-fail-fast: true
     secrets:
       NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
 
@@ -66,6 +76,9 @@ jobs:
       packages: read
       statuses: read
     uses: Verjson/.github/.github/workflows/node-ci.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    with:
+      ci-level-id: "release-gate"
+      ci-level-fail-fast: true
     secrets:
       NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
 

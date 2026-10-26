@@ -13,6 +13,7 @@ python3 - "$workflow" "$docs" <<'PY' \
   && pass "trusted-ref mode reuses the bounded secretless pipeline" \
   || fail "trusted-ref mode does not preserve the secretless pipeline boundary"
 import sys
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -62,6 +63,47 @@ install = next(step for step in steps if step.get("name") == "Install from verif
 rebuild = next(step for step in steps if step.get("name") == "Rebuild exact approved lifecycle packages without credentials")
 provision = next(step for step in steps if step.get("name") == "Provision trusted compatibility sandbox")
 plan = next(step for step in steps if step.get("name") == "Run exact credentialless consumer script plan")
+fail_fast_guard = next(
+    step for step in steps if step.get("name") == "Reject unsupported level-local fail-fast mode"
+)
+helper_download = next(
+    step for step in steps if step.get("name") == "Download trusted script-plan receipt supervisor"
+)
+assert steps.index(fail_fast_guard) == 1
+assert fail_fast_guard["env"] == {
+    "CI_LEVEL_FAIL_FAST_JSON": "${{ toJSON(inputs.ci-level-fail-fast) }}",
+    "CI_LEVEL_SECRETLESS_PR_JSON": "${{ toJSON(inputs.secretless-pr) }}",
+    "CI_LEVEL_SECRETLESS_TRUSTED_REF_JSON": "${{ toJSON(inputs.secretless-trusted-ref) }}",
+}
+assert steps.index(fail_fast_guard) < steps.index(plan)
+assert steps.index(fail_fast_guard) < min(
+    steps.index(step)
+    for step in steps
+    if step.get("run") in ("npm run build", "npm run typecheck --if-present", "npm test", "npm run lint --if-present")
+)
+assert helper_download["env"]["JOB_WORKFLOW_SHA"] == "${{ fromJSON(toJSON(job)).workflow_sha }}"
+assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in helper_download["if"]
+assert "${JOB_WORKFLOW_SHA}/scripts/ci_build_artifacts.py" in helper_download["run"]
+assert '"$RUNNER_TEMP/ci_build_artifacts.py"' in helper_download["run"]
+assert steps.index(helper_download) < steps.index(plan)
+
+def run_fail_fast_guard(fail_fast, secretless_pr, trusted_ref):
+    environment = {
+        "CI_LEVEL_FAIL_FAST_JSON": fail_fast,
+        "CI_LEVEL_SECRETLESS_PR_JSON": secretless_pr,
+        "CI_LEVEL_SECRETLESS_TRUSTED_REF_JSON": trusted_ref,
+    }
+    return subprocess.run(
+        ["/usr/bin/bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", fail_fast_guard["run"]],
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+assert run_fail_fast_guard("false", "false", "false").returncode != 0
+assert run_fail_fast_guard("false", "true", "false").returncode == 0
+assert run_fail_fast_guard("false", "false", "true").returncode == 0
+assert run_fail_fast_guard("true", "false", "false").returncode == 0
 for step in (restore, install, rebuild, plan):
     assert "inputs.secretless-pr || inputs.secretless-trusted-ref" in step["if"]
 for name in ("GH_TOKEN", "GITHUB_TOKEN", "NODE_AUTH_TOKEN", "NPM_TOKEN",
@@ -103,7 +145,7 @@ assert 'npm_command = [str(node_command), npm_cli_command]' in plan["run"]
 assert 'npm_command = [str(resolved_npm_executable)]' in plan["run"]
 assert '"--chdir", str(sandbox_directory), "--",' in plan["run"]
 assert '*npm_command, "run", name,' in plan["run"]
-assert "subprocess.run(" in plan["run"] and "pass_fds=tuple(" in plan["run"]
+assert "run_script_plan_with_receipts(" in plan["run"] and "pass_fds=tuple(" in plan["run"]
 assert "global_config_file.fileno()" in plan["run"]
 
 for command in ("npm run build", "npm run typecheck --if-present", "npm test", "npm run lint --if-present"):

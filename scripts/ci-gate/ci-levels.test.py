@@ -460,10 +460,15 @@ class ValidatorTests(unittest.TestCase):
                 ci_levels.parse_levels(text, KNOWN, SECRETS)
             self.assertEqual(ctx.exception.errors[0].code, code)
 
-    def test_malformed_booleans_are_rejected_and_fail_fast_false_is_not_yet_supported(self):
+    def test_malformed_booleans_are_rejected_and_fail_fast_false_is_preserved(self):
         self.assertEqual(codes(levels({"id": "a", "failFast": "true"})), ["bad_type"])
         self.assertEqual(codes(levels({"id": "a", "failFast": 1})), ["bad_type"])
-        self.assertEqual(codes(levels({"id": "a", "failFast": False})), ["fail_fast_unsupported"])
+        parsed = ci_levels.parse_levels(
+            json.dumps({"version": 1, "levels": [{"id": "a", "failFast": False}]}),
+            KNOWN,
+            SECRETS,
+        )
+        self.assertIs(parsed.levels[0].fail_fast, False)
         self.assertEqual(codes(levels({"id": "a", "failFast": True})), [])
 
     def test_empty_work_is_rejected(self):

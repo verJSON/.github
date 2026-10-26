@@ -447,6 +447,7 @@ PY
 plan_fixture="$tmp/plan-fixture"
 mkdir -p "$plan_fixture/examples/nested" "$plan_fixture/.git" "$plan_fixture/node_modules" \
   "$plan_fixture/runner-temp/_runner_file_commands"
+cp "$root/scripts/ci_build_artifacts.py" "$plan_fixture/runner-temp/ci_build_artifacts.py"
 plan_toolchain="$tmp/plan-tool-cache/node/22.0.0/x64"
 mkdir -p "$plan_toolchain/bin"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$plan_toolchain/bin/node"
@@ -463,16 +464,56 @@ run_plan() {
   (cd "$plan_fixture" && PATH="$plan_toolchain/bin:$PATH" \
     RUNNER_TOOL_CACHE="$tmp/plan-tool-cache" NPM_STUB_LOG=/workspace/node_modules/.npm.log \
     CI_SCRIPT_PLAN="$root_plan" NESTED_MANIFESTS="$nested" \
+    CI_ENTRY_REPOSITORY=Verjson/nested-manifest-fixture CI_ENTRY_EVENT=pull_request \
+    CI_ENTRY_REF=refs/pull/1/merge \
+    CI_ENTRY_COMMIT=0123456789abcdef0123456789abcdef01234567 \
+    CI_ENTRY_WORKFLOW_SHA=89abcdef0123456789abcdef0123456789abcdef \
+    CI_ENTRY_RUN_ID=24680 CI_ENTRY_RUN_ATTEMPT=3 CI_ENTRY_JOB_ID=build-test \
+    CI_LEVEL_ID=unit CI_LEVEL_FAIL_FAST=true \
     RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux \
     RUNNER_TEMP="$plan_fixture/runner-temp" \
     GITHUB_ENV="$plan_fixture/runner-temp/_runner_file_commands/GITHUB_ENV" \
+    GITHUB_OUTPUT="$plan_fixture/runner-temp/_runner_file_commands/GITHUB_OUTPUT" \
     bash "$tmp/plan.sh")
+}
+
+assert_receipt_identity() {
+  local receipt_directory
+  receipt_directory="$(find "$plan_fixture/runner-temp" -mindepth 1 -maxdepth 1 \
+    -type d -name '.verjson-node-ci-entry-receipts-*' -print -quit)"
+  [ -n "$receipt_directory" ] || return 1
+  python3 - "$receipt_directory/entry-000000.json" "$receipt_directory/entry-000001.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+expected = {
+    "repository": "Verjson/nested-manifest-fixture",
+    "event": "pull_request",
+    "ref": "refs/pull/1/merge",
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "workflowSha": "89abcdef0123456789abcdef0123456789abcdef",
+    "runId": "24680",
+    "runAttempt": "3",
+    "jobId": "build-test",
+    "levelId": "unit",
+}
+for receipt_path in sys.argv[1:]:
+    receipt = json.loads(Path(receipt_path).read_text(encoding="utf-8"))
+    if receipt.get("identity") != expected:
+        raise SystemExit(f"receipt identity mismatch in {receipt_path}")
+PY
 }
 
 both_plan='[{"path":"examples/nested","approvedPackages":["@verjson/nested-lib"],"scriptPlan":["verify"]}]'
 if run_plan '["root-verify"]' "$both_plan" >/dev/null \
     && grep -qFx '/workspace	run root-verify' "$plan_fixture/node_modules/.npm.log" \
     && grep -qFx '/workspace/examples/nested	run verify' "$plan_fixture/node_modules/.npm.log"; then
+  if assert_receipt_identity; then
+    pass "script-entry receipts preserve distinct workflow identity fields"
+  else
+    fail "script-entry receipts do not preserve distinct workflow identity fields"
+  fi
   pass "each manifest's script plan runs in that manifest's own directory"
 else
   fail "the nested script plan did not run in its own manifest directory"

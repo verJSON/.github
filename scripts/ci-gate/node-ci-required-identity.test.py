@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 from contextlib import ExitStack, redirect_stderr
 from io import StringIO
 from pathlib import Path
@@ -30,7 +31,7 @@ PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 GENERATOR = ROOT / "scripts/gen-node-ci-protected.py"
 TRUSTED_HELPER = ROOT / "scripts/ci_build_artifacts.py"
 HEAD = "a" * 40
-LEGACY_SHA256 = "9ecd8a30e94752f054fb28e0657e67005c1cd381c78b26e4c7cf1371a8beef4e"
+LEGACY_SHA256 = "c6c19852726435fd0ca7504dfb9a64bdb86232e18a37069b60cf84343ea3d83c"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
@@ -187,6 +188,84 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         )
         self.assertNotIn("python3 -I - <<'PY'", run_step["run"])
 
+    def test_protected_helper_is_staged_once_and_reused_read_only_by_runner_uid(self):
+        steps = self.workflow["jobs"]["build-test"]["steps"]
+        fetch_step = next(
+            step for step in steps
+            if step.get("name") == "Download pinned protected candidate helper"
+        )
+        reuse_step = next(
+            step for step in steps
+            if step.get("name") == "Download trusted script-plan receipt supervisor"
+        )
+        self.assertEqual(fetch_step.get("id"), "protected-candidate-helper")
+        self.assertIn("sha256sum", fetch_step["run"])
+        self.assertNotIn("curl ", reuse_step["run"])
+        with tempfile.TemporaryDirectory(prefix="protected-helper-stage-") as temporary:
+            root = Path(temporary)
+            runner_temp = root / "runner temp"
+            runner_temp.mkdir(mode=0o700)
+            output_file = root / "fetch-output"
+            fixture = root / "helper-fixture.py"
+            fixture.write_bytes(TRUSTED_HELPER.read_bytes())
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            curl_log = root / "curl-calls"
+            fake_curl = fake_bin / "curl"
+            fake_curl.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "destination=''\n"
+                "while (($#)); do\n"
+                "  if [[ $1 == -o ]]; then destination=$2; shift 2; else shift; fi\n"
+                "done\n"
+                "[[ -n $destination ]]\n"
+                "cp -- \"$CI_HELPER_FIXTURE\" \"$destination\"\n"
+                "printf 'called\\n' >> \"$CI_HELPER_CURL_LOG\"\n",
+                encoding="utf-8",
+            )
+            fake_curl.chmod(0o700)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "CI_HELPER_FIXTURE": str(fixture),
+                    "CI_HELPER_CURL_LOG": str(curl_log),
+                    "GITHUB_OUTPUT": str(output_file),
+                    "JOB_WORKFLOW_SHA": "a" * 40,
+                    "PATH": f"{fake_bin}:{environment['PATH']}",
+                    "RUNNER_TEMP": str(runner_temp),
+                }
+            )
+            subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", fetch_step["run"]],
+                env=environment,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            helper = runner_temp / "ci_build_artifacts.py"
+            metadata = helper.stat(follow_symlinks=False)
+            self.assertTrue(helper.is_file())
+            self.assertEqual(metadata.st_uid, os.geteuid())
+            self.assertEqual(metadata.st_nlink, 1)
+            self.assertEqual(metadata.st_mode & 0o777, 0o400)
+            with self.assertRaises(PermissionError):
+                os.open(helper, os.O_WRONLY)
+            staged_digest = output_file.read_text(encoding="utf-8").strip().split("=", 1)[1]
+            self.assertEqual(staged_digest, hashlib.sha256(helper.read_bytes()).hexdigest())
+            reuse_environment = environment.copy()
+            reuse_environment["PROTECTED_CANDIDATE_HELPER_SHA256"] = staged_digest
+            subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", reuse_step["run"]],
+                env=reuse_environment,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(curl_log.read_text(encoding="utf-8").splitlines(), ["called"])
+            self.assertEqual(helper.stat().st_mode & 0o777, 0o400)
+            self.assertEqual(hashlib.sha256(helper.read_bytes()).hexdigest(), staged_digest)
+
     def test_candidate_plan_executes_successfully_through_the_staged_trusted_helper(self):
         result, remaining = self.run_candidate_plan(
             lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
@@ -194,8 +273,301 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
             script_plan=["first"],
         )
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("trusted helper candidate ran", result.stdout)
+        self.assertIn("trusted helper candidate ran", result.stderr)
         self.assertEqual([], remaining)
+
+    def test_protected_bubblewrap_continues_after_failure_and_extinguishes_detached_child(self):
+        with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
+            receipt_capture = Path(capture_dir) / "receipts.json"
+            result, remaining = self.run_candidate_plan(
+                lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+                "case \" $* \" in\n"
+                "  *' run first '*)\n"
+                "    /usr/bin/setsid /bin/bash -c 'sleep 1; touch \"$1\"' detached \"$GITHUB_WORKSPACE/late-marker\" </dev/null >/dev/null 2>&1 &\n"
+                "    /usr/bin/setsid /bin/bash -c 'trap \"\" TERM; kill -STOP $$; sleep 1; touch \"$1\"' detached \"$GITHUB_WORKSPACE/stopped-late\" </dev/null >/dev/null 2>&1 &\n"
+                "    /usr/bin/python3 -c 'import os,signal,sys,time\np=os.fork()\nif p == 0:\n q=os.fork()\n if q: os._exit(0)\n os.setsid()\n signal.signal(signal.SIGTERM, signal.SIG_IGN)\n time.sleep(1)\n open(sys.argv[1],\"w\").close()\n os._exit(0)\nos.waitpid(p,0)' \"$GITHUB_WORKSPACE/double-fork-late\" </dev/null >/dev/null 2>&1 &\n"
+                "    printf started > \"$GITHUB_WORKSPACE/first-started\"\n"
+                "    exit 23 ;;\n"
+                "  *' run second '*)\n"
+                "    sleep 2\n"
+                "    test ! -e \"$GITHUB_WORKSPACE/stopped-late\" || exit 31\n"
+                "    test ! -e \"$GITHUB_WORKSPACE/double-fork-late\" || exit 32\n"
+                "    test -f \"$GITHUB_WORKSPACE/first-started\" || exit 30\n"
+                "    test ! -e \"$GITHUB_WORKSPACE/late-marker\" || exit 29\n"
+                "    printf ran > \"$GITHUB_WORKSPACE/second-ran\" ;;\n"
+                "esac\n",
+                script_plan=["first", "second"],
+                environment_updates={"CI_LEVEL_FAIL_FAST": "false"},
+                receipt_capture=receipt_capture,
+                post_run_absent="late-marker",
+            )
+            self.assertNotEqual(0, result.returncode, result.stderr)
+            self.assertEqual([], remaining)
+            receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual([receipt["state"] for receipt in receipts], ["completed", "completed"])
+            self.assertEqual([receipt["exitCode"] for receipt in receipts], [23, 0])
+            self.assertEqual([receipt["identity"]["jobId"] for receipt in receipts], ["build-test"] * 2)
+            self.assertEqual([receipt["identity"]["levelId"] for receipt in receipts], ["test-levels"] * 2)
+
+    def test_protected_bubblewrap_signal_style_exit_does_not_continue(self):
+        with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
+            receipt_capture = Path(capture_dir) / "receipts.json"
+            result, remaining = self.run_candidate_plan(
+                lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+                "case \" $* \" in\n"
+                "  *' run first '*) exit 143 ;;\n"
+                "  *' run second '*) touch \"$GITHUB_WORKSPACE/second-ran\" ;;\n"
+                "esac\n",
+                script_plan=["first", "second"],
+                environment_updates={"CI_LEVEL_FAIL_FAST": "false"},
+                receipt_capture=receipt_capture,
+                post_run_absent="second-ran",
+            )
+            self.assertNotEqual(0, result.returncode, result.stderr)
+            self.assertEqual([], remaining)
+            receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [receipt["state"] for receipt in receipts],
+                ["candidate-terminal", "not-run-aborted"],
+            )
+            self.assertEqual(receipts[0]["exitCode"], 143)
+            self.assertIsNone(receipts[0]["signal"])
+            self.assertTrue(receipts[0]["candidateStarted"])
+
+    def test_protected_candidate_self_sigint_and_sigterm_are_terminal_without_host_cancellation(self):
+        for self_signal, expected_signal in (("sigint", signal.SIGINT), ("sigterm", signal.SIGTERM)):
+            with self.subTest(self_signal=self_signal), tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
+                receipt_capture = Path(capture_dir) / "receipts.json"
+                plan_receipt_capture = Path(capture_dir) / "plan.json"
+                result, remaining = self.run_candidate_plan(
+                    lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+                    "case \"$*\" in\n"
+                    f"  *self-{self_signal}*) exec /usr/bin/python3 -c 'import os,signal; signal.signal(signal.{expected_signal.name}, signal.SIG_DFL); os.kill(os.getpid(), signal.{expected_signal.name})' ;;\n"
+                    "  *second*) touch \"$GITHUB_WORKSPACE/second-ran\" ;;\n"
+                    "esac\n",
+                    script_plan=[f"self-{self_signal}", "second"],
+                    environment_updates={"CI_LEVEL_FAIL_FAST": "false"},
+                    receipt_capture=receipt_capture,
+                    plan_receipt_capture=plan_receipt_capture,
+                    post_run_absent="second-ran",
+                )
+                self.assertNotEqual(0, result.returncode, result.stderr + result.stdout)
+                self.assertEqual([], remaining)
+                receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    [item["state"] for item in receipts],
+                    ["candidate-terminal", "not-run-aborted"],
+                )
+                self.assertTrue(receipts[0]["candidateStarted"])
+                self.assertEqual(receipts[0]["signal"], int(expected_signal))
+                self.assertIsNone(receipts[0]["hostCancellationSignal"])
+                self.assertIsNone(receipts[0]["supervisorSignal"])
+                plan = json.loads(plan_receipt_capture.read_text(encoding="utf-8"))
+                self.assertEqual(plan["state"], "infrastructure-failure")
+                self.assertIsNone(plan["hostCancellationSignal"])
+
+    def test_protected_bubblewrap_startup_failure_does_not_continue_after_deleted_cwd(self):
+        with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
+            receipt_capture = Path(capture_dir) / "receipts.json"
+            result, remaining = self.run_candidate_plan(
+                lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+                "case \" $* \" in\n"
+                "  *' run first '*) rm -rf \"$GITHUB_WORKSPACE/nested\"; exit 23 ;;\n"
+                "  *' run nested-after '*) touch \"$GITHUB_WORKSPACE/nested-ran\" ;;\n"
+                "esac\n",
+                script_plan=["first"],
+                nested_manifests=[
+                    {"path": "nested", "approvedPackages": [], "scriptPlan": ["nested-after"]}
+                ],
+                environment_updates={"CI_LEVEL_FAIL_FAST": "false"},
+                receipt_capture=receipt_capture,
+                post_run_absent="nested-ran",
+            )
+            self.assertNotEqual(0, result.returncode, result.stderr)
+            self.assertEqual([], remaining)
+            receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [receipt["state"] for receipt in receipts],
+                ["completed", "infrastructure-failure"],
+            )
+            self.assertEqual(receipts[0]["exitCode"], 23)
+
+    def test_protected_bubblewrap_cancellation_after_ack_prevents_candidate_start(self):
+        with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
+            receipt_capture = Path(capture_dir) / "receipts.json"
+            plan_receipt_capture = Path(capture_dir) / "plan.json"
+            result, remaining = self.run_candidate_plan(
+                lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+                "case \"$2\" in\n"
+                " first) touch \"$GITHUB_WORKSPACE/first-ran\" ;;\n"
+                " second) touch \"$GITHUB_WORKSPACE/second-ran\" ;;\n"
+                "esac\n",
+                script_plan=["first", "second"],
+                environment_updates={"CI_LEVEL_FAIL_FAST": "false"},
+                receipt_capture=receipt_capture,
+                plan_receipt_capture=plan_receipt_capture,
+                post_run_absent=["first-ran", "second-ran", ".after-ack-ready"],
+                cancel_after_ack_probe=True,
+                block_host_signal_mask=True,
+            )
+
+            self.assertNotEqual(0, result.returncode, result.stderr)
+            self.assertEqual([], remaining)
+            receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [receipt["state"] for receipt in receipts], ["interrupted", "not-run-aborted"]
+            )
+            self.assertFalse(receipts[0]["candidateStarted"], receipts[0])
+            self.assertIsNone(receipts[0]["exitCode"], receipts[0])
+            self.assertIsNone(receipts[0]["signal"], receipts[0])
+            self.assertEqual(receipts[0]["hostCancellationSignal"], signal.SIGTERM)
+            self.assertEqual(receipts[0]["supervisorSignal"], signal.SIGTERM)
+            self.assertEqual(receipts[0]["cleanup"], "verified")
+            plan = json.loads(plan_receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual(plan["state"], "interrupted")
+            self.assertEqual(plan["hostCancellationSignal"], signal.SIGTERM)
+
+    def test_protected_bubblewrap_cancellation_during_cleanup_invalidates_plan(self):
+        with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
+            receipt_capture = Path(capture_dir) / "receipts.json"
+            result, remaining = self.run_candidate_plan(
+                lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+                "case \"$2\" in\n"
+                " first)\n"
+                "  /usr/bin/setsid /bin/bash -c 'trap \"\" TERM; while :; do sleep 0.02; done' detached </dev/null >/dev/null 2>&1 &\n"
+                "  exit 0 ;;\n"
+                " second) touch \"$GITHUB_WORKSPACE/second-ran\" ;;\n"
+                "esac\n",
+                script_plan=["first", "second"],
+                environment_updates={"CI_LEVEL_FAIL_FAST": "false"},
+                receipt_capture=receipt_capture,
+                plan_receipt_capture=Path(capture_dir) / "plan.json",
+                post_run_absent="second-ran",
+                cancel_cleanup_probe=True,
+            )
+            self.assertNotEqual(0, result.returncode, result.stderr)
+            self.assertEqual([], remaining)
+            receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual([item["state"] for item in receipts], ["interrupted", "not-run-aborted"], receipts)
+            self.assertTrue(receipts[0]["candidateStarted"])
+            self.assertEqual(receipts[0]["exitCode"], 0)
+            self.assertIsNone(receipts[0]["signal"])
+            self.assertEqual(receipts[0]["hostCancellationSignal"], signal.SIGTERM)
+            self.assertEqual(receipts[0]["cleanup"], "verified")
+            plan = json.loads((Path(capture_dir) / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(plan["state"], "interrupted")
+            self.assertEqual(plan["hostCancellationSignal"], signal.SIGTERM)
+
+    def test_protected_host_captures_pending_sigterm_before_handler_unblock(self):
+        with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
+            receipt_capture = Path(capture_dir) / "receipts.json"
+            plan_receipt_capture = Path(capture_dir) / "plan.json"
+            result, remaining = self.run_candidate_plan(
+                lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+                "case \"$2\" in\n"
+                " first) touch \"$GITHUB_WORKSPACE/first-ran\" ;;\n"
+                " second) touch \"$GITHUB_WORKSPACE/second-ran\" ;;\n"
+                "esac\n",
+                script_plan=["first", "second"],
+                environment_updates={"CI_LEVEL_FAIL_FAST": "false", "VERJSON_CI_TEST_PENDING_HOST_SIGNAL": "1"},
+                receipt_capture=receipt_capture,
+                plan_receipt_capture=plan_receipt_capture,
+                post_run_absent=["first-ran", "second-ran"],
+            )
+            self.assertNotEqual(0, result.returncode, result.stderr)
+            self.assertEqual([], remaining)
+            self.assertTrue(receipt_capture.is_file(), result.stderr)
+            receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
+            plan = json.loads(plan_receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual(plan["state"], "interrupted")
+            self.assertEqual(plan["hostCancellationSignal"], signal.SIGTERM)
+            self.assertEqual(
+                [receipt["state"] for receipt in receipts],
+                ["interrupted", "not-run-aborted"],
+            )
+            self.assertFalse(receipts[0]["candidateStarted"])
+            self.assertIsNone(receipts[0]["exitCode"])
+            self.assertEqual(receipts[0]["hostCancellationSignal"], signal.SIGTERM)
+
+    def test_protected_bubblewrap_cancels_live_term_resistant_candidate_and_descendants(self):
+        with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
+            receipt_capture = Path(capture_dir) / "receipts.json"
+            plan_receipt_capture = Path(capture_dir) / "plan.json"
+            candidate_script = """count_file="$GITHUB_WORKSPACE/.live-cancel-count"
+count=0
+[[ -f "$count_file" ]] && read -r count < "$count_file"
+count=$((count + 1))
+/usr/bin/python3 -c 'import signal; assert signal.SIGTERM not in signal.pthread_sigmask(signal.SIG_BLOCK, set())'
+printf '%s\\n' "$count" > "$count_file"
+if (( count == 1 )); then
+ /usr/bin/setsid /bin/bash -c 'trap "" TERM; touch "$1"; for _ in {1..1000}; do [[ -f "$3" ]] && break; sleep 0.01; done; [[ -f "$3" ]] || exit 91; sleep 4; touch "$2"; while :; do :; done' detached "$GITHUB_WORKSPACE/.term-resistant-started" "$GITHUB_WORKSPACE/.term-resistant-late" "$GITHUB_WORKSPACE/.cancel-sent" </dev/null >/dev/null 2>&1 &
+ for _ in {1..200}; do [[ -f "$GITHUB_WORKSPACE/.term-resistant-started" ]] && break; sleep 0.01; done
+ [[ -f "$GITHUB_WORKSPACE/.term-resistant-started" ]] || exit 90
+ trap "" TERM
+ touch "$GITHUB_WORKSPACE/.candidate-ready"
+ while :; do sleep 0.02; done
+else
+ touch "$GITHUB_WORKSPACE/second-ran"
+fi
+"""
+            result, remaining = self.run_candidate_plan(
+                lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+                candidate_script,
+                script_plan=["live-cancel", "second"],
+                environment_updates={"CI_LEVEL_FAIL_FAST": "false"},
+                receipt_capture=receipt_capture,
+                plan_receipt_capture=plan_receipt_capture,
+                post_run_absent=["second-ran", ".term-resistant-late"],
+                post_run_absent_delay=2.3,
+                cancel_live_candidate_probe=True,
+                block_host_signal_mask=True,
+            )
+
+            self.assertNotEqual(0, result.returncode, result.stderr)
+            self.assertEqual([], remaining)
+            elapsed_match = re.search(r"LIVE_CANDIDATE_CANCEL_SECONDS=([0-9.]+)", result.stderr)
+            self.assertIsNotNone(elapsed_match, result.stderr)
+            self.assertGreaterEqual(float(elapsed_match.group(1)), 0.45, result.stderr)
+            self.assertTrue(receipt_capture.is_file(), result.stderr)
+            receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [item["state"] for item in receipts],
+                ["interrupted", "not-run-aborted"],
+            )
+            self.assertIsNone(receipts[0]["exitCode"])
+            self.assertEqual(receipts[0]["signal"], signal.SIGKILL)
+            self.assertEqual(receipts[0]["hostCancellationSignal"], signal.SIGTERM)
+            self.assertEqual(receipts[0]["supervisorSignal"], signal.SIGTERM)
+            self.assertEqual(receipts[0]["cleanup"], "verified")
+            plan = json.loads(plan_receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual(plan["state"], "interrupted")
+            self.assertEqual(plan["hostCancellationSignal"], signal.SIGTERM)
+
+    def test_protected_candidate_cannot_access_or_forge_the_supervisor_channel(self):
+        with tempfile.TemporaryDirectory(prefix="entry receipts ") as capture_dir:
+            receipt_capture = Path(capture_dir) / "receipts.json"
+            result, remaining = self.run_candidate_plan(
+                lambda baseline: (baseline / "blob").write_text("verified", encoding="utf-8"),
+                "case \"$2\" in\n"
+                " first)\n"
+                "  /usr/bin/python3 -I -c 'import os,sys; p=\"/proc/1/fd/1\";\n"
+                "for flags in (os.O_RDONLY, os.O_WRONLY):\n"
+                " try:\n  fd=os.open(p, flags)\n"
+                " except PermissionError:\n  continue\n"
+                " else:\n  os.close(fd); sys.exit(91)\n"
+                "print(\"{\\\"version\\\":1,\\\"pid\\\":1,\\\"state\\\":\\\"candidate-exit\\\"}\")'\n"
+                "  ;;\n"
+                "esac\n",
+                script_plan=["first"],
+                receipt_capture=receipt_capture,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual([], remaining)
+            receipts = json.loads(receipt_capture.read_text(encoding="utf-8"))
+            self.assertEqual(len(receipts), 1)
+            self.assertEqual(receipts[0]["state"], "completed")
+            self.assertEqual(receipts[0]["exitCode"], 0)
+            self.assertIn('"state":"candidate-exit"', result.stderr)
 
     def test_consumer_mounts_verified_artifact_read_only_with_live_fd_at_launch(self):
         result, remaining = self.run_candidate_plan(
@@ -681,6 +1053,16 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                     ).returncode,
                 )
 
+    def test_protected_entry_receipts_bind_the_admitted_checkout_head_sha(self):
+        step = self.candidate_plan_step()
+        self.assertEqual(step["env"]["CI_ENTRY_COMMIT"], "${{ inputs.head-sha }}")
+        checkout = next(
+            step
+            for step in self.workflow["jobs"]["build-test"]["steps"]
+            if str(step.get("uses", "")).startswith("actions/checkout@")
+        )
+        self.assertEqual(checkout["with"]["ref"], "${{ inputs.head-sha }}")
+
 
     def candidate_plan_step(self):
         step = next(
@@ -694,7 +1076,16 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
         fixture += "\n# END TRUSTED_HELPER_BODY_FIXTURE\n"
         return {**step, "run": step["run"] + fixture}
 
-    def stage_candidate_helper(self, runner_temp, candidate_run, *, bwrap_probe=False):
+    def stage_candidate_helper(
+        self,
+        runner_temp,
+        candidate_run,
+        *,
+        bwrap_probe=False,
+        cancel_cleanup_probe=False,
+        cancel_live_candidate_probe=False,
+        cancel_after_ack_probe=False,
+    ):
         helper_source = TRUSTED_HELPER.read_text(encoding="utf-8")
         start = "# BEGIN TRUSTED_HELPER_BODY_FIXTURE\n"
         end = "# END TRUSTED_HELPER_BODY_FIXTURE"
@@ -719,24 +1110,25 @@ class RequiredWorkflowIdentityTest(unittest.TestCase):
                     + helper_source[function_end:]
                 )
         if bwrap_probe:
-            marker = "active_process = subprocess.Popen(\n"
+            marker = "candidate_result = ci_build_artifacts.run_supervised_bubblewrap(\n"
             self.assertEqual(1, helper_source.count(marker))
-            probe = r'''_d1_original_popen = subprocess.Popen
-def _d1_probe_popen(argv, **kwargs):
+            probe = r'''_d1_original_supervisor = ci_build_artifacts.run_supervised_bubblewrap
+def _d1_probe_supervisor(arguments, *, environment, pass_fds, host_signals, cwd=None, test_hook=None):
     import fcntl
     import stat
 
     workspace_bind = ["--bind", str(workspace), str(workspace)]
     workspace_index = next(
-        index for index in range(len(argv))
-        if argv[index:index + len(workspace_bind)] == workspace_bind
+        index
+        for index in range(len(arguments))
+        if arguments[index:index + len(workspace_bind)] == workspace_bind
     )
     artifact_mounts = []
-    for index, argument in enumerate(argv[:-2]):
+    for index, argument in enumerate(arguments[:-2]):
         if argument != "--ro-bind":
             continue
-        source = argv[index + 1]
-        target = Path(argv[index + 2])
+        source = arguments[index + 1]
+        target = Path(arguments[index + 2])
         if source.startswith("/proc/self/fd/") and target == workspace / "app.js":
             artifact_mounts.append((index, int(source.rsplit("/", 1)[1])))
     if len(artifact_mounts) != 1:
@@ -744,8 +1136,8 @@ def _d1_probe_popen(argv, **kwargs):
     mount_index, descriptor = artifact_mounts[0]
     if workspace_index >= mount_index:
         raise AssertionError("workspace bind must precede ArtifactSet mounts")
-    if descriptor not in kwargs.get("pass_fds", ()):
-        raise AssertionError("ArtifactSet descriptor is not retained for process launch")
+    if descriptor not in pass_fds:
+        raise AssertionError("ArtifactSet descriptor not retained at process launch")
     metadata = os.fstat(descriptor)
     if not stat.S_ISREG(metadata.st_mode):
         raise AssertionError("ArtifactSet descriptor is not a regular file")
@@ -760,7 +1152,6 @@ def _d1_probe_popen(argv, **kwargs):
         pass
     else:
         raise AssertionError("ArtifactSet descriptor accepted a write")
-
     child_check = (
         "import os,sys\n"
         "fd=int(sys.argv[1])\n"
@@ -770,7 +1161,7 @@ def _d1_probe_popen(argv, **kwargs):
         "except OSError:\n pass\n"
         "else:\n raise AssertionError('inherited ArtifactSet FD is writable')\n"
     )
-    child = _d1_original_popen(
+    child = subprocess.Popen(
         [sys.executable, "-c", child_check, str(descriptor)],
         pass_fds=(descriptor,),
         stdout=subprocess.PIPE,
@@ -782,19 +1173,156 @@ def _d1_probe_popen(argv, **kwargs):
         raise AssertionError(
             f"ArtifactSet descriptor was not usable at child launch: {child_stdout}{child_stderr}"
         )
+    return _d1_original_supervisor(
+        arguments,
+        environment=environment,
+        pass_fds=pass_fds,
+        host_signals=host_signals,
+        cwd=cwd,
+        test_hook=test_hook,
+    )
+ci_build_artifacts.run_supervised_bubblewrap = _d1_probe_supervisor
+'''
+            source_line = helper_source.index(marker)
+            line_start = helper_source.rfind("\n", 0, source_line) + 1
+            indent = helper_source[line_start:source_line]
+            helper_source = (
+                helper_source[:line_start]
+                + textwrap.indent(probe, indent)
+                + helper_source[line_start:]
+            )
 
-    class _D1ProbeProcess:
-        args = argv
-        pid = 2_147_483_647
-        returncode = 0
+        if cancel_live_candidate_probe:
+            marker = "candidate_result = ci_build_artifacts.run_supervised_bubblewrap(\n"
+            self.assertEqual(1, helper_source.count(marker))
+            probe = r'''_d1_original_live_supervisor = ci_build_artifacts.run_supervised_bubblewrap
+def _d1_cancel_live_candidate(arguments, *, environment, pass_fds, host_signals, cwd=None, test_hook=None):
+    import threading
+    ready_marker = Path(environment["GITHUB_WORKSPACE"]) / ".candidate-ready"
+    cancel_marker = Path(environment["GITHUB_WORKSPACE"]) / ".cancel-sent"
+    watcher_stopped = threading.Event()
+    signalled_at = None
+    def _watch_candidate():
+        nonlocal signalled_at
+        deadline = time.monotonic() + 20
+        while not watcher_stopped.is_set() and time.monotonic() < deadline:
+            if ready_marker.is_file():
+                signalled_at = time.monotonic()
+                cancel_marker.touch(exist_ok=True)
+                host_signals.capture(int(signal.SIGTERM))
+                return
+            time.sleep(0.01)
+    watcher = threading.Thread(target=_watch_candidate, daemon=True)
+    watcher.start()
+    try:
+        return _d1_original_live_supervisor(
+            arguments,
+            environment=environment,
+            pass_fds=pass_fds,
+            host_signals=host_signals,
+            cwd=cwd,
+            test_hook=test_hook,
+        )
+    finally:
+        watcher_stopped.set()
+        watcher.join(timeout=1)
+        if watcher.is_alive():
+            raise AssertionError("host-signal watcher did not stop")
+        if signalled_at is not None:
+            print(
+                f"LIVE_CANDIDATE_CANCEL_SECONDS={time.monotonic() - signalled_at:.3f}",
+                file=sys.stderr,
+            )
+ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_live_candidate'''
+            source_line = helper_source.index(marker)
+            line_start = helper_source.rfind("\n", 0, source_line) + 1
+            indent = helper_source[line_start:source_line]
+            helper_source = (
+                helper_source[:line_start]
+                + textwrap.indent(probe, indent)
+                + "\n"
+                + helper_source[line_start:]
+            )
+        if cancel_after_ack_probe:
+            marker = "candidate_result = ci_build_artifacts.run_supervised_bubblewrap(\n"
+            self.assertEqual(1, helper_source.count(marker))
+            probe = r'''_d1_original_after_ack_supervisor = ci_build_artifacts.run_supervised_bubblewrap
+def _d1_cancel_after_ack(arguments, *, environment, pass_fds, host_signals, cwd=None, test_hook=None):
+    import os
+    import signal
+    import threading
+    import time
 
-        @staticmethod
-        def poll():
-            return 0
+    marker = Path(environment["GITHUB_WORKSPACE"]) / ".after-ack-ready"
+    stopped = threading.Event()
+    observed = threading.Event()
+    shim = Path(os.environ["RUNNER_TEMP"]) / "bwrap-blocked-signal-mask"
+    shim.write_text(
+        "#!/usr/bin/python3" + chr(10)
+        + "import os,signal,sys" + chr(10)
+        + "signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGINT,signal.SIGTERM})" + chr(10)
+        + "os.execvpe('/usr/bin/bwrap',['/usr/bin/bwrap',*sys.argv[1:]],os.environ)" + chr(10),
+        encoding="utf-8",
+    )
+    shim.chmod(0o700)
 
-    return _D1ProbeProcess()
+    def _signal_after_ack():
+        deadline = time.monotonic() + 10
+        while not stopped.is_set() and time.monotonic() < deadline:
+            if marker.is_file():
+                observed.set()
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
+            time.sleep(0.01)
 
-subprocess.Popen = _d1_probe_popen
+    watcher = threading.Thread(target=_signal_after_ack, daemon=True)
+    watcher.start()
+    arguments = [str(shim), *arguments[1:]]
+    try:
+        return _d1_original_after_ack_supervisor(
+            arguments,
+            environment=environment,
+            pass_fds=pass_fds,
+            host_signals=host_signals,
+            cwd=cwd,
+            test_hook=test_hook,
+            test_after_ack_marker=str(marker),
+        )
+    finally:
+        stopped.set()
+        watcher.join(timeout=1)
+        if watcher.is_alive() or not observed.is_set():
+            raise AssertionError("host cancellation did not arrive after the launch ACK")
+ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_after_ack
+'''
+            source_line = helper_source.index(marker)
+            line_start = helper_source.rfind("\n", 0, source_line) + 1
+            indent = helper_source[line_start:source_line]
+            helper_source = (
+                helper_source[:line_start]
+                + textwrap.indent(probe, indent)
+                + helper_source[line_start:]
+            )
+        if cancel_cleanup_probe:
+            marker = "candidate_result = ci_build_artifacts.run_supervised_bubblewrap(\n"
+            self.assertEqual(1, helper_source.count(marker))
+            probe = r'''_d1_original_supervisor = ci_build_artifacts.run_supervised_bubblewrap
+def _d1_cancel_cleanup(arguments, *, environment, pass_fds, host_signals, cwd=None, test_hook=None):
+    def _inject_cleanup_cancellation(event):
+        if test_hook is not None:
+            test_hook(event)
+        if event == "cleanup-start":
+            host_signals.capture(int(signal.SIGTERM))
+
+    return _d1_original_supervisor(
+        arguments,
+        environment=environment,
+        pass_fds=pass_fds,
+        host_signals=host_signals,
+        cwd=cwd,
+        test_hook=_inject_cleanup_cancellation,
+    )
+ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_cleanup
 '''
             source_line = helper_source.index(marker)
             line_start = helper_source.rfind("\n", 0, source_line) + 1
@@ -823,12 +1351,13 @@ subprocess.Popen = _d1_probe_popen
         contract.chmod(0o400)
         return cache_root, reference, contract_bytes
 
-    def script_plan_environment(self, runner_temp, plan_source):
-        entries, default_plan = shared_script_plan.normalize_outputs(plan_source, "")
+    def script_plan_environment(self, runner_temp, plan_source, nested_source=""):
+        entries, default_plan = shared_script_plan.normalize_outputs(plan_source, nested_source)
         entries_path = shared_script_plan.write_normalized_entries(entries, str(runner_temp))
         return {
             "SCRIPT_PLAN_DEFAULT_PLAN": "true" if default_plan else "false",
             "SCRIPT_PLAN_ENTRIES_FILE": entries_path,
+            "NESTED_MANIFESTS": nested_source,
         }
 
     def run_candidate_plan(
@@ -858,6 +1387,15 @@ subprocess.Popen = _d1_probe_popen
         script_plan=None,
         verified_artifact=False,
         bwrap_probe=False,
+        cancel_cleanup_probe=False,
+        receipt_capture=None,
+        plan_receipt_capture=None,
+        post_run_absent=None,
+        post_run_absent_delay=0,
+        nested_manifests=None,
+        cancel_live_candidate_probe=False,
+        cancel_after_ack_probe=False,
+        block_host_signal_mask=False,
     ):
         with tempfile.TemporaryDirectory() as directory, ExitStack() as cleanup_stack:
             root = Path(directory)
@@ -884,9 +1422,16 @@ subprocess.Popen = _d1_probe_popen
                 (workspace / ".git").mkdir()
             cache_setup(baseline)
             (workspace / "package.json").write_text(
-                json.dumps({"scripts": {"first": "true", "second": "true"}}),
+                json.dumps({"scripts": {"first": "true", "second": "true", "live-cancel": "true", "self-sigint": "true", "self-sigterm": "true"}}),
                 encoding="utf-8",
             )
+            for manifest in nested_manifests or []:
+                nested_workspace = workspace / manifest["path"]
+                nested_workspace.mkdir(parents=True)
+                (nested_workspace / "package.json").write_text(
+                    json.dumps({"scripts": {name: "true" for name in manifest["scriptPlan"]}}),
+                    encoding="utf-8",
+                )
             tool_bin = root / "tool" / "bin"
             tool_bin.mkdir(parents=True)
             tool_bin.parent.chmod(tool_root_mode)
@@ -1039,7 +1584,10 @@ subprocess.Popen = _d1_probe_popen
                 shadow_npm.chmod(0o755)
                 path = f"{shadow_bin}:{path}"
             plan_value = ["first", "second"] if script_plan is None else script_plan
-            plan_environment = self.script_plan_environment(runner_temp, json.dumps(plan_value))
+            nested_source = json.dumps(nested_manifests) if nested_manifests else ""
+            plan_environment = self.script_plan_environment(
+                runner_temp, json.dumps(plan_value), nested_source
+            )
             env = {
                 **os.environ,
                 "PATH": path,
@@ -1047,8 +1595,19 @@ subprocess.Popen = _d1_probe_popen
                 "RUNNER_ENVIRONMENT": "github-hosted",
                 "RUNNER_OS": "Linux",
             "GITHUB_ENV": str(command_file),
-            "GITHUB_OUTPUT": str(runner_temp / "GITHUB_OUTPUT"),
+                "GITHUB_OUTPUT": str(runner_temp / "GITHUB_OUTPUT"),
+                "VERJSON_CI_OUTPUT_FILE": str(runner_temp / "GITHUB_OUTPUT"),
                 **plan_environment,
+                "CI_ENTRY_REPOSITORY": "Verjson/fixture",
+                "CI_ENTRY_EVENT": "pull_request",
+                "CI_ENTRY_REF": "refs/pull/7/merge",
+                "CI_ENTRY_COMMIT": "a" * 40,
+                "CI_ENTRY_WORKFLOW_SHA": "b" * 40,
+                "CI_ENTRY_RUN_ID": "123",
+                "CI_ENTRY_RUN_ATTEMPT": "1",
+                "CI_ENTRY_JOB_ID": "build-test",
+                "CI_LEVEL_ID": "test-levels",
+                "CI_LEVEL_FAIL_FAST": "true",
                 "CANDIDATE_CACHE_ROOT": str(runner_temp / "verjson-candidate-caches-test"),
                 "npm_config_cache": str(baseline),
                 "RUNNER_TOOL_CACHE": str(tool_bin.parent),
@@ -1167,19 +1726,69 @@ subprocess.Popen = _d1_probe_popen
                     f'is_relative_to("{fixture_opt / "microsoft" / "powershell"}")',
                 )
             helper_path = self.stage_candidate_helper(
-                runner_temp, candidate_run, bwrap_probe=bwrap_probe
+                runner_temp,
+                candidate_run,
+                bwrap_probe=bwrap_probe,
+                cancel_cleanup_probe=cancel_cleanup_probe,
+                cancel_live_candidate_probe=cancel_live_candidate_probe,
+                cancel_after_ack_probe=cancel_after_ack_probe,
             )
             self.assertTrue(
                 workspace.is_dir(),
                 f"candidate workspace disappeared before helper invocation: {workspace}; root={list(root.iterdir())}",
             )
+            command = ["/usr/bin/bash", "-c", candidate_run]
+            if block_host_signal_mask:
+                blocked_mask_exec = (
+                    "import os,signal,sys; "
+                    "signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGINT,signal.SIGTERM}); "
+                    "os.execvpe(sys.argv[1],sys.argv[1:],os.environ)"
+                )
+                command = [sys.executable, "-c", blocked_mask_exec, *command]
             result = subprocess.run(
-                ["/usr/bin/bash", "-c", candidate_run],
+                command,
                 cwd=workspace,
                 env=env,
                 capture_output=True,
                 text=True,
             )
+            if post_run_absent is not None:
+                absent_markers = (
+                    (post_run_absent,)
+                    if isinstance(post_run_absent, str)
+                    else post_run_absent
+                )
+                for marker in absent_markers:
+                    self.assertFalse(
+                        (workspace / marker).exists(),
+                    f"candidate wrote forbidden marker {marker}; stdout={result.stdout!r}; stderr={result.stderr!r}",
+                    )
+            if post_run_absent_delay:
+                if not isinstance(post_run_absent_delay, (int, float)) or not 0 < post_run_absent_delay <= 3.0:
+                    raise AssertionError("delayed marker verification exceeded its bound")
+                deadline = time.monotonic() + post_run_absent_delay
+                while time.monotonic() < deadline:
+                    time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+                for marker in absent_markers:
+                    self.assertFalse(
+                        (workspace / marker).exists(),
+                        f"candidate wrote delayed forbidden marker {marker}",
+                    )
+            if receipt_capture is not None or plan_receipt_capture is not None:
+                receipt_directories = list(runner_temp.glob(".verjson-node-ci-entry-receipts-*"))
+                self.assertEqual(len(receipt_directories), 1, result.stderr)
+                if receipt_capture is not None:
+                    receipt_records = sorted(receipt_directories[0].glob("entry-*.json"))
+                    Path(receipt_capture).write_text(
+                        json.dumps(
+                            [json.loads(record.read_text(encoding="utf-8")) for record in receipt_records]
+                        ),
+                        encoding="utf-8",
+                    )
+                if plan_receipt_capture is not None:
+                    plan_receipt = receipt_directories[0] / "plan.json"
+                    self.assertTrue(plan_receipt.is_file(), result.stderr)
+                    Path(plan_receipt_capture).write_bytes(plan_receipt.read_bytes())
             self.assertNotIn(f"can't open file '{helper_path}'", result.stderr)
             if swap_thread is not None:
                 swap_thread.join(timeout=5)
@@ -1247,6 +1856,18 @@ subprocess.Popen = _d1_probe_popen
                             "RUNNER_OS": "Linux",
                             "GITHUB_ENV": str(command_file),
                             "GITHUB_OUTPUT": str(runner_temp / "GITHUB_OUTPUT"),
+                        "VERJSON_CI_OUTPUT_FILE": str(runner_temp / "GITHUB_OUTPUT"),
+                        "CI_ENTRY_REPOSITORY": "Verjson/fixture",
+                        "CI_ENTRY_EVENT": "pull_request",
+                        "CI_ENTRY_REF": "refs/pull/7/merge",
+                        "CI_ENTRY_COMMIT": "a" * 40,
+                        "CI_ENTRY_WORKFLOW_SHA": "b" * 40,
+                        "CI_ENTRY_RUN_ID": "123",
+                        "CI_ENTRY_RUN_ATTEMPT": "1",
+                        "CI_ENTRY_JOB_ID": "build-test",
+                        "CI_LEVEL_ID": "test-levels",
+                        "CI_LEVEL_FAIL_FAST": "true",
+                        "PWD": str(workspace),
                             **self.script_plan_environment(runner_temp, '["first"]'),
                             "CANDIDATE_CACHE_ROOT": str(baseline),
                             "npm_config_cache": str(baseline),
@@ -1308,7 +1929,7 @@ subprocess.Popen = _d1_probe_popen
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("service variables reached candidate npm script", result.stdout)
+        self.assertIn("service variables reached candidate npm script", result.stderr)
         plan_run = self.candidate_plan_step()["run"]
         self.assertIn('legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]', plan_run)
         self.assertIn("*legacy_network_args,", plan_run)
@@ -1329,7 +1950,7 @@ subprocess.Popen = _d1_probe_popen
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("alternatives-managed awk ran in the candidate sandbox", result.stdout)
+        self.assertIn("alternatives-managed awk ran in the candidate sandbox", result.stderr)
         self.assertEqual([], remaining)
 
     def test_candidate_path_shadow_cannot_replace_setup_node_tools(self):
@@ -1349,7 +1970,7 @@ subprocess.Popen = _d1_probe_popen
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("trusted npm CLI fixture invoked", result.stdout)
+        self.assertIn("trusted npm CLI fixture invoked", result.stderr)
         self.assertEqual([], remaining)
 
     def test_node_26_npm_cli_is_selected_from_its_own_tool_prefix(self):
@@ -1362,8 +1983,8 @@ subprocess.Popen = _d1_probe_popen
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("trusted npm CLI fixture invoked", result.stdout)
-        self.assertNotIn("decoy npm CLI", result.stdout)
+        self.assertIn("trusted npm CLI fixture invoked", result.stderr)
+        self.assertNotIn("decoy npm CLI", result.stderr)
         self.assertEqual([], remaining)
 
     def test_identical_npm_cli_candidates_from_symlink_layout_are_deduplicated(self):
@@ -1375,7 +1996,7 @@ subprocess.Popen = _d1_probe_popen
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("trusted npm CLI fixture invoked", result.stdout)
+        self.assertIn("trusted npm CLI fixture invoked", result.stderr)
         self.assertEqual([], remaining)
 
     def test_distinct_npm_cli_candidates_fail_closed(self):
@@ -1755,6 +2376,18 @@ PY
                     "RUNNER_OS": "Linux",
                     "GITHUB_ENV": str(command_file),
                     "GITHUB_OUTPUT": str(runner_temp / "GITHUB_OUTPUT"),
+                    "VERJSON_CI_OUTPUT_FILE": str(runner_temp / "GITHUB_OUTPUT"),
+                    "CI_ENTRY_REPOSITORY": "Verjson/fixture",
+                    "CI_ENTRY_EVENT": "pull_request",
+                    "CI_ENTRY_REF": "refs/pull/7/merge",
+                    "CI_ENTRY_COMMIT": "a" * 40,
+                    "CI_ENTRY_WORKFLOW_SHA": "b" * 40,
+                    "CI_ENTRY_RUN_ID": "123",
+                    "CI_ENTRY_RUN_ATTEMPT": "1",
+                    "CI_ENTRY_JOB_ID": "build-test",
+                    "CI_LEVEL_ID": "test-levels",
+                    "CI_LEVEL_FAIL_FAST": "true",
+                    "PWD": str(workspace),
                     **self.script_plan_environment(runner_temp, '["first"]'),
                     "CANDIDATE_CACHE_ROOT": str(runner_temp / "verjson-candidate-caches-test"),
                     "npm_config_cache": str(baseline),
