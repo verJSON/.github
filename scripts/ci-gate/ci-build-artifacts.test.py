@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import gzip
+import contextlib
 import io
 import json
 import os
@@ -17,10 +18,70 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(ROOT / "scripts/ci-gate/conformance"))
 import yaml
 import ci_build_artifacts as artifacts
 import ci_postgres_sandbox as postgres_profile
+from expressions import Evaluator, UnsupportedExpression
+
+
+def _pax_record(key: bytes, value: bytes) -> bytes:
+    length = 0
+    while True:
+        record = str(length).encode("ascii") + b" " + key + b"=" + value + b"\n"
+        if len(record) == length:
+            return record
+        length = len(record)
+
+
+def _padded_tar_bytes(value: bytes) -> bytes:
+    padding = (-len(value)) % tarfile.BLOCKSIZE
+    return value + bytes(padding)
+
+
+def _tar_extension(
+    extension_type: bytes,
+    payload: bytes,
+    *,
+    declared_size: int | None = None,
+    padded_block: bytes | None = None,
+) -> bytes:
+    info = tarfile.TarInfo("PaxHeaders.0/header")
+    info.type = extension_type
+    info.size = len(payload) if declared_size is None else declared_size
+    info.mtime = 0
+    return info.tobuf() + (padded_block if padded_block is not None else _padded_tar_bytes(payload))
+
+
+def _tar_member(name: str, payload: bytes, *, mode: int = 0o644) -> bytes:
+    info = tarfile.TarInfo(name)
+    info.size = len(payload)
+    info.mode = mode
+    info.mtime = 0
+    return info.tobuf() + _padded_tar_bytes(payload)
+
+
+def _compressed_tar(members: bytes) -> bytes:
+    return gzip.compress(members + bytes(tarfile.BLOCKSIZE * 2))
+
+
+def _parse_test_tar(members: bytes) -> list[tarfile.TarInfo]:
+    with artifacts._BoundedTarFile.open(
+        fileobj=io.BytesIO(_compressed_tar(members)),
+        mode="r|gz",
+        tarinfo=artifacts._BoundedTarInfo,
+    ) as archive:
+        return list(archive)
+
+
+def _pax_payload_of_size(size: int) -> bytes:
+    for value_size in range(size):
+        payload = _pax_record(b"comment", b"a" * value_size)
+        if len(payload) == size:
+            return payload
+    raise AssertionError(f"unable to construct PAX payload of size {size}")
 
 
 class SharedNetworkBoundaryTests(unittest.TestCase):
@@ -108,6 +169,32 @@ class SharedNetworkBoundaryTests(unittest.TestCase):
                     select["env"]["BUILD_ARTIFACT_MODE_SHARE_ELIGIBLE"],
                     "${{ inputs.build-artifact-mode-share-eligible }}",
                 )
+
+    def test_consumer_receipts_require_verified_artifact_and_executed_candidate_plan(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        for filename in ("node-ci.yml", "node-ci-protected.yml"):
+            with self.subTest(workflow=filename):
+                workflow = yaml.safe_load((root / ".github/workflows" / filename).read_text())
+                steps = workflow["jobs"]["build-test"]["steps"]
+                verify = next(step for step in steps if step.get("id") == "verify-build-artifact")
+                execute = next(step for step in steps if step.get("id") == "run-script-plan")
+                upload = next(step for step in steps if step.get("id") == "upload-build-artifact")
+                receipt = next(
+                    step for step in steps if step.get("id") == "create-build-artifact-receipt"
+                )
+                self.assertIn("verify-extract", verify["run"])
+                self.assertIn(
+                    "toJSON(fromJSON(steps.export-build-artifact.outputs.share-available)) == 'true'",
+                    upload["if"],
+                )
+                execution_marker = (
+                    "run-protected-candidate-plan"
+                    if filename == "node-ci-protected.yml"
+                    else "run_script_plan_with_receipts"
+                )
+                self.assertIn(execution_marker, execute["run"])
+                self.assertIn("steps.verify-build-artifact.outcome == 'success'", receipt["if"])
+                self.assertIn("steps.run-script-plan.outcome == 'success'", receipt["if"])
 
     def test_post_candidate_profile_failure_keeps_execution_in_infrastructure_receipt(self) -> None:
         candidate = SimpleNamespace(
@@ -511,6 +598,12 @@ class SharedNetworkBoundaryTests(unittest.TestCase):
 
 
 class ArtifactPolicyTests(unittest.TestCase):
+    def test_checked_in_policy_remains_version_one_with_no_repositories(self) -> None:
+        policy = json.loads((ROOT / "config/ci-build-artifact-policy.json").read_text())
+        self.assertIs(type(policy.get("version")), int)
+        self.assertEqual(policy["version"], 1)
+        self.assertEqual(policy["repositories"], {})
+
     def test_missing_exact_repository_policy_row_selects_fallback(self) -> None:
         table = artifacts.load_policy_table(b'{"version":1,"repositories":{}}')
         self.assertIsNone(artifacts._policy_row(table, "Verjson/private-repo"))
@@ -1554,6 +1647,42 @@ class ArtifactFilesystemTests(unittest.TestCase):
         self.assertEqual(verified["digest"], digest)
         self.assertEqual((destination / "dist/app.js").read_bytes(), b"built bytes")
 
+    def test_sparse_metadata_is_rejected_before_manifest_or_payload_extraction(self) -> None:
+        artifact_file = self.root / "sparse-metadata.tar.gz"
+        artifact_file.write_bytes(b"test archive bytes")
+        member = tarfile.TarInfo("manifest.json")
+        member.size = 0
+        member.sparse = [(0, 1)]
+
+        class SparseArchive:
+            extraction_attempted = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _traceback):
+                return False
+
+            def __iter__(self):
+                return iter((member,))
+
+            def extractfile(self, _member):
+                self.extraction_attempted = True
+                raise AssertionError("sparse member must be rejected before extraction")
+
+        archive = SparseArchive()
+        with patch.object(artifacts._BoundedTarFile, "open", return_value=archive):
+            with self.assertRaisesRegex(artifacts.ArtifactError, "sparse member"):
+                artifacts.verify_and_extract(
+                    artifact_file,
+                    self.root / "sparse-metadata-out",
+                    expected_digest=hashlib.sha256(artifact_file.read_bytes()).hexdigest(),
+                    artifact_id="101",
+                    expected_identity={key: value for key, value in self.identity.items() if key != "lane"},
+                    consumers=1,
+                )
+        self.assertFalse(archive.extraction_attempted)
+
     def test_exported_long_path_pax_header_remains_compatible(self) -> None:
         long_name = "x" * 120 + ".js"
         long_file = self.workspace / "dist" / long_name
@@ -1647,6 +1776,201 @@ class ArtifactFilesystemTests(unittest.TestCase):
             )
 
 
+class ArtifactTarExtensionTests(unittest.TestCase):
+    def test_direct_gnu_sparse_type_is_rejected_before_sparse_parser(self) -> None:
+        raw = _tar_extension(tarfile.GNUTYPE_SPARSE, b"") + _tar_member("payload/file", b"")
+        with patch.object(
+            tarfile.TarInfo,
+            "_proc_sparse",
+            side_effect=AssertionError("GNU sparse parser must not run"),
+        ):
+            with self.assertRaisesRegex(artifacts.ArtifactError, "GNU sparse"):
+                _parse_test_tar(raw)
+
+    def test_local_global_and_solaris_pax_sparse_versions_are_rejected_before_parser(self) -> None:
+        sparse_versions = {
+            "0.0": (
+                (b"GNU.sparse.size", b"1"),
+                (b"GNU.sparse.numblocks", b"1"),
+                (b"GNU.sparse.offset", b"0"),
+                (b"GNU.sparse.numbytes", b"1"),
+            ),
+            "0.1": (
+                (b"GNU.sparse.size", b"1"),
+                (b"GNU.sparse.numblocks", b"1"),
+                (b"GNU.sparse.map", b"0,1"),
+            ),
+            "1.0": (
+                (b"GNU.sparse.major", b"1"),
+                (b"GNU.sparse.minor", b"0"),
+                (b"GNU.sparse.realsize", b"1"),
+            ),
+        }
+        for extension_type in (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE):
+            for version, records in sparse_versions.items():
+                with self.subTest(extension=extension_type, version=version):
+                    payload = b"".join(_pax_record(key, value) for key, value in records)
+                    raw = _tar_extension(extension_type, payload) + _tar_member("payload/file", b"")
+                    with patch.object(
+                        tarfile.TarInfo,
+                        "_proc_pax",
+                        side_effect=AssertionError("forbidden PAX must not reach stdlib parser"),
+                    ):
+                        with self.assertRaisesRegex(artifacts.ArtifactError, "forbidden key"):
+                            _parse_test_tar(raw)
+
+    def test_empty_duplicate_and_pax_size_forbidden_records_are_rejected(self) -> None:
+        cases = {
+            "empty size": _pax_record(b"size", b""),
+            "empty sparse key": _pax_record(b"GNU.sparse.map", b""),
+            "duplicate sparse key": _pax_record(b"GNU.sparse.map", b"0,1")
+            + _pax_record(b"GNU.sparse.map", b"2,1"),
+            "duplicate size key": _pax_record(b"size", b"1") + _pax_record(b"size", b"2"),
+        }
+        for label, payload in cases.items():
+            with self.subTest(label=label):
+                with patch.object(
+                    tarfile.TarInfo,
+                    "_proc_pax",
+                    side_effect=AssertionError("forbidden PAX must not reach stdlib parser"),
+                ):
+                    with self.assertRaisesRegex(artifacts.ArtifactError, "forbidden key"):
+                        _parse_test_tar(
+                            _tar_extension(tarfile.XHDTYPE, payload)
+                            + _tar_member("payload/file", b"")
+                        )
+
+    def test_padding_hidden_fields_and_malformed_trailing_records_are_rejected(self) -> None:
+        visible = _pax_record(b"comment", b"ok")
+        hidden = _pax_record(b"GNU.sparse.map", b"0,1")
+        padding = visible + hidden + bytes(tarfile.BLOCKSIZE - len(visible) - len(hidden))
+        cases = {
+            "padding-hidden sparse key": _tar_extension(
+                tarfile.XHDTYPE,
+                visible,
+                padded_block=padding,
+            ),
+            "malformed trailing record": _tar_extension(
+                tarfile.XHDTYPE,
+                visible + b"not-a-record",
+            ),
+            "invalid record length": _tar_extension(tarfile.XHDTYPE, b"1 x"),
+            "nonzero padding": _tar_extension(
+                tarfile.XHDTYPE,
+                visible,
+                padded_block=visible + b"x" + bytes(tarfile.BLOCKSIZE - len(visible) - 1),
+            ),
+        }
+        for label, extension in cases.items():
+            with self.subTest(label=label):
+                with patch.object(
+                    tarfile.TarInfo,
+                    "_proc_pax",
+                    side_effect=AssertionError("invalid PAX must not reach stdlib parser"),
+                ):
+                    with self.assertRaises(artifacts.ArtifactError):
+                        _parse_test_tar(extension + _tar_member("payload/file", b""))
+
+        trailing = _tar_member("ordinary", b"") + _tar_extension(
+            tarfile.XHDTYPE,
+            visible + b"not-a-record",
+        ) + _tar_member("after", b"")
+        with self.assertRaises(artifacts.ArtifactError):
+            _parse_test_tar(trailing)
+
+    def test_pax_block_is_read_once_then_replayed_to_stdlib(self) -> None:
+        payload = _pax_record(b"comment", b"ordinary metadata")
+        block = _padded_tar_bytes(payload)
+
+        class CountingReader(io.BytesIO):
+            def __init__(self, value: bytes) -> None:
+                super().__init__(value)
+                self.read_sizes: list[int] = []
+
+            def read(self, size: int = -1) -> bytes:
+                self.read_sizes.append(size)
+                return super().read(size)
+
+        source = CountingReader(block)
+        archive = SimpleNamespace(fileobj=source)
+        info = artifacts._BoundedTarInfo("PaxHeaders.0/header")
+        info.type = tarfile.XHDTYPE
+        info.size = len(payload)
+
+        def consume_replay(_info: tarfile.TarInfo, replay_archive: object) -> tarfile.TarInfo:
+            replay = replay_archive.fileobj.read(info._block(info.size))
+            self.assertEqual(replay, block)
+            return info
+
+        with patch.object(tarfile.TarInfo, "_proc_pax", consume_replay):
+            self.assertIs(info._proc_pax(archive), info)
+        self.assertEqual(source.read_sizes, [len(block)])
+        self.assertIs(archive.fileobj, source)
+
+    def test_extension_chain_depth_fails_as_artifact_error_before_recursion_limit(self) -> None:
+        below_limit = b"".join(_tar_extension(tarfile.XHDTYPE, b"") for _ in range(15))
+        below_limit += _tar_member("payload/file", b"")
+        at_limit = b"".join(_tar_extension(tarfile.XHDTYPE, b"") for _ in range(16))
+        at_limit += _tar_member("payload/file", b"")
+        over_limit = b"".join(_tar_extension(tarfile.XHDTYPE, b"") for _ in range(17))
+        over_limit += _tar_member("payload/file", b"")
+        with patch.object(artifacts, "MAX_TAR_EXTENSION_CHAIN_DEPTH", 16):
+            self.assertEqual(len(_parse_test_tar(below_limit)), 1)
+            self.assertEqual(len(_parse_test_tar(at_limit)), 1)
+            with self.assertRaisesRegex(artifacts.ArtifactError, "consecutive extension depth"):
+                _parse_test_tar(over_limit)
+
+    def test_extension_header_size_rejects_at_the_limit_before_payload_read(self) -> None:
+        maximum_payload = _pax_payload_of_size(artifacts.MAX_TAR_EXTENSION_BYTES)
+        self.assertEqual(
+            len(_parse_test_tar(_tar_extension(tarfile.XHDTYPE, maximum_payload) + _tar_member("file", b""))),
+            1,
+        )
+        info = tarfile.TarInfo("PaxHeaders.limit")
+        info.type = tarfile.XHDTYPE
+        info.size = artifacts.MAX_TAR_EXTENSION_BYTES
+        info.size += 1
+        info.mtime = 0
+        with self.assertRaisesRegex(artifacts.ArtifactError, "size limit"):
+            _parse_test_tar(info.tobuf())
+
+    def test_extension_count_and_bytes_persist_across_ordinary_members(self) -> None:
+        at_limit = b"".join(
+            _tar_extension(tarfile.XHDTYPE, b"") + _tar_member(f"file-{index}", b"")
+            for index in range(3)
+        )
+        over_limit = at_limit + _tar_extension(tarfile.XHDTYPE, b"") + _tar_member("file-3", b"")
+        with patch.object(artifacts, "MAX_TAR_EXTENSION_HEADERS", 3):
+            self.assertEqual(len(_parse_test_tar(at_limit)), 3)
+            with self.assertRaisesRegex(artifacts.ArtifactError, "extension header count"):
+                _parse_test_tar(over_limit)
+
+        two_extensions = (
+            _tar_extension(tarfile.XHDTYPE, b"")
+            + _tar_member("first", b"")
+            + _tar_extension(tarfile.XHDTYPE, b"")
+            + _tar_member("second", b"")
+        )
+        with patch.object(artifacts, "MAX_TAR_EXTENSION_TOTAL_BYTES", 2 * tarfile.BLOCKSIZE):
+            self.assertEqual(len(_parse_test_tar(two_extensions)), 2)
+        with patch.object(artifacts, "MAX_TAR_EXTENSION_TOTAL_BYTES", 2 * tarfile.BLOCKSIZE - 1):
+            with self.assertRaisesRegex(artifacts.ArtifactError, "cumulative extension byte"):
+                _parse_test_tar(two_extensions)
+
+    def test_extension_byte_quota_counts_padded_blocks_at_511_512_513_boundaries(self) -> None:
+        for payload_size in (511, 512, 513):
+            with self.subTest(payload_size=payload_size):
+                payload = _pax_payload_of_size(payload_size)
+                raw = _tar_extension(tarfile.XHDTYPE, payload) + _tar_member("file", b"")
+                padded_payload_size = ((payload_size + tarfile.BLOCKSIZE - 1) // tarfile.BLOCKSIZE) * tarfile.BLOCKSIZE
+                exact_quota = tarfile.BLOCKSIZE + padded_payload_size
+                with patch.object(artifacts, "MAX_TAR_EXTENSION_TOTAL_BYTES", exact_quota):
+                    self.assertEqual(len(_parse_test_tar(raw)), 1)
+                with patch.object(artifacts, "MAX_TAR_EXTENSION_TOTAL_BYTES", exact_quota - 1):
+                    with self.assertRaisesRegex(artifacts.ArtifactError, "cumulative extension byte"):
+                        _parse_test_tar(raw)
+
+
 class ExportCommandFailureTests(unittest.TestCase):
     def test_export_validation_error_fails_instead_of_selecting_lane_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1663,6 +1987,41 @@ class ExportCommandFailureTests(unittest.TestCase):
 
 
 class ArtifactReceiptTests(unittest.TestCase):
+    def test_aggregate_selection_values_must_be_exact_json_booleans(self) -> None:
+        environment = {
+            "GITHUB_REPOSITORY": "Verjson/app",
+            "GITHUB_REF": "refs/heads/main",
+            "CALLER_COMMIT": "b" * 40,
+            "CALLER_WORKFLOW_SHA": "c" * 40,
+            "REUSABLE_WORKFLOW_SHA": "d" * 40,
+            "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "MODE_GATE_RESULT": "success",
+            "PREFLIGHT_RESULT": "success",
+            "PRODUCER_RESULT": "skipped",
+            "UPLOAD_RESULT": "skipped",
+            "ARTIFACT_ID": "",
+            "ARTIFACT_DIGEST": "",
+            "EXPECTED_LANES_JSON": "[]",
+            "NEEDS_JSON": "{}",
+            "EXPECTED_PROFILE": "",
+            "EXPECTED_ATTEMPT": "1",
+            "SHARE_SELECTED": "false",
+            "POLICY_SELECTED": "false",
+        }
+        for field in ("SHARE_SELECTED", "POLICY_SELECTED"):
+            for invalid in (None, "", "TRUE", "False", "yes"):
+                with self.subTest(field=field, invalid=invalid):
+                    current = dict(environment)
+                    if invalid is None:
+                        current.pop(field)
+                    else:
+                        current[field] = invalid
+                    stderr = io.StringIO()
+                    with patch.dict(os.environ, current, clear=True), contextlib.redirect_stderr(stderr):
+                        self.assertEqual(artifacts.main(["aggregate"]), 1)
+                    self.assertIn("exact JSON boolean", stderr.getvalue())
+
     def test_aggregate_validates_exact_lane_receipts_and_command_digests(self) -> None:
         environment = {
             "GITHUB_REPOSITORY": "Verjson/app",
@@ -1792,6 +2151,35 @@ class CompactReceiptTests(unittest.TestCase):
                 identity={},
                 attempt="1",
             )
+
+    def test_selected_producer_and_upload_failures_cannot_fall_back(self) -> None:
+        cases = (
+            ("failed producer", "failed", "", "", ""),
+            ("skipped producer", "skipped", "", "", ""),
+            ("canceled producer", "cancelled", "", "", ""),
+            ("failed upload", "success", "failure", "101", "a" * 64),
+            ("skipped upload", "success", "skipped", "101", "a" * 64),
+            ("canceled upload", "success", "cancelled", "101", "a" * 64),
+            ("missing outputs", "success", "success", "", ""),
+        )
+        for label, producer_result, upload_result, artifact_id, artifact_digest in cases:
+            with self.subTest(label=label):
+                with self.assertRaises(artifacts.IntegrityError):
+                    artifacts.verify_aggregate(
+                        share_selected=False,
+                        policy_selected=True,
+                        mode_gate_result="success",
+                        preflight_result="success",
+                        producer_result=producer_result,
+                        upload_result=upload_result,
+                        artifact_id=artifact_id,
+                        artifact_digest=artifact_digest,
+                        expected_lanes=[],
+                        receipts={},
+                        expected_profile="",
+                        identity={},
+                        attempt="1",
+                    )
 
     def test_fallback_checks_lane_results_without_requiring_receipts(self) -> None:
         artifacts.verify_aggregate(
@@ -2155,6 +2543,88 @@ class RoleAuthorizationTests(unittest.TestCase):
                     candidate_environment.pop(env_name, None)
                 candidate_environment.update({"BUILD_ARTIFACT_ROLE": "consumer"})
                 self.assertEqual(candidate_environment["BUILD_ARTIFACT_ROLE"], "consumer")
+
+
+class ArtifactWorkflowGuardTests(unittest.TestCase):
+    workflows = (
+        ROOT / ".github/workflows/node-ci.yml",
+        ROOT / ".github/workflows/node-ci-protected.yml",
+    )
+    upload_guard = (
+        "needs.eligibility.outputs.should-run != 'false' && "
+        "inputs.build-artifact-role == 'producer' && "
+        "toJSON(fromJSON(steps.export-build-artifact.outputs.share-available)) == 'true'"
+    )
+    receipt_guard = (
+        "needs.eligibility.outputs.should-run != 'false' && success() && "
+        "inputs.build-artifact-role == 'consumer' && "
+        "steps.verify-build-artifact.outcome == 'success' && "
+        "steps.run-script-plan.outcome == 'success'"
+    )
+
+    def _load_guard(self, workflow_path: Path, step_id: str) -> str:
+        document = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+        steps = [
+            step
+            for job in document["jobs"].values()
+            for step in job.get("steps", [])
+            if step.get("id") == step_id
+        ]
+        self.assertEqual(1, len(steps), f"expected one {step_id} in {workflow_path.name}")
+        return steps[0]["if"]
+
+    def test_loaded_upload_guard_requires_producer_and_exact_share_availability(self):
+        for workflow_path in self.workflows:
+            with self.subTest(workflow=workflow_path.name):
+                guard = self._load_guard(workflow_path, "upload-build-artifact")
+                self.assertEqual(self.upload_guard, guard)
+                base = {
+                    "needs.eligibility.outputs.should-run": "true",
+                    "inputs.build-artifact-role": "producer",
+                    "steps.export-build-artifact.outputs.share-available": "true",
+                }
+                self.assertTrue(Evaluator(base).evaluate(guard))
+
+                for overrides in (
+                    {"inputs.build-artifact-role": "consumer"},
+                    {"steps.export-build-artifact.outputs.share-available": "false"},
+                    {"needs.eligibility.outputs.should-run": "false"},
+                ):
+                    bindings = {**base, **overrides}
+                    self.assertFalse(Evaluator(bindings).evaluate(guard))
+
+                malformed = {
+                    **base,
+                    "steps.export-build-artifact.outputs.share-available": "TRUE",
+                }
+                with self.assertRaises(UnsupportedExpression):
+                    Evaluator(malformed).evaluate(guard)
+
+    def test_loaded_receipt_guard_requires_verified_and_executed_success(self):
+        for workflow_path in self.workflows:
+            with self.subTest(workflow=workflow_path.name):
+                guard = self._load_guard(workflow_path, "create-build-artifact-receipt")
+                self.assertEqual(self.receipt_guard, guard)
+                base = {
+                    "needs.eligibility.outputs.should-run": "true",
+                    "inputs.build-artifact-role": "consumer",
+                    "steps.verify-build-artifact.outcome": "success",
+                    "steps.run-script-plan.outcome": "success",
+                }
+                def evaluate_guard(bindings):
+                    return Evaluator(
+                        bindings, functions={"success": lambda: True}
+                    ).evaluate(guard)
+
+                self.assertTrue(evaluate_guard(base))
+
+                for overrides in (
+                    {"steps.verify-build-artifact.outcome": "failure"},
+                    {"steps.run-script-plan.outcome": "failure"},
+                    {"inputs.build-artifact-role": "producer"},
+                    {"needs.eligibility.outputs.should-run": "false"},
+                ):
+                    self.assertFalse(evaluate_guard({**base, **overrides}))
 
 
 if __name__ == "__main__":

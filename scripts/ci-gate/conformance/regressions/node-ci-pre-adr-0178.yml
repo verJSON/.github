@@ -670,7 +670,7 @@ jobs:
       artifact-id: ${{ steps.upload-build-artifact.outputs.artifact-id }}
       artifact-digest: ${{ steps.upload-build-artifact.outputs.artifact-digest }}
       upload-result: ${{ steps.upload-build-artifact.outcome }}
-      share-available: ${{ steps.upload-build-artifact.outputs.artifact-id != '' && steps.export-build-artifact.outputs.share-available == 'true' && steps.upload-build-artifact.outcome == 'success' }}
+      share-available: ${{ steps.export-build-artifact.outputs.share-available }}
       receipt: ${{ steps.create-build-artifact-receipt.outputs.receipt }}
       receipt-id: ${{ steps.create-build-artifact-receipt.outputs.receipt-id }}
       receipt-digest: ${{ steps.create-build-artifact-receipt.outputs.receipt-digest }}
@@ -1161,6 +1161,7 @@ jobs:
         digest-mismatch: error
     - name: Verify and safely extract read-only ArtifactSet
       if: needs.eligibility.outputs.should-run != 'false' && inputs.build-artifact-role == 'consumer'
+      id: verify-build-artifact
       env:
         ARTIFACT_ID: ${{ inputs.build-artifact-id }}
         ARTIFACT_DIGEST: ${{ inputs.build-artifact-digest }}
@@ -1354,7 +1355,7 @@ jobs:
       run: "set -euo pipefail\npython3 -I \"$RUNNER_TEMP/ci_build_artifacts.py\" export \\\n  --workspace \"$GITHUB_WORKSPACE\" \\\n  --output \"$RUNNER_TEMP/ci-build-artifact.tar.gz\" \\\n  --roots-json \"$BUILD_ARTIFACT_PATHS\" \\\n  --consumers \"$BUILD_ARTIFACT_PARTICIPANT_COUNT\"\n"
     - name: Upload one-day same-run ArtifactSet
       id: upload-build-artifact
-      if: needs.eligibility.outputs.should-run != 'false' && inputs.build-artifact-role == 'producer' && steps.export-build-artifact.outputs.share-available == 'true'
+      if: needs.eligibility.outputs.should-run != 'false' && inputs.build-artifact-role == 'producer' && toJSON(fromJSON(steps.export-build-artifact.outputs.share-available)) == 'true'
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
       with:
         path: ${{ runner.temp }}/ci-build-artifact.tar.gz
@@ -1511,7 +1512,7 @@ jobs:
       run: "set -euo pipefail\ncache_dir=\"$RUNNER_TEMP/verjson-npm-cache\"\nmkdir -p \"$cache_dir\"\nsize_kb=\"$(du -sk \"$cache_dir\" | cut -f1)\"\nsize_mb=\"$(( (size_kb + 1023) / 1024 ))\"\n{\n  echo \"### npm cache\"\n  echo \"- scoped path: \\`$cache_dir\\`\"\n  echo \"- size: ${size_mb} MB\"\n  echo \"- upload limit: ${CACHE_MAX_MB} MB\"\n} >> \"$GITHUB_STEP_SUMMARY\"\nif [ \"$size_kb\" -gt \"$(( CACHE_MAX_MB * 1024 ))\" ]; then\n  echo \"::warning::npm cache is ${size_mb} MB; clearing it instead of uploading more than ${CACHE_MAX_MB} MB\"\n  find \"$cache_dir\" -mindepth 1 -delete\nfi\n"
     - name: Create trusted per-lane TestReceipt
       id: create-build-artifact-receipt
-      if: needs.eligibility.outputs.should-run != 'false' && success() && inputs.build-artifact-role == 'consumer'
+      if: needs.eligibility.outputs.should-run != 'false' && success() && inputs.build-artifact-role == 'consumer' && steps.verify-build-artifact.outcome == 'success' && steps.run-script-plan.outcome == 'success'
       env:
         BUILD_ARTIFACT_LEVEL_ID: ${{ inputs.build-artifact-level-id }}
         CALLER_COMMIT: ${{ github.sha }}

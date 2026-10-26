@@ -643,7 +643,7 @@ def _artifact_level_inputs(
     ]
     if role == "participant":
         lines += [
-            "      build-artifact-role: ${{ github.run_attempt == '1' && needs.artifact-preflight.outputs.build-artifact-share-selected == 'true' && needs.artifact-producer.result == 'success' && needs.artifact-producer.outputs.build-artifact-share-available == 'true' && 'consumer' || 'level' }}",
+            "      build-artifact-role: ${{ toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'false' && 'level' || 'consumer' }}",
             f"      build-artifact-authorization-plan-json: {_scalar(authorization_plan_json)}",
             "      build-artifact-needs-results: ${{ needs.artifact-preflight.outputs.build-artifact-needs-results }}",
             f"      build-artifact-level-id: {json.dumps(level.id)}",
@@ -677,6 +677,13 @@ def _render_artifact_level(level: Level, plan: Plan, sha: str) -> list[str]:
     ]
     if participant:
         condition_terms += ["needs.artifact-preflight.result == 'success'"]
+    if participant:
+        selected = "toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected))"
+        share_available = "toJSON(fromJSON(needs.artifact-producer.outputs.build-artifact-share-available))"
+        condition_terms.append(
+            f"({selected} == 'false' || (github.run_attempt == '1' && {selected} == 'true' "
+            f"&& needs.artifact-producer.result == 'success' && {share_available} == 'true'))"
+        )
     condition_terms.append(f"({original})")
     lines = [
         f"  {level.id}:",
@@ -885,11 +892,11 @@ def _render_artifact_jobs(plan: Plan, sha: str) -> list[list[str]]:
     producer_condition = "true" if static_fallback else (_job_condition(producer_level) or "true")
     producer_gate = (
         "needs.artifact-preflight.result == 'success' && "
-        "github.run_attempt == '1' && needs.artifact-preflight.outputs.build-artifact-share-selected == 'true'"
+        "github.run_attempt == '1' && toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'true'"
         if static_fallback
         else "needs.artifact-mode-gate.result == 'success' && "
         "needs.artifact-preflight.result == 'success' && "
-        "github.run_attempt == '1' && needs.artifact-preflight.outputs.build-artifact-share-selected == 'true'"
+        "github.run_attempt == '1' && toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'true'"
     )
     producer_condition = f"always() && !cancelled() && {producer_gate} && ({producer_condition})"
     producer_inputs = [
@@ -956,10 +963,11 @@ def _render_aggregate(plan: Plan, sha: str | None = None) -> list[str]:
         assert sha is not None
         lines += [
             "      - name: Verify build artifact receipts",
+            "        if: always()",
             f"        uses: Verjson/.github/.github/actions/node-ci-build-artifact-aggregate@{sha}",
             "        with:",
-            "          share-selected: ${{ github.run_attempt == '1' && needs.artifact-preflight.outputs.build-artifact-share-selected == 'true' && needs.artifact-producer.result == 'success' && needs.artifact-producer.outputs.build-artifact-share-available == 'true' }}",
-            "          policy-selected: ${{ github.run_attempt == '1' && needs.artifact-preflight.outputs.build-artifact-share-selected == 'true' }}",
+            "          share-selected: ${{ needs.artifact-producer.result == 'skipped' && 'false' || needs.artifact-producer.outputs.build-artifact-share-available }}",
+            "          policy-selected: ${{ needs.artifact-preflight.outputs.build-artifact-share-selected }}",
             "          mode-gate-result: ${{ needs.artifact-mode-gate.result }}",
             "          preflight-result: ${{ needs.artifact-preflight.result }}",
             "          producer-result: ${{ needs.artifact-producer.result }}",

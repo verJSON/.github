@@ -462,8 +462,29 @@ class TheHarnessFailsClosed(unittest.TestCase):
         self.assertIn('skips', outcome.skipped_steps)
 
     def test_an_unsupported_construct_raises_rather_than_evaluating_false(self):
+        self.assertTrue(Evaluator({}).evaluate("fromJSON('true') == true"))
+        self.assertFalse(Evaluator({}).evaluate("fromJSON('false') == true"))
+        self.assertTrue(Evaluator({}).evaluate("toJSON(fromJSON('true')) == 'true'"))
+
+        for raw in ("1", "0"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(UnsupportedExpression):
+                    Evaluator({}).evaluate(f"toJSON(fromJSON('{raw}')) == 'true'")
+
+        for raw in ('"true"', "null"):
+            with self.subTest(raw=raw):
+                self.assertFalse(
+                    Evaluator({}).evaluate(f"toJSON(fromJSON('{raw}')) == 'true'")
+                )
+
         with self.assertRaises(UnsupportedExpression):
-            Evaluator({}).evaluate("fromJSON('[]')")
+            Evaluator({}).evaluate("toJSON(fromJSON('0')) == 'false'")
+        with self.assertRaises(UnsupportedExpression):
+            Evaluator({}).evaluate("toJSON(fromJSON('1')) == 'false'")
+        with self.assertRaises(UnsupportedExpression):
+            Evaluator({}).evaluate("fromJSON('TRUE') == true")
+        with self.assertRaises(UnsupportedExpression):
+            Evaluator({}).evaluate("fromJSON('NaN') == true")
 
     def test_a_status_function_nothing_bound_raises_the_modules_own_error(self):
         """A bare NameError reads as a harness crash, not an unmodelled guard."""
@@ -1195,6 +1216,52 @@ class BothSecretlessLanesTakeTheSameAcquisitionPath(unittest.TestCase):
             'npm ci', set(outcomes['build-test'].executed_steps),
             'the credentialed lane no longer runs `npm ci`, so asserting its '
             'absence in the secretless lane proves nothing')
+
+
+class FromJsonSemanticsTests(unittest.TestCase):
+    def test_raw_context_string_equality_is_case_insensitive(self):
+        self.assertTrue(
+            Evaluator({'inputs.role': 'PRODUCER'}).evaluate("inputs.role == 'producer'")
+        )
+
+    def test_python_does_not_decode_backslashes_in_expression_literals(self):
+        expression = r"fromJSON('\x74rue') == true"
+        with self.assertRaises(UnsupportedExpression):
+            Evaluator({}).evaluate(expression)
+
+    def test_from_json_uses_github_loose_equality_for_supported_primitives(self):
+        self.assertTrue(Evaluator({}).evaluate("fromJSON('null') == false"))
+        self.assertTrue(Evaluator({}).evaluate("fromJSON('\"1\"') == true"))
+        self.assertTrue(Evaluator({}).evaluate("fromJSON('\"TRUE\"') == 'true'"))
+        self.assertTrue(Evaluator({}).evaluate("toJSON(fromJSON('null')) == 'null'"))
+        self.assertTrue(Evaluator({}).evaluate("toJSON(fromJSON('true')) == 'TRUE'"))
+        with self.assertRaises(UnsupportedExpression):
+            Evaluator({}).evaluate("fromJSON('\"1_0\"') == true")
+
+    def test_from_json_arrays_use_github_truthiness(self):
+        self.assertTrue(Evaluator({}).evaluate("fromJSON('[]')"))
+
+    def test_operator_text_inside_json_string_is_preserved(self):
+        expression = """fromJSON('"a||b"') == 'a||b'"""
+        self.assertTrue(Evaluator({}).evaluate(expression))
+        escaped_apostrophe = """fromJSON('"a''||b"') == 'a''||b'"""
+        self.assertTrue(Evaluator({}).evaluate(escaped_apostrophe))
+
+    def test_non_ascii_case_equality_fails_closed(self):
+        with self.assertRaises(UnsupportedExpression):
+            Evaluator({}).evaluate("fromJSON('\"straße\"') == 'STRASSE'")
+
+    def test_unsupported_to_json_shapes_fail_closed(self):
+        with self.assertRaises(UnsupportedExpression):
+            Evaluator({}).evaluate("toJSON(fromJSON('\"straße\"')) == '\"straße\"'")
+        with self.assertRaises(UnsupportedExpression):
+            Evaluator({}).evaluate("toJSON(fromJSON('1.0')) == '1'")
+        with self.assertRaises(UnsupportedExpression):
+            Evaluator({}).evaluate("toJSON(fromJSON('9007199254740993')) == '9007199254740993'")
+        with self.assertRaises(UnsupportedExpression):
+            Evaluator({}).evaluate("toJSON(fromJSON('[1]')) == '[1]'")
+        with self.assertRaises(UnsupportedExpression):
+            Evaluator({}).evaluate("toJSON(fromJSON('1000000000000000')) == '1000000000000000'")
 
 
 if __name__ == '__main__':

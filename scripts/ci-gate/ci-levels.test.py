@@ -20,7 +20,9 @@ GENERATOR = ROOT / "scripts/gen-node-ci-caller.py"
 SHA = "a" * 40
 
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "scripts/ci-gate/conformance"))
 import ci_levels  # noqa: E402
+from expressions import Evaluator, UnsupportedExpression  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location("gen_node_ci_caller", GENERATOR)
 gen = importlib.util.module_from_spec(_spec)
@@ -170,11 +172,23 @@ class BuildArtifactSchemaTests(unittest.TestCase):
         self.assertEqual(jobs["setup"]["needs"], ["artifact-mode-gate"])
         self.assertNotIn("artifact-preflight", jobs["setup"]["needs"])
         self.assertIn("github.run_attempt == '1'", jobs["artifact-producer"]["if"])
-        self.assertIn("github.run_attempt == '1'", jobs["test"]["with"]["build-artifact-role"])
-        self.assertIn("needs.artifact-producer.outputs.build-artifact-share-available == 'true'", jobs["test"]["with"]["build-artifact-role"])
-        self.assertIn("|| 'level'", jobs["test"]["with"]["build-artifact-role"])
-        self.assertNotIn("needs.artifact-producer.result == 'success'", jobs["test"]["if"])
-        self.assertIn("github.run_attempt == '1'", jobs["test-levels"]["steps"][1]["with"]["share-selected"])
+        self.assertIn(
+            "toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'false'",
+            jobs["test"]["with"]["build-artifact-role"],
+        )
+        self.assertIn("github.run_attempt == '1'", jobs["test"]["if"])
+        self.assertIn(
+            "needs.artifact-producer.result == 'success'",
+            jobs["test"]["if"],
+        )
+        self.assertIn(
+            "toJSON(fromJSON(needs.artifact-producer.outputs.build-artifact-share-available)) == 'true'",
+            jobs["test"]["if"],
+        )
+        self.assertIn("needs.artifact-producer.result == 'skipped'", jobs["test-levels"]["steps"][1]["with"]["share-selected"])
+        self.assertEqual(jobs["test-levels"]["steps"][1]["if"], "always()")
+        self.assertEqual(jobs["test-levels"]["if"], "${{ always() }}")
+        self.assertNotIn("continue-on-error", json.dumps(jobs["test-levels"]))
         aggregate_projection = jobs["test-levels"]["steps"][1]["with"]["needs-json"]
         self.assertIn('"build-artifact-receipt":${{ toJSON(needs.build.outputs.build-artifact-receipt) }}', aggregate_projection)
         self.assertIn('needs.test.outputs.build-artifact-receipt', aggregate_projection)
@@ -190,6 +204,97 @@ class BuildArtifactSchemaTests(unittest.TestCase):
         )
         self.assertIn("policy-selected", jobs["test-levels"]["steps"][1]["with"])
         self.assertNotIn("receipts", jobs["test-levels"]["steps"][1]["with"])
+
+    def test_generated_participant_selection_is_exact_and_fails_closed(self):
+        document = self.artifact_document()
+        jobs = yaml.safe_load(self.render(document))["jobs"]
+        selected = "toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected))"
+        available = "toJSON(fromJSON(needs.artifact-producer.outputs.build-artifact-share-available))"
+        participant_if = (
+            "${{ always() && !cancelled() && needs.artifact-mode-gate.result == 'success' "
+            "&& needs.artifact-preflight.result == 'success' "
+            f"&& ({selected} == 'false' || (github.run_attempt == '1' && {selected} == 'true' "
+            f"&& needs.artifact-producer.result == 'success' && {available} == 'true')) && (true) }}}}"
+        )
+        for level_id in ("build", "test"):
+            self.assertEqual(jobs[level_id]["if"], participant_if)
+            self.assertIn(f"{selected} == 'false'", jobs[level_id]["if"])
+            self.assertIn(f"{selected} == 'true'", jobs[level_id]["if"])
+            self.assertIn("github.run_attempt == '1'", jobs[level_id]["if"])
+            self.assertIn("needs.artifact-producer.result == 'success'", jobs[level_id]["if"])
+            self.assertIn(f"{available} == 'true'", jobs[level_id]["if"])
+
+        def route(preflight_result, raw_selected, attempt, producer_result, raw_available):
+            bindings = {
+                "needs.artifact-mode-gate.result": "success",
+                "needs.artifact-preflight.result": preflight_result,
+                "github.run_attempt": attempt,
+                "needs.artifact-preflight.outputs.build-artifact-share-selected": raw_selected,
+                "needs.artifact-producer.result": producer_result,
+                "needs.artifact-producer.outputs.build-artifact-share-available": raw_available,
+            }
+            functions = {
+                "always": lambda: True,
+                "cancelled": lambda: False,
+                "success": lambda: True,
+                "failure": lambda: False,
+            }
+            level_ids = [level["id"] for level in document["levels"]]
+            try:
+                launches = [
+                    Evaluator(bindings, functions=functions).evaluate(jobs[level_id]["if"])
+                    for level_id in level_ids
+                ]
+                if not all(launches):
+                    return "no-launch"
+
+                level_roles = []
+                for level_id in level_ids:
+                    role_expression = jobs[level_id]["with"]["build-artifact-role"]
+                    role_expression = role_expression.removeprefix("${{").removesuffix("}}").strip()
+                    level_roles.append(
+                        Evaluator(bindings).evaluate(f"({role_expression}) == 'level'")
+                    )
+            except UnsupportedExpression:
+                return "no-launch"
+
+            if all(level_roles):
+                return "original-plan"
+            if not any(level_roles):
+                return "consumer-plan"
+            return "no-launch"
+
+        cases = (
+            ("success", "true", "1", "failure", "true", "no-launch"),
+            ("success", "true", "1", "success", "", "no-launch"),
+            ("success", "false", "1", "skipped", "", "original-plan"),
+            ("success", "false", "2", "skipped", "", "original-plan"),
+            ("success", "true", "1", "success", "true", "consumer-plan"),
+            ("success", "TRUE", "1", "success", "true", "no-launch"),
+            ("success", "False", "1", "skipped", "", "no-launch"),
+            ("success", '"true"', "1", "success", "true", "no-launch"),
+            ("success", "1", "1", "success", "true", "no-launch"),
+            ("success", "0", "1", "skipped", "", "no-launch"),
+            ("success", "null", "1", "skipped", "", "no-launch"),
+            ("success", "", "1", "skipped", "", "no-launch"),
+            ("success", "true", "2", "success", "true", "no-launch"),
+            ("success", "true", "1", "failed", "true", "no-launch"),
+            ("success", "true", "1", "skipped", "", "no-launch"),
+            ("success", "true", "1", "cancelled", "", "no-launch"),
+            ("success", "true", "1", "success", "false", "no-launch"),
+            ("success", "true", "1", "success", "TRUE", "no-launch"),
+            ("success", "true", "1", "success", "1", "no-launch"),
+            ("success", "true", "1", "success", '"true"', "no-launch"),
+            ("success", "true", "1", "success", "null", "no-launch"),
+            ("success", "true", "1", "success", "", "no-launch"),
+            ("failure", "false", "1", "skipped", "", "no-launch"),
+        )
+        for preflight, raw_selected, attempt, producer, raw_available, expected in cases:
+            with self.subTest(raw_selected=raw_selected, attempt=attempt, producer=producer):
+                self.assertEqual(
+                    route(preflight, raw_selected, attempt, producer, raw_available),
+                    expected,
+                )
 
     def test_producer_keeps_runtime_script_plans_while_execution_uses_preflight_plan(self):
         document = levels(

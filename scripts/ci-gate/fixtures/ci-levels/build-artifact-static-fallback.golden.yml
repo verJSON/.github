@@ -46,7 +46,7 @@ jobs:
 
   artifact-producer:
     needs: [artifact-preflight]
-    if: ${{ always() && !cancelled() && needs.artifact-preflight.result == 'success' && github.run_attempt == '1' && needs.artifact-preflight.outputs.build-artifact-share-selected == 'true' && (true) }}
+    if: ${{ always() && !cancelled() && needs.artifact-preflight.result == 'success' && github.run_attempt == '1' && toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'true' && (true) }}
     permissions:
       contents: read
       packages: read
@@ -72,7 +72,7 @@ jobs:
 
   build:
     needs: [artifact-mode-gate, artifact-preflight, artifact-producer]
-    if: ${{ always() && !cancelled() && needs.artifact-mode-gate.result == 'success' && needs.artifact-preflight.result == 'success' && (true) }}
+    if: ${{ always() && !cancelled() && needs.artifact-mode-gate.result == 'success' && needs.artifact-preflight.result == 'success' && (toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'false' || (github.run_attempt == '1' && toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'true' && needs.artifact-producer.result == 'success' && toJSON(fromJSON(needs.artifact-producer.outputs.build-artifact-share-available)) == 'true')) && (true) }}
     permissions:
       contents: read
       packages: read
@@ -83,7 +83,7 @@ jobs:
       ci-level-fail-fast: true
       secretless-pr: ${{ github.event_name == 'pull_request' }}
       secretless-trusted-ref: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
-      build-artifact-role: ${{ github.run_attempt == '1' && needs.artifact-preflight.outputs.build-artifact-share-selected == 'true' && needs.artifact-producer.result == 'success' && needs.artifact-producer.outputs.build-artifact-share-available == 'true' && 'consumer' || 'level' }}
+      build-artifact-role: ${{ toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'false' && 'level' || 'consumer' }}
       build-artifact-authorization-plan-json: "{\"version\":1,\"pushBranches\":[\"main\"],\"secrets\":[\"NODE_AUTH_TOKEN\"],\"levels\":[{\"id\":\"build\",\"needs\":[],\"events\":null,\"branches\":null,\"inputs\":{},\"failFast\":true},{\"id\":\"test\",\"needs\":[{\"level\":\"build\",\"condition\":\"success\"}],\"events\":[\"push\"],\"branches\":null,\"inputs\":{},\"failFast\":true}],\"buildArtifact\":{\"producer\":\"build\",\"consumers\":[\"test\"],\"paths\":[\".next\"]}}"
       build-artifact-needs-results: ${{ needs.artifact-preflight.outputs.build-artifact-needs-results }}
       build-artifact-level-id: "build"
@@ -101,7 +101,7 @@ jobs:
 
   test:
     needs: [artifact-mode-gate, artifact-preflight, artifact-producer, build]
-    if: ${{ always() && !cancelled() && needs.artifact-mode-gate.result == 'success' && needs.artifact-preflight.result == 'success' && (!cancelled() && needs.build.result == 'success' && (github.event_name == 'push')) }}
+    if: ${{ always() && !cancelled() && needs.artifact-mode-gate.result == 'success' && needs.artifact-preflight.result == 'success' && (toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'false' || (github.run_attempt == '1' && toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'true' && needs.artifact-producer.result == 'success' && toJSON(fromJSON(needs.artifact-producer.outputs.build-artifact-share-available)) == 'true')) && (!cancelled() && needs.build.result == 'success' && (github.event_name == 'push')) }}
     permissions:
       contents: read
       packages: read
@@ -112,7 +112,7 @@ jobs:
       ci-level-fail-fast: true
       secretless-pr: ${{ github.event_name == 'pull_request' }}
       secretless-trusted-ref: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
-      build-artifact-role: ${{ github.run_attempt == '1' && needs.artifact-preflight.outputs.build-artifact-share-selected == 'true' && needs.artifact-producer.result == 'success' && needs.artifact-producer.outputs.build-artifact-share-available == 'true' && 'consumer' || 'level' }}
+      build-artifact-role: ${{ toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'false' && 'level' || 'consumer' }}
       build-artifact-authorization-plan-json: "{\"version\":1,\"pushBranches\":[\"main\"],\"secrets\":[\"NODE_AUTH_TOKEN\"],\"levels\":[{\"id\":\"build\",\"needs\":[],\"events\":null,\"branches\":null,\"inputs\":{},\"failFast\":true},{\"id\":\"test\",\"needs\":[{\"level\":\"build\",\"condition\":\"success\"}],\"events\":[\"push\"],\"branches\":null,\"inputs\":{},\"failFast\":true}],\"buildArtifact\":{\"producer\":\"build\",\"consumers\":[\"test\"],\"paths\":[\".next\"]}}"
       build-artifact-needs-results: ${{ needs.artifact-preflight.outputs.build-artifact-needs-results }}
       build-artifact-level-id: "test"
@@ -164,10 +164,11 @@ jobs:
           done
           exit "${failed}"
       - name: Verify build artifact receipts
+        if: always()
         uses: Verjson/.github/.github/actions/node-ci-build-artifact-aggregate@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         with:
-          share-selected: ${{ github.run_attempt == '1' && needs.artifact-preflight.outputs.build-artifact-share-selected == 'true' && needs.artifact-producer.result == 'success' && needs.artifact-producer.outputs.build-artifact-share-available == 'true' }}
-          policy-selected: ${{ github.run_attempt == '1' && needs.artifact-preflight.outputs.build-artifact-share-selected == 'true' }}
+          share-selected: ${{ needs.artifact-producer.result == 'skipped' && 'false' || needs.artifact-producer.outputs.build-artifact-share-available }}
+          policy-selected: ${{ needs.artifact-preflight.outputs.build-artifact-share-selected }}
           mode-gate-result: ${{ needs.artifact-mode-gate.result }}
           preflight-result: ${{ needs.artifact-preflight.result }}
           producer-result: ${{ needs.artifact-producer.result }}
