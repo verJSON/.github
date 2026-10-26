@@ -594,6 +594,16 @@ def _client_bundle_files(
             raise PostgresSandboxError("Postgres client bundle has a file outside bin or lib")
         if relative.count("/") != 1:
             raise PostgresSandboxError("Postgres client bundle has a nested file path")
+        expected_mode = (
+            0o555
+            if relative in {"bin/psql", "bin/pg_dump"}
+            or Path(relative).name.startswith("ld-linux")
+            else 0o444
+        )
+        if stat.S_IMODE(metadata.st_mode) != expected_mode:
+            raise PostgresSandboxError(
+                f"Postgres client bundle {relative} has unsafe permissions"
+            )
         entries.append(
             {
                 "path": relative,
@@ -601,7 +611,12 @@ def _client_bundle_files(
             }
         )
     names = {entry["path"] for entry in entries}
-    required = {"bin/psql", "bin/pg_dump"}
+    required = {
+        "bin/psql",
+        "bin/pg_dump",
+        "lib/psql.elf",
+        "lib/pg_dump.elf",
+    }
     if not required.issubset(names) or not any(name.startswith("lib/ld-linux") for name in names):
         raise PostgresSandboxError("Postgres client bundle is incomplete")
     return entries
@@ -669,11 +684,15 @@ def _require_client_version(output: str, executable: str, expected: str) -> None
         raise PostgresSandboxError(f"pinned Postgres {executable} client version mismatch")
 
 
-def _run_staged_client(loader: Path, library_directory: Path, executable: Path) -> str:
+def _run_staged_client(
+    loader: Path, library_directory: Path, executable: Path, argv0: Path
+) -> str:
     try:
         result = subprocess.run(
             [
                 str(loader),
+                "--argv0",
+                str(argv0),
                 "--library-path",
                 str(library_directory),
                 str(executable),
@@ -754,12 +773,18 @@ def stage_client_bundle(
             "#!/bin/sh\n"
             "set -eu\n"
             f"exec {CLIENT_SANDBOX_PATH}/lib/{loader_name} "
+            f'--argv0 "{CLIENT_SANDBOX_PATH}/bin/{name}" '
             f"--library-path {CLIENT_SANDBOX_PATH}/lib "
             f"{CLIENT_SANDBOX_PATH}/lib/{name}.elf \"$@\"\n",
             encoding="utf-8",
         )
         wrapper.chmod(0o555)
-        output = _run_staged_client(loader, library_directory, library_directory / f"{name}.elf")
+        output = _run_staged_client(
+            loader,
+            library_directory,
+            library_directory / f"{name}.elf",
+            wrapper,
+        )
         _require_client_version(output, name, profile["clientVersion"])
 
     write_client_manifest(bundle_path, profile)
