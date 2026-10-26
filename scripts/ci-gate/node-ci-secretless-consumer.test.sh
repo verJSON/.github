@@ -462,6 +462,9 @@ runner_environment.update({
 })
 runner_temp = Path(runner_environment["RUNNER_TEMP"])
 shutil.copyfile(Path(sys.argv[3]) / "scripts/ci_build_artifacts.py", runner_temp / "ci_build_artifacts.py")
+script_plan_dir = Path(sys.argv[3]) / ".github/actions/node-ci-script-plan"
+for module in ("script_plan.py", "normalized_entries.py"):
+ shutil.copyfile(script_plan_dir / module, runner_temp / module)
 hostile_bash_env = fixture / "hostile-bash-env"
 startup_marker = fixture / "bash-env-sourced"
 hostile_bash_env.write_text(f"printf sourced > {startup_marker}\n", encoding="utf-8")

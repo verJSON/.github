@@ -277,10 +277,19 @@ def validate_hosted_compatibility(candidate, candidate_manifest):
     assert execution["run"] == "\n".join((*compatibility_commands, ""))
     for command in compatibility_commands:
         assert execution["run"].splitlines().count(command) == 1
-        assert not any(
-            line.endswith("\t" + command)
+        platform_harnesses = {
+            "bash scripts/ci-gate/node-ci-secretless-consumer.test.sh",
+            "bash scripts/ci-gate/node-ci-secretless-nested-manifests.test.sh",
+        }
+        registrations = [
+            line.split("\t", 1)
             for line in candidate_manifest.splitlines()
-        )
+            if line.endswith("\t" + command)
+        ]
+        if command in platform_harnesses:
+            assert registrations == [["platform", command]]
+        else:
+            assert registrations == []
     aggregate = candidate_jobs["shell-tests"]
     assert "hosted-compatibility-tests" in aggregate["needs"]
     assert aggregate["steps"][0]["env"]["COMPATIBILITY_RESULT"] == (

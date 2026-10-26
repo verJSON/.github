@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import yaml
 from pathlib import Path
 
@@ -26,6 +27,7 @@ PINNED_ACTION_FILE_HASHES = {
 }
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(ACTION))
+import normalized_entries  # noqa: E402
 import script_plan  # noqa: E402
 
 
@@ -70,6 +72,17 @@ class GoldenPlanTests(unittest.TestCase):
                     {"entries": entries, "defaultPlan": default_plan},
                     self.golden[name],
                 )
+            validated = normalized_entries.validate_normalized_entries(entries, nested_source)
+            self.assertEqual(
+                [entry.as_json() for entry in validated.entries],
+                entries,
+            )
+            self.assertEqual(
+                [manifest.path for manifest in validated.nested_manifests],
+                [manifest["path"] for manifest in json.loads(nested_source)]
+                if nested_source.strip()
+                else [],
+            )
 
     def test_nested_plans_keep_manifest_scope_and_allow_same_script_in_two_manifests(self) -> None:
         nested = encoded(
@@ -107,6 +120,19 @@ class GoldenPlanTests(unittest.TestCase):
         self.assertFalse(script_plan.requires_services_for_script("test:isolated", plan_source))
         self.assertTrue(script_plan.requires_services_for_script("build", plan_source))
         self.assertFalse(script_plan.requires_services_for_script("lint", plan_source))
+
+    def test_level_wrappers_fail_closed_in_compatibility_service_grants(self) -> None:
+        level_wrapper = encoded(
+            [
+                {
+                    "id": "test",
+                    "inputs": {"secretless-ci-script-plan": encoded(["test"])},
+                }
+            ]
+        )
+
+        with self.assertRaises(script_plan.ScriptPlanError):
+            script_plan.requires_services_for_script("test", level_wrapper)
 
     def test_blank_plan_preserves_test_name_default_service_grant(self) -> None:
         self.assertTrue(script_plan.requires_services_for_script("unit:test", " \n "))
@@ -293,6 +319,59 @@ class GoldenPlanTests(unittest.TestCase):
             self.assertEqual(len(normalized), 32)
             self.assertEqual(len(normalized[0]["unsetEnv"]), 16)
             self.assertEqual(output_lines[1], "default-plan=false")
+        validated = normalized_entries.validate_normalized_entries(normalized, "")
+        self.assertEqual(len(validated.entries), 32)
+        self.assertEqual(len(validated.entries[0].unset_env), 16)
+
+    def test_normalized_entry_validator_rejects_malformed_shapes_and_bindings(self) -> None:
+        nested_source = encoded(
+            [
+                {"path": "packages/one", "approvedPackages": [], "scriptPlan": ["test"]},
+                {"path": "packages/two", "approvedPackages": [], "scriptPlan": ["build"]},
+            ]
+        )
+        valid_entries, _ = script_plan.normalize_outputs("", nested_source)
+        malformed_cases = [
+            [
+                {
+                    "id": "test",
+                    "inputs": {"secretless-ci-script-plan": encoded(["test"])},
+                }
+            ],
+            [
+                {
+                    "manifestPath": "packages/one",
+                    "manifestIndex": True,
+                    "script": "test",
+                    "unsetEnv": [],
+                    "requiresServices": True,
+                }
+            ],
+            [
+                {**valid_entries[0], "manifestPath": "packages/two"},
+                valid_entries[1],
+            ],
+            [
+                {**valid_entries[0], "requiresServices": 1},
+                valid_entries[1],
+            ],
+            [valid_entries[1], valid_entries[0]],
+        ]
+
+        for entries in malformed_cases:
+            with self.subTest(entries=entries), self.assertRaises(script_plan.ScriptPlanError):
+                normalized_entries.validate_normalized_entries(entries, nested_source)
+
+    def test_normalized_validator_preserves_unicode_whitespace_and_duplicate_key_behavior(self) -> None:
+        nested_source = (
+            '\u00a0[{"path":"packages/db","approvedPackages":[],"scriptPlan":["build"],'
+            '"scriptPlan":["test"]}]\u00a0'
+        )
+        entries, _ = script_plan.normalize_outputs("", nested_source)
+
+        validated = normalized_entries.validate_normalized_entries(entries, nested_source)
+
+        self.assertEqual([entry.script for entry in validated.entries], ["test"])
 
     def test_compatibility_cli_emits_service_grant(self) -> None:
         env = {
@@ -371,6 +450,77 @@ class WorkflowAdoptionTests(unittest.TestCase):
                     "COMPATIBILITY_REQUIRES_SERVICES: ${{ steps.compatibility-script-plan.outputs.requires-services }}",
                     workflow,
                 )
+
+    def test_standard_and_protected_executors_use_the_sha_bound_validator(self) -> None:
+        workflow = yaml.safe_load((ROOT / ".github/workflows/node-ci.yml").read_text(encoding="utf-8"))
+        steps = workflow["jobs"]["build-test"]["steps"]
+        standard_executor = next(
+            step["run"]
+            for step in steps
+            if step.get("name") == "Run exact credentialless consumer script plan"
+        )
+        self.assertIn("import normalized_entries as normalized_script_plan", standard_executor)
+        self.assertIn("validate_normalized_entries(", standard_executor)
+        trusted_download = next(
+            step["run"]
+            for step in steps
+            if step.get("name") == "Download trusted script-plan parser modules"
+        )
+        self.assertIn(
+            "${JOB_WORKFLOW_SHA}/.github/actions/node-ci-script-plan/normalized_entries.py",
+            trusted_download,
+        )
+        self.assertIn(
+            "${JOB_WORKFLOW_SHA}/.github/actions/node-ci-script-plan/script_plan.py",
+            trusted_download,
+        )
+
+        protected_helper = (ROOT / "scripts/ci_build_artifacts.py").read_text(encoding="utf-8")
+        self.assertIn("import normalized_entries as normalized_script_plan", protected_helper)
+        self.assertIn("validate_normalized_entries(", protected_helper)
+
+        protected_workflow = (ROOT / ".github/workflows/node-ci-protected.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "${JOB_WORKFLOW_SHA}/.github/actions/node-ci-script-plan/normalized_entries.py",
+            protected_workflow,
+        )
+
+    def test_standard_executor_runs_the_shared_normalized_validator(self) -> None:
+        workflow = yaml.safe_load((ROOT / ".github/workflows/node-ci.yml").read_text(encoding="utf-8"))
+        run = next(
+            step["run"]
+            for step in workflow["jobs"]["build-test"]["steps"]
+            if step.get("name") == "Run exact credentialless consumer script plan"
+        )
+        start = run.index('nested_source = os.environ.get("NESTED_MANIFESTS", "")')
+        end = run.index("nested_directories = []", start)
+        validation_block = run[start:end]
+        valid_entries = [
+            {
+                "manifestPath": None,
+                "manifestIndex": None,
+                "script": "build",
+                "unsetEnv": [],
+                "requiresServices": False,
+            }
+        ]
+        namespace = {
+            "normalized_entries": valid_entries,
+            "normalized_script_plan": normalized_entries,
+            "os": os,
+            "sys": sys,
+        }
+
+        with patch.dict(os.environ, {"NESTED_MANIFESTS": ""}):
+            exec(validation_block, namespace)
+
+        self.assertEqual(namespace["validated_plan"].entries[0].script, "build")
+        namespace["normalized_entries"] = [{"id": "build", "inputs": {}}]
+        with patch.dict(os.environ, {"NESTED_MANIFESTS": ""}):
+            with self.assertRaises(SystemExit):
+                exec(validation_block, namespace)
 
     def test_checked_in_action_files_match_the_immutable_workflow_pin(self) -> None:
         for filename, expected_sha256 in PINNED_ACTION_FILE_HASHES.items():

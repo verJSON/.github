@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tarfile
@@ -2543,6 +2544,68 @@ class RoleAuthorizationTests(unittest.TestCase):
                     candidate_environment.pop(env_name, None)
                 candidate_environment.update({"BUILD_ARTIFACT_ROLE": "consumer"})
                 self.assertEqual(candidate_environment["BUILD_ARTIFACT_ROLE"], "consumer")
+
+
+class ProtectedCandidatePlanValidationTests(unittest.TestCase):
+    def test_protected_executor_uses_the_trusted_shared_normalized_validator(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            (checkout / "package.json").write_text(
+                json.dumps({"scripts": {"other": "true"}}),
+                encoding="utf-8",
+            )
+            for module_name in ("script_plan.py", "normalized_entries.py"):
+                trusted_module = ROOT / ".github/actions/node-ci-script-plan" / module_name
+                staged_module = runner_temp / module_name
+                staged_module.write_bytes(trusted_module.read_bytes())
+                staged_module.chmod(0o400)
+
+            entries_path = runner_temp / "entries.json"
+            entries_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "manifestPath": None,
+                            "manifestIndex": None,
+                            "script": "build",
+                            "unsetEnv": [],
+                            "requiresServices": False,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            original_cwd = Path.cwd()
+            original_sys_path = list(sys.path)
+            try:
+                os.chdir(checkout)
+                with patch.dict(
+                    os.environ,
+                    {
+                        "RUNNER_TEMP": str(runner_temp),
+                        "SCRIPT_PLAN_ENTRIES_FILE": str(entries_path),
+                        "SCRIPT_PLAN_DEFAULT_PLAN": "false",
+                        "NESTED_MANIFESTS": "",
+                    },
+                ), patch("signal.signal"):
+                    sys.modules.pop("normalized_entries", None)
+                    sys.modules.pop("script_plan", None)
+                    with self.assertRaises(SystemExit) as error:
+                        artifacts.run_protected_candidate_plan()
+            finally:
+                os.chdir(original_cwd)
+                sys.path[:] = original_sys_path
+                sys.modules.pop("normalized_entries", None)
+                sys.modules.pop("script_plan", None)
+
+        self.assertEqual(
+            str(error.exception),
+            "planned npm script absent from package.json: build",
+        )
 
 
 class ArtifactWorkflowGuardTests(unittest.TestCase):

@@ -609,6 +609,18 @@ AI review authorization succeeded, while the review decision remained
 printed `true`. The owner's standing admin authority was used after review;
 no gate was weakened.
 
+31. **Admin merge PostgreSQL client wrapper `argv[0]`.** Verjson/.github#1921
+("fix(ci): preserve read-only PostgreSQL client execution", `Part of #1817`)
+merged 2026-10-26 at head
+`ae6a3b2109e03d4a6d00f8156979e145782e2587` and merge commit
+`5d16a17d04a3f74cd6244f1787b4cdbd200d4f9e`. Its base was
+`1eaec44cb0ab8e25c8dd279eae6dc65df25c41b3`. GitHub reports it was merged by
+`pyousefi`, with 21 SUCCESS and 8 SKIPPED check conclusions. AI review
+authorization approved the exact final head; the review decision remained
+`REVIEW_REQUIRED`. The available PR record does not retain the required
+pre-merge assertion result, so this entry does not claim that assertion
+passed. No gate was weakened.
+
 ### Exit condition ("CI optimized and working"), measurable
 
 The window closes when all hold, each evidenced in the closing PR:
