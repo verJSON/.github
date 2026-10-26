@@ -542,6 +542,16 @@ the rollup has 23 SUCCESS and 11 SKIPPED conclusions, including SUCCESS for
 `--admin` was used under the owner's standing authority. GitHub still reports
 `REVIEW_REQUIRED`; no gate was weakened.
 
+25. **Admin merge trusted level-local fail-fast receipts.** Verjson/.github#1914
+("feat(ci): add trusted level-local fail-fast receipts") admin-squash-merged
+2026-10-26 at head `745c61d2d1284b2d9e876b05ca56e73fcb3fad10` and merge commit
+`a79d11c1d54c77eb0bd7a930961ca0f8b8aaf0eb`. Its base was fetched clean
+`origin/main` at `c9cfdbc09e9caebe094908ab7c6adf178f29613f`. GitHub reports
+21 SUCCESS, 8 SKIPPED, and 1 NEUTRAL check conclusions. The review decision was
+`REVIEW_REQUIRED`. The raw output/result for
+`bash scripts/assert-mergeable-head.sh Verjson/.github 1914` was not retained;
+this entry makes no claim that the assertion passed.
+
 ### Exit condition ("CI optimized and working"), measurable
 
 The window closes when all hold, each evidenced in the closing PR:

@@ -257,7 +257,8 @@ jobs:
     # The locale-collation group is the same case: its guards must be proven
     # under en_US.UTF-8, whose locale source data fleet images do not carry.
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    # Combines the previous 8-minute compatibility job and 15-minute Postgres acceptance budget.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -1966,6 +1967,11 @@ jobs:
             exit 1
           fi
 
+      - name: Run Postgres sandbox hosted acceptance
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          VERJSON_CI_POSTGRES_HOSTED_ACCEPTANCE: '1'
+        run: python3 -I scripts/ci-gate/ci-postgres-sandbox-hosted-acceptance.test.py
       - name: Run namespace-bound compatibility contracts
         env:
           RUNNER_LABELS: ''
@@ -1986,6 +1992,26 @@ jobs:
           ACTIONS_CI_COMMAND_BUDGET_SECONDS: ${{ github.event_name == 'pull_request' && '60' || '' }}
         run: bash scripts/actions-ci-group.sh locale-collation
 
+      - name: Clean up Postgres sandbox containers
+        if: always()
+        run: |
+          set -uo pipefail
+          cleanup_status=0
+          cleanup_script="scripts/ci_postgres_sandbox.py"
+          for state_file in \
+            "$RUNNER_TEMP/ci-postgres-sandbox-acceptance-state.json" \
+            "$RUNNER_TEMP/ci-postgres-sandbox-fresh-state.json"; do
+            [[ -e "$state_file" || -L "$state_file" ]] || continue
+            if [[ ! -f "$cleanup_script" ]]; then
+              echo "::error::Postgres sandbox cleanup helper missing" >&2
+              cleanup_status=1
+              continue
+            fi
+            python3 -I "$cleanup_script" cleanup \
+              --runner-temp "$RUNNER_TEMP" \
+              --state-file "$state_file" || cleanup_status=1
+          done
+          exit "$cleanup_status"
   # scripts/gen-adr-index.sh --check (run above, in the changelog-release
   # group) only ever sees this PR's own tree, so it cannot catch two open PRs
   # independently allocating the same docs/decisions/NNNN-<slug> number --

@@ -375,6 +375,27 @@ def replace_once(document: str, old: str, new: str) -> str:
     return document.replace(old, new)
 
 
+def include_protected_declaration_in_postgres_guard(document: str) -> str:
+    step_marker = "      - name: Reject Postgres compatibility profile conflicts\n"
+    if document.count(step_marker) != 1:
+        raise SystemExit("protected Postgres compatibility guard boundary drifted")
+    step_start = document.index(step_marker)
+    step_end = document.find("\n      - ", step_start + len(step_marker))
+    if step_end == -1:
+        raise SystemExit("protected Postgres compatibility guard must not be the last step")
+    step = document[step_start:step_end]
+    source_env = (
+        "          POSTGRES_PROFILE_COMPATIBILITY_INPUT: "
+        "${{ inputs.secretless-compatibility-ranges }}\n"
+    )
+    protected_env = source_env + (
+        "          PROTECTED_BASELINE_DECLARATION_PATH: "
+        "${{ inputs.protected-type-surface-declaration-path }}\n"
+    )
+    step = replace_once(step, source_env, protected_env)
+    return document[:step_start] + step + document[step_end:]
+
+
 def remove_candidate_credentials(document: str, step_name: str) -> str:
     step_marker = f"      - name: {step_name}\n"
     if document.count(step_marker) != 1:
@@ -915,9 +936,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
           consume_artifact = os.environ.get("BUILD_ARTIFACT_ROLE") == "consumer"
           if shared_artifact:
               sys.path.insert(0, str(runner_temp))
-              from ci_build_artifacts import artifact_mount_roots, bubblewrap_network_args
-          else:
-              bubblewrap_network_args = None
+              from ci_build_artifacts import artifact_mount_roots
 
           def verified_artifact_mounts():
               if not consume_artifact:
@@ -1616,6 +1635,15 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                   script_home = cache_root / f"home-{{index}}"
                   script_tmp.mkdir(mode=0o700)
                   script_home.mkdir(mode=0o700)
+                  npm_user_config = script_tmp / "npm-userconfig"
+                  npm_global_config = script_tmp / "npm-globalconfig"
+                  for config_path in (npm_user_config, npm_global_config):
+                      config_descriptor = os.open(
+                          config_path,
+                          os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                          0o400,
+                      )
+                      os.close(config_descriptor)
                   if baseline is not None:
                       for relative, _size, _digest in baseline_inventory:
                           source = baseline / relative
@@ -1649,7 +1677,11 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                       ),
                       "COREPACK_ENABLE_NETWORK": "0",
                       "NPM_CONFIG_CACHE": str(script_cache),
+                  "NPM_CONFIG_USERCONFIG": str(npm_user_config),
+                  "NPM_CONFIG_GLOBALCONFIG": str(npm_global_config),
                       "npm_config_cache": str(script_cache),
+                  "npm_config_userconfig": str(npm_user_config),
+                  "npm_config_globalconfig": str(npm_global_config),
                       "VERJSON_CHANGELOG_TOOL_CACHE": str(changelog_cache_root),
                       "VERJSON_CHANGELOG_CONTRACT_REF": changelog_ref,
                       "VERJSON_CHANGELOG_CONTRACT_SHA256": changelog_sha256,
@@ -1665,13 +1697,6 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                       script_env["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_cache)
                   if requires_services:
                       script_env.update(candidate_service_env)
-                  for env_name in unset_env:
-                      script_env.pop(env_name, None)
-                  script_env["BUILD_ARTIFACT_ROLE"] = os.environ.get("BUILD_ARTIFACT_ROLE", "")
-                  script_env.update({{
-                      "NPM_CONFIG_SCRIPT_SHELL": "/bin/sh",
-                      "npm_config_script_shell": "/bin/sh",
-                  }})
                   tool_path_entries = [
                       *(str(executable.parent) for executable in tool_executables.values()),
                       "/usr/local/bin",
@@ -1679,6 +1704,16 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                       "/bin",
                   ]
                   script_env["PATH"] = ":".join(dict.fromkeys(tool_path_entries))
+                  if postgres_profile is not None and requires_services:
+                      script_env = postgres_profile_module.candidate_environment(
+                          script_env,
+                          script_env["PATH"],
+                      )
+                  for env_name in unset_env:
+                      script_env.pop(env_name, None)
+                  script_env["BUILD_ARTIFACT_ROLE"] = os.environ.get("BUILD_ARTIFACT_ROLE", "")
+                  script_env["NPM_CONFIG_SCRIPT_SHELL"] = "/bin/sh"
+                  script_env["npm_config_script_shell"] = "/bin/sh"
                   isolated_paths = (script_cache, script_tmp, script_home)
                   if len(set(isolated_paths)) != len(isolated_paths):
                       sys.exit("candidate writable mount paths are not distinct")
@@ -1761,17 +1796,27 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                     raise
                   artifact_mount_args, artifact_mount_fds = verified_artifact_mounts()
                   tool_prefix_fds.extend(artifact_mount_fds)
-                  network_args = (
-                      bubblewrap_network_args(shared_artifact=True)
-                      if shared_artifact
-                      else ["--cap-drop", "ALL"]
+                  network_args = ci_build_artifacts.bubblewrap_network_args(
+                      shared_artifact=shared_artifact,
+                      legacy_unshare=not requires_services,
+                      postgres_profile=postgres_profile is not None,
                   )
                   artifact_helper_args = (
                       ["--ro-bind", str(runner_temp / "ci_build_artifacts.py"), "/tmp/ci_build_artifacts.py"]
                       if shared_artifact
                       else []
                   )
-                  legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]
+                  legacy_network_args = []
+                  postgres_mount_args = (
+                      postgres_profile_module.profile_mount_args(postgres_profile_state)
+                      if postgres_profile is not None and requires_services
+                      else []
+                  )
+                  if postgres_profile is not None:
+                      postgres_profile_module.verify_profile_runtime(
+                          postgres_state_file,
+                          runner_temp=runner_temp,
+                      )
                   try:
                       received_signal = host_signals.poll()
                       if received_signal is not None:
@@ -1794,6 +1839,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                                     "--tmpfs", "/tmp",
                                     *artifact_helper_args,
                                     *legacy_network_args,
+                                    *postgres_mount_args,
                                     *directory_args,
                                     *chmod_args,
                                     "--ro-bind", "/usr", "/usr",
@@ -1816,6 +1862,8 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                                     "--bind", str(script_cache), str(script_cache),
                                     "--bind", str(script_home), str(script_home),
                                     "--bind", str(script_tmp), str(script_tmp),
+                  "--ro-bind", str(npm_user_config), str(npm_user_config),
+                  "--ro-bind", str(npm_global_config), str(npm_global_config),
                                     "--proc", "/proc",
                                     "--dev", "/dev",
                                     "--chdir", str(script_directory),
@@ -1829,6 +1877,20 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                           pass_fds=tuple(tool_prefix_fds),
                           host_signals=host_signals,
                       )
+                      if postgres_profile is not None:
+                          def verify_postgres_runtime():
+                              postgres_profile_module.verify_profile_runtime(
+                                  postgres_state_file,
+                                  runner_temp=runner_temp,
+                              )
+                              if candidate_result.return_code is None:
+                                  raise IntegrityError(
+                                      "trusted Bubblewrap supervisor omitted the candidate exit code"
+                                  )
+
+                          ci_build_artifacts._verify_candidate_runtime_boundary(
+                              candidate_result, verify_postgres_runtime
+                          )
                       candidate_status = candidate_result.return_code
                       if candidate_status is None:
                           raise IntegrityError("trusted Bubblewrap supervisor omitted the candidate exit code")
@@ -1884,6 +1946,11 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                   "jobId": os.environ["CI_ENTRY_JOB_ID"],
                   "levelId": os.environ["CI_LEVEL_ID"],
               }}
+              if postgres_profile is not None:
+                  postgres_profile_state = postgres_profile_module.prepare_profile_for_candidate(
+                      postgres_state_file,
+                      runner_temp=runner_temp,
+                  )
               receipt_result = run_script_plan_with_receipts(
                   command_records,
                   receipt_identity,
@@ -2081,6 +2148,16 @@ def configure_protected_baseline(document: str) -> str:
     )
 
     build = remainder
+    profile_validation_source = (
+        "POSTGRES_COMPATIBILITY_RANGES: ${{ inputs.secretless-compatibility-ranges }}"
+    )
+    profile_validation_request = (
+        "POSTGRES_COMPATIBILITY_RANGES: ${{ needs.acquire-secretless-dependencies.outputs.protected-baseline-request "
+        "|| inputs.secretless-compatibility-ranges }}"
+    )
+    if build.count(profile_validation_source) != 1:
+        raise SystemExit("protected node-ci Postgres profile compatibility boundary drifted")
+    build = build.replace(profile_validation_source, profile_validation_request, 1)
     build_request = (
         "COMPATIBILITY_RANGES: ${{ needs.acquire-secretless-dependencies.outputs.protected-baseline-request "
         "|| inputs.secretless-compatibility-ranges }}"
@@ -2155,6 +2232,7 @@ def render() -> str:
         "      db-image:\n",
         INPUTS + PROTECTED_INPUTS + "      db-image:\n",
     )
+    document = include_protected_declaration_in_postgres_guard(document)
     document = insert_protected_baseline_step(document)
     document = configure_protected_baseline(document)
     document = replace_once(document, "          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}", "          HEAD_SHA: ${{ inputs.head-sha }}")

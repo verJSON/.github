@@ -258,7 +258,7 @@ def require_service_runner_from_script(script, normalized, runner_environment):
 def candidate_variables_for_script(script, requires_services):
     environment_start = script.index("script_env = {")
     start = script.index("if requires_services:\n", environment_start)
-    end = script.index("for env_name in unset_env:", start)
+    end = script.index("tool_path_entries = [", start)
     source = textwrap.dedent(script[start:end])
     namespace = {
         "candidate_service_env": {"DB_HOST": "127.0.0.1", "DATABASE_URL": "postgres://local"},
@@ -1381,10 +1381,11 @@ def main():
             assert "run_script_plan_with_receipts(" in script_plan["run"]
             assert "if requires_services:" in script_plan["run"]
             assert "script_env.update(candidate_service_env)" in script_plan["run"]
-            assert 'legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]' in script_plan["run"]
-            assert 'bubblewrap_network_args(shared_artifact=True)' in script_plan["run"]
-            assert "*legacy_network_args," in script_plan["run"]
-            assert '"--unshare-net"' in script_plan["run"]
+            assert "network_args = ci_build_artifacts.bubblewrap_network_args(" in script_plan["run"]
+            assert "shared_artifact=shared_artifact," in script_plan["run"]
+            assert "legacy_unshare=not requires_services," in script_plan["run"]
+            assert "postgres_profile=postgres_profile is not None," in script_plan["run"]
+            assert "*network_args," in script_plan["run"]
             assert '"--ro-bind"' in script_plan["run"]
             assert '"--bind" if tool_prefix == browser_cache else "--ro-bind"' in script_plan["run"]
             assert "git_metadata" in script_plan["run"]

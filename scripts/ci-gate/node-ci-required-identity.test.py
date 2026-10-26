@@ -31,7 +31,7 @@ PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 GENERATOR = ROOT / "scripts/gen-node-ci-protected.py"
 TRUSTED_HELPER = ROOT / "scripts/ci_build_artifacts.py"
 HEAD = "a" * 40
-LEGACY_SHA256 = "c6c19852726435fd0ca7504dfb9a64bdb86232e18a37069b60cf84343ea3d83c"
+LEGACY_SHA256 = "9e1f04bbf0c51c119ff2d8819252de9c3e0732f8dfe0ed7f2e9c656a5a04365d"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
@@ -599,6 +599,229 @@ fi
 
                 visit(root)
 
+    def test_postgres_profile_is_validated_before_services_and_credentialed_install(self):
+        for workflow_path in (LEGACY, PROTECTED):
+            with self.subTest(workflow=workflow_path.name):
+                workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+                steps = workflow["jobs"]["build-test"]["steps"]
+                validation = next(
+                    (index, step)
+                    for index, step in enumerate(steps)
+                    if step.get("name") == "Validate Postgres sandbox profile request"
+                )
+                validation_index, validation_step = validation
+                if workflow_path == LEGACY:
+                    expected_compatibility_ranges = "${{ inputs.secretless-compatibility-ranges }}"
+                else:
+                    expected_compatibility_ranges = (
+                        "${{ needs.acquire-secretless-dependencies.outputs.protected-baseline-request "
+                        "|| inputs.secretless-compatibility-ranges }}"
+                    )
+                self.assertEqual(
+                    validation_step.get("env", {}).get("POSTGRES_COMPATIBILITY_RANGES"),
+                    expected_compatibility_ranges,
+                )
+                self.assertIn(
+                    '--compatibility-ranges "$POSTGRES_COMPATIBILITY_RANGES"',
+                    validation_step["run"],
+                )
+                self.assertIn("inputs.postgres-sandbox-profile != ''", validation_step["if"])
+                self.assertIn("python3 -I", validation_step["run"])
+                self.assertIn('ci_postgres_sandbox.py" validate', validation_step["run"])
+                for service_name in ("Start database service", "Start cache service"):
+                    service_index = next(
+                        index for index, step in enumerate(steps)
+                        if step.get("name") == service_name
+                    )
+                    self.assertLess(validation_index, service_index)
+                credentialed_installs = [
+                    index
+                    for index, step in enumerate(steps)
+                    if "npm ci" in step.get("run", "")
+                    and step.get("env", {}).get("NODE_AUTH_TOKEN")
+                    == "${{ secrets.NODE_AUTH_TOKEN }}"
+                ]
+                self.assertTrue(credentialed_installs)
+                self.assertLess(validation_index, min(credentialed_installs))
+
+    def test_postgres_compatibility_conflicts_fail_before_token_acquisition(self):
+        generator = self.load_generator()
+        generated_protected = yaml.safe_load(generator.render())
+
+        for workflow_path in (LEGACY, PROTECTED):
+            with self.subTest(workflow=workflow_path.name):
+                workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+                eligibility = workflow["jobs"]["eligibility"]
+                guard = next(
+                    step
+                    for step in eligibility["steps"]
+                    if step.get("name") == "Reject Postgres compatibility profile conflicts"
+                )
+                self.assertNotIn("if", guard)
+                self.assertEqual(
+                    "${{ inputs.postgres-sandbox-profile }}",
+                    guard["env"]["POSTGRES_SANDBOX_PROFILE"],
+                )
+                self.assertEqual(
+                    "${{ inputs.secretless-compatibility-ranges }}",
+                    guard["env"]["POSTGRES_PROFILE_COMPATIBILITY_INPUT"],
+                )
+                if workflow_path == LEGACY:
+                    self.assertNotIn("PROTECTED_BASELINE_DECLARATION_PATH", guard["env"])
+                else:
+                    self.assertEqual(
+                        "${{ inputs.protected-type-surface-declaration-path }}",
+                        guard["env"]["PROTECTED_BASELINE_DECLARATION_PATH"],
+                    )
+                    generated_guard = next(
+                        step
+                        for step in generated_protected["jobs"]["eligibility"]["steps"]
+                        if step.get("name") == "Reject Postgres compatibility profile conflicts"
+                    )
+                    self.assertEqual(guard["env"], generated_guard["env"])
+                    self.assertEqual(guard["run"], generated_guard["run"])
+
+                self.assertIn("Postgres sandbox profile", guard["run"])
+                self.assertIn('compatibility_ranges.strip() not in {"", "{}"}', guard["run"])
+                self.assertIn("or protected_baseline", guard["run"])
+                self.assertIn("sys.exit(", guard["run"])
+                self.assertNotIn("NODE_AUTH_TOKEN", guard.get("env", {}))
+
+                acquisition = workflow["jobs"]["acquire-secretless-dependencies"]
+                acquisition_needs = acquisition.get("needs", [])
+                if isinstance(acquisition_needs, str):
+                    acquisition_needs = [acquisition_needs]
+                self.assertIn("eligibility", acquisition_needs)
+                self.assertNotIn("always()", acquisition.get("if", ""))
+                token_steps = [
+                    step
+                    for step in acquisition["steps"]
+                    if "NODE_AUTH_TOKEN" in step.get("env", {})
+                ]
+                self.assertTrue(token_steps, "dependency acquisition must remain token-bearing")
+
+    def test_postgres_profile_rejects_artifact_sharing_before_token_acquisition(self):
+        generator = self.load_generator()
+        generated_protected = yaml.safe_load(generator.render())
+
+        for workflow_path in (LEGACY, PROTECTED):
+            with self.subTest(workflow=workflow_path.name):
+                workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+                workflow_events = workflow.get("on", workflow.get(True, {}))
+                self.assertEqual(
+                    "level",
+                    workflow_events["workflow_call"]["inputs"]["build-artifact-role"]["default"],
+                )
+                eligibility = workflow["jobs"]["eligibility"]
+                guard = next(
+                    step
+                    for step in eligibility["steps"]
+                    if step.get("name") == "Reject Postgres compatibility profile conflicts"
+                )
+                generated_guard = next(
+                    step
+                    for step in generated_protected["jobs"]["eligibility"]["steps"]
+                    if step.get("name") == "Reject Postgres compatibility profile conflicts"
+                )
+                self.assertEqual(guard["run"], generated_guard["run"])
+                for variable in (
+                    "POSTGRES_SANDBOX_PROFILE",
+                    "POSTGRES_PROFILE_COMPATIBILITY_INPUT",
+                    "BUILD_ARTIFACT_ROLE",
+                ):
+                    self.assertEqual(guard["env"].get(variable), generated_guard["env"].get(variable))
+
+                self.assertLess(
+                    eligibility["steps"].index(guard),
+                    len(eligibility["steps"]),
+                )
+                acquisition = workflow["jobs"]["acquire-secretless-dependencies"]
+                self.assertIn("eligibility", acquisition.get("needs", []))
+                self.assertNotIn("always()", acquisition.get("if", ""))
+                self.assertTrue(
+                    any(
+                        "NODE_AUTH_TOKEN" in step.get("env", {})
+                        for step in acquisition.get("steps", [])
+                    ),
+                    "dependency acquisition must remain token-bearing",
+                )
+
+                for role, expected_returncode in (("level", 0), ("producer", 1), ("consumer", 1)):
+                    with self.subTest(role=role):
+                        environment = os.environ.copy()
+                        environment.update(
+                            {
+                                "POSTGRES_SANDBOX_PROFILE": "postgres-17",
+                                "POSTGRES_PROFILE_COMPATIBILITY_INPUT": "",
+                                "BUILD_ARTIFACT_ROLE": role,
+                            }
+                        )
+                        environment.pop("PROTECTED_BASELINE_DECLARATION_PATH", None)
+                        result = subprocess.run(
+                            ["bash", "-euo", "pipefail", "-c", guard["run"]],
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                            env=environment,
+                        )
+                        self.assertEqual(expected_returncode, result.returncode, result.stderr)
+
+                self.assertEqual(
+                    "${{ inputs.build-artifact-role }}",
+                    guard["env"]["BUILD_ARTIFACT_ROLE"],
+                )
+
+    def test_postgres_candidate_runtime_is_present_in_canonical_and_protected_paths(self):
+        canonical_workflow = yaml.safe_load(LEGACY.read_text(encoding="utf-8"))
+        canonical_step = next(
+            step
+            for step in canonical_workflow["jobs"]["build-test"]["steps"]
+            if step.get("name") == "Run exact credentialless consumer script plan"
+        )
+        protected_step = next(
+            step
+            for step in self.workflow["jobs"]["build-test"]["steps"]
+            if step.get("name") == "Run exact credentialless consumer script plan"
+        )
+        generator = self.load_generator()
+        protected_runtime = generator.protected_candidate_helper_body()
+        generated_workflow = yaml.safe_load(generator.render())
+        generated_protected_step = next(
+            step
+            for step in generated_workflow["jobs"]["build-test"]["steps"]
+            if step.get("name") == "Run exact credentialless consumer script plan"
+        )
+
+        for runtime_name, runtime in (
+            ("canonical", canonical_step["run"]),
+            ("protected helper", protected_runtime),
+        ):
+            with self.subTest(runtime=runtime_name):
+                self.assertIn("postgres_profile_module.candidate_environment(", runtime)
+                self.assertIn("postgres_profile_module.profile_mount_args(", runtime)
+                self.assertIn("postgres_profile_module.verify_profile_runtime(", runtime)
+                self.assertLess(
+                    runtime.index("postgres_profile_module.verify_profile_runtime("),
+                    runtime.index("arguments = ["),
+                )
+
+        self.assertEqual(1, canonical_step["run"].count("*postgres_mount_args,"))
+        self.assertEqual(1, protected_runtime.count("*postgres_mount_args,"))
+        self.assertEqual(
+            "${{ inputs.postgres-sandbox-profile }}",
+            protected_step["env"]["VERJSON_CI_POSTGRES_PROFILE"],
+        )
+        self.assertEqual(
+            "${{ runner.temp }}/ci-postgres-sandbox-state.json",
+            protected_step["env"]["VERJSON_CI_POSTGRES_SANDBOX_STATE"],
+        )
+        self.assertIn(
+            '"$RUNNER_TEMP/ci_build_artifacts.py" run-protected-candidate-plan',
+            protected_step["run"],
+        )
+        self.assertEqual(protected_step["env"], generated_protected_step["env"])
+        self.assertEqual(protected_step["run"], generated_protected_step["run"])
+
     def test_changelog_cache_is_verified_before_the_networkless_sandbox(self):
         steps = self.workflow["jobs"]["build-test"]["steps"]
         cache_setup = next(
@@ -637,7 +860,10 @@ fi
         self.assertIn("hashlib.sha256", warm["run"])
         self.assertNotIn("bash scripts/render-next.sh", warm["run"])
         self.assertIn("VERJSON_CHANGELOG_TOOL_CACHE", self.candidate_plan_step()["run"])
-        self.assertIn('"--unshare-net"', self.candidate_plan_step()["run"])
+        candidate_run = self.candidate_plan_step()["run"]
+        self.assertIn("ci_build_artifacts.bubblewrap_network_args(", candidate_run)
+        self.assertIn("postgres_profile=postgres_profile is not None", candidate_run)
+        self.assertIn("*network_args,", candidate_run)
         self.assertIn('"--ro-bind"', self.candidate_plan_step()["run"])
 
     def changelog_cache_warm_step(self):
@@ -1931,7 +2157,8 @@ ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_cleanup
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("service variables reached candidate npm script", result.stderr)
         plan_run = self.candidate_plan_step()["run"]
-        self.assertIn('legacy_network_args = [] if shared_artifact or requires_services else ["--unshare-net"]', plan_run)
+        self.assertIn("ci_build_artifacts.bubblewrap_network_args(", plan_run)
+        self.assertIn("legacy_unshare=not requires_services", plan_run)
         self.assertIn("*legacy_network_args,", plan_run)
         self.assertIn(
             "if any(requires_services for _directory, _name, _unset_env, requires_services in normalized):",

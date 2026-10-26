@@ -32,9 +32,9 @@ for wf in "$ci" "$release" "$actions_ci"; do
     expected_setups=2
   elif [ "$wf" = "$actions_ci" ]; then
     # shell-test-groups, adr-number-collision (#983), hosted compatibility
-    # (#1114), changed-path classification, the documentation contracts, and
-    # the runner-isolation contract (ADR 0235).
-    expected_checkouts=6
+    # (#1114, including Postgres sandbox acceptance), changed-path
+    # classification, documentation contracts, and runner isolation (ADR 0235).
+ expected_checkouts=6
   fi
   if [ "$wf" != "$actions_ci" ]; then
     [ "$wf" = "$ci" ] || expected_setups=2

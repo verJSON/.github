@@ -401,7 +401,9 @@ for name in wired:
     assert plan["env"].get(name) == compatibility["env"][name], name
 code = [line.strip() for line in plan["run"].splitlines() if not line.lstrip().startswith("#")]
 assert any('network_args = ["--cap-drop", "ALL"]' in line for line in code)
-assert any('bubblewrap_network_args(shared_artifact=True)' in line for line in code)
+assert any('network_args = bubblewrap_network_args(' in line for line in code)
+assert any('shared_artifact=shared_artifact,' in line for line in code)
+assert any('postgres_profile=postgres_profile is not None,' in line for line in code)
 assert "runtime_cache_content = verified_runtime_cache_content()" in code
 PY
 

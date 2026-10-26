@@ -101,11 +101,13 @@ with open(sys.argv[1], encoding="utf-8") as stream:
 
 def validate_hosted_compatibility_job(candidate):
     jobs = candidate["jobs"]
-    target = "hosted-compatibility-tests"
+    fixed_hosted_jobs = {
+        "hosted-compatibility-tests",
+    }
     unexpected = sorted(
         job_id
         for job_id, job in jobs.items()
-        if job_id != target
+        if job_id not in fixed_hosted_jobs
         and isinstance(job, dict)
         and job.get("runs-on") == "ubuntu-24.04"
     )
@@ -114,8 +116,9 @@ def validate_hosted_compatibility_job(candidate):
             "literal hosted selector escaped compatibility job: "
             + ",".join(unexpected)
         )
-    if jobs.get(target, {}).get("runs-on") != "ubuntu-24.04":
-        raise AssertionError(f"{target} must own literal hosted selector")
+    for target in fixed_hosted_jobs:
+        if jobs.get(target, {}).get("runs-on") != "ubuntu-24.04":
+            raise AssertionError(f"{target} must own literal hosted selector")
 
 
 validate_hosted_compatibility_job(document)
