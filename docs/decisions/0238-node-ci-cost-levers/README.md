@@ -390,6 +390,15 @@ The GitHub-hosted acceptance fixture checks the real Bubblewrap/AppArmor path, D
 
 The external canary's `scripts/generate-schema-sql.mjs` still uses the legacy `postgres:17.6` tag. That is adopter drift to update at the canary; it does not change the canonical profile's reviewed 17.11 digest.
 
+## Amendment 2026-10-26 — isolated schema-validation PostgreSQL profile
+
+- **Issue:** [Verjson/.github#1817](https://github.com/Verjson/.github/issues/1817), canonical CI fail-fast and sandbox profiles.
+- **Decision:** Keep generic `postgres-17.11` unchanged and add the default-off `postgres-schema-validation-17.11` profile for the adopter's schema-validation contract. It uses the same reviewed amd64 image digest, container network isolation, Unix socket, and same-image client bundle.
+
+The schema-validation profile creates only `schema_snapshot`, `schema_migrations`, and `schema_reference`. It exposes only the fixed `DATABASE_URL_SCHEMA_SNAPSHOT`, `DATABASE_URL_SCHEMA_MIGRATIONS`, and `DATABASE_URL_SCHEMA_REFERENCE` socket URLs, alongside `PGHOST=/run/verjson-postgres`, `PGPORT=5432`, and `PGUSER=verjson_ci`. The database owner remains `postgres`; the candidate role has no superuser, database-creation, or role-creation capability. Trusted setup revokes the default `PUBLIC` database privileges, grants the candidate `CONNECT` to all three databases and `USAGE, CREATE` on each `public` schema, and grants `TEMP` only on `schema_migrations`. That database alone receives the fixed verifier prelude (`authenticated`, `auth`, and `storage` objects); the migration role owns those fixed objects so it can apply the existing policies without a database-level `CREATE` grant. No compatibility, producer/consumer artifact-sharing, service, TCP, egress, Docker-socket, or privileged-broker exception is introduced.
+
+Schema generation and reference push use `schema_snapshot` and `schema_reference`; migration replay uses `schema_migrations`. The hosted acceptance compares normalized outputs across these three independent clean databases, checks their privilege and prelude boundaries, and exercises the Bubblewrap/AppArmor runner. Candidate scripts must call `/opt/verjson/postgres-client/bin/psql` and `/opt/verjson/postgres-client/bin/pg_dump` by absolute path: npm may put a workspace `.bin` directory ahead of inherited `PATH`. The hosted acceptance places failing workspace shims first on `PATH` and verifies that the pinned absolute clients still run. Local Docker/Bubblewrap tests do not establish GitHub-hosted AppArmor acceptance.
+
 ## Amendment 2026-10-26 — harden same-run ArtifactSet parsing and selection
 
 - **Issue:** [Verjson/.github#1869](https://github.com/Verjson/.github/issues/1869), D1 hardening.

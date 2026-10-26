@@ -6811,6 +6811,7 @@ jobs:
                   script_env = postgres_profile_module.candidate_environment(
                       script_env,
                       script_env["PATH"],
+                      profile_name=postgres_profile["name"],
                   )
               for env_name in unset_env:
                   script_env.pop(env_name, None)
@@ -8738,7 +8739,8 @@ jobs:
           for state_file in \
             "$POSTGRES_STATE_FILE" \
             "$RUNNER_TEMP/ci-postgres-sandbox-acceptance-state.json" \
-            "$RUNNER_TEMP/ci-postgres-sandbox-fresh-state.json"; do
+            "$RUNNER_TEMP/ci-postgres-sandbox-fresh-state.json" \
+            "$RUNNER_TEMP/ci-postgres-schema-validation-state.json"; do
             if [[ -e "$state_file" || -L "$state_file" ]]; then
               if [[ ! -f "$cleanup_script" ]]; then
                 echo "::error::Postgres sandbox cleanup helper is missing" >&2

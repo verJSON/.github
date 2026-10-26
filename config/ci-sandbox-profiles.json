@@ -9,6 +9,15 @@
       "clientVersion": "17.11",
       "networkMode": "none",
       "publishedPorts": []
+    },
+    "postgres-schema-validation-17.11": {
+      "image": "docker.io/library/postgres",
+      "digest": "sha256:3518071376d0b6156b02e1db2747a78511b5b9dc3763cc79c506ebe2dc2ee71c",
+      "platform": "linux/amd64",
+      "serverVersion": "17.11",
+      "clientVersion": "17.11",
+      "networkMode": "none",
+      "publishedPorts": []
     }
   }
 }

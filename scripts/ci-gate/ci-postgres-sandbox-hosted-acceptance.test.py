@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import errno
 import os
 import re
 import shutil
@@ -25,6 +26,11 @@ sys.path.insert(0, str(SCRIPT_DIR.parent))
 import ci_build_artifacts
 import ci_postgres_sandbox
 
+LOOPBACK_NETWORK_ERRNOS = frozenset((errno.ECONNREFUSED, errno.ENETUNREACH))
+OUTBOUND_NETWORK_ERRNOS = frozenset(
+    (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ETIMEDOUT)
+)
+
 
 def _checked_output(command: list[str], *, timeout: float = 30) -> str:
     result = subprocess.run(
@@ -42,6 +48,59 @@ def _checked_output(command: list[str], *, timeout: float = 30) -> str:
     return result.stdout.strip()
 
 
+def _assert_network_namespace_error(
+    label: str,
+    error_number: int | None,
+    error_message: str | None,
+    allowed_numbers: frozenset[int],
+) -> None:
+    if error_number not in allowed_numbers or error_message != os.strerror(error_number):
+        expected = sorted(
+            (number, os.strerror(number)) for number in allowed_numbers
+        )
+        raise AssertionError(
+            f"{label} did not fail at the network namespace boundary: "
+            f"expected one of {expected!r}, "
+            f"got errno={error_number} ({error_message!r})"
+        )
+
+
+class NetworkBoundaryAssertionTests(unittest.TestCase):
+    def test_unrelated_socket_error_is_not_accepted_as_network_isolation(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "network namespace"):
+            _assert_network_namespace_error(
+                "TCP egress",
+                errno.ECONNREFUSED,
+                "Connection refused",
+                OUTBOUND_NETWORK_ERRNOS,
+            )
+
+    def test_network_unreachable_requires_its_matching_message(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "network namespace"):
+            _assert_network_namespace_error(
+                "TCP egress",
+                errno.ENETUNREACH,
+                "Permission denied",
+                OUTBOUND_NETWORK_ERRNOS,
+            )
+
+    def test_accepts_the_specific_network_unreachable_error(self) -> None:
+        _assert_network_namespace_error(
+            "TCP egress",
+            errno.ENETUNREACH,
+            os.strerror(errno.ENETUNREACH),
+            OUTBOUND_NETWORK_ERRNOS,
+        )
+
+    def test_loopback_allows_only_its_network_specific_failures(self) -> None:
+        _assert_network_namespace_error(
+            "loopback probe",
+            errno.ECONNREFUSED,
+            os.strerror(errno.ECONNREFUSED),
+            LOOPBACK_NETWORK_ERRNOS,
+        )
+
+
 class PostgresSandboxHostedAcceptanceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -55,8 +114,10 @@ class PostgresSandboxHostedAcceptanceTests(unittest.TestCase):
         cls.runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
         cls.primary_state_file = cls.runner_temp / "ci-postgres-sandbox-acceptance-state.json"
         cls.secondary_state_file = cls.runner_temp / "ci-postgres-sandbox-fresh-state.json"
+        cls.schema_state_file = cls.runner_temp / "ci-postgres-schema-validation-state.json"
         cls.primary = None
         cls.secondary = None
+        cls.schema_profile = None
         cls.npm_global_config = cls.runner_temp / "ci-postgres-sandbox-npm-globalconfig"
         cls.candidate_state_file = None
         cls.candidate_state_snapshot = None
@@ -143,7 +204,22 @@ class PostgresSandboxHostedAcceptanceTests(unittest.TestCase):
                 cls.secondary_state_file,
                 runner_temp=cls.runner_temp,
             )
+            if cls.schema_state_file.exists() or cls.schema_state_file.is_symlink():
+                raise AssertionError("schema-validation Postgres state path already exists")
+            cls.schema_profile = ci_postgres_sandbox.provision_profile(
+                ci_postgres_sandbox.SCHEMA_VALIDATION_PROFILE_NAME,
+                runner_temp=cls.runner_temp,
+                state_file=cls.schema_state_file,
+            )
+            cls.schema_profile = ci_postgres_sandbox.prepare_profile_for_candidate(
+                cls.schema_state_file,
+                runner_temp=cls.runner_temp,
+            )
         except BaseException:
+            ci_postgres_sandbox.cleanup_profile(
+                cls.schema_state_file,
+                runner_temp=cls.runner_temp,
+            )
             ci_postgres_sandbox.cleanup_profile(
                 cls.secondary_state_file,
                 runner_temp=cls.runner_temp,
@@ -156,6 +232,24 @@ class PostgresSandboxHostedAcceptanceTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
+        schema_profile = getattr(cls, "schema_profile", None)
+        ci_postgres_sandbox.cleanup_profile(
+            cls.schema_state_file,
+            runner_temp=cls.runner_temp,
+        )
+        if schema_profile is not None:
+            inspect = subprocess.run(
+                ["docker", "inspect", schema_profile["containerName"]],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=10,
+                env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
+            )
+            if inspect.returncode == 0:
+                raise AssertionError("schema-validation Postgres container survived cleanup")
+        if cls.schema_state_file.exists():
+            raise AssertionError("schema-validation Postgres cleanup receipt survived cleanup")
         secondary = getattr(cls, "secondary", None)
         ci_postgres_sandbox.cleanup_profile(
             cls.secondary_state_file,
@@ -213,17 +307,18 @@ class PostgresSandboxHostedAcceptanceTests(unittest.TestCase):
         *,
         extra_mounts: tuple[str, ...] = (),
     ) -> list[str]:
-        state_file = (
-            self.primary_state_file
-            if state["containerName"] == self.primary["containerName"]
-            else self.secondary_state_file
-        )
+        state_file = {
+            self.primary["containerName"]: self.primary_state_file,
+            self.secondary["containerName"]: self.secondary_state_file,
+            self.schema_profile["containerName"]: self.schema_state_file,
+        }[state["containerName"]]
         ci_postgres_sandbox.verify_profile_runtime(
             state_file,
             runner_temp=self.runner_temp,
         )
         environment = ci_postgres_sandbox.profile_environment(
-            "/opt/verjson/node/bin:/opt/verjson/postgres-client/bin:/usr/bin:/bin"
+            "/opt/verjson/node/bin:/opt/verjson/postgres-client/bin:/usr/bin:/bin",
+            profile_name=state["profileName"],
         )
         arguments = [
             self.bwrap,
@@ -316,6 +411,157 @@ class PostgresSandboxHostedAcceptanceTests(unittest.TestCase):
             self.fail("sandbox command unexpectedly succeeded")
         return result
 
+    def _assert_network_boundary(self, state: dict[str, object]) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            listener.settimeout(2)
+            loopback_port = listener.getsockname()[1]
+
+            with socket.create_connection(("127.0.0.1", loopback_port), timeout=2) as client:
+                accepted, _ = listener.accept()
+                with accepted:
+                    accepted.settimeout(2)
+                    client.sendall(b"host-positive-control")
+                    self.assertEqual(accepted.recv(64), b"host-positive-control")
+
+            network_probe = r"""
+import json
+import os
+import socket
+import subprocess
+from pathlib import Path
+
+observed = []
+def observe(label, operation):
+    try:
+        operation()
+    except OSError as error:
+        observed.append({"label": label, "errno": error.errno, "message": error.strerror})
+    else:
+        observed.append({"label": label, "errno": None, "message": "operation succeeded"})
+
+def connect(destination):
+    with socket.create_connection(destination, timeout=2):
+        pass
+
+observe(
+    "host loopback",
+    lambda: connect(("127.0.0.1", __LOOPBACK_PORT__)),
+)
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as dns:
+    observe("DNS egress", lambda: dns.sendto(b"verjson-probe", ("8.8.8.8", 53)))
+for label, destination in (
+    ("TCP egress", ("1.1.1.1", 443)),
+    ("metadata access", ("169.254.169.254", 80)),
+):
+    observe(label, lambda destination=destination: connect(destination))
+
+def must_reject(label, operation):
+    try:
+        operation()
+    except OSError:
+        return
+    raise SystemExit(f"{label} unexpectedly succeeded")
+
+socket_path = Path("/run/verjson-postgres/.s.PGSQL.5432")
+for label, mutation in (
+    ("socket permission mutation", lambda: os.chmod(socket_path, 0o600)),
+    ("socket replacement", lambda: socket_path.unlink()),
+):
+    must_reject(label, mutation)
+must_reject(
+    "socket directory mutation",
+    lambda: (socket_path.parent / "candidate-write").write_text("forbidden"),
+)
+
+docker_socket = Path("/var/run/docker.sock")
+if docker_socket.exists():
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect(str(docker_socket))
+    except OSError:
+        pass
+    else:
+        raise SystemExit("Docker socket reachable")
+docker = subprocess.run(["docker", "info"], capture_output=True, timeout=3, check=False)
+if docker.returncode == 0:
+    raise SystemExit("Docker daemon reachable")
+print(json.dumps(observed))
+""".replace("__LOOPBACK_PORT__", str(loopback_port))
+            network = self._candidate(
+                state,
+                ["/usr/bin/python3", "-I", "-c", network_probe],
+            )
+            observations = json.loads(network.stdout)
+            expected_labels = [
+                "host loopback",
+                "DNS egress",
+                "TCP egress",
+                "metadata access",
+            ]
+            self.assertEqual([item["label"] for item in observations], expected_labels)
+            for observation in observations:
+                allowed_numbers = (
+                    LOOPBACK_NETWORK_ERRNOS
+                    if observation["label"] == "host loopback"
+                    else OUTBOUND_NETWORK_ERRNOS
+                )
+                _assert_network_namespace_error(
+                    observation["label"],
+                    observation["errno"],
+                    observation["message"],
+                    allowed_numbers,
+                )
+
+        server_egress = subprocess.run(
+            [
+                "docker",
+                "exec",
+                str(state["containerId"]),
+                "/usr/lib/postgresql/17/bin/psql",
+                "-X",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "--username=postgres",
+                "--dbname=postgres",
+                "--command",
+                "COPY (SELECT 1) TO PROGRAM 'bash -c ''echo > /dev/tcp/1.1.1.1/443''';",
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=10,
+            env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
+        )
+        server_output = server_egress.stdout + "\n" + server_egress.stderr
+        self.assertNotEqual(server_egress.returncode, 0, server_output)
+        container_network = subprocess.run(
+            [
+                "docker",
+                "exec",
+                str(state["containerId"]),
+                "bash",
+                "-c",
+                "echo > /dev/tcp/1.1.1.1/443",
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=10,
+            env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
+        )
+        container_output = container_network.stdout + "\n" + container_network.stderr
+        self.assertNotEqual(container_network.returncode, 0, container_output)
+        network_messages = [
+            os.strerror(number) for number in OUTBOUND_NETWORK_ERRNOS
+        ]
+        self.assertTrue(
+            any(message in container_output for message in network_messages),
+            container_output,
+        )
+
     def _assert_supervisor_stops_candidate(self, cause: str) -> None:
         self.assertIn(cause, {"timeout", "host-cancellation"})
         candidate_started_at: float | None = None
@@ -368,7 +614,21 @@ class PostgresSandboxHostedAcceptanceTests(unittest.TestCase):
         self.assertEqual(interrupted.exception.signum, signal.SIGTERM)
         self.assertEqual(interrupted.exception.cleanup_status, "verified")
 
-    def _psql(self, state: dict[str, object], sql: str, *, success: bool = True) -> str:
+    def _psql(
+        self,
+        state: dict[str, object],
+        sql: str,
+        *,
+        database: str | None = None,
+        user: str = "verjson_ci",
+        success: bool = True,
+    ) -> str:
+        if database is None:
+            database = (
+                "app_test"
+                if state["profileName"] == ci_postgres_sandbox.PROFILE_NAME
+                else "schema_migrations"
+            )
         result = self._candidate(
             state,
             [
@@ -378,6 +638,8 @@ class PostgresSandboxHostedAcceptanceTests(unittest.TestCase):
                 "-t",
                 "-v",
                 "ON_ERROR_STOP=1",
+                "--username=" + user,
+                "--dbname=" + database,
                 "--command",
                 sql,
             ],
@@ -385,8 +647,21 @@ class PostgresSandboxHostedAcceptanceTests(unittest.TestCase):
         )
         return result.stdout.strip()
 
-    def _push_drizzle_schema(self, state: dict[str, object]) -> None:
-        config_path = self.runner_temp / f"drizzle-config-{state['containerName']}.json"
+    def _push_drizzle_schema(
+        self, state: dict[str, object], *, database: str | None = None
+    ) -> None:
+        profile_environment = ci_postgres_sandbox.profile_environment(
+            profile_name=state["profileName"]
+        )
+        if state["profileName"] == ci_postgres_sandbox.PROFILE_NAME:
+            url = profile_environment["DATABASE_URL"]
+        else:
+            database = database or "schema_snapshot"
+            if database not in ci_postgres_sandbox.SCHEMA_VALIDATION_DATABASES:
+                raise AssertionError("Drizzle target database is outside the schema profile")
+            url_key = ci_postgres_sandbox.SCHEMA_VALIDATION_DATABASES[database]
+            url = profile_environment[url_key]
+        config_path = self.runner_temp / f"drizzle-config-{state['containerName']}-{database or 'app_test'}.json"
         config_path.write_text(
             json.dumps(
                 {
@@ -394,7 +669,7 @@ class PostgresSandboxHostedAcceptanceTests(unittest.TestCase):
                     "out": "/tmp/ci-postgres-sandbox-drizzle-out",
                     "dialect": "postgresql",
                     "dbCredentials": {
-                        "url": ci_postgres_sandbox.profile_environment()["DATABASE_URL"]
+                        "url": url
                     },
                     "strict": False,
                     "verbose": False,
@@ -422,7 +697,9 @@ class PostgresSandboxHostedAcceptanceTests(unittest.TestCase):
         finally:
             config_path.unlink(missing_ok=True)
 
-    def _apply_routines(self, state: dict[str, object]) -> None:
+    def _apply_routines(
+        self, state: dict[str, object], *, database: str | None = None
+    ) -> None:
         migration = (self.drizzle_dir / "migration.sql").read_text(encoding="utf-8")
         routines = re.findall(
             r"(?ms)^-- BEGIN schema-routines: ([^\s]+)\s*\n(.*?)^-- END schema-routines: \1\s*$",
@@ -434,16 +711,18 @@ class PostgresSandboxHostedAcceptanceTests(unittest.TestCase):
         routines_path = self.runner_temp / f"postgres-routines-{state['containerName']}.sql"
         routines_path.write_text(routine_sql + "\n", encoding="utf-8")
         try:
-            self._candidate(
-                state,
-                [
+            command = [
                     "/opt/verjson/postgres-client/bin/psql",
                     "-X",
                     "-v",
                     "ON_ERROR_STOP=1",
-                    "--file",
-                    "/tmp/ci-postgres-sandbox-routines.sql",
-                ],
+                ]
+            if state["profileName"] == ci_postgres_sandbox.SCHEMA_VALIDATION_PROFILE_NAME:
+                command.extend(("--username=verjson_ci", "--dbname=" + (database or "schema_snapshot")))
+            command.extend(("--file", "/tmp/ci-postgres-sandbox-routines.sql"))
+            self._candidate(
+                state,
+                command,
                 extra_mounts=(
                     "--ro-bind",
                     str(routines_path),
@@ -453,20 +732,32 @@ class PostgresSandboxHostedAcceptanceTests(unittest.TestCase):
         finally:
             routines_path.unlink(missing_ok=True)
 
-    def _apply_migration(self, state: dict[str, object]) -> None:
+    def _apply_migration(
+        self, state: dict[str, object], *, database: str | None = None
+    ) -> None:
+        command = [
+            "/opt/verjson/postgres-client/bin/psql",
+            "-X",
+            "-v",
+            "ON_ERROR_STOP=1",
+        ]
+        if state["profileName"] == ci_postgres_sandbox.SCHEMA_VALIDATION_PROFILE_NAME:
+            command.extend(("--username=verjson_ci", "--dbname=" + (database or "schema_migrations")))
+        command.extend(("--file", "/opt/verjson/drizzle/migration.sql"))
         self._candidate(
             state,
-            [
-                "/opt/verjson/postgres-client/bin/psql",
-                "-X",
-                "-v",
-                "ON_ERROR_STOP=1",
-                "--file",
-                "/opt/verjson/drizzle/migration.sql",
-            ],
+            command,
         )
 
-    def _normalized_schema_dump(self, state: dict[str, object]) -> str:
+    def _normalized_schema_dump(
+        self, state: dict[str, object], *, database: str | None = None
+    ) -> str:
+        if database is None:
+            database = (
+                "app_test"
+                if state["profileName"] == ci_postgres_sandbox.PROFILE_NAME
+                else "schema_migrations"
+            )
         result = self._candidate(
             state,
             [
@@ -476,7 +767,7 @@ class PostgresSandboxHostedAcceptanceTests(unittest.TestCase):
                 "--no-privileges",
                 "--no-comments",
                 "--schema=public",
-                "app_test",
+                "--dbname=" + database,
             ],
         )
         lines = [
@@ -553,80 +844,7 @@ class PostgresSandboxHostedAcceptanceTests(unittest.TestCase):
         self.assertIn('"fresh_database":true', first.stdout)
         self.assertIn('"fresh_database":true', second.stdout)
 
-        network_probe = r"""
-import os
-import socket
-import subprocess
-from pathlib import Path
-
-def must_be_blocked(label, operation):
-    try:
-        operation()
-    except OSError:
-        return
-    raise SystemExit(f"{label} unexpectedly succeeded")
-
-dns = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-must_be_blocked("DNS egress", lambda: dns.sendto(b"verjson-probe", ("8.8.8.8", 53)))
-for label, destination in (
-    ("TCP egress", ("1.1.1.1", 443)),
-    ("metadata access", ("169.254.169.254", 80)),
-):
-    must_be_blocked(label, lambda: socket.create_connection(destination, timeout=2))
-
-socket_path = Path("/run/verjson-postgres/.s.PGSQL.5432")
-for label, mutation in (
-    ("socket permission mutation", lambda: os.chmod(socket_path, 0o600)),
-    ("socket replacement", lambda: socket_path.unlink()),
-):
-    must_be_blocked(label, mutation)
-must_be_blocked(
-    "socket directory mutation",
-    lambda: (socket_path.parent / "candidate-write").write_text("forbidden"),
-)
-
-docker_socket = Path("/var/run/docker.sock")
-if docker_socket.exists():
-    try:
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.connect(str(docker_socket))
-    except OSError:
-        pass
-    else:
-        raise SystemExit("Docker socket was reachable")
-docker = subprocess.run(["docker", "info"], capture_output=True, timeout=3, check=False)
-if docker.returncode == 0:
-    raise SystemExit("Docker daemon was reachable")
-print("network, metadata, Docker, and read-only socket checks passed")
-"""
-        network = self._candidate(
-            self.primary,
-            ["/usr/bin/python3", "-I", "-c", network_probe],
-        )
-        self.assertIn("checks passed", network.stdout)
-
-        container_id = str(self.primary["containerId"])
-        server_egress = subprocess.run(
-            [
-                "docker",
-                "exec",
-                container_id,
-                "/usr/lib/postgresql/17/bin/psql",
-                "-X",
-                "-v",
-                "ON_ERROR_STOP=1",
-                "--username=postgres",
-                "--dbname=postgres",
-                "--command",
-                "COPY (SELECT 1) TO PROGRAM 'bash -c ''echo > /dev/tcp/1.1.1.1/443''';",
-            ],
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=10,
-            env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
-        )
-        self.assertNotEqual(server_egress.returncode, 0, server_egress.stdout)
+        self._assert_network_boundary(self.primary)
 
         bad_profile = {**self.profile, "digest": "sha256:" + "0" * 64}
         with tempfile.TemporaryDirectory(dir=self.runner_temp) as directory:
@@ -678,6 +896,183 @@ print("network, metadata, Docker, and read-only socket checks passed")
         self.assertEqual(plan["state"], "infrastructure-failure")
         self.assertEqual(receipt["state"], "infrastructure-failure")
         bad_state_file.unlink(missing_ok=True)
+
+    def test_schema_validation_profile_exercises_three_isolated_socket_databases(self) -> None:
+        state = self.schema_profile
+        profile_name = ci_postgres_sandbox.SCHEMA_VALIDATION_PROFILE_NAME
+
+        self.assertEqual(state["profileName"], profile_name)
+        self.assertEqual(
+            ci_postgres_sandbox.local_auth_policy(profile_name).splitlines(),
+            [
+                "local all postgres peer",
+                "local schema_snapshot verjson_ci trust",
+                "local schema_migrations verjson_ci trust",
+                "local schema_reference verjson_ci trust",
+                "local all all reject",
+                "host all all 0.0.0.0/0 reject",
+                "host all all ::/0 reject",
+            ],
+        )
+
+        self._push_drizzle_schema(state, database="schema_snapshot")
+        self._apply_routines(state, database="schema_snapshot")
+        self._push_drizzle_schema(state, database="schema_reference")
+        self._apply_routines(state, database="schema_reference")
+        self._apply_migration(state, database="schema_migrations")
+
+        dumps = {
+            database: self._normalized_schema_dump(state, database=database)
+            for database in ci_postgres_sandbox.SCHEMA_VALIDATION_DATABASES
+        }
+        self.assertEqual(dumps["schema_snapshot"], dumps["schema_migrations"])
+        self.assertEqual(dumps["schema_snapshot"], dumps["schema_reference"])
+
+        self._psql(
+            state,
+            "ALTER TABLE auth.users ADD COLUMN schema_acceptance_probe integer; "
+            "CREATE TABLE storage.schema_acceptance_probe (id integer PRIMARY KEY); "
+            "CREATE TABLE public.schema_policy_marker (value integer); "
+            "ALTER TABLE public.schema_policy_marker ENABLE ROW LEVEL SECURITY; "
+            "CREATE POLICY schema_validation_policy ON public.schema_policy_marker "
+            "USING (value IS NOT NULL);",
+            database="schema_migrations",
+        )
+        migration_ddl = self._psql(
+            state,
+            "SELECT (SELECT count(*) FROM information_schema.columns "
+            "WHERE table_schema='auth' AND table_name='users' "
+            "AND column_name='schema_acceptance_probe')::text || '|' || "
+            "(to_regclass('storage.schema_acceptance_probe') IS NOT NULL)::text || '|' || "
+            "(SELECT relrowsecurity FROM pg_class "
+            "WHERE oid='public.schema_policy_marker'::regclass)::text || '|' || "
+            "(SELECT count(*) FROM pg_policies WHERE schemaname='public' "
+            "AND tablename='schema_policy_marker' "
+            "AND policyname='schema_validation_policy')::text;",
+            database="schema_migrations",
+        )
+        self.assertEqual(migration_ddl, "1|true|true|1")
+
+        for database in ci_postgres_sandbox.SCHEMA_VALIDATION_DATABASES:
+            with self.subTest(database=database):
+                access = self._psql(
+                    state,
+                    "SELECT current_user || '|' || current_database() || '|' || "
+                    "current_setting('server_version') || '|' || "
+                    "(inet_server_addr() IS NULL)::text || '|' || "
+                    "has_database_privilege(current_user, current_database(), 'CONNECT')::text || '|' || "
+                    "has_database_privilege(current_user, current_database(), 'TEMP')::text || '|' || "
+                    "has_database_privilege(current_user, current_database(), 'CREATE')::text;",
+                    database=database,
+                )
+                expected_temp = "true" if database == "schema_migrations" else "false"
+                fields = access.split("|")
+                self.assertEqual(fields[0:2], ["verjson_ci", database])
+                self.assertTrue(fields[2].startswith("17.11"), access)
+                self.assertEqual(fields[3:], ["true", "true", expected_temp, "false"])
+                if database != "schema_migrations":
+                    self._psql(
+                        state,
+                        "CREATE TEMP TABLE forbidden_temp(value integer);",
+                        database=database,
+                        success=False,
+                    )
+
+        prelude = self._psql(
+            state,
+            "SELECT current_user || '|' || "
+            "(SELECT NOT rolcanlogin FROM pg_roles WHERE rolname='authenticated')::text || '|' || "
+            "(SELECT count(*) FROM pg_namespace WHERE nspname IN ('auth', 'storage'))::text || '|' || "
+            "(SELECT count(*) FROM pg_class WHERE relname IN ('users', 'identities', 'objects'))::text || '|' || "
+            "(to_regprocedure('auth.uid()') IS NOT NULL)::text || '|' || "
+            "(to_regprocedure('storage.foldername(text)') IS NOT NULL)::text;",
+            database="schema_migrations",
+        )
+        self.assertEqual(prelude, "verjson_ci|true|2|3|true|true")
+        for database in ("schema_snapshot", "schema_reference"):
+            self.assertEqual(
+                self._psql(
+                    state,
+                    "SELECT to_regnamespace('auth') IS NULL AND to_regnamespace('storage') IS NULL;",
+                    database=database,
+                ),
+                "t",
+            )
+
+        self._psql(
+            state,
+            "CREATE TABLE public.profile_isolation_marker(value integer);",
+            database="schema_snapshot",
+        )
+        for database in ("schema_migrations", "schema_reference"):
+            self.assertEqual(
+                self._psql(
+                    state,
+                    "SELECT to_regclass('public.profile_isolation_marker') IS NULL;",
+                    database=database,
+                ),
+                "t",
+            )
+
+        for user, expected_error in (
+            ("postgres", "Peer authentication failed"),
+            ("ci_unreviewed", "pg_hba.conf rejects connection"),
+        ):
+            denied = self._candidate(
+                state,
+                [
+                    "/opt/verjson/postgres-client/bin/psql",
+                    "-X",
+                    "--username=" + user,
+                    "--dbname=schema_migrations",
+                    "--command=SELECT 1",
+                ],
+                success=False,
+            )
+            self.assertIn(expected_error, denied.stderr)
+
+        self._assert_network_boundary(state)
+
+    def test_workspace_client_shims_cannot_replace_profile_client_tools(self) -> None:
+        with tempfile.TemporaryDirectory(dir=self.runner_temp) as directory:
+            shim_directory = Path(directory)
+            for name in ("psql", "pg_dump"):
+                shim = shim_directory / name
+                shim.write_text(
+                    "#!/bin/sh\necho untrusted-workspace-shim >&2\nexit 93\n",
+                    encoding="utf-8",
+                )
+                shim.chmod(0o555)
+
+            probe = r"""
+import os
+import shutil
+import subprocess
+
+os.environ["PATH"] = "/tmp/untrusted-bin:/opt/verjson/postgres-client/bin"
+for tool in ("psql", "pg_dump"):
+    resolved = shutil.which(tool)
+    if resolved != f"/tmp/untrusted-bin/{tool}":
+        raise SystemExit(f"test did not put untrusted {tool} first on PATH: {resolved}")
+    result = subprocess.run(
+        [f"/opt/verjson/postgres-client/bin/{tool}", "--version"],
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    if "PostgreSQL) 17.11" not in result.stdout:
+        raise SystemExit(f"trusted {tool} version mismatch: {result.stdout}")
+    if "untrusted-workspace-shim" in result.stderr:
+        raise SystemExit(f"untrusted {tool} shim executed")
+    print(f"trusted {tool}: {result.stdout.strip()}")
+"""
+            result = self._candidate(
+                self.schema_profile,
+                ["/usr/bin/python3", "-I", "-c", probe],
+                extra_mounts=("--ro-bind", str(shim_directory), "/tmp/untrusted-bin"),
+            )
+            self.assertIn("trusted psql: psql (PostgreSQL) 17.11", result.stdout)
+            self.assertIn("trusted pg_dump: pg_dump (PostgreSQL) 17.11", result.stdout)
 
     def test_production_supervisor_cleans_timeout_and_host_cancellation(self) -> None:
         self._assert_supervisor_stops_candidate("timeout")

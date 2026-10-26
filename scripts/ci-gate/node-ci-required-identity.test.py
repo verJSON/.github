@@ -31,7 +31,7 @@ PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 GENERATOR = ROOT / "scripts/gen-node-ci-protected.py"
 TRUSTED_HELPER = ROOT / "scripts/ci_build_artifacts.py"
 HEAD = "a" * 40
-LEGACY_SHA256 = "eb56f66fd892809c9c470dded58ed2371c3412af95a7e6668c924812a56ba5b0"
+LEGACY_SHA256 = "90d5cc31b9a0dfa5fadf84d01e67ef0d8d4a02a9b9a7593e21eda30df508de95"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
@@ -798,6 +798,7 @@ fi
         ):
             with self.subTest(runtime=runtime_name):
                 self.assertIn("postgres_profile_module.candidate_environment(", runtime)
+                self.assertIn('profile_name=postgres_profile["name"]', runtime)
                 self.assertIn("postgres_profile_module.profile_mount_args(", runtime)
                 self.assertIn("postgres_profile_module.verify_profile_runtime(", runtime)
                 self.assertLess(

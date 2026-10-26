@@ -564,6 +564,17 @@ direct-human approval. From fetched, clean `origin/main`,
 printed `true`. The owner's standing admin authority was used; no gate was
 weakened.
 
+27. **Admin merge same-run ArtifactSet hardening.** Verjson/.github#1917
+("fix(ci): harden build-once artifact sharing") admin-squash-merged
+2026-10-26 at head `8dd65a796e8513895b3b17366cc9211cca154ab7` and merge commit
+`e7fa9e87429eff3a1ab501b9c158cf088dd2505a`. Its base was fetched clean
+`origin/main` at `29a2e79e75ca11c6054c9027bf10ec9544f7d366`. GitHub reports
+merged by `pyousefi`, 21 SUCCESS and 5 SKIPPED check conclusions, and review
+decision `REVIEW_REQUIRED`. From the fetched clean base,
+`bash scripts/assert-mergeable-head.sh Verjson/.github 1917` exited 0 and
+printed `true`. The owner's standing admin authority was used after review;
+no gate was weakened.
+
 ### Exit condition ("CI optimized and working"), measurable
 
 The window closes when all hold, each evidenced in the closing PR:

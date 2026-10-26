@@ -36,6 +36,13 @@ PROFILE_FIELDS = {
     "publishedPorts",
 }
 PROFILE_NAME = "postgres-17.11"
+SCHEMA_VALIDATION_PROFILE_NAME = "postgres-schema-validation-17.11"
+PROFILE_NAMES = {PROFILE_NAME, SCHEMA_VALIDATION_PROFILE_NAME}
+SCHEMA_VALIDATION_DATABASES = {
+    "schema_snapshot": "DATABASE_URL_SCHEMA_SNAPSHOT",
+    "schema_migrations": "DATABASE_URL_SCHEMA_MIGRATIONS",
+    "schema_reference": "DATABASE_URL_SCHEMA_REFERENCE",
+}
 PROFILE_ROOT_PREFIX = "verjson-postgres-profile-"
 PROFILE_ROOT_NAME_PATTERN = re.compile(r"verjson-postgres-profile-[a-z0-9_]{8}\Z")
 PROFILE_IMAGE_DIGEST = (
@@ -92,17 +99,26 @@ def _cleanup_failed_staging(
         )
 
 
-def local_auth_policy() -> str:
-    """Allow container-local postgres maintenance and the app test role only."""
+def local_auth_policy(profile_name: str = PROFILE_NAME) -> str:
+    """Allow trusted maintenance and only the selected profile's candidate databases."""
+    if profile_name == PROFILE_NAME:
+        candidate_rules = ["local app_test verjson_ci trust"]
+    elif profile_name == SCHEMA_VALIDATION_PROFILE_NAME:
+        candidate_rules = [
+            f"local {database} verjson_ci trust"
+            for database in SCHEMA_VALIDATION_DATABASES
+        ]
+    else:
+        raise PostgresSandboxError(f"unknown Postgres sandbox profile: {profile_name!r}")
     return "\n".join(
-        (
+        [
             "local all postgres peer",
-            "local app_test verjson_ci trust",
+            *candidate_rules,
             "local all all reject",
             "host all all 0.0.0.0/0 reject",
             "host all all ::/0 reject",
             "",
-        )
+        ]
     )
 
 
@@ -127,13 +143,13 @@ def resolve_profile(name: str | None) -> dict[str, Any] | None:
     """Resolve only the reviewed profile; an empty value leaves it disabled."""
     if name is None or name == "":
         return None
-    if not isinstance(name, str) or name != PROFILE_NAME:
+    if not isinstance(name, str) or name not in PROFILE_NAMES:
         raise PostgresSandboxError(f"unknown Postgres sandbox profile: {name!r}")
 
     profiles = _profile_document()["profiles"]
-    if set(profiles) != {PROFILE_NAME}:
+    if set(profiles) != PROFILE_NAMES:
         raise PostgresSandboxError("Postgres sandbox profile allowlist changed unexpectedly")
-    profile = profiles[PROFILE_NAME]
+    profile = profiles[name]
     if not isinstance(profile, dict) or set(profile) != PROFILE_FIELDS:
         raise PostgresSandboxError("Postgres sandbox profile has an invalid shape")
     if (
@@ -147,7 +163,7 @@ def resolve_profile(name: str | None) -> dict[str, Any] | None:
         or profile["publishedPorts"] != []
     ):
         raise PostgresSandboxError("Postgres sandbox profile is outside the reviewed boundary")
-    return {**profile, "name": PROFILE_NAME, "image": f"{profile['image']}@{profile['digest']}"}
+    return {**profile, "name": name, "image": f"{profile['image']}@{profile['digest']}"}
 
 
 def validate_profile_request(
@@ -194,7 +210,7 @@ def validate_profile_state(
         raise PostgresSandboxError("Postgres sandbox state has an invalid shape")
     if state["schemaVersion"] != 1 or type(state["schemaVersion"]) is not int:
         raise PostgresSandboxError("unsupported Postgres sandbox state schema")
-    if state["profileName"] != PROFILE_NAME:
+    if state["profileName"] not in PROFILE_NAMES:
         raise PostgresSandboxError("Postgres sandbox state names an unreviewed profile")
     if not isinstance(state["containerName"], str) or not re.fullmatch(
         r"verjson-postgres-[a-f0-9]{12}", state["containerName"]
@@ -246,7 +262,9 @@ def verify_profile_socket(state: dict[str, Any]) -> None:
     socket_directory = Path(state.get("socketDirectory", ""))
     if socket_directory.is_symlink() or not socket_directory.is_dir():
         raise PostgresSandboxError("Postgres socket directory was replaced")
-    verify_local_auth_policy(socket_directory)
+    verify_local_auth_policy(
+        socket_directory, profile_name=state.get("profileName", PROFILE_NAME)
+    )
     socket_path = socket_directory / POSTGRES_SOCKET_NAME
     try:
         metadata = socket_path.lstat()
@@ -268,7 +286,7 @@ def build_container_args(
     socket_dir: str | Path,
 ) -> list[str]:
     """Build the trusted server command without TCP or a published port."""
-    if profile.get("name") != PROFILE_NAME or profile.get("networkMode") != "none":
+    if profile.get("name") not in PROFILE_NAMES or profile.get("networkMode") != "none":
         raise PostgresSandboxError("container command requires the reviewed Postgres profile")
     if not re.fullmatch(r"verjson-postgres-[a-f0-9]{12}", container_name):
         raise PostgresSandboxError("invalid per-run Postgres container name")
@@ -327,19 +345,23 @@ def _require_directory(path: str | Path, label: str) -> Path:
     return resolved
 
 
-def write_local_auth_policy(socket_dir: str | Path) -> Path:
+def write_local_auth_policy(
+    socket_dir: str | Path, *, profile_name: str = PROFILE_NAME
+) -> Path:
     socket_path = _require_directory(socket_dir, "Postgres socket directory")
     policy_path = socket_path / POSTGRES_HBA_NAME
     try:
         with policy_path.open("x", encoding="utf-8") as policy_file:
-            policy_file.write(local_auth_policy())
+            policy_file.write(local_auth_policy(profile_name))
         policy_path.chmod(0o444)
     except OSError as exc:
         raise PostgresSandboxError("Postgres local auth policy could not be staged") from exc
     return policy_path
 
 
-def verify_local_auth_policy(socket_dir: str | Path) -> None:
+def verify_local_auth_policy(
+    socket_dir: str | Path, *, profile_name: str = PROFILE_NAME
+) -> None:
     policy_path = _require_directory(socket_dir, "Postgres socket directory") / POSTGRES_HBA_NAME
     try:
         metadata = policy_path.lstat()
@@ -350,7 +372,7 @@ def verify_local_auth_policy(socket_dir: str | Path) -> None:
         not stat.S_ISREG(metadata.st_mode)
         or metadata.st_mode & 0o777 != 0o444
         or metadata.st_size > 4096
-        or policy != local_auth_policy()
+        or policy != local_auth_policy(profile_name)
     ):
         raise PostgresSandboxError("Postgres local auth policy was replaced or mutated")
 
@@ -359,10 +381,11 @@ def build_bubblewrap_profile_args(
     *,
     socket_dir: str | Path,
     client_bundle: str | Path,
+    profile_name: str = PROFILE_NAME,
 ) -> list[str]:
     """Expose only the server socket and verified client tree as read-only mounts."""
     socket_path = _require_directory(socket_dir, "Postgres socket directory")
-    verify_local_auth_policy(socket_path)
+    verify_local_auth_policy(socket_path, profile_name=profile_name)
     socket_file = socket_path / POSTGRES_SOCKET_NAME
     try:
         if not stat.S_ISSOCK(socket_file.lstat().st_mode):
@@ -399,49 +422,118 @@ def build_bubblewrap_profile_args(
     ]
 
 
-def profile_environment(path: str = "") -> dict[str, str]:
+def profile_environment(
+    path: str = "",
+    *,
+    profile_name: str = PROFILE_NAME,
+) -> dict[str, str]:
     """Return candidate connection settings that can only target the Unix socket."""
     encoded_socket_path = SOCKET_SANDBOX_PATH.replace("/", "%2F")
-    environment = {
-        "DATABASE_URL": (
-            f"postgresql://verjson_ci@{encoded_socket_path}/app_test?port=5432"
-        ),
-        "PGHOST": SOCKET_SANDBOX_PATH,
-        "PGPORT": "5432",
-        "PGUSER": "verjson_ci",
-        "PGDATABASE": "app_test",
-        "DB_HOST": SOCKET_SANDBOX_PATH,
-        "DB_PORT": "5432",
-    }
+    if profile_name == PROFILE_NAME:
+        environment = {
+            "DATABASE_URL": (
+                f"postgresql://verjson_ci@{encoded_socket_path}/app_test?port=5432"
+            ),
+            "PGHOST": SOCKET_SANDBOX_PATH,
+            "PGPORT": "5432",
+            "PGUSER": "verjson_ci",
+            "PGDATABASE": "app_test",
+            "DB_HOST": SOCKET_SANDBOX_PATH,
+            "DB_PORT": "5432",
+        }
+    elif profile_name == SCHEMA_VALIDATION_PROFILE_NAME:
+        environment = {
+            key: f"postgresql://verjson_ci@{encoded_socket_path}/{database}?port=5432"
+            for database, key in SCHEMA_VALIDATION_DATABASES.items()
+        }
+        environment.update(
+            {
+                "PGHOST": SOCKET_SANDBOX_PATH,
+                "PGPORT": "5432",
+                "PGUSER": "verjson_ci",
+            }
+        )
+    else:
+        raise PostgresSandboxError(f"unknown Postgres sandbox profile: {profile_name!r}")
     if path:
         environment["PATH"] = f"{CLIENT_SANDBOX_PATH}/bin:{path}"
     return environment
 
 
-def candidate_environment(inherited: dict[str, str], path: str = "") -> dict[str, str]:
+def candidate_environment(
+    inherited: dict[str, str],
+    path: str = "",
+    *,
+    profile_name: str = PROFILE_NAME,
+) -> dict[str, str]:
     """Remove ambient libpq routes and install only the reviewed socket settings."""
     candidate = {
         name: value
         for name, value in inherited.items()
-        if not name.upper().startswith("PG") and name.upper() != "DATABASE_URL"
+        if not name.upper().startswith("PG")
+        and name.upper() != "DATABASE_URL"
+        and not (
+            profile_name == SCHEMA_VALIDATION_PROFILE_NAME
+            and name.upper().startswith("DATABASE_URL_")
+        )
     }
-    candidate.update(profile_environment(path))
+    candidate.update(profile_environment(path, profile_name=profile_name))
     return candidate
 
 
-def database_bootstrap_sql() -> str:
-    """Create a schema-capable role without database or server administration rights."""
-    return "\n".join(
-        (
-            "CREATE ROLE verjson_ci LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;",
-            "CREATE DATABASE app_test OWNER postgres;",
-            "REVOKE ALL ON DATABASE app_test FROM PUBLIC;",
-            "GRANT CONNECT ON DATABASE app_test TO verjson_ci;",
-            "\\connect app_test",
-            "REVOKE ALL ON SCHEMA public FROM PUBLIC;",
-            "GRANT USAGE, CREATE ON SCHEMA public TO verjson_ci;",
+def database_bootstrap_sql(*, profile_name: str = PROFILE_NAME) -> str:
+    """Create only the databases and object permissions required by the selected profile."""
+    if profile_name == PROFILE_NAME:
+        return "\n".join(
+            (
+                "CREATE ROLE verjson_ci LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;",
+                "CREATE DATABASE app_test OWNER postgres;",
+                "REVOKE ALL ON DATABASE app_test FROM PUBLIC;",
+                "GRANT CONNECT ON DATABASE app_test TO verjson_ci;",
+                "\\connect app_test",
+                "REVOKE ALL ON SCHEMA public FROM PUBLIC;",
+                "GRANT USAGE, CREATE ON SCHEMA public TO verjson_ci;",
+            )
         )
-    )
+    if profile_name != SCHEMA_VALIDATION_PROFILE_NAME:
+        raise PostgresSandboxError(f"unknown Postgres sandbox profile: {profile_name!r}")
+
+    statements = [
+        "CREATE ROLE verjson_ci LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;",
+        "CREATE ROLE authenticated NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;",
+    ]
+    for database in SCHEMA_VALIDATION_DATABASES:
+        statements.extend(
+            (
+                f"CREATE DATABASE {database} OWNER postgres;",
+                f"REVOKE ALL ON DATABASE {database} FROM PUBLIC;",
+                f"GRANT CONNECT ON DATABASE {database} TO verjson_ci;",
+            )
+        )
+    statements.append("GRANT TEMP ON DATABASE schema_migrations TO verjson_ci;")
+    for database in SCHEMA_VALIDATION_DATABASES:
+        statements.extend(
+            (
+                f"\\connect {database}",
+                "REVOKE ALL ON SCHEMA public FROM PUBLIC;",
+                "GRANT USAGE, CREATE ON SCHEMA public TO verjson_ci;",
+            )
+        )
+        if database == "schema_migrations":
+            statements.extend(
+                (
+                    "CREATE SCHEMA auth AUTHORIZATION verjson_ci;",
+                    "CREATE SCHEMA storage AUTHORIZATION verjson_ci;",
+                    "SET ROLE verjson_ci;",
+                    "CREATE TABLE IF NOT EXISTS auth.users (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), email text);",
+                    "CREATE TABLE IF NOT EXISTS auth.identities (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid, provider text, provider_id text, identity_data jsonb);",
+                    "CREATE TABLE IF NOT EXISTS storage.objects (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), bucket_id text, name text, owner uuid);",
+                    "CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS $$ SELECT NULL::uuid $$;",
+                    "CREATE OR REPLACE FUNCTION storage.foldername(name text) RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT string_to_array(name, '/') $$;",
+                    "RESET ROLE;",
+                )
+            )
+    return "\n".join(statements)
 
 
 def parse_ldd_dependencies(output: str) -> dict[str, str]:
@@ -520,7 +612,7 @@ def write_client_manifest(bundle: str | Path, profile: dict[str, Any]) -> Path:
     entries = _client_bundle_files(root, require_read_only_directories=False)
     manifest = {
         "schemaVersion": 1,
-        "profile": PROFILE_NAME,
+        "profile": profile.get("name"),
         "image": profile.get("image"),
         "clientVersion": profile.get("clientVersion"),
         "files": entries,
@@ -550,7 +642,7 @@ def verify_client_bundle(bundle: str | Path, profile: dict[str, Any]) -> None:
         not isinstance(manifest, dict)
         or set(manifest) != {"schemaVersion", "profile", "image", "clientVersion", "files"}
         or manifest["schemaVersion"] != 1
-        or manifest["profile"] != PROFILE_NAME
+        or manifest["profile"] != profile.get("name")
         or manifest["image"] != profile.get("image")
         or manifest["clientVersion"] != profile.get("clientVersion")
         or not isinstance(manifest["files"], list)
@@ -796,7 +888,9 @@ def _assert_container_boundary(container_id: str, profile: dict[str, Any]) -> No
         raise PostgresSandboxError("Postgres sandbox server is not running")
 
 
-def _assert_postgres_privileges(container_id: str) -> None:
+def _assert_postgres_privileges(
+    container_id: str, *, profile_name: str = PROFILE_NAME
+) -> None:
     psql = [
         "docker",
         "exec",
@@ -808,27 +902,95 @@ def _assert_postgres_privileges(container_id: str) -> None:
         "-v",
         "ON_ERROR_STOP=1",
         "--username=postgres",
-        "--dbname=app_test",
     ]
     roles = _run_docker(
         [
             *psql,
+            "--dbname=postgres",
             "--command=SELECT rolsuper || ':' || rolcreatedb || ':' || rolcreaterole || ':' || rolinherit FROM pg_roles WHERE rolname='verjson_ci';",
         ]
     )
     if roles != "false:false:false:false":
         raise PostgresSandboxError("Postgres candidate role has administrative privileges")
-    socket_only = _run_docker([*psql, "--command=SELECT inet_server_addr() IS NULL;"])
-    if socket_only != "t":
-        raise PostgresSandboxError("Postgres server accepted a non-Unix-socket connection")
-    schema_access = _run_docker(
-        [
-            *psql,
-            "--command=SELECT has_schema_privilege('verjson_ci', 'public', 'USAGE') AND has_schema_privilege('verjson_ci', 'public', 'CREATE');",
-        ]
-    )
-    if schema_access != "t":
-        raise PostgresSandboxError("Postgres candidate role lacks required schema privileges")
+
+    if profile_name not in PROFILE_NAMES:
+        raise PostgresSandboxError(f"unknown Postgres sandbox profile: {profile_name!r}")
+    if profile_name == PROFILE_NAME:
+        socket_only = _run_docker(
+            [
+                *psql,
+                "--dbname=app_test",
+                "--command=SELECT inet_server_addr() IS NULL;",
+            ]
+        )
+        if socket_only != "t":
+            raise PostgresSandboxError("Postgres server accepted a non-Unix-socket connection")
+        schema_access = _run_docker(
+            [
+                *psql,
+                "--dbname=app_test",
+                "--command=SELECT has_schema_privilege('verjson_ci', 'public', 'USAGE') AND has_schema_privilege('verjson_ci', 'public', 'CREATE');",
+            ]
+        )
+        if schema_access != "t":
+            raise PostgresSandboxError("Postgres candidate role lacks required schema privileges")
+        return
+
+    databases = {
+        "schema_snapshot": False,
+        "schema_migrations": True,
+        "schema_reference": False,
+    }
+
+    for database, expects_temp in databases.items():
+        socket_only = _run_docker(
+            [
+                *psql,
+                f"--dbname={database}",
+                "--command=SELECT inet_server_addr() IS NULL;",
+            ]
+        )
+        if socket_only != "t":
+            raise PostgresSandboxError("Postgres server accepted a non-Unix-socket connection")
+        database_privileges = _run_docker(
+            [
+                *psql,
+                "--dbname=postgres",
+                "--command="
+                f"SELECT has_database_privilege('verjson_ci', '{database}', 'CONNECT') || ':' || "
+                f"has_database_privilege('verjson_ci', '{database}', 'TEMP') || ':' || "
+                f"has_database_privilege('verjson_ci', '{database}', 'CREATE');",
+            ]
+        )
+        if database_privileges != f"true:{str(expects_temp).lower()}:false":
+            raise PostgresSandboxError(
+                "Postgres candidate database privileges are outside the profile"
+            )
+        schema_access = _run_docker(
+            [
+                *psql,
+                f"--dbname={database}",
+                "--command=SELECT has_schema_privilege('verjson_ci', 'public', 'USAGE') AND has_schema_privilege('verjson_ci', 'public', 'CREATE');",
+            ]
+        )
+        if schema_access != "t":
+            raise PostgresSandboxError("Postgres candidate role lacks required schema privileges")
+
+    if profile_name == SCHEMA_VALIDATION_PROFILE_NAME:
+        prelude = _run_docker(
+            [
+                *psql,
+                "--dbname=schema_migrations",
+                "--command=SELECT "
+                "(SELECT NOT rolcanlogin FROM pg_roles WHERE rolname='authenticated') AND "
+                "(SELECT count(*) = 2 FROM pg_namespace WHERE nspname IN ('auth', 'storage') AND pg_get_userbyid(nspowner)='verjson_ci') AND "
+                "(SELECT count(*) = 3 FROM pg_class WHERE relname IN ('users', 'identities', 'objects') AND pg_get_userbyid(relowner)='verjson_ci') AND "
+                "to_regprocedure('auth.uid()') IS NOT NULL AND "
+                "to_regprocedure('storage.foldername(text)') IS NOT NULL;",
+            ]
+        )
+        if prelude != "t":
+            raise PostgresSandboxError("Postgres schema migration prelude is incomplete or misowned")
 
 
 def provision_profile(
@@ -861,7 +1023,7 @@ def provision_profile(
     container_name = f"verjson-postgres-{secrets.token_hex(6)}"
     state: dict[str, Any] = {
         "schemaVersion": 1,
-        "profileName": PROFILE_NAME,
+        "profileName": profile_name,
         "containerName": container_name,
         "containerId": None,
         "rootDirectory": str(root),
@@ -878,7 +1040,7 @@ def provision_profile(
         _cleanup_failed_staging(root, state_path, failure, remove_state=True)
         raise
     try:
-        write_local_auth_policy(socket_dir)
+        write_local_auth_policy(socket_dir, profile_name=profile_name)
         admin_password = secrets.token_urlsafe(32)
         container_id = _run_docker(
             build_container_args(
@@ -908,10 +1070,10 @@ def provision_profile(
                 "--username=postgres",
                 "--dbname=postgres",
             ],
-            input_text=database_bootstrap_sql(),
+            input_text=database_bootstrap_sql(profile_name=profile_name),
             timeout=30,
         )
-        _assert_postgres_privileges(container_id)
+        _assert_postgres_privileges(container_id, profile_name=profile_name)
         socket_file = socket_dir / POSTGRES_SOCKET_NAME
         metadata = socket_file.lstat()
         if not stat.S_ISSOCK(metadata.st_mode):
@@ -982,7 +1144,9 @@ def prepare_profile_for_candidate(
     profile = resolve_profile(state["profileName"])
     _assert_container_boundary(state["containerId"], profile)
     verify_profile_socket(state)
-    _assert_postgres_privileges(state["containerId"])
+    _assert_postgres_privileges(
+        state["containerId"], profile_name=state["profileName"]
+    )
     stage_client_bundle(
         state["containerId"],
         profile=profile,
@@ -1007,6 +1171,7 @@ def profile_mount_args(state: dict[str, Any]) -> list[str]:
     return build_bubblewrap_profile_args(
         socket_dir=state["socketDirectory"],
         client_bundle=state["clientBundleDirectory"],
+        profile_name=state["profileName"],
     )
 
 
