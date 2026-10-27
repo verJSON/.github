@@ -646,6 +646,31 @@ The owner's standing admin authority was used; no gate was weakened.
 printed `true`. The owner's standing admin authority was used; no gate was
 weakened.
 
+34. **Admin merge ArtifactSet caller-workflow binding.** Verjson/.github#1928
+(`fix(ci): bind ArtifactSet authorization to caller workflow`, `Part of #1869`)
+merged 2026-10-27 at head
+`eb56ea0b99fb26c6c27e4613a0c47650a6d7172a` and merge commit
+`c057010e98c1d55c32839a0beb6614efeba5bb0e`. Its base was fetched clean
+`origin/main` at `30627c100325d1ffe0cccf29bf98613d1b7b6570`. GitHub reports
+20 SUCCESS and 5 SKIPPED checks; the review decision remained
+`REVIEW_REQUIRED`. From that clean base,
+`bash scripts/assert-mergeable-head.sh Verjson/.github 1928` exited 0 and
+printed `true`. `gpt-6-astra`, `gpt-6.1-sol`, and `code-reviewer`
+reviewed the change and returned GO; the Fable and Opus Agent tools were
+unavailable. The owner's standing admin authority was used; no gate was
+weakened.
+
+35. **Admin merge persistent-lane rejection.** Verjson/.github#1931
+(`fix(ci): reject persistent untrusted runner lane`, `Part of #1831`)
+merged 2026-10-27 at head
+`d8604d31f706442d440197811c76e53d157829ae` and merge commit
+`1adb1724a58dfb4e2c9bfbd55d0646555575a147`. Its base was
+`c057010e98c1d55c32839a0beb6614efeba5bb0e`. GitHub reports 30 SUCCESS and
+15 SKIPPED checks; the review decision remained `REVIEW_REQUIRED`. The
+available PR record does not retain the required pre-merge assertion result,
+so this entry makes no claim that the assertion passed. The owner's standing
+admin authority was used; no gate was weakened.
+
 ### Exit condition ("CI optimized and working"), measurable
 
 The window closes when all hold, each evidenced in the closing PR:
