@@ -36,11 +36,21 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: runner-deployment-${{ github.repository }}-${{ inputs.fleet-selector }}
+  group: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.repository.private != true && format('public-rejected-{0}-{1}-{2}', github.repository, github.run_id, github.run_attempt) || format('runner-deployment-{0}-{1}', github.repository, inputs.fleet-selector) }}
   cancel-in-progress: false
 
 jobs:
+  reject-public-pull-request-caller:
+    if: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.repository.private != true }}
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Reject public pull request callers
+        run: |
+          echo "::error::This reusable workflow does not accept public pull request callers"
+          exit 1
   verify-default-branch:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.repository.private == true) }}
     runs-on: ubuntu-24.04
     permissions: {}
     steps:
@@ -57,7 +67,7 @@ jobs:
           }
 
   dry-run:
-    if: inputs.dry-run
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (inputs.dry-run) }}
     needs: verify-default-branch
     environment: production
     runs-on: ${{ github.repository_owner != 'Verjson' && 'ubuntu-24.04' || fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
@@ -173,7 +183,7 @@ jobs:
           done
 
   deploy:
-    if: ${{ !inputs.dry-run }}
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (!inputs.dry-run) }}
     needs: verify-default-branch
     environment: production
     runs-on: ${{ github.repository_owner != 'Verjson' && 'ubuntu-24.04' || fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}

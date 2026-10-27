@@ -300,7 +300,13 @@ CANONICAL_CONTAINER_CANDIDATE_EXPRESSION = (
     "|| github.event_name == 'pull_request' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') "
     "|| fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')"
 )
-CANONICAL_CONTAINER_CANDIDATE_SELECTOR = "${{ " + CANONICAL_CONTAINER_CANDIDATE_EXPRESSION + " }}"
+CANONICAL_CONTAINER_CANDIDATE_SELECTOR = (
+    "${{ (github.event_name == 'pull_request' || "
+    "github.event_name == 'pull_request_target') && "
+    "github.event.repository.private != true && 'ubuntu-24.04' || ("
+    + CANONICAL_CONTAINER_CANDIDATE_EXPRESSION
+    + ") }}"
+)
 
 # Complete routing expressions reviewed by the organization contract. This is
 # deliberately a full-expression allowlist, not a list of blessed reference
@@ -360,6 +366,46 @@ REVIEWED_SELECTOR_EXPRESSIONS = frozenset(
     )
     for spelling in (expression, expression.replace("'Verjson'", "'verJSON'"))
 )
+
+PUBLIC_PR_HOSTED_SELECTOR_PREFIX = (
+    "(github.event_name == 'pull_request' || "
+    "github.event_name == 'pull_request_target') && "
+    "github.event.repository.private != true && 'ubuntu-24.04' || ("
+)
+PUBLIC_CALL_REJECTION_CONDITION = (
+    "${{ (github.event_name == 'pull_request' || "
+    "github.event_name == 'pull_request_target') && "
+    "github.event.repository.private != true }}"
+)
+PUBLIC_CALL_REJECTION_RUN = (
+    'echo "::error::This reusable workflow does not accept public pull request callers"\n'
+    "exit 1\n"
+)
+
+
+def is_public_pr_hosted_wrapper(
+    expression: str, reviewed_expressions: frozenset[str]
+) -> bool:
+    """Accept only the fail-closed hosted prefix around a reviewed selector."""
+    if not expression.startswith(PUBLIC_PR_HOSTED_SELECTOR_PREFIX) or not expression.endswith(")"):
+        return False
+    return expression[len(PUBLIC_PR_HOSTED_SELECTOR_PREFIX) : -1] in reviewed_expressions
+
+
+def is_public_call_rejection_sentinel(name: str, body: dict) -> bool:
+    """Recognize the one inert hosted job used to reject public reusable calls."""
+    if name != "reject-public-pull-request-caller":
+        return False
+    if body.get("if") != PUBLIC_CALL_REJECTION_CONDITION:
+        return False
+    if body.get("runs-on") != "ubuntu-24.04" or body.get("permissions") != {}:
+        return False
+    return body.get("steps") == [
+        {
+            "name": "Reject public pull request callers",
+            "run": PUBLIC_CALL_REJECTION_RUN,
+        }
+    ]
 
 # The only job-level reusable-workflow inputs in the organization contract that
 # select the called workflow's runner. These are NOT arbitrary `with:` keys:
@@ -702,7 +748,9 @@ def validate_selector_expressions(
             raise Undetermined(
                 "selector uses unsupported dynamic expression syntax"
             )
-        if expression not in reviewed_expressions:
+        if expression not in reviewed_expressions and not is_public_pr_hosted_wrapper(
+            expression, reviewed_expressions
+        ):
             raise Undetermined(
                 "selector uses an unreviewed routing expression source or shape"
             )
@@ -926,8 +974,10 @@ def check_job(report: Report, path: str, name: str, body: dict, line: int,
     # it. The public-repository half of this rule — a literal should still use
     # `vars.CI_RUNNER_FASTLANE`, a variable, so capacity moves stay
     # org-variable edits (ADR 0041) — is #816, deferred by decision.
-    if visibility == "private" and LINUX_HOSTED_LITERAL.search(
-        outside_expressions(selector)
+    if (
+        visibility == "private"
+        and LINUX_HOSTED_LITERAL.search(outside_expressions(selector))
+        and not is_public_call_rejection_sentinel(name, body)
     ):
         report.violation(
             path, runs_on_line,

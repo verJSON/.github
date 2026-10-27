@@ -1247,27 +1247,9 @@ dedicated group's runners are physically ephemeral, enforce any workflow's
 `runs-on` choice, or establish the broader public pull-request isolation
 guarantee by itself.
 
-## Amendment (2026-10-27, #1831) — verify public reusable-workflow callers
-
-**Context.** A reusable workflow can be called by a public repository's
-pull-request workflow. The generic relay review and pending ledgers do not
-prove that every reachable job in that caller context uses a GitHub-hosted
-runner: caller-controlled variables, inputs, and repository identity can
-change its selector, and a remote callee cannot be inspected even when
-SHA-pinned.
-
-**Decision.** The runner-isolation checker evaluates every local
-`workflow_call` entrypoint as a public pull-request caller. It keeps caller
-identity, variables, inputs, and other unmodeled values symbolic through
-nested local calls. Every reachable job must resolve to a GitHub-hosted
-ephemeral runner; a remote reusable call fails closed. These findings use a
-separate scenario digest and cannot be waived by generic relay pending or
-reviewed rows. Evaluation is bounded per entrypoint, with nested calls sharing
-their caller's budget and a separate finite workflow-scan budget. Recursion or
-budget exhaustion produces an undetermined failure, never a clean result.
-
-**Scope.** This check proves the runner selector and inspected local call path
-for the modeled public pull-request scenario. It does not attest physical
-runner ephemerality or validate the implementation of a remote reusable
-workflow.
+## Amendment (2026-10-27, #1831) — enforce public reusable-workflow isolation
+**Context.** A reusable workflow can be called by a public repository's pull-request workflow. Generic relay review and pending ledgers do not prove every reachable job uses a hosted runner: caller-controlled variables, inputs, and repository identity can change a selector, and remote callees cannot be inspected even when SHA-pinned.
+**Decision.** The runner-isolation checker evaluates local `workflow_call` entrypoints under both `pull_request` and `pull_request_target` public-caller contexts. Caller identity, variables, inputs, and unmodeled values remain symbolic through nested local calls. Every reachable job must resolve to a GitHub-hosted ephemeral runner; a remote reusable call fails closed. Findings use separate scenario digests and cannot be waived by generic relay pending or reviewed rows. Evaluation is bounded per entrypoint; nested calls share the caller's budget, with a separate finite workflow-scan budget. Recursion or budget exhaustion produces an undetermined failure, never a clean result.
+**Enforcement.** Public callers route code execution to literal `ubuntu-24.04` before caller inputs or organization variables. Privileged reusable workflows reject public calls through a hosted sentinel that exits nonzero and guard every existing job, including `always()` jobs. Control-plane `app-key-environment` and `gate-rearm` remain callable through hosted jobs. Rejected public release and deployment calls use per-run concurrency groups disjoint from trusted serialization keys.
+**Scope.** The checker proves runner selection and the inspected local call path for modeled public pull-request scenarios. It does not attest that a runner is physically ephemeral or validate a remote reusable workflow's implementation.
 

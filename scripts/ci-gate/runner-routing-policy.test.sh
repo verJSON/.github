@@ -70,6 +70,10 @@ expected_literal_hosted_sites=$'actions-ci.yml:hosted-compatibility-tests:    ru
 expected_literal_hosted_sites="$(printf '%s\n' \
   "$expected_literal_hosted_sites" \
   $'changelog-contract-fleet-report.yml:report:    runs-on: ubuntu-24.04' \
+ $'ai-privileged-merge.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nai-promotion-retry.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04' \
+ $'changelog-release.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\ncontainer-deployment-review-producer.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\ncontainer-deployment.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04' \
+ $'container-release.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nnotify-umbrella.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nrelease-dispatch.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04' \
+ $'release-propose.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nrenovate-changelog.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nrenovate-compatibility-canary.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04' \
   $'cli-projects-package-surface-required.yml:admission:    runs-on: ubuntu-24.04\ncli-projects-package-surface-required.yml:package-surface:    runs-on: ubuntu-24.04' \
   $'node-release.yml:prepare:    runs-on: ubuntu-24.04\nnode-release.yml:release:    runs-on: ubuntu-24.04\nnode-release.yml:retention:    runs-on: ubuntu-24.04' \
   $'node-ci.yml:artifact-mode-gate:    runs-on: ubuntu-24.04\nnode-ci.yml:artifact-preflight:    runs-on: ubuntu-24.04\nnode-ci-protected.yml:artifact-mode-gate:    runs-on: ubuntu-24.04\nnode-ci-protected.yml:artifact-preflight:    runs-on: ubuntu-24.04' \
@@ -1082,19 +1086,21 @@ assert_route "$workflows/actionlint.yml" actionlint Verjson/.github '' false \
   '["self-hosted","d"]' '["self-hosted","u"]' '["self-hosted","u"]' \
   "actionlint — an unset fast lane degrades to CI_RUNNER_UNTRUSTED" ''
 
-# ADR 0235 decision 4: a public pull request takes the ephemeral untrusted
-# lane with a hosted tail, ahead of the fast lane; a private one keeps its lane.
+# ADR 0235 public PR events use the literal hosted runner before any
+# caller-selected or lane-variable selector; private calls retain their lane.
 EVENT_NAME=pull_request assert_route "$workflows/actionlint.yml" actionlint Verjson/.github '' false \
-  '["self-hosted","d"]' '' '["ubuntu-24.04"]' \
+  '["self-hosted","d"]' '' 'ubuntu-24.04' \
   "actionlint — a public pull request takes the untrusted lane's hosted tail, not the fast lane" \
   '["self-hosted","fast"]'
 EVENT_NAME=pull_request assert_route "$workflows/actionlint.yml" actionlint Verjson/.github '' false \
-  '["self-hosted","d"]' '["untrusted-canary"]' '["untrusted-canary"]' \
-  "actionlint — a public pull request takes a configured untrusted lane" '["self-hosted","fast"]'
+  '["self-hosted","d"]' '["untrusted-canary"]' 'ubuntu-24.04' \
+  "actionlint — a public pull request uses hosted before a configured untrusted lane" '["self-hosted","fast"]'
+EVENT_NAME=pull_request_target assert_route "$workflows/actionlint.yml" actionlint Verjson/.github '' '' \
+  '["self-hosted","d"]' '["untrusted-canary"]' 'ubuntu-24.04' \
+  "actionlint — pull_request_target with unknown visibility uses hosted" '["self-hosted","fast"]'
 EVENT_NAME=pull_request assert_route "$workflows/actionlint.yml" actionlint Verjson/verjson-authn '' true \
   '["self-hosted","d"]' '' '["self-hosted","d"]' \
   "actionlint — a private pull request keeps the trusted lane" '["self-hosted","fast"]'
-
 # Mutation check. The obvious way to write the public branch —
 # `private == false` — is FAIL-OPEN: Actions coerces a missing `private` to 0,
 # and 0 == false, so an unreadable repository would reach the fast lane. That
@@ -1164,17 +1170,15 @@ done < <(policy_jobs)
 # through to CI_LANE_FALLBACK, so an unset untrusted lane lands on hosted.
 for candidate_job in prepare pull-request-build skip-private-node-build; do
   EVENT_NAME=pull_request assert_route "$workflows/container-candidate.yml" "$candidate_job" Verjson/.github '' false \
-    '["self-hosted","private-canary"]' '' '["ubuntu-24.04"]' \
-    "container-candidate $candidate_job — a public pull request with no untrusted lane lands on hosted"
+    '["self-hosted","private-canary"]' '' 'ubuntu-24.04' \
+    "container-candidate $candidate_job — a public pull request uses the literal hosted runner"
+  EVENT_NAME=pull_request_target assert_route "$workflows/container-candidate.yml" "$candidate_job" Verjson/.github '' '' \
+    '["self-hosted","private-canary"]' '["untrusted-canary"]' 'ubuntu-24.04' \
+    "container-candidate $candidate_job — pull_request_target with unknown visibility uses hosted"
   EVENT_NAME=pull_request assert_route "$workflows/container-candidate.yml" "$candidate_job" Verjson/verjson-authn '' true \
     '["self-hosted","private-canary"]' '' '["self-hosted","private-canary"]' \
     "container-candidate $candidate_job — a private pull request keeps the trusted lane"
 done
-
-# The `runner` input is the per-caller override, but only on the jobs that
-# expose it. pulumi-ci's `validate` and `preview-admission` deliberately do not:
-# they sit on the credential boundary in ADR 0027/0029, so a caller must not be
-# able to redirect them to a pool of its choosing.
 while read -r wf_name job; do
   wf="$workflows/$wf_name"
   name="${wf_name%.yml} $job"
@@ -1357,8 +1361,11 @@ for name in $policy_files; do
         || ! grep -qF 'CI_LANE_FALLBACK' <<<"$value"; then
       deviant="$deviant$name: $line"$'\n'
     fi
-  done <<EOF
-$(grep -nE "^    runs-on:" "$workflows/$name")
+done <<EOF
+$(awk '
+  /^  [A-Za-z0-9_-]+:$/ { job = $1; sub(/:$/, "", job) }
+  /^    runs-on:/ && job != "reject-public-pull-request-caller" { print NR ":" $0 }
+' "$workflows/$name")
 EOF
 done
 
