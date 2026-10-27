@@ -128,3 +128,15 @@ legacy routing behavior. The secretless eligibility-gated lane and literal
 hosted fallback remain ahead of caller runner input. The protected workflow
 twin is regenerated from `node-ci.yml`; exact-site tests bind both selectors
 to their job markers in both files.
+
+## 2026-10-27 amendment — canonical candidate feature flag
+
+The `approved-candidate-v1` delegation remains gated by
+`VERJSON_CANDIDATE_WORKERS_ENABLED`. This switch controls a feature limited to the
+private `Verjson/verjson-ci` repository on its default branch, and its pinned
+callee reads the same variable. It is contract identity, not an adopter's runner
+or package installation policy. The public `public-v1` adapter uses hosted
+capacity independently; its candidate guard stays bound by the immutable
+source-contract test. A candidate request outside the exact private canonical
+default-branch and enabled-flag context fails the caller workflow; a skipped
+candidate job cannot make the required check pass.

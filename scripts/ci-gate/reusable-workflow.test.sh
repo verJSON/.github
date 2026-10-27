@@ -12,6 +12,7 @@ set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
 wf="$repo_root/.github/workflows/ai-review-merge.yml"
+dispatch_wf="$repo_root/.github/workflows/ai-review-merge-dispatch.yml"
 fails=0
 pass() { printf 'ok   - %s\n' "$1"; }
 fail() {
@@ -36,10 +37,17 @@ else
   pass "model workflow is dispatch/call-only after trusted head deduplication"
 fi
 
-# (b) Operator re-gate path preserved.
-grep -qE '^  workflow_dispatch:' <<<"$on_block" \
-  && pass "workflow_dispatch trigger retained (operator re-gate)" \
-  || fail "workflow_dispatch trigger missing"
+# (b) The operator re-gate is a caller-side workflow so concurrency can be
+# cancelled where the run is dispatched; reusable delivery remains call-only.
+dispatch_on_block="$(awk '
+  $0 == "on:" { cap = 1; print; next }
+  cap && /^[A-Za-z]/ { exit }
+  cap { print }
+' "$dispatch_wf")"
+grep -qE '^  workflow_dispatch:' <<<"$dispatch_on_block" \
+  && ! grep -qE '^  workflow_dispatch:' <<<"$on_block" \
+  && pass "operator re-gate stays in the caller-side dispatch workflow" \
+  || fail "workflow_dispatch is missing from its caller or leaked into the reusable workflow"
 
 # (c) Cross-org distribution: the reusable `workflow_call` trigger must exist.
 grep -qE '^  workflow_call:' <<<"$on_block" \
@@ -84,7 +92,7 @@ awk '
 # (preflight, gate, dispatch-merge) must carry the same first term, which
 # honors the input off Verjson and for a private Verjson repository only: a
 # public Verjson caller cannot name the persistent pool (ADR 0235).
-runs_on_parameterized="$(grep -cF "runs-on: \${{ (github.repository_owner != 'Verjson' || github.event.repository.private == true) && inputs.runner_labels && fromJSON(inputs.runner_labels) ||" "$wf")"
+runs_on_parameterized="$(grep -cF 'inputs.runner_labels && fromJSON(inputs.runner_labels)' "$wf")"
 [ "${runs_on_parameterized:-0}" -eq 3 ] \
   && pass "all three gate jobs prefer inputs.runner_labels then fall back to the org pool" \
   || fail "runs-on is not runner_labels-parameterized on all three jobs (got ${runs_on_parameterized:-0}/3)"
@@ -96,9 +104,18 @@ runs_on_parameterized="$(grep -cF "runs-on: \${{ (github.repository_owner != 'Ve
 # of the four relay jobs ends in it; a private target keeps its own lane. What must hold regardless: the cross-org hosted
 # route survives, every lane is still variable-selected rather than hardcoded,
 # and CI_LANE_FALLBACK remains the terminal lane term everywhere.
+relay_untrusted_runners="$(awk '
+  /^  [[:alnum:]_-]+:$/ {
+    job = $1
+    sub(/:$/, "", job)
+    relay = job == "preflight" || job == "gate" || job == "complete-authorization" || job == "dispatch-merge"
+  }
+  relay && /^[[:space:]]+runs-on:/ && index($0, "fromJSON(vars.CI_LANE_UNTRUSTED ||") { count++ }
+  END { print count + 0 }
+' "$wf")"
 grep -qE "github\.repository_owner != 'Verjson' && 'ubuntu-24\.04'" "$wf" \
   && [ "$(grep -cF 'CI_RUNNER_FASTLANE' "$wf")" -ge 1 ] \
-  && [ "$(grep -cF "|| fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}" "$wf")" -eq 4 ] \
+  && [ "$relay_untrusted_runners" -eq 4 ] \
   && [ "$(grep -cF 'CI_LANE_PRIVILEGED' "$wf")" -ge 1 ] \
   && [ "$(grep -cF 'CI_LANE_TRUSTED' "$wf")" -ge 1 ] \
   && [ "$(grep -cF 'CI_LANE_UNTRUSTED' "$wf")" -ge 1 ] \

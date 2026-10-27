@@ -65,7 +65,13 @@ const results = cases.map(([body, context]) => {
     .replace(/github\.repository_owner != 'Verjson'/g, "actionsNotEqual(github.repository_owner, 'Verjson')")
     .replace(/github\.repository_owner != \(vars\.CI_PROFILE_OWNER \|\| 'Verjson'\)/g, "actionsNotEqual(github.repository_owner, (vars.CI_PROFILE_OWNER || 'Verjson'))")
     .replace(/\(vars\.CI_PROFILE_OWNER \|\| 'Verjson'\) != 'Verjson'/g, "actionsNotEqual((vars.CI_PROFILE_OWNER || 'Verjson'), 'Verjson')")
+  .replace(/github\.event_name == 'pull_request'/g, "actionsEqual(github.event_name, 'pull_request')")
+  .replace(/github\.event_name == 'pull_request_review'/g, "actionsEqual(github.event_name, 'pull_request_review')")
+  .replace(/github\.event_name == 'pull_request_review_comment'/g, "actionsEqual(github.event_name, 'pull_request_review_comment')")
+  .replace(/github\.event_name == 'merge_group'/g, "actionsEqual(github.event_name, 'merge_group')")
+  .replace(/github\.event_name == 'pull_request_target'/g, "actionsEqual(github.event_name, 'pull_request_target')")
     .replace(/github\.event\.repository\.private == true/g, "actionsEqual(github.event.repository.private, true)")
+    .replace(/github\.event\.repository\.private != true/g, "actionsNotEqual(github.event.repository.private, true)")
     .replace(/needs\.eligibility\.result == 'success'/g, "actionsEqual(needs.eligibility.result, 'success')")
     .replace(/inputs\.([A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)+)/g, "inputs['$1']");
   if (/(?:==|!=|[<>])/.test(expression)) {
@@ -85,7 +91,8 @@ def context_for(**ctx) -> dict:
     if "eligibility_result" in ctx:
         eligibility["result"] = ctx["eligibility_result"]
     return {
-        "github": {"repository_owner": ctx.get("owner", "Verjson"),
+        "github": {"event_name": ctx.get("event_name", "push"),
+                   "repository_owner": ctx.get("owner", "Verjson"),
                    "event": {"repository": {"private": ctx.get("private")}}},
         "inputs": {"runner": ctx.get("runner", ""),
                    "secretless-pr": ctx.get("secretless_pr", False),
@@ -149,7 +156,7 @@ def test_builtin_profile_is_identical_to_the_legacy_spelling() -> None:
 
 def test_secretless_routes_fail_closed_for_falsy_lanes_and_ineligible_results() -> None:
     shapes = (
-        ("secretless-first", catalog.expression("caller-runner")),
+        ("secretless-first", catalog._CALLER_RUNNER_PROFILE_TAIL),
         ("secretless-first-legacy-tail", LEGACY_CALLER_RUNNER),
     )
     cases = (
@@ -176,7 +183,10 @@ def test_secretless_routes_fail_closed_for_falsy_lanes_and_ineligible_results() 
 
     for shape, tail in shapes:
         expression = catalog.expression(shape)
-        expected = f"{FAIL_CLOSED_SECRETLESS_PREFIX} || {tail}"
+        expected = (
+            f"{catalog.PUBLIC_PR_HOSTED} || "
+            f"({FAIL_CLOSED_SECRETLESS_PREFIX} || {tail})"
+        )
         check(f"{shape} keeps the frozen fail-closed prefix and expected tail",
               expression, expected)
         for secretless_flag in ("secretless_pr", "secretless_ref"):
@@ -226,6 +236,40 @@ def test_custom_profile_secretless_failures_stay_hosted() -> None:
         )
         check(f"custom profile {eligibility_result} eligibility stays hosted",
               got, "ubuntu-24.04")
+
+
+def test_public_pull_request_events_preempt_every_caller_lane() -> None:
+    variables = {
+        "CI_PROFILE_OWNER": "Verjson",
+        "CI_LANE_TRUSTED": PERSISTENT,
+        "CI_LANE_UNTRUSTED": PERSISTENT,
+        "CI_LANE_FALLBACK": PERSISTENT,
+    }
+    for shape in catalog.SHAPES:
+        expression = catalog.expression(shape)
+        for event_name in catalog.PUBLIC_PR_EVENTS:
+            for private in (False, None):
+                got = resolve(
+                    expression,
+                    event_name=event_name,
+                    owner="Verjson",
+                    private=private,
+                    runner=PERSISTENT,
+                    secretless_pr=True,
+                    eligibility_result="success",
+                    vars=variables,
+                )
+                check(f"{shape} public {event_name} private={private}", got, "ubuntu-24.04")
+
+    private_run = resolve(
+        catalog.expression("caller-runner"),
+        event_name="pull_request",
+        owner="Verjson",
+        private=True,
+        runner=PERSISTENT,
+        vars=variables,
+    )
+    check("private pull_request keeps configured caller lane", private_run, ["self-hosted", "general"])
 
 
 def test_evaluator_rejects_unmodeled_comparison_operators() -> None:
@@ -408,8 +452,15 @@ def test_analyzer_allowlist_accepts_every_catalog_shape() -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     for shape in catalog.SHAPES:
+        expression = " ".join(catalog.expression(shape).split())
+        allowed = (
+            expression in module.REVIEWED_SELECTOR_EXPRESSIONS
+            or module.is_public_pr_hosted_wrapper(
+                expression, module.REVIEWED_SELECTOR_EXPRESSIONS
+            )
+        )
         check(f"allowlist has {shape}",
-              " ".join(catalog.expression(shape).split()) in module.REVIEWED_SELECTOR_EXPRESSIONS, True)
+              allowed, True)
 
 
 if __name__ == "__main__":

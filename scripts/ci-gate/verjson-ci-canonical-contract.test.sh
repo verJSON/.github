@@ -77,16 +77,8 @@ def validate(workflow: str, adoption: str, fixture: str, source_provenance: dict
     assert "inputs.profile == 'public-v1'" in ci["if"]
     selector = ci["runs-on"]
     source_selector = source_ci["runs-on"].removeprefix("${{ ").removesuffix(" }}")
-    assert f"({source_selector})" in selector
-    hosted_prefix = re.search(
-        r"\(\(github\.event_name == 'pull_request' \|\| "
-        r"github\.event_name == 'pull_request_target'\) && "
-        r"github\.event\.repository\.private != true && 'ubuntu-24\.04'\)",
-        selector,
-    )
-    assert hosted_prefix is not None
-    assert hosted_prefix.start() < selector.find("vars.CI_LANE_TRUSTED")
-    assert hosted_prefix.start() < selector.find("vars.CI_LANE_UNTRUSTED")
+    assert selector == "ubuntu-24.04"
+    assert "ubuntu-24.04" in source_selector
 
     steps = ci["steps"]
     assert steps[0]["uses"] == source_steps[0]["uses"]
@@ -113,7 +105,7 @@ def validate(workflow: str, adoption: str, fixture: str, source_provenance: dict
 
     source_upload = source_steps[4]
     local_upload = steps[3]
-    assert local_upload["uses"] == source_upload["uses"]
+    assert local_upload["uses"] == "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
     assert local_upload["if"] == source_upload["if"]
     assert local_upload["with"] == source_upload["with"]
 
@@ -124,12 +116,32 @@ def validate(workflow: str, adoption: str, fixture: str, source_provenance: dict
     assert "exit 2" in reject_public["steps"][0]["run"]
 
     reject_profile = jobs["reject-profile"]
-    assert "inputs.profile != 'public-v1'" in reject_profile["if"]
-    assert "inputs.profile != 'approved-candidate-v1'" in reject_profile["if"]
-    source_reject_selector = source_jobs["reject-profile"]["runs-on"].removeprefix("${{ ").removesuffix(" }}")
-    assert source_reject_selector in reject_profile["runs-on"]
-    assert "github.event.repository.private != true && 'ubuntu-24.04'" in reject_profile["runs-on"]
-    assert reject_profile["runs-on"].find("github.event.repository.private != true") < reject_profile["runs-on"].find("vars.CI_LANE_TRUSTED")
+    expected_candidate_rejection = (
+        "${{ inputs.profile != 'public-v1' && "
+        "(inputs.profile != 'approved-candidate-v1' || "
+        "vars.VERJSON_CANDIDATE_WORKERS_ENABLED != 'true' || "
+        "github.repository != 'Verjson/verjson-ci' || "
+        "github.ref != 'refs/heads/main' || "
+        "github.event.repository.private != true) }}"
+    )
+    assert reject_profile["if"] == expected_candidate_rejection
+
+    def candidate_profile_rejected(profile, flag, repository, ref, is_private):
+        return profile != "public-v1" and (
+            profile != "approved-candidate-v1"
+            or flag != "true"
+            or repository != "Verjson/verjson-ci"
+            or ref != "refs/heads/main"
+            or is_private is not True
+        )
+
+    assert candidate_profile_rejected(
+        "approved-candidate-v1", "true", "Other/private-ci", "refs/heads/main", True
+    )
+    assert not candidate_profile_rejected(
+        "approved-candidate-v1", "true", "Verjson/verjson-ci", "refs/heads/main", True
+    )
+    assert reject_profile["runs-on"] == "ubuntu-24.04"
     assert "exit 2" in reject_profile["steps"][0]["run"]
 
     candidate = jobs["candidate"]
@@ -137,6 +149,7 @@ def validate(workflow: str, adoption: str, fixture: str, source_provenance: dict
     source_candidate_if = source_jobs["candidate"]["if"].removeprefix("${{ ").removesuffix(" }}")
     candidate_if = candidate["if"].removeprefix("${{ ").removesuffix(" }}")
     assert candidate_if == source_candidate_if + " && github.event.repository.private == true"
+    assert "vars.VERJSON_CANDIDATE_WORKERS_ENABLED" in candidate_if
     assert candidate["with"] == {
         "profile": "${{ inputs.profile }}",
         "image": "${{ inputs.image }}",
@@ -161,11 +174,20 @@ mutants = {
     ),
     "forwarded secrets": (workflow_text.replace("  permissions:\n", "  secrets: inherit\n\n  permissions:\n"), adoption_text, fixture_text, provenance),
     "missing required image": (workflow_text.replace("        required: true\n        type: string\n      config:", "        required: false\n        type: string\n      config:"), adoption_text, fixture_text, provenance),
-    "unsafe public runner": (workflow_text.replace("&& 'ubuntu-24.04') ||", "&& fromJSON(vars.CI_LANE_UNTRUSTED)) ||"), adoption_text, fixture_text, provenance),
-    "pull request target omitted": (workflow_text.replace(" || github.event_name == 'pull_request_target'", ""), adoption_text, fixture_text, provenance),
+    "unsafe public runner": (workflow_text.replace("    runs-on: ubuntu-24.04\n", "    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED) }}\n", 1), adoption_text, fixture_text, provenance),
     "unknown visibility trusted": (workflow_text.replace("github.event.repository.private != true", "github.event.repository.private == false"), adoption_text, fixture_text, provenance),
     "direct scenario interpolation": (workflow_text.replace('--env VERJSON_CI_SCENARIO="$VERJSON_CI_SCENARIO"', '--env VERJSON_CI_SCENARIO="${{ inputs.scenario }}"'), adoption_text, fixture_text, provenance),
     "public candidate delegation": (workflow_text.replace("github.event.repository.private == true", "github.event.repository.private != true"), adoption_text, fixture_text, provenance),
+    "private noncanonical candidate has no rejection": (
+        workflow_text.replace(
+            "github.repository != 'Verjson/verjson-ci'",
+            "github.repository == 'Verjson/verjson-ci'",
+            1,
+        ),
+        adoption_text,
+        fixture_text,
+        provenance,
+    ),
     "exposed result copy": (workflow_text.replace("      scenario:\n", "      result_copy:\n        required: false\n        type: string\n      scenario:\n"), adoption_text, fixture_text, provenance),
     "unsafe sibling job": (workflow_text.replace(
         "  candidate:\n",

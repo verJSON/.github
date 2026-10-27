@@ -1462,32 +1462,25 @@ jobs:
             r"review environment.*Verjson/beta:ai-review-app:branch_policies.*'main'.*develop/next",
         )
 
-    def test_the_admission_set_is_the_caller_the_rearm_gate_hard_requires(self):
-        # `retired_path` describes the ruleset split, not the gate, and today it
-        # only coincidentally equals the file `gate-rearm.yml` cannot proceed
-        # without. When the split completes and `retired_path` is repointed,
-        # admission would silently follow it and the severity split would invert
-        # with no test failing. So this asserts against the gate itself.
-        #
-        # The gate reads more than one adopter caller, but only one read is
-        # fatal on every arm; the others sit inside the label-receipt path. The
-        # fatal one is identified by the diagnostic it emits, not by position,
-        # so reordering the file does not quietly repoint this assertion.
+    def test_dispatch_caller_is_distinct_from_the_required_workflow_identity(self):
         gate = (ROOT / ".github/workflows/gate-rearm.yml").read_text(encoding="utf-8")
         fatal = gate.index("could not read the protected default-branch review caller")
-        reads = re.findall(
-            r"repos/\$TARGET_REPO/contents/(\.github/workflows/[A-Za-z0-9._-]+\.ya?ml)\?",
+        self.assertIn(
+            '"repos/$TARGET_REPO/contents/.github/workflows/$AI_REVIEW_DISPATCH_WORKFLOW?ref=$branch_ref"',
             gate[:fatal],
         )
-        self.assertTrue(reads, "the gate's fatal caller read was not found")
+        self.assertIn(
+            "AI_REVIEW_DISPATCH_WORKFLOW: ${{ github.repository == 'Verjson/.github' && "
+            "'ai-review-merge-dispatch.yml' || 'ai-review-merge.yml' }}",
+            gate,
+        )
         contract = json.loads(
             (ROOT / "config/ai-review-required-workflow-rollout.json").read_text(encoding="utf-8")
         )
-
         self.assertEqual(
             contract["adopter_conformance"]["caller_workflows"]["admission"],
-            [reads[-1]],
-            "the admission set must be exactly the caller gate-rearm.yml cannot proceed without",
+            [".github/workflows/ai-review-merge.yml"],
+            "dispatch workflow selection must not silently change required-workflow identity",
         )
 
     def test_a_branch_policy_admitting_more_than_the_default_branch_is_reported(self):

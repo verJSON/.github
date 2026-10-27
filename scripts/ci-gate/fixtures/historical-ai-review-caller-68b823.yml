@@ -1,0 +1,54 @@
+# GENERATED FILE — do not edit by hand.
+# Regenerate with:
+#   scripts/gen-ai-review-caller.sh 68b823b133dabc8d8e9f11f9ab5c179e78ae5692 > .github/workflows/ai-review-merge.yml
+name: AI review
+run-name: AI review authorization ${{ inputs.authorization_check_id }} from arm ${{ inputs.arm_run_id }}.${{ inputs.arm_run_attempt }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        required: true
+        type: string
+      expected_head_sha:
+        required: true
+        type: string
+      authorization_check_id:
+        required: true
+        type: string
+      arm_run_id:
+        required: true
+        type: string
+      arm_run_attempt:
+        required: true
+        type: string
+      explicit_rereview:
+        required: false
+        type: boolean
+        default: false
+      review_policy:
+        required: true
+        type: string
+
+permissions:
+  actions: write
+  checks: write
+  contents: read
+  issues: write
+  pull-requests: write
+  statuses: read
+
+jobs:
+  review:
+    uses: Verjson/.github/.github/workflows/ai-review-merge.yml@68b823b133dabc8d8e9f11f9ab5c179e78ae5692
+    secrets: inherit
+    with:
+      ai_review_environment: ai-review-app
+      contract_ref: 68b823b133dabc8d8e9f11f9ab5c179e78ae5692
+      pr_number: ${{ inputs.pr_number }}
+      expected_head_sha: ${{ inputs.expected_head_sha }}
+      authorization_check_id: ${{ inputs.authorization_check_id }}
+      arm_run_id: ${{ inputs.arm_run_id }}
+      arm_run_attempt: ${{ inputs.arm_run_attempt }}
+      explicit_rereview: ${{ inputs.explicit_rereview }}
+      review_policy: ${{ inputs.review_policy }}

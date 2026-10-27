@@ -50,7 +50,7 @@ grep -qE '^      config-file:$' <<<"$workflow_call" \
 # hosted branch before caller inputs or organization runner variables. The
 # focused runner-policy contract pins the original suffix for private/trusted
 # events.
-grep -qF "    runs-on: \${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || ((" "$wf" \
+grep -qF "    runs-on: \${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || ((" "$wf" \
   && pass "public PR callers select hosted before the bounded runner mapping" \
   || fail "runs-on does not route public PR callers to hosted first"
 

@@ -2490,7 +2490,7 @@ PRIVILEGED_EVENTS = (
     "discussion_comment",
 )
 # Relays: a workflow another workflow or account starts with values it chooses.
-# gate-rearm.yml's pull_request_target run dispatches ai-review-merge.yml with
+# gate-rearm.yml's pull_request_target run dispatches ai-review-merge-dispatch.yml with
 # a pull request number and head SHA, and a caller passes any input it likes,
 # so a relayed job can be handed a fork's head. Each is scanned like a
 # privileged event, and a job that materializes the head, or whose head
@@ -2630,7 +2630,6 @@ RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
     ('rework-reconcile.yml [workflow_dispatch]', 'reconcile'): frozenset(),
     ('runner-canary.yml [workflow_dispatch]', 'canary'): frozenset({'relay-head'}),
     ('ui-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),
-    ('verjson-ci.yml [workflow_call]', 'ci'): frozenset(),
 }
 
 
@@ -3673,7 +3672,7 @@ def check_public_calls(
     budget: EvaluationBudget | None = None,
     workflow_scan_budget: WorkflowScanBudget | None = None,
 ) -> list[Violation]:
-    """Check every reusable entrypoint as if called by a public pull request.
+    """Check every reusable entrypoint from both public pull request events.
 
     This scenario deliberately bypasses the relay pending/reviewed ledgers. Caller
     identity, configuration variables, inputs, and other unmodeled context stay
@@ -3690,21 +3689,22 @@ def check_public_calls(
         document = load_workflow(os.path.join(directory, name))
         if "workflow_call" not in triggers(document):
             continue
-        scan = Scan(
-            directory,
-            repository,
-            "pull_request",
-            strict_public_call=True,
-            budget=EvaluationBudget(max_steps=max_steps),
-            workflow_scan_budget=scan_budget,
-        )
-        path = f"{name} [public pull_request workflow_call]"
-        try:
-            violations.extend(check_workflow(scan, path, document))
-        except BudgetExceeded as error:
-            raise Undetermined(f"{path}: {error}") from error
-        except WorkflowScanExceeded as error:
-            raise Undetermined(f"{path}: {error}") from error
+        for event in (*PULL_REQUEST_EVENTS, "pull_request_target"):
+            scan = Scan(
+                directory,
+                repository,
+                event,
+                strict_public_call=True,
+                budget=EvaluationBudget(max_steps=max_steps),
+                workflow_scan_budget=scan_budget,
+            )
+            path = f"{name} [public {event} workflow_call]"
+            try:
+                violations.extend(check_workflow(scan, path, document))
+            except BudgetExceeded as error:
+                raise Undetermined(f"{path}: {error}") from error
+            except WorkflowScanExceeded as error:
+                raise Undetermined(f"{path}: {error}") from error
     return violations
 
 

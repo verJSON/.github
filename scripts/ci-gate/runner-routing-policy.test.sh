@@ -71,7 +71,7 @@ expected_literal_hosted_sites="$(printf '%s\n' \
   "$expected_literal_hosted_sites" \
   $'container-candidate-publish.yml:public-call-guard:    runs-on: ubuntu-24.04' \
   $'changelog-contract-fleet-report.yml:report:    runs-on: ubuntu-24.04' \
- $'ai-privileged-merge.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nai-promotion-retry.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04' \
+ $'ai-privileged-merge.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nai-promotion-retry.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nai-review-merge.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04' \
  $'changelog-release.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\ncontainer-deployment-review-producer.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\ncontainer-deployment.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04' \
  $'container-release.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nnotify-umbrella.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nrelease-dispatch.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04' \
  $'release-propose.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nrenovate-changelog.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nrenovate-compatibility-canary.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04' \
@@ -79,6 +79,7 @@ expected_literal_hosted_sites="$(printf '%s\n' \
   $'node-release.yml:prepare:    runs-on: ubuntu-24.04\nnode-release.yml:public-call-guard:    runs-on: ubuntu-24.04\nnode-release.yml:release:    runs-on: ubuntu-24.04\nnode-release.yml:retention:    runs-on: ubuntu-24.04' \
   $'node-ci.yml:artifact-mode-gate:    runs-on: ubuntu-24.04\nnode-ci.yml:artifact-preflight:    runs-on: ubuntu-24.04\nnode-ci-protected.yml:artifact-mode-gate:    runs-on: ubuntu-24.04\nnode-ci-protected.yml:artifact-preflight:    runs-on: ubuntu-24.04' \
   $'node-ci.yml:deferred-ci:    runs-on: ubuntu-24.04\nnode-ci-protected.yml:deferred-ci:    runs-on: ubuntu-24.04' \
+ $'verjson-ci.yml:ci:    runs-on: ubuntu-24.04\nverjson-ci.yml:reject-profile:    runs-on: ubuntu-24.04\nverjson-ci.yml:reject-public-profile:    runs-on: ubuntu-24.04' \
   | sort)"
 
 validate_literal_hosted_inventory() {
@@ -270,7 +271,8 @@ unsafe_portable="$(
     | grep -vE ':[0-9]+:[[:space:]]+runs-on: ubuntu-24\.04$' \
     | grep -v "inputs.github-hosted-runner" \
     | grep -v "vars.CI_RUNNER_FASTLANE" \
- | grep -vF "runs-on: \${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || 'ubuntu-24.04') }}" \
+ | grep -vF "runs-on: \${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || 'ubuntu-24.04') }}" \
+    | grep -vF "runs-on: \${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')) }}" \
     | grep -v "vars.CI_LANE_UNTRUSTED || '\[\"ubuntu-24.04\"\]'" \
     | sed "s/vars\.CI_LANE_FALLBACK || '\\[\"ubuntu-24\.04\"\\]'//" \
     | grep -E "ubuntu-(24\\.04|latest)" \
@@ -341,7 +343,7 @@ fastlane_no_fallback="$(
   && pass "hosted fallbacks are reachable only by callers outside Verjson" \
   || fail "hosted fallback reachable by a Verjson caller: $unsafe_portable"
 
-grep -qF "runs-on: \${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}" "$workflows/gate-rearm.yml" \
+grep -qF "github.event.repository.private != true && 'ubuntu-24.04' || (fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK" "$workflows/gate-rearm.yml" \
   && pass "the required authorization arm routes through the trusted organization lane" \
   || fail "gate-rearm required-workflow lane routing drifted"
 
@@ -1344,8 +1346,9 @@ done
 policy_files="node-ci.yml node-release.yml notify-umbrella.yml helm-ci.yml ui-ci.yml pulumi-ci.yml actionlint.yml changelog-validate.yml changelog-release.yml generated-artifacts.yml"
 deviant=""
 job_count=0
+expected_node_untrusted_selector="$(PYTHONPATH="$root/scripts" python3 -c 'from runner_lane_catalog import expression; print(expression("untrusted-lane"))')"
 for name in $policy_files; do
-  while IFS= read -r line; do
+  while IFS=$'\t' read -r job line; do
     [ -n "$line" ] || continue
     value="${line#*runs-on:}"
     value="${value# }"
@@ -1357,6 +1360,10 @@ for name in $policy_files; do
     fi
     if [ "$name" = node-ci.yml ] \
         && [ "$value" = '${{ fromJSON(vars.CI_LANE_UNTRUSTED || '\''["ubuntu-24.04"]'\'') }}' ]; then
+      continue
+    fi
+    if [ "$name" = node-ci.yml ] && [ "$job" = acquire-secretless-dependencies ] \
+      && [ "$value" = "\${{ $expected_node_untrusted_selector }}" ]; then
       continue
     fi
     # ADR 0178's deferral check. Keyed on the exact literal value, which alone
@@ -1375,7 +1382,7 @@ for name in $policy_files; do
 done <<EOF
 $(awk '
   /^  [A-Za-z0-9_-]+:$/ { job = $1; sub(/:$/, "", job) }
-  /^    runs-on:/ && job != "reject-public-pull-request-caller" { print NR ":" $0 }
+  /^    runs-on:/ && job != "reject-public-pull-request-caller" { print job "\t" NR ":" $0 }
 ' "$workflows/$name")
 EOF
 done

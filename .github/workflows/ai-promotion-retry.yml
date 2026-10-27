@@ -35,7 +35,7 @@ concurrency:
 
 jobs:
   reject-public-pull-request-caller:
-    if: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.repository.private != true }}
+    if: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true }}
     runs-on: ubuntu-24.04
     permissions: {}
     steps:
@@ -44,7 +44,7 @@ jobs:
           echo "::error::This reusable workflow does not accept public pull request callers"
           exit 1
   resolve:
-    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.repository.private == true) }}
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) }}
     runs-on: ${{ github.repository_owner == 'Verjson' && fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || 'ubuntu-24.04' }}
     permissions:
       actions: read
@@ -179,7 +179,7 @@ jobs:
 
   promote:
     needs: resolve
-    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (needs.resolve.outputs.ready == 'true') }}
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (needs.resolve.outputs.ready == 'true') }}
     permissions:
       actions: write
       checks: read

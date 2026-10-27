@@ -438,7 +438,7 @@ class GeneratedCallerTests(unittest.TestCase):
                         encoding="utf-8"
                     )
                 )
-                called_job = next(iter(reusable["jobs"].values()))
+                called_job = reusable["jobs"][f"release-{mode}"]
                 self.assertEqual(job["permissions"], called_job["permissions"])
                 self.assertNotIn("issues: write", raw if mode == "dispatch" else "")
                 self.assertNotIn("actions: write", raw if mode == "propose" else "")
@@ -475,7 +475,7 @@ class GeneratedCallerTests(unittest.TestCase):
             self.assertNotIn(f"{other_permission}: write", raw)
             self.assertEqual(
                 {
-                    "group": "release-propose-${{ github.repository }}",
+                    "group": "${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && format('public-rejected-{0}-{1}-{2}', github.repository, github.run_id, github.run_attempt) || format('release-propose-{0}', github.repository) }}",
                     "cancel-in-progress": False,
                 },
                 document["concurrency"],

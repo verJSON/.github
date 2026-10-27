@@ -40,7 +40,7 @@
     "gate-rearm.yml": {
       "jobs": {
         "app-key-policy": {
-          "uses": "Verjson/.github/.github/workflows/app-key-environment.yml@ebe23fafbdb77dd2cca6f1862d932fde881b80d7"
+          "runs-on": "ubuntu-24.04"
         },
         "arm": {
           "runs-on": "${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}"
@@ -50,7 +50,8 @@
         },
         "runner-acquisition-watchdog": {
           "runs-on": "${{ fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}"
-        }
+        },
+        "validate-ai-review-key": {}
       }
     },
     "generated-artifacts.yml": {
@@ -123,6 +124,28 @@
         },
         "resolve": {
           "if": null
+        }
+      }
+    },
+    "ai-review-merge.yml": {
+      "jobs": {
+        "app-key-policy": {
+          "if": "github.event_name != 'workflow_dispatch' || inputs.ai_review_environment == 'ai-review-app'"
+        },
+        "title-policy": {
+          "if": null
+        },
+        "preflight": {
+          "if": "github.event_name != 'pull_request_target' && (\n  github.event_name != 'workflow_dispatch' ||\n  (\n    github.ref == 'refs/heads/main' &&\n    github.event.repository.default_branch == 'main' &&\n    github.ref_protected &&\n    inputs.ai_review_environment == 'ai-review-app'\n  )\n) && (\n  github.event_name == 'workflow_dispatch' ||\n  (\n    (\n      (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||\n      (github.event.action == 'labeled' && github.event.label.name == 're-review') ||\n      (github.event.action == 'unlabeled' &&\n        (github.event.label.name == 'hold' || github.event.label.name == 'DO NOT MERGE'))\n    ) &&\n    !github.event.pull_request.draft &&\n    !contains(github.event.pull_request.labels.*.name, 'hold') &&\n    !contains(github.event.pull_request.labels.*.name, 'DO NOT MERGE') &&\n    needs.title-policy.outputs.title_held != 'true'\n  )\n)"
+        },
+        "gate": {
+          "if": "${{ needs.app-key-policy.result == 'success' && (needs.preflight.outputs.lane == 'fast' || needs.preflight.outputs.lane == 'ai') }}"
+        },
+        "complete-authorization": {
+          "if": "${{ always() && inputs.authorization_check_id != '' && (github.event_name != 'workflow_dispatch' || inputs.ai_review_environment == 'ai-review-app') }}"
+        },
+        "dispatch-merge": {
+          "if": "needs.complete-authorization.result == 'success' && needs.complete-authorization.outputs.ai_authorized == 'true' && needs.preflight.outputs.authority == 'ai-merge'"
         }
       }
     },
@@ -223,9 +246,17 @@
       }
     }
   },
-  "trusted_concurrency_groups": {
-    "changelog-release.yml": "changelog-release-${{ github.repository }}",
-    "container-deployment.yml": "runner-deployment-${{ github.repository }}-${{ inputs.fleet-selector }}",
-    "container-release.yml": "container-release-${{ github.repository }}"
+ "public_concurrency_groups": {
+  "container-candidate.yml": "format('public-pr-container-candidate-{0}-{1}-{2}', github.repository, github.run_id, github.run_attempt)"
+ },
+ "trusted_concurrency_groups": {
+    "container-candidate.yml": "format('container-candidate-{0}-{1}', github.repository, github.sha)",
+    "ai-privileged-merge.yml": "format('ai-terminal-promotion-{0}-{1}', inputs.pr_number, inputs.expected_head_sha)",
+    "changelog-release.yml": "format('changelog-release-{0}', github.repository)",
+    "container-candidate-publish.yml": "format('container-candidate-publish-{0}-{1}', github.repository, github.sha)",
+    "container-deployment.yml": "format('runner-deployment-{0}-{1}', github.repository, inputs.fleet-selector)",
+    "container-release.yml": "format('container-release-{0}', github.repository)",
+    "release-dispatch.yml": "format('release-propose-{0}', github.repository)",
+    "release-propose.yml": "format('release-propose-{0}', github.repository)"
   }
 }

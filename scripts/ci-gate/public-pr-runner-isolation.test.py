@@ -2923,7 +2923,6 @@ SNAPSHOT_RELAY_BACKLOG = {
     ('rework-reconcile.yml [workflow_dispatch]', 'reconcile'): frozenset(),
     ('runner-canary.yml [workflow_dispatch]', 'canary'): frozenset({'relay-head'}),
     ('ui-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),
-    ('verjson-ci.yml [workflow_call]', 'ci'): frozenset(),
 }
 
 
@@ -3024,6 +3023,40 @@ if error is not None or violations:
 else:
     fail("strict public-call analysis treated an unknown caller lane as clean")
 
+target_only_selector = public_call_fixture.replace(
+    "runs-on: [self-hosted, general]",
+    "runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'self-hosted' }}",
+)
+violations, error = strict_public_call_scan({"service.yml": target_only_selector})
+if error is None and any(
+    "[public pull_request_target workflow_call]" in violation.path
+    for violation in violations
+):
+    ok("strict public-call analysis also checks pull_request_target")
+else:
+    fail(f"strict public-call analysis missed the pull_request_target runner: {error or violations}")
+
+all_public_pr_events_hosted = public_call_fixture.replace(
+    "runs-on: [self-hosted, general]",
+    "runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || 'self-hosted' }}",
+)
+violations, error = strict_public_call_scan({"service.yml": all_public_pr_events_hosted})
+if error is None and not violations:
+    ok("strict public-call analysis accepts hosted-first routing for all five PR events")
+else:
+    fail(f"strict public-call analysis rejected hosted-first PR routing: {error or violations}")
+
+missing_merge_group = all_public_pr_events_hosted.replace(
+    " || github.event_name == 'merge_group'", ""
+)
+violations, error = strict_public_call_scan({"service.yml": missing_merge_group})
+if error is None and any(
+    "[public merge_group workflow_call]" in violation.path for violation in violations
+):
+    ok("strict public-call analysis rejects a selector missing one public PR event")
+else:
+    fail(f"strict public-call analysis missed an omitted public event: {error or violations}")
+
 violations, error = strict_public_call_scan({"service.yml": """
 on:
   workflow_call:
@@ -3068,7 +3101,7 @@ on:
   workflow_call:
 jobs:
   build:
-    if: ${{ github.event_name != 'pull_request' }}
+    if: ${{ github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' }}
     runs-on: [self-hosted, general]
     steps:
       - run: 'true'

@@ -17,6 +17,17 @@ from __future__ import annotations
 
 BUILTIN_PROFILE = "Verjson"
 HOSTED = "ubuntu-24.04"
+PUBLIC_PR_EVENTS = (
+    "pull_request",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "merge_group",
+    "pull_request_target",
+)
+PUBLIC_PR_HOSTED = (
+    "(" + " || ".join(f"github.event_name == '{event}'" for event in PUBLIC_PR_EVENTS) + ") && "
+    f"github.event.repository.private != true && '{HOSTED}'"
+)
 
 # Evaluated in the caller's context: a reusable workflow reads the caller's
 # `vars`. Unset or empty falls back to the built-in profile.
@@ -53,20 +64,24 @@ SECRETLESS_HOSTED_FALLBACK = f"{SECRETLESS} && '{HOSTED}'"
 
 MARKER = "runner-lane:"
 SHAPES = {
+    # Jobs that deliberately use only the organization's untrusted lane.
+    "untrusted-lane": (
+        f"{PUBLIC_PR_HOSTED} || ({_UNTRUSTED_STRICT})"
+    ),
     # Explicit caller override, foreign-owner hosted default, then owner
     # organization's trusted/private and strict-or-legacy untrusted routes.
-    "caller-runner": _CALLER_RUNNER_PROFILE_TAIL,
+    "caller-runner": f"{PUBLIC_PR_HOSTED} || ({_CALLER_RUNNER_PROFILE_TAIL})",
     # Profile-aware secretless shape for the remaining ADR 0240 rollout.
     "secretless-first": (
-        f"{SECRETLESS_ELIGIBLE_UNTRUSTED}"
+        f"{PUBLIC_PR_HOSTED} || ({SECRETLESS_ELIGIBLE_UNTRUSTED}"
         f" || {SECRETLESS_HOSTED_FALLBACK}"
-        f" || {_CALLER_RUNNER_PROFILE_TAIL}"
+        f" || {_CALLER_RUNNER_PROFILE_TAIL})"
     ),
     # Compatibility shape for callers still on the pre-profile routing tail.
     "secretless-first-legacy-tail": (
-        f"{SECRETLESS_ELIGIBLE_UNTRUSTED}"
+        f"{PUBLIC_PR_HOSTED} || ({SECRETLESS_ELIGIBLE_UNTRUSTED}"
         f" || {SECRETLESS_HOSTED_FALLBACK}"
-        f" || {_SECRETLESS_LEGACY_TAIL}"
+        f" || {_SECRETLESS_LEGACY_TAIL})"
     ),
 }
 

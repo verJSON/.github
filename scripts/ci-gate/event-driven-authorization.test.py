@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 from app_client_id_contract import CLIENT_ID_GUARD_RUN
 REVIEW = ROOT / ".github/workflows/ai-review-merge.yml"
+DISPATCH = ROOT / ".github/workflows/ai-review-merge-dispatch.yml"
 REARM = ROOT / ".github/workflows/gate-rearm.yml"
 PROMOTE = ROOT / ".github/workflows/ai-privileged-merge.yml"
 TERMINAL_MERGE = ROOT / "scripts/ci-gate/terminal-merge.sh"
@@ -28,6 +29,13 @@ MODEL_ACTION = f"{MODEL_ACTION_NAME}@{MODEL_ACTION_SHA}"
 IMMUTABLE_MODEL_ACTION = re.compile(
     rf"^{re.escape(MODEL_ACTION_NAME)}@[0123456789abcdef]{{40}}$")
 TRUSTED_BOTS = {"renovate[bot]", "mend[bot]", "github-actions[bot]"}
+PUBLIC_PR_EVENTS = (
+    "pull_request",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "merge_group",
+    "pull_request_target",
+)
 
 
 def load(path: Path):
@@ -41,6 +49,9 @@ def require(condition: bool, message: str) -> None:
 
 
 def compact_expression(expression: str) -> str:
+    expression = expression.strip()
+    if expression.startswith("${{") and expression.endswith("}}"):
+        expression = expression[3:-2]
     characters = []
     quote = None
     escaped = False
@@ -599,6 +610,7 @@ def main() -> int:
     rearm_text = REARM.read_text(encoding="utf-8")
     promote_text = PROMOTE.read_text(encoding="utf-8")
     retry_text = RETRY.read_text(encoding="utf-8")
+    dispatch = load(DISPATCH)
     rearm_generator = (ROOT / "scripts/gen-gate-rearm-caller.sh").read_text(encoding="utf-8")
     promote_generator = (ROOT / "scripts/gen-privileged-merge-caller.sh").read_text(encoding="utf-8")
     verifier_text = (ROOT / "scripts/ci-gate/verify-arm-receipt.sh").read_text(encoding="utf-8")
@@ -607,7 +619,7 @@ def main() -> int:
     promote = load(PROMOTE)
     retry = load(RETRY)
 
-    dispatch_inputs = review[True]["workflow_dispatch"]["inputs"]
+    dispatch_inputs = dispatch[True]["workflow_dispatch"]["inputs"]
     environment_input = dispatch_inputs.get("ai_review_environment", {})
     require(
         environment_input.get("type") == "choice"
@@ -629,17 +641,26 @@ def main() -> int:
         "inputs.ai_review_environment == 'ai-review-app'"
     )
     compact_environment_guard = "".join(direct_environment_guard.split())
+    public_call_guard = (
+        "(" + "&&".join(f"github.event_name!='{event}'" for event in PUBLIC_PR_EVENTS)
+        + "||github.event.repository.private==true)"
+    )
     app_key_condition = "".join(str(review["jobs"]["app-key-policy"].get("if", "")).split())
     completion_condition = "".join(str(review["jobs"]["complete-authorization"].get("if", "")).split())
     expected_completion_guard = (
-        "${{always()&&inputs.authorization_check_id!=''&&("
+        "${{" + public_call_guard + "&&(always()&&inputs.authorization_check_id!=''&&("
+        + compact_environment_guard
+        + "))}}"
+    )
+    expected_app_key_guard = (
+        "${{" + public_call_guard + "&&("
         + compact_environment_guard
         + ")}}"
     )
     require(
-        app_key_condition == compact_environment_guard
+        app_key_condition == expected_app_key_guard
         and completion_condition == expected_completion_guard,
-        "App-key jobs must conjunctively reject direct dispatch to unapproved environments",
+        "App-key jobs must reject public callers and direct dispatch to unapproved environments",
     )
     dispatch_guard = compact_expression(str(preflight.get("if", "")))
     dispatch_conjuncts = split_top_level(dispatch_guard, "&&")
@@ -652,13 +673,21 @@ def main() -> int:
         "inputs.ai_review_environment=='ai-review-app'))"
     )
     require(
-        len(dispatch_conjuncts) == 3
-        and dispatch_conjuncts[0] == "github.event_name!='pull_request_target'"
-        and dispatch_conjuncts[1] == required_dispatch_guard
+        len(dispatch_conjuncts) == 2
+        and dispatch_conjuncts[0] == public_call_guard
+        and dispatch_conjuncts[1].startswith("(")
+        and dispatch_conjuncts[1].endswith(")")
         and len(dispatch_disjunctions) == 1,
         "direct dispatch must be a protected-main conjunct with no trailing OR bypass",
     )
-    pull_request_terms = split_top_level(dispatch_conjuncts[2][1:-1], "||")
+    dispatch_context_terms = split_top_level(dispatch_conjuncts[1][1:-1], "&&")
+    require(
+        len(dispatch_context_terms) == 3
+        and dispatch_context_terms[0] == "github.event_name!='pull_request_target'"
+        and dispatch_context_terms[1] == required_dispatch_guard,
+        "direct dispatch must remain bound to protected main",
+    )
+    pull_request_terms = split_top_level(dispatch_context_terms[2][1:-1], "||")
     required_pull_request_guard = (
         "(((github.event.action!='labeled'&&github.event.action!='unlabeled')||"
         "(github.event.action=='labeled'&&github.event.label.name=='re-review')||"
@@ -677,7 +706,8 @@ def main() -> int:
     )
     require(
         'DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}' in rearm_text
-        and 'gh workflow run ai-review-merge.yml --repo "$TARGET_REPO" --ref "$DEFAULT_BRANCH"' in rearm_text,
+        and "AI_REVIEW_DISPATCH_WORKFLOW: ${{ github.repository == 'Verjson/.github' && 'ai-review-merge-dispatch.yml' || 'ai-review-merge.yml' }}" in rearm_text
+        and 'gh workflow run "$AI_REVIEW_DISPATCH_WORKFLOW" --repo "$TARGET_REPO" --ref "$DEFAULT_BRANCH"' in rearm_text,
         "trusted dispatcher must explicitly target the repository default branch",
     )
     expected_run_name = (
@@ -903,7 +933,7 @@ def main() -> int:
     dispatch_step = next(step for step in arm["steps"] if step.get("name") == "Dispatch trusted review after receipt publication")
     receipt_step = next(step for step in arm["steps"] if step.get("name") == "Upload immutable arm receipt")
     require(arm_script.index('gh api --method POST "repos/$TARGET_REPO/check-runs"') <
-            arm_script.index('if [ "$APP_KEY_POLICY_RESULT" != success ]; then') and
+            arm_script.index('if [ "$APP_KEY_POLICY_RESULT" != success ] || [ "$AI_REVIEW_KEY_VALIDATION_RESULT" != success ]; then') and
             arm["steps"].index(receipt_step) < arm["steps"].index(dispatch_step),
             "arm must create a failure-visible check, enforce pinned key policy, publish the receipt, then dispatch")
 

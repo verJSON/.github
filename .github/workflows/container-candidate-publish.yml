@@ -49,7 +49,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: container-candidate-publish-${{ github.repository }}-${{ github.sha }}
+  group: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && format('public-rejected-{0}-{1}-{2}', github.repository, github.run_id, github.run_attempt) || format('container-candidate-publish-{0}-{1}', github.repository, github.sha) }}
   cancel-in-progress: false
 
 jobs:

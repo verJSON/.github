@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   event-policy:
-    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')) }}
     permissions: {}
     outputs:
       run_control_plane: ${{ steps.classify.outputs.run_control_plane }}
@@ -107,7 +107,7 @@ jobs:
           ' <<<"$policies" >/dev/null
   validate-ai-review-key:
     needs: app-key-policy
-    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || 'ubuntu-24.04') }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || 'ubuntu-24.04') }}
     timeout-minutes: 2
     environment: ${{ inputs.ai_review_environment || 'ai-review-app' }}
     permissions:
@@ -152,11 +152,11 @@ jobs:
     # value. Any other value, including a rollback to the persistent pool or a
     # reformatted array, skips the job (dormant, fail-safe), so no token is
     # issued to a persistent host. The step guards remain as a backstop.
-    if: ${{ needs.event-policy.outputs.run_control_plane == 'true' && (((github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.repository.private != true) || (vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') == '["ubuntu-24.04"]') }}
+    if: ${{ needs.event-policy.outputs.run_control_plane == 'true' && (((github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true) || (vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') == '["ubuntu-24.04"]') }}
     # A watchdog defect must never become a veto on an otherwise-authorized
     # merge; the stall path acts through cancellation, not this job's result.
     continue-on-error: true
-    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     # Two sequential acquisitions at the limit, the policy jobs between them,
     # and the cancellation grace (asserted by the registered watchdog test).
     timeout-minutes: 40
@@ -274,7 +274,7 @@ jobs:
     # This trusted, secret-bearing control-plane job follows the organization
     # lane contract. Fleet placement changes through variables, never by
     # hardcoding a provider or runner label in this reusable workflow.
-    runs-on: ${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]')) }}
     timeout-minutes: 5
     permissions:
       actions: write
@@ -296,6 +296,7 @@ jobs:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       REPOSITORY_ID: ${{ github.repository_id }}
       TARGET_REPO: ${{ github.repository }}
+      AI_REVIEW_DISPATCH_WORKFLOW: ${{ github.repository == 'Verjson/.github' && 'ai-review-merge-dispatch.yml' || 'ai-review-merge.yml' }}
       REVIEW_AUTHORITY: ${{ vars.AI_REVIEW_AUTHORITY || 'human' }}
       PRIMARY_PROVIDER: ${{ vars.AI_REVIEW_PRIMARY_PROVIDER || 'anthropic' }}
       PRIMARY_MODEL: ${{ vars.AI_REVIEW_PRIMARY_MODEL || 'auto' }}
@@ -516,7 +517,7 @@ jobs:
             branch_ref="$(jq -rn --arg branch "$DEFAULT_BRANCH" '$branch | @uri | gsub("%2F"; "/")')"
             caller_file="$(mktemp "${RUNNER_TEMP:-/tmp}/ai-review-caller.XXXXXX")"
             if ! GH_TOKEN="$ACTIONS_TOKEN" gh api \
-              "repos/$TARGET_REPO/contents/.github/workflows/ai-review-merge.yml?ref=$branch_ref" \
+              "repos/$TARGET_REPO/contents/.github/workflows/$AI_REVIEW_DISPATCH_WORKFLOW?ref=$branch_ref" \
               -H 'Accept: application/vnd.github.raw+json' >"$caller_file"; then
               rm -f "$caller_file"
               echo "::error::could not read the protected default-branch review caller" >&2
@@ -778,11 +779,12 @@ jobs:
 
             expected_review_title="AI review authorization $check_id from arm $source_run_id.$source_attempt"
             review_pages="$(GH_TOKEN="$ACTIONS_TOKEN" gh api --paginate --slurp \
-              "repos/$TARGET_REPO/actions/workflows/ai-review-merge.yml/runs?event=workflow_dispatch&per_page=100")" || return 1
-            owned_reviews="$(jq -ce --arg title "$expected_review_title" --arg branch "$DEFAULT_BRANCH" --arg repo "$TARGET_REPO" '
+              "repos/$TARGET_REPO/actions/workflows/$AI_REVIEW_DISPATCH_WORKFLOW/runs?event=workflow_dispatch&per_page=100")" || return 1
+            owned_reviews="$(jq -ce --arg title "$expected_review_title" --arg branch "$DEFAULT_BRANCH" --arg repo "$TARGET_REPO" \
+              --arg workflow_path ".github/workflows/$AI_REVIEW_DISPATCH_WORKFLOW" '
               [.[].workflow_runs[] | select(
                 .display_title == $title and .event == "workflow_dispatch" and
-                .path == ".github/workflows/ai-review-merge.yml" and .head_branch == $branch and
+                .path == $workflow_path and .head_branch == $branch and
                 (.head_repository.full_name | ascii_downcase) == ($repo | ascii_downcase) and (.repository.full_name | ascii_downcase) == ($repo | ascii_downcase)
               )]
             ' <<<"$review_pages")" || return 1
@@ -1041,6 +1043,8 @@ jobs:
           # only what it is shown, ADR 0237). It contains CASING_REPAIR and the previous floor
           # 12098a0e (#1650). Raise it whenever a review-path security fix lands on main.
           MINIMUM_SAFE_REVIEW = "4d95c2ee5884ae2a4eb0732b655dbd43b7211262"
+          # This bootstrap proof is specifically for generated adopter callers.
+          # The canonical local dispatcher has its own byte-exact generator contract.
           CALLER = ".github/workflows/ai-review-merge.yml"
           MAX_PATHS = 32
           MAX_BLOB_BYTES = 262144
@@ -1062,7 +1066,7 @@ jobs:
           INPUTS = (
               ("pr_number", True), ("expected_head_sha", True), ("authorization_check_id", True),
               ("arm_run_id", True), ("arm_run_attempt", True), ("explicit_rereview", False),
-              ("review_policy", True),
+              ("review_policy", True), ("allow_absent_checks", False),
           )
 
 
@@ -1080,25 +1084,37 @@ jobs:
               return "$" + "{{ inputs." + name + " }}"
 
 
+          HISTORICAL_BASE_CALLER_SHA256 = frozenset({
+              "29d9311938dd6ab178b4f847ed5b3d1dfb50abb303e510abe817eab80ac0e810",
+              "92a1e3dc746ef6c6afee056b848db57c31160fc3f6354af294599fbcce370604",
+              "977d3cf42906c092f4bd79c05dec45452c17561d05d4cd12da73f1610a71eab8",
+          })
+
+
           def render_caller(sha):
               lines = [
                   "# GENERATED FILE — do not edit by hand.",
                   "# Regenerate with:",
-                  f"#   scripts/gen-ai-review-caller.sh {sha} > .github/workflows/ai-review-merge.yml",
+                  f"# scripts/gen-ai-review-caller.sh {sha} > .github/workflows/ai-review-merge.yml",
                   "name: AI review",
                   "run-name: AI review authorization " + expression("authorization_check_id")
                   + " from arm " + expression("arm_run_id") + "." + expression("arm_run_attempt"),
-                  "",
                   "on:",
                   "  workflow_dispatch:",
                   "    inputs:",
               ]
               for name, required in INPUTS:
                   lines += [f"      {name}:", f"        required: {'true' if required else 'false'}"]
-                  lines += ["        type: string"] if name != "explicit_rereview" else [
+                  lines += ["        type: string"] if name not in {"explicit_rereview", "allow_absent_checks"} else [
                       "        type: boolean", "        default: false"]
               lines += [
-                  "", "permissions:", "  actions: write", "  checks: write", "  contents: read",
+                  "",
+                  "concurrency:",
+                  "  group: ai-review-" + "$" + "{{ github.workflow }}" + "-" + expression("pr_number"),
+                  "  cancel-in-progress: true",
+                  "",
+                  "permissions:",
+                  "  actions: write", "  checks: write", "  contents: read",
                   "  issues: write", "  pull-requests: write", "  statuses: read", "",
                   "jobs:", "  review:",
                   f"    uses: Verjson/.github/.github/workflows/ai-review-merge.yml@{sha}",
@@ -1292,7 +1308,11 @@ jobs:
               stale = pinned(base_caller)
               contract = pinned(head_caller)
               require(stale != contract, "review caller revision is unchanged")
-              require(base_caller == render_caller(stale), "default-branch review caller is not generated")
+              base_digest = hashlib.sha256(base_caller).hexdigest()
+              require(
+                  base_caller == render_caller(stale) or base_digest in HISTORICAL_BASE_CALLER_SHA256,
+                  "default-branch review caller is not generated by a recognized template",
+              )
               require(head_caller == render_caller(contract), "proposed review caller is not generated")
               # Consumer contract tests mirror the caller pin and digest. A mirror may change only by
               # swapping exactly those tokens; workflow and action configuration may not change at all.
@@ -1560,7 +1580,7 @@ jobs:
               exit 1
             fi
           fi
-          if ! gh workflow run ai-review-merge.yml --repo "$TARGET_REPO" --ref "$DEFAULT_BRANCH" \
+          if ! gh workflow run "$AI_REVIEW_DISPATCH_WORKFLOW" --repo "$TARGET_REPO" --ref "$DEFAULT_BRANCH" \
             -f pr_number="$PR_NUMBER" -f expected_head_sha="$EXPECTED_HEAD_SHA" \
             -f authorization_check_id="$CHECK_ID" -f arm_run_id="$GITHUB_RUN_ID" \
             -f arm_run_attempt="$GITHUB_RUN_ATTEMPT" -f explicit_rereview="${{ steps.arm.outputs.explicit_rereview || false }}" \

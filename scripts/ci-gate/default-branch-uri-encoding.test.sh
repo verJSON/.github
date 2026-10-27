@@ -286,6 +286,7 @@ if [ -n "${GH_STUB_STDOUT:-}" ]; then printf '%s\n' "$GH_STUB_STDOUT"; else cat 
 SH
 chmod +x "$tmp/bin/gh"
 export PATH="$tmp/bin:$PATH" ACTIONS_TOKEN=actions-token TARGET_REPO=Verjson/example
+export AI_REVIEW_DISPATCH_WORKFLOW=ai-review-merge.yml
 export CALLER_FILE="$fixture" GH_CALLS="$tmp/gh-calls"
 
 # --------------------------------------------------------------------------------------

@@ -37,19 +37,13 @@ assert "inputs.secretless-pr" in acquire["if"]
 assert "inputs.secretless-trusted-ref" in acquire["if"]
 assert "needs.eligibility.outputs.should-run != 'false'" in acquire["if"]
 assert acquire["permissions"] == {"contents": "read", "packages": "read"}
-assert acquire["runs-on"] == "${{ fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}"
+assert acquire["runs-on"] == "${{ " + runner_lanes.expression("untrusted-lane") + " }}"
 assert build["permissions"] == {"contents": "read"}
 # Both secretless builds need hosted capacity. Successful eligibility may
 # use the configured untrusted lane; all other results use the hosted fallback.
-secretless_prefix = (
-    runner_lanes.SECRETLESS_ELIGIBLE_UNTRUSTED
-    + " || "
-    + runner_lanes.SECRETLESS_HOSTED_FALLBACK
-    + " || "
-)
 assert build["runs-on"] == "$" + "{{ " + runner_lanes.expression("secretless-first") + " }}"
-assert build["runs-on"].startswith("${{ " + secretless_prefix)
 assert "eligibility" in build["needs"]
+assert build["runs-on"].index(runner_lanes.SECRETLESS_ELIGIBLE_UNTRUSTED) < build["runs-on"].index(runner_lanes.SECRETLESS_HOSTED_FALLBACK)
 assert build["runs-on"].index(runner_lanes.SECRETLESS_HOSTED_FALLBACK) < build["runs-on"].index("inputs.runner != ''")
 assert "cleanup-secretless-transfer" not in jobs
 assert docs.count("permissions:\n      contents: read\n      packages: read\n      statuses: read") == 4

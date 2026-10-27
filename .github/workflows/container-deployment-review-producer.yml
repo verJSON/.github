@@ -10,7 +10,7 @@ on:
 permissions: {}
 jobs:
   reject-public-pull-request-caller:
-    if: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.repository.private != true }}
+    if: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true }}
     runs-on: ubuntu-24.04
     permissions: {}
     steps:
@@ -19,7 +19,7 @@ jobs:
           echo "::error::This reusable workflow does not accept public pull request callers"
           exit 1
   environment-preflight:
-    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.repository.private == true) }}
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) }}
     permissions: {actions: read, contents: read}
     runs-on: ${{ github.repository_owner != 'Verjson' && 'ubuntu-24.04' || fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     outputs:
@@ -55,7 +55,7 @@ jobs:
             echo "workflow-sha=$workflow_sha"
           } >> "$GITHUB_OUTPUT"
   analyze:
-    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.repository.private == true) }}
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) }}
     needs: environment-preflight
     permissions: {actions: write, contents: read, pull-requests: read, checks: read}
     runs-on: ${{ github.repository_owner != 'Verjson' && 'ubuntu-24.04' || fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
@@ -106,7 +106,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with: {name: 'runner-deploy-${{ inputs.kind }}-review-${{ github.run_id }}-${{ github.run_attempt }}', path: review-receipt.json, if-no-files-found: error, retention-days: 90}
   publish-code:
-    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (inputs.kind == 'code') }}
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (inputs.kind == 'code') }}
     needs: [analyze, environment-preflight]
     environment: runner-deploy-code-review-publisher
     permissions: {actions: read, contents: read}
@@ -156,7 +156,7 @@ jobs:
             --artifact-digest '${{ needs.analyze.outputs.artifact-digest }}' --installation-id '${{ steps.publisher.outputs.installation-id }}' \
             --expected-installation-id '${{ needs.analyze.outputs.expected-installation-id }}'
   publish-security:
-    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (inputs.kind == 'security') }}
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (inputs.kind == 'security') }}
     needs: [analyze, environment-preflight]
     environment: runner-deploy-security-review-publisher
     permissions: {actions: read, contents: read}
@@ -206,7 +206,7 @@ jobs:
             --artifact-digest '${{ needs.analyze.outputs.artifact-digest }}' --installation-id '${{ steps.publisher.outputs.installation-id }}' \
             --expected-installation-id '${{ needs.analyze.outputs.expected-installation-id }}'
   publish-ai:
-    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (inputs.kind == 'ai') }}
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (inputs.kind == 'ai') }}
     needs: [analyze, environment-preflight]
     environment: runner-deploy-ai-review-publisher
     permissions: {actions: read, contents: read}

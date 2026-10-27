@@ -15,23 +15,27 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 BASELINE = json.loads(
     (ROOT / "scripts" / "ci-gate" / "fixtures" / "public-pr-workflow-policy-baseline.json").read_text()
 )
-PUBLIC_EVENT = "(github.event_name == 'pull_request' || github.event_name == 'pull_request_target')"
+PUBLIC_EVENTS = (
+    "pull_request",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "merge_group",
+    "pull_request_target",
+)
+PUBLIC_EVENT = "(" + " || ".join(f"github.event_name == '{event}'" for event in PUBLIC_EVENTS) + ")"
 PUBLIC_CALL = f"{PUBLIC_EVENT} && github.event.repository.private != true"
 ALLOW_GUARD = (
-    "(github.event_name != 'pull_request' && github.event_name != 'pull_request_target' "
+    "(github.event_name != 'pull_request' && github.event_name != 'pull_request_review' "
+    "&& github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' "
+    "&& github.event_name != 'pull_request_target' "
     "|| github.event.repository.private == true)"
 )
 SENTINEL_JOB = "reject-public-pull-request-caller"
 SAFE_HOSTED_EXCEPTIONS = frozenset(
     {"app-key-environment.yml", "gate-rearm.yml"}
 )
-TRUSTED_GROUPS = {
-    "changelog-release.yml": "format('changelog-release-{0}', github.repository)",
-    "container-release.yml": "format('container-release-{0}', github.repository)",
-    "container-deployment.yml": (
-        "format('runner-deployment-{0}-{1}', github.repository, inputs.fleet-selector)"
-    ),
-}
+TRUSTED_GROUPS = BASELINE["trusted_concurrency_groups"]
+PUBLIC_GROUPS = BASELINE.get("public_concurrency_groups", {})
 
 
 def load_workflow(name: str) -> dict:
@@ -42,11 +46,12 @@ def expression(value: object) -> str:
     value = str(value).strip()
     if value.startswith("${{") and value.endswith("}}"):
         value = value[3:-2].strip()
-    return re.sub(r"\s+", " ", value)
+    value = re.sub(r"\s+", " ", value)
+    return re.sub(r"\(\s+|\s+\)", lambda match: match.group().strip(), value)
 
 
 def public_call_is_rejected(event_name: str, repository_private: object) -> bool:
-    return event_name in {"pull_request", "pull_request_target"} and repository_private is not True
+    return event_name in PUBLIC_EVENTS and repository_private is not True
 
 
 class PublicCallGuardContractTest(unittest.TestCase):
@@ -106,28 +111,26 @@ class PublicCallGuardContractTest(unittest.TestCase):
                             expected += f" && ({expression(original['if'])})"
                         self.assertEqual(expression(jobs[job_id].get("if")), expected)
 
-    def test_unknown_visibility_fails_closed_for_both_pull_request_events(self):
-        cases = (
-            ("pull_request", False, True),
-            ("pull_request", None, True),
-            ("pull_request", True, False),
-            ("pull_request_target", False, True),
-            ("pull_request_target", None, True),
-            ("pull_request_target", True, False),
-            ("push", None, False),
-            ("workflow_dispatch", False, False),
+    def test_unknown_visibility_fails_closed_for_all_public_pull_request_events(self):
+        cases = tuple(
+            (event_name, repository_private, expected)
+            for event_name in (*PUBLIC_EVENTS, "push", "workflow_dispatch")
+            for repository_private, expected in ((False, event_name in PUBLIC_EVENTS), (None, event_name in PUBLIC_EVENTS), (True, False))
         )
         for event_name, repository_private, expected in cases:
             with self.subTest(event=event_name, private=repository_private):
                 self.assertEqual(public_call_is_rejected(event_name, repository_private), expected)
 
-    def test_rejected_calls_cannot_replace_trusted_pending_release_or_deployment(self):
+    def test_public_calls_cannot_replace_trusted_pending_release_or_deployment(self):
         public_group = "format('public-rejected-{0}-{1}-{2}', github.repository, github.run_id, github.run_attempt)"
         for name, trusted_group in TRUSTED_GROUPS.items():
             with self.subTest(workflow=name):
                 workflow = load_workflow(name)
                 concurrency = workflow["concurrency"]
-                expected = f"{PUBLIC_CALL} && {public_group} || {trusted_group}"
+                workflow_public_group = PUBLIC_GROUPS.get(name, public_group)
+                expected = f"{PUBLIC_CALL} && {workflow_public_group} || {trusted_group}"
+                self.assertTrue(concurrency["group"].startswith("${{"))
+                self.assertTrue(concurrency["group"].endswith("}}"))
                 self.assertEqual(expression(concurrency["group"]), expected)
                 self.assertEqual(concurrency["cancel-in-progress"], "false")
 

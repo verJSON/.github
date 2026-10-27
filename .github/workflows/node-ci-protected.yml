@@ -659,7 +659,7 @@ jobs:
     # lane for custom profiles, without CI_LANE_FALLBACK; the built-in Verjson
     # profile retains its legacy untrusted-lane fallback behavior.
     # runner-lane: caller-runner
-    runs-on: ${{ inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != (vars.CI_PROFILE_OWNER || 'Verjson') && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || (vars.CI_PROFILE_OWNER || 'Verjson') != 'Verjson' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != (vars.CI_PROFILE_OWNER || 'Verjson') && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || (vars.CI_PROFILE_OWNER || 'Verjson') != 'Verjson' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]')) }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       # Reading a commit's combined status needs `statuses` (not `contents`).
@@ -892,7 +892,8 @@ jobs:
   acquire-secretless-dependencies:
     needs: eligibility
     if: (inputs.build-artifact-role == 'level' || inputs.build-artifact-role == 'consumer' || inputs.build-artifact-role == 'producer') && needs.eligibility.outputs.should-run != 'false'
-    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
+    # runner-lane: untrusted-lane
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')) }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       actions: read
@@ -2294,7 +2295,7 @@ jobs:
     # the profile-aware caller-runner tail for ordinary builds. ADR 0234 sets
     # the hosted secretless invariant; ADRs 0033/0240 define the routing tail.
     # runner-lane: secretless-first
-    runs-on: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && needs.eligibility.result == 'success' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'ubuntu-24.04' || inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != (vars.CI_PROFILE_OWNER || 'Verjson') && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || (vars.CI_PROFILE_OWNER || 'Verjson') != 'Verjson' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || ((inputs.secretless-pr || inputs.secretless-trusted-ref) && needs.eligibility.result == 'success' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'ubuntu-24.04' || inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != (vars.CI_PROFILE_OWNER || 'Verjson') && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || (vars.CI_PROFILE_OWNER || 'Verjson') != 'Verjson' && fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]')) }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       actions: read

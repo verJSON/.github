@@ -80,7 +80,8 @@ write_latest(){
 }
 run_case(){
   : >"$CALLS"; write_latest
-  bash -c 'set -euo pipefail; source "$1"; printf "latest_id=%s\n" "$latest_id"' _ "$tmp/recover.sh"
+  AI_REVIEW_DISPATCH_WORKFLOW=ai-review-merge.yml \
+    bash -c 'set -euo pipefail; source "$1"; printf "latest_id=%s\n" "$latest_id"' _ "$tmp/recover.sh"
 }
 
 export RECEIPT_COUNT=0 REVIEW_RUNS_JSON='[]'

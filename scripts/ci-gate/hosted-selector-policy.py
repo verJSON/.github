@@ -301,7 +301,8 @@ CANONICAL_CONTAINER_CANDIDATE_EXPRESSION = (
     "|| fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')"
 )
 CANONICAL_CONTAINER_CANDIDATE_SELECTOR = (
-    "${{ (github.event_name == 'pull_request' || "
+    "${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || "
+    "github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || "
     "github.event_name == 'pull_request_target') && "
     "github.event.repository.private != true && 'ubuntu-24.04' || ("
     + CANONICAL_CONTAINER_CANDIDATE_EXPRESSION
@@ -323,10 +324,10 @@ REVIEWED_SELECTOR_EXPRESSIONS = frozenset(
         "fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')",
         # ADR 0242: gate-rearm's key validator gives public and unresolved
         # pull-request callers the hosted image before considering private lanes.
-        "(github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || 'ubuntu-24.04')",
+        "(github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || 'ubuntu-24.04')",
         # The write-scoped acquisition watchdog follows the same public-hosted
         # placement and admits it independently of a stale untrusted lane.
-        "(github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')",
+        "(github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')",
         "fromJSON(vars.CI_RUNNER_FASTLANE || '[\"ubuntu-24.04\"]')",
         "fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')",
         "github.repository_owner != 'Verjson' && 'ubuntu-24.04' || fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')",
@@ -373,15 +374,24 @@ REVIEWED_SELECTOR_EXPRESSIONS = frozenset(
     for spelling in (expression, expression.replace("'Verjson'", "'verJSON'"))
 )
 
+PUBLIC_PR_EVENTS = (
+    "pull_request",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "merge_group",
+    "pull_request_target",
+)
+PUBLIC_PR_EVENT_CONDITION = "(" + " || ".join(
+    f"github.event_name == '{event}'" for event in PUBLIC_PR_EVENTS
+) + ")"
 PUBLIC_PR_HOSTED_SELECTOR_PREFIX = (
-    "(github.event_name == 'pull_request' || "
-    "github.event_name == 'pull_request_target') && "
-    "github.event.repository.private != true && 'ubuntu-24.04' || ("
+    PUBLIC_PR_EVENT_CONDITION
+    + " && github.event.repository.private != true && 'ubuntu-24.04' || ("
 )
 PUBLIC_CALL_REJECTION_CONDITION = (
-    "${{ (github.event_name == 'pull_request' || "
-    "github.event_name == 'pull_request_target') && "
-    "github.event.repository.private != true }}"
+    "${{ "
+    + PUBLIC_PR_EVENT_CONDITION
+    + " && github.event.repository.private != true }}"
 )
 PUBLIC_CALL_REJECTION_RUN = (
     'echo "::error::This reusable workflow does not accept public pull request callers"\n'

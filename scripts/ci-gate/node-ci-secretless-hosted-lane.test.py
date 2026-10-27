@@ -453,8 +453,20 @@ def binding_violations(document: dict) -> list[str]:
     if not (lane.startswith("${{") and lane.endswith("}}")):
         return [f"guard lane is not an expression: {lane!r}"]
     lane_expression = lane[3:-2].strip()
+    public_events = (
+        "pull_request",
+        "pull_request_review",
+        "pull_request_review_comment",
+        "merge_group",
+        "pull_request_target",
+    )
+    public_hosted_prefix = (
+        "(" + " || ".join(
+            f"github.event_name == '{event}'" for event in public_events
+        ) + ") && github.event.repository.private != true && 'ubuntu-24.04' || ("
+    )
     expected_prefix = (
-        f"${{{{ ({SECRETLESS_CONDITION}) && needs.eligibility.result == 'success' "
+        f"${{{{ {public_hosted_prefix}({SECRETLESS_CONDITION}) && needs.eligibility.result == 'success' "
         f"&& fromJSON({lane_expression}) || ({SECRETLESS_CONDITION}) && 'ubuntu-24.04' || "
     )
     problems = []

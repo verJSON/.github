@@ -251,11 +251,13 @@ def unguarded_condition(job):
     return " ".join(condition[len(guarded_if_prefix) : -len(") }}")].split())
 
 expected_pr_runner_selector = (
-    "${{ github.event_name != 'pull_request' && inputs.runner != '' && fromJSON(inputs.runner) "
+    "${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') "
+    "&& github.event.repository.private != true && 'ubuntu-24.04' "
+    "|| (github.event_name != 'pull_request' && inputs.runner != '' && fromJSON(inputs.runner) "
     "|| github.repository_owner != 'Verjson' && 'ubuntu-24.04' "
     "|| github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') "
     "|| github.event_name == 'pull_request' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') "
-    "|| fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}"
+    "|| fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')) }}"
 )
 
 def validate_authority(read_only, publication):
