@@ -14,13 +14,9 @@ ORG="${ORG:-Verjson}"
 # variables), but this name did not, so the reconciler resolved no group and went
 # undetermined — #266 again, by name rather than by id (#401).
 GENERAL_GROUP_NAME="${GENERAL_GROUP_NAME:-DigitalOcean}"
-# No default. `isolated` was the old one, and that group has not existed since it
-# was deleted on 2026-07-31 — shipping a name that resolves to nothing is the
-# defect this file was already carrying twice over. Unreachable today, because
-# CI_LANE_UNTRUSTED resolves to the general lane, but the moment the
-# untrusted lane is repointed the empty value fails closed through
-# lane_group_name saying no group is configured, rather than fails closed saying
-# a group nobody has heard of is missing.
+# No default. `isolated` was the old group name, and that group has not existed
+# since it was deleted on 2026-07-31. An explicitly classified untrusted lane
+# must name its live group; hosted untrusted selectors need no group name.
 UNTRUSTED_GROUP_NAME="${UNTRUSTED_GROUP_NAME:-}"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 larger_runner_allowlist_file="$script_dir/hosted-larger-runner-allowlist.json"
@@ -226,10 +222,9 @@ default_selector="$(selector CI_LANE_TRUSTED "$default_var")" || exit 2
 untrusted_selector="$(selector CI_LANE_UNTRUSTED "$untrusted_var")" || exit 2
 privileged_selector="$(selector CI_LANE_PRIVILEGED "$privileged_var")" || exit 2
 
-# A self-hosted selector remains valid before the live cut and for rollback.
-# Once the lane is hosted, however, only the standard ephemeral image is the
-# reviewed destination.  Accepting another hosted label could silently admit a
-# larger or differently governed runner class.
+# Once the lane is hosted, only the standard ephemeral image is the reviewed
+# destination. Accepting another hosted label could silently admit a larger or
+# differently governed runner class.
 if jq -e 'index("self-hosted") == null' <<<"$untrusted_selector" >/dev/null \
   && [ "$untrusted_selector" != '["ubuntu-24.04"]' ]; then
   die_undetermined \
@@ -289,6 +284,12 @@ has_capacity() {
 
 default_lane="$(group_for_selector CI_LANE_TRUSTED "$default_selector")" || exit 2
 untrusted_lane="$(group_for_selector CI_LANE_UNTRUSTED "$untrusted_selector")" || exit 2
+if [ "$untrusted_lane" = general ]; then
+  printf '## Runner admission reconciliation (%s)\n\n' "$ORG"
+  printf '### Drift\n\n'
+  printf '%s\n' '- `CI_LANE_UNTRUSTED` resolves to the persistent general runner lane, contrary to ADR 0235. Set it to `["ubuntu-24.04"]` or a dedicated lane classified as `untrusted`. Runner-group configuration, per-repository admission, and runner capacity were not inspected; selector and group values are redacted.'
+  exit 1
+fi
 privileged_lane="$(group_for_selector CI_LANE_PRIVILEGED "$privileged_selector")" || exit 2
 
 # One listing, slurped: `--paginate` emits one object per page, so streaming

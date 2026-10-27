@@ -23,6 +23,9 @@ path=""
 for arg in "$@"; do
   case "$arg" in /orgs/*) path="$arg";; esac
 done
+if [ -n "${GH_API_LOG:-}" ]; then
+  printf '%s\n' "$path" >> "$GH_API_LOG"
+fi
 if [ -n "${FAIL_PATH:-}" ] && [[ "$path" == *"$FAIL_PATH"* ]]; then
   echo "HTTP 403: Resource not accessible" >&2
   exit 1
@@ -86,6 +89,7 @@ esac
 GH
 chmod +x "$tmp/bin/gh"
 export PATH="$tmp/bin:$PATH"
+export GH_API_LOG="$tmp/gh-api.log"
 
 export DEFAULT_VAR='{"value":"[\"self-hosted\",\"general\"]","visibility":"all"}'
 # Unset by default: the lane variables above resolve, so the fallback term is
@@ -94,7 +98,7 @@ export FALLBACK_VAR=''
 # The retired pair, still set org-wide during the migration. Kept equal to the
 # lanes here so the divergence case below is the only one that reports it.
 export LEGACY_DEFAULT_VAR='{"value":"[\"self-hosted\",\"general\"]","visibility":"all"}'
-export UNTRUSTED_VAR='{"value":"[\"self-hosted\",\"general\"]","visibility":"all"}'
+export UNTRUSTED_VAR='{"value":"[\"ubuntu-24.04\"]","visibility":"all"}'
 export PRIVILEGED_VAR='{"value":"[\"self-hosted\",\"general\"]","visibility":"all"}'
 # GitHub's own default group. A custom group cannot be made default (ADR 0003),
 # so this one is always present in a real org — which is why its ABSENCE below
@@ -123,7 +127,7 @@ export HOSTED_RUNNERS_404='0'
 # after the namespaced-lane one proves that.
 export UNTRUSTED_GROUP_NAME='isolated'
 
-run_case() { bash "$script" 2>&1; }
+run_case() { : > "$GH_API_LOG"; bash "$script" 2>&1; }
 code_of() { run_case >/dev/null 2>&1; printf '%s' "$?"; }
 
 out="$(run_case)"
@@ -289,7 +293,7 @@ out="$(run_case)"
   || fail "privileged admission drift was not reported independently: $out"
 
 DEFAULT_VAR='{"value":"[\"self-hosted\",\"general\"]","visibility":"all"}'
-UNTRUSTED_VAR='{"value":"[\"self-hosted\",\"general\"]","visibility":"all"}'
+UNTRUSTED_VAR='{"value":"[\"ubuntu-24.04\"]","visibility":"all"}'
 LEGACY_DEFAULT_VAR='{"value":"[\"self-hosted\",\"general\"]","visibility":"all"}'
 LEGACY_UNTRUSTED_VAR='{"value":"[\"self-hosted\",\"general\"]","visibility":"all"}'
 G4_GROUP='{"id":4,"name":"DigitalOcean","visibility":"all","allows_public_repositories":true,"default":false}'
@@ -326,7 +330,7 @@ out="$(run_case)"
   && pass "ungoverned lane selector is undetermined" \
   || fail "ungoverned lane did not return exit 2 without leaking its value: $out"
 
-UNTRUSTED_VAR='{"value":"[\"self-hosted\",\"general\"]","visibility":"all"}'
+UNTRUSTED_VAR='{"value":"[\"ubuntu-24.04\"]","visibility":"all"}'
 FAIL_PATH='/actions/variables/VERJSON_RUNNER_DEFAULT'
 [ "$(code_of)" = "2" ] \
   && pass "org API failure is undetermined, never clean" \
@@ -348,6 +352,57 @@ out="$(run_case)"
   && grep -qF 'No drift' <<<"$out" \
   && pass "namespaced ADR 0035 lane labels map without reconciler changes" \
   || fail "namespaced lane labels did not reconcile: $out"
+
+# Keep the dedicated untrusted-group path observable while the general lane is
+# rejected as a rollback. These fixture lines model records from paginated API
+# output, as the mock contract above documents.
+PRIVILEGED_VAR='{"value":"[\"self-hosted\",\"lane-general\"]","visibility":"all"}'
+G6_GROUP='{"id":6,"name":"isolated","visibility":"all","allows_public_repositories":false}'
+G6_MEMBERS=''
+out="$(run_case)"
+[ "$(code_of)" = "1" ] \
+  && grep -qF 'Verjson/public-app' <<<"$out" \
+  && grep -qF 'untrusted lane' <<<"$out" \
+  && ! grep -qF 'isolated' <<<"$out" \
+  && pass "dedicated untrusted group public-admission denial is reported" \
+  || fail "dedicated untrusted group public-admission denial was not reported: $out"
+
+G6_GROUP='{"id":6,"name":"isolated","visibility":"selected","allows_public_repositories":true}'
+# The required public repository is on page 1 so a last-page-only result fails.
+G6_MEMBERS=$'Verjson/public-app\nVerjson/private-lib'
+out="$(run_case)"
+[ "$(code_of)" = "0" ] \
+  && grep -qF 'No drift' <<<"$out" \
+  && pass "selected untrusted-group membership spanning API pages is admitted" \
+  || fail "selected untrusted-group members were not reconciled: $out"
+
+G6_MEMBERS='Verjson/private-lib'
+out="$(run_case)"
+[ "$(code_of)" = "1" ] \
+  && grep -qF 'Verjson/public-app' <<<"$out" \
+  && grep -qF 'untrusted lane' <<<"$out" \
+  && ! grep -qF 'isolated' <<<"$out" \
+  && pass "selected untrusted-group membership denial is reported" \
+  || fail "selected untrusted-group membership denial was not reported: $out"
+
+G6_MEMBERS=$'Verjson/private-lib\nVerjson/public-app'
+G6_RUNNERS='{"name":"untrusted-1","status":"offline","labels":["self-hosted","lane-untrusted"]}'
+out="$(run_case)"
+[ "$(code_of)" = "1" ] \
+  && grep -qF 'CI_LANE_UNTRUSTED has no matching online runner' <<<"$out" \
+  && pass "offline dedicated untrusted capacity is reported" \
+  || fail "offline dedicated untrusted capacity was not reported: $out"
+
+G6_RUNNERS='{"name":"untrusted-1","status":"online","labels":["self-hosted","lane-mismatch"]}'
+out="$(run_case)"
+[ "$(code_of)" = "1" ] \
+  && grep -qF 'CI_LANE_UNTRUSTED has no matching online runner' <<<"$out" \
+  && pass "mismatched dedicated untrusted labels do not count as capacity" \
+  || fail "mismatched dedicated untrusted labels counted as capacity: $out"
+
+G6_GROUP='{"id":6,"name":"isolated","visibility":"all","allows_public_repositories":true}'
+G6_MEMBERS=''
+G6_RUNNERS='{"name":"untrusted-1","status":"online","labels":["self-hosted","lane-untrusted"]}'
 
 # Same fixture, with the untrusted group unconfigured. Reaching a lane whose
 # group nobody has named must be undetermined and say so — the alternative, the
@@ -375,19 +430,21 @@ out="$(run_case)"
   && pass "a missing lane-selected group fails closed without disclosing its configured name" \
   || fail "missing selected group was not safely reported by lane: $out"
 
-# 2. A group NO lane selects, gone: irrelevant, so it must not take the run down.
-#    This is the live regression — all three lanes resolve to `general`, nothing
-#    routes to `isolated`, and the reconciler still died fetching it.
+# 2. ADR 0235 withdrew this selector as an untrusted-lane rollback. It is known
+#    policy drift even when the untrusted group is currently unselected.
 UNTRUSTED_VAR='{"value":"[\"self-hosted\",\"lane-general\"]","visibility":"all"}'
 PRIVILEGED_VAR='{"value":"[\"self-hosted\",\"lane-general\"]","visibility":"all"}'
 out="$(run_case)"
-[ "$(code_of)" = "0" ] \
-  && grep -qF 'No drift' <<<"$out" \
-  && pass "a deleted group that no lane selects does not block reconciliation" \
-  || fail "unselected deleted group still broke the run: $out"
+[ "$(code_of)" = "1" ] \
+  && grep -qF 'resolves to the persistent general runner lane' <<<"$out" \
+  && ! grep -qF 'isolated' <<<"$out" \
+  && ! grep -qF '/actions/runner-groups' "$GH_API_LOG" \
+  && pass "a persistent untrusted selector is reported before group lookup" \
+  || fail "persistent untrusted selector was not safely reported: $out"
 
 # 3. The general lane is the one every private repository rides. Its group going
 #    missing is the highest-blast-radius case, and it had no coverage.
+UNTRUSTED_VAR='{"value":"[\"ubuntu-24.04\"]","visibility":"all"}'
 DELETED_GROUPS='4'
 DEFAULT_VAR='{"value":"[\"self-hosted\",\"lane-general\"]","visibility":"all"}'
 out="$(run_case)"
@@ -801,7 +858,7 @@ export G1_GROUP='{"id":1,"name":"GitHub","visibility":"all","allows_public_repos
 # a pre-migration SHA, so a lane edit that leaves it behind sends those consumers
 # somewhere this run never examined. Silence there is what made #401 invisible.
 DEFAULT_VAR='{"value":"[\"self-hosted\",\"general\"]","visibility":"all"}'
-UNTRUSTED_VAR='{"value":"[\"self-hosted\",\"general\"]","visibility":"all"}'
+UNTRUSTED_VAR='{"value":"[\"ubuntu-24.04\"]","visibility":"all"}'
 LEGACY_DEFAULT_VAR='{"value":"[\"self-hosted\",\"gone\"]","visibility":"all"}'
 LEGACY_UNTRUSTED_VAR='{"value":"[\"self-hosted\",\"general\"]","visibility":"all"}'
 out="$(run_case)"
@@ -882,11 +939,20 @@ for index in "${!untrusted_alias_names[@]}"; do
   printf -v "${untrusted_alias_envs[$index]}" '%s' "$persistent_record"
   export "${untrusted_alias_envs[$index]}"
   out="$(run_case)"
-  [ "$(code_of)" = "1" ] \
-    && grep -qF 'differs from CI_LANE_UNTRUSTED' <<<"$out" \
-    && grep -qF 'CI_LANE_UNTRUSTED' <<<"$out" \
-    && pass "partial cut at ${untrusted_alias_names[$index]} is reported as alias divergence" \
-    || fail "partial cut at ${untrusted_alias_names[$index]} survived or failed for the wrong reason: $out"
+  if [ "$index" = "0" ]; then
+    [ "$(code_of)" = "1" ] \
+      && grep -qF 'resolves to the persistent general runner lane' <<<"$out" \
+      && ! grep -qF 'isolated' <<<"$out" \
+      && ! grep -qF '/actions/runner-groups' "$GH_API_LOG" \
+      && pass "the canonical persistent selector is rejected before alias comparison" \
+      || fail "the canonical persistent selector was not safely rejected: $out"
+  else
+    [ "$(code_of)" = "1" ] \
+      && grep -qF 'differs from CI_LANE_UNTRUSTED' <<<"$out" \
+      && grep -qF 'CI_LANE_UNTRUSTED' <<<"$out" \
+      && pass "partial cut at ${untrusted_alias_names[$index]} is reported as alias divergence" \
+      || fail "partial cut at ${untrusted_alias_names[$index]} survived or failed for the wrong reason: $out"
+  fi
 done
 
 for index in "${!untrusted_alias_names[@]}"; do
@@ -948,6 +1014,45 @@ out="$(run_case)"
   && grep -qF 'CI_LANE_UNTRUSTED is unset' <<<"$out" \
   && pass "hosted fallback cannot conceal a missing canonical untrusted alias" \
   || fail "fallback concealed missing CI_LANE_UNTRUSTED: $out"
+
+# ADR 0235 withdrew the untrusted lane's persistent general-pool rollback.
+# This known selector drift must be reported before the monitor reads any runner
+# group, and its public report must not contain configured or selector values.
+DEFAULT_VAR="$persistent_record"
+FALLBACK_VAR="$persistent_record"
+PRIVILEGED_VAR="$persistent_record"
+LEGACY_DEFAULT_VAR=''
+LEGACY_UNTRUSTED_VAR=''
+FAIL_PATH=''
+DELETED_GROUPS=''
+GENERAL_GROUP_NAME='general-group-selector-canary'
+UNTRUSTED_GROUP_NAME='untrusted-group-selector-canary'
+set_all_untrusted_aliases "$hosted_record"
+
+expected_general_drift="$(cat <<'EXPECTED'
+## Runner admission reconciliation (Verjson)
+
+### Drift
+
+- `CI_LANE_UNTRUSTED` resolves to the persistent general runner lane, contrary to ADR 0235. Set it to `["ubuntu-24.04"]` or a dedicated lane classified as `untrusted`. Runner-group configuration, per-repository admission, and runner capacity were not inspected; selector and group values are redacted.
+EXPECTED
+)"
+for value in \
+  '{"value":"[\"self-hosted\",\"general\"]","visibility":"all"}' \
+  '{"value":"[\"self-hosted\",\"lane-general\"]","visibility":"all"}' \
+  '{"value":"[\"self-hosted\",\"general\",\"lane-untrusted\",\"selector-canary\"]","visibility":"all"}' \
+  '{"value":"[\"self-hosted\",\"lane-untrusted\",\"general\",\"selector-canary\"]","visibility":"all"}'; do
+  UNTRUSTED_VAR="$value"
+  code=0
+  out="$(run_case)" || code=$?
+  [ "$code" = "1" ] \
+    && [ "$out" = "$expected_general_drift" ] \
+    && ! grep -qF '/actions/runner-groups' "$GH_API_LOG" \
+    && ! grep -qF 'selector-canary' <<<"$out" \
+    && ! grep -qF 'group-selector-canary' <<<"$out" \
+    && pass "persistent untrusted selector is reported before runner-group lookup" \
+    || fail "persistent untrusted selector was not safely rejected: code=$code report=$out api=$(cat "$GH_API_LOG")"
+done
 
 if [ "$fails" -eq 0 ]; then
   echo "All tests passed."
