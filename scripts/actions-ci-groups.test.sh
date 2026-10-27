@@ -2110,11 +2110,12 @@ expected = shards | {
     "merge-gate\tpython3 scripts/ci-gate/review-caller-bootstrap.test.py": 360,
     # 31s serially on main run 38513400637.
     "platform\tpython3 scripts/ci-gate/hosted-selector-policy.test.py": 90,
-    # The runner-isolation test measured 122s whole inside the platform group
-    # at #1827's round 13, so it runs as two parts: 62s (core) and 69s
-    # (probes) inside the platform group, each about a third of 180s.
-    "platform\tRUNNER_ISOLATION_TEST_PART=core python3 scripts/ci-gate/public-pr-runner-isolation.test.py": 180,
-    "platform\tRUNNER_ISOLATION_TEST_PART=probes python3 scripts/ci-gate/public-pr-runner-isolation.test.py": 180,
+    # Core measured 161s hosted on #1927; its budget is twice that rounded up.
+    # The local platform group measured probe shards at 95s and 109s; twice the
+    # slower shard rounds to 240s. Hosted shard timings are pending the next PR run.
+    "platform\tRUNNER_ISOLATION_TEST_PART=core python3 scripts/ci-gate/public-pr-runner-isolation.test.py": 330,
+    "platform\tRUNNER_ISOLATION_TEST_PART=probes-r8-r10 python3 scripts/ci-gate/public-pr-runner-isolation.test.py": 240,
+    "platform\tRUNNER_ISOLATION_TEST_PART=probes-r11-r14 python3 scripts/ci-gate/public-pr-runner-isolation.test.py": 240,
     # 51s on main run 38799238936, before #1822 added 15 assertions to it.
     "merge-gate\tbash scripts/assert-mergeable-head.test.sh": 120,
 }

@@ -36,19 +36,26 @@ def fail(label: str) -> None:
     print(f"FAIL - {label}")
 
 
-# actions-ci runs this file as two rows, each under its budget:
-# RUNNER_ISOLATION_TEST_PART=core runs every check outside the probes block
-# (round-8 finding 6 through round 13, between the two markers below), and
-# =probes runs that block on top of every definition outside it. Unset (or
-# `all`) runs everything once. The parts partition the checks
-# (public-pr-runner-isolation-parts.test.py pins it).
+# actions-ci runs the core and two probe shards. Unset (or `all`) runs
+# everything once; the partition contract pins exact check coverage.
 TEST_PART = os.environ.get("RUNNER_ISOLATION_TEST_PART", "all")
 PROBES_BEGIN = "# >>> runner-isolation probes part begins"
 PROBES_END = "# <<< runner-isolation probes part ends"
+PROBE_PARTS = {
+    "probes-r8-r10": (
+        "# >>> runner-isolation probes r8-r10 begins",
+        "# <<< runner-isolation probes r8-r10 ends",
+    ),
+    "probes-r11-r14": (
+        "# >>> runner-isolation probes r11-r14 begins",
+        "# <<< runner-isolation probes r11-r14 ends",
+    ),
+}
+TEST_PARTS = ("core", *PROBE_PARTS)
 # The two selector conditions, exactly as ast.unparse renders them; only these
 # two `if` statements are left out of a part (round 14).
 SELECTOR_CONDITIONS = (
-    "TEST_PART not in ('all', 'core', 'probes')",
+    "TEST_PART not in ('all', *TEST_PARTS)",
     "TEST_PART != 'all' and __name__ == '__main__'",
 )
 
@@ -58,14 +65,28 @@ def run_part(part: str) -> int:
         source = handle.read()
     lines = source.split("\n")
     begin, end = lines.index(PROBES_BEGIN) + 1, lines.index(PROBES_END) + 1
+    shard_ranges = {
+        name: (lines.index(markers[0]) + 1, lines.index(markers[1]) + 1)
+        for name, markers in PROBE_PARTS.items()
+    }
     definitions = (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef, ast.Assign, ast.AnnAssign)
     selected = []
     for node in ast.parse(source).body:
-        inside = begin < node.lineno < end
+        inside_probes = begin < node.lineno < end
         if isinstance(node, ast.If) and ast.unparse(node.test) in SELECTOR_CONDITIONS:
             continue  # the selector itself
-        if (part == "core" and not inside) or (part == "probes" and (inside or isinstance(node, definitions))):
+        selected_begin, selected_end = shard_ranges.get(part, (0, 0))
+        inside_selected_shard = selected_begin < node.lineno < selected_end
+        if (part == "core" and not inside_probes) or (
+            part != "core"
+            and (inside_selected_shard or (isinstance(node, definitions) and not inside_probes))
+        ):
             selected.append(node)
+    if sys.argv[1:] == ["--partition-plan"]:
+        print("PARTITION_SELECTION:" + ",".join(f"{node.lineno}:{node.col_offset}" for node in selected))
+        return 0
+    if not selected:
+        return 1
     scope = {"__name__": "__main__", "__file__": __file__}
     try:
         exec(compile(ast.Module(body=selected, type_ignores=[]), __file__, "exec"), scope)
@@ -74,8 +95,8 @@ def run_part(part: str) -> int:
     return 1 if scope["failures"] else 0
 
 
-if TEST_PART not in ("all", "core", "probes"):
-    print(f"unknown RUNNER_ISOLATION_TEST_PART {TEST_PART!r}: expected all, core, or probes", file=sys.stderr)
+if TEST_PART not in ("all", *TEST_PARTS):
+    print(f"unknown RUNNER_ISOLATION_TEST_PART {TEST_PART!r}: expected all or {', '.join(TEST_PARTS)}", file=sys.stderr)
     sys.exit(2)
 if TEST_PART != "all" and __name__ == "__main__":
     sys.exit(run_part(TEST_PART))
@@ -4093,6 +4114,7 @@ expect(verify_with("npm pack --ignore-scripts\n", {"./package.json": with_script
        "an `npm pack --ignore-scripts` does not trace the lifecycle scripts it skips", *PENDING_ARGS)
 
 # >>> runner-isolation probes part begins
+# >>> runner-isolation probes r8-r10 begins
 # Round-8 finding 6: a program reached through a symbolic link binds the link
 # and its target's bytes and is followed into the target; a link out of the
 # tree, or a broken one, is a program the row cannot bind.
@@ -4353,6 +4375,8 @@ expect_bound("python3 scripts/zz-spawn.py\n",
               "scripts/zz-ok.sh": "echo ok\n"},
              "scripts/zz-ok.sh", "a getoutput string read as a shell command")
 
+# <<< runner-isolation probes r8-r10 ends
+# >>> runner-isolation probes r11-r14 begins
 # Round-11 blocker: every Python call is classified by its imported name, so
 # an alias (`from subprocess import getoutput as g`, `import os as o`, a
 # loader imported by name) is read exactly like the original.
@@ -4539,6 +4563,7 @@ expect(verify_with("python3 scripts/zz-spawn.py\n", {"scripts/zz-spawn.py": 'imp
        0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",), "a builtins call that runs nothing is not refused",
        *PENDING_ARGS)
 
+# <<< runner-isolation probes r11-r14 ends
 # <<< runner-isolation probes part ends
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8
