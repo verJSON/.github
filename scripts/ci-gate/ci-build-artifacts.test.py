@@ -609,6 +609,15 @@ class ArtifactPolicyTests(unittest.TestCase):
         table = artifacts.load_policy_table(b'{"version":1,"repositories":{}}')
         self.assertIsNone(artifacts._policy_row(table, "Verjson/private-repo"))
 
+    def test_version_one_policy_cannot_enroll_a_repository(self) -> None:
+        with self.assertRaisesRegex(
+            artifacts.IntegrityError,
+            "version 1 cannot enroll repositories",
+        ):
+            artifacts.load_policy_table(
+                b'{"version":1,"repositories":{"Verjson/private-repo":{}}}'
+            )
+
     def test_policy_path_matching_uses_components(self) -> None:
         requested = artifacts.normalize_roots(["dist/app"], "paths")
         allowed = artifacts.normalize_roots(["dist"], "allowed")
@@ -895,12 +904,35 @@ class ArtifactPolicyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (checkout / "package-lock.json").write_text('{"lockfileVersion":3}\n', encoding="utf-8")
-            caller_workflow = checkout / ".github/workflows/node-ci.yml"
+            caller_workflow_path = ".github/workflows/ci.yml"
+            caller_workflow = checkout / caller_workflow_path
             caller_workflow.parent.mkdir(parents=True)
-            caller_workflow_bytes = b"name: trusted caller\n"
+            reusable_workflow_ref = b"Verjson/.github/.github/workflows/node-ci.yml@" + b"a" * 40
+            caller_workflow_bytes = (
+                b"name: trusted caller\n"
+                b"on: pull_request\n"
+                b"jobs:\n"
+                b"  preflight:\n"
+                b"    uses: " + reusable_workflow_ref + b"\n"
+                b"  build:\n"
+                b"    needs: [preflight]\n"
+                b"    uses: " + reusable_workflow_ref + b"\n"
+                b"    with:\n"
+                b"      build-artifact-role: producer\n"
+                b"  test:\n"
+                b"    needs: [preflight, build]\n"
+                b"    uses: " + reusable_workflow_ref + b"\n"
+                b"    with:\n"
+                b"      build-artifact-role: consumer\n"
+                b"      build-artifact-id: ${{ needs.build.outputs.artifact-id }}\n"
+                b"      build-artifact-digest: ${{ needs.build.outputs.artifact-digest }}\n"
+                b"  aggregate:\n"
+                b"    if: always()\n"
+                b"    needs: [preflight, build, test]\n"
+            )
             caller_workflow.write_bytes(caller_workflow_bytes)
             subprocess.run(
-                ["git", "-C", str(checkout), "add", "package.json", "package-lock.json", ".github/workflows/node-ci.yml"],
+                ["git", "-C", str(checkout), "add", "package.json", "package-lock.json", caller_workflow_path],
                 check=True,
             )
             subprocess.run(["git", "-C", str(checkout), "commit", "-qm", "fixture"], check=True)
@@ -936,22 +968,30 @@ class ArtifactPolicyTests(unittest.TestCase):
                 "requiredPaths": ["dist"],
                 "profileFiles": ["package.json", "package-lock.json"],
                 "audienceApproved": True,
+                "callerWorkflowPath": caller_workflow_path,
+                "callerWorkflowDigest": hashlib.sha256(caller_workflow_bytes).hexdigest(),
             }
-            policy_table = {"version": 1, "repositories": {"Verjson/app": row}}
+            policy_table = {"version": 2, "repositories": {"Verjson/app": row}}
 
             def select(candidate_plan, *, run_attempt="1", mode_share_eligible=True, policy_override=None,
                        candidate_commit=None,
-                       candidate_base_sha=None):
+                       candidate_base_sha=None, caller_workflow_sha=None, caller_workflow_ref=None,
+                       event_name="pull_request", base_ref="main", ref_name="feature"):
                 return artifacts.select_preflight(
                     candidate_plan,
                     policy_table if policy_override is None else policy_override,
                     repository="Verjson/app",
                     private=True,
-                    event_name="pull_request",
-                    base_ref="main",
-                    ref_name="feature",
+                    event_name=event_name,
+                    base_ref=base_ref,
+                    ref_name=ref_name,
                     commit=commit if candidate_commit is None else candidate_commit,
-                    caller_workflow_sha="b" * 40,
+                    caller_workflow_sha=trusted_base_commit if caller_workflow_sha is None else caller_workflow_sha,
+                    caller_workflow_ref=(
+                        "Verjson/app/.github/workflows/ci.yml@refs/heads/main"
+                        if caller_workflow_ref is None
+                        else caller_workflow_ref
+                    ),
                     caller_base_sha=commit if candidate_base_sha is None else candidate_base_sha,
                     workflow_sha="c" * 40,
                     runner_policy='["ubuntu-24.04"]',
@@ -967,6 +1007,22 @@ class ArtifactPolicyTests(unittest.TestCase):
                 )
 
             result = select(plan, mode_share_eligible=True)
+            missing_workflow_revision = select(plan, caller_workflow_sha="f" * 40)
+            self.assertFalse(missing_workflow_revision["share-selected"])
+            self.assertEqual(missing_workflow_revision["reason"], "caller-workflow-digest-mismatch")
+
+            wrong_workflow_path = select(
+                plan,
+                caller_workflow_ref="Verjson/app/.github/workflows/other.yml@refs/heads/main",
+            )
+            self.assertFalse(wrong_workflow_path["share-selected"])
+            self.assertEqual(wrong_workflow_path["reason"], "caller-workflow-path-mismatch")
+
+            wrong_digest_policy = json.loads(json.dumps(policy_table))
+            wrong_digest_policy["repositories"]["Verjson/app"]["callerWorkflowDigest"] = "0" * 64
+            wrong_workflow_digest = select(plan, policy_override=wrong_digest_policy)
+            self.assertFalse(wrong_workflow_digest["share-selected"])
+            self.assertEqual(wrong_workflow_digest["reason"], "caller-workflow-digest-mismatch")
             mutation_commands = (
                 "jest --json --outputFile dist/report.json",
                 "eslint --output-file dist/report.json",
@@ -1018,7 +1074,7 @@ class ArtifactPolicyTests(unittest.TestCase):
             nested_row["requiredPaths"] = ["packages/widget/dist"]
             nested_result = select(
                 nested_plan,
-                policy_override={"version": 1, "repositories": {"Verjson/app": nested_row}},
+                policy_override={"version": 2, "repositories": {"Verjson/app": nested_row}},
             )
             self.assertFalse(nested_result["share-selected"])
             self.assertEqual(nested_result["reason"], "nested-export-roots-not-admitted")
@@ -1062,15 +1118,16 @@ class ArtifactPolicyTests(unittest.TestCase):
             floating["levels"][1]["inputs"]["node-version"] = "24"
             floating_result = artifacts.select_preflight(
                 floating,
-                {"version": 1, "repositories": {"Verjson/app": row}},
+                {"version": 2, "repositories": {"Verjson/app": row}},
                 repository="Verjson/app",
                 private=True,
                 event_name="pull_request",
                 base_ref="main",
                 ref_name="feature",
                 commit=commit,
-                caller_workflow_sha="b" * 40,
-            caller_base_sha=commit,
+                caller_workflow_sha=trusted_base_commit,
+                caller_workflow_ref="Verjson/app/.github/workflows/ci.yml@refs/heads/main",
+                caller_base_sha=commit,
                 workflow_sha="c" * 40,
                 runner_policy='["ubuntu-24.04"]',
                 runner_os="Linux",
@@ -1084,7 +1141,7 @@ class ArtifactPolicyTests(unittest.TestCase):
             self.assertTrue(result["share-selected"])
             caller_workflow.write_bytes(b"name: attacker-modified caller\n")
             subprocess.run(
-                ["git", "-C", str(checkout), "add", ".github/workflows/node-ci.yml"], check=True
+                ["git", "-C", str(checkout), "add", caller_workflow_path], check=True
             )
             subprocess.run(["git", "-C", str(checkout), "commit", "-qm", "modify caller"], check=True)
             modified_commit = subprocess.run(
@@ -1099,12 +1156,16 @@ class ArtifactPolicyTests(unittest.TestCase):
             self.assertFalse(modified_caller["share-selected"])
             self.assertEqual(modified_caller["reason"], "caller-workflow-changed-in-pull-request")
             merged_caller = select(
-                plan, candidate_commit=modified_commit, candidate_base_sha=modified_commit
+                plan,
+                candidate_commit=modified_commit,
+                candidate_base_sha=modified_commit,
+                caller_workflow_sha=modified_commit,
             )
-            self.assertTrue(merged_caller["share-selected"], merged_caller)
+            self.assertFalse(merged_caller["share-selected"], merged_caller)
+            self.assertEqual(merged_caller["reason"], "caller-workflow-digest-mismatch")
             caller_workflow.write_bytes(caller_workflow_bytes)
             subprocess.run(
-                ["git", "-C", str(checkout), "add", ".github/workflows/node-ci.yml"], check=True
+                ["git", "-C", str(checkout), "add", caller_workflow_path], check=True
             )
             subprocess.run(["git", "-C", str(checkout), "commit", "-qm", "restore trusted caller"], check=True)
             commit = subprocess.run(
@@ -1113,6 +1174,80 @@ class ArtifactPolicyTests(unittest.TestCase):
                 text=True,
                 capture_output=True,
             ).stdout.strip()
+
+            push_plan = json.loads(json.dumps(plan))
+            for level in push_plan["levels"]:
+                level["events"] = ["push"]
+            graph_mutations = {
+                "needs": caller_workflow_bytes.replace(
+                    b"needs: [preflight, build]", b"needs: [preflight]"
+                ),
+                "reusable workflow pin": caller_workflow_bytes.replace(
+                    b"@" + b"a" * 40, b"@main"
+                ),
+                "artifact output wiring": caller_workflow_bytes.replace(
+                    b"needs.build.outputs.artifact-digest",
+                    b"needs.preflight.outputs.artifact-digest",
+                ),
+                "aggregate omission": caller_workflow_bytes.replace(
+                    b"  aggregate:\n    if: always()\n    needs: [preflight, build, test]\n", b""
+                ),
+            }
+            for mutation, mutated_bytes in graph_mutations.items():
+                with self.subTest(caller_graph_mutation=mutation):
+                    caller_workflow.write_bytes(mutated_bytes)
+                    subprocess.run(
+                        ["git", "-C", str(checkout), "add", caller_workflow_path], check=True
+                    )
+                    subprocess.run(
+                        ["git", "-C", str(checkout), "commit", "-qm", f"mutate {mutation}"],
+                        check=True,
+                    )
+                    mutated_commit = subprocess.run(
+                        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+                        check=True,
+                        text=True,
+                        capture_output=True,
+                    ).stdout.strip()
+                    mutation_result = select(
+                        push_plan,
+                        event_name="push",
+                        base_ref="",
+                        ref_name="main",
+                        candidate_commit=mutated_commit,
+                        candidate_base_sha=mutated_commit,
+                        caller_workflow_sha=mutated_commit,
+                    )
+                    self.assertFalse(mutation_result["share-selected"], mutation_result)
+                    self.assertEqual(mutation_result["reason"], "caller-workflow-digest-mismatch")
+            caller_workflow.unlink()
+            caller_workflow.symlink_to("ci-target.yml")
+            subprocess.run(
+                ["git", "-C", str(checkout), "add", "-A", caller_workflow_path], check=True
+            )
+            subprocess.run(["git", "-C", str(checkout), "commit", "-qm", "symlink caller workflow"], check=True)
+            symlink_commit = subprocess.run(
+                ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+                check=True,
+                text=True,
+                capture_output=True,
+            ).stdout.strip()
+            symlink_policy = json.loads(json.dumps(policy_table))
+            symlink_policy["repositories"]["Verjson/app"]["callerWorkflowDigest"] = hashlib.sha256(
+                b"ci-target.yml"
+            ).hexdigest()
+            symlink_result = select(
+                push_plan,
+                event_name="push",
+                base_ref="",
+                ref_name="main",
+                candidate_commit=symlink_commit,
+                candidate_base_sha=symlink_commit,
+                caller_workflow_sha=symlink_commit,
+                policy_override=symlink_policy,
+            )
+            self.assertFalse(symlink_result["share-selected"], symlink_result)
+            self.assertEqual(symlink_result["reason"], "caller-workflow-digest-mismatch")
             producer_plan = json.loads(result["producer-plan"])
             self.assertEqual(json.loads(producer_plan["full"]), [{"script": "build", "unsetEnv": [], "requiresServices": False}])
             consumer_plan = json.loads(result["consumer-plans"])["test"]
@@ -1142,8 +1277,8 @@ class ArtifactPolicyTests(unittest.TestCase):
                     "BUILD_ARTIFACT_PACKAGE_MANAGER_VERSION": "10.8.2",
                     "REPOSITORY_PRIVATE": "true",
                     "CALLER_COMMIT": commit,
-            "CALLER_BASE_SHA": commit,
-                    "CALLER_WORKFLOW_SHA": "b" * 40,
+                    "CALLER_BASE_SHA": commit,
+                    "CALLER_WORKFLOW_SHA": trusted_base_commit,
                     "REUSABLE_WORKFLOW_SHA": "c" * 40,
                     "RUNNER_POLICY": '["ubuntu-24.04"]',
                     "RUNNER_OS": "Linux",
@@ -1151,6 +1286,7 @@ class ArtifactPolicyTests(unittest.TestCase):
                     "ImageOS": "ubuntu24",
                     "ImageVersion": "20261001.1.0",
                     "GITHUB_REPOSITORY": "Verjson/app",
+                    "GITHUB_WORKFLOW_REF": "Verjson/app/.github/workflows/ci.yml@refs/heads/main",
                     "GITHUB_EVENT_NAME": "pull_request",
                     "GITHUB_BASE_REF": "main",
                     "GITHUB_REF_NAME": "feature",
@@ -2445,6 +2581,136 @@ class RoleAuthorizationTests(unittest.TestCase):
                 {**base, "BUILD_ARTIFACT_AUTHORIZATION_PLAN_JSON": json.dumps(internal_input_plan)},
             ), self.assertRaisesRegex(artifacts.IntegrityError, "reserved internal inputs"):
                 artifacts._authorize_role_from_environment()
+
+    def test_caller_workflow_ref_keeps_at_signs_in_branch_name(self) -> None:
+        self.assertEqual(
+            artifacts._caller_workflow_path_from_ref(
+                "Verjson/app",
+                "Verjson/app/.github/workflows/node-ci.yml@refs/heads/release@next",
+            ),
+            ".github/workflows/node-ci.yml",
+        )
+
+    def test_role_authorization_rejects_caller_workflow_digest_mismatch(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        commit = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], check=True, text=True, capture_output=True
+        ).stdout.strip()
+        plan = {
+            "version": 1,
+            "pushBranches": ["main"],
+            "secrets": ["NODE_AUTH_TOKEN"],
+            "levels": [
+                {
+                    "id": lane,
+                    "needs": [],
+                    "events": ["pull_request"],
+                    "branches": ["main"],
+                    "inputs": {
+                        "secretless-ci-script-plan": json.dumps(
+                            ["build", {"script": "test", "requiresServices": False}],
+                            separators=(",", ":"),
+                        ),
+                        "secretless-ci-non-app-script-plan": json.dumps(
+                            ["build", "lint"], separators=(",", ":")
+                        ),
+                        "node-version": "24.1.0",
+                        "package-manager": "npm",
+                    },
+                }
+                for lane in ("build", "test")
+            ],
+            "buildArtifact": {"producer": "build", "consumers": ["test"], "paths": ["dist"]},
+        }
+        row = {
+            "repository": "Verjson/app",
+            "visibility": "private",
+            "producer": "build",
+            "consumers": ["test"],
+            "buildScript": "build",
+            "allowedPaths": ["dist"],
+            "requiredPaths": ["dist"],
+            "profileFiles": ["package.json", "package-lock.json"],
+            "audienceApproved": True,
+            "callerWorkflowPath": ".github/workflows/node-ci.yml",
+            "callerWorkflowDigest": "0" * 64,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            policy_path = Path(temporary) / "policy.json"
+            policy_path.write_bytes(
+                artifacts.canonical_json({"version": 2, "repositories": {"Verjson/app": row}})
+            )
+            environment = {
+                "BUILD_ARTIFACT_AUTHORIZATION_PLAN_JSON": json.dumps(plan),
+                "BUILD_ARTIFACT_POLICY_FILE": str(policy_path),
+                "BUILD_ARTIFACT_NEEDS_RESULTS": "{}",
+                "BUILD_ARTIFACT_ROLE": "producer",
+                "BUILD_ARTIFACT_LEVEL_ID": "build",
+                "BUILD_ARTIFACT_PARTICIPANT_COUNT": "2",
+                "BUILD_ARTIFACT_NODE_VERSION": "24.1.0",
+                "BUILD_ARTIFACT_PACKAGE_MANAGER": "npm",
+                "BUILD_ARTIFACT_PACKAGE_MANAGER_VERSION": "10.8.2",
+                "CALLER_COMMIT": commit,
+                "CALLER_BASE_SHA": commit,
+                "CALLER_WORKFLOW_SHA": commit,
+                "GITHUB_WORKFLOW_REF": "Verjson/app/.github/workflows/node-ci.yml@refs/heads/main",
+                "REUSABLE_WORKFLOW_SHA": "d" * 40,
+                "GITHUB_WORKSPACE": str(root),
+                "GITHUB_REPOSITORY": "Verjson/app",
+                "GITHUB_REF": "refs/pull/1/merge",
+                "GITHUB_REF_NAME": "1/merge",
+                "GITHUB_BASE_REF": "main",
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_RUN_ID": "123",
+                "GITHUB_RUN_ATTEMPT": "1",
+                "BUILD_ARTIFACT_HEAD_REPOSITORY": "Verjson/app",
+                "SECRETLESS_PR": "true",
+                "SECRETLESS_TRUSTED_REF": "false",
+                "REPOSITORY_PRIVATE": "true",
+                "RUNNER_POLICY": '["ubuntu-24.04"]',
+                "RUNNER_OS": "Linux",
+                "RUNNER_ARCH": "X64",
+                "ImageOS": "ubuntu24",
+                "ImageVersion": "20261001.1.0",
+            }
+            for input_name, value in artifacts.effective_runtime_inputs(
+                plan["levels"][0], "pull_request"
+            ).items():
+                environment[artifacts._runtime_input_environment_name(input_name)] = json.dumps(value)
+
+            original_run = subprocess.run
+
+            def run_with_fixed_versions(args, *call_args, **call_kwargs):
+                if args == ["npm", "--version"]:
+                    return subprocess.CompletedProcess(args, 0, "10.8.2\n", "")
+                if args == ["node", "--version"]:
+                    return subprocess.CompletedProcess(args, 0, "v24.1.0\n", "")
+                return original_run(args, *call_args, **call_kwargs)
+
+            with patch("ci_build_artifacts.subprocess.run", side_effect=run_with_fixed_versions):
+                for role, lane in (("producer", "build"), ("consumer", "test")):
+                    participant_level = next(
+                        item for item in plan["levels"] if item["id"] == lane
+                    )
+                    role_runtime_inputs = {
+                        artifacts._runtime_input_environment_name(input_name): json.dumps(value)
+                        for input_name, value in artifacts.effective_runtime_inputs(
+                            participant_level, "pull_request"
+                        ).items()
+                    }
+                    with self.subTest(role=role), patch.dict(
+                        os.environ,
+                        {
+                            **environment,
+                            **role_runtime_inputs,
+                            "BUILD_ARTIFACT_ROLE": role,
+                            "BUILD_ARTIFACT_LEVEL_ID": lane,
+                        },
+                    ), self.assertRaisesRegex(
+                        artifacts.IntegrityError,
+                        "caller-workflow-digest-mismatch",
+                    ):
+                        artifacts._authorize_role_from_environment()
 
     def test_both_workflows_reject_unknown_roles_and_guard_acquisition(self) -> None:
         root = Path(__file__).resolve().parents[2]
