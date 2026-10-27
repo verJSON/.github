@@ -1226,3 +1226,24 @@ amendment also overstated what the `patch` pattern shares with the trace.
 - Residual 11 lists every non-import binding, class attributes, cross-file
   re-exports, and `.__call__`.
 
+## Amendment (2026-10-27, #1831) — reject the persistent untrusted selector
+
+**Context.** Decision 2 withdraws ADR 0147's rollback of
+`CI_LANE_UNTRUSTED` to the persistent `general` lane. The runner-admission
+reconciler still classified that selector as `general` and continued into
+runner-group inspection, allowing the withdrawn rollback to be treated as a
+live lane.
+
+**Decision.** After validating and classifying `CI_LANE_UNTRUSTED`, the
+reconciler reports a fixed, redacted Markdown drift entry and exits 1 when the
+selector resolves to `general`. It does this before runner-group API calls, so
+the scheduled workflow records the known policy drift in its existing durable
+issue. Exit 2 remains reserved for unavailable, malformed, or otherwise
+undetermined state. The reviewed hosted selector `["ubuntu-24.04"]` and an
+explicitly classified `untrusted` group remain valid routes.
+
+**Scope.** This monitor detects selector drift. It does not attest that a
+dedicated group's runners are physically ephemeral, enforce any workflow's
+`runs-on` choice, or establish the broader public pull-request isolation
+guarantee by itself.
+
