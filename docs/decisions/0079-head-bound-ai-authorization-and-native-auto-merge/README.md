@@ -418,3 +418,11 @@ when the path changed can finish. Adopters continue to require their generated
 `.github/workflows/ai-review-merge.yml` caller path. Repository, workflow event,
 branch, status, conclusion, head, authorization, and attestation checks remain
 unchanged; lookalike paths fail closed.
+
+## Amendment (2026-10-27, #1831) — validate generated contract pins as ASCII
+
+`gen-ai-review-caller.sh` accepts a contract revision only when all 40
+characters are lowercase ASCII hexadecimal digits. The explicit character set
+keeps Bash validation stable under locale collation; uppercase and Unicode
+lookalikes fail. The caller contract test exercises valid and invalid pins under
+`en_US.UTF-8`.

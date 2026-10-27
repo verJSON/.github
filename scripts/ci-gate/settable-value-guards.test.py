@@ -38,8 +38,9 @@ NON_ASCII_DIGITS = ("\u0663", "\uff13", "\u0661\u0660")
 NON_ASCII_PROBES = ("\u00e9", "\uff41", "\uff21", "\u0663", "\uff13", "\u00a0")
 
 # The reviewed inventory: every guard the scanner finds, in the repository and
-# in the generator's HEAD output. A change is a review point.
-GUARD_COUNT = 531
+# in the generator's HEAD output. A change is a review point. The public
+# verjson-ci adapter adds one input guard to the prior reviewed inventory.
+GUARD_COUNT = 532
 # Shapes the scanner cannot judge, each with the reason it is safe.
 # Each unreadable guard reviewed by its exact text at its site: an edit to the
 # pattern, including a range added around a reviewed expansion, changes the

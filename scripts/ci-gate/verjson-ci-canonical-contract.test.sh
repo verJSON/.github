@@ -10,7 +10,9 @@ provenance="$root/scripts/ci-gate/fixtures/verjson-ci-reusable-c9084daca387849c0
 python3 - "$workflow" "$adoption" "$fixture" "$provenance" <<'PY'
 import hashlib
 import json
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -88,7 +90,18 @@ def validate(workflow: str, adoption: str, fixture: str, source_provenance: dict
     local_validate = steps[1]
     assert local_validate["name"] == source_validate["name"]
     assert local_validate["env"] == source_validate["env"]
-    assert local_validate["run"] == source_validate["run"]
+    source_image_guard = (
+        '[[ "$VERJSON_CI_IMAGE" =~ ^[a-z0-9.-]+(:[0-9]+)?/'
+        '[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]'
+    )
+    local_image_guard = (
+        '[[ "$VERJSON_CI_IMAGE" =~ '
+        '^[abcdefghijklmnopqrstuvwxyz0123456789.-]+(:[0123456789]+)?/'
+        '[abcdefghijklmnopqrstuvwxyz0123456789._/-]+@sha256:'
+        '[0123456789abcdef]{64}$ ]]'
+    )
+    assert source_validate["run"].count(source_image_guard) == 1
+    assert source_validate["run"].replace(source_image_guard, local_image_guard, 1) == local_validate["run"]
 
     source_run = source_steps[2]["run"]
     local_run = steps[2]["run"]
@@ -160,6 +173,33 @@ def validate(workflow: str, adoption: str, fixture: str, source_provenance: dict
 
 
 validate(workflow_text, adoption_text, fixture_text, provenance)
+
+local_validation = parse_workflow(workflow_text)["jobs"]["ci"]["steps"][1]["run"]
+image_guard = re.search(r'\[\[ "\$VERJSON_CI_IMAGE" =~ (.+?) \]\] \|\| \{', local_validation)
+assert image_guard is not None
+image_pattern = image_guard.group(1)
+image_cases = (
+    ("ghcr.io/verjson/ci@sha256:" + "a" * 64, True),
+    ("registry.example:5000/team/image_name@sha256:" + "0" * 64, True),
+    ("ghcr.io/Verjson/ci@sha256:" + "a" * 64, False),
+    ("ghcr.io/verjson/ci@sha256:" + "A" * 64, False),
+    ("ghcr.io/v\u00e9rjson/ci@sha256:" + "a" * 64, False),
+    ("ghcr.io/verjson/\uff41@sha256:" + "a" * 64, False),
+    ("ghcr.io/verjson/ci@sha256:" + "a" * 63 + "\u0663", False),
+)
+for image, expected in image_cases:
+    result = subprocess.run(
+        ["bash", "-c", '[[ "$VERJSON_CI_IMAGE" =~ $IMAGE_PATTERN ]]'],
+        env={
+            **os.environ,
+            "LC_ALL": "en_US.UTF-8",
+            "IMAGE_PATTERN": image_pattern,
+            "VERJSON_CI_IMAGE": image,
+        },
+        check=False,
+    )
+    assert (result.returncode == 0) is expected, f"unexpected image validation result: {image!r}"
+
 print("ok - public-v1 adapter matches its pinned source with only reviewed safety changes")
 print("ok - public PR paths are hosted and unsupported public profiles fail explicitly")
 print("ok - protected candidate delegation is private, main-branch dispatch only")

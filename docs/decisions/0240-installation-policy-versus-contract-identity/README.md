@@ -140,3 +140,13 @@ capacity independently; its candidate guard stays bound by the immutable
 source-contract test. A candidate request outside the exact private canonical
 default-branch and enabled-flag context fails the caller workflow; a skipped
 candidate job cannot make the required check pass.
+
+## 2026-10-27 amendment — keep public image validation locale-independent
+
+The public adapter validates OCI image references with explicit ASCII character
+sets. Bash range expressions such as `[a-z]` and `[0-9]` can admit additional
+characters under a non-C locale, so the local validator spells out lowercase
+ASCII letters and digits. The source workflow fixture remains byte-verified at
+its pinned SHA; the golden contract permits only this one reviewed validator
+normalization. Regression cases run under `en_US.UTF-8` and reject uppercase and
+Unicode lookalikes.

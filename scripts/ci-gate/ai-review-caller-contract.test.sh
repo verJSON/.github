@@ -6,7 +6,7 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 sha=0123456789abcdef0123456789abcdef01234567
 
-"$root/scripts/gen-ai-review-caller.sh" "$sha" >"$tmp/caller.yml"
+LC_ALL=en_US.UTF-8 "$root/scripts/gen-ai-review-caller.sh" "$sha" >"$tmp/caller.yml"
 python3 - "$tmp/caller.yml" "$sha" <<'PY'
 import sys, yaml
 
@@ -116,8 +116,10 @@ if grep -Eq '(^|@)(main|master|v[0-9]+)([[:space:]]|$)' "$tmp/caller.yml"; then
   echo 'generated review caller contains a mutable reference' >&2
   exit 1
 fi
-for invalid in main v1 0123456789abcdef0123456789abcdef0123456 ''; do
-  if "$root/scripts/gen-ai-review-caller.sh" "$invalid" >/dev/null 2>&1; then
+uppercase_sha="A${sha:1}"
+non_ascii_hex="${sha:0:39}é"
+for invalid in main v1 0123456789abcdef0123456789abcdef0123456 '' "$uppercase_sha" "$non_ascii_hex"; do
+  if LC_ALL=en_US.UTF-8 "$root/scripts/gen-ai-review-caller.sh" "$invalid" >/dev/null 2>&1; then
     echo "generator accepted unsafe ref: ${invalid:-<empty>}" >&2
     exit 1
   fi

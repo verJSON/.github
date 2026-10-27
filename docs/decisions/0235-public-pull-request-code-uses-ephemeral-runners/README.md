@@ -1272,3 +1272,12 @@ caller must be rejected before any existing job runs.
   function cannot bypass the refusal.
 - This rule rejects public callers for these protected publishing workflows;
   it does not change the hosted-runner policy for public CI reusables.
+
+## 2026-10-27 clarification — rebind the capability-floor relay digest
+
+The `capability-floor-observe.yml [workflow_dispatch] observe` pending row's
+backlog digest is rebound because its sparse checkout includes
+`scripts/gen-ai-review-caller.sh`, whose contract-pin validator now spells out
+lowercase ASCII hexadecimal characters. The workflow, callers, runner selector,
+unresolved reason, and pending justification are unchanged; no relay key or
+runner exception was added. The digest binds the updated sparse-checkout bytes.
