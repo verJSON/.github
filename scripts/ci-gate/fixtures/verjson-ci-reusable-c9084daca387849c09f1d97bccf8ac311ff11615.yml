@@ -1,0 +1,120 @@
+name: verjson-ci
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        description: Explicit public or protected approved-candidate execution profile.
+        required: false
+        default: public-v1
+        type: string
+      image:
+        description: OCI image reference pinned by digest.
+        required: true
+        type: string
+      config:
+        description: Repository-relative contract path.
+        required: false
+        default: verjson-ci.yml
+        type: string
+      result_copy:
+        description: Optional absolute path used only by disposable conformance harnesses.
+        required: false
+        default: ''
+        type: string
+      scenario:
+        description: Provider-neutral scenario identity used by conformance fixtures.
+        required: false
+        default: default
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    if: ${{ inputs.profile == 'public-v1' }}
+    runs-on: ${{ github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Validate immutable image identity
+        env:
+          VERJSON_CI_IMAGE: ${{ inputs.image }}
+        run: |
+          [[ "$VERJSON_CI_IMAGE" =~ ^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::image must be an OCI repository reference pinned by sha256 digest"
+            exit 2
+          }
+      - name: Run verjson-ci
+        env:
+          VERJSON_CI_CONFIG: ${{ inputs.config }}
+          VERJSON_CI_IMAGE: ${{ inputs.image }}
+        run: >-
+          docker run --rm
+          --volume "$GITHUB_WORKSPACE:/workspace"
+          --workdir /workspace
+          --env VERJSON_CI_PROVIDER=github
+          --env VERJSON_CI_COMMIT="$GITHUB_SHA"
+          --env VERJSON_CI_SCENARIO="${{ inputs.scenario }}"
+          "$VERJSON_CI_IMAGE"
+          run --config "$VERJSON_CI_CONFIG" --output .verjson-ci/result.json
+      - name: Copy disposable conformance result
+        if: ${{ inputs.result_copy != '' }}
+        env:
+          RESULT_COPY: ${{ inputs.result_copy }}
+        run: cp .verjson-ci/result.json "$RESULT_COPY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ always() && !env.ACT }}
+        with:
+          name: verjson-ci-result
+          path: .verjson-ci/*.json
+          if-no-files-found: error
+
+  reject-profile:
+    if: ${{ inputs.profile != 'public-v1' && inputs.profile != 'approved-candidate-v1' }}
+    runs-on: ${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    steps:
+      - run: exit 2
+
+  candidate:
+    if: ${{ inputs.profile == 'approved-candidate-v1' && vars.VERJSON_CANDIDATE_WORKERS_ENABLED == 'true' && github.repository == 'Verjson/verjson-ci' && github.ref == 'refs/heads/main' }}
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    steps:
+      - name: Require protected candidate activation
+        env:
+          ENABLED: ${{ vars.VERJSON_CANDIDATE_WORKERS_ENABLED }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          test "$ENABLED" = true
+          test "$REPOSITORY" = Verjson/verjson-ci
+          test "$REF" = refs/heads/main
+          test "$EVENT" = workflow_dispatch
+          test -x /usr/local/bin/verjson-ci
+          test -r /etc/verjson-candidate-github-acquisition/config.json
+          test -r /etc/verjson-candidate-oci-execution/config.json
+      - name: Acquire exact approved producer artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          umask 077
+          mkdir "$RUNNER_TEMP/verjson-candidate-reusable"
+          /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/verjson-ci acquire-github-candidate "$RUNNER_TEMP/verjson-candidate-reusable/acquired" 3<<<"$GH_TOKEN"
+      - name: Execute both approved scenarios through the reusable workflow
+        run: >-
+          /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin
+          /usr/local/bin/verjson-ci execute-candidate-role reusable
+          "$RUNNER_TEMP/verjson-candidate-reusable/acquired"
+          "$RUNNER_TEMP/verjson-candidate-reusable/results"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: candidate-reusable
+          path: ${{ runner.temp }}/verjson-candidate-reusable/results/
+          if-no-files-found: error
+          retention-days: 1

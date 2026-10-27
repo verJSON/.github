@@ -28,7 +28,63 @@ permissions:
 
 jobs:
   ci:
+    if: ${{ inputs.profile == 'public-v1' }}
+    runs-on: ${{ ((github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04') || (github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]')) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Validate immutable image identity
+        env:
+          VERJSON_CI_IMAGE: ${{ inputs.image }}
+        run: |
+          [[ "$VERJSON_CI_IMAGE" =~ ^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::image must be an OCI repository reference pinned by sha256 digest"
+            exit 2
+          }
+      - name: Run verjson-ci
+        env:
+          VERJSON_CI_CONFIG: ${{ inputs.config }}
+          VERJSON_CI_IMAGE: ${{ inputs.image }}
+          VERJSON_CI_SCENARIO: ${{ inputs.scenario }}
+        run: >-
+          docker run --rm
+          --volume "$GITHUB_WORKSPACE:/workspace"
+          --workdir /workspace
+          --env VERJSON_CI_PROVIDER=github
+          --env VERJSON_CI_COMMIT="$GITHUB_SHA"
+          --env VERJSON_CI_SCENARIO="$VERJSON_CI_SCENARIO"
+          "$VERJSON_CI_IMAGE"
+          run --config "$VERJSON_CI_CONFIG" --output .verjson-ci/result.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ always() && !env.ACT }}
+        with:
+          name: verjson-ci-result
+          path: .verjson-ci/*.json
+          if-no-files-found: error
+
+  reject-public-profile:
+    if: ${{ github.event.repository.private != true && inputs.profile != 'public-v1' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Reject protected profiles from public repositories
+        run: |
+          echo "::error::public repositories may use only the public-v1 verjson-ci profile"
+          exit 2
+
+  reject-profile:
+    if: ${{ inputs.profile != 'public-v1' && inputs.profile != 'approved-candidate-v1' }}
+    runs-on: ${{ github.event.repository.private != true && 'ubuntu-24.04' || fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    steps:
+      - name: Reject unsupported verjson-ci profile
+        run: |
+          echo "::error::unsupported verjson-ci profile"
+          exit 2
+
+  candidate:
+    if: ${{ inputs.profile == 'approved-candidate-v1' && vars.VERJSON_CANDIDATE_WORKERS_ENABLED == 'true' && github.repository == 'Verjson/verjson-ci' && github.ref == 'refs/heads/main' && github.event.repository.private == true }}
     permissions:
+      actions: read
       contents: read
     uses: Verjson/verjson-ci/.github/workflows/reusable-ci.yml@c9084daca387849c09f1d97bccf8ac311ff11615
     with:

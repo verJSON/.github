@@ -1,0 +1,8 @@
+{
+  "repository": "Verjson/verjson-ci",
+  "path": ".github/workflows/reusable-ci.yml",
+  "commit": "c9084daca387849c09f1d97bccf8ac311ff11615",
+  "sha256": "51aa1dc4fb34a04a5ce939a5740e2654f1a82d10733406c16c267bc81029f3ef",
+  "retrieved": "2026-10-27",
+  "retrieval": "Authenticated GitHub Contents API"
+}
