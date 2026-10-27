@@ -38,9 +38,25 @@ def validate(document: dict, helper_text: str) -> list[str]:
         problems.append("workflow GITHUB_TOKEN lacks its exact read-only scopes")
 
     jobs = document.get("jobs") or {}
-    if set(jobs) != {"app-key-policy", "attribute"}:
-        problems.append("workflow must contain exactly the policy and attribution jobs")
+    if set(jobs) != {"reject-public-pull-request-caller", "app-key-policy", "attribute"}:
+        problems.append("workflow must contain exactly the public-call guard, policy, and attribution jobs")
         return problems
+    reject_public = jobs["reject-public-pull-request-caller"]
+    expected_public_call_guard = (
+        "${{ (github.event_name == 'pull_request' || "
+        "github.event_name == 'pull_request_review' || "
+        "github.event_name == 'pull_request_review_comment' || "
+        "github.event_name == 'merge_group' || "
+        "github.event_name == 'pull_request_target') && "
+        "github.event.repository.private != true }}"
+    )
+    if reject_public.get("if") != expected_public_call_guard:
+        problems.append("public-call guard does not reject all five public events")
+    if reject_public.get("runs-on") != "ubuntu-24.04" or reject_public.get("permissions") != {}:
+        problems.append("public-call guard must use a permissionless hosted runner")
+    reject_steps = reject_public.get("steps") or []
+    if len(reject_steps) != 1 or "exit 1" not in reject_steps[0].get("run", ""):
+        problems.append("public-call guard does not fail explicitly")
     job = jobs["attribute"]
     expected_runner = "${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}"
     if job.get("runs-on") != expected_runner:
