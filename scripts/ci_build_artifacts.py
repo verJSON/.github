@@ -94,6 +94,7 @@ _EXACT_PACKAGE_MANAGER_VERSION = re.compile(r"v?[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-
 _POLICY_FIELDS = {
     "repository", "visibility", "producer", "consumers", "buildScript",
     "allowedPaths", "requiredPaths", "profileFiles", "audienceApproved",
+    "callerWorkflowPath", "callerWorkflowDigest",
 }
 _MANIFEST_FIELDS = {
     "version", "repository", "ref", "commit", "callerWorkflowSha",
@@ -3110,21 +3111,36 @@ def load_policy_table(source: str | bytes) -> dict[str, Any]:
         raw = json.loads(source)
     except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as exc:
         raise IntegrityError("trusted ArtifactSet policy is not valid JSON") from exc
-    if not isinstance(raw, dict) or set(raw) != {"version", "repositories"} or raw.get("version") != 1:
+    if not isinstance(raw, dict) or set(raw) != {"version", "repositories"}:
+        raise IntegrityError("trusted ArtifactSet policy schema is invalid")
+    version = raw.get("version")
+    if type(version) is not int or version not in {1, 2}:
         raise IntegrityError("trusted ArtifactSet policy schema is invalid")
     repositories = raw.get("repositories")
     if not isinstance(repositories, dict) or any(not isinstance(key, str) for key in repositories):
         raise IntegrityError("trusted ArtifactSet policy repository map is invalid")
+    if version == 1 and repositories:
+        raise IntegrityError("trusted ArtifactSet policy version 1 cannot enroll repositories")
     return raw
 
 
 def _policy_row(table: dict[str, Any], repository: str) -> dict[str, Any] | None:
+    if table.get("version") != 2:
+        return None
     row = table["repositories"].get(repository)
     if not isinstance(row, dict) or set(row) != _POLICY_FIELDS:
         return None
     if row.get("repository") != repository or row.get("visibility") != "private":
         return None
     if not isinstance(row.get("audienceApproved"), bool):
+        return None
+    caller_workflow_path = row.get("callerWorkflowPath")
+    caller_workflow_digest = row.get("callerWorkflowDigest")
+    if (
+        not _is_caller_workflow_path(caller_workflow_path)
+        or not isinstance(caller_workflow_digest, str)
+        or _SHA256.fullmatch(caller_workflow_digest) is None
+    ):
         return None
     if not isinstance(row.get("producer"), str) or not _ID.fullmatch(row["producer"]):
         return None
@@ -3147,7 +3163,78 @@ def _policy_row(table: dict[str, Any], repository: str) -> dict[str, Any] | None
         return None
     if row["producer"] in consumers:
         return None
-    return {**row, "allowedPaths": allowed, "requiredPaths": required, "profileFiles": profiles}
+    return {
+        **row,
+        "allowedPaths": allowed,
+        "requiredPaths": required,
+        "profileFiles": profiles,
+        "callerWorkflowPath": caller_workflow_path,
+        "callerWorkflowDigest": caller_workflow_digest,
+    }
+
+
+def _is_caller_workflow_path(value: Any) -> bool:
+    parts = _path_parts(value)
+    return (
+        parts is not None
+        and len(parts) == 3
+        and parts[:2] == (".github", "workflows")
+        and Path(parts[2]).suffix.lower() in {".yml", ".yaml"}
+    )
+
+
+def _caller_workflow_path_from_ref(repository: str, workflow_ref: str) -> str | None:
+    if not isinstance(workflow_ref, str):
+        return None
+    repository_prefix = f"{repository}/"
+    if not workflow_ref.casefold().startswith(repository_prefix.casefold()):
+        return None
+    workflow_path, separator, ref = workflow_ref[len(repository_prefix):].partition("@refs/")
+    if not separator or not ref or not _is_caller_workflow_path(workflow_path):
+        return None
+    return workflow_path
+
+
+def _caller_workflow_matches_policy(
+    *,
+    repository: Path,
+    workflow_commit: str,
+    workflow_path: str,
+    workflow_digest: str,
+) -> bool:
+    if not _REVISION.fullmatch(workflow_commit):
+        return False
+    try:
+        entries = subprocess.run(
+            ["git", "-C", str(repository), "ls-tree", "-z", "--full-tree", workflow_commit, "--", workflow_path],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout.split(b"\0")
+        matching: list[tuple[str, str, str]] = []
+        for entry in entries:
+            metadata, separator, raw_path = entry.partition(b"\t")
+            if not separator or raw_path.decode("utf-8", errors="strict") != workflow_path:
+                continue
+            mode, kind, object_id = metadata.decode("ascii", errors="strict").split(" ")
+            matching.append((mode, kind, object_id))
+    except (subprocess.CalledProcessError, UnicodeDecodeError, ValueError):
+        return False
+    if len(matching) != 1:
+        return False
+    mode, kind, object_id = matching[0]
+    if kind != "blob" or mode not in {"100644", "100755"}:
+        return False
+    try:
+        workflow_bytes = subprocess.run(
+            ["git", "-C", str(repository), "cat-file", "blob", object_id],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout
+    except subprocess.CalledProcessError:
+        return False
+    return hashlib.sha256(workflow_bytes).hexdigest() == workflow_digest
 
 
 def _pull_request_workflow_graph_unchanged(checkout: Path, base_commit: str, commit: str) -> bool:
@@ -3631,6 +3718,8 @@ def _build_profile(
     repository_name: str,
     workflow_sha: str,
     caller_workflow_sha: str,
+    caller_workflow_path: str,
+    caller_workflow_digest: str,
     runner_policy: str,
     runner_os: str,
     runner_arch: str,
@@ -3664,6 +3753,8 @@ def _build_profile(
         "repository": repository_name,
         "commit": commit,
         "callerWorkflowSha": caller_workflow_sha,
+        "callerWorkflowPath": caller_workflow_path,
+        "callerWorkflowDigest": caller_workflow_digest,
         "reusableWorkflowSha": workflow_sha,
         "runnerPolicy": runner_policy,
         "runnerOS": runner_os,
@@ -3723,6 +3814,7 @@ def select_preflight(
     ref_name: str,
     commit: str,
     caller_workflow_sha: str,
+    caller_workflow_ref: str,
     caller_base_sha: str,
     workflow_sha: str,
     runner_policy: str,
@@ -3788,6 +3880,16 @@ def select_preflight(
         return fallback("policy-row-missing-or-invalid")
     if not private or not row["audienceApproved"]:
         return fallback("audience-not-approved")
+    caller_workflow_path = _caller_workflow_path_from_ref(repository, caller_workflow_ref)
+    if caller_workflow_path is None or caller_workflow_path != row["callerWorkflowPath"]:
+        return fallback("caller-workflow-path-mismatch")
+    if not _caller_workflow_matches_policy(
+        repository=checkout,
+        workflow_commit=caller_workflow_sha,
+        workflow_path=caller_workflow_path,
+        workflow_digest=row["callerWorkflowDigest"],
+    ):
+        return fallback("caller-workflow-digest-mismatch")
     if not _REVISION.fullmatch(commit):
         raise IntegrityError("caller commit is not an immutable full object ID")
     if event_name == "pull_request" and not _pull_request_workflow_graph_unchanged(
@@ -3857,6 +3959,8 @@ def select_preflight(
                 repository_name=repository,
                 workflow_sha=workflow_sha,
                 caller_workflow_sha=caller_workflow_sha,
+                caller_workflow_path=row["callerWorkflowPath"],
+                caller_workflow_digest=row["callerWorkflowDigest"],
                 runner_policy=runner_policy,
                 runner_os=runner_os,
                 runner_arch=runner_arch,
@@ -4725,6 +4829,7 @@ def _authorize_role_from_environment() -> None:
         ref_name=os.environ.get("GITHUB_REF_NAME", ""),
         commit=expected_commit,
         caller_workflow_sha=os.environ["CALLER_WORKFLOW_SHA"],
+        caller_workflow_ref=os.environ.get("GITHUB_WORKFLOW_REF", ""),
         caller_base_sha=os.environ.get("CALLER_BASE_SHA", ""),
         workflow_sha=os.environ["REUSABLE_WORKFLOW_SHA"],
         runner_policy=os.environ["RUNNER_POLICY"],
@@ -6212,7 +6317,8 @@ def main(argv: list[str] | None = None) -> int:
                 ref_name=os.environ.get("GITHUB_REF_NAME", ""),
                 commit=os.environ["CALLER_COMMIT"],
                 caller_workflow_sha=os.environ["CALLER_WORKFLOW_SHA"],
-            caller_base_sha=os.environ.get("CALLER_BASE_SHA", ""),
+                caller_workflow_ref=os.environ.get("GITHUB_WORKFLOW_REF", ""),
+                caller_base_sha=os.environ.get("CALLER_BASE_SHA", ""),
                 workflow_sha=os.environ["REUSABLE_WORKFLOW_SHA"],
                 runner_policy=os.environ["RUNNER_POLICY"],
                 runner_os=os.environ["RUNNER_OS"],
