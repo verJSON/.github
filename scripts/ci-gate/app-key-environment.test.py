@@ -174,33 +174,41 @@ class WorkflowBoundaryTests(unittest.TestCase):
                 self.assertFalse(set(trigger["workflow_call"].get("secrets", {})) & (set(audit.ROLES.values()) | {"release_app_private_key"}))
                 policy = doc["jobs"]["app-key-policy"]
                 if name == "gate-rearm":
-                    # gate-rearm is the organization required-workflow entrypoint,
-                    # where a relative reusable call fails at startup (ADR 0171,
-                    # 2026-09-11 canary), so it must pin the policy workflow to a
-                    # full immutable SHA in this repository.
-                    self.assertRegex(
-                        policy["uses"],
-                        r"^Verjson/\.github/\.github/workflows/app-key-environment\.yml@[0-9a-f]{40}$",
+                    # Required-workflow execution cannot start a relative reusable
+                    # workflow (ADR 0171), so these two policy jobs remain inline.
+                    self.assertNotIn("uses", policy)
+                    self.assertEqual(policy["runs-on"], "ubuntu-24.04")
+                    self.assertEqual(
+                        policy.get("permissions"),
+                        {"actions": "read", "contents": "read"},
                     )
+                    self.assertNotIn("secrets", policy)
+                    key_validation = doc["jobs"]["validate-ai-review-key"]
+                    self.assertEqual(key_validation["needs"], "app-key-policy")
+                    self.assertEqual(
+                        key_validation["environment"],
+                        "${{ inputs.ai_review_environment || 'ai-review-app' }}",
+                    )
+                    self.assertEqual(key_validation.get("permissions"), {"contents": "read"})
+                    self.assertNotIn("uses", key_validation)
                 else:
                     self.assertEqual(policy["uses"], "./.github/workflows/app-key-environment.yml")
-                # Keep the caller's read-only token boundary explicit while
-                # passing the reduced permissions into the nested policy.
-                self.assertEqual(
-                    policy.get("permissions"),
-                    {"actions": "read", "contents": "read"},
-                    f"{name}: app-key policy must retain explicit read-only permissions",
-                )
-                if name in ("ai-review-merge", "gate-rearm"):
-                    # Both edges reach validate-ai-review-key, so both carry the
-                    # narrow named grant (never inherit): an edge with no grant
-                    # delivers nothing to the environment-bound validator.
+                    # Keep the caller's read-only token boundary explicit while
+                    # passing the reduced permissions into the nested policy.
                     self.assertEqual(
-                        policy.get("secrets"),
-                        {"AI_REVIEW_APP_PRIVATE_KEY": "${{ secrets.AI_REVIEW_APP_PRIVATE_KEY }}"},
+                        policy.get("permissions"),
+                        {"actions": "read", "contents": "read"},
+                        f"{name}: app-key policy must retain explicit read-only permissions",
                     )
-                else:
-                    self.assertNotIn("secrets", policy)
+                    if name == "ai-review-merge":
+                        # The reusable edge carries only the one named secret
+                        # consumed by its environment-bound validator.
+                        self.assertEqual(
+                            policy.get("secrets"),
+                            {"AI_REVIEW_APP_PRIVATE_KEY": "${{ secrets.AI_REVIEW_APP_PRIVATE_KEY }}"},
+                        )
+                    else:
+                        self.assertNotIn("secrets", policy)
                 for job in jobs:
                     value = doc["jobs"][job]
                     self.assertIn(field, value["environment"])
@@ -235,6 +243,45 @@ class WorkflowBoundaryTests(unittest.TestCase):
         self.assertIn("mktemp", validator["run"])
         self.assertIn("trap 'rm -f \"$key_file\"' EXIT", validator["run"])
         self.assertIn('openssl rsa -in "$key_file" -check -noout', validator["run"])
+
+    def test_gate_rearm_inline_validators_match_the_reusable_policy_source(self):
+        source = workflow("app-key-environment")
+        rearm = workflow("gate-rearm")
+        source_validate = next(
+            step for step in source["jobs"]["validate"]["steps"]
+            if step.get("name") == "Verify the caller's main-only role environment before key-job admission"
+        )
+        inline_validate = next(
+            step for step in rearm["jobs"]["app-key-policy"]["steps"]
+            if step.get("name") == source_validate["name"]
+        )
+        self.assertEqual(inline_validate["run"], source_validate["run"])
+        self.assertEqual(inline_validate["env"]["ROLE"], "ai-review")
+        self.assertEqual(
+            inline_validate["env"]["ENVIRONMENT"],
+            "${{ inputs.ai_review_environment || 'ai-review-app' }}",
+        )
+        source_key = next(
+            step for step in source["jobs"]["validate-ai-review-key"]["steps"]
+            if step.get("name") == "Validate resolved AI review App private key"
+        )
+        inline_key = next(
+            step for step in rearm["jobs"]["validate-ai-review-key"]["steps"]
+            if step.get("name") == source_key["name"]
+        )
+        self.assertEqual(inline_key["run"], source_key["run"])
+        self.assertEqual(inline_key["env"], source_key["env"])
+        self.assertFalse(any(step.get("uses", "").startswith("actions/checkout@") for step in rearm["jobs"]["validate-ai-review-key"]["steps"]))
+        selector = rearm["jobs"]["validate-ai-review-key"]["runs-on"]
+        self.assertIn("github.event.repository.private != true && 'ubuntu-24.04'", selector)
+        self.assertIn("github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED", selector)
+        self.assertIn("|| 'ubuntu-24.04'", selector)
+        arm = rearm["jobs"]["arm"]
+        self.assertIn("app-key-policy", arm["needs"])
+        self.assertIn("validate-ai-review-key", arm["needs"])
+        arm_step = next(step for step in arm["steps"] if step.get("id") == "arm")
+        self.assertIn("AI_REVIEW_KEY_VALIDATION_RESULT", arm_step["env"])
+        self.assertIn("AI_REVIEW_KEY_VALIDATION_RESULT", arm_step["run"])
 
     def test_retry_inherits_context_and_retains_fixed_environment(self):
         retry = workflow("ai-promotion-retry")
@@ -298,10 +345,11 @@ class WorkflowBoundaryTests(unittest.TestCase):
         self.assertIn("ascii_upcase", review_jobs["title-policy"]["steps"][0]["run"])
         self.assertIn(marker, review_jobs["title-policy"]["steps"][0]["run"])
 
-    def test_gate_rearm_uses_pinned_policy_result_without_caller_sha_validator_checkout(self):
+    def test_gate_rearm_uses_both_inline_policy_results_without_caller_sha_validator_checkout(self):
         jobs = workflow("gate-rearm")["jobs"]
         arm = jobs["arm"]
         self.assertIn("app-key-policy", arm["needs"])
+        self.assertIn("validate-ai-review-key", arm["needs"])
         self.assertFalse(
             any(step.get("with", {}).get("path") == ".gate-trust" for step in arm["steps"])
         )
@@ -316,14 +364,21 @@ class WorkflowBoundaryTests(unittest.TestCase):
         self.assertEqual(
             receipt["env"]["APP_KEY_POLICY_RESULT"], "${{ needs.app-key-policy.result }}"
         )
+        self.assertEqual(
+            receipt["env"]["AI_REVIEW_KEY_VALIDATION_RESULT"],
+            "${{ needs.validate-ai-review-key.result }}",
+        )
         self.assertNotIn("AI_REVIEW_APP_PRIVATE_KEY", receipt["env"])
         self.assertNotIn(".gate-trust/scripts/ci-gate/validate-ai-review-app-key.sh", receipt["run"])
-        self.assertIn('if [ "$APP_KEY_POLICY_RESULT" != success ]; then', receipt["run"])
+        self.assertIn(
+            'if [ "$APP_KEY_POLICY_RESULT" != success ] || [ "$AI_REVIEW_KEY_VALIDATION_RESULT" != success ]; then',
+            receipt["run"],
+        )
 
     def test_native_rearm_and_retry_defaults_are_only_canonical_role_environments(self):
         rearm = workflow("gate-rearm")["jobs"]
         expression = "${{ inputs.ai_review_environment || 'ai-review-app' }}"
-        self.assertEqual(rearm["app-key-policy"]["with"]["environment"], expression)
+        self.assertEqual(rearm["validate-ai-review-key"]["environment"], expression)
         self.assertEqual(rearm["arm"]["environment"], expression)
         self.assertEqual(workflow("ai-promotion-retry")["jobs"]["promote"]["with"]["merge_environment"],
                          "${{ inputs.merge_environment || 'merge-app' }}")

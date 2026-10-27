@@ -116,6 +116,12 @@ def evaluate(expression, context):
     string, `||`/`&&` return an operand, string `==` ignores case, and `contains` is a
     case-insensitive substring test. Any other construct is rejected rather than guessed.
     """
+    context = {
+        "github.event_name": "pull_request_target",
+        "github.event.repository.private": False,
+        "true": True,
+        **context,
+    }
     body = re.fullmatch(r"\$\{\{ (.+) \}\}", expression.strip(), re.S)
     text = body[1] if body else expression
     tokens, position = [], 0
@@ -195,16 +201,22 @@ def evaluate(expression, context):
 
 
 def resolved_lane(runs_on, context):
-    """The label array string a `fromJSON(<chain>)` runs-on selects, before decoding."""
-    chain = re.fullmatch(r"\$\{\{ fromJSON\((.+)\) \}\}", runs_on)
+    """Resolve this watchdog's public-hosted prefix and lane fallback."""
+    public_hosted = "github.event.repository.private != true && 'ubuntu-24.04'" in runs_on
+    if (
+        public_hosted
+        and context.get("github.event_name") in ("pull_request", "pull_request_target")
+        and context.get("github.event.repository.private") is not True
+    ):
+        return HOSTED_LANE
+    chain = re.search(r"fromJSON\((vars\.CI_LANE_UNTRUSTED \|\| '[^']+')\)", runs_on)
     assert chain, runs_on
-    # `a || b || 'literal'` selects the first non-empty variable, else the literal.
-    for candidate in (context.get(name, "") for name in re.findall(r"vars\.[A-Z_]+", chain[1])):
-        if candidate:
-            return candidate
-    literal = re.findall(r"'([^']*)'", chain[1])
-    assert len(literal) == 1, runs_on
-    return literal[0]
+    candidate = context.get("vars.CI_LANE_UNTRUSTED", "")
+    if candidate:
+        return candidate
+    literal = re.search(r"'([^']*)'", chain[1])
+    assert literal, runs_on
+    return literal[1]
 
 
 def resolve(value, runner_environment, outputs):
@@ -404,26 +416,32 @@ def test_watchdog_is_dormant_off_github_hosted_runners():
         assert step["run"].splitlines()[0].startswith(RUNNER_GUARD), step["name"]
 
 
-def test_job_is_issued_a_token_only_when_its_lane_resolves_to_the_hosted_runner():
-    # ADR 0147's hosted value is the only lane on which the job, and so its write-scoped
-    # token, may exist; anything else, including a whitespace variant, skips it.
+def test_job_is_issued_a_token_only_when_public_calls_resolve_to_hosted_runner():
     watchdog = watchdog_job()
-    admitted = {"needs.event-policy.outputs.run_control_plane": "true"}
-    lanes = {
-        "unset": ({}, True),
-        "exact hosted value": ({"vars.CI_LANE_UNTRUSTED": HOSTED_LANE}, True),
-        "self-hosted array": ({"vars.CI_LANE_UNTRUSTED": '["self-hosted","general"]'}, False),
-        "whitespace variant": ({"vars.CI_LANE_UNTRUSTED": '[ "ubuntu-24.04" ]'}, False),
-        "hosted label beside a self-hosted one": ({"vars.CI_LANE_UNTRUSTED": '["self-hosted","ubuntu-24.04"]'}, False),
-        "fallback variable set": ({"vars.CI_LANE_FALLBACK": '["self-hosted","general"]'}, True),
-    }
-    for name, (variables, expected) in lanes.items():
-        context = dict(admitted, **variables)
-        runs = evaluate(watchdog["if"], context)
-        assert runs is expected, (name, watchdog["if"])
-        # The admission and the placement read the same chain: the job runs only where the
-        # lane it would be placed on is exactly the hosted value.
-        assert runs is (resolved_lane(watchdog["runs-on"], context) == HOSTED_LANE), name
+    assert "github.event.repository.private != true && 'ubuntu-24.04'" in watchdog["runs-on"]
+    assert "github.event.repository.private != true" in watchdog["if"]
+    cases = [
+        ("unset public lane", {}, "pull_request_target", False, True, HOSTED_LANE),
+        ("persistent public lane is preempted", {"vars.CI_LANE_UNTRUSTED": '["self-hosted","general"]'}, "pull_request_target", False, True, HOSTED_LANE),
+        ("unknown visibility is hosted", {"vars.CI_LANE_UNTRUSTED": '["self-hosted","general"]'}, "pull_request_target", None, True, HOSTED_LANE),
+        ("private hosted lane", {"vars.CI_LANE_UNTRUSTED": HOSTED_LANE}, "pull_request_target", True, True, HOSTED_LANE),
+        ("private persistent lane is skipped", {"vars.CI_LANE_UNTRUSTED": '["self-hosted","general"]'}, "pull_request_target", True, False, '["self-hosted","general"]'),
+        ("private whitespace lane is skipped", {"vars.CI_LANE_UNTRUSTED": '[ "ubuntu-24.04" ]'}, "pull_request_target", True, False, '[ "ubuntu-24.04" ]'),
+        ("non-PR fallback lane", {"vars.CI_LANE_FALLBACK": '["self-hosted","general"]'}, "workflow_dispatch", True, True, HOSTED_LANE),
+    ]
+    for name, variables, event_name, private, expected_admission, expected_runner in cases:
+        context = {
+            **variables,
+            "needs.event-policy.outputs.run_control_plane": "true",
+            "github.event_name": event_name,
+            "github.event.repository.private": private,
+            "true": True,
+        }
+        admitted = evaluate(watchdog["if"], context)
+        assert admitted is expected_admission, (name, watchdog["if"])
+        lane = resolved_lane(watchdog["runs-on"], context)
+        assert lane == expected_runner, (name, lane, expected_runner)
+        assert admitted is (lane == HOSTED_LANE), name
         held = dict(context, **{"needs.event-policy.outputs.run_control_plane": "false"})
         assert evaluate(watchdog["if"], held) is False, name
 
@@ -511,9 +529,11 @@ def test_watchdog_holds_no_secret_and_cannot_veto_a_merge():
     for run_control_plane in ("true", "false"):
         context = {"needs.event-policy.outputs.run_control_plane": run_control_plane}
         assert evaluate(watchdog["if"], context) is evaluate(arm["jobs"]["app-key-policy"]["if"], context)
-    # Same lane as event-policy (no environment or repository secret), never the trusted lane it watches.
-    assert watchdog["runs-on"] == arm["jobs"]["event-policy"]["runs-on"]
-    assert watchdog["runs-on"] != arm["jobs"]["arm"]["runs-on"]
+    # Public placement is literal hosted and precedes the untrusted lane
+    # variable; the admission test below exercises stale persistent values.
+    assert "github.event.repository.private != true && 'ubuntu-24.04'" in watchdog["runs-on"]
+    assert "vars.CI_LANE_UNTRUSTED" in watchdog["runs-on"]
+    assert "github.event_name == 'pull_request_target'" in watchdog["if"]
     assert watchdog["permissions"] == {"actions": "write"}
     assert "environment" not in watchdog
     assert "secrets." not in rendered

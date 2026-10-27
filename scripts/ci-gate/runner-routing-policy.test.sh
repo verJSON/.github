@@ -66,7 +66,7 @@ literal_hosted_job_sites() {
 }
 
 literal_hosted_sites="$(literal_hosted_job_sites "${workflow_files[@]}")"
-expected_literal_hosted_sites=$'actions-ci.yml:hosted-compatibility-tests:    runs-on: ubuntu-24.04\ncontainer-deployment.yml:verify-default-branch:    runs-on: ubuntu-24.04\nai-privileged-merge.yml:cleanup_arm_receipt:    runs-on: ubuntu-24.04\nai-privileged-merge.yml:invalid_verjson_route:    runs-on: ubuntu-24.04\nai-privileged-merge.yml:validate_privileged_lane:    runs-on: ubuntu-24.04\napp-key-environment.yml:validate:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:acquire-private-node-dependencies:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:attest-sbom:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:candidate-manifest:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:evict-node-modules-transfer:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:mirror-gar:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:prepare:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:publish-base:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:publish-derived:    runs-on: ubuntu-24.04\ncontainer-release.yml:promote:    runs-on: ubuntu-24.04\nprivileged-merge-conformance.yml:audit:    runs-on: ubuntu-24.04'
+expected_literal_hosted_sites=$'actions-ci.yml:hosted-compatibility-tests:    runs-on: ubuntu-24.04\ncontainer-deployment.yml:verify-default-branch:    runs-on: ubuntu-24.04\nai-privileged-merge.yml:cleanup_arm_receipt:    runs-on: ubuntu-24.04\nai-privileged-merge.yml:invalid_verjson_route:    runs-on: ubuntu-24.04\nai-privileged-merge.yml:validate_privileged_lane:    runs-on: ubuntu-24.04\napp-key-environment.yml:validate:    runs-on: ubuntu-24.04\ngate-rearm.yml:app-key-policy:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:acquire-private-node-dependencies:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:attest-sbom:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:candidate-manifest:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:evict-node-modules-transfer:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:mirror-gar:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:prepare:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:publish-base:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:publish-derived:    runs-on: ubuntu-24.04\ncontainer-release.yml:promote:    runs-on: ubuntu-24.04\nprivileged-merge-conformance.yml:audit:    runs-on: ubuntu-24.04'
 expected_literal_hosted_sites="$(printf '%s\n' \
   "$expected_literal_hosted_sites" \
   $'changelog-contract-fleet-report.yml:report:    runs-on: ubuntu-24.04' \
@@ -269,6 +269,7 @@ unsafe_portable="$(
     | grep -vE ':[0-9]+:[[:space:]]+runs-on: ubuntu-24\.04$' \
     | grep -v "inputs.github-hosted-runner" \
     | grep -v "vars.CI_RUNNER_FASTLANE" \
+ | grep -vF "runs-on: \${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || 'ubuntu-24.04') }}" \
     | grep -v "vars.CI_LANE_UNTRUSTED || '\[\"ubuntu-24.04\"\]'" \
     | sed "s/vars\.CI_LANE_FALLBACK || '\\[\"ubuntu-24\.04\"\\]'//" \
     | grep -E "ubuntu-(24\\.04|latest)" \
@@ -983,6 +984,15 @@ assert_route "$workflows/app-key-environment.yml" validate-ai-review-key Verjson
 assert_route "$workflows/app-key-environment.yml" validate-ai-review-key Verjson/verjson-authn '' true \
   '["trusted-canary"]' '["untrusted-canary"]' '["trusted-canary"]' \
   "validate-ai-review-key — private caller keeps the trusted lane"
+EVENT_NAME=pull_request_target assert_route "$workflows/gate-rearm.yml" validate-ai-review-key Verjson/.github '' false \
+  '["trusted-canary"]' '["self-hosted","general"]' 'ubuntu-24.04' \
+  "gate-rearm key validation — public target ignores persistent lane values"
+EVENT_NAME=pull_request_target assert_route "$workflows/gate-rearm.yml" validate-ai-review-key Verjson/verjson-authn '' true \
+  '["trusted-canary"]' '["untrusted-canary"]' '["trusted-canary"]' \
+  "gate-rearm key validation — private target follows the trusted lane"
+EVENT_NAME=pull_request_target assert_route "$workflows/gate-rearm.yml" validate-ai-review-key Verjson/.github '' '' \
+  '["trusted-canary"]' '["self-hosted","general"]' 'ubuntu-24.04' \
+  "gate-rearm key validation — unresolved visibility stays hosted"
 
 # #411 and ADR 0235. A supplied runner_labels value is explicit fleet
 # authority off Verjson and for a private Verjson repository, and must beat

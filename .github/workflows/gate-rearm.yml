@@ -67,33 +67,74 @@ jobs:
                 printf 'new_title_held=%s\n' "$new_title_held"
               } >>"$GITHUB_OUTPUT"
 
+  # ADR 0242 keeps the required-workflow path local: relative reusable calls
+  # fail with zero jobs here (ADR 0171's 2026-09-11 canary). These two jobs
+  # remain behaviorally matched to app-key-environment.yml by the platform test.
   app-key-policy:
     needs: event-policy
     if: ${{ needs.event-policy.outputs.run_control_plane == 'true' }}
-    # Absolute pinned reference, not a relative path: when this file runs as an
-    # organization ruleset required workflow, a relative reusable call fails at
-    # startup with zero jobs (canary receipt, 2026-09-11), so the policy check
-    # must name its trusted revision explicitly. Pinned to ebe23faf, a main
-    # commit reachable from refs (the earlier f56af66c pin named a squashed
-    # PR-branch head on no ref, and the injected run then had no jobs), which
-    # contains the inline App-key validator; update the pin with a reviewed
-    # revision bump so this nested call does not inherit the outer caller SHA.
-    uses: Verjson/.github/.github/workflows/app-key-environment.yml@ebe23fafbdb77dd2cca6f1862d932fde881b80d7
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
     permissions:
       actions: read
       contents: read
-    # The validator's validate-ai-review-key job binds the environment inside
-    # the called workflow and needs a grant on this edge to resolve the key
-    # (an edge with no grant delivers nothing: run 36289883288). The narrow
-    # named grant, proven post-withdrawal of the organization copy on
-    # ai-review-merge's identical edge (run 36290560349), is used instead of
-    # inheritance so this injected workflow forwards one secret, not the set.
-    secrets:
-      AI_REVIEW_APP_PRIVATE_KEY: ${{ secrets.AI_REVIEW_APP_PRIVATE_KEY }}
-    with:
-      role: ai-review
-      environment: ${{ inputs.ai_review_environment || 'ai-review-app' }}
+    steps:
+      - name: Verify the caller's main-only role environment before key-job admission
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          ROLE: ai-review
+          ENVIRONMENT: ${{ inputs.ai_review_environment || 'ai-review-app' }}
+        run: |
+          set -euo pipefail
+          case "$ROLE" in release|merge|ai-review) ;; *) exit 1 ;; esac
+          [ "$ENVIRONMENT" = "$ROLE-app" ]
+          [ "$REF" = refs/heads/main ]
+          [ "$DEFAULT_BRANCH" = main ]
+          environment_record=$(gh api "repos/$REPOSITORY/environments/$ENVIRONMENT")
+          jq -e --arg name "$ENVIRONMENT" '
+            .name == $name and (.id | type == "number" and . > 0) and
+            .deployment_branch_policy.protected_branches == false and
+            .deployment_branch_policy.custom_branch_policies == true
+          ' <<<"$environment_record" >/dev/null
+          policies=$(gh api "repos/$REPOSITORY/environments/$ENVIRONMENT/deployment-branch-policies?per_page=100")
+          jq -e '
+            .total_count == 1 and (.branch_policies | length) == 1 and
+            .branch_policies[0].name == "main" and
+            .branch_policies[0].type == "branch"
+          ' <<<"$policies" >/dev/null
+  validate-ai-review-key:
+    needs: app-key-policy
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || 'ubuntu-24.04') }}
+    timeout-minutes: 2
+    environment: ${{ inputs.ai_review_environment || 'ai-review-app' }}
+    permissions:
+      contents: read
+    steps:
+      - name: Validate resolved AI review App private key
+        env:
+          AI_REVIEW_APP_PRIVATE_KEY: ${{ secrets.AI_REVIEW_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
 
+          key="${AI_REVIEW_APP_PRIVATE_KEY:-}"
+          if [ -z "$key" ]; then
+            echo "::error::AI_REVIEW_APP_PRIVATE_KEY is empty or unavailable" >&2
+            exit 1
+          fi
+
+          umask 077
+          key_file="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ai-review-app-key.XXXXXX")"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s' "$key" >"$key_file"
+          unset key
+
+          if ! openssl rsa -in "$key_file" -check -noout >/dev/null 2>&1; then
+            echo "::error::AI_REVIEW_APP_PRIVATE_KEY is not a valid PEM RSA private key" >&2
+            exit 1
+          fi
   # ADR 0230: `timeout-minutes` never counts queue time, so a job GitHub never
   # hands to a runner stays queued indefinitely, and with this workflow's
   # non-cancelling PR concurrency group it holds every later arm for the PR as
@@ -111,11 +152,11 @@ jobs:
     # value. Any other value, including a rollback to the persistent pool or a
     # reformatted array, skips the job (dormant, fail-safe), so no token is
     # issued to a persistent host. The step guards remain as a backstop.
-    if: ${{ needs.event-policy.outputs.run_control_plane == 'true' && (vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') == '["ubuntu-24.04"]' }}
+    if: ${{ needs.event-policy.outputs.run_control_plane == 'true' && (((github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.repository.private != true) || (vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') == '["ubuntu-24.04"]') }}
     # A watchdog defect must never become a veto on an otherwise-authorized
     # merge; the stall path acts through cancellation, not this job's result.
     continue-on-error: true
-    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     # Two sequential acquisitions at the limit, the policy jobs between them,
     # and the cancellation grace (asserted by the registered watchdog test).
     timeout-minutes: 40
@@ -220,7 +261,7 @@ jobs:
 
   arm:
     environment: ${{ inputs.ai_review_environment || 'ai-review-app' }}
-    needs: [event-policy, app-key-policy]
+    needs: [event-policy, app-key-policy, validate-ai-review-key]
     # Body/base-only edits and title edits that do not change held state skip
     # runner placement and credential validation in the permissionless event-policy job.
     if: ${{ always() && needs.event-policy.outputs.run_control_plane == 'true' }}
@@ -326,6 +367,7 @@ jobs:
           ACTIONS_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
           APP_KEY_POLICY_RESULT: ${{ needs.app-key-policy.result }}
+          AI_REVIEW_KEY_VALIDATION_RESULT: ${{ needs.validate-ai-review-key.result }}
         run: |
           set -euo pipefail
           [[ "$TARGET_REPO" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+$ ]] || exit 1
@@ -920,7 +962,7 @@ jobs:
             exit 1
           fi
 
-          if [ "$APP_KEY_POLICY_RESULT" != success ]; then
+          if [ "$APP_KEY_POLICY_RESULT" != success ] || [ "$AI_REVIEW_KEY_VALIDATION_RESULT" != success ]; then
             echo 'failure_reason=ai_review_environment_policy' >>"$GITHUB_OUTPUT"
             echo "::error::AI review environment policy did not succeed; no review was dispatched"
             exit 1

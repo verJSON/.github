@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0242](0242-inline-required-workflow-app-key-validation/README.md) | 2026-10-27 | Inline app-key validation in the required gate workflow |
 | [0241](0241-configured-github-app-client-id-preflight-policy/README.md) | 2026-10-25 | Preflight validation pins the configured GitHub App client-ID format |
 | [0240](0240-installation-policy-versus-contract-identity/README.md) | 2026-10-22 | Installation policy versus contract identity |
 | [0239](0239-unified-untrusted-execution-boundary/README.md) | 2026-10-22 | Unified untrusted-execution boundary for UI and Pulumi pull requests |
