@@ -31,6 +31,10 @@ ALLOW_GUARD = (
     "|| github.event.repository.private == true)"
 )
 SENTINEL_JOB = "reject-public-pull-request-caller"
+REJECTION_STEP = {
+    "name": "Reject public pull request callers",
+    "run": 'echo "::error::This reusable workflow does not accept public pull request callers"\nexit 1\n',
+}
 SAFE_HOSTED_EXCEPTIONS = frozenset(
     {"app-key-environment.yml", "gate-rearm.yml"}
 )
@@ -98,6 +102,9 @@ class PublicCallGuardContractTest(unittest.TestCase):
                 self.assertEqual(expression(sentinel["if"]), PUBLIC_CALL)
                 self.assertEqual(sentinel["runs-on"], "ubuntu-24.04")
                 self.assertEqual(sentinel.get("permissions"), {})
+                self.assertEqual(set(sentinel), {"if", "runs-on", "permissions", "steps"})
+                self.assertEqual(sentinel["steps"], [REJECTION_STEP])
+                self.assertNotIn("secrets.", json.dumps(sentinel))
                 self.assertNotIn("uses", sentinel)
                 self.assertTrue(
                     any(re.search(r"\bexit\s+[1-9][0-9]*\b", str(step.get("run", ""))) for step in sentinel["steps"]),

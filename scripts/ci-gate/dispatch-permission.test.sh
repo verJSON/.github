@@ -40,6 +40,8 @@ document = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 jobs = document["jobs"]
 
 expected = {
+    # Permissionless rejection for public pull-request callers.
+    "reject-public-pull-request-caller": {},
     # Permissionless event-time title classification.
     "title-policy": {},
     # Reusable app-key policy callee; reads its own workflow metadata only.

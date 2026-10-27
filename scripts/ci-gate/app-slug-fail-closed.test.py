@@ -18,7 +18,9 @@ assert not any(step.get("name") == "Mint dedicated authorization App token" for 
 assert "--argjson app_id 15368" in arm_script and ".app.id == $app_id" in arm_script
 assert "--arg slug github-actions" in arm_script and ".app.slug == $slug" in arm_script
 create_check = arm_script.index('gh api --method POST "repos/$TARGET_REPO/check-runs"')
-policy_result_check = arm_script.index('if [ "$APP_KEY_POLICY_RESULT" != success ]; then')
+policy_result_check = arm_script.index(
+    'if [ "$APP_KEY_POLICY_RESULT" != success ] || [ "$AI_REVIEW_KEY_VALIDATION_RESULT" != success ]; then'
+)
 dispatch = next(step for step in arm["steps"] if step.get("name") == "Dispatch trusted review after receipt publication")
 receipt = next(step for step in arm["steps"] if step.get("name") == "Upload immutable arm receipt")
 assert create_check < policy_result_check

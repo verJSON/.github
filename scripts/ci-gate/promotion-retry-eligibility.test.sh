@@ -14,13 +14,15 @@ import yaml
 
 workflow = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 jobs = workflow["jobs"]
+allow_guard = "(github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true)"
 resolve = jobs["resolve"]
 steps = {step.get("name"): step for step in resolve["steps"]}
 assert resolve["outputs"]["ready"] == "${{ steps.resolve.outputs.ready || steps.adoption.outputs.ready }}"
 assert steps["Resolve executing trusted workflow revision"]["if"] == "steps.adoption.outputs.adopted == 'true'"
 assert steps["Check out immutable review-policy decoder"]["if"] == "steps.adoption.outputs.adopted == 'true'"
 assert steps["Resolve exact-head authorization"]["if"] == "steps.adoption.outputs.adopted == 'true'"
-assert jobs["promote"]["if"] == "needs.resolve.outputs.ready == 'true'"
+assert resolve["if"] == "${{ " + allow_guard + " }}"
+assert jobs["promote"]["if"] == "${{ " + allow_guard + " && (needs.resolve.outputs.ready == 'true') }}"
 PY
 if [ "$?" -eq 0 ]; then
   pass "unadopted resolution skips checkout and only ready=true can promote"

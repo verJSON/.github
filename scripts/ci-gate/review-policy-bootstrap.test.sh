@@ -21,6 +21,7 @@ cat "$CALLER_FILE"
 SH
 chmod +x "$tmp/bin/gh"
 export PATH="$tmp/bin:$PATH" ACTIONS_TOKEN=actions-token TARGET_REPO=Verjson/example DEFAULT_BRANCH=main
+export AI_REVIEW_DISPATCH_WORKFLOW=ai-review-merge.yml AI_REVIEW_LEGACY_DISPATCH_WORKFLOW=
 # shellcheck source=/dev/null
 source "$tmp/selector.sh"
 decode_envelope() {

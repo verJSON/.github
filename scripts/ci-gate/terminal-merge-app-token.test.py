@@ -147,7 +147,16 @@ def validate(document: dict, raw: str) -> list[str]:
         problems.append("merge token escaped the terminal operation")
     report_condition = terminal_condition + " && steps.terminal-merge.outcome == 'success'"
     confirm_condition = "${{ always() && " + report_condition + " }}"
-    cleanup_condition = "${{ always() && needs.privileged_merge.outputs.terminal_merge_succeeded == 'true' }}"
+    allow_guard = (
+        "(github.event_name != 'pull_request' && github.event_name != 'pull_request_review' "
+        "&& github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' "
+        "&& github.event_name != 'pull_request_target' "
+        "|| github.event.repository.private == true)"
+    )
+    cleanup_condition = (
+        "${{ " + allow_guard + " && "
+        "(always() && needs.privileged_merge.outputs.terminal_merge_succeeded == 'true') }}"
+    )
     if (
         capture.get("if") != terminal_condition
         or merge.get("if") != terminal_condition

@@ -71,7 +71,29 @@ python3 - "$canonical" <<'PY' && pass "terminal routing has no runner-produced t
 import sys, yaml
 d = yaml.safe_load(open(sys.argv[1]))
 jobs = d["jobs"]
-if list(jobs) != ["app-key-policy", "invalid_verjson_route", "validate_privileged_lane", "privileged_merge", "cleanup_arm_receipt"]:
+def failure_can_be_ignored(action):
+    if "continue-on-error" not in action:
+        return False
+    value = action["continue-on-error"]
+    return value is not False and str(value).lower() != "false"
+
+if list(jobs) != ["reject-public-pull-request-caller", "app-key-policy", "invalid_verjson_route", "validate_privileged_lane", "privileged_merge", "cleanup_arm_receipt"]:
+    sys.exit(1)
+sentinel = jobs["reject-public-pull-request-caller"]
+public_guard = "(github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true"
+if (
+    sentinel.get("if") != "${{ " + public_guard + " }}"
+    or sentinel.get("runs-on") != "ubuntu-24.04"
+    or sentinel.get("permissions") != {}
+    or "needs" in sentinel
+    or failure_can_be_ignored(sentinel)
+    or len(sentinel.get("steps", [])) != 1
+    or sentinel["steps"][0].get("name") != "Reject public pull request callers"
+    or sentinel["steps"][0].get("run") != 'echo "::error::This reusable workflow does not accept public pull request callers"\nexit 1\n'
+    or "if" in sentinel["steps"][0]
+    or failure_can_be_ignored(sentinel["steps"][0])
+    or "secrets." in str(sentinel)
+):
     sys.exit(1)
 guard = jobs["invalid_verjson_route"]
 validation = jobs["validate_privileged_lane"]
@@ -112,11 +134,21 @@ import yaml
 workflow = yaml.safe_load(open(sys.argv[1]))
 
 allowed = ("Verjson/.github", "Verjson/verjson-github-runner")
-want_guard_if = "${{ github.repository_owner == 'Verjson' && !(github.event.repository.visibility == 'public' && (github.repository == 'Verjson/.github' || github.repository == 'Verjson/verjson-github-runner') || github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-github-runner') }}"
-want_validation_if = "${{ github.repository_owner == 'Verjson' && github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-github-runner' }}"
+allow_guard = "(github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true)"
+public_guard = "(github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true"
+want_guard_if = "${{ " + allow_guard + " && (github.repository_owner == 'Verjson' && !(github.event.repository.visibility == 'public' && (github.repository == 'Verjson/.github' || github.repository == 'Verjson/verjson-github-runner') || github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-github-runner')) }}"
+want_validation_if = "${{ " + allow_guard + " && (github.repository_owner == 'Verjson' && github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-github-runner') }}"
 want_if = "${{ always() && (github.repository_owner != 'Verjson' || github.event.repository.visibility == 'public' && (github.repository == 'Verjson/.github' || github.repository == 'Verjson/verjson-github-runner') || github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-github-runner' && inputs.privileged_lane == '[\"ubuntu-24.04\"]' && needs.validate_privileged_lane.result == 'success') }}"
 want_if = "${{ needs.app-key-policy.result == 'success' && (" + want_if.removeprefix("${{").removesuffix("}}").strip() + ") }}"
+want_if = "${{ " + allow_guard + " && (" + want_if.removeprefix("${{").removesuffix("}}").strip() + ") }}"
 want_runs_on = "${{ github.repository_owner != 'Verjson' && inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.visibility == 'public' && 'ubuntu-24.04' || fromJSON(inputs.privileged_lane) }}"
+want_cleanup_if = "${{ " + allow_guard + " && (always() && needs.privileged_merge.outputs.terminal_merge_succeeded == 'true') }}"
+
+def failure_can_be_ignored(action):
+    if "continue-on-error" not in action:
+        return False
+    value = action["continue-on-error"]
+    return value is not False and str(value).lower() != "false"
 
 def valid(candidate):
     jobs = candidate.get("jobs", {})
@@ -125,7 +157,18 @@ def valid(candidate):
     cleanup = jobs.get("cleanup_arm_receipt", {})
     guard_steps = guard.get("steps", [])
     return (
-        list(jobs) == ["app-key-policy", "invalid_verjson_route", "validate_privileged_lane", "privileged_merge", "cleanup_arm_receipt"]
+        list(jobs) == ["reject-public-pull-request-caller", "app-key-policy", "invalid_verjson_route", "validate_privileged_lane", "privileged_merge", "cleanup_arm_receipt"]
+        and jobs["reject-public-pull-request-caller"].get("if") == "${{ " + public_guard + " }}"
+        and jobs["reject-public-pull-request-caller"].get("runs-on") == "ubuntu-24.04"
+        and jobs["reject-public-pull-request-caller"].get("permissions") == {}
+        and "needs" not in jobs["reject-public-pull-request-caller"]
+        and not failure_can_be_ignored(jobs["reject-public-pull-request-caller"])
+        and len(jobs["reject-public-pull-request-caller"].get("steps", [])) == 1
+        and jobs["reject-public-pull-request-caller"]["steps"][0].get("name") == "Reject public pull request callers"
+        and jobs["reject-public-pull-request-caller"]["steps"][0].get("run") == 'echo "::error::This reusable workflow does not accept public pull request callers"\nexit 1\n'
+        and "if" not in jobs["reject-public-pull-request-caller"]["steps"][0]
+        and not failure_can_be_ignored(jobs["reject-public-pull-request-caller"]["steps"][0])
+        and "secrets." not in str(jobs["reject-public-pull-request-caller"])
         and guard.get("if") == want_guard_if
         and guard.get("runs-on") == "ubuntu-24.04"
         and guard.get("timeout-minutes") == 1
@@ -144,6 +187,7 @@ def valid(candidate):
         and "outputs" not in jobs["validate_privileged_lane"]
         and set(merge.get("outputs", {})) == {"arm_receipt_artifact_id", "terminal_merge_succeeded"}
         and cleanup.get("needs") == "privileged_merge"
+        and cleanup.get("if") == want_cleanup_if
         and cleanup.get("permissions") == {"actions": "write"}
         and "environment" not in cleanup
         and "secrets" not in cleanup
@@ -189,6 +233,40 @@ mutations.append(runner_only_gate)
 credentialed_validation = copy.deepcopy(workflow)
 credentialed_validation["jobs"]["validate_privileged_lane"]["env"]["GH_TOKEN"] = "${{ secrets.ORG_ADMIN_TOKEN }}"
 mutations.append(credentialed_validation)
+
+public_guard_widened = copy.deepcopy(workflow)
+public_guard_widened["jobs"]["reject-public-pull-request-caller"]["if"] = "${{ false }}"
+mutations.append(public_guard_widened)
+
+dependent_sentinel = copy.deepcopy(workflow)
+dependent_sentinel["jobs"]["reject-public-pull-request-caller"]["needs"] = ["app-key-policy"]
+mutations.append(dependent_sentinel)
+
+masked_sentinel_job = copy.deepcopy(workflow)
+masked_sentinel_job["jobs"]["reject-public-pull-request-caller"]["continue-on-error"] = True
+mutations.append(masked_sentinel_job)
+
+masked_sentinel_step = copy.deepcopy(workflow)
+masked_sentinel_step["jobs"]["reject-public-pull-request-caller"]["steps"][0]["continue-on-error"] = True
+mutations.append(masked_sentinel_step)
+
+masked_sentinel_job_expression = copy.deepcopy(workflow)
+masked_sentinel_job_expression["jobs"]["reject-public-pull-request-caller"]["continue-on-error"] = "${{ true }}"
+mutations.append(masked_sentinel_job_expression)
+
+masked_sentinel_step_expression = copy.deepcopy(workflow)
+masked_sentinel_step_expression["jobs"]["reject-public-pull-request-caller"]["steps"][0]["continue-on-error"] = "${{ true }}"
+mutations.append(masked_sentinel_step_expression)
+
+skipped_sentinel_step = copy.deepcopy(workflow)
+skipped_sentinel_step["jobs"]["reject-public-pull-request-caller"]["steps"][0]["if"] = "${{ false }}"
+mutations.append(skipped_sentinel_step)
+
+public_gate_removed = copy.deepcopy(workflow)
+public_gate_removed["jobs"]["privileged_merge"]["if"] = public_gate_removed["jobs"]["privileged_merge"]["if"].replace(
+    allow_guard + " && ", "", 1
+)
+mutations.append(public_gate_removed)
 
 private_literal = copy.deepcopy(workflow)
 private_literal["jobs"]["privileged_merge"]["runs-on"] = want_runs_on.replace(
