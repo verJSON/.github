@@ -92,7 +92,21 @@ permissions:
   contents: read
 
 jobs:
+  public-call-guard:
+    name: Reject public reusable workflow calls
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Reject public pull-request workflow callers
+        if: ${{ contains(fromJSON('["pull_request","pull_request_review","pull_request_review_comment","merge_group","pull_request_target"]'), github.event_name) && github.event.repository.private != true }}
+        run: |
+          echo "::error::public pull-request events cannot call this reusable workflow"
+          exit 1
+
   prepare:
+    if: needs.public-call-guard.result == 'success'
+    needs:
+      - public-call-guard
     name: Prepare release packages without publication credentials
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ inputs.timeout-minutes }}
@@ -415,7 +429,10 @@ jobs:
           compression-level: 0
 
   release:
-    needs: prepare
+    if: needs.public-call-guard.result == 'success'
+    needs:
+      - public-call-guard
+      - prepare
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -925,8 +942,12 @@ jobs:
 
   retention:
     name: Apply the package retention policy
-    needs: release
-    if: needs.release.outputs.new-release-published == 'true'
+    needs:
+      - public-call-guard
+      - release
+    if: >-
+      ${{ needs.public-call-guard.result == 'success' && (needs.release.outputs.new-release-published ==
+      'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

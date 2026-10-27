@@ -240,6 +240,16 @@ expected_acquisition_condition = (
     "&& needs.prepare.result == 'success' "
     "&& needs.prepare.outputs.has-private-node-packages == 'true'"
 )
+public_call_guard_result = "needs.public-call-guard.result == 'success'"
+guarded_if_prefix = f"${{{{ {public_call_guard_result} && ("
+
+def unguarded_condition(job):
+    condition = job.get("if", "")
+    assert condition.startswith(guarded_if_prefix) and condition.endswith(") }}"), (
+        "publication authority predicate drifted or is missing the public-call guard"
+    )
+    return " ".join(condition[len(guarded_if_prefix) : -len(") }}")].split())
+
 expected_pr_runner_selector = (
     "${{ github.event_name != 'pull_request' && inputs.runner != '' && fromJSON(inputs.runner) "
     "|| github.repository_owner != 'Verjson' && 'ubuntu-24.04' "
@@ -255,14 +265,14 @@ def validate_authority(read_only, publication):
     assert set(publication["jobs"]) == {
         "prepare", "acquire-private-node-dependencies", "publish-base",
         "publish-derived", "attest-sbom", "mirror-gar", "candidate-manifest",
-        "evict-node-modules-transfer"
+        "evict-node-modules-transfer", "public-call-guard"
     }, "publication entrypoint has an unexpected static graph"
     for job_name in publication["jobs"]:
         assert publication["jobs"][job_name]["runs-on"] == "ubuntu-24.04", (
             f"deployable publication job {job_name} must use an independently trusted hosted runner"
         )
     acquisition = publication["jobs"]["acquire-private-node-dependencies"]
-    assert acquisition["if"] == expected_acquisition_condition, (
+    assert unguarded_condition(acquisition) == expected_acquisition_condition, (
         "private dependency acquisition must run only on trusted publication events"
     )
     assert acquisition["outputs"]["transfer-encryption-key"] == (
@@ -325,6 +335,8 @@ def validate_authority(read_only, publication):
             publication_job = copy.deepcopy(publication["jobs"][job_name])
             read_only_job.pop("runs-on")
             publication_job.pop("runs-on")
+            publication_job.pop("if")
+            publication_job.pop("needs")
             assert publication_job["outputs"].pop("mirror-matrix", None) == (
                 "${{ steps.config.outputs.mirror-matrix }}"
             )
@@ -413,17 +425,19 @@ def validate_authority(read_only, publication):
                 f"caller cannot satisfy {job_name} permission {permission}: {level}"
             )
     for job_name, expected in expected_conditions.items():
-        actual = " ".join(publication["jobs"][job_name]["if"].split())
+        actual = unguarded_condition(publication["jobs"][job_name])
         assert actual == expected, (
             f"{job_name} publication authority predicate drifted"
         )
-    assert set(publication["jobs"]["candidate-manifest"]["needs"]) == candidate_producers, (
+    assert set(publication["jobs"]["candidate-manifest"]["needs"]) == candidate_producers | {
+        "public-call-guard"
+    }, (
         "candidate manifest direct producers drifted"
     )
 
 candidate_producers = {"prepare", "publish-base", "publish-derived", "attest-sbom", "mirror-gar"}
 candidate_job = publisher["jobs"]["candidate-manifest"]
-assert candidate_job["if"] == candidate_condition
+assert unguarded_condition(candidate_job) == candidate_condition
 
 # GitHub skips a job with any skipped dependency unless always() opts the job into
 # evaluation. All direct producers must then be terminal-success: an unrelated
@@ -431,7 +445,7 @@ assert candidate_job["if"] == candidate_condition
 # skipped direct producer remains fail closed.
 def candidate_manifest_runs(results):
     return (
-        candidate_job["if"].startswith("always()")
+        unguarded_condition(candidate_job).startswith("always()")
         and all(results[name] == "success" for name in candidate_producers - {"mirror-gar"})
         and results["mirror-gar"] in ("success", "skipped")
     )
@@ -516,11 +530,11 @@ except AssertionError as error:
 # "re-run failed jobs" (which reuses the acquisition job's key output) still restores it.
 evict = publisher["jobs"]["evict-node-modules-transfer"]
 assert set(evict["needs"]) == {
-    "acquire-private-node-dependencies", "publish-base", "publish-derived"
+    "public-call-guard", "acquire-private-node-dependencies", "publish-base", "publish-derived"
 }, "eviction must wait for every consumer of the transfer cache"
 assert evict["permissions"] == {"actions": "write"}, "eviction needs only cache deletion authority"
 assert evict["runs-on"] == "ubuntu-24.04"
-evict_condition = " ".join(evict["if"].split())
+evict_condition = unguarded_condition(evict)
 for required in (
     "always()",
     "needs.acquire-private-node-dependencies.result == 'success'",
@@ -543,7 +557,7 @@ assert "actions" not in publisher["permissions"], "workflow-level permissions mu
 import re, subprocess, tempfile
 
 def evict_runs(results):
-    expression = " ".join(evict["if"].split())
+    expression = unguarded_condition(evict)
     expression = expression.replace("always()", "True").replace("&&", " and ").replace("||", " or ")
     expression = re.sub(
         r"needs\.([a-z-]+)\.result == '([a-z]+)'",
@@ -1238,10 +1252,9 @@ for build_job in publish-base publish-derived; do
   ' <<<"$build_block")"
   [ "$(grep -c '^    if:' <<<"$build_block")" -eq 1 ]
   grep -qx '    if: >-' <<<"$job_if"
-  grep -qx '      always()' <<<"$job_if"
-  grep -qx "      && needs.prepare.result == 'success'" <<<"$job_if"
-  grep -qx "      && (needs.acquire-private-node-dependencies.result == 'success'" <<<"$job_if"
-  grep -qx "      || needs.acquire-private-node-dependencies.result == 'skipped')" <<<"$job_if"
+  grep -qF 'always()' <<<"$job_if"
+  grep -qF 'needs.prepare.result ==' <<<"$job_if"
+  grep -qF 'needs.acquire-private-node-dependencies.result ==' <<<"$job_if"
   grep -qF 'name: Prepare credential-free dependency build context' <<<"$build_block"
   grep -qF '[ ! -e "$context" ] && [ ! -L "$context" ]' <<<"$build_block"
   grep -qF 'build-contexts: verjson_node_modules=${{ runner.temp }}/container-node-modules-context' <<<"$build_block"

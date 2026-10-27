@@ -1253,3 +1253,22 @@ guarantee by itself.
 **Enforcement.** Public callers route code execution to literal `ubuntu-24.04` before caller inputs or organization variables. Privileged reusable workflows reject public calls through a hosted sentinel that exits nonzero and guard every existing job, including `always()` jobs. Control-plane `app-key-environment` and `gate-rearm` remain callable through hosted jobs. Rejected public release and deployment calls use per-run concurrency groups disjoint from trusted serialization keys.
 **Scope.** The checker proves runner selection and the inspected local call path for modeled public pull-request scenarios. It does not attest that a runner is physically ephemeral or validate a remote reusable workflow's implementation.
 
+## Amendment (2026-10-27, #1831) — reject public calls to protected publishing workflows
+
+**Finding.** Routing public pull-request work to a hosted runner does not make
+an arbitrary call to a release or container publishing reusable workflow safe.
+Those workflows can publish packages, images, and attestations, so a public
+caller must be rejected before any existing job runs.
+
+**Decision (PM, 2026-10-27; part #1831).**
+
+- `node-release.yml` and `container-candidate-publish.yml` run a small
+  `ubuntu-24.04` sentinel with `permissions: {}`. It fails for public
+  `pull_request`, `pull_request_review`, `pull_request_review_comment`,
+  `merge_group`, and `pull_request_target` calls.
+- Every existing job directly depends on the sentinel and requires its result
+  to be successful. Jobs using `always()` keep their existing publication
+  conditions and add the same sentinel-result requirement, so that status
+  function cannot bypass the refusal.
+- This rule rejects public callers for these protected publishing workflows;
+  it does not change the hosted-runner policy for public CI reusables.

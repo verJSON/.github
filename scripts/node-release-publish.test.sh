@@ -35,10 +35,39 @@ assert "preparation, publication, and retention use fresh GitHub-hosted ubuntu-2
 assert inputs["package-dirs"]["default"] == '["."]'
 assert inputs["release-assets"]["default"] == "[]"
 assert inputs["contract-ref"]["required"] is True
-assert set(doc["jobs"]) == {"prepare", "release", "retention"}
+public_events = (
+    "pull_request",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "merge_group",
+    "pull_request_target",
+)
+public_events_json = '["' + '","'.join(public_events) + '"]'
+public_call = (
+    f"contains(fromJSON('{public_events_json}'), github.event_name) "
+    "&& github.event.repository.private != true"
+)
+public_call_guard = doc["jobs"]["public-call-guard"]
+assert public_call_guard["runs-on"] == "ubuntu-24.04"
+assert public_call_guard.get("permissions", {}) == {}
+assert "needs" not in public_call_guard
+assert len(public_call_guard["steps"]) == 1
+guard_step = public_call_guard["steps"][0]
+assert "uses" not in guard_step
+assert guard_step["if"].strip() == f"${{{{ {public_call} }}}}"
+assert "exit 1" in guard_step["run"]
+assert set(doc["jobs"]) == {"public-call-guard", "prepare", "release", "retention"}
 prepare = doc["jobs"]["prepare"]
 release = doc["jobs"]["release"]
 retention = doc["jobs"]["retention"]
+guard_result = "needs.public-call-guard.result == 'success'"
+for job_name in ("prepare", "release", "retention"):
+    job = doc["jobs"][job_name]
+    needs = job.get("needs", [])
+    if isinstance(needs, str):
+        needs = [needs]
+    assert "public-call-guard" in needs, f"{job_name} must depend on the public-call guard"
+    assert guard_result in job.get("if", ""), f"{job_name} must require the guard to succeed"
 runner_guard_names = {
     "prepare": "Require a fresh GitHub-hosted preparation runner",
     "release": "Require a fresh GitHub-hosted publication runner",
@@ -56,7 +85,7 @@ assert prepare["permissions"] == {"contents": "read", "packages": "read"}
 assert prepare["env"] == {"NODE_AUTH_TOKEN": ""}, "preparation must mask runner-inherited credentials"
 assert prepare["outputs"]["package-artifact-id"] == "${{ steps.upload-packages.outputs.artifact-id }}"
 assert prepare["runs-on"] == "ubuntu-24.04", "preparation must not route to a shared caller-selected runner"
-assert release["needs"] == "prepare"
+assert set(release["needs"]) == {"public-call-guard", "prepare"}
 assert release["runs-on"] == "ubuntu-24.04", "publication must run on a fresh hosted runner"
 assert release["permissions"] == {"actions": "read", "contents": "write", "packages": "write"}
 assert retention["runs-on"] == "ubuntu-24.04", "retention must not reuse a preparation runner"
@@ -196,10 +225,10 @@ assert "retention-days: 1" in raw
 outputs = on["workflow_call"]["outputs"]
 assert outputs["new-release-published"]["value"] == "${{ jobs.release.outputs.new-release-published }}"
 assert outputs["new-release-version"]["value"] == "${{ jobs.release.outputs.new-release-version }}"
-assert retention["needs"] == "release"
+assert set(retention["needs"]) == {"public-call-guard", "release"}
 assert not retention.get("continue-on-error", False), "cleanup authorization failures must fail the release workflow"
 assert retention["permissions"] == {"contents": "read", "packages": "write"}
-assert retention["if"] == "needs.release.outputs.new-release-published == 'true'"
+assert "needs.release.outputs.new-release-published == 'true'" in retention["if"]
 cleanup = retention["steps"][-1]
 assert "package_retention.py" in cleanup["run"] and "--apply" in cleanup["run"]
 assert cleanup["env"]["GH_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"

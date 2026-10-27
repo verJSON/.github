@@ -80,6 +80,7 @@ platform	@budget=180 RUNNER_ISOLATION_TEST_PART=probes python3 scripts/ci-gate/p
 platform	python3 scripts/ci-gate/public-pr-runner-isolation-parts.test.py
 platform	python3 scripts/ci-gate/runner-isolation-required.test.py
 platform	python3 scripts/ci-gate/public-call-guard-contract.test.py
+platform	python3 scripts/ci-gate/public-reusable-workflow-guard.test.py
 platform	python3 scripts/ci-gate/backlog-sparse-closure.test.py
 platform	python3 scripts/public-review-caller-rollout.test.py
 platform	python3 scripts/ci-gate/public-pr-runner-isolation.py --pending scripts/ci-gate/public-pr-runner-isolation.pending.tsv --reviewed scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv .github/workflows
