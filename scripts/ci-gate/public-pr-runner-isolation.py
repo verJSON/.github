@@ -96,6 +96,45 @@ class Undetermined(Exception):
     """The checker could not decide. Never rendered as clean."""
 
 
+class BudgetExceeded(Undetermined):
+    """Strict evaluation ran out of its bounded work allowance."""
+
+
+class WorkflowScanExceeded(Undetermined):
+    """Strict public-call analysis scanned too many workflow files."""
+
+
+class WorkflowScanBudget:
+    """Bound total workflow files and nested workflow scans in one tree."""
+
+    def __init__(self, max_scans: int = 4096) -> None:
+        self.max_scans = max_scans
+        self.scans = 0
+
+    def spend(self, amount: int = 1) -> None:
+        self.scans += amount
+        if self.scans > self.max_scans:
+            raise WorkflowScanExceeded(
+                "strict public-call analysis exceeded its workflow scan budget "
+                f"of {self.max_scans} scans"
+            )
+
+
+class EvaluationBudget:
+    """Bound strict caller analysis across nested workflows and expressions."""
+
+    def __init__(self, max_steps: int = 10000) -> None:
+        self.max_steps = max_steps
+        self.steps = 0
+
+    def spend(self, amount: int = 1) -> None:
+        self.steps += amount
+        if self.steps > self.max_steps:
+            raise BudgetExceeded(
+                f"strict public-call analysis exceeded its work budget of {self.max_steps} steps"
+            )
+
+
 class _Unknown:
     def __repr__(self) -> str:
         return "<unknown>"
@@ -128,11 +167,13 @@ TOKEN = re.compile(
 )
 
 
-def tokenize(text: str) -> list[tuple[str, object]]:
+def tokenize(text: str, budget: EvaluationBudget | None = None) -> list[tuple[str, object]]:
     tokens: list[tuple[str, object]] = []
     position = 0
     text = text.rstrip()
     while position < len(text):
+        if budget is not None:
+            budget.spend()
         match = TOKEN.match(text, position)
         if not match or match.end() == position:
             raise Undetermined(f"cannot tokenize expression near {text[position:position + 20]!r}")
@@ -155,9 +196,14 @@ def tokenize(text: str) -> list[tuple[str, object]]:
 
 
 class Parser:
-    def __init__(self, text: str) -> None:
-        self.tokens = tokenize(text)
+    def __init__(self, text: str, budget: EvaluationBudget | None = None) -> None:
+        self.budget = budget
+        self.tokens = tokenize(text, budget)
         self.index = 0
+
+    def spend(self) -> None:
+        if self.budget is not None:
+            self.budget.spend()
 
     def peek(self) -> tuple[str, object] | None:
         return self.tokens[self.index] if self.index < len(self.tokens) else None
@@ -174,41 +220,53 @@ class Parser:
         return token is not None and token[0] == "op" and token[1] == value
 
     def parse(self):
-        node = self.disjunction()
+        self.spend()
+        try:
+            node = self.disjunction()
+        except RecursionError as error:
+            raise Undetermined("expression nesting exceeds the parser's safe depth") from error
         if self.peek() is not None:
             raise Undetermined(f"trailing token {self.peek()!r}")
         return node
 
     def disjunction(self):
+        self.spend()
         node = self.conjunction()
         while self.at("||"):
+            self.spend()
             self.index += 1
             node = ("or", node, self.conjunction())
         return node
 
     def conjunction(self):
+        self.spend()
         node = self.comparison()
         while self.at("&&"):
+            self.spend()
             self.index += 1
             node = ("and", node, self.comparison())
         return node
 
     def comparison(self):
+        self.spend()
         node = self.unary()
         while self.peek() is not None and self.peek()[0] == "op" and self.peek()[1] in (
             "==", "!=", "<", "<=", ">", ">=",
         ):
+            self.spend()
             operator = self.take("op")[1]
             node = ("compare", operator, node, self.unary())
         return node
 
     def unary(self):
+        self.spend()
         if self.at("!"):
             self.index += 1
             return ("not", self.unary())
         return self.primary()
 
     def primary(self):
+        self.spend()
         token = self.peek()
         if token is None:
             raise Undetermined("unexpected end of expression")
@@ -251,31 +309,37 @@ class Parser:
                 return ("ref", tuple(path))
 
 
-def references(node) -> set[tuple[str, ...]]:
+def references(node, budget: EvaluationBudget | None = None) -> set[tuple[str, ...]]:
+    if budget is not None:
+        budget.spend()
     kind = node[0]
     if kind == "ref":
         return {node[1]}
     if kind == "literal":
         return set()
     if kind == "call":
-        return set().union(*(references(argument) for argument in node[2])) if node[2] else set()
+        return set().union(*(references(argument, budget) for argument in node[2])) if node[2] else set()
     if kind == "compare":
-        return references(node[2]) | references(node[3])
-    return set().union(*(references(child) for child in node[1:]))
+        return references(node[2], budget) | references(node[3], budget)
+    return set().union(*(references(child, budget) for child in node[1:]))
 
 
 ENUMERATED_SCOPES = ("vars", "inputs")
 
 
-def enumerated_references(node) -> set[tuple[str, str]]:
+def enumerated_references(
+    node,
+    budget: EvaluationBudget | None = None,
+) -> set[tuple[str, str]]:
     """The free `vars.*` / `inputs.*` names an expression reads."""
+    paths = references(node, budget)
     return {
-        (path[0].lower(), path[1])
-        for path in references(node)
+        (path[0].lower(), path[1].lower())
+        for path in paths
         if path[0].lower() in ENUMERATED_SCOPES and len(path) == 2
     } | {
-        (path[0].lower(), ".".join(path[1:]))
-        for path in references(node)
+        (path[0].lower(), ".".join(part.lower() for part in path[1:]))
+        for path in paths
         if path[0].lower() in ENUMERATED_SCOPES and len(path) != 2
     }
 
@@ -293,11 +357,16 @@ def exact_comparison(node):
             and reference[1][0].lower() in ENUMERATED_SCOPES
             and other[0] == "literal"
         ):
-            return reference[1][0].lower(), reference[1][1], other[1]
+            return reference[1][0].lower(), reference[1][1].lower(), other[1]
     return None
 
 
-def compared_literals(node) -> dict[tuple[str, str], list]:
+def compared_literals(
+    node,
+    budget: EvaluationBudget | None = None,
+) -> dict[tuple[str, str], list]:
+    if budget is not None:
+        budget.spend()
     found: dict[tuple[str, str], list] = {}
     kind = node[0]
     if kind == "compare":
@@ -312,7 +381,7 @@ def compared_literals(node) -> dict[tuple[str, str], list]:
     else:
         children = list(node[1:])
     for child in children:
-        for key, values in compared_literals(child).items():
+        for key, values in compared_literals(child, budget).items():
             found.setdefault(key, []).extend(values)
     return found
 
@@ -343,7 +412,9 @@ def truthiness(value) -> list[bool]:
         return [False]
     if value is None or value is False or value == "":
         return [False]
-    if isinstance(value, float) and (value == 0 or value != value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and (
+        value == 0 or (isinstance(value, float) and value != value)
+    ):
         return [False]
     return [True]
 
@@ -366,10 +437,12 @@ def _number(value) -> float:
     return float("nan")
 
 
-def compare(operator: str, left, right) -> bool:
+def compare(operator: str, left, right, *, identity_unknown: bool = False):
     """Actions semantics: case-insensitive strings, numeric coercion otherwise."""
-    if isinstance(left, tuple) or isinstance(right, tuple):
-        # Arrays and objects compare by identity, which no selector relies on.
+    complex_value = (list, tuple, dict)
+    if isinstance(left, complex_value) or isinstance(right, complex_value):
+        if identity_unknown and operator in ("==", "!="):
+            return UNKNOWN
         identical = left is right
         return identical if operator == "==" else not identical if operator == "!=" else False
     if isinstance(left, str) and isinstance(right, str):
@@ -396,57 +469,92 @@ def _freeze(value):
     return value
 
 
-def from_json(value):
+def from_json(value, *, fail_closed: bool = False):
     if value is UNKNOWN:
         return UNKNOWN
     if not isinstance(value, str):
+        if fail_closed:
+            raise Undetermined("strict public-call analysis cannot apply fromJSON to a non-string value")
         return EVALUATION_ERROR
     try:
-        return _freeze(json.loads(value))
-    except ValueError:
+        if fail_closed:
+            def reject_nonstandard_constant(constant: str):
+                raise ValueError(f"non-standard JSON constant {constant}")
+
+            parsed = json.loads(value, parse_constant=reject_nonstandard_constant)
+        else:
+            parsed = json.loads(value)
+        return _freeze(parsed)
+    except (ValueError, TypeError, OverflowError, RecursionError) as error:
+        if fail_closed:
+            raise Undetermined("strict public-call analysis cannot resolve invalid fromJSON input") from error
         return EVALUATION_ERROR
 
 
 STATUS_FUNCTIONS = frozenset({"success", "failure", "cancelled", "always"})
 
 
-def evaluate(node, resolve, call=None) -> list:
+def evaluate(
+    node,
+    resolve,
+    call=None,
+    *,
+    budget: EvaluationBudget | None = None,
+    identity_unknown: bool = False,
+    fail_closed_json: bool = False,
+) -> list:
     """Every value the expression can produce, given a reference resolver."""
+    if budget is not None:
+        budget.spend()
     kind = node[0]
+
+    def recurse(child):
+        return evaluate(
+            child,
+            resolve,
+            call,
+            budget=budget,
+            identity_unknown=identity_unknown,
+            fail_closed_json=fail_closed_json,
+        )
+
     if kind == "literal":
         return [node[1]]
     if kind == "ref":
         return resolve(node[1])
     if kind == "not":
-        return _unique([not truth for value in evaluate(node[1], resolve, call) for truth in truthiness(value)])
+        return _unique([not truth for value in recurse(node[1]) for truth in truthiness(value)])
     if kind in ("and", "or"):
         results: list = []
-        for value in evaluate(node[1], resolve, call):
+        for value in recurse(node[1]):
             for truth in truthiness(value):
                 short_circuits = (not truth) if kind == "and" else truth
                 if short_circuits:
                     results.append(value)
                 else:
-                    results.extend(evaluate(node[2], resolve, call))
+                    results.extend(recurse(node[2]))
         return _unique(results)
     if kind == "compare":
-        if enumerated_references(node) and exact_comparison(node) is None:
+        if enumerated_references(node, budget) and exact_comparison(node) is None:
             # The candidates for a free value cannot be chosen to decide this
             # comparison (another reference, a function result, an ordering),
             # so both outcomes are possible.
             return [True, False]
         results = []
-        for left in evaluate(node[2], resolve, call):
-            for right in evaluate(node[3], resolve, call):
+        for left in recurse(node[2]):
+            for right in recurse(node[3]):
                 if left is UNKNOWN or right is UNKNOWN:
                     results.extend([True, False])
                 else:
-                    results.append(compare(node[1], left, right))
+                    results.append(compare(node[1], left, right, identity_unknown=identity_unknown))
         return _unique(results)
     if kind == "call":
         name, arguments = node[1], node[2]
         if name == "fromjson" and len(arguments) == 1:
-            return _unique([from_json(value) for value in evaluate(arguments[0], resolve, call)])
+            return _unique([
+                from_json(value, fail_closed=fail_closed_json)
+                for value in recurse(arguments[0])
+            ])
         if name in STATUS_FUNCTIONS and call is not None:
             return call(name)
         return [UNKNOWN]
@@ -491,12 +599,16 @@ class Context:
         needs: tuple[str, ...] = (),
         unreachable: frozenset[str] = frozenset(),
         event: str = "pull_request",
+        symbolic_public_call: bool = False,
+        budget: EvaluationBudget | None = None,
     ) -> None:
         self.repository = repository
         self.event = event
         self.values = values
         self.needs = needs
         self.unreachable = unreachable
+        self.symbolic_public_call = symbolic_public_call
+        self.budget = budget
 
     def status(self, name: str) -> list:
         if name == "always":
@@ -514,21 +626,38 @@ class Context:
             # workflow_call scan cannot know: try every event a caller can have.
             return list(CALLER_EVENTS) if self.event == "workflow_call" else [self.event]
         if lowered == ("github", "repository"):
-            return [self.repository]
+            return [UNKNOWN] if self.symbolic_public_call else [self.repository]
         if lowered == ("github", "repository_owner"):
-            return [self.repository.split("/")[0]]
+            return [UNKNOWN] if self.symbolic_public_call else [self.repository.split("/")[0]]
         if lowered == ("github", "event", "repository", "private"):
             return [False]
         if lowered == ("github", "event", "repository", "visibility"):
             return ["public"]
         if lowered[0] == "vars" and len(path) == 2:
-            return [self.values.get(("vars", path[1]), "")]
+            if self.symbolic_public_call:
+                return [UNKNOWN]
+            return [self._lookup_value("vars", path[1], "")]
         if lowered[0] == "inputs" and len(path) == 2:
-            return [self.values.get(("inputs", path[1]))]
+            if self.symbolic_public_call:
+                return [UNKNOWN]
+            return [self._lookup_value("inputs", path[1], None)]
         return [UNKNOWN]
 
+    def _lookup_value(self, scope: str, name: str, default):
+        target = (scope.lower(), name.lower())
+        for (candidate_scope, candidate_name), value in self.values.items():
+            if (candidate_scope.lower(), candidate_name.lower()) == target:
+                return value
+        return default
 
-def assignments(nodes, bindings: dict[str, tuple]):
+
+def assignments(
+    nodes,
+    bindings: dict[str, tuple],
+    *,
+    symbolic: bool = False,
+    budget: EvaluationBudget | None = None,
+):
     """Every combination of the variables and inputs the expressions read.
 
     Enumerated jointly rather than per reference, so `vars.X != '' &&
@@ -538,24 +667,35 @@ def assignments(nodes, bindings: dict[str, tuple]):
     names = sorted(
         (scope, name)
         for node in present
-        for scope, name in enumerated_references(node)
+        for scope, name in enumerated_references(node, budget)
         if "." not in name
     )
     names = sorted(set(names))
+    if symbolic:
+        if budget is not None:
+            budget.spend(max(1, len(names)))
+        yield {name: UNKNOWN for name in names}
+        return
     literals: dict[tuple[str, str], list] = {}
     for node in present:
-        for key, values in compared_literals(node).items():
+        for key, values in compared_literals(node, budget).items():
             literals.setdefault(key, []).extend(values)
     choices = []
     for scope, name in names:
         if scope == "vars":
-            base = ["", EPHEMERAL_SELECTOR if name in EPHEMERAL_LANE_VARIABLES else PERSISTENT_SELECTOR]
+            base = ["", EPHEMERAL_SELECTOR if name.upper() in EPHEMERAL_LANE_VARIABLES else PERSISTENT_SELECTOR]
             extra = [as_variable_text(value) for value in literals.get((scope, name), [])]
         else:
-            base = list(bindings.get(name, (None,)))
+            binding_name = name
+            if scope == "inputs":
+                binding_name = next(
+                    (candidate for candidate in bindings if candidate.lower() == name.lower()),
+                    name,
+                )
+            base = list(bindings.get(binding_name, (None,)))
             # A fixed binding is exact; only attacker-shaped inputs take every
             # literal their consumer compares them against.
-            adversarial = bindings.get(name) is ADVERSARIAL_INPUT_VALUES
+            adversarial = bindings.get(binding_name) is ADVERSARIAL_INPUT_VALUES
             extra = literals.get((scope, name), []) if adversarial else []
         choices.append(tuple(_unique(base + extra)))
     for values in itertools.product(*choices):
@@ -564,7 +704,7 @@ def assignments(nodes, bindings: dict[str, tuple]):
 
 def describe(assignment: dict[tuple[str, str], object]) -> str:
     return ", ".join(
-        f"{scope}.{name}={'<unset>' if value in ('', None) else value}"
+        f"{scope}.{name.upper() if scope == 'vars' else name}={'<unset>' if value in ('', None) else value}"
         for (scope, name), value in assignment.items()
     ) or "no variables or inputs"
 
@@ -589,7 +729,13 @@ def selector_outcomes(runs_on, context: Context) -> list:
     if isinstance(runs_on, str):
         match = FULL_EXPRESSION.match(runs_on)
         if match:
-            return evaluate(Parser(match.group(1)).parse(), context.resolve)
+            return evaluate(
+                Parser(match.group(1), context.budget).parse(),
+                context.resolve,
+                budget=context.budget,
+                identity_unknown=context.symbolic_public_call,
+                fail_closed_json=context.symbolic_public_call,
+            )
         if "${{" in runs_on:
             raise Undetermined("runner selector interpolates an expression into a string")
         return [runs_on]
@@ -611,18 +757,20 @@ def selector_outcomes(runs_on, context: Context) -> list:
     raise Undetermined(f"unsupported runs-on shape {runs_on!r}")
 
 
-def calls(node) -> set[str]:
+def calls(node, budget: EvaluationBudget | None = None) -> set[str]:
+    if budget is not None:
+        budget.spend()
     kind = node[0]
     if kind == "call":
-        return {node[1]}.union(*(calls(argument) for argument in node[2]))
+        return {node[1]}.union(*(calls(argument, budget) for argument in node[2]))
     if kind in ("literal", "ref"):
         return set()
     if kind == "compare":
-        return calls(node[2]) | calls(node[3])
-    return set().union(*(calls(child) for child in node[1:]))
+        return calls(node[2], budget) | calls(node[3], budget)
+    return set().union(*(calls(child, budget) for child in node[1:]))
 
 
-def condition_node(condition):
+def condition_node(condition, budget: EvaluationBudget | None = None):
     """Parse a job `if:` and apply Actions' implicit `success() &&`."""
     implicit_success = ("call", "success", [])
     if condition is None:
@@ -631,23 +779,30 @@ def condition_node(condition):
         node = ("literal", condition)
     elif isinstance(condition, str):
         match = FULL_EXPRESSION.match(condition)
-        node = Parser(match.group(1) if match else condition).parse()
+        node = Parser(match.group(1) if match else condition, budget).parse()
     else:
         raise Undetermined(f"unsupported if: shape {condition!r}")
-    if calls(node) & STATUS_FUNCTIONS:
+    if calls(node, budget) & STATUS_FUNCTIONS:
         return node
     return ("and", implicit_success, node)
 
 
-def selector_node(runs_on):
+def selector_node(runs_on, budget: EvaluationBudget | None = None):
     match = FULL_EXPRESSION.match(runs_on) if isinstance(runs_on, str) else None
-    return Parser(match.group(1)).parse() if match else None
+    return Parser(match.group(1), budget).parse() if match else None
 
 
 def can_run(condition, context: Context) -> bool:
     return any(
         truth
-        for value in evaluate(condition, context.resolve, context.status)
+        for value in evaluate(
+            condition,
+            context.resolve,
+            context.status,
+            budget=context.budget,
+            identity_unknown=context.symbolic_public_call,
+            fail_closed_json=context.symbolic_public_call,
+        )
         for truth in truthiness(value)
     )
 
@@ -657,19 +812,29 @@ def job_needs(job: dict) -> tuple[str, ...]:
     return (needs,) if isinstance(needs, str) else tuple(str(need) for need in needs)
 
 
-def dependency_order(path: str, jobs: dict) -> list[Violation]:
+def dependency_order(
+    path: str,
+    jobs: dict,
+    budget: EvaluationBudget | None = None,
+) -> list[str]:
     ordered: list[str] = []
+    completed: set[str] = set()
     visiting: set[str] = set()
 
     def visit(name: str) -> None:
-        if name in ordered:
+        if budget is not None:
+            budget.spend()
+        if name in completed:
             return
         if name in visiting or name not in jobs:
             raise Undetermined(f"{path}: job graph is cyclic or names a missing job '{name}'")
         visiting.add(name)
         for need in job_needs(jobs[name]):
+            if budget is not None:
+                budget.spend()
             visit(need)
         visiting.discard(name)
+        completed.add(name)
         ordered.append(name)
 
     for name in jobs:
@@ -683,11 +848,27 @@ def is_reachable(
     bindings: dict[str, tuple],
     unreachable: frozenset[str],
     event: str,
+    *,
+    symbolic_public_call: bool = False,
+    budget: EvaluationBudget | None = None,
 ) -> bool:
-    condition = condition_node(job.get("if"))
+    condition = condition_node(job.get("if"), budget)
     return any(
-        can_run(condition, Context(repository, assignment, job_needs(job), unreachable, event))
-        for assignment in assignments((condition,), bindings)
+        can_run(
+            condition,
+            Context(
+                repository,
+                assignment,
+                job_needs(job),
+                unreachable,
+                event,
+                symbolic_public_call,
+                budget,
+            ),
+        )
+        for assignment in assignments(
+            (condition,), bindings, symbolic=symbolic_public_call, budget=budget
+        )
     )
 
 
@@ -698,12 +879,20 @@ def workflow_call_inputs(document: dict) -> dict:
     return trigger["workflow_call"].get("inputs") or {}
 
 
-def callee_bindings(job: dict, callee: dict) -> dict[str, tuple]:
+def callee_bindings(
+    job: dict,
+    callee: dict,
+    *,
+    symbolic: bool = False,
+) -> dict[str, tuple]:
     supplied = job.get("with") or {}
+    supplied_by_name = {str(name).lower(): value for name, value in supplied.items()}
     bindings: dict[str, tuple] = {}
     for name, declaration in workflow_call_inputs(callee).items():
-        if name in supplied:
-            value = supplied[name]
+        if symbolic:
+            bindings[name] = (UNKNOWN,)
+        elif str(name).lower() in supplied_by_name:
+            value = supplied_by_name[str(name).lower()]
             if isinstance(value, str) and "${{" in value:
                 bindings[name] = ADVERSARIAL_INPUT_VALUES
             else:
@@ -2476,6 +2665,19 @@ def review_digest(chain: tuple, job: dict, inherited: dict, closure: dict | None
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+PUBLIC_CALL_SCENARIO = "public-pr-workflow-call-v1"
+
+
+def public_call_digest(path: str, name: str, chain: tuple, job: dict, document: dict) -> str:
+    """Give strict public-call findings an identity outside review/backlog ledgers."""
+    return review_digest(
+        chain,
+        job,
+        inherited_settings(document),
+        {"scenario": PUBLIC_CALL_SCENARIO, "path": path, "job": name},
+    )
+
+
 FULL_SHA_PIN = re.compile(r"@[0-9a-f]{40}$")
 def _is_reference(value: str, path: tuple[str, ...]) -> bool:
     """Whether `value` is exactly the expression `${{ <path> }}`, however spaced."""
@@ -3087,7 +3289,17 @@ def job_closure(
 class Scan:
     """Traversal state for one triggering event across local reusable calls."""
 
-    def __init__(self, directory: str, repository: str, event: str, lists: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        directory: str,
+        repository: str,
+        event: str,
+        lists: tuple[str, ...] = (),
+        *,
+        strict_public_call: bool = False,
+        budget: EvaluationBudget | None = None,
+        workflow_scan_budget: WorkflowScanBudget | None = None,
+    ) -> None:
         self.directory = directory
         # Workflows live at <root>/.github/workflows; scripts resolve from <root>.
         self.root = os.path.dirname(os.path.dirname(os.path.abspath(directory)))
@@ -3098,6 +3310,9 @@ class Scan:
         )
         self.repository = repository
         self.event = event
+        self.strict_public_call = strict_public_call
+        self.budget = budget
+        self.workflow_scan_budget = workflow_scan_budget
         self.findings: list[Finding] = []
 
     @property
@@ -3129,6 +3344,16 @@ def check_call(
     uses = str(job["uses"])
     local = LOCAL_REUSABLE.match(uses)
     if not local:
+        if scan.strict_public_call:
+            return [
+                Violation(
+                    path,
+                    name,
+                    f"strict public-call placement cannot be verified for remote reusable workflow {uses}, "
+                    "even when the reference is SHA-pinned "
+                    f"(scenario digest {public_call_digest(path, name, chain, job, document)})",
+                )
+            ]
         if scan.privileged:
             scan.findings.append(
                 Finding(
@@ -3152,12 +3377,14 @@ def check_call(
     if depth >= MAX_CALL_DEPTH:
         raise Undetermined(f"{path}: job '{name}' exceeds the reusable-call depth of {MAX_CALL_DEPTH}")
     callee = local.group(1)
+    if scan.workflow_scan_budget is not None:
+        scan.workflow_scan_budget.spend()
     callee_document = load_workflow(os.path.join(scan.directory, callee))
     return check_workflow(
         scan,
         f"{path}:{name} -> {callee}",
         callee_document,
-        callee_bindings(job, callee_document),
+        callee_bindings(job, callee_document, symbolic=scan.strict_public_call),
         depth + 1,
         chain + ({"job": job, "inherited": inherited_settings(document)},),
     )
@@ -3175,24 +3402,140 @@ def check_workflow(
     jobs = {str(name): job for name, job in (document.get("jobs") or {}).items()}
     unreachable: set[str] = set()
     violations: list[Violation] = []
-    for name in dependency_order(path, jobs):
+    try:
+        ordered_jobs = dependency_order(path, jobs, scan.budget)
+    except RecursionError as error:
+        if not scan.strict_public_call:
+            raise Undetermined(
+                f"{path}: job dependency analysis exceeded the safe recursion depth"
+            ) from error
+        name = "<job dependency graph>"
+        digest = public_call_digest(path, name, chain, {"jobs": jobs}, document)
+        return [
+            Violation(
+                path,
+                name,
+                "strict public-call reachability is undetermined: job dependency analysis "
+                f"exceeded the safe recursion depth ({error}) (scenario digest {digest})",
+            )
+        ]
+    for name in ordered_jobs:
+        if scan.budget is not None:
+            scan.budget.spend()
         job = jobs[name]
-        if not is_reachable(job, scan.repository, bindings, frozenset(unreachable), scan.event):
+        try:
+            reachable = is_reachable(
+                job,
+                scan.repository,
+                bindings,
+                frozenset(unreachable),
+                scan.event,
+                symbolic_public_call=scan.strict_public_call,
+                budget=scan.budget,
+            )
+        except RecursionError as error:
+            if not scan.strict_public_call:
+                raise Undetermined(
+                    f"{path}: job '{name}' condition analysis exceeded the safe recursion depth"
+                ) from error
+            violations.append(
+                Violation(
+                    path,
+                    name,
+                    "strict public-call reachability undetermined: expression analysis "
+                    f"exceeded the safe recursion depth ({error}) "
+                    f"(scenario digest {public_call_digest(path, name, chain, job, document)})",
+                )
+            )
+            continue
+        except BudgetExceeded:
+            raise
+        except Undetermined as error:
+            if not scan.strict_public_call:
+                raise
+            violations.append(
+                Violation(
+                    path,
+                    name,
+                    f"strict public-call reachability is undetermined: {error} "
+                    f"(scenario digest {public_call_digest(path, name, chain, job, document)})",
+                )
+            )
+            continue
+        if not reachable:
             unreachable.add(name)
             continue
         if "uses" in job:
-            violations.extend(check_call(scan, path, name, job, depth, chain, document))
+            try:
+                violations.extend(check_call(scan, path, name, job, depth, chain, document))
+            except WorkflowScanExceeded:
+                raise
+            except BudgetExceeded:
+                raise
+            except Undetermined as error:
+                if not scan.strict_public_call:
+                    raise
+                violations.append(
+                    Violation(
+                        path,
+                        name,
+                        f"strict public-call placement is undetermined: {error} "
+                        f"(scenario digest {public_call_digest(path, name, chain, job, document)})",
+                    )
+                )
             continue
         try:
             found = check_job(
-                path, name, job, scan.repository, bindings, frozenset(unreachable), scan.event
+                path,
+                name,
+                job,
+                scan.repository,
+                bindings,
+                frozenset(unreachable),
+                scan.event,
+                symbolic_public_call=scan.strict_public_call,
+                budget=scan.budget,
             )
+        except RecursionError as error:
+            if not scan.strict_public_call:
+                raise Undetermined(
+                    f"{path}: job '{name}' placement analysis exceeded the safe recursion depth"
+                ) from error
+            found = [
+                Violation(
+                    path,
+                    name,
+                    "strict public-call placement is undetermined: expression analysis "
+                    f"exceeded the safe recursion depth (scenario digest "
+                    f"{public_call_digest(path, name, chain, job, document)})",
+                )
+            ]
+        except BudgetExceeded:
+            raise
         except Undetermined as error:
-            if not scan.privileged:
+            if not scan.privileged and not scan.strict_public_call:
                 raise
-            # A privileged job whose placement cannot be proven hosted needs review.
-            found = [Violation(path, name, f"placement undetermined: {error}")]
-        if not scan.privileged:
+            if scan.strict_public_call:
+                found = [
+                    Violation(
+                        path,
+                        name,
+                        f"strict public-call placement is undetermined: {error} "
+                        f"(scenario digest {public_call_digest(path, name, chain, job, document)})",
+                    )
+                ]
+            else:
+                # A privileged job whose placement cannot be proven hosted needs review.
+                found = [Violation(path, name, f"placement undetermined: {error}")]
+        if scan.strict_public_call:
+            digest = public_call_digest(path, name, chain, job, document)
+            found = [
+                finding
+                if "(scenario digest " in finding.detail
+                else Violation(finding.path, finding.job, f"{finding.detail} (scenario digest {digest})")
+                for finding in found
+            ]
+        if not scan.privileged or scan.strict_public_call:
             violations.extend(found)
         elif found:
             closure = job_closure(
@@ -3257,14 +3600,30 @@ def check_job(
     bindings: dict[str, tuple],
     unreachable: frozenset[str],
     event: str,
+    *,
+    symbolic_public_call: bool = False,
+    budget: EvaluationBudget | None = None,
 ) -> list[Violation]:
     runs_on = job.get("runs-on")
     if runs_on is None:
         raise Undetermined(f"{path}: job '{name}' has no runs-on")
-    condition = condition_node(job.get("if"))
+    condition = condition_node(job.get("if"), budget)
     violations = []
-    for assignment in assignments((condition, selector_node(runs_on)), bindings):
-        context = Context(repository, assignment, job_needs(job), unreachable, event)
+    for assignment in assignments(
+        (condition, selector_node(runs_on, budget)),
+        bindings,
+        symbolic=symbolic_public_call,
+        budget=budget,
+    ):
+        context = Context(
+            repository,
+            assignment,
+            job_needs(job),
+            unreachable,
+            event,
+            symbolic_public_call,
+            budget,
+        )
         if not can_run(condition, context):
             continue
         for outcome in selector_outcomes(runs_on, context):
@@ -3307,6 +3666,48 @@ def relay_bindings(document: dict, event: str) -> dict[str, tuple]:
     return bindings
 
 
+def check_public_calls(
+    directory: str,
+    repository: str,
+    *,
+    budget: EvaluationBudget | None = None,
+    workflow_scan_budget: WorkflowScanBudget | None = None,
+) -> list[Violation]:
+    """Check every reusable entrypoint as if called by a public pull request.
+
+    This scenario deliberately bypasses the relay pending/reviewed ledgers. Caller
+    identity, configuration variables, inputs, and other unmodeled context stay
+    symbolic through every local reusable-workflow call.
+    """
+    max_steps = budget.max_steps if budget is not None else EvaluationBudget().max_steps
+    scan_budget = workflow_scan_budget or WorkflowScanBudget()
+    violations: list[Violation] = []
+    names = sorted(
+        name for name in os.listdir(directory) if name.endswith((".yml", ".yaml"))
+    )
+    scan_budget.spend(len(names))
+    for name in names:
+        document = load_workflow(os.path.join(directory, name))
+        if "workflow_call" not in triggers(document):
+            continue
+        scan = Scan(
+            directory,
+            repository,
+            "pull_request",
+            strict_public_call=True,
+            budget=EvaluationBudget(max_steps=max_steps),
+            workflow_scan_budget=scan_budget,
+        )
+        path = f"{name} [public pull_request workflow_call]"
+        try:
+            violations.extend(check_workflow(scan, path, document))
+        except BudgetExceeded as error:
+            raise Undetermined(f"{path}: {error}") from error
+        except WorkflowScanExceeded as error:
+            raise Undetermined(f"{path}: {error}") from error
+    return violations
+
+
 def check_tree(
     directory: str, repository: str, findings: list[Finding] | None = None, lists: tuple[str, ...] = ()
 ) -> list[Violation]:
@@ -3333,6 +3734,7 @@ def check_tree(
             violations.extend(check_workflow(scan, label, document, relay_bindings(document, event)))
             if findings is not None:
                 findings.extend(scan.findings)
+    violations.extend(check_public_calls(directory, repository))
     return violations
 
 

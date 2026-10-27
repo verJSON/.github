@@ -1247,3 +1247,27 @@ dedicated group's runners are physically ephemeral, enforce any workflow's
 `runs-on` choice, or establish the broader public pull-request isolation
 guarantee by itself.
 
+## Amendment (2026-10-27, #1831) — verify public reusable-workflow callers
+
+**Context.** A reusable workflow can be called by a public repository's
+pull-request workflow. The generic relay review and pending ledgers do not
+prove that every reachable job in that caller context uses a GitHub-hosted
+runner: caller-controlled variables, inputs, and repository identity can
+change its selector, and a remote callee cannot be inspected even when
+SHA-pinned.
+
+**Decision.** The runner-isolation checker evaluates every local
+`workflow_call` entrypoint as a public pull-request caller. It keeps caller
+identity, variables, inputs, and other unmodeled values symbolic through
+nested local calls. Every reachable job must resolve to a GitHub-hosted
+ephemeral runner; a remote reusable call fails closed. These findings use a
+separate scenario digest and cannot be waived by generic relay pending or
+reviewed rows. Evaluation is bounded per entrypoint, with nested calls sharing
+their caller's budget and a separate finite workflow-scan budget. Recursion or
+budget exhaustion produces an undetermined failure, never a clean result.
+
+**Scope.** This check proves the runner selector and inspected local call path
+for the modeled public pull-request scenario. It does not attest physical
+runner ephemerality or validate the implementation of a remote reusable
+workflow.
+
