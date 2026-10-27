@@ -621,6 +621,20 @@ authorization approved the exact final head; the review decision remained
 pre-merge assertion result, so this entry does not claim that assertion
 passed. No gate was weakened.
 
+32. **Admin merge Playwright cold-cache evidence correction.** Verjson/.github#1925
+(`docs(node-ci): record Playwright cold-cache evidence`, `Part of #1830`) merged
+2026-10-26 at head `8382e4587bb711da04fa7ac8e2ff15e0d4d890fd` and merge commit
+`6d433b001ba4981ea26f82eb6ea83a934fbe2ebc`. Its base was fetched clean
+`origin/main` at `f097312261a57ace5fb7f5a53aaac2819891421b`. GitHub reports
+12 SUCCESS, 7 SKIPPED, and 1 NEUTRAL check conclusions; the review decision
+remained `REVIEW_REQUIRED`. From that clean base,
+`bash scripts/assert-mergeable-head.sh Verjson/.github 1925` exited 0 and
+printed `true`. `gpt-6-astra` reviewed cold-transfer scope; `gpt-6.1-sol`
+reviewed the cold-transfer and Playwright evidence; `code-reviewer` reviewed
+the final documentation diff. The Fable and Opus Agent tool was unavailable
+in this session.
+The owner's standing admin authority was used; no gate was weakened.
+
 ### Exit condition ("CI optimized and working"), measurable
 
 The window closes when all hold, each evidenced in the closing PR:
