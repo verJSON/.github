@@ -117,3 +117,14 @@ caller input and retain the same need for selector-level fallback. Eligibility
 or acquisition failures continue to fail required build-test before checkout.
 ADR 0234 receives the corresponding dated correction to the hosted-capacity
 invariant.
+
+## 2026-10-27 amendment — profile-aware Node CI selectors
+
+The Node CI `eligibility` job now uses the catalog's `caller-runner` shape,
+and `build-test` uses `secretless-first`. This completes the Node CI part of
+rollout step 2: custom profiles use their strict untrusted lane without
+inheriting `CI_LANE_FALLBACK`, while the built-in Verjson profile retains its
+legacy routing behavior. The secretless eligibility-gated lane and literal
+hosted fallback remain ahead of caller runner input. The protected workflow
+twin is regenerated from `node-ci.yml`; exact-site tests bind both selectors
+to their job markers in both files.

@@ -635,6 +635,17 @@ the final documentation diff. The Fable and Opus Agent tool was unavailable
 in this session.
 The owner's standing admin authority was used; no gate was weakened.
 
+33. **Admin merge of the #1925 ledger entry.** Verjson/.github#1926
+("docs(adr): record #1925 admin merge") merged 2026-10-27 at head
+`8401c63f2dbf471f324061e929720f5f07339429` and merge commit
+`30627c100325d1ffe0cccf29bf98613d1b7b6570`. Its base was
+`6d433b001ba4981ea26f82eb6ea83a934fbe2ebc`. GitHub reports 12 SUCCESS,
+7 SKIPPED, and 1 NEUTRAL check conclusions; the review decision remained
+`REVIEW_REQUIRED`. From fetched clean `origin/main`,
+`bash scripts/assert-mergeable-head.sh Verjson/.github 1926` exited 0 and
+printed `true`. The owner's standing admin authority was used; no gate was
+weakened.
+
 ### Exit condition ("CI optimized and working"), measurable
 
 The window closes when all hold, each evidenced in the closing PR:

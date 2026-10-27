@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -33,8 +34,8 @@ LEGACY_CALLER_RUNNER = (
     "fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || "
     "fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')"
 )
-# Pre-#1869 selector retained only to prove migration-tail equivalence when
-# both secretless inputs are false. The new fail-closed prefix has its own oracle.
+# Pre-profile selector retained as the migration-compatibility oracle when
+# both secretless inputs are false. The fail-closed prefix has its own oracle.
 LEGACY_SECRETLESS_FIRST = (
     "(inputs.secretless-pr || inputs.secretless-trusted-ref) && "
     "fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') || " + LEGACY_CALLER_RUNNER
@@ -246,24 +247,80 @@ def test_evaluator_rejects_unmodeled_comparison_operators() -> None:
             check(f"evaluator rejects unmodeled {label} comparison", False, True)
 
 
-def test_legacy_tail_shape_is_limited_to_node_ci_build_test() -> None:
-    workflow_dir = ROOT / ".github/workflows"
-    workflows = {*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")}
-    legacy_runs_on = "${{ " + catalog.expression("secretless-first-legacy-tail") + " }}"
-    actual = set()
-    for path in workflows:
-        document = yaml.safe_load(path.read_text()) or {}
-        jobs = document.get("jobs", {}) if isinstance(document, dict) else {}
-        if not isinstance(jobs, dict):
-            continue
-        for job_name, job in jobs.items():
-            if isinstance(job, dict) and job.get("runs-on") == legacy_runs_on:
-                actual.add((path.name, job_name))
-    check(
-        "legacy-tail selector is limited to both node-ci build-test jobs",
-        actual,
-        {("node-ci.yml", "build-test"), ("node-ci-protected.yml", "build-test")},
+def _runner_lane_site(source: str, job_name: str) -> tuple[str, str] | None:
+    lines = source.splitlines()
+    jobs_start = next((index for index, line in enumerate(lines) if line == "jobs:"), None)
+    if jobs_start is None:
+        return None
+    job_start = next((index for index in range(jobs_start + 1, len(lines))
+                      if lines[index] == f"  {job_name}:"), None)
+    if job_start is None:
+        return None
+    job_end = next((index for index in range(job_start + 1, len(lines))
+                    if re.fullmatch(r"  [A-Za-z0-9_-]+:", lines[index])), len(lines))
+    job_lines = lines[job_start + 1:job_end]
+    runs_on = [index for index, line in enumerate(job_lines)
+               if re.match(r"^    runs-on:", line)]
+    if len(runs_on) != 1 or runs_on[0] == 0:
+        return None
+    marker = re.fullmatch(r"    # runner-lane: (\S+)", job_lines[runs_on[0] - 1])
+    if marker is None:
+        return None
+    return marker.group(1), job_lines[runs_on[0]].removeprefix("    runs-on: ")
+
+
+def _runner_lane_site_matches(source: str, job_name: str, shape: str) -> bool:
+    site = _runner_lane_site(source, job_name)
+    expected = (shape, catalog.runs_on_line(shape, "    ").strip().removeprefix("runs-on: "))
+    return site == expected
+
+
+def test_node_ci_runner_lane_roles_are_explicit_on_both_workflows() -> None:
+    roles = {"eligibility": "caller-runner", "build-test": "secretless-first"}
+    workflow_paths = (
+        ROOT / ".github/workflows/node-ci.yml",
+        ROOT / ".github/workflows/node-ci-protected.yml",
     )
+    for path in workflow_paths:
+        source = path.read_text()
+        document = yaml.safe_load(source) or {}
+        jobs = document.get("jobs", {})
+        for job_name, shape in roles.items():
+            check(f"{path.name} {job_name} marker and selector",
+                  _runner_lane_site_matches(source, job_name, shape), True)
+            check(f"{path.name} {job_name} YAML selector",
+                  jobs[job_name].get("runs-on"),
+                  "$" + "{{ " + catalog.expression(shape) + " }}")
+    workflow_dir = ROOT / ".github/workflows"
+    legacy_tail_sites = {
+        path.name
+        for path in {*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")}
+        if "# runner-lane: secretless-first-legacy-tail" in path.read_text()
+    }
+    check("no workflow retains a legacy-tail site", legacy_tail_sites, set())
+
+
+def test_runner_lane_site_rejects_missing_misplaced_and_wrong_role_markers() -> None:
+    valid = (
+        "jobs:\n  eligibility:\n    # runner-lane: caller-runner\n"
+        + catalog.runs_on_line("caller-runner", "    ") + "\n"
+        + "  build-test:\n    # runner-lane: secretless-first\n"
+        + catalog.runs_on_line("secretless-first", "    ") + "\n"
+    )
+    mutations = (
+        (valid.replace("    # runner-lane: caller-runner\n", "", 1), "eligibility"),
+        (valid.replace("    # runner-lane: caller-runner\n    runs-on:",
+                       "    # runner-lane: caller-runner\n    steps: []\n    runs-on:", 1),
+         "eligibility"),
+        (valid.replace("    # runner-lane: caller-runner", "    # runner-lane: secretless-first", 1),
+         "eligibility"),
+        (valid.replace("    # runner-lane: secretless-first", "    # runner-lane: caller-runner", 1),
+         "build-test"),
+    )
+    expected_roles = {"eligibility": "caller-runner", "build-test": "secretless-first"}
+    for source, job_name in mutations:
+        check(f"reject invalid {job_name} runner-lane marker",
+              _runner_lane_site_matches(source, job_name, expected_roles[job_name]), False)
 
 
 def test_foreign_owner_without_a_profile_is_hosted() -> None:
@@ -281,8 +338,8 @@ def test_custom_profile_uses_its_own_lanes() -> None:
 
 
 def test_custom_profile_shapes_do_not_send_untrusted_events_to_the_fallback() -> None:
-    # The legacy-tail shape is deliberately excluded until node-ci's profile
-    # rollout. The profile-aware shapes must use their strict untrusted lane.
+    # The legacy-tail shape preserves built-in fallback semantics for migration;
+    # current Node CI uses the profile-aware shapes and strict custom untrusted lane.
     vars_ = {"CI_PROFILE_OWNER": "acme", "CI_LANE_FALLBACK": PERSISTENT}
     for shape in ("caller-runner", "secretless-first"):
         for private in (False, None):
