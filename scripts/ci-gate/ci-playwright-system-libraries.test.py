@@ -1230,9 +1230,9 @@ import ci_playwright_system_libraries as profile
 profile._require_root = lambda: None
 profile._read_os_release = lambda: {"ID": "ubuntu", "VERSION_ID": "24.04"}
 profile._exact_output = lambda *args, **kwargs: b"amd64"
-profile._validate_safe_key = lambda: None
+profile._publish_safe_key_snapshot = lambda _root: Path("/tmp/unused-keyring.gpg")
 profile._state_file_path = lambda _path: Path(sys.argv[3])
-profile._make_apt_environment = lambda _root: {}
+profile._make_apt_environment = lambda _root, _safe_key: {}
 profile._apt_options = lambda _paths: []
 profile._apt_environment = lambda _paths: profile.SAFE_ENV
 profile._scan_global_dpkg_config = lambda: {
@@ -1491,6 +1491,230 @@ raise SystemExit(0)
         self.assertLessEqual(len(diagnostic), 360)
         self.assertTrue(all(char.isprintable() or char == "\n" for char in diagnostic))
         self.assertNotIn("x" * 241, diagnostic)
+
+
+class AuthenticatedKeySnapshotTests(unittest.TestCase):
+    @staticmethod
+    def _root_stat(metadata: Any, *, uid: int = 0, mode: int | None = None) -> SimpleNamespace:
+        return SimpleNamespace(
+            st_mode=metadata.st_mode if mode is None else mode,
+            st_uid=uid,
+            st_dev=metadata.st_dev,
+            st_ino=metadata.st_ino,
+            st_nlink=metadata.st_nlink,
+            st_size=metadata.st_size,
+            st_mtime_ns=metadata.st_mtime_ns,
+            st_ctime_ns=metadata.st_ctime_ns,
+        )
+
+    @contextlib.contextmanager
+    def _root_owned_source_metadata(
+        self,
+        source: Path,
+        *,
+        before_open: Any = None,
+        overrides: dict[Path, tuple[int, int | None]] | None = None,
+    ):
+        real_lstat = os.lstat
+        real_fstat = os.fstat
+        real_open = os.open
+        source_fd = None
+        source_identity = None
+        parent_paths = set(source.parents)
+        overrides = overrides or {}
+
+        def fake_lstat(path: str | Path, *args: Any, **kwargs: Any) -> Any:
+            metadata = real_lstat(path, *args, **kwargs)
+            normalized = Path(path)
+            if normalized == source or normalized in parent_paths:
+                uid, mode = overrides.get(normalized, (0, None))
+                return self._root_stat(metadata, uid=uid, mode=mode)
+            return metadata
+
+        def fake_open(path: str | Path, flags: int, *args: Any, **kwargs: Any) -> int:
+            nonlocal source_fd, source_identity
+            if os.fspath(path) == str(source) and before_open is not None:
+                before_open()
+            descriptor = real_open(path, flags, *args, **kwargs)
+            if os.fspath(path) == str(source):
+                source_fd = descriptor
+                opened = real_fstat(descriptor)
+                source_identity = (opened.st_dev, opened.st_ino)
+            return descriptor
+
+        def fake_fstat(descriptor: int) -> Any:
+            metadata = real_fstat(descriptor)
+            if descriptor == source_fd and (metadata.st_dev, metadata.st_ino) == source_identity:
+                return self._root_stat(metadata)
+            return metadata
+
+        with patch.object(playwright_profile.os, "lstat", side_effect=fake_lstat), patch.object(
+            playwright_profile.os, "fstat", side_effect=fake_fstat
+        ), patch.object(playwright_profile.os, "open", side_effect=fake_open):
+            yield {"source_fd": lambda: source_fd}
+
+    @staticmethod
+    def _restore_test_directories(root: Path) -> None:
+        for path in root.rglob("*"):
+            if path.is_dir() and not path.is_symlink():
+                path.chmod(0o700)
+
+    def test_authentic_world_writable_key_is_snapshotted_and_signed_by_uses_private_copy(self) -> None:
+        payload = b"reviewed archive key bytes"
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temporary_directory:
+            root = Path(temporary_directory)
+            root.chmod(0o711)
+            source = root / "host-key.gpg"
+            source.write_bytes(payload)
+            source.chmod(0o777)
+            writable_descriptor = os.open(source, os.O_RDWR)
+            try:
+                with self._root_owned_source_metadata(source), patch.object(
+                    playwright_profile, "SAFE_KEY", str(source)
+                ), patch.object(
+                    playwright_profile, "SAFE_KEY_SHA256", hashlib.sha256(payload).hexdigest()
+                ), patch.object(playwright_profile.os, "chown"):
+                    snapshot = playwright_profile._publish_safe_key_snapshot(root)
+                    paths = playwright_profile._make_apt_environment(root, snapshot)
+                    self.assertEqual(snapshot.read_bytes(), payload)
+                    self.assertEqual(stat.S_IMODE(snapshot.stat().st_mode), 0o444)
+                    self.assertEqual(snapshot.stat().st_uid, os.geteuid())
+                    self.assertEqual(stat.S_IMODE(snapshot.parent.stat().st_mode), 0o555)
+                    self.assertEqual(paths["safe_key"], snapshot)
+                    self.assertEqual(source.stat().st_mode & 0o777, 0o777)
+                    self.assertEqual(paths["source_list"].read_text().count(str(snapshot)), 3)
+                    os.pwrite(writable_descriptor, b"changed", 0)
+                    self.assertEqual(snapshot.read_bytes(), payload)
+            finally:
+                os.close(writable_descriptor)
+                self._restore_test_directories(root)
+
+    def test_key_snapshot_fails_closed_for_wrong_digest_symlink_fifo_oversize_and_collision(self) -> None:
+        payload = b"reviewed archive key bytes"
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temporary_directory:
+            root = Path(temporary_directory)
+            root.chmod(0o711)
+            source = root / "host-key.gpg"
+            source.write_bytes(payload)
+            with self._root_owned_source_metadata(source), patch.object(
+                playwright_profile, "SAFE_KEY", str(source)
+            ), patch.object(playwright_profile, "SAFE_KEY_SHA256", "0" * 64):
+                with self.assertRaisesRegex(playwright_profile.PlaywrightProfileError, "digest mismatch"):
+                    playwright_profile._publish_safe_key_snapshot(root)
+
+            target = root / "target.gpg"
+            target.write_bytes(payload)
+            source.unlink()
+            source.symlink_to(target)
+            with patch.object(playwright_profile, "SAFE_KEY", str(source)):
+                with self.assertRaises(playwright_profile.PlaywrightProfileError):
+                    playwright_profile._publish_safe_key_snapshot(root)
+
+            source.unlink()
+            os.mkfifo(source)
+            with self._root_owned_source_metadata(source), patch.object(
+                playwright_profile, "SAFE_KEY", str(source)
+            ):
+                with self.assertRaises(playwright_profile.PlaywrightProfileError):
+                    playwright_profile._publish_safe_key_snapshot(root)
+
+            source.unlink()
+            source.write_bytes(b"x" * (playwright_profile.MAX_SAFE_KEY_BYTES + 1))
+            with self._root_owned_source_metadata(source), patch.object(
+                playwright_profile, "SAFE_KEY", str(source)
+            ):
+                with self.assertRaises(playwright_profile.PlaywrightProfileError):
+                    playwright_profile._publish_safe_key_snapshot(root)
+
+            source.write_bytes(payload)
+            (root / "keyrings").mkdir()
+            with self._root_owned_source_metadata(source), patch.object(
+                playwright_profile, "SAFE_KEY", str(source)
+            ), patch.object(
+                playwright_profile, "SAFE_KEY_SHA256", hashlib.sha256(payload).hexdigest()
+            ), patch.object(playwright_profile.os, "chown"):
+                with self.assertRaises(FileExistsError):
+                    playwright_profile._publish_safe_key_snapshot(root)
+            self._restore_test_directories(root)
+
+    def test_replacement_between_lstat_and_open_is_rejected(self) -> None:
+        payload = b"reviewed archive key bytes"
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temporary_directory:
+            root = Path(temporary_directory)
+            root.chmod(0o711)
+            source = root / "host-key.gpg"
+            replacement = root / "replacement.gpg"
+            source.write_bytes(payload)
+            replacement.write_bytes(payload)
+            replaced = False
+
+            def replace_source() -> None:
+                nonlocal replaced
+                if not replaced:
+                    replaced = True
+                    os.replace(replacement, source)
+
+            with self._root_owned_source_metadata(source, before_open=replace_source), patch.object(
+                playwright_profile, "SAFE_KEY", str(source)
+            ), patch.object(
+                playwright_profile, "SAFE_KEY_SHA256", hashlib.sha256(payload).hexdigest()
+            ):
+                with self.assertRaisesRegex(playwright_profile.PlaywrightProfileError, "changed while opening"):
+                    playwright_profile._publish_safe_key_snapshot(root)
+
+    def test_in_place_source_mutation_during_read_cannot_publish_unauthenticated_key(self) -> None:
+        payload = b"reviewed archive key bytes" * 5000
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temporary_directory:
+            root = Path(temporary_directory)
+            root.chmod(0o711)
+            source = root / "host-key.gpg"
+            source.write_bytes(payload)
+            writer = os.open(source, os.O_WRONLY)
+            mutated = False
+            real_read = os.read
+
+            def mutate_during_read(descriptor: int, size: int) -> bytes:
+                nonlocal mutated
+                chunk = real_read(descriptor, size)
+                if descriptor == source_metadata["source_fd"]() and not mutated:
+                    mutated = True
+                    os.pwrite(writer, b"x", 80_000)
+                return chunk
+
+            try:
+                with self._root_owned_source_metadata(source) as source_metadata, patch.object(
+                    playwright_profile, "SAFE_KEY", str(source)
+                ), patch.object(
+                    playwright_profile, "SAFE_KEY_SHA256", hashlib.sha256(payload).hexdigest()
+                ), patch.object(playwright_profile.os, "read", side_effect=mutate_during_read):
+                    with self.assertRaises(playwright_profile.PlaywrightProfileError):
+                        playwright_profile._publish_safe_key_snapshot(root)
+                self.assertFalse((root / "keyrings").exists())
+            finally:
+                os.close(writer)
+                self._restore_test_directories(root)
+
+    def test_non_root_or_writable_source_parents_are_rejected(self) -> None:
+        payload = b"reviewed archive key bytes"
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temporary_directory:
+            root = Path(temporary_directory)
+            root.chmod(0o711)
+            source = root / "host-key.gpg"
+            source.write_bytes(payload)
+            writable_parent = source.parent.stat().st_mode | stat.S_IWGRP
+            overrides = {source.parent: (0, writable_parent)}
+            with self._root_owned_source_metadata(source, overrides=overrides), patch.object(
+                playwright_profile, "SAFE_KEY", str(source)
+            ):
+                with self.assertRaisesRegex(playwright_profile.PlaywrightProfileError, "parent is unsafe"):
+                    playwright_profile._publish_safe_key_snapshot(root)
+
+            non_root_source = {source: (os.geteuid() + 1, source.stat().st_mode)}
+            with self._root_owned_source_metadata(source, overrides=non_root_source), patch.object(
+                playwright_profile, "SAFE_KEY", str(source)
+            ):
+                with self.assertRaisesRegex(playwright_profile.PlaywrightProfileError, "owner"):
+                    playwright_profile._publish_safe_key_snapshot(root)
 
 
 if __name__ == "__main__":

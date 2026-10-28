@@ -1229,7 +1229,8 @@
         "distribution": "ubuntu",
         "versionId": "24.04"
       },
-      "playwrightVersion": "1.63.0"
+      "playwrightVersion": "1.63.0",
+      "keyringSha256": "80a36b0a6de2f69f49d2df75ef473ccde121e9e190b9ea01d20a4f63778d5c31"
     }
   },
   "schemaVersion": 1

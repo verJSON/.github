@@ -30,7 +30,7 @@ from functools import wraps
 
 PROFILE_ID = "playwright-chromium-1.63.0-ubuntu-24.04-amd64"
 PLAYWRIGHT_VERSION = "1.63.0"
-EXPECTED_CATALOG_SHA256 = "932dc0580f023cfbad0885e63bae40d2f33a580f3e2234bce15b4761b8f58134"
+EXPECTED_CATALOG_SHA256 = "2c4a7d73cbbd86e72b6830156fa4bc4c852bc5a6f0bfab387fc26b511c015715"
 EXPECTED_MANIFEST_SHA256 = "e20854d12666e7db8cc947158056de7b49a272d45628c9faa9d8e491b5fb8d87"
 STATE_SCHEMA_VERSION = 1
 MAX_PACKAGE_COUNT = 256
@@ -47,6 +47,8 @@ DPKG_HOOK_OPTIONS = frozenset({"pre-invoke", "post-invoke", "status-logger"})
 DPKG_SAFE_CONFIG = {"no-debsig": "", "log": "/var/log/dpkg.log"}
 NEEDRESTART_CONFIG = "/etc/dpkg/dpkg.cfg.d/needrestart"
 SAFE_KEY = "/usr/share/keyrings/ubuntu-archive-keyring.gpg"
+SAFE_KEY_SHA256 = "80a36b0a6de2f69f49d2df75ef473ccde121e9e190b9ea01d20a4f63778d5c31"
+MAX_SAFE_KEY_BYTES = 1024 * 1024
 SAFE_ENV = {
     "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
     "HOME": "/nonexistent",
@@ -531,9 +533,12 @@ def resolve_profile(profile_id: str) -> dict[str, Any]:
         "directPackages",
         "packages",
         "packageManifestSha256",
+        "keyringSha256",
     }
     if not isinstance(profile, dict) or set(profile) != fields or profile["id"] != PROFILE_ID:
         raise PlaywrightProfileError("Playwright profile has an invalid shape")
+    if profile["keyringSha256"] != SAFE_KEY_SHA256:
+        raise PlaywrightProfileError("Playwright profile signing-key digest is not reviewed")
     if profile["playwrightVersion"] != PLAYWRIGHT_VERSION:
         raise PlaywrightProfileError("Playwright profile version does not match the reviewed profile")
     if profile["platform"] != {
@@ -861,27 +866,91 @@ def _installed_profile_closure(
     return package_versions
 
 
-def _validate_safe_key() -> None:
+def _publish_safe_key_snapshot(root: Path) -> Path:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
     try:
-        metadata = os.lstat(SAFE_KEY)
+        key_path = Path(SAFE_KEY)
+        if key_path.resolve(strict=True) != key_path:
+            raise PlaywrightProfileError("Ubuntu archive signing key path is not canonical")
+        for parent in reversed(key_path.parents):
+            parent_metadata = os.lstat(parent)
+            if (
+                not stat.S_ISDIR(parent_metadata.st_mode)
+                or parent_metadata.st_uid != 0
+                or parent_metadata.st_mode & 0o022
+            ):
+                raise PlaywrightProfileError("Ubuntu archive signing key parent is unsafe")
+        before = os.lstat(SAFE_KEY)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != 0
+            or before.st_size <= 0
+            or before.st_size > MAX_SAFE_KEY_BYTES
+        ):
+            raise PlaywrightProfileError("Ubuntu archive signing key has unsafe type, owner, or size")
+        source_fd = os.open(SAFE_KEY, flags)
     except OSError as error:
-        raise PlaywrightProfileError("Ubuntu archive signing key is unavailable") from error
+        raise PlaywrightProfileError("Ubuntu archive signing key unavailable") from error
+    try:
+        opened = os.fstat(source_fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != 0
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise PlaywrightProfileError("Ubuntu archive signing key changed while opening")
+        chunks = bytearray()
+        while len(chunks) <= MAX_SAFE_KEY_BYTES:
+            chunk = os.read(source_fd, min(65536, MAX_SAFE_KEY_BYTES + 1 - len(chunks)))
+            if not chunk:
+                break
+            chunks.extend(chunk)
+        after = os.fstat(source_fd)
+        current = os.lstat(SAFE_KEY)
+        if (
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+            or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise PlaywrightProfileError("Ubuntu archive signing key changed while reading")
+        data = bytes(chunks)
+    finally:
+        os.close(source_fd)
+    if (
+        not data
+        or len(data) > MAX_SAFE_KEY_BYTES
+        or not hmac.compare_digest(hashlib.sha256(data).hexdigest(), SAFE_KEY_SHA256)
+    ):
+        raise PlaywrightProfileError("Ubuntu archive signing key digest mismatch")
+    key_directory = root / "keyrings"
+    key_directory.mkdir(mode=0o755)
+    os.chown(key_directory, os.geteuid(), os.getegid())
+    os.chmod(key_directory, 0o755)
+    snapshot = key_directory / "ubuntu-archive-keyring.gpg"
+    _write_root_file(snapshot, data, mode=0o444)
+    os.chmod(key_directory, 0o555)
+    descriptor = os.open(snapshot, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        metadata = os.fstat(descriptor)
+        copied = bytearray()
+        while len(copied) <= MAX_SAFE_KEY_BYTES:
+            chunk = os.read(descriptor, min(65536, MAX_SAFE_KEY_BYTES + 1 - len(copied)))
+            if not chunk:
+                break
+            copied.extend(chunk)
+    finally:
+        os.close(descriptor)
     if (
         not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_uid != 0
-        or metadata.st_mode & 0o022
-        or os.path.realpath(SAFE_KEY) != SAFE_KEY
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o444
+        or metadata.st_nlink != 1
+        or bytes(copied) != data
     ):
-        raise PlaywrightProfileError(
-            "Ubuntu archive signing key has unsafe ownership or permissions "
-            f"(regular={stat.S_ISREG(metadata.st_mode)}, uid={metadata.st_uid}, "
-            f"mode={stat.S_IMODE(metadata.st_mode):04o}, "
-            f"canonical={os.path.realpath(SAFE_KEY) == SAFE_KEY})"
-        )
-    owner = _exact_output(("/usr/bin/dpkg-query", "-S", SAFE_KEY), maximum=4096)
-    if owner != f"ubuntu-keyring: {SAFE_KEY}\n".encode("ascii"):
-        raise PlaywrightProfileError("Ubuntu archive signing key is not owned by ubuntu-keyring")
-
+        os.chmod(key_directory, 0o755)
+        snapshot.unlink(missing_ok=True)
+        raise PlaywrightProfileError("private Ubuntu archive signing key snapshot is unsafe")
+    return snapshot
 
 def _write_root_file(path: Path, data: bytes, mode: int = 0o400) -> None:
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
@@ -960,7 +1029,7 @@ def _apt_environment(paths: dict[str, Path]) -> dict[str, str]:
     return {**SAFE_ENV, "HOME": str(paths["home"]), "APT_CONFIG": str(apt_config)}
 
 
-def _make_apt_environment(root: Path) -> dict[str, Path]:
+def _make_apt_environment(root: Path, safe_key: Path) -> dict[str, Path]:
     apt_uid = pwd.getpwnam("_apt").pw_uid
     lists = root / "lists"
     cache = root / "cache"
@@ -988,9 +1057,9 @@ def _make_apt_environment(root: Path) -> dict[str, Path]:
         os.chown(directory, 0, 0)
     source_list = root / "ubuntu.sources.list"
     source_data = (
-        f"deb [arch=amd64 signed-by={SAFE_KEY}] https://archive.ubuntu.com/ubuntu noble main universe\n"
-        f"deb [arch=amd64 signed-by={SAFE_KEY}] https://archive.ubuntu.com/ubuntu noble-updates main universe\n"
-        f"deb [arch=amd64 signed-by={SAFE_KEY}] https://security.ubuntu.com/ubuntu noble-security main universe\n"
+        f"deb [arch=amd64 signed-by={safe_key}] https://archive.ubuntu.com/ubuntu noble main universe\n"
+        f"deb [arch=amd64 signed-by={safe_key}] https://archive.ubuntu.com/ubuntu noble-updates main universe\n"
+        f"deb [arch=amd64 signed-by={safe_key}] https://security.ubuntu.com/ubuntu noble-security main universe\n"
     ).encode("ascii")
     _write_root_file(source_list, source_data)
     apt_config = root / "apt.conf"
@@ -1004,6 +1073,7 @@ def _make_apt_environment(root: Path) -> dict[str, Path]:
         "sourceparts": sourceparts,
         "configparts": configparts,
         "trustedparts": trustedparts,
+        "safe_key": safe_key,
         "apt_config": apt_config,
         "home": home,
     }
@@ -1773,11 +1843,11 @@ def provision(
     )
     image_identity = _runner_image_identity() if require_nonempty_plan else {}
     state_path = _state_file_path(state_file)
-    _validate_safe_key()
     root = _create_private_temp_root()
     receipt: dict[str, Any] | None = None
     try:
-        paths = _make_apt_environment(root)
+        safe_key = _publish_safe_key_snapshot(root)
+        paths = _make_apt_environment(root, safe_key)
         options = _apt_options(paths)
         apt_environment = _apt_environment(paths)
         snapshot = _scan_global_dpkg_config()
