@@ -423,7 +423,7 @@ class GeneratedCallerTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 raw, document = self.generate(mode)
                 triggers = document.get("on", document.get(True))
-                self.assertEqual({"schedule", "workflow_dispatch"}, set(triggers))
+                self.assertEqual({"schedule", "workflow_dispatch"} if mode == "propose" else {"workflow_dispatch"}, set(triggers))
                 self.assertNotIn("autonomy", triggers["workflow_dispatch"]["inputs"])
                 job = document["jobs"]["release-propose"]
                 self.assertEqual(
@@ -442,6 +442,15 @@ class GeneratedCallerTests(unittest.TestCase):
                 self.assertEqual(job["permissions"], called_job["permissions"])
                 self.assertNotIn("issues: write", raw if mode == "dispatch" else "")
                 self.assertNotIn("actions: write", raw if mode == "propose" else "")
+
+    def test_dispatch_admission_rejects_scheduled_and_non_default_branch_runs(self) -> None:
+        workflow = yaml.safe_load((ROOT / ".github/workflows/release-dispatch.yml").read_text(encoding="utf-8"))
+        step = next(step for step in workflow["jobs"]["release-dispatch"]["steps"] if step.get("name") == "Admit release dispatch on the default branch")
+        base = {"PATH": "/usr/bin:/bin", "DEFAULT_BRANCH": "main", "DISPATCH_REF": "refs/heads/main", "CONTRACT_REF": self.sha}
+        for event, ref, expected in (("schedule", "refs/heads/main", 1), ("push", "refs/heads/main", 1), ("workflow_dispatch", "refs/heads/other", 1), ("workflow_dispatch", "refs/heads/main", 0)):
+            with self.subTest(event=event, ref=ref):
+                result = subprocess.run(["bash", "-c", step["run"]], env=base | {"EVENT_NAME": event, "DISPATCH_REF": ref}, capture_output=True, text=True)
+                self.assertEqual(expected, result.returncode, result.stderr)
 
     def test_generator_refuses_implicit_or_invalid_autonomy(self) -> None:
         generator = str(ROOT / "scripts" / "gen-changelog-caller.sh")

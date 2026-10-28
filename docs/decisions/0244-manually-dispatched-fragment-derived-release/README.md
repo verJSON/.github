@@ -2,9 +2,9 @@
 
 - **Date:** 2026-10-28
 - **Status:** Proposed
-- **Issue:** [#1939](https://github.com/VerJSON/.github/issues/1939)
+- **Issues:** [#1939](https://github.com/VerJSON/.github/issues/1939), [#1940](https://github.com/VerJSON/.github/issues/1940)
 - **Category:** release automation and GitHub write authority
-- **Supersedes:** [ADR 0218](../0218-require-explicit-release-dispatch-version/README.md)
+- **Supersedes:** [ADR 0218](../0218-require-explicit-release-dispatch-version/README.md), and the scheduled dispatch provision of [ADR 0101](../0101-explicit-release-proposal-autonomy/README.md)
 - **Extends:** [ADR 0038](../0038-canonical-changelog-contract/README.md) and [ADR 0183](../0183-release-plan-resolves-optional-version/README.md)
 
 ## Context
@@ -13,7 +13,7 @@ The release manager decides when to release, but the selected `NEXT/` fragments 
 
 ## Decision
 
-The generated node, artifact, and snapshot callers offer an optional `version` input. When it is empty, the existing pinned `release-plan` derives the next tag from the highest impact of the selected fragments and the latest immutable release snapshot for the selected namespace. If supplied, a version is validated against the same plan. Whitespace-only and invalid explicit values are errors. The selected source commit, namespace, selection digest, and resolved version remain bound before the snapshot and publication steps. Summaries expose the resolved plan. Authorization remains the explicit release manager dispatch; no tag-push or main-merge release trigger is added.
+The generated node, artifact, and snapshot callers offer an optional `version` input. When it is empty, the existing pinned `release-plan` derives the next tag from the highest impact of the selected fragments and the latest immutable release snapshot for the selected namespace. If supplied, a version is validated against the same plan. Whitespace-only and invalid explicit values are errors. The selected source commit, namespace, selection digest, and resolved version remain bound before the snapshot and publication steps. Summaries expose the resolved plan. The authorized release manager explicitly initiates a dispatch; no tag-push or main-merge release trigger is added. Scheduled proposal-only runs may continue, but scheduled release dispatch is rejected in both the generated caller and reusable dispatch workflow. GitHub workflow_dispatch can also be invoked via API, so this event check does not by itself prove a direct human session; existing credential and review controls remain necessary.
 
 The existing empty-selection behavior remains a successful no-op without a release. A new namespace with no prior release snapshot requires an explicit initial version; it is not inferred. Existing legacy fragments without impact retain the established patch default; newly introduced fragments must meet the canonical impact validation contract. Version arithmetic follows the canonical engine's existing major/minor/patch rules, including for `0.x`; this change introduces no separate prerelease policy.
 
