@@ -15,10 +15,15 @@ quietly loses coverage is how the TAB/IFS false negative would come back.
 from __future__ import annotations
 
 import os
+import importlib.util
 import shutil
 import subprocess
 import sys
 import tempfile
+import contextlib
+import io
+from unittest import mock
+import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -881,7 +886,75 @@ code, output = run_policy("--visibility", "public",
 if code == 0:
     ok("this repository's own workflows pass the policy")
 else:
-    fail(f"this repository's own workflows do not pass (exit {code}): {output.strip()}")
+ fail(f"this repository's own workflows do not pass (exit {code}): {output.strip()}")
+
+spec = importlib.util.spec_from_file_location("hosted_selector_policy", SCRIPT)
+policy = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(policy)
+acceptance_path = os.path.join(
+ CANONICAL_WORKFLOWS, "playwright-profile-hosted-acceptance.yml"
+)
+with open(acceptance_path, encoding="utf-8") as stream:
+ acceptance = yaml.safe_load(stream)
+acceptance_job = acceptance["jobs"]["hosted-profile-acceptance"]
+if policy.is_fixed_hosted_profile_acceptance(
+ acceptance_path, "hosted-profile-acceptance", acceptance_job
+):
+ ok("the fixed hosted exception is recognized at its exact canonical site")
+else:
+ fail("the fixed hosted exception did not recognize its canonical site")
+invalid_sites = (
+ (acceptance_path, "other-job", acceptance_job),
+ (os.path.join(CANONICAL_WORKFLOWS, "copied.yml"),
+  "hosted-profile-acceptance", acceptance_job),
+ (acceptance_path, "hosted-profile-acceptance",
+  {**acceptance_job, "runs-on": "ubuntu-latest"}),
+ (acceptance_path, "hosted-profile-acceptance",
+  {**acceptance_job, "strategy": {"matrix": {"runner": ["ubuntu-24.04"]}}}),
+ (acceptance_path, "hosted-profile-acceptance",
+  {**acceptance_job, "if": "always()"}),
+)
+for path, job_name, body in invalid_sites:
+ if not policy.is_fixed_hosted_profile_acceptance(path, job_name, body):
+  ok(f"fixed hosted exception rejects mutation at {job_name}")
+ else:
+  fail(f"fixed hosted exception accepted mutation at {job_name}")
+
+with open(acceptance_path, "rb") as stream:
+ fixed_hosted_source = stream.read()
+fixed_hosted_mutations = (
+ ("inline pull_request_target trigger", fixed_hosted_source.replace(
+  b"  pull_request:\n", b"  pull_request:\n  pull_request_target: {}\n", 1)),
+ ("quoted job-level permission override", fixed_hosted_source.replace(
+  b"    timeout-minutes: 25\n",
+  b'    "permissions": {"contents": "write"}\n    timeout-minutes: 25\n', 1)),
+ ("unknown workflow routing field", fixed_hosted_source.replace(
+  b"permissions:\n", b"defaults: {run: {shell: bash}}\n\npermissions:\n", 1)),
+ ("unknown job routing field", fixed_hosted_source.replace(
+  b"    timeout-minutes: 25\n", b"    services: {}\n    timeout-minutes: 25\n", 1)),
+ ("duplicate YAML document", fixed_hosted_source + b"\n---\n{}\n"),
+ ("YAML alias syntax", fixed_hosted_source.replace(
+  b"name: Playwright profile hosted acceptance\n",
+  b"name: Playwright profile hosted acceptance\nmarker: &a fixed\nalias: *a\n", 1)),
+ ("oversized workflow source", fixed_hosted_source + b"#" * 4096),
+)
+for label, mutated_source in fixed_hosted_mutations:
+ with tempfile.TemporaryDirectory() as directory:
+  mutated_path = os.path.join(directory, "playwright-profile-hosted-acceptance.yml")
+  with open(mutated_path, "wb") as stream:
+   stream.write(mutated_source)
+  output = io.StringIO()
+  try:
+   with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+    with mock.patch.object(policy.yaml, "load_all", side_effect=AssertionError("YAML parser ran before fixed-template rejection")):
+     code = policy.main(["--visibility", "public", directory])
+  except AssertionError as error:
+   fail(f"selector rejects {label} before YAML parsing: {error}")
+  else:
+   if code == 2:
+    ok(f"selector rejects {label} before YAML parsing")
+   else:
+    fail(f"selector accepted {label} or returned the wrong status: {code}; {output.getvalue()}")
 
 # ---------------------------------------------------------------------------
 # Coverage guard. Porting this suite from shell silently dropped three fixtures
@@ -890,6 +963,33 @@ else:
 # An unreferenced fixture is dead weight that reads as coverage, so the suite
 # now fails rather than letting the next port lose one.
 # ---------------------------------------------------------------------------
+# The initial independent text scan must consume the bounded snapshot too.
+with tempfile.TemporaryDirectory() as oversized_fixed_dir:
+    oversized_fixed = os.path.join(
+        oversized_fixed_dir, "playwright-profile-hosted-acceptance.yml"
+    )
+    with open(oversized_fixed, "wb") as stream:
+        stream.write(b"#" * (4 * 1024 * 1024))
+    output = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with mock.patch.object(
+                policy, "check_os_lane_references",
+                side_effect=AssertionError("source scanner ran before bounded admission"),
+            ):
+                with mock.patch.object(
+                    policy.yaml, "load_all",
+                    side_effect=AssertionError("YAML parser ran before bounded admission"),
+                ):
+                    code = policy.main(["--visibility", "public", oversized_fixed_dir])
+    except AssertionError as error:
+        fail(f"oversized workflow source reached a later stage: {error}")
+    else:
+        if code == 2 and "exceeds its byte limit" in output.getvalue():
+            ok("4 MiB fixed workflow is rejected before source scanning and YAML")
+        else:
+            fail(f"oversized workflow did not fail at bounded admission: {code}; {output.getvalue()}")
+
 on_disk = {
     entry for entry in os.listdir(FIXTURES)
     if os.path.isdir(os.path.join(FIXTURES, entry))

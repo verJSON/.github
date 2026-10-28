@@ -70,6 +70,12 @@ def _prepend_dependency_path(argv: list[str]) -> None:
 if __name__ == "__main__":
     _prepend_dependency_path(sys.argv)
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    import runner_lane_catalog as lane_catalog  # noqa: E402
+except ImportError:
+    lane_catalog = None
+
 try:
     import yaml  # noqa: E402 - the dependency path must be in place first
 except ImportError as error:
@@ -159,7 +165,7 @@ class Undetermined(Exception):
 class _LinedDict(dict):
     """A mapping that remembers the source line of each of its keys."""
 
-    __slots__ = ("lines",)
+    __slots__ = ("lines", "fixed_hosted_profile_verified")
 
 
 class PolicyLoader(yaml.SafeLoader):
@@ -176,6 +182,7 @@ class PolicyLoader(yaml.SafeLoader):
 def _construct_lined_map(loader: PolicyLoader, node: yaml.MappingNode):
     data = _LinedDict()
     data.lines = {}
+    data.fixed_hosted_profile_verified = False
     yield data
     data.update(loader.construct_mapping(node))
     data.lines = {
@@ -207,7 +214,55 @@ def _compose_node(self, parent, index):  # noqa: ANN001 - PyYAML hook signature
 PolicyLoader.compose_node = _compose_node
 
 
-def load_workflow(path: str) -> _LinedDict:
+def read_workflow_source(path: str) -> bytes:
+    """Read one bounded, stable byte snapshot before scanning or parsing."""
+    fixed_hosted_profile = os.path.basename(path) == "playwright-profile-hosted-acceptance.yml"
+    try:
+        if fixed_hosted_profile:
+            if lane_catalog is None:
+                raise Undetermined(f"{path}: fixed hosted profile policy is unavailable")
+            return lane_catalog.read_fixed_hosted_profile_source(path)
+
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        nonblock = getattr(os, "O_NONBLOCK", None)
+        if nofollow is None or nonblock is None:
+            raise Undetermined(f"{path}: safe workflow file opens are unavailable")
+        flags = os.O_RDONLY | nofollow | nonblock | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(path, flags)
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                raise Undetermined(f"{path}: workflow source is not a regular file")
+            if before.st_size > MAX_WORKFLOW_BYTES:
+                raise Undetermined(
+                    f"{path}: {before.st_size} bytes exceeds the {MAX_WORKFLOW_BYTES}-byte ceiling"
+                )
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                source = stream.read(MAX_WORKFLOW_BYTES + 1)
+            after = os.fstat(descriptor)
+            before_identity = (
+                before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns
+            )
+            after_identity = (
+                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns
+            )
+            if before_identity != after_identity:
+                raise Undetermined(f"{path}: workflow source changed while being read")
+            if len(source) > MAX_WORKFLOW_BYTES:
+                raise Undetermined(
+                    f"{path}: more than {MAX_WORKFLOW_BYTES} bytes read from workflow source"
+                )
+            return source
+        finally:
+            os.close(descriptor)
+    except Undetermined:
+        raise
+    except (OSError, ValueError) as error:
+        detail = " ".join(str(error).split())
+        raise Undetermined(f"{path}: cannot read workflow source: {detail}") from error
+
+
+def load_workflow(path: str, source: bytes | None = None) -> _LinedDict:
     """Return the single workflow document, or raise Undetermined.
 
     Every anomaly below is refused rather than skipped. "I could not read this
@@ -215,31 +270,35 @@ def load_workflow(path: str) -> _LinedDict:
     the difference is visible in the exit code.
     """
     try:
-        size = os.path.getsize(path)
-    except OSError as error:
-        raise Undetermined(f"{path}: cannot stat: {error}") from error
-    if size > MAX_WORKFLOW_BYTES:
-        raise Undetermined(
-            f"{path}: {size} bytes exceeds the {MAX_WORKFLOW_BYTES}-byte ceiling"
+        fixed_hosted_profile = (
+            os.path.basename(path) == "playwright-profile-hosted-acceptance.yml"
         )
-    try:
-        with open(path, encoding="utf-8") as stream:
-            documents = list(yaml.load_all(stream, Loader=PolicyLoader))
-    except (yaml.YAMLError, UnicodeDecodeError, OSError) as error:
+        if source is None:
+            source = read_workflow_source(path)
+        elif fixed_hosted_profile:
+            if lane_catalog is None:
+                raise Undetermined(f"{path}: fixed hosted profile policy is unavailable")
+            lane_catalog.validate_fixed_hosted_profile_bytes(path, source)
+        if len(source) > MAX_WORKFLOW_BYTES:
+            raise Undetermined(
+                f"{path}: {len(source)} bytes exceeds the {MAX_WORKFLOW_BYTES}-byte ceiling"
+            )
+        text = source.decode("utf-8")
+        documents = list(yaml.load_all(text, Loader=PolicyLoader))
+    except Undetermined:
+        raise
+    except (yaml.YAMLError, UnicodeDecodeError, OSError, ValueError) as error:
         detail = " ".join(str(error).split())
-        raise Undetermined(f"{path}: cannot parse: {detail}") from error
-
+        raise Undetermined(f"{path}: cannot read or parse: {detail}") from error
     if len(documents) != 1:
-        # GitHub reads the first document. A reader that silently takes one of
-        # several is guessing, and the metered selector can live in the other.
-        raise Undetermined(
-            f"{path}: expected exactly one YAML document, found {len(documents)}"
-        )
+        # GitHub reads only the first document. Silently taking one of several
+        # guesses which document contains the live selector.
+        raise Undetermined(f"{path}: expected one YAML document, found {len(documents)}")
     document = documents[0]
-    if not isinstance(document, dict):
-        raise Undetermined(f"{path}: top level is not a mapping")
+    if not isinstance(document, _LinedDict):
+        raise Undetermined(f"{path}: workflow document must be a mapping")
+    document.fixed_hosted_profile_verified = fixed_hosted_profile
     return document
-
 
 def extract_jobs(path: str, document: dict) -> list[tuple[str, dict, int]]:
     """Return (name, body, line) per job, or raise Undetermined.
@@ -878,12 +937,46 @@ def check_reusable_runner_inputs(
             )
 
 
+FIXED_HOSTED_PROFILE_ACCEPTANCE_WORKFLOW = "playwright-profile-hosted-acceptance.yml"
+FIXED_HOSTED_PROFILE_ACCEPTANCE_JOB = "hosted-profile-acceptance"
+FIXED_HOSTED_PROFILE_ACCEPTANCE_MARKER = "    # runner-lane: fixed-hosted-profile-acceptance"
+
+
+def is_fixed_hosted_profile_acceptance(path: str, name: str, body: dict) -> bool:
+    """Recognize the fixed site after load_workflow verified its raw template."""
+    expected_path = os.path.abspath(
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            ".github",
+            "workflows",
+            FIXED_HOSTED_PROFILE_ACCEPTANCE_WORKFLOW,
+        )
+    )
+    return (
+        os.path.abspath(path) == expected_path
+        and name == FIXED_HOSTED_PROFILE_ACCEPTANCE_JOB
+        and body.get("runs-on") == "ubuntu-24.04"
+        and body.get("if")
+        == "github.event.pull_request.head.repo.full_name == github.repository"
+        and "strategy" not in body
+        and "uses" not in body
+        and "with" not in body
+        and "permissions" not in body
+    )
+
+def text_is_job_header(text: str) -> bool:
+    return bool(re.fullmatch(r"  [A-Za-z0-9_-]+:", text))
+
+
 def check_job(report: Report, path: str, name: str, body: dict, line: int,
               visibility: str, consumer_policy: bool = False,
               canonical_canary: bool = False,
               canonical_container_candidate: bool = False,
               canonical_changelog_pr_gate: bool = False,
-              guarded_fastlane_caller: bool = False) -> None:
+              guarded_fastlane_caller: bool = False,
+              fixed_hosted_profile_verified: bool = False) -> None:
     if consumer_policy:
         check_reusable_runner_inputs(
             report,
@@ -901,6 +994,10 @@ def check_job(report: Report, path: str, name: str, body: dict, line: int,
     lines = getattr(body, "lines", {})
     runs_on_line = lines.get("runs-on", line)
     timeout_line = lines.get("timeout-minutes", runs_on_line)
+    fixed_hosted_acceptance = (
+        fixed_hosted_profile_verified
+        and is_fixed_hosted_profile_acceptance(path, name, body)
+    )
 
     selector_values = [body["runs-on"]]
     raw_runs_on = flatten(body["runs-on"])
@@ -953,7 +1050,9 @@ def check_job(report: Report, path: str, name: str, body: dict, line: int,
     # Parsing and job extraction still fail closed, expression construction
     # stays inside the reviewed grammar, and matrix sources are still folded in.
     if consumer_policy:
-        if not canonical_changelog_pr_gate and LINUX_HOSTED_LITERAL.search(outside_expressions(selector)):
+        if not canonical_changelog_pr_gate and LINUX_HOSTED_LITERAL.search(
+            outside_expressions(selector)
+        ):
             report.violation(
                 path,
                 runs_on_line,
@@ -994,6 +1093,7 @@ def check_job(report: Report, path: str, name: str, body: dict, line: int,
         visibility == "private"
         and LINUX_HOSTED_LITERAL.search(outside_expressions(selector))
         and not is_public_call_rejection_sentinel(name, body)
+        and not fixed_hosted_acceptance
     ):
         report.violation(
             path, runs_on_line,
@@ -1061,32 +1161,28 @@ def check_job(report: Report, path: str, name: str, body: dict, line: int,
         )
 
 
-def check_os_lane_references(report: Report, path: str, sanctioned: set[str]) -> bool:
-    """R5 — a file-wide TEXT scan, deliberately independent of the parser.
-
-    Every other rule depends on resolving the document; this one must hold even
-    for a file the parser refuses, and it is the rule that answers "who can spend
-    hosted minutes" with one grep. A reference in a comment counts: a
-    commented-out selector is a copy-paste away from a live one, which is exactly
-    how this defect class regrew four times (#175, #182, #192, #203).
-    """
+def check_os_lane_references(
+    report: Report,
+    path: str,
+    sanctioned: set[str],
+    source: bytes,
+) -> bool:
+    """Scan the same bounded bytes that are passed to the YAML parser."""
     found = False
-    try:
-        with open(path, encoding="utf-8", errors="replace") as stream:
-            for number, text in enumerate(stream, start=1):
-                if OS_LANE_TEXT.search(text):
-                    found = True
-                    if os.path.basename(path) not in sanctioned:
-                        report.violation(
-                            path, number,
-                            "R5 off-path reference to an OS lane variable — only the "
-                            "sanctioned desktop-release path may name "
-                            "CI_LANE_TRUSTED_MACOS or CI_LANE_TRUSTED_WINDOWS",
-                        )
-    except OSError as error:
-        report.anomaly(f"{path}: cannot read: {error}")
+    text = source.decode("utf-8", errors="replace")
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    for number, line in enumerate(lines, start=1):
+        if OS_LANE_TEXT.search(line):
+            found = True
+            if os.path.basename(path) not in sanctioned:
+                report.violation(
+                    path,
+                    number,
+                    "R5 off-path reference to an OS lane variable — only the "
+                    "sanctioned desktop-release path may name "
+                    "CI_LANE_TRUSTED_MACOS or CI_LANE_TRUSTED_WINDOWS",
+                )
     return found
-
 
 def check_os_lane_trigger(report: Report, path: str, document: dict) -> None:
     """R6 — every workflow that can select an OS lane is dispatch-only."""
@@ -1224,10 +1320,13 @@ def main(argv: list[str]) -> int:
 
     for path in workflow_files:
         references_os_lane = False
-        if not arguments.consumer_policy:
-            references_os_lane = check_os_lane_references(report, path, sanctioned)
         try:
-            document = load_workflow(path)
+            source = read_workflow_source(path)
+            if not arguments.consumer_policy:
+                references_os_lane = check_os_lane_references(
+                    report, path, sanctioned, source
+                )
+            document = load_workflow(path, source)
             jobs = extract_jobs(path, document)
         except Undetermined as error:
             report.anomaly(str(error))
@@ -1262,6 +1361,7 @@ def main(argv: list[str]) -> int:
                 name in canonical_candidate_jobs,
                 arguments.consumer_policy and is_canonical_changelog_pr_gate(document),
                 arguments.consumer_policy and is_guarded_fastlane_caller(document),
+                getattr(document, "fixed_hosted_profile_verified", False),
             )
 
     for message in report.anomalies:

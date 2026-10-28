@@ -1818,6 +1818,8 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                           postgres_state_file,
                           runner_temp=runner_temp,
                       )
+                  if playwright_profile_module is not None:
+                      playwright_profile_module.verify_runtime(playwright_profile_name, playwright_state_file)
                   try:
                       received_signal = host_signals.poll()
                       if received_signal is not None:

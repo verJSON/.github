@@ -29,6 +29,7 @@ assert checkout["with"]["ref"] == "${{ job.workflow_sha }}"
 assert set(checkout["with"]["sparse-checkout"].splitlines()) == {
     ".github/actionlint.yaml",
     "scripts/ci-gate/hosted-selector-policy.py",
+    "scripts/runner_lane_catalog.py",
 }
 assert checkout["with"]["sparse-checkout-cone-mode"] is False
 assert checkout["with"]["persist-credentials"] is False
