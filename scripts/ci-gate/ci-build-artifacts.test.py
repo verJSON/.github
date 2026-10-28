@@ -17,6 +17,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -894,6 +895,135 @@ class ArtifactPolicyTests(unittest.TestCase):
         self.assertTrue(artifacts._role_matches_lane("consumer", "test", artifact))
         self.assertTrue(artifacts._role_matches_lane("producer", "build", artifact))
         self.assertFalse(artifacts._role_matches_lane("producer", "test", artifact))
+
+    def test_caller_workflow_blob_size_is_bounded_and_hashed_in_chunks(self) -> None:
+        workflow_path = ".github/workflows/ci.yml"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repository = Path(temp_dir)
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            subprocess.run(["git", "-C", str(repository), "config", "user.email", "ci@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(repository), "config", "user.name", "CI"], check=True)
+            workflow_file = repository / workflow_path
+            workflow_file.parent.mkdir(parents=True)
+            for size in (
+                0,
+                artifacts.MAX_CALLER_WORKFLOW_BLOB_BYTES - 1,
+                artifacts.MAX_CALLER_WORKFLOW_BLOB_BYTES,
+                artifacts.MAX_CALLER_WORKFLOW_BLOB_BYTES + 1,
+            ):
+                with self.subTest(size=size):
+                    workflow_bytes = b"x" * size
+                    workflow_file.write_bytes(workflow_bytes)
+                    subprocess.run(
+                        ["git", "-C", str(repository), "add", "--", workflow_path],
+                        check=True,
+                    )
+                    subprocess.run(
+                        ["git", "-C", str(repository), "commit", "-qm", "workflow fixture"],
+                        check=True,
+                    )
+                    commit = subprocess.run(
+                        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+                        check=True,
+                        text=True,
+                        capture_output=True,
+                    ).stdout.strip()
+                    with patch.object(artifacts.subprocess, "run", wraps=subprocess.run) as git_run:
+                        matches = artifacts._caller_workflow_matches_policy(
+                            repository=repository,
+                            workflow_commit=commit,
+                            workflow_path=workflow_path,
+                            workflow_digest=hashlib.sha256(workflow_bytes).hexdigest(),
+                        )
+                    self.assertEqual(matches, size <= artifacts.MAX_CALLER_WORKFLOW_BLOB_BYTES)
+                    cat_file_calls = [
+                        call for call in git_run.call_args_list if "cat-file" in call.args[0]
+                    ]
+                    if size > artifacts.MAX_CALLER_WORKFLOW_BLOB_BYTES:
+                        self.assertEqual(cat_file_calls, [])
+                    else:
+                        self.assertEqual(len(cat_file_calls), 1)
+                        self.assertIsNot(cat_file_calls[0].kwargs["stdout"], subprocess.PIPE)
+                        self.assertIs(cat_file_calls[0].kwargs["stderr"], subprocess.DEVNULL)
+                        self.assertEqual(
+                            cat_file_calls[0].kwargs["timeout"],
+                            artifacts.CALLER_WORKFLOW_BLOB_READ_TIMEOUT_SECONDS,
+                        )
+
+    def test_caller_workflow_blob_size_metadata_must_be_bounded_decimal(self) -> None:
+        workflow_path = ".github/workflows/ci.yml"
+        object_id = "a" * 40
+        for size_text in ("not-a-size", "1000000000000000000"):
+            with self.subTest(size_text=size_text):
+                entry = (
+                    f"100644 blob {object_id} {size_text}\t{workflow_path}\0".encode("ascii")
+                )
+                with patch.object(
+                    artifacts.subprocess,
+                    "run",
+                    return_value=SimpleNamespace(stdout=entry),
+                ) as git_run:
+                    self.assertFalse(
+                        artifacts._caller_workflow_matches_policy(
+                            repository=Path("unused"),
+                            workflow_commit="b" * 40,
+                            workflow_path=workflow_path,
+                            workflow_digest="c" * 64,
+                        )
+                    )
+                self.assertEqual(git_run.call_count, 1)
+
+    def test_caller_workflow_extraction_failures_reject_the_blob(self) -> None:
+        workflow_path = ".github/workflows/ci.yml"
+        workflow_bytes = b"name: trusted caller\n"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repository = Path(temp_dir)
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            subprocess.run(["git", "-C", str(repository), "config", "user.email", "ci@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(repository), "config", "user.name", "CI"], check=True)
+            workflow_file = repository / workflow_path
+            workflow_file.parent.mkdir(parents=True)
+            workflow_file.write_bytes(workflow_bytes)
+            subprocess.run(
+                ["git", "-C", str(repository), "add", "--", workflow_path],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repository), "commit", "-qm", "workflow fixture"],
+                check=True,
+            )
+            commit = subprocess.run(
+                ["git", "-C", str(repository), "rev-parse", "HEAD"],
+                check=True,
+                text=True,
+                capture_output=True,
+            ).stdout.strip()
+            original_run = subprocess.run
+            cases = (
+                ("truncated", workflow_bytes[:-1], 0),
+                ("excess", workflow_bytes + b"x", 0),
+                ("nonzero exit", workflow_bytes, 1),
+                ("timeout", workflow_bytes, None),
+            )
+            for label, extracted_bytes, returncode in cases:
+                with self.subTest(label=label):
+                    def fake_run(command: list[str], **kwargs: Any) -> Any:
+                        if "cat-file" not in command:
+                            return original_run(command, **kwargs)
+                        kwargs["stdout"].write(extracted_bytes)
+                        if returncode is None:
+                            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+                        return SimpleNamespace(returncode=returncode)
+
+                    with patch.object(artifacts.subprocess, "run", side_effect=fake_run):
+                        self.assertFalse(
+                            artifacts._caller_workflow_matches_policy(
+                                repository=repository,
+                                workflow_commit=commit,
+                                workflow_path=workflow_path,
+                                workflow_digest=hashlib.sha256(workflow_bytes).hexdigest(),
+                            )
+                        )
 
     def test_trusted_preflight_selects_and_derives_only_the_shared_build(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
