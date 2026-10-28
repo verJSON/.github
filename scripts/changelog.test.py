@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -1843,6 +1844,50 @@ class ChangelogContractTests(unittest.TestCase):
         plan = changelog.release_plan(self.root, "v1.2.0-rc.10", [])
         self.assertEqual("v1.2.0-rc.10", plan["version"])
         self.assertIn("advances an existing prerelease", plan["bump_rationale"])
+
+    def test_explicit_next_patch_recovers_occupied_build_precedence(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        (snapshots / "v1.1.0.md").write_text("stable\n", encoding="utf-8")
+        (snapshots / "python-v99.0.0+other.md").write_text("other namespace\n", encoding="utf-8")
+        path = fragment(self.root, "2026-07-30-issue-249-feature.md", impact="patch")
+        for impact, occupied, recovered, skipped in (
+            ("patch", "v1.1.1", "v1.1.2", "v1.1.3"),
+            ("minor", "v1.2.0", "v1.2.1", "v1.2.2"),
+            ("major", "v2.0.0", "v2.0.1", "v2.0.2"),
+        ):
+            with self.subTest(impact=impact):
+                text = path.read_text(encoding="utf-8")
+                path.write_text(re.sub(r"impact: (patch|minor|major)", f"impact: {impact}", text), encoding="utf-8")
+                first, second = (snapshots / f"{occupied}+{label}.md" for label in ("build.1", "build.2"))
+                first.write_text("one\n", encoding="utf-8")
+                second.write_text("two\n", encoding="utf-8")
+                with self.assertRaisesRegex(changelog.ChangelogError, "newer than the latest stable snapshot"):
+                    changelog.release_plan(self.root, "", [])
+                for duplicate in (occupied, f"{occupied}+other"):
+                    with self.assertRaisesRegex(changelog.ChangelogError, "equal precedence"):
+                        changelog.release_plan(self.root, duplicate, [])
+                plan = changelog.release_plan(self.root, recovered, [])
+                self.assertEqual(recovered, plan["version"])
+                self.assertIn("avoids the occupied stable precedence", plan["bump_rationale"])
+                blocked = snapshots / f"{recovered}+other.md"
+                blocked.write_text("already used\n", encoding="utf-8")
+                with self.assertRaisesRegex(changelog.ChangelogError, "equal precedence"):
+                    changelog.release_plan(self.root, recovered, [])
+                blocked.unlink()
+                with self.assertRaisesRegex(changelog.ChangelogError, f"require a {impact} bump"):
+                    changelog.release_plan(self.root, skipped, [])
+                first.unlink()
+                second.unlink()
+
+    def test_other_namespace_or_unrelated_build_does_not_allow_overbump(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        for version in ("v1.1.0", "v1.3.0+build.1", "python-v1.2.0+build.1"):
+            (snapshots / f"{version}.md").write_text("previous\n", encoding="utf-8")
+        fragment(self.root, "2026-07-30-issue-249-feature.md", impact="minor")
+        with self.assertRaisesRegex(changelog.ChangelogError, "require a minor bump"):
+            changelog.release_plan(self.root, "v1.2.1", [])
 
     def test_qualified_history_at_or_below_stable_does_not_move_baseline(self) -> None:
         snapshots = self.root / "CHANGELOG"
