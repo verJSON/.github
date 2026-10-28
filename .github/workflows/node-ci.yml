@@ -6058,7 +6058,7 @@ jobs:
               --runner-environment "$RUNNER_ENVIRONMENT" \
               --runner-os "$RUNNER_OS"
           receipt_identity="$(stat -c '%d:%i' -- "$PLAYWRIGHT_STATE_FILE")"
-          [[ "$receipt_identity" =~ ^[0-9]+:[0-9]+$ ]]
+          [[ "$receipt_identity" =~ ^[0123456789]+:[0123456789]+$ ]]
           echo "receipt_identity=$receipt_identity" >> "$GITHUB_OUTPUT"
       - name: Run exact credentialless consumer script plan
         id: run-script-plan
@@ -7254,6 +7254,8 @@ jobs:
           blocked_service_env = {
               "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
               "GITHUB_STEP_SUMMARY", "VERJSON_CI_TRUSTED_DB_HOST",
+              "VERJSON_CI_PLAYWRIGHT_PROFILE", "VERJSON_CI_PLAYWRIGHT_STATE",
+              "VERJSON_CI_PLAYWRIGHT_SECRETLESS_MODE",
               "VERJSON_CI_COMMAND_FILES_DIR", "GH_TOKEN",
               "GITHUB_TOKEN", "NODE_AUTH_TOKEN",
               "NPM_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "FTP_PROXY",
@@ -8810,7 +8812,7 @@ jobs:
           set -euo pipefail
           if [[ -e "$PLAYWRIGHT_STATE_FILE" || -L "$PLAYWRIGHT_STATE_FILE" ]]; then
             [[ -f "$RUNNER_TEMP/ci_playwright_system_libraries.py" ]]
-            [[ "$PLAYWRIGHT_STATE_IDENTITY" =~ ^[0-9]+:[0-9]+$ ]] || {
+            [[ "$PLAYWRIGHT_STATE_IDENTITY" =~ ^[0123456789]+:[0123456789]+$ ]] || {
               echo "::error::Playwright receipt identity is unavailable; refusing cleanup" >&2
               exit 1
             }

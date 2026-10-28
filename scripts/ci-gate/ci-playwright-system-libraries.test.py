@@ -1148,11 +1148,12 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
                 signum: signal.getsignal(signum)
                 for signum in (signal.SIGINT, signal.SIGTERM)
             }
-            temp_roots_before = set(Path("/var/tmp").glob("verjson-playwright-apt-*"))
             for index, pending_signals in enumerate(
                 ((signal.SIGINT,), (signal.SIGTERM, signal.SIGTERM, signal.SIGINT))
             ):
                 with self.subTest(signals=tuple(signal.Signals(s).name for s in pending_signals)):
+                    owned_root = temporary_path / f"owned-apt-root-{index}"
+                    owned_root.mkdir()
                     descendant_pid_file = temporary_path / f"descendant-{index}.pid"
                     parent_pid_file = temporary_path / f"parent-{index}.pid"
                     real_popen = playwright_profile.subprocess.Popen
@@ -1178,7 +1179,8 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
                         with self.assertRaisesRegex(
                             playwright_profile.PlaywrightProfileError, "cancelled"
                         ):
-                            with playwright_profile.OperationLifecycle():
+                            with playwright_profile.OperationLifecycle() as operation:
+                                operation.register_temp_root(owned_root)
                                 playwright_profile._run_supervised(
                                     (
                                         sys.executable,
@@ -1207,7 +1209,7 @@ class PlaywrightSystemLibraryProfileTests(unittest.TestCase):
                             time.sleep(0.02)
                         self.assertTrue(process_stopped(pid), f"descendant process {pid} survived cancellation")
 
-            self.assertEqual(set(Path("/var/tmp").glob("verjson-playwright-apt-*")), temp_roots_before)
+                    self.assertFalse(owned_root.exists())
             self.assertEqual(list(temporary_path.glob("receipt-*")), [])
 
     def test_term_during_process_registration_cleans_descendants_and_never_writes_receipt(self) -> None:

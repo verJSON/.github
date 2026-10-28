@@ -872,7 +872,12 @@ def _validate_safe_key() -> None:
         or metadata.st_mode & 0o022
         or os.path.realpath(SAFE_KEY) != SAFE_KEY
     ):
-        raise PlaywrightProfileError("Ubuntu archive signing key has unsafe ownership or permissions")
+        raise PlaywrightProfileError(
+            "Ubuntu archive signing key has unsafe ownership or permissions "
+            f"(regular={stat.S_ISREG(metadata.st_mode)}, uid={metadata.st_uid}, "
+            f"mode={stat.S_IMODE(metadata.st_mode):04o}, "
+            f"canonical={os.path.realpath(SAFE_KEY) == SAFE_KEY})"
+        )
     owner = _exact_output(("/usr/bin/dpkg-query", "-S", SAFE_KEY), maximum=4096)
     if owner != f"ubuntu-keyring: {SAFE_KEY}\n".encode("ascii"):
         raise PlaywrightProfileError("Ubuntu archive signing key is not owned by ubuntu-keyring")
