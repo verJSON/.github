@@ -23,6 +23,8 @@ The existing exact-head, selection-receipt, provenance, release credential, conc
 
 A manager can initiate a release without manually calculating its tag, while an explicit valid version remains possible for bootstrap and controlled cases. The plan is visible in the release run and only becomes authoritative for that run. Adopters must regenerate the complete canonical caller set from one reviewed immutable contract revision. This decision does not activate GitHub Actions, deploy artifacts, change release cadence, or grant additional approval authority.
 
+The scheduled-dispatch removal is classified as major because an existing scheduled caller can no longer initiate publication. The qualified-baseline change is also major: callers that previously derived a version from prerelease or build-only history must now resolve the ambiguity explicitly. The optional manual version input itself is additive and classified as minor.
+
 ## Verification
 
 Generator and release caller tests cover all three caller modes, blank and explicit versions, empty selections, mixed impacts, bootstrap, invalid values, and selection binding. Exercise the exact pinned release command in a disposable clean checkout before delivering an adopter. Remote workflow evidence remains pending while organization Actions are paused.

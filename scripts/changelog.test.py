@@ -1845,6 +1845,18 @@ class ChangelogContractTests(unittest.TestCase):
         self.assertEqual("v1.2.0-rc.10", plan["version"])
         self.assertIn("advances an existing prerelease", plan["bump_rationale"])
 
+    def test_stable_build_classification_respects_namespace_and_semver_core(self) -> None:
+        for version, expected in (
+            ("v1.2.0+build.1", True),
+            ("python-v1.2.0+build.1", False),
+            ("v1.2.1+build.1", False),
+            ("v1.2.0-rc.1+build.1", False),
+            ("v1.2.0", False),
+            ("v1.2", False),
+        ):
+            with self.subTest(version=version):
+                self.assertEqual(expected, changelog.is_stable_build_at_core(version, "v", (1, 2, 0)))
+
     def test_explicit_next_patch_recovers_occupied_build_precedence(self) -> None:
         snapshots = self.root / "CHANGELOG"
         snapshots.mkdir()
