@@ -14,6 +14,7 @@
     {
       "repository": "Verjson/verjson-cli-cloud",
       "callers": [
+        {"path": ".github/workflows/ai-review-label-rearm.yml", "generator": "scripts/gen-ai-review-label-rearm-caller.sh", "canonical_workflows": ["gate-rearm.yml"]},
         {"path": ".github/workflows/ai-review-merge.yml", "generator": "scripts/gen-ai-review-caller.sh", "canonical_workflows": ["ai-review-merge.yml"]},
         {"path": ".github/workflows/ai-privileged-merge.yml", "generator": "scripts/gen-privileged-merge-caller.sh", "canonical_workflows": ["ai-privileged-merge.yml"]},
         {"path": ".github/workflows/ai-promotion-retry.yml", "generator": "scripts/gen-privileged-merge-caller.sh", "canonical_workflows": ["ai-promotion-retry.yml"]},
@@ -35,6 +36,7 @@
       "repository": "Verjson/AiB",
       "callers": [
         {"path": ".github/workflows/ai-privileged-merge.yml", "generator": "scripts/gen-privileged-merge-caller.sh", "canonical_workflows": ["ai-privileged-merge.yml"]},
+        {"path": ".github/workflows/ai-review-label-rearm.yml", "generator": "scripts/gen-ai-review-label-rearm-caller.sh", "canonical_workflows": ["gate-rearm.yml"]},
         {"path": ".github/workflows/changelog.yml", "generator": "scripts/gen-changelog-caller.sh", "canonical_workflows": ["generated-artifacts.yml"]}
       ]
     },
