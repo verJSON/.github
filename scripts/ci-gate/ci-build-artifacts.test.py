@@ -22,10 +22,13 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(ROOT / "scripts/ci-gate/conformance"))
+sys.path.insert(0, str(ROOT / ".github/actions/node-ci-script-plan"))
 import yaml
 import ci_build_artifacts as artifacts
 import ci_postgres_sandbox as postgres_profile
 from expressions import Evaluator, UnsupportedExpression
+import normalized_entries
+import script_plan
 
 
 def _pax_record(key: bytes, value: bytes) -> bytes:
@@ -2813,6 +2816,44 @@ class RoleAuthorizationTests(unittest.TestCase):
 
 
 class ProtectedCandidatePlanValidationTests(unittest.TestCase):
+    def test_normalized_nested_manifest_errors_identify_the_invalid_field(self) -> None:
+        nested_manifests = json.dumps(
+            [{"path": "packages/widget", "approvedPackages": [], "scriptPlan": [{"script": "test"}]}]
+        )
+        cases = (
+            (
+                "non-integer index",
+                "0",
+                "packages/widget",
+                "manifest index must be a JSON integer",
+            ),
+            (
+                "out-of-range index",
+                1,
+                "packages/widget",
+                "manifest index is out of range",
+            ),
+            (
+                "path/index mismatch",
+                0,
+                "packages/other",
+                "manifest path does not match its index",
+            ),
+        )
+        for label, manifest_index, manifest_path, expected_error in cases:
+            with self.subTest(label=label):
+                entries = [
+                    {
+                        "manifestPath": manifest_path,
+                        "manifestIndex": manifest_index,
+                        "script": "test",
+                        "unsetEnv": [],
+                        "requiresServices": False,
+                    }
+                ]
+                with self.assertRaisesRegex(script_plan.ScriptPlanError, expected_error):
+                    normalized_entries.validate_normalized_entries(entries, nested_manifests)
+
     def test_protected_executor_uses_the_trusted_shared_normalized_validator(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
