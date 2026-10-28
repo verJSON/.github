@@ -759,11 +759,15 @@ def validate_release_bump(repo_root: Path, version: str, selected: list[Fragment
         allow_qualified_bootstrap=True, allow_newer_qualified_history=True,
     )
     same_core_prereleases = []
+    expected_core_occupied_by_build = False
     for path in snapshot_paths(repo_root):
         previous = SEMVER_RELEASE.fullmatch(path.stem)
         if previous is None or previous["prefix"] != prefix:
             continue
         core = tuple(int(previous[name]) for name in ("major", "minor", "patch"))
+        if (bump is not None and core == bump[2] and previous["prerelease"] is None
+            and previous["build"] is not None):
+            expected_core_occupied_by_build = True
         if bump is None and core > requested_core:
             raise ChangelogError(
                 f"explicit bootstrap version {version} precedes existing qualified snapshot {path.stem}"
@@ -781,6 +785,12 @@ def validate_release_bump(repo_root: Path, version: str, selected: list[Fragment
         return
     previous_core, impact, expected_core = bump
     if requested_core == expected_core:
+        return
+    # Resolve an already-occupied stable precedence only by an explicit,
+    # plain stable release at the immediately following patch core.
+    if (expected_core_occupied_by_build and requested["prerelease"] is None
+        and requested["build"] is None
+        and requested_core == (expected_core[0], expected_core[1], expected_core[2] + 1)):
         return
     # Explicit progression or graduation can target an existing prerelease core.
     # Those fragments may describe only changes since the prerelease.
@@ -1002,11 +1012,25 @@ def release_plan(
         resolved_match = SEMVER_RELEASE.fullmatch(resolved)
         resolved_core = tuple(int(resolved_match[name]) for name in ("major", "minor", "patch"))
         if resolved_core != expected_core:
-            action = "advances" if resolved_match["prerelease"] else "graduates"
-            rationale = (
-                f"The explicit version {resolved} {action} an existing prerelease "
-                f"after {previous_release}; the selected fragment impact is {impact}."
+            occupied = any(
+                (entry := SEMVER_RELEASE.fullmatch(path.stem)) is not None
+                and entry["prefix"] == prefix
+                and entry["prerelease"] is None and entry["build"] is not None
+                and tuple(int(entry[name]) for name in ("major", "minor", "patch")) == expected_core
+                for path in snapshot_paths(repo_root)
             )
+            if (occupied and resolved_match["prerelease"] is None and resolved_match["build"] is None
+                and resolved_core == (expected_core[0], expected_core[1], expected_core[2] + 1)):
+                rationale = (
+                    f"The explicit version {resolved} avoids the occupied stable precedence "
+                    f"{expected_release}; the selected fragment impact is {impact}."
+                )
+            else:
+                action = "advances" if resolved_match["prerelease"] else "graduates"
+                rationale = (
+                    f"The explicit version {resolved} {action} an existing prerelease "
+                    f"after {previous_release}; the selected fragment impact is {impact}."
+                )
         elif resolved_match["prerelease"] is not None or resolved_match["build"] is not None:
             rationale = (
                 f"The highest selected fragment impact is {impact}; the explicit "
