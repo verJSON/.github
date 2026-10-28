@@ -671,6 +671,17 @@ available PR record does not retain the required pre-merge assertion result,
 so this entry makes no claim that the assertion passed. The owner's standing
 admin authority was used; no gate was weakened.
 
+36. **Admin merge canonical caller policy.** Verjson/.github#1927
+(`feat(ci): harden canonical CI caller policy`, `Part of #1869`) admin-squash-merged
+2026-10-28 at head `aad8b95659f3909a20540090601d8512fc476ac0` and merge commit
+`24db445fe410df7bfbd740d8766b2d9ad8e73915`. Its base was fetched clean
+`origin/main` at `1adb1724a58dfb4e2c9bfbd55d0646555575a147`. From that clean
+base, `bash scripts/assert-mergeable-head.sh Verjson/.github 1927` exited 0
+and printed `true`. GitHub reports 23 SUCCESS, 10 SKIPPED, and 1 NEUTRAL
+check conclusion. Codex Astra, Codex Sol, and Code Reviewer returned GO;
+Fable and Opus Agent tools were unavailable. The owner's standing admin
+authority was used; no check failed and no gate was weakened.
+
 ### Exit condition ("CI optimized and working"), measurable
 
 The window closes when all hold, each evidenced in the closing PR:
