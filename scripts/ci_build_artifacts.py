@@ -34,6 +34,10 @@ MAX_FILES = 512
 MAX_PARTICIPANTS = 16
 MAX_DEPTH = 32
 MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+# Caller workflow bytes stay bounded until the trusted policy digest matches.
+MAX_CALLER_WORKFLOW_BLOB_BYTES = 1024 * 1024
+CALLER_WORKFLOW_BLOB_HASH_CHUNK_BYTES = 64 * 1024
+CALLER_WORKFLOW_BLOB_READ_TIMEOUT_SECONDS = 30
 MAX_TAR_EXTENSION_BYTES = 16 * 1024
 MAX_TAR_EXTENSION_HEADERS = MAX_FILES + 1
 MAX_TAR_EXTENSION_CHAIN_DEPTH = 16
@@ -3208,35 +3212,67 @@ def _caller_workflow_matches_policy(
         return False
     try:
         entries = subprocess.run(
-            ["git", "-C", str(repository), "ls-tree", "-z", "--full-tree", workflow_commit, "--", workflow_path],
+            [
+                "git",
+                "-C",
+                str(repository),
+                "ls-tree",
+                "-l",
+                "-z",
+                "--full-tree",
+                workflow_commit,
+                "--",
+                workflow_path,
+            ],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         ).stdout.split(b"\0")
-        matching: list[tuple[str, str, str]] = []
+        matching: list[tuple[str, str, str, int]] = []
         for entry in entries:
             metadata, separator, raw_path = entry.partition(b"\t")
             if not separator or raw_path.decode("utf-8", errors="strict") != workflow_path:
                 continue
-            mode, kind, object_id = metadata.decode("ascii", errors="strict").split(" ")
-            matching.append((mode, kind, object_id))
+            mode, kind, object_id, size_text = metadata.decode("ascii", errors="strict").split()
+            if (
+                not size_text.isascii()
+                or not size_text.isdigit()
+                or len(size_text) > len(str(MAX_CALLER_WORKFLOW_BLOB_BYTES))
+            ):
+                return False
+            workflow_size = int(size_text)
+            if str(workflow_size) != size_text or workflow_size > MAX_CALLER_WORKFLOW_BLOB_BYTES:
+                return False
+            matching.append((mode, kind, object_id, workflow_size))
     except (subprocess.CalledProcessError, UnicodeDecodeError, ValueError):
         return False
     if len(matching) != 1:
         return False
-    mode, kind, object_id = matching[0]
+    mode, kind, object_id, workflow_size = matching[0]
     if kind != "blob" or mode not in {"100644", "100755"}:
         return False
     try:
-        workflow_bytes = subprocess.run(
-            ["git", "-C", str(repository), "cat-file", "blob", object_id],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        ).stdout
-    except subprocess.CalledProcessError:
+        with tempfile.TemporaryFile() as workflow_file:
+            result = subprocess.run(
+                ["git", "-C", str(repository), "cat-file", "blob", object_id],
+                check=False,
+                stdout=workflow_file,
+                stderr=subprocess.DEVNULL,
+                timeout=CALLER_WORKFLOW_BLOB_READ_TIMEOUT_SECONDS,
+            )
+            if result.returncode != 0 or workflow_file.tell() != workflow_size:
+                return False
+            workflow_file.seek(0)
+            digest = hashlib.sha256()
+            actual_size = 0
+            while block := workflow_file.read(CALLER_WORKFLOW_BLOB_HASH_CHUNK_BYTES):
+                actual_size += len(block)
+                if actual_size > MAX_CALLER_WORKFLOW_BLOB_BYTES:
+                    return False
+                digest.update(block)
+            return actual_size == workflow_size and digest.hexdigest() == workflow_digest
+    except (OSError, subprocess.SubprocessError):
         return False
-    return hashlib.sha256(workflow_bytes).hexdigest() == workflow_digest
 
 
 def _pull_request_workflow_graph_unchanged(checkout: Path, base_commit: str, commit: str) -> bool:
