@@ -1702,12 +1702,79 @@ class ChangelogContractTests(unittest.TestCase):
 
         selected = changelog.select_release_fragments(self.root, [])
 
-        self.assertEqual("v1.2.4", changelog.next_version(self.root, []))
+        with self.assertRaisesRegex(changelog.ChangelogError, "only prerelease or build-qualified snapshots"):
+            changelog.next_version(self.root, [])
         changelog.validate_release_bump(
             self.root,
             "v1.2.4-rc.1+build.007",
             selected,
         )
+
+    def test_qualified_only_history_requires_explicit_bootstrap(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        fragment(self.root, "2026-07-30-issue-249-next.md", impact="patch")
+        for prior in ("v1.2.0-rc.1", "v1.2.0+build.1"):
+            with self.subTest(prior=prior):
+                path = snapshots / f"{prior}.md"
+                path.write_text("previous\n", encoding="utf-8")
+                with self.assertRaisesRegex(changelog.ChangelogError, "supply an explicit bootstrap version"):
+                    changelog.release_plan(self.root, "", [])
+                plan = changelog.release_plan(self.root, "v1.2.0", [])
+                self.assertEqual("v1.2.0", plan["version"])
+                self.assertEqual("bootstrap", plan["bump"])
+                path.unlink()
+
+    def test_explicit_bootstrap_cannot_move_behind_qualified_history(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        fragment(self.root, "2026-07-30-issue-249-next.md", impact="patch")
+        for prior in ("v9.0.0-rc.1", "v9.0.0+build.1"):
+            with self.subTest(prior=prior):
+                path = snapshots / f"{prior}.md"
+                path.write_text("previous\n", encoding="utf-8")
+                with self.assertRaisesRegex(changelog.ChangelogError, "precedes existing qualified snapshot"):
+                    changelog.release_plan(self.root, "v1.0.0", [])
+                self.assertEqual("v9.0.0", changelog.release_plan(self.root, "v9.0.0", [])["version"])
+                for ambiguous in ("v9.0.0-alpha", "v9.0.0+different"):
+                    with self.assertRaisesRegex(changelog.ChangelogError, "ambiguous precedence"):
+                        changelog.release_plan(self.root, ambiguous, [])
+                path.unlink()
+
+    def test_explicit_bootstrap_release_with_only_prerelease_history_succeeds(self) -> None:
+        self.init_git()
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        (snapshots / "v1.2.0-rc.1.md").write_text("preview\n", encoding="utf-8")
+        fragment(self.root, "2026-07-30-issue-249-next.md", impact="patch")
+        self.commit_all("prepare explicit bootstrap")
+        changelog.release(self.root, "v1.2.0", [])
+        self.assertTrue((snapshots / "v1.2.0.md").is_file())
+        self.assertEqual("tag", run(self.root, "git", "cat-file", "-t", "v1.2.0"))
+
+    def test_qualified_history_newer_than_stable_fails_closed(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        (snapshots / "v1.1.0.md").write_text("stable\n", encoding="utf-8")
+        fragment(self.root, "2026-07-30-issue-249-next.md", impact="patch")
+        for prior in ("v1.2.0-rc.1", "v1.2.0+build.1"):
+            with self.subTest(prior=prior):
+                path = snapshots / f"{prior}.md"
+                path.write_text("qualified\n", encoding="utf-8")
+                for requested in ("", "v1.1.1"):
+                    with self.assertRaisesRegex(changelog.ChangelogError, "newer than the latest stable snapshot"):
+                        changelog.release_plan(self.root, requested, [])
+                path.unlink()
+
+    def test_qualified_history_at_or_below_stable_does_not_move_baseline(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        for version in ("v1.2.0", "v1.2.0-rc.1", "v1.1.0+build.1", "python-v9.0.0-rc.1"):
+            (snapshots / f"{version}.md").write_text("previous\n", encoding="utf-8")
+        fragment(self.root, "2026-07-30-issue-249-next.md", impact="patch")
+        plan = changelog.release_plan(self.root, "", [])
+        self.assertEqual("v1.2.0", plan["previous_release"])
+        self.assertEqual("v1.2.1", plan["version"])
 
     def test_help_names_next_version_as_read_only_and_documents_its_selectors(self) -> None:
         top_level = run(self.root, sys.executable, str(MODULE_PATH), "--help")

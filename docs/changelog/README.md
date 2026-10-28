@@ -485,8 +485,7 @@ caller, so the failure at least states its cause.
 
 ### Release proposals are generated and explicitly autonomous
 
-`scripts/gen-changelog-caller.sh release-propose` emits a daily and
-operator-triggered caller. Adoption requires an explicit autonomy choice; there
+`scripts/gen-changelog-caller.sh release-propose` emits a caller with explicit operator dispatch. Proposal-only mode also runs daily; dispatch mode does not run on a schedule. Adoption requires an explicit autonomy choice; there
 is no default that can silently gain write authority. Here, `PIN` must be an
 immutable contract commit containing #799; a previously advertised pin does not
 gain a new generator mode retroactively:
