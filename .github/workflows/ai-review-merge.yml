@@ -130,10 +130,8 @@ on:
         type: string
       allow_absent_checks:
         description: >-
-          Proceed even though the PR has NO CI checks at all. Defaults to false
-          (strict): absent checks are treated as not-green (#143). A consumer
-          whose CI is path-filtered can set this per call; engaging it is logged
-          as a warning on the run.
+          Retained for caller compatibility and currently has no effect. It does
+          not bypass the privileged merge workflow's required check evaluation.
         required: false
         type: boolean
         default: false
