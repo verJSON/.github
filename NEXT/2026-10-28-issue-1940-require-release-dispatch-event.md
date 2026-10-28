@@ -1,7 +1,7 @@
 ---
 date: 2026-10-28
 issue: 1940
-impact: patch
+impact: major
 title: Require an explicit event to dispatch releases
 ---
 

@@ -692,6 +692,7 @@ def derived_release_bump(
     selected: list[Fragment],
     *,
     allow_qualified_bootstrap: bool = False,
+    allow_newer_qualified_history: bool = False,
 ) -> tuple[tuple[int, int, int], str, tuple[int, int, int]] | None:
     stable_cores = []
     qualified_cores = []
@@ -711,7 +712,10 @@ def derived_release_bump(
             )
         return None
     previous_core = max(stable_cores)
-    if qualified_cores and max(qualified_cores) > previous_core:
+    if (
+        qualified_cores and max(qualified_cores) > previous_core
+        and not allow_newer_qualified_history
+    ):
         raise ChangelogError(
             f"cannot determine the next version for {prefix}: a prerelease or "
             "build-qualified snapshot is newer than the latest stable snapshot"
@@ -737,49 +741,58 @@ def derived_release_version(
     return prefix + ".".join(map(str, bump[2]))
 
 
+def prerelease_precedence(value: str) -> tuple[tuple[int, int | str], ...]:
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part)
+        for part in value.split(".")
+    )
+
+
 def validate_release_bump(repo_root: Path, version: str, selected: list[Fragment]) -> None:
     requested = SEMVER_RELEASE.fullmatch(version)
     if requested is None:
-        raise ChangelogError(
-            "version must be v-prefixed SemVer, optionally with a stream prefix"
-        )
+        raise ChangelogError("version must be v-prefixed SemVer, optionally with a stream prefix")
     prefix = requested["prefix"]
-    requested_core = tuple(
-        int(requested[name]) for name in ("major", "minor", "patch")
-    )
+    requested_core = tuple(int(requested[name]) for name in ("major", "minor", "patch"))
     bump = derived_release_bump(
-        repo_root, prefix, selected, allow_qualified_bootstrap=True
+        repo_root, prefix, selected,
+        allow_qualified_bootstrap=True, allow_newer_qualified_history=True,
     )
-    if bump is None:
-        for path in snapshot_paths(repo_root):
-            previous = SEMVER_RELEASE.fullmatch(path.stem)
-            if previous is None or previous["prefix"] != prefix:
-                continue
-            previous_core = tuple(
-                int(previous[name]) for name in ("major", "minor", "patch")
+    same_core_prereleases = []
+    for path in snapshot_paths(repo_root):
+        previous = SEMVER_RELEASE.fullmatch(path.stem)
+        if previous is None or previous["prefix"] != prefix:
+            continue
+        core = tuple(int(previous[name]) for name in ("major", "minor", "patch"))
+        if bump is None and core > requested_core:
+            raise ChangelogError(
+                f"explicit bootstrap version {version} precedes existing qualified snapshot {path.stem}"
             )
-            if previous_core > requested_core:
-                raise ChangelogError(
-                    f"explicit bootstrap version {version} precedes existing "
-                    f"qualified snapshot {path.stem}"
-                )
-            if previous_core == requested_core and (
-                requested["prerelease"] is not None or requested["build"] is not None
-            ):
-                raise ChangelogError(
-                    f"explicit qualified bootstrap version {version} has ambiguous "
-                    f"precedence against existing qualified snapshot {path.stem}"
-                )
+        if core != requested_core:
+            continue
+        if previous["prerelease"] is not None:
+            same_core_prereleases.append(previous["prerelease"])
+        elif requested["prerelease"] is None:
+            raise ChangelogError(f"explicit version {version} has equal precedence to existing snapshot {path.stem}")
+        if requested["prerelease"] is not None:
+            if previous["prerelease"] is None or prerelease_precedence(requested["prerelease"]) <= prerelease_precedence(previous["prerelease"]):
+                raise ChangelogError(f"explicit version {version} does not advance the precedence of {path.stem}")
+    if bump is None:
         return
     previous_core, impact, expected_core = bump
-    if requested_core != expected_core:
-        previous_text = ".".join(map(str, previous_core))
-        expected_text = ".".join(map(str, expected_core))
-        requested_text = ".".join(map(str, requested_core))
-        raise ChangelogError(
-            f"selected fragments require a {impact} bump from {prefix}{previous_text}"
-            f" to {prefix}{expected_text}; requested {prefix}{requested_text}"
-        )
+    if requested_core == expected_core:
+        return
+    # Explicit progression or graduation can target an existing prerelease core.
+    # Those fragments may describe only changes since the prerelease.
+    if requested_core > previous_core and requested_core >= expected_core and same_core_prereleases:
+        return
+    previous_text = ".".join(map(str, previous_core))
+    expected_text = ".".join(map(str, expected_core))
+    requested_text = ".".join(map(str, requested_core))
+    raise ChangelogError(
+        f"selected fragments require a {impact} bump from {prefix}{previous_text}"
+        f" to {prefix}{expected_text}; requested {prefix}{requested_text}"
+    )
 
 
 def git(repo_root: Path, *args: str) -> str:
@@ -973,7 +986,8 @@ def release_plan(
     resolved = version or next_version_for_entries(repo_root, prefix, selected)
     validate_release_bump(repo_root, resolved, selected)
     bump = derived_release_bump(
-        repo_root, prefix, selected, allow_qualified_bootstrap=bool(version)
+        repo_root, prefix, selected, allow_qualified_bootstrap=bool(version),
+        allow_newer_qualified_history=bool(version),
     )
     previous_release = None
     impact = "bootstrap"
@@ -985,10 +999,24 @@ def release_plan(
         previous_core, impact, expected_core = bump
         previous_release = prefix + ".".join(map(str, previous_core))
         expected_release = prefix + ".".join(map(str, expected_core))
-        rationale = (
-            f"The highest selected fragment impact is {impact}; the canonical "
-            f"release rule advances {previous_release} to {expected_release}."
-        )
+        resolved_match = SEMVER_RELEASE.fullmatch(resolved)
+        resolved_core = tuple(int(resolved_match[name]) for name in ("major", "minor", "patch"))
+        if resolved_core != expected_core:
+            action = "advances" if resolved_match["prerelease"] else "graduates"
+            rationale = (
+                f"The explicit version {resolved} {action} an existing prerelease "
+                f"after {previous_release}; the selected fragment impact is {impact}."
+            )
+        elif resolved_match["prerelease"] is not None or resolved_match["build"] is not None:
+            rationale = (
+                f"The highest selected fragment impact is {impact}; the explicit "
+                f"version {resolved} has the required core {expected_release}."
+            )
+        else:
+            rationale = (
+                f"The highest selected fragment impact is {impact}; the canonical "
+                f"release rule advances {previous_release} to {expected_release}."
+            )
     return {
         "bump": impact,
         "bump_rationale": rationale,

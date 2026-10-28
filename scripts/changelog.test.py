@@ -1720,9 +1720,13 @@ class ChangelogContractTests(unittest.TestCase):
                 path.write_text("previous\n", encoding="utf-8")
                 with self.assertRaisesRegex(changelog.ChangelogError, "supply an explicit bootstrap version"):
                     changelog.release_plan(self.root, "", [])
-                plan = changelog.release_plan(self.root, "v1.2.0", [])
-                self.assertEqual("v1.2.0", plan["version"])
+                requested = "v1.2.0" if "-rc." in prior else "v1.2.1"
+                plan = changelog.release_plan(self.root, requested, [])
+                self.assertEqual(requested, plan["version"])
                 self.assertEqual("bootstrap", plan["bump"])
+                if "+" in prior:
+                    with self.assertRaisesRegex(changelog.ChangelogError, "equal precedence"):
+                        changelog.release_plan(self.root, "v1.2.0", [])
                 path.unlink()
 
     def test_explicit_bootstrap_cannot_move_behind_qualified_history(self) -> None:
@@ -1735,10 +1739,19 @@ class ChangelogContractTests(unittest.TestCase):
                 path.write_text("previous\n", encoding="utf-8")
                 with self.assertRaisesRegex(changelog.ChangelogError, "precedes existing qualified snapshot"):
                     changelog.release_plan(self.root, "v1.0.0", [])
-                self.assertEqual("v9.0.0", changelog.release_plan(self.root, "v9.0.0", [])["version"])
-                for ambiguous in ("v9.0.0-alpha", "v9.0.0+different"):
-                    with self.assertRaisesRegex(changelog.ChangelogError, "ambiguous precedence"):
-                        changelog.release_plan(self.root, ambiguous, [])
+                if "-rc." in prior:
+                    self.assertEqual("v9.0.0", changelog.release_plan(self.root, "v9.0.0", [])["version"])
+                    self.assertEqual("v9.0.0-rc.2", changelog.release_plan(self.root, "v9.0.0-rc.2", [])["version"])
+                    with self.assertRaisesRegex(changelog.ChangelogError, "does not advance"):
+                        changelog.release_plan(self.root, "v9.0.0-alpha", [])
+                else:
+                    with self.assertRaisesRegex(changelog.ChangelogError, "equal precedence"):
+                        changelog.release_plan(self.root, "v9.0.0", [])
+                if "-rc." in prior:
+                    self.assertEqual("v9.0.0+different", changelog.release_plan(self.root, "v9.0.0+different", [])["version"])
+                else:
+                    with self.assertRaisesRegex(changelog.ChangelogError, "equal precedence"):
+                        changelog.release_plan(self.root, "v9.0.0+different", [])
                 path.unlink()
 
     def test_explicit_bootstrap_release_with_only_prerelease_history_succeeds(self) -> None:
@@ -1761,10 +1774,57 @@ class ChangelogContractTests(unittest.TestCase):
             with self.subTest(prior=prior):
                 path = snapshots / f"{prior}.md"
                 path.write_text("qualified\n", encoding="utf-8")
-                for requested in ("", "v1.1.1"):
-                    with self.assertRaisesRegex(changelog.ChangelogError, "newer than the latest stable snapshot"):
-                        changelog.release_plan(self.root, requested, [])
+                with self.assertRaisesRegex(changelog.ChangelogError, "newer than the latest stable snapshot"):
+                    changelog.release_plan(self.root, "", [])
+                self.assertEqual("v1.1.1", changelog.release_plan(self.root, "v1.1.1", [])["version"])
+                if "-rc." in prior:
+                    plan = changelog.release_plan(self.root, "v1.2.0", [])
+                    self.assertEqual("v1.2.0", plan["version"])
+                    self.assertIn("graduates an existing prerelease", plan["bump_rationale"])
+                    self.assertEqual("v1.2.0-rc.2", changelog.release_plan(self.root, "v1.2.0-rc.2", [])["version"])
+                    self.assertEqual("v1.2.0+build.2", changelog.release_plan(self.root, "v1.2.0+build.2", [])["version"])
+                else:
+                    with self.assertRaisesRegex(changelog.ChangelogError, "equal precedence"):
+                        changelog.release_plan(self.root, "v1.2.0", [])
                 path.unlink()
+
+    def test_qualified_release_rationale_names_the_actual_version(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        (snapshots / "v1.1.0.md").write_text("stable\n", encoding="utf-8")
+        (snapshots / "v1.2.0-rc.1.md").write_text("preview\n", encoding="utf-8")
+        fragment(self.root, "2026-07-30-issue-249-feature.md", impact="minor")
+        for requested in ("v1.2.0-rc.2", "v1.2.0+build.2"):
+            with self.subTest(version=requested):
+                plan = changelog.release_plan(self.root, requested, [])
+                self.assertIn(requested, plan["bump_rationale"])
+                self.assertIn("required core v1.2.0", plan["bump_rationale"])
+
+    def test_prerelease_progression_cannot_undercut_selected_impact(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        (snapshots / "v1.1.0.md").write_text("stable\n", encoding="utf-8")
+        (snapshots / "v1.2.0-rc.1.md").write_text("preview\n", encoding="utf-8")
+        fragment(self.root, "2026-07-30-issue-249-breaking.md", impact="major")
+        for requested in ("v1.2.0", "v1.2.0-rc.2"):
+            with self.subTest(version=requested):
+                with self.assertRaisesRegex(changelog.ChangelogError, "require a major bump"):
+                    changelog.release_plan(self.root, requested, [])
+        self.assertEqual("v2.0.0", changelog.release_plan(self.root, "v2.0.0", [])["version"])
+
+    def test_explicit_prerelease_must_advance_semver_precedence(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        (snapshots / "v1.1.0.md").write_text("stable\n", encoding="utf-8")
+        (snapshots / "v1.2.0-rc.2+build.1.md").write_text("preview\n", encoding="utf-8")
+        fragment(self.root, "2026-07-30-issue-249-next.md", impact="patch")
+        for rejected in ("v1.2.0-rc.1", "v1.2.0-rc.2+build.2", "v1.2.0-alpha"):
+            with self.subTest(version=rejected):
+                with self.assertRaisesRegex(changelog.ChangelogError, "does not advance"):
+                    changelog.release_plan(self.root, rejected, [])
+        plan = changelog.release_plan(self.root, "v1.2.0-rc.10", [])
+        self.assertEqual("v1.2.0-rc.10", plan["version"])
+        self.assertIn("advances an existing prerelease", plan["bump_rationale"])
 
     def test_qualified_history_at_or_below_stable_does_not_move_baseline(self) -> None:
         snapshots = self.root / "CHANGELOG"

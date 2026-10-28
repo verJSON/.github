@@ -789,6 +789,13 @@ if run_guard "$version_guard" PREFIX=v INPUT_VERSION= GITHUB_OUTPUT="$tmp/versio
 else
   fail "the blank version failed to derive the canonical next version: $(cat "$tmp/guard.out")"
 fi
+for whitespace in ' ' $'\302\240'; do
+  if run_guard "$version_guard" PREFIX=v "INPUT_VERSION=$whitespace" "GITHUB_OUTPUT=$tmp/version-output"; then
+    fail "the release plan accepted whitespace-only explicit version input"
+  else
+    pass "the release plan rejects whitespace-only explicit version input"
+  fi
+done
 : >"$tmp/version-output"
 if run_guard "$version_guard" PREFIX=v INPUT_VERSION= COMPONENT=python GITHUB_OUTPUT="$tmp/version-output"; then
   grep -q '^selected=false$' "$tmp/version-output" \
