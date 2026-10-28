@@ -1,7 +1,7 @@
 ---
 date: 2026-10-28
 issue: 1939
-impact: patch
+impact: minor
 title: Derive manually dispatched release versions from fragments
 ---
 
