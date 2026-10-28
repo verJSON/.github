@@ -2992,10 +2992,10 @@ class ChangelogContractTests(unittest.TestCase):
             "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}",
             workflow,
         )
-        # The push still targets the branch by name, which is what makes the pin
-        # fail closed: from the dispatch commit this refspec is non-fast-forward
-        # once the branch has moved, so a raced release tags nothing.
-        self.assertIn('"$release_commit:refs/heads/$DEFAULT_BRANCH"', workflow)
+        # The pinned guard compares the branch value to the dispatch SHA and
+        # atomically publishes the validated release commit and tag.
+        self.assertIn('bash .changelog-contract/scripts/release-push-guard.sh', workflow)
+        self.assertIn('"$DEFAULT_BRANCH" "$GITHUB_REF" "$GITHUB_SHA" "$release_commit" "$VERSION"', workflow)
         # The checkout is detached at the dispatch commit, so nothing may derive
         # the branch from HEAD.
         self.assertNotIn("git symbolic-ref", workflow)
