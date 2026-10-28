@@ -279,9 +279,10 @@ and validates each prior status; no caller-supplied prefix is accepted.
 After `.github` PR #1927 merged as `24db445fe410df7bfbd740d8766b2d9ad8e73915`,
 active ruleset 20722935 still pinned `.github/workflows/gate-rearm.yml` to
 `180b8dbb6ef7687e2a48e92df7de79fa5e56c4d2`. PR #1934's required-workflow run
-40626789428 executed that older SHA and failed when it dispatched the former
-`ai-review-merge.yml`, which is now reusable-only. The merged gate revision
-selects the canonical generated `ai-review-merge-dispatch.yml` and also
+40626789428 executed that older SHA; its `arm` job failed at dispatch when it
+invoked the former `ai-review-merge.yml`, which is now reusable-only. The
+merged gate revision selects the canonical generated
+`ai-review-merge-dispatch.yml` and also
 activates the other reviewed gate-rearm hardening in #1927, including inline
 App-key validation, runner routing, caller-bootstrap validation, and client-ID
 validation.
@@ -291,5 +292,10 @@ Under the owner's standing authorization, ruleset 20722935 was rotated at
 `24db445fe410df7bfbd740d8766b2d9ad8e73915`. The PUT changed only
 `rules[0].parameters.workflows[0].sha`; a complete read-back comparison showed
 the workflow path, ref, repository ID, enforcement, targeting conditions, and
-bypass actors unchanged. A fresh required-workflow result for PR #1934 is
-pending and must be verified before merge.
+bypass actors unchanged. Post-rotation PR #1934 run 1852 at head
+`f7ece975e8b9df0b73061c029b8d4ebf9b7101ef` used workflow SHA
+`24db445fe410df7bfbd740d8766b2d9ad8e73915` and selected
+`ai-review-merge-dispatch.yml`. Its `arm` and `AI review authorization` checks
+passed; dispatch run 40628569755 also concluded success. GitHub reported 19
+successful and 5 skipped checks, with no failures. The final receipt commit
+still requires its own checks before merge.
