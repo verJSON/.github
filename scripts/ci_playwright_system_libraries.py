@@ -879,7 +879,11 @@ def _publish_safe_key_snapshot(root: Path) -> Path:
                 or parent_metadata.st_uid != 0
                 or parent_metadata.st_mode & 0o022
             ):
-                raise PlaywrightProfileError("Ubuntu archive signing key parent is unsafe")
+                raise PlaywrightProfileError(
+                    "Ubuntu archive signing key parent is unsafe "
+                    f"({parent}, uid={parent_metadata.st_uid}, "
+                    f"mode={stat.S_IMODE(parent_metadata.st_mode):04o})"
+                )
         before = os.lstat(SAFE_KEY)
         if (
             not stat.S_ISREG(before.st_mode)

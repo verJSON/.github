@@ -1706,8 +1706,12 @@ class AuthenticatedKeySnapshotTests(unittest.TestCase):
             with self._root_owned_source_metadata(source, overrides=overrides), patch.object(
                 playwright_profile, "SAFE_KEY", str(source)
             ):
-                with self.assertRaisesRegex(playwright_profile.PlaywrightProfileError, "parent is unsafe"):
+                with self.assertRaises(playwright_profile.PlaywrightProfileError) as raised:
                     playwright_profile._publish_safe_key_snapshot(root)
+                self.assertEqual(
+                    str(raised.exception),
+                    f"Ubuntu archive signing key parent is unsafe ({source.parent}, uid=0, mode=0731)",
+                )
 
             non_root_source = {source: (os.geteuid() + 1, source.stat().st_mode)}
             with self._root_owned_source_metadata(source, overrides=non_root_source), patch.object(
