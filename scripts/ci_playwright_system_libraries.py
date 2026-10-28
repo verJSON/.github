@@ -1994,6 +1994,30 @@ def cleanup(state_file: str | Path, expected_identity: str) -> None:
     finally:
         os.close(directory_fd)
 
+
+def _cli_error_detail(error: BaseException) -> str:
+    if not isinstance(error, PlaywrightProfileError):
+        return ""
+    escaped: list[str] = []
+    size = 0
+    for character in str(error):
+        if character == "%":
+            encoded = "%25"
+        elif character == "\r":
+            encoded = "%0D"
+        elif character == "\n":
+            encoded = "%0A"
+        elif not character.isprintable():
+            encoded = f"%{ord(character):02X}"
+        else:
+            encoded = character
+        if size + len(encoded) > 240:
+            break
+        escaped.append(encoded)
+        size += len(encoded)
+    return "".join(escaped)
+
+
 def _command_line(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2043,7 +2067,12 @@ def _command_line(argv: list[str] | None = None) -> int:
         else:
             cleanup(args.state_file, args.expected_identity)
     except (OSError, subprocess.SubprocessError, UnicodeError, PlaywrightProfileError) as error:
-        print(f"::error::trusted Playwright system-library profile failed ({type(error).__name__})", file=sys.stderr)
+        detail = _cli_error_detail(error)
+        suffix = f": {detail}" if detail else ""
+        print(
+            f"::error::trusted Playwright system-library profile failed ({type(error).__name__}){suffix}",
+            file=sys.stderr,
+        )
         return 1
     return 0
 

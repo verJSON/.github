@@ -1460,5 +1460,36 @@ raise SystemExit(0)
             )
 
 
+    def test_cli_reports_bounded_single_line_profile_diagnostics(self) -> None:
+        message = "hosted profile precondition failed\n::warning::forged\x1b\x00\x08\x7f" + ("x" * 300)
+        with patch.object(
+            playwright_profile,
+            "resolve_profile",
+            side_effect=playwright_profile.PlaywrightProfileError(message),
+        ), patch("sys.stderr", io.StringIO()) as error_stream:
+            result = playwright_profile._command_line(
+                [
+                    "validate",
+                    "--profile",
+                    PROFILE_ID,
+                    "--runner-environment",
+                    "github-hosted",
+                    "--runner-os",
+                    "Linux",
+                ]
+            )
+
+        diagnostic = error_stream.getvalue()
+        self.assertEqual(result, 1)
+        self.assertIn(
+            "hosted profile precondition failed%0A::warning::forged%1B%00%08%7F",
+            diagnostic,
+        )
+        self.assertEqual(diagnostic.count("\n"), 1)
+        self.assertLessEqual(len(diagnostic), 360)
+        self.assertTrue(all(char.isprintable() or char == "\n" for char in diagnostic))
+        self.assertNotIn("x" * 241, diagnostic)
+
+
 if __name__ == "__main__":
     unittest.main()
