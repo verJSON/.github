@@ -106,7 +106,7 @@ jobs:
           PY
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: 24.19.0
+          node-version: 26.12.1
           registry-url: https://npm.pkg.github.com
       - name: Acquire immutable deployment CLI
         env:
@@ -222,7 +222,7 @@ jobs:
           PY
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: 24.19.0
+          node-version: 26.12.1
           registry-url: https://npm.pkg.github.com
       - name: Acquire immutable deployment CLI
         env:
