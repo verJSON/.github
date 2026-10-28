@@ -748,6 +748,17 @@ def prerelease_precedence(value: str) -> tuple[tuple[int, int | str], ...]:
     )
 
 
+def is_stable_build_at_core(version: str, prefix: str, core: tuple[int, int, int]) -> bool:
+    match = SEMVER_RELEASE.fullmatch(version)
+    return bool(
+        match is not None
+        and match["prefix"] == prefix
+        and match["prerelease"] is None
+        and match["build"] is not None
+        and tuple(int(match[name]) for name in ("major", "minor", "patch")) == core
+    )
+
+
 def validate_release_bump(repo_root: Path, version: str, selected: list[Fragment]) -> None:
     requested = SEMVER_RELEASE.fullmatch(version)
     if requested is None:
@@ -765,8 +776,7 @@ def validate_release_bump(repo_root: Path, version: str, selected: list[Fragment
         if previous is None or previous["prefix"] != prefix:
             continue
         core = tuple(int(previous[name]) for name in ("major", "minor", "patch"))
-        if (bump is not None and core == bump[2] and previous["prerelease"] is None
-            and previous["build"] is not None):
+        if bump is not None and is_stable_build_at_core(path.stem, prefix, bump[2]):
             expected_core_occupied_by_build = True
         if bump is None and core > requested_core:
             raise ChangelogError(
@@ -1013,10 +1023,7 @@ def release_plan(
         resolved_core = tuple(int(resolved_match[name]) for name in ("major", "minor", "patch"))
         if resolved_core != expected_core:
             occupied = any(
-                (entry := SEMVER_RELEASE.fullmatch(path.stem)) is not None
-                and entry["prefix"] == prefix
-                and entry["prerelease"] is None and entry["build"] is not None
-                and tuple(int(entry[name]) for name in ("major", "minor", "patch")) == expected_core
+                is_stable_build_at_core(path.stem, prefix, expected_core)
                 for path in snapshot_paths(repo_root)
             )
             if (occupied and resolved_match["prerelease"] is None and resolved_match["build"] is None
