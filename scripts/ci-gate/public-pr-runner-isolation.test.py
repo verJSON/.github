@@ -2936,7 +2936,6 @@ SNAPSHOT_RELAY_BACKLOG = {
     ('release.yml [workflow_dispatch]', 'publish'): frozenset(),
     ('release.yml [workflow_dispatch]', 'snapshot'): frozenset(),
     ('release.yml [workflow_dispatch]', 'verify'): frozenset({'full-checkout', 'relay-head', 'runtime-checkout'}),
-    ('renovate-changelog.yml [workflow_call]', 'attribute'): frozenset({'relay-head', 'runtime-checkout'}),
     ('renovate-compatibility-canary.yml [workflow_call]', 'receipt'): frozenset(),
     ('renovate-compatibility-reconcile.yml [workflow_dispatch]', 'observe'): frozenset(),
     ('renovate-grouping-plan.yml [workflow_dispatch]', 'plan'): frozenset({'relay-head', 'runtime-checkout'}),

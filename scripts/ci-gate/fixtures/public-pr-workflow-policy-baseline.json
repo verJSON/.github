@@ -225,16 +225,6 @@
         }
       }
     },
-    "renovate-changelog.yml": {
-      "jobs": {
-        "app-key-policy": {
-          "if": null
-        },
-        "attribute": {
-          "if": null
-        }
-      }
-    },
     "renovate-compatibility-canary.yml": {
       "jobs": {
         "canary": {

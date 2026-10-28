@@ -161,7 +161,6 @@ class WorkflowBoundaryTests(unittest.TestCase):
         consumers = {
             "changelog-release": ("release_environment", ["release"]),
             "container-release": ("release_environment", ["promote"]),
-            "renovate-changelog": ("release_environment", ["attribute"]),
             "ai-privileged-merge": ("merge_environment", ["privileged_merge"]),
             "ai-review-merge": ("ai_review_environment", ["gate", "complete-authorization"]),
             "gate-rearm": ("ai_review_environment", ["arm"]),
@@ -391,8 +390,7 @@ class WorkflowBoundaryTests(unittest.TestCase):
                  (["gen-privileged-merge-caller.sh", sha, '[{"name":"CI","app_id":1,"workflow_id":2,"workflow_path":".github/workflows/ci.yml"}]'], "merge_environment"),
                  (["gen-container-release.sh", "workflow", sha], "release_environment"),
                  (["gen-changelog-caller.sh", "release-node", sha], "release_environment"),
-                 (["gen-changelog-caller.sh", "release-snapshot", sha], "release_environment"),
-                 (["gen-changelog-caller.sh", "renovate-attribution", sha], "release_environment")]
+                 (["gen-changelog-caller.sh", "release-snapshot", sha], "release_environment")]
         for command, field in cases:
             with self.subTest(command=command[0:2]):
                 text = subprocess.check_output(["bash", str(ROOT / "scripts" / command[0]), *command[1:]], cwd=ROOT, text=True)

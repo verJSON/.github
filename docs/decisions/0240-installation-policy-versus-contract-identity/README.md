@@ -150,3 +150,12 @@ ASCII letters and digits. The source workflow fixture remains byte-verified at
 its pinned SHA; the golden contract permits only this one reviewed validator
 normalization. Regression cases run under `en_US.UTF-8` and reject uppercase and
 Unicode lookalikes.
+
+## 2026-10-27 amendment — public callers remain on hosted runners
+
+Decision 3's caller-runner precedence applies only after the public-caller
+placement guard admits the job. Public and unresolved callers select the
+literal hosted runner before lane variables or the caller's `runner` input,
+as required by ADR 0239. In Node CI, the catalog's `caller-runner` selector
+is nested behind that outer guard. This clarifies the existing public-runner
+invariant without changing profile ownership or trusted-caller routing.

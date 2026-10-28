@@ -8,7 +8,7 @@
       "input": "release_environment",
       "confinement": "canonical",
       "organization_copy": "withdraw",
-      "reason": "Release snapshot, container promotion, Renovate attribution and the release canary mint release tokens through the caller-selected main-only environment."
+      "reason": "Release snapshot, container promotion and the release canary mint release tokens through the caller-selected main-only environment."
     },
     {
       "role": "merge",

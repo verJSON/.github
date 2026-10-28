@@ -1154,7 +1154,6 @@ grant_cases=(
   "workflow"
   "generated-artifacts"
   "generated-artifacts-with-adr-index"
-  "renovate-attribution"
   "release-node"
   "release-artifact --build-runner ubuntu-24.04"
   "release-snapshot"
@@ -1363,91 +1362,121 @@ fixture_workflows() {
   printf '%s\n' "$fixture"
 }
 
-renovate_caller="$tmp/grants-renovate-attribution.yml"
-renovate_uses="verJSON/.github/.github/workflows/renovate-changelog.yml@$sha"
+grant_caller="$tmp/grants-changelog-release.yml"
+cat >"$grant_caller" <<EOF
+name: Changelog release permission test
+on:
+  workflow_call:
+jobs:
+  release:
+    uses: verJSON/.github/.github/workflows/changelog-release.yml@$sha
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    with:
+      release_environment: release-app
+      contract_ref: $sha
+      version: 1.2.3
+EOF
+grant_uses="verJSON/.github/.github/workflows/changelog-release.yml@$sha"
 
 # A calling job with no permissions anywhere gets the repository's default token,
 # which this test cannot see; guessing write-all would accept any callee.
-ungranted="$tmp/renovate-no-permissions.yml"
-awk '/^permissions:$/ { skipping = 1; next }
-  skipping && /^  / { next }
-  { skipping = 0; print }' "$renovate_caller" >"$ungranted"
-if cmp -s "$renovate_caller" "$ungranted"; then
-  fail "the permissions-removal mutation changed nothing; the undeclared-grant check is unproven"
-elif python3 "$tmp/check_callee_grants.py" "$ungranted" "$callee_workflows" >"$tmp/grants.out" 2>&1; then
+ungranted="$tmp/no-permissions.yml"
+python3 - "$grant_caller" "$ungranted" <<'PY'
+import sys
+import yaml
+caller = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+del caller["jobs"]["release"]["permissions"]
+yaml.safe_dump(caller, open(sys.argv[2], "w", encoding="utf-8"), sort_keys=False)
+PY
+if python3 "$tmp/check_callee_grants.py" "$ungranted" "$callee_workflows" >"$tmp/grants.out" 2>&1; then
   fail "a calling job that declares no permissions was accepted"
-elif grep -qxF 'caller job renovate-changelog declares no permissions' "$tmp/grants.out"; then
-  pass "a calling job that declares no permissions is rejected rather than assumed write-all"
+elif grep -qxF 'caller job release declares no permissions' "$tmp/grants.out"; then
+  pass "a calling job with no declared permissions is rejected rather than assumed write-all"
 else
-  fail "the undeclared-grant mutation was rejected for the wrong reason: $(cat "$tmp/grants.out")"
+  fail "the no-permissions case was rejected for the wrong reason: $(cat "$tmp/grants.out")"
 fi
 
-# A callee that itself calls a reusable workflow caps the nested callee at the
-# calling job's grant, not the outer caller's: renovate-attribution grants
-# pull-requests: read, but renovate-changelog.yml's app-key-policy job does not
-# pass it on, so app-key-environment.yml asking for it must be rejected.
+# The caller grants pull-request reads, but the intermediate job caps them.
+
 expect_grant_report "a nested callee asking for more than its calling job grants" \
-  "$renovate_caller" \
+  "$grant_caller" \
   "$(fixture_workflows nested-over-ask \
     '["app-key-environment.yml", "set", "jobs.validate-ai-review-key.permissions.pull-requests", "read"]')" \
-  "renovate-changelog via renovate-changelog.yml job app-key-policy grants pull-requests: none but app-key-environment.yml job validate-ai-review-key needs pull-requests: read"
+  "release via changelog-release.yml job app-key-policy grants pull-requests: none but app-key-environment.yml job validate-ai-review-key needs pull-requests: read"
+without_nested_cap="$(fixture_workflows nested-cap-removed \
+  '["changelog-release.yml", "set", "jobs.app-key-policy.permissions.pull-requests", "read"]' \
+  '["app-key-environment.yml", "set", "jobs.validate-ai-review-key.permissions.pull-requests", "read"]')"
+if python3 "$tmp/check_callee_grants.py" "$grant_caller" "$without_nested_cap" >"$tmp/grants.out" 2>&1; then
+  if [ -z "$(cat "$tmp/grants.out")" ]; then
+    pass "nested pull-request request succeeds when the intermediate cap is removed"
+  else
+    fail "removing the intermediate cap left unexpected findings: $(cat "$tmp/grants.out")"
+  fi
+else
+  fail "removing the intermediate cap did not clear the nested request: $(cat "$tmp/grants.out")"
+fi
 
 # GitHub rejects a reusable-workflow cycle; the recursion must report one rather
 # than overflow the stack.
 expect_grant_report "a reusable-workflow cycle" \
-  "$renovate_caller" \
+  "$grant_caller" \
   "$(fixture_workflows cycle \
-    '["app-key-environment.yml", "set", "jobs.loop", {"uses": "./.github/workflows/renovate-changelog.yml", "permissions": {"actions": "read", "contents": "read"}}]')" \
-  "renovate-changelog via renovate-changelog.yml job app-key-policy via app-key-environment.yml job loop closes a reusable-workflow cycle: renovate-changelog.yml -> app-key-environment.yml -> renovate-changelog.yml"
+    '["changelog-release.yml", "set", "jobs.loop", {"uses": "./.github/workflows/changelog-release.yml", "permissions": {"actions": "read", "contents": "read"}}]')" \
+  "release via changelog-release.yml job loop closes a reusable-workflow cycle: changelog-release.yml -> changelog-release.yml"
 
 # Only this repository's reusable workflows are on disk here; a foreign
 # owner/repo with the same file name is a different workflow (#1682 casing aside).
-foreign_caller="$tmp/renovate-foreign-owner.yml"
-sed "s#uses: verJSON/\.github/#uses: someone-else/.github/#" "$renovate_caller" >"$foreign_caller"
+foreign_caller="$tmp/foreign-owner.yml"
+sed "s#uses: verJSON/.github/.github/workflows/changelog-release.yml@$sha#uses: someone-else/.github/.github/workflows/changelog-release.yml@$sha#" \
+  "$grant_caller" >"$foreign_caller"
 expect_grant_report "a caller delegating to another repository's workflow of the same name" \
   "$foreign_caller" "$callee_workflows" \
-  "renovate-changelog calls 'someone-else/.github/.github/workflows/renovate-changelog.yml@$sha', which is not a reusable workflow in this repository"
+  "release calls 'someone-else/.github/.github/workflows/changelog-release.yml@$sha', which is not a reusable workflow in this repository"
 
-local_caller="$tmp/renovate-local-uses.yml"
-sed "s#uses: $renovate_uses#uses: ./.github/workflows/renovate-changelog.yml#" "$renovate_caller" >"$local_caller"
+local_caller="$tmp/local-uses.yml"
+sed "s#uses: $grant_uses#uses: ./.github/workflows/changelog-release.yml#" "$grant_caller" >"$local_caller"
 expect_grant_report "a caller job whose uses: is not a reusable workflow in this repository" \
   "$local_caller" "$callee_workflows" \
-  "renovate-changelog calls './.github/workflows/renovate-changelog.yml', which is not a reusable workflow in this repository"
+  "release calls './.github/workflows/changelog-release.yml', which is not a reusable workflow in this repository"
 
-missing_caller="$tmp/renovate-missing-callee.yml"
-sed "s#/renovate-changelog\.yml@#/missing-callee.yml@#" "$renovate_caller" >"$missing_caller"
+missing_caller="$tmp/missing-callee.yml"
+sed "s#/changelog-release\.yml@#/missing-callee.yml@#" "$grant_caller" >"$missing_caller"
 expect_grant_report "a caller delegating to a workflow absent from this repository" \
   "$missing_caller" "$callee_workflows" \
-  "renovate-changelog delegates to missing-callee.yml, which is not in this repository"
+  "release delegates to missing-callee.yml, which is not in this repository"
 
 remote_nested="verJSON/.github/.github/workflows/app-key-environment.yml@$sha"
 expect_grant_report "a nested uses: that is not a local reusable workflow" \
-  "$renovate_caller" \
-  "$(fixture_workflows remote-nested "[\"renovate-changelog.yml\", \"set\", \"jobs.app-key-policy.uses\", \"$remote_nested\"]")" \
-  "renovate-changelog.yml job app-key-policy calls '$remote_nested', which is not a local reusable workflow"
+  "$grant_caller" \
+  "$(fixture_workflows remote-nested \
+    '["changelog-release.yml", "set", "jobs.app-key-policy.uses", "'"$remote_nested"'"]')" \
+  "changelog-release.yml job app-key-policy calls '$remote_nested', which is not a local reusable workflow"
 
-# A called job declaring nothing, under a callee declaring nothing, inherits its
-# caller's grant; its nested callee is capped there and cannot exceed it.
+# A job with no declared grant inherits its callee's top-level grant, and that
+# inherited grant remains bounded by the caller's permission set.
 expect_grant_report "a nested callee over-asking beneath a job that inherits its grant" \
-  "$renovate_caller" \
+  "$grant_caller" \
   "$(fixture_workflows inherited-grant \
-    '["renovate-changelog.yml", "del", "permissions"]' \
-    '["renovate-changelog.yml", "del", "jobs.app-key-policy.permissions"]' \
+    '["changelog-release.yml", "del", "permissions"]' \
+    '["changelog-release.yml", "del", "jobs.app-key-policy.permissions"]' \
     '["app-key-environment.yml", "set", "jobs.validate-ai-review-key.permissions.issues", "write"]')" \
-  "renovate-changelog via renovate-changelog.yml job app-key-policy grants issues: none but app-key-environment.yml job validate-ai-review-key needs issues: write"
+  "release via changelog-release.yml job app-key-policy grants issues: none but app-key-environment.yml job validate-ai-review-key needs issues: write"
 
 # A callee's top level is the default for jobs that declare nothing, and only
-# for them: app-key-policy declares less and passes, attribute inherits and fails.
-expect_grant_report "a callee top level over-asking for a job that inherits it" \
-  "$renovate_caller" \
+# for those jobs.
+expect_grant_report "a callee top-level over-asking for a job that inherits it" \
+  "$grant_caller" \
   "$(fixture_workflows callee-top-level \
-    '["renovate-changelog.yml", "set", "permissions.issues", "write"]' \
-    '["renovate-changelog.yml", "del", "jobs.attribute.permissions"]')" \
-  "renovate-changelog grants issues: none but renovate-changelog.yml job attribute needs issues: write"
+    '["changelog-release.yml", "set", "permissions.issues", "write"]' \
+    '["changelog-release.yml", "del", "jobs.release.permissions"]')" \
+  "release grants issues: none but changelog-release.yml job release needs issues: write"
 
-recased_caller="$tmp/renovate-recased-owner.yml"
-sed "s#uses: verJSON/\.github/#uses: Verjson/.GitHub/#" "$renovate_caller" >"$recased_caller"
-if cmp -s "$renovate_caller" "$recased_caller"; then
+recased_caller="$tmp/recased-owner.yml"
+sed "s#uses: verJSON/.github/#uses: Verjson/.GitHub/#" "$grant_caller" >"$recased_caller"
+if cmp -s "$grant_caller" "$recased_caller"; then
   fail "the owner-casing mutation changed nothing; case-insensitive matching is unproven"
 elif python3 "$tmp/check_callee_grants.py" "$recased_caller" "$callee_workflows" >"$tmp/grants.out" 2>&1; then
   pass "this repository's owner/repo is matched case-insensitively"

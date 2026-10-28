@@ -18,8 +18,7 @@
         {"path": ".github/workflows/ai-privileged-merge.yml", "generator": "scripts/gen-privileged-merge-caller.sh", "canonical_workflows": ["ai-privileged-merge.yml"]},
         {"path": ".github/workflows/ai-promotion-retry.yml", "generator": "scripts/gen-privileged-merge-caller.sh", "canonical_workflows": ["ai-promotion-retry.yml"]},
         {"path": ".github/workflows/changelog.yml", "generator": "scripts/gen-changelog-caller.sh", "canonical_workflows": ["generated-artifacts.yml"]},
-        {"path": ".github/workflows/release.yml", "generator": "scripts/gen-changelog-caller.sh", "canonical_workflows": ["changelog-release.yml", "node-release.yml"]},
-        {"path": ".github/workflows/renovate-changelog.yml", "generator": "scripts/gen-changelog-caller.sh", "canonical_workflows": ["renovate-changelog.yml"]}
+        {"path": ".github/workflows/release.yml", "generator": "scripts/gen-changelog-caller.sh", "canonical_workflows": ["changelog-release.yml", "node-release.yml"]}
       ]
     },
     {
@@ -29,16 +28,14 @@
         {"path": ".github/workflows/ai-privileged-merge.yml", "generator": "scripts/gen-privileged-merge-caller.sh", "canonical_workflows": ["ai-privileged-merge.yml"]},
         {"path": ".github/workflows/ai-promotion-retry.yml", "generator": "scripts/gen-privileged-merge-caller.sh", "canonical_workflows": ["ai-promotion-retry.yml"]},
         {"path": ".github/workflows/changelog.yml", "generator": "scripts/gen-changelog-caller.sh", "canonical_workflows": ["generated-artifacts.yml"]},
-        {"path": ".github/workflows/release.yml", "generator": "scripts/gen-changelog-caller.sh", "canonical_workflows": ["changelog-release.yml", "node-release.yml"]},
-        {"path": ".github/workflows/renovate-changelog.yml", "generator": "scripts/gen-changelog-caller.sh", "canonical_workflows": ["renovate-changelog.yml"]}
+        {"path": ".github/workflows/release.yml", "generator": "scripts/gen-changelog-caller.sh", "canonical_workflows": ["changelog-release.yml", "node-release.yml"]}
       ]
     },
     {
       "repository": "Verjson/AiB",
       "callers": [
         {"path": ".github/workflows/ai-privileged-merge.yml", "generator": "scripts/gen-privileged-merge-caller.sh", "canonical_workflows": ["ai-privileged-merge.yml"]},
-        {"path": ".github/workflows/changelog.yml", "generator": "scripts/gen-changelog-caller.sh", "canonical_workflows": ["generated-artifacts.yml"]},
-        {"path": ".github/workflows/renovate-changelog.yml", "generator": "scripts/gen-changelog-caller.sh", "canonical_workflows": ["renovate-changelog.yml"]}
+        {"path": ".github/workflows/changelog.yml", "generator": "scripts/gen-changelog-caller.sh", "canonical_workflows": ["generated-artifacts.yml"]}
       ]
     },
     {

@@ -35,7 +35,7 @@ a key only when that copy is deleted.
 Keep public App client IDs in their existing variables. Model API credentials and
 `NODE_AUTH_TOKEN` retain their existing roles. App-key reusable calls now inherit the caller secret context, including these unrelated secrets; non-App workflows retain narrow grants.
 `node-release.yml` does not consume the release App key. Snapshot publication and
-container release do, as does Renovate attribution.
+container release do.
 
 ## Record every remaining broad copy as migration residue
 
@@ -54,7 +54,7 @@ key is confined to its main-only environment. See
 
 Inventory every App-key reader and every repository selected by the relevant
 organization secrets and inherited required workflows. Include generated release,
-privileged merge/retry, review/rearm, Renovate attribution and canary callers.
+privileged merge/retry, review/rearm and canary callers.
 Use authenticated metadata queries; a forbidden or incomplete inventory is unknown,
 never proof of absence. Do not print or hash key values.
 

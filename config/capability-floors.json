@@ -33,7 +33,7 @@
     },
     {
       "id": "changelog-renovate-default-source-link",
-      "description": "The changelog contract accepts Renovate's default source-link suffix in a fragment body (#927). A pin predating this commit rejects otherwise-valid Renovate-authored changelog rows as invalid; this is not driven by an org variable, just a contract-shape change every consumer needs. Observed live in Verjson/verjson-cli-cloud's renovate-changelog.yml (issue #977).",
+      "description": "The changelog contract accepts Renovate's default source-link suffix in a fragment body (#927). A pin predating this commit rejects otherwise-valid dependency-update fragments with that suffix; this contract-shape change applies regardless of fragment author and is not driven by an org variable. The shape was observed in Verjson/verjson-cli-cloud's then-current renovate-changelog.yml (issue #977).",
       "introduced_at": "ac37ae430157fc9345d430ec29a2c7d99ce1a9a4",
       "issue": 933,
       "generators": [

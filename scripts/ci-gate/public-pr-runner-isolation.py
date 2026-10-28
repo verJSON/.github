@@ -2622,7 +2622,6 @@ RELAY_BACKLOG: dict[tuple[str, str], frozenset[str]] = {
     # programs it runs (tree_programs), never the whole tree.
     ('release.yml [workflow_dispatch]', 'verify'):
         frozenset({'full-checkout', 'relay-head', 'runtime-checkout'}),
-    ('renovate-changelog.yml [workflow_call]', 'attribute'): frozenset({'relay-head', 'runtime-checkout'}),
     ('renovate-compatibility-canary.yml [workflow_call]', 'receipt'): frozenset(),
     ('renovate-compatibility-reconcile.yml [workflow_dispatch]', 'observe'): frozenset(),
     ('renovate-grouping-plan.yml [workflow_dispatch]', 'plan'): frozenset({'relay-head', 'runtime-checkout'}),
