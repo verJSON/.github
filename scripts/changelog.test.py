@@ -1800,6 +1800,24 @@ class ChangelogContractTests(unittest.TestCase):
                 self.assertIn(requested, plan["bump_rationale"])
                 self.assertIn("required core v1.2.0", plan["bump_rationale"])
 
+    def test_explicit_higher_prerelease_core_requires_matching_history(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        (snapshots / "v1.1.0.md").write_text("stable\n", encoding="utf-8")
+        (snapshots / "v3.0.0-rc.1.md").write_text("preview\n", encoding="utf-8")
+        fragment(self.root, "2026-07-30-issue-249-fix.md", impact="patch")
+        with self.assertRaisesRegex(changelog.ChangelogError, "newer than the latest stable snapshot"):
+            changelog.release_plan(self.root, "", [])
+        for requested, action in (("v3.0.0-rc.2", "advances"), ("v3.0.0", "graduates")):
+            with self.subTest(version=requested):
+                plan = changelog.release_plan(self.root, requested, [])
+                self.assertEqual(requested, plan["version"])
+                self.assertIn(f"{action} an existing prerelease", plan["bump_rationale"])
+        for requested in ("v2.0.0", "v2.0.0-rc.1"):
+            with self.subTest(version=requested):
+                with self.assertRaisesRegex(changelog.ChangelogError, "require a patch bump"):
+                    changelog.release_plan(self.root, requested, [])
+
     def test_prerelease_progression_cannot_undercut_selected_impact(self) -> None:
         snapshots = self.root / "CHANGELOG"
         snapshots.mkdir()
