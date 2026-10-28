@@ -226,6 +226,8 @@ class _BoundedTarInfo(tarfile.TarInfo):
         block = source.read(padded_size)
         if len(block) != padded_size:
             raise ArtifactError("ArtifactSet PAX extension block is truncated")
+        # tarfile applies PAX metadata while parsing, so reject forbidden size/sparse
+        # overrides and malformed framing before the standard parser can use them.
         _validate_pax_extension_block(block, self.size)
 
         # The tar stream cannot seek backward, so replay the bounded block to the
