@@ -62,14 +62,17 @@ def validate_normalized_entries(
                     "normalized root script-plan entries must precede nested entries"
                 )
         else:
-            if (
-                type(manifest_index) is not int
-                or manifest_index < 0
-                or manifest_index >= len(nested_manifests)
-                or manifest_path != nested_manifests[manifest_index].path
-            ):
+            if type(manifest_index) is not int:
                 raise script_plan.ScriptPlanError(
-                    "normalized nested script-plan entry has an invalid manifest"
+                    "normalized nested script-plan entry manifest index must be a JSON integer"
+                )
+            if manifest_index < 0 or manifest_index >= len(nested_manifests):
+                raise script_plan.ScriptPlanError(
+                    "normalized nested script-plan entry manifest index is out of range"
+                )
+            if manifest_path != nested_manifests[manifest_index].path:
+                raise script_plan.ScriptPlanError(
+                    "normalized nested script-plan entry manifest path does not match its index"
                 )
             if manifest_index < last_manifest_index:
                 raise script_plan.ScriptPlanError(
