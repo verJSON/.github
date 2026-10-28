@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -451,6 +452,29 @@ class GeneratedCallerTests(unittest.TestCase):
             with self.subTest(event=event, ref=ref):
                 result = subprocess.run(["bash", "-c", step["run"]], env=base | {"EVENT_NAME": event, "DISPATCH_REF": ref}, capture_output=True, text=True)
                 self.assertEqual(expected, result.returncode, result.stderr)
+
+    def test_npm_stamp_rejects_build_metadata_before_running_npm(self) -> None:
+        for mode in ("release-node", "release-artifact", "release-snapshot"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                args = ["bash", str(ROOT / "scripts/gen-changelog-caller.sh"), mode, self.sha]
+                if mode == "release-artifact":
+                    args += ["--build-runner", "general"]
+                workflow = yaml.safe_load(subprocess.run(args, check=True, capture_output=True, text=True).stdout)
+                step = next(step for step in workflow["jobs"]["verify"]["steps"] if step.get("name") == "Stamp the dispatched package versions")
+                root = Path(directory)
+                fake_npm = root / "npm"
+                fake_npm.write_text("#!/bin/sh\nprintf called > \"$NPM_MARKER\"\n", encoding="utf-8")
+                fake_npm.chmod(0o755)
+                marker = root / "called"
+                env = {"PATH": f"{root}:/usr/bin:/bin", "NPM_MARKER": str(marker), "PACKAGE_VERSION": "1.2.0+build.2"}
+                rejected = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root, env=env, capture_output=True, text=True)
+                self.assertNotEqual(0, rejected.returncode)
+                self.assertIn("npm strips build metadata", rejected.stdout)
+                self.assertFalse(marker.exists())
+                env["PACKAGE_VERSION"] = "1.2.0"
+                accepted = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root, env=env, capture_output=True, text=True)
+                self.assertEqual(0, accepted.returncode, accepted.stderr)
+                self.assertTrue(marker.exists())
 
     def test_generator_refuses_implicit_or_invalid_autonomy(self) -> None:
         generator = str(ROOT / "scripts" / "gen-changelog-caller.sh")

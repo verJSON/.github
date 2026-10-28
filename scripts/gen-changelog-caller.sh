@@ -1541,6 +1541,10 @@ ${verify_dependency_steps}
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           NODE_AUTH_TOKEN: ''
         run: |
+          if [[ "\$PACKAGE_VERSION" == *+* ]]; then
+            echo "::error::npm strips build metadata from package versions; release a version without build metadata."
+            exit 1
+          fi
           package_dirs=(${package_dirs_shell})
           for package_dir in "\${package_dirs[@]}"; do
             npm version --prefix "\$package_dir" "\$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
@@ -2153,6 +2157,10 @@ ${verify_dependency_steps}
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           NODE_AUTH_TOKEN: ''
         run: |
+          if [[ "\$PACKAGE_VERSION" == *+* ]]; then
+            echo "::error::npm strips build metadata from package versions; release a version without build metadata."
+            exit 1
+          fi
           package_dirs=(${package_dirs_shell})
           for package_dir in "\${package_dirs[@]}"; do
             npm version --prefix "\$package_dir" "\$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
@@ -2582,6 +2590,10 @@ ${verify_dependency_steps}
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           NODE_AUTH_TOKEN: ''
         run: |
+          if [[ "\$PACKAGE_VERSION" == *+* ]]; then
+            echo "::error::npm strips build metadata from package versions; release a version without build metadata."
+            exit 1
+          fi
           package_dirs=(${package_dirs_shell})
           for package_dir in "\${package_dirs[@]}"; do
             npm version --prefix "\$package_dir" "\$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
@@ -5918,6 +5930,10 @@ else:
         "NODE_AUTH_TOKEN": "''",
     }
     approved_stamp_body = "\n".join((
+        'if [[ "$PACKAGE_VERSION" == *+* ]]; then',
+        '  echo "::error::npm strips build metadata from package versions; release a version without build metadata."',
+        '  exit 1',
+        'fi',
         "package_dirs(<approved-directories>)",
         'for package_dir in "${package_dirs[@]}"; do',
         '  npm version --prefix "$package_dir" "$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version',
