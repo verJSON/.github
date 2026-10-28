@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 from pathlib import Path
 
+import yaml
+
 root = Path(__file__).resolve().parents[2]
 arm = (root / ".github/workflows/gate-rearm.yml").read_text()
 gate = (root / ".github/workflows/ai-review-merge.yml").read_text()
+dispatcher = (root / ".github/workflows/ai-review-merge-dispatch.yml").read_text()
 receipt = (root / "scripts/ci-gate/verify-arm-receipt.sh").read_text()
 client = (root / "scripts/ci-gate/openai-review.py").read_text()
 deepseek = (root / "scripts/ci-gate/deepseek-review.py").read_text()
 
-dispatch = gate.split("  workflow_dispatch:\n", 1)[1].split("  workflow_call:\n", 1)[0]
-dispatch_inputs = [line for line in dispatch.splitlines() if line.startswith("      ") and not line.startswith("        ") and line.rstrip().endswith(":")]
+dispatcher_document = yaml.safe_load(dispatcher)
+dispatcher_on = dispatcher_document.get("on", dispatcher_document.get(True, {}))
+dispatch_inputs = dispatcher_on["workflow_dispatch"]["inputs"]
+dispatcher_review = dispatcher_document["jobs"]["review"]["with"]
 
 checks = {
     "primary and rereview org variables are separate": all(name in arm for name in (
@@ -27,6 +32,10 @@ checks = {
     ),
     "trusted consumers use the strict envelope decoder": gate.count("review-policy-envelope.py") >= 3 and "review-policy-envelope.py" in receipt,
     "workflow dispatch stays within GitHub input limit": len(dispatch_inputs) <= 10,
+    "dispatcher forwards the bounded review policy to its reusable worker": (
+        dispatch_inputs.get("review_policy", {}).get("required") is True
+        and dispatcher_review.get("review_policy") == "${{ inputs.review_policy }}"
+    ),
     "paid re-review requires maintainer permission": "collaborators/$rereview_actor/permission" in arm and 'rereview_actor="${REQUEST_ACTOR:-}"' in arm and '[ "$explicit_label_delivery" = true ]' in arm and "admin|maintain" in arm and "no longer has maintain/admin" in receipt,
     "provider secrets remain scoped": all(secret in gate for secret in (
         "OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}",

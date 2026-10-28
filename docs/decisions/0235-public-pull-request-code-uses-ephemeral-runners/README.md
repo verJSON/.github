@@ -1247,3 +1247,37 @@ dedicated group's runners are physically ephemeral, enforce any workflow's
 `runs-on` choice, or establish the broader public pull-request isolation
 guarantee by itself.
 
+## Amendment (2026-10-27, #1831) — enforce public reusable-workflow isolation
+**Context.** A reusable workflow can be called by a public repository's pull-request workflow. Generic relay review and pending ledgers do not prove every reachable job uses a hosted runner: caller-controlled variables, inputs, and repository identity can change a selector, and remote callees cannot be inspected even when SHA-pinned.
+**Decision.** The runner-isolation checker evaluates local `workflow_call` entrypoints under all five public PR event contexts: `pull_request`, `pull_request_review`, `pull_request_review_comment`, `merge_group`, and `pull_request_target`. Caller identity, variables, inputs, and unmodeled values remain symbolic through nested local calls. Every reachable job must resolve to a GitHub-hosted ephemeral runner; a remote reusable call fails closed. Findings use separate scenario digests and cannot be waived by generic relay pending or reviewed rows. Evaluation is bounded per entrypoint; nested calls share the caller's budget, with a separate finite workflow-scan budget. Recursion or budget exhaustion produces an undetermined failure, never a clean result.
+**Enforcement.** Public callers route code execution to literal `ubuntu-24.04` before caller inputs or organization variables. Privileged reusable workflows reject public calls through a hosted sentinel that exits nonzero and guard every existing job, including `always()` jobs. Control-plane `app-key-environment` and `gate-rearm` remain callable through hosted jobs. Rejected public calls to privileged merge and release workflows use per-run concurrency groups disjoint from trusted serialization keys. `container-candidate-publish.yml` also puts public pull-request calls in a per-run group so their base-SHA key cannot occupy the trusted publication queue. `container-candidate.yml` gives public calls a unique run-and-attempt group while preserving the repository-and-SHA key for trusted work. `cancel-in-progress: false` prevents canceling a running job but does not protect the single pending slot from replacement.
+**Scope.** The checker proves runner selection and the inspected local call path for modeled public pull-request scenarios. It does not attest that a runner is physically ephemeral or validate a remote reusable workflow's implementation.
+
+## Amendment (2026-10-27, #1831) — reject public calls to protected publishing workflows
+
+**Finding.** Routing public pull-request work to a hosted runner does not make
+an arbitrary call to a release or container publishing reusable workflow safe.
+Those workflows can publish packages, images, and attestations, so a public
+caller must be rejected before any existing job runs.
+
+**Decision (PM, 2026-10-27; part #1831).**
+
+- `node-release.yml` and `container-candidate-publish.yml` run a small
+  `ubuntu-24.04` sentinel with `permissions: {}`. It fails for public
+  `pull_request`, `pull_request_review`, `pull_request_review_comment`,
+  `merge_group`, and `pull_request_target` calls.
+- Every existing job directly depends on the sentinel and requires its result
+  to be successful. Jobs using `always()` keep their existing publication
+  conditions and add the same sentinel-result requirement, so that status
+  function cannot bypass the refusal.
+- This rule rejects public callers for these protected publishing workflows;
+  it does not change the hosted-runner policy for public CI reusables.
+
+## 2026-10-27 clarification — rebind the capability-floor relay digest
+
+The `capability-floor-observe.yml [workflow_dispatch] observe` pending row's
+backlog digest is rebound because its sparse checkout includes
+`scripts/gen-ai-review-caller.sh`, whose contract-pin validator now spells out
+lowercase ASCII hexadecimal characters. The workflow, callers, runner selector,
+unresolved reason, and pending justification are unchanged; no relay key or
+runner exception was added. The digest binds the updated sparse-checkout bytes.

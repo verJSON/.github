@@ -6,7 +6,7 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 sha=0123456789abcdef0123456789abcdef01234567
 
-"$root/scripts/gen-ai-review-caller.sh" "$sha" >"$tmp/caller.yml"
+LC_ALL=en_US.UTF-8 "$root/scripts/gen-ai-review-caller.sh" "$sha" >"$tmp/caller.yml"
 python3 - "$tmp/caller.yml" "$sha" <<'PY'
 import sys, yaml
 
@@ -37,7 +37,8 @@ for invalid in (
         pass
     else:
         raise AssertionError(f"invalid run-name mutation was accepted: {invalid!r}")
-assert workflow["on"] == {"workflow_dispatch": {"inputs": {
+inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+assert inputs == {
     "pr_number": {"required": "true", "type": "string"},
     "expected_head_sha": {"required": "true", "type": "string"},
     "authorization_check_id": {"required": "true", "type": "string"},
@@ -45,7 +46,12 @@ assert workflow["on"] == {"workflow_dispatch": {"inputs": {
     "arm_run_attempt": {"required": "true", "type": "string"},
     "explicit_rereview": {"required": "false", "type": "boolean", "default": "false"},
     "review_policy": {"required": "true", "type": "string"},
-}}}
+"allow_absent_checks": {"required": "false", "type": "boolean", "default": "false"},
+}
+assert workflow["concurrency"] == {
+    "group": "ai-review-${{ github.workflow }}-${{ inputs.pr_number }}",
+    "cancel-in-progress": "true",
+}
 assert workflow["permissions"] == {
     "actions": "write", "checks": "write", "contents": "read",
     "issues": "write", "pull-requests": "write", "statuses": "read",
@@ -57,6 +63,7 @@ assert job["secrets"] == "inherit"
 assert set(job["with"]) == {
     "pr_number", "expected_head_sha", "authorization_check_id", "arm_run_id",
     "arm_run_attempt", "explicit_rereview", "review_policy", "ai_review_environment",
+    "allow_absent_checks",
     "contract_ref",
 }
 assert job["with"]["contract_ref"] == sha
@@ -87,13 +94,32 @@ for label, invalid in (
         raise AssertionError(f"{label} escaped the generated caller contract")
 PY
 
-grep -qF "scripts/gen-ai-review-caller.sh $sha" "$tmp/caller.yml"
+"$root/scripts/gen-ai-review-caller.sh" --local >"$tmp/local-caller.yml"
+python3 - "$tmp/local-caller.yml" <<'PY'
+import sys
+import yaml
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    workflow = yaml.load(stream, Loader=yaml.BaseLoader)
+assert workflow["name"] == "AI review + auto-merge"
+inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+assert inputs["ai_review_environment"]["default"] == "ai-review-app"
+assert workflow["concurrency"]["cancel-in-progress"] == "true"
+job = workflow["jobs"]["review"]
+assert job["uses"] == "./.github/workflows/ai-review-merge.yml"
+assert job["with"]["contract_ref"] == "${{ github.sha }}"
+PY
+
+grep -qF "scripts/gen-ai-review-caller.sh $sha > .github/workflows/ai-review-merge.yml" "$tmp/caller.yml"
+grep -qF "scripts/gen-ai-review-caller.sh --local > .github/workflows/ai-review-merge-dispatch.yml" "$tmp/local-caller.yml"
 if grep -Eq '(^|@)(main|master|v[0-9]+)([[:space:]]|$)' "$tmp/caller.yml"; then
   echo 'generated review caller contains a mutable reference' >&2
   exit 1
 fi
-for invalid in main v1 0123456789abcdef0123456789abcdef0123456 ''; do
-  if "$root/scripts/gen-ai-review-caller.sh" "$invalid" >/dev/null 2>&1; then
+uppercase_sha="A${sha:1}"
+non_ascii_hex="${sha:0:39}é"
+for invalid in main v1 0123456789abcdef0123456789abcdef0123456 '' "$uppercase_sha" "$non_ascii_hex"; do
+  if LC_ALL=en_US.UTF-8 "$root/scripts/gen-ai-review-caller.sh" "$invalid" >/dev/null 2>&1; then
     echo "generator accepted unsafe ref: ${invalid:-<empty>}" >&2
     exit 1
   fi

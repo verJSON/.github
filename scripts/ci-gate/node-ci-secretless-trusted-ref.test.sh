@@ -15,6 +15,8 @@ python3 - "$workflow" "$docs" <<'PY' \
 import sys
 import subprocess
 from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).parents[2] / "scripts"))
+import runner_lane_catalog as runner_lanes
 
 import yaml
 
@@ -35,21 +37,14 @@ assert "inputs.secretless-pr" in acquire["if"]
 assert "inputs.secretless-trusted-ref" in acquire["if"]
 assert "needs.eligibility.outputs.should-run != 'false'" in acquire["if"]
 assert acquire["permissions"] == {"contents": "read", "packages": "read"}
-assert acquire["runs-on"] == "${{ fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}"
+assert acquire["runs-on"] == "${{ " + runner_lanes.expression("untrusted-lane") + " }}"
 assert build["permissions"] == {"contents": "read"}
 # Both secretless builds need hosted capacity. Successful eligibility may
 # use the configured untrusted lane; all other results use the hosted fallback.
-assert build["runs-on"].startswith("${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && needs.eligibility.result == 'success' && fromJSON(vars.CI_LANE_UNTRUSTED")
+assert build["runs-on"] == "$" + "{{ " + runner_lanes.expression("secretless-first") + " }}"
 assert "eligibility" in build["needs"]
-assert "|| (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'ubuntu-24.04' || " in build["runs-on"]
-assert build["runs-on"].endswith(
-    "inputs.runner != '' && fromJSON(inputs.runner) || "
-    "github.repository_owner != 'Verjson' && 'ubuntu-24.04' || "
-    "github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || "
-    "vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || "
-    "fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || "
-    "'[\"ubuntu-24.04\"]') }}"
-)
+assert build["runs-on"].index(runner_lanes.SECRETLESS_ELIGIBLE_UNTRUSTED) < build["runs-on"].index(runner_lanes.SECRETLESS_HOSTED_FALLBACK)
+assert build["runs-on"].index(runner_lanes.SECRETLESS_HOSTED_FALLBACK) < build["runs-on"].index("inputs.runner != ''")
 assert "cleanup-secretless-transfer" not in jobs
 assert docs.count("permissions:\n      contents: read\n      packages: read\n      statuses: read") == 4
 

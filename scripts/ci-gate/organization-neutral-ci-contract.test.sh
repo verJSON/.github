@@ -31,7 +31,51 @@ find_legacy_context_refs() {
   scan_pattern "(vars|secrets)\\[[[:space:]]*['\"]${legacy_prefix}[A-Z0-9_]+['\"][[:space:]]*\\]" "$@" || return $?
 }
 
-legacy_context_refs="$(find_legacy_context_refs "${contract_paths[@]}")"
+# The snapshot is byte-verified against its immutable upstream commit. The
+# active Verjson-only candidate gate keeps its matching source flag: ADR 0240
+# treats that canonical repository's feature switch as contract identity, not
+# installation policy. The adapter contract test binds its scope and callee.
+legacy_candidate_context="vars.${legacy_prefix}CANDIDATE_WORKERS_ENABLED"
+legacy_candidate_gate="    if: \${{ inputs.profile == 'approved-candidate-v1' && ${legacy_candidate_context} == 'true' && github.repository == 'Verjson/verjson-ci' && github.ref == 'refs/heads/main' && github.event.repository.private == true }}"
+legacy_candidate_gate_match="$(grep -nFx "$legacy_candidate_gate" .github/workflows/verjson-ci.yml)"
+if [ "$(grep -Fxc "$legacy_candidate_gate" .github/workflows/verjson-ci.yml)" -ne 1 ]; then
+  printf 'candidate gate exception must match exactly once in the canonical adapter\n' >&2
+  exit 1
+fi
+legacy_candidate_record=".github/workflows/verjson-ci.yml:${legacy_candidate_gate_match%%:*}:${legacy_candidate_gate}"
+legacy_candidate_rejection_line="      ${legacy_candidate_context} != 'true' ||"
+legacy_candidate_rejection_match="$(grep -nFx "$legacy_candidate_rejection_line" .github/workflows/verjson-ci.yml)"
+if [ "$(grep -Fxc "$legacy_candidate_rejection_line" .github/workflows/verjson-ci.yml)" -ne 1 ]; then
+  printf 'candidate rejection exception must match exactly once in the canonical adapter\n' >&2
+  exit 1
+fi
+legacy_candidate_rejection_record=".github/workflows/verjson-ci.yml:${legacy_candidate_rejection_match%%:*}:${legacy_candidate_rejection_line}"
+legacy_candidate_contract_assertion="    assert \"${legacy_candidate_context}\" in candidate_if"
+legacy_candidate_contract_match="$(grep -nFx "$legacy_candidate_contract_assertion" scripts/ci-gate/verjson-ci-canonical-contract.test.sh)"
+if [ "$(grep -Fxc "$legacy_candidate_contract_assertion" scripts/ci-gate/verjson-ci-canonical-contract.test.sh)" -ne 1 ]; then
+  printf 'candidate contract exception must match exactly once in the canonical contract test\n' >&2
+  exit 1
+fi
+legacy_candidate_contract_record="scripts/ci-gate/verjson-ci-canonical-contract.test.sh:${legacy_candidate_contract_match%%:*}:${legacy_candidate_contract_assertion}"
+legacy_candidate_rejection_assertion="        \"${legacy_candidate_context} != 'true' || \""
+legacy_candidate_rejection_assertion_match="$(grep -nFx "$legacy_candidate_rejection_assertion" scripts/ci-gate/verjson-ci-canonical-contract.test.sh)"
+if [ "$(grep -Fxc "$legacy_candidate_rejection_assertion" scripts/ci-gate/verjson-ci-canonical-contract.test.sh)" -ne 1 ]; then
+  printf 'candidate rejection assertion must match exactly once in the canonical contract test\n' >&2
+  exit 1
+fi
+legacy_candidate_rejection_assertion_record="scripts/ci-gate/verjson-ci-canonical-contract.test.sh:${legacy_candidate_rejection_assertion_match%%:*}:${legacy_candidate_rejection_assertion}"
+legacy_context_refs="$(find_legacy_context_refs "${contract_paths[@]}" \
+  | grep -v '^scripts/ci-gate/fixtures/verjson-ci-reusable-c9084daca387849c09f1d97bccf8ac311ff11615\.yml:' \
+  | grep -vFx "$legacy_candidate_record" \
+  | grep -vFx "$legacy_candidate_rejection_record" \
+  | grep -vFx "$legacy_candidate_contract_record" \
+  | grep -vFx "$legacy_candidate_rejection_assertion_record" || true)"
+candidate_gate_refs="$(find_legacy_context_refs .github/workflows/verjson-ci.yml \
+  | grep -F "$legacy_candidate_context == 'true'" || true)"
+[ "$(printf '%s\n' "$candidate_gate_refs" | sed '/^$/d' | wc -l)" -eq 1 ] || {
+  echo 'the canonical candidate contract must contain exactly one scoped Verjson feature gate' >&2
+  exit 1
+}
 [ -z "$legacy_context_refs" ] || {
   printf 'organization-branded GitHub configuration remains:\n%s\n' "$legacy_context_refs" >&2
   exit 1
@@ -39,6 +83,13 @@ legacy_context_refs="$(find_legacy_context_refs "${contract_paths[@]}")"
 
 fixture_dir="$(mktemp -d)"
 fixture="$fixture_dir/bracket-forms.yml"
+spoof_fixture="$fixture_dir/unrelated-comment.yml"
+printf 'vars.%sUNRELATED_POLICY: true # %s\n' "$legacy_prefix" "$legacy_candidate_context" > "$spoof_fixture"
+spoof_refs="$(find_legacy_context_refs "$spoof_fixture")"
+if [ -z "$spoof_refs" ]; then
+  printf 'candidate flag comment masked an unrelated legacy variable reference\n' >&2
+  exit 1
+fi
 trap 'rm -rf "$fixture_dir"' EXIT
 printf '%s\n' \
   "vars['${legacy_prefix}LANE_TRUSTED']" \

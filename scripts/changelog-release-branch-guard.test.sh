@@ -38,8 +38,9 @@ case "$first_step" in
 esac
 
 # --------------------------------------------------------------------------
-# ...and the job must carry no `if:` of its own. Reinstating one restores the
-# silent-success failure exactly, while leaving the step below it visible.
+# ...and the job-level gate may only exclude public reusable calls from public
+# repositories. It must not skip invalid dispatch refs; the step below rejects
+# those with a failing status.
 # --------------------------------------------------------------------------
 job_header="$(awk '
   /^  release:$/          { inside = 1; next }
@@ -48,9 +49,13 @@ job_header="$(awk '
   inside                   { print }
 ' "$workflow")"
 
-grep -qE '^    if:' <<<"$job_header" \
-  && fail "the release job carries a job-level if:, so a non-default ref skips green" \
-  || pass "the release job is unconditional, so a rejection is a failure not a skip"
+expected_job_if="if: \${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) }}"
+job_if="$(printf '%s\n' "$job_header" | sed -n '/^[[:space:]]*if:/p' | sed 's/^[[:space:]]*//')"
+if [ "$job_if" = "$expected_job_if" ]; then
+  pass "the job gate only excludes public events from public repositories"
+else
+  fail "the release job gate diverged from the public-call guard: ${job_if:-missing}"
+fi
 
 # --------------------------------------------------------------------------
 # Execute the real block rather than asserting on its text. A comparison that

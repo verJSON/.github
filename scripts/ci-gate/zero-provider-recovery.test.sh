@@ -104,6 +104,12 @@ export ZERO_PROVIDER_RECEIPT_VERIFIER="$tmp/receipt-verifier"
 
 cat >"$tmp/bin/gh" <<'SH'
 #!/usr/bin/env bash
+if [[ "${TARGET_REPO,,}" == "verjson/.github" ]]; then
+  dispatch_workflow="ai-review-merge-dispatch.yml"
+else
+  dispatch_workflow="ai-review-merge.yml"
+fi
+dispatch_workflow_path=".github/workflows/$dispatch_workflow"
 [ -z "${API_CAPTURE:-}" ] || printf "%s\n" "$*" >>"$API_CAPTURE"
 case "$*" in
   "api repos/$TARGET_REPO/actions/runs/$REVIEW_RUN_ID")
@@ -111,11 +117,11 @@ case "$*" in
       --arg title "${RUN_TITLE:-AI review authorization $AUTHORIZATION_CHECK_ID from arm $ARM_RUN_ID.$ARM_RUN_ATTEMPT}" \
       --arg repo "${RUN_REPOSITORY:-verJSON/example}" --arg branch "$DEFAULT_BRANCH" \
       --arg actor "${RUN_ACTOR:-github-actions[bot]}" \
-      --arg status "${RUN_STATUS:-in_progress}" \
-      '{id:$id,run_attempt:$attempt,event:"workflow_dispatch",path:".github/workflows/ai-review-merge.yml",
+      --arg status "${RUN_STATUS:-in_progress}" --arg workflow_path "$dispatch_workflow_path" \
+      '{id:$id,run_attempt:$attempt,event:"workflow_dispatch",path:$workflow_path,
         display_title:$title,head_branch:$branch,head_repository:{full_name:$repo},repository:{full_name:$repo},
         actor:{login:$actor},triggering_actor:{login:$actor},status:$status}' ;;
-  "api --paginate --slurp repos/$TARGET_REPO/actions/workflows/ai-review-merge.yml/runs?event=workflow_dispatch&per_page=100")
+  "api --paginate --slurp repos/$TARGET_REPO/actions/workflows/$dispatch_workflow/runs?event=workflow_dispatch&per_page=100")
     # Verjson/.github#1480 — count the polls so a test can prove which
     # conditions are retried and which are refused on the first look.
     polls=1
@@ -134,18 +140,19 @@ case "$*" in
       --arg title "${RUN_TITLE:-AI review authorization $AUTHORIZATION_CHECK_ID from arm $ARM_RUN_ID.$ARM_RUN_ATTEMPT}" \
       --arg repo "${RUN_REPOSITORY:-verJSON/example}" --arg branch "$DEFAULT_BRANCH" \
       --argjson attempt "${CORRELATED_RUN_ATTEMPT:-1}" \
-      --argjson duplicate "${DUPLICATE_CORRELATED_RUN:-false}" '
+      --argjson duplicate "${DUPLICATE_CORRELATED_RUN:-false}" \
+      --arg workflow_path "$dispatch_workflow_path" '
       [{workflow_runs: ([{
-        id:$id,run_attempt:$attempt,event:"workflow_dispatch",path:".github/workflows/ai-review-merge.yml",
+        id:$id,run_attempt:$attempt,event:"workflow_dispatch",path:$workflow_path,
         display_title:$title,head_branch:$branch,head_repository:{full_name:$repo},repository:{full_name:$repo}
       }] + (if $duplicate then [{
-        id:($id + 1),run_attempt:1,event:"workflow_dispatch",path:".github/workflows/ai-review-merge.yml",
+        id:($id + 1),run_attempt:1,event:"workflow_dispatch",path:$workflow_path,
         display_title:$title,head_branch:$branch,head_repository:{full_name:$repo},repository:{full_name:$repo}
       }] else [] end))}]' ;;
   "api --paginate --slurp repos/$TARGET_REPO/actions/runs/$REVIEW_RUN_ID/jobs?filter=all&per_page=100")
     pre="${PREFLIGHT_CONCLUSION:-failure}"; gate="${GATE_CONCLUSION:-skipped}"
     gate_steps='[]'; [ "$gate" = skipped ] || gate_steps='[{"name":"Reserve AI review pass 1","status":"completed","conclusion":"success"}]'
-    prefix="${JOB_NAME_PREFIX:-}"
+    prefix="${JOB_NAME_PREFIX:-review / }"
     jq -nc --arg pre "$pre" --arg gate "$gate" --arg prefix "$prefix" --argjson gate_steps "$gate_steps" \
       --argjson attempt "$REVIEW_RUN_ATTEMPT" '
       [{jobs:[range(1; $attempt) as $n |
@@ -203,8 +210,8 @@ RUN_TITLE="AI review authorization $AUTHORIZATION_CHECK_ID from arm 7002.$ARM_RU
 RUN_TITLE="AI review authorization $AUTHORIZATION_CHECK_ID from arm $ARM_RUN_ID.2" \
   expect_fail "substituted arm attempt cannot correlate recovery" "run identity mismatch" verify
 unset RUN_TITLE
-JOB_NAME_PREFIX='review / ' \
-  expect_fail "synthetic reusable-job names cannot stand in for real direct-run history" "approached the provider boundary" verify
+JOB_NAME_PREFIX='unexpected / ' \
+  expect_fail "unexpected nested job-name prefix cannot correlate recovery" "approached the provider boundary" verify
 CURRENT_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   expect_fail "stale head recovery mutation fails closed" "recovery head is stale" verify
 REVIEW_POLICY=different-policy \
@@ -314,6 +321,9 @@ expect_pass 'verified failed exact authorization passes actual preflight then ga
 [ "$(grep -c 'jobs?filter=all' "$API_CAPTURE")" -eq 2 ] \
   && pass 'gate independently repeats prior-provider proof' \
   || fail 'gate did not repeat prior-provider proof'
+expect_pass 'adopter recovery selects its caller-prefixed reusable jobs' verify
+TARGET_REPO=Verjson/.github RUN_REPOSITORY=Verjson/.github JOB_NAME_PREFIX='review / ' \
+  expect_pass 'canonical repository uses its dispatch-wrapper path for recovery' verify
 unset API_CAPTURE
 ZERO_PROVIDER_RECOVERY=false expect_fail 'failed authorization without recovery proof remains refused' 'not pending review' gate_admission
 ZERO_PROVIDER_RECOVERY=garbage expect_fail 'malformed recovery proof flag is refused' 'invalid zero-provider recovery flag' gate_admission

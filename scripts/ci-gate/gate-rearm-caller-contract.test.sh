@@ -177,16 +177,22 @@ assert "check_app_id" in arm_run and "check_app_slug" in arm_run
 assert ".check_app_id // .app_id" not in arm_run and ".check_app_slug // .app_slug" not in arm_run
 assert "legacy AI App-owned authorization could not be safely recovered" not in arm_run
 assert "no duplicate review was dispatched" in arm_run
-assert arm["needs"] == ["event-policy", "app-key-policy"]
+assert arm["needs"] == ["event-policy", "app-key-policy", "validate-ai-review-key"]
 app_key_policy = doc["jobs"]["app-key-policy"]
-assert app_key_policy["uses"] == "Verjson/.github/.github/workflows/app-key-environment.yml@ebe23fafbdb77dd2cca6f1862d932fde881b80d7"
+assert "uses" not in app_key_policy
 assert app_key_policy["needs"] == "event-policy"
+key_validation = doc["jobs"]["validate-ai-review-key"]
+assert key_validation["needs"] == "app-key-policy"
+assert key_validation["environment"] == "${{ inputs.ai_review_environment || 'ai-review-app' }}"
+assert key_validation["permissions"] == {"contents": "read"}
+assert not any(step.get("uses", "").startswith("actions/checkout@") for step in key_validation["steps"])
 assert not any(step.get("uses", "").startswith("actions/checkout@") for step in arm["steps"])
 assert not any(".gate-trust" in str(step) for step in arm["steps"])
 create = next(step for step in arm["steps"] if step.get("id") == "arm")
 assert create["env"]["APP_KEY_POLICY_RESULT"] == "${{ needs.app-key-policy.result }}"
+assert create["env"]["AI_REVIEW_KEY_VALIDATION_RESULT"] == "${{ needs.validate-ai-review-key.result }}"
 assert "AI_REVIEW_APP_PRIVATE_KEY" not in create["env"]
-assert 'if [ "$APP_KEY_POLICY_RESULT" != success ]; then' in create["run"]
+assert 'if [ "$APP_KEY_POLICY_RESULT" != success ] || [ "$AI_REVIEW_KEY_VALIDATION_RESULT" != success ]; then' in create["run"]
 script = "\n".join(step.get("run", "") for step in arm["steps"])
 for marker in (
     '[[ "$TARGET_REPO" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+$ ]]',

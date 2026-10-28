@@ -26,9 +26,15 @@ REQUIRED_CHECKS = json.dumps(
     ],
     separators=(",", ":"),
 )
+ALLOW_GUARD = (
+    "(github.event_name != 'pull_request' && github.event_name != 'pull_request_review' "
+    "&& github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' "
+    "&& github.event_name != 'pull_request_target' "
+    "|| github.event.repository.private == true)"
+)
 CLEANUP_CONDITION = (
-    "${{ always() && "
-    "needs.privileged_merge.outputs.terminal_merge_succeeded == 'true' }}"
+    "${{ " + ALLOW_GUARD + " && "
+    "(always() && needs.privileged_merge.outputs.terminal_merge_succeeded == 'true') }}"
 )
 
 

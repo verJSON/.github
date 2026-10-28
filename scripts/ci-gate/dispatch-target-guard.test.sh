@@ -6,7 +6,8 @@ set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
-wf="$repo_root/.github/workflows/ai-review-merge.yml"
+wf="$repo_root/.github/workflows/ai-review-merge-dispatch.yml"
+reusable_wf="$repo_root/.github/workflows/ai-review-merge.yml"
 fails=0
 pass() { printf 'ok   - %s\n' "$1"; }
 fail() { printf 'FAIL - %s\n' "$1"; fails=$((fails + 1)); }
@@ -37,7 +38,7 @@ if grep -qE '^      repository:' <<<"$call_block"; then
 else
   pass "workflow_call rejects the absent repository input by schema"
 fi
-grep -qF 'TARGET_REPO: ${{ github.repository }}' "$wf" \
+grep -qF 'TARGET_REPO: ${{ github.repository }}' "$reusable_wf" \
   && pass "target is bound to the repository where the workflow executes" \
   || fail "TARGET_REPO is not fixed to github.repository"
 if grep -q 'inputs\.repository\|id: target_guard' "$wf"; then

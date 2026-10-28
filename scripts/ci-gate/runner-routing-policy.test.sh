@@ -66,14 +66,20 @@ literal_hosted_job_sites() {
 }
 
 literal_hosted_sites="$(literal_hosted_job_sites "${workflow_files[@]}")"
-expected_literal_hosted_sites=$'actions-ci.yml:hosted-compatibility-tests:    runs-on: ubuntu-24.04\ncontainer-deployment.yml:verify-default-branch:    runs-on: ubuntu-24.04\nai-privileged-merge.yml:cleanup_arm_receipt:    runs-on: ubuntu-24.04\nai-privileged-merge.yml:invalid_verjson_route:    runs-on: ubuntu-24.04\nai-privileged-merge.yml:validate_privileged_lane:    runs-on: ubuntu-24.04\napp-key-environment.yml:validate:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:acquire-private-node-dependencies:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:attest-sbom:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:candidate-manifest:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:evict-node-modules-transfer:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:mirror-gar:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:prepare:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:publish-base:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:publish-derived:    runs-on: ubuntu-24.04\ncontainer-release.yml:promote:    runs-on: ubuntu-24.04\nprivileged-merge-conformance.yml:audit:    runs-on: ubuntu-24.04'
+expected_literal_hosted_sites=$'actions-ci.yml:hosted-compatibility-tests:    runs-on: ubuntu-24.04\ncontainer-deployment.yml:verify-default-branch:    runs-on: ubuntu-24.04\nai-privileged-merge.yml:cleanup_arm_receipt:    runs-on: ubuntu-24.04\nai-privileged-merge.yml:invalid_verjson_route:    runs-on: ubuntu-24.04\nai-privileged-merge.yml:validate_privileged_lane:    runs-on: ubuntu-24.04\napp-key-environment.yml:validate:    runs-on: ubuntu-24.04\ngate-rearm.yml:app-key-policy:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:acquire-private-node-dependencies:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:attest-sbom:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:candidate-manifest:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:evict-node-modules-transfer:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:mirror-gar:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:prepare:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:publish-base:    runs-on: ubuntu-24.04\ncontainer-candidate-publish.yml:publish-derived:    runs-on: ubuntu-24.04\ncontainer-release.yml:promote:    runs-on: ubuntu-24.04\nprivileged-merge-conformance.yml:audit:    runs-on: ubuntu-24.04'
 expected_literal_hosted_sites="$(printf '%s\n' \
   "$expected_literal_hosted_sites" \
+  $'container-candidate-publish.yml:public-call-guard:    runs-on: ubuntu-24.04' \
   $'changelog-contract-fleet-report.yml:report:    runs-on: ubuntu-24.04' \
+ $'ai-privileged-merge.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nai-promotion-retry.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nai-review-merge.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04' \
+ $'changelog-release.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\ncontainer-deployment-review-producer.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\ncontainer-deployment.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04' \
+ $'container-release.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nnotify-umbrella.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nrelease-dispatch.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04' \
+ $'release-propose.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04\nrenovate-compatibility-canary.yml:reject-public-pull-request-caller:    runs-on: ubuntu-24.04' \
   $'cli-projects-package-surface-required.yml:admission:    runs-on: ubuntu-24.04\ncli-projects-package-surface-required.yml:package-surface:    runs-on: ubuntu-24.04' \
-  $'node-release.yml:prepare:    runs-on: ubuntu-24.04\nnode-release.yml:release:    runs-on: ubuntu-24.04\nnode-release.yml:retention:    runs-on: ubuntu-24.04' \
+  $'node-release.yml:prepare:    runs-on: ubuntu-24.04\nnode-release.yml:public-call-guard:    runs-on: ubuntu-24.04\nnode-release.yml:release:    runs-on: ubuntu-24.04\nnode-release.yml:retention:    runs-on: ubuntu-24.04' \
   $'node-ci.yml:artifact-mode-gate:    runs-on: ubuntu-24.04\nnode-ci.yml:artifact-preflight:    runs-on: ubuntu-24.04\nnode-ci-protected.yml:artifact-mode-gate:    runs-on: ubuntu-24.04\nnode-ci-protected.yml:artifact-preflight:    runs-on: ubuntu-24.04' \
   $'node-ci.yml:deferred-ci:    runs-on: ubuntu-24.04\nnode-ci-protected.yml:deferred-ci:    runs-on: ubuntu-24.04' \
+ $'verjson-ci.yml:ci:    runs-on: ubuntu-24.04\nverjson-ci.yml:reject-profile:    runs-on: ubuntu-24.04\nverjson-ci.yml:reject-public-profile:    runs-on: ubuntu-24.04' \
   | sort)"
 
 validate_literal_hosted_inventory() {
@@ -265,6 +271,8 @@ unsafe_portable="$(
     | grep -vE ':[0-9]+:[[:space:]]+runs-on: ubuntu-24\.04$' \
     | grep -v "inputs.github-hosted-runner" \
     | grep -v "vars.CI_RUNNER_FASTLANE" \
+ | grep -vF "runs-on: \${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || 'ubuntu-24.04') }}" \
+    | grep -vF "runs-on: \${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]')) }}" \
     | grep -v "vars.CI_LANE_UNTRUSTED || '\[\"ubuntu-24.04\"\]'" \
     | sed "s/vars\.CI_LANE_FALLBACK || '\\[\"ubuntu-24\.04\"\\]'//" \
     | grep -E "ubuntu-(24\\.04|latest)" \
@@ -335,7 +343,7 @@ fastlane_no_fallback="$(
   && pass "hosted fallbacks are reachable only by callers outside Verjson" \
   || fail "hosted fallback reachable by a Verjson caller: $unsafe_portable"
 
-grep -qF "runs-on: \${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}" "$workflows/gate-rearm.yml" \
+grep -qF "github.event.repository.private != true && 'ubuntu-24.04' || (fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK" "$workflows/gate-rearm.yml" \
   && pass "the required authorization arm routes through the trusted organization lane" \
   || fail "gate-rearm required-workflow lane routing drifted"
 
@@ -979,6 +987,15 @@ assert_route "$workflows/app-key-environment.yml" validate-ai-review-key Verjson
 assert_route "$workflows/app-key-environment.yml" validate-ai-review-key Verjson/verjson-authn '' true \
   '["trusted-canary"]' '["untrusted-canary"]' '["trusted-canary"]' \
   "validate-ai-review-key — private caller keeps the trusted lane"
+EVENT_NAME=pull_request_target assert_route "$workflows/gate-rearm.yml" validate-ai-review-key Verjson/.github '' false \
+  '["trusted-canary"]' '["self-hosted","general"]' 'ubuntu-24.04' \
+  "gate-rearm key validation — public target ignores persistent lane values"
+EVENT_NAME=pull_request_target assert_route "$workflows/gate-rearm.yml" validate-ai-review-key Verjson/verjson-authn '' true \
+  '["trusted-canary"]' '["untrusted-canary"]' '["trusted-canary"]' \
+  "gate-rearm key validation — private target follows the trusted lane"
+EVENT_NAME=pull_request_target assert_route "$workflows/gate-rearm.yml" validate-ai-review-key Verjson/.github '' '' \
+  '["trusted-canary"]' '["self-hosted","general"]' 'ubuntu-24.04' \
+  "gate-rearm key validation — unresolved visibility stays hosted"
 
 # #411 and ADR 0235. A supplied runner_labels value is explicit fleet
 # authority off Verjson and for a private Verjson repository, and must beat
@@ -1082,19 +1099,21 @@ assert_route "$workflows/actionlint.yml" actionlint Verjson/.github '' false \
   '["self-hosted","d"]' '["self-hosted","u"]' '["self-hosted","u"]' \
   "actionlint — an unset fast lane degrades to CI_RUNNER_UNTRUSTED" ''
 
-# ADR 0235 decision 4: a public pull request takes the ephemeral untrusted
-# lane with a hosted tail, ahead of the fast lane; a private one keeps its lane.
+# ADR 0235 public PR events use the literal hosted runner before any
+# caller-selected or lane-variable selector; private calls retain their lane.
 EVENT_NAME=pull_request assert_route "$workflows/actionlint.yml" actionlint Verjson/.github '' false \
-  '["self-hosted","d"]' '' '["ubuntu-24.04"]' \
+  '["self-hosted","d"]' '' 'ubuntu-24.04' \
   "actionlint — a public pull request takes the untrusted lane's hosted tail, not the fast lane" \
   '["self-hosted","fast"]'
 EVENT_NAME=pull_request assert_route "$workflows/actionlint.yml" actionlint Verjson/.github '' false \
-  '["self-hosted","d"]' '["untrusted-canary"]' '["untrusted-canary"]' \
-  "actionlint — a public pull request takes a configured untrusted lane" '["self-hosted","fast"]'
+  '["self-hosted","d"]' '["untrusted-canary"]' 'ubuntu-24.04' \
+  "actionlint — a public pull request uses hosted before a configured untrusted lane" '["self-hosted","fast"]'
+EVENT_NAME=pull_request_target assert_route "$workflows/actionlint.yml" actionlint Verjson/.github '' '' \
+  '["self-hosted","d"]' '["untrusted-canary"]' 'ubuntu-24.04' \
+  "actionlint — pull_request_target with unknown visibility uses hosted" '["self-hosted","fast"]'
 EVENT_NAME=pull_request assert_route "$workflows/actionlint.yml" actionlint Verjson/verjson-authn '' true \
   '["self-hosted","d"]' '' '["self-hosted","d"]' \
   "actionlint — a private pull request keeps the trusted lane" '["self-hosted","fast"]'
-
 # Mutation check. The obvious way to write the public branch —
 # `private == false` — is FAIL-OPEN: Actions coerces a missing `private` to 0,
 # and 0 == false, so an unreadable repository would reach the fast lane. That
@@ -1164,17 +1183,15 @@ done < <(policy_jobs)
 # through to CI_LANE_FALLBACK, so an unset untrusted lane lands on hosted.
 for candidate_job in prepare pull-request-build skip-private-node-build; do
   EVENT_NAME=pull_request assert_route "$workflows/container-candidate.yml" "$candidate_job" Verjson/.github '' false \
-    '["self-hosted","private-canary"]' '' '["ubuntu-24.04"]' \
-    "container-candidate $candidate_job — a public pull request with no untrusted lane lands on hosted"
+    '["self-hosted","private-canary"]' '' 'ubuntu-24.04' \
+    "container-candidate $candidate_job — a public pull request uses the literal hosted runner"
+  EVENT_NAME=pull_request_target assert_route "$workflows/container-candidate.yml" "$candidate_job" Verjson/.github '' '' \
+    '["self-hosted","private-canary"]' '["untrusted-canary"]' 'ubuntu-24.04' \
+    "container-candidate $candidate_job — pull_request_target with unknown visibility uses hosted"
   EVENT_NAME=pull_request assert_route "$workflows/container-candidate.yml" "$candidate_job" Verjson/verjson-authn '' true \
     '["self-hosted","private-canary"]' '' '["self-hosted","private-canary"]' \
     "container-candidate $candidate_job — a private pull request keeps the trusted lane"
 done
-
-# The `runner` input is the per-caller override, but only on the jobs that
-# expose it. pulumi-ci's `validate` and `preview-admission` deliberately do not:
-# they sit on the credential boundary in ADR 0027/0029, so a caller must not be
-# able to redirect them to a pool of its choosing.
 while read -r wf_name job; do
   wf="$workflows/$wf_name"
   name="${wf_name%.yml} $job"
@@ -1329,8 +1346,9 @@ done
 policy_files="node-ci.yml node-release.yml notify-umbrella.yml helm-ci.yml ui-ci.yml pulumi-ci.yml actionlint.yml changelog-validate.yml changelog-release.yml generated-artifacts.yml"
 deviant=""
 job_count=0
+expected_node_untrusted_selector="$(PYTHONPATH="$root/scripts" python3 -c 'from runner_lane_catalog import expression; print(expression("untrusted-lane"))')"
 for name in $policy_files; do
-  while IFS= read -r line; do
+  while IFS=$'\t' read -r job line; do
     [ -n "$line" ] || continue
     value="${line#*runs-on:}"
     value="${value# }"
@@ -1342,6 +1360,10 @@ for name in $policy_files; do
     fi
     if [ "$name" = node-ci.yml ] \
         && [ "$value" = '${{ fromJSON(vars.CI_LANE_UNTRUSTED || '\''["ubuntu-24.04"]'\'') }}' ]; then
+      continue
+    fi
+    if [ "$name" = node-ci.yml ] && [ "$job" = acquire-secretless-dependencies ] \
+      && [ "$value" = "\${{ $expected_node_untrusted_selector }}" ]; then
       continue
     fi
     # ADR 0178's deferral check. Keyed on the exact literal value, which alone
@@ -1357,8 +1379,11 @@ for name in $policy_files; do
         || ! grep -qF 'CI_LANE_FALLBACK' <<<"$value"; then
       deviant="$deviant$name: $line"$'\n'
     fi
-  done <<EOF
-$(grep -nE "^    runs-on:" "$workflows/$name")
+done <<EOF
+$(awk '
+  /^  [A-Za-z0-9_-]+:$/ { job = $1; sub(/:$/, "", job) }
+  /^    runs-on:/ && job != "reject-public-pull-request-caller" { print job "\t" NR ":" $0 }
+' "$workflows/$name")
 EOF
 done
 

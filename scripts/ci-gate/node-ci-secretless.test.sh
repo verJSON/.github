@@ -12,7 +12,10 @@ python3 - "$workflow" <<'PY' \
   && pass "secretless mode separates credentialed acquisition from PR execution" \
   || fail "secretless mode does not preserve the two-job credential boundary"
 import sys
+from pathlib import Path
 import yaml
+sys.path.insert(0, str(Path(sys.argv[1]).parents[2] / "scripts"))
+import runner_lane_catalog as runner_lanes
 
 doc = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 inputs = doc[True]["workflow_call"]["inputs"]
@@ -28,19 +31,14 @@ acquire = jobs["acquire-secretless-dependencies"]
 build = jobs["build-test"]
 assert acquire["permissions"] == {"contents": "read", "packages": "read"}
 assert "inputs.secretless-pr" in acquire["if"]
-assert acquire["runs-on"] == "${{ fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}"
+assert acquire["runs-on"] == "${{ " + runner_lanes.expression("untrusted-lane") + " }}"
 assert {"eligibility", "acquire-secretless-dependencies"} <= set(build["needs"])
 assert build["permissions"] == {"contents": "read"}
 assert build["if"] == (
     "always() && (inputs.build-artifact-role == 'level' || "
     "inputs.build-artifact-role == 'consumer' || inputs.build-artifact-role == 'producer')"
 )
-assert build["runs-on"].startswith(
-    "${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && "
-    "needs.eligibility.result == 'success' && "
-    "fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') || "
-    "(inputs.secretless-pr || inputs.secretless-trusted-ref) && 'ubuntu-24.04' || "
-)
+assert build["runs-on"] == "${{ " + runner_lanes.expression("secretless-first") + " }}"
 assert build["runs-on"].index("inputs.secretless-pr") < build["runs-on"].index("inputs.runner")
 
 acquire_steps = acquire["steps"]

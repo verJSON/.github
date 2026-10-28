@@ -1,0 +1,252 @@
+{
+  "allowed_public_workflows": {
+    "actionlint.yml": {
+      "jobs": {
+        "actionlint": {
+          "runs-on": "${{ (github.repository_owner != 'Verjson' || inputs.github-hosted-runner) && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || github.event_name == 'pull_request' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') || github.event.repository.visibility == 'public' && fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}"
+        }
+      }
+    },
+    "app-key-environment.yml": {
+      "jobs": {
+        "validate": {
+          "runs-on": "ubuntu-24.04"
+        },
+        "validate-ai-review-key": {
+          "runs-on": "${{ github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}"
+        }
+      }
+    },
+    "changelog-validate.yml": {
+      "jobs": {
+        "validate": {
+          "runs-on": "${{ inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_RUNNER_OVERFLOW || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_RUNNER_OVERFLOW || vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}"
+        }
+      }
+    },
+    "container-candidate.yml": {
+      "jobs": {
+        "prepare": {
+          "runs-on": "${{ github.event_name != 'pull_request' && inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || github.event_name == 'pull_request' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}"
+        },
+        "pull-request-build": {
+          "runs-on": "${{ github.event_name != 'pull_request' && inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || github.event_name == 'pull_request' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}"
+        },
+        "skip-private-node-build": {
+          "runs-on": "${{ github.event_name != 'pull_request' && inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || github.event_name == 'pull_request' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}"
+        }
+      }
+    },
+    "gate-rearm.yml": {
+      "jobs": {
+        "app-key-policy": {
+          "runs-on": "ubuntu-24.04"
+        },
+        "arm": {
+          "runs-on": "${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}"
+        },
+        "event-policy": {
+          "runs-on": "${{ fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}"
+        },
+        "runner-acquisition-watchdog": {
+          "runs-on": "${{ fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}"
+        },
+        "validate-ai-review-key": {}
+      }
+    },
+    "generated-artifacts.yml": {
+      "jobs": {
+        "validate": {
+          "runs-on": "${{ inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}"
+        }
+      }
+    },
+    "helm-ci.yml": {
+      "jobs": {
+        "lint-template": {
+          "runs-on": "${{ inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != (vars.CI_PROFILE_OWNER || 'Verjson') && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || (vars.CI_PROFILE_OWNER || 'Verjson') != 'Verjson' && fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}"
+        }
+      }
+    },
+    "pulumi-ci.yml": {
+      "jobs": {
+        "preview": {
+          "runs-on": "${{ inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}"
+        },
+        "preview-admission": {
+          "runs-on": "${{ github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}"
+        },
+        "validate": {
+          "runs-on": "${{ github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}"
+        }
+      }
+    },
+    "repo-hygiene.yml": {
+      "jobs": {
+        "hygiene": {
+          "runs-on": "${{ inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}"
+        }
+      }
+    },
+    "ui-ci.yml": {
+      "jobs": {
+        "build-test": {
+          "runs-on": "${{ inputs.runner != '' && fromJSON(inputs.runner) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}"
+        }
+      }
+    }
+  },
+  "base_commit": "1adb1724a58dfb4e2c9bfbd55d0646555575a147",
+  "rejected_public_workflows": {
+    "ai-privileged-merge.yml": {
+      "jobs": {
+        "app-key-policy": {
+          "if": null
+        },
+        "cleanup_arm_receipt": {
+          "if": "${{ always() && needs.privileged_merge.outputs.terminal_merge_succeeded == 'true' }}"
+        },
+        "invalid_verjson_route": {
+          "if": "${{ github.repository_owner == 'Verjson' && !(github.event.repository.visibility == 'public' && (github.repository == 'Verjson/.github' || github.repository == 'Verjson/verjson-github-runner') || github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-github-runner') }}"
+        },
+        "privileged_merge": {
+          "if": "${{ needs.app-key-policy.result == 'success' && (always() && (github.repository_owner != 'Verjson' || github.event.repository.visibility == 'public' && (github.repository == 'Verjson/.github' || github.repository == 'Verjson/verjson-github-runner') || github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-github-runner' && inputs.privileged_lane == '[\"ubuntu-24.04\"]' && needs.validate_privileged_lane.result == 'success')) }}"
+        },
+        "validate_privileged_lane": {
+          "if": "${{ github.repository_owner == 'Verjson' && github.event.repository.visibility == 'private' && github.repository != 'Verjson/.github' && github.repository != 'Verjson/verjson-github-runner' }}"
+        }
+      }
+    },
+    "ai-promotion-retry.yml": {
+      "jobs": {
+        "promote": {
+          "if": "needs.resolve.outputs.ready == 'true'"
+        },
+        "resolve": {
+          "if": null
+        }
+      }
+    },
+    "ai-review-merge.yml": {
+      "jobs": {
+        "app-key-policy": {
+          "if": "github.event_name != 'workflow_dispatch' || inputs.ai_review_environment == 'ai-review-app'"
+        },
+        "title-policy": {
+          "if": null
+        },
+        "preflight": {
+          "if": "github.event_name != 'pull_request_target' && (\n  github.event_name != 'workflow_dispatch' ||\n  (\n    github.ref == 'refs/heads/main' &&\n    github.event.repository.default_branch == 'main' &&\n    github.ref_protected &&\n    inputs.ai_review_environment == 'ai-review-app'\n  )\n) && (\n  github.event_name == 'workflow_dispatch' ||\n  (\n    (\n      (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||\n      (github.event.action == 'labeled' && github.event.label.name == 're-review') ||\n      (github.event.action == 'unlabeled' &&\n        (github.event.label.name == 'hold' || github.event.label.name == 'DO NOT MERGE'))\n    ) &&\n    !github.event.pull_request.draft &&\n    !contains(github.event.pull_request.labels.*.name, 'hold') &&\n    !contains(github.event.pull_request.labels.*.name, 'DO NOT MERGE') &&\n    needs.title-policy.outputs.title_held != 'true'\n  )\n)"
+        },
+        "gate": {
+          "if": "${{ needs.app-key-policy.result == 'success' && (needs.preflight.outputs.lane == 'fast' || needs.preflight.outputs.lane == 'ai') }}"
+        },
+        "complete-authorization": {
+          "if": "${{ always() && inputs.authorization_check_id != '' && (github.event_name != 'workflow_dispatch' || inputs.ai_review_environment == 'ai-review-app') }}"
+        },
+        "dispatch-merge": {
+          "if": "needs.complete-authorization.result == 'success' && needs.complete-authorization.outputs.ai_authorized == 'true' && needs.preflight.outputs.authority == 'ai-merge'"
+        }
+      }
+    },
+    "changelog-release.yml": {
+      "jobs": {
+        "app-key-policy": {
+          "if": null
+        },
+        "release": {
+          "if": null
+        }
+      }
+    },
+    "container-deployment-review-producer.yml": {
+      "jobs": {
+        "analyze": {
+          "if": null
+        },
+        "environment-preflight": {
+          "if": null
+        },
+        "publish-ai": {
+          "if": "inputs.kind == 'ai'"
+        },
+        "publish-code": {
+          "if": "inputs.kind == 'code'"
+        },
+        "publish-security": {
+          "if": "inputs.kind == 'security'"
+        }
+      }
+    },
+    "container-deployment.yml": {
+      "jobs": {
+        "deploy": {
+          "if": "${{ !inputs.dry-run }}"
+        },
+        "dry-run": {
+          "if": "inputs.dry-run"
+        },
+        "verify-default-branch": {
+          "if": null
+        }
+      }
+    },
+    "container-release.yml": {
+      "jobs": {
+        "app-key-policy": {
+          "if": null
+        },
+        "promote": {
+          "if": "${{ needs.app-key-policy.result == 'success' && (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.event.repository.default_branch == 'main') }}"
+        },
+        "retention": {
+          "if": "needs.promote.result == 'success'"
+        }
+      }
+    },
+    "notify-umbrella.yml": {
+      "jobs": {
+        "dispatch": {
+          "if": null
+        }
+      }
+    },
+    "release-dispatch.yml": {
+      "jobs": {
+        "release-dispatch": {
+          "if": null
+        }
+      }
+    },
+    "release-propose.yml": {
+      "jobs": {
+        "release-propose": {
+          "if": null
+        }
+      }
+    },
+    "renovate-compatibility-canary.yml": {
+      "jobs": {
+        "canary": {
+          "if": null
+        },
+        "receipt": {
+          "if": "${{ always() }}"
+        }
+      }
+    }
+  },
+ "public_concurrency_groups": {
+  "container-candidate.yml": "format('public-pr-container-candidate-{0}-{1}-{2}', github.repository, github.run_id, github.run_attempt)"
+ },
+ "trusted_concurrency_groups": {
+    "container-candidate.yml": "format('container-candidate-{0}-{1}', github.repository, github.sha)",
+    "ai-privileged-merge.yml": "format('ai-terminal-promotion-{0}-{1}', inputs.pr_number, inputs.expected_head_sha)",
+    "changelog-release.yml": "format('changelog-release-{0}', github.repository)",
+    "container-candidate-publish.yml": "format('container-candidate-publish-{0}-{1}', github.repository, github.sha)",
+    "container-deployment.yml": "format('runner-deployment-{0}-{1}', github.repository, inputs.fleet-selector)",
+    "container-release.yml": "format('container-release-{0}', github.repository)",
+    "release-dispatch.yml": "format('release-propose-{0}', github.repository)",
+    "release-propose.yml": "format('release-propose-{0}', github.repository)"
+  }
+}

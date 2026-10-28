@@ -38,17 +38,15 @@ run-name: AI review authorization ${{ inputs.authorization_check_id }} from arm 
 # out with the `hold` label, a "DO NOT MERGE" title marker, or a draft.
 #
 # Cross-repo dispatch is bounded to THIS org (ADR 0020, #119). The optional
-# Operators re-gate by dispatching this workflow in the repository that owns
-# the PR. Cross-repository dispatch was retired by ADR 0036 because the
+# Operators re-gate by dispatching `.github/workflows/ai-review-merge-dispatch.yml`
+# in the repository that owns the PR. Cross-repository dispatch was retired by ADR 0036 because the
 # unprivileged github.token is intentionally repository-scoped.
 #
-# Cross-ORG distribution (ADR 0022, #128): this file is ALSO a `workflow_call`
-# reusable, so consumers in other orgs (e.g. tequityapp) pin it instead of
-# hand-copying it — upstream fixes then reach every consumer via `@v1` and the
-# shipped `scripts/ci-gate/*.test.sh` guard the shared logic once for everyone.
-# The dispatch and reusable entrypoints share one file: the trusted arm invokes
-# `workflow_dispatch`; a cross-org consumer adds a thin caller that `uses:` it
-# under `workflow_call`. When called,
+# Cross-org distribution (ADR 0022, #128): this workflow is reusable only.
+# Consumers pin it rather than hand-copying it; generated caller workflows own
+# dispatch concurrency so sibling reusable calls cannot cancel one another.
+# The canonical repository's dispatch caller lives at
+# `.github/workflows/ai-review-merge-dispatch.yml`. When called,
 # `github.repository`/`github.event`/`github.repository_owner` are inherited from
 # the CALLER, so `TARGET_REPO` and the PR number resolve to the consumer's own
 # repository. Consumers must
@@ -85,47 +83,6 @@ run-name: AI review authorization ${{ inputs.authorization_check_id }} from arm 
 # the repository where the workflow executes.
 
 on:
-  workflow_dispatch:
-    inputs:
-      ai_review_environment:
-        description: Main-only environment containing the ai-review App private key
-        required: true
-        type: choice
-        options:
-          - ai-review-app
-        default: ai-review-app
-      pr_number:
-        description: PR number to review
-        required: true
-      expected_head_sha:
-        description: Exact PR head authorized by the trusted arm
-        required: true
-      authorization_check_id:
-        description: Exact Checks API record created by the trusted arm
-        required: true
-      arm_run_id:
-        description: Trusted arm workflow run containing the immutable receipt
-        required: true
-      arm_run_attempt:
-        description: Trusted arm run attempt containing the immutable receipt
-        required: true
-      explicit_rereview:
-        description: Whether a maintainer explicitly requested a same-head review
-        required: false
-        type: boolean
-        default: false
-      review_policy:
-        description: Receipt-bound canonical provider/model/budget/pricing base64url envelope
-        required: true
-      allow_absent_checks:
-        description: >-
-          Proceed even though the PR has NO CI checks at all. Absent checks are
-          normally treated as not-green (#143); set this only for a PR that is
-          genuinely expected to trigger nothing (e.g. docs-only under a `paths:`
-          filter). Engaging it is logged as a warning on the run.
-        required: false
-        type: boolean
-        default: false
   workflow_call:
     # Inherited context enables caller-owned main-only environment secrets.
     # This also grants accessible caller secrets to reviewed code (ADR 0171).
@@ -190,22 +147,6 @@ on:
       DEEPSEEK_API_KEY:
         required: false
 
-concurrency:
-  group: ai-review-${{ github.event.pull_request.number || inputs.pr_number }}
-  # Label events start a workflow before job-level `if:` guards are evaluated.
-  # Only gate-control changes may cancel an active review; in particular, the
-  # classify step's own removal of `re-review` must not cancel its parent run.
-  cancel-in-progress: >-
-    ${{
-      (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
-      (github.event.action == 'labeled' &&
-        (github.event.label.name == 're-review' ||
-         github.event.label.name == 'hold' ||
-         github.event.label.name == 'DO NOT MERGE')) ||
-      (github.event.action == 'unlabeled' &&
-        (github.event.label.name == 'hold' || github.event.label.name == 'DO NOT MERGE'))
-    }}
-
 permissions:
   actions: read
   contents: read
@@ -222,10 +163,22 @@ env:
   REVIEW_POLICY: ${{ inputs.review_policy || 'eyJhY3RvciI6InJldXNhYmxlLWNhbGxlciIsImFjdG9yX3Blcm1pc3Npb24iOiJtYWludGFpbiIsImF1dGhvcml0eSI6Imh1bWFuIiwiYnVkZ2V0X3VzZCI6ImF1dG8iLCJleHBsaWNpdF9yZXJldmlldyI6ZmFsc2UsImZhbGxiYWNrX2J1ZGdldF91c2QiOiIiLCJmYWxsYmFja19tb2RlbCI6IiIsIm1vZGVsIjoiYXV0byIsInByaWNpbmdfdmVyc2lvbiI6ImFudGhyb3BpYy1uYXRpdmUtdjEiLCJwcm92aWRlciI6ImFudGhyb3BpYyJ9' }}
 
 jobs:
+  reject-public-pull-request-caller:
+    if: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true }}
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Reject public pull request callers
+        run: |
+          echo "::error::This reusable workflow does not accept public pull request callers"
+          exit 1
   app-key-policy:
     if: >-
-      github.event_name != 'workflow_dispatch' ||
-      inputs.ai_review_environment == 'ai-review-app'
+      ${{
+        (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (
+          github.event_name != 'workflow_dispatch' || inputs.ai_review_environment == 'ai-review-app'
+        )
+      }}
     uses: ./.github/workflows/app-key-environment.yml
     secrets:
       AI_REVIEW_APP_PRIVATE_KEY: ${{ secrets.AI_REVIEW_APP_PRIVATE_KEY }}
@@ -237,7 +190,8 @@ jobs:
       environment: ${{ inputs.ai_review_environment }}
 
   title-policy:
-    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')) }}
     permissions: {}
     outputs:
       title_held: ${{ steps.classify.outputs.title_held }}
@@ -266,31 +220,33 @@ jobs:
     # own rebases, so its branches are left untouched. Same opt-out guard as
     # classify.
     if: >-
-      github.event_name != 'pull_request_target' &&
-      (
-        github.event_name != 'workflow_dispatch' ||
-        (
-          github.ref == 'refs/heads/main' &&
-          github.event.repository.default_branch == 'main' &&
-          github.ref_protected &&
-          inputs.ai_review_environment == 'ai-review-app'
+      ${{
+        (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (
+          github.event_name != 'pull_request_target' && (
+            github.event_name != 'workflow_dispatch' ||
+            (
+              github.ref == 'refs/heads/main' &&
+              github.event.repository.default_branch == 'main' &&
+              github.ref_protected &&
+              inputs.ai_review_environment == 'ai-review-app'
+            )
+          ) && (
+            github.event_name == 'workflow_dispatch' ||
+            (
+              (
+                (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+                (github.event.action == 'labeled' && github.event.label.name == 're-review') ||
+                (github.event.action == 'unlabeled' &&
+                  (github.event.label.name == 'hold' || github.event.label.name == 'DO NOT MERGE'))
+              ) &&
+              !github.event.pull_request.draft &&
+              !contains(github.event.pull_request.labels.*.name, 'hold') &&
+              !contains(github.event.pull_request.labels.*.name, 'DO NOT MERGE') &&
+              needs.title-policy.outputs.title_held != 'true'
+            )
+          )
         )
-      ) &&
-      (
-        github.event_name == 'workflow_dispatch' ||
-        (
-          (
-            (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
-            (github.event.action == 'labeled' && github.event.label.name == 're-review') ||
-            (github.event.action == 'unlabeled' &&
-              (github.event.label.name == 'hold' || github.event.label.name == 'DO NOT MERGE'))
-          ) &&
-          !github.event.pull_request.draft &&
-          !contains(github.event.pull_request.labels.*.name, 'hold') &&
-          !contains(github.event.pull_request.labels.*.name, 'DO NOT MERGE') &&
-          needs.title-policy.outputs.title_held != 'true'
-        )
-      )
+      }}
     # Off-Verjson callers keep their own fleet via `with.runner_labels`, or run
     # on GitHub-hosted ubuntu-24.04 (#175, ADR 0030). A Verjson caller's
     # `runner_labels` is honored only for a private repository (ADR 0235).
@@ -301,7 +257,7 @@ jobs:
     # off persistent runners. preflight cannot consult `target_private` because
     # it is the job that resolves it; TARGET_REPO is always the event
     # repository since ADR 0036 retired cross-repository dispatch.
-    runs-on: ${{ (github.repository_owner != 'Verjson' || github.event.repository.private == true) && inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_RUNNER_OVERFLOW || vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || ((github.repository_owner != 'Verjson' || github.event.repository.private == true) && inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && fromJSON(vars.CI_RUNNER_OVERFLOW || vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')) }}
     # This job combines the former 10-minute freshness and classification jobs.
     timeout-minutes: 20
     permissions:
@@ -834,7 +790,12 @@ jobs:
   gate:
     environment: ${{ inputs.ai_review_environment }}
     needs: [preflight, app-key-policy]
-    if: ${{ needs.app-key-policy.result == 'success' && (needs.preflight.outputs.lane == 'fast' || needs.preflight.outputs.lane == 'ai') }}
+    if: >-
+      ${{
+        (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (
+          needs.app-key-policy.result == 'success' && (needs.preflight.outputs.lane == 'fast' || needs.preflight.outputs.lane == 'ai')
+        )
+      }}
     outputs:
       review_outcome: ${{ steps.submit.outputs.outcome || 'skipped' }}
     # Off-Verjson callers keep their own fleet via `with.runner_labels`, or run
@@ -849,7 +810,7 @@ jobs:
     # This job no longer waits for ordinary CI: it performs the bounded review
     # and dispatches one immediate promotion attempt. Deterministic CI
     # completion re-enters through ai-promotion-retry.yml (ADRs 0081 and 0087).
-    runs-on: ${{ (github.repository_owner != 'Verjson' || github.event.repository.private == true) && inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && needs.preflight.outputs.target_private != 'false' && fromJSON(vars.CI_RUNNER_OVERFLOW || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || ((github.repository_owner != 'Verjson' || github.event.repository.private == true) && inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && needs.preflight.outputs.target_private != 'false' && fromJSON(vars.CI_RUNNER_OVERFLOW || vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')) }}
     # Fast retains its former 45-minute ceiling. AI gets a bounded review
     # allowance plus checkout, input preparation, submission, and dispatch
     # buffer; none of this budget is an ordinary-CI wait.
@@ -2275,10 +2236,15 @@ jobs:
   complete-authorization:
     environment: ${{ inputs.ai_review_environment }}
     needs: [preflight, gate, app-key-policy]
-    if: ${{ always() && inputs.authorization_check_id != '' && (github.event_name != 'workflow_dispatch' || inputs.ai_review_environment == 'ai-review-app') }}
+    if: >-
+      ${{
+        (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (
+          always() && inputs.authorization_check_id != '' && (github.event_name != 'workflow_dispatch' || inputs.ai_review_environment == 'ai-review-app')
+        )
+      }}
     outputs:
       ai_authorized: ${{ steps.complete.outputs.ai_authorized }}
-    runs-on: ${{ github.event.repository.private == true && fromJSON(vars.CI_RUNNER_FASTLANE || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (github.event.repository.private == true && fromJSON(vars.CI_RUNNER_FASTLANE || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')) }}
     timeout-minutes: 5
     permissions:
       actions: write
@@ -2596,8 +2562,13 @@ jobs:
 
   dispatch-merge:
     needs: [preflight, gate, complete-authorization]
-    if: needs.complete-authorization.result == 'success' && needs.complete-authorization.outputs.ai_authorized == 'true' && needs.preflight.outputs.authority == 'ai-merge'
-    runs-on: ${{ (github.repository_owner != 'Verjson' || github.event.repository.private == true) && inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && needs.preflight.outputs.target_private != 'false' && fromJSON(vars.CI_LANE_PRIVILEGED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
+    if: >-
+      ${{
+        (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (
+          needs.complete-authorization.result == 'success' && needs.complete-authorization.outputs.ai_authorized == 'true' && needs.preflight.outputs.authority == 'ai-merge'
+        )
+      }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || ((github.repository_owner != 'Verjson' || github.event.repository.private == true) && inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.private == true && needs.preflight.outputs.target_private != 'false' && fromJSON(vars.CI_LANE_PRIVILEGED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')) }}
     timeout-minutes: 5
     permissions:
       actions: write

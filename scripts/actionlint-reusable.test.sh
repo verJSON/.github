@@ -46,15 +46,13 @@ grep -qE '^      config-file:$' <<<"$workflow_call" \
 # opt-in input; everything after it follows the visibility policy that
 # runner-routing-policy.test.sh pins across all the reusable workflows.
 #
-# ADR 0050 inserts a third branch: a PUBLIC Verjson target takes the fast lane.
-# It is keyed on `visibility == 'public'` rather than `private == false`
-# because Actions coerces an absent `private` to 0, making `== false` true for
-# an unreadable repository too — fail-open. The unresolved case must keep
-# falling through to CI_LANE_UNTRUSTED, which is the final lane term.
-expected_runs_on='    runs-on: ${{ (github.repository_owner != '\''Verjson'\'' || inputs.github-hosted-runner) && '\''ubuntu-24.04'\'' || github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '\''["ubuntu-24.04"]'\'') || github.event_name == '\''pull_request'\'' && fromJSON(vars.CI_LANE_UNTRUSTED || '\''["ubuntu-24.04"]'\'') || github.event.repository.visibility == '\''public'\'' && fromJSON(vars.CI_RUNNER_FASTLANE || vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '\''["ubuntu-24.04"]'\'') || fromJSON(vars.CI_LANE_UNTRUSTED || vars.CI_LANE_FALLBACK || '\''["ubuntu-24.04"]'\'') }}'
-grep -qxF "$expected_runs_on" "$wf" \
-  && pass "hosted stays opt-in while Verjson callers follow the visibility policy" \
-  || fail "runs-on does not preserve the bounded runner mapping"
+# Public pull_request and pull_request_target callers must take the literal
+# hosted branch before caller inputs or organization runner variables. The
+# focused runner-policy contract pins the original suffix for private/trusted
+# events.
+grep -qF "    runs-on: \${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || ((" "$wf" \
+  && pass "public PR callers select hosted before the bounded runner mapping" \
+  || fail "runs-on does not route public PR callers to hosted first"
 
 uses_lines="$(grep -E '^[[:space:]]+- uses:' "$wf" || true)"
 [ -n "$uses_lines" ] \

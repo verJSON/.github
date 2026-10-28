@@ -36,19 +36,26 @@ def fail(label: str) -> None:
     print(f"FAIL - {label}")
 
 
-# actions-ci runs this file as two rows, each under its budget:
-# RUNNER_ISOLATION_TEST_PART=core runs every check outside the probes block
-# (round-8 finding 6 through round 13, between the two markers below), and
-# =probes runs that block on top of every definition outside it. Unset (or
-# `all`) runs everything once. The parts partition the checks
-# (public-pr-runner-isolation-parts.test.py pins it).
+# actions-ci runs the core and two probe shards. Unset (or `all`) runs
+# everything once; the partition contract pins exact check coverage.
 TEST_PART = os.environ.get("RUNNER_ISOLATION_TEST_PART", "all")
 PROBES_BEGIN = "# >>> runner-isolation probes part begins"
 PROBES_END = "# <<< runner-isolation probes part ends"
+PROBE_PARTS = {
+    "probes-r8-r10": (
+        "# >>> runner-isolation probes r8-r10 begins",
+        "# <<< runner-isolation probes r8-r10 ends",
+    ),
+    "probes-r11-r14": (
+        "# >>> runner-isolation probes r11-r14 begins",
+        "# <<< runner-isolation probes r11-r14 ends",
+    ),
+}
+TEST_PARTS = ("core", *PROBE_PARTS)
 # The two selector conditions, exactly as ast.unparse renders them; only these
 # two `if` statements are left out of a part (round 14).
 SELECTOR_CONDITIONS = (
-    "TEST_PART not in ('all', 'core', 'probes')",
+    "TEST_PART not in ('all', *TEST_PARTS)",
     "TEST_PART != 'all' and __name__ == '__main__'",
 )
 
@@ -58,14 +65,28 @@ def run_part(part: str) -> int:
         source = handle.read()
     lines = source.split("\n")
     begin, end = lines.index(PROBES_BEGIN) + 1, lines.index(PROBES_END) + 1
+    shard_ranges = {
+        name: (lines.index(markers[0]) + 1, lines.index(markers[1]) + 1)
+        for name, markers in PROBE_PARTS.items()
+    }
     definitions = (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef, ast.Assign, ast.AnnAssign)
     selected = []
     for node in ast.parse(source).body:
-        inside = begin < node.lineno < end
+        inside_probes = begin < node.lineno < end
         if isinstance(node, ast.If) and ast.unparse(node.test) in SELECTOR_CONDITIONS:
             continue  # the selector itself
-        if (part == "core" and not inside) or (part == "probes" and (inside or isinstance(node, definitions))):
+        selected_begin, selected_end = shard_ranges.get(part, (0, 0))
+        inside_selected_shard = selected_begin < node.lineno < selected_end
+        if (part == "core" and not inside_probes) or (
+            part != "core"
+            and (inside_selected_shard or (isinstance(node, definitions) and not inside_probes))
+        ):
             selected.append(node)
+    if sys.argv[1:] == ["--partition-plan"]:
+        print("PARTITION_SELECTION:" + ",".join(f"{node.lineno}:{node.col_offset}" for node in selected))
+        return 0
+    if not selected:
+        return 1
     scope = {"__name__": "__main__", "__file__": __file__}
     try:
         exec(compile(ast.Module(body=selected, type_ignores=[]), __file__, "exec"), scope)
@@ -74,8 +95,8 @@ def run_part(part: str) -> int:
     return 1 if scope["failures"] else 0
 
 
-if TEST_PART not in ("all", "core", "probes"):
-    print(f"unknown RUNNER_ISOLATION_TEST_PART {TEST_PART!r}: expected all, core, or probes", file=sys.stderr)
+if TEST_PART not in ("all", *TEST_PARTS):
+    print(f"unknown RUNNER_ISOLATION_TEST_PART {TEST_PART!r}: expected all or {', '.join(TEST_PARTS)}", file=sys.stderr)
     sys.exit(2)
 if TEST_PART != "all" and __name__ == "__main__":
     sys.exit(run_part(TEST_PART))
@@ -2915,7 +2936,6 @@ SNAPSHOT_RELAY_BACKLOG = {
     ('release.yml [workflow_dispatch]', 'publish'): frozenset(),
     ('release.yml [workflow_dispatch]', 'snapshot'): frozenset(),
     ('release.yml [workflow_dispatch]', 'verify'): frozenset({'full-checkout', 'relay-head', 'runtime-checkout'}),
-    ('renovate-changelog.yml [workflow_call]', 'attribute'): frozenset({'relay-head', 'runtime-checkout'}),
     ('renovate-compatibility-canary.yml [workflow_call]', 'receipt'): frozenset(),
     ('renovate-compatibility-reconcile.yml [workflow_dispatch]', 'observe'): frozenset(),
     ('renovate-grouping-plan.yml [workflow_dispatch]', 'plan'): frozenset({'relay-head', 'runtime-checkout'}),
@@ -2923,7 +2943,6 @@ SNAPSHOT_RELAY_BACKLOG = {
     ('rework-reconcile.yml [workflow_dispatch]', 'reconcile'): frozenset(),
     ('runner-canary.yml [workflow_dispatch]', 'canary'): frozenset({'relay-head'}),
     ('ui-ci.yml [workflow_call]', 'build-test'): frozenset({'relay-head'}),
-    ('verjson-ci.yml [workflow_call]', 'ci'): frozenset(),
 }
 
 
@@ -2935,6 +2954,519 @@ def load_checker():
 
 
 CHECKER = load_checker()
+
+
+expect({"dispatch.yml": """
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: string
+jobs:
+  dispatch:
+    if: ${{ inputs.MODE == 'debug' && inputs.mode == 'debug' }}
+    runs-on: [self-hosted, general]
+    steps:
+      - run: 'true'
+"""}, 1,
+       ("VIOLATION: dispatch.yml [workflow_dispatch]: job 'dispatch'",
+        "requires a reviewed entry"),
+       "mixed-case input references share one workflow_dispatch value")
+
+
+def strict_public_call_scan(workflows: dict[str, str], budget=None, workflow_scan_budget=None):
+    with tempfile.TemporaryDirectory() as root:
+        directory = os.path.join(root, ".github", "workflows")
+        os.makedirs(directory)
+        for name, body in workflows.items():
+            target = os.path.join(directory, name)
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write(textwrap.dedent(body))
+        try:
+            return CHECKER.check_public_calls(
+                directory,
+                "Verjson/.github",
+                budget=budget,
+                workflow_scan_budget=workflow_scan_budget,
+            ), None
+        except CHECKER.Undetermined as error:
+            return None, str(error)
+
+
+def strict_workflow_steps(workflow: str) -> int:
+    with tempfile.TemporaryDirectory() as root:
+        directory = os.path.join(root, ".github", "workflows")
+        os.makedirs(directory)
+        workflow_path = os.path.join(directory, "service.yml")
+        with open(workflow_path, "w", encoding="utf-8") as handle:
+            handle.write(textwrap.dedent(workflow))
+        budget = CHECKER.EvaluationBudget(max_steps=100000)
+        scan = CHECKER.Scan(
+            directory,
+            "Verjson/.github",
+            "pull_request",
+            strict_public_call=True,
+            budget=budget,
+        )
+        CHECKER.check_workflow(
+            scan,
+            "service.yml [public pull_request workflow_call]",
+            CHECKER.load_workflow(workflow_path),
+        )
+        return budget.steps
+
+
+public_call_fixture = """
+on:
+  workflow_call:
+jobs:
+  build:
+    runs-on: [self-hosted, general]
+    steps:
+      - run: 'true'
+"""
+violations, error = strict_public_call_scan({"service.yml": public_call_fixture.replace(
+    "    runs-on: [self-hosted, general]",
+    "    if: ${{ github.repository_owner == 'acme' }}\n    runs-on: [self-hosted, general]",
+)})
+if error is None and violations and "public" in str(violations[0]).lower() and "scenario digest sha256:" in str(violations[0]):
+    ok("strict public-call analysis treats caller repository identity as unknown")
+else:
+    fail(f"strict public-call analysis missed caller-controlled identity: {error or violations}")
+
+violations, error = strict_public_call_scan({"service.yml": public_call_fixture.replace(
+    "    runs-on: [self-hosted, general]",
+    "    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}",
+)})
+if error is not None or violations:
+    ok("strict public-call analysis never samples caller organization variables")
+else:
+    fail("strict public-call analysis treated an unknown caller lane as clean")
+
+target_only_selector = public_call_fixture.replace(
+    "runs-on: [self-hosted, general]",
+    "runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || 'self-hosted' }}",
+)
+violations, error = strict_public_call_scan({"service.yml": target_only_selector})
+if error is None and any(
+    "[public pull_request_target workflow_call]" in violation.path
+    for violation in violations
+):
+    ok("strict public-call analysis also checks pull_request_target")
+else:
+    fail(f"strict public-call analysis missed the pull_request_target runner: {error or violations}")
+
+all_public_pr_events_hosted = public_call_fixture.replace(
+    "runs-on: [self-hosted, general]",
+    "runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || 'self-hosted' }}",
+)
+violations, error = strict_public_call_scan({"service.yml": all_public_pr_events_hosted})
+if error is None and not violations:
+    ok("strict public-call analysis accepts hosted-first routing for all five PR events")
+else:
+    fail(f"strict public-call analysis rejected hosted-first PR routing: {error or violations}")
+
+missing_merge_group = all_public_pr_events_hosted.replace(
+    " || github.event_name == 'merge_group'", ""
+)
+violations, error = strict_public_call_scan({"service.yml": missing_merge_group})
+if error is None and any(
+    "[public merge_group workflow_call]" in violation.path for violation in violations
+):
+    ok("strict public-call analysis rejects a selector missing one public PR event")
+else:
+    fail(f"strict public-call analysis missed an omitted public event: {error or violations}")
+
+violations, error = strict_public_call_scan({"service.yml": """
+on:
+  workflow_call:
+    inputs:
+      runner:
+        type: string
+        default: ''
+jobs:
+  build:
+    runs-on: ${{ inputs.runner != '' && fromJSON(inputs.runner) || 'ubuntu-24.04' }}
+    steps:
+      - run: 'true'
+"""})
+if error is not None or violations:
+    ok("strict public-call analysis never samples caller workflow inputs")
+else:
+    fail("strict public-call analysis treated an unknown caller input as clean")
+
+violations, error = strict_public_call_scan({
+    "service.yml": """
+on:
+  workflow_call:
+jobs:
+  nested:
+    uses: ./.github/workflows/nested.yml
+""",
+    "nested.yml": public_call_fixture.replace(
+        "    runs-on: [self-hosted, general]",
+        "    if: ${{ github.repository_owner == 'acme' }}\n    runs-on: [self-hosted, general]",
+    ),
+})
+if error is None and any(
+    violation.path == "service.yml [public pull_request workflow_call]:nested -> nested.yml"
+    for violation in violations
+):
+    ok("strict public-call context reaches nested local reusable workflows")
+else:
+    fail(f"strict public-call context was lost in a nested reusable workflow: {error or violations}")
+
+violations, error = strict_public_call_scan({"service.yml": """
+on:
+  workflow_call:
+jobs:
+  build:
+    if: ${{ github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' }}
+    runs-on: [self-hosted, general]
+    steps:
+      - run: 'true'
+"""})
+if error is None and not violations:
+    ok("strict public-call analysis honors an explicit non-PR caller guard")
+else:
+    fail(f"strict public-call analysis ignored an explicit non-PR guard: {error or violations}")
+
+violations, error = strict_public_call_scan({"service.yml": """
+on:
+  workflow_call:
+jobs:
+  nested:
+    uses: example/ci/.github/workflows/build.yml@0123456789abcdef0123456789abcdef01234567
+"""})
+if error is not None or (
+    violations and "even when the reference is SHA-pinned" in str(violations[0])
+):
+    ok("strict public-call analysis refuses even SHA-pinned remote reusable calls")
+else:
+    fail(f"strict public-call analysis accepted an unreadable remote reusable call: {violations}")
+
+if CHECKER.truthiness(0) == [False]:
+    ok("Actions expression truthiness treats numeric zero as false")
+else:
+    fail("Actions expression truthiness treated numeric zero as true")
+
+input_bindings = CHECKER.callee_bindings(
+    {"with": {"Runner": "ubuntu-24.04"}},
+    {"on": {"workflow_call": {"inputs": {"runner": {"default": ""}}}}},
+)
+if input_bindings.get("runner") == ("ubuntu-24.04",):
+    ok("reusable-workflow input names are matched case-insensitively")
+else:
+    fail(f"reusable-workflow input lookup ignored caller key casing: {input_bindings}")
+
+if all(
+    CHECKER.compare("==", left, right, identity_unknown=True) is CHECKER.UNKNOWN
+    for left, right in ((["same"], ["same"]), ({"key": "same"}, {"key": "same"}))
+):
+    ok("strict expression comparison does not use structural array or object equality")
+else:
+    fail("strict expression comparison used structural array or object equality")
+
+public_call_document = {"on": {"workflow_call": {}}}
+public_call_job = {"runs-on": "ubuntu-24.04"}
+strict_digest = CHECKER.public_call_digest(
+    "service.yml [public pull_request workflow_call]",
+    "build",
+    (),
+    public_call_job,
+    public_call_document,
+)
+generic_digest = CHECKER.review_digest(
+    (), public_call_job, CHECKER.inherited_settings(public_call_document)
+)
+if strict_digest.startswith("sha256:") and strict_digest != generic_digest:
+    ok("strict public-call findings have a distinct scenario digest identity")
+else:
+    fail("strict public-call digest identity can collide with a generic review digest")
+
+try:
+    CHECKER.from_json("not-json", fail_closed=True)
+except CHECKER.Undetermined:
+    ok("strict public-call analysis treats malformed fromJSON input as undetermined")
+else:
+    fail("strict public-call analysis treated malformed fromJSON input as a clean value")
+
+try:
+    CHECKER.from_json("NaN", fail_closed=True)
+except CHECKER.Undetermined:
+    ok("strict public-call analysis rejects non-standard JSON constants")
+else:
+    fail("strict public-call analysis accepted a non-standard JSON constant")
+
+large_json_integer = "1" + ("0" * 400)
+try:
+    CHECKER.from_json(large_json_integer, fail_closed=True)
+except CHECKER.Undetermined:
+    ok("strict public-call analysis fails closed on overflowing JSON integers")
+except OverflowError as error:
+    fail(f"strict public-call analysis leaked JSON integer overflow: {error}")
+else:
+    fail("strict public-call analysis accepted an overflowing JSON integer")
+if CHECKER.from_json(large_json_integer) is CHECKER.EVALUATION_ERROR:
+    ok("generic fromJSON overflow remains an evaluation error")
+else:
+    fail("generic fromJSON overflow did not fail closed")
+
+long_condition = " || ".join(["true"] * 600)
+with tempfile.TemporaryDirectory() as root:
+    directory = os.path.join(root, ".github", "workflows")
+    os.makedirs(directory)
+    workflow_path = os.path.join(directory, "service.yml")
+    with open(workflow_path, "w", encoding="utf-8") as handle:
+        handle.write(textwrap.dedent(f"""
+        on:
+          workflow_call:
+        jobs:
+          build:
+            if: ${{{{ {long_condition} }}}}
+            runs-on: ubuntu-24.04
+        """))
+    workflow = CHECKER.load_workflow(workflow_path)
+    scan = CHECKER.Scan(
+        directory,
+        "Verjson/.github",
+        "pull_request",
+        strict_public_call=True,
+        budget=CHECKER.EvaluationBudget(max_steps=8),
+    )
+    try:
+        CHECKER.check_workflow(scan, "service.yml [public pull_request workflow_call]", workflow)
+    except CHECKER.Undetermined as error:
+        if "work budget" in str(error):
+            ok("long expression preprocessing exhausts the shared budget as Undetermined")
+        else:
+            fail(f"long expression failed without the shared work budget: {error}")
+    except RecursionError:
+        fail("long expression preprocessing leaked RecursionError before budget exhaustion")
+    else:
+        fail("long expression preprocessing ignored the exhausted shared budget")
+
+deep_condition = " || ".join(["true"] * 900)
+violations, error = strict_public_call_scan({"service.yml": f"""
+on:
+  workflow_call:
+jobs:
+  build:
+    if: ${{{{ {deep_condition} }}}}
+    runs-on: ubuntu-24.04
+"""})
+if (
+    error is None
+    and violations
+    and "reachability undetermined" in str(violations[0])
+    and "recursion depth" in str(violations[0])
+):
+    ok("deep condition traversal fails closed as an undetermined public-call finding")
+else:
+    fail(f"deep condition traversal did not fail closed: {error or violations}")
+
+with tempfile.TemporaryDirectory() as root:
+    directory = os.path.join(root, ".github", "workflows")
+    os.makedirs(directory)
+    workflow_path = os.path.join(directory, "service.yml")
+    with open(workflow_path, "w", encoding="utf-8") as handle:
+        handle.write(textwrap.dedent(f"""
+        on:
+          workflow_call:
+        jobs:
+          build:
+            if: ${{{{ {deep_condition} }}}}
+            runs-on: ubuntu-24.04
+        """))
+    try:
+        CHECKER.check_tree(directory, "Verjson/.github")
+    except CHECKER.Undetermined as error:
+        if "recursion depth" in str(error):
+            ok("the ordinary tree scan reports deep condition recursion as undetermined")
+        else:
+            fail(f"the ordinary tree scan failed for another reason: {error}")
+    except RecursionError:
+        fail("the ordinary tree scan leaked RecursionError before strict scanning")
+    else:
+        fail("the ordinary tree scan accepted an unanalyzable deep condition")
+
+deep_needs_jobs = ["on:", "  workflow_call:", "jobs:"]
+for index in reversed(range(1200)):
+    name = f"job_{index:04d}"
+    deep_needs_jobs.append(f"  {name}:")
+    if index:
+        deep_needs_jobs.append(f"    needs: job_{index - 1:04d}")
+    deep_needs_jobs.append("    runs-on: ubuntu-24.04")
+deep_needs_workflow = "\n".join(deep_needs_jobs)
+violations, error = strict_public_call_scan({"service.yml": deep_needs_workflow})
+if (
+    error is None
+    and violations
+    and violations[0].job == "<job dependency graph>"
+    and "scenario digest sha256:" in str(violations[0])
+):
+    ok("deep job dependency recursion yields a strict scenario finding")
+else:
+    fail(f"deep job dependency recursion did not fail closed: {error or violations}")
+
+with tempfile.TemporaryDirectory() as root:
+    directory = os.path.join(root, ".github", "workflows")
+    os.makedirs(directory)
+    with open(os.path.join(directory, "service.yml"), "w", encoding="utf-8") as handle:
+        handle.write(deep_needs_workflow)
+    try:
+        CHECKER.check_tree(directory, "Verjson/.github")
+    except CHECKER.Undetermined as error:
+        if "dependency analysis" in str(error):
+            ok("the ordinary tree scan reports deep dependency recursion as undetermined")
+        else:
+            fail(f"the ordinary tree scan failed for another reason: {error}")
+    except RecursionError:
+        fail("the ordinary tree scan leaked dependency RecursionError")
+    else:
+        fail("the ordinary tree scan accepted an unanalyzable dependency graph")
+
+dependency_budget = CHECKER.EvaluationBudget(max_steps=0)
+try:
+    CHECKER.dependency_order("service.yml", {"build": {}}, dependency_budget)
+except CHECKER.BudgetExceeded:
+    if dependency_budget.steps == 1:
+        ok("dependency traversal consumes the shared evaluation budget")
+    else:
+        fail(f"dependency traversal spent an unexpected budget: {dependency_budget.steps}")
+else:
+    fail("dependency traversal ignored its exhausted evaluation budget")
+
+violations, error = strict_public_call_scan(
+    {"service.yml": public_call_fixture},
+    CHECKER.EvaluationBudget(max_steps=0),
+)
+if error and "work budget" in error:
+    ok("strict public-call analysis fails closed when its shared work budget is exhausted")
+else:
+    fail(f"strict public-call analysis ignored an exhausted work budget: {error or violations}")
+
+budget_condition = " || ".join(["true"] * 20)
+budgeted_entrypoint = f"""
+on:
+  workflow_call:
+jobs:
+  build:
+    if: ${{{{ {budget_condition} }}}}
+    runs-on: ubuntu-24.04
+"""
+entrypoint_steps = strict_workflow_steps(budgeted_entrypoint)
+violations, error = strict_public_call_scan(
+    {"first.yml": budgeted_entrypoint, "second.yml": budgeted_entrypoint},
+    CHECKER.EvaluationBudget(max_steps=entrypoint_steps + 1),
+)
+if error is None and not violations:
+    ok("independent public workflow entrypoints receive isolated evaluation budgets")
+else:
+    fail(f"independent public workflow entrypoints shared evaluation budgets: {error or violations}")
+
+budgeted_nested_entry = f"""
+on:
+  workflow_call:
+jobs:
+  call_nested:
+    if: ${{{{ {budget_condition} }}}}
+    uses: ./.github/workflows/nested.yml
+"""
+budgeted_nested_workflow = f"""
+on:
+  workflow_call:
+jobs:
+  build:
+    if: ${{{{ {budget_condition} }}}}
+    runs-on: ubuntu-24.04
+"""
+entry_steps = strict_workflow_steps(budgeted_entrypoint)
+nested_steps = strict_workflow_steps(budgeted_nested_workflow)
+violations, error = strict_public_call_scan(
+    {"entry.yml": budgeted_nested_entry, "nested.yml": budgeted_nested_workflow},
+    CHECKER.EvaluationBudget(max_steps=max(entry_steps, nested_steps) + 1),
+)
+if error and "work budget" in error:
+    ok("nested local workflows share their entrypoint's evaluation budget")
+else:
+    fail(f"nested local workflow did not share its entrypoint budget: {error or violations}")
+
+with tempfile.TemporaryDirectory() as root:
+    directory = os.path.join(root, ".github", "workflows")
+    os.makedirs(directory)
+    for name, body in {
+        "entry.yml": budgeted_nested_entry,
+        "nested.yml": budgeted_nested_workflow,
+    }.items():
+        with open(os.path.join(directory, name), "w", encoding="utf-8") as handle:
+            handle.write(textwrap.dedent(body))
+    try:
+        CHECKER.check_public_calls(
+            directory,
+            "Verjson/.github",
+            workflow_scan_budget=CHECKER.WorkflowScanBudget(max_scans=2),
+        )
+    except CHECKER.Undetermined as error:
+        if "workflow scan budget" in str(error):
+            ok("public-call traversal has a separate finite workflow scan budget")
+        else:
+            fail(f"workflow scan cap failed without a bounded result: {error}")
+    else:
+        fail("public-call traversal ignored the total workflow scan cap")
+
+scan_cap_workflows = {
+    "entry.yml": """
+on:
+  workflow_call:
+jobs:
+  first:
+    uses: ./.github/workflows/nested.yml
+  second:
+    uses: ./.github/workflows/nested.yml
+  third:
+    uses: ./.github/workflows/nested.yml
+""",
+    "nested.yml": """
+on:
+  workflow_call:
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+""",
+}
+scan_budget = CHECKER.WorkflowScanBudget(max_scans=3)
+loads = []
+original_load_workflow = CHECKER.load_workflow
+
+
+def track_workflow_load(path):
+    loads.append(os.path.basename(path))
+    return original_load_workflow(path)
+
+
+CHECKER.load_workflow = track_workflow_load
+try:
+    violations, error = strict_public_call_scan(
+        scan_cap_workflows,
+        workflow_scan_budget=scan_budget,
+    )
+finally:
+    CHECKER.load_workflow = original_load_workflow
+
+if (
+    error is not None
+    and "workflow scan budget" in error
+    and scan_budget.scans == 4
+    and loads == ["entry.yml", "nested.yml"]
+):
+    ok("nested scan-budget exhaustion stops sibling workflow loads")
+else:
+    fail(
+        "nested scan-budget exhaustion did not stop further loads: "
+        f"error={error or violations}, scans={scan_budget.scans}, loads={loads}"
+    )
+
 grown = sorted(set(CHECKER.RELAY_BACKLOG) - set(SNAPSHOT_RELAY_BACKLOG))
 widened = sorted(
     (key, sorted(kinds - SNAPSHOT_RELAY_BACKLOG[key]))
@@ -3206,9 +3738,11 @@ CALLER_TREE = {
     """,
 }
 CALLER_LABEL = ("container-candidate.yml [workflow_call]", "pull-request-build")
-expect({**CALLER_TREE, "pending.tsv": backlog_row(CALLER_TREE, *CALLER_LABEL)}, 0,
-       ("PENDING: container-candidate.yml [workflow_call]: job 'pull-request-build'",),
-       "a standalone workflow_call job's checkout of its caller's repository is not refused as this tree",
+expect({**CALLER_TREE, "pending.tsv": backlog_row(CALLER_TREE, *CALLER_LABEL)}, 1,
+       ("PENDING: container-candidate.yml [workflow_call]: job 'pull-request-build'",
+        "VIOLATION: container-candidate.yml [public pull_request workflow_call]: job 'pull-request-build'",
+        "scenario digest sha256:"),
+       "a generic relay backlog row cannot waive the strict public-call scenario",
        *PENDING_ARGS)
 
 # Round-6 should-fix: `-e` is errexit to a shell, not inline code, so
@@ -3579,6 +4113,7 @@ expect(verify_with("npm pack --ignore-scripts\n", {"./package.json": with_script
        "an `npm pack --ignore-scripts` does not trace the lifecycle scripts it skips", *PENDING_ARGS)
 
 # >>> runner-isolation probes part begins
+# >>> runner-isolation probes r8-r10 begins
 # Round-8 finding 6: a program reached through a symbolic link binds the link
 # and its target's bytes and is followed into the target; a link out of the
 # tree, or a broken one, is a program the row cannot bind.
@@ -3839,6 +4374,8 @@ expect_bound("python3 scripts/zz-spawn.py\n",
               "scripts/zz-ok.sh": "echo ok\n"},
              "scripts/zz-ok.sh", "a getoutput string read as a shell command")
 
+# <<< runner-isolation probes r8-r10 ends
+# >>> runner-isolation probes r11-r14 begins
 # Round-11 blocker: every Python call is classified by its imported name, so
 # an alias (`from subprocess import getoutput as g`, `import os as o`, a
 # loader imported by name) is read exactly like the original.
@@ -4025,6 +4562,7 @@ expect(verify_with("python3 scripts/zz-spawn.py\n", {"scripts/zz-spawn.py": 'imp
        0, ("PENDING: release.yml [workflow_dispatch]: job 'verify'",), "a builtins call that runs nothing is not refused",
        *PENDING_ARGS)
 
+# <<< runner-isolation probes r11-r14 ends
 # <<< runner-isolation probes part ends
 # ---------------------------------------------------------------------------
 # Round-7 nits: the verify binding hashes raw bytes (two invalid UTF-8

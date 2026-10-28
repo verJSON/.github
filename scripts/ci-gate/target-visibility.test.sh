@@ -109,23 +109,35 @@ rc="$(run_step 'false' 0 "$dispatcher_lookup")"
 
 # (e) preflight publishes the target's visibility, and gate and dispatch-merge
 # reach a persistent lane only when both the event payload and that lookup say
-# private. A public target takes the ephemeral untrusted lane (ADR 0235); the
-# runner-routing-policy matrix evaluates every polarity.
-{ grep -q "target_private: \${{ steps.target_visibility.outputs.target_private }}" "$wf" \
-    && [ "$(grep -cF "github.event.repository.private == true && needs.preflight.outputs.target_private != 'false' && " "$wf")" -eq 2 ] \
-    && grep -qF "|| fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]') }}" "$wf"; } \
-  && pass "gate and dispatch-merge need a private payload and lookup to leave the untrusted lane" \
-  || fail "gate routing drifted from the resolved-visibility policy"
+# private. Public pull-request callers are first forced onto hosted capacity.
+if python3 - "$wf" <<'PY'
+import sys
+import yaml
 
-# (f) The money guard. A private target must never spend hosted minutes just
-# because the lookup failed: the persistent branch tests `!= 'false'`, never
-# `== 'true'`, so unresolved visibility ('') keeps a private payload on its
-# lane. A public target is routed by the event payload, which the lookup cannot
-# widen back onto the pool (ADR 0235).
-! grep -qF "target_private != 'true'" "$wf" \
-  && ! grep -qF "repository.private != true" "$wf" \
-  && pass "fast-lane routing never treats unresolved visibility as public" \
-  || fail "routing uses a != polarity, so unreadable visibility would spend hosted minutes"
+workflow = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+jobs = workflow["jobs"]
+events = "(github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target')"
+public_call = events + " && github.event.repository.private != true"
+if jobs["reject-public-pull-request-caller"].get("if") != "${{ " + public_call + " }}":
+    raise SystemExit("public caller sentinel guard drifted")
+if "target_private: ${{ steps.target_visibility.outputs.target_private }}" not in open(sys.argv[1], encoding="utf-8").read():
+    raise SystemExit("preflight stopped publishing target visibility")
+for name in ("gate", "dispatch-merge"):
+    route = jobs[name].get("runs-on", "")
+    if not route.startswith("${{ " + public_call + " && 'ubuntu-24.04' || "):
+        raise SystemExit(f"{name} no longer routes public calls to hosted capacity first")
+    if "github.event.repository.private == true && needs.preflight.outputs.target_private != 'false' && " not in route:
+        raise SystemExit(f"{name} no longer requires private payload and lookup before the persistent lane")
+    if "needs.preflight.outputs.target_private != 'true'" in route:
+        raise SystemExit(f"{name} treats unresolved visibility as public")
+    if "fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')" not in route:
+        raise SystemExit(f"{name} no longer has the fail-safe untrusted lane")
+PY
+then
+  pass "public callers use hosted capacity; persistent routing requires both private signals"
+else
+  fail "gate or dispatch-merge routing drifted from the resolved-visibility policy"
+fi
 
 if [ "$fails" -eq 0 ]; then
   echo "All tests passed."

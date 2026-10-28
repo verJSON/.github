@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   event-policy:
-    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]')) }}
     permissions: {}
     outputs:
       run_control_plane: ${{ steps.classify.outputs.run_control_plane }}
@@ -67,33 +67,74 @@ jobs:
                 printf 'new_title_held=%s\n' "$new_title_held"
               } >>"$GITHUB_OUTPUT"
 
+  # ADR 0242 keeps the required-workflow path local: relative reusable calls
+  # fail with zero jobs here (ADR 0171's 2026-09-11 canary). These two jobs
+  # remain behaviorally matched to app-key-environment.yml by the platform test.
   app-key-policy:
     needs: event-policy
     if: ${{ needs.event-policy.outputs.run_control_plane == 'true' }}
-    # Absolute pinned reference, not a relative path: when this file runs as an
-    # organization ruleset required workflow, a relative reusable call fails at
-    # startup with zero jobs (canary receipt, 2026-09-11), so the policy check
-    # must name its trusted revision explicitly. Pinned to ebe23faf, a main
-    # commit reachable from refs (the earlier f56af66c pin named a squashed
-    # PR-branch head on no ref, and the injected run then had no jobs), which
-    # contains the inline App-key validator; update the pin with a reviewed
-    # revision bump so this nested call does not inherit the outer caller SHA.
-    uses: Verjson/.github/.github/workflows/app-key-environment.yml@ebe23fafbdb77dd2cca6f1862d932fde881b80d7
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
     permissions:
       actions: read
       contents: read
-    # The validator's validate-ai-review-key job binds the environment inside
-    # the called workflow and needs a grant on this edge to resolve the key
-    # (an edge with no grant delivers nothing: run 36289883288). The narrow
-    # named grant, proven post-withdrawal of the organization copy on
-    # ai-review-merge's identical edge (run 36290560349), is used instead of
-    # inheritance so this injected workflow forwards one secret, not the set.
-    secrets:
-      AI_REVIEW_APP_PRIVATE_KEY: ${{ secrets.AI_REVIEW_APP_PRIVATE_KEY }}
-    with:
-      role: ai-review
-      environment: ${{ inputs.ai_review_environment || 'ai-review-app' }}
+    steps:
+      - name: Verify the caller's main-only role environment before key-job admission
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          ROLE: ai-review
+          ENVIRONMENT: ${{ inputs.ai_review_environment || 'ai-review-app' }}
+        run: |
+          set -euo pipefail
+          case "$ROLE" in release|merge|ai-review) ;; *) exit 1 ;; esac
+          [ "$ENVIRONMENT" = "$ROLE-app" ]
+          [ "$REF" = refs/heads/main ]
+          [ "$DEFAULT_BRANCH" = main ]
+          environment_record=$(gh api "repos/$REPOSITORY/environments/$ENVIRONMENT")
+          jq -e --arg name "$ENVIRONMENT" '
+            .name == $name and (.id | type == "number" and . > 0) and
+            .deployment_branch_policy.protected_branches == false and
+            .deployment_branch_policy.custom_branch_policies == true
+          ' <<<"$environment_record" >/dev/null
+          policies=$(gh api "repos/$REPOSITORY/environments/$ENVIRONMENT/deployment-branch-policies?per_page=100")
+          jq -e '
+            .total_count == 1 and (.branch_policies | length) == 1 and
+            .branch_policies[0].name == "main" and
+            .branch_policies[0].type == "branch"
+          ' <<<"$policies" >/dev/null
+  validate-ai-review-key:
+    needs: app-key-policy
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (github.event.repository.private == true && fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') || 'ubuntu-24.04') }}
+    timeout-minutes: 2
+    environment: ${{ inputs.ai_review_environment || 'ai-review-app' }}
+    permissions:
+      contents: read
+    steps:
+      - name: Validate resolved AI review App private key
+        env:
+          AI_REVIEW_APP_PRIVATE_KEY: ${{ secrets.AI_REVIEW_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
 
+          key="${AI_REVIEW_APP_PRIVATE_KEY:-}"
+          if [ -z "$key" ]; then
+            echo "::error::AI_REVIEW_APP_PRIVATE_KEY is empty or unavailable" >&2
+            exit 1
+          fi
+
+          umask 077
+          key_file="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ai-review-app-key.XXXXXX")"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s' "$key" >"$key_file"
+          unset key
+
+          if ! openssl rsa -in "$key_file" -check -noout >/dev/null 2>&1; then
+            echo "::error::AI_REVIEW_APP_PRIVATE_KEY is not a valid PEM RSA private key" >&2
+            exit 1
+          fi
   # ADR 0230: `timeout-minutes` never counts queue time, so a job GitHub never
   # hands to a runner stays queued indefinitely, and with this workflow's
   # non-cancelling PR concurrency group it holds every later arm for the PR as
@@ -111,11 +152,11 @@ jobs:
     # value. Any other value, including a rollback to the persistent pool or a
     # reformatted array, skips the job (dormant, fail-safe), so no token is
     # issued to a persistent host. The step guards remain as a backstop.
-    if: ${{ needs.event-policy.outputs.run_control_plane == 'true' && (vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') == '["ubuntu-24.04"]' }}
+    if: ${{ needs.event-policy.outputs.run_control_plane == 'true' && (((github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true) || (vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') == '["ubuntu-24.04"]') }}
     # A watchdog defect must never become a veto on an otherwise-authorized
     # merge; the stall path acts through cancellation, not this job's result.
     continue-on-error: true
-    runs-on: ${{ fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || fromJSON(vars.CI_LANE_UNTRUSTED || '["ubuntu-24.04"]') }}
     # Two sequential acquisitions at the limit, the policy jobs between them,
     # and the cancellation grace (asserted by the registered watchdog test).
     timeout-minutes: 40
@@ -220,7 +261,7 @@ jobs:
 
   arm:
     environment: ${{ inputs.ai_review_environment || 'ai-review-app' }}
-    needs: [event-policy, app-key-policy]
+    needs: [event-policy, app-key-policy, validate-ai-review-key]
     # Body/base-only edits and title edits that do not change held state skip
     # runner placement and credential validation in the permissionless event-policy job.
     if: ${{ always() && needs.event-policy.outputs.run_control_plane == 'true' }}
@@ -233,7 +274,7 @@ jobs:
     # This trusted, secret-bearing control-plane job follows the organization
     # lane contract. Fleet placement changes through variables, never by
     # hardcoding a provider or runner label in this reusable workflow.
-    runs-on: ${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]')) }}
     timeout-minutes: 5
     permissions:
       actions: write
@@ -255,6 +296,7 @@ jobs:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       REPOSITORY_ID: ${{ github.repository_id }}
       TARGET_REPO: ${{ github.repository }}
+      AI_REVIEW_DISPATCH_WORKFLOW: ${{ github.repository == 'Verjson/.github' && 'ai-review-merge-dispatch.yml' || 'ai-review-merge.yml' }}
       REVIEW_AUTHORITY: ${{ vars.AI_REVIEW_AUTHORITY || 'human' }}
       PRIMARY_PROVIDER: ${{ vars.AI_REVIEW_PRIMARY_PROVIDER || 'anthropic' }}
       PRIMARY_MODEL: ${{ vars.AI_REVIEW_PRIMARY_MODEL || 'auto' }}
@@ -326,6 +368,7 @@ jobs:
           ACTIONS_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
           APP_KEY_POLICY_RESULT: ${{ needs.app-key-policy.result }}
+          AI_REVIEW_KEY_VALIDATION_RESULT: ${{ needs.validate-ai-review-key.result }}
         run: |
           set -euo pipefail
           [[ "$TARGET_REPO" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+/[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]+$ ]] || exit 1
@@ -474,7 +517,7 @@ jobs:
             branch_ref="$(jq -rn --arg branch "$DEFAULT_BRANCH" '$branch | @uri | gsub("%2F"; "/")')"
             caller_file="$(mktemp "${RUNNER_TEMP:-/tmp}/ai-review-caller.XXXXXX")"
             if ! GH_TOKEN="$ACTIONS_TOKEN" gh api \
-              "repos/$TARGET_REPO/contents/.github/workflows/ai-review-merge.yml?ref=$branch_ref" \
+              "repos/$TARGET_REPO/contents/.github/workflows/$AI_REVIEW_DISPATCH_WORKFLOW?ref=$branch_ref" \
               -H 'Accept: application/vnd.github.raw+json' >"$caller_file"; then
               rm -f "$caller_file"
               echo "::error::could not read the protected default-branch review caller" >&2
@@ -736,11 +779,12 @@ jobs:
 
             expected_review_title="AI review authorization $check_id from arm $source_run_id.$source_attempt"
             review_pages="$(GH_TOKEN="$ACTIONS_TOKEN" gh api --paginate --slurp \
-              "repos/$TARGET_REPO/actions/workflows/ai-review-merge.yml/runs?event=workflow_dispatch&per_page=100")" || return 1
-            owned_reviews="$(jq -ce --arg title "$expected_review_title" --arg branch "$DEFAULT_BRANCH" --arg repo "$TARGET_REPO" '
+              "repos/$TARGET_REPO/actions/workflows/$AI_REVIEW_DISPATCH_WORKFLOW/runs?event=workflow_dispatch&per_page=100")" || return 1
+            owned_reviews="$(jq -ce --arg title "$expected_review_title" --arg branch "$DEFAULT_BRANCH" --arg repo "$TARGET_REPO" \
+              --arg workflow_path ".github/workflows/$AI_REVIEW_DISPATCH_WORKFLOW" '
               [.[].workflow_runs[] | select(
                 .display_title == $title and .event == "workflow_dispatch" and
-                .path == ".github/workflows/ai-review-merge.yml" and .head_branch == $branch and
+                .path == $workflow_path and .head_branch == $branch and
                 (.head_repository.full_name | ascii_downcase) == ($repo | ascii_downcase) and (.repository.full_name | ascii_downcase) == ($repo | ascii_downcase)
               )]
             ' <<<"$review_pages")" || return 1
@@ -920,7 +964,7 @@ jobs:
             exit 1
           fi
 
-          if [ "$APP_KEY_POLICY_RESULT" != success ]; then
+          if [ "$APP_KEY_POLICY_RESULT" != success ] || [ "$AI_REVIEW_KEY_VALIDATION_RESULT" != success ]; then
             echo 'failure_reason=ai_review_environment_policy' >>"$GITHUB_OUTPUT"
             echo "::error::AI review environment policy did not succeed; no review was dispatched"
             exit 1
@@ -999,6 +1043,8 @@ jobs:
           # only what it is shown, ADR 0237). It contains CASING_REPAIR and the previous floor
           # 12098a0e (#1650). Raise it whenever a review-path security fix lands on main.
           MINIMUM_SAFE_REVIEW = "4d95c2ee5884ae2a4eb0732b655dbd43b7211262"
+          # This bootstrap proof is specifically for generated adopter callers.
+          # The canonical local dispatcher has its own byte-exact generator contract.
           CALLER = ".github/workflows/ai-review-merge.yml"
           MAX_PATHS = 32
           MAX_BLOB_BYTES = 262144
@@ -1020,7 +1066,7 @@ jobs:
           INPUTS = (
               ("pr_number", True), ("expected_head_sha", True), ("authorization_check_id", True),
               ("arm_run_id", True), ("arm_run_attempt", True), ("explicit_rereview", False),
-              ("review_policy", True),
+              ("review_policy", True), ("allow_absent_checks", False),
           )
 
 
@@ -1038,25 +1084,37 @@ jobs:
               return "$" + "{{ inputs." + name + " }}"
 
 
+          HISTORICAL_BASE_CALLER_SHA256 = frozenset({
+              "29d9311938dd6ab178b4f847ed5b3d1dfb50abb303e510abe817eab80ac0e810",
+              "92a1e3dc746ef6c6afee056b848db57c31160fc3f6354af294599fbcce370604",
+              "977d3cf42906c092f4bd79c05dec45452c17561d05d4cd12da73f1610a71eab8",
+          })
+
+
           def render_caller(sha):
               lines = [
                   "# GENERATED FILE — do not edit by hand.",
                   "# Regenerate with:",
-                  f"#   scripts/gen-ai-review-caller.sh {sha} > .github/workflows/ai-review-merge.yml",
+                  f"# scripts/gen-ai-review-caller.sh {sha} > .github/workflows/ai-review-merge.yml",
                   "name: AI review",
                   "run-name: AI review authorization " + expression("authorization_check_id")
                   + " from arm " + expression("arm_run_id") + "." + expression("arm_run_attempt"),
-                  "",
                   "on:",
                   "  workflow_dispatch:",
                   "    inputs:",
               ]
               for name, required in INPUTS:
                   lines += [f"      {name}:", f"        required: {'true' if required else 'false'}"]
-                  lines += ["        type: string"] if name != "explicit_rereview" else [
+                  lines += ["        type: string"] if name not in {"explicit_rereview", "allow_absent_checks"} else [
                       "        type: boolean", "        default: false"]
               lines += [
-                  "", "permissions:", "  actions: write", "  checks: write", "  contents: read",
+                  "",
+                  "concurrency:",
+                  "  group: ai-review-" + "$" + "{{ github.workflow }}" + "-" + expression("pr_number"),
+                  "  cancel-in-progress: true",
+                  "",
+                  "permissions:",
+                  "  actions: write", "  checks: write", "  contents: read",
                   "  issues: write", "  pull-requests: write", "  statuses: read", "",
                   "jobs:", "  review:",
                   f"    uses: Verjson/.github/.github/workflows/ai-review-merge.yml@{sha}",
@@ -1250,7 +1308,11 @@ jobs:
               stale = pinned(base_caller)
               contract = pinned(head_caller)
               require(stale != contract, "review caller revision is unchanged")
-              require(base_caller == render_caller(stale), "default-branch review caller is not generated")
+              base_digest = hashlib.sha256(base_caller).hexdigest()
+              require(
+                  base_caller == render_caller(stale) or base_digest in HISTORICAL_BASE_CALLER_SHA256,
+                  "default-branch review caller is not generated by a recognized template",
+              )
               require(head_caller == render_caller(contract), "proposed review caller is not generated")
               # Consumer contract tests mirror the caller pin and digest. A mirror may change only by
               # swapping exactly those tokens; workflow and action configuration may not change at all.
@@ -1518,7 +1580,7 @@ jobs:
               exit 1
             fi
           fi
-          if ! gh workflow run ai-review-merge.yml --repo "$TARGET_REPO" --ref "$DEFAULT_BRANCH" \
+          if ! gh workflow run "$AI_REVIEW_DISPATCH_WORKFLOW" --repo "$TARGET_REPO" --ref "$DEFAULT_BRANCH" \
             -f pr_number="$PR_NUMBER" -f expected_head_sha="$EXPECTED_HEAD_SHA" \
             -f authorization_check_id="$CHECK_ID" -f arm_run_id="$GITHUB_RUN_ID" \
             -f arm_run_attempt="$GITHUB_RUN_ATTEMPT" -f explicit_rereview="${{ steps.arm.outputs.explicit_rereview || false }}" \

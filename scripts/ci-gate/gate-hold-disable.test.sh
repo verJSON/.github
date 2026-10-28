@@ -17,11 +17,8 @@ from pathlib import Path
 import yaml
 
 lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
-event_job = next(i for i, line in enumerate(lines) if line == "  event-policy:")
-event_run = next(i for i in range(event_job + 1, len(lines)) if lines[i].strip() == "run: |")
-event_body_indent = len(lines[event_run]) - len(lines[event_run].lstrip()) + 2
-event_end = next(i for i in range(event_run + 1, len(lines)) if lines[i] == "  app-key-policy:")
-Path(sys.argv[3]).write_text("\n".join(line[event_body_indent:] for line in lines[event_run + 1:event_end]) + "\n", encoding="utf-8")
+workflow = yaml.safe_load(Path(sys.argv[1]).read_text(encoding="utf-8"))
+Path(sys.argv[3]).write_text(workflow["jobs"]["event-policy"]["steps"][0]["run"] + "\n", encoding="utf-8")
 review = yaml.safe_load(Path(sys.argv[4]).read_text(encoding="utf-8"))
 Path(sys.argv[5]).write_text(review["jobs"]["title-policy"]["steps"][0]["run"], encoding="utf-8")
 step_name = "- name: Authorize hold-clearing actor before AI review admission"
@@ -125,6 +122,7 @@ export PATH="$tmp/bin:$PATH" CALLS="$tmp/calls" META_FILE="$tmp/meta.json" TMP_T
 export PRIVILEGED_ACTOR=other-admin PRIVILEGED_ACTOR_ROLE_NAME=admin PRIVILEGED_ACTOR_BASE_PERMISSION=admin
 export DISABLED_META_FILE="$tmp/disabled.json" GRAPHQL_FILE="$tmp/graphql.json" LATEST_FILE="$tmp/latest.json" CHECK_FILE="$tmp/check.json"
 export TARGET_REPO=Verjson/example PR_NUMBER=7 APP_ID=4242 APP_SLUG=verjson-ai-review
+export AI_REVIEW_DISPATCH_WORKFLOW=ai-review-merge.yml
 export DEFAULT_BRANCH=main EVENT_LABEL=hold EVENT_OLD_TITLE_HELD=false GITHUB_REPOSITORY_OWNER=Verjson
 export EVENT_NAME=pull_request_target REPOSITORY_ID=1234
 export REQUEST_ACTOR=maintainer
@@ -134,7 +132,7 @@ export EVENT_HEAD_SHA=0123456789abcdef0123456789abcdef01234567
 export EVENT_NEW_TITLE_HELD=false HOLD_CLEAR_ACTOR_PERMISSION=''
 export GITHUB_ENV="$tmp/github-env"
 export ACTIONS_TOKEN=actions-token GH_TOKEN=actions-token GITHUB_SERVER_URL=https://github.com
-export APP_KEY_POLICY_RESULT=success AI_REVIEW_ENVIRONMENT=ai-review-app
+export APP_KEY_POLICY_RESULT=success AI_REVIEW_KEY_VALIDATION_RESULT=success AI_REVIEW_ENVIRONMENT=ai-review-app
 export GITHUB_RUN_ID=8000 GITHUB_RUN_ATTEMPT=1 RUNNER_TEMP="$tmp"
 export GITHUB_OUTPUT="$tmp/github-output"
 CALLER_FILE="$tmp/current-caller.yml"
@@ -198,13 +196,15 @@ assert jobs["arm"]["permissions"].get("checks") == "write"
 assert create["env"].get("GH_TOKEN") == "${{ github.token }}"
 assert not any(step.get("name") == "Mint dedicated authorization App token" for step in steps)
 assert "--argjson app_id 15368" in create["run"] and ".app.id == $app_id" in create["run"]
-assert jobs["arm"]["needs"] == ["event-policy", "app-key-policy"]
+assert jobs["arm"]["needs"] == ["event-policy", "app-key-policy", "validate-ai-review-key"]
 assert create["env"]["APP_KEY_POLICY_RESULT"] == "${{ needs.app-key-policy.result }}"
+assert create["env"]["AI_REVIEW_KEY_VALIDATION_RESULT"] == "${{ needs.validate-ai-review-key.result }}"
 assert "AI_REVIEW_APP_PRIVATE_KEY" not in create["env"]
-assert 'if [ "$APP_KEY_POLICY_RESULT" != success ]; then' in create["run"]
+policy_guard = 'if [ "$APP_KEY_POLICY_RESULT" != success ] || [ "$AI_REVIEW_KEY_VALIDATION_RESULT" != success ]; then'
+assert policy_guard in create["run"]
 receipt = next(step for step in steps if step.get("name") == "Upload immutable arm receipt")
 dispatch = next(step for step in steps if step.get("name") == "Dispatch trusted review after receipt publication")
-assert create["run"].index("gh api --method POST") < create["run"].index('if [ "$APP_KEY_POLICY_RESULT" != success ]; then')
+assert create["run"].index("gh api --method POST") < create["run"].index(policy_guard)
 assert steps.index(receipt) < steps.index(dispatch)
 
 event_policy = jobs["event-policy"]
@@ -214,7 +214,7 @@ assert 'gsub("[ _-]+";" ")' in event_policy["steps"][0]["run"]
 assert 'gsub("[ _-]+";"-")' in event_policy["steps"][0]["run"]
 assert jobs["app-key-policy"]["needs"] == "event-policy"
 assert "needs.event-policy.outputs.run_control_plane == 'true'" in jobs["app-key-policy"]["if"]
-assert jobs["arm"]["needs"] == ["event-policy", "app-key-policy"]
+assert jobs["arm"]["needs"] == ["event-policy", "app-key-policy", "validate-ai-review-key"]
 assert "needs.event-policy.outputs.run_control_plane == 'true'" in jobs["arm"]["if"]
 
 assert jobs["app-key-policy"]["if"] == "${{ needs.event-policy.outputs.run_control_plane == 'true' }}"

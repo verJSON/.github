@@ -195,10 +195,17 @@ def enumerate_open_prs(client: GhClient, org: str) -> list[PullRequest]:
             raise AuditError("invalid_response", "GraphQL pagination cursor was missing")
 
 
+def ai_review_dispatch_workflow(repo: str) -> str:
+    if repo.casefold() == "verjson/.github":
+        return "ai-review-merge-dispatch.yml"
+    return "ai-review-merge.yml"
+
+
 def workflow_state(client: GhClient, repo: str, base: str) -> str:
     local_state = "missing"
+    dispatch_workflow = ai_review_dispatch_workflow(repo)
     try:
-        workflow = client.json(["api", f"repos/{repo}/actions/workflows/ai-review-merge.yml"])
+        workflow = client.json(["api", f"repos/{repo}/actions/workflows/{dispatch_workflow}"])
     except AuditError as error:
         if error.status != 404:
             raise
@@ -231,7 +238,7 @@ def workflow_state(client: GhClient, repo: str, base: str) -> str:
     required = any(
         rule.get("type") == "workflows"
         and any(
-            workflow.get("path") == ".github/workflows/ai-review-merge.yml"
+        workflow.get("path") == ".github/workflows/ai-review-merge.yml"
             for workflow in rule.get("parameters", {}).get("workflows", [])
             if isinstance(workflow, dict)
         )

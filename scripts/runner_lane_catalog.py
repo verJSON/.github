@@ -1,32 +1,33 @@
-"""The one place a reusable workflow's `runs-on` lane expression is spelled.
+"""Canonical reusable-workflow runner-lane expressions (ADR 0240, 0234, 0238).
 
-ADR 0240 separates the portable contract from the installation policy. The
-contract is the *shape* of each selector: which term wins, in what order, and
-which tier is fail-safe. The installation policy is who the installation is,
-named by the organization variable `CI_PROFILE_OWNER`. It defaults to the
-built-in `Verjson` profile, so an unset variable resolves exactly as the
-literal `'Verjson'` did before.
+The built-in Verjson profile is the default; CI_PROFILE_OWNER selects a custom
+profile. Custom profiles are fail-closed for public and unclassified events:
+their untrusted lane never falls through to CI_LANE_FALLBACK. The built-in
+profile keeps its historical fallback. The secretless-first shape adds a
+fail-closed, eligibility-gated untrusted prefix and a literal hosted fallback
+ahead of the profile-aware caller-runner tail, where an explicit caller runner
+still wins first under ADR 0033.
 
-`runs-on` cannot call an action, so this catalog is a generator input rather
-than a runtime job: `scripts/gen-runner-lane.py` stamps each marked `runs-on:`
-line from `expression()`, and CI fails on any hand-edited or stale line.
-
-Security shape (ADR 0240, adversarial review of 2026-10-22): non-built-in
-profiles never let public or unclassified events reach CI_LANE_FALLBACK
-through lane variables. In the normal routing tail, an explicit caller runner
-still wins first, as in every tier of ADR 0033. secretless-first adds its
-eligibility-gated untrusted lane and literal hosted fallback before that tail.
-
-secretless-first-legacy-tail is a migration shape for node-ci: it adds the
-same fail-closed secretless terms while preserving node-ci's current
-non-secretless selector byte-for-byte. Do not use it for new callers; the
-remaining node-ci profile rollout is tracked by ADR 0240.
+secretless-first-legacy-tail remains a migration-compatibility shape that
+preserves the pre-profile built-in routing tail. Current Node CI uses
+secretless-first; new callers should use that profile-aware shape.
 """
 
 from __future__ import annotations
 
 BUILTIN_PROFILE = "Verjson"
 HOSTED = "ubuntu-24.04"
+PUBLIC_PR_EVENTS = (
+    "pull_request",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "merge_group",
+    "pull_request_target",
+)
+PUBLIC_PR_HOSTED = (
+    "(" + " || ".join(f"github.event_name == '{event}'" for event in PUBLIC_PR_EVENTS) + ") && "
+    f"github.event.repository.private != true && '{HOSTED}'"
+)
 
 # Evaluated in the caller's context: a reusable workflow reads the caller's
 # `vars`. Unset or empty falls back to the built-in profile.
@@ -63,21 +64,24 @@ SECRETLESS_HOSTED_FALLBACK = f"{SECRETLESS} && '{HOSTED}'"
 
 MARKER = "runner-lane:"
 SHAPES = {
-    # An explicit caller `runner` wins; a foreign owner is hosted; a private
-    # repository gets the trusted lane; everything else is untrusted.
-    "caller-runner": _CALLER_RUNNER_PROFILE_TAIL,
+    # Jobs that deliberately use only the organization's untrusted lane.
+    "untrusted-lane": (
+        f"{PUBLIC_PR_HOSTED} || ({_UNTRUSTED_STRICT})"
+    ),
+    # Explicit caller override, foreign-owner hosted default, then owner
+    # organization's trusted/private and strict-or-legacy untrusted routes.
+    "caller-runner": f"{PUBLIC_PR_HOSTED} || ({_CALLER_RUNNER_PROFILE_TAIL})",
     # Profile-aware secretless shape for the remaining ADR 0240 rollout.
     "secretless-first": (
-        f"{SECRETLESS_ELIGIBLE_UNTRUSTED}"
+        f"{PUBLIC_PR_HOSTED} || ({SECRETLESS_ELIGIBLE_UNTRUSTED}"
         f" || {SECRETLESS_HOSTED_FALLBACK}"
-        f" || {_CALLER_RUNNER_PROFILE_TAIL}"
+        f" || {_CALLER_RUNNER_PROFILE_TAIL})"
     ),
-    # node-ci `build-test` keeps its current non-secretless policy until its
-    # profile-aware tail is rolled out separately under ADR 0240.
+    # Compatibility shape for callers still on the pre-profile routing tail.
     "secretless-first-legacy-tail": (
-        f"{SECRETLESS_ELIGIBLE_UNTRUSTED}"
+        f"{PUBLIC_PR_HOSTED} || ({SECRETLESS_ELIGIBLE_UNTRUSTED}"
         f" || {SECRETLESS_HOSTED_FALLBACK}"
-        f" || {_SECRETLESS_LEGACY_TAIL}"
+        f" || {_SECRETLESS_LEGACY_TAIL})"
     ),
 }
 

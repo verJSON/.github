@@ -25,11 +25,21 @@ permissions:
 concurrency:
   # Package retention is destructive. Serialize releases for this repository so
   # two version-keyed runs cannot validate and delete the same package concurrently.
-  group: container-release-${{ github.repository }}
+  group: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && format('public-rejected-{0}-{1}-{2}', github.repository, github.run_id, github.run_attempt) || format('container-release-{0}', github.repository) }}
   cancel-in-progress: false
 
 jobs:
+  reject-public-pull-request-caller:
+    if: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true }}
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Reject public pull request callers
+        run: |
+          echo "::error::This reusable workflow does not accept public pull request callers"
+          exit 1
   app-key-policy:
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) }}
     uses: ./.github/workflows/app-key-environment.yml
     permissions:
       actions: read
@@ -41,7 +51,7 @@ jobs:
   promote:
     environment: ${{ inputs.release_environment }}
     needs: app-key-policy
-    if: ${{ needs.app-key-policy.result == 'success' && (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.event.repository.default_branch == 'main') }}
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (needs.app-key-policy.result == 'success' && (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.event.repository.default_branch == 'main')) }}
     runs-on: ubuntu-24.04
     env:
       GIT_NO_REPLACE_OBJECTS: "1"
@@ -422,7 +432,7 @@ jobs:
   retention:
     name: Apply the image retention policy
     needs: promote
-    if: needs.promote.result == 'success'
+    if: ${{ (github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true) && (needs.promote.result == 'success') }}
     continue-on-error: true
     runs-on: ${{ github.repository_owner != 'Verjson' && 'ubuntu-24.04' || fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
     timeout-minutes: 30

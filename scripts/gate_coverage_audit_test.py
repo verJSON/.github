@@ -74,7 +74,8 @@ class FakeClient:
         if args[:2] == ["api", "graphql"]:
             return self.pages.pop(0)
         repo = args[1].split("/actions/workflows/")[0].removeprefix("repos/")
-        state = self.workflows.get(repo, "active")
+        workflow_path = args[1].split("/actions/workflows/", 1)[1]
+        state = self.workflows.get((repo, workflow_path), self.workflows.get(repo, "active"))
         if state == "missing":
             raise MODULE.AuditError("github_unavailable", "missing", 404)
         return {"state": state}
@@ -95,6 +96,45 @@ class GateCoverageAuditTest(unittest.TestCase):
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             result = MODULE.main(list(args), client)
         return result, stdout.getvalue(), stderr.getvalue()
+
+    def test_dispatch_lookup_uses_target_repo_but_required_rule_keeps_legacy_identity(self):
+        for repo, workflow_path in (
+            ("Verjson/.github", "ai-review-merge-dispatch.yml"),
+            ("Verjson/app", "ai-review-merge.yml"),
+            ("Other/.github", "ai-review-merge.yml"),
+        ):
+            with self.subTest(repo=repo):
+                client = FakeClient([], workflows={(repo, workflow_path): "active"})
+
+                self.assertEqual(MODULE.workflow_state(client, repo, "main"), "active")
+                self.assertEqual(
+                    client.commands[0][1],
+                    f"repos/{repo}/actions/workflows/{workflow_path}",
+                )
+
+        repo = "Verjson/.github"
+        client = FakeClient(
+            [],
+            workflows={(repo, "ai-review-merge-dispatch.yml"): "missing"},
+            rules={
+                repo: [
+                    {
+                        "type": "workflows",
+                        "parameters": {
+                            "workflows": [
+                                {"path": ".github/workflows/ai-review-merge.yml"}
+                            ]
+                        },
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(MODULE.workflow_state(client, repo, "main"), "required")
+        self.assertIn(
+            "repos/Verjson/.github/actions/workflows/ai-review-merge-dispatch.yml",
+            client.commands[0][1],
+        )
 
     def test_classifies_exact_targets_and_supported_retriggers(self):
         nodes = [

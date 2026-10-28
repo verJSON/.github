@@ -328,10 +328,11 @@ assert_generated_contract_rejects_caller \
 
 workflow="$root/.github/workflows/container-deployment.yml"
 grep -q '^    environment: production$' "$workflow"
-grep -q 'if: inputs.dry-run' "$workflow"
+expected_public_call_condition="(github.event_name != 'pull_request' && github.event_name != 'pull_request_review' && github.event_name != 'pull_request_review_comment' && github.event_name != 'merge_group' && github.event_name != 'pull_request_target' || github.event.repository.private == true)"
+grep -Fq "if: \${{ ${expected_public_call_condition} && (inputs.dry-run) }}" "$workflow"
 # The literal GitHub expression is the contract under test.
 # shellcheck disable=SC2016
-grep -q 'if: \${{ !inputs.dry-run }}' "$workflow"
+grep -Fq "if: \${{ ${expected_public_call_condition} && (!inputs.dry-run) }}" "$workflow"
 grep -q 'cancel-in-progress: false' "$workflow"
 grep -q 'container_deployment_preflight.py' "$workflow"
 assert_cli_cloud_lock_matches_manifest() {

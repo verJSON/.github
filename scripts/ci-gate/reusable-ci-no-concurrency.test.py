@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 REUSABLE_CI = (
     "node-ci.yml",
     "node-ci-protected.yml",
+    "ai-review-merge.yml",
     "helm-ci.yml",
     "pulumi-ci.yml",
     "ui-ci.yml",

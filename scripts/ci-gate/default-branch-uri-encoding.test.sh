@@ -286,6 +286,7 @@ if [ -n "${GH_STUB_STDOUT:-}" ]; then printf '%s\n' "$GH_STUB_STDOUT"; else cat 
 SH
 chmod +x "$tmp/bin/gh"
 export PATH="$tmp/bin:$PATH" ACTIONS_TOKEN=actions-token TARGET_REPO=Verjson/example
+export AI_REVIEW_DISPATCH_WORKFLOW=ai-review-merge.yml
 export CALLER_FILE="$fixture" GH_CALLS="$tmp/gh-calls"
 
 # --------------------------------------------------------------------------------------
@@ -2584,9 +2585,6 @@ REF_SITE_ALLOWLIST=(
   # sha-guarded: `hub_tree`'s own parameter. Its two callers pass the literal "main" and a
   # value USES_RE extracted under a 40-hex pattern, so the constraint is at the caller.
   $'scripts/fleet-contract-inventory.py\tref\tscripts/fleet-contract-inventory.py\t(?P<sha>[0-9a-f]{40})'
-  # sha-guarded: `require_sha` is the 40-hex boundary check for this value, but it is a
-  # call rather than an inline pattern, so the scan cannot read it as one.
-  $'scripts/renovate-changelog.py\thead_sha\tscripts/renovate-changelog.py\trequire_sha(planned["head_sha"], "plan.head_sha")'
   # `rules/branches/` was settled on 2026-09-26 (#1470): measured against a temporary
   # ruleset targeting `release/2026.09` in Verjson/demo-repository, the endpoint resolves
   # the same rules for `release%2F2026.09` and `release/2026.09`, so the path form is the

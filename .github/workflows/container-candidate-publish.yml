@@ -49,11 +49,25 @@ permissions:
   contents: read
 
 concurrency:
-  group: container-candidate-publish-${{ github.repository }}-${{ github.sha }}
+  group: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && format('public-rejected-{0}-{1}-{2}', github.repository, github.run_id, github.run_attempt) || format('container-candidate-publish-{0}-{1}', github.repository, github.sha) }}
   cancel-in-progress: false
 
 jobs:
+  public-call-guard:
+    name: Reject public reusable workflow calls
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Reject public pull-request workflow callers
+        if: ${{ contains(fromJSON('["pull_request","pull_request_review","pull_request_review_comment","merge_group","pull_request_target"]'), github.event_name) && github.event.repository.private != true }}
+        run: |
+          echo "::error::public pull-request events cannot call this reusable workflow"
+          exit 1
+
   prepare:
+    if: needs.public-call-guard.result == 'success'
+    needs:
+      - public-call-guard
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.config.outputs.matrix }}
@@ -197,12 +211,14 @@ jobs:
 
   acquire-private-node-dependencies:
     if: >-
-      always() &&
-      ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.default_branch == 'main') ||
-      (github.event_name == 'workflow_dispatch' && github.repository == 'Verjson/.github' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) &&
-      needs.prepare.result == 'success' &&
-      needs.prepare.outputs.has-private-node-packages == 'true'
-    needs: prepare
+      ${{ needs.public-call-guard.result == 'success' && (always() && ((github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' && github.event.repository.default_branch == 'main') ||
+      (github.event_name == 'workflow_dispatch' && github.repository == 'Verjson/.github' && github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch))) && needs.prepare.result ==
+      'success' && needs.prepare.outputs.has-private-node-packages == 'true') }}
+    needs:
+      - public-call-guard
+      - prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -361,17 +377,16 @@ jobs:
 
   publish-base:
     if: >-
-      always()
-      && ((github.event_name == 'push'
-      && github.ref == 'refs/heads/main'
-      && github.event.repository.default_branch == 'main')
-      || (github.event_name == 'workflow_dispatch'
-      && github.repository == 'Verjson/.github'
-      && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)))
-      && needs.prepare.result == 'success'
-      && (needs.acquire-private-node-dependencies.result == 'success'
-      || needs.acquire-private-node-dependencies.result == 'skipped')
-    needs: [prepare, acquire-private-node-dependencies]
+      ${{ needs.public-call-guard.result == 'success' && (always() && ((github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' && github.event.repository.default_branch == 'main') ||
+      (github.event_name == 'workflow_dispatch' && github.repository == 'Verjson/.github' && github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch))) && needs.prepare.result ==
+      'success' && (needs.acquire-private-node-dependencies.result == 'success' ||
+      needs.acquire-private-node-dependencies.result == 'skipped')) }}
+    needs:
+      - public-call-guard
+      - prepare
+      - acquire-private-node-dependencies
     permissions:
       contents: read
       packages: write
@@ -745,18 +760,18 @@ jobs:
 
   publish-derived:
     if: >-
-      always()
-      && ((github.event_name == 'push'
-      && github.ref == 'refs/heads/main'
-      && github.event.repository.default_branch == 'main')
-      || (github.event_name == 'workflow_dispatch'
-      && github.repository == 'Verjson/.github'
-      && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)))
-      && needs.prepare.result == 'success'
-      && (needs.acquire-private-node-dependencies.result == 'success'
-      || needs.acquire-private-node-dependencies.result == 'skipped')
-      && needs.publish-base.result == 'success'
-    needs: [prepare, acquire-private-node-dependencies, publish-base]
+      ${{ needs.public-call-guard.result == 'success' && (always() && ((github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' && github.event.repository.default_branch == 'main') ||
+      (github.event_name == 'workflow_dispatch' && github.repository == 'Verjson/.github' && github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch))) && needs.prepare.result ==
+      'success' && (needs.acquire-private-node-dependencies.result == 'success' ||
+      needs.acquire-private-node-dependencies.result == 'skipped') && needs.publish-base.result ==
+      'success') }}
+    needs:
+      - public-call-guard
+      - prepare
+      - acquire-private-node-dependencies
+      - publish-base
     permissions:
       contents: read
       packages: write
@@ -1172,11 +1187,15 @@ jobs:
     # job's own `if` admits only trusted default-branch push/dispatch events, so requiring its
     # result to be 'success' here is the only default-branch guard this job needs.
     if: >-
-      always() &&
-      needs.acquire-private-node-dependencies.result == 'success' &&
-      needs.publish-base.result == 'success' &&
-      (needs.publish-derived.result == 'success' || needs.publish-derived.result == 'skipped')
-    needs: [acquire-private-node-dependencies, publish-base, publish-derived]
+      ${{ needs.public-call-guard.result == 'success' && (always() &&
+      needs.acquire-private-node-dependencies.result == 'success' && needs.publish-base.result ==
+      'success' && (needs.publish-derived.result == 'success' || needs.publish-derived.result ==
+      'skipped')) }}
+    needs:
+      - public-call-guard
+      - acquire-private-node-dependencies
+      - publish-base
+      - publish-derived
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -1210,17 +1229,16 @@ jobs:
 
   attest-sbom:
     if: >-
-      always()
-      && ((github.event_name == 'push'
-      && github.ref == 'refs/heads/main'
-      && github.event.repository.default_branch == 'main')
-      || (github.event_name == 'workflow_dispatch'
-      && github.repository == 'Verjson/.github'
-      && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)))
-      && needs.prepare.result == 'success'
-      && needs.publish-base.result == 'success'
-      && needs.publish-derived.result == 'success'
-    needs: [prepare, publish-base, publish-derived]
+      ${{ needs.public-call-guard.result == 'success' && (always() && ((github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' && github.event.repository.default_branch == 'main') ||
+      (github.event_name == 'workflow_dispatch' && github.repository == 'Verjson/.github' && github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch))) && needs.prepare.result ==
+      'success' && needs.publish-base.result == 'success' && needs.publish-derived.result == 'success') }}
+    needs:
+      - public-call-guard
+      - prepare
+      - publish-base
+      - publish-derived
     permissions:
       actions: read
       contents: read
@@ -1352,15 +1370,18 @@ jobs:
 
   mirror-gar:
     if: >-
-      always() &&
-      ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.default_branch == 'main') ||
-       (github.event_name == 'workflow_dispatch' && github.repository == 'Verjson/.github' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) &&
-      needs.prepare.result == 'success' &&
-      needs.publish-base.result == 'success' &&
-      needs.publish-derived.result == 'success' &&
-      needs.attest-sbom.result == 'success' &&
-      needs.prepare.outputs.has-gar == 'true'
-    needs: [prepare, publish-base, publish-derived, attest-sbom]
+      ${{ needs.public-call-guard.result == 'success' && (always() && ((github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' && github.event.repository.default_branch == 'main') ||
+      (github.event_name == 'workflow_dispatch' && github.repository == 'Verjson/.github' && github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch))) && needs.prepare.result ==
+      'success' && needs.publish-base.result == 'success' && needs.publish-derived.result == 'success' &&
+      needs.attest-sbom.result == 'success' && needs.prepare.outputs.has-gar == 'true') }}
+    needs:
+      - public-call-guard
+      - prepare
+      - publish-base
+      - publish-derived
+      - attest-sbom
     permissions:
       actions: read
       contents: read
@@ -1481,19 +1502,20 @@ jobs:
 
   candidate-manifest:
     if: >-
-      always()
-      && ((github.event_name == 'push'
-      && github.ref == 'refs/heads/main'
-      && github.event.repository.default_branch == 'main')
-      || (github.event_name == 'workflow_dispatch'
-      && github.repository == 'Verjson/.github'
-      && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)))
-      && needs.prepare.result == 'success'
-      && needs.publish-base.result == 'success'
-      && needs.publish-derived.result == 'success'
-      && needs.attest-sbom.result == 'success'
-      && (needs.mirror-gar.result == 'success' || needs.mirror-gar.result == 'skipped')
-    needs: [prepare, publish-base, publish-derived, attest-sbom, mirror-gar]
+      ${{ needs.public-call-guard.result == 'success' && (always() && ((github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' && github.event.repository.default_branch == 'main') ||
+      (github.event_name == 'workflow_dispatch' && github.repository == 'Verjson/.github' && github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch))) && needs.prepare.result ==
+      'success' && needs.publish-base.result == 'success' && needs.publish-derived.result == 'success' &&
+      needs.attest-sbom.result == 'success' && (needs.mirror-gar.result == 'success' ||
+      needs.mirror-gar.result == 'skipped')) }}
+    needs:
+      - public-call-guard
+      - prepare
+      - publish-base
+      - publish-derived
+      - attest-sbom
+      - mirror-gar
     permissions:
       actions: read
       contents: read

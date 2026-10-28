@@ -270,7 +270,7 @@ REQUIRED_CHECKS = json.dumps([{"name": "ci / build", "app_id": 15368, "workflow_
 def generator_invocations(sha):
     """`(script, arguments)` for every mode of every SHA-stamping generator."""
     changelog_modes = ["workflow", "generated-artifacts", "generated-artifacts-with-adr-index",
-                       "renovate-attribution", "adr-index-generator", "adr-index-test",
+                       "adr-index-generator", "adr-index-test",
                        "renderer", "codeowners", "contract-test", "pr-gate", "release-node",
                        "release-snapshot"]
     invocations = [("gen-changelog-caller.sh", [mode, sha]) for mode in changelog_modes]

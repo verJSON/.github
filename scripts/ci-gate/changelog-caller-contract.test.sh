@@ -78,7 +78,7 @@ skip() { printf 'skip - %s\n' "$1"; }
 # pass (#1736).
 declare workflow renderer default_release custom_release component_release
 declare custom_contract generated_artifacts generated_artifacts_with_adr
-declare renovate_attribution adr_index_generator adr_index_test pr_gate
+declare adr_index_generator adr_index_test pr_gate
 declare canonical_codeowners release_node_workflow
 mode_capture_failures=0
 capture_mode() {
@@ -137,7 +137,16 @@ capture_mode component_release release-node "$sha" --only-package-dir packages/c
 capture_mode custom_contract contract-test "$sha" --scope @acme --node-version 22.23.1 --package-dir compat --release-asset contract/schema.graphql --release-asset contract/schema.sha256
 capture_mode generated_artifacts generated-artifacts "$sha"
 capture_mode generated_artifacts_with_adr generated-artifacts-with-adr-index "$sha"
-capture_mode renovate_attribution renovate-attribution "$sha"
+if bash "$gen" renovate-attribution "$sha" >/dev/null 2>&1; then
+  fail "retired Renovate fragment-writer mode remains available"
+else
+  pass "retired Renovate fragment-writer mode is unavailable"
+fi
+if [ -e "$repo_root/.github/workflows/renovate-changelog.yml" ] || [ -e "$repo_root/scripts/renovate-changelog.py" ]; then
+  fail "canonical Renovate fragment-writer artifacts remain checked in"
+else
+  pass "canonical Renovate fragment-writer artifacts are retired"
+fi
 capture_mode adr_index_generator adr-index-generator "$sha"
 capture_mode adr_index_test adr-index-test "$sha"
 capture_mode pr_gate pr-gate "$sha"
@@ -321,7 +330,7 @@ print()
 PY
 }
 for audited_mode in pr-gate release-node release-artifact release-snapshot release-propose workflow \
-  generated-artifacts generated-artifacts-with-adr-index renovate-attribution; do
+  generated-artifacts generated-artifacts-with-adr-index; do
   audit_args=("$audited_mode" "$sha")
   [ "$audited_mode" != release-artifact ] || audit_args+=(--build-runner ubuntu-24.04)
   [ "$audited_mode" != release-propose ] || audit_args+=(--autonomy propose)
@@ -399,29 +408,6 @@ audit_report="$(audit_checkout_credentials release-node "$tampered_reordered" 2>
     && pass "moving the consuming step before the checkout re-flags it (#974)" \
     || fail "audit failed for the wrong reason: $audit_report"; }
 
-grep -q "renovate-changelog.yml@$sha" <<<"$renovate_attribution" \
-  && grep -qE "^ +contract_ref: $sha$" <<<"$renovate_attribution" \
-  && pass "Renovate attribution caller binds reusable workflow and helper contract pin" \
-  || fail "Renovate attribution caller does not bind its immutable pin"
-grep -qE '^  pull_request_target:$' <<<"$renovate_attribution" \
-  && grep -qE '^    types: \[opened, reopened, synchronize\]$' <<<"$renovate_attribution" \
-  && ! grep -qE '^  (pull_request|push|workflow_dispatch|workflow_run|schedule):' <<<"$renovate_attribution" \
-  && pass "Renovate attribution caller is limited to reviewed pull_request_target events" \
-  || fail "Renovate attribution caller exposes an unsafe event"
-grep -qF "github.event.pull_request.head.repo.full_name == github.repository" <<<"$renovate_attribution" \
-  && grep -qF "github.event.pull_request.user.login == 'app/renovate'" <<<"$renovate_attribution" \
-  && grep -qF "github.event.pull_request.user.login == 'renovate[bot]'" <<<"$renovate_attribution" \
-  && grep -qF "startsWith(github.event.pull_request.head.ref, 'renovate/')" <<<"$renovate_attribution" \
-  && pass "Renovate attribution caller rejects forks, other authors, and other branches" \
-  || fail "Renovate attribution caller lacks an admission predicate"
-grep -qF 'release_app_client_id: ${{ vars.RELEASE_APP_CLIENT_ID }}' <<<"$renovate_attribution" \
-  && grep -qF 'release_environment: release-app' <<<"$renovate_attribution" \
-  && grep -qE '^  pull-requests: read$' <<<"$renovate_attribution" \
-  && grep -qE '^    secrets: inherit$' <<<"$renovate_attribution" \
-  && ! grep -qE 'ORG_ADMIN_TOKEN|contents: write' <<<"$renovate_attribution" \
-  && pass "Renovate attribution caller selects the dedicated App environment and exact read scopes" \
-  || fail "Renovate attribution caller broadens credentials or lacks PR-read permission"
-
 # 5. A ref that is not a bare commit is rejected, not quoted and passed through.
 # An earlier sibling generator accepted a ref and let YAML be injected through
 # it; the guard is asserted, not assumed.
@@ -432,7 +418,7 @@ for bad in 'main' "$(printf 'main\n    if: false')" '../../evil' "${sha^^}" "${s
     pass "generator rejects non-commit ref: '${bad//$'\n'/\\n}'"
   fi
 done
-for mode in generated-artifacts generated-artifacts-with-adr-index renovate-attribution adr-index-generator pr-gate; do
+for mode in generated-artifacts generated-artifacts-with-adr-index adr-index-generator pr-gate; do
   if bash "$gen" "$mode" main >/dev/null 2>&1; then
     fail "$mode accepted a mutable ref"
   else
@@ -1291,7 +1277,6 @@ build_adopter() {
   bash "$gen" renderer "$sha" >"$dir/scripts/render-next.sh"
   bash "$gen" "$caller" "$sha" >"$dir/.github/workflows/changelog.yml"
   bash "$gen" pr-gate "$sha" >"$dir/.github/workflows/changelog-contract.yml"
-  bash "$gen" renovate-attribution "$sha" >"$dir/.github/workflows/renovate-changelog.yml"
   if [ "$caller" = generated-artifacts-with-adr-index ]; then
     bash "$gen" adr-index-generator "$sha" >"$dir/scripts/gen-adr-index.sh"
     chmod +x "$dir/scripts/gen-adr-index.sh"
@@ -1558,93 +1543,387 @@ grep -q "release-propose.yml@$sha" "$adopter/.github/workflows/release-propose.y
   && grep -qE "^ +contract_ref: $sha$" "$adopter/.github/workflows/release-propose.yml" \
   && pass "canonical release proposer pins uses and contract_ref to the same commit" \
   || fail "canonical release proposer does not bind uses and contract_ref to $sha"
-schedule_adopter_script "$adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  pass "emitted suite passes against an unreleased adopter"
-else
-  fail "emitted suite failed before any release: $(tail -2 "$ADOPTER_LOG")"
-fi
-SCHED_SCRIPT
-)"
 
 stale_renovate_caller="$tmproot/adopter-stale-renovate-caller"
 cp -a "$adopter" "$stale_renovate_caller"
-sed -i "s/renovate-changelog.yml@$sha/renovate-changelog.yml@0000000000000000000000000000000000000000/" \
-  "$stale_renovate_caller/.github/workflows/renovate-changelog.yml"
+cat >"$stale_renovate_caller/.github/workflows/renovate-changelog.yml" <<EOF
+name: Renovate changelog
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+jobs:
+  renovate-changelog:
+    uses: Verjson/.github/.github/workflows/renovate-changelog.yml@$sha
+EOF
 schedule_adopter_script "$stale_renovate_caller" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepted a stale Renovate attribution reusable pin"
+  fail "emitted suite accepted a stale Renovate writer caller"
+elif grep -qF 'retired workflow path is present' "$ADOPTER_LOG"; then
+  pass "emitted suite rejects the stale Renovate writer caller"
 else
-  pass "emitted suite rejects a stale Renovate attribution reusable pin"
+  fail "stale Renovate writer caller was rejected for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
 
-overprivileged_renovate_caller="$tmproot/adopter-overprivileged-renovate-caller"
-cp -a "$adopter" "$overprivileged_renovate_caller"
-sed -i 's/^  contents: read$/  contents: write/' \
-  "$overprivileged_renovate_caller/.github/workflows/renovate-changelog.yml"
-schedule_adopter_script "$overprivileged_renovate_caller" "$(cat <<'SCHED_SCRIPT'
+renamed_renovate_caller="$tmproot/adopter-renamed-renovate-caller"
+cp -a "$adopter" "$renamed_renovate_caller"
+cat >"$renamed_renovate_caller/.github/workflows/dependency-helper.yaml" <<EOF
+name: Dependency helper
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+jobs:
+  synchronize:
+    uses: verJSON/.github/.github/workflows/renovate-changelog.yml@$sha
+EOF
+schedule_adopter_script "$renamed_renovate_caller" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepted a Contents-write Renovate attribution caller"
+  fail "emitted suite accepted a renamed caller for the retired Renovate writer"
+elif grep -qF 'retired workflow path is present' "$ADOPTER_LOG"; then
+  pass "emitted suite rejects the retired writer when caller file and job are renamed"
 else
-  pass "emitted suite rejects a Contents-write Renovate attribution caller"
+  fail "renamed Renovate writer caller was rejected for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
 
-wrong_event_renovate_caller="$tmproot/adopter-wrong-event-renovate-caller"
-cp -a "$adopter" "$wrong_event_renovate_caller"
-sed -i 's/^  pull_request_target:$/  pull_request:/' \
-  "$wrong_event_renovate_caller/.github/workflows/renovate-changelog.yml"
-schedule_adopter_script "$wrong_event_renovate_caller" "$(cat <<'SCHED_SCRIPT'
+escaped_renovate_caller="$tmproot/adopter-escaped-renovate-caller"
+cp -a "$adopter" "$escaped_renovate_caller"
+cat >"$escaped_renovate_caller/.github/workflows/dependency-hook.yaml" <<EOF
+name: Dependency hook
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+jobs:
+  synchronize:
+    uses: "Verjson/.github/.github/workflows/\u0072enovate-changelog.yml@$sha"
+EOF
+grep -qF '\u0072enovate-changelog.yml' \
+  "$escaped_renovate_caller/.github/workflows/dependency-hook.yaml" \
+  || fail "escaped Renovate caller fixture did not retain the YAML escape"
+schedule_adopter_script "$escaped_renovate_caller" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepted an event that cannot write the bot head"
+  fail "emitted suite accepted a Unicode-escaped retired Renovate caller"
+elif grep -qF 'retired workflow path is present' "$ADOPTER_LOG"; then
+  pass "emitted suite rejects a Unicode-escaped retired Renovate caller"
 else
-  pass "emitted suite rejects a Renovate attribution caller on the wrong event"
+  fail "Unicode-escaped Renovate caller was rejected for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
 
-missing_gate_renovate_caller="$tmproot/adopter-missing-renovate-gate"
-cp -a "$adopter" "$missing_gate_renovate_caller"
-sed -i '/^    if: >-$/,/^    uses:/ { /^    uses:/!d; }' \
-  "$missing_gate_renovate_caller/.github/workflows/renovate-changelog.yml"
-schedule_adopter_script "$missing_gate_renovate_caller" "$(cat <<'SCHED_SCRIPT'
+quoted_key_renovate_caller="$tmproot/adopter-quoted-key-renovate-caller"
+cp -a "$adopter" "$quoted_key_renovate_caller"
+cat >"$quoted_key_renovate_caller/.github/workflows/quoted-helper.yaml" <<EOF
+name: Quoted helper
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+jobs:
+  synchronize:
+    "uses": Verjson/.github/.github/workflows/renovate-changelog.yml@$sha
+EOF
+schedule_adopter_script "$quoted_key_renovate_caller" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepted a Renovate caller with no admission gate"
+  fail "emitted suite accepted a retired caller with a quoted uses key"
+elif grep -qF 'retired workflow path is present' "$ADOPTER_LOG"; then
+  pass "emitted suite rejects a retired caller with a quoted uses key"
 else
-  pass "emitted suite rejects a Renovate caller with no admission gate (#1014)"
+  fail "quoted-key Renovate caller was rejected for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
 
-for mutation in fork actor branch duplicate-if; do
-  mutated_renovate_caller="$tmproot/adopter-mutated-renovate-$mutation"
-  cp -a "$adopter" "$mutated_renovate_caller"
-  case "$mutation" in
-    fork)
-      sed -i 's/head.repo.full_name == github.repository/head.repo.full_name != github.repository/' \
-        "$mutated_renovate_caller/.github/workflows/renovate-changelog.yml"
-      ;;
-    actor)
-      sed -i "s/'renovate\[bot\]'/'dependabot[bot]'/" \
-        "$mutated_renovate_caller/.github/workflows/renovate-changelog.yml"
-      ;;
-    branch)
-      sed -i "s/head.ref, 'renovate\/'/head.ref, 'deps\/'/" \
-        "$mutated_renovate_caller/.github/workflows/renovate-changelog.yml"
-      ;;
-    duplicate-if)
-      sed -i '/^    uses:/a\    if: true' \
-        "$mutated_renovate_caller/.github/workflows/renovate-changelog.yml"
-      ;;
-  esac
-  run_adopter "$mutated_renovate_caller" \
-    && fail "emitted suite accepted a Renovate caller with a mutated $mutation predicate" \
-    || pass "emitted suite rejects a Renovate caller with a mutated $mutation predicate (#1014)"
+make_renovate_fixture() {
+  local name="$1"
+  local fixture="$tmproot/adopter-$name"
+  cp -a "$adopter" "$fixture"
+  cat >"$fixture/.github/workflows/$name.yaml"
+  printf '%s\n' "$fixture"
+}
+
+assert_retired_rejected() {
+  local fixture="$1"
+  schedule_adopter_script "$fixture" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a source mention of the retired Renovate workflow"
+elif grep -qF 'retired workflow path is present' "$ADOPTER_LOG"; then
+  pass "emitted suite rejects a source mention of the retired Renovate workflow"
+else
+  fail "retired workflow source mention was rejected for another reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+}
+
+assert_scanner_error() {
+  local fixture="$1"
+  schedule_adopter_script "$fixture" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted an unsafe workflow file"
+elif grep -qF 'cannot safely inspect workflows' "$ADOPTER_LOG"; then
+  pass "emitted suite fails closed on an unsafe workflow file"
+else
+  fail "unsafe workflow file was rejected for another reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+}
+
+assert_symlink_scanner() {
+  local fixture="$1"
+  schedule_adopter_script "$fixture" "$(cat <<'SCHED_SCRIPT'
+scanner="$copy/.retired-path-scanner.py"
+if ! python3 -I - "$copy/scripts/changelog-contract.test.sh" "$scanner" <<'PY'
+from pathlib import Path
+import sys
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+marker = "if ! python3 -I - \"$root/.github/workflows\" <<'PY'\n"
+start = source.index(marker) + len(marker)
+end = source.index("\nPY\nthen", start)
+Path(sys.argv[2]).write_text(source[start:end] + "\n", encoding="utf-8")
+PY
+then
+  fail "emitted retired-path scanner is not invoked with isolated Python"
+fi
+if python3 -I "$scanner" "$copy/.github/workflows" >"$copy.scanner.log" 2>&1; then
+  fail "source scanner accepted a symlinked workflow file"
+elif grep -qF 'symlink in workflow directory' "$copy.scanner.log"; then
+  pass "isolated source scanner rejects a symlink beside malicious pathlib.py"
+else
+  fail "symlinked workflow was rejected for another reason: $(tail -2 "$copy.scanner.log")"
+fi
+SCHED_SCRIPT
+)"
+}
+
+folded_renovate_caller="$(make_renovate_fixture folded-renovate-caller <<EOF
+name: Folded retired caller
+jobs:
+  check:
+    steps:
+      - uses: >-
+          Verjson/.github/.github/workflows/renovate-
+          changelog.yml@$sha
+EOF
+)"
+assert_retired_rejected "$folded_renovate_caller"
+
+literal_renovate_caller="$(make_renovate_fixture literal-renovate-caller <<EOF
+name: Literal retired caller
+jobs:
+  check:
+    steps:
+      - uses: |
+          Verjson/.github/.github/workflows/renovate-changelog.yml@$sha
+EOF
+)"
+assert_retired_rejected "$literal_renovate_caller"
+
+p2_quoted_name_caller="$(make_renovate_fixture p2-quoted-name <<EOF
+name: 'Example " name'
+jobs:
+  check:
+    steps:
+      - uses: "Verjson/.github/.github/workflows/\\u0072enovate-changelog.yml@$sha"
+EOF
+)"
+assert_retired_rejected "$p2_quoted_name_caller"
+
+p2_run_block_caller="$(make_renovate_fixture p2-run-block <<EOF
+name: Shell block before retired caller
+jobs:
+  check:
+    steps:
+      - run: |
+          grep "\\.github" .github
+          echo "unmatched
+      - uses: "Verjson/.github/.github/workflows/\\u0072enovate-changelog.yml@$sha"
+EOF
+)"
+assert_retired_rejected "$p2_run_block_caller"
+
+escaped_line_continuation_caller="$(make_renovate_fixture escaped-line-continuation <<EOF
+name: Escaped line continuation
+jobs:
+  check:
+    steps:
+      - uses: "Verjson/.github/.github/workflows/renovate-\\
+          changelog.yml@$sha"
+EOF
+)"
+assert_retired_rejected "$escaped_line_continuation_caller"
+
+for separator_codepoint in 0085 2028 2029; do
+  printf -v unicode_separator '%b' "\\u${separator_codepoint}"
+  unicode_line_continuation_caller="$(make_renovate_fixture "unicode-line-continuation-${separator_codepoint}" <<EOF
+name: Unicode line continuation
+jobs:
+  check:
+    steps:
+      - uses: "Verjson/.github/.github/workflows/renovate-\\${unicode_separator}changelog.yml@$sha"
+EOF
+)"
+  assert_retired_rejected "$unicode_line_continuation_caller"
 done
 
+for continuation_kind in cr crlf; do
+  case "$continuation_kind" in
+    cr) printf -v unicode_separator '%b' '\r' ;;
+    crlf) printf -v unicode_separator '%b' '\r\n' ;;
+  esac
+  unicode_line_continuation_caller="$(make_renovate_fixture "unicode-line-continuation-${continuation_kind}" <<EOF
+name: Unicode line continuation
+jobs:
+  check:
+    steps:
+      - uses: "Verjson/.github/.github/workflows/renovate-\\${unicode_separator}changelog.yml@$sha"
+EOF
+)"
+  assert_retired_rejected "$unicode_line_continuation_caller"
+done
+
+slash_escape_caller="$(make_renovate_fixture slash-escape <<EOF
+name: Escaped slash
+jobs:
+  check:
+    steps:
+      - uses: "Verjson\\/.github/.github/workflows/renovate-changelog.yml@$sha"
+EOF
+)"
+assert_retired_rejected "$slash_escape_caller"
+
+hex_escape_caller="$(make_renovate_fixture hex-escape <<EOF
+name: Hex escape
+jobs:
+  check:
+    steps:
+      - uses: "Verjson/.github/.github/workflows/\\x72enovate-changelog.yml@$sha"
+EOF
+)"
+assert_retired_rejected "$hex_escape_caller"
+
+wide_escape_caller="$(make_renovate_fixture wide-escape <<EOF
+name: Wide Unicode escape
+jobs:
+  check:
+    steps:
+      - uses: "Verjson/.github/.github/workflows/\\U00000072enovate-changelog.yml@$sha"
+EOF
+)"
+assert_retired_rejected "$wide_escape_caller"
+
+aliased_job_caller="$(make_renovate_fixture aliased-job-map <<EOF
+name: Aliased job map
+job_template: &job_template
+  runs-on: ubuntu-latest
+  steps:
+    - uses: Verjson/.github/.github/workflows/renovate-changelog.yml@$sha
+jobs:
+  copied: *job_template
+EOF
+)"
+assert_retired_rejected "$aliased_job_caller"
+
+comment_mention_caller="$(make_renovate_fixture comment-mention <<EOF
+# Verjson/.github/.github/workflows/renovate-changelog.yml@$sha
+name: Source comment mention
+jobs: {}
+EOF
+)"
+assert_retired_rejected "$comment_mention_caller"
+
+run_body_mention_caller="$(make_renovate_fixture run-body-mention <<EOF
+name: Source run-body mention
+jobs:
+  check:
+    steps:
+      - run: |
+          echo 'Verjson/.github/.github/workflows/renovate-changelog.yml@$sha'
+EOF
+)"
+assert_retired_rejected "$run_body_mention_caller"
+
+clean_source_caller="$(make_renovate_fixture clean-source-syntax <<EOF
+name: Unrelated workflow syntax
+jobs:
+  check:
+    steps:
+      - uses: actions/checkout@v4
+        with: {uses: metadata, modes: [fast, safe]}
+      - run: |
+          printf 'ordinary shell body'
+          printf '%s\n' '\uD800' '\UFFFFFFFF'
+EOF
+)"
+printf '          \techo "tabbed run body"\n' \
+  >>"$clean_source_caller/.github/workflows/clean-source-syntax.yaml"
+schedule_adopter_script "$clean_source_caller" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "emitted suite accepts unrelated metadata, flow syntax, tabbed run bodies, and invalid Unicode escape literals"
+else
+  fail "ordinary source syntax was rejected: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
+
+invalid_utf8_caller="$(make_renovate_fixture invalid-utf8 <<EOF
+name: Invalid UTF-8
+jobs: {}
+EOF
+)"
+printf '\377' >>"$invalid_utf8_caller/.github/workflows/invalid-utf8.yaml"
+assert_scanner_error "$invalid_utf8_caller"
+
+symlinked_workflow_caller="$(make_renovate_fixture symlinked-workflow <<EOF
+name: Symlinked workflow
+jobs: {}
+EOF
+)"
+symlink_target="$tmproot/symlink-target.yml"
+printf '%s\n' 'name: Symlink target' 'jobs: {}' >"$symlink_target"
+rm "$symlinked_workflow_caller/.github/workflows/symlinked-workflow.yaml"
+ln -s "$symlink_target" "$symlinked_workflow_caller/.github/workflows/symlinked-workflow.yaml"
+cat >"$symlinked_workflow_caller/pathlib.py" <<'PY'
+raise SystemExit(0)
+PY
+assert_symlink_scanner "$symlinked_workflow_caller"
+
+oversized_workflow_caller="$(make_renovate_fixture oversized-workflow <<EOF
+name: Oversized workflow
+jobs: {}
+EOF
+)"
+python3 - "$oversized_workflow_caller/.github/workflows/oversized.yaml" <<'PY'
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_bytes(b"#" + b" " * (2 * 1024 * 1024))
+PY
+assert_scanner_error "$oversized_workflow_caller"
+workflow_count_caller="$(make_renovate_fixture workflow-count-limit <<EOF
+name: Workflow count limit
+jobs: {}
+EOF
+)"
+python3 - "$workflow_count_caller/.github/workflows" <<'PY'
+from pathlib import Path
+import sys
+
+directory = Path(sys.argv[1])
+for index in range(257):
+    (directory / f"workflow-{index:03}.yaml").write_text("", encoding="utf-8")
+PY
+schedule_adopter_script "$workflow_count_caller" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted more workflow files than the inspection limit"
+elif grep -qF 'workflow file count exceeds inspection limit' "$ADOPTER_LOG"; then
+  pass "emitted suite stops when workflow files exceed the inspection limit"
+else
+  fail "workflow count overflow was rejected another reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 stale_proposer="$tmproot/adopter-stale-proposer"
 cp -a "$adopter" "$stale_proposer"
 sed -i "s/release-propose.yml@$sha/release-propose.yml@0000000000000000000000000000000000000000/" \
@@ -6970,7 +7249,6 @@ expect_set_divergence_named() {
 # the enumeration forgets is a member a subset regeneration may leave behind.
 expect_set_divergence_named .github/workflows/changelog.yml
 expect_set_divergence_named .github/workflows/changelog-contract.yml
-expect_set_divergence_named .github/workflows/renovate-changelog.yml
 expect_set_divergence_named .github/workflows/release.yml
 expect_set_divergence_named .github/workflows/release-propose.yml
 expect_set_divergence_named scripts/render-next.sh
@@ -7478,12 +7756,6 @@ else
 fi
 expect_unestablished_pin "a required member replaced by a directory" scripts/render-next.sh \
   replace_member_with_directory "is present but not a readable regular file"
-expect_unestablished_pin "an optional member replaced by dangling symlink" \
-  .github/workflows/renovate-changelog.yml replace_member_with_dangling_symlink \
-  "symlink"
-expect_unestablished_pin "an optional member replaced by a live symlink" \
-  .github/workflows/renovate-changelog.yml replace_member_with_live_symlink \
-  "symlink"
 replace_parent_with_live_symlink() {
   local target="${1}.target"
   mv "$1" "$target"
@@ -7547,8 +7819,6 @@ sync_last_rejection
   fi
 }
 
-verify_safe_symlink_repair "leaf" .github/workflows/renovate-changelog.yml \
-  replace_member_with_live_symlink .github/workflows/renovate-changelog.yml
 verify_safe_symlink_repair "parent" .github/workflows \
   replace_parent_with_live_symlink .github/workflows
 

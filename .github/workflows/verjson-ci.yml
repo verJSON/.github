@@ -28,7 +28,69 @@ permissions:
 
 jobs:
   ci:
+    if: ${{ inputs.profile == 'public-v1' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Validate immutable image identity
+        env:
+          VERJSON_CI_IMAGE: ${{ inputs.image }}
+        run: |
+          [[ "$VERJSON_CI_IMAGE" =~ ^[abcdefghijklmnopqrstuvwxyz0123456789.-]+(:[0123456789]+)?/[abcdefghijklmnopqrstuvwxyz0123456789._/-]+@sha256:[0123456789abcdef]{64}$ ]] || {
+            echo "::error::image must be an OCI repository reference pinned by sha256 digest"
+            exit 2
+          }
+      - name: Run verjson-ci
+        env:
+          VERJSON_CI_CONFIG: ${{ inputs.config }}
+          VERJSON_CI_IMAGE: ${{ inputs.image }}
+          VERJSON_CI_SCENARIO: ${{ inputs.scenario }}
+        run: >-
+          docker run --rm
+          --volume "$GITHUB_WORKSPACE:/workspace"
+          --workdir /workspace
+          --env VERJSON_CI_PROVIDER=github
+          --env VERJSON_CI_COMMIT="$GITHUB_SHA"
+          --env VERJSON_CI_SCENARIO="$VERJSON_CI_SCENARIO"
+          "$VERJSON_CI_IMAGE"
+          run --config "$VERJSON_CI_CONFIG" --output .verjson-ci/result.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() && !env.ACT }}
+        with:
+          name: verjson-ci-result
+          path: .verjson-ci/*.json
+          if-no-files-found: error
+
+  reject-public-profile:
+    if: ${{ github.event.repository.private != true && inputs.profile != 'public-v1' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Reject protected profiles from public repositories
+        run: |
+          echo "::error::public repositories may use only the public-v1 verjson-ci profile"
+          exit 2
+
+  reject-profile:
+    if: >-
+      ${{ inputs.profile != 'public-v1' &&
+      (inputs.profile != 'approved-candidate-v1' ||
+      vars.VERJSON_CANDIDATE_WORKERS_ENABLED != 'true' ||
+      github.repository != 'Verjson/verjson-ci' ||
+      github.ref != 'refs/heads/main' ||
+      github.event.repository.private != true) }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Reject unsupported verjson-ci profile
+        run: |
+          echo "::error::unsupported verjson-ci profile"
+          exit 2
+
+  candidate:
+    if: ${{ inputs.profile == 'approved-candidate-v1' && vars.VERJSON_CANDIDATE_WORKERS_ENABLED == 'true' && github.repository == 'Verjson/verjson-ci' && github.ref == 'refs/heads/main' && github.event.repository.private == true }}
     permissions:
+      actions: read
       contents: read
     uses: Verjson/verjson-ci/.github/workflows/reusable-ci.yml@c9084daca387849c09f1d97bccf8ac311ff11615
     with:

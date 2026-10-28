@@ -2737,7 +2737,17 @@ class ChangelogContractTests(unittest.TestCase):
             MODULE_PATH.parent.parent / ".github/workflows/changelog-release.yml"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("group: changelog-release-${{ github.repository }}", workflow)
+        self.assertIn(
+            "group: ${{ (github.event_name == 'pull_request' || "
+            "github.event_name == 'pull_request_review' || "
+            "github.event_name == 'pull_request_review_comment' || "
+            "github.event_name == 'merge_group' || "
+            "github.event_name == 'pull_request_target') && "
+            "github.event.repository.private != true && "
+            "format('public-rejected-{0}-{1}-{2}', github.repository, github.run_id, github.run_attempt) || "
+            "format('changelog-release-{0}', github.repository) }}",
+            workflow,
+        )
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertIn("contract_ref:", workflow)
         self.assertIn("ref: ${{ inputs.contract_ref }}", workflow)

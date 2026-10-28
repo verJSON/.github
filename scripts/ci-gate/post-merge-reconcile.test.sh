@@ -7,7 +7,9 @@ grep -q 'pull_request_target:' "$workflow"
 grep -q 'github.event.pull_request.merged == true' "$workflow"
 grep -q 'ai-review-authorization:' "$workflow"
 grep -q 'ai-review-run:' "$workflow"
-grep -q 'path == ".github/workflows/ai-review-merge.yml"' "$workflow"
+grep -qF "AI_REVIEW_DISPATCH_WORKFLOW: \${{ github.repository == 'Verjson/.github' && 'ai-review-merge-dispatch.yml' || 'ai-review-merge.yml' }}" "$workflow"
+grep -qF "AI_REVIEW_LEGACY_DISPATCH_WORKFLOW: \${{ github.repository == 'Verjson/.github' && 'ai-review-merge.yml' || '' }}" "$workflow"
+grep -qF 'legacy_workflow_path != "" and .path == ".github/workflows/" + $legacy_workflow_path' "$workflow"
 grep -q 'ref: \${{ github.sha }}' "$workflow"
 ! grep -q 'pull_request.base.sha' "$workflow"
 grep -q "if: steps.evidence.outputs.eligible == 'true'" "$workflow"
@@ -85,9 +87,11 @@ export CHECK_FILE="$tmp/check.json" REVIEWS_FILE="$tmp/reviews.json" RUN_FILE="$
 export JOBS_FILE="$tmp/jobs.json" ARTIFACTS_FILE="$tmp/artifacts.json"
 export ATTESTATION_SOURCE="$tmp/attestation-source.json"
 export TARGET_REPO=Verjson/example PR_NUMBER=7
+export AI_REVIEW_LEGACY_DISPATCH_WORKFLOW=
 export MERGED_HEAD_SHA=1111111111111111111111111111111111111111
 export EXPECTED_APP_ID=4242 EXPECTED_APP_SLUG=ai-review-authorization
 export DEFAULT_BRANCH=main RUNNER_TEMP="$tmp" GITHUB_OUTPUT="$tmp/evidence-output"
+export AI_REVIEW_DISPATCH_WORKFLOW=ai-review-merge.yml
 
 write_check() {
   local summary="$1" status="${2:-completed}" conclusion="${3:-success}"
@@ -98,17 +102,18 @@ write_check() {
       app:{id:$app_id,slug:$app_slug},output:{summary:$summary}}' >"$CHECK_FILE"
 }
 write_valid_ai_evidence() {
+  local workflow_path="${1:-.github/workflows/ai-review-merge.yml}"
   jq -nc --arg head "$MERGED_HEAD_SHA" \
     '{state:"APPROVED",commit_id:$head,user:{login:"ai-review-authorization[bot]"},
       body:"<!-- ai-review-authorization:9001 -->\n<!-- ai-review-run:8001 -->"}' \
     | jq -s '.' >"$REVIEWS_FILE"
-  jq -nc --arg head "$MERGED_HEAD_SHA" \
-    '{repository:{full_name:"verJSON/example"},head_sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",head_branch:"main",
+  jq -nc --arg head "$MERGED_HEAD_SHA" --arg workflow_path "$workflow_path" --arg repo "$TARGET_REPO" \
+    '{repository:{full_name:$repo},head_sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",head_branch:"main",
       event:"workflow_dispatch",status:"completed",
-      conclusion:"success",path:".github/workflows/ai-review-merge.yml"}' >"$RUN_FILE"
+      conclusion:"success",path:$workflow_path}' >"$RUN_FILE"
   printf '{"artifacts":[{"name":"merge-attestation-8001","expired":false,"archive_download_url":"https://api.github.test/artifacts/81"}]}\n' >"$ARTIFACTS_FILE"
-  jq -nc --arg head "$MERGED_HEAD_SHA" \
-    '{version:1,repository:"Verjson/example",pr_number:7,head_sha:$head,run_id:8001,followups:[]}' \
+  jq -nc --arg head "$MERGED_HEAD_SHA" --arg repo "$TARGET_REPO" \
+    '{version:1,repository:$repo,pr_number:7,head_sha:$head,run_id:8001,followups:[]}' \
     >"$ATTESTATION_SOURCE"
 }
 run_evidence() {
@@ -170,6 +175,28 @@ else
   echo 'FAIL - exact-head ai-merge evidence did not reach attestation processing'
   exit 1
 fi
+TARGET_REPO=Verjson/.github
+AI_REVIEW_DISPATCH_WORKFLOW=ai-review-merge-dispatch.yml
+AI_REVIEW_LEGACY_DISPATCH_WORKFLOW=ai-review-merge.yml
+write_valid_ai_evidence .github/workflows/ai-review-merge-dispatch.yml
+if run_evidence && grep -qx 'eligible=true' "$GITHUB_OUTPUT"; then
+  printf 'ok - canonical current dispatch receipt path accepted\n'
+else
+  printf 'FAIL - canonical current dispatch receipt path rejected\n'
+  exit 1
+fi
+write_valid_ai_evidence .github/workflows/ai-review-merge.yml
+if run_evidence && grep -qx 'eligible=true' "$GITHUB_OUTPUT"; then
+  printf 'ok - canonical legacy dispatch receipt path accepted\n'
+else
+  printf 'FAIL - canonical legacy dispatch receipt path rejected\n'
+  exit 1
+fi
+write_valid_ai_evidence .github/workflows/ai-review-merge-dispatch-lookalike.yml
+expect_rejected "canonical lookalike dispatch path rejected"
+TARGET_REPO=Verjson/example
+AI_REVIEW_DISPATCH_WORKFLOW=ai-review-merge.yml
+AI_REVIEW_LEGACY_DISPATCH_WORKFLOW=
 
 write_valid_ai_evidence
 write_check $'AI approval persisted.\n<!-- ai-review-authorized:v1:9001:1111111111111111111111111111111111111111:ai-merge -->' completed success 15368 github-actions

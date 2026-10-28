@@ -159,7 +159,7 @@ with open(os.environ["WORKFLOW"], encoding="utf-8") as stream:
 
 def assert_provenance_boundary(document):
     jobs = document["jobs"]
-    assert set(jobs) == {"app-key-policy", "promote", "retention"}, "release job graph is not exact"
+    assert set(jobs) == {"reject-public-pull-request-caller", "app-key-policy", "promote", "retention"}, "release job graph is not exact"
     assert jobs["promote"]["runs-on"] == "ubuntu-24.04", (
         "release promotion and manifest attestation must use an independently trusted hosted runner"
     )
@@ -294,7 +294,7 @@ engine_run_line="$(grep -n 'python3 -I .container-release-contract/scripts/chang
 ! grep -Eq 'python3? scripts/changelog.py release' "$workflow"
 ! grep -Eq 'gh attestation verify|actions/attest-build-provenance@' "$workflow"
 ! grep -q 'container-release-${{ github.repository }}-${{ inputs.version }}' "$workflow"
-grep -q 'group: container-release-${{ github.repository }}' "$workflow"
+grep -Fq "group: \${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && format('public-rejected-{0}-{1}-{2}', github.repository, github.run_id, github.run_attempt) || format('container-release-{0}', github.repository) }}" "$workflow"
 grep -q 'complete stable alias set diverged' "$workflow"
 grep -q 'continue-on-error: true' "$workflow"
 grep -q 'package_retention.py' "$workflow"

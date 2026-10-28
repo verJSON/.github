@@ -39,6 +39,7 @@ esac
 SH
 chmod +x "$tmp/bin/gh"
 export PATH="$tmp/bin:$PATH" CALLS="$tmp/calls" DEFAULT_BRANCH=main TARGET_REPO=Verjson/example PR_NUMBER=7
+export AI_REVIEW_DISPATCH_WORKFLOW=ai-review-merge.yml
 export EXPECTED_HEAD_SHA=0123456789abcdef0123456789abcdef01234567 CHECK_ID=9001 ACTIONS_TOKEN=actions-token GH_TOKEN=actions-token
 export GITHUB_RUN_ID=7001 GITHUB_RUN_ATTEMPT=2 EVENT_ACTION=synchronize EVENT_LABEL=''
 export LABEL_FILE="$tmp/label-state"

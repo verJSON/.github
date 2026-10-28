@@ -8,6 +8,16 @@ for value in TARGET_REPO PR_NUMBER EXPECTED_HEAD_SHA AUTHORIZATION_CHECK_ID ARM_
   [ -n "${!value:-}" ] || { echo "::error::missing zero-provider recovery identity: $value"; exit 1; }
 done
 [[ "$TARGET_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || exit 1
+if [[ "${TARGET_REPO,,}" == "verjson/.github" ]]; then
+  dispatch_workflow="ai-review-merge-dispatch.yml"
+else
+  dispatch_workflow="ai-review-merge.yml"
+fi
+# Both the canonical dispatcher and generated adopter caller invoke the
+# reusable review workflow from a job named `review`; GitHub prefixes each
+# called job with that caller job name in the Actions API.
+dispatch_job_prefix="review / "
+dispatch_workflow_path=".github/workflows/$dispatch_workflow"
 [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || exit 1
 [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
 [[ "$AUTHORIZATION_CHECK_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
@@ -43,9 +53,10 @@ api() {
 api review-run "$tmp/review-run.json" "repos/$TARGET_REPO/actions/runs/$REVIEW_RUN_ID"
 expected_title="AI review authorization $AUTHORIZATION_CHECK_ID from arm $ARM_RUN_ID.$ARM_RUN_ATTEMPT"
 jq -e --argjson run "$REVIEW_RUN_ID" --argjson attempt "$REVIEW_RUN_ATTEMPT" \
-  --arg title "$expected_title" --arg branch "$DEFAULT_BRANCH" --arg repo "$TARGET_REPO" '
+  --arg title "$expected_title" --arg branch "$DEFAULT_BRANCH" --arg repo "$TARGET_REPO" \
+  --arg workflow_path "$dispatch_workflow_path" '
     .id == $run and .run_attempt == $attempt and .event == "workflow_dispatch" and
-    .path == ".github/workflows/ai-review-merge.yml" and .display_title == $title and
+  .path == $workflow_path and .display_title == $title and
     .head_branch == $branch and (.head_repository.full_name | ascii_downcase) == ($repo | ascii_downcase) and
     (.repository.full_name | ascii_downcase) == ($repo | ascii_downcase) and
     # A workflow_dispatch run can remain queued while an environment-gated
@@ -104,9 +115,9 @@ if [ "$REVIEW_RUN_ATTEMPT" -eq 1 ]; then
   # before this loop can re-ask, so a transient fetch failure fails closed
   # immediately rather than being retried. That is the #1476 boundary applied
   # here: an absence within an answer may be retried, an absent answer may not.
-  select_matching='[.[].workflow_runs[] | select(
+select_matching='[.[].workflow_runs[] | select(
       .display_title == $title and .event == "workflow_dispatch" and
-      .path == ".github/workflows/ai-review-merge.yml" and .head_branch == $branch and
+  .path == $workflow_path and .head_branch == $branch and
       (.head_repository.full_name | ascii_downcase) == ($repo | ascii_downcase) and (.repository.full_name | ascii_downcase) == ($repo | ascii_downcase)
     )]'
   runlist_attempts=5
@@ -114,9 +125,10 @@ if [ "$REVIEW_RUN_ATTEMPT" -eq 1 ]; then
   poll=1
   while [ "$poll" -le "$runlist_attempts" ]; do
     api correlated-runs "$tmp/correlated-runs.json" --paginate --slurp \
-      "repos/$TARGET_REPO/actions/workflows/ai-review-merge.yml/runs?event=workflow_dispatch&per_page=100"
+  "repos/$TARGET_REPO/actions/workflows/$dispatch_workflow/runs?event=workflow_dispatch&per_page=100"
     matching_count="$(jq --arg title "$expected_title" --arg branch "$DEFAULT_BRANCH" \
-      --arg repo "$TARGET_REPO" "$select_matching | length" "$tmp/correlated-runs.json")"
+    --arg repo "$TARGET_REPO" --arg workflow_path "$dispatch_workflow_path" \
+    "$select_matching | length" "$tmp/correlated-runs.json")"
     [ "$matching_count" -eq 0 ] || break
     [ "$poll" -eq "$runlist_attempts" ] || sleep 3
     poll=$((poll + 1))
@@ -131,12 +143,14 @@ if [ "$REVIEW_RUN_ATTEMPT" -eq 1 ]; then
     exit 1
   fi
   jq -e --argjson run "$REVIEW_RUN_ID" --arg title "$expected_title" \
-    --arg branch "$DEFAULT_BRANCH" --arg repo "$TARGET_REPO" \
+  --arg branch "$DEFAULT_BRANCH" --arg repo "$TARGET_REPO" \
+  --arg workflow_path "$dispatch_workflow_path" \
     "$select_matching | .[0].id == \$run" "$tmp/correlated-runs.json" >/dev/null || {
       echo "::error::the sole correlated dispatch is not review run $REVIEW_RUN_ID"
       exit 1
     }
-  jq -e --arg title "$expected_title" --arg branch "$DEFAULT_BRANCH" --arg repo "$TARGET_REPO" \
+jq -e --arg title "$expected_title" --arg branch "$DEFAULT_BRANCH" --arg repo "$TARGET_REPO" \
+  --arg workflow_path "$dispatch_workflow_path" \
     "$select_matching | .[0].run_attempt == 1" "$tmp/correlated-runs.json" >/dev/null || {
       echo "::error::initial direct review dispatch was retried; only run_attempt 1 may claim the initial dispatch"
       exit 1
@@ -152,21 +166,21 @@ jq -e '.status == "completed" and .conclusion == "failure"' "$tmp/check.json" >/
 
 api prior-jobs "$tmp/prior-jobs.json" --paginate --slurp \
   "repos/$TARGET_REPO/actions/runs/$REVIEW_RUN_ID/jobs?filter=all&per_page=100"
-jq -e --argjson attempt "$REVIEW_RUN_ATTEMPT" '
+jq -e --argjson attempt "$REVIEW_RUN_ATTEMPT" --arg job_prefix "$dispatch_job_prefix" '
   [.[].jobs[] | select(.run_attempt < $attempt)] as $prior |
   ($attempt > 1) and
   ([range(1; $attempt)] | all(.[]; . as $n |
-    ([$prior[] | select(.run_attempt == $n and .name == "preflight")] | length) == 1 and
-    ([$prior[] | select(.run_attempt == $n and .name == "gate")] | length) == 1 and
-    ([$prior[] | select(.run_attempt == $n and .name == "complete-authorization")] | length) == 1 and
-    ([$prior[] | select(.run_attempt == $n and .name == "dispatch-merge")] | length) == 1 and
-    all($prior[] | select(.run_attempt == $n and .name == "preflight");
+    ([$prior[] | select(.run_attempt == $n and .name == ($job_prefix + "preflight"))] | length) == 1 and
+    ([$prior[] | select(.run_attempt == $n and .name == ($job_prefix + "gate"))] | length) == 1 and
+    ([$prior[] | select(.run_attempt == $n and .name == ($job_prefix + "complete-authorization"))] | length) == 1 and
+    ([$prior[] | select(.run_attempt == $n and .name == ($job_prefix + "dispatch-merge"))] | length) == 1 and
+    all($prior[] | select(.run_attempt == $n and .name == ($job_prefix + "preflight"));
       .status == "completed" and (.conclusion == "success" or .conclusion == "failure" or .conclusion == "skipped")) and
-    all($prior[] | select(.run_attempt == $n and .name == "gate");
+    all($prior[] | select(.run_attempt == $n and .name == ($job_prefix + "gate"));
       .status == "completed" and .conclusion == "skipped" and (.steps | length) == 0) and
-    all($prior[] | select(.run_attempt == $n and .name == "complete-authorization");
+    all($prior[] | select(.run_attempt == $n and .name == ($job_prefix + "complete-authorization"));
       .status == "completed" and .conclusion == "failure") and
-    all($prior[] | select(.run_attempt == $n and .name == "dispatch-merge");
+    all($prior[] | select(.run_attempt == $n and .name == ($job_prefix + "dispatch-merge"));
       .status == "completed" and .conclusion == "skipped" and (.steps | length) == 0)
   ))
   ' "$tmp/prior-jobs.json" >/dev/null || {

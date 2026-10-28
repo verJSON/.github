@@ -21,6 +21,8 @@ jobs:
     timeout-minutes: 5
     env:
       TARGET_REPO: ${{ github.repository }}
+      AI_REVIEW_DISPATCH_WORKFLOW: ${{ github.repository == 'Verjson/.github' && 'ai-review-merge-dispatch.yml' || 'ai-review-merge.yml' }}
+      AI_REVIEW_LEGACY_DISPATCH_WORKFLOW: ${{ github.repository == 'Verjson/.github' && 'ai-review-merge.yml' || '' }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
       MERGED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       HEAD_REF: ${{ github.event.pull_request.head.ref }}
@@ -99,10 +101,12 @@ jobs:
           }
           run_id="$(jq -r .run_id <<<"$evidence")"
           run="$(gh api "repos/$TARGET_REPO/actions/runs/$run_id")"
-          jq -e --arg repo "$TARGET_REPO" --arg default_branch "$DEFAULT_BRANCH" '
+          jq -e --arg repo "$TARGET_REPO" --arg default_branch "$DEFAULT_BRANCH" \
+          --arg workflow_path ".github/workflows/$AI_REVIEW_DISPATCH_WORKFLOW" \
+          --arg legacy_workflow_path "$AI_REVIEW_LEGACY_DISPATCH_WORKFLOW" '
             (.repository.full_name | ascii_downcase) == ($repo | ascii_downcase) and .head_branch == $default_branch and .event == "workflow_dispatch"
             and .status == "completed" and .conclusion == "success"
-            and .path == ".github/workflows/ai-review-merge.yml"' <<<"$run" >/dev/null
+          and (.path == $workflow_path or ($legacy_workflow_path != "" and .path == ".github/workflows/" + $legacy_workflow_path))' <<<"$run" >/dev/null
           if [ "$legacy_authorization" = true ]; then
             dispatch_merge="$(gh api "repos/$TARGET_REPO/actions/runs/$run_id/jobs?per_page=100" | jq -cer '
               [.jobs[] | select(.name == "dispatch-merge")]

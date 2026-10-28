@@ -53,6 +53,21 @@ def run_policy(*arguments: str) -> tuple[int, str]:
     return completed.returncode, completed.stdout + completed.stderr
 
 
+def assert_temporary_workflow(
+    workflow: str, visibility: str, expected_exit: int, label: str
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        workflow_dir = os.path.join(directory, ".github", "workflows")
+        os.makedirs(workflow_dir)
+        with open(os.path.join(workflow_dir, "policy-test.yml"), "w", encoding="utf-8") as stream:
+            stream.write(workflow)
+        code, output = run_policy("--visibility", visibility, workflow_dir)
+    if code == expected_exit:
+        ok(label)
+    else:
+        fail(f"{label} (expected exit {expected_exit}, got {code}: {output.strip()})")
+
+
 exercised_fixtures: set[str] = set()
 
 
@@ -803,6 +818,64 @@ with tempfile.TemporaryDirectory() as dependency_root:
 # ---------------------------------------------------------------------------
 # The real tree this check gates, exercised through the same entry point CI uses.
 # ---------------------------------------------------------------------------
+guarded_selector_workflow = """name: policy-test
+on:
+  workflow_call:
+jobs:
+  check:
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true && 'ubuntu-24.04' || (fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')) }}
+    steps:
+      - run: echo ok
+"""
+assert_temporary_workflow(
+    guarded_selector_workflow,
+    "public",
+    0,
+    "the public hosted-first wrapper around a reviewed selector is accepted",
+)
+assert_temporary_workflow(
+    guarded_selector_workflow.replace(
+        "fromJSON(vars.CI_LANE_UNTRUSTED || '[\"ubuntu-24.04\"]')",
+        "fromJSON(vars.CI_LANE_OTHER || '[\"ubuntu-24.04\"]')",
+    ),
+    "public",
+    2,
+    "the hosted-first wrapper does not bless an unreviewed selector suffix",
+)
+
+public_call_sentinel = """name: policy-test
+on:
+  workflow_call:
+jobs:
+  reject-public-pull-request-caller:
+    if: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' || github.event_name == 'pull_request_target') && github.event.repository.private != true }}
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Reject public pull request callers
+        run: |
+          echo \"::error::This reusable workflow does not accept public pull request callers\"
+          exit 1
+"""
+assert_temporary_workflow(
+    public_call_sentinel,
+    "private",
+    0,
+    "the exact inert public-call sentinel may use the hosted runner on private repositories",
+)
+assert_temporary_workflow(
+    public_call_sentinel.replace("          exit 1\n", "          echo accepted\n"),
+    "private",
+    1,
+    "a public-call sentinel without a failing command gets no hosted-runner exception",
+)
+assert_temporary_workflow(
+    public_call_sentinel.replace("    permissions: {}", "    permissions:\n      contents: write"),
+    "private",
+    1,
+    "a privileged public-call sentinel gets no hosted-runner exception",
+)
+
 code, output = run_policy("--visibility", "public",
                           os.path.join(os.path.dirname(ROOT), ".github", "workflows"))
 if code == 0:

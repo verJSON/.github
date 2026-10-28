@@ -117,3 +117,45 @@ caller input and retain the same need for selector-level fallback. Eligibility
 or acquisition failures continue to fail required build-test before checkout.
 ADR 0234 receives the corresponding dated correction to the hosted-capacity
 invariant.
+
+## 2026-10-27 amendment — profile-aware Node CI selectors
+
+The Node CI `eligibility` job now uses the catalog's `caller-runner` shape,
+and `build-test` uses `secretless-first`. This completes the Node CI part of
+rollout step 2: custom profiles use their strict untrusted lane without
+inheriting `CI_LANE_FALLBACK`, while the built-in Verjson profile retains its
+legacy routing behavior. The secretless eligibility-gated lane and literal
+hosted fallback remain ahead of caller runner input. The protected workflow
+twin is regenerated from `node-ci.yml`; exact-site tests bind both selectors
+to their job markers in both files.
+
+## 2026-10-27 amendment — canonical candidate feature flag
+
+The `approved-candidate-v1` delegation remains gated by
+`VERJSON_CANDIDATE_WORKERS_ENABLED`. This switch controls a feature limited to the
+private `Verjson/verjson-ci` repository on its default branch, and its pinned
+callee reads the same variable. It is contract identity, not an adopter's runner
+or package installation policy. The public `public-v1` adapter uses hosted
+capacity independently; its candidate guard stays bound by the immutable
+source-contract test. A candidate request outside the exact private canonical
+default-branch and enabled-flag context fails the caller workflow; a skipped
+candidate job cannot make the required check pass.
+
+## 2026-10-27 amendment — keep public image validation locale-independent
+
+The public adapter validates OCI image references with explicit ASCII character
+sets. Bash range expressions such as `[a-z]` and `[0-9]` can admit additional
+characters under a non-C locale, so the local validator spells out lowercase
+ASCII letters and digits. The source workflow fixture remains byte-verified at
+its pinned SHA; the golden contract permits only this one reviewed validator
+normalization. Regression cases run under `en_US.UTF-8` and reject uppercase and
+Unicode lookalikes.
+
+## 2026-10-27 amendment — public callers remain on hosted runners
+
+Decision 3's caller-runner precedence applies only after the public-caller
+placement guard admits the job. Public and unresolved callers select the
+literal hosted runner before lane variables or the caller's `runner` input,
+as required by ADR 0239. In Node CI, the catalog's `caller-runner` selector
+is nested behind that outer guard. This clarifies the existing public-runner
+invariant without changing profile ownership or trusted-caller routing.

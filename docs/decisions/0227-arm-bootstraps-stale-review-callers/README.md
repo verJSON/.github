@@ -250,3 +250,26 @@ Live receipt: verjson-cli#342, run 39205143913 ("AI review authorization arm",
 `workflow_url` under `actions/required_workflows/`), created 2026-10-19T05:33:06Z, after
 the ruleset update, on head `dd79b13c`. It concluded `success`.
 
+
+
+### 2026-10-27 — Keep generated adopter callers and the canonical dispatcher distinct
+
+The canonical `ai-review-merge.yml` is now reusable-only. Its checked-in dispatch wrapper is generated separately as `ai-review-merge-dispatch.yml`; adopter wrappers remain generated into `ai-review-merge.yml` and are the only files eligible for stale-caller bootstrap. The inline bootstrap renderer must match `scripts/gen-ai-review-caller.sh` byte-for-byte, including the caller-owned concurrency group and optional `allow_absent_checks` input. Regeneration commands redirect generator stdout to the destination file. The caller generator and bootstrap contract tests both enforce this boundary.
+
+### Amendment (2026-10-27, #1831) — recognize frozen historical base callers
+
+The protected-base check accepts only the current generated template or one of
+three exact historical caller byte digests from canonical generator revisions
+`68b823b1`, `65529002`, and `4d95c2ee`. This permits an adopter to replace a real
+older generated caller after the canonical template changed. The proposed caller
+must still match the current generator byte-for-byte; unknown or edited base
+templates fail closed. The workflow compares fixed digests and never executes
+source from the protected base or proposed head.
+
+### Amendment (2026-10-27, #1831) — preserve recovery through the canonical dispatcher
+
+The canonical dispatch wrapper exposes reusable-workflow jobs with the exact
+`review / ` name prefix in the Actions run API. Zero-provider recovery derives
+that fixed prefix only for `Verjson/.github` and keeps the direct job names for
+adopter callers. It still requires exactly one matching job per prior attempt
+and validates each prior status; no caller-supplied prefix is accepted.

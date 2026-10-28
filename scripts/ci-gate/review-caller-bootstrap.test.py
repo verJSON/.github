@@ -24,6 +24,12 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/gate-rearm.yml"
 GENERATOR = ROOT / "scripts/gen-ai-review-caller.sh"
 FRAGMENT_GENERATOR = ROOT / "scripts/gen-ai-review-caller-bootstrap-fragment.sh"
+HISTORICAL_BASE_CALLER = ROOT / "scripts/ci-gate/fixtures/historical-ai-review-caller-68b823.yml"
+HISTORICAL_BASE_CALLER_SHA256 = {
+    "29d9311938dd6ab178b4f847ed5b3d1dfb50abb303e510abe817eab80ac0e810",
+    "92a1e3dc746ef6c6afee056b848db57c31160fc3f6354af294599fbcce370604",
+    "977d3cf42906c092f4bd79c05dec45452c17561d05d4cd12da73f1610a71eab8",
+}
 
 TARGET_REPO = "Verjson/example"
 API_REPO = "verJSON/example"
@@ -69,13 +75,22 @@ def generate_caller(sha: str) -> bytes:
     return subprocess.run(["bash", str(GENERATOR), sha], check=True, capture_output=True).stdout
 
 
+assert len(HISTORICAL_BASE_CALLER.read_bytes()) == 1603
+assert hashlib.sha256(HISTORICAL_BASE_CALLER.read_bytes()).hexdigest() in HISTORICAL_BASE_CALLER_SHA256
+
+
 def digest(sha: str) -> str:
     return hashlib.sha256(generate_caller(sha)).hexdigest()
 
 
 def mirror(sha: str) -> bytes:
+    caller_digest = (
+        hashlib.sha256(HISTORICAL_BASE_CALLER.read_bytes()).hexdigest()
+        if sha == STALE
+        else digest(sha)
+    )
     return (f"const reviewCallerContractSha = '{sha}';\n"
-            f"const reviewCallerDigest = '{digest(sha)}';\n").encode()
+            f"const reviewCallerDigest = '{caller_digest}';\n").encode()
 
 
 CI_CALLER = ".github/workflows/ci.yml"
@@ -133,7 +148,7 @@ class Consumer:
     """A consumer repository state: a protected main commit and one PR head."""
 
     def __init__(self) -> None:
-        self.base = {CALLER: generate_caller(STALE), "README.md": b"# example\n"}
+        self.base = {CALLER: HISTORICAL_BASE_CALLER.read_bytes(), "README.md": b"# example\n"}
         self.head = dict(self.base)
         self.head[CALLER] = generate_caller(CONTRACT)
         self.modes: dict[tuple[str, str], str] = {}
@@ -353,6 +368,7 @@ class Harness:
             "GH_TOKEN": "actions-token",
             "ACTIONS_TOKEN": "actions-token",
             "TARGET_REPO": TARGET_REPO,
+            "AI_REVIEW_DISPATCH_WORKFLOW": "ai-review-merge.yml",
             "PR_NUMBER": PR_NUMBER,
             "DEFAULT_BRANCH": "main",
             "EXPECTED_HEAD_SHA": HEAD,
@@ -414,6 +430,14 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
 
     def add(name, consumer, mutation=None):
         cases.append((name, consumer, mutation))
+
+    historical_proposal = Consumer()
+    historical_proposal.head[CALLER] = HISTORICAL_BASE_CALLER.read_bytes().replace(STALE.encode(), CONTRACT.encode())
+    add("a historical caller template cannot be proposed", historical_proposal)
+    unknown_historical_base = Consumer()
+    unknown_historical_base.base[CALLER] += b"# unrecognized template change\n"
+    add("an unrecognized historical base caller is not a bootstrap", unknown_historical_base,
+        ('base_caller == render_caller(stale) or base_digest in HISTORICAL_BASE_CALLER_SHA256,', 'True,'))
 
     add("a closed pull request is not a bootstrap", pull_override(Consumer(), state="closed"),
         ('require(pull.get("state") == "open",', 'require(True,'))
@@ -482,9 +506,6 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
     substituted.tree_edits["head"] = point_caller_at_substitute
     add("blob bytes that do not hash to the tree's object ID are rejected", substituted,
         ('require(len(content) == size and git_blob_sha(content) == sha,', 'require(len(content) == size,'))
-    add("a hand-edited default-branch caller is not a bootstrap",
-        with_files(**{CALLER: (tamper(generate_caller(STALE)), generate_caller(CONTRACT))}),
-        ('require(base_caller == render_caller(stale),', 'require(True,'))
     add("a hand-edited proposed caller is not a bootstrap",
         with_files(**{CALLER: (generate_caller(STALE), tamper(generate_caller(CONTRACT)))}),
         ('require(head_caller == render_caller(contract),', 'require(True,'))
@@ -712,6 +733,8 @@ def ineligible_cases() -> list[tuple[str, Consumer, tuple[str, str] | None]]:
 
 
 INELIGIBLE_REASONS = {
+    "a historical caller template cannot be proposed": "proposed review caller is not generated",
+    "an unrecognized historical base caller is not a bootstrap": "recognized template",
     "a closed pull request is not a bootstrap": "pull request is not open",
     "a moved head is not a bootstrap": "pull request head moved",
     "a pull request into another branch is not a bootstrap": "does not target the default branch",
@@ -725,7 +748,6 @@ INELIGIBLE_REASONS = {
     "a truncated tree listing is not a bootstrap": "tree listing is truncated",
     "a tree listing that repeats a path is not a bootstrap": "tree listing repeats a path",
     "blob bytes that do not hash to the tree's object ID are rejected": "blob content does not match its ID",
-    "a hand-edited default-branch caller is not a bootstrap": "default-branch review caller is not generated",
     "a hand-edited proposed caller is not a bootstrap": "proposed review caller is not generated",
     "a default-branch caller that already contains the casing repair admits no bootstrap": "already contains the casing repair",
     "a proposed revision before the casing repair is not a bootstrap": "predates the minimum safe review revision",

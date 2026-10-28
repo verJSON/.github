@@ -71,7 +71,6 @@ RENDERED_WORKFLOWS = {
                 "workflow",
                 "generated-artifacts",
                 "generated-artifacts-with-adr-index",
-                "renovate-attribution",
                 "pr-gate",
                 "release-node",
                 "release-snapshot",

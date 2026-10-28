@@ -75,10 +75,13 @@ platform	bash scripts/ci-gate/ui-ci-untrusted-execution.test.sh
 platform	bash scripts/ci-gate/generated-artifacts.test.sh
 platform	bash scripts/ci-gate/runner-routing-policy.test.sh
 platform	bash scripts/ci-gate/runner-routing-policy-cwd.test.sh
-platform	@budget=180 RUNNER_ISOLATION_TEST_PART=core python3 scripts/ci-gate/public-pr-runner-isolation.test.py
-platform	@budget=180 RUNNER_ISOLATION_TEST_PART=probes python3 scripts/ci-gate/public-pr-runner-isolation.test.py
+platform	@budget=330 RUNNER_ISOLATION_TEST_PART=core python3 scripts/ci-gate/public-pr-runner-isolation.test.py
+platform	@budget=240 RUNNER_ISOLATION_TEST_PART=probes-r8-r10 python3 scripts/ci-gate/public-pr-runner-isolation.test.py
+platform	@budget=240 RUNNER_ISOLATION_TEST_PART=probes-r11-r14 python3 scripts/ci-gate/public-pr-runner-isolation.test.py
 platform	python3 scripts/ci-gate/public-pr-runner-isolation-parts.test.py
 platform	python3 scripts/ci-gate/runner-isolation-required.test.py
+platform	python3 scripts/ci-gate/public-call-guard-contract.test.py
+platform	python3 scripts/ci-gate/public-reusable-workflow-guard.test.py
 platform	python3 scripts/ci-gate/backlog-sparse-closure.test.py
 platform	python3 scripts/public-review-caller-rollout.test.py
 platform	python3 scripts/ci-gate/public-pr-runner-isolation.py --pending scripts/ci-gate/public-pr-runner-isolation.pending.tsv --reviewed scripts/ci-gate/public-pr-runner-isolation.reviewed.tsv .github/workflows
@@ -247,8 +250,6 @@ changelog-release-1	bash scripts/changelog-migration.test.sh
 docs	python3 scripts/changelog.py validate --repo-root .
 changelog-release-2	bash scripts/changelog-release-permissions.test.sh
 changelog-release-3	python3 scripts/changelog-release-app-token.test.py
-changelog-release-4	python3 scripts/renovate-changelog.test.py
-changelog-release-1	python3 scripts/ci-gate/renovate-changelog.test.py
 changelog-release-2	python3 scripts/release-app-canary.test.py
 changelog-release-3	bash scripts/changelog-release-branch-guard.test.sh
 changelog-release-3	python3 scripts/ci-gate/generator-header-provenance.test.py

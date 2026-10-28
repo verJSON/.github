@@ -38,7 +38,6 @@ CASES: dict[str, list[list[str]]] = {
     "workflow": [[]],
     "generated-artifacts": [[]],
     "generated-artifacts-with-adr-index": [[]],
-    "renovate-attribution": [[]],
     "adr-index-generator": [[]],
     "adr-index-test": [[]],
     "renderer": [[]],
