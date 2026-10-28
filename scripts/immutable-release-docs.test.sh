@@ -28,11 +28,11 @@ fi
 
 release_instructions="$(sed -n '/^## Cutting a release$/,$p' "$versioning_docs")"
 
-if grep -qF 'Dispatch the pinned `.github/workflows/release.yml` with that version' <<<"$release_instructions" \
+if grep -qF 'dispatch the pinned `.github/workflows/release.yml`'  <<<"$release_instructions" \
   && grep -qF 'dispatch commit' <<<"$release_instructions" \
   && grep -qF 'concurrent change to `main` makes publication fail closed' <<<"$release_instructions" \
   && ! grep -qF 'gh release create' <<<"$release_instructions"; then
-  pass "release instructions use an explicit-version dispatch bound to its verified source"
+  pass "release instructions use a manual dispatch bound to its verified source"
 else
   fail "release instructions omit the exact-source dispatch or revive manual release creation"
 fi

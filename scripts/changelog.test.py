@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -1702,12 +1703,213 @@ class ChangelogContractTests(unittest.TestCase):
 
         selected = changelog.select_release_fragments(self.root, [])
 
-        self.assertEqual("v1.2.4", changelog.next_version(self.root, []))
+        with self.assertRaisesRegex(changelog.ChangelogError, "only prerelease or build-qualified snapshots"):
+            changelog.next_version(self.root, [])
         changelog.validate_release_bump(
             self.root,
             "v1.2.4-rc.1+build.007",
             selected,
         )
+
+    def test_qualified_only_history_requires_explicit_bootstrap(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        fragment(self.root, "2026-07-30-issue-249-next.md", impact="patch")
+        for prior in ("v1.2.0-rc.1", "v1.2.0+build.1"):
+            with self.subTest(prior=prior):
+                path = snapshots / f"{prior}.md"
+                path.write_text("previous\n", encoding="utf-8")
+                with self.assertRaisesRegex(changelog.ChangelogError, "supply an explicit bootstrap version"):
+                    changelog.release_plan(self.root, "", [])
+                requested = "v1.2.0" if "-rc." in prior else "v1.2.1"
+                plan = changelog.release_plan(self.root, requested, [])
+                self.assertEqual(requested, plan["version"])
+                self.assertEqual("bootstrap", plan["bump"])
+                if "+" in prior:
+                    with self.assertRaisesRegex(changelog.ChangelogError, "equal precedence"):
+                        changelog.release_plan(self.root, "v1.2.0", [])
+                path.unlink()
+
+    def test_explicit_bootstrap_cannot_move_behind_qualified_history(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        fragment(self.root, "2026-07-30-issue-249-next.md", impact="patch")
+        for prior in ("v9.0.0-rc.1", "v9.0.0+build.1"):
+            with self.subTest(prior=prior):
+                path = snapshots / f"{prior}.md"
+                path.write_text("previous\n", encoding="utf-8")
+                with self.assertRaisesRegex(changelog.ChangelogError, "precedes existing qualified snapshot"):
+                    changelog.release_plan(self.root, "v1.0.0", [])
+                if "-rc." in prior:
+                    self.assertEqual("v9.0.0", changelog.release_plan(self.root, "v9.0.0", [])["version"])
+                    self.assertEqual("v9.0.0-rc.2", changelog.release_plan(self.root, "v9.0.0-rc.2", [])["version"])
+                    with self.assertRaisesRegex(changelog.ChangelogError, "does not advance"):
+                        changelog.release_plan(self.root, "v9.0.0-alpha", [])
+                else:
+                    with self.assertRaisesRegex(changelog.ChangelogError, "equal precedence"):
+                        changelog.release_plan(self.root, "v9.0.0", [])
+                if "-rc." in prior:
+                    self.assertEqual("v9.0.0+different", changelog.release_plan(self.root, "v9.0.0+different", [])["version"])
+                else:
+                    with self.assertRaisesRegex(changelog.ChangelogError, "equal precedence"):
+                        changelog.release_plan(self.root, "v9.0.0+different", [])
+                path.unlink()
+
+    def test_explicit_bootstrap_release_with_only_prerelease_history_succeeds(self) -> None:
+        self.init_git()
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        (snapshots / "v1.2.0-rc.1.md").write_text("preview\n", encoding="utf-8")
+        fragment(self.root, "2026-07-30-issue-249-next.md", impact="patch")
+        self.commit_all("prepare explicit bootstrap")
+        changelog.release(self.root, "v1.2.0", [])
+        self.assertTrue((snapshots / "v1.2.0.md").is_file())
+        self.assertEqual("tag", run(self.root, "git", "cat-file", "-t", "v1.2.0"))
+
+    def test_qualified_history_newer_than_stable_fails_closed(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        (snapshots / "v1.1.0.md").write_text("stable\n", encoding="utf-8")
+        fragment(self.root, "2026-07-30-issue-249-next.md", impact="patch")
+        for prior in ("v1.2.0-rc.1", "v1.2.0+build.1"):
+            with self.subTest(prior=prior):
+                path = snapshots / f"{prior}.md"
+                path.write_text("qualified\n", encoding="utf-8")
+                with self.assertRaisesRegex(changelog.ChangelogError, "newer than the latest stable snapshot"):
+                    changelog.release_plan(self.root, "", [])
+                self.assertEqual("v1.1.1", changelog.release_plan(self.root, "v1.1.1", [])["version"])
+                if "-rc." in prior:
+                    plan = changelog.release_plan(self.root, "v1.2.0", [])
+                    self.assertEqual("v1.2.0", plan["version"])
+                    self.assertIn("graduates an existing prerelease", plan["bump_rationale"])
+                    self.assertEqual("v1.2.0-rc.2", changelog.release_plan(self.root, "v1.2.0-rc.2", [])["version"])
+                    self.assertEqual("v1.2.0+build.2", changelog.release_plan(self.root, "v1.2.0+build.2", [])["version"])
+                else:
+                    with self.assertRaisesRegex(changelog.ChangelogError, "equal precedence"):
+                        changelog.release_plan(self.root, "v1.2.0", [])
+                path.unlink()
+
+    def test_qualified_release_rationale_names_the_actual_version(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        (snapshots / "v1.1.0.md").write_text("stable\n", encoding="utf-8")
+        (snapshots / "v1.2.0-rc.1.md").write_text("preview\n", encoding="utf-8")
+        fragment(self.root, "2026-07-30-issue-249-feature.md", impact="minor")
+        for requested in ("v1.2.0-rc.2", "v1.2.0+build.2"):
+            with self.subTest(version=requested):
+                plan = changelog.release_plan(self.root, requested, [])
+                self.assertIn(requested, plan["bump_rationale"])
+                self.assertIn("required core v1.2.0", plan["bump_rationale"])
+
+    def test_explicit_higher_prerelease_core_requires_matching_history(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        (snapshots / "v1.1.0.md").write_text("stable\n", encoding="utf-8")
+        (snapshots / "v3.0.0-rc.1.md").write_text("preview\n", encoding="utf-8")
+        fragment(self.root, "2026-07-30-issue-249-fix.md", impact="patch")
+        with self.assertRaisesRegex(changelog.ChangelogError, "newer than the latest stable snapshot"):
+            changelog.release_plan(self.root, "", [])
+        for requested, action in (("v3.0.0-rc.2", "advances"), ("v3.0.0", "graduates")):
+            with self.subTest(version=requested):
+                plan = changelog.release_plan(self.root, requested, [])
+                self.assertEqual(requested, plan["version"])
+                self.assertIn(f"{action} an existing prerelease", plan["bump_rationale"])
+        for requested in ("v2.0.0", "v2.0.0-rc.1"):
+            with self.subTest(version=requested):
+                with self.assertRaisesRegex(changelog.ChangelogError, "require a patch bump"):
+                    changelog.release_plan(self.root, requested, [])
+
+    def test_prerelease_progression_cannot_undercut_selected_impact(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        (snapshots / "v1.1.0.md").write_text("stable\n", encoding="utf-8")
+        (snapshots / "v1.2.0-rc.1.md").write_text("preview\n", encoding="utf-8")
+        fragment(self.root, "2026-07-30-issue-249-breaking.md", impact="major")
+        for requested in ("v1.2.0", "v1.2.0-rc.2"):
+            with self.subTest(version=requested):
+                with self.assertRaisesRegex(changelog.ChangelogError, "require a major bump"):
+                    changelog.release_plan(self.root, requested, [])
+        self.assertEqual("v2.0.0", changelog.release_plan(self.root, "v2.0.0", [])["version"])
+
+    def test_explicit_prerelease_must_advance_semver_precedence(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        (snapshots / "v1.1.0.md").write_text("stable\n", encoding="utf-8")
+        (snapshots / "v1.2.0-rc.2+build.1.md").write_text("preview\n", encoding="utf-8")
+        fragment(self.root, "2026-07-30-issue-249-next.md", impact="patch")
+        for rejected in ("v1.2.0-rc.1", "v1.2.0-rc.2+build.2", "v1.2.0-alpha"):
+            with self.subTest(version=rejected):
+                with self.assertRaisesRegex(changelog.ChangelogError, "does not advance"):
+                    changelog.release_plan(self.root, rejected, [])
+        plan = changelog.release_plan(self.root, "v1.2.0-rc.10", [])
+        self.assertEqual("v1.2.0-rc.10", plan["version"])
+        self.assertIn("advances an existing prerelease", plan["bump_rationale"])
+
+    def test_stable_build_classification_respects_namespace_and_semver_core(self) -> None:
+        for version, expected in (
+            ("v1.2.0+build.1", True),
+            ("python-v1.2.0+build.1", False),
+            ("v1.2.1+build.1", False),
+            ("v1.2.0-rc.1+build.1", False),
+            ("v1.2.0", False),
+            ("v1.2", False),
+        ):
+            with self.subTest(version=version):
+                self.assertEqual(expected, changelog.is_stable_build_at_core(version, "v", (1, 2, 0)))
+
+    def test_explicit_next_patch_recovers_occupied_build_precedence(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        (snapshots / "v1.1.0.md").write_text("stable\n", encoding="utf-8")
+        (snapshots / "python-v99.0.0+other.md").write_text("other namespace\n", encoding="utf-8")
+        path = fragment(self.root, "2026-07-30-issue-249-feature.md", impact="patch")
+        for impact, occupied, recovered, skipped in (
+            ("patch", "v1.1.1", "v1.1.2", "v1.1.3"),
+            ("minor", "v1.2.0", "v1.2.1", "v1.2.2"),
+            ("major", "v2.0.0", "v2.0.1", "v2.0.2"),
+        ):
+            with self.subTest(impact=impact):
+                text = path.read_text(encoding="utf-8")
+                path.write_text(re.sub(r"impact: (patch|minor|major)", f"impact: {impact}", text), encoding="utf-8")
+                first, second = (snapshots / f"{occupied}+{label}.md" for label in ("build.1", "build.2"))
+                first.write_text("one\n", encoding="utf-8")
+                second.write_text("two\n", encoding="utf-8")
+                with self.assertRaisesRegex(changelog.ChangelogError, "newer than the latest stable snapshot"):
+                    changelog.release_plan(self.root, "", [])
+                for duplicate in (occupied, f"{occupied}+other"):
+                    with self.assertRaisesRegex(changelog.ChangelogError, "equal precedence"):
+                        changelog.release_plan(self.root, duplicate, [])
+                plan = changelog.release_plan(self.root, recovered, [])
+                self.assertEqual(recovered, plan["version"])
+                self.assertIn("avoids the occupied stable precedence", plan["bump_rationale"])
+                blocked = snapshots / f"{recovered}+other.md"
+                blocked.write_text("already used\n", encoding="utf-8")
+                with self.assertRaisesRegex(changelog.ChangelogError, "equal precedence"):
+                    changelog.release_plan(self.root, recovered, [])
+                blocked.unlink()
+                with self.assertRaisesRegex(changelog.ChangelogError, f"require a {impact} bump"):
+                    changelog.release_plan(self.root, skipped, [])
+                first.unlink()
+                second.unlink()
+
+    def test_other_namespace_or_unrelated_build_does_not_allow_overbump(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        for version in ("v1.1.0", "v1.3.0+build.1", "python-v1.2.0+build.1"):
+            (snapshots / f"{version}.md").write_text("previous\n", encoding="utf-8")
+        fragment(self.root, "2026-07-30-issue-249-feature.md", impact="minor")
+        with self.assertRaisesRegex(changelog.ChangelogError, "require a minor bump"):
+            changelog.release_plan(self.root, "v1.2.1", [])
+
+    def test_qualified_history_at_or_below_stable_does_not_move_baseline(self) -> None:
+        snapshots = self.root / "CHANGELOG"
+        snapshots.mkdir()
+        for version in ("v1.2.0", "v1.2.0-rc.1", "v1.1.0+build.1", "python-v9.0.0-rc.1"):
+            (snapshots / f"{version}.md").write_text("previous\n", encoding="utf-8")
+        fragment(self.root, "2026-07-30-issue-249-next.md", impact="patch")
+        plan = changelog.release_plan(self.root, "", [])
+        self.assertEqual("v1.2.0", plan["previous_release"])
+        self.assertEqual("v1.2.1", plan["version"])
 
     def test_help_names_next_version_as_read_only_and_documents_its_selectors(self) -> None:
         top_level = run(self.root, sys.executable, str(MODULE_PATH), "--help")
@@ -2790,10 +2992,10 @@ class ChangelogContractTests(unittest.TestCase):
             "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}",
             workflow,
         )
-        # The push still targets the branch by name, which is what makes the pin
-        # fail closed: from the dispatch commit this refspec is non-fast-forward
-        # once the branch has moved, so a raced release tags nothing.
-        self.assertIn('"$release_commit:refs/heads/$DEFAULT_BRANCH"', workflow)
+        # The pinned guard compares the branch value to the dispatch SHA and
+        # atomically publishes the validated release commit and tag.
+        self.assertIn('bash .changelog-contract/scripts/release-push-guard.sh', workflow)
+        self.assertIn('"$DEFAULT_BRANCH" "$GITHUB_REF" "$GITHUB_SHA" "$release_commit" "$VERSION"', workflow)
         # The checkout is detached at the dispatch commit, so nothing may derive
         # the branch from HEAD.
         self.assertNotIn("git symbolic-ref", workflow)

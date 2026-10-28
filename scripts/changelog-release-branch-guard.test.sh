@@ -129,11 +129,9 @@ run_guard refs/heads/main-backup main >/dev/null 2>&1
 # (cancel-in-progress: false) can hold it open behind another release. The
 # window is not theoretical: it releases and publishes a tree nothing checked.
 #
-# github.sha is the caller's dispatch commit, and the guard above has already
-# proved that commit is the default branch head. Pinning it makes the final
-# `git push --atomic` non-fast-forward when main has moved, so a concurrent
-# merge fails the release with no tag pushed instead of tagging unverified
-# content (#463, #464, ADR 0062).
+# github.sha is the caller's dispatch commit. The release push guard
+# compares the target branch to that SHA and requires the new commit to be
+# its direct child before atomically publishing the branch and tag.
 # --------------------------------------------------------------------------
 checkout_ref="$(awk '
   /^      - name: Check out release repository$/ { instep = 1; next }

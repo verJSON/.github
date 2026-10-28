@@ -16,8 +16,9 @@ the operational reference for the decision recorded in
   Review each update through a pull request.
 - **Legacy aliases:** existing `@v2` and `@v3` tags stay at their current targets.
   New releases do not move them; migrate callers to release commits.
-- Releases are dispatched with an explicit `vX.Y.Z` version. No release or tag
-  movement follows a plain push to `main`.
+- Release managers explicitly dispatch releases. A blank version derives `vX.Y.Z`
+  from the selected fragment impacts; bootstrap namespaces require an explicit version.
+  No release or tag movement follows a plain push to `main`.
 
 ## Why pin (not `@main`)
 
@@ -76,9 +77,11 @@ does not rewrite their workflow files.
 ## Cutting a release
 
 1. Land the change on `main` after review and green CI.
-2. Choose the exact `vX.Y.Z` version for the repository's contract release.
-3. Dispatch the pinned `.github/workflows/release.yml` with that version and the
-   intended fragments. Its verification and publication jobs use the same
+2. Select the intended fragments and dispatch the pinned `.github/workflows/release.yml`.
+   Leave version blank to derive it from their highest impact, or supply an exact
+   `vX.Y.Z` version for validation. A new namespace needs an explicit initial version.
+3. Inspect the resolved version and selection in the release plan. The verification
+   and publication jobs use the same
    dispatch commit. A concurrent change to `main` makes publication fail closed;
    re-dispatch from the new head after verification.
 4. Read back the immutable release commit, `vX.Y.Z` tag, and changelog snapshot.

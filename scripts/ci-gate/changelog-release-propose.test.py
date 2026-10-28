@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -423,7 +424,7 @@ class GeneratedCallerTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 raw, document = self.generate(mode)
                 triggers = document.get("on", document.get(True))
-                self.assertEqual({"schedule", "workflow_dispatch"}, set(triggers))
+                self.assertEqual({"schedule", "workflow_dispatch"} if mode == "propose" else {"workflow_dispatch"}, set(triggers))
                 self.assertNotIn("autonomy", triggers["workflow_dispatch"]["inputs"])
                 job = document["jobs"]["release-propose"]
                 self.assertEqual(
@@ -442,6 +443,38 @@ class GeneratedCallerTests(unittest.TestCase):
                 self.assertEqual(job["permissions"], called_job["permissions"])
                 self.assertNotIn("issues: write", raw if mode == "dispatch" else "")
                 self.assertNotIn("actions: write", raw if mode == "propose" else "")
+
+    def test_dispatch_admission_rejects_scheduled_and_non_default_branch_runs(self) -> None:
+        workflow = yaml.safe_load((ROOT / ".github/workflows/release-dispatch.yml").read_text(encoding="utf-8"))
+        step = next(step for step in workflow["jobs"]["release-dispatch"]["steps"] if step.get("name") == "Admit release dispatch on the default branch")
+        base = {"PATH": "/usr/bin:/bin", "DEFAULT_BRANCH": "main", "DISPATCH_REF": "refs/heads/main", "CONTRACT_REF": self.sha}
+        for event, ref, expected in (("schedule", "refs/heads/main", 1), ("push", "refs/heads/main", 1), ("workflow_dispatch", "refs/heads/other", 1), ("workflow_dispatch", "refs/heads/main", 0)):
+            with self.subTest(event=event, ref=ref):
+                result = subprocess.run(["bash", "-c", step["run"]], env=base | {"EVENT_NAME": event, "DISPATCH_REF": ref}, capture_output=True, text=True)
+                self.assertEqual(expected, result.returncode, result.stderr)
+
+    def test_npm_stamp_rejects_build_metadata_before_running_npm(self) -> None:
+        for mode in ("release-node", "release-artifact", "release-snapshot"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                args = ["bash", str(ROOT / "scripts/gen-changelog-caller.sh"), mode, self.sha]
+                if mode == "release-artifact":
+                    args += ["--build-runner", "general"]
+                workflow = yaml.safe_load(subprocess.run(args, check=True, capture_output=True, text=True).stdout)
+                step = next(step for step in workflow["jobs"]["verify"]["steps"] if step.get("name") == "Stamp the dispatched package versions")
+                root = Path(directory)
+                fake_npm = root / "npm"
+                fake_npm.write_text("#!/bin/sh\nprintf called > \"$NPM_MARKER\"\n", encoding="utf-8")
+                fake_npm.chmod(0o755)
+                marker = root / "called"
+                env = {"PATH": f"{root}:/usr/bin:/bin", "NPM_MARKER": str(marker), "PACKAGE_VERSION": "1.2.0+build.2"}
+                rejected = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root, env=env, capture_output=True, text=True)
+                self.assertNotEqual(0, rejected.returncode)
+                self.assertIn("npm strips build metadata", rejected.stdout)
+                self.assertFalse(marker.exists())
+                env["PACKAGE_VERSION"] = "1.2.0"
+                accepted = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root, env=env, capture_output=True, text=True)
+                self.assertEqual(0, accepted.returncode, accepted.stderr)
+                self.assertTrue(marker.exists())
 
     def test_generator_refuses_implicit_or_invalid_autonomy(self) -> None:
         generator = str(ROOT / "scripts" / "gen-changelog-caller.sh")
@@ -516,7 +549,7 @@ class GeneratedCallerTests(unittest.TestCase):
         document = yaml.safe_load(result.stdout)
 
         self.assertEqual(
-            "Release ${{ inputs.version }} ${{ inputs.selector_digest || 'manual' }}",
+            "Release ${{ inputs.version || 'auto' }} ${{ inputs.selector_digest || 'manual' }}",
             document["run-name"],
         )
         inputs = document.get("on", document.get(True))["workflow_dispatch"]["inputs"]

@@ -437,38 +437,26 @@ grep -qF "node-version: \${{ '24' }}" <<<"$default_release" \
 grep -qF '# Legacy compatibility input; all Node release jobs use fresh ubuntu-24.04 runners.' <<<"$default_release" \
   && pass "release-node documents its hosted-runner contract" \
   || fail "release-node runner input no longer documents its compatibility scope"
-assert_explicit_release_version() {
-  local mode="$1" workflow="$2" version_input first_verify_step
+assert_optional_release_version() {
+  local mode="$1" workflow="$2" version_input
   version_input="$(sed -n '/^      version:$/,/^      prefix:$/p' <<<"$workflow" | sed '$d')"
-  first_verify_step="$(awk '/^  verify:$/ { in_verify=1 } in_verify && /^    steps:$/ { getline; print; exit }' <<<"$workflow")"
-  grep -qF 'description: Exact SemVer tag to release' <<<"$version_input" \
-    && grep -qF 'required: true' <<<"$version_input" \
-    && ! grep -qF 'default:' <<<"$version_input" \
-    && [ "$first_verify_step" = '      - name: Require an explicit release version' ] \
-    && pass "$mode requires a version before any release work" \
-    || fail "$mode permits a blank version or starts release work before validating it"
+  grep -qF 'description: Optional exact SemVer tag; blank derives the next version from selected fragments' <<<"$version_input" \
+    && grep -qF 'required: false' <<<"$version_input" \
+    && grep -qF "default: ''" <<<"$version_input" \
+    && pass "$mode supports a manually dispatched derived version" \
+    || fail "$mode does not expose a derived-version input"
 }
-assert_explicit_release_version release-node "$default_release"
-version_guard="$(python3 -c 'import sys, yaml; print(yaml.safe_load(sys.stdin)["jobs"]["verify"]["steps"][0]["run"])' <<<"$default_release")"
-# Bash's \u escape is locale-dependent; exercise UTF-8 bytes with the emitted step's decoder.
-# The step starts Python isolated, which ignores PYTHONUTF8, so it must request UTF-8 itself.
-[ -n "$version_guard" ] \
-  && grep -qF "python3 -I -X utf8 - <<'PY'" <<<"$version_guard" \
-  && ! env -u PYTHONUTF8 LC_ALL=C INPUT_VERSION='' bash -c "$version_guard" >/dev/null 2>&1 \
-  && ! env -u PYTHONUTF8 LC_ALL=C INPUT_VERSION='  ' bash -c "$version_guard" >/dev/null 2>&1 \
-  && ! env -u PYTHONUTF8 LC_ALL=C INPUT_VERSION=$'\xc2\xa0' bash -c "$version_guard" >/dev/null 2>&1 \
-  && env -u PYTHONUTF8 LC_ALL=C INPUT_VERSION='v1.2.3' bash -c "$version_guard" >/dev/null 2>&1 \
-  && pass "release dispatch rejects blank versions before resolving a plan" \
-  || fail "release dispatch version guard accepts blank input or rejects an explicit version"
+assert_optional_release_version release-node "$default_release"
 component_trigger="$(sed -n '/^on:$/,/^permissions:$/p' <<<"$component_release" | sed '$d')"
 expected_component_trigger="$(cat <<'YAML'
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Exact SemVer tag to release
-        required: true
+        description: Optional exact SemVer tag; blank derives the next version from selected fragments
+        required: false
         type: string
+        default: ''
       prefix:
         description: Exact version namespace prefix; independent from component
         required: false
@@ -513,7 +501,7 @@ for component_mode in release-snapshot release-artifact; do
     component_mode_release="$(bash "$gen" "$component_mode" "$sha" --default-prefix schema-v --default-component cli-schema)"
   fi
   component_mode_trigger="$(sed -n '/^on:$/,/^permissions:$/p' <<<"$component_mode_release" | sed '$d')"
-  assert_explicit_release_version "$component_mode" "$component_mode_release"
+  assert_optional_release_version "$component_mode" "$component_mode_release"
   [ "$component_mode_trigger" = "$expected_component_trigger" ] \
     && pass "$component_mode emits the same byte-exact component workflow defaults (#1565)" \
     || fail "$component_mode component workflow defaults differ from release-node"
@@ -3064,12 +3052,12 @@ import sys
 
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
-old = "name: Release\nrun-name: Release ${{ inputs.version }} ${{ inputs.selector_digest || 'manual' }}\n"
+old = "name: Release\nrun-name: Release ${{ inputs.version || 'auto' }} ${{ inputs.selector_digest || 'manual' }}\n"
 if text.count(old) != 1:
     raise SystemExit("the release caller lost its name and run-name")
 text = text.replace(old, (
     "name: Release it's # ${{ '\n"
-    "run-name: Release ${{ inputs.version }} ${{ inputs.selector_digest || 'manual' }} ${{ github.token }}\n"
+    "run-name: Release ${{ inputs.version || 'auto' }} ${{ inputs.selector_digest || 'manual' }} ${{ github.token }}\n"
 ))
 open(path, "w", encoding="utf-8").write(text)
 PY
@@ -3171,7 +3159,7 @@ import sys
 
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
-old = "run-name: Release ${{ inputs.version }} ${{ inputs.selector_digest || 'manual' }}\n"
+old = "run-name: Release ${{ inputs.version || 'auto' }} ${{ inputs.selector_digest || 'manual' }}\n"
 if text.count(old) != 1:
     raise SystemExit("the release caller lost its run-name")
 text = text.replace(old, "", 1).rstrip("\n") + "\n" + old.rstrip("\n") + " ${{ github.token }}\n"
