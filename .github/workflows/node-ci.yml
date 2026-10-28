@@ -422,6 +422,13 @@ on:
         required: false
         type: string
         default: ''
+      playwright-sandbox-profile:
+        description: >-
+          Explicit opt-in fixed Playwright system-library profile for secretless script plans.
+          Empty (the default) leaves host libraries unchanged; only reviewed profile IDs are accepted.
+        required: false
+        type: string
+        default: ''
       db-image:
         description: >-
           Optional database image (e.g. pgvector/pgvector:pg16) to run as a
@@ -2001,6 +2008,24 @@ jobs:
             --artifact-role "$POSTGRES_ARTIFACT_ROLE" \
             --compatibility-ranges "$POSTGRES_COMPATIBILITY_RANGES" \
             --secretless-mode "$POSTGRES_SECRETLESS_MODE"
+      - name: Validate Playwright system-library profile request
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.playwright-sandbox-profile != ''
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          PLAYWRIGHT_PROFILE: ${{ inputs.playwright-sandbox-profile }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RUNNER_OS: ${{ runner.os }}
+          VERJSON_CI_SECRETLESS_MODE: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          mkdir -p "$RUNNER_TEMP/config"
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci_playwright_system_libraries.py" -o "$RUNNER_TEMP/ci_playwright_system_libraries.py"
+          curl --fail --silent --show-error --location "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/config/ci-playwright-system-libraries.json" -o "$RUNNER_TEMP/config/ci-playwright-system-libraries.json"
+          python3 -I "$RUNNER_TEMP/ci_playwright_system_libraries.py" validate \
+            --profile "$PLAYWRIGHT_PROFILE" \
+            --runner-environment "$RUNNER_ENVIRONMENT" \
+            --runner-os "$RUNNER_OS"
       - name: Prepare job-scoped changelog tool cache
         if: needs.eligibility.outputs.should-run != 'false'
         run: |
@@ -2071,6 +2096,7 @@ jobs:
           BUILD_ARTIFACT_RUNTIME_INPUT_SCHEMA_DIR: ${{ toJSON(inputs.schema-dir) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_RUNNER: ${{ toJSON(inputs.runner) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_POSTGRES_SANDBOX_PROFILE: ${{ toJSON(inputs.postgres-sandbox-profile) }}
+          BUILD_ARTIFACT_RUNTIME_INPUT_PLAYWRIGHT_SANDBOX_PROFILE: ${{ toJSON(inputs.playwright-sandbox-profile) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_DB_IMAGE: ${{ toJSON(inputs.db-image) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_DB_PORT: ${{ toJSON(inputs.db-port) }}
           BUILD_ARTIFACT_RUNTIME_INPUT_DB_HEALTH_CMD: ${{ toJSON(inputs.db-health-cmd) }}
@@ -6009,6 +6035,31 @@ jobs:
           mode: normalize
           script-plan: ${{ steps.select-build-artifact-plan.outputs.plan || (steps.classify-diff.outputs.non-app == 'true' && inputs.secretless-ci-non-app-script-plan || inputs.secretless-ci-script-plan) }}
           nested-manifests: ${{ inputs.secretless-nested-manifests }}
+      - name: Provision Playwright system-library profile
+        id: provision-playwright-profile
+        if: needs.eligibility.outputs.should-run != 'false' && inputs.playwright-sandbox-profile != '' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        env:
+          PLAYWRIGHT_PROFILE: ${{ inputs.playwright-sandbox-profile }}
+          PLAYWRIGHT_STATE_FILE: /run/verjson-playwright-${{ github.run_id }}-${{ github.run_attempt }}-ci.json
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RUNNER_OS: ${{ runner.os }}
+        run: |
+          set -euo pipefail
+          sudo /usr/bin/env -i \
+            PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            HOME=/nonexistent \
+            DEBIAN_FRONTEND=noninteractive \
+            LC_ALL=C \
+            APT_CONFIG=/dev/null \
+            VERJSON_CI_SECRETLESS_MODE=true \
+            /usr/bin/python3 -I "$RUNNER_TEMP/ci_playwright_system_libraries.py" provision \
+              --profile "$PLAYWRIGHT_PROFILE" \
+              --state-file "$PLAYWRIGHT_STATE_FILE" \
+              --runner-environment "$RUNNER_ENVIRONMENT" \
+              --runner-os "$RUNNER_OS"
+          receipt_identity="$(stat -c '%d:%i' -- "$PLAYWRIGHT_STATE_FILE")"
+          [[ "$receipt_identity" =~ ^[0123456789]+:[0123456789]+$ ]]
+          echo "receipt_identity=$receipt_identity" >> "$GITHUB_OUTPUT"
       - name: Run exact credentialless consumer script plan
         id: run-script-plan
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
@@ -6036,6 +6087,11 @@ jobs:
           VERJSON_CI_LEGACY_DB_IMAGE: ${{ inputs.db-image }}
           VERJSON_CI_LEGACY_CACHE_IMAGE: ${{ inputs.cache-image }}
           VERJSON_CI_POSTGRES_SECRETLESS_MODE: 'true'
+          VERJSON_CI_PLAYWRIGHT_PROFILE: ${{ inputs.playwright-sandbox-profile }}
+          VERJSON_CI_PLAYWRIGHT_STATE: /run/verjson-playwright-${{ github.run_id }}-${{ github.run_attempt }}-ci.json
+          VERJSON_CI_PLAYWRIGHT_SECRETLESS_MODE: 'true'
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RUNNER_OS: ${{ runner.os }}
           RESTORE_PERSISTED_PUBLIC_CACHE: ${{ inputs.cache && inputs.package-manager == 'npm' }}
           RUNTIME_CACHE_DIR: ${{ runner.temp }}/secretless-runtime-cache-${{ github.run_id }}-${{ github.run_attempt }}
           SCRIPT_PLAN_DEFAULT_PLAN: ${{ steps.node-ci-script-plan.outputs.default-plan }}
@@ -6098,6 +6154,17 @@ jobs:
                   secretless_mode=os.environ.get("VERJSON_CI_POSTGRES_SECRETLESS_MODE") == "true",
               )
               postgres_state_file = Path(os.environ["VERJSON_CI_POSTGRES_SANDBOX_STATE"])
+
+          playwright_profile_name = os.environ.get("VERJSON_CI_PLAYWRIGHT_PROFILE", "")
+          playwright_profile_module = None
+          playwright_state_file = None
+          if playwright_profile_name:
+              import ci_playwright_system_libraries as playwright_profile_module
+
+              if os.environ.get("VERJSON_CI_PLAYWRIGHT_SECRETLESS_MODE") != "true":
+                  sys.exit("Playwright system-library profile requires a secretless script plan")
+              playwright_profile_module.resolve_profile(playwright_profile_name)
+              playwright_state_file = Path(os.environ["VERJSON_CI_PLAYWRIGHT_STATE"])
 
           host_signals = ci_build_artifacts.HostSignalQueue()
           signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
@@ -6243,6 +6310,8 @@ jobs:
           blocked_service_env = {
               "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
               "GITHUB_STEP_SUMMARY", "VERJSON_CI_TRUSTED_DB_HOST",
+              "VERJSON_CI_PLAYWRIGHT_PROFILE", "VERJSON_CI_PLAYWRIGHT_STATE",
+              "VERJSON_CI_PLAYWRIGHT_SECRETLESS_MODE",
               "VERJSON_CI_COMMAND_FILES_DIR", "GH_TOKEN",
               "GITHUB_TOKEN", "NODE_AUTH_TOKEN",
               "NPM_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "FTP_PROXY",
@@ -6740,6 +6809,8 @@ jobs:
                   "VERJSON_CI_POSTGRES_PROFILE", "VERJSON_CI_POSTGRES_SANDBOX_STATE",
                   "VERJSON_CI_LEGACY_DB_IMAGE", "VERJSON_CI_LEGACY_CACHE_IMAGE",
                   "VERJSON_CI_POSTGRES_SECRETLESS_MODE",
+                  "VERJSON_CI_PLAYWRIGHT_PROFILE", "VERJSON_CI_PLAYWRIGHT_STATE",
+                  "VERJSON_CI_PLAYWRIGHT_SECRETLESS_MODE",
               ):
                   script_env.pop(env_name, None)
               for env_name in service_env_names:
@@ -6814,6 +6885,11 @@ jobs:
                   postgres_profile_module.verify_profile_runtime(
                       postgres_state_file,
                       runner_temp=runner_temp,
+                  )
+              if playwright_profile_module is not None:
+                  playwright_profile_module.verify_runtime(
+                      playwright_profile_name,
+                      playwright_state_file,
                   )
               arguments = [
                   str(bubblewrap),
@@ -7178,6 +7254,8 @@ jobs:
           blocked_service_env = {
               "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
               "GITHUB_STEP_SUMMARY", "VERJSON_CI_TRUSTED_DB_HOST",
+              "VERJSON_CI_PLAYWRIGHT_PROFILE", "VERJSON_CI_PLAYWRIGHT_STATE",
+              "VERJSON_CI_PLAYWRIGHT_SECRETLESS_MODE",
               "VERJSON_CI_COMMAND_FILES_DIR", "GH_TOKEN",
               "GITHUB_TOKEN", "NODE_AUTH_TOKEN",
               "NPM_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "FTP_PROXY",
@@ -8725,6 +8803,29 @@ jobs:
             fi
           done
           exit "$cleanup_status"
+      - name: Remove Playwright system-library receipt
+        if: always() && needs.eligibility.outputs.should-run != 'false' && inputs.playwright-sandbox-profile != ''
+        env:
+          PLAYWRIGHT_STATE_FILE: /run/verjson-playwright-${{ github.run_id }}-${{ github.run_attempt }}-ci.json
+          PLAYWRIGHT_STATE_IDENTITY: ${{ steps.provision-playwright-profile.outputs.receipt_identity }}
+        run: |
+          set -euo pipefail
+          if [[ -e "$PLAYWRIGHT_STATE_FILE" || -L "$PLAYWRIGHT_STATE_FILE" ]]; then
+            [[ -f "$RUNNER_TEMP/ci_playwright_system_libraries.py" ]]
+            [[ "$PLAYWRIGHT_STATE_IDENTITY" =~ ^[0123456789]+:[0123456789]+$ ]] || {
+              echo "::error::Playwright receipt identity is unavailable; refusing cleanup" >&2
+              exit 1
+            }
+            sudo /usr/bin/env -i \
+              PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+              HOME=/nonexistent \
+              DEBIAN_FRONTEND=noninteractive \
+              LC_ALL=C \
+              APT_CONFIG=/dev/null \
+              /usr/bin/python3 -I "$RUNNER_TEMP/ci_playwright_system_libraries.py" cleanup \
+                --state-file "$PLAYWRIGHT_STATE_FILE" \
+                --expected-identity "$PLAYWRIGHT_STATE_IDENTITY"
+          fi
       - name: Stop cache service
         if: always() && needs.eligibility.outputs.should-run != 'false' && inputs.cache-image != ''
         env:

@@ -80,6 +80,7 @@ expected_literal_hosted_sites="$(printf '%s\n' \
   $'node-ci.yml:artifact-mode-gate:    runs-on: ubuntu-24.04\nnode-ci.yml:artifact-preflight:    runs-on: ubuntu-24.04\nnode-ci-protected.yml:artifact-mode-gate:    runs-on: ubuntu-24.04\nnode-ci-protected.yml:artifact-preflight:    runs-on: ubuntu-24.04' \
   $'node-ci.yml:deferred-ci:    runs-on: ubuntu-24.04\nnode-ci-protected.yml:deferred-ci:    runs-on: ubuntu-24.04' \
  $'verjson-ci.yml:ci:    runs-on: ubuntu-24.04\nverjson-ci.yml:reject-profile:    runs-on: ubuntu-24.04\nverjson-ci.yml:reject-public-profile:    runs-on: ubuntu-24.04' \
+  $'playwright-profile-hosted-acceptance.yml:hosted-profile-acceptance:    runs-on: ubuntu-24.04' \
   | sort)"
 
 validate_literal_hosted_inventory() {
@@ -95,6 +96,67 @@ else
   fail "$inventory_error"
 fi
 
+if python3 - "$workflows/playwright-profile-hosted-acceptance.yml" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    lines = stream.read().splitlines()
+source = "\n".join(lines)
+assert "&" not in source and "*" not in source and "<<:" not in source
+on_index = lines.index("on:")
+next_top_level = next(
+    (index for index in range(on_index + 1, len(lines))
+     if lines[index] and not lines[index][0].isspace()),
+    len(lines),
+)
+trigger_keys = {
+    match.group(1)
+    for line in lines[on_index + 1:next_top_level]
+    if (match := re.fullmatch(r"  ([A-Za-z0-9_-]+):", line))
+}
+permissions_index = lines.index("permissions:")
+permissions_end = next(
+    (index for index in range(permissions_index + 1, len(lines))
+     if lines[index] and not lines[index][0].isspace()),
+    len(lines),
+)
+permission_lines = [
+    line for line in lines[permissions_index + 1:permissions_end]
+    if line.strip() and not line.lstrip().startswith("#")
+]
+jobs_index = lines.index("jobs:")
+job_headers = [
+    match.group(1)
+    for line in lines[jobs_index + 1:]
+    if (match := re.fullmatch(r"  ([A-Za-z0-9_-]+):", line))
+]
+job_start = lines.index("  hosted-profile-acceptance:")
+job_end = next(
+    (index for index in range(job_start + 1, len(lines))
+     if lines[index].startswith("  ") and not lines[index].startswith("    ")
+     and lines[index].endswith(":")),
+    len(lines),
+)
+job_lines = lines[job_start + 1:job_end]
+run_index = next((index for index, line in enumerate(job_lines)
+                  if line == "    runs-on: ubuntu-24.04"), None)
+assert trigger_keys == {"pull_request"}
+assert permission_lines == ["  contents: read"]
+assert job_headers == ["hosted-profile-acceptance"]
+assert "    if: github.event.pull_request.head.repo.full_name == github.repository" in job_lines
+assert not any(re.match(r"^ {4}(strategy|uses|with|permissions|secrets)\s*:", line)
+               for line in job_lines)
+assert not re.search(r"\bsecrets\b|\bgithub\.token\b", source, re.IGNORECASE)
+assert run_index is not None and run_index > 0
+assert job_lines[run_index - 1] == "    # runner-lane: fixed-hosted-profile-acceptance"
+PY
+then
+pass "fixed hosted acceptance has only the authorized workflow/job/marker/selector tuple"
+else
+fail "fixed hosted acceptance exceeded its exact same-repository hosted boundary"
+fi
 if python3 - "$root/.github/workflows/actions-ci.yml" <<'PY'
 import copy
 import sys
