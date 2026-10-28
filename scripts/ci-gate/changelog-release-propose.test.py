@@ -516,7 +516,7 @@ class GeneratedCallerTests(unittest.TestCase):
         document = yaml.safe_load(result.stdout)
 
         self.assertEqual(
-            "Release ${{ inputs.version }} ${{ inputs.selector_digest || 'manual' }}",
+            "Release ${{ inputs.version || 'auto' }} ${{ inputs.selector_digest || 'manual' }}",
             document["run-name"],
         )
         inputs = document.get("on", document.get(True))["workflow_dispatch"]["inputs"]
