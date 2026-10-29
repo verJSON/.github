@@ -54,18 +54,12 @@ contract_errors() {
     || printf '%s\n' 'invalid-route observability guard receives a terminal credential'
   grep -qF 'permissions: {}' <<<"$guard" \
     || printf '%s\n' 'invalid-route observability guard is not credentialless'
-  merge_step="$(step "$privileged" privileged_merge 'Merge the authorized head')"
-  grep -qF 'GH_TOKEN: ${{ steps.merge-app-token.outputs.token }}' <<<"$merge_step" \
-    || printf '%s\n' 'terminal operation does not receive the merge App token'
-  grep -qF 'bash .gate-trust/scripts/ci-gate/terminal-merge.sh' <<<"$merge_step" \
-    && [ "$(grep -cE '^[[:space:]]+(bash |gh )' <<<"$merge_step")" -eq 1 ] \
-    && [ "$(grep -c 'gh ' "$terminal_helper")" -eq 3 ] \
-    && grep -qF 'repos/$TARGET_REPO/pulls/$PR_NUMBER' "$terminal_helper" \
-    && grep -qF 'branch_path="$(jq -rn --arg branch "$DEFAULT_BRANCH"' "$terminal_helper" \
-    && grep -qF 'repos/$TARGET_REPO/git/ref/heads/$branch_path' "$terminal_helper" \
-    && grep -qF 'gh pr merge "$PR_NUMBER"' "$terminal_helper" \
-    || printf '%s\n' 'merge App token is not confined to exact-target live-base reads and terminal merge'
-
+  ! grep -qE 'merge-app-token|MERGE_APP_PRIVATE_KEY|actions/create-github-app-token|gh pr merge' <<<"$terminal" \
+    || printf '%s\n' 'retired terminal job contains a merge credential or operation'
+  grep -qF 'Hold autonomous terminal merge' <<<"$terminal" \
+    && grep -qF 'exit 1' "$terminal_helper" \
+    && ! grep -qF 'gh pr merge' "$terminal_helper" \
+    || printf '%s\n' 'terminal merge hold is missing'
   grep -qF 'uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' <<<"$checkout" \
     || printf '%s\n' 'immutable verifier checkout is not pinned'
   grep -qF 'repository: Verjson/.github' <<<"$checkout" \
@@ -76,7 +70,7 @@ contract_errors() {
     || printf '%s\n' 'verifier checkout persists credentials'
   grep -qF 'scripts/ci-gate/verify-arm-receipt.sh' <<<"$checkout" \
     || printf '%s\n' 'verifier checkout is not sparse-scoped to the arm verifier'
-  [ "$(grep -cE '^[[:space:]]+(- )?uses:' <<<"$terminal")" -eq 2 ] \
+  [ "$(grep -cE '^[[:space:]]+(- )?uses:' <<<"$terminal")" -eq 1 ] \
     || printf '%s\n' 'terminal merge job action boundary drifted'
   ! grep -qE 'github\.event\.pull_request|github\.head_ref|repository:.*TARGET_REPO|ref:.*EXPECTED_HEAD_SHA' <<<"$terminal" \
     || printf '%s\n' 'terminal merge job can check out PR-controlled material'
@@ -100,7 +94,7 @@ reset_fixtures() {
 }
 
 assert_contract "$review_workflow" "$privileged_workflow" \
-  'current split confines the merge App token to the terminal operation'
+  'retired terminal job has no merge token or mutation'
 
 reset_fixtures
 sed -i '/^permissions:$/i\\  ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}' "$tmp/review.yml"

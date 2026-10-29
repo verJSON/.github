@@ -19,9 +19,6 @@ steps = document["jobs"]["privileged_merge"]["steps"]
 names = [
     "Authorize terminal merge from trusted metadata",
     "Revalidate independent review receipt",
-    "Merge the authorized head",
-    "Confirm terminal merge state",
-    "Export terminal merge cleanup receipt",
 ]
 for name in names:
     matches = [step for step in steps if step.get("name") == name]
@@ -163,15 +160,7 @@ else
   pass "non-executable sparse-checkout fixture rejects direct execution"
 fi
 write_base; expect_pass "explicit bash invocation supports a non-executable sparse-checkout verifier" run_promote
-grep -q -- '--admin --squash --match-head-commit' "$CALLS" \
-  && pass "all-success promotion merges the exact authorized head" || fail "terminal promotion did not use exact-head admin squash merge"
-write_base
-for draft_state in '.draft=true' 'del(.draft)' '.draft=null' '.draft="false"'; do
-  write_base
-  jq "$draft_state" "$TERMINAL_META_FILE" >"$tmp/x" && mv "$tmp/x" "$TERMINAL_META_FILE"
-  expect_fail "terminal REST draft guard rejects $draft_state" run_promote
-  ! grep -q 'pr merge' "$CALLS" || fail "terminal REST draft guard allowed $draft_state"
-done
+! grep -q 'pr merge' "$CALLS" || fail "authorization preflight attempted a merge"
 write_base
 # #1615: the reviewing token cannot always resolve author_association correctly (e.g. a
 # default GITHUB_TOKEN without org-membership read visibility reports a real org MEMBER as
@@ -182,10 +171,7 @@ jq '.[1].author_association="NONE"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$R
 jq '.[1]' "$REVIEWS_FILE" >"$REVIEW_REFETCH_FILE"
 cp "$REVIEWS_FILE" "$LATEST_REVIEWS_FILE"
 expect_pass "unresolvable author_association still promotes a real admin/maintain reviewer (#1615)" run_promote
-grep -q -- '--admin --squash --match-head-commit' "$CALLS" \
-  && pass "author_association-blind promotion still merges the exact authorized head" \
-  || fail "author_association-blind promotion did not use exact-head admin squash merge"
-
+! grep -q 'pr merge' "$CALLS" || fail "authorization preflight attempted a merge"
 write_base
 # Selection can no longer rely on author_association to keep candidates scoped to
 # org-associated accounts (#1615), and this is a PUBLIC repository: anyone can leave a
@@ -196,10 +182,7 @@ write_base
 jq '.[1] as $base | . + [($base | .id=90 | .user.login="attacker" | .body="unrelated comment")]' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"
 cp "$REVIEWS_FILE" "$LATEST_REVIEWS_FILE"
 expect_pass "a higher-ID review from a non-privileged public account cannot block or supersede a real approval" run_promote
-grep -q -- '--admin --squash --match-head-commit' "$CALLS" \
-  && pass "griefing-resistant selection still merges the real approver's exact-head receipt" \
-  || fail "griefing-resistant selection did not reach terminal merge"
-
+! grep -q 'pr merge' "$CALLS" || fail "authorization preflight attempted a merge"
 write_base
 # The walk-from-highest-ID search that closes the griefing gap above must itself be
 # bounded: without a cap, a flood of junk reviews posted above the real approval would
@@ -238,16 +221,6 @@ write_base; jq '.[1] as $base | . + [($base | .id=83 | .body="later verdict")]' 
 write_base; jq '.[1].user.type="Bot"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "bot-authored independent-review receipt never promotes" run_promote
 write_base; export INDEPENDENT_REVIEWER_ROLE=write; expect_fail "write-only receipt author never promotes" run_promote
 write_base; export TERMINAL_REVIEWER_ROLE=write; expect_fail "permission downgrade before token mint never promotes" run_promote
-write_base
-jq '.labels=[{"name":"hold"}]' "$TERMINAL_META_FILE" >"$tmp/x" && mv "$tmp/x" "$TERMINAL_META_FILE"
-if run_promote >"$tmp/out" 2>&1; then
-  fail "hold added after authorization reached terminal merge"
-elif [ "$(cat "$PULL_CALLS_FILE")" = 2 ] &&
-    grep -q 'terminal merge rejected' "$tmp/out" && ! grep -q 'pr merge' "$CALLS"; then
-  pass "hold added after authorization blocks at terminal merge boundary"
-else
-  fail "late hold did not fail at the terminal merge boundary"
-fi
 write_base; jq '.headRepositoryOwner.login="outsider"' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"; expect_fail "fork PR fails closed" run_promote
 write_base; jq '.isDraft=true' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"; expect_pass "draft PR is a terminal no-op" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "draft merged"
 write_base; jq '.labels=[{"name":"hold"}]' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"; expect_pass "held PR is a terminal no-op" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "hold merged"
@@ -255,7 +228,7 @@ write_base; jq '.labels=[{"name":"DO NOT MERGE"}]' "$META_FILE" >"$tmp/x" && mv 
 write_base; jq '.labels=[{"name":"Do__Not--Merge"}]' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"; expect_pass "normalized hold label is a terminal no-op" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "normalized hold label merged"
 write_base; jq '.title="chore: DO NOT MERGE until QA"' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"; expect_pass "DO NOT MERGE title is a terminal no-op" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "DO NOT MERGE title merged"
 write_base; jq --arg title $'DO NOT MERGE\u212a' '.title=$title' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"; expect_pass "Unicode boundary title is a terminal no-op" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "Unicode boundary title merged"
-write_base; jq '.title="REDO NOT MERGEABLE: QA"' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"; expect_pass "embedded title words are not a hold" run_promote; grep -q 'pr merge' "$CALLS" || fail "embedded title words blocked a valid promotion"
+write_base; jq '.title="REDO NOT MERGEABLE: QA"' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"; expect_pass "embedded title words are not a hold" run_promote; grep -q 'check-runs' "$CALLS" || fail "embedded title words blocked authorization preflight"
 for malformed in truncated labels-not-array label-name-not-string title-not-string; do
   write_base
   case "$malformed" in
@@ -341,35 +314,6 @@ for self_path in ai-review-merge ai-privileged-merge ai-promotion-retry; do
     fail "promotion workflow rejected without the non-promotion contract: $self_path"
   fi
 done
-write_base
-: >"$GITHUB_OUTPUT"
-if (export MERGE_CONFIRMED=false; run_promote) >"$tmp/out" 2>&1; then
-  fail "unconfirmed merge postcondition did not fail closed"
-else
-  pass "unconfirmed merge postcondition fails closed"
-fi
-! grep -q '^terminal_merge_succeeded=true$' "$GITHUB_OUTPUT" \
-  && pass "unconfirmed merge does not export cleanup eligibility" \
-  || fail "unconfirmed merge exported cleanup eligibility"
-
-write_base
-: >"$GITHUB_OUTPUT"
-export MERGE_CONFIRMED_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-if run_promote >"$tmp/out" 2>&1; then
-  fail "wrong-head merged postcondition did not fail closed"
-else
-  pass "wrong-head merged postcondition fails closed"
-fi
-unset MERGE_CONFIRMED_HEAD
-! grep -q '^terminal_merge_succeeded=true$' "$GITHUB_OUTPUT" \
-  && pass "wrong-head merged postcondition does not export cleanup eligibility" \
-  || fail "wrong-head merged postcondition exported cleanup eligibility"
-# A promotion that arrives after the PR left OPEN is a no-op either way, but the
-# two ways are not the same event and must not read the same in the log. MERGED is
-# the ordinary race: a duplicate dispatch for work already landed. CLOSED-unmerged
-# means the gate authorized a head that a human then closed — nothing to merge, so
-# still a no-op, but an upstream anomaly worth seeing. #1329 deleted the only test
-# that distinguished them and left both on one silent `exit 0` (#1331).
 write_base; jq '.state="MERGED"' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"; expect_pass "duplicate promotion after merge is idempotent" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "merged PR repeated mutation"
 grep -q 'already merged' "$tmp/out" \
   && pass "an already-merged no-op says so" || fail "merged no-op is silent and unattributable"

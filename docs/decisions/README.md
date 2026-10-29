@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0249](0249-temporary-autonomous-merge-hold/README.md) | 2026-10-29 | Temporarily hold autonomous terminal merges |
 | [0243](0243-agent-authored-changelog-context/README.md) | 2026-10-27 | Dependency updates require agent-authored changelog context |
 | [0242](0242-inline-required-workflow-app-key-validation/README.md) | 2026-10-27 | Inline app-key validation in the required gate workflow |
 | [0241](0241-configured-github-app-client-id-preflight-policy/README.md) | 2026-10-25 | Preflight validation pins the configured GitHub App client-ID format |
