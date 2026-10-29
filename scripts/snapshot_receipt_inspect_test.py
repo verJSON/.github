@@ -91,6 +91,35 @@ class SnapshotReceiptInspectionTest(unittest.TestCase):
         with self.assertRaises(ReceiptError):
             self.inspect(receipt, dict(self.expected, sourceCommit=alternate))
 
+    def test_grafted_parent_cannot_replace_the_commit_object_parent(self):
+        alternate = self.git("commit-tree", self.receipt["snapshotTree"], "-m", "alternate")
+        grafts = self.repo / ".git/info/grafts"
+        grafts.write_text(f"{self.receipt['snapshotCommit']} {alternate}\n")
+        self.assertIsNone(self.inspect())
+        receipt = dict(self.receipt, sourceCommit=alternate)
+        expected = dict(self.expected, sourceCommit=alternate)
+        with self.assertRaises(ReceiptError):
+            self.inspect(receipt, expected)
+
+    def test_oversized_and_ambiguous_raw_commits_are_rejected(self):
+        tree = self.receipt["snapshotTree"]
+        parent = self.receipt["sourceCommit"]
+        header = f"tree {tree}\nparent {parent}\nauthor Test <test@example.invalid> 0 +0000\ncommitter Test <test@example.invalid> 0 +0000\n"
+        for payload in (
+            (header + f"tree {tree}\n\nrelease\n").encode(),
+            (header + f"parent {parent}\n\nrelease\n").encode(),
+            (header + "\n").encode() + b"x" * (1024 * 1024),
+        ):
+            with self.subTest(size=len(payload)):
+                result = subprocess.run(["git", "-C", str(self.repo), "hash-object", "--literally", "-t", "commit", "-w", "--stdin"],
+                                        env=self.env, input=payload, check=True, capture_output=True)
+                commit = result.stdout.decode().strip()
+                self.git("tag", "-fa", "v1.2.3", "-m", "release", commit)
+                receipt = dict(self.receipt, snapshotCommit=commit,
+                               tagObject=self.git("rev-parse", "refs/tags/v1.2.3"))
+                with self.assertRaises(ReceiptError):
+                    self.inspect(receipt)
+
     def test_symlink_snapshot_is_rejected_even_with_matching_digest(self):
         (self.repo / "CHANGELOG/v1.2.3.md").unlink()
         (self.repo / "CHANGELOG/v1.2.3.md").symlink_to("../source")

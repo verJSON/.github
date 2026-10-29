@@ -28,6 +28,7 @@ _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _ID = re.compile(r"[1-9][0-9]{0,19}\Z")
 _MAX_RECEIPT = 16 * 1024
 _MAX_SNAPSHOT = 16 * 1024 * 1024
+_MAX_COMMIT = 1024 * 1024
 
 
 def _unique_object(pairs):
@@ -115,11 +116,22 @@ def inspect_snapshot_receipt(data: bytes, *, expected: dict, repository: Path) -
     tag = git("cat-file", "-p", receipt["tagObject"]).split(b"\n\n", 1)[0].splitlines()
     if tag[:3] != [f"object {receipt['snapshotCommit']}".encode(), b"type commit", f"tag {receipt['version']}".encode()]:
         raise ReceiptError("tag object binding differs")
-    parents = git("rev-list", "--parents", "-n", "1", receipt["snapshotCommit"]).decode("ascii").split()
-    if parents != [receipt["snapshotCommit"], receipt["sourceCommit"]]:
+    commit_id = receipt["snapshotCommit"]
+    if git("cat-file", "-t", commit_id).strip() != b"commit":
+        raise ReceiptError("snapshot object is not a commit")
+    if int(git("cat-file", "-s", commit_id).strip()) > _MAX_COMMIT:
+        raise ReceiptError("snapshot commit is too large")
+    raw_commit = git("cat-file", "commit", commit_id)
+    header, separator, _ = raw_commit.partition(b"\n\n")
+    if not separator:
+        raise ReceiptError("snapshot commit header is malformed")
+    lines = header.split(b"\n")
+    trees = [line for line in lines if line == b"tree" or line.startswith(b"tree ")]
+    parents = [line for line in lines if line == b"parent" or line.startswith(b"parent ")]
+    if trees != [f"tree {receipt['snapshotTree']}".encode()]:
+        raise ReceiptError("snapshot tree differs or is ambiguous")
+    if parents != [f"parent {receipt['sourceCommit']}".encode()]:
         raise ReceiptError("snapshot commit does not have the expected sole parent")
-    if git("rev-parse", f"{receipt['snapshotCommit']}^{{tree}}").strip().decode("ascii") != receipt["snapshotTree"]:
-        raise ReceiptError("snapshot tree differs")
     path = f"CHANGELOG/{receipt['version']}.md"
     entry = git("ls-tree", "-z", receipt["snapshotCommit"], "--", path)
     match = re.fullmatch(rb"100644 blob ([0-9a-f]+)\t" + re.escape(path.encode()) + rb"\x00", entry)
