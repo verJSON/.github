@@ -253,6 +253,7 @@ changelog-release-3	python3 scripts/changelog-release-app-token.test.py
 changelog-release-2	python3 scripts/release-app-canary.test.py
 changelog-release-3	bash scripts/changelog-release-branch-guard.test.sh
 changelog-release-3	python3 scripts/ci-gate/generator-header-provenance.test.py
+changelog-release-3	python3 scripts/ci-gate/release-snapshot-hold.test.py
 docs	bash scripts/doc-tag-pins.test.sh
 docs	bash scripts/doc-fragment-names.test.sh
 docs	bash scripts/trigger-scope.test.sh

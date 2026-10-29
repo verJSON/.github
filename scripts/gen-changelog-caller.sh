@@ -18,7 +18,7 @@
 #   scripts/gen-changelog-caller.sh pr-gate <sha> [--untrusted-runner <label>[,<label>...]] > .github/workflows/changelog-contract.yml
 #   scripts/gen-changelog-caller.sh release-node <sha> [--scope <scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--release-asset <path>]... > .github/workflows/release.yml
 #   scripts/gen-changelog-caller.sh release-artifact <sha> --build-runner <selector>... [--approved-internal-package <@verjson/name>]... [--scope <scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] > .github/workflows/release.yml
-#   scripts/gen-changelog-caller.sh release-snapshot <sha> [--scope <scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--package-dir <relative-dir>]... [--only-package-dir <relative-dir>]... > .github/workflows/release.yml
+#   scripts/gen-changelog-caller.sh release-snapshot <sha> [--require-downstream-completion] [--scope <scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--package-dir <relative-dir>]... [--only-package-dir <relative-dir>]... > .github/workflows/release.yml
 #   scripts/gen-changelog-caller.sh release-propose <sha> --autonomy {propose|dispatch} > .github/workflows/release-propose.yml
 #
 # Every changelog-enabled workflow mode publishes the organization ruleset's
@@ -72,7 +72,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $(basename "$0") {workflow|generated-artifacts|generated-artifacts-with-adr-index|adr-index-generator|adr-index-test|codeowners|renderer|contract-test|pr-gate|release-node|release-artifact|release-snapshot|release-propose} <40-hex-commit> [--codeowners-org <org> --codeowners-team <team>] [--scope <npm-scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--package-dir <relative-dir>]... [--only-package-dir <relative-dir>]... [--release-caller-package-dirs <workflow-path>=<dir>[,<dir>...]]... [--release-asset <path>]... [--build-runner <selector>]... [--approved-internal-package <@verjson/name>]... [--autonomy {propose|dispatch}] [--untrusted-runner <label>[,<label>...]]" >&2
+  echo "usage: $(basename "$0") {workflow|generated-artifacts|generated-artifacts-with-adr-index|adr-index-generator|adr-index-test|codeowners|renderer|contract-test|pr-gate|release-node|release-artifact|release-snapshot|release-propose} <40-hex-commit> [--require-downstream-completion] [--codeowners-org <org> --codeowners-team <team>] [--scope <npm-scope>] [--node-version <version>] [--default-prefix <prefix> --default-component <component>] [--package-dir <relative-dir>]... [--only-package-dir <relative-dir>]... [--release-caller-package-dirs <workflow-path>=<dir>[,<dir>...]]... [--release-asset <path>]... [--build-runner <selector>]... [--approved-internal-package <@verjson/name>]... [--autonomy {propose|dispatch}] [--untrusted-runner <label>[,<label>...]]" >&2
   echo "required check: changelog / validate" >&2
   exit 2
 }
@@ -104,8 +104,12 @@ codeowners_org=""
 codeowners_team=""
 codeowners_org_set=false
 codeowners_team_set=false
+require_downstream_completion=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --require-downstream-completion)
+      [ "$require_downstream_completion" = false ] || usage
+      require_downstream_completion=true; shift ;;
     --codeowners-org)
       [ "$#" -ge 2 ] && [ "$codeowners_org_set" = false ] || usage
       codeowners_org="$2"; codeowners_org_set=true; shift 2 ;;
@@ -190,6 +194,10 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ "$require_downstream_completion" = true ] && [ "$mode" != release-snapshot ] && [ "$mode" != contract-test ]; then
+  echo "$(basename "$0"): --require-downstream-completion is accepted only by release-snapshot and contract-test" >&2
+  exit 2
+fi
 if [ "$codeowners_org_set" = true ] || [ "$codeowners_team_set" = true ]; then
   if { [ "$mode" != codeowners ] && [ "$mode" != contract-test ]; } ||
      ! [[ "$codeowners_org" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]] ||
@@ -385,6 +393,7 @@ selected_package_dirs_json="$selected_package_dirs_json]"
 # index members inside `contract-test`) takes no options and states its own mode.
 generation_command() {
   local command="$mode $ref" release_caller_spec release_asset build_runner quoted_build_runner approved_package
+  [ "$require_downstream_completion" = false ] || command="$command --require-downstream-completion"
   [ -z "$codeowners_org" ] || command="$command --codeowners-org $codeowners_org --codeowners-team $codeowners_team"
   [ "$release_scope" = "@verjson" ] \
     || command="$command --scope $release_scope"
@@ -960,7 +969,20 @@ release_artifact_publish_job() {
 EOF
 }
 
+downstream_completion_hold_step() {
+  cat <<'EOF'
+      - name: Hold until downstream completion is authenticated
+        run: |
+          echo "::error::Downstream completion evidence is unavailable. Release remains on hold."
+          exit 1
+EOF
+}
+
 release_snapshot_publish_job() {
+  local downstream_hold=""
+  if [ "$require_downstream_completion" = true ]; then
+    downstream_hold="$(downstream_completion_hold_step)"
+  fi
   cat <<EOF
   publish:
     name: Publish the released snapshot
@@ -971,7 +993,8 @@ release_snapshot_publish_job() {
     permissions:
       contents: write
     steps:
-      - uses: ${release_checkout}
+${downstream_hold:+${downstream_hold}
+}      - uses: ${release_checkout}
         with:
           ref: \${{ needs.verify.outputs.version }}
           fetch-depth: 0
@@ -2297,7 +2320,10 @@ emit_release_snapshot() {
   # Computed before the here-document: a command substitution inside one
   # cannot fail the generator, and a caller rendered from a failed one is
   # truncated in silence.
-  local verify_dependency_steps snapshot_job
+  local verify_dependency_steps snapshot_job downstream_hold=""
+  if [ "$require_downstream_completion" = true ]; then
+    downstream_hold="$(downstream_completion_hold_step)"
+  fi
   verify_dependency_steps="$(emit_verify_dependency_steps "steps.release-version.outputs.selected == 'true' && hashFiles('package.json') != ''")" || return
   snapshot_job="$(release_snapshot_job "$ref")" || return
   local publish_job
@@ -2409,6 +2435,8 @@ jobs:
 ${release_version_guard_step}
       - name: Prepare job-scoped changelog tool cache
         run: echo "VERJSON_CHANGELOG_TOOL_CACHE=\$RUNNER_TEMP/verjson-changelog-tools" >> "\$GITHUB_ENV"
+${downstream_hold:+${downstream_hold}
+}
       # changelog-release.yml carries this guard too, but there it fires inside
       # \`snapshot\` — after \`verify\` has already spent a full suite run on a ref
       # whose tree will never be tagged. It is asserted here first because
@@ -3015,6 +3043,7 @@ CONTRACT_REF="${ref}"
 CONTRACT_SHA256="${contract_sha256}"
 ADR_INDEX_SHA256="${adr_index_sha256}"
 ADR_INDEX_TEST_SHA256="${adr_index_test_sha256}"
+EXPECTED_DOWNSTREAM_COMPLETION_REQUIRED="${require_downstream_completion}"
 EXPECTED_CODEOWNERS_SHA256="${codeowners_sha256}"
 ${codeowners_assignments}
 EXPECTED_RELEASE_SCOPE="${release_scope}"
@@ -5788,6 +5817,23 @@ expected_verification_step_identities.extend((
     ("Stamp the dispatched package versions", ""),
     ("Run the release verification suite", ""),
 ))
+completion_required = os.environ.get("EXPECTED_DOWNSTREAM_COMPLETION_REQUIRED") == "true"
+completion_flag_count = (generator_provenance_tokens() or []).count("--require-downstream-completion")
+if completion_flag_count != (1 if completion_required else 0) or (completion_required and release_mode != "release-snapshot"):
+    problems.append("downstream completion policy differs from generated contract")
+if completion_required:
+    expected_verification_step_identities.insert(2, ("Hold until downstream completion is authenticated", ""))
+completion_step = named_step("Hold until downstream completion is authenticated", "verify")
+if completion_required:
+    completion_fields = step_mapping_entries(completion_step)
+    if (completion_fields is None or set(completion_fields) != {"name", "run"}
+            or run_body(completion_step) != '\n'.join((
+                'echo "::error::Downstream completion evidence is unavailable. Release remains on hold."',
+                'exit 1',
+            ))):
+        problems.append("downstream completion hold differs from generated policy")
+elif completion_step is not None:
+    problems.append("unexpected downstream completion hold")
 verification_step_identities = []
 for step in verification_job_steps:
     fields = step_mapping_entries(step)
@@ -5832,6 +5878,9 @@ for step in verification_job_steps:
     step_name = yaml_scalar_value(fields.get("name", "")) or ""
     if step_name == "Refuse a repository-controlled dependency acquisition contract path":
         break
+    if completion_required and step_name == "Hold until downstream completion is authenticated":
+        # Its exact body and position are validated above; the legacy digest covers the other steps.
+        continue
     if step_name == "Validate required OS-scoped build lanes":
         # The generated contract pins this step to the dispatch options and
         # hashes its complete YAML block. Omit it here because runner labels vary.
@@ -6803,6 +6852,7 @@ PY
     EXPECTED_RELEASE_NODE_PUBLISH_JOB="$EXPECTED_RELEASE_NODE_PUBLISH_JOB" \
     EXPECTED_RELEASE_ARTIFACT_PUBLISH_JOB="$EXPECTED_RELEASE_ARTIFACT_PUBLISH_JOB" \
     EXPECTED_RELEASE_SNAPSHOT_PUBLISH_JOB="$EXPECTED_RELEASE_SNAPSHOT_PUBLISH_JOB" \
+    EXPECTED_DOWNSTREAM_COMPLETION_REQUIRED="$EXPECTED_DOWNSTREAM_COMPLETION_REQUIRED" \
     EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES="$EXPECTED_RELEASE_APPROVED_INTERNAL_PACKAGES" \
     RELEASE_CALLER_PACKAGE_DIRS_JSON="$workflow_package_dirs_json" \
     python3 "$work/release-shape.py" "$release_workflow" \
