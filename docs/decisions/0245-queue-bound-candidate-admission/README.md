@@ -219,6 +219,10 @@ result. Any closed test pull request and its checks remain durable records.
 Results from such an organization do not establish production `VerJSON`
 ruleset, event, or authorization behavior.
 
+The [isolated public canary plan](canary-plan.md) specifies the proposed
+setup, evidence, approval gates and teardown. It is not authorization to
+create a separate organization or change production settings.
+
 ## Verification before rollout
 
 - Unit and mutation tests reject missing, skipped, failed, cancelled, stale,
