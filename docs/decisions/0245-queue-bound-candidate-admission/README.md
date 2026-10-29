@@ -223,6 +223,27 @@ The [isolated public canary plan](canary-plan.md) specifies the proposed
 setup, evidence, approval gates and teardown. It is not authorization to
 create a separate organization or change production settings.
 
+## Isolated PR-head dispatch observation (2026-10-29)
+
+In a separate public test organization, the controlled [draft PR](https://github.com/test-agent-verjson/tbd-queue-canary-20261029165528-c5edae32/pull/1)
+initially had no reported workflow runs or checks. After the reviewed test
+workflow was fast-forwarded onto a temporary default seed branch, GitHub
+reported it active; an identical-tree PR-head synchronization then produced
+[run 40920898226](https://github.com/test-agent-verjson/tbd-queue-canary-20261029165528-c5edae32/actions/runs/40920898226)
+on head `4e63fcd3fc1d299d3ad2eccf50cb7516f0bb393f`. Its `canary-signal` check
+`123613504993` succeeded on a GitHub-hosted runner. This is one observed
+sequence, not proof that default-branch registration is a general prerequisite.
+
+After the run was terminal, the original `main` default was restored and the
+seed ref was deleted and verified absent; the protected test target and PR head
+remained unchanged. The PR remained draft, `REVIEW_REQUIRED`, outside the
+queue, and without auto-merge. The owner reported no active organization
+webhooks; the webhook API inventory was not readable and that statement was
+not API-verified. The [sanitized dispatch record](evidence/2026-10-29-isolated-pr-dispatch.json)
+contains the selected observation and local receipt hashes, which do not
+authenticate provider responses. No human approval, queue enrollment,
+merge-group execution, merge, or production admission was established.
+
 ## Verification before rollout
 
 - Unit and mutation tests reject missing, skipped, failed, cancelled, stale,
