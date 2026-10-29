@@ -118,6 +118,36 @@ safe. Adding a required check to PR heads alone does not close the draft-to-read
 race because GitHub can accept skipped results. A queue is only effective when
 bypass actors cannot bypass it and the required check runs for every merge group.
 
+## Admission preconditions and operational sequence
+
+The ruleset must require the organization-owned workflow at its reviewed,
+immutable path and revision. A same-named status from the GitHub Actions App
+is not sufficient: candidate-controlled workflows can use that App too. Bind
+any required status to its expected producer, and verify that ruleset-required
+workflow enforcement cannot be replaced or omitted by candidate code. The
+aggregate itself must have no job-level condition or path filter that can skip
+it; absent or skipped prerequisites are failures.
+
+Before a pilot, inventory the actual applicable rulesets and bypass actors.
+Restore the protections suspended under #1933 or establish a reviewed,
+equivalent enforcement image for the pilot; do not assume suspended controls
+are active. A bypass-capable credential cannot be used for autonomous
+admission. Configure and test queue grouping so every candidate tree that can
+land has passed its own required evidence. Record the merge method, grouping,
+concurrency, timeout, removal, and failure attribution in the reviewed pilot
+configuration; if the platform cannot enforce this, hold the adopter.
+
+Where the applicable policy requires a direct-human attestation bound to a
+queue candidate, a head-only authorization is insufficient. A group rebuild
+invalidates the prior candidate-bound evidence. Do not enroll or merge under
+that policy until an implementable candidate-attestation sequence, expiration,
+rebuild handling, and bounded recovery are verified against the identity
+contract. If no such sequence exists, that policy and queue combination stays
+unsupported. Independent agent approval requires its own authorized identity
+and policy capability; it is not implied by agent evaluation or by this ADR.
+Ineligible repositories remain held until a separately reviewed non-bypass
+alternative is available.
+
 ## Verification before rollout
 
 - Unit and mutation tests reject missing, skipped, failed, cancelled, stale,
