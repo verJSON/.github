@@ -1381,7 +1381,7 @@ run_adopter() {
     cache_env=("XDG_CACHE_HOME=$1.cache")
   fi
   (
-    cd "$1" && env "${cache_env[@]}" ./scripts/changelog-contract.test.sh
+    cd "$1" && env "${cache_env[@]}" "GITHUB_REPOSITORY_OWNER=${ADOPTER_GITHUB_OWNER:-}" ./scripts/changelog-contract.test.sh
   ) >"$adopter_log" 2>&1 || status=$?
   if [ "${ADOPTER_ISOLATED_LOG:-}" != 1 ]; then
     last_rejection_pid=
@@ -1531,6 +1531,27 @@ adopter="$tmproot/adopter"
 build_adopter "$adopter"
 adopter_template="$tmproot/adopter-template"
 cp -a "$adopter" "$adopter_template"
+export ADOPTER_GITHUB_OWNER=Acme
+schedule_adopter_script "$adopter" '
+  if [ "$status" -ne 0 ] && grep -qF "CODEOWNERS organization does not match" "$ADOPTER_LOG"; then
+    pass "default ownership rejects a foreign GitHub repository owner"
+  else fail "default ownership accepted a foreign GitHub repository owner"; fi
+'
+unset ADOPTER_GITHUB_OWNER
+foreign_adopter="$tmproot/adopter-foreign-codeowners"
+cp -a "$adopter" "$foreign_adopter"
+bash "$gen" codeowners "$sha" --codeowners-org Acme --codeowners-team platform >"$foreign_adopter/.github/CODEOWNERS"
+bash "$gen" contract-test "$sha" --codeowners-org Acme --codeowners-team platform >"$foreign_adopter/scripts/changelog-contract.test.sh"
+schedule_adopter_script "$foreign_adopter" '
+  if [ "$status" -eq 0 ]; then pass "foreign generated ownership passes"; else fail "foreign generated ownership failed"; fi
+'
+printf "* @Acme/other\n" >>"$foreign_adopter/.github/CODEOWNERS"
+schedule_adopter_script "$foreign_adopter" '
+  if [ "$status" -ne 0 ] && grep -qF ".github/CODEOWNERS is not the generated artifact" "$ADOPTER_LOG"; then
+    pass "foreign generated ownership rejects tampering"
+  else fail "foreign generated ownership did not reject tampering"; fi
+'
+
 [ -f "$adopter/.github/workflows/release.yml" ] \
   && [ ! -e "$adopter/.github/workflows/changelog-release.yml" ] \
   && pass "generated adopter installs the canonical release caller path" \

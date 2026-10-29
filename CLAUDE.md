@@ -77,6 +77,7 @@ Each entry states the concrete fact and how/when it was last verified — a live
 not just inspection of prose (#956: an entry asserting external status should say how it
 was confirmed, since inspection-only claims go stale silently).
 
+- [#1953](https://github.com/verJSON/.github/issues/1953) — Make generated CODEOWNERS portable across organizations; the existing canonical generator embeds the verJSON team. Issue open as verified with GitHub on 2026-10-28.
 - [#1763](https://github.com/verJSON/.github/issues/1763) — The authorization arm could wait indefinitely on a lost runner assignment; #1772 (ADR 0230) adds a hosted-only acquisition watchdog. Open until org ruleset 20722935 is rotated to `f2914525` and a live cancel receipt exists; `ai-review-merge.yml` still needs the same bound. Verified 2026-10-14 from verjson-payments runs 37352915856 and 38427381694.
 
 - [#1667](https://github.com/Verjson/.github/issues/1667) — Track configurable generated OCI candidate destinations for GHCR, GAR, and Sonatype Nexus. Opened 2026-10-01 after live issue searches and checking related [.github#1264](https://github.com/Verjson/.github/issues/1264), [.github#1186](https://github.com/Verjson/.github/issues/1186), and [verjson-ci#30](https://github.com/Verjson/verjson-ci/issues/30); those cover adopter rollout and GitLab CE Nexus engine work, not registry-neutral canonical publisher destinations.

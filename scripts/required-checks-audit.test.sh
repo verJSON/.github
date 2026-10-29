@@ -283,7 +283,7 @@ case "$*" in
       emit "$PROPS_FILE"
     fi
     exit 0 ;;
-  *"repos/Verjson/.github/contents/scripts/gen-changelog-caller.sh"*)
+  *"repos/Verjson/.github/contents/scripts/gen-changelog-caller.sh"*|*"repos/Other/.github/contents/scripts/gen-changelog-caller.sh"*)
     printf 'fetch\n' >>"$GENERATOR_FETCHES"
     if [ "${GENERATOR_USE_REAL:-false}" = true ]; then
       git -C "$REPO_ROOT" show "$CONTRACT_PIN:scripts/gen-changelog-caller.sh"
@@ -293,9 +293,9 @@ case "$*" in
     exit 0 ;;
   *"commits?per_page=1"*)
 printf '[{"sha":"%s"}]\n' "$CONTRACT_PIN" | jq -r "$filter"; exit 0 ;;
- *"repos/Verjson/.github/compare/"*) printf '{"status":"%s"}\n' "${PIN_ANCESTRY_STATUS:-identical}" | { if [ -n "$filter" ]; then jq -r "$filter"; else cat; fi; }; exit 0 ;;
-  *"repos/Verjson/.github/branches/main"*) printf '{"commit":{"sha":"%s"}}\n' "$CONTRACT_PIN" | { if [ -n "$filter" ]; then jq -r "$filter"; else cat; fi; }; exit 0 ;;
-  *"repos/Verjson/.github"*) printf '{"default_branch":"main"}\n' | { if [ -n "$filter" ]; then jq -r "$filter"; else cat; fi; }; exit 0 ;;
+ *"repos/Verjson/.github/compare/"*|*"repos/Other/.github/compare/"*) printf '{"status":"%s"}\n' "${PIN_ANCESTRY_STATUS:-identical}" | { if [ -n "$filter" ]; then jq -r "$filter"; else cat; fi; }; exit 0 ;;
+  *"repos/Verjson/.github/branches/main"*|*"repos/Other/.github/branches/main"*) printf '{"commit":{"sha":"%s"}}\n' "$CONTRACT_PIN" | { if [ -n "$filter" ]; then jq -r "$filter"; else cat; fi; }; exit 0 ;;
+  *"repos/Verjson/.github"*|*"repos/Other/.github"*) printf '{"default_branch":"main"}\n' | { if [ -n "$filter" ]; then jq -r "$filter"; else cat; fi; }; exit 0 ;;
   *"/contents/.github/workflows"|*"/contents/.github/workflows?ref="*)
     [ "${WORKFLOWS_FAIL:-false}" = true ] && exit 1
     emit "$WORKFLOW_LIST_FILE"; exit 0 ;;
@@ -1243,6 +1243,26 @@ unset PIN_ANCESTRY_STATUS
   && pass "an unmerged consumer-selected generator pin is rejected before fetch or execution" \
   || { fail "an unmerged generator pin reached trusted execution ($rc)"; out | sed 's/^/diag - /'; }
 
+stack node
+run_generator contract-test "$contract_pin" --only-package-dir packages/cli-schema \
+  --release-caller-package-dirs .github/workflows/release-extra.yml=compat \
+  --codeowners-org Verjson --codeowners-team platform >"$content_root/scripts/changelog-contract.test.sh"
+rc="$(run_audit)"
+if ! grep -q 'generated-contract-\|generated-codeowners-' "$tmp/out.txt"; then
+  pass "the audit reconstructs explicitly selected organization ownership"
+else fail "the audit rejected generated ownership parameters ($rc)"; out | sed 's/^/diag - /'; fi
+run_generator contract-test "$contract_pin" --only-package-dir packages/cli-schema \
+  --release-caller-package-dirs .github/workflows/release-extra.yml=compat \
+  --codeowners-org Other --codeowners-team platform >"$content_root/scripts/changelog-contract.test.sh"
+rc="$(run_audit)"
+{ [ "$rc" != "rc=0" ] && grep -q 'generated-codeowners-organization-mismatch' "$tmp/out.txt"; } \
+  && pass "the audit rejects ownership for another organization" \
+  || { fail "the audit accepted a foreign owner ($rc)"; out | sed 's/^/diag - /'; }
+stack node
+rc="$(RCA_ORG=Other run_audit)"
+{ [ "$rc" != "rc=0" ] && grep -q 'generated-codeowners-organization-mismatch' "$tmp/out.txt"; } \
+  && pass "the audit rejects default ownership in another organization" \
+  || { fail "the audit accepted default ownership in another organization ($rc)"; out | sed 's/^/diag - /'; }
 stack node
 printf '\n# handwritten drift\n' >>"$content_root/scripts/render-next.sh"
 rc="$(run_audit)"
