@@ -238,7 +238,7 @@ class JobResult:
         self.stderr = stderr
 
 
-def run_watchdog(snapshots, runner_environment="github-hosted", preset_outputs=None):
+def run_watchdog(snapshots, runner_environment="github-hosted", preset_outputs=None, ambient_timezone=None):
     """Run the job's steps in order, honoring each step's `if` the way the runner would.
 
     `preset_outputs` runs every step unconditionally with those step outputs, to exercise a
@@ -260,6 +260,8 @@ def run_watchdog(snapshots, runner_environment="github-hosted", preset_outputs=N
         (stub_dir / "calls").write_text("", encoding="utf-8")
         env = {key: value for key, value in os.environ.items()
                if not key.startswith(("GITHUB_", "RUNNER_"))}
+        if ambient_timezone is not None:
+            env["TZ"] = ambient_timezone
         env.update({key: str(value) for key, value in job_definition["env"].items()})
         env.update({
             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
@@ -501,6 +503,29 @@ def test_a_queue_shorter_than_the_limit_is_tolerated():
     assert completed.returncode == 0, completed.stderr
     assert cancellations(calls) == [], calls
     assert elapsed < limit, elapsed
+
+
+def test_timezone_does_not_change_the_acquisition_deadline():
+    limit = limit_seconds()
+
+    def queued(created_offset):
+        return snapshot(
+            job("event-policy", "completed", labels=("ubuntu-24.04",)),
+            job("app-key-policy / validate", "completed", 5, ("ubuntu-24.04",)),
+            job("app-key-policy / validate-ai-review-key", "queued", created_offset),
+        )
+
+    for timezone in ("UTC", "America/New_York"):
+        before, calls, elapsed = run_watchdog(
+            [queued(1 - limit), healthy_runs()[-1]], ambient_timezone=timezone
+        )
+        assert before.returncode == 0, (timezone, before.stderr, calls)
+        assert cancellations(calls) == [], (timezone, calls)
+        assert elapsed == env_seconds("POLL_INTERVAL_SECONDS"), (timezone, elapsed)
+        at_limit, calls, _ = run_watchdog([queued(-limit)], ambient_timezone=timezone)
+        assert at_limit.returncode != 0, (timezone, at_limit.stderr)
+        assert posts(calls)[0][0] == START, (timezone, calls)
+        assert cancellations(calls) == ["cancel", "force-cancel"], (timezone, calls)
 
 
 def test_environment_approval_wait_is_not_a_runner_stall():
