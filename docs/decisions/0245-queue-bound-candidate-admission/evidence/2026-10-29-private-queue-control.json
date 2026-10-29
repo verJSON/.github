@@ -1,0 +1,218 @@
+{
+  "schema_version": 1,
+  "observed_date_utc": "2026-10-29",
+  "repository": "VerJSON/verjson-agents",
+  "visibility": "private",
+  "organization_plan": "team",
+  "cases": {
+    "queue": {
+      "result": "ruleset-rejected: gh: Validation Failed (HTTP 422)\n",
+      "branch": "pm-private-queue-pilot-20261029t162002z-af86559a",
+      "main_before": "ed4dca6a79f2dc44c610ea871ab1f061378724bf",
+      "main_after": "ed4dca6a79f2dc44c610ea871ab1f061378724bf",
+      "rulesets_before": [
+        [
+          20513599,
+          "changelog-contract-required",
+          "active"
+        ],
+        [
+          20515822,
+          "core-checks-actions",
+          "active"
+        ],
+        [
+          20722935,
+          "ai-authorization-arm-required",
+          "active"
+        ]
+      ],
+      "rulesets_after": [
+        [
+          20513599,
+          "changelog-contract-required",
+          "active"
+        ],
+        [
+          20515822,
+          "core-checks-actions",
+          "active"
+        ],
+        [
+          20722935,
+          "ai-authorization-arm-required",
+          "active"
+        ]
+      ],
+      "effective_rules_before": [],
+      "branch_delete_404": true,
+      "observed_branch_workflow_runs": 0,
+      "matching_pull_requests_after": 0,
+      "local_receipt_sha256": {
+        "summary": "290b5c52f930a7562a0991a682b6553eb9470089ab090036a0be28139973661e",
+        "create-ruleset": "a5f96853fded0ad35db09431cba7bdb6ab897bac51c3642afc45b28ae9bf7c1f",
+        "rulesets-before": "209d8c7b8c86c3ac81b78f115dacbfcfd55a1b6ad070ff45519fef67d27dcc4b",
+        "rulesets-after": "209d8c7b8c86c3ac81b78f115dacbfcfd55a1b6ad070ff45519fef67d27dcc4b",
+        "main-before": "b668288a8d27d336236cf37fe66911e7e404bd27dd7b230187c1a30477a79f7f",
+        "main-after": "b668288a8d27d336236cf37fe66911e7e404bd27dd7b230187c1a30477a79f7f",
+        "branch-rules-before": "009bba259ccb3f7fd88dee2c4b373fe9a7bfdf481812f44bfe958ceaf045f214",
+        "verify-ref-deleted": "10f8e4118800720e014375013223e7d01a4b46128d37b4db41e23dab3b0dbf20",
+        "branch-runs-after": "3608612067438808b5d750852734561f921568892b63f97aaf3cb68819c9c13f",
+        "delayed-workflow-runs": "3608612067438808b5d750852734561f921568892b63f97aaf3cb68819c9c13f",
+        "pull-requests-after": "009bba259ccb3f7fd88dee2c4b373fe9a7bfdf481812f44bfe958ceaf045f214",
+        "rulesets-after-failed-create": "209d8c7b8c86c3ac81b78f115dacbfcfd55a1b6ad070ff45519fef67d27dcc4b"
+      },
+      "http_status": 422,
+      "github_errors": [
+        "Invalid rule 'merge_queue': "
+      ],
+      "new_ruleset_after_rejection": false,
+      "queue_rule_parameters_reconstructed": {
+        "check_response_timeout_minutes": 60,
+        "grouping_strategy": "ALLGREEN",
+        "max_entries_to_build": 1,
+        "max_entries_to_merge": 1,
+        "merge_method": "SQUASH",
+        "min_entries_to_merge": 1,
+        "min_entries_to_merge_wait_minutes": 0
+      }
+    },
+    "control": {
+      "result": "review-rule-configured",
+      "branch": "pm-private-control-20261029t162039z-1be625e0",
+      "main_before": "ed4dca6a79f2dc44c610ea871ab1f061378724bf",
+      "main_after": "ed4dca6a79f2dc44c610ea871ab1f061378724bf",
+      "rulesets_before": [
+        [
+          20513599,
+          "changelog-contract-required",
+          "active"
+        ],
+        [
+          20515822,
+          "core-checks-actions",
+          "active"
+        ],
+        [
+          20722935,
+          "ai-authorization-arm-required",
+          "active"
+        ]
+      ],
+      "rulesets_after": [
+        [
+          20513599,
+          "changelog-contract-required",
+          "active"
+        ],
+        [
+          20515822,
+          "core-checks-actions",
+          "active"
+        ],
+        [
+          20722935,
+          "ai-authorization-arm-required",
+          "active"
+        ]
+      ],
+      "effective_rules_before": [],
+      "branch_delete_404": true,
+      "observed_branch_workflow_runs": 0,
+      "matching_pull_requests_after": 0,
+      "local_receipt_sha256": {
+        "summary": "48090f30508f4323e2bc6986ae54776960b4d7105faf85c702a72c2bc2854635",
+        "create-ruleset": "63566c3132a946634c4f28a6ec3014d551f9e1aff4c35b2f8d217bd9e06869a7",
+        "rulesets-before": "209d8c7b8c86c3ac81b78f115dacbfcfd55a1b6ad070ff45519fef67d27dcc4b",
+        "rulesets-after": "209d8c7b8c86c3ac81b78f115dacbfcfd55a1b6ad070ff45519fef67d27dcc4b",
+        "main-before": "b668288a8d27d336236cf37fe66911e7e404bd27dd7b230187c1a30477a79f7f",
+        "main-after": "b668288a8d27d336236cf37fe66911e7e404bd27dd7b230187c1a30477a79f7f",
+        "branch-rules-before": "009bba259ccb3f7fd88dee2c4b373fe9a7bfdf481812f44bfe958ceaf045f214",
+        "verify-ref-deleted": "10f8e4118800720e014375013223e7d01a4b46128d37b4db41e23dab3b0dbf20",
+        "branch-runs-after": "3608612067438808b5d750852734561f921568892b63f97aaf3cb68819c9c13f",
+        "delayed-workflow-runs": "3608612067438808b5d750852734561f921568892b63f97aaf3cb68819c9c13f",
+        "pull-requests-after": "009bba259ccb3f7fd88dee2c4b373fe9a7bfdf481812f44bfe958ceaf045f214",
+        "request-body": "656d3159dc36feb419138e2a57ed156de50defc0fca5fd3276cff2927efd64df",
+        "rule-readback": "63566c3132a946634c4f28a6ec3014d551f9e1aff4c35b2f8d217bd9e06869a7",
+        "effective-rules": "c13e657cdf160474d98936ed9005b22963d3ad40ff3cce77e2076761ba5c4d21",
+        "verify-rule-deleted": "09c1468d3eecb4611019833825c13f65f4cf074ec3e707f5a662ccc0e465d305"
+      },
+      "ruleset_id": 26137340,
+      "bypass_actors": [],
+      "review_rule": [
+        {
+          "type": "pull_request",
+          "parameters": {
+            "required_approving_review_count": 1,
+            "dismiss_stale_reviews_on_push": true,
+            "required_reviewers": [],
+            "require_code_owner_review": false,
+            "dismissal_restriction": {
+              "enabled": false,
+              "allowed_actors": []
+            },
+            "require_last_push_approval": true,
+            "required_review_thread_resolution": true,
+            "require_extra_approval_for_unattributed_changes": true,
+            "allowed_merge_methods": [
+              "merge",
+              "squash",
+              "rebase"
+            ]
+          }
+        }
+      ],
+      "effective_rules": [
+        {
+          "type": "pull_request",
+          "parameters": {
+            "required_approving_review_count": 1,
+            "dismiss_stale_reviews_on_push": true,
+            "required_reviewers": [],
+            "require_code_owner_review": false,
+            "dismissal_restriction": {
+              "enabled": false,
+              "allowed_actors": []
+            },
+            "require_last_push_approval": true,
+            "required_review_thread_resolution": true,
+            "require_extra_approval_for_unattributed_changes": true,
+            "allowed_merge_methods": [
+              "merge",
+              "squash",
+              "rebase"
+            ]
+          }
+        }
+      ],
+      "ruleset_delete_404": true,
+      "captured_request_body": {
+        "name": "PM private review rule control 20261029T162039Z-1be625e0",
+        "target": "branch",
+        "enforcement": "active",
+        "bypass_actors": [],
+        "conditions": {
+          "ref_name": {
+            "include": [
+              "refs/heads/pm-private-control-20261029t162039z-1be625e0"
+            ],
+            "exclude": []
+          }
+        },
+        "rules": [
+          {
+            "type": "pull_request",
+            "parameters": {
+              "required_approving_review_count": 1,
+              "dismiss_stale_reviews_on_push": true,
+              "require_code_owner_review": false,
+              "require_last_push_approval": true,
+              "required_review_thread_resolution": true
+            }
+          }
+        ]
+      }
+    }
+  },
+  "limits": "A single queue-rule request shape was rejected; the provider did not report its reason. This does not prove general private queue eligibility, plan causation, queue execution, approval enforcement, or production readiness. The queue request shape was reconstructed from the pilot invocation; the original request body was not separately captured."
+}

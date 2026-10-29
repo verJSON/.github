@@ -166,6 +166,27 @@ only. It did not create a pull request, enqueue or merge, dispatch a
 `merge_group` check, test reviewer or bypass enforcement, or establish queue
 eligibility for any private repository. Those remain rollout prerequisites.
 
+## Private-repository configuration control (2026-10-29)
+
+On Team-plan private `VerJSON/verjson-agents`, a request to create the same
+queue rule shape used in the public probe was rejected with HTTP 422 and the
+provider error `Invalid rule 'merge_queue':` with no reason. A separate
+exact-branch control with the same review-rule parameters and no queue rule
+was accepted and effective with no bypass actors. This comparison narrows
+the observed rejection to the requested queue rule, but does not establish
+why it was rejected or general private-repository eligibility.
+
+Neither probe created a pull request or ran a queue. The temporary branches
+and the control ruleset were deleted and verified absent; existing ruleset
+inventory and `main` head were unchanged. Immediate and delayed branch-run
+queries returned no workflow runs, and no pull requests matched the test
+heads. The [sanitized control record](evidence/2026-10-29-private-queue-control.json)
+includes observed responses and local receipt hashes. The queue request shape
+is reconstructed from the invocation because its original request body was
+not separately captured; hashes do not authenticate GitHub responses.
+No result establishes queue execution, approval enforcement, or production
+readiness.
+
 ## Follow-up canary isolation constraint (2026-10-29)
 
 A live enqueue and merge-group probe needs a real pull request. Targeting a
