@@ -184,6 +184,7 @@ merge-gate	bash scripts/ci-gate/terminal-live-base.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-pin.test.sh
 merge-gate	bash scripts/ci-gate/budget-exceeded.test.sh
 docs	bash scripts/gen-adr-index.sh --check
+changelog-release-1	python3 scripts/snapshot_receipt_inspect_test.py
 changelog-release-1	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=1 bash scripts/ci-gate/changelog-caller-contract.test.sh
 changelog-release-2	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=2 bash scripts/ci-gate/changelog-caller-contract.test.sh
 changelog-release-3	@budget=600 CHANGELOG_CALLER_CONTRACT_SHARD=3 bash scripts/ci-gate/changelog-caller-contract.test.sh
