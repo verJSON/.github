@@ -166,6 +166,38 @@ only. It did not create a pull request, enqueue or merge, dispatch a
 `merge_group` check, test reviewer or bypass enforcement, or establish queue
 eligibility for any private repository. Those remain rollout prerequisites.
 
+## Follow-up canary isolation constraint (2026-10-29)
+
+A live enqueue and merge-group probe needs a real pull request. Targeting a
+temporary base branch in `VerJSON/.github` does not isolate it from the
+repository's production control plane: GitHub documents
+[`pull_request_target` in the default-branch context](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request_target),
+and the default-branch re-arm workflow runs on pull-request opening. Its key
+validation path can access the existing review environment. The other
+Actions-enabled public repository, `verjson-git-runners`, also triggers a
+re-arm caller on opening; its pinned reusable path references the review
+secret and may select the organization's self-hosted trusted lane. Do not
+run the probe there under a requirement to avoid production secrets and runners.
+
+GitHub [documents merge queues](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue)
+for public repositories owned by organizations; a personal public repository
+is not a supported substitute for this organization-owned queue test. A newly
+created `VerJSON` repository would also inherit organization-wide secret and
+App availability. The [sanitized isolation inventory](evidence/2026-10-29-canary-isolation.json)
+records counts, workflow locations, and scope without recording secret names
+or values. The inventory is an observation, not evidence of actual credential
+use or a claim about any other organization.
+
+An independent public organization with no inherited production secrets,
+privileged Apps, production runners, or required workflows could be evaluated
+as a test environment if separately authorized. Its Actions enablement,
+review authority, event routing, repository retention, and teardown need
+verification first. A human approval required for enqueue or merge remains a
+real approval; do not fabricate it or remove the gate to obtain a positive
+result. Any closed test pull request and its checks remain durable records.
+Results from such an organization do not establish production `VerJSON`
+ruleset, event, or authorization behavior.
+
 ## Verification before rollout
 
 - Unit and mutation tests reject missing, skipped, failed, cancelled, stale,
