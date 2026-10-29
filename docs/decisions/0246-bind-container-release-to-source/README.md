@@ -136,6 +136,42 @@ selected transaction depends on detecting that history. Until that proof and
 the registry recovery contract are available, do not claim #1949's source
 binding is implemented or enable promotion by weakening a check.
 
+## Admission and recovery prerequisites
+
+The release authorization must identify the initial dispatch source before the
+run starts. The dispatch supplies that expected commit, and the trusted workflow
+verifies the actual resolved source and authorization against it before mutation;
+a moved ref or missing authorization fails closed. Identity, scope, expiry,
+revocation, and separation of the dispatcher's authority from candidate code
+must be specified and verified under the applicable identity policy. A candidate
+for the exact authorized source must be available, including when push path
+filters skipped its build; a trusted credentialless build for that source or an
+explicit hold is required. Do not substitute a nearby candidate.
+
+The present release App has an always-bypass role on default-branch rulesets.
+This proposal does not grant that role to autonomous admission or resolve the
+snapshot write path. Before rollout, define and verify an authorized non-bypass
+snapshot transaction and its recovery, or hold the release; do not infer safety
+from dropping an admin flag. Any change to existing bypass policy requires its
+own reviewed decision and applicable protection checks.
+
+Require an annotated signed tag with a verifiable tag object for new
+selection-bound records. A retry must execute the originally recorded trusted
+contract revision, or a separately verified compatible successor, with an
+independently authorized signer and evidence-store trust root. Record key
+custody, revocation, accepted identities, store durability, and acceptance
+receipts before enabling this path. A missing store or signer holds publication.
+For outstanding scoped fragments or legacy retries lacking proof, name an owner
+and a separately reviewed resolution; never fabricate source equivalence or
+silently omit changes. #1948 tracks the selection contract.
+
+The transaction design must specify states and recovery at each Git and registry
+boundary, including concurrent writers. A prior-state comparison alone is not
+an atomic registry compare-and-swap. Prove an enforceable serialization or
+conditional update mechanism for every destination; otherwise hold that
+promotion path. Preserve the Git ref ABA limitation until a server-enforced or
+auditable mechanism is proven.
+
 ## Verification before delivery
 
 - Unit and mutation tests cover matching and stale sources, malformed commits,
