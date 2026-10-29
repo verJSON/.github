@@ -148,6 +148,24 @@ and policy capability; it is not implied by agent evaluation or by this ADR.
 Ineligible repositories remain held until a separately reviewed non-bypass
 alternative is available.
 
+## Limited public-repository configuration probe (2026-10-29)
+
+On the Team-plan organization’s public `VerJSON/.github` repository, a
+reversible probe created an exact-match temporary branch ruleset with no
+bypass actors, one required approval, last-push approval, and a merge queue.
+GitHub accepted ruleset `26135526`; its effective branch rules included both
+pull-request review and merge queue, and GraphQL returned queue ID
+`MQ_kwDOS6lUXM4ABQ2E`. The temporary ruleset and branch were then deleted;
+subsequent API reads confirmed both absent. Existing repository ruleset
+inventory and `main` head were unchanged. A [sanitized evidence summary](evidence/2026-10-29-public-queue-probe.json)
+records the observed rule, queue, teardown, and local receipt hashes. The
+original API captures remain local; their hashes do not authenticate them.
+
+This demonstrates configuration and readback for this public repository
+only. It did not create a pull request, enqueue or merge, dispatch a
+`merge_group` check, test reviewer or bypass enforcement, or establish queue
+eligibility for any private repository. Those remain rollout prerequisites.
+
 ## Verification before rollout
 
 - Unit and mutation tests reject missing, skipped, failed, cancelled, stale,
