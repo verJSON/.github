@@ -58,7 +58,7 @@ class PromotionTest(unittest.TestCase):
             }
         ]
         self.now = datetime(2026, 8, 9, 1, tzinfo=timezone.utc)
-        self.state = {"candidateManifestDigest": "sha256:" + "9" * 64, "aliases": {}, "release": {"workflow": {"path": ".github/workflows/container-release.yml", "contractCommit": "c" * 40}, "sourceCommit": "d" * 40, "runId": 456, "runAttempt": 1}, "timestamps": {"candidatePublishedAt": "2026-08-09T00:00:00Z", "releasedAt": "2026-08-09T01:00:00Z"}, "previousRelease": None, "provenance": {"default": "sha256:" + "7" * 64}, "sbom": {"default": "sha256:" + "5" * 64}}
+        self.state = {"candidateManifestDigest": "sha256:" + "9" * 64, "aliases": {}, "release": {"workflow": {"path": ".github/workflows/container-release.yml", "contractCommit": "c" * 40}, "sourceCommit": "a" * 40, "runId": 456, "runAttempt": 1}, "timestamps": {"candidatePublishedAt": "2026-08-09T00:00:00Z", "releasedAt": "2026-08-09T01:00:00Z"}, "previousRelease": None, "provenance": {"default": "sha256:" + "7" * 64}, "sbom": {"default": "sha256:" + "5" * 64}}
 
     def release(self, *args, **kwargs):
         kwargs.setdefault("now", self.now)
@@ -105,6 +105,11 @@ class PromotionTest(unittest.TestCase):
                 candidate, config = self.contract_repository_candidate(signer)
                 with self.assertRaises(promotion.ManifestError):
                     self.release(candidate, config, self.state, "1.2.3")
+
+    def test_new_release_rejects_candidate_from_another_source_commit(self):
+        self.state["release"]["sourceCommit"] = "d" * 40
+        with self.assertRaisesRegex(promotion.ManifestError, "candidate source commit"):
+            self.release(self.candidate, self.config, self.state, "1.2.3")
 
     def test_exact_digests_form_deterministic_release(self):
         result = self.release(self.candidate, self.config, self.state, "1.2.3")
