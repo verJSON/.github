@@ -62,32 +62,6 @@ class PostMergeCleanupTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return yaml.safe_load(result.stdout)
 
-    def run_export(self, artifact_id: str) -> tuple[subprocess.CompletedProcess[str], str]:
-        export_step = self.merge_step("Export terminal merge cleanup receipt")
-        with tempfile.TemporaryDirectory() as temporary:
-            runner_temp = pathlib.Path(temporary)
-            (runner_temp / "arm-receipt-artifact-id").write_text(
-                f"{artifact_id}\n", encoding="utf-8"
-            )
-            output = runner_temp / "github-output"
-            environment = {
-                **os.environ,
-                "RUNNER_TEMP": str(runner_temp),
-                "GITHUB_OUTPUT": str(output),
-            }
-            result = subprocess.run(
-                ["bash", "-c", export_step["run"]],
-                cwd=ROOT,
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            github_output = (
-                output.read_text(encoding="utf-8") if output.exists() else ""
-            )
-            return result, github_output
-
     def run_cleanup(
         self, artifact_id: str, *, delete_mode: str = "success"
     ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
@@ -160,31 +134,10 @@ exit 0
         ):
             self.assertNotIn(forbidden, cleanup_text)
 
-    def test_cleanup_output_is_exported_only_after_exact_merge_confirmation(self) -> None:
-        terminal = self.merge_step("Merge the authorized head")
-        export = self.merge_step("Export terminal merge cleanup receipt")
-        report = self.merge_step("Report closing issue outcomes")
-        confirm = self.merge_step("Confirm terminal merge state")
-        self.assertEqual(confirm["id"], "confirm-terminal-merge")
-        self.assertEqual(self.merge_steps.index(confirm), self.merge_steps.index(terminal) + 1)
-        self.assertEqual(self.merge_steps.index(export), self.merge_steps.index(confirm) + 1)
-        self.assertLess(self.merge_steps.index(export), self.merge_steps.index(report))
-        self.assertEqual(
-            export["if"], "steps.confirm-terminal-merge.outcome == 'success'"
-        )
-        self.assertEqual(
-            self.merge_job["outputs"],
-            {
-                "arm_receipt_artifact_id": (
-                    "${{ steps.export-cleanup-receipt.outputs."
-                    "arm_receipt_artifact_id }}"
-                ),
-                "terminal_merge_succeeded": (
-                    "${{ steps.export-cleanup-receipt.outputs."
-                    "terminal_merge_succeeded }}"
-                ),
-            },
-        )
+    def test_retired_merge_never_enables_cleanup(self) -> None:
+        self.assertEqual(self.merge_job["outputs"]["terminal_merge_succeeded"], "false")
+        self.assertEqual(self.merge_job["outputs"]["arm_receipt_artifact_id"], "")
+        self.assertFalse(any(step.get("name") == "Export terminal merge cleanup receipt" for step in self.merge_steps))
 
     def test_cleanup_consumes_only_the_merge_job_outputs(self) -> None:
         self.assertEqual(self.cleanup_job["needs"], "privileged_merge")
@@ -226,23 +179,6 @@ exit 0
                 "pull-requests": "read",
             },
         )
-
-    def test_export_rejects_missing_or_nonpositive_artifact_ids(self) -> None:
-        for artifact_id in ("", "0", "-1", "abc", "1 2"):
-            with self.subTest(artifact_id=artifact_id):
-                result, github_output = self.run_export(artifact_id)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(github_output, "")
-
-    def test_export_persists_cleanup_outputs_before_later_failures(self) -> None:
-        result, github_output = self.run_export("123")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            github_output,
-            "arm_receipt_artifact_id=123\nterminal_merge_succeeded=true\n",
-        )
-        self.assertIn("always()", self.cleanup_job["if"])
-        self.assertNotIn("result", self.cleanup_job["if"])
 
     def test_successful_cleanup_deletes_the_exact_artifact_once(self) -> None:
         result, calls = self.run_cleanup("123")

@@ -153,8 +153,8 @@ jobs:
     runs-on: ${{ github.repository_owner != 'Verjson' && inputs.runner_labels && fromJSON(inputs.runner_labels) || github.repository_owner != 'Verjson' && 'ubuntu-24.04' || github.event.repository.visibility == 'public' && 'ubuntu-24.04' || fromJSON(inputs.privileged_lane) }}
     timeout-minutes: 5
     outputs:
-      arm_receipt_artifact_id: ${{ steps.export-cleanup-receipt.outputs.arm_receipt_artifact_id }}
-      terminal_merge_succeeded: ${{ steps.export-cleanup-receipt.outputs.terminal_merge_succeeded }}
+      arm_receipt_artifact_id: ''
+      terminal_merge_succeeded: 'false'
     permissions:
       actions: read
       checks: read
@@ -208,7 +208,6 @@ jobs:
           path: .gate-trust
           sparse-checkout: |
             scripts/ci-gate/closing-issue-visibility.py
-            scripts/ci-gate/terminal-merge.sh
             scripts/ci-gate/verify-arm-receipt.sh
             scripts/ci-gate/review-policy-envelope.py
           sparse-checkout-cone-mode: false
@@ -558,87 +557,10 @@ jobs:
           echo "authorized=true" >>"$GITHUB_OUTPUT"
           echo "Independent review receipt $review_id for exact head $EXPECTED_HEAD_SHA was terminally revalidated for $reviewer."
 
-      - name: Capture closing issue references
-        if: steps.authorize-merge.outputs.authorized == 'true' && steps.independent-review.outputs.authorized == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Hold autonomous terminal merge
         run: |
-          set -euo pipefail
-          python3 -I .gate-trust/scripts/ci-gate/closing-issue-visibility.py capture \
-            --output "$RUNNER_TEMP/closing-issues.json"
-
-      - name: Validate GitHub App client ID
-        id: generated_app_client_id_ai-privileged-merge_privileged_merge_1
-        if: "steps.authorize-merge.outputs.authorized == 'true' && steps.independent-review.outputs.authorized == 'true'"
-        shell: bash
-        env:
-          APP_CLIENT_ID: "${{ inputs.merge_app_client_id || vars.MERGE_APP_CLIENT_ID }}"
-          LC_ALL: C
-        run: |
-          # Generated from scripts/app_client_id_contract.py.
-          set -euo pipefail
-          if [[ ! "$APP_CLIENT_ID" =~ ^Iv[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.]{8,126}$ ]]; then
-            printf '%s\n' '::error::GitHub App client ID is not accepted by the configured App policy' >&2
-            exit 1
-          fi
-      - name: Mint exact-repository terminal merge App token
-        if: steps.authorize-merge.outputs.authorized == 'true' && steps.independent-review.outputs.authorized == 'true'
-        id: merge-app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
-        with:
-          client-id: ${{ inputs.merge_app_client_id || vars.MERGE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.MERGE_APP_PRIVATE_KEY }}
-          owner: ${{ steps.merge-target.outputs.owner }}
-          repositories: ${{ steps.merge-target.outputs.repository }}
-          permission-contents: write
-          permission-pull-requests: write
-
-      - name: Merge the authorized head
-        id: terminal-merge
-        if: steps.authorize-merge.outputs.authorized == 'true' && steps.independent-review.outputs.authorized == 'true'
-        env:
-          GH_TOKEN: ${{ steps.merge-app-token.outputs.token }}
-          AUTHORIZED_BASE_SHA: ${{ steps.authorize-merge.outputs.authorized_base_sha }}
-          DEFAULT_BRANCH: ${{ steps.authorize-merge.outputs.default_branch }}
-        run: |
-          set -euo pipefail
-          bash .gate-trust/scripts/ci-gate/terminal-merge.sh
-
-      - name: Confirm terminal merge state
-        id: confirm-terminal-merge
-        if: ${{ always() && steps.authorize-merge.outputs.authorized == 'true' && steps.independent-review.outputs.authorized == 'true' && steps.terminal-merge.outcome == 'success' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          merged="$(gh pr view "$PR_NUMBER" --repo "$TARGET_REPO" --json state,headRefOid)"
-          jq -e --arg head "$EXPECTED_HEAD_SHA" '.state == "MERGED" and .headRefOid == $head' \
-            <<<"$merged" >/dev/null || {
-            echo "::error::GitHub did not confirm terminal merge of the authorized head"; exit 1;
-          }
-          echo "Merged authorized head $EXPECTED_HEAD_SHA after every declared required check succeeded."
-
-      - name: Export terminal merge cleanup receipt
-        id: export-cleanup-receipt
-        if: steps.confirm-terminal-merge.outcome == 'success'
-        run: |
-          set -euo pipefail
-          receipt_artifact_id="$(<"$RUNNER_TEMP/arm-receipt-artifact-id")"
-          [[ "$receipt_artifact_id" =~ ^[123456789][0123456789]*$ ]] || {
-            echo "::error::confirmed terminal merge lacks a valid arm receipt artifact ID"
-            exit 1
-          }
-          printf 'arm_receipt_artifact_id=%s\nterminal_merge_succeeded=true\n' \
-            "$receipt_artifact_id" >>"$GITHUB_OUTPUT"
-
-      - name: Report closing issue outcomes
-        if: steps.authorize-merge.outputs.authorized == 'true' && steps.independent-review.outputs.authorized == 'true' && steps.terminal-merge.outcome == 'success'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          python3 -I .gate-trust/scripts/ci-gate/closing-issue-visibility.py report \
-            --input "$RUNNER_TEMP/closing-issues.json"
+          echo "::error::Autonomous terminal merge is disabled pending non-bypass admission (#1945)."
+          exit 1
 
   cleanup_arm_receipt:
     needs: privileged_merge
