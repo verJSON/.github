@@ -2,12 +2,16 @@ import copy
 from datetime import datetime, timezone
 import importlib.util
 import json
+import os
+import subprocess
+import tempfile
 import sys
 import unittest
 from unittest.mock import patch
 from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -58,7 +62,7 @@ class PromotionTest(unittest.TestCase):
             }
         ]
         self.now = datetime(2026, 8, 9, 1, tzinfo=timezone.utc)
-        self.state = {"candidateManifestDigest": "sha256:" + "9" * 64, "aliases": {}, "release": {"workflow": {"path": ".github/workflows/container-release.yml", "contractCommit": "c" * 40}, "sourceCommit": "d" * 40, "runId": 456, "runAttempt": 1}, "timestamps": {"candidatePublishedAt": "2026-08-09T00:00:00Z", "releasedAt": "2026-08-09T01:00:00Z"}, "previousRelease": None, "provenance": {"default": "sha256:" + "7" * 64}, "sbom": {"default": "sha256:" + "5" * 64}}
+        self.state = {"candidateManifestDigest": "sha256:" + "9" * 64, "aliases": {}, "release": {"workflow": {"path": ".github/workflows/container-release.yml", "contractCommit": "c" * 40}, "sourceCommit": "a" * 40, "runId": 456, "runAttempt": 1}, "timestamps": {"candidatePublishedAt": "2026-08-09T00:00:00Z", "releasedAt": "2026-08-09T01:00:00Z"}, "previousRelease": None, "provenance": {"default": "sha256:" + "7" * 64}, "sbom": {"default": "sha256:" + "5" * 64}}
 
     def release(self, *args, **kwargs):
         kwargs.setdefault("now", self.now)
@@ -105,6 +109,11 @@ class PromotionTest(unittest.TestCase):
                 candidate, config = self.contract_repository_candidate(signer)
                 with self.assertRaises(promotion.ManifestError):
                     self.release(candidate, config, self.state, "1.2.3")
+
+    def test_new_release_rejects_candidate_from_another_source_commit(self):
+        self.state["release"]["sourceCommit"] = "d" * 40
+        with self.assertRaisesRegex(promotion.ManifestError, "candidate source commit"):
+            self.release(self.candidate, self.config, self.state, "1.2.3")
 
     def test_exact_digests_form_deterministic_release(self):
         result = self.release(self.candidate, self.config, self.state, "1.2.3")
@@ -191,6 +200,39 @@ class PromotionTest(unittest.TestCase):
         historical = self.release(self.candidate, self.config, self.state, "1.2.3")
         historical["schemaVersion"] = 2
         self.assertTrue(list(self.schema_validator.iter_errors(historical)))
+
+    def test_tagged_retry_uses_recorded_source_even_after_dispatch_head_moves(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/container-release.yml").read_text())
+        steps = workflow["jobs"]["promote"]["steps"]
+        preflight = next(step["run"] for step in steps if step.get("name") == "Fail-closed preflight and immutable plan")
+        start = preflight.index('if git show-ref --verify --quiet "refs/tags/v$VERSION"; then')
+        end = preflight.index("\njq -n --arg digest", start)
+        context_script = preflight[start:end] + '\nprintf "%s\\n" "$context"\n'
+        recorded = self.release(self.candidate, self.config, self.state, "1.2.3")
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        env.update(VERSION="1.2.3", GITHUB_SHA="e" * 40, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "-q", str(root)], check=True, env=env)
+            manifest = root / "RELEASES/containers/v1.2.3.json"
+            manifest.parent.mkdir(parents=True)
+            for source, accepted in (("a" * 40, True), ("d" * 40, False)):
+                with self.subTest(recorded_source=source):
+                    release = copy.deepcopy(recorded)
+                    release["release"]["sourceCommit"] = source
+                    manifest.write_text(json.dumps(release))
+                    subprocess.run(["git", "-C", str(root), "add", str(manifest.relative_to(root))], check=True, env=env)
+                    subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture"], check=True, env=env)
+                    subprocess.run(["git", "-C", str(root), "tag", "-f", "v1.2.3"], check=True, env=env, stdout=subprocess.DEVNULL)
+                    result = subprocess.run(["bash", "-euc", context_script], cwd=root, env=env, check=True, capture_output=True, text=True)
+                    retry_state = copy.deepcopy(self.state)
+                    retry_state.update(json.loads(result.stdout))
+                    self.assertEqual(source, retry_state["release"]["sourceCommit"])
+                    if accepted:
+                        self.assertEqual(recorded, self.release(self.candidate, self.config, retry_state, "1.2.3"))
+                    else:
+                        with self.assertRaisesRegex(promotion.ManifestError, "candidate source commit"):
+                            self.release(self.candidate, self.config, retry_state, "1.2.3")
 
     def test_exact_partial_alias_is_idempotent(self):
         image = self.candidate["images"][0]
