@@ -11,6 +11,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+# Git fixtures must not inherit workstation hooks or global Git configuration.
+os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
+os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+
 
 path = Path(__file__).with_name("review-verdict.py")
 spec = importlib.util.spec_from_file_location("review_verdict", path)

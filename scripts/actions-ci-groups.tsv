@@ -127,6 +127,7 @@ merge-gate	bash scripts/ci-gate/validate-ai-review-app-key.test.sh
 merge-gate	bash scripts/ci-gate/freshness.test.sh
 merge-gate	bash scripts/ci-gate/review-comment.test.sh
 merge-gate	bash scripts/ci-gate/review-context.test.sh
+merge-gate	bash scripts/ci-gate/review-git-fixture-isolation.test.sh
 merge-gate	bash scripts/ci-gate/read-pr-files.test.sh
 merge-gate	bash scripts/ci-gate/ai-review-retry.test.sh
 merge-gate	bash scripts/ci-gate/semantic-verdict.test.sh
