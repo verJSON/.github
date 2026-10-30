@@ -184,8 +184,8 @@ heads. The [sanitized control record](evidence/2026-10-29-private-queue-control.
 includes observed responses and local receipt hashes. The queue request shape
 is reconstructed from the invocation because its original request body was
 not separately captured; hashes do not authenticate GitHub responses.
-No result establishes queue execution, approval enforcement, or production
-readiness.
+Neither configuration probe established queue execution, approval enforcement,
+or production readiness; the later isolated execution is recorded below.
 
 ## Follow-up canary isolation constraint (2026-10-29)
 
@@ -214,8 +214,11 @@ privileged Apps, production runners, or required workflows could be evaluated
 as a test environment if separately authorized. Its Actions enablement,
 review authority, event routing, repository retention, and teardown need
 verification first. A human approval required for enqueue or merge remains a
-real approval; do not fabricate it or remove the gate to obtain a positive
-result. Any closed test pull request and its checks remain durable records.
+real approval; do not fabricate it or remove the gate merely to obtain a
+positive result. The owner subsequently explicitly waived that requirement
+for the isolated experiment recorded below. That exception did not apply to
+production rules. Any closed test pull request and its checks remain durable
+records.
 Results from such an organization do not establish production `VerJSON`
 ruleset, event, or authorization behavior.
 
@@ -241,8 +244,33 @@ queue, and without auto-merge. The owner reported no active organization
 webhooks; the webhook API inventory was not readable and that statement was
 not API-verified. The [sanitized dispatch record](evidence/2026-10-29-isolated-pr-dispatch.json)
 contains the selected observation and local receipt hashes, which do not
-authenticate provider responses. No human approval, queue enrollment,
-merge-group execution, merge, or production admission was established.
+authenticate provider responses. At that point no human approval, queue
+enrollment, merge-group execution, merge, or production admission was established.
+
+## Isolated public queue execution (2026-10-30)
+
+The owner explicitly waived the human-review requirement for this test until
+distinct agent run identities are available. The test-only exact-branch rule
+required zero approvals and retained the pull-request rule, empty bypass list,
+Actions-bound `canary-signal` check, and one-entry squash queue. This departure
+from the original canary plan does not demonstrate human or agent approval
+enforcement and does not change production policy.
+
+[PR 1](https://github.com/test-agent-verjson/tbd-queue-canary-20261029165528-c5edae32/pull/1)
+was enqueued with its expected head `4e63fcd3fc1d299d3ad2eccf50cb7516f0bb393f`.
+[Merge-group run 41147372166](https://github.com/test-agent-verjson/tbd-queue-canary-20261029165528-c5edae32/actions/runs/41147372166)
+passed on commit `0e760f56fb452b25642a9fe2062c77e40bbb01fa`, with base
+`7a8eec65fefe72f21e2e6ecd3296ffb8304e90d2`. The landed target tip and PR
+merge commit were the same commit, with tree
+`2c54a2ad9e11d97eb9fefe1d43a9b5ad123b829a`. The test rule and refs were removed;
+the queue entry and active runs were absent on readback. The PR and run remain
+as provider records. The [observation and evidence limitations](https://github.com/verJSON/.github/issues/1945#issuecomment-6536107555)
+are recorded on the issue.
+
+This single public-repository result does not establish approval enforcement,
+private-repository eligibility, negative check behavior, queue concurrency,
+base-change handling, or production admission. The owner reported no active
+organization webhooks; that inventory was not independently verified.
 
 ## Verification before rollout
 

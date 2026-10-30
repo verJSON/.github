@@ -1,6 +1,7 @@
 # Isolated public merge-queue canary plan
 
-**Status:** Proposed; no separate organization or repository has been created.
+**Status:** Proposed plan; an isolated execution with an explicit review waiver
+is recorded in the [decision record](README.md#isolated-public-queue-execution-2026-10-30).
 **Issue:** [verJSON/.github#1945](https://github.com/verJSON/.github/issues/1945).
 This is a platform experiment, not a production admission design or authority to
 change VerJSON settings.
