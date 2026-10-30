@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "repository": "VerJSON/.github",
+  "plan_reported": "team",
+  "visibility": "public",
+  "branch": "refs/heads/pm-queue-pilot-20261029t160323z-2c976bf7",
+  "rule_id": 26135526,
+  "rule_scope": {
+    "exclude": [],
+    "include": [
+      "refs/heads/pm-queue-pilot-20261029t160323z-2c976bf7"
+    ]
+  },
+  "bypass_actors": [],
+  "rules": [
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 1,
+        "dismiss_stale_reviews_on_push": true,
+        "required_reviewers": [],
+        "require_code_owner_review": false,
+        "dismissal_restriction": {
+          "enabled": false,
+          "allowed_actors": []
+        },
+        "require_last_push_approval": true,
+        "required_review_thread_resolution": true,
+        "require_extra_approval_for_unattributed_changes": true,
+        "allowed_merge_methods": [
+          "merge",
+          "squash",
+          "rebase"
+        ]
+      }
+    },
+    {
+      "type": "merge_queue",
+      "parameters": {
+        "merge_method": "SQUASH",
+        "max_entries_to_build": 1,
+        "min_entries_to_merge": 1,
+        "max_entries_to_merge": 1,
+        "min_entries_to_merge_wait_minutes": 0,
+        "grouping_strategy": "ALLGREEN",
+        "check_response_timeout_minutes": 60
+      }
+    }
+  ],
+  "effective_rules": [
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 1,
+        "dismiss_stale_reviews_on_push": true,
+        "required_reviewers": [],
+        "require_code_owner_review": false,
+        "dismissal_restriction": {
+          "enabled": false,
+          "allowed_actors": []
+        },
+        "require_last_push_approval": true,
+        "required_review_thread_resolution": true,
+        "require_extra_approval_for_unattributed_changes": true,
+        "allowed_merge_methods": [
+          "merge",
+          "squash",
+          "rebase"
+        ]
+      }
+    },
+    {
+      "type": "merge_queue",
+      "parameters": {
+        "merge_method": "SQUASH",
+        "max_entries_to_build": 1,
+        "min_entries_to_merge": 1,
+        "max_entries_to_merge": 1,
+        "min_entries_to_merge_wait_minutes": 0,
+        "grouping_strategy": "ALLGREEN",
+        "check_response_timeout_minutes": 60
+      }
+    }
+  ],
+  "graphql_queue_id": "MQ_kwDOS6lUXM4ABQ2E",
+  "main_before": "4abc3be930da8489ea4d028637973c20c7885722",
+  "main_after": "4abc3be930da8489ea4d028637973c20c7885722",
+  "rulesets_before": [
+    [
+      20515822,
+      "core-checks-actions",
+      "active"
+    ],
+    [
+      20722935,
+      "ai-authorization-arm-required",
+      "active"
+    ]
+  ],
+  "rulesets_after": [
+    [
+      20515822,
+      "core-checks-actions",
+      "active"
+    ],
+    [
+      20722935,
+      "ai-authorization-arm-required",
+      "active"
+    ]
+  ],
+  "deletion_readbacks": {
+    "verify-rule-deleted": {
+      "exit_code": 1,
+      "http_404": true
+    },
+    "verify-ref-deleted": {
+      "exit_code": 1,
+      "http_404": true
+    }
+  },
+  "local_receipt_sha256": {
+    "rule-readback": "ff11eef2c8efa2efe4f9f33452be28741f5c0f9f2484a39aff7dd4867f1d94d3",
+    "effective-rules": "93492e686ec3a04f0f5ef289017e1b03c0b914edab1bb16d17d10396d1ac6e80",
+    "graphql": "186a7090eac6220792b140b3a5727c763e2e71639e307aa20b7a9ca02e9c88a1",
+    "verify-rule-deleted": "09c1468d3eecb4611019833825c13f65f4cf074ec3e707f5a662ccc0e465d305",
+    "verify-ref-deleted": "10f8e4118800720e014375013223e7d01a4b46128d37b4db41e23dab3b0dbf20",
+    "main-before": "f8947639ebf0ac6be7a6b9de9b75268893df3f37cad9a9f66fd7580e6899e4b2",
+    "main-after": "f8947639ebf0ac6be7a6b9de9b75268893df3f37cad9a9f66fd7580e6899e4b2",
+    "rulesets-before": "7dae409abfea0f6dd865683a1f82242e9975ebe39d50f5781a5268bcf1bca22e",
+    "rulesets-after": "7dae409abfea0f6dd865683a1f82242e9975ebe39d50f5781a5268bcf1bca22e"
+  },
+  "limitations": "Local API capture; hashes bind the local receipt files but do not authenticate GitHub responses. No PR, enqueue, merge, required check, bypass enforcement, or private-repository eligibility was tested.",
+  "probe_started_at_utc": "2026-10-29T16:03:23Z"
+}
