@@ -642,6 +642,22 @@ def _script_candidate_status_failure(status: TrustedCandidateStatus) -> ScriptCa
     )
 
 
+HARNESS_LAUNCH_GATE_ENTRYPOINT = r'''import os, sys
+try:
+    gate = int(sys.argv[1])
+    try:
+        frame = os.read(gate, 2)
+        end = os.read(gate, 1)
+    finally:
+        os.close(gate)
+    if frame != b"G" or end != b"" or len(sys.argv) < 3:
+        os._exit(125)
+    os.execvpe(sys.argv[2], sys.argv[2:], os.environ)
+except BaseException:
+    os._exit(125)
+'''
+
+
 SANDBOX_SUPERVISOR_ENTRYPOINT = r'''import ctypes, json, os, queue, re, select, signal, subprocess, sys, time
 from pathlib import Path
 watched_signals = {signal.SIGINT, signal.SIGTERM}

@@ -205,6 +205,92 @@ class HostSignalQueueTests(unittest.TestCase):
             signals.poll()
 
 
+class HarnessLaunchGateTests(unittest.TestCase):
+    def test_pinned_process_identity_survives_gate_exec(self):
+        import compatibility_lane_peer as peer
+
+        read_fd, write_fd = os.pipe()
+        try:
+            process = subprocess.Popen(
+                [sys.executable, '-I', '-c', artifacts.HARNESS_LAUNCH_GATE_ENTRYPOINT,
+                 str(read_fd), sys.executable, '-I', '-c',
+                 "import os,sys; print(os.getpid(),flush=True); sys.stdin.buffer.read(1)"],
+                pass_fds=(read_fd,), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+        except BaseException:
+            os.close(write_fd)
+            raise
+        finally:
+            os.close(read_fd)
+        pidfd = proc_fd = -1
+        communicated = False
+        try:
+            pidfd = os.pidfd_open(process.pid)
+            proc_fd = os.open('/proc', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            os.write(write_fd, b'G')
+            os.close(write_fd)
+            write_fd = -1
+            self.assertTrue(select.select([process.stdout], [], [], 3)[0])
+            self.assertEqual(int(process.stdout.readline()), process.pid)
+            peer._assert_live(pidfd)
+            self.assertEqual(peer._pidfd_pid(proc_fd, pidfd), process.pid)
+            process.communicate(input=b'x', timeout=3)
+            communicated = True
+            self.assertEqual(process.returncode, 0)
+        finally:
+            if write_fd >= 0:
+                os.close(write_fd)
+            for fd in (pidfd, proc_fd):
+                if fd >= 0:
+                    os.close(fd)
+            if not communicated:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=3)
+
+    def test_gate_executes_only_after_complete_authorization_and_closes_the_pipe(self):
+        for authorization, expected_status in ((b'G', 0), (b'', 125), (b'GX', 125)):
+            with self.subTest(authorization=authorization):
+                read_fd, write_fd = os.pipe()
+                code = (
+                    "import os,sys\n"
+                    "try: os.fstat(int(sys.argv[1]))\n"
+                    "except OSError: print('gate closed')\n"
+                    "else: sys.exit(9)\n"
+                )
+                communicated = False
+                try:
+                    process = subprocess.Popen(
+                        [sys.executable, '-I', '-c', artifacts.HARNESS_LAUNCH_GATE_ENTRYPOINT,
+                         str(read_fd), sys.executable, '-I', '-c', code, str(read_fd)],
+                        pass_fds=(read_fd,), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    )
+                except BaseException:
+                    os.close(write_fd)
+                    raise
+                finally:
+                    os.close(read_fd)
+                try:
+                    self.assertEqual(select.select([process.stdout], [], [], 0.1)[0], [])
+                    if authorization:
+                        os.write(write_fd, authorization)
+                        if authorization == b'G':
+                            self.assertEqual(select.select([process.stdout], [], [], 0.1)[0], [])
+                    os.close(write_fd)
+                    write_fd = -1
+                    stdout, _ = process.communicate(timeout=3)
+                    communicated = True
+                    self.assertEqual(process.returncode, expected_status)
+                    self.assertEqual(stdout, b'gate closed\n' if expected_status == 0 else b'')
+                finally:
+                    if write_fd >= 0:
+                        os.close(write_fd)
+                    if not communicated:
+                        if process.poll() is None:
+                            process.kill()
+                        process.communicate(timeout=3)
+
+
 class EntryReceiptSupervisorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()

@@ -109,6 +109,16 @@ not authenticated. A forked holder can half-close the shared socket, so the
 gate must prevent that ownership transfer rather than treating EOF as proof
 that the supervisor ended the exchange.
 
+An experimental, unwired launch wrapper waits for an exact pipe frame and EOF,
+closes the gate descriptor and then executes the supplied command. The frame is
+not authorization: a caller must protect the write end, bind release to the
+authenticated attempt and controller decision, and enforce a bounded supervisor
+deadline and cancellation cutoff. The wrapper inherits its supplied environment
+and PATH. Its caller must independently establish executable and interpreter
+provenance and prevent other control descriptors from reaching the harness.
+The existing supervisor's `candidate-started` event describes its current direct
+launch and is not evidence of execution through this experimental wrapper.
+
 ## Controller candidates
 
 An experimental, unwired `scripts/ci-gate/compatibility_lane_evidence.py` compares
