@@ -92,6 +92,23 @@ namespace differed from the host. These observations do not establish
 descriptor-transfer safety, harness provenance, the full coordinator, or
 production admission.
 
+An experimental, unwired launch-handoff reader accepts one attempt- and
+nonce-bound Unix seqpacket from a pinned live supervisor and checks the received
+pidfd against a live direct child in the supervisor's PID namespace. It rejects
+extra packets and ambiguous descriptors. The caller must establish a trusted
+host procfs, aligned credential namespaces, an independently pinned supervisor,
+exclusive child-reaping ownership, and a pre-execution gate; the helper does
+not create or acknowledge that gate or select the intended child. It does not
+prove interpreter, harness or executed-byte provenance, controller isolation,
+or cleanup. The caller must retain and recheck the child and supervisor pidfds
+through the acceptance cutoff. Socket ownership, cancellation, and descriptor handoff require
+trusted bounded consumers without asynchronously raised exceptions. This is
+not an admission or launch authorization.
+The one-shot reader waits for socket EOF to reject queued extra packets; EOF is
+not authenticated. A forked holder can half-close the shared socket, so the
+gate must prevent that ownership transfer rather than treating EOF as proof
+that the supervisor ended the exchange.
+
 ## Controller candidates
 
 An experimental, unwired `scripts/ci-gate/compatibility_lane_evidence.py` compares

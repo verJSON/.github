@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from contextlib import ExitStack
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import compatibility_lane_channel as channel
@@ -25,6 +26,127 @@ def read_to_eof(endpoint):
 
 
 class LaneChannelTests(unittest.TestCase):
+    def _launch_resources(self):
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        process = subprocess.Popen(['/usr/bin/sleep', '10'])
+
+        def stop_process():
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+
+        stack.callback(stop_process)
+        def keep(fd):
+            stack.callback(os.close, fd)
+            return fd
+        supervisor_fd = keep(os.pidfd_open(os.getpid()))
+        child_fd = keep(os.pidfd_open(process.pid))
+        namespace_fd = keep(os.open('/proc/self/ns/pid', os.O_RDONLY | os.O_CLOEXEC))
+        proc_fd = keep(os.open('/proc', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC))
+        return process, supervisor_fd, child_fd, namespace_fd, proc_fd
+
+    def test_launch_handoff_rejects_invalid_bindings_and_incomplete_sequences(self):
+        import compatibility_lane_peer as peer
+        import struct
+
+        process, supervisor_fd, child_fd, namespace_fd, proc_fd = self._launch_resources()
+        try:
+            for case in ('wrong-supervisor', 'wrong-nonce', 'not-pidfd', 'supervisor-as-child', 'multiple-fds', 'no-end'):
+                with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as listener:
+                        listener.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+                        listener.bind(directory + '/launch')
+                        listener.listen(1)
+                        with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as sender:
+                            sender.connect(directory + '/launch')
+                            accepted, _ = listener.accept()
+                            with accepted:
+                                fds = ([proc_fd] if case == 'not-pidfd' else
+                                       [supervisor_fd] if case == 'supervisor-as-child' else
+                                       [child_fd, child_fd] if case == 'multiple-fds' else [child_fd])
+                                nonce = b'b' * 32 if case == 'wrong-nonce' else b'a' * 32
+                                sender.sendmsg([b'launch:attempt-1:' + nonce],
+                                               [(socket.SOL_SOCKET, socket.SCM_RIGHTS, struct.pack(f'{len(fds)}i', *fds))])
+                                if case != 'no-end':
+                                    sender.shutdown(socket.SHUT_WR)
+                                before = len(os.listdir('/proc/self/fd'))
+                                with self.assertRaises(peer.PeerEvidenceError):
+                                    result = peer.receive_launch_pidfd(
+                                        accepted, supervisor_pidfd=child_fd if case == 'wrong-supervisor' else supervisor_fd,
+                                        expected_uid=os.getuid(), supervisor_namespace_fd=namespace_fd,
+                                        trusted_proc_fd=proc_fd, attempt='attempt-1', nonce='a' * 32,
+                                        deadline=time.monotonic() + 0.1,
+                                    )
+                                    os.close(result)
+                                self.assertEqual(len(os.listdir('/proc/self/fd')), before)
+        finally:
+            self.doCleanups()
+
+    def test_launch_handoff_rejects_duplicate_packets_without_leaking_descriptors(self):
+        import compatibility_lane_peer as peer
+        import struct
+
+        with tempfile.TemporaryDirectory() as directory:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as listener:
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+                listener.bind(directory + '/launch')
+                listener.listen(1)
+                with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as sender:
+                    sender.connect(directory + '/launch')
+                    accepted, _ = listener.accept()
+                    with accepted:
+                        process, supervisor_fd, child_fd, namespace_fd, proc_fd = self._launch_resources()
+                        try:
+                            for _ in range(2):
+                                sender.sendmsg([b'launch:attempt-1:' + b'a' * 32],
+                                               [(socket.SOL_SOCKET, socket.SCM_RIGHTS, struct.pack('i', child_fd))])
+                            sender.shutdown(socket.SHUT_WR)
+                            before = len(os.listdir('/proc/self/fd'))
+                            with self.assertRaises(peer.PeerEvidenceError):
+                                result = peer.receive_launch_pidfd(
+                                    accepted, supervisor_pidfd=supervisor_fd, expected_uid=os.getuid(),
+                                    supervisor_namespace_fd=namespace_fd, trusted_proc_fd=proc_fd,
+                                    attempt='attempt-1', nonce='a' * 32, deadline=time.monotonic() + 2,
+                                )
+                                os.close(result)
+                            self.assertEqual(len(os.listdir('/proc/self/fd')), before)
+                        finally:
+                            self.doCleanups()
+
+    def test_launch_handoff_pins_only_the_supervisors_live_child(self):
+        import compatibility_lane_peer as peer
+        import struct
+
+        with tempfile.TemporaryDirectory() as directory:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as listener:
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+                listener.bind(directory + '/launch')
+                listener.listen(1)
+                with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as sender:
+                    sender.connect(directory + '/launch')
+                    accepted, _ = listener.accept()
+                    with accepted:
+                        process, supervisor_fd, child_fd, namespace_fd, proc_fd = self._launch_resources()
+                        try:
+                            sender.sendmsg([b'launch:attempt-1:' + b'a' * 32], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                                                   struct.pack('i', child_fd))])
+                            sender.shutdown(socket.SHUT_WR)
+                            received = peer.receive_launch_pidfd(
+                                accepted, supervisor_pidfd=supervisor_fd, expected_uid=os.getuid(),
+                                supervisor_namespace_fd=namespace_fd, trusted_proc_fd=proc_fd,
+                                attempt='attempt-1', nonce='a' * 32, deadline=time.monotonic() + 2,
+                            )
+                            try:
+                                self.assertEqual(peer._pidfd_pid(proc_fd, received), process.pid)
+                            finally:
+                                os.close(received)
+                        finally:
+                            self.doCleanups()
+
     @unittest.skipUnless(os.environ.get('VERJSON_TEST_REAL_BWRAP') == '1', 'requires Bubblewrap')
     def test_chunk_sender_evidence_matches_a_live_isolated_process(self):
         import compatibility_lane_peer as peer
