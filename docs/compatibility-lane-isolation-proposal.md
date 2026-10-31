@@ -18,6 +18,19 @@ The existing `verjson-ci` source execution boundary provides a relevant read-onl
 
 ## Controller candidates
 
+An experimental, unwired `scripts/ci-gate/compatibility_lane_evidence.py` compares
+an independently supplied plan and terminal results as an unordered complete
+lane set. It binds the declared policy, GitHub.com owner and repository IDs,
+candidate and base, run, workflow revision, and lane inputs. A `matching`
+result means only that the supplied records match; `readyForApply` is always
+false. The source identifiers are opaque labels that a future trusted controller
+must independently resolve and authenticate. The comparator does not authenticate
+records, compute or verify digests, establish a sandbox, run assertions, or prove
+that the supplied candidate and base are current. It is not an active check or
+an authorization to merge. Its version 1 is an experimental wire shape, not an
+adopted organization contract, and currently covers GitHub.com only.
+
+
 An independently enforced controller must execute the protected complete lane plan; candidate-authored calls and their outputs cannot be its authority. One candidate is a generalized organization-required workflow and trusted supervisor, building on the existing [CLI package-surface required workflow](../.github/workflows/cli-projects-package-surface-required.yml) and [ADR 0154](decisions/0154-authenticate-required-workflow-identity-overrides/README.md). Another is a separately controlled App that executes the plan and publishes an App-bound required check. A new App is not presumed necessary: select between these only after demonstrating the required enforcement and candidate/base binding on the intended GitHub plan and runner. Existing examples are repository-specific and do not establish cross-organization or merge-group support.
 
 On 2026-10-31 UTC, a [public canary run](https://github.com/test-agent-verjson/tbd-queue-canary-20261029165528-c5edae32/actions/runs/41153346595) invoked one reusable workflow twice. Both executions received the same caller workflow reference and reusable job name, while their `job.check_run_id` values differed. GitHub's jobs API associated each ID with the run, attempt, head SHA and a different displayed job name. This permits correlation of those observed executions, not authorization of the caller-controlled names, proof that every required call occurred, or proof of required-workflow enforcement. The probe used `workflow_dispatch`; pull-request, merge-group and private-repository behavior remain unverified. Its temporary workflow files were removed after the run.
