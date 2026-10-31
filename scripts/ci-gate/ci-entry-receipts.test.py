@@ -2835,6 +2835,7 @@ class TrustedCandidateStatusTests(unittest.TestCase):
                         with accepted:
                             namespace_fd, supervisor_pidfd = notices[0].borrow()
                             try:
+                                self.assertNotEqual(os.fstat(namespace_fd).st_ino, os.stat('/proc/self/ns/pid').st_ino)
                                 peer_pidfd = peer.pin_recorded_connector(
                                     accepted, expected_uid=os.getuid(), supervisor_pidfd=supervisor_pidfd,
                                     supervisor_namespace_fd=namespace_fd, trusted_proc_fd=proc_fd,

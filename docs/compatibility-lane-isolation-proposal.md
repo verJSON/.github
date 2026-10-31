@@ -52,6 +52,14 @@ pidfds through final acceptance. This observation does not authenticate harness
 code, launch, a subsequent writer, or lane completion, and cannot authorize
 admission. Its descriptor handoff requires queued cancellation rather than
 asynchronously raised exceptions, which can interrupt ownership transfer.
+An isolated public [canary run](https://github.com/test-agent-verjson/tbd-queue-canary-20261029165528-c5edae32/actions/runs/41166094673)
+checked out commit `a6d6bf37f4acddac129fb4d58eb42e028d804a2b` and passed the receipt and
+connector suites with the canonical hosted sandbox provisioner. One probe matched
+an accepted connector to its supervisor's pinned PID namespace through a
+read-only socket mount; a separate deadline probe verified that its supervisor
+namespace differed from the host. These observations do not establish
+descriptor-transfer safety, harness provenance, the full coordinator, or
+production admission.
 
 ## Controller candidates
 
