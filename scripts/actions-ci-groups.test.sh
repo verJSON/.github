@@ -1451,6 +1451,15 @@ document = yaml.safe_load(pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"))
 # command of their own, so no manifest row could run them. Each entry carries the
 # reason it is not a gate; adding one is a reviewable act, not a naming accident.
 NON_GATE_MODULES = {
+    "scripts/ci-gate/compatibility_lane_evidence.py": (
+        "experimental lane record comparator imported by its registered test"
+    ),
+    "scripts/ci-gate/compatibility_lane_channel.py": (
+        "experimental lane relay imported by its registered test"
+    ),
+    "scripts/ci-gate/compatibility_lane_peer.py": (
+        "experimental connector evidence imported by its registered test"
+    ),
     "scripts/ci-gate/ascii_digit_locales.py": (
         "locale-matrix helper imported by the digit-guard tests"
     ),

@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import errno
+from dataclasses import replace
 import json
 import os
 import queue
+import select
 import signal
 import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
+import time
 import unittest
 from unittest.mock import patch
 from contextlib import redirect_stdout
@@ -21,6 +25,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "scripts/ci-gate"))
 sys.path.insert(0, str(ROOT / ".github/actions/node-ci-script-plan"))
 
 import ci_build_artifacts as artifacts
@@ -200,6 +205,92 @@ class HostSignalQueueTests(unittest.TestCase):
             signals.poll()
 
 
+class HarnessLaunchGateTests(unittest.TestCase):
+    def test_pinned_process_identity_survives_gate_exec(self):
+        import compatibility_lane_peer as peer
+
+        read_fd, write_fd = os.pipe()
+        try:
+            process = subprocess.Popen(
+                [sys.executable, '-I', '-c', artifacts.HARNESS_LAUNCH_GATE_ENTRYPOINT,
+                 str(read_fd), sys.executable, '-I', '-c',
+                 "import os,sys; print(os.getpid(),flush=True); sys.stdin.buffer.read(1)"],
+                pass_fds=(read_fd,), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+        except BaseException:
+            os.close(write_fd)
+            raise
+        finally:
+            os.close(read_fd)
+        pidfd = proc_fd = -1
+        communicated = False
+        try:
+            pidfd = os.pidfd_open(process.pid)
+            proc_fd = os.open('/proc', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            os.write(write_fd, b'G')
+            os.close(write_fd)
+            write_fd = -1
+            self.assertTrue(select.select([process.stdout], [], [], 3)[0])
+            self.assertEqual(int(process.stdout.readline()), process.pid)
+            peer._assert_live(pidfd)
+            self.assertEqual(peer._pidfd_pid(proc_fd, pidfd), process.pid)
+            process.communicate(input=b'x', timeout=3)
+            communicated = True
+            self.assertEqual(process.returncode, 0)
+        finally:
+            if write_fd >= 0:
+                os.close(write_fd)
+            for fd in (pidfd, proc_fd):
+                if fd >= 0:
+                    os.close(fd)
+            if not communicated:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=3)
+
+    def test_gate_executes_only_after_complete_authorization_and_closes_the_pipe(self):
+        for authorization, expected_status in ((b'G', 0), (b'', 125), (b'GX', 125)):
+            with self.subTest(authorization=authorization):
+                read_fd, write_fd = os.pipe()
+                code = (
+                    "import os,sys\n"
+                    "try: os.fstat(int(sys.argv[1]))\n"
+                    "except OSError: print('gate closed')\n"
+                    "else: sys.exit(9)\n"
+                )
+                communicated = False
+                try:
+                    process = subprocess.Popen(
+                        [sys.executable, '-I', '-c', artifacts.HARNESS_LAUNCH_GATE_ENTRYPOINT,
+                         str(read_fd), sys.executable, '-I', '-c', code, str(read_fd)],
+                        pass_fds=(read_fd,), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    )
+                except BaseException:
+                    os.close(write_fd)
+                    raise
+                finally:
+                    os.close(read_fd)
+                try:
+                    self.assertEqual(select.select([process.stdout], [], [], 0.1)[0], [])
+                    if authorization:
+                        os.write(write_fd, authorization)
+                        if authorization == b'G':
+                            self.assertEqual(select.select([process.stdout], [], [], 0.1)[0], [])
+                    os.close(write_fd)
+                    write_fd = -1
+                    stdout, _ = process.communicate(timeout=3)
+                    communicated = True
+                    self.assertEqual(process.returncode, expected_status)
+                    self.assertEqual(stdout, b'gate closed\n' if expected_status == 0 else b'')
+                finally:
+                    if write_fd >= 0:
+                        os.close(write_fd)
+                    if not communicated:
+                        if process.poll() is None:
+                            process.kill()
+                        process.communicate(timeout=3)
+
+
 class EntryReceiptSupervisorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -207,6 +298,424 @@ class EntryReceiptSupervisorTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.runner_temp = self.root / "runner-temp"
         self.runner_temp.mkdir(mode=0o700)
+
+    def test_namespace_event_is_published_before_launch_with_owned_handles(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-namespace-event'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        notifications = queue.Queue(maxsize=1)
+        received = []
+
+        def on_event(event):
+            if event == 'control-accepted':
+                notice = notifications.get_nowait()
+                namespace_fd, pidfd = notice.borrow()
+                try:
+                    self.assertEqual(os.fstat(namespace_fd).st_ino, notice.namespace_inode)
+                    os.fstat(pidfd)
+                finally:
+                    os.close(namespace_fd)
+                    os.close(pidfd)
+                received.append(notice)
+
+        status = artifacts.run_supervised_bubblewrap(
+            [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+            namespace_notifications=notifications, namespace_attempt_id='lane-1',
+            execution_timeout_seconds=5, test_hook=on_event,
+        )
+        self.assertEqual(status.return_code, 0)
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0].attempt_id, 'lane-1')
+        self.assertGreater(received[0].supervisor_pid, 0)
+        with self.assertRaises(artifacts.IntegrityError):
+            received[0].borrow()
+
+    def test_borrowed_pidfd_reports_supervisor_exit_after_notice_revocation(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-borrowed-namespace'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        notifications = queue.Queue(maxsize=1)
+        borrowed = []
+        notices = []
+
+        def on_event(event):
+            if event == 'control-accepted':
+                notice = notifications.get_nowait()
+                notices.append(notice)
+                borrowed.extend(notice.borrow())
+                self.assertFalse(select.select([borrowed[1]], [], [], 0)[0])
+
+        try:
+            artifacts.run_supervised_bubblewrap(
+                [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                namespace_notifications=notifications, namespace_attempt_id='lane-1',
+                execution_timeout_seconds=5, test_hook=on_event,
+            )
+            self.assertEqual(len(borrowed), 2)
+            self.assertEqual(os.fstat(borrowed[0]).st_ino, notices[0].namespace_inode)
+            self.assertTrue(select.select([borrowed[1]], [], [], 0)[0])
+            with self.assertRaises(artifacts.IntegrityError):
+                notices[0].borrow()
+        finally:
+            for descriptor in borrowed:
+                os.close(descriptor)
+
+    def test_concurrent_borrow_and_revocation_close_owned_descriptors(self) -> None:
+        before = set(os.listdir('/proc/self/fd'))
+        namespace_fd = os.open('/proc/self/ns/pid', os.O_RDONLY | os.O_CLOEXEC)
+        pidfd = os.pidfd_open(os.getpid())
+        notice = artifacts.PinnedSupervisorNamespace(
+            'lane-1', os.getpid(), os.fstat(namespace_fd).st_ino, namespace_fd, pidfd,
+        )
+        barrier = threading.Barrier(2)
+        failures = []
+
+        def borrower():
+            barrier.wait()
+            try:
+                try:
+                    borrowed_namespace, borrowed_pidfd = notice.borrow()
+                except artifacts.IntegrityError:
+                    return
+                try:
+                    if os.fstat(borrowed_namespace).st_ino != notice.namespace_inode:
+                        failures.append('wrong namespace')
+                finally:
+                    os.close(borrowed_namespace)
+                    os.close(borrowed_pidfd)
+            except Exception as error:
+                failures.append(repr(error))
+
+        thread = threading.Thread(target=borrower)
+        thread.start()
+        barrier.wait()
+        self.assertTrue(notice._revoke())
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+        with self.assertRaises(artifacts.IntegrityError):
+            notice.borrow()
+        self.assertEqual(set(os.listdir('/proc/self/fd')), before)
+
+    def test_full_namespace_queue_prevents_candidate_launch(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-full-queue'
+        marker = self.root / 'candidate-launched'
+        fake_bubblewrap.write_text(textwrap.dedent(f'''\
+            #!/usr/bin/python3
+            import json, os, sys
+            status_fd = int(sys.argv[sys.argv.index('--json-status-fd') + 1])
+            namespace = os.stat('/proc/self/ns/pid').st_ino
+            os.write(status_fd, json.dumps({{'child-pid': os.getpid(), 'pid-namespace': namespace}}).encode() + b'\\n')
+            print(json.dumps({{'version': 2, 'pid': 1, 'event': 'ready', 'pidNamespace': namespace}}), flush=True)
+            if sys.stdin.buffer.readline() == b'launch\\n':
+                open({str(marker)!r}, 'w').close()
+        '''), encoding='utf-8')
+        fake_bubblewrap.chmod(0o700)
+        notifications = queue.Queue(maxsize=1)
+        notifications.put_nowait('occupied')
+        with self.assertRaisesRegex(artifacts.ScriptCandidateTerminal, 'namespace publication failed') as caught:
+            artifacts.run_supervised_bubblewrap(
+                [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                namespace_notifications=notifications, namespace_attempt_id='lane-1', execution_timeout_seconds=3,
+            )
+        self.assertFalse(caught.exception.candidate_started)
+        self.assertFalse(marker.exists())
+        self.assertEqual(notifications.get_nowait(), 'occupied')
+
+    def test_publication_exception_revokes_notice_already_inserted_in_queue(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-publication-exception'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        notifications = queue.Queue(maxsize=1)
+        original_put = notifications.put_nowait
+
+        def publish_then_fail(notice):
+            original_put(notice)
+            raise RuntimeError('injected publication failure')
+
+        with patch.object(notifications, 'put_nowait', side_effect=publish_then_fail):
+            with self.assertRaisesRegex(artifacts.ScriptCandidateTerminal, 'injected publication failure'):
+                artifacts.run_supervised_bubblewrap(
+                    [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                    namespace_notifications=notifications, namespace_attempt_id='lane-1',
+                    execution_timeout_seconds=5,
+                )
+        notice = notifications.get_nowait()
+        self.assertEqual((notice._namespace_fd, notice._pidfd), (-1, -1))
+        with self.assertRaises(artifacts.IntegrityError):
+            notice.borrow()
+
+    def test_unread_namespace_notification_does_not_retain_descriptors(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-unread-namespace'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        notifications = queue.Queue(maxsize=1)
+        before = set(os.listdir('/proc/self/fd'))
+        artifacts.run_supervised_bubblewrap(
+            [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+            namespace_notifications=notifications, namespace_attempt_id='lane-1', execution_timeout_seconds=5,
+        )
+        event = notifications.get_nowait()
+        self.assertEqual(set(os.listdir('/proc/self/fd')), before)
+        with self.assertRaises(artifacts.IntegrityError):
+            event.borrow()
+
+    def test_cancellation_after_namespace_publication_revokes_notice_before_launch(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-namespace-cancel'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        notifications = queue.Queue(maxsize=1)
+        original_put = notifications.put_nowait
+        cancelled = False
+        events = []
+
+        def publish_then_cancel(notice):
+            nonlocal cancelled
+            original_put(notice)
+            cancelled = True
+
+        with patch.object(notifications, 'put_nowait', side_effect=publish_then_cancel):
+            with self.assertRaises(artifacts.ScriptCandidateTerminal) as caught:
+                artifacts.run_supervised_bubblewrap(
+                    [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                    namespace_notifications=notifications, namespace_attempt_id='lane-1', execution_timeout_seconds=5,
+                    cancellation_signal=lambda: signal.SIGTERM if cancelled else None, test_hook=events.append,
+                )
+        self.assertEqual(caught.exception.host_cancellation_signal, signal.SIGTERM)
+        self.assertNotIn('candidate-started', events)
+        with self.assertRaises(artifacts.IntegrityError):
+            notifications.get_nowait().borrow()
+
+    def test_cancellation_during_slow_namespace_publication_precedes_timeout(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-slow-namespace-cancel'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        notifications = queue.Queue(maxsize=1)
+        original_put = notifications.put_nowait
+        cancelled = False
+
+        def publish_cancel_and_delay(notice):
+            nonlocal cancelled
+            original_put(notice)
+            cancelled = True
+            time.sleep(0.3)
+
+        with patch.object(notifications, 'put_nowait', side_effect=publish_cancel_and_delay):
+            with self.assertRaises(artifacts.ScriptPlanInterrupted) as caught:
+                artifacts.run_supervised_bubblewrap(
+                    [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                    namespace_notifications=notifications, namespace_attempt_id='lane-1', execution_timeout_seconds=0.2,
+                    cancellation_signal=lambda: signal.SIGTERM if cancelled else None,
+                )
+        self.assertEqual(caught.exception.signum, signal.SIGTERM)
+        self.assertFalse(caught.exception.candidate_started)
+        with self.assertRaises(artifacts.IntegrityError):
+            notifications.get_nowait().borrow()
+
+    def test_supervisor_deadline_rejects_late_outcome_and_cleans_descendants(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-deadline'
+        survivor_pid_file = self.root / 'deadline-pids.json'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0, survivor_pid_file=survivor_pid_file,
+        )
+        with self.assertRaisesRegex(artifacts.ScriptCandidateTerminal, 'execution deadline') as caught:
+            artifacts.run_supervised_bubblewrap(
+                [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'},
+                pass_fds=(), execution_timeout_seconds=1.0,
+            )
+        self.assertEqual(caught.exception.cleanup_status, 'unverified')
+        self.assertTrue(caught.exception.infrastructure_failure)
+        self.assertTrue(survivor_pid_file.exists())
+        for pid in json.loads(survivor_pid_file.read_text(encoding='ascii')).values():
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+
+    def test_supervisor_accepts_clean_completion_before_its_deadline(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-before-deadline'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        status = artifacts.run_supervised_bubblewrap(
+            [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'},
+            pass_fds=(), execution_timeout_seconds=5,
+        )
+        self.assertEqual(status.return_code, 0)
+        self.assertEqual(status.cleanup, 'complete')
+
+    def test_supervisor_does_not_accept_a_result_after_its_deadline(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-late-acceptance'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        original = artifacts._parse_trusted_candidate_status
+
+        def delayed_parse(*args, **kwargs):
+            result = original(*args, **kwargs)
+            time.sleep(1.1)
+            return result
+
+        with patch.object(artifacts, '_parse_trusted_candidate_status', side_effect=delayed_parse):
+            with self.assertRaisesRegex(artifacts.ScriptCandidateTerminal, 'execution deadline'):
+                artifacts.run_supervised_bubblewrap(
+                    [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'},
+                    pass_fds=(), execution_timeout_seconds=1.0,
+                )
+
+    def test_supervisor_rejects_invalid_deadlines_before_launch(self) -> None:
+        for timeout in [0, -1, True, float('nan'), float('inf'), 10**1000, '1']:
+            with self.subTest(timeout=timeout):
+                with self.assertRaisesRegex(artifacts.IntegrityError, 'execution deadline is invalid'):
+                    artifacts.run_supervised_bubblewrap(
+                        ['/not/a/launcher'], environment={}, pass_fds=(), execution_timeout_seconds=timeout,
+                    )
+
+    def test_host_cancellation_before_acceptance_takes_precedence_over_deadline(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-cancel-at-cutoff'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        original = artifacts._parse_trusted_candidate_status
+        cancelled = False
+
+        def delayed_parse(*args, **kwargs):
+            nonlocal cancelled
+            result = original(*args, **kwargs)
+            cancelled = True
+            time.sleep(1.1)
+            return result
+
+        with patch.object(artifacts, '_parse_trusted_candidate_status', side_effect=delayed_parse):
+            with self.assertRaises(artifacts.ScriptPlanInterrupted) as caught:
+                artifacts.run_supervised_bubblewrap(
+                    [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                    execution_timeout_seconds=1.0,
+                    cancellation_signal=lambda: signal.SIGTERM if cancelled else None,
+                )
+        self.assertEqual(caught.exception.signum, signal.SIGTERM)
+
+    def test_supervisor_rejects_success_when_cleanup_finishes_after_deadline(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-late-cleanup'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        original_parse = artifacts._parse_trusted_candidate_status
+        original_close = os.close
+        parsed = False
+        delayed = False
+
+        def mark_parsed(*args, **kwargs):
+            nonlocal parsed
+            result = original_parse(*args, **kwargs)
+            parsed = True
+            return result
+
+        def delayed_close(descriptor):
+            nonlocal delayed
+            if parsed and not delayed:
+                delayed = True
+                time.sleep(1.1)
+            return original_close(descriptor)
+
+        with patch.object(artifacts, '_parse_trusted_candidate_status', side_effect=mark_parsed):
+            with patch.object(artifacts.os, 'close', side_effect=delayed_close):
+                with self.assertRaisesRegex(artifacts.ScriptCandidateTerminal, 'execution deadline'):
+                    artifacts.run_supervised_bubblewrap(
+                        [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'},
+                        pass_fds=(), execution_timeout_seconds=1.0,
+                    )
+
+    def test_cancellation_does_not_remove_the_deadline_during_bootstrap(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-no-pid'
+        fake_bubblewrap.write_text(textwrap.dedent('''\
+            #!/usr/bin/python3
+            import json, os, sys, time
+            status_fd = int(sys.argv[sys.argv.index('--json-status-fd') + 1])
+            namespace = os.stat('/proc/self/ns/pid').st_ino
+            print(json.dumps({'version': 2, 'pid': 1, 'event': 'ready', 'pidNamespace': namespace}), flush=True)
+            time.sleep(2)
+            os.close(status_fd)
+        '''), encoding='utf-8')
+        fake_bubblewrap.chmod(0o700)
+        started = time.monotonic()
+        with self.assertRaises(artifacts.ScriptPlanInterrupted) as caught:
+            artifacts.run_supervised_bubblewrap(
+                [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                execution_timeout_seconds=0.2, cancellation_signal=lambda: signal.SIGTERM,
+            )
+        self.assertEqual(caught.exception.signum, signal.SIGTERM)
+        self.assertLess(time.monotonic() - started, 1.5)
+
+    def test_infrastructure_failure_is_not_reclassified_as_late_cancellation(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-failure-at-cutoff'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        original = artifacts._parse_trusted_candidate_status
+        cancelled = False
+
+        def failed_parse(*args, **kwargs):
+            nonlocal cancelled
+            result = original(*args, **kwargs)
+            cancelled = True
+            return replace(result, state='bootstrap-failure')
+
+        with patch.object(artifacts, '_parse_trusted_candidate_status', side_effect=failed_parse):
+            with self.assertRaises(artifacts.ScriptCandidateTerminal) as caught:
+                artifacts.run_supervised_bubblewrap(
+                    [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                    execution_timeout_seconds=5, cancellation_signal=lambda: signal.SIGTERM if cancelled else None,
+                )
+        self.assertTrue(caught.exception.infrastructure_failure)
+
+    def test_timeout_retains_cancellation_observed_during_cleanup(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-timeout-cleanup-signal'
+        survivor_pid_file = self.root / 'timeout-cleanup-pids.json'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0, survivor_pid_file=survivor_pid_file,
+        )
+        original_close = os.close
+        candidate_started = False
+        cancelled = False
+
+        def on_event(event):
+            nonlocal candidate_started
+            if event == 'candidate-started':
+                candidate_started = True
+
+        def cancel_during_close(descriptor):
+            nonlocal cancelled
+            if candidate_started:
+                cancelled = True
+            return original_close(descriptor)
+
+        with patch.object(artifacts.os, 'close', side_effect=cancel_during_close):
+            with self.assertRaises(artifacts.ScriptCandidateTerminal) as caught:
+                artifacts.run_supervised_bubblewrap(
+                    [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                    execution_timeout_seconds=0.4, test_hook=on_event,
+                    cancellation_signal=lambda: signal.SIGTERM if cancelled else None,
+                )
+        self.assertTrue(caught.exception.infrastructure_failure)
+        self.assertEqual(caught.exception.host_cancellation_signal, signal.SIGTERM)
 
     def run_plan(self, fail_fast: bool, outcomes: dict[str, int] | None = None):
         calls: list[str] = []
@@ -2387,6 +2896,129 @@ class TrustedCandidateStatusTests(unittest.TestCase):
                 getattr(caught.exception, "return_code", getattr(caught.exception, "candidate_exit_code", None))
             )
             self.assertFalse(candidate_marker.exists())
+
+    @unittest.skipUnless(os.environ.get("VERJSON_TEST_REAL_BWRAP") == "1", "requires provisioned hosted Bubblewrap/AppArmor")
+    def test_real_recorded_connector_matches_isolated_supervisor_namespace(self) -> None:
+        self._exercise_supervised_sender(inherited=False)
+
+    @unittest.skipUnless(os.environ.get("VERJSON_TEST_REAL_BWRAP") == "1", "requires provisioned hosted Bubblewrap/AppArmor")
+    def test_real_supervised_inherited_writer_is_not_the_connector(self) -> None:
+        self._exercise_supervised_sender(inherited=True)
+
+    def _exercise_supervised_sender(self, *, inherited: bool) -> None:
+        import compatibility_lane_peer as peer
+        import socket
+
+        with tempfile.TemporaryDirectory() as directory:
+            notifications = queue.Queue(maxsize=1)
+            notices = []
+            matched = []
+            proc_fd = os.open('/proc', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            self.addCleanup(os.close, proc_fd)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+                listener.bind(directory + '/listener')
+                listener.listen(1)
+                listener.settimeout(3)
+
+                def on_event(event):
+                    if event == 'control-accepted':
+                        notices.append(notifications.get_nowait())
+                    elif event == 'candidate-started':
+                        accepted, _ = listener.accept()
+                        with accepted:
+                            namespace_fd, supervisor_pidfd = notices[0].borrow()
+                            try:
+                                self.assertNotEqual(os.fstat(namespace_fd).st_ino, os.stat('/proc/self/ns/pid').st_ino)
+                                peer_pidfd = peer.pin_recorded_connector(
+                                    accepted, expected_uid=os.getuid(), supervisor_pidfd=supervisor_pidfd,
+                                    supervisor_namespace_fd=namespace_fd, trusted_proc_fd=proc_fd,
+                                )
+                                try:
+                                    def read_chunk():
+                                        return peer.read_pinned_chunk(
+                                            accepted, sender_pidfd=peer_pidfd, expected_uid=os.getuid(),
+                                            trusted_proc_fd=proc_fd, deadline=time.monotonic() + 2,
+                                        )
+                                    if inherited:
+                                        with self.assertRaisesRegex(peer.PeerEvidenceError, 'sender credentials do not match'):
+                                            read_chunk()
+                                        peer._assert_live(peer_pidfd)
+                                    else:
+                                        self.assertEqual(read_chunk(), b's')
+                                finally:
+                                    os.close(peer_pidfd)
+                                matched.append(True)
+                            finally:
+                                os.close(supervisor_pidfd)
+                                os.close(namespace_fd)
+
+                candidate = (
+                    "import os,socket,time\ns=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\n"
+                    "s.connect('/probe/listener')\n"
+                    + ("pid=os.fork()\nif pid==0:\n s.sendall(b's')\n os._exit(0)\nos.waitpid(pid,0)\n"
+                       if inherited else "s.sendall(b's')\n")
+                    + "time.sleep(30)\n"
+                )
+                arguments = [
+                    '/usr/bin/bwrap', '--unshare-user', '--unshare-pid', '--as-pid-1',
+                    '--unshare-ipc', '--unshare-uts', '--unshare-net', '--cap-drop', 'ALL',
+                    '--die-with-parent', '--new-session', '--ro-bind', '/usr', '/usr',
+                    '--ro-bind', '/bin', '/bin', '--ro-bind', '/lib', '/lib',
+                    '--ro-bind', '/lib64', '/lib64', '--ro-bind', directory, '/probe',
+                    '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--chdir', '/',
+                    '--', '/usr/bin/python3', '-I', '-c', artifacts.SANDBOX_SUPERVISOR_ENTRYPOINT,
+                    '/usr/bin/python3', '-I', '-c', candidate,
+                ]
+                with self.assertRaisesRegex(artifacts.ScriptCandidateTerminal, 'execution deadline'):
+                    artifacts.run_supervised_bubblewrap(
+                        arguments, environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                        execution_timeout_seconds=6, namespace_notifications=notifications,
+                        namespace_attempt_id='real-connector', test_hook=on_event,
+                    )
+                self.assertEqual(matched, [True])
+
+    @unittest.skipUnless(os.environ.get("VERJSON_TEST_REAL_BWRAP") == "1", "requires provisioned hosted Bubblewrap/AppArmor")
+    def test_real_deadline_kills_a_candidate_and_its_new_session(self) -> None:
+        marker = f'verjson-deadline-probe-{os.getpid()}'
+        notifications = queue.Queue(maxsize=1)
+        notices = []
+
+        def on_event(event):
+            if event == 'control-accepted':
+                notice = notifications.get_nowait()
+                namespace_fd, pidfd = notice.borrow()
+                try:
+                    self.assertEqual(os.fstat(namespace_fd).st_ino, notice.namespace_inode)
+                    self.assertNotEqual(notice.namespace_inode, os.stat('/proc/self/ns/pid').st_ino)
+                    self.assertFalse(select.select([pidfd], [], [], 0)[0])
+                    notices.append(notice)
+                finally:
+                    os.close(namespace_fd)
+                    os.close(pidfd)
+
+        candidate = "import os,time\nif os.fork() == 0:\n os.setsid()\n time.sleep(30)\ntime.sleep(30)\n"
+        arguments = [
+            '/usr/bin/bwrap', '--unshare-user', '--unshare-pid', '--as-pid-1',
+            '--unshare-ipc', '--unshare-uts', '--unshare-net', '--cap-drop', 'ALL',
+            '--die-with-parent', '--new-session', '--ro-bind', '/usr', '/usr',
+            '--ro-bind', '/bin', '/bin', '--ro-bind', '/lib', '/lib',
+            '--ro-bind', '/lib64', '/lib64', '--proc', '/proc', '--dev', '/dev',
+            '--tmpfs', '/tmp', '--chdir', '/', '--', '/usr/bin/python3', '-I', '-c',
+            artifacts.SANDBOX_SUPERVISOR_ENTRYPOINT, '/usr/bin/python3', '-I', '-c', candidate, marker,
+        ]
+        with self.assertRaisesRegex(artifacts.ScriptCandidateTerminal, 'execution deadline') as caught:
+            artifacts.run_supervised_bubblewrap(
+                arguments, environment={'PATH': '/usr/bin:/bin'}, pass_fds=(), execution_timeout_seconds=3,
+                namespace_notifications=notifications, namespace_attempt_id='real-lane', test_hook=on_event,
+            )
+        self.assertEqual(len(notices), 1)
+        with self.assertRaises(artifacts.IntegrityError):
+            notices[0].borrow()
+        self.assertTrue(caught.exception.candidate_started)
+        self.assertTrue(caught.exception.infrastructure_failure)
+        processes = subprocess.run(['/bin/ps', '-eww', '-o', 'args='], check=True, capture_output=True, text=True)
+        self.assertFalse(any(marker in line for line in processes.stdout.splitlines()))
 
     @unittest.skipUnless(os.environ.get("VERJSON_TEST_REAL_BWRAP") == "1", "requires provisioned hosted Bubblewrap/AppArmor")
     def test_pid1_supervisor_reaps_an_adopted_zombie_before_returning(self) -> None:

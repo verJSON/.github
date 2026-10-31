@@ -35,6 +35,8 @@ platform	python3 scripts/ci-gate/node-ci-python-heredocs.test.py
 platform	python3 scripts/ci-gate/node-ci-script-plan.test.py
 platform	python3 scripts/ci-gate/node-ci-secretless-range-resolution.test.py
 platform	@budget=90 python3 scripts/ci-gate/compatibility-sandbox-provisioning.test.py
+platform	python3 scripts/ci-gate/compatibility-lane-evidence.test.py
+platform	python3 scripts/ci-gate/compatibility-lane-channel.test.py
 platform	python3 scripts/ci-gate/compatibility-sandbox-acquirer.test.py
 platform	bash scripts/ci-gate/node-ci-secretless-pnpm.test.sh
 platform	bash scripts/ci-gate/node-ci-secretless-pnpm-install.test.sh
