@@ -69,6 +69,9 @@ code, or establish the namespace and socket lifecycle needed for admission.
 An opt-in supervisor fixture additionally exercises a cooperating sender with
 the pinned connector and chunk reader together; its result is evidence only on
 the runner profile where it is actually executed.
+The fixture also checks a forked writer that inherits the connection while the
+original connector remains alive. It does not establish resistance to descriptor
+transfer from other namespaces, capability-based forgery, or arbitrary writers.
 
 An experimental, unwired connector-evidence helper pins the kernel-recorded
 connector with `SO_PEERPIDFD`, checks its UID and pidfd identity, and compares

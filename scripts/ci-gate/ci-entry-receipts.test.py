@@ -2813,6 +2813,13 @@ class TrustedCandidateStatusTests(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get("VERJSON_TEST_REAL_BWRAP") == "1", "requires provisioned hosted Bubblewrap/AppArmor")
     def test_real_recorded_connector_matches_isolated_supervisor_namespace(self) -> None:
+        self._exercise_supervised_sender(inherited=False)
+
+    @unittest.skipUnless(os.environ.get("VERJSON_TEST_REAL_BWRAP") == "1", "requires provisioned hosted Bubblewrap/AppArmor")
+    def test_real_supervised_inherited_writer_is_not_the_connector(self) -> None:
+        self._exercise_supervised_sender(inherited=True)
+
+    def _exercise_supervised_sender(self, *, inherited: bool) -> None:
         import compatibility_lane_peer as peer
         import socket
 
@@ -2842,10 +2849,17 @@ class TrustedCandidateStatusTests(unittest.TestCase):
                                     supervisor_namespace_fd=namespace_fd, trusted_proc_fd=proc_fd,
                                 )
                                 try:
-                                    self.assertEqual(peer.read_pinned_chunk(
-                                        accepted, sender_pidfd=peer_pidfd, expected_uid=os.getuid(),
-                                        trusted_proc_fd=proc_fd, deadline=time.monotonic() + 2,
-                                    ), b's')
+                                    def read_chunk():
+                                        return peer.read_pinned_chunk(
+                                            accepted, sender_pidfd=peer_pidfd, expected_uid=os.getuid(),
+                                            trusted_proc_fd=proc_fd, deadline=time.monotonic() + 2,
+                                        )
+                                    if inherited:
+                                        with self.assertRaisesRegex(peer.PeerEvidenceError, 'sender credentials do not match'):
+                                            read_chunk()
+                                        peer._assert_live(peer_pidfd)
+                                    else:
+                                        self.assertEqual(read_chunk(), b's')
                                 finally:
                                     os.close(peer_pidfd)
                                 matched.append(True)
@@ -2853,7 +2867,13 @@ class TrustedCandidateStatusTests(unittest.TestCase):
                                 os.close(supervisor_pidfd)
                                 os.close(namespace_fd)
 
-                candidate = "import socket,time\ns=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\ns.connect('/probe/listener')\ns.sendall(b's')\ntime.sleep(30)\n"
+                candidate = (
+                    "import os,socket,time\ns=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\n"
+                    "s.connect('/probe/listener')\n"
+                    + ("pid=os.fork()\nif pid==0:\n s.sendall(b's')\n os._exit(0)\nos.waitpid(pid,0)\n"
+                       if inherited else "s.sendall(b's')\n")
+                    + "time.sleep(30)\n"
+                )
                 arguments = [
                     '/usr/bin/bwrap', '--unshare-user', '--unshare-pid', '--as-pid-1',
                     '--unshare-ipc', '--unshare-uts', '--unshare-net', '--cap-drop', 'ALL',
