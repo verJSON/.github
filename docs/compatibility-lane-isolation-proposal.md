@@ -52,6 +52,18 @@ credential-forging capabilities, concurrent writers and descriptor sharing.
 The probes did not exercise Bubblewrap or a hosted runner. The current relay
 uses `recv`, does not inspect per-message credentials and remains unauthenticated.
 
+An experimental, unwired chunk reader observes `SCM_CREDENTIALS` against a
+live pinned sender pidfd and a deadline. It rejects EOF, unexpected ancillary
+data, truncation and mismatched credentials, and attempts to close all received
+descriptors. Its caller must enable `SO_PASSCRED` before any sender can enqueue
+data, ensure the socket credential and trusted procfs PID and UID namespace
+views agree, retain and recheck the pidfd through final acceptance, and control
+socket ownership. The helper does not prove harness provenance, prevent
+capability-based credential forgery, authenticate complete frames or identify
+who closed a shared socket. Cancellation must be queued; asynchronous exceptions
+or concurrent descriptor manipulation can interrupt descriptor cleanup. It is
+not connected to the relay or admission path.
+
 An experimental, unwired connector-evidence helper pins the kernel-recorded
 connector with `SO_PEERPIDFD`, checks its UID and pidfd identity, and compares
 its live PID namespace with a live pinned supervisor. It rejects unavailable or

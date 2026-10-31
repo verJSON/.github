@@ -1,10 +1,12 @@
 """Experimental connector identity evidence; this does not authorize a peer."""
 
 import ctypes
+import math
 import os
 import select
 import socket
 import struct
+import time
 
 _SO_PEERPIDFD = 77  # Linux asm-generic/socket.h; unavailable kernels fail closed.
 
@@ -42,6 +44,62 @@ def _pidfd_pid(proc_fd, pidfd):
     if len(lines) != 1 or not lines[0].isdigit():
         raise PeerEvidenceError('pidfd identity is unavailable')
     return int(lines[0])
+
+
+def read_pinned_chunk(endpoint, *, sender_pidfd, expected_uid, trusted_proc_fd, deadline):
+    """Observe one chunk from a pinned process; this does not authorize its contents."""
+    received_fds = []
+    try:
+        if (type(endpoint) is not socket.socket or endpoint.family != socket.AF_UNIX
+                or endpoint.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM
+                or endpoint.getsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED) != 1
+                or type(expected_uid) is not int or not 0 <= expected_uid <= 0xffffffff
+                or type(deadline) not in (int, float) or deadline > time.monotonic() + 60
+                or not math.isfinite(deadline)
+                or any(type(fd) is not int or not 0 <= fd <= 0x7fffffff
+                       for fd in (sender_pidfd, trusted_proc_fd))):
+            raise PeerEvidenceError('sender evidence request is invalid')
+        _assert_procfs_root(trusted_proc_fd)
+        _assert_live(sender_pidfd)
+        pid = _pidfd_pid(trusted_proc_fd, sender_pidfd)
+        if pid <= 0:
+            raise PeerEvidenceError('sender pidfd identity is unavailable')
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise PeerEvidenceError('sender evidence deadline expired')
+        endpoint.settimeout(remaining)
+        data, ancillary, flags, _ = endpoint.recvmsg(
+            4096, socket.CMSG_SPACE(12) + socket.CMSG_SPACE(64), socket.MSG_CMSG_CLOEXEC,
+        )
+        for level, kind, payload in ancillary:
+            if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                size = struct.calcsize('i')
+                received_fds.extend(struct.unpack(f'{len(payload) // size}i', payload[:len(payload) // size * size]))
+        if flags & (socket.MSG_CTRUNC | socket.MSG_TRUNC) or not data or len(ancillary) != 1:
+            raise PeerEvidenceError('sender evidence is incomplete or ambiguous')
+        level, kind, payload = ancillary[0]
+        if level != socket.SOL_SOCKET or kind != socket.SCM_CREDENTIALS or len(payload) != 12:
+            raise PeerEvidenceError('sender credentials are unavailable')
+        actual_pid, uid, _gid = struct.unpack('iII', payload)
+        if actual_pid != pid or uid != expected_uid:
+            raise PeerEvidenceError('sender credentials do not match')
+        _assert_live(sender_pidfd)
+        if time.monotonic() >= deadline:
+            raise PeerEvidenceError('sender evidence deadline expired')
+        return data
+    except (OSError, ValueError, OverflowError, struct.error) as error:
+        if isinstance(error, PeerEvidenceError):
+            raise
+        raise PeerEvidenceError('sender evidence is unavailable') from error
+    finally:
+        cleanup_failed = False
+        for fd in received_fds:
+            try:
+                os.close(fd)
+            except OSError:
+                cleanup_failed = True
+        if cleanup_failed:
+            raise PeerEvidenceError('received descriptor cleanup failed')
 
 
 def pin_recorded_connector(endpoint, *, expected_uid, supervisor_pidfd, supervisor_namespace_fd, trusted_proc_fd):

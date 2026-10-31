@@ -25,6 +25,150 @@ def read_to_eof(endpoint):
 
 
 class LaneChannelTests(unittest.TestCase):
+    def test_chunk_sender_evidence_rejects_an_inherited_writer(self):
+        import compatibility_lane_peer as peer
+
+        receiver, sender = socket.socketpair()
+        receiver.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+        pidfd = os.pidfd_open(os.getpid())
+        proc_fd = os.open('/proc', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            sender.sendall(b'parent')
+            self.assertEqual(peer.read_pinned_chunk(receiver, sender_pidfd=pidfd,
+                                                    expected_uid=os.getuid(), trusted_proc_fd=proc_fd,
+                                                    deadline=time.monotonic() + 2), b'parent')
+            child = os.fork()
+            if child == 0:
+                receiver.close()
+                sender.sendall(b'child')
+                os._exit(0)
+            os.waitpid(child, 0)
+            with self.assertRaises(peer.PeerEvidenceError):
+                peer.read_pinned_chunk(receiver, sender_pidfd=pidfd,
+                                       expected_uid=os.getuid(), trusted_proc_fd=proc_fd, deadline=time.monotonic() + 2)
+        finally:
+            receiver.close()
+            sender.close()
+            os.close(pidfd)
+            os.close(proc_fd)
+
+    def test_chunk_sender_evidence_rejects_received_descriptors_without_leaks(self):
+        import compatibility_lane_peer as peer
+        import struct
+
+        receiver, sender = socket.socketpair()
+        receiver.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+        pidfd = os.pidfd_open(os.getpid())
+        proc_fd = os.open('/proc', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            for count in (1, 100):
+                with self.subTest(count=count):
+                    sender.sendmsg([b'x'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                           struct.pack(f'{count}i', *([proc_fd] * count)))])
+                    before = len(os.listdir('/proc/self/fd'))
+                    with self.assertRaises(peer.PeerEvidenceError):
+                        peer.read_pinned_chunk(receiver, sender_pidfd=pidfd,
+                                               expected_uid=os.getuid(), trusted_proc_fd=proc_fd, deadline=time.monotonic() + 2)
+                    self.assertEqual(len(os.listdir('/proc/self/fd')), before)
+        finally:
+            receiver.close()
+            sender.close()
+            os.close(pidfd)
+            os.close(proc_fd)
+
+    def test_chunk_sender_evidence_fails_closed_without_valid_credentials(self):
+        import compatibility_lane_peer as peer
+
+        pidfd = os.pidfd_open(os.getpid())
+        proc_fd = os.open('/proc', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            for case in ('disabled', 'queued-before-enable', 'wrong-uid', 'eof'):
+                with self.subTest(case=case):
+                    receiver, sender = socket.socketpair()
+                    with receiver, sender:
+                        if case == 'queued-before-enable':
+                            sender.sendall(b'x')
+                        if case != 'disabled':
+                            receiver.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+                        if case in ('disabled', 'wrong-uid'):
+                            sender.sendall(b'x')
+                        if case == 'eof':
+                            sender.shutdown(socket.SHUT_WR)
+                        with self.assertRaises(peer.PeerEvidenceError):
+                            peer.read_pinned_chunk(receiver, sender_pidfd=pidfd,
+                                                   expected_uid=os.getuid() + (case == 'wrong-uid'),
+                                                   trusted_proc_fd=proc_fd, deadline=time.monotonic() + 2)
+        finally:
+            os.close(pidfd)
+            os.close(proc_fd)
+
+    def test_chunk_sender_evidence_times_out_for_an_idle_sender(self):
+        import compatibility_lane_peer as peer
+
+        receiver, sender = socket.socketpair()
+        receiver.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+        pidfd = os.pidfd_open(os.getpid())
+        proc_fd = os.open('/proc', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            with self.assertRaises(peer.PeerEvidenceError):
+                peer.read_pinned_chunk(receiver, sender_pidfd=pidfd, expected_uid=os.getuid(),
+                                       trusted_proc_fd=proc_fd, deadline=time.monotonic() + 0.02)
+        finally:
+            receiver.close()
+            sender.close()
+            os.close(pidfd)
+            os.close(proc_fd)
+
+    def test_chunk_sender_evidence_rejects_unbounded_deadlines(self):
+        import compatibility_lane_peer as peer
+
+        receiver, sender = socket.socketpair()
+        receiver.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+        pidfd = os.pidfd_open(os.getpid())
+        proc_fd = os.open('/proc', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            for deadline in (10 ** 1000, 1e308):
+                with self.subTest(deadline=deadline):
+                    with self.assertRaises(peer.PeerEvidenceError):
+                        peer.read_pinned_chunk(receiver, sender_pidfd=pidfd, expected_uid=os.getuid(),
+                                               trusted_proc_fd=proc_fd, deadline=deadline)
+        finally:
+            receiver.close()
+            sender.close()
+            os.close(pidfd)
+            os.close(proc_fd)
+
+    def test_chunk_sender_cleanup_attempts_every_descriptor_after_close_failure(self):
+        import compatibility_lane_peer as peer
+        import struct
+
+        receiver, sender = socket.socketpair()
+        receiver.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+        pidfd = os.pidfd_open(os.getpid())
+        proc_fd = os.open('/proc', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        original_close = os.close
+        closed = []
+
+        def close_and_report_error_once(fd):
+            original_close(fd)
+            closed.append(fd)
+            if len(closed) == 1:
+                raise OSError('injected cleanup failure')
+
+        try:
+            sender.sendmsg([b'x'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, struct.pack('2i', proc_fd, proc_fd))])
+            with patch.object(peer, '_pidfd_pid', return_value=os.getpid()), \
+                    patch.object(peer.os, 'close', side_effect=close_and_report_error_once):
+                with self.assertRaises(peer.PeerEvidenceError):
+                    peer.read_pinned_chunk(receiver, sender_pidfd=pidfd, expected_uid=os.getuid(),
+                                           trusted_proc_fd=proc_fd, deadline=time.monotonic() + 2)
+            self.assertEqual(len(closed), 2)
+        finally:
+            receiver.close()
+            sender.close()
+            original_close(pidfd)
+            original_close(proc_fd)
+
     def test_pins_live_recorded_connector_in_supervisor_namespace(self):
         import compatibility_lane_peer as peer
 
