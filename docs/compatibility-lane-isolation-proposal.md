@@ -16,6 +16,17 @@ The current trusted package policy authorizes package names and ranges, while th
 
 The existing `verjson-ci` source execution boundary provides a relevant read-only source and network-namespace implementation, but its current interface does not establish fixture authority, trusted compatibility assertions, or multi-lane completeness. Reuse requires a reviewed integration and evidence for those additional properties.
 
+The existing Bubblewrap supervisor also exposes an experimental opt-in elapsed
+deadline. It begins before launch and withholds success if the deadline passes
+before cleanup and result processing finish; cleanup has separate bounds and can
+finish after the cutoff. Existing callers retain their prior behavior. A timeout
+is an infrastructure failure with cleanup conservatively
+unverified. A cancellation observed before the deadline is reported as an
+interruption; one observed during timeout cleanup is retained on the timeout
+failure. The enclosing plan still owns the final cancellation acceptance cutoff.
+The deadline alone does not authenticate a harness or prove PID-namespace cleanup;
+the real-profile probe and integration remain necessary before use for admission.
+
 ## Controller candidates
 
 An experimental, unwired `scripts/ci-gate/compatibility_lane_evidence.py` compares

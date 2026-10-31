@@ -115,6 +115,10 @@ class IntegrityError(ArtifactError):
     """Trusted input or authenticated workflow result failed integrity checks."""
 
 
+class _SupervisorDeadlineExpired(IntegrityError):
+    pass
+
+
 _TAR_EXTENSION_TYPES = frozenset(
     {
         tarfile.XHDTYPE,
@@ -1432,9 +1436,19 @@ def run_supervised_bubblewrap(
     cwd: str | None = None,
     test_hook: Callable[[str], None] | None = None,
     test_after_ack_marker: str | None = None,
+    execution_timeout_seconds: float | None = None,
 ) -> TrustedCandidateStatus:
+    """Run the pinned supervisor; an optional deadline includes launch and cleanup.
+
+    This call does not close the shared plan's cancellation acceptance window.
+    """
     if not arguments:
         raise IntegrityError("trusted sandbox launcher arguments are invalid")
+    if execution_timeout_seconds is not None and (
+        type(execution_timeout_seconds) not in (int, float)
+        or not 0 < execution_timeout_seconds <= 86400
+    ):
+        raise IntegrityError("trusted sandbox execution deadline is invalid")
     signals = _coerce_host_signal_queue(host_signals, cancellation_signal)
     if test_after_ack_marker is not None and (
         not isinstance(test_after_ack_marker, str)
@@ -1700,6 +1714,18 @@ def run_supervised_bubblewrap(
 
         while True:
             signals.poll()
+            if (
+                execution_timeout_seconds is not None
+                and time.monotonic() - start_time >= execution_timeout_seconds
+            ):
+                if signals.host_cancel_signal is not None:
+                    candidate_outcome = authenticated_candidate_outcome()
+                    raise ScriptPlanInterrupted(
+                        signals.host_cancel_signal, candidate_started=authenticated_candidate_started(),
+                        candidate_exit_code=candidate_outcome['exitCode'] if candidate_outcome else None,
+                        candidate_signal=candidate_outcome['candidateSignal'] if candidate_outcome else None,
+                    )
+                raise _SupervisorDeadlineExpired("trusted sandbox execution deadline expired")
             readable_fds = []
             if not wrapper_eof:
                 readable_fds.append(process.stdout.fileno())
@@ -1707,7 +1733,10 @@ def run_supervised_bubblewrap(
                 readable_fds.append(status_read_fd)
             if readable_fds:
                 try:
-                    readable, _writable, _exceptional = select.select(readable_fds, [], [], 0.05)
+                    wait_seconds = 0.05
+                    if execution_timeout_seconds is not None:
+                        wait_seconds = max(0.0, min(wait_seconds, start_time + execution_timeout_seconds - time.monotonic()))
+                    readable, _writable, _exceptional = select.select(readable_fds, [], [], wait_seconds)
                 except InterruptedError:
                     readable = []
             else:
@@ -1807,6 +1836,22 @@ def run_supervised_bubblewrap(
         )
         if status.state in {"bootstrap-failure", "exec-failure", "cleanup-failure", "supervisor-failure"}:
             raise _script_candidate_status_failure(status)
+        if execution_timeout_seconds is not None and host_signal is None:
+            late_signal = signals.poll()
+            if late_signal is not None:
+                interruption = ScriptPlanInterrupted(
+                    late_signal, candidate_started=status.candidate_started,
+                    candidate_exit_code=status.return_code, candidate_signal=status.signum,
+                    supervisor_signal=status.supervisor_signal,
+                )
+                interruption.cleanup_status = "verified" if status.cleanup == "complete" else status.cleanup
+                raise interruption
+        if (
+            execution_timeout_seconds is not None
+            and host_signal is None
+            and time.monotonic() - start_time >= execution_timeout_seconds
+        ):
+            raise _SupervisorDeadlineExpired("trusted sandbox execution deadline expired")
         if status.state == "interrupted":
             interruption = ScriptPlanInterrupted(
                 status.host_cancellation_signal or signal.SIGTERM,
@@ -1839,7 +1884,6 @@ def run_supervised_bubblewrap(
                 cleanup_status="verified" if status.cleanup == "complete" else status.cleanup,
                 candidate_started=True,
             )
-        return status
     except ScriptPlanInterrupted:
         raise
     except BaseException as error:
@@ -1862,6 +1906,7 @@ def run_supervised_bubblewrap(
             cleanup_status="unverified",
             candidate_started=candidate_started,
             host_cancellation_signal=signals.host_cancel_signal,
+            infrastructure_failure=isinstance(error, _SupervisorDeadlineExpired),
         ) from error
     finally:
         if process is not None:
@@ -1900,6 +1945,31 @@ def run_supervised_bubblewrap(
                     os.close(descriptor)
                 except OSError:
                     pass
+        pending_error = sys.exc_info()[1]
+        if (
+            execution_timeout_seconds is not None
+            and isinstance(pending_error, ScriptCandidateTerminal)
+            and isinstance(pending_error.__cause__, _SupervisorDeadlineExpired)
+        ):
+            pending_error.host_cancellation_signal = signals.poll()
+
+    if execution_timeout_seconds is not None:
+        late_signal = signals.poll()
+        if late_signal is not None:
+            interruption = ScriptPlanInterrupted(
+                late_signal, candidate_started=status.candidate_started,
+                candidate_exit_code=status.return_code, candidate_signal=status.signum,
+                supervisor_signal=status.supervisor_signal,
+            )
+            interruption.cleanup_status = "verified" if status.cleanup == "complete" else status.cleanup
+            raise interruption
+        if time.monotonic() - start_time >= execution_timeout_seconds:
+            raise ScriptCandidateTerminal(
+                "trusted sandbox execution deadline expired", return_code=status.return_code,
+                signum=status.signum, cleanup_status="unverified",
+                candidate_started=status.candidate_started, infrastructure_failure=True,
+            )
+    return status
 
 def _validate_script_entry_identity(identity: Any) -> dict[str, str]:
     if not isinstance(identity, dict) or set(identity) != _SCRIPT_ENTRY_IDENTITY_FIELDS:

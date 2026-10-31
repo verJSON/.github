@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+from dataclasses import replace
 import json
 import os
 import queue
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from unittest.mock import patch
 from contextlib import redirect_stdout
@@ -207,6 +209,199 @@ class EntryReceiptSupervisorTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.runner_temp = self.root / "runner-temp"
         self.runner_temp.mkdir(mode=0o700)
+
+    def test_supervisor_deadline_rejects_late_outcome_and_cleans_descendants(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-deadline'
+        survivor_pid_file = self.root / 'deadline-pids.json'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0, survivor_pid_file=survivor_pid_file,
+        )
+        with self.assertRaisesRegex(artifacts.ScriptCandidateTerminal, 'execution deadline') as caught:
+            artifacts.run_supervised_bubblewrap(
+                [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'},
+                pass_fds=(), execution_timeout_seconds=1.0,
+            )
+        self.assertEqual(caught.exception.cleanup_status, 'unverified')
+        self.assertTrue(caught.exception.infrastructure_failure)
+        self.assertTrue(survivor_pid_file.exists())
+        for pid in json.loads(survivor_pid_file.read_text(encoding='ascii')).values():
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+
+    def test_supervisor_accepts_clean_completion_before_its_deadline(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-before-deadline'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        status = artifacts.run_supervised_bubblewrap(
+            [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'},
+            pass_fds=(), execution_timeout_seconds=5,
+        )
+        self.assertEqual(status.return_code, 0)
+        self.assertEqual(status.cleanup, 'complete')
+
+    def test_supervisor_does_not_accept_a_result_after_its_deadline(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-late-acceptance'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        original = artifacts._parse_trusted_candidate_status
+
+        def delayed_parse(*args, **kwargs):
+            result = original(*args, **kwargs)
+            time.sleep(1.1)
+            return result
+
+        with patch.object(artifacts, '_parse_trusted_candidate_status', side_effect=delayed_parse):
+            with self.assertRaisesRegex(artifacts.ScriptCandidateTerminal, 'execution deadline'):
+                artifacts.run_supervised_bubblewrap(
+                    [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'},
+                    pass_fds=(), execution_timeout_seconds=1.0,
+                )
+
+    def test_supervisor_rejects_invalid_deadlines_before_launch(self) -> None:
+        for timeout in [0, -1, True, float('nan'), float('inf'), 10**1000, '1']:
+            with self.subTest(timeout=timeout):
+                with self.assertRaisesRegex(artifacts.IntegrityError, 'execution deadline is invalid'):
+                    artifacts.run_supervised_bubblewrap(
+                        ['/not/a/launcher'], environment={}, pass_fds=(), execution_timeout_seconds=timeout,
+                    )
+
+    def test_host_cancellation_before_acceptance_takes_precedence_over_deadline(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-cancel-at-cutoff'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        original = artifacts._parse_trusted_candidate_status
+        cancelled = False
+
+        def delayed_parse(*args, **kwargs):
+            nonlocal cancelled
+            result = original(*args, **kwargs)
+            cancelled = True
+            time.sleep(1.1)
+            return result
+
+        with patch.object(artifacts, '_parse_trusted_candidate_status', side_effect=delayed_parse):
+            with self.assertRaises(artifacts.ScriptPlanInterrupted) as caught:
+                artifacts.run_supervised_bubblewrap(
+                    [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                    execution_timeout_seconds=1.0,
+                    cancellation_signal=lambda: signal.SIGTERM if cancelled else None,
+                )
+        self.assertEqual(caught.exception.signum, signal.SIGTERM)
+
+    def test_supervisor_rejects_success_when_cleanup_finishes_after_deadline(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-late-cleanup'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        original_parse = artifacts._parse_trusted_candidate_status
+        original_close = os.close
+        parsed = False
+        delayed = False
+
+        def mark_parsed(*args, **kwargs):
+            nonlocal parsed
+            result = original_parse(*args, **kwargs)
+            parsed = True
+            return result
+
+        def delayed_close(descriptor):
+            nonlocal delayed
+            if parsed and not delayed:
+                delayed = True
+                time.sleep(1.1)
+            return original_close(descriptor)
+
+        with patch.object(artifacts, '_parse_trusted_candidate_status', side_effect=mark_parsed):
+            with patch.object(artifacts.os, 'close', side_effect=delayed_close):
+                with self.assertRaisesRegex(artifacts.ScriptCandidateTerminal, 'execution deadline'):
+                    artifacts.run_supervised_bubblewrap(
+                        [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'},
+                        pass_fds=(), execution_timeout_seconds=1.0,
+                    )
+
+    def test_cancellation_does_not_remove_the_deadline_during_bootstrap(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-no-pid'
+        fake_bubblewrap.write_text(textwrap.dedent('''\
+            #!/usr/bin/python3
+            import json, os, sys, time
+            status_fd = int(sys.argv[sys.argv.index('--json-status-fd') + 1])
+            namespace = os.stat('/proc/self/ns/pid').st_ino
+            print(json.dumps({'version': 2, 'pid': 1, 'event': 'ready', 'pidNamespace': namespace}), flush=True)
+            time.sleep(2)
+            os.close(status_fd)
+        '''), encoding='utf-8')
+        fake_bubblewrap.chmod(0o700)
+        started = time.monotonic()
+        with self.assertRaises(artifacts.ScriptPlanInterrupted) as caught:
+            artifacts.run_supervised_bubblewrap(
+                [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                execution_timeout_seconds=0.2, cancellation_signal=lambda: signal.SIGTERM,
+            )
+        self.assertEqual(caught.exception.signum, signal.SIGTERM)
+        self.assertLess(time.monotonic() - started, 1.5)
+
+    def test_infrastructure_failure_is_not_reclassified_as_late_cancellation(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-failure-at-cutoff'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        original = artifacts._parse_trusted_candidate_status
+        cancelled = False
+
+        def failed_parse(*args, **kwargs):
+            nonlocal cancelled
+            result = original(*args, **kwargs)
+            cancelled = True
+            return replace(result, state='bootstrap-failure')
+
+        with patch.object(artifacts, '_parse_trusted_candidate_status', side_effect=failed_parse):
+            with self.assertRaises(artifacts.ScriptCandidateTerminal) as caught:
+                artifacts.run_supervised_bubblewrap(
+                    [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                    execution_timeout_seconds=5, cancellation_signal=lambda: signal.SIGTERM if cancelled else None,
+                )
+        self.assertTrue(caught.exception.infrastructure_failure)
+
+    def test_timeout_retains_cancellation_observed_during_cleanup(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-timeout-cleanup-signal'
+        survivor_pid_file = self.root / 'timeout-cleanup-pids.json'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0, survivor_pid_file=survivor_pid_file,
+        )
+        original_close = os.close
+        candidate_started = False
+        cancelled = False
+
+        def on_event(event):
+            nonlocal candidate_started
+            if event == 'candidate-started':
+                candidate_started = True
+
+        def cancel_during_close(descriptor):
+            nonlocal cancelled
+            if candidate_started:
+                cancelled = True
+            return original_close(descriptor)
+
+        with patch.object(artifacts.os, 'close', side_effect=cancel_during_close):
+            with self.assertRaises(artifacts.ScriptCandidateTerminal) as caught:
+                artifacts.run_supervised_bubblewrap(
+                    [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                    execution_timeout_seconds=0.4, test_hook=on_event,
+                    cancellation_signal=lambda: signal.SIGTERM if cancelled else None,
+                )
+        self.assertTrue(caught.exception.infrastructure_failure)
+        self.assertEqual(caught.exception.host_cancellation_signal, signal.SIGTERM)
 
     def run_plan(self, fail_fast: bool, outcomes: dict[str, int] | None = None):
         calls: list[str] = []
@@ -2387,6 +2582,28 @@ class TrustedCandidateStatusTests(unittest.TestCase):
                 getattr(caught.exception, "return_code", getattr(caught.exception, "candidate_exit_code", None))
             )
             self.assertFalse(candidate_marker.exists())
+
+    @unittest.skipUnless(os.environ.get("VERJSON_TEST_REAL_BWRAP") == "1", "requires provisioned hosted Bubblewrap/AppArmor")
+    def test_real_deadline_kills_a_candidate_and_its_new_session(self) -> None:
+        marker = f'verjson-deadline-probe-{os.getpid()}'
+        candidate = "import os,time\nif os.fork() == 0:\n os.setsid()\n time.sleep(30)\ntime.sleep(30)\n"
+        arguments = [
+            '/usr/bin/bwrap', '--unshare-user', '--unshare-pid', '--as-pid-1',
+            '--unshare-ipc', '--unshare-uts', '--unshare-net', '--cap-drop', 'ALL',
+            '--die-with-parent', '--new-session', '--ro-bind', '/usr', '/usr',
+            '--ro-bind', '/bin', '/bin', '--ro-bind', '/lib', '/lib',
+            '--ro-bind', '/lib64', '/lib64', '--proc', '/proc', '--dev', '/dev',
+            '--tmpfs', '/tmp', '--chdir', '/', '--', '/usr/bin/python3', '-I', '-c',
+            artifacts.SANDBOX_SUPERVISOR_ENTRYPOINT, '/usr/bin/python3', '-I', '-c', candidate, marker,
+        ]
+        with self.assertRaisesRegex(artifacts.ScriptCandidateTerminal, 'execution deadline') as caught:
+            artifacts.run_supervised_bubblewrap(
+                arguments, environment={'PATH': '/usr/bin:/bin'}, pass_fds=(), execution_timeout_seconds=3,
+            )
+        self.assertTrue(caught.exception.candidate_started)
+        self.assertTrue(caught.exception.infrastructure_failure)
+        processes = subprocess.run(['/bin/ps', '-eww', '-o', 'args='], check=True, capture_output=True, text=True)
+        self.assertFalse(any(marker in line for line in processes.stdout.splitlines()))
 
     @unittest.skipUnless(os.environ.get("VERJSON_TEST_REAL_BWRAP") == "1", "requires provisioned hosted Bubblewrap/AppArmor")
     def test_pid1_supervisor_reaps_an_adopted_zombie_before_returning(self) -> None:
