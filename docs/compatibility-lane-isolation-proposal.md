@@ -16,6 +16,14 @@ The current trusted package policy authorizes package names and ranges, while th
 
 The existing `verjson-ci` source execution boundary provides a relevant read-only source and network-namespace implementation, but its current interface does not establish fixture authority, trusted compatibility assertions, or multi-lane completeness. Reuse requires a reviewed integration and evidence for those additional properties.
 
+## Controller candidates
+
+An independently enforced controller must execute the protected complete lane plan; candidate-authored calls and their outputs cannot be its authority. One candidate is a generalized organization-required workflow and trusted supervisor, building on the existing [CLI package-surface required workflow](../.github/workflows/cli-projects-package-surface-required.yml) and [ADR 0154](decisions/0154-authenticate-required-workflow-identity-overrides/README.md). Another is a separately controlled App that executes the plan and publishes an App-bound required check. A new App is not presumed necessary: select between these only after demonstrating the required enforcement and candidate/base binding on the intended GitHub plan and runner. Existing examples are repository-specific and do not establish cross-organization or merge-group support.
+
+On 2026-10-31 UTC, a [public canary run](https://github.com/test-agent-verjson/tbd-queue-canary-20261029165528-c5edae32/actions/runs/41153346595) invoked one reusable workflow twice. Both executions received the same caller workflow reference and reusable job name, while their `job.check_run_id` values differed. GitHub's jobs API associated each ID with the run, attempt, head SHA and a different displayed job name. This permits correlation of those observed executions, not authorization of the caller-controlled names, proof that every required call occurred, or proof of required-workflow enforcement. The probe used `workflow_dispatch`; pull-request, merge-group and private-repository behavior remain unverified. Its temporary workflow files were removed after the run.
+
+The existing [ADR 0226](decisions/0226-superseded-cancelled-check-runs-do-not-block-admission/README.md) notes that Actions checks share an App identity. A same-name check from that App is therefore not by itself evidence that the intended required workflow ran. Test same-name spoofing, omission and changed workflow pins against the actual protected integration before selecting an enforcement mechanism.
+
 ## Adoption and verification
 
 Define and review the policy and harness trust roots, complete plan format, fixture acquisition, downgrade behavior and result protocol before binding them to the reusable workflow. Retain compatibility for current callers through an explicitly tested migration; do not silently treat legacy caller scripts as independently verified assertions. A changed required check needs evidence of both enforcement and adopter rollout.
