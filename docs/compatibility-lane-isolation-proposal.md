@@ -42,6 +42,17 @@ establish and protect the connection and descriptor lifecycle, in addition to
 checking peer and supervisor identities. This probe does not establish the
 behavior of every supported kernel or an accepted-connection implementation.
 
+An experimental, unwired connector-evidence helper pins the kernel-recorded
+connector with `SO_PEERPIDFD`, checks its UID and pidfd identity, and compares
+its live PID namespace with a live pinned supervisor. It rejects unavailable or
+inconsistent evidence. The caller must establish that the supplied procfs root
+is the trusted host view; the helper checks procfs type and root, not mount
+provenance. Its caller owns the returned pidfd and must retain and check both
+pidfds through final acceptance. This observation does not authenticate harness
+code, launch, a subsequent writer, or lane completion, and cannot authorize
+admission. Its descriptor handoff requires queued cancellation rather than
+asynchronously raised exceptions, which can interrupt ownership transfer.
+
 ## Controller candidates
 
 An experimental, unwired `scripts/ci-gate/compatibility_lane_evidence.py` compares

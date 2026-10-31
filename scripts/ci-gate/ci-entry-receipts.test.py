@@ -2811,6 +2811,59 @@ class TrustedCandidateStatusTests(unittest.TestCase):
             self.assertFalse(candidate_marker.exists())
 
     @unittest.skipUnless(os.environ.get("VERJSON_TEST_REAL_BWRAP") == "1", "requires provisioned hosted Bubblewrap/AppArmor")
+    def test_real_recorded_connector_matches_isolated_supervisor_namespace(self) -> None:
+        import compatibility_lane_peer as peer
+        import socket
+
+        with tempfile.TemporaryDirectory() as directory:
+            notifications = queue.Queue(maxsize=1)
+            notices = []
+            matched = []
+            proc_fd = os.open('/proc', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            self.addCleanup(os.close, proc_fd)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                listener.bind(directory + '/listener')
+                listener.listen(1)
+                listener.settimeout(3)
+
+                def on_event(event):
+                    if event == 'control-accepted':
+                        notices.append(notifications.get_nowait())
+                    elif event == 'candidate-started':
+                        accepted, _ = listener.accept()
+                        with accepted:
+                            namespace_fd, supervisor_pidfd = notices[0].borrow()
+                            try:
+                                peer_pidfd = peer.pin_recorded_connector(
+                                    accepted, expected_uid=os.getuid(), supervisor_pidfd=supervisor_pidfd,
+                                    supervisor_namespace_fd=namespace_fd, trusted_proc_fd=proc_fd,
+                                )
+                                os.close(peer_pidfd)
+                                matched.append(True)
+                            finally:
+                                os.close(supervisor_pidfd)
+                                os.close(namespace_fd)
+
+                candidate = "import socket,time\ns=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\ns.connect('/probe/listener')\ntime.sleep(30)\n"
+                arguments = [
+                    '/usr/bin/bwrap', '--unshare-user', '--unshare-pid', '--as-pid-1',
+                    '--unshare-ipc', '--unshare-uts', '--unshare-net', '--cap-drop', 'ALL',
+                    '--die-with-parent', '--new-session', '--ro-bind', '/usr', '/usr',
+                    '--ro-bind', '/bin', '/bin', '--ro-bind', '/lib', '/lib',
+                    '--ro-bind', '/lib64', '/lib64', '--ro-bind', directory, '/probe',
+                    '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--chdir', '/',
+                    '--', '/usr/bin/python3', '-I', '-c', artifacts.SANDBOX_SUPERVISOR_ENTRYPOINT,
+                    '/usr/bin/python3', '-I', '-c', candidate,
+                ]
+                with self.assertRaisesRegex(artifacts.ScriptCandidateTerminal, 'execution deadline'):
+                    artifacts.run_supervised_bubblewrap(
+                        arguments, environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                        execution_timeout_seconds=6, namespace_notifications=notifications,
+                        namespace_attempt_id='real-connector', test_hook=on_event,
+                    )
+                self.assertEqual(matched, [True])
+
+    @unittest.skipUnless(os.environ.get("VERJSON_TEST_REAL_BWRAP") == "1", "requires provisioned hosted Bubblewrap/AppArmor")
     def test_real_deadline_kills_a_candidate_and_its_new_session(self) -> None:
         marker = f'verjson-deadline-probe-{os.getpid()}'
         notifications = queue.Queue(maxsize=1)

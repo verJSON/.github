@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -21,6 +23,234 @@ def read_to_eof(endpoint):
 
 
 class LaneChannelTests(unittest.TestCase):
+    def test_pins_live_recorded_connector_in_supervisor_namespace(self):
+        import compatibility_lane_peer as peer
+
+        with tempfile.TemporaryDirectory() as directory:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                listener.bind(directory + '/listener')
+                listener.listen(1)
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.connect(directory + '/listener')
+                    accepted, _ = listener.accept()
+                    with accepted:
+                        namespace_fd = os.open('/proc/self/ns/pid', os.O_RDONLY | os.O_CLOEXEC)
+                        supervisor_pidfd = os.pidfd_open(os.getpid())
+                        proc_fd = os.open('/proc', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+                        try:
+                            peer_pidfd = peer.pin_recorded_connector(
+                                accepted, expected_uid=os.getuid(), supervisor_pidfd=supervisor_pidfd,
+                                supervisor_namespace_fd=namespace_fd, trusted_proc_fd=proc_fd,
+                            )
+                            try:
+                                os.fstat(peer_pidfd)
+                            finally:
+                                os.close(peer_pidfd)
+                        finally:
+                            os.close(proc_fd)
+                            os.close(supervisor_pidfd)
+                            os.close(namespace_fd)
+
+    def test_unavailable_socket_evidence_fails_closed_with_domain_error(self):
+        import compatibility_lane_peer as peer
+
+        endpoint, other = socket.socketpair()
+        with endpoint, other:
+            with patch.object(socket.socket, 'getsockopt', side_effect=OSError('unsupported')):
+                with self.assertRaises(peer.PeerEvidenceError):
+                    peer.pin_recorded_connector(
+                        endpoint, expected_uid=os.getuid(), supervisor_pidfd=-1,
+                        supervisor_namespace_fd=-1, trusted_proc_fd=-1,
+                    )
+
+    def test_invalid_descriptor_arguments_fail_with_domain_error(self):
+        import compatibility_lane_peer as peer
+
+        endpoint, other = socket.socketpair()
+        with endpoint, other:
+            for descriptor in (None, True, -1, 2 ** 64):
+                with self.subTest(descriptor=descriptor):
+                    with self.assertRaises(peer.PeerEvidenceError):
+                        peer.pin_recorded_connector(
+                            endpoint, expected_uid=os.getuid(), supervisor_pidfd=descriptor,
+                            supervisor_namespace_fd=descriptor, trusted_proc_fd=descriptor,
+                        )
+
+    def test_rejects_a_fabricated_procfs_root_even_with_matching_namespace(self):
+        import compatibility_lane_peer as peer
+
+        endpoint, other = socket.socketpair()
+        with tempfile.TemporaryDirectory() as directory, endpoint, other:
+            os.makedirs(f'{directory}/{os.getpid()}/ns')
+            os.symlink('/proc/self/ns/pid', f'{directory}/{os.getpid()}/ns/pid')
+            namespace_fd = os.open('/proc/self/ns/pid', os.O_RDONLY | os.O_CLOEXEC)
+            supervisor_pidfd = os.pidfd_open(os.getpid())
+            fake_proc_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                with patch.object(peer, '_pidfd_pid', return_value=os.getpid()):
+                    result = None
+                    try:
+                        with self.assertRaises(peer.PeerEvidenceError):
+                            result = peer.pin_recorded_connector(
+                                endpoint, expected_uid=os.getuid(), supervisor_pidfd=supervisor_pidfd,
+                                supervisor_namespace_fd=namespace_fd, trusted_proc_fd=fake_proc_fd,
+                            )
+                    finally:
+                        if result is not None:
+                            os.close(result)
+            finally:
+                os.close(fake_proc_fd)
+                os.close(supervisor_pidfd)
+                os.close(namespace_fd)
+
+    def test_rejects_a_live_non_pidfd_as_supervisor_identity(self):
+        import compatibility_lane_peer as peer
+
+        endpoint, other = socket.socketpair()
+        pipe_read, pipe_write = os.pipe()
+        namespace_fd = os.open('/proc/self/ns/pid', os.O_RDONLY | os.O_CLOEXEC)
+        proc_fd = os.open('/proc', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        with endpoint, other:
+            try:
+                result = None
+                try:
+                    with self.assertRaises(peer.PeerEvidenceError):
+                        result = peer.pin_recorded_connector(
+                            endpoint, expected_uid=os.getuid(), supervisor_pidfd=pipe_read,
+                            supervisor_namespace_fd=namespace_fd, trusted_proc_fd=proc_fd,
+                        )
+                finally:
+                    if result is not None:
+                        os.close(result)
+            finally:
+                os.close(proc_fd)
+                os.close(namespace_fd)
+                os.close(pipe_write)
+                os.close(pipe_read)
+
+    def test_rejects_wrong_peer_evidence_without_leaking_descriptors(self):
+        import compatibility_lane_peer as peer
+
+        endpoint, other = socket.socketpair()
+        namespace_fd = os.open('/proc/self/ns/pid', os.O_RDONLY | os.O_CLOEXEC)
+        supervisor_pidfd = os.pidfd_open(os.getpid())
+        proc_fd = os.open('/proc', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        with endpoint, other, tempfile.TemporaryFile() as wrong_namespace:
+            try:
+                before = set(os.listdir('/proc/self/fd'))
+                cases = ('uid', 'namespace', 'pid')
+                for case in cases:
+                    with self.subTest(case=case):
+                        expected_uid = os.getuid() + (case == 'uid')
+                        selected_namespace = wrong_namespace.fileno() if case == 'namespace' else namespace_fd
+                        pid_values = [os.getpid(), os.getpid() + 1] if case == 'pid' else None
+                        with patch.object(peer, '_pidfd_pid', side_effect=pid_values, wraps=peer._pidfd_pid):
+                            with self.assertRaises(peer.PeerEvidenceError):
+                                peer.pin_recorded_connector(
+                                    endpoint, expected_uid=int(expected_uid), supervisor_pidfd=supervisor_pidfd,
+                                    supervisor_namespace_fd=selected_namespace, trusted_proc_fd=proc_fd,
+                                )
+                        self.assertEqual(set(os.listdir('/proc/self/fd')), before)
+                original_getsockopt = endpoint.getsockopt
+
+                def without_peer_pidfd(level, option, *args):
+                    if option == peer._SO_PEERPIDFD:
+                        raise OSError('SO_PEERPIDFD unsupported')
+                    return original_getsockopt(level, option, *args)
+
+                with patch.object(socket.socket, 'getsockopt', side_effect=without_peer_pidfd):
+                    with self.assertRaises(peer.PeerEvidenceError):
+                        peer.pin_recorded_connector(
+                            endpoint, expected_uid=os.getuid(), supervisor_pidfd=supervisor_pidfd,
+                            supervisor_namespace_fd=namespace_fd, trusted_proc_fd=proc_fd,
+                        )
+                self.assertEqual(set(os.listdir('/proc/self/fd')), before)
+            finally:
+                os.close(proc_fd)
+                os.close(supervisor_pidfd)
+                os.close(namespace_fd)
+
+    def test_rejects_an_accepted_connection_after_its_connector_exits(self):
+        import compatibility_lane_peer as peer
+
+        with tempfile.TemporaryDirectory() as directory:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                path = directory + '/listener'
+                listener.bind(path)
+                listener.listen(1)
+                listener.settimeout(5)
+                child = os.fork()
+                if child == 0:
+                    try:
+                        listener.close()
+                        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                            client.connect(path)
+                    finally:
+                        os._exit(0)
+                accepted, _ = listener.accept()
+                os.waitpid(child, 0)
+                with accepted:
+                    namespace_fd = os.open('/proc/self/ns/pid', os.O_RDONLY | os.O_CLOEXEC)
+                    supervisor_pidfd = os.pidfd_open(os.getpid())
+                    proc_fd = os.open('/proc', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+                    try:
+                        before = set(os.listdir('/proc/self/fd'))
+                        with self.assertRaises(peer.PeerEvidenceError):
+                            peer.pin_recorded_connector(
+                                accepted, expected_uid=os.getuid(), supervisor_pidfd=supervisor_pidfd,
+                                supervisor_namespace_fd=namespace_fd, trusted_proc_fd=proc_fd,
+                            )
+                        self.assertEqual(set(os.listdir('/proc/self/fd')), before)
+                    finally:
+                        os.close(proc_fd)
+                        os.close(supervisor_pidfd)
+                        os.close(namespace_fd)
+
+    def test_rejects_supervisor_exit_during_peer_validation(self):
+        import compatibility_lane_peer as peer
+
+        endpoint, other = socket.socketpair()
+        hold_read, hold_write = os.pipe()
+        child = os.fork()
+        if child == 0:
+            os.close(hold_write)
+            os.read(hold_read, 1)
+            os._exit(0)
+        os.close(hold_read)
+        supervisor_pidfd = os.pidfd_open(child)
+        namespace_fd = os.open('/proc/self/ns/pid', os.O_RDONLY | os.O_CLOEXEC)
+        proc_fd = os.open('/proc', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        original_pid = peer._pidfd_pid
+        calls = 0
+
+        def exit_supervisor_during_validation(proc, pidfd):
+            nonlocal calls
+            value = original_pid(proc, pidfd)
+            calls += 1
+            if calls == 2:
+                os.kill(child, signal.SIGKILL)
+                os.waitpid(child, 0)
+            return value
+
+        with endpoint, other:
+            try:
+                with patch.object(peer, '_pidfd_pid', side_effect=exit_supervisor_during_validation):
+                    with self.assertRaises(peer.PeerEvidenceError):
+                        peer.pin_recorded_connector(
+                            endpoint, expected_uid=os.getuid(), supervisor_pidfd=supervisor_pidfd,
+                            supervisor_namespace_fd=namespace_fd, trusted_proc_fd=proc_fd,
+                        )
+                self.assertEqual(calls, 2)
+            finally:
+                os.close(hold_write)
+                try:
+                    os.waitpid(child, 0)
+                except ChildProcessError:
+                    pass
+                os.close(proc_fd)
+                os.close(namespace_fd)
+                os.close(supervisor_pidfd)
+
     def test_relays_one_bound_request_and_response_without_granting_readiness(self):
         harness_controller, harness = socket.socketpair()
         candidate_controller, candidate = socket.socketpair()

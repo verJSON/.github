@@ -1457,6 +1457,9 @@ NON_GATE_MODULES = {
     "scripts/ci-gate/compatibility_lane_channel.py": (
         "experimental lane relay imported by its registered test"
     ),
+    "scripts/ci-gate/compatibility_lane_peer.py": (
+        "experimental connector evidence imported by its registered test"
+    ),
     "scripts/ci-gate/ascii_digit_locales.py": (
         "locale-matrix helper imported by the digit-guard tests"
     ),
