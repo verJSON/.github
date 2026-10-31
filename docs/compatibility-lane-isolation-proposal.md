@@ -42,6 +42,16 @@ establish and protect the connection and descriptor lifecycle, in addition to
 checking peer and supervisor identities. This probe does not establish the
 behavior of every supported kernel or an accepted-connection implementation.
 
+In a separate local Linux 6.18 WSL2 socketpair probe, `SO_PASSCRED` and
+`recvmsg` reported the child PID for bytes written through an inherited
+descriptor; a second probe received queued parent and child bytes with their
+respective credentials. This supports investigating credential-bearing reads,
+but does not establish a sender-authentication mechanism. The receiver must
+handle missing or truncated credentials, PID-namespace translation, PID reuse,
+credential-forging capabilities, concurrent writers and descriptor sharing.
+The probes did not exercise Bubblewrap or a hosted runner. The current relay
+uses `recv`, does not inspect per-message credentials and remains unauthenticated.
+
 An experimental, unwired connector-evidence helper pins the kernel-recorded
 connector with `SO_PEERPIDFD`, checks its UID and pidfd identity, and compares
 its live PID namespace with a live pinned supervisor. It rejects unavailable or
