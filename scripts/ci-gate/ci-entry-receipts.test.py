@@ -25,6 +25,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "scripts/ci-gate"))
 sys.path.insert(0, str(ROOT / ".github/actions/node-ci-script-plan"))
 
 import ci_build_artifacts as artifacts
