@@ -41,6 +41,18 @@ that the supplied candidate and base are current. It is not an active check or
 an authorization to merge. Its version 1 is an experimental wire shape, not an
 adopted organization contract, and currently covers GitHub.com only.
 
+An experimental, unwired lane relay forwards one versioned request and one
+response between controller-owned Unix stream sockets. Each sender half-closes
+its write side after its single bounded frame; the relay checks the complete
+stream, the frame shape and the controller-supplied nonce before forwarding.
+It closes its sockets and withholds success on malformed, incomplete, late or
+ambiguous exchanges. The future controller must generate a unique nonce and
+bind it to the authorized lane and attempt. The candidate response is untrusted
+input to the harness, not an assertion or completion receipt. The relay does not
+authenticate either peer, launch or isolate processes, protect a harness result
+channel, verify cleanup, or establish admission; it always reports
+`readyForApply: false`.
+
 
 An independently enforced controller must execute the protected complete lane plan; candidate-authored calls and their outputs cannot be its authority. One candidate is a generalized organization-required workflow and trusted supervisor, building on the existing [CLI package-surface required workflow](../.github/workflows/cli-projects-package-surface-required.yml) and [ADR 0154](decisions/0154-authenticate-required-workflow-identity-overrides/README.md). Another is a separately controlled App that executes the plan and publishes an App-bound required check. A new App is not presumed necessary: select between these only after demonstrating the required enforcement and candidate/base binding on the intended GitHub plan and runner. Existing examples are repository-specific and do not establish cross-organization or merge-group support.
 
