@@ -25,6 +25,52 @@ def read_to_eof(endpoint):
 
 
 class LaneChannelTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('VERJSON_TEST_REAL_BWRAP') == '1', 'requires Bubblewrap')
+    def test_chunk_sender_evidence_matches_a_live_isolated_process(self):
+        import compatibility_lane_peer as peer
+        import struct
+
+        with tempfile.TemporaryDirectory() as directory:
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            with listener:
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+                listener.bind(directory + '/listener')
+                listener.listen(1)
+                listener.settimeout(3)
+                command = [
+                    '/usr/bin/bwrap', '--unshare-user', '--unshare-pid', '--unshare-net',
+                    '--cap-drop', 'ALL', '--die-with-parent', '--ro-bind', '/usr', '/usr', '--ro-bind', '/lib', '/lib',
+                    '--ro-bind', '/lib64', '/lib64', '--ro-bind', directory, '/probe',
+                    '--proc', '/proc', '--dev', '/dev', '--', '/usr/bin/python3', '-I', '-c',
+                    "import socket,time; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); "
+                    "s.connect('/probe/listener'); s.sendall(b'isolated'); time.sleep(10)",
+                ]
+                process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                try:
+                    accepted, _ = listener.accept()
+                    with accepted:
+                        pid, _, _ = struct.unpack('iII', accepted.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                        pidfd = os.pidfd_open(pid)
+                        try:
+                            proc_fd = os.open('/proc', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+                            try:
+                                self.assertNotEqual(os.stat(f'/proc/{pid}/ns/pid').st_ino,
+                                                    os.stat('/proc/self/ns/pid').st_ino)
+                                self.assertEqual(peer.read_pinned_chunk(
+                                    accepted, sender_pidfd=pidfd, expected_uid=os.getuid(), trusted_proc_fd=proc_fd,
+                                    deadline=time.monotonic() + 2), b'isolated')
+                            finally:
+                                os.close(proc_fd)
+                        finally:
+                            os.close(pidfd)
+                finally:
+                    process.terminate()
+                    try:
+                        process.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate(timeout=5)
+
     def test_chunk_sender_evidence_rejects_an_inherited_writer(self):
         import compatibility_lane_peer as peer
 

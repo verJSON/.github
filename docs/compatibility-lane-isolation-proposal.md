@@ -63,6 +63,9 @@ capability-based credential forgery, authenticate complete frames or identify
 who closed a shared socket. Cancellation must be queued; asynchronous exceptions
 or concurrent descriptor manipulation can interrupt descriptor cleanup. It is
 not connected to the relay or admission path.
+An opt-in direct Bubblewrap probe exercises a live sender in a separate PID
+namespace. This does not exercise the trusted supervisor, authenticate harness
+code, or establish the namespace and socket lifecycle needed for admission.
 
 An experimental, unwired connector-evidence helper pins the kernel-recorded
 connector with `SO_PEERPIDFD`, checks its UID and pidfd identity, and compares
