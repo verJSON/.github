@@ -7,11 +7,13 @@ from dataclasses import replace
 import json
 import os
 import queue
+import select
 import signal
 import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -209,6 +211,231 @@ class EntryReceiptSupervisorTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.runner_temp = self.root / "runner-temp"
         self.runner_temp.mkdir(mode=0o700)
+
+    def test_namespace_event_is_published_before_launch_with_owned_handles(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-namespace-event'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        notifications = queue.Queue(maxsize=1)
+        received = []
+
+        def on_event(event):
+            if event == 'control-accepted':
+                notice = notifications.get_nowait()
+                namespace_fd, pidfd = notice.borrow()
+                try:
+                    self.assertEqual(os.fstat(namespace_fd).st_ino, notice.namespace_inode)
+                    os.fstat(pidfd)
+                finally:
+                    os.close(namespace_fd)
+                    os.close(pidfd)
+                received.append(notice)
+
+        status = artifacts.run_supervised_bubblewrap(
+            [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+            namespace_notifications=notifications, namespace_attempt_id='lane-1',
+            execution_timeout_seconds=5, test_hook=on_event,
+        )
+        self.assertEqual(status.return_code, 0)
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0].attempt_id, 'lane-1')
+        self.assertGreater(received[0].supervisor_pid, 0)
+        with self.assertRaises(artifacts.IntegrityError):
+            received[0].borrow()
+
+    def test_borrowed_pidfd_reports_supervisor_exit_after_notice_revocation(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-borrowed-namespace'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        notifications = queue.Queue(maxsize=1)
+        borrowed = []
+        notices = []
+
+        def on_event(event):
+            if event == 'control-accepted':
+                notice = notifications.get_nowait()
+                notices.append(notice)
+                borrowed.extend(notice.borrow())
+                self.assertFalse(select.select([borrowed[1]], [], [], 0)[0])
+
+        try:
+            artifacts.run_supervised_bubblewrap(
+                [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                namespace_notifications=notifications, namespace_attempt_id='lane-1',
+                execution_timeout_seconds=5, test_hook=on_event,
+            )
+            self.assertEqual(len(borrowed), 2)
+            self.assertEqual(os.fstat(borrowed[0]).st_ino, notices[0].namespace_inode)
+            self.assertTrue(select.select([borrowed[1]], [], [], 0)[0])
+            with self.assertRaises(artifacts.IntegrityError):
+                notices[0].borrow()
+        finally:
+            for descriptor in borrowed:
+                os.close(descriptor)
+
+    def test_concurrent_borrow_and_revocation_close_owned_descriptors(self) -> None:
+        before = set(os.listdir('/proc/self/fd'))
+        namespace_fd = os.open('/proc/self/ns/pid', os.O_RDONLY | os.O_CLOEXEC)
+        pidfd = os.pidfd_open(os.getpid())
+        notice = artifacts.PinnedSupervisorNamespace(
+            'lane-1', os.getpid(), os.fstat(namespace_fd).st_ino, namespace_fd, pidfd,
+        )
+        barrier = threading.Barrier(2)
+        failures = []
+
+        def borrower():
+            barrier.wait()
+            try:
+                try:
+                    borrowed_namespace, borrowed_pidfd = notice.borrow()
+                except artifacts.IntegrityError:
+                    return
+                try:
+                    if os.fstat(borrowed_namespace).st_ino != notice.namespace_inode:
+                        failures.append('wrong namespace')
+                finally:
+                    os.close(borrowed_namespace)
+                    os.close(borrowed_pidfd)
+            except Exception as error:
+                failures.append(repr(error))
+
+        thread = threading.Thread(target=borrower)
+        thread.start()
+        barrier.wait()
+        self.assertTrue(notice._revoke())
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+        with self.assertRaises(artifacts.IntegrityError):
+            notice.borrow()
+        self.assertEqual(set(os.listdir('/proc/self/fd')), before)
+
+    def test_full_namespace_queue_prevents_candidate_launch(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-full-queue'
+        marker = self.root / 'candidate-launched'
+        fake_bubblewrap.write_text(textwrap.dedent(f'''\
+            #!/usr/bin/python3
+            import json, os, sys
+            status_fd = int(sys.argv[sys.argv.index('--json-status-fd') + 1])
+            namespace = os.stat('/proc/self/ns/pid').st_ino
+            os.write(status_fd, json.dumps({{'child-pid': os.getpid(), 'pid-namespace': namespace}}).encode() + b'\\n')
+            print(json.dumps({{'version': 2, 'pid': 1, 'event': 'ready', 'pidNamespace': namespace}}), flush=True)
+            if sys.stdin.buffer.readline() == b'launch\\n':
+                open({str(marker)!r}, 'w').close()
+        '''), encoding='utf-8')
+        fake_bubblewrap.chmod(0o700)
+        notifications = queue.Queue(maxsize=1)
+        notifications.put_nowait('occupied')
+        with self.assertRaisesRegex(artifacts.ScriptCandidateTerminal, 'namespace publication failed') as caught:
+            artifacts.run_supervised_bubblewrap(
+                [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                namespace_notifications=notifications, namespace_attempt_id='lane-1', execution_timeout_seconds=3,
+            )
+        self.assertFalse(caught.exception.candidate_started)
+        self.assertFalse(marker.exists())
+        self.assertEqual(notifications.get_nowait(), 'occupied')
+
+    def test_publication_exception_revokes_notice_already_inserted_in_queue(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-publication-exception'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        notifications = queue.Queue(maxsize=1)
+        original_put = notifications.put_nowait
+
+        def publish_then_fail(notice):
+            original_put(notice)
+            raise RuntimeError('injected publication failure')
+
+        with patch.object(notifications, 'put_nowait', side_effect=publish_then_fail):
+            with self.assertRaisesRegex(artifacts.ScriptCandidateTerminal, 'injected publication failure'):
+                artifacts.run_supervised_bubblewrap(
+                    [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                    namespace_notifications=notifications, namespace_attempt_id='lane-1',
+                    execution_timeout_seconds=5,
+                )
+        notice = notifications.get_nowait()
+        self.assertEqual((notice._namespace_fd, notice._pidfd), (-1, -1))
+        with self.assertRaises(artifacts.IntegrityError):
+            notice.borrow()
+
+    def test_unread_namespace_notification_does_not_retain_descriptors(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-unread-namespace'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        notifications = queue.Queue(maxsize=1)
+        before = set(os.listdir('/proc/self/fd'))
+        artifacts.run_supervised_bubblewrap(
+            [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+            namespace_notifications=notifications, namespace_attempt_id='lane-1', execution_timeout_seconds=5,
+        )
+        event = notifications.get_nowait()
+        self.assertEqual(set(os.listdir('/proc/self/fd')), before)
+        with self.assertRaises(artifacts.IntegrityError):
+            event.borrow()
+
+    def test_cancellation_after_namespace_publication_revokes_notice_before_launch(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-namespace-cancel'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        notifications = queue.Queue(maxsize=1)
+        original_put = notifications.put_nowait
+        cancelled = False
+        events = []
+
+        def publish_then_cancel(notice):
+            nonlocal cancelled
+            original_put(notice)
+            cancelled = True
+
+        with patch.object(notifications, 'put_nowait', side_effect=publish_then_cancel):
+            with self.assertRaises(artifacts.ScriptCandidateTerminal) as caught:
+                artifacts.run_supervised_bubblewrap(
+                    [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                    namespace_notifications=notifications, namespace_attempt_id='lane-1', execution_timeout_seconds=5,
+                    cancellation_signal=lambda: signal.SIGTERM if cancelled else None, test_hook=events.append,
+                )
+        self.assertEqual(caught.exception.host_cancellation_signal, signal.SIGTERM)
+        self.assertNotIn('candidate-started', events)
+        with self.assertRaises(artifacts.IntegrityError):
+            notifications.get_nowait().borrow()
+
+    def test_cancellation_during_slow_namespace_publication_precedes_timeout(self) -> None:
+        fake_bubblewrap = self.root / 'fake-bwrap-slow-namespace-cancel'
+        self.write_fake_bubblewrap(
+            fake_bubblewrap, state='candidate-exit', exit_code=0, candidate_signal=None,
+            bubblewrap_exit=0,
+        )
+        notifications = queue.Queue(maxsize=1)
+        original_put = notifications.put_nowait
+        cancelled = False
+
+        def publish_cancel_and_delay(notice):
+            nonlocal cancelled
+            original_put(notice)
+            cancelled = True
+            time.sleep(0.3)
+
+        with patch.object(notifications, 'put_nowait', side_effect=publish_cancel_and_delay):
+            with self.assertRaises(artifacts.ScriptPlanInterrupted) as caught:
+                artifacts.run_supervised_bubblewrap(
+                    [str(fake_bubblewrap)], environment={'PATH': '/usr/bin:/bin'}, pass_fds=(),
+                    namespace_notifications=notifications, namespace_attempt_id='lane-1', execution_timeout_seconds=0.2,
+                    cancellation_signal=lambda: signal.SIGTERM if cancelled else None,
+                )
+        self.assertEqual(caught.exception.signum, signal.SIGTERM)
+        self.assertFalse(caught.exception.candidate_started)
+        with self.assertRaises(artifacts.IntegrityError):
+            notifications.get_nowait().borrow()
 
     def test_supervisor_deadline_rejects_late_outcome_and_cleans_descendants(self) -> None:
         fake_bubblewrap = self.root / 'fake-bwrap-deadline'
@@ -2586,6 +2813,22 @@ class TrustedCandidateStatusTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("VERJSON_TEST_REAL_BWRAP") == "1", "requires provisioned hosted Bubblewrap/AppArmor")
     def test_real_deadline_kills_a_candidate_and_its_new_session(self) -> None:
         marker = f'verjson-deadline-probe-{os.getpid()}'
+        notifications = queue.Queue(maxsize=1)
+        notices = []
+
+        def on_event(event):
+            if event == 'control-accepted':
+                notice = notifications.get_nowait()
+                namespace_fd, pidfd = notice.borrow()
+                try:
+                    self.assertEqual(os.fstat(namespace_fd).st_ino, notice.namespace_inode)
+                    self.assertNotEqual(notice.namespace_inode, os.stat('/proc/self/ns/pid').st_ino)
+                    self.assertFalse(select.select([pidfd], [], [], 0)[0])
+                    notices.append(notice)
+                finally:
+                    os.close(namespace_fd)
+                    os.close(pidfd)
+
         candidate = "import os,time\nif os.fork() == 0:\n os.setsid()\n time.sleep(30)\ntime.sleep(30)\n"
         arguments = [
             '/usr/bin/bwrap', '--unshare-user', '--unshare-pid', '--as-pid-1',
@@ -2599,7 +2842,11 @@ class TrustedCandidateStatusTests(unittest.TestCase):
         with self.assertRaisesRegex(artifacts.ScriptCandidateTerminal, 'execution deadline') as caught:
             artifacts.run_supervised_bubblewrap(
                 arguments, environment={'PATH': '/usr/bin:/bin'}, pass_fds=(), execution_timeout_seconds=3,
+                namespace_notifications=notifications, namespace_attempt_id='real-lane', test_hook=on_event,
             )
+        self.assertEqual(len(notices), 1)
+        with self.assertRaises(artifacts.IntegrityError):
+            notices[0].borrow()
         self.assertTrue(caught.exception.candidate_started)
         self.assertTrue(caught.exception.infrastructure_failure)
         processes = subprocess.run(['/bin/ps', '-eww', '-o', 'args='], check=True, capture_output=True, text=True)

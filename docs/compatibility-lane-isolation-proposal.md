@@ -27,6 +27,14 @@ failure. The enclosing plan still owns the final cancellation acceptance cutoff.
 The deadline alone does not authenticate a harness or prove PID-namespace cleanup;
 the real-profile probe and integration remain necessary before use for admission.
 
+An optional, unwired supervisor notification exposes a provisional pinned PID
+namespace and supervisor pidfd before launch. The notice revokes its own handles
+when supervision ends; borrowed duplicates belong to the consumer and remain open
+until it closes them. A consumer must check pidfd liveness and reject prelaunch,
+aborted, or stale notices. The notice does not authenticate a socket peer or
+authorize a lane. Queue and notice locks require trusted, bounded in-process
+consumers; the deadline does not bound a stalled holder of either lock.
+
 ## Controller candidates
 
 An experimental, unwired `scripts/ci-gate/compatibility_lane_evidence.py` compares

@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -117,6 +118,53 @@ class IntegrityError(ArtifactError):
 
 class _SupervisorDeadlineExpired(IntegrityError):
     pass
+
+
+class PinnedSupervisorNamespace:
+    """A revocable provisional namespace identity; borrowed descriptors are caller-owned."""
+
+    def __init__(self, attempt_id: str, supervisor_pid: int, namespace_inode: int, namespace_fd: int, pidfd: int):
+        self.attempt_id = attempt_id
+        self.supervisor_pid = supervisor_pid
+        self.namespace_inode = namespace_inode
+        self._namespace_fd = namespace_fd
+        self._pidfd = pidfd
+        self._lock = threading.Lock()
+
+    def borrow(self) -> tuple[int, int]:
+        with self._lock:
+            if self._namespace_fd < 0 or self._pidfd < 0:
+                raise IntegrityError("trusted sandbox namespace identity is revoked")
+            namespace_fd = -1
+            pidfd = -1
+            try:
+                if select.select([self._pidfd], [], [], 0)[0]:
+                    raise IntegrityError("trusted sandbox supervisor is no longer live")
+                namespace_fd = os.dup(self._namespace_fd)
+                pidfd = os.dup(self._pidfd)
+                if os.fstat(namespace_fd).st_ino != self.namespace_inode or select.select([pidfd], [], [], 0)[0]:
+                    raise IntegrityError("trusted sandbox namespace identity is no longer live")
+                return namespace_fd, pidfd
+            except (OSError, ValueError, IntegrityError) as error:
+                for descriptor in (namespace_fd, pidfd):
+                    if descriptor >= 0:
+                        os.close(descriptor)
+                if isinstance(error, IntegrityError):
+                    raise
+                raise IntegrityError("trusted sandbox namespace identity is unavailable") from error
+
+    def _revoke(self) -> bool:
+        with self._lock:
+            descriptors = (self._namespace_fd, self._pidfd)
+            self._namespace_fd = self._pidfd = -1
+            success = True
+            for descriptor in descriptors:
+                if descriptor >= 0:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        success = False
+            return success
 
 
 _TAR_EXTENSION_TYPES = frozenset(
@@ -1437,6 +1485,8 @@ def run_supervised_bubblewrap(
     test_hook: Callable[[str], None] | None = None,
     test_after_ack_marker: str | None = None,
     execution_timeout_seconds: float | None = None,
+    namespace_notifications: queue.Queue[PinnedSupervisorNamespace] | None = None,
+    namespace_attempt_id: str | None = None,
 ) -> TrustedCandidateStatus:
     """Run the pinned supervisor; an optional deadline includes launch and cleanup.
 
@@ -1449,6 +1499,17 @@ def run_supervised_bubblewrap(
         or not 0 < execution_timeout_seconds <= 86400
     ):
         raise IntegrityError("trusted sandbox execution deadline is invalid")
+    if namespace_notifications is None:
+        if namespace_attempt_id is not None:
+            raise IntegrityError("trusted sandbox namespace notification is invalid")
+    elif (
+        type(namespace_notifications) is not queue.Queue
+        or namespace_notifications.maxsize != 1
+        or execution_timeout_seconds is None
+        or type(namespace_attempt_id) is not str
+        or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", namespace_attempt_id) is None
+    ):
+        raise IntegrityError("trusted sandbox namespace notification is invalid")
     signals = _coerce_host_signal_queue(host_signals, cancellation_signal)
     if test_after_ack_marker is not None and (
         not isinstance(test_after_ack_marker, str)
@@ -1460,6 +1521,7 @@ def run_supervised_bubblewrap(
     status_read_fd, status_write_fd = os.pipe()
     process: subprocess.Popen[bytes] | None = None
     pidfd: int | None = None
+    published_namespace: PinnedSupervisorNamespace | None = None
     status_data = bytearray()
     wrapper_data = bytearray()
     wrapper_offset = 0
@@ -1484,6 +1546,30 @@ def run_supervised_bubblewrap(
     def checkpoint(event: str) -> None:
         if test_hook is not None:
             test_hook(event)
+
+    def publish_namespace() -> None:
+        nonlocal published_namespace
+        if pidfd is None or child_pid is None or pid_namespace is None or namespace_notifications is None:
+            raise IntegrityError("trusted sandbox namespace identity is unavailable")
+        namespace_fd = -1
+        pinned_pidfd = -1
+        try:
+            if select.select([pidfd], [], [], 0)[0]:
+                raise IntegrityError("trusted sandbox supervisor exited before publication")
+            namespace_fd = os.open(f"/proc/{child_pid}/ns/pid", os.O_RDONLY | os.O_CLOEXEC)
+            pinned_pidfd = os.dup(pidfd)
+            if os.fstat(namespace_fd).st_ino != pid_namespace or select.select([pidfd], [], [], 0)[0]:
+                raise IntegrityError("trusted sandbox namespace changed before publication")
+            notice = PinnedSupervisorNamespace(namespace_attempt_id, child_pid, pid_namespace, namespace_fd, pinned_pidfd)
+            published_namespace = notice
+            namespace_notifications.put_nowait(notice)
+        except (OSError, queue.Full) as error:
+            raise IntegrityError("trusted sandbox namespace publication failed") from error
+        finally:
+            if published_namespace is None:
+                for descriptor in (namespace_fd, pinned_pidfd):
+                    if descriptor >= 0:
+                        os.close(descriptor)
 
     def drain_fd(descriptor: int, target: bytearray, limit: int) -> bool:
         eof = False
@@ -1759,6 +1845,15 @@ def run_supervised_bubblewrap(
                     raise IntegrityError("trusted wrapper ready identity mismatches Bubblewrap status")
                 pin_supervisor()
                 launch_signal = signals.launch_decision()
+                if launch_signal is None and namespace_notifications is not None:
+                    if time.monotonic() - start_time >= execution_timeout_seconds:
+                        raise _SupervisorDeadlineExpired("trusted sandbox execution deadline expired")
+                    publish_namespace()
+                    launch_signal = signals.launch_decision()
+                    if time.monotonic() - start_time >= execution_timeout_seconds:
+                        if launch_signal is not None:
+                            raise ScriptPlanInterrupted(launch_signal)
+                        raise _SupervisorDeadlineExpired("trusted sandbox execution deadline expired")
                 send_control(launch_signal)
             if (
                 control_sent
@@ -1909,6 +2004,7 @@ def run_supervised_bubblewrap(
             infrastructure_failure=isinstance(error, _SupervisorDeadlineExpired),
         ) from error
     finally:
+        namespace_revoked = published_namespace is None or published_namespace._revoke()
         if process is not None:
             try:
                 terminate_after_error()
@@ -1945,6 +2041,12 @@ def run_supervised_bubblewrap(
                     os.close(descriptor)
                 except OSError:
                     pass
+        if not namespace_revoked:
+            raise ScriptCandidateTerminal(
+                "trusted sandbox namespace notification cleanup failed",
+                cleanup_status="unverified", candidate_started=authenticated_candidate_started(),
+                host_cancellation_signal=signals.host_cancel_signal, infrastructure_failure=True,
+            )
         pending_error = sys.exc_info()[1]
         if (
             execution_timeout_seconds is not None
