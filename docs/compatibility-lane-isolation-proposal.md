@@ -34,6 +34,13 @@ until it closes them. A consumer must check pidfd liveness and reject prelaunch,
 aborted, or stale notices. The notice does not authenticate a socket peer or
 authorize a lane. Queue and notice locks require trusted, bounded in-process
 consumers; the deadline does not bound a stalled holder of either lock.
+In an unautomated local Linux 6.18 WSL2 probe, a socketpair created before `fork` reported
+the creator through `SO_PEERCRED` and `SO_PEERPIDFD` even when the child sent
+the message. These credentials therefore do not identify every subsequent
+sender when a descriptor is inherited or transferred. The controller must
+establish and protect the connection and descriptor lifecycle, in addition to
+checking peer and supervisor identities. This probe does not establish the
+behavior of every supported kernel or an accepted-connection implementation.
 
 ## Controller candidates
 
