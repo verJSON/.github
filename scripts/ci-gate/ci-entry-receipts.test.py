@@ -2823,6 +2823,7 @@ class TrustedCandidateStatusTests(unittest.TestCase):
             proc_fd = os.open('/proc', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
             self.addCleanup(os.close, proc_fd)
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
                 listener.bind(directory + '/listener')
                 listener.listen(1)
                 listener.settimeout(3)
@@ -2840,13 +2841,19 @@ class TrustedCandidateStatusTests(unittest.TestCase):
                                     accepted, expected_uid=os.getuid(), supervisor_pidfd=supervisor_pidfd,
                                     supervisor_namespace_fd=namespace_fd, trusted_proc_fd=proc_fd,
                                 )
-                                os.close(peer_pidfd)
+                                try:
+                                    self.assertEqual(peer.read_pinned_chunk(
+                                        accepted, sender_pidfd=peer_pidfd, expected_uid=os.getuid(),
+                                        trusted_proc_fd=proc_fd, deadline=time.monotonic() + 2,
+                                    ), b's')
+                                finally:
+                                    os.close(peer_pidfd)
                                 matched.append(True)
                             finally:
                                 os.close(supervisor_pidfd)
                                 os.close(namespace_fd)
 
-                candidate = "import socket,time\ns=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\ns.connect('/probe/listener')\ntime.sleep(30)\n"
+                candidate = "import socket,time\ns=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\ns.connect('/probe/listener')\ns.sendall(b's')\ntime.sleep(30)\n"
                 arguments = [
                     '/usr/bin/bwrap', '--unshare-user', '--unshare-pid', '--as-pid-1',
                     '--unshare-ipc', '--unshare-uts', '--unshare-net', '--cap-drop', 'ALL',
