@@ -270,6 +270,14 @@ def value(name, quote='"'):
 contract_ref = value("CONTRACT_REF")
 if contract_ref != sys.argv[2]:
     raise SystemExit(1)
+org_matches = re.findall(r'^EXPECTED_CODEOWNERS_ORG="([^"]*)"$', text, re.MULTILINE)
+team_matches = re.findall(r'^EXPECTED_CODEOWNERS_TEAM="([^"]*)"$', text, re.MULTILINE)
+if len(org_matches) != len(team_matches) or len(org_matches) > 1:
+    raise SystemExit(1)
+owner_org = org_matches[0] if org_matches else ""
+owner_team = team_matches[0] if team_matches else ""
+if org_matches and (not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?', owner_org) or not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?', owner_team)):
+    raise SystemExit(1)
 scope = value("EXPECTED_RELEASE_SCOPE")
 node = value("EXPECTED_RELEASE_NODE_VERSION")
 package_dir_flag = value("GENERATOR_RELEASE_PACKAGE_DIR_FLAG", "'")
@@ -300,7 +308,7 @@ for path, package_dirs in callers.items():
         or len(set(package_dirs)) != len(package_dirs)
     ):
         raise SystemExit(1)
-print(json.dumps({"scope": scope, "node": node, "package_dir_flag": package_dir_flag, "package_dirs": dirs, "expected_release_callers": callers}, separators=(",", ":")))
+print(json.dumps({"scope": scope, "node": node, "package_dir_flag": package_dir_flag, "package_dirs": dirs, "expected_release_callers": callers, "owner_org": owner_org, "owner_team": owner_team}, separators=(",", ":")))
 PY
   )" || {
     echo "::error::phase=audit repo=$repo result=generated-contract-parameters-invalid"
@@ -326,6 +334,17 @@ PY
     args+=("$package_dir_flag" "$package_dir")
   done < <(jq -r '.package_dirs[]' <<<"$params")
   local contract_test_args=("${args[@]}")
+local owner_org owner_team
+owner_org="$(jq -r .owner_org <<<"$params")"
+owner_team="$(jq -r .owner_team <<<"$params")"
+local expected_owner_org="${owner_org:-verJSON}"
+if [ "${expected_owner_org,,}" != "${ORG,,}" ]; then
+  echo "::error::phase=audit repo=$repo result=generated-codeowners-organization-mismatch"
+  return 1
+fi
+if [ -n "$owner_org" ]; then
+  contract_test_args+=(--codeowners-org "$owner_org" --codeowners-team "$owner_team")
+fi
   while IFS=$'\t' read -r caller_path caller_dirs; do
     [ "$caller_path" = .github/workflows/release.yml ] && continue
     contract_test_args+=(--release-caller-package-dirs "$caller_path=$caller_dirs")

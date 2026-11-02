@@ -82,6 +82,36 @@ class CodeownersTests(unittest.TestCase):
         ).stdout
         self.assertEqual(emitted, owners.CONTENT)
 
+    def test_foreign_owner_is_bound_to_generated_contract(self):
+        import hashlib
+        import re
+        pin = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+        generator = ['bash', str(ROOT / 'scripts/gen-changelog-caller.sh')]
+        options = ['--codeowners-org', 'Acme', '--codeowners-team', 'platform']
+        artifact = subprocess.check_output(generator + ['codeowners', pin] + options)
+        contract = subprocess.check_output(generator + ['contract-test', pin] + options, text=True)
+        self.assertIn(b'* @Acme/platform\n', artifact)
+        self.assertIn('EXPECTED_CODEOWNERS_SHA256="' + hashlib.sha256(artifact).hexdigest() + '"', contract)
+        self.assertIn('EXPECTED_CODEOWNERS_ORG="Acme"', contract)
+        self.assertIn('EXPECTED_CODEOWNERS_TEAM="platform"', contract)
+        self.assertIn('contract-test ' + pin + ' --codeowners-org Acme --codeowners-team platform', contract)
+        self.assertNotEqual(hashlib.sha256(artifact + b'* @Acme/other\n').hexdigest(), hashlib.sha256(artifact).hexdigest())
+        self.assertIsNotNone(re.search(r'\[ ! -L "\$root/\.github" \]', contract))
+
+    def test_owner_parameters_reject_unsafe_and_incomplete_values(self):
+        pin = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+        generator = ['bash', str(ROOT / 'scripts/gen-changelog-caller.sh')]
+        for mode in ('codeowners', 'contract-test'):
+            for options in (['--codeowners-org', 'Acme'], ['--codeowners-team', 'devs'],
+                            ['--codeowners-org', '', '--codeowners-team', 'devs'],
+                            ['--codeowners-org', 'Acme\n* @other/owners', '--codeowners-team', 'devs'],
+                            ['--codeowners-org', 'Acme', '--codeowners-team', 'devs/other'],
+                            ['--codeowners-org', 'Acme', '--codeowners-team', 'devs', '--codeowners-team', 'other']):
+                with self.subTest(mode=mode, options=options):
+                    result = subprocess.run(generator + [mode, pin] + options, capture_output=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, b'')
+
     def test_competing_fallback_locations_fail(self):
         for path in ('CODEOWNERS', 'docs/CODEOWNERS'):
             candidate = self.root / path
