@@ -1988,8 +1988,10 @@ sed -i "s/release-propose.yml@$sha/release-propose.yml@0000000000000000000000000
 schedule_adopter_script "$stale_proposer" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted a release proposer on another pin"
-else
+elif grep -qF 'does not call release-propose.yml at the shared pin' "$ADOPTER_LOG"; then
   pass "emitted suite rejects a release proposer on another pin"
+else
+  fail "release proposer on another pin was rejected for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
@@ -2001,8 +2003,10 @@ sed -i '/^      issues: write$/a\      actions: write' \
 schedule_adopter_script "$overprivileged_proposer" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted both issue and dispatch authority in propose mode"
-else
+elif grep -qF 'propose mode must grant issues-write and not actions-write' "$ADOPTER_LOG"; then
   pass "emitted suite rejects mixed release-proposer write authority"
+else
+  fail "mixed release-proposer write authority was rejected for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
@@ -2014,18 +2018,25 @@ sed -i '/^      contract_ref:/a\      autonomy: ${{ inputs.autonomy }}' \
 schedule_adopter_script "$event_selected_proposer" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted event-selected release autonomy"
-else
+elif grep -qF 'must select autonomy through its reusable workflow path' "$ADOPTER_LOG"; then
   pass "emitted suite rejects event-selected release autonomy"
+else
+  fail "event-selected release autonomy was rejected for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
 
+# Regenerations below build the case fixtures, not case assertions: a
+# generator failure must abort every shard, never be suspended with the case
+# that precedes it, or an empty release.yml would read as a valid rejection.
 nested_adopter="$tmproot/adopter-nested-only-release"
 build_adopter "$nested_adopter"
 bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
   --default-prefix schema-v --default-component cli-schema \
-  >"$nested_adopter/.github/workflows/release.yml"
-bash "$gen" contract-test "$sha" --only-package-dir packages/cli-schema >"$nested_adopter/scripts/changelog-contract.test.sh"
+  >"$nested_adopter/.github/workflows/release.yml" \
+  || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
+bash "$gen" contract-test "$sha" --only-package-dir packages/cli-schema >"$nested_adopter/scripts/changelog-contract.test.sh" \
+  || { echo "FAIL - could not generate the nested-only contract test"; exit 1; }
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   pass "nested-only release and contract agree on component defaults without selecting root (#1286, #1565)"
@@ -2039,45 +2050,56 @@ sed -i "s/default: 'schema-v'/default: v/" \
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "component release contract accepted a mutated default prefix"
-else
+elif grep -qF 'workflow_dispatch input schema differs from the generated contract' "$ADOPTER_LOG"; then
   pass "component release contract rejects default-prefix byte drift (#1565)"
+else
+  fail "default-prefix byte drift was rejected for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
 bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
   --default-prefix schema-v --default-component cli-schema \
-  >"$nested_adopter/.github/workflows/release.yml"
+  >"$nested_adopter/.github/workflows/release.yml" \
+  || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
 sed -i "s/default: 'cli-schema'/default: ''/" \
   "$nested_adopter/.github/workflows/release.yml"
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "component release contract accepted a mutated default component"
-else
+elif grep -qF 'workflow_dispatch input schema differs from the generated contract' "$ADOPTER_LOG"; then
   pass "component release contract rejects default-component byte drift (#1565)"
+else
+  fail "default-component byte drift was rejected for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
 bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
   --default-prefix schema-v --default-component cli-schema \
-  >"$nested_adopter/.github/workflows/release.yml"
+  >"$nested_adopter/.github/workflows/release.yml" \
+  || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
 sed -i 's/package_dirs=(packages\/cli-schema)/package_dirs=(. packages\/cli-schema)/' "$nested_adopter/.github/workflows/release.yml"
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "nested-only contract accepted an extra root verification stamp"
-else
+elif grep -qF 'does not stamp every package directory selected for publication' "$ADOPTER_LOG"; then
   pass "nested-only contract rejects extra root verification stamp (#1286)"
+else
+  fail "extra root verification stamp was rejected for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
 bash "$gen" release-node "$sha" --only-package-dir packages/cli-schema \
   --default-prefix schema-v --default-component cli-schema \
-  >"$nested_adopter/.github/workflows/release.yml"
+  >"$nested_adopter/.github/workflows/release.yml" \
+  || { echo "FAIL - could not regenerate the nested-only release caller"; exit 1; }
 sed -i 's/\["packages\/cli-schema"\]/[".","packages\/cli-schema"]/' "$nested_adopter/.github/workflows/release.yml"
 schedule_adopter_script "$nested_adopter" "$(cat <<'SCHED_SCRIPT'
 if [ "$status" -eq 0 ]; then
   fail "nested-only contract accepted root publication"
-else
+elif grep -qF 'does not pass '\''package-dirs: ' "$ADOPTER_LOG"; then
   pass "nested-only contract rejects extra root publication (#1286)"
+else
+  fail "extra root publication was rejected for the wrong reason: $(tail -2 "$ADOPTER_LOG")"
 fi
 SCHED_SCRIPT
 )"
