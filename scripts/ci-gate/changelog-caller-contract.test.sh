@@ -172,6 +172,63 @@ fi
 # above the gate's `if` and END directly below the `fi` that closes it.
 # BEGIN generator-only assertions
 if generator_only_assertions; then
+# A guard that reads a grep capture must reach its own fail(): under the
+# emitted suite's `set -e`/pipefail, `x="$(grep …)"` (piped or not) aborts on no
+# match before the guard runs, so the adopter sees a red check and no reason
+# (#1975). Every capture that runs grep must end in a `||` fallback.
+silent_captures="$(python3 - "$gen" <<'PY'
+import re, sys
+source = open(sys.argv[1], encoding="utf-8").read().split("\n")
+def statements():
+    """Yield (first source line, statement) with backslash and trailing-pipe
+    continuations joined, so a capture is one string but keeps its line."""
+    i = 0
+    while i < len(source):
+        start, text = i, source[i]
+        while (text.endswith("\\") or text.rstrip().endswith("|")) and i + 1 < len(source):
+            i += 1
+            text = text.rstrip().rstrip("\\") + " " + source[i].strip()
+        yield start + 1, text
+        i += 1
+def substitution(line, start):
+    """Return the body of the $( … ) opening at start, honoring quotes."""
+    depth, i, quote = 0, start, None
+    while i < len(line):
+        c = line[i]
+        if quote:
+            if c == "\\" and quote == '"':
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+        elif c in "'\"":
+            quote = c
+        elif line.startswith("$(", i):
+            depth += 1
+            i += 2
+            continue
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return line[start + 2:i]
+        i += 1
+    return None
+def top_level(body):
+    """Drop quoted spans so a `|`/`||` inside a grep pattern is not structure."""
+    return re.sub(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"", "''", body)
+for number, line in statements():
+    for match in re.finditer(r"(?:^|[\s;(])(?:local\s+)?[A-Za-z_][A-Za-z0-9_]*=\"?(\\?\$\()", line):
+        body = substitution(line, match.start(1) + (1 if line[match.start(1)] == "\\" else 0))
+        if body is None:
+            continue
+        bare = top_level(body)
+        if re.search(r"(?:^|\|)\s*grep\b", bare) and not re.search(r"\|\|[^|]*$", bare):
+            print(f"{number}: {line.strip()[:100]}")
+PY
+)"
+[ -z "$silent_captures" ] \
+  && pass "no emitted grep capture aborts the suite before its guard reports (#1975)" \
+  || fail "emitted grep captures abort silently on no match: $silent_captures"
 grep -qF 'uses: verJSON/.github/.github/workflows/generated-artifacts.yml@' <<<"$workflow" \
   && grep -qF 'raw.githubusercontent.com/verJSON/.github/' <<<"$renderer" \
   && grep -qF '* @verJSON/devs' <<<"$canonical_codeowners" \
@@ -5027,6 +5084,12 @@ expect_rejection "a snapshot job with no explicit runner (#465)" drop_snapshot_r
 expect_rejection "a resumed release that verifies the later dispatch tree instead of its tagged snapshot (#591)" drop_resume_snapshot_checkout
 expect_rejection "an npm ci installing with GITHUB_TOKEN (#465)" install_with_github_token
 expect_rejection "a verification job without package metadata preparation (#550)" drop_verify_prepare
+sync_last_rejection
+# The guard must say why. A capture that aborts the suite under pipefail on no
+# match rejects the tree with no diagnostic at all (#1975).
+grep -qF 'does not prepare package metadata before stamping and verifying the release tree (#550)' "$tmproot/run.out" \
+  && pass "the missing metadata-preparation guard reports its own diagnostic (#1975)" \
+  || fail "a verification job without package metadata preparation was rejected without its diagnostic: $(tail -2 "$tmproot/run.out")"
 expect_rejection "a verification suite with no dispatched version stamp (#519)" drop_verify_stamp
 expect_rejection "version stamps that can run package lifecycle scripts (#519)" enable_stamp_lifecycle_scripts
 expect_rejection "a first release whose scaffold version already matches the dispatch (#579)" reject_same_version_stamp
