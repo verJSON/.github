@@ -2581,20 +2581,27 @@ for failure in renderer download digest python; do
   failing="$tmproot/adopter-$failure-failure"
   build_adopter "$failing"
   inject_render_failure "$failing" "$failure"
-  if run_adopter "$failing"; then
-    fail "a $failure failure with renderable NEXT/ fragments reported success"
-  else
-    pass "a $failure failure with renderable NEXT/ fragments fails closed"
-  fi
+  schedule_adopter_script "$failing" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "a $failure failure with renderable NEXT/ fragments reported success"
+else
+  pass "a $failure failure with renderable NEXT/ fragments fails closed"
+fi
+SCHED_SCRIPT
+)"
 
   emptied="$tmproot/adopter-$failure-empty"
   build_adopter "$emptied"
   python3 "$contract_src" release --repo-root "$emptied" --version v1.0.0 >/dev/null 2>&1
   inject_render_failure "$emptied" "$failure"
-sync_last_rejection
-  run_adopter "$emptied" \
-    && pass "a genuinely emptied NEXT/ remains distinct from a $failure failure" \
-    || fail "an emptied NEXT/ is mistaken for a $failure failure: $(tail -3 "$tmproot/run.out")"
+  schedule_adopter_script "$emptied" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  pass "a genuinely emptied NEXT/ remains distinct from a $failure failure"
+else
+  fail "an emptied NEXT/ is mistaken for a $failure failure: $(tail -3 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 done
 
 # An adopter with nothing to publish has no release.yml; `agents` and
@@ -5600,13 +5607,16 @@ expect_backlink_rejection() {
   cp "$refs_adopter/NEXT/2026-08-03-issue-5-refs.md" "$dir/NEXT/"
   commit_fixture "$dir" backlink
   corrupt_render "$dir" "$2"
-  if run_adopter "$dir"; then
-    fail "emitted suite accepted $label"
-  elif grep -q 'back-link missing from the rendered log' "$tmproot/run.out"; then
-    pass "emitted suite rejects $label"
-  else
-    fail "$label failed for another reason: $(tail -2 "$tmproot/run.out")"
-  fi
+  schedule_adopter_script "$dir" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted $label"
+elif grep -q 'back-link missing from the rendered log' "$ADOPTER_LOG"; then
+  pass "emitted suite rejects $label"
+else
+  fail "$label failed for another reason: $(tail -2 "$ADOPTER_LOG")"
+fi
+SCHED_SCRIPT
+)"
 }
 
 expect_backlink_rejection "a rendered back-link naming the wrong issue" 's/issue #5;/issue #55;/'
@@ -5928,11 +5938,14 @@ binding = '    runs-on: ${{ matrix.os }}'
 assert source.count(binding) == 2
 path.write_text(source.replace(binding, "    # runs-on: ${{ matrix.os }}\n    runs-on: 'general'", 1))
 PY
-if run_adopter "$unbound_acquisition_adopter"; then
+schedule_adopter_script "$unbound_acquisition_adopter" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepts acquisition detached from its approved OS matrix"
 else
   pass "emitted suite rejects acquisition detached from its approved OS matrix"
 fi
+SCHED_SCRIPT
+)"
 
 sync_last_rejection
 if python3 "$repo_root/scripts/ci-gate/hosted-selector-policy.py" \
@@ -7140,15 +7153,18 @@ expect_set_divergence_named() {
   dir="$tmproot/set-atomicity-$set_atomicity_seq"
   build_adopter "$dir" yes "$caller"
   stale_pin "$dir" "$member"
-  if run_adopter "$dir"; then
-    fail "emitted suite accepted a set with $member left at an earlier contract commit"
-    return
-  fi
-  grep -qF "$member" "$tmproot/run.out" \
-    && grep -qF "$stale_contract_ref" "$tmproot/run.out" \
-    && grep -qF "$sha" "$tmproot/run.out" \
+  schedule_adopter_script "$dir" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
+  fail "emitted suite accepted a set with $member left at an earlier contract commit"
+else
+  grep -qF "$member" "$ADOPTER_LOG" \
+    && grep -qF "$stale_contract_ref" "$ADOPTER_LOG" \
+    && grep -qF "$sha" "$ADOPTER_LOG" \
     && pass "a subset regeneration naming $member reports both contract commits" \
-    || fail "rejecting $member did not name the member and both commits: $(tr '\n' ' ' <"$tmproot/run.out" | tail -c 400)"
+    || fail "rejecting $member did not name the member and both commits: $(tr '\n' ' ' <"$ADOPTER_LOG" | tail -c 400)"
+fi
+SCHED_SCRIPT
+)"
 }
 
 # Every member of the set, not just the one that motivated the check. A member
@@ -7535,15 +7551,17 @@ two_stale="$tmproot/adopter-two-stale-members"
 build_adopter "$two_stale"
 stale_pin "$two_stale" scripts/render-next.sh
 stale_pin "$two_stale" .github/workflows/changelog-contract.yml
-if run_adopter "$two_stale"; then
+schedule_adopter_script "$two_stale" "$(cat <<'SCHED_SCRIPT'
+if [ "$status" -eq 0 ]; then
   fail "emitted suite accepted two members left at an earlier contract commit"
 else
-sync_last_rejection
-  { grep -qF 'scripts/render-next.sh is still at' "$tmproot/run.out" \
-    && grep -qF '.github/workflows/changelog-contract.yml is still at' "$tmproot/run.out"; } \
+  { grep -qF 'scripts/render-next.sh is still at' "$ADOPTER_LOG" \
+    && grep -qF '.github/workflows/changelog-contract.yml is still at' "$ADOPTER_LOG"; } \
     && pass "a subset regeneration names every divergent member, not just the first" \
-    || fail "only one divergent member was named: $(tr '\n' ' ' <"$tmproot/run.out" | tail -c 400)"
+    || fail "only one divergent member was named: $(tr '\n' ' ' <"$ADOPTER_LOG" | tail -c 400)"
 fi
+SCHED_SCRIPT
+)"
 
 # --------------------------------------------------------------------------
 # Divergence is reported on positive evidence, never inferred from a quiet scan
