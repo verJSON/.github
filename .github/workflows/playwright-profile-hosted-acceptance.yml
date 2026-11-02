@@ -1,0 +1,31 @@
+name: Playwright profile hosted acceptance
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+    paths:
+      - '.github/workflows/playwright-profile-hosted-acceptance.yml'
+      - 'config/ci-playwright-system-libraries.json'
+      - 'scripts/ci_playwright_system_libraries.py'
+      - 'scripts/ci-gate/ci-playwright-system-libraries.test.py'
+      - 'scripts/ci-gate/playwright-profile-hosted-acceptance.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  hosted-profile-acceptance:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    # runner-lane: fixed-hosted-profile-acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Install and verify the fixed profile with a nonempty plan
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RUNNER_OS: ${{ runner.os }}
+        run: bash scripts/ci-gate/playwright-profile-hosted-acceptance.sh

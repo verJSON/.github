@@ -15,6 +15,10 @@ secretless-first; new callers should use that profile-aware shape.
 
 from __future__ import annotations
 
+import hashlib
+import os
+import stat
+
 BUILTIN_PROFILE = "Verjson"
 HOSTED = "ubuntu-24.04"
 PUBLIC_PR_EVENTS = (
@@ -62,6 +66,19 @@ SECRETLESS_ELIGIBLE_UNTRUSTED = (
 )
 SECRETLESS_HOSTED_FALLBACK = f"{SECRETLESS} && '{HOSTED}'"
 
+# The profile acceptance job must exercise the real hosted Ubuntu image. Keep
+# this fixed exception bound to its single canonical workflow/job site.
+FIXED_HOSTED_PROFILE_ACCEPTANCE = "fixed-hosted-profile-acceptance"
+FIXED_HOSTED_PROFILE_ACCEPTANCE_WORKFLOW = "playwright-profile-hosted-acceptance.yml"
+FIXED_HOSTED_PROFILE_ACCEPTANCE_SIZE = 1133
+FIXED_HOSTED_PROFILE_ACCEPTANCE_MAX_BYTES = 2048
+FIXED_HOSTED_PROFILE_ACCEPTANCE_SHA256 = (
+    "c26f146f1786a07c04cbe1ac0f61cc1380d5b418518434eb40c6092d9be6c379"
+)
+FIXED_HOSTED_JOB_SITES = frozenset(
+    {("playwright-profile-hosted-acceptance.yml", "hosted-profile-acceptance")}
+)
+
 MARKER = "runner-lane:"
 SHAPES = {
     # Jobs that deliberately use only the organization's untrusted lane.
@@ -83,6 +100,9 @@ SHAPES = {
         f" || {SECRETLESS_HOSTED_FALLBACK}"
         f" || {_SECRETLESS_LEGACY_TAIL})"
     ),
+    # A one-site acceptance exception for the system-package profile's live
+    # hosted-runner proof. The generator enforces the workflow/job identity.
+    FIXED_HOSTED_PROFILE_ACCEPTANCE: HOSTED,
 }
 
 
@@ -91,4 +111,56 @@ def expression(shape: str) -> str:
 
 
 def runs_on_line(shape: str, indent: str) -> str:
-    return f"{indent}runs-on: ${{{{ {expression(shape)} }}}}"
+    selected = expression(shape)
+    if shape == FIXED_HOSTED_PROFILE_ACCEPTANCE:
+        return f"{indent}runs-on: {selected}"
+    return f"{indent}runs-on: ${{{{ {selected} }}}}"
+
+
+def validate_fixed_hosted_profile_bytes(path: str | os.PathLike[str], source: bytes) -> None:
+    if os.path.basename(os.fspath(path)) != FIXED_HOSTED_PROFILE_ACCEPTANCE_WORKFLOW:
+        raise ValueError("fixed hosted profile workflow path is not admitted")
+    if len(source) > FIXED_HOSTED_PROFILE_ACCEPTANCE_MAX_BYTES:
+        raise ValueError("fixed hosted profile workflow exceeds its byte limit")
+    if (
+        len(source) != FIXED_HOSTED_PROFILE_ACCEPTANCE_SIZE
+        or hashlib.sha256(source).hexdigest() != FIXED_HOSTED_PROFILE_ACCEPTANCE_SHA256
+    ):
+        raise ValueError("fixed hosted profile workflow differs from the approved template")
+
+
+def read_fixed_hosted_profile_source(path: str | os.PathLike[str]) -> bytes:
+    """Read the one admitted hosted profile workflow as a bounded snapshot."""
+    if os.path.basename(os.fspath(path)) != FIXED_HOSTED_PROFILE_ACCEPTANCE_WORKFLOW:
+        raise ValueError("fixed hosted profile workflow path is not admitted")
+
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise ValueError("fixed hosted profile workflow requires no-follow file opens")
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    if nonblock is None:
+        raise ValueError("fixed hosted profile workflow requires nonblocking file opens")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | nofollow | nonblock
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("fixed hosted profile workflow must be a regular file")
+        if before.st_size > FIXED_HOSTED_PROFILE_ACCEPTANCE_MAX_BYTES:
+            raise ValueError("fixed hosted profile workflow exceeds its byte limit")
+        if before.st_size != FIXED_HOSTED_PROFILE_ACCEPTANCE_SIZE:
+            raise ValueError("fixed hosted profile workflow differs from the approved template")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            source = stream.read(FIXED_HOSTED_PROFILE_ACCEPTANCE_MAX_BYTES + 1)
+        after = os.fstat(descriptor)
+        if (
+            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            or len(source) != FIXED_HOSTED_PROFILE_ACCEPTANCE_SIZE
+        ):
+            raise ValueError("fixed hosted profile workflow changed while being read")
+    finally:
+        os.close(descriptor)
+
+    validate_fixed_hosted_profile_bytes(path, source)
+    return source

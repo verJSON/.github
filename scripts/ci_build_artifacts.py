@@ -79,6 +79,7 @@ RUNTIME_INPUT_DEFAULTS: dict[str, Any] = {
     "secretless-ci-non-app-paths": "",
     "schema-dir": "",
     "postgres-sandbox-profile": "",
+    "playwright-sandbox-profile": "",
     "runner": "",
     "db-image": "",
     "db-port": "5432",
@@ -4969,6 +4970,17 @@ def run_protected_candidate_plan() -> None:
         )
         postgres_state_file = Path(os.environ["VERJSON_CI_POSTGRES_SANDBOX_STATE"])
 
+    playwright_profile_name = os.environ.get("VERJSON_CI_PLAYWRIGHT_PROFILE", "")
+    playwright_profile_module = None
+    playwright_state_file = None
+    if playwright_profile_name:
+        import ci_playwright_system_libraries as playwright_profile_module
+
+        if os.environ.get("VERJSON_CI_PLAYWRIGHT_SECRETLESS_MODE") != "true":
+            sys.exit("Playwright system-library profile requires a secretless script plan")
+        playwright_profile_module.resolve_profile(playwright_profile_name)
+        playwright_state_file = Path(os.environ["VERJSON_CI_PLAYWRIGHT_STATE"])
+
     host_signals = ci_build_artifacts.HostSignalQueue()
     signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
     def stop_on_termination(signum, _frame):
@@ -5038,6 +5050,8 @@ def run_protected_candidate_plan() -> None:
     blocked_service_env = {
         "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
         "GITHUB_STEP_SUMMARY", "VERJSON_CI_TRUSTED_DB_HOST",
+        "VERJSON_CI_PLAYWRIGHT_PROFILE", "VERJSON_CI_PLAYWRIGHT_STATE",
+        "VERJSON_CI_PLAYWRIGHT_SECRETLESS_MODE",
         "VERJSON_CI_COMMAND_FILES_DIR", "GH_TOKEN",
         "GITHUB_TOKEN", "NODE_AUTH_TOKEN",
         "NPM_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "FTP_PROXY",
@@ -6133,6 +6147,8 @@ def run_protected_candidate_plan() -> None:
                     postgres_state_file,
                     runner_temp=runner_temp,
                 )
+            if playwright_profile_module is not None:
+                playwright_profile_module.verify_runtime(playwright_profile_name, playwright_state_file)
             try:
                 received_signal = host_signals.poll()
                 if received_signal is not None:

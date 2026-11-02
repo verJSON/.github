@@ -118,6 +118,28 @@ or acquisition failures continue to fail required build-test before checkout.
 ADR 0234 receives the corresponding dated correction to the hosted-capacity
 invariant.
 
+## 2026-10-28 amendment — fixed hosted profile acceptance
+
+Issues [#1869](https://github.com/Verjson/.github/issues/1869) and
+[#1875](https://github.com/Verjson/.github/issues/1875) require a live,
+nonempty package-install acceptance on the supported GitHub-hosted Ubuntu
+image. A local simulation cannot establish the runner image's installed dpkg
+version or exercise the actual namespace and package transaction. The
+acceptance therefore needs one deliberately fixed hosted placement.
+
+The catalog authorizes `fixed-hosted-profile-acceptance` only at
+`.github/workflows/playwright-profile-hosted-acceptance.yml`, job
+`hosted-profile-acceptance`, with the adjacent marker and literal
+`ubuntu-24.04` selector. The generator requires that exact marker site and
+rejects copies or missing markers; the hosted selector policy and runner
+inventory bind the same path, job, marker, and selector tuple. The job is
+limited to same-repository pull requests, uses only `contents: read`, has no
+runner inputs, variables, matrix, or fallback, and persists no checkout
+credentials or secrets.
+This exception grants no general hosted-runner placement and must not be
+copied to another workflow. Any additional acceptance site requires a new
+decision and independent review.
+
 ## 2026-10-27 amendment — profile-aware Node CI selectors
 
 The Node CI `eligibility` job now uses the catalog's `caller-runner` shape,

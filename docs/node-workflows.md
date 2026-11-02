@@ -689,3 +689,7 @@ consumer execution.
 enabled, `DB_HOST` and `DB_PORT` are reserved for the selected database endpoint
 and cache configuration cannot replace them. Cache-only callers may use those
 names as ordinary container configuration.
+
+## Playwright system libraries
+
+The current Playwright 1.63.0 outside canary may opt into `playwright-sandbox-profile: playwright-chromium-1.63.0-ubuntu-24.04-amd64`. This profile is limited to GitHub-hosted Ubuntu 24.04 amd64 secretless script plans. Trusted setup installs the fixed system-library dependency closure from signed, hash-pinned Ubuntu metadata and writes a receipt checked before the candidate launches. It does not install browser binaries or change the lane’s network policy. Keep `playwright install-deps` out of the untrusted candidate; browser binaries and cold-cache seeding remain separate from this profile.
