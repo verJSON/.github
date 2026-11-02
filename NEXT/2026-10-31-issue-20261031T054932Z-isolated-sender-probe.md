@@ -1,6 +1,7 @@
 ---
 date: 2026-10-31
 id: 20261031T054932Z
+refs: 1966
 impact: patch
 title: Probe pinned sender chunks across a PID namespace
 ---

@@ -1,6 +1,7 @@
 ---
 date: 2026-10-31
 id: 20261031T061120Z
+refs: 1966
 impact: patch
 title: Close supervisor descriptors when cleanup verification fails
 ---

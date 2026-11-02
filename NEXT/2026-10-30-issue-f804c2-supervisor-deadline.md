@@ -1,6 +1,7 @@
 ---
 date: 2026-10-30
 id: f804c2
+refs: 1966
 impact: patch
 title: Add an opt-in supervised execution deadline
 ---

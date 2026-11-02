@@ -1,6 +1,7 @@
 ---
 date: 2026-10-31
 id: 20261031T055400Z
+refs: 1966
 impact: patch
 title: Probe an inherited writer under the sandbox supervisor
 ---

@@ -1,6 +1,7 @@
 ---
 date: 2026-11-02
 id: 20261102T191402Z
+refs: 1966
 impact: patch
 title: Reap an unreleased trusted launcher through its pinned pidfd
 ---

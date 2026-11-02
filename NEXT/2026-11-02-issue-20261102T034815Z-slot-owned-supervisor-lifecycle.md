@@ -1,6 +1,7 @@
 ---
 date: 2026-11-02
 id: 20261102T034815Z
+refs: 1966
 impact: patch
 title: Retain experimental supervisor lifecycle ownership
 ---

@@ -1,6 +1,7 @@
 ---
 date: 2026-10-31
 id: 20261031T033947Z
+refs: 1966
 impact: patch
 title: Expose provisional supervised namespace identity
 ---

@@ -1,6 +1,7 @@
 ---
 date: 2026-10-30
 id: 5b32c7
+refs: 1966
 impact: patch
 title: Add an experimental compatibility lane relay
 ---

@@ -1,6 +1,7 @@
 ---
 date: 2026-11-02
 id: 20261102T034105Z
+refs: 1966
 impact: patch
 title: Own experimental namespace borrows through their use
 ---

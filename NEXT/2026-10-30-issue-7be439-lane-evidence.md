@@ -1,6 +1,7 @@
 ---
 date: 2026-10-30
 id: 7be439
+refs: 1966
 impact: patch
 title: Compare experimental compatibility lane evidence
 ---

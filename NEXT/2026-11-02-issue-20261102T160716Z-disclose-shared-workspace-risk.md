@@ -1,6 +1,7 @@
 ---
 date: 2026-11-02
 id: 20261102T160716Z
+refs: 1966
 impact: patch
 title: Disclose the shared workspace writer assumption
 ---

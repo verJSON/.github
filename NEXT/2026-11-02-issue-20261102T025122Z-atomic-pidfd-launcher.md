@@ -1,6 +1,7 @@
 ---
 date: 2026-11-02
 id: 20261102T025122Z
+refs: 1966
 impact: patch
 title: Add atomic pidfd launcher boundary
 ---

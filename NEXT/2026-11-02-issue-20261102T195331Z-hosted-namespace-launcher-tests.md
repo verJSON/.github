@@ -1,6 +1,7 @@
 ---
 date: 2026-11-02
 id: 20261102T195331Z
+refs: 1966
 impact: patch
 title: Run namespace-bound launcher tests in the hosted compatibility job
 ---

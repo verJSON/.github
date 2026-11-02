@@ -1,6 +1,7 @@
 ---
 date: 2026-10-31
 id: 20261031T060043Z
+refs: 1966
 impact: patch
 title: Observe a supervisor child pidfd handoff
 ---

@@ -1,6 +1,7 @@
 ---
 date: 2026-10-31
 id: 20261031T005133Z
+refs: 1966
 impact: patch
 title: Propose compatibility lane trust boundaries
 ---
