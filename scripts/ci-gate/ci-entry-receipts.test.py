@@ -2434,6 +2434,14 @@ class AtomicLauncherOwnershipTests(unittest.TestCase):
         kill_group.assert_not_called()
 
 
+def _cause_chain(error: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    while error is not None and error not in chain:
+        chain.append(error)
+        error = error.__cause__ or error.__context__
+    return chain
+
+
 class SupervisedProcessGroupSafetyTests(unittest.TestCase):
     def test_failed_launcher_authentication_never_waits_on_a_numeric_pid(self) -> None:
         process = MagicMock()
@@ -2511,9 +2519,33 @@ class SupervisedProcessGroupSafetyTests(unittest.TestCase):
             patch.object(artifacts, "_reap_pinned_supervisor"),
             patch.object(artifacts, "extinguish_supervised_process_group"),
         ):
-            with self.assertRaises(BaseException):
+            with self.assertRaises(artifacts.IntegrityError) as raised:
                 artifacts.run_supervised_bubblewrap(["/usr/bin/true"], environment={}, pass_fds=())
+        self.assertIn(errno.EIO, [getattr(error, "errno", None) for error in _cause_chain(raised.exception)])
         self.assertEqual(close_calls.count(status_write_fd), 1)
+
+    def test_unreleased_launcher_kill_failure_is_reported_as_unexited(self) -> None:
+        process = MagicMock()
+        process.pid = 123456789
+        process.returncode = None
+        with (
+            patch.object(artifacts.subprocess, "Popen", return_value=process),
+            patch.object(artifacts, "_supervised_process_group_id", return_value=process.pid),
+            patch.object(artifacts.os, "pidfd_open", side_effect=lambda _pid: os.open("/dev/null", os.O_RDONLY)),
+            patch.object(artifacts, "_authenticate_bubblewrap_gate", side_effect=artifacts.IntegrityError("lost gate")),
+            patch.object(artifacts, "_reap_pinned_supervisor",
+                         side_effect=artifacts._SupervisorReapTimeout("still running")) as reap,
+            patch.object(artifacts.signal, "pidfd_send_signal", side_effect=PermissionError(errno.EPERM, "denied")),
+            patch.object(artifacts.os, "killpg") as kill_group,
+        ):
+            with self.assertRaises(artifacts.IntegrityError) as raised:
+                artifacts.run_supervised_bubblewrap(["/usr/bin/true"], environment={}, pass_fds=())
+        chain = _cause_chain(raised.exception)
+        self.assertTrue(any("unreleased trusted launcher did not exit" in str(error) for error in chain))
+        self.assertIn(errno.EPERM, [getattr(error, "errno", None) for error in chain])
+        self.assertEqual(reap.call_count, 1)
+        process.wait.assert_not_called()
+        kill_group.assert_not_called()
 
     def test_unreleased_launcher_surviving_sigkill_is_reported_as_unexited(self) -> None:
         process = MagicMock()
@@ -5183,6 +5215,29 @@ class EntryReceiptSupervisorTests(unittest.TestCase):
                     artifacts.validate_script_entry_receipts(
                         receipt_directory, ENTRIES, IDENTITY, False
                     )
+
+    def test_unverified_pre_identity_cancellation_publishes_an_infrastructure_failure_plan(self) -> None:
+        host_signals = artifacts.HostSignalQueue()
+
+        def cancel_before_identity(_ordinal: int, _entry: dict[str, object]):
+            host_signals.capture(signal.SIGTERM)
+            raise artifacts.ScriptPlanInterrupted(signal.SIGTERM)
+
+        with self.assertRaises(artifacts.ScriptPlanExecutionError) as caught:
+            artifacts.run_script_plan_with_receipts(
+                ENTRIES, IDENTITY, False, self.runner_temp, cancel_before_identity,
+                host_signals=host_signals,
+            )
+
+        receipt_directory = caught.exception.receipt_directory
+        plan = json.loads((receipt_directory / "plan.json").read_text(encoding="utf-8"))
+        receipts = load_receipts(receipt_directory)
+        self.assertEqual(plan["state"], "infrastructure-failure")
+        self.assertEqual(plan["hostCancellationSignal"], signal.SIGTERM)
+        self.assertEqual(receipts[0]["state"], "infrastructure-failure")
+        self.assertFalse(receipts[0]["candidateStarted"])
+        self.assertEqual(receipts[0]["cleanup"], "unverified")
+        self.assertEqual(receipts[0]["hostCancellationSignal"], signal.SIGTERM)
 
     def test_interrupted_receipt_is_single_and_starts_the_aborted_suffix(self) -> None:
         host_signals = artifacts.HostSignalQueue()

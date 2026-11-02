@@ -3139,6 +3139,8 @@ def run_supervised_bubblewrap(
                         signal.pidfd_send_signal(leader_pidfd, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
+                    except OSError as error:
+                        raise IntegrityError("unreleased trusted launcher did not exit") from error
                     try:
                         _reap_pinned_supervisor(process, leader_pidfd, 5)
                     except BaseException as error:
@@ -4733,7 +4735,7 @@ def run_script_plan_with_receipts(
                     error_host_signal = latched_signal
                 if (
                     isinstance(error, ScriptPlanInterrupted)
-                    and error.cleanup_status != "failed"
+                    and error.cleanup_status not in {"failed", "unverified"}
                 ):
                     if (
                         latched_signal is None

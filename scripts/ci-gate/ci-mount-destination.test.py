@@ -214,8 +214,6 @@ emit('terminal', state='candidate-exit', candidateStarted=True, exitCode=code, c
                     if candidate_pidfd < 0:
                         raise AssertionError("started candidate identity was not pinned") from error
                     if not await_pidfd_reaped(candidate_pidfd, 3):
-                        if getattr(error, "cleanup_status", None) != "unverified":
-                            raise AssertionError("unreaped candidate was not reported as unverified") from error
                         raise AssertionError("rejected candidate was not proven reaped") from error
                 return
             if not swap_completed:
