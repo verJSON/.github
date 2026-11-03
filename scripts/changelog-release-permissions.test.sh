@@ -128,11 +128,10 @@ for invalid_client_id in '' 4583107 'Iv23liIrniWY27YJKYDP ' 'Ivabcdefgh$()' 'Iv2
     pass "the release workflow rejects malformed App client ID '${invalid_client_id:-<empty>}'"
   fi
 done
-grep -qF 'git push --atomic origin \' "$workflow" \
-  && grep -qF '"$release_commit:refs/heads/$DEFAULT_BRANCH" \' "$workflow" \
-  && grep -qF '"refs/tags/$VERSION"' "$workflow" \
-  && pass "the release still publishes commit and exact tag atomically" \
-  || fail "the atomic commit+tag push shape changed"
+grep -qF 'bash .changelog-contract/scripts/release-push-guard.sh \' "$workflow" \
+  && grep -qF '"$DEFAULT_BRANCH" "$GITHUB_REF" "$GITHUB_SHA" "$release_commit" "$VERSION"' "$workflow" \
+  && pass "the release invokes the pinned atomic expected-head push guard" \
+  || fail "the atomic expected-head push guard is missing"
 
 if [ "$fails" -eq 0 ]; then
   echo "All tests passed."

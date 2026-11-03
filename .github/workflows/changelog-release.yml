@@ -137,11 +137,9 @@ jobs:
           # pushed and published without anything ever checking it, which is the
           # failure a pre-snapshot verify job exists to prevent (#463, #464).
           #
-          # The guard above has already proved this commit is the default branch
-          # head as of the dispatch. Pinning it also makes the final --atomic
-          # push non-fast-forward when main has since moved, so a concurrent
-          # merge fails the release with no tag pushed and every fragment still
-          # unconsumed — recoverable by re-dispatch (ADR 0062).
+          # The atomic push requires the default branch still to equal the
+          # dispatch commit and verifies the release commit is its direct child
+          # before updating the branch and tag (ADR 0244).
           ref: ${{ github.sha }}
           token: ${{ steps.release-app-token.outputs.token }}
       # actions/checkout follows a symlink at its path and empties the target;
@@ -191,6 +189,5 @@ jobs:
           python3 -I .changelog-contract/scripts/changelog.py "${args[@]}"
           release_commit="$(git rev-parse HEAD)"
           test "$(git rev-list -n 1 "$VERSION")" = "$release_commit"
-          git push --atomic origin \
-            "$release_commit:refs/heads/$DEFAULT_BRANCH" \
-            "refs/tags/$VERSION"
+          bash .changelog-contract/scripts/release-push-guard.sh \
+            "$DEFAULT_BRANCH" "$GITHUB_REF" "$GITHUB_SHA" "$release_commit" "$VERSION"

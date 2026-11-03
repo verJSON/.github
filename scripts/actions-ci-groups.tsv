@@ -249,6 +249,7 @@ changelog-release-4	bash scripts/changelog-pr-gate-generator.test.sh
 changelog-release-1	bash scripts/changelog-migration.test.sh
 docs	python3 scripts/changelog.py validate --repo-root .
 changelog-release-2	bash scripts/changelog-release-permissions.test.sh
+changelog-release-2	python3 scripts/release-push-guard.test.py
 changelog-release-3	python3 scripts/changelog-release-app-token.test.py
 changelog-release-2	python3 scripts/release-app-canary.test.py
 changelog-release-3	bash scripts/changelog-release-branch-guard.test.sh

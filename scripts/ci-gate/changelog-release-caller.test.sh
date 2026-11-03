@@ -80,8 +80,8 @@ if set(triggers) != {"workflow_dispatch"}:
     )
 inputs = (triggers.get("workflow_dispatch") or {}).get("inputs") or {}
 version_input = inputs.get("version") or {}
-if version_input.get("required") is not True or "default" in version_input:
-    bad("workflow_dispatch must require `version` without a default")
+if version_input.get("required") is not False or version_input.get("default") != "":
+    bad("workflow_dispatch must make `version` optional with an empty default")
 if (inputs.get("prefix") or {}).get("default") != "v":
     bad("workflow_dispatch does not default the independent release prefix to `v`")
 for receipt_input in ("expected_head", "selector_digest"):
@@ -199,11 +199,10 @@ cache_steps = [
 ]
 if (
     len(cache_steps) != 1
-    or len(steps_of(verify)) < 2
-    or steps_of(verify)[0].get("name") != "Require an explicit release version"
-    or "if" in steps_of(verify)[0]
-    or "continue-on-error" in steps_of(verify)[0]
-    or steps_of(verify)[1] is not cache_steps[0]
+    or not steps_of(verify)
+    or steps_of(verify)[0] is not cache_steps[0]
+    or "if" in cache_steps[0]
+    or "continue-on-error" in cache_steps[0]
     or cache_steps[0].get("run") != 'echo "VERJSON_CHANGELOG_TOOL_CACHE=$RUNNER_TEMP/verjson-changelog-tools" >> "$GITHUB_ENV"'
 ):
     bad("`verify` does not export a job-writable runner.temp cache before repository steps (#630)")
@@ -239,7 +238,7 @@ else:
     if "GITHUB_STEP_SUMMARY" not in selector_run or "GITHUB_SHA" not in selector_run:
         bad("the release-plan step does not publish the operator-facing resolution summary")
     if selector_env.get("INPUT_VERSION") != "${{ inputs.version }}":
-        bad("the release-plan step does not read the required version input")
+        bad("the release-plan step does not read the optional version input")
 
 
 # #465(1). A repository-scoped GITHUB_TOKEN cannot read a private GitHub
@@ -790,6 +789,13 @@ if run_guard "$version_guard" PREFIX=v INPUT_VERSION= GITHUB_OUTPUT="$tmp/versio
 else
   fail "the blank version failed to derive the canonical next version: $(cat "$tmp/guard.out")"
 fi
+for whitespace in ' ' $'\302\240'; do
+  if run_guard "$version_guard" PREFIX=v "INPUT_VERSION=$whitespace" "GITHUB_OUTPUT=$tmp/version-output"; then
+    fail "the release plan accepted whitespace-only explicit version input"
+  else
+    pass "the release plan rejects whitespace-only explicit version input"
+  fi
+done
 : >"$tmp/version-output"
 if run_guard "$version_guard" PREFIX=v INPUT_VERSION= COMPONENT=python GITHUB_OUTPUT="$tmp/version-output"; then
   grep -q '^selected=false$' "$tmp/version-output" \

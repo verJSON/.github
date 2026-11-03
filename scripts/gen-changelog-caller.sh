@@ -1035,23 +1035,6 @@ release_download_artifact='actions/download-artifact@9000827ccba6bdab643e8b6fd33
 release_cache_save='actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0'
 release_cache_restore='actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0'
 
-release_version_guard_step=$(cat <<'EOF'
-      - name: Require an explicit release version
-        env:
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          python3 -I -X utf8 - <<'PY'
-          import os
-          import sys
-
-          if not os.environ['INPUT_VERSION'].strip():
-              print('::error::version is required for release dispatch', file=sys.stderr)
-              raise SystemExit(1)
-          PY
-EOF
-)
-
 release_plan_step=$(cat <<'EOF'
       - name: Resolve the release selection and version
         id: release-version
@@ -1212,7 +1195,7 @@ emit_release_node() {
   publish_job="$(release_node_publish_job "$ref" "$release_node_version" "$release_scope" "$package_dirs_json" "$release_assets_json")" || return
   cat <<EOF
 name: Release
-run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}
+run-name: Release \${{ inputs.version || 'auto' }} \${{ inputs.selector_digest || 'manual' }}
 
 concurrency:
   group: release-\${{ github.repository }}
@@ -1267,18 +1250,19 @@ concurrency:
 # package.json; never assert a hardcoded version literal. This order is
 # intentional: the suite verifies the exact package metadata that will ship.
 #
-# The operator explicitly dispatches publication with the version to cut.
-# The canonical release plan validates it against selected fragments on this
-# exact source commit; no push trigger infers a version from commit subjects
-# (ADR 0038, ADR 0060).
+# The operator explicitly dispatches publication. A blank version is derived
+# by the canonical release plan from selected fragments on this exact source
+# commit; no push trigger infers a version from commit subjects.
+# An explicit version is validated against the same release plan.
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Exact SemVer tag to release
-        required: true
+        description: Optional exact SemVer tag; blank derives the next version from selected fragments
+        required: false
         type: string
+        default: ''
       prefix:
         description: Exact version namespace prefix; independent from component
         required: false
@@ -1321,7 +1305,6 @@ jobs:
       selection-digest: \${{ steps.release-version.outputs.selection-digest }}
       snapshot-exists: \${{ steps.release-state.outputs.snapshot-exists }}
     steps:
-${release_version_guard_step}
       - name: Prepare job-scoped changelog tool cache
         run: echo "VERJSON_CHANGELOG_TOOL_CACHE=\$RUNNER_TEMP/verjson-changelog-tools" >> "\$GITHUB_ENV"
       # changelog-release.yml carries this guard too, but there it fires inside
@@ -1532,6 +1515,10 @@ ${verify_dependency_steps}
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           NODE_AUTH_TOKEN: ''
         run: |
+          if [[ "\$PACKAGE_VERSION" == *+* ]]; then
+            echo "::error::npm strips build metadata from package versions; release a version without build metadata."
+            exit 1
+          fi
           package_dirs=(${package_dirs_shell})
           for package_dir in "\${package_dirs[@]}"; do
             npm version --prefix "\$package_dir" "\$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
@@ -1849,7 +1836,7 @@ EOF
   build_job="$(release_artifact_build_job_for "$private_dependencies" "${build_runners_yaml%$'\n'}")" || return
   cat <<EOF
 name: Release
-run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}
+run-name: Release \${{ inputs.version || 'auto' }} \${{ inputs.selector_digest || 'manual' }}
 
 concurrency:
   group: release-\${{ github.repository }}
@@ -1899,18 +1886,19 @@ concurrency:
 # package.json; never assert a hardcoded version literal. This order is
 # intentional: the suite verifies the exact package metadata that will ship.
 #
-# The operator explicitly dispatches publication with the version to cut.
-# The canonical release plan validates it against selected fragments on this
-# exact source commit; no push trigger infers a version from commit subjects
-# (ADR 0038, ADR 0060).
+# The operator explicitly dispatches publication. A blank version is derived
+# by the canonical release plan from selected fragments on this exact source
+# commit; no push trigger infers a version from commit subjects.
+# An explicit version is validated against the same release plan.
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Exact SemVer tag to release
-        required: true
+        description: Optional exact SemVer tag; blank derives the next version from selected fragments
+        required: false
         type: string
+        default: ''
       prefix:
         description: Exact version namespace prefix; independent from component
         required: false
@@ -1953,7 +1941,6 @@ jobs:
       selection-digest: \${{ steps.release-version.outputs.selection-digest }}
       snapshot-exists: \${{ steps.release-state.outputs.snapshot-exists }}
     steps:
-${release_version_guard_step}
       - name: Prepare job-scoped changelog tool cache
         run: echo "VERJSON_CHANGELOG_TOOL_CACHE=\$RUNNER_TEMP/verjson-changelog-tools" >> "\$GITHUB_ENV"
       # changelog-release.yml carries this guard too, but there it fires inside
@@ -2144,6 +2131,10 @@ ${verify_dependency_steps}
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           NODE_AUTH_TOKEN: ''
         run: |
+          if [[ "\$PACKAGE_VERSION" == *+* ]]; then
+            echo "::error::npm strips build metadata from package versions; release a version without build metadata."
+            exit 1
+          fi
           package_dirs=(${package_dirs_shell})
           for package_dir in "\${package_dirs[@]}"; do
             npm version --prefix "\$package_dir" "\$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
@@ -2278,7 +2269,7 @@ emit_release_snapshot() {
   publish_job="$(release_snapshot_publish_job)" || return
   cat <<EOF
 name: Release
-run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}
+run-name: Release \${{ inputs.version || 'auto' }} \${{ inputs.selector_digest || 'manual' }}
 
 concurrency:
   group: release-\${{ github.repository }}
@@ -2326,18 +2317,19 @@ concurrency:
 # package.json; never assert a hardcoded version literal. This order is
 # intentional: the suite verifies the exact package metadata that will ship.
 #
-# The operator explicitly dispatches publication with the version to cut.
-# The canonical release plan validates it against selected fragments on this
-# exact source commit; no push trigger infers a version from commit subjects
-# (ADR 0038, ADR 0060).
+# The operator explicitly dispatches publication. A blank version is derived
+# by the canonical release plan from selected fragments on this exact source
+# commit; no push trigger infers a version from commit subjects.
+# An explicit version is validated against the same release plan.
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Exact SemVer tag to release
-        required: true
+        description: Optional exact SemVer tag; blank derives the next version from selected fragments
+        required: false
         type: string
+        default: ''
       prefix:
         description: Exact version namespace prefix; independent from component
         required: false
@@ -2380,7 +2372,6 @@ jobs:
       selection-digest: \${{ steps.release-version.outputs.selection-digest }}
       snapshot-exists: \${{ steps.release-state.outputs.snapshot-exists }}
     steps:
-${release_version_guard_step}
       - name: Prepare job-scoped changelog tool cache
         run: echo "VERJSON_CHANGELOG_TOOL_CACHE=\$RUNNER_TEMP/verjson-changelog-tools" >> "\$GITHUB_ENV"
       # changelog-release.yml carries this guard too, but there it fires inside
@@ -2573,6 +2564,10 @@ ${verify_dependency_steps}
           PACKAGE_VERSION: \${{ steps.release-version.outputs.package-version }}
           NODE_AUTH_TOKEN: ''
         run: |
+          if [[ "\$PACKAGE_VERSION" == *+* ]]; then
+            echo "::error::npm strips build metadata from package versions; release a version without build metadata."
+            exit 1
+          fi
           package_dirs=(${package_dirs_shell})
           for package_dir in "\${package_dirs[@]}"; do
             npm version --prefix "\$package_dir" "\$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
@@ -2692,25 +2687,25 @@ EOF
 }
 
 emit_release_propose() {
-  local write_permission reusable_workflow generation_command
+  local write_permission reusable_workflow generation_command schedule_trigger
   generation_command="$(generation_command)"
   if [ "$release_autonomy" = propose ]; then
     write_permission="      issues: write"
     reusable_workflow="release-propose.yml"
+    schedule_trigger=$'  schedule:\n    - cron: \'17 9 * * *\'\n'
   else
     write_permission="      actions: write"
     reusable_workflow="release-dispatch.yml"
+    schedule_trigger=''
   fi
   cat <<EOF
 name: Release proposal
 
 # Generated by verJSON/.github scripts/gen-changelog-caller.sh ${generation_command}
-# — do not edit by hand. The autonomy is fixed in source so a scheduled run
-# cannot acquire a different write permission through an event input.
+# — do not edit by hand. The autonomy is fixed in source; dispatch mode
+# requires explicit initiation while proposal-only mode may be scheduled.
 on:
-  schedule:
-    - cron: '17 9 * * *'
-  workflow_dispatch:
+${schedule_trigger}  workflow_dispatch:
     inputs:
       fragments:
         description: Newline-separated NEXT fragment filenames; empty selects the component stream
@@ -3554,10 +3549,16 @@ if [ -e "$release_propose_workflow" ]; then
     || fail "$release_propose_workflow does not pass the shared pinned contract_ref"
   ! grep -qE '^ +autonomy:' "$release_propose_workflow" \
     || fail "$release_propose_workflow must select autonomy through its reusable workflow path"
-  grep -qE '^  schedule:$' "$release_propose_workflow" \
-    && grep -qE '^  workflow_dispatch:$' "$release_propose_workflow" \
+  grep -qE '^  workflow_dispatch:$' "$release_propose_workflow" \
     && ! grep -qE '^  (push|pull_request|pull_request_target):' "$release_propose_workflow" \
-    || fail "$release_propose_workflow must be schedule/operator triggered, never release-on-merge"
+    || fail "$release_propose_workflow must be operator triggered, never release-on-merge"
+  if [ "$autonomy" = dispatch ]; then
+    ! grep -qE '^  schedule:$' "$release_propose_workflow" \
+      || fail "$release_propose_workflow dispatch cannot be scheduled"
+  else
+    grep -qE '^  schedule:$' "$release_propose_workflow" \
+      || fail "$release_propose_workflow proposal must include its schedule"
+  fi
   proposer_job="$(awk '
     /^  release-propose:[[:space:]]*$/ { capture = 1 }
     capture && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ && $0 !~ /^  release-propose:/ { exit }
@@ -4049,9 +4050,10 @@ EXPECTED_TRIGGER_BLOCK = (
     (2, "workflow_dispatch:"),
     (4, "inputs:"),
     (6, "version:"),
-    (8, "description: Exact SemVer tag to release"),
-    (8, "required: true"),
+    (8, "description: Optional exact SemVer tag; blank derives the next version from selected fragments"),
+    (8, "required: false"),
     (8, "type: string"),
+    (8, "default: ''"),
     (6, "prefix:"),
     (8, "description: Exact version namespace prefix; independent from component"),
     (8, "required: false"),
@@ -4707,9 +4709,9 @@ APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
     "release-snapshot": "0caf167486937a2def16a5223fcb64b1a4a737447d424c83a891c2aac4e3b3a2",
 }
 APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256 = {
-    "release-node": "6aedd9fb8cf31648d7172575f99eab93f785f741313880f2a63298b72e8fc9d7",
-    "release-artifact": "cdc96e2dfc87263418d76b5e3332252838c2ec9f71bc2640a2135d59799d011a",
-    "release-snapshot": "d8738716f844b29bb794c5e1a4555859cd6b6906f29036ead4be7dcea700a57b",
+    "release-node": "3040af91a675c5d82c4704bed128dcb114876567a8cb88304789df3bea330cd2",
+    "release-artifact": "3eea02355f661dad891de16344dd8bf23126ccf312392cf1246df553a33b2dc0",
+    "release-snapshot": "0ad23fabe300c3f06f9c5d9c98743af351f6052f940cae64bc5ad27bdb761539",
 }
 EXPECTED_RELEASE_STATE_ENV = {
     "VERSION": "${{ steps.release-version.outputs.version }}",
@@ -5726,7 +5728,6 @@ for index, line in enumerate(lines):
 workflow_steps = list(workflow_step_blocks())
 verification_job_steps = list(workflow_step_blocks("verify"))
 expected_verification_step_identities = [
-    ("Require an explicit release version", ""),
     ("Prepare job-scoped changelog tool cache", ""),
     ("Release only from the default branch", ""),
     ("Bind a proposer dispatch to its exact derived head", ""),
@@ -5903,6 +5904,10 @@ else:
         "NODE_AUTH_TOKEN": "''",
     }
     approved_stamp_body = "\n".join((
+        'if [[ "$PACKAGE_VERSION" == *+* ]]; then',
+        '  echo "::error::npm strips build metadata from package versions; release a version without build metadata."',
+        '  exit 1',
+        'fi',
         "package_dirs(<approved-directories>)",
         'for package_dir in "${package_dirs[@]}"; do',
         '  npm version --prefix "$package_dir" "$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version',
@@ -6158,7 +6163,7 @@ PY
     fail "$release_workflow has invalid pinned package-directory JSON"
     continue
   fi
-  grep -qF "run-name: Release \${{ inputs.version }} \${{ inputs.selector_digest || 'manual' }}" "$release_workflow" \
+  grep -qF "run-name: Release \${{ inputs.version || 'auto' }} \${{ inputs.selector_digest || 'manual' }}" "$release_workflow" \
     || fail "$release_workflow lacks the resolved-version run title required for idempotent dispatch"
 
   # Comments stripped before structural matching so a migration note naming a
@@ -6720,12 +6725,9 @@ PY
     <<<"$verify_job" \
     || fail "$release_workflow does not give repository verification hooks a job-writable changelog cache beneath runner.temp (#630)"
   first_two_verify_steps="$(awk '/^[[:space:]]+- name:/ { sub(/^[[:space:]]*/, ""); print; if (++count == 2) exit }' <<<"$verify_job")"
-  [ "$first_two_verify_steps" = $'- name: Require an explicit release version\n- name: Prepare job-scoped changelog tool cache' ] \
+  [[ "$first_two_verify_steps" == $'- name: Prepare job-scoped changelog tool cache\n'* ]] \
     && grep -qF 'INPUT_VERSION: ${{ inputs.version }}' <<<"$verify_job" \
-    && grep -qF "python3 -I -X utf8 - <<'PY'" <<<"$verify_job" \
-    && ! grep -qF "PYTHONUTF8" <<<"$verify_job" \
-    && grep -qF "if not os.environ['INPUT_VERSION'].strip():" <<<"$verify_job" \
-    || fail "$release_workflow does not reject blank versions before repository verification"
+    || fail "$release_workflow does not pass the optional version to the release plan"
   grep -qF "if: steps.release-version.outputs.selected == 'true' && steps.release-state.outputs.snapshot-exists == 'true'" <<<"$verify_job" \
     || fail "$release_workflow does not condition resumed verification on an existing snapshot"
   grep -qF 'ref: ${{ steps.release-version.outputs.version }}' <<<"$verify_job" \

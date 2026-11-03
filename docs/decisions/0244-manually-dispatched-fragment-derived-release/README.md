@@ -1,0 +1,42 @@
+# 0244 — Derive manually dispatched release versions from fragments
+
+- **Date:** 2026-10-28
+- **Status:** Proposed
+- **Issues:** [#1939](https://github.com/VerJSON/.github/issues/1939), [#1940](https://github.com/VerJSON/.github/issues/1940)
+- **Category:** release automation and GitHub write authority
+- **Supersedes:** [ADR 0218](../0218-require-explicit-release-dispatch-version/README.md), and the scheduled dispatch provision of [ADR 0101](../0101-explicit-release-proposal-autonomy/README.md)
+- **Extends:** [ADR 0038](../0038-canonical-changelog-contract/README.md) and [ADR 0183](../0183-release-plan-resolves-optional-version/README.md)
+
+## Context
+
+The release manager decides when to release, but the selected `NEXT/` fragments already carry the information needed to compute the version. Requiring the manager to transcribe that result adds work and creates an opportunity for error. ADR 0218 requires a version at dispatch; the owner has directed that manual release initiation remain explicit while the version is calculated automatically.
+
+## Decision
+
+The generated node, artifact, and snapshot callers offer an optional `version` input. When it is empty, the existing pinned `release-plan` derives the next tag from the highest impact of the selected fragments and the latest immutable release snapshot for the selected namespace. If supplied, a version is validated against the same plan. Whitespace-only and invalid explicit values are errors. The selected source commit, namespace, selection digest, and resolved version remain bound before the snapshot and publication steps. Summaries expose the resolved plan. The authorized release manager explicitly initiates a dispatch; no tag-push or main-merge release trigger is added. Scheduled proposal-only runs may continue, but scheduled release dispatch is rejected in both the generated caller and reusable dispatch workflow. GitHub workflow_dispatch can also be invoked via API, so this event check does not by itself prove a direct human session; existing credential and review controls remain necessary.
+
+The existing empty-selection behavior remains a successful no-op without a release. A new namespace with no prior release snapshot requires an explicit initial version; it is not inferred. Automatic calculation requires a plain stable snapshot and fails closed if qualified history is newer. An explicit version can select an impact-governed stable hotfix, advance an existing prerelease by SemVer precedence, or graduate an existing prerelease to its stable core. Prerelease progression and graduation must reach at least the core required by the selected fragments’ highest impact; they cannot publish a major-impact change under a minor or patch version. A higher core is allowed only when explicitly requested and an existing prerelease snapshot has that exact core, because the selected fragments may describe changes since that prerelease. Without such a match, the ordinary exact aggregate bump applies; blank input never silently chooses the higher core. Build metadata does not change precedence, so equal-precedence snapshots cannot be released again. If the exact impact-derived stable core is already occupied by a build-qualified stable snapshot, the release manager may explicitly choose the immediately following plain stable patch core. Automatic selection still fails closed, no arbitrary jump is permitted, and other namespaces do not influence the decision. npm strips build metadata when stamping package versions, so any generated caller that actually performs npm stamping rejects build-qualified versions before snapshot publication. Generic snapshot-only releases without a package manifest may still use build metadata when SemVer precedence advances; registry support is not implied. Explicit bootstrap cannot move behind qualified-only history. Existing legacy fragments without impact retain the established patch default; newly introduced fragments must meet the canonical impact validation contract. Version arithmetic follows the canonical engine's major/minor/patch rules, including for `0.x`. Prerelease sequencing remains an explicitly selected release workflow rather than an inferred stable bump.
+
+The existing exact-head, selection-receipt, provenance, release credential, concurrency, immutable pin, and verify → snapshot → publish controls remain in force. If selection or source no longer matches, fail instead of silently retargeting. Retrying after an existing snapshot uses the canonical restart-safe path; it must not rewrite an immutable release or duplicate a tag.
+
+## Consequences
+
+A manager can initiate a release without manually calculating its tag, while an explicit valid version remains possible for bootstrap and controlled cases. The plan is visible in the release run and only becomes authoritative for that run. Adopters must regenerate the complete canonical caller set from one reviewed immutable contract revision. This decision does not activate GitHub Actions, deploy artifacts, change release cadence, or grant additional approval authority.
+
+The scheduled-dispatch removal is classified as major because an existing scheduled caller can no longer initiate publication. The qualified-baseline change is also major: callers that previously derived a version from prerelease or build-only history must now resolve the ambiguity explicitly. The optional manual version input itself is additive and classified as minor.
+
+## Verification
+
+Generator and release caller tests cover all three caller modes, blank and explicit versions, empty selections, mixed impacts, bootstrap, invalid values, and selection binding. Exercise the exact pinned release command in a disposable clean checkout before delivering an adopter. Remote workflow evidence remains pending while organization Actions are paused.
+
+## Expected-head guard and remaining boundaries
+
+Before an atomic branch-and-tag push, the pinned `release-push-guard.sh` reads the raw release commit with replacement objects disabled and requires its sole parent to be the authenticated dispatch SHA. It verifies the annotated tag targets that commit, and supplies a branch-specific `--force-with-lease` with the dispatch SHA as the expected old ref. The validated update is necessarily a direct fast-forward: the lease is a compare-and-swap condition, not permission to rewrite history or overwrite an existing tag. An advanced or rewound current branch, an existing conflicting tag, or an invalid parent rejects the whole atomic push. An already-present identical tag object is an idempotent no-op, not a newly created tag; Git does not transmit that ref as an update even if an empty-old-value tag lease is requested. The branch may advance in that case, without overwriting the tag, so this protocol does not prove that the tag was absent at the instant of publication. The control does not bypass GitHub rules or supply a bypass credential. Local bare-repository tests include a server enforcing `receive.denyNonFastForwards`; actual GitHub ruleset behavior remains unverified while Actions is paused.
+
+This guards the branch value at the atomic update. It cannot detect an ABA sequence in which a branch changes and then returns to the same dispatch SHA before the push. Such history requires separate audit evidence; do not claim the lease detects it. [#1942](https://github.com/VerJSON/.github/issues/1942) tracks the guard and its limits.
+
+## Proposed release-manager authority
+
+A release manager may be an authorized human or agent. The proposed authority contract binds an issuer-backed principal and run to the tenant, repository, exact dispatch SHA, selected-fragment digest, operation, target environment and audience, expiry, and a single-use nonce. An independently trusted verifier and replay ledger enforce that binding and produce an auditable decision receipt. This design reuses [verjson-agent-identity#1](https://github.com/VerJSON/verjson-agent-identity/issues/1); it does not infer authority from a model name, a shared GitHub account, or the `workflow_dispatch` event.
+
+The issuer, runtime verification, replay ledger and receipt path are not implemented or demonstrated by this decision. No agent approval or release capability is established here. [#1940](https://github.com/VerJSON/.github/issues/1940) remains open until an actual authorized identity and its enforcement are validated; existing credential controls remain in force.
