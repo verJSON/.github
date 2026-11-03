@@ -13,6 +13,8 @@ from datetime import date
 from pathlib import Path
 from unittest import mock
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parent.parent
 AUDIT_PATH = ROOT / "scripts/ai-review-required-workflow-audit.py"
@@ -43,6 +45,11 @@ RENDER_FLAGS = (
     "render_arm_property_ruleset_payload", "render_arm_property_rollback_payload",
     "render_arm_property_unset_values_payload",
 )
+# The arm job's routing exactly as gate-rearm.yml ships it (#1927, 24db445f).
+# Read from the workflow, not from the audit, so the pin cannot agree with itself.
+SHIPPED_ARM_RUNNER = yaml.safe_load(
+    (ROOT / ".github/workflows/gate-rearm.yml").read_text(encoding="utf-8"),
+)["jobs"]["arm"]["runs-on"]
 PRIVATE_KEY = "AI_REVIEW_APP_PRIVATE_KEY"
 ORGANIZATION_SECRETS = "orgs/Verjson/actions/secrets?per_page=100"
 
@@ -147,9 +154,9 @@ on:
 jobs:
   arm:
     continue-on-error: true
-    runs-on: ${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '["ubuntu-24.04"]') }}
+    runs-on: SHIPPED_ARM_RUNNER
     steps: []
-"""
+""".replace("SHIPPED_ARM_RUNNER", SHIPPED_ARM_RUNNER)
         # The retired path stays selected until the retarget lands, so the audit
         # must read it too. `pull_request` is what made it schedulable; #642
         # removed it and nothing noticed for four days.
@@ -1367,7 +1374,7 @@ jobs:
         # Adopter findings fail every live run, so anything checked only after
         # them would never reach the daily report (#1799 review).
         self.remove_adopter_caller("Verjson/alpha", ".github/workflows/ai-review-merge.yml")
-        self.workflow_source(self.workflow.replace("pull_request_target", "workflow_dispatch"))
+        self.workflow_source(self.workflow.replace("  pull_request_target:\n", "  workflow_dispatch:\n"))
         self.fixture[self.ruleset_path][0]["added_by_github"] = True
         with self.assertRaises(AUDIT.AuditError) as caught:
             AUDIT.audit(self.contract, self.read)
@@ -1619,8 +1626,47 @@ jobs:
         self.fixture["orgs/Verjson/installations"][0]["installations"][0]["events"] = ["pull_request"]
         self.assert_audit_error("event subscriptions drifted")
 
+    def arm_with_runner(self, runs_on):
+        self.workflow_source(self.workflow.replace(
+            f"    runs-on: {SHIPPED_ARM_RUNNER}\n", f"    runs-on: {runs_on(SHIPPED_ARM_RUNNER)}\n",
+        ))
+
+    def test_the_shipped_arm_runner_routing_satisfies_the_replacement_check(self):
+        # #1927 (24db445f, the SHA ruleset 20722935 pins) routes public
+        # pull-request events to a hosted runner and everything else to the
+        # trusted lane.
+        self.enter_split_state()
+        self.arm_with_runner(lambda reviewed: reviewed)
+        self.assertEqual(AUDIT.audit(self.contract, self.read)["state"], "split")
+
+    def test_any_other_arm_runner_routing_is_drift(self):
+        routings = {
+            "pre-#1927 trusted lane for every event": lambda _: (
+                "${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK || '[\"ubuntu-24.04\"]') }}"
+            ),
+            "hosted image for private repositories too": lambda reviewed: reviewed.replace(
+                " && github.event.repository.private != true", "",
+            ),
+            "hosted image for every event": lambda _: "ubuntu-24.04",
+            "another hosted image for public events": lambda reviewed: reviewed.replace(
+                "&& 'ubuntu-24.04' ||", "&& 'ubuntu-latest' ||",
+            ),
+            "widened fallback label set": lambda reviewed: reviewed.replace(
+                "'[\"ubuntu-24.04\"]'", "'[\"ubuntu-24.04\", \"self-hosted\"]'",
+            ),
+        }
+        for name, routing in routings.items():
+            with self.subTest(routing=name):
+                self.assertNotEqual(routing(SHIPPED_ARM_RUNNER), SHIPPED_ARM_RUNNER)
+                self.fixture = self.make_fixture()
+                self.enter_split_state()
+                self.arm_with_runner(routing)
+                with self.assertRaises(AUDIT.AuditFindings) as caught:
+                    AUDIT.audit(self.contract, self.read)
+                self.assertEqual(caught.exception.findings, ("required arm is not routed through the trusted lane",))
+
     def test_replacement_requires_supported_trigger_nonveto_and_trusted_lane(self):
-        self.workflow_source(self.workflow.replace("pull_request_target", "workflow_dispatch"))
+        self.workflow_source(self.workflow.replace("  pull_request_target:\n", "  workflow_dispatch:\n"))
         self.assert_audit_error("lacks pull_request_target")
         self.fixture = self.make_fixture()
         self.workflow_source(self.workflow.replace("    continue-on-error: true\n", ""))

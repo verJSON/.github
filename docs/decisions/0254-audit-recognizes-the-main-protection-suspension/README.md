@@ -75,6 +75,13 @@ on 2026-11-03. This ADR records that decision.
    and requires both images to agree. A widened exclusion, live or in the
    contract, is drift.
 
+7. **Folded contract updates.** Two reviewed changes had landed while the audit
+   could not see past `main-protection`: ADR 0252's Actions-paused excludes
+   (item 6) and the arm job's `runs-on` routing that #1927 merged at
+   `24db445f`, the SHA ruleset 20722935 pins. This change folds both into the
+   audit's pins so that the first full run reports real drift, not stale
+   contract values.
+
 ### Why this does not reopen ADR 0094's rejection
 
 ADR 0094 rejects a contract that relaxes enforcement *while presenting itself as
