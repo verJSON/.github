@@ -179,6 +179,18 @@ class ActionsPausedDriftTest(unittest.TestCase):
         self.assertIn("actions-paused-drift=conformant paused=2 enabled=2 relaxations=2", result.stdout)
         self.assertEqual(sorted(calls), sorted(build_responses(world)))
 
+    def test_paused_repository_with_actions_enabled_is_drift(self):
+        world = default_world()
+        world["repositories"]["verjson-editor"]["actions_enabled"] = True
+
+        result, _ = self.run_audit(world)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "ERROR: verjson-editor is verjson-actions-state=paused but its Actions are enabled",
+            result.stderr,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

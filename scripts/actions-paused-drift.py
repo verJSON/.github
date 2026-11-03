@@ -206,15 +206,23 @@ def main(arguments: list[str] | None = None) -> int:
         organization = policy["organization"]
         states = read_actions_states(organization, policy["property"])
         repositories = read_repositories(organization)
+        findings = []
         for name, state in states.items():
-            if state == "paused":
-                read_actions_enabled(organization, name)
+            if state == "paused" and read_actions_enabled(organization, name):
+                findings.append(
+                    f"{name} is {policy['property']}=paused but its Actions are enabled"
+                )
             read_branch_ruleset_ids(organization, name, repositories[name]["default_branch"])
         for relaxation in policy["relaxations"]:
             read_relaxation(organization, relaxation)
     except (OSError, AuditDataError, RuntimeError) as error:
         print(f"ERROR: cannot establish Actions-paused state: {error}", file=sys.stderr)
         return 2
+
+    if findings:
+        for finding in findings:
+            print(f"ERROR: {finding}", file=sys.stderr)
+        return 1
 
     paused = sum(1 for state in states.values() if state == "paused")
     print(
