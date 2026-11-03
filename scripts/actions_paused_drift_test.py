@@ -408,6 +408,20 @@ class ActionsPausedDriftTest(unittest.TestCase):
             result.stderr,
         )
 
+    def test_policy_with_an_unknown_relaxation_scope_fails_closed(self):
+        world = default_world()
+        policy = build_policy(world)
+        policy["paused_only_relaxations"][1] = dict(policy["paused_only_relaxations"][1], scope="enterprise")
+
+        result, calls = self.run_audit(world, policy=policy)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(
+            "paused_only_relaxations[1].scope must be one of ['organization', 'repository']",
+            result.stderr,
+        )
+        self.assertEqual(calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

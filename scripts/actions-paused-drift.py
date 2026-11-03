@@ -17,6 +17,7 @@ CHECKED_IN_POLICY = ROOT / "config/actions-paused-drift-policy.json"
 # its repository is paused, and blocks again once the repository is enabled.
 RELAXATION_ENFORCEMENT = {"paused": "evaluate", "enabled": "active"}
 RULESET_ENFORCEMENTS = {"active", "disabled", "evaluate"}
+RELAXATION_SCOPES = {"organization", "repository"}
 
 
 class AuditDataError(Exception):
@@ -135,10 +136,12 @@ def read_policy(policy: Path):
         require_exact_keys(
             require_mapping(entry, location), {"ruleset_id", "scope", "repository"}, location
         )
+        if entry["scope"] not in RELAXATION_SCOPES:
+            raise AuditDataError(f"{location}.scope must be one of {sorted(RELAXATION_SCOPES)}")
         relaxations.append(
             {
                 "ruleset_id": require_positive_integer(entry["ruleset_id"], f"{location}.ruleset_id"),
-                "scope": require_string(entry["scope"], f"{location}.scope"),
+                "scope": entry["scope"],
                 "repository": require_string(entry["repository"], f"{location}.repository"),
             }
         )
