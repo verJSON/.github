@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import unittest
 from unittest.mock import patch
 import yaml
@@ -40,10 +41,14 @@ def await_pidfd_reaped(pidfd: int, timeout: float) -> bool:
     return False
 
 
+REAPER_FLAG = "--namespace-reaper"
+BOOTSTRAP_FLAG = "--namespace-bootstrap"
+
+
 def exercise_destination_replacement(library_path: str, when: str) -> None:
     uid_map = Path("/proc/self/uid_map").read_text(encoding="ascii").split()
     if (os.getpid() != 2 or os.getppid() != 1 or os.getuid() != 0
-            or Path("/proc/1/comm").read_text(encoding="ascii").strip() != "bwrap"
+            or Path("/proc/1/cmdline").read_bytes().split(b"\0")[2:3] != [REAPER_FLAG.encode()]
             or len(uid_map) != 3 or uid_map[0] != "0" or uid_map[2] != "1"):
         raise RuntimeError("destination race requires an isolated PID namespace with a PID 1 reaper")
     if when not in ("before-mount", "after-mount", "after-start"):
@@ -255,10 +260,18 @@ class MountDestinationIsolationTests(unittest.TestCase):
             library = str(Path(directory) / "launcher.so")
             subprocess.run(["/usr/bin/cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2",
                             "-fPIC", "-shared", "-pthread", str(SOURCE), "-o", library], check=True)
-            subprocess.run(["unshare", "--user", "--map-root-user", "--mount", "--pid", "--fork", "--mount-proc",
-                            "/usr/bin/bwrap", "--unshare-pid", "--bind", "/", "/", "--dev", "/dev",
-                            "--proc", "/proc", "--", "/usr/bin/python3", str(Path(__file__).resolve()),
-                            "--inside", library, when], check=True)
+            # Ubuntu 24.04 denies unprivileged user namespaces, and anything run
+            # inside bwrap is confined to bwrap//&unpriv_bwrap with every
+            # capability denied, so the candidate's nested bwrap could not mount.
+            # A root bootstrap instead writes the same single 0 -> runner-uid map
+            # for a child (no newuidmap), which then makes the mount and PID
+            # namespaces; a minimal reaper is PID 1 and the race runs unconfined
+            # as PID 2, so the nested /usr/bin/bwrap attaches its profile as in
+            # production. Passwordless sudo is part of the hosted runner contract;
+            # without it this fails loudly rather than skipping.
+            subprocess.run(["sudo", "-n", "/usr/bin/python3", str(Path(__file__).resolve()),
+                            BOOTSTRAP_FLAG, str(os.getuid()), str(os.getgid()), library, when],
+                           check=True)
 
     @unittest.skipUnless(os.environ.get("VERJSON_TEST_REAL_BWRAP") == "1", "requires provisioned hosted Bubblewrap/AppArmor")
     def test_destination_replaced_before_mount_is_disclosed(self):
@@ -273,8 +286,68 @@ class MountDestinationIsolationTests(unittest.TestCase):
         self.exercise_in_isolated_namespace("after-start")
 
 
+def run_namespace_bootstrap(uid: str, gid: str, library_path: str, when: str) -> None:
+    """Run as root: map 0 -> the runner uid and gid for a child's new user
+    namespace, then let that child build the mount and PID namespaces."""
+    release_r, release_w = os.pipe()
+    ready_r, ready_w = os.pipe()
+    child = os.fork()
+    if child == 0:
+        try:
+            os.close(release_w)
+            os.close(ready_r)
+            os.setgroups([])
+            os.unshare(os.CLONE_NEWUSER)
+            os.write(ready_w, b"1")
+            if os.read(release_r, 1) != b"1":
+                os._exit(125)
+            os.setresgid(0, 0, 0)
+            os.setresuid(0, 0, 0)
+            os.execv("/usr/bin/unshare", [
+                "unshare", "--mount", "--pid", "--fork", "--mount-proc", "--kill-child",
+                "/usr/bin/python3", str(Path(__file__).resolve()), REAPER_FLAG, library_path, when,
+            ])
+        except BaseException:
+            traceback.print_exc()
+        finally:
+            os._exit(127)
+    os.close(release_r)
+    os.close(ready_w)
+    if os.read(ready_r, 1) != b"1":
+        raise RuntimeError("namespace bootstrap child failed before mapping")
+    Path(f"/proc/{child}/uid_map").write_text(f"0 {int(uid)} 1\n", encoding="ascii")
+    Path(f"/proc/{child}/setgroups").write_text("deny\n", encoding="ascii")
+    Path(f"/proc/{child}/gid_map").write_text(f"0 {int(gid)} 1\n", encoding="ascii")
+    os.write(release_w, b"1")
+    _, status = os.waitpid(child, 0)
+    sys.exit(os.waitstatus_to_exitcode(status))
+
+
+def run_namespace_reaper(library_path: str, when: str) -> None:
+    """PID 1 of the race's namespace: start the race as PID 2 and reap orphans
+    until it exits. Exiting then, as bwrap's init did, makes the kernel kill any
+    process the race left behind."""
+    child = os.fork()
+    if child == 0:
+        try:
+            os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve()),
+                                      "--inside", library_path, when])
+        except BaseException:
+            traceback.print_exc()
+        finally:
+            os._exit(127)
+    while True:
+        pid, status = os.waitpid(-1, 0)
+        if pid == child:
+            sys.exit(os.waitstatus_to_exitcode(status))
+
+
 if __name__ == "__main__":
-    if len(sys.argv) == 4 and sys.argv[1] == "--inside":
+    if len(sys.argv) == 6 and sys.argv[1] == BOOTSTRAP_FLAG:
+        run_namespace_bootstrap(*sys.argv[2:6])
+    elif len(sys.argv) == 4 and sys.argv[1] == REAPER_FLAG:
+        run_namespace_reaper(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) == 4 and sys.argv[1] == "--inside":
         exercise_destination_replacement(sys.argv[2], sys.argv[3])
     else:
         unittest.main()
