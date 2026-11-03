@@ -565,6 +565,26 @@ class DraftDeferralTests(unittest.TestCase):
                         "a draft must hold no runner and report no lane or aggregate result",
                     )
 
+    def test_a_ready_pull_request_schedules_its_whole_plan(self):
+        plans = {
+            (): {"ci"},
+            ("--levels", str(FIXTURES / "gitflow.json")): {"lint", "unit", "integration", "diagnostics", ci_levels.AGGREGATE_ID},
+        }
+        for arguments, expected in plans.items():
+            with self.subTest(arguments=arguments):
+                jobs = yaml.safe_load(run_generator(SHA, *arguments).stdout)["jobs"]
+                self.assertEqual({name for name, job in jobs.items() if schedules(job, draft=False)}, expected)
+
+    def test_a_push_carries_no_draft_flag_and_schedules_its_whole_plan(self):
+        plans = {
+            (): {"ci"},
+            ("--levels", str(FIXTURES / "gitflow.json")): {"unit", "integration", "release-gate", ci_levels.AGGREGATE_ID},
+        }
+        for arguments, expected in plans.items():
+            with self.subTest(arguments=arguments):
+                jobs = yaml.safe_load(run_generator(SHA, *arguments).stdout)["jobs"]
+                self.assertEqual({name for name, job in jobs.items() if schedules(job, event="push")}, expected)
+
     def test_a_pull_request_caller_reruns_when_a_draft_becomes_ready(self):
         triggers = yaml.safe_load(run_generator(SHA).stdout)[True]
         self.assertEqual(
