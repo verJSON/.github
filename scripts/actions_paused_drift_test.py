@@ -522,6 +522,18 @@ class ActionsPausedDriftTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("ruleset 21551883 enforcement {'mode': 'active'} is not one of", result.stderr)
 
+    def test_repository_with_two_actions_state_entries_fails_closed(self):
+        world = default_world()
+        responses = build_responses(world)
+        responses["orgs/Verjson/properties/values?per_page=100"][0][0]["properties"].append(
+            {"property_name": "verjson-actions-state", "value": "enabled"}
+        )
+
+        result, _ = self.run_audit(world, responses=responses)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("verjson-editor carries verjson-actions-state more than once", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

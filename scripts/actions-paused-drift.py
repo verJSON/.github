@@ -172,6 +172,8 @@ def read_actions_states(organization: str, property_name: str):
             for item in require_array(entry.get("properties"), f"{location}.properties")
         ]
         matching = [item for item in values if item.get("property_name") == property_name]
+        if len(matching) > 1:
+            raise AuditDataError(f"{name} carries {property_name} more than once in {path}")
         # The API lists an unset property with a null value; such a repository is
         # not excluded from anything, so ADR 0252 does not govern it.
         if matching and matching[0].get("value") is not None:
