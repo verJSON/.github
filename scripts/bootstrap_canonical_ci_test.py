@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -104,6 +105,106 @@ class BootstrapTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_unsafe_caller_apply_is_held_before_local_or_remote_changes(self):
+        output = self.repository / ".github/workflows/ai-privileged-merge.yml"
+        for kind in ("missing", "custom", "dangling-symlink"):
+            with self.subTest(kind=kind):
+                output.unlink(missing_ok=True)
+                if kind == "custom":
+                    output.write_text("customer-owned\n", encoding="utf-8")
+                elif kind == "dangling-symlink":
+                    output.symlink_to("missing-target")
+                gh = FakeGitHub(variable_current=False, secret_present=False)
+                with mock.patch.dict(os.environ, {"BOOTSTRAP_NODE_AUTH_TOKEN": "secret"}):
+                    with self.assertRaisesRegex(bootstrap.BootstrapError, "caller delivery is unavailable"):
+                        bootstrap.converge(bootstrap.validate_manifest(manifest()), gh, self.workspace, self.contract, "apply")
+                self.assertEqual(gh.calls, [])
+                if kind == "custom":
+                    self.assertEqual(output.read_text(encoding="utf-8"), "customer-owned\n")
+                elif kind == "dangling-symlink":
+                    self.assertTrue(output.is_symlink())
+                else:
+                    self.assertFalse(output.exists())
+                with self.assertRaisesRegex(bootstrap.BootstrapError, "caller delivery is unavailable"):
+                    bootstrap.generate_callers(bootstrap.validate_manifest(manifest()), self.workspace, self.contract, "apply")
+
+    def test_dry_run_rejects_dangling_caller_symlink(self):
+        output = self.repository / ".github/workflows/ai-privileged-merge.yml"
+        output.symlink_to("missing-target")
+        with self.assertRaisesRegex(bootstrap.BootstrapError, "caller output is a symlink"):
+            bootstrap.generate_callers(bootstrap.validate_manifest(manifest()), self.workspace, self.contract, "dry-run")
+        self.assertTrue(output.is_symlink())
+
+    def test_cli_held_or_invalid_apply_never_writes_receipt_over_caller(self):
+        output = self.repository / ".github/workflows/ai-privileged-merge.yml"
+        manifest_path = self.root / "manifest.json"
+        for kind in ("existing", "missing", "dangling-symlink", "invalid-manifest"):
+            with self.subTest(kind=kind):
+                output.unlink(missing_ok=True)
+                value = manifest()
+                if kind in ("existing", "invalid-manifest"):
+                    output.write_text("customer-owned\n", encoding="utf-8")
+                elif kind == "dangling-symlink":
+                    output.symlink_to("missing-target")
+                if kind == "invalid-manifest":
+                    value["callers"][0]["generator"] = "unsupported"
+                manifest_path.write_text(json.dumps(value), encoding="utf-8")
+                with mock.patch.object(sys, "argv", ["bootstrap-canonical-ci.py", "apply", str(manifest_path), "--receipt", str(output)]), mock.patch.object(bootstrap, "GitHub") as github, mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                    self.assertEqual(bootstrap.main(), 1)
+                    github.return_value.json.assert_not_called()
+                    github.return_value.run.assert_not_called()
+                if kind in ("existing", "invalid-manifest"):
+                    self.assertEqual(output.read_text(encoding="utf-8"), "customer-owned\n")
+                elif kind == "dangling-symlink":
+                    self.assertTrue(output.is_symlink())
+                    self.assertFalse((output.parent / "missing-target").exists())
+                else:
+                    self.assertFalse(output.exists())
+                self.assertEqual(json.loads(stdout.getvalue())["status"], "failed")
+
+    def test_cli_preserves_partial_effect_receipt_without_overwriting_existing_file(self):
+        value = manifest()
+        value["callers"] = []
+        manifest_path = self.root / "organization-only.json"
+        manifest_path.write_text(json.dumps(value), encoding="utf-8")
+        receipt_path = self.root / "partial-receipt.json"
+        partial = {"mode": "apply", "status": "failed", "variables": [{"status": "applied"}]}
+        for exists in (False, True):
+            with self.subTest(existing=exists):
+                receipt_path.unlink(missing_ok=True)
+                if exists:
+                    receipt_path.write_text("customer-owned\n", encoding="utf-8")
+                with mock.patch.object(sys, "argv", ["bootstrap-canonical-ci.py", "apply", str(manifest_path), "--receipt", str(receipt_path)]), mock.patch.object(bootstrap, "converge", side_effect=bootstrap.ConvergenceError("uncertain", dict(partial))), mock.patch("sys.stdout", new_callable=io.StringIO) as stdout, mock.patch("sys.stderr", new_callable=io.StringIO):
+                    self.assertEqual(bootstrap.main(), 1)
+                self.assertEqual(json.loads(stdout.getvalue())["variables"], partial["variables"])
+                if exists:
+                    self.assertEqual(receipt_path.read_text(encoding="utf-8"), "customer-owned\n")
+                else:
+                    self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["variables"], partial["variables"])
+
+    def test_cli_receipt_creation_does_not_replace_existing_files_or_symlinks(self):
+        manifest_path = self.root / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest()), encoding="utf-8")
+        receipt_path = self.root / "receipt.json"
+        for kind in ("new", "existing", "dangling-symlink"):
+            with self.subTest(kind=kind):
+                receipt_path.unlink(missing_ok=True)
+                if kind == "existing":
+                    receipt_path.write_text("customer-owned\n", encoding="utf-8")
+                elif kind == "dangling-symlink":
+                    receipt_path.symlink_to("missing-target")
+                with mock.patch.object(sys, "argv", ["bootstrap-canonical-ci.py", "dry-run", str(manifest_path), "--receipt", str(receipt_path)]), mock.patch.object(bootstrap, "converge", return_value={"status": "planned"}), mock.patch("sys.stdout", new_callable=io.StringIO) as stdout, mock.patch("sys.stderr", new_callable=io.StringIO):
+                    self.assertEqual(bootstrap.main(), 0 if kind == "new" else 1)
+                if kind == "new":
+                    self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8"))["status"], "planned")
+                else:
+                    self.assertEqual(json.loads(stdout.getvalue())["status"], "planned")
+                    if kind == "existing":
+                        self.assertEqual(receipt_path.read_text(encoding="utf-8"), "customer-owned\n")
+                    else:
+                        self.assertTrue(receipt_path.is_symlink())
+                        self.assertFalse((receipt_path.parent / "missing-target").exists())
+
     def test_dry_run_is_read_only_and_redacted(self):
         gh = FakeGitHub(variable_current=False, secret_present=False)
         with mock.patch.dict(os.environ, {"BOOTSTRAP_NODE_AUTH_TOKEN": "top-secret"}):
@@ -116,30 +217,31 @@ class BootstrapTests(unittest.TestCase):
         self.assertFalse(any(call[0] == "run" for call in gh.calls))
         self.assertFalse((self.repository / ".github/workflows/ai-privileged-merge.yml").exists())
 
-    def test_apply_converges_variable_secret_and_immutable_caller(self):
+    def test_apply_without_callers_converges_variable_and_secret(self):
         gh = FakeGitHub(variable_current=False, secret_present=False)
+        value = manifest()
+        value["callers"] = []
         with mock.patch.dict(os.environ, {"BOOTSTRAP_NODE_AUTH_TOKEN": "top-secret"}):
             receipt = bootstrap.converge(
-                bootstrap.validate_manifest(manifest()), gh, self.workspace, self.contract, "apply"
+                bootstrap.validate_manifest(value), gh, self.workspace, self.contract, "apply"
             )
-        generated = (self.repository / ".github/workflows/ai-privileged-merge.yml").read_text()
-        self.assertEqual(generated, f"pin={SHA}\n")
+        self.assertEqual(receipt["callers"], [])
         writes = [call for call in gh.calls if call[0] == "run"]
         self.assertEqual(len(writes), 2)
         self.assertIsNone(writes[0][2])
         self.assertEqual(writes[1][2], "top-secret")
         self.assertNotIn("top-secret", json.dumps(receipt))
 
-    def test_second_apply_leaves_current_variable_and_caller_unchanged(self):
-        output = self.repository / ".github/workflows/ai-privileged-merge.yml"
-        output.write_text(f"pin={SHA}\n", encoding="utf-8")
+    def test_apply_without_callers_leaves_current_variable_unchanged(self):
+        value = manifest()
+        value["callers"] = []
         gh = FakeGitHub()
         with mock.patch.dict(os.environ, {"BOOTSTRAP_NODE_AUTH_TOKEN": "rotated"}):
             receipt = bootstrap.converge(
-                bootstrap.validate_manifest(manifest()), gh, self.workspace, self.contract, "apply"
+                bootstrap.validate_manifest(value), gh, self.workspace, self.contract, "apply"
             )
         self.assertEqual(receipt["variables"][0]["status"], "current")
-        self.assertEqual(receipt["callers"][0]["status"], "current")
+        self.assertEqual(receipt["callers"], [])
         self.assertEqual([call[1][0] for call in gh.calls if call[0] == "run"], ["secret"])
 
     def test_check_rejects_drift_without_writes(self):
@@ -329,7 +431,7 @@ class BootstrapTests(unittest.TestCase):
             bootstrap.converge(value, gh, self.workspace, self.contract, "apply")
         self.assertEqual(gh.calls, [])
 
-    def test_cli_writes_explicit_provisioning_required_receipt_without_mutation(self):
+    def test_cli_reports_provisioning_required_without_receipt_write(self):
         value = manifest()
         value["secrets"] = {
             "AI_REVIEW_APP_PRIVATE_KEY": {
@@ -339,11 +441,12 @@ class BootstrapTests(unittest.TestCase):
         manifest_path = self.root / "rejected.json"
         receipt_path = self.root / "receipt.json"
         manifest_path.write_text(json.dumps(value), encoding="utf-8")
-        with mock.patch.object(
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout, mock.patch.object(
             sys, "argv", ["bootstrap-canonical-ci.py", "apply", str(manifest_path), "--receipt", str(receipt_path)]
         ):
             self.assertEqual(bootstrap.main(), 1)
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertFalse(receipt_path.exists())
+        receipt = json.loads(stdout.getvalue())
         self.assertEqual(receipt["status"], "provisioning_required")
         self.assertEqual(receipt["provisioning_path"], "docs/app-key-environment-rollout.md")
         self.assertIn("AI_REVIEW_APP_PRIVATE_KEY", receipt["error"])
@@ -365,7 +468,7 @@ class BootstrapTests(unittest.TestCase):
             manifest_path.write_text(json.dumps(value), encoding="utf-8")
             with self.subTest(name=name), mock.patch.dict(
                 os.environ, {"BOOTSTRAP_MERGE_ALIAS": "top-secret"}
-            ), mock.patch.object(bootstrap, "GitHub") as github:
+            ), mock.patch.object(bootstrap, "GitHub") as github, mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
                 with mock.patch.object(
                     sys,
                     "argv",
@@ -379,7 +482,8 @@ class BootstrapTests(unittest.TestCase):
                 ):
                     self.assertEqual(bootstrap.main(), 1)
                 github.assert_not_called()
-            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                self.assertFalse(receipt_path.exists())
+                receipt = json.loads(stdout.getvalue())
             self.assertEqual(receipt["status"], "provisioning_required")
             self.assertIn(f"secret {name}", receipt["error"])
             self.assertNotIn("top-secret", json.dumps(receipt))
@@ -397,9 +501,11 @@ class BootstrapTests(unittest.TestCase):
 
     def test_missing_secret_fails_before_secret_write(self):
         gh = FakeGitHub()
+        value = manifest()
+        value["callers"] = []
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(bootstrap.BootstrapError, "environment .* is missing"):
-                bootstrap.converge(bootstrap.validate_manifest(manifest()), gh, self.workspace, self.contract, "apply")
+                bootstrap.converge(bootstrap.validate_manifest(value), gh, self.workspace, self.contract, "apply")
         self.assertFalse(any(call[0] == "run" and call[1][0] == "secret" for call in gh.calls))
 
     def test_incomplete_inventory_and_foreign_operator_fail_closed(self):
@@ -430,32 +536,92 @@ class BootstrapTests(unittest.TestCase):
                     raise bootstrap.BootstrapError("secret upload failed")
                 return super().run(arguments, stdin=stdin, sensitive=sensitive)
         gh = FailingSecret(variable_current=False)
+        value = manifest()
+        value["callers"] = []
         with mock.patch.dict(os.environ, {"BOOTSTRAP_NODE_AUTH_TOKEN": "never-rendered"}):
             with self.assertRaises(bootstrap.ConvergenceError) as raised:
-                bootstrap.converge(bootstrap.validate_manifest(manifest()), gh, self.workspace, self.contract, "apply")
+                bootstrap.converge(bootstrap.validate_manifest(value), gh, self.workspace, self.contract, "apply")
         receipt = raised.exception.receipt
         self.assertEqual(receipt["status"], "failed")
         self.assertEqual(receipt["variables"][0]["status"], "applied")
+        self.assertEqual(receipt["secrets"][0]["status"], "uncertain")
         self.assertNotIn("never-rendered", json.dumps(receipt))
 
-    def test_multiple_caller_replacement_rolls_back_on_failure(self):
+    def test_failed_variable_dispatch_is_uncertain_not_a_confirmed_no_op(self):
+        class FailingVariable(FakeGitHub):
+            def run(self, arguments, *, stdin=None, sensitive=False):
+                raise bootstrap.BootstrapError("untrusted failure details")
+        value = manifest()
+        value["callers"] = []
+        with mock.patch.dict(os.environ, {"BOOTSTRAP_NODE_AUTH_TOKEN": "secret"}):
+            with self.assertRaises(bootstrap.ConvergenceError) as raised:
+                bootstrap.converge(value, FailingVariable(variable_current=False), self.workspace, self.contract, "apply")
+        receipt = raised.exception.receipt
+        self.assertEqual(receipt["variables"][0]["status"], "uncertain")
+        self.assertEqual(receipt["secrets"], [])
+        self.assertNotIn("untrusted failure details", str(raised.exception))
+
+    def test_os_failure_after_a_remote_write_preserves_partial_reconciliation_receipt(self):
+        class FailingSecret(FakeGitHub):
+            def run(self, arguments, *, stdin=None, sensitive=False):
+                if arguments[0] == "secret":
+                    raise OSError("private process error")
+                return super().run(arguments, stdin=stdin, sensitive=sensitive)
+        value = manifest()
+        value["callers"] = []
+        gh = FailingSecret(variable_current=False)
+        with mock.patch.dict(os.environ, {"BOOTSTRAP_NODE_AUTH_TOKEN": "secret"}):
+            with self.assertRaises(bootstrap.ConvergenceError) as raised:
+                bootstrap.converge(value, gh, self.workspace, self.contract, "apply")
+        receipt = raised.exception.receipt
+        self.assertEqual(receipt["variables"][0]["status"], "applied")
+        self.assertEqual(receipt["secrets"][0]["status"], "uncertain")
+        self.assertNotIn("private process error", json.dumps(receipt))
+
+    def test_local_error_after_remote_effects_keeps_partial_receipt(self):
+        value = manifest()
+        value["callers"] = []
+        gh = FakeGitHub(variable_current=False)
+        with mock.patch.dict(os.environ, {"BOOTSTRAP_NODE_AUTH_TOKEN": "secret"}), mock.patch.object(bootstrap, "generate_callers", side_effect=[[], OSError("private filesystem error")]):
+            with self.assertRaises(bootstrap.ConvergenceError) as raised:
+                bootstrap.converge(value, gh, self.workspace, self.contract, "apply")
+        receipt = raised.exception.receipt
+        self.assertEqual(receipt["variables"][0]["status"], "applied")
+        self.assertEqual(receipt["secrets"][0]["status"], "applied")
+        self.assertNotIn("private filesystem error", json.dumps(receipt))
+
+    def test_github_output_decode_failure_is_sanitized_after_dispatch(self):
+        error = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+        with mock.patch.object(bootstrap.subprocess, "run", side_effect=error):
+            with self.assertRaises(bootstrap.BootstrapError) as raised:
+                bootstrap.GitHub("gh").run(["api", "fixture"], sensitive=True)
+        self.assertNotIn("invalid", str(raised.exception))
+
+    def test_secret_input_is_snapshotted_before_remote_writes(self):
+        class ChangingEnvironment(FakeGitHub):
+            def run(self, arguments, *, stdin=None, sensitive=False):
+                if arguments[0] == "api":
+                    os.environ.pop("BOOTSTRAP_NODE_AUTH_TOKEN", None)
+                return super().run(arguments, stdin=stdin, sensitive=sensitive)
+        value = manifest()
+        value["callers"] = []
+        gh = ChangingEnvironment(variable_current=False)
+        with mock.patch.dict(os.environ, {"BOOTSTRAP_NODE_AUTH_TOKEN": "original-secret"}):
+            receipt = bootstrap.converge(value, gh, self.workspace, self.contract, "apply")
+        self.assertEqual(receipt["status"], "converged")
+        secret_calls = [call for call in gh.calls if call[0] == "run" and call[1][0] == "secret"]
+        self.assertEqual(secret_calls[0][2], "original-secret")
+        self.assertNotIn("original-secret", json.dumps(receipt))
+
+    def test_multiple_existing_callers_are_untouched_when_delivery_is_held(self):
         value = manifest()
         value["callers"].append({**value["callers"][0], "output": ".github/workflows/ai-promotion-retry.yml"})
         first = self.repository / value["callers"][0]["output"]
         second = self.repository / value["callers"][1]["output"]
         first.write_text("first-original\n", encoding="utf-8")
         second.write_text("second-original\n", encoding="utf-8")
-        real_replace = os.replace
-        calls = 0
-        def fail_second(source, destination):
-            nonlocal calls
-            calls += 1
-            if calls == 2:
-                raise OSError("fixture replacement failure")
-            real_replace(source, destination)
-        with mock.patch.object(bootstrap.os, "replace", side_effect=fail_second):
-            with self.assertRaisesRegex(bootstrap.BootstrapError, "prior files restored"):
-                bootstrap.generate_callers(bootstrap.validate_manifest(value), self.workspace, self.contract, "apply")
+        with self.assertRaisesRegex(bootstrap.BootstrapError, "caller delivery is unavailable"):
+            bootstrap.generate_callers(bootstrap.validate_manifest(value), self.workspace, self.contract, "apply")
         self.assertEqual(first.read_text(), "first-original\n")
         self.assertEqual(second.read_text(), "second-original\n")
 

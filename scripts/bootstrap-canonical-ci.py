@@ -9,7 +9,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -110,10 +109,13 @@ class GitHub:
         self.executable = executable
 
     def run(self, arguments: list[str], *, stdin: str | None = None, sensitive: bool = False) -> str:
-        result = subprocess.run(
-            [self.executable, *arguments], input=stdin, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-        )
+        try:
+            result = subprocess.run(
+                [self.executable, *arguments], input=stdin, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+        except (OSError, UnicodeError) as error:
+            raise BootstrapError("GitHub command could not be observed") from error
         if result.returncode:
             message = "secret upload failed" if sensitive else (
                 result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "GitHub command failed"
@@ -277,7 +279,8 @@ def app_expectations(manifest: dict[str, Any], live: dict[int, dict[str, Any]]) 
 
 
 def generate_callers(manifest: dict[str, Any], workspace: Path, contract_root: Path, mode: str) -> list[dict[str, str]]:
-    generated: list[tuple[Path, bytes]] = []
+    if mode == "apply" and manifest["callers"]:
+        raise BootstrapError("caller delivery is unavailable until conflict-safe ownership is implemented")
     receipt: list[dict[str, str]] = []
     workspace_root = workspace.resolve(strict=True)
     for caller in manifest["callers"]:
@@ -290,7 +293,7 @@ def generate_callers(manifest: dict[str, Any], workspace: Path, contract_root: P
         resolved_parent = output.parent.resolve(strict=True) if output.parent.is_dir() else None
         if resolved_parent is None or (resolved_parent != repository and repository not in resolved_parent.parents):
             raise BootstrapError(f"caller output parent escapes or is absent: {caller['output']}")
-        if output.exists() and output.is_symlink():
+        if output.is_symlink():
             raise BootstrapError(f"caller output is a symlink: {caller['output']}")
         generator = contract_root / "scripts" / GENERATORS[caller["generator"]]
         arguments = list(caller["arguments"])
@@ -303,44 +306,18 @@ def generate_callers(manifest: dict[str, Any], workspace: Path, contract_root: P
         result = subprocess.run(command, cwd=repository, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         if result.returncode:
             raise BootstrapError(f"generator failed for {caller['repository']}/{caller['output']}")
-        generated.append((output, result.stdout))
         current = output.read_bytes() if output.exists() else None
         status = "current" if current == result.stdout else "drifted"
         receipt.append({"repository": caller["repository"], "output": caller["output"], "status": status})
     if mode == "check" and any(item["status"] == "drifted" for item in receipt):
         raise BootstrapError("one or more generated callers drift from the manifest")
-    if mode == "apply":
-        staged: list[tuple[Path, Path]] = []
-        originals: dict[Path, tuple[bytes, int] | None] = {}
-        for output, content in generated:
-            originals[output] = (output.read_bytes(), output.stat().st_mode & 0o777) if output.exists() else None
-            with tempfile.NamedTemporaryFile(dir=output.parent, delete=False) as stream:
-                stream.write(content)
-                temporary = Path(stream.name)
-            temporary.chmod(0o755 if output.suffix == ".sh" else 0o644)
-            staged.append((temporary, output))
-        applied: list[Path] = []
-        try:
-            for temporary, output in staged:
-                os.replace(temporary, output)
-                applied.append(output)
-        except OSError as error:
-            for output in reversed(applied):
-                original = originals[output]
-                if original is None:
-                    output.unlink(missing_ok=True)
-                else:
-                    output.write_bytes(original[0])
-                    output.chmod(original[1])
-            raise BootstrapError("generated caller replacement failed; prior files restored") from error
-        finally:
-            for temporary, _ in staged:
-                temporary.unlink(missing_ok=True)
     return receipt
 
 
 def converge(manifest: dict[str, Any], gh: GitHub, workspace: Path, contract_root: Path, mode: str) -> dict[str, Any]:
     manifest = validate_manifest(manifest)
+    if mode == "apply" and manifest["callers"]:
+        raise BootstrapError("caller delivery is unavailable until conflict-safe ownership is implemented")
     reject_environment_only_app_keys(manifest["secrets"])
     contract_head = subprocess.run(
         ["git", "-C", str(contract_root), "rev-parse", "HEAD"], text=True,
@@ -354,8 +331,10 @@ def converge(manifest: dict[str, Any], gh: GitHub, workspace: Path, contract_roo
     )
     if contract_status.returncode or contract_status.stdout:
         raise BootstrapError("contract root must be clean before generator execution")
+    secret_values: dict[str, str] = {}
     if mode == "apply":
-        missing = [spec["environment"] for spec in manifest["secrets"].values() if not os.environ.get(spec["environment"])]
+        secret_values = {name: os.environ.get(spec["environment"], "") for name, spec in manifest["secrets"].items()}
+        missing = [spec["environment"] for name, spec in manifest["secrets"].items() if not secret_values[name]]
         if missing:
             raise BootstrapError(f"secret environment {missing[0]} is missing")
     caller_plan = generate_callers(manifest, workspace, contract_root, "dry-run" if mode == "apply" else mode)
@@ -394,9 +373,10 @@ def converge(manifest: dict[str, Any], gh: GitHub, workspace: Path, contract_roo
             try:
                 gh.run(["api", "--method", method, endpoint, "-f", f"name={name}", "-f", f"value={spec['value']}", "-f", f"visibility={spec['visibility']}"])
                 variable_receipt["status"] = "applied"
-            except BootstrapError as error:
+            except (BootstrapError, OSError) as error:
+                variable_receipt["status"] = "uncertain"
                 receipt["status"] = "failed"
-                raise ConvergenceError(str(error), receipt) from error
+                raise ConvergenceError("organization variable write outcome uncertain", receipt) from error
     for name, spec in manifest["secrets"].items():
         live = live_secrets.get(name)
         exists = live is not None and live.get("visibility") == spec["visibility"]
@@ -405,22 +385,23 @@ def converge(manifest: dict[str, Any], gh: GitHub, workspace: Path, contract_roo
         if mode == "check" and not exists:
             raise BootstrapError(f"secret {name} is absent or has different visibility")
         if mode == "apply":
-            value = os.environ[spec["environment"]]
+            value = secret_values[name]
             try:
                 gh.run(
                     ["secret", "set", name, "--org", manifest["organization"], "--visibility", spec["visibility"]],
                     stdin=value, sensitive=True,
                 )
                 secret_receipt["status"] = "applied"
-            except BootstrapError as error:
+            except (BootstrapError, OSError) as error:
+                secret_receipt["status"] = "uncertain"
                 receipt["status"] = "failed"
-                raise ConvergenceError(str(error), receipt) from error
+                raise ConvergenceError("organization secret write outcome uncertain", receipt) from error
     try:
         receipt["callers"] = generate_callers(manifest, workspace, contract_root, "apply") if mode == "apply" else caller_plan
-    except BootstrapError as error:
+    except (BootstrapError, OSError) as error:
         receipt["callers"] = caller_plan
         receipt["status"] = "failed"
-        raise ConvergenceError(str(error), receipt) from error
+        raise ConvergenceError("caller inspection failed after remote effects; reconcile", receipt) from error
     receipt["status"] = "planned" if mode == "dry-run" else "converged"
     return receipt
 
@@ -436,10 +417,12 @@ def main() -> int:
     arguments = parser.parse_args()
     receipt: dict[str, Any]
     exit_code = 0
+    partial_effects = False
     try:
         manifest = validate_manifest(json.loads(arguments.manifest.read_text(encoding="utf-8")))
         receipt = converge(manifest, GitHub(arguments.gh), arguments.workspace, arguments.contract_root, arguments.mode)
     except (BootstrapError, OSError, json.JSONDecodeError) as error:
+        partial_effects = isinstance(error, ConvergenceError)
         status = "provisioning_required" if isinstance(error, ProvisioningRequiredError) else "failed"
         receipt = error.receipt if isinstance(error, ConvergenceError) else {"mode": arguments.mode, "status": status}
         if isinstance(error, ProvisioningRequiredError):
@@ -447,9 +430,16 @@ def main() -> int:
         receipt["error"] = str(error)
         exit_code = 1
     rendered = json.dumps(receipt, sort_keys=True, indent=2) + "\n"
-    if arguments.receipt:
-        arguments.receipt.write_text(rendered, encoding="utf-8")
-    else:
+    wrote_receipt = False
+    if arguments.receipt and (exit_code == 0 or partial_effects or arguments.mode != "apply"):
+        try:
+            with arguments.receipt.open("x", encoding="utf-8") as stream:
+                stream.write(rendered)
+            wrote_receipt = True
+        except OSError:
+            sys.stderr.write("receipt could not be created; inspect stdout for the result\n")
+            exit_code = 1
+    if not wrote_receipt or partial_effects:
         sys.stdout.write(rendered)
     return exit_code
 
