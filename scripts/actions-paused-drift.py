@@ -16,6 +16,7 @@ CHECKED_IN_POLICY = ROOT / "config/actions-paused-drift-policy.json"
 # ADR 0252: a paused-only relaxation records results without blocking while
 # its repository is paused, and blocks again once the repository is enabled.
 RELAXATION_ENFORCEMENT = {"paused": "evaluate", "enabled": "active"}
+ACTIONS_STATES = frozenset(RELAXATION_ENFORCEMENT)
 RULESET_ENFORCEMENTS = {"active", "disabled", "evaluate"}
 RELAXATION_SCOPES = {"organization", "repository"}
 
@@ -175,10 +176,10 @@ def read_actions_states(organization: str, property_name: str):
         # not excluded from anything, so ADR 0252 does not govern it.
         if matching and matching[0].get("value") is not None:
             value = matching[0]["value"]
-            if value not in RELAXATION_ENFORCEMENT:
+            if value not in ACTIONS_STATES:
                 raise AuditDataError(
                     f"{name} has {property_name}={value!r}, "
-                    f"expected one of {sorted(RELAXATION_ENFORCEMENT)}"
+                    f"expected one of {sorted(ACTIONS_STATES)}"
                 )
             states[name] = value
     return states
@@ -252,50 +253,59 @@ def read_relaxation(organization: str, relaxation: dict, repository_id: int):
     return enforcement
 
 
+def repository_findings(policy: dict, states: dict, repositories: dict):
+    organization = policy["organization"]
+    state_property = policy["property"]
+    baseline = policy["baseline_ruleset_id"]
+    findings = []
+    for name, state in states.items():
+        if name not in repositories:
+            raise AuditDataError(
+                f"{name} has {state_property} but is not in the organization repository listing"
+            )
+        if state == "paused" and read_actions_enabled(organization, name):
+            findings.append(f"{name} is {state_property}=paused but its Actions are enabled")
+        branch = repositories[name]["default_branch"]
+        governed = baseline in read_branch_ruleset_ids(organization, name, branch)
+        if state == "enabled" and governed:
+            findings.append(
+                f"{name} is {state_property}=enabled but its default branch {branch} "
+                f"is still governed by the paused baseline ruleset {baseline}"
+            )
+        if state == "paused" and not governed:
+            findings.append(
+                f"{name} is {state_property}=paused but its default branch {branch} "
+                f"is not governed by the paused baseline ruleset {baseline}"
+            )
+    return findings
+
+
+def relaxation_findings(policy: dict, states: dict, repositories: dict):
+    findings = []
+    for relaxation in policy["relaxations"]:
+        ruleset_id = relaxation["ruleset_id"]
+        name = relaxation["repository"]
+        if name not in states:
+            raise AuditDataError(
+                f"declared relaxation {ruleset_id} names {name}, which has no {policy['property']}"
+            )
+        enforcement = read_relaxation(policy["organization"], relaxation, repositories[name]["id"])
+        expected = RELAXATION_ENFORCEMENT[states[name]]
+        if enforcement != expected:
+            findings.append(
+                f"ruleset {ruleset_id} for {name} is {enforcement}, "
+                f"expected {expected} while {policy['property']}={states[name]}"
+            )
+    return findings
+
+
 def main(arguments: list[str] | None = None) -> int:
     try:
         policy = read_policy(select_policy(sys.argv[1:] if arguments is None else arguments))
-        organization = policy["organization"]
-        states = read_actions_states(organization, policy["property"])
-        repositories = read_repositories(organization)
-        findings = []
-        for name, state in states.items():
-            if name not in repositories:
-                raise AuditDataError(
-                    f"{name} has {policy['property']} but is not in the organization repository listing"
-                )
-            if state == "paused" and read_actions_enabled(organization, name):
-                findings.append(
-                    f"{name} is {policy['property']}=paused but its Actions are enabled"
-                )
-            branch = repositories[name]["default_branch"]
-            governed = policy["baseline_ruleset_id"] in read_branch_ruleset_ids(
-                organization, name, branch
-            )
-            if state == "enabled" and governed:
-                findings.append(
-                    f"{name} is {policy['property']}=enabled but its default branch {branch} "
-                    f"is still governed by the paused baseline ruleset {policy['baseline_ruleset_id']}"
-                )
-            if state == "paused" and not governed:
-                findings.append(
-                    f"{name} is {policy['property']}=paused but its default branch {branch} "
-                    f"is not governed by the paused baseline ruleset {policy['baseline_ruleset_id']}"
-                )
-        for relaxation in policy["relaxations"]:
-            name = relaxation["repository"]
-            if name not in states:
-                raise AuditDataError(
-                    f"declared relaxation {relaxation['ruleset_id']} names {name}, "
-                    f"which has no {policy['property']}"
-                )
-            enforcement = read_relaxation(organization, relaxation, repositories[name]["id"])
-            expected = RELAXATION_ENFORCEMENT[states[name]]
-            if enforcement != expected:
-                findings.append(
-                    f"ruleset {relaxation['ruleset_id']} for {name} is {enforcement}, "
-                    f"expected {expected} while {policy['property']}={states[name]}"
-                )
+        states = read_actions_states(policy["organization"], policy["property"])
+        repositories = read_repositories(policy["organization"])
+        findings = repository_findings(policy, states, repositories)
+        findings += relaxation_findings(policy, states, repositories)
     except (OSError, AuditDataError, RuntimeError) as error:
         print(f"ERROR: cannot establish Actions-paused state: {error}", file=sys.stderr)
         return 2
