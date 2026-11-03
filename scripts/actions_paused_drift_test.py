@@ -328,6 +328,20 @@ class ActionsPausedDriftTest(unittest.TestCase):
             result.stderr,
         )
 
+    def test_organization_relaxation_no_longer_targeting_its_repository_fails_closed(self):
+        world = default_world()
+        responses = build_responses(world)
+        responses["orgs/Verjson/rulesets/21750617"][0]["conditions"]["repository_id"] = {
+            "repository_ids": [999]
+        }
+
+        result, _ = self.run_audit(world, responses=responses)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(
+            "organization ruleset 21750617 must target exactly verjson-authn (12)", result.stderr
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

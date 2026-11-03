@@ -205,13 +205,21 @@ def read_branch_ruleset_ids(organization: str, name: str, branch: str):
     }
 
 
-def read_relaxation(organization: str, relaxation: dict):
+def read_relaxation(organization: str, relaxation: dict, repository_id: int):
     ruleset_id = relaxation["ruleset_id"]
+    name = relaxation["repository"]
     if relaxation["scope"] == "organization":
-        path = f"orgs/{organization}/rulesets/{ruleset_id}"
-    else:
-        path = f"repos/{organization}/{relaxation['repository']}/rulesets/{ruleset_id}"
-    return gh_json_object(path)
+        ruleset = gh_json_object(f"orgs/{organization}/rulesets/{ruleset_id}")
+        # A repository-id-targeted org ruleset cannot take the property exclude,
+        # which is why ADR 0252 relaxes it; it must still bind only its repository.
+        conditions = require_mapping(ruleset.get("conditions"), f"ruleset {ruleset_id}.conditions")
+        target = conditions.get("repository_id")
+        if not isinstance(target, dict) or target.get("repository_ids") != [repository_id]:
+            raise AuditDataError(
+                f"organization ruleset {ruleset_id} must target exactly {name} ({repository_id})"
+            )
+        return ruleset
+    return gh_json_object(f"repos/{organization}/{name}/rulesets/{ruleset_id}")
 
 
 def main(arguments: list[str] | None = None) -> int:
@@ -247,7 +255,9 @@ def main(arguments: list[str] | None = None) -> int:
                     f"declared relaxation {relaxation['ruleset_id']} names {name}, "
                     f"which has no {policy['property']}"
                 )
-            enforcement = read_relaxation(organization, relaxation).get("enforcement")
+            enforcement = read_relaxation(
+                organization, relaxation, repositories[name]["id"]
+            ).get("enforcement")
             expected = RELAXATION_ENFORCEMENT[states[name]]
             if enforcement != expected:
                 findings.append(
