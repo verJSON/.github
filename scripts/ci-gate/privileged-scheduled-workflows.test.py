@@ -806,6 +806,12 @@ def main() -> int:
             ruleset_conformance_text,
             count=1,
         ),
+        "Actions-paused drift audit extra token": ruleset_conformance_text.replace(
+            "        run: python3 -I scripts/actions-paused-drift.py",
+            "          GITHUB_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}\n"
+            "        run: python3 -I scripts/actions-paused-drift.py",
+            1,
+        ),
         "required-workflow audit dropped": ruleset_conformance_text.replace(
             "run: python3 -I scripts/authn-type-surface-ruleset.py audit",
             "run: 'true'",
