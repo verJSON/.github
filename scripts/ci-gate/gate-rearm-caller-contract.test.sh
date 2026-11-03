@@ -181,6 +181,10 @@ then
 else
   fail "pinned lifecycle caller triggers, permissions, or immutable target drifted"
 fi
+grep -qxF "# scripts/gen-ai-review-lifecycle-rearm-caller.sh $contract_sha > .github/workflows/ai-review-lifecycle-rearm.yml" \
+  "$pinned_lifecycle_caller" \
+  && pass "pinned lifecycle caller records an exact reproducible command" \
+  || fail "pinned lifecycle caller lacks exact regeneration provenance"
 
 for invalid_ref in main v1 '' \
   0123456789abcdef0123456789abcdef0123456 \
@@ -199,6 +203,9 @@ jobs: {}'; do
     && fail "lifecycle generator accepted mutable, malformed, or injected ref '$invalid_ref'" \
     || pass "lifecycle generator rejects unsafe ref '${invalid_ref:-<empty>}'"
 done
+"$lifecycle_generator" "$contract_sha" extra >"$tmp/rejected.yml" 2>/dev/null \
+  && fail "lifecycle generator ignored an extra argument" \
+  || pass "lifecycle generator rejects extra arguments"
 "$generator" "$contract_sha" extra >"$tmp/rejected.yml" 2>/dev/null \
   && fail "generator ignored an extra argument" \
   || pass "generator rejects extra arguments"
