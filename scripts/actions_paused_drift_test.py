@@ -391,6 +391,23 @@ class ActionsPausedDriftTest(unittest.TestCase):
             result.stderr,
         )
 
+    def test_governed_repository_missing_from_the_repository_listing_fails_closed(self):
+        world = default_world()
+        responses = build_responses(world)
+        responses["orgs/Verjson/repos?type=all&per_page=100"][0] = [
+            entry
+            for entry in responses["orgs/Verjson/repos?type=all&per_page=100"][0]
+            if entry["name"] != "verjson-agents"
+        ]
+
+        result, _ = self.run_audit(world, responses=responses)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(
+            "verjson-agents has verjson-actions-state but is not in the organization repository listing",
+            result.stderr,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

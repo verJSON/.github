@@ -253,6 +253,10 @@ def main(arguments: list[str] | None = None) -> int:
         repositories = read_repositories(organization)
         findings = []
         for name, state in states.items():
+            if name not in repositories:
+                raise AuditDataError(
+                    f"{name} has {policy['property']} but is not in the organization repository listing"
+                )
             if state == "paused" and read_actions_enabled(organization, name):
                 findings.append(
                     f"{name} is {policy['property']}=paused but its Actions are enabled"
