@@ -1977,6 +1977,13 @@ jobs:
           submodules: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && 'false' || 'recursive' }}
           token: ${{ (inputs.secretless-pr || inputs.secretless-trusted-ref) && github.token || secrets.submodules-token || github.token }}
           persist-credentials: ${{ !(inputs.secretless-pr || inputs.secretless-trusted-ref) }}
+      - name: Disclose shared workspace isolation assumption
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        shell: bash
+        run: |
+          warning='This job assumes no other host process can modify the checkout while sandboxed scripts run. A concurrent or leftover host writer can redirect mounts, including verified artifact mounts. Use an isolated runner and prevent competing workspace writers for the whole job.'
+          printf '::warning title=Shared workspace isolation::%s\n' "$warning"
+          printf '### Shared workspace isolation assumption\n\n%s\n' "$warning" >> "$GITHUB_STEP_SUMMARY"
       - name: Validate Postgres sandbox profile request
         if: needs.eligibility.outputs.should-run != 'false' && inputs.postgres-sandbox-profile != ''
         env:
