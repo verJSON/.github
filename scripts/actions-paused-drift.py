@@ -255,11 +255,10 @@ def read_relaxation(organization: str, relaxation: dict, repository_id: int):
     return enforcement
 
 
-def repository_findings(policy: dict, states: dict, repositories: dict):
+def collect_repository_findings(policy: dict, states: dict, repositories: dict, findings: list):
     organization = policy["organization"]
     state_property = policy["property"]
     baseline = policy["baseline_ruleset_id"]
-    findings = []
     for name, state in states.items():
         if name not in repositories:
             raise AuditDataError(
@@ -279,11 +278,9 @@ def repository_findings(policy: dict, states: dict, repositories: dict):
                 f"{name} is {state_property}=paused but its default branch {branch} "
                 f"is not governed by the paused baseline ruleset {baseline}"
             )
-    return findings
 
 
-def relaxation_findings(policy: dict, states: dict, repositories: dict):
-    findings = []
+def collect_relaxation_findings(policy: dict, states: dict, repositories: dict, findings: list):
     for relaxation in policy["relaxations"]:
         ruleset_id = relaxation["ruleset_id"]
         name = relaxation["repository"]
@@ -298,23 +295,30 @@ def relaxation_findings(policy: dict, states: dict, repositories: dict):
                 f"ruleset {ruleset_id} for {name} is {enforcement}, "
                 f"expected {expected} while {policy['property']}={states[name]}"
             )
-    return findings
+
+
+def print_findings(findings: list):
+    for finding in findings:
+        print(f"ERROR: {finding}", file=sys.stderr)
 
 
 def main(arguments: list[str] | None = None) -> int:
+    # Collected in place so drift found before a later failed read is still
+    # reported alongside the exit-2 diagnosis instead of being discarded.
+    findings = []
     try:
         policy = read_policy(select_policy(sys.argv[1:] if arguments is None else arguments))
         states = read_actions_states(policy["organization"], policy["property"])
         repositories = read_repositories(policy["organization"])
-        findings = repository_findings(policy, states, repositories)
-        findings += relaxation_findings(policy, states, repositories)
+        collect_repository_findings(policy, states, repositories, findings)
+        collect_relaxation_findings(policy, states, repositories, findings)
     except (OSError, AuditDataError, RuntimeError) as error:
+        print_findings(findings)
         print(f"ERROR: cannot establish Actions-paused state: {error}", file=sys.stderr)
         return 2
 
     if findings:
-        for finding in findings:
-            print(f"ERROR: {finding}", file=sys.stderr)
+        print_findings(findings)
         return 1
 
     paused = sum(1 for state in states.values() if state == "paused")

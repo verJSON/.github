@@ -534,6 +534,18 @@ class ActionsPausedDriftTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("verjson-editor carries verjson-actions-state more than once", result.stderr)
 
+    def test_drift_found_before_a_failed_read_is_still_reported(self):
+        world = default_world()
+        world["repositories"]["verjson-editor"]["actions_enabled"] = True
+
+        result, _ = self.run_audit(world, failing_paths=["repos/Verjson/verjson-ai/rulesets/21551883"])
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        finding = "ERROR: verjson-editor is verjson-actions-state=paused but its Actions are enabled"
+        unestablished = "ERROR: cannot establish Actions-paused state"
+        self.assertIn(finding, result.stderr)
+        self.assertLess(result.stderr.index(finding), result.stderr.index(unestablished))
+
 
 if __name__ == "__main__":
     unittest.main()
