@@ -45,6 +45,9 @@ RULESET_METADATA_FIELDS = frozenset({
 })
 
 
+FINDING_CODE = "authorization-arm-rollout-not-ready"
+
+
 class AuditError(Exception):
     pass
 
@@ -1004,9 +1007,9 @@ def verify_authorization(contract: dict, read, governed: dict[str, bool]) -> boo
     return environment_custody
 
 
-def adopter_conformance_findings(
+def adopter_conformance_classes(
     contract: dict, read, repositories: list[dict], covered: list[str], environment_custody: bool
-) -> list[str]:
+) -> list[tuple[str, list[str]]]:
     """Report armed adopters that cannot satisfy the arm they are required to pass.
 
     Enrollment is granted by a repository property and admission requires a
@@ -1120,19 +1123,19 @@ def adopter_conformance_findings(
     # class at a time would make the fleet take as many scheduled days to become
     # visible as there are classes — the same "the control could not tell you"
     # shape this audit exists to remove.
+    #
+    # Every class is returned, empty or not: an empty class is the positive
+    # statement that it was evaluated and nothing is left in it, which is what
+    # lets ADR 0189 read a shrinking recorded item set as an improvement.
     return [
-        concise_findings(name, items)
-        for name, items in (
-            (
-                "armed adopters that cannot satisfy the arm: the admission caller is absent or undispatchable",
-                sorted(blocked),
-            ),
-            ("armed adopters with an incomplete generated adopter caller set", sorted(findings)),
-            ("armed adopters without a conforming review environment", sorted(environment_findings)),
-            (f"armed {environment} environments that lack {private_key}", sorted(key_findings["missing"])),
-            (f"armed {environment} environments whose {private_key} is unreadable", sorted(key_findings["unreadable"])),
-        )
-        if items
+        (
+            "armed adopters that cannot satisfy the arm: the admission caller is absent or undispatchable",
+            sorted(blocked),
+        ),
+        ("armed adopters with an incomplete generated adopter caller set", sorted(findings)),
+        ("armed adopters without a conforming review environment", sorted(environment_findings)),
+        (f"armed {environment} environments that lack {private_key}", sorted(key_findings["missing"])),
+        (f"armed {environment} environments whose {private_key} is unreadable", sorted(key_findings["unreadable"])),
     ]
 
 
@@ -1317,11 +1320,12 @@ def audit(contract: dict, read=gh_pages, allow_unschedulable_selection: bool = F
     # organization-wide reach for a rule that governs a subset is what made the
     # credential scope look like a blocker rather than a decision.
     environment_custody = verify_authorization(contract, read, {name: governed[name] for name in covered})
-    # Reported together, for the reason adopter_conformance_findings reports its
+    # Reported together, for the reason adopter_conformance_classes reports its
     # classes together: the audit runs daily, and anything checked only after a
     # standing finding would never reach the report at all.
+    classes = adopter_conformance_classes(contract, read, repositories, covered, environment_custody)
     findings = [suspension_finding(contract)] if state == "suspended" else []
-    findings += adopter_conformance_findings(contract, read, repositories, covered, environment_custody)
+    findings += [concise_findings(name, items) for name, items in classes if items]
     findings += replacement_workflow_findings(contract, read)
     report = {
         "unpinned_live_fields": unpinned_live_fields(
@@ -1338,6 +1342,11 @@ def audit(contract: dict, read=gh_pages, allow_unschedulable_selection: bool = F
         "governed_repositories": len(governed),
         "armed_repositories": len(covered),
         "state": f"{state}-legacy-selector" if state != "ready" and selector == "legacy" else state,
+        # The item set behind each list finding, named as the finding line names
+        # it, for scripts/audit-finding-state.py to compare (ADR 0189).
+        "finding_classes": [
+            {"class": f"{FINDING_CODE}: {name}", "items": items} for name, items in classes
+        ],
     }
     if findings:
         raise AuditFindings(findings, report)
@@ -1453,7 +1462,7 @@ def main() -> int:
             print(json.dumps(error.report, sort_keys=True, separators=(",", ":")))
         findings = error.findings if isinstance(error, AuditFindings) else (str(error),)
         for finding in findings:
-            print(f"ERROR: authorization-arm-rollout-not-ready: {finding}", file=sys.stderr)
+            print(f"ERROR: {FINDING_CODE}: {finding}", file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0

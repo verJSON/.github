@@ -22,6 +22,12 @@ SPEC = importlib.util.spec_from_file_location("ai_review_required_workflow_audit
 AUDIT = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(AUDIT)
+STATE_SPEC = importlib.util.spec_from_file_location(
+    "audit_finding_state", ROOT / "scripts/audit-finding-state.py"
+)
+STATE = importlib.util.module_from_spec(STATE_SPEC)
+assert STATE_SPEC.loader is not None
+STATE_SPEC.loader.exec_module(STATE)
 
 # The generated caller family an armed adopter is expected to carry. Held here
 # rather than derived from the contract so a contract that forgets the set fails
@@ -557,6 +563,49 @@ jobs:
         self.assertEqual(alone, [suspension])
         self.assertEqual(len(beside_consumer_drift), 2)
         self.assertIn(suspension, beside_consumer_drift)
+
+    def test_a_shrinking_consumer_drift_beside_the_suspension_is_an_improved_match(self):
+        # The suspension is a constant line compared by exact text; the #1810
+        # class is compared by its recorded item set. Each must adjudicate on its
+        # own while both are reported (ADR 0189 2026-10-21 amendment, ADR 0254).
+        incomplete = "armed adopters with an incomplete generated adopter caller set"
+        recorded_items = sorted([
+            "Verjson/alpha:.github/workflows/ai-review-label-rearm.yml",
+            "Verjson/beta:.github/workflows/ai-review-label-rearm.yml",
+        ])
+        recorded = f"authorization-arm-rollout-not-ready: {AUDIT.concise_findings(incomplete, recorded_items)}"
+        suspension = f"authorization-arm-rollout-not-ready: {AUDIT.suspension_finding(self.contract)}"
+        entries = [
+            STATE.validated_entry({
+                "expires": "2999-01-01",
+                "finding": suspension,
+                "fingerprint": STATE.fingerprint(suspension),
+                "issue": 1933,
+                "reason": "suspended under the owner hold",
+            }, "ai-review-arm", 0),
+            STATE.validated_entry({
+                "expires": "2999-01-01",
+                "finding": recorded,
+                "finding_class": f"authorization-arm-rollout-not-ready: {incomplete}",
+                "fingerprint": STATE.fingerprint(recorded),
+                "issue": 1810,
+                "items": recorded_items,
+                "reason": "consumer drift",
+            }, "ai-review-arm", 1),
+        ]
+        self.enter_suspended_state()
+        self.remove_adopter_caller("Verjson/beta", ".github/workflows/ai-review-label-rearm.yml")
+        status, stdout, stderr = self.run_main()
+        findings = [match.group(1) for match in map(STATE.FINDING_LINE.match, stderr.splitlines()) if match]
+        state = STATE.adjudicate(findings, entries, date(2026, 11, 3), STATE.finding_classes(stdout, findings))
+        self.assertEqual(status, 1)
+        self.assertEqual(state["verdict"], "match", state)
+        self.assertEqual(state["new"], [])
+        self.assertEqual(state["stale"], [])
+        self.assertEqual(
+            [(item["issue"], item["recorded_items"], item["observed_items"]) for item in state["improved"]],
+            [(1810, 2, 1)],
+        )
 
     def test_the_shipped_suspension_expectation_is_the_line_the_audit_reports(self):
         # Remove this test with the entry once #1933 restores enforcement: the
@@ -2062,6 +2111,44 @@ jobs:
             sorted(callers["admission"] + callers["completeness"]),
             sorted(ADOPTER_CALLERS),
         )
+
+    def test_every_evaluated_adopter_class_is_reported_with_its_items_even_when_empty(self):
+        # ADR 0189 relaxes a shrinking item set only on positive evidence: a
+        # class that is absent from the report was not evaluated, so only an
+        # empty list may read as "this class has no item left".
+        self.remove_adopter_caller("Verjson/beta", ".github/workflows/ai-review-label-rearm.yml")
+        with self.assertRaises(AUDIT.AuditFindings) as caught:
+            AUDIT.audit(self.contract, self.read)
+        classes = {record["class"]: record["items"] for record in caught.exception.report["finding_classes"]}
+        prefix = "authorization-arm-rollout-not-ready: "
+        self.assertEqual(len(classes), 5)
+        self.assertTrue(all(name.startswith(prefix) for name in classes))
+        incomplete = prefix + "armed adopters with an incomplete generated adopter caller set"
+        self.assertEqual(classes.pop(incomplete), ["Verjson/beta:.github/workflows/ai-review-label-rearm.yml"])
+        self.assertEqual(set(map(tuple, classes.values())), {()})
+
+    def test_each_finding_reaches_the_adjudicator_on_its_own_line_bound_to_its_items(self):
+        self.remove_adopter_caller("Verjson/alpha", ".github/workflows/ai-review-merge.yml")
+        self.remove_adopter_caller("Verjson/beta", ".github/workflows/ai-review-label-rearm.yml")
+        status, stdout, stderr = self.run_main()
+        self.assertEqual(status, 1)
+        findings = [line.removeprefix("ERROR: ") for line in stderr.splitlines()]
+        self.assertEqual(len(findings), 2, stderr)
+        classes = STATE.finding_classes(stdout, findings)
+        bound = sorted(record["finding"] for record in classes.values() if record["finding"])
+        self.assertEqual(bound, sorted(findings))
+
+    def test_a_conforming_report_states_every_adopter_class_empty(self):
+        status, stdout, stderr = self.run_main()
+        self.assertEqual(status, 0, stderr)
+        classes = STATE.finding_classes(stdout, [])
+        self.assertEqual(len(classes), 5)
+        self.assertEqual({tuple(record["items"]) for record in classes.values()}, {()})
+
+    def test_the_audit_and_the_adjudicator_compute_one_item_digest(self):
+        items = [f"Verjson/repo-{index:02}:caller" for index in range(10)]
+        finding = AUDIT.concise_findings("name", list(reversed(items)))
+        self.assertTrue(finding.endswith(f" items=sha256:{STATE.items_digest(items)}"))
 
     def test_a_disabled_admission_caller_is_reported_as_undispatchable(self):
         # `gate-rearm.yml` dispatches the review lane into the adopter. A
