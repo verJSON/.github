@@ -72,9 +72,18 @@ is the same reason concurrency already belongs to the caller (ADR 0238).
   in step with its `uses:` pin. Hand-written callers keep their current behavior.
 - The aggregate still runs under `always()` on a ready or pushed run, so an
   expected level that skipped fails it.
-- Between a ready event and its run creating jobs, GitHub's native required-check
-  evaluation sees the draft's skipped `test-levels` as passing. The merge gate
-  treats the unfinished ready run as pending (ADR 0229).
+- For a multi-level caller, GitHub's native required-check evaluation can see the
+  draft's skipped `test-levels` as passing for the whole ready run. `test-levels`
+  needs every level, and its new check run may not exist until they finish. Only
+  the organization merge gate (ADR 0229), itself a required check, keeps that
+  window closed: it treats the unfinished ready run as pending. A merge that
+  bypasses the gate could land before any level ran. The single-job caller has no
+  such window, because its required `ci / build-test` is never reported on a draft.
+- This departs from ADR 0223 in two ways. Levels that ADR 0223 would run on drafts
+  as Tier 1, such as `lint`, are deferred too, since the generated plan cannot tell
+  light levels from heavy ones. `converted_to_draft` does not cancel a ready run in
+  progress, which spends those minutes so a ready run is never cancelled into a red
+  required check (verjson-agents#457).
 - A pull request that goes ready, then draft, then ready again on one head runs
   the plan a second time. The second run waits for the first instead of
   cancelling it. This trades duplicate minutes in a rare sequence for never

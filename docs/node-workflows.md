@@ -572,7 +572,9 @@ Without `--levels` the output is the single `ci` job, so the required context st
   of a required context, while a draft-time failure would stay on the head after the
   ready run passed ([ADR 0253](decisions/0253-generated-node-ci-callers-defer-drafts/README.md)).
   The single-job caller follows the same rule, and its `ci / build-test` is not reported
-  on a draft.
+  on a draft. A multi-level caller's draft does report a skipped `test-levels`, which
+  native protection may count as passing until the ready run's `test-levels` reports;
+  the required organization merge gate (ADR 0229) is what holds the merge until then.
 - **Errors.** Invalid files exit 1 with one `code path: message` line per error.
 
 ## Publishing a contract-selected release

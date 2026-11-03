@@ -1225,6 +1225,12 @@ class ExpressionSyntaxTests(unittest.TestCase):
             Evaluator(bindings).evaluate(
                 "${{ !github.event.pull_request.draft && github.event_name == 'pull_request' }}"))
 
+    def test_a_leading_negation_inverts_a_true_operand(self):
+        bindings = {'github.event.pull_request.draft': True, 'github.event_name': 'pull_request'}
+        self.assertFalse(
+            Evaluator(bindings).evaluate(
+                "${{ !github.event.pull_request.draft && github.event_name == 'pull_request' }}"))
+
 
 class FromJsonSemanticsTests(unittest.TestCase):
     def test_raw_context_string_equality_is_case_insensitive(self):
