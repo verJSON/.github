@@ -135,6 +135,57 @@ else
   fail "canonical event sets overlap or lifecycle re-arm caller contract drifted"
 fi
 
+# In a consumer `./.github/workflows/gate-rearm.yml` is its own generated
+# caller, which since #1665 subscribes only to head transitions. The pinned
+# lifecycle caller delivers the remaining events straight to the immutable
+# canonical arm, independent of that local caller (#1982).
+pinned_lifecycle_caller="$tmp/pinned-ai-review-lifecycle-rearm.yml"
+if [ ! -x "$lifecycle_generator" ]; then
+  fail "AI review lifecycle re-arm caller generator missing or not executable"
+elif ! "$lifecycle_generator" "$contract_sha" >"$pinned_lifecycle_caller" 2>"$tmp/pinned-lifecycle.err"; then
+  fail "lifecycle re-arm caller generator rejected a valid contract SHA: $(cat "$tmp/pinned-lifecycle.err")"
+elif python3 - "$pinned_lifecycle_caller" "$contract_sha" <<'PY'
+import sys
+import yaml
+
+path, sha = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    doc = yaml.load(stream, Loader=yaml.BaseLoader)
+
+assert doc == {
+    "name": "AI review lifecycle re-arm",
+    "on": {
+        "pull_request_target": {
+            "types": ["ready_for_review", "converted_to_draft", "edited", "unlabeled"],
+        },
+    },
+    "permissions": {"actions": "read", "contents": "read"},
+    "jobs": {
+        "rearm": {
+            "permissions": {
+                "actions": "write",
+                "checks": "write",
+                "contents": "read",
+                "issues": "write",
+                "pull-requests": "write",
+            },
+            "uses": f"Verjson/.github/.github/workflows/gate-rearm.yml@{sha}",
+            "secrets": "inherit",
+            "with": {"ai_review_environment": "ai-review-app"},
+        },
+    },
+}, doc
+PY
+then
+  pass "pinned lifecycle caller delivers lifecycle events to the immutable canonical arm"
+else
+  fail "pinned lifecycle caller triggers, permissions, or immutable target drifted"
+fi
+grep -qxF "# scripts/gen-ai-review-lifecycle-rearm-caller.sh $contract_sha > .github/workflows/ai-review-lifecycle-rearm.yml" \
+  "$pinned_lifecycle_caller" \
+  && pass "pinned lifecycle caller records an exact reproducible command" \
+  || fail "pinned lifecycle caller lacks exact regeneration provenance"
+
 for invalid_ref in main v1 '' \
   0123456789abcdef0123456789abcdef0123456 \
   '0123456789abcdef0123456789abcdef01234567
@@ -143,6 +194,18 @@ jobs: {}'; do
     && fail "generator accepted mutable, malformed, or injected ref '$invalid_ref'" \
     || pass "generator rejects unsafe ref '${invalid_ref:-<empty>}'"
 done
+for invalid_ref in main v1 '' \
+  0123456789abcdef0123456789abcdef0123456 \
+  0123456789ABCDEF0123456789ABCDEF01234567 \
+  '0123456789abcdef0123456789abcdef01234567
+jobs: {}'; do
+  "$lifecycle_generator" "$invalid_ref" >"$tmp/rejected.yml" 2>/dev/null \
+    && fail "lifecycle generator accepted mutable, malformed, or injected ref '$invalid_ref'" \
+    || pass "lifecycle generator rejects unsafe ref '${invalid_ref:-<empty>}'"
+done
+"$lifecycle_generator" "$contract_sha" extra >"$tmp/rejected.yml" 2>/dev/null \
+  && fail "lifecycle generator ignored an extra argument" \
+  || pass "lifecycle generator rejects extra arguments"
 "$generator" "$contract_sha" extra >"$tmp/rejected.yml" 2>/dev/null \
   && fail "generator ignored an extra argument" \
   || pass "generator rejects extra arguments"
