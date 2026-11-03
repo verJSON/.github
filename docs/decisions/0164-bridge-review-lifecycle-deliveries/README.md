@@ -96,3 +96,29 @@ audit's rollout contract lists the lifecycle caller in its completeness set, so 
 adopter that lacks it is reported rather than silently degraded. It is not an admission
 caller. A read-only enumeration on 2026-11-03 found the file in 9 of the 32
 `verjson-core-checks=enforced` repositories, all in the `--local` form.
+
+This amendment supersedes three statements in *Decision* above, which recorded the
+pre-#1663 design and were never revised when #1663 and #1665 split the callers:
+
+- extending `ai-review-label-rearm.yml` to deliver `ready_for_review`,
+  `converted_to_draft`, `edited` and `unlabeled` — the label caller now delivers only
+  `labeled`, and `ai-review-lifecycle-rearm.yml` delivers the four lifecycle activities;
+- keeping that one caller path stable — receipt verification and orphan recovery now
+  authenticate both paths, each bound to its own permitted events
+  (`gate-rearm.yml` `local_delivery_path`);
+- generating the consumer caller with `scripts/gen-ai-review-label-rearm-caller.sh` —
+  the lifecycle caller comes from `scripts/gen-ai-review-lifecycle-rearm-caller.sh` at
+  the same reviewed immutable contract SHA.
+
+The source binding, live draft/hold checks, recovery and rollout statements are unchanged.
+
+Requiring the caller from every armed adopter widens a known exposure. `gate-rearm.yml`
+declares its `ai-review-arm-<PR>` concurrency group at workflow level, so every
+delivered `edited` event joins that group when its run is created, before the
+`event-policy` job reads `changes.title.from` and skips a body-only or base-only edit.
+GitHub keeps one pending run per group, so such an edit can displace a pending required
+arm run, which concludes `cancelled` (the first 2026-10-15 amendment of
+[ADR 0226](../0226-superseded-cancelled-check-runs-do-not-block-admission/README.md)).
+That exposure already exists wherever the `--local` caller is installed; the remedy
+belongs to the open same-group arbitration gap in
+[#1905](https://github.com/Verjson/.github/issues/1905) and is not changed here.
