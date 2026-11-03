@@ -342,6 +342,16 @@ class ActionsPausedDriftTest(unittest.TestCase):
             "organization ruleset 21750617 must target exactly verjson-authn (12)", result.stderr
         )
 
+    def test_repository_relaxation_inherited_from_the_organization_fails_closed(self):
+        world = default_world()
+        responses = build_responses(world)
+        responses["repos/Verjson/verjson-ai/rulesets/21551883"][0]["source_type"] = "Organization"
+
+        result, _ = self.run_audit(world, responses=responses)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("ruleset 21551883 must be a Repository ruleset of verjson-ai", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

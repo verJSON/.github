@@ -219,7 +219,16 @@ def read_relaxation(organization: str, relaxation: dict, repository_id: int):
                 f"organization ruleset {ruleset_id} must target exactly {name} ({repository_id})"
             )
         return ruleset
-    return gh_json_object(f"repos/{organization}/{name}/rulesets/{ruleset_id}")
+    ruleset = gh_json_object(f"repos/{organization}/{name}/rulesets/{ruleset_id}")
+    # The repository endpoint also returns inherited organization rulesets.
+    source = ruleset.get("source")
+    if (
+        ruleset.get("source_type") != "Repository"
+        or not isinstance(source, str)
+        or source.casefold() != f"{organization}/{name}".casefold()
+    ):
+        raise AuditDataError(f"ruleset {ruleset_id} must be a Repository ruleset of {name}")
+    return ruleset
 
 
 def main(arguments: list[str] | None = None) -> int:
