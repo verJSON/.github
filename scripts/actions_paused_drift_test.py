@@ -292,6 +292,16 @@ class ActionsPausedDriftTest(unittest.TestCase):
         self.assertIn("paused=2 enabled=2 relaxations=2", result.stdout)
         self.assertFalse([path for path in calls if "/ungoverned/" in path])
 
+    def test_actions_permissions_without_a_boolean_enabled_fails_closed(self):
+        world = default_world()
+        responses = build_responses(world)
+        responses["repos/Verjson/verjson-editor/actions/permissions"] = [{"sha_pinning_required": False}]
+
+        result, _ = self.run_audit(world, responses=responses)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("repos/Verjson/verjson-editor/actions/permissions.enabled must be a boolean", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

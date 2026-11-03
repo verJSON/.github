@@ -186,7 +186,10 @@ def read_repositories(organization: str):
 
 def read_actions_enabled(organization: str, name: str):
     path = f"repos/{organization}/{name}/actions/permissions"
-    return gh_json_object(path).get("enabled")
+    enabled = gh_json_object(path).get("enabled")
+    if not isinstance(enabled, bool):
+        raise AuditDataError(f"{path}.enabled must be a boolean")
+    return enabled
 
 
 def read_branch_ruleset_ids(organization: str, name: str, branch: str):
