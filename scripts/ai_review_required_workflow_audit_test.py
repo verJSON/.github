@@ -50,6 +50,7 @@ RENDER_FLAGS = (
 SHIPPED_ARM_RUNNER = yaml.safe_load(
     (ROOT / ".github/workflows/gate-rearm.yml").read_text(encoding="utf-8"),
 )["jobs"]["arm"]["runs-on"]
+RUNNER_ROUTING_FINDING = "required arm does not use the reviewed runner routing"
 PRIVATE_KEY = "AI_REVIEW_APP_PRIVATE_KEY"
 ORGANIZATION_SECRETS = "orgs/Verjson/actions/secrets?per_page=100"
 
@@ -1663,7 +1664,28 @@ jobs:
                 self.arm_with_runner(routing)
                 with self.assertRaises(AUDIT.AuditFindings) as caught:
                     AUDIT.audit(self.contract, self.read)
-                self.assertEqual(caught.exception.findings, ("required arm is not routed through the trusted lane",))
+                self.assertEqual(caught.exception.findings, (RUNNER_ROUTING_FINDING,))
+
+    def test_a_suspended_audit_reports_runner_routing_drift_on_its_own_line(self):
+        suspension = f"authorization-arm-rollout-not-ready: {AUDIT.suspension_finding(self.contract)}"
+        routing = f"authorization-arm-rollout-not-ready: {RUNNER_ROUTING_FINDING}"
+        self.enter_suspended_state()
+        self.arm_with_runner(lambda _: "ubuntu-24.04")
+        _, _, stderr = self.run_main()
+        observed = [
+            match.group(1)
+            for match in map(STATE.FINDING_LINE.match, stderr.splitlines())
+            if match
+        ]
+        state = STATE.adjudicate(
+            observed,
+            [{"fingerprint": STATE.fingerprint(suspension), "expires": date(2026, 12, 3)}],
+            date(2026, 11, 3),
+        )
+        self.assertEqual(observed, [suspension, routing])
+        self.assertEqual(state["expected"], [STATE.fingerprint(suspension)])
+        self.assertEqual(state["stale"], [])
+        self.assertEqual(state["new"], [STATE.fingerprint(routing)])
 
     def test_replacement_requires_supported_trigger_nonveto_and_trusted_lane(self):
         self.workflow_source(self.workflow.replace("  pull_request_target:\n", "  workflow_dispatch:\n"))
@@ -1673,7 +1695,7 @@ jobs:
         self.assert_audit_error("can veto ADR 0090")
         self.fixture = self.make_fixture()
         self.workflow_source(self.workflow.replace("CI_LANE_TRUSTED", "CI_LANE_PRIVILEGED"))
-        self.assert_audit_error("not routed through the trusted lane")
+        self.assert_audit_error(RUNNER_ROUTING_FINDING)
 
     def assert_contract_rejected(self, mutate, diagnostic):
         contract = copy.deepcopy(self.contract)

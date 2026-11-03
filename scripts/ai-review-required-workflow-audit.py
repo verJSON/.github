@@ -1175,12 +1175,14 @@ def verify_selected_workflow_is_schedulable(carrier: dict, read) -> None:
     )
 
 
-# The arm job's reviewed `runs-on`, exactly as #1927 merged it at 24db445f (the
-# SHA ruleset 20722935 pins): public pull-request events run on one hosted
-# image, everything else on the trusted lane. Pinned, not read back from the
-# workflow, because the workflow is what this check reviews; any other value,
-# including a wider label set or the hosted image for private repositories,
-# is drift.
+# The arm job's reviewed `runs-on`. It matches the gate-rearm.yml that main
+# ships, which is also the revision ruleset 20722935 pins (24db445f, #1927,
+# ADR 0235's 2026-10-27 amendment): public pull-request events run on one
+# hosted image, everything else on the trusted lane. The audit reads the
+# replacement from main and compares it with this constant; it does not read
+# the pinned revision. Pinned here rather than read back from the workflow,
+# because the workflow is what this check reviews. Any other value, including
+# a wider label set or the hosted image for private repositories, is drift.
 REVIEWED_ARM_RUNNER = (
     "${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' "
     "|| github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' "
@@ -1201,7 +1203,7 @@ def replacement_workflow_findings(contract: dict, read) -> list[str]:
         for conforms, message in (
             (isinstance(triggers, dict) and "pull_request_target" in triggers, "replacement lacks pull_request_target"),
             (arm.get("continue-on-error") == "true", "replacement can veto ADR 0090 human merges"),
-            (arm.get("runs-on") == REVIEWED_ARM_RUNNER, "required arm is not routed through the trusted lane"),
+            (arm.get("runs-on") == REVIEWED_ARM_RUNNER, "required arm does not use the reviewed runner routing"),
         )
         if not conforms
     ]

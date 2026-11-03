@@ -77,8 +77,12 @@ on 2026-11-03. This ADR records that decision.
 
 7. **Folded contract updates.** Two reviewed changes had landed while the audit
    could not see past `main-protection`: ADR 0252's Actions-paused excludes
-   (item 6) and the arm job's `runs-on` routing that #1927 merged at
-   `24db445f`, the SHA ruleset 20722935 pins. This change folds both into the
+   (item 6) and the arm job's `runs-on` routing that
+   [#1927](https://github.com/verJSON/.github/pull/1927) merged at `24db445f`,
+   the revision ruleset 20722935 pins. That routing sends public pull-request
+   events to a literal hosted image and was approved by
+   [ADR 0235](../0235-public-pull-request-code-uses-ephemeral-runners/README.md)'s
+   2026-10-27 amendment (#1831). This change folds both into the
    audit's pins so that the first full run reports real drift, not stale
    contract values.
 
