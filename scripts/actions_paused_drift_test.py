@@ -204,6 +204,19 @@ class ActionsPausedDriftTest(unittest.TestCase):
             result.stderr,
         )
 
+    def test_paused_repository_outside_the_baseline_ruleset_is_drift(self):
+        world = default_world()
+        world["repositories"]["verjson-editor"]["baseline"] = False
+
+        result, _ = self.run_audit(world)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "ERROR: verjson-editor is verjson-actions-state=paused but its default branch "
+            "main is not governed by the paused baseline ruleset 26466984",
+            result.stderr,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
