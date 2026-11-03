@@ -73,3 +73,26 @@ remains separate rollout evidence, not something the local condition test proves
 References: [#1275](https://github.com/Verjson/.github/issues/1275),
 [job conditions and runner assignment](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts),
 [reusable workflow concurrency](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations).
+
+## Amendment (2026-11-03) — generate the consumer lifecycle caller at a contract SHA (#1982)
+
+[#1663](https://github.com/Verjson/.github/issues/1663) narrowed the label caller to
+`labeled` and moved the four lifecycle activities to a separate
+`ai-review-lifecycle-rearm.yml`, whose generator accepted only `--local`;
+[#1665](https://github.com/Verjson/.github/issues/1665) then made the generated consumer
+`gate-rearm.yml` a reusable caller subscribed only to the three head transitions. A
+consumer regenerating at current `main` therefore had no generated delivery for
+`ready_for_review`, `converted_to_draft`, `edited` or `unlabeled`, which is the
+invariant this ADR records. Found while regenerating `verjson-identity-contracts`.
+
+`scripts/gen-ai-review-lifecycle-rearm-caller.sh <sha>` now emits the consumer caller,
+targeting `Verjson/.github/.github/workflows/gate-rearm.yml@<sha>` directly with the
+label caller's argument contract and thin, explicitly permissioned shape. The receipt
+binding above is unchanged: the arm authenticates the top-level caller path, which is
+the same for either form. A consumer already carrying the `--local` form composes through
+its own generated `gate-rearm.yml` `workflow_call` entry and keeps working; the pinned
+form removes that dependency on the local head-transition caller. The authorization
+audit's rollout contract lists the lifecycle caller in its completeness set, so an armed
+adopter that lacks it is reported rather than silently degraded. It is not an admission
+caller. A read-only enumeration on 2026-11-03 found the file in 9 of the 32
+`verjson-core-checks=enforced` repositories, all in the `--local` form.

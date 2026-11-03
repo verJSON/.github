@@ -135,10 +135,10 @@ else
   fail "canonical event sets overlap or lifecycle re-arm caller contract drifted"
 fi
 
-# A consumer cannot reach `./.github/workflows/gate-rearm.yml` as the hub's
-# reusable bridge, and since #1666 its generated `gate-rearm.yml` no longer
-# subscribes to lifecycle events, so the pinned lifecycle caller is the only
-# path that delivers them to the canonical arm (#1982).
+# In a consumer `./.github/workflows/gate-rearm.yml` is its own generated
+# caller, which since #1665 subscribes only to head transitions. The pinned
+# lifecycle caller delivers the remaining events straight to the immutable
+# canonical arm, independent of that local caller (#1982).
 pinned_lifecycle_caller="$tmp/pinned-ai-review-lifecycle-rearm.yml"
 if [ ! -x "$lifecycle_generator" ]; then
   fail "AI review lifecycle re-arm caller generator missing or not executable"
