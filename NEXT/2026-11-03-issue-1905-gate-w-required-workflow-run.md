@@ -11,5 +11,6 @@ title: Refuse a merge whose required workflow did not succeed on the exact head 
 - A required run created at or before the ruleset's `updated_at` is stale. Every edit to the ruleset therefore ships a re-arm sweep of open enrolled pull requests (`docs/arm-recovery-runbook.md`).
 - Missing, unbound, stale, undated, ambiguous, changed-between-reads, cancelled and not-successful runs all fail closed with exit 3, as does a `workflows` rule whose shape cannot be read. A refused or foreign ruleset read exits 1. A ref with no `workflows` rule is unaffected.
 - Gate W is a precondition only. Merge admission stays with #1945.
+- A contract test pins that the org-required arm never skips or yields to a local caller on `opened`, `reopened` or `synchronize` (F-3): no condition reads the invocation identity, and the arm classifies only the label and lifecycle callers.
 
 Part of #1905.
