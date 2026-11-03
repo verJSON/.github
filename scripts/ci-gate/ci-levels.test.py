@@ -606,6 +606,9 @@ class DraftDeferralTests(unittest.TestCase):
                     "a same-head event must not cancel a running ready run into a red required check",
                 )
 
+    def test_a_new_commit_cancels_the_run_it_supersedes(self):
+        self.assertTrue(self.cancels("synchronize"), "a superseded head's run would keep its runner to the end")
+
     def test_a_pull_request_caller_reruns_when_a_draft_becomes_ready(self):
         triggers = yaml.safe_load(run_generator(SHA).stdout)[True]
         self.assertEqual(
