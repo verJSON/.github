@@ -26,6 +26,7 @@ SPEC.loader.exec_module(AUDIT)
 ADOPTER_CALLERS = (
     ".github/workflows/ai-review-merge.yml",
     ".github/workflows/ai-review-label-rearm.yml",
+    ".github/workflows/ai-review-lifecycle-rearm.yml",
     ".github/workflows/ai-privileged-merge.yml",
     ".github/workflows/ai-promotion-retry.yml",
 )
