@@ -190,6 +190,15 @@ jobs: {}'; do
     && fail "generator accepted mutable, malformed, or injected ref '$invalid_ref'" \
     || pass "generator rejects unsafe ref '${invalid_ref:-<empty>}'"
 done
+for invalid_ref in main v1 '' \
+  0123456789abcdef0123456789abcdef0123456 \
+  0123456789ABCDEF0123456789ABCDEF01234567 \
+  '0123456789abcdef0123456789abcdef01234567
+jobs: {}'; do
+  "$lifecycle_generator" "$invalid_ref" >"$tmp/rejected.yml" 2>/dev/null \
+    && fail "lifecycle generator accepted mutable, malformed, or injected ref '$invalid_ref'" \
+    || pass "lifecycle generator rejects unsafe ref '${invalid_ref:-<empty>}'"
+done
 "$generator" "$contract_sha" extra >"$tmp/rejected.yml" 2>/dev/null \
   && fail "generator ignored an extra argument" \
   || pass "generator rejects extra arguments"
