@@ -9,6 +9,7 @@ import json
 import re
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest import mock
 
@@ -563,6 +564,190 @@ jobs:
         with self.assertRaises(AUDIT.AuditFindings) as caught:
             AUDIT.audit(self.contract, self.read)
         self.assertEqual(caught.exception.report["state"], "suspended-legacy-selector")
+
+    # ARB RUN-D D-3: suspension waives exactly `enforcement`. Everything else
+    # that keeps `split` red keeps `suspended` red too.
+
+    def test_a_suspended_ruleset_with_an_added_bypass_actor_names_the_suspended_image(self):
+        self.enter_suspended_state()
+        self.fixture[self.ruleset_path][0]["bypass_actors"].append(
+            {"actor_id": 5, "actor_type": "Integration", "bypass_mode": "always"},
+        )
+        self.assert_audit_error(
+            r"matches neither reviewed image .* nearest suspended: bypass_actors: expected 4 entries"
+        )
+
+    def test_a_suspended_ruleset_missing_a_protection_rule_is_drift(self):
+        self.enter_suspended_state()
+        live = self.fixture[self.ruleset_path][0]
+        live["rules"] = [rule for rule in live["rules"] if rule["type"] != "non_fast_forward"]
+        self.assert_audit_error(r"matches neither reviewed image .* nearest suspended: rules: expected 4 entries")
+
+    def test_a_suspended_ruleset_with_a_changed_pinned_parameter_is_drift(self):
+        self.enter_suspended_state()
+        self.drift_main_protection()
+        self.assert_audit_error(
+            r"matches neither reviewed image .* nearest suspended: "
+            r"rules\[3\]\.parameters\.required_approving_review_count: 0 is not"
+        )
+
+    def test_an_unpinned_live_key_alone_leaves_the_ruleset_suspended_and_reported(self):
+        # ADR 0188's residual is identical in both states: reported, never drift.
+        self.enter_suspended_state()
+        self.live_pull_request_parameters()["require_extra_approval_for_unattributed_changes"] = True
+        with self.assertRaises(AUDIT.AuditFindings) as caught:
+            AUDIT.audit(self.contract, self.read)
+        self.assertEqual(caught.exception.findings, (AUDIT.suspension_finding(self.contract),))
+        self.assertIn(
+            "main-protection.rules[3].parameters.require_extra_approval_for_unattributed_changes",
+            caught.exception.report["unpinned_live_fields"],
+        )
+
+    def test_an_enforcement_other_than_active_or_disabled_is_never_suspended(self):
+        for enforcement in ("evaluate", "Disabled", "", None):
+            with self.subTest(enforcement=enforcement):
+                self.fixture = self.make_fixture()
+                self.enter_suspended_state()
+                self.fixture[self.ruleset_path][0]["enforcement"] = enforcement
+                self.assert_audit_error(
+                    rf"matches neither reviewed image .* enforcement: {re.escape(repr(enforcement))} is not"
+                )
+
+    def test_the_preimage_with_enforcement_disabled_is_not_suspended(self):
+        # Disabled before the split, the workflows rule is still on main-protection.
+        # Only the reviewed post-split image may be suspended.
+        self.fixture[self.ruleset_path][0]["enforcement"] = "disabled"
+        self.assert_audit_error(
+            r"matches neither reviewed image .* nearest preimage: enforcement: 'disabled' is not 'active'"
+        )
+
+    def test_a_suspended_audit_requires_the_arm_ruleset_to_exist(self):
+        self.enter_suspended_state()
+        self.fixture["orgs/Verjson/rulesets"][0].remove({"id": self.arm_id})
+        self.assert_audit_error(r"must have exactly one arm ruleset, found \[\]")
+
+    def test_a_suspended_audit_rejects_a_duplicated_arm_ruleset(self):
+        self.enter_suspended_state()
+        self.fixture["orgs/Verjson/rulesets"][0].append({"id": 4343})
+        self.fixture["orgs/Verjson/rulesets/4343"] = [{"id": 4343, **copy.deepcopy(self.contract["arm_ruleset"])}]
+        self.assert_audit_error(r"must have exactly one arm ruleset, found \[4242, 4343\]")
+
+    def test_a_suspended_audit_rejects_a_drifted_arm_ruleset(self):
+        self.enter_suspended_state()
+        self.fixture[f"orgs/Verjson/rulesets/{self.arm_id}"][0]["enforcement"] = "evaluate"
+        self.assert_audit_error("arm ruleset drifted from both reviewed selector images")
+
+    def test_a_suspended_audit_rejects_another_ruleset_requiring_the_arm_workflow(self):
+        self.enter_suspended_state()
+        self.fixture["orgs/Verjson/rulesets"][0].append({"id": 99})
+        self.fixture["orgs/Verjson/rulesets/99"] = [{"id": 99, "name": "elsewhere", "rules": [{
+            "type": "workflows",
+            "parameters": {"workflows": [{"path": self.contract["replacement_path"]}]},
+        }]}]
+        self.assert_audit_error(r"workflow identities are not exclusive: \[\(4242, .*\), \(99, ")
+
+    def test_a_suspended_audit_rejects_another_ruleset_requiring_the_arm_status(self):
+        self.enter_suspended_state()
+        self.fixture["orgs/Verjson/rulesets"][0].append({"id": 99})
+        self.fixture["orgs/Verjson/rulesets/99"] = [{"id": 99, "name": "elsewhere", "rules": [{
+            "type": "required_status_checks",
+            "parameters": {"required_status_checks": [{"context": "AI review authorization"}]},
+        }]}]
+        self.assert_audit_error(r"status is also required: \[\(99, 'AI review authorization'\)\]")
+
+    def prerequisite_failures(self):
+        """Each later fail-fast check, broken alone, and the first two broken together."""
+        def unschedulable():
+            self.workflow_source("name: x\non:\n  workflow_call:\njobs:\n  arm:\n    steps: []\n")
+
+        def without_deterministic_ci():
+            rows = self.fixture["orgs/Verjson/properties/values?per_page=100"][0]
+            beta = next(row for row in rows if row["repository_full_name"] == "Verjson/beta")
+            beta["properties"] = [
+                {"property_name": "verjson-stack", "value": "helm"},
+                {"property_name": "verjson-core-checks", "value": "enforced"},
+                {"property_name": "verjson-ai-authorization", "value": "enforced"},
+            ]
+
+        def shadowed():
+            self.fixture["repos/Verjson/alpha/actions/secrets?per_page=100"][0]["secrets"] = [
+                {"name": PRIVATE_KEY},
+            ]
+
+        def unreachable_variable():
+            self.select_scope("variables", "AI_REVIEW_APP_ID", ["Verjson/beta"])
+
+        def unschedulable_and_shadowed():
+            unschedulable()
+            shadowed()
+
+        return (
+            ("schedulability", unschedulable, r"gate-rearm\.yml.*declares only"),
+            ("deterministic CI", without_deterministic_ci, "without canonical deterministic required CI.*Verjson/beta"),
+            ("shadowing", shadowed, "credential shadowing.*alpha:secret"),
+            ("authorization custody", unreachable_variable, "AI_REVIEW_APP_ID.*missing=1.*Verjson/alpha"),
+            ("fail-fast order", unschedulable_and_shadowed, r"gate-rearm\.yml.*declares only"),
+        )
+
+    def prerequisite_error(self, enter, mutate):
+        self.fixture = self.make_fixture()
+        enter()
+        mutate()
+        with self.assertRaises(AUDIT.AuditError) as caught:
+            AUDIT.audit(self.contract, self.read)
+        return caught.exception
+
+    def test_a_suspended_audit_runs_every_later_check_exactly_as_split_does(self):
+        for name, mutate, guard in self.prerequisite_failures():
+            with self.subTest(check=name):
+                split = self.prerequisite_error(self.enter_split_state, mutate)
+                suspended = self.prerequisite_error(self.enter_suspended_state, mutate)
+                self.assertNotIsInstance(suspended, AUDIT.AuditFindings)
+                self.assertRegex(str(suspended), guard)
+                self.assertEqual(str(suspended), str(split))
+
+    def test_a_suspended_audit_failing_a_prerequisite_never_adjudicates_as_a_match(self):
+        suspension = STATE.fingerprint(
+            f"authorization-arm-rollout-not-ready: {AUDIT.suspension_finding(self.contract)}"
+        )
+        self.enter_suspended_state()
+        self.fixture["repos/Verjson/alpha/actions/secrets?per_page=100"][0]["secrets"] = [{"name": PRIVATE_KEY}]
+        observed = [
+            match.group(1)
+            for match in map(STATE.FINDING_LINE.match, self.run_main()[2].splitlines())
+            if match
+        ]
+        state = STATE.adjudicate(
+            observed,
+            [{"fingerprint": suspension, "expires": date(2026, 12, 3)}],
+            date(2026, 11, 3),
+        )
+        self.assertEqual(state["verdict"], "drift")
+        self.assertEqual(state["stale"], [suspension])
+        self.assertEqual(len(state["new"]), 1)
+        self.assertRegex(observed[0], "credential shadowing.*alpha:secret")
+
+    def test_no_render_mode_runs_from_the_suspended_state(self):
+        suspended = "matches the reviewed suspended image \\(#1933\\)"
+        not_split = "ruleset state is suspended, expected split"
+        modes = (
+            ("render_split_payload", "arm_ruleset", suspended),
+            ("render_arm_ruleset_payload", "arm_ruleset", suspended),
+            ("render_rollback_payload", "arm_ruleset", not_split),
+            ("render_arm_property_schema_payload", "legacy_arm_ruleset", suspended),
+            ("render_arm_property_values_payload", "legacy_arm_ruleset", suspended),
+            ("render_arm_property_ruleset_payload", "legacy_arm_ruleset", suspended),
+            ("render_arm_property_rollback_payload", "arm_ruleset", not_split),
+            ("render_arm_property_unset_values_payload", "legacy_arm_ruleset", not_split),
+        )
+        self.assertEqual({flag for flag, _, _ in modes}, set(RENDER_FLAGS))
+        for flag, arm_image, reason in modes:
+            with self.subTest(flag=flag):
+                self.fixture = self.make_fixture()
+                self.enter_suspended_state(arm_image)
+                status, stdout, stderr = self.run_main(flag)
+                self.assertEqual((status, stdout), (1, ""))
+                self.assertRegex(stderr, f"^ERROR: authorization-arm-rollout-not-ready: .*{reason}")
 
     def test_split_state_requires_the_arm_ruleset_to_exist_and_match(self):
         self.fixture[self.ruleset_path] = [{

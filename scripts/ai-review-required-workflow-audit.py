@@ -625,8 +625,12 @@ def verify_ruleset_state(contract: dict, read, expected: str | None = None) -> t
         # how a key GitHub added looked exactly like a real regression (#1404).
         nearest, mismatches = min(
             (
-                (name, image_mismatches(live, contract[name]))
-                for name in ("preimage", "postimage")
+                (name, image_mismatches(live, image))
+                for name, image in (
+                    ("preimage", contract["preimage"]),
+                    ("postimage", contract["postimage"]),
+                    ("suspended", suspended_image(contract)),
+                )
             ),
             key=lambda candidate: len(candidate[1]),
         )
