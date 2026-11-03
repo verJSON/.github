@@ -994,7 +994,19 @@ class PidfdLauncherIntegrationTests(unittest.TestCase):
             unrelated_source.write_text("int verjson_pidfd_launch(void) { return -987; }\n", encoding="ascii")
             subprocess.run(["/usr/bin/cc", "-std=c11", "-fPIC", "-shared", str(unrelated_source),
                             "-o", unrelated_library], check=True)
-            subprocess.run(["unshare", "--user", "--map-root-user", "--mount", "--pid", "--fork", "--mount-proc",
+            # Ubuntu 24.04 confines user-namespace creation with AppArmor, and a
+            # process inside bwrap runs as bwrap//&unpriv_bwrap with every
+            # capability denied, so neither `unshare --user` nor a nested bwrap can
+            # host the real bwrap this test starts. Root creates only the PID and
+            # mount namespaces; setpriv drops back to this user and execs Python as
+            # PID 1, unconfined, so the nested /usr/bin/bwrap attaches its profile
+            # exactly as the hosted ci-entry-receipts real-bwrap tests do.
+            # Passwordless sudo is part of the provisioned hosted runner contract;
+            # without it this fails loudly rather than skipping.
+            subprocess.run(["sudo", "-n", "/usr/bin/unshare", "--pid", "--fork", "--mount", "--mount-proc",
+                            "--kill-child",
+                            "/usr/bin/setpriv", f"--reuid={os.getuid()}", f"--regid={os.getgid()}",
+                            "--init-groups",
                             "/usr/bin/python3", str(Path(__file__).resolve()), "--inside", library, unrelated_library], check=True)
 
 
