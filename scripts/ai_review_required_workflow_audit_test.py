@@ -30,6 +30,18 @@ ADOPTER_CALLERS = (
     ".github/workflows/ai-privileged-merge.yml",
     ".github/workflows/ai-promotion-retry.yml",
 )
+STATE_SPEC = importlib.util.spec_from_file_location(
+    "audit_finding_state", ROOT / "scripts/audit-finding-state.py",
+)
+STATE = importlib.util.module_from_spec(STATE_SPEC)
+assert STATE_SPEC.loader is not None
+STATE_SPEC.loader.exec_module(STATE)
+RENDER_FLAGS = (
+    "render_split_payload", "render_arm_ruleset_payload", "render_rollback_payload",
+    "render_arm_property_schema_payload", "render_arm_property_values_payload",
+    "render_arm_property_ruleset_payload", "render_arm_property_rollback_payload",
+    "render_arm_property_unset_values_payload",
+)
 PRIVATE_KEY = "AI_REVIEW_APP_PRIVATE_KEY"
 ORGANIZATION_SECRETS = "orgs/Verjson/actions/secrets?per_page=100"
 
@@ -267,6 +279,52 @@ jobs:
             "id": self.arm_id, **copy.deepcopy(self.contract[arm_image]),
         }]
 
+    def enter_suspended_state(self, arm_image="arm_ruleset"):
+        """Stub the split with main-protection disabled under the owner hold (#1933)."""
+        self.enter_split_state_with(arm_image)
+        self.fixture[self.ruleset_path][0]["enforcement"] = "disabled"
+
+    def run_main(self, flag=None):
+        """Run the CLI against the fixture; return its status, stdout, and stderr."""
+        audit = AUDIT.audit
+        render = AUDIT.render_payload
+        render_property = AUDIT.render_property_migration_payload
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(AUDIT, "parse_args", return_value=argparse.Namespace(**{
+                name: name == flag for name in RENDER_FLAGS
+            })),
+            mock.patch.object(AUDIT, "read_contract", return_value=self.contract),
+            # The renderers call `audit` through the module too, with their own
+            # `read` and flags; only main's bare call is rebound to the fixture.
+            mock.patch.object(
+                AUDIT,
+                "audit",
+                side_effect=lambda contract, read=None, **flags: audit(contract, read or self.read, **flags),
+            ),
+            mock.patch.object(
+                AUDIT, "render_payload", side_effect=lambda contract, mode: render(contract, mode, self.read),
+            ),
+            mock.patch.object(
+                AUDIT,
+                "render_property_migration_payload",
+                side_effect=lambda contract, mode: render_property(contract, mode, self.read),
+            ),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            status = AUDIT.main()
+        return status, stdout.getvalue(), stderr.getvalue()
+
+    def reported_fingerprints(self):
+        """Fingerprint each finding line exactly as the scheduled adjudicator reads it."""
+        _, _, stderr = self.run_main()
+        return [
+            STATE.fingerprint(match.group(1))
+            for match in map(STATE.FINDING_LINE.match, stderr.splitlines())
+            if match
+        ]
+
     def read(self, path, allow_missing=False):
         if path not in self.fixture:
             if allow_missing:
@@ -460,6 +518,51 @@ jobs:
         report = AUDIT.audit(self.contract, self.read)
         self.assertEqual(report["state"], "split")
         self.assertEqual(report["current_path"], ".github/workflows/gate-rearm.yml")
+
+    def test_a_suspended_protection_ruleset_is_reported_by_its_constant_finding(self):
+        self.enter_suspended_state()
+        with self.assertRaises(AUDIT.AuditFindings) as caught:
+            AUDIT.audit(self.contract, self.read)
+        self.assertEqual(
+            str(caught.exception),
+            "main-protection (18098028) matches the reviewed suspended image (#1933)",
+        )
+
+    def test_a_suspended_protection_ruleset_reports_the_suspended_state(self):
+        self.enter_suspended_state()
+        with self.assertRaises(AUDIT.AuditFindings) as caught:
+            AUDIT.audit(self.contract, self.read)
+        self.assertEqual(caught.exception.report["state"], "suspended")
+
+    def test_the_suspension_fingerprint_does_not_depend_on_the_consumer_drift_finding(self):
+        # The #1810 finding comes and goes as adopters regenerate. Joined onto one
+        # line, every such change would also re-fingerprint the suspension and
+        # turn its reviewed expectation stale (ARB RUN-D, D-2).
+        suspension = STATE.fingerprint(
+            f"authorization-arm-rollout-not-ready: {AUDIT.suspension_finding(self.contract)}"
+        )
+        self.enter_suspended_state()
+        alone = self.reported_fingerprints()
+        self.remove_adopter_caller("Verjson/beta", ".github/workflows/ai-review-label-rearm.yml")
+        beside_consumer_drift = self.reported_fingerprints()
+        self.assertEqual(alone, [suspension])
+        self.assertEqual(len(beside_consumer_drift), 2)
+        self.assertIn(suspension, beside_consumer_drift)
+
+    def test_the_shipped_suspension_expectation_is_the_line_the_audit_reports(self):
+        # Remove this test with the entry once #1933 restores enforcement: the
+        # scheduled run then reports the entry stale until both are gone.
+        entries = STATE.read_expectations(ROOT / "config/audit-expected-findings.json", "ai-review-arm")
+        recorded = [entry["finding"] for entry in entries if entry["issue"] == 1933]
+        self.assertEqual(recorded, [
+            f"authorization-arm-rollout-not-ready: {AUDIT.suspension_finding(AUDIT.read_contract())}",
+        ])
+
+    def test_a_suspended_legacy_selector_is_named_in_the_report_state(self):
+        self.enter_suspended_state("legacy_arm_ruleset")
+        with self.assertRaises(AUDIT.AuditFindings) as caught:
+            AUDIT.audit(self.contract, self.read)
+        self.assertEqual(caught.exception.report["state"], "suspended-legacy-selector")
 
     def test_split_state_requires_the_arm_ruleset_to_exist_and_match(self):
         self.fixture[self.ruleset_path] = [{
@@ -1060,7 +1163,12 @@ jobs:
             contextlib.redirect_stderr(stderr),
         ):
             self.assertEqual(AUDIT.main(), 1)
-        self.assertEqual(stderr.getvalue(), f"ERROR: authorization-arm-rollout-not-ready: {message}\n")
+        # One line per finding, each adjudicated on its own (ADR 0189, ARB RUN-D D-2).
+        self.assertEqual(stderr.getvalue(), "".join(
+            f"ERROR: authorization-arm-rollout-not-ready: {finding}\n"
+            for finding in caught.exception.findings
+        ))
+        self.assertEqual(len(caught.exception.findings), 2)
         self.assertEqual(json.loads(stdout.getvalue()), caught.exception.report)
 
     def test_a_render_that_meets_findings_writes_no_payload(self):
@@ -1379,6 +1487,23 @@ jobs:
             contract["postimage"]["conditions"]["repository_name"]["include"] = ["verjson-leads"]
         self.assert_contract_rejected(narrow_scope, "beyond removing the workflows rule")
 
+    def test_a_contract_may_not_declare_its_own_suspended_image(self):
+        # The suspended image is derived from the postimage. A declared one would
+        # be a second, hand-written source a reviewer has to diff by eye.
+        def declare(contract):
+            contract["suspended"] = copy.deepcopy(contract["postimage"])
+            contract["suspended"]["enforcement"] = "disabled"
+        self.assert_contract_rejected(declare, "suspended image is derived from the postimage, never declared")
+
+    def test_a_disabled_reviewed_protection_image_is_rejected(self):
+        # Were the reviewed images themselves disabled, the derived suspended
+        # image would equal the postimage and a disabled ruleset would read as
+        # `split`. Suspension has to stay a named, distinct state (ARB RUN-D D-1).
+        def disable(contract):
+            for name in ("preimage", "postimage", "rollback_payload"):
+                contract[name]["enforcement"] = "disabled"
+        self.assert_contract_rejected(disable, "protection images must be active")
+
     def test_the_arm_may_not_be_scoped_by_name_or_to_the_wrong_property(self):
         # Scoping the arm by name would re-create the ~ALL hazard the split
         # exists to remove, and silently decouple it from deterministic CI.
@@ -1592,8 +1717,9 @@ jobs:
         # predicted from the pin skew.
         self.remove_adopter_caller("Verjson/alpha", ".github/workflows/ai-review-merge.yml")
         self.remove_adopter_caller("Verjson/beta", ".github/workflows/ai-review-label-rearm.yml")
-        message = self.audit_error_message()
-        blocked, incomplete = (part.strip() for part in message.split(" | ")[:2])
+        with self.assertRaises(AUDIT.AuditFindings) as caught:
+            AUDIT.audit(self.contract, self.read)
+        blocked, incomplete = caught.exception.findings[:2]
         self.assertIn("cannot satisfy the arm", blocked)
         self.assertIn("Verjson/alpha:.github/workflows/ai-review-merge.yml", blocked)
         self.assertNotIn("Verjson/beta", blocked)

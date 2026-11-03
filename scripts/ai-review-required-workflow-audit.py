@@ -52,7 +52,10 @@ class AuditFindings(AuditError):
     """
 
     def __init__(self, findings: list[str], report: dict):
-        super().__init__(" | ".join(findings))
+        super().__init__("\n".join(findings))
+        # Reported one per line, so each is fingerprinted on its own (ADR 0189):
+        # joined, any change to one finding re-keyed every other one with it.
+        self.findings = tuple(findings)
         self.report = report
 
 
@@ -205,6 +208,15 @@ def read_contract(path: Path = CONTRACT) -> dict:
     derived = copy.deepcopy(images["preimage"])
     derived["rules"] = [rule for rule in derived["rules"] if rule.get("type") != "workflows"]
     require(derived == images["postimage"], "postimage changes fields beyond removing the workflows rule")
+    # The postimage inherits this, so the derived suspended image differs from
+    # it in exactly one field and a disabled ruleset can never read as `split`.
+    require(
+        images["preimage"]["enforcement"] == "active",
+        "protection images must be active, so suspension stays a distinct reviewed state",
+    )
+    # The suspended image is derived from the postimage at audit time, so the
+    # one difference it may carry is reviewed in code, not in a contract diff.
+    require("suspended" not in contract, "the suspended image is derived from the postimage, never declared")
 
     arm_name = contract.get("arm_ruleset_name")
     require(isinstance(arm_name, str) and arm_name, "arm ruleset name is invalid")
@@ -580,6 +592,24 @@ def require_reach(read, organization: str, kind: str, name: str, item: dict, gov
     return item
 
 
+def suspended_image(contract: dict) -> dict:
+    """The split postimage with main-protection disabled under the owner hold (#1933).
+
+    Derived, never declared, so the one difference it may carry is the one
+    reviewed here: every other asserted field still has to match the postimage.
+    """
+    image = copy.deepcopy(contract["postimage"])
+    image["enforcement"] = "disabled"
+    return image
+
+
+def suspension_finding(contract: dict) -> str:
+    return (
+        f"{contract['postimage']['name']} ({contract['ruleset_id']}) "
+        "matches the reviewed suspended image (#1933)"
+    )
+
+
 def verify_ruleset_state(contract: dict, read, expected: str | None = None) -> tuple[str, dict]:
     path = f"orgs/{contract['organization']}/rulesets/{contract['ruleset_id']}"
     live = normalize_ruleset(single_object(read, path))
@@ -587,6 +617,8 @@ def verify_ruleset_state(contract: dict, read, expected: str | None = None) -> t
         state = "ready"
     elif matches_image(live, contract["postimage"]):
         state = "split"
+    elif matches_image(live, suspended_image(contract)):
+        state = "suspended"
     else:
         # Name the nearest image and the fields that disagree. "Differs from both"
         # alone sent a reader off to diff two forty-line objects by eye, which is
@@ -1253,7 +1285,8 @@ def audit(contract: dict, read=gh_pages, allow_unschedulable_selection: bool = F
     # Reported together, for the reason adopter_conformance_findings reports its
     # classes together: the audit runs daily, and anything checked only after a
     # standing finding would never reach the report at all.
-    findings = adopter_conformance_findings(contract, read, repositories, covered, environment_custody)
+    findings = [suspension_finding(contract)] if state == "suspended" else []
+    findings += adopter_conformance_findings(contract, read, repositories, covered, environment_custody)
     findings += replacement_workflow_findings(contract, read)
     report = {
         "unpinned_live_fields": unpinned_live_fields(
@@ -1269,7 +1302,7 @@ def audit(contract: dict, read=gh_pages, allow_unschedulable_selection: bool = F
         "replacement_path": contract["replacement_path"],
         "governed_repositories": len(governed),
         "armed_repositories": len(covered),
-        "state": "split-legacy-selector" if state == "split" and selector == "legacy" else state,
+        "state": f"{state}-legacy-selector" if state != "ready" and selector == "legacy" else state,
     }
     if findings:
         raise AuditFindings(findings, report)
@@ -1383,7 +1416,9 @@ def main() -> int:
         # payload, and a failed render must leave it empty.
         if isinstance(error, AuditFindings) and not any(vars(args).values()):
             print(json.dumps(error.report, sort_keys=True, separators=(",", ":")))
-        print(f"ERROR: authorization-arm-rollout-not-ready: {error}", file=sys.stderr)
+        findings = error.findings if isinstance(error, AuditFindings) else (str(error),)
+        for finding in findings:
+            print(f"ERROR: authorization-arm-rollout-not-ready: {finding}", file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
