@@ -271,6 +271,27 @@ class ActionsPausedDriftTest(unittest.TestCase):
             },
         )
 
+    def test_repository_without_an_actions_state_is_outside_the_audit(self):
+        world = default_world()
+        responses = build_responses(world)
+        responses["orgs/Verjson/properties/values?per_page=100"][0].append(
+            {
+                "repository_id": 99,
+                "repository_name": "ungoverned",
+                "repository_full_name": "verJSON/ungoverned",
+                "properties": [{"property_name": "verjson-actions-state", "value": None}],
+            }
+        )
+        responses["orgs/Verjson/repos?type=all&per_page=100"][0].append(
+            {"id": 99, "name": "ungoverned", "default_branch": "main"}
+        )
+
+        result, calls = self.run_audit(world, responses=responses)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("paused=2 enabled=2 relaxations=2", result.stdout)
+        self.assertFalse([path for path in calls if "/ungoverned/" in path])
+
 
 if __name__ == "__main__":
     unittest.main()
