@@ -217,6 +217,19 @@ class ActionsPausedDriftTest(unittest.TestCase):
             result.stderr,
         )
 
+    def test_enabled_repository_whose_relaxation_is_still_evaluate_is_drift(self):
+        world = default_world()
+        world["enforcement"][21551883] = "evaluate"
+
+        result, _ = self.run_audit(world)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "ERROR: ruleset 21551883 for verjson-ai is evaluate, expected active "
+            "while verjson-actions-state=enabled",
+            result.stderr,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

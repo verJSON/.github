@@ -227,7 +227,13 @@ def main(arguments: list[str] | None = None) -> int:
                     f"is not governed by the paused baseline ruleset {policy['baseline_ruleset_id']}"
                 )
         for relaxation in policy["relaxations"]:
-            read_relaxation(organization, relaxation)
+            name = relaxation["repository"]
+            enforcement = read_relaxation(organization, relaxation).get("enforcement")
+            if states[name] == "enabled" and enforcement != "active":
+                findings.append(
+                    f"ruleset {relaxation['ruleset_id']} for {name} is {enforcement}, "
+                    f"expected active while {policy['property']}=enabled"
+                )
     except (OSError, AuditDataError, RuntimeError) as error:
         print(f"ERROR: cannot establish Actions-paused state: {error}", file=sys.stderr)
         return 2
