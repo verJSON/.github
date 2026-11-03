@@ -242,6 +242,11 @@ def main(arguments: list[str] | None = None) -> int:
                 )
         for relaxation in policy["relaxations"]:
             name = relaxation["repository"]
+            if name not in states:
+                raise AuditDataError(
+                    f"declared relaxation {relaxation['ruleset_id']} names {name}, "
+                    f"which has no {policy['property']}"
+                )
             enforcement = read_relaxation(organization, relaxation).get("enforcement")
             expected = RELAXATION_ENFORCEMENT[states[name]]
             if enforcement != expected:

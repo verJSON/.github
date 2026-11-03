@@ -314,6 +314,20 @@ class ActionsPausedDriftTest(unittest.TestCase):
             result.stderr,
         )
 
+    def test_declared_relaxation_repository_without_an_actions_state_fails_closed(self):
+        world = default_world()
+        world["relaxations"].append(
+            {"ruleset_id": 21830367, "scope": "organization", "repository": "verjson-cli-projects"}
+        )
+
+        result, _ = self.run_audit(world, responses=build_responses(default_world()))
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(
+            "declared relaxation 21830367 names verjson-cli-projects, which has no verjson-actions-state",
+            result.stderr,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
