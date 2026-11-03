@@ -159,7 +159,7 @@ class GeneratedCallerSupersessionTest(unittest.TestCase):
         snippet = re.search(r"```yaml\n(concurrency:.*?)```", docs, re.S).group(1)
         self.assertEqual(out.count(snippet), 1)
         self.assertEqual(yaml.safe_load(out)["concurrency"]["cancel-in-progress"],
-                         "${{ github.event_name == 'pull_request' }}")
+                         "${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}")
 
 
 if __name__ == "__main__":

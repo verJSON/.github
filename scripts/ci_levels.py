@@ -62,7 +62,7 @@ CONCURRENCY = (
     "  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request'"
     " && format('pr-{0}', github.event.pull_request.number)"
     " || format('run-{0}', github.run_id) }}\n"
-    "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n"
+    "  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}\n"
 )
 
 AGGREGATE_SCRIPT = """\

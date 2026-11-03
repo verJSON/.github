@@ -593,6 +593,19 @@ class DraftDeferralTests(unittest.TestCase):
             "an aggregate skipped with its levels would pass a ready head nothing verified",
         )
 
+    @staticmethod
+    def cancels(action):
+        cancel = yaml.safe_load(ci_levels.CONCURRENCY)["concurrency"]["cancel-in-progress"]
+        return Evaluator({"github.event_name": "pull_request", "github.event.action": action}).evaluate(cancel)
+
+    def test_a_same_commit_transition_waits_for_the_running_run(self):
+        for action in ("opened", "reopened", "ready_for_review"):
+            with self.subTest(action=action):
+                self.assertFalse(
+                    self.cancels(action),
+                    "a same-head event must not cancel a running ready run into a red required check",
+                )
+
     def test_a_pull_request_caller_reruns_when_a_draft_becomes_ready(self):
         triggers = yaml.safe_load(run_generator(SHA).stdout)[True]
         self.assertEqual(
