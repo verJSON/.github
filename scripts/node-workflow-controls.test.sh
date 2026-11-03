@@ -342,7 +342,7 @@ rm -rf "$publish_workspace"
   && grep -qF '`cache-dependency-path`' "$docs" \
   && grep -qF '`cache: false`' "$docs" \
   && grep -qF '`NODE_AUTH_TOKEN`' "$docs" \
-  && grep -qF 'cancel-in-progress: true' "$docs" \
+  && grep -qF "cancel-in-progress: \${{ github.event.action == 'synchronize' }}" "$docs" \
   && grep -qF '`cancel-in-progress: false`' "$docs"; } \
   && pass "usage docs cover timeout, cache, auth, and caller concurrency decisions" \
   || fail "usage docs omit a required timeout/cache/concurrency contract"
