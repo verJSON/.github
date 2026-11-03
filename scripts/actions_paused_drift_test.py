@@ -472,6 +472,19 @@ class ActionsPausedDriftTest(unittest.TestCase):
         self.assertIn("usage: actions-paused-drift.py [--test-policy PATH]", result.stderr)
         self.assertFalse(called)
 
+    def test_repository_listed_twice_in_property_values_fails_closed(self):
+        world = default_world()
+        responses = build_responses(world)
+        values = responses["orgs/Verjson/properties/values?per_page=100"]
+        duplicate = json.loads(json.dumps(values[0][0]))
+        duplicate["properties"][1]["value"] = "enabled"
+        values.append([duplicate])
+
+        result, _ = self.run_audit(world, responses=responses)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("verjson-editor is listed more than once", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

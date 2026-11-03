@@ -157,11 +157,15 @@ def read_policy(policy: Path):
 
 def read_actions_states(organization: str, property_name: str):
     states = {}
+    seen = set()
     path = f"orgs/{organization}/properties/values?per_page=100"
     for index, entry in enumerate(gh_json_list(path)):
         location = f"{path} item {index}"
         require_mapping(entry, location)
         name = require_string(entry.get("repository_name"), f"{location}.repository_name")
+        if name in seen:
+            raise AuditDataError(f"{name} is listed more than once in {path}")
+        seen.add(name)
         values = [
             require_mapping(item, f"{location}.properties")
             for item in require_array(entry.get("properties"), f"{location}.properties")
