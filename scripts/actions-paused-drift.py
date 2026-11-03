@@ -16,6 +16,7 @@ CHECKED_IN_POLICY = ROOT / "config/actions-paused-drift-policy.json"
 # ADR 0252: a paused-only relaxation records results without blocking while
 # its repository is paused, and blocks again once the repository is enabled.
 RELAXATION_ENFORCEMENT = {"paused": "evaluate", "enabled": "active"}
+RULESET_ENFORCEMENTS = {"active", "disabled", "evaluate"}
 
 
 class AuditDataError(Exception):
@@ -218,17 +219,23 @@ def read_relaxation(organization: str, relaxation: dict, repository_id: int):
             raise AuditDataError(
                 f"organization ruleset {ruleset_id} must target exactly {name} ({repository_id})"
             )
-        return ruleset
-    ruleset = gh_json_object(f"repos/{organization}/{name}/rulesets/{ruleset_id}")
-    # The repository endpoint also returns inherited organization rulesets.
-    source = ruleset.get("source")
-    if (
-        ruleset.get("source_type") != "Repository"
-        or not isinstance(source, str)
-        or source.casefold() != f"{organization}/{name}".casefold()
-    ):
-        raise AuditDataError(f"ruleset {ruleset_id} must be a Repository ruleset of {name}")
-    return ruleset
+    else:
+        ruleset = gh_json_object(f"repos/{organization}/{name}/rulesets/{ruleset_id}")
+        # The repository endpoint also returns inherited organization rulesets.
+        source = ruleset.get("source")
+        if (
+            ruleset.get("source_type") != "Repository"
+            or not isinstance(source, str)
+            or source.casefold() != f"{organization}/{name}".casefold()
+        ):
+            raise AuditDataError(f"ruleset {ruleset_id} must be a Repository ruleset of {name}")
+    enforcement = ruleset.get("enforcement")
+    if enforcement not in RULESET_ENFORCEMENTS:
+        raise AuditDataError(
+            f"ruleset {ruleset_id} enforcement {enforcement!r} is not one of "
+            f"{sorted(RULESET_ENFORCEMENTS)}"
+        )
+    return enforcement
 
 
 def main(arguments: list[str] | None = None) -> int:
@@ -264,9 +271,7 @@ def main(arguments: list[str] | None = None) -> int:
                     f"declared relaxation {relaxation['ruleset_id']} names {name}, "
                     f"which has no {policy['property']}"
                 )
-            enforcement = read_relaxation(
-                organization, relaxation, repositories[name]["id"]
-            ).get("enforcement")
+            enforcement = read_relaxation(organization, relaxation, repositories[name]["id"])
             expected = RELAXATION_ENFORCEMENT[states[name]]
             if enforcement != expected:
                 findings.append(

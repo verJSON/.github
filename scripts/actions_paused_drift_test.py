@@ -352,6 +352,19 @@ class ActionsPausedDriftTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("ruleset 21551883 must be a Repository ruleset of verjson-ai", result.stderr)
 
+    def test_relaxation_without_a_known_enforcement_fails_closed(self):
+        world = default_world()
+        responses = build_responses(world)
+        del responses["repos/Verjson/verjson-ai/rulesets/21551883"][0]["enforcement"]
+
+        result, _ = self.run_audit(world, responses=responses)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(
+            "ruleset 21551883 enforcement None is not one of ['active', 'disabled', 'evaluate']",
+            result.stderr,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
