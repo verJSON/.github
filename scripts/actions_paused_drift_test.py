@@ -375,6 +375,22 @@ class ActionsPausedDriftTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("ruleset 21551883 response carries id 21564092", result.stderr)
 
+    def test_branch_rule_without_a_ruleset_id_fails_closed(self):
+        world = default_world()
+        responses = build_responses(world)
+        responses["repos/Verjson/verjson-editor/rules/branches/main?per_page=100"][0].append(
+            {"type": "pull_request", "ruleset_id": "26466984"}
+        )
+
+        result, _ = self.run_audit(world, responses=responses)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(
+            "repos/Verjson/verjson-editor/rules/branches/main?per_page=100 rule.ruleset_id "
+            "must be a positive integer",
+            result.stderr,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -202,7 +202,10 @@ def read_actions_enabled(organization: str, name: str):
 def read_branch_ruleset_ids(organization: str, name: str, branch: str):
     path = f"repos/{organization}/{name}/rules/branches/{quote(branch, safe='/')}?per_page=100"
     return {
-        require_mapping(rule, path).get("ruleset_id") for rule in gh_json_list(path)
+        require_positive_integer(
+            require_mapping(rule, f"{path} rule").get("ruleset_id"), f"{path} rule.ruleset_id"
+        )
+        for rule in gh_json_list(path)
     }
 
 
