@@ -2096,6 +2096,8 @@ expected = shards | {
     "changelog-release-3\tbash scripts/component-changelog-contract.test.sh": 90,
     "platform\tbash scripts/actions-ci-groups.test.sh": 180,
     "platform\tbash scripts/ci-gate/runner-admission-reconcile.test.sh": 120,
+    # 67 s on run 41549155557, and a 60 s timeout on PR #1979 (#1980).
+    "platform\tpython3 scripts/ci-gate/node-ci-secretless-hosted-lane.test.py": 150,
     "platform\tpython3 scripts/ci-gate/app-key-environment.test.py": 120,
     "platform\tbash scripts/required-checks-audit.test.sh": 120,
     "platform\tpython3 scripts/ci-gate/conformance/conformance.test.py": 120,
