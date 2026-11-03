@@ -167,6 +167,11 @@ jobs:
       TARGET_REPO: ${{ github.repository }}
       ARM_RUN_ID: ${{ github.run_id }}
       ARM_RUN_ATTEMPT: ${{ github.run_attempt }}
+      # Who invoked this arm, for the recovery advice only (ADR 0255 section 6): a
+      # direct, org-required run has no caller input, and every generated caller
+      # passes one. Neither value gates any job or step (ADR 0255 section 3).
+      ARM_WORKFLOW_REF: ${{ github.workflow_ref }}
+      ARM_CALLER_ENVIRONMENT: ${{ inputs.ai_review_environment }}
       ACQUISITION_LIMIT_SECONDS: '900'
       POLL_INTERVAL_SECONDS: '15'
       CANCEL_GRACE_SECONDS: '120'
@@ -216,7 +221,26 @@ jobs:
                     echo "stalled_job_id=$stalled_job_id"
                     echo 'stalled=true'
                   } >>"$GITHUB_OUTPUT"
-                  jq -r --arg run "$ARM_RUN_ID" '"::error title=Runner acquisition stalled::\(.name) waited \(.age)s for a runner labelled [\(.labels)], past the \(env.ACQUISITION_LIMIT_SECONDS)s limit. Cancelling arm run \($run) to release this pull request'"'"'s arm concurrency group; re-run the arm or push to re-arm."' <<<"$verdict"
+                  # The recovery differs by invocation (ADR 0255 section 6). A required
+                  # run and a label or lifecycle delivery cannot be re-run, so only a
+                  # caller head run is advised to; recovery is possible, never assured.
+                  runbook="https://github.com/verJSON/.github/blob/main/docs/arm-recovery-runbook.md#interim-recovery-close-and-reopen"
+                  reopen="close and reopen the pull request (a human or App actor only, at most 2 attempts per head, only when no run of its arm family is queued or in progress, never a bypass), or push a new head; see $runbook"
+                  if [ -z "${ARM_CALLER_ENVIRONMENT:-}" ]; then
+                    recovery="This is the org-required arm, which cannot be re-run (gh run rerun answers 404): $reopen."
+                  else
+                    case "${ARM_WORKFLOW_REF:-}" in
+                      "$TARGET_REPO/.github/workflows/gate-rearm.yml@"*)
+                        recovery="This is the repository's gate re-arm caller run: re-run this run, or push a new head. Re-running it does not restore a cancelled org-required arm on this head; see $runbook." ;;
+                      "$TARGET_REPO/.github/workflows/ai-review-label-rearm.yml@"*)
+                        recovery="This is a label delivery, which refuses a second attempt: remove and re-apply the label." ;;
+                      "$TARGET_REPO/.github/workflows/ai-review-lifecycle-rearm.yml@"*)
+                        recovery="This is a lifecycle delivery, which refuses a second attempt: repeat the lifecycle transition (for example convert to draft and mark ready again), or push a new head." ;;
+                      *)
+                        recovery="This is an unrecognized arm invocation: $reopen." ;;
+                    esac
+                  fi
+                  jq -r --arg run "$ARM_RUN_ID" --arg recovery "$recovery" '"::error title=Runner acquisition stalled::\(.name) waited \(.age)s for a runner labelled [\(.labels)], past the \(env.ACQUISITION_LIMIT_SECONDS)s limit. Cancelling arm run \($run) to release the arm concurrency group of this pull request. \($recovery)"' <<<"$verdict"
                   gh api --method POST "repos/$TARGET_REPO/actions/runs/$ARM_RUN_ID/cancel" >/dev/null ||
                     echo "::warning::cancel request for arm run $ARM_RUN_ID was not accepted"
                   exit 1

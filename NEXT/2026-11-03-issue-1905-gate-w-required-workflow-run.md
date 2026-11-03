@@ -13,5 +13,6 @@ title: Refuse a merge whose required workflow did not succeed on the exact head 
 - Gate W is a precondition only. Merge admission stays with #1945.
 - A contract test pins that the org-required arm never skips or yields to a local caller on `opened`, `reopened` or `synchronize` (F-3): no condition reads the invocation identity, and the arm classifies only the label and lifecycle callers.
 - `docs/arm-recovery-runbook.md` codifies the interim close-and-reopen recovery (F-6). Only a human or an App actor may run it, at most twice per head, and only when the pull request's whole arm family is quiet. It never uses `gh run rerun` and never a bypass. It stays permanently for watchdog and external cancellations.
+- The arm's runner-acquisition watchdog now gives the recovery for the kind of run it cancelled, instead of advising a re-run that cannot work (F-9). For the org-required run, it advises close-and-reopen under the interim rules, or a push. For the local `gate re-arm` run, a re-run or a push. For a label delivery, re-applying the label. For a lifecycle delivery, repeating the transition. Consumers receive the new advice when the ruleset pin and caller pins next move past this change.
 
 Part of #1905.
