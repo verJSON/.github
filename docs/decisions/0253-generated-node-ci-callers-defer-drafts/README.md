@@ -74,11 +74,13 @@ is the same reason concurrency already belongs to the caller (ADR 0238).
   expected level that skipped fails it.
 - For a multi-level caller, GitHub's native required-check evaluation can see the
   draft's skipped `test-levels` as passing for the whole ready run. `test-levels`
-  needs every level, and its new check run may not exist until they finish. Only
-  the organization merge gate (ADR 0229), itself a required check, keeps that
-  window closed: it treats the unfinished ready run as pending. A merge that
-  bypasses the gate could land before any level ran. The single-job caller has no
-  such window, because its required `ci / build-test` is never reported on a draft.
+  needs every level, and its new check run may not exist until they finish. The
+  organization merge gate (`scripts/assert-mergeable-head.sh`, ADR 0229) treats the
+  unfinished ready run as pending, but it is a script run before autonomous merges,
+  not a status check. Any merge not admitted through it, including a native
+  merge-button merge or auto-merge, could land before any level ran. The
+  single-job caller has no such window, because its required `ci / build-test` is
+  never reported on a draft.
 - This departs from ADR 0223 in two ways. Levels that ADR 0223 would run on drafts
   as Tier 1, such as `lint`, are deferred too, since the generated plan cannot tell
   light levels from heavy ones. `converted_to_draft` does not cancel a ready run in

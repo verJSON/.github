@@ -573,8 +573,9 @@ Without `--levels` the output is the single `ci` job, so the required context st
   ready run passed ([ADR 0253](decisions/0253-generated-node-ci-callers-defer-drafts/README.md)).
   The single-job caller follows the same rule, and its `ci / build-test` is not reported
   on a draft. A multi-level caller's draft does report a skipped `test-levels`, which
-  native protection may count as passing until the ready run's `test-levels` reports;
-  the required organization merge gate (ADR 0229) is what holds the merge until then.
+  native protection may count as passing until the ready run's `test-levels` reports.
+  Only the organization merge gate (`assert-mergeable-head.sh`, ADR 0229), run before
+  autonomous merges, holds the merge until then; a native merge is not held.
 - **Errors.** Invalid files exit 1 with one `code path: message` line per error.
 
 ## Publishing a contract-selected release
