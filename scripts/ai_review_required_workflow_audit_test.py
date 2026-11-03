@@ -749,6 +749,53 @@ jobs:
                 self.assertEqual((status, stdout), (1, ""))
                 self.assertRegex(stderr, f"^ERROR: authorization-arm-rollout-not-ready: .*{reason}")
 
+    # ADR 0252 (#1985): the arm ruleset excludes Actions-paused repositories.
+
+    def arm_repository_property(self):
+        return self.fixture[f"orgs/Verjson/rulesets/{self.arm_id}"][0]["conditions"]["repository_property"]
+
+    def test_an_arm_ruleset_without_the_paused_exclusion_is_drift(self):
+        for image, selector in (("arm_ruleset", "target"), ("legacy_arm_ruleset", "legacy")):
+            with self.subTest(selector=selector):
+                self.fixture = self.make_fixture()
+                self.enter_split_state_with(image)
+                self.arm_repository_property()["exclude"] = []
+                self.assert_audit_error(
+                    "arm ruleset drifted from both reviewed selector images: "
+                    rf"nearest {selector}: conditions\.repository_property\.exclude: expected 1 entries"
+                )
+
+    def test_an_arm_exclusion_widened_to_another_property_value_is_drift(self):
+        self.enter_legacy_selector_state()
+        self.arm_repository_property()["exclude"][0]["property_values"].append("enabled")
+        self.assert_audit_error(
+            "arm ruleset drifted from both reviewed selector images: nearest legacy: "
+            r"conditions\.repository_property\.exclude\[0\]\.property_values: expected 1 entries"
+        )
+
+    def test_an_arm_exclusion_widened_by_another_entry_is_drift(self):
+        self.enter_legacy_selector_state()
+        self.arm_repository_property()["exclude"].append(
+            {"name": "verjson-stack", "property_values": ["helm"], "source": "custom"},
+        )
+        self.assert_audit_error(
+            "arm ruleset drifted from both reviewed selector images: "
+            r"nearest legacy: conditions\.repository_property\.exclude: expected 1 entries"
+        )
+
+    def test_the_node_core_checks_ruleset_without_the_paused_exclusion_is_drift(self):
+        # ADR 0252 gave 20515817 the same exclusion as the arm ruleset.
+        node = next(
+            declaration for declaration in self.contract["deterministic_rulesets"]
+            if declaration["stack"] == "node"
+        )
+        self.enter_legacy_selector_state()
+        self.fixture[f"orgs/Verjson/rulesets/{node['id']}"][0]["conditions"]["repository_property"]["exclude"] = []
+        self.assert_audit_error(
+            rf"deterministic ruleset {node['id']} drifted from the fields its reviewed image asserts: "
+            r"conditions\.repository_property\.exclude: expected 1 entries"
+        )
+
     def test_split_state_requires_the_arm_ruleset_to_exist_and_match(self):
         self.fixture[self.ruleset_path] = [{
             "id": self.contract["ruleset_id"], **copy.deepcopy(self.contract["postimage"]),
@@ -1707,6 +1754,33 @@ jobs:
         def other_refs(contract):
             contract["arm_ruleset"]["conditions"]["ref_name"]["include"] = ["~ALL"]
         self.assert_contract_rejected(other_refs, "targets different refs")
+
+    def test_the_arm_exclusion_is_only_the_reviewed_actions_paused_one(self):
+        def widen(contract):
+            contract["arm_ruleset"]["conditions"]["repository_property"]["exclude"][0]["property_values"].append("enabled")
+            contract["legacy_arm_ruleset"]["conditions"]["repository_property"]["exclude"][0]["property_values"].append(
+                "enabled",
+            )
+        self.assert_contract_rejected(widen, "neither none nor the reviewed Actions-paused exclusion")
+
+    def test_both_arm_selector_images_carry_the_same_exclusion(self):
+        # A property migration renders the target image; dropping the exclusion
+        # there would quietly re-require the arm on paused repositories.
+        def target_only(contract):
+            contract["arm_ruleset"]["conditions"]["repository_property"]["exclude"] = []
+        self.assert_contract_rejected(target_only, "legacy arm ruleset exclusion differs from the target image")
+
+    def test_removing_the_paused_exclusion_from_both_images_is_a_valid_contract(self):
+        # ADR 0252's rollback and its end state both remove the exclusion; the
+        # contract has to follow in one diff without a code change.
+        contract = copy.deepcopy(self.contract)
+        for name in ("arm_ruleset", "legacy_arm_ruleset"):
+            contract[name]["conditions"]["repository_property"]["exclude"] = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "contract.json"
+            path.write_text(json.dumps(contract), encoding="utf-8")
+            restored = AUDIT.read_contract(path)
+        self.assertEqual(restored["arm_ruleset"]["conditions"]["repository_property"]["exclude"], [])
 
     def test_the_relocated_rule_must_be_the_same_rule(self):
         def creation_bypass(contract):

@@ -27,6 +27,12 @@ CONTRACT = Path(
     )
 )
 RULESET_FIELDS = ("name", "target", "enforcement", "bypass_actors", "conditions", "rules")
+# ADR 0252 (#1985): the one exclusion the arm ruleset may carry, as GitHub returns it.
+ACTIONS_PAUSED_EXCLUSION = {
+    "name": "verjson-actions-state",
+    "property_values": ["paused"],
+    "source": "custom",
+}
 # The only events GitHub will start a ruleset-required workflow on. A selected
 # workflow declaring none of them is inert, however valid its YAML is.
 RULESET_ELIGIBLE_TRIGGERS = frozenset({"pull_request", "pull_request_target", "merge_group"})
@@ -264,10 +270,22 @@ def read_contract(path: Path = CONTRACT) -> dict:
         "repository_name" not in conditions,
         "arm ruleset must be scoped by repository property, not by name",
     )
+    # ADR 0252 (#1985) excludes Actions-paused repositories from the arm ruleset
+    # whichever selector it uses, so a property migration keeps the exclusion.
+    # Removing it again is a contract diff to `[]`; nothing in between is reviewed.
+    exclusion = conditions.get("repository_property", {}).get("exclude")
+    require(
+        exclusion in ([], [ACTIONS_PAUSED_EXCLUSION]),
+        "arm ruleset exclusion is neither none nor the reviewed Actions-paused exclusion",
+    )
+    require(
+        images["legacy_arm_ruleset"]["conditions"].get("repository_property", {}).get("exclude") == exclusion,
+        "legacy arm ruleset exclusion differs from the target image",
+    )
     require(
         conditions.get("repository_property")
         == {
-            "exclude": [],
+            "exclude": exclusion,
             "include": [{
                 "name": contract["arm_property"]["name"],
                 "property_values": [contract["arm_property"]["value"]],
@@ -279,7 +297,7 @@ def read_contract(path: Path = CONTRACT) -> dict:
     require(
         images["legacy_arm_ruleset"]["conditions"].get("repository_property")
         == {
-            "exclude": [],
+            "exclude": exclusion,
             "include": [{
                 "name": contract["core_checks_property"],
                 "property_values": [contract["core_checks_value"]],

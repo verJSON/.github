@@ -59,6 +59,22 @@ on 2026-11-03. This ADR records that decision.
    the test binding it to the audit's text, are removed. The derived image
    itself stays, so a later reviewed suspension is recognized the same way.
 
+6. **The ADR 0252 exclusion is pinned with it.** Once the audit got past
+   `main-protection`, a live read-only run stopped at the arm ruleset:
+   ADR 0252 (#1985) had added
+   `repository_property.exclude: [{name: verjson-actions-state, property_values: [paused]}]`
+   to `ai-authorization-arm-required` (20722935) and `core-checks-node`
+   (20515817), and the rollout contract did not pin it. The contract now pins
+   that exact entry, as GitHub returns it, in both arm selector images and in
+   the node core-checks image. Both arm images carry it, not only the legacy
+   selector the live ruleset uses today, because ADR 0252 excludes paused
+   repositories from the arm ruleset whichever selector it carries: a property
+   migration renders the target image, and without the exclusion that render
+   would quietly re-require the arm on every paused repository. The validator
+   accepts exactly two values for the arm exclusion, none or that one entry,
+   and requires both images to agree. A widened exclusion, live or in the
+   contract, is drift.
+
 ### Why this does not reopen ADR 0094's rejection
 
 ADR 0094 rejects a contract that relaxes enforcement *while presenting itself as
@@ -87,6 +103,17 @@ change is still rejected.
 - A suspended `main-protection` is now an accepted, reported state rather than a
   hard failure. The control against misuse is that the state is narrow (one
   field), loud (a finding on every run), and bounded (an expiring entry).
+- ADR 0252's per-repository re-enable (setting `verjson-actions-state` to
+  `enabled`) changes no ruleset, so it needs no contract change. Its rollback,
+  and its end state once no repository is `paused`, remove the exclude
+  condition from 20722935 and 20515817. That ruleset change must land together
+  with a contract change that sets the exclusion back to `[]` in both arm images
+  and the node image, regenerated from a read-only readback of the live rulesets.
+  Until then the audit reports both rulesets as drift.
+- While the exclusion holds, the audit still counts a paused repository that
+  carries the arm selector property as armed. It still demands that
+  repository's adopter callers and review environment, so the readiness
+  findings stay conservative.
 - Branch protection itself is not restored by this change. The risks #1933
   records, including unprotected default branches, remain the owner's hold.
 - Follow-ups that apply to `split` as well, out of scope here: pin
