@@ -585,6 +585,14 @@ class DraftDeferralTests(unittest.TestCase):
                 jobs = yaml.safe_load(run_generator(SHA, *arguments).stdout)["jobs"]
                 self.assertEqual({name for name, job in jobs.items() if schedules(job, event="push")}, expected)
 
+    def test_on_a_ready_pull_request_the_aggregate_still_judges_skipped_levels(self):
+        """Paired with the truth table, where an expected level that skipped fails it."""
+        jobs = yaml.safe_load(run_generator(SHA, "--levels", str(FIXTURES / "gitflow.json")).stdout)["jobs"]
+        self.assertTrue(
+            schedules(jobs[ci_levels.AGGREGATE_ID], draft=False, upstream="skipped"),
+            "an aggregate skipped with its levels would pass a ready head nothing verified",
+        )
+
     def test_a_pull_request_caller_reruns_when_a_draft_becomes_ready(self):
         triggers = yaml.safe_load(run_generator(SHA).stdout)[True]
         self.assertEqual(
