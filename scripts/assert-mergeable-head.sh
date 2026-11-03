@@ -854,7 +854,7 @@ gate_w="$(jq -rn --slurpfile required "$required_workflows" --slurpfile runs "$r
       | [ $bound[] | select((.created_at | instant) > $changed) ] as $fresh
       | ($fresh | max_by(.run_number)) as $newest
       | if (any($rulesets["\($rule.ruleset_id)"].workflows[]?; . == $rule.entry) | not) then
-          "changed: ruleset \($rule.ruleset_id) no longer reports the required workflow \($rule.path)@\($rule.entry.sha) that the branch rules returned, so its change time does not date that rule; re-run the assertion"
+          "changed: ruleset \($rule.ruleset_id) no longer reports the required workflow \($rule.path)@\($rule.entry.sha // $rule.entry.ref // "an unpinned ref") that the branch rules returned, so its change time does not date that rule; re-run the assertion"
         elif $changed == null then
           "undated: ruleset \($rule.ruleset_id) reports no readable change time, so a run of \($rule.path) cannot be shown to postdate the current rule"
         elif ($at_path | length) == 0 then
@@ -865,7 +865,7 @@ gate_w="$(jq -rn --slurpfile required "$required_workflows" --slurpfile runs "$r
           ([ $bound[] | select((.created_at | instant) == null) | .id | tostring ] | join(", ")) as $undated
           | "undated: run \($undated) of required workflow \($rule.path) reports no readable creation time, so it cannot be ordered against the change of ruleset \($rule.ruleset_id)"
         elif ($fresh | length) == 0 then
-          "stale: every run of required workflow \($rule.path) (ruleset \($rule.ruleset_id)) on this head was created before the ruleset last changed at \($changed_at), so none is evidence under the current rule; re-arm the head (docs/arm-recovery-runbook.md)"
+          "stale: every run of required workflow \($rule.path) (ruleset \($rule.ruleset_id)) on this head was created at or before the ruleset last changed at \($changed_at), so none is evidence under the current rule; re-arm the head (docs/arm-recovery-runbook.md)"
         # Only fresh runs can vouch, so only they can be ambiguous: a required-workflow
         # id seen only before the ruleset changed is no candidate for this rule.
         elif ($fresh | map(.workflow_id) | unique | length) > 1 then

@@ -282,7 +282,7 @@ reset_env
 RUNS_FIXTURE="$(wf_runs "$(required_run 41600000001 701 190 2026-11-03T16:00:00Z success)")"
 run
 expect "a successful required run created before the ruleset last changed fails Gate W as stale" 3 \
-  "stale: every run of required workflow $GATE_PATH (ruleset $RULESET_ID) on this head was created before the ruleset last changed at 2026-11-03T11:39:01.138-05:00"
+  "stale: every run of required workflow $GATE_PATH (ruleset $RULESET_ID) on this head was created at or before the ruleset last changed at 2026-11-03T11:39:01.138-05:00"
 
 # Run times are second-granular and the change time is not: a run created in the
 # change's own second may precede it, so it is stale too. The UTC spelling the
@@ -292,7 +292,7 @@ RULESET_FIXTURE="$(ruleset 2026-11-03T16:39:01.138Z "[$workflow_entry]")"
 RUNS_FIXTURE="$(wf_runs "$(required_run 41711448295 703 211 2026-11-03T16:39:01Z success)")"
 run
 expect "a required run created in the same second as the ruleset change is stale" 3 \
-  "stale: every run of required workflow $GATE_PATH (ruleset $RULESET_ID) on this head was created before the ruleset last changed at 2026-11-03T16:39:01.138Z"
+  "stale: every run of required workflow $GATE_PATH (ruleset $RULESET_ID) on this head was created at or before the ruleset last changed at 2026-11-03T16:39:01.138Z"
 
 # Where the change time cannot be read, staleness cannot be ruled out, so nothing on
 # the head is evidence. jq orders every number above null, so an unread time would
