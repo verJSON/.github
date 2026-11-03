@@ -27,6 +27,12 @@ CONTRACT = Path(
     )
 )
 RULESET_FIELDS = ("name", "target", "enforcement", "bypass_actors", "conditions", "rules")
+# ADR 0252 (#1985): the one exclusion the arm ruleset may carry, as GitHub returns it.
+ACTIONS_PAUSED_EXCLUSION = {
+    "name": "verjson-actions-state",
+    "property_values": ["paused"],
+    "source": "custom",
+}
 # The only events GitHub will start a ruleset-required workflow on. A selected
 # workflow declaring none of them is inert, however valid its YAML is.
 RULESET_ELIGIBLE_TRIGGERS = frozenset({"pull_request", "pull_request_target", "merge_group"})
@@ -52,7 +58,10 @@ class AuditFindings(AuditError):
     """
 
     def __init__(self, findings: list[str], report: dict):
-        super().__init__(" | ".join(findings))
+        super().__init__("\n".join(findings))
+        # Reported one per line, so each is fingerprinted on its own (ADR 0189):
+        # joined, any change to one finding re-keyed every other one with it.
+        self.findings = tuple(findings)
         self.report = report
 
 
@@ -205,6 +214,15 @@ def read_contract(path: Path = CONTRACT) -> dict:
     derived = copy.deepcopy(images["preimage"])
     derived["rules"] = [rule for rule in derived["rules"] if rule.get("type") != "workflows"]
     require(derived == images["postimage"], "postimage changes fields beyond removing the workflows rule")
+    # The postimage inherits this, so the derived suspended image differs from
+    # it in exactly one field and a disabled ruleset can never read as `split`.
+    require(
+        images["preimage"]["enforcement"] == "active",
+        "protection images must be active, so suspension stays a distinct reviewed state",
+    )
+    # The suspended image is derived from the postimage at audit time, so the
+    # one difference it may carry is reviewed in code, not in a contract diff.
+    require("suspended" not in contract, "the suspended image is derived from the postimage, never declared")
 
     arm_name = contract.get("arm_ruleset_name")
     require(isinstance(arm_name, str) and arm_name, "arm ruleset name is invalid")
@@ -252,10 +270,22 @@ def read_contract(path: Path = CONTRACT) -> dict:
         "repository_name" not in conditions,
         "arm ruleset must be scoped by repository property, not by name",
     )
+    # ADR 0252 (#1985) excludes Actions-paused repositories from the arm ruleset
+    # whichever selector it uses, so a property migration keeps the exclusion.
+    # Removing it again is a contract diff to `[]`; nothing in between is reviewed.
+    exclusion = conditions.get("repository_property", {}).get("exclude")
+    require(
+        exclusion in ([], [ACTIONS_PAUSED_EXCLUSION]),
+        "arm ruleset exclusion is neither none nor the reviewed Actions-paused exclusion",
+    )
+    require(
+        images["legacy_arm_ruleset"]["conditions"].get("repository_property", {}).get("exclude") == exclusion,
+        "legacy arm ruleset exclusion differs from the target image",
+    )
     require(
         conditions.get("repository_property")
         == {
-            "exclude": [],
+            "exclude": exclusion,
             "include": [{
                 "name": contract["arm_property"]["name"],
                 "property_values": [contract["arm_property"]["value"]],
@@ -267,7 +297,7 @@ def read_contract(path: Path = CONTRACT) -> dict:
     require(
         images["legacy_arm_ruleset"]["conditions"].get("repository_property")
         == {
-            "exclude": [],
+            "exclude": exclusion,
             "include": [{
                 "name": contract["core_checks_property"],
                 "property_values": [contract["core_checks_value"]],
@@ -580,6 +610,24 @@ def require_reach(read, organization: str, kind: str, name: str, item: dict, gov
     return item
 
 
+def suspended_image(contract: dict) -> dict:
+    """The split postimage with main-protection disabled under the owner hold (#1933).
+
+    Derived, never declared, so the one difference it may carry is the one
+    reviewed here: every other asserted field still has to match the postimage.
+    """
+    image = copy.deepcopy(contract["postimage"])
+    image["enforcement"] = "disabled"
+    return image
+
+
+def suspension_finding(contract: dict) -> str:
+    return (
+        f"{contract['postimage']['name']} ({contract['ruleset_id']}) "
+        "matches the reviewed suspended image (#1933)"
+    )
+
+
 def verify_ruleset_state(contract: dict, read, expected: str | None = None) -> tuple[str, dict]:
     path = f"orgs/{contract['organization']}/rulesets/{contract['ruleset_id']}"
     live = normalize_ruleset(single_object(read, path))
@@ -587,14 +635,20 @@ def verify_ruleset_state(contract: dict, read, expected: str | None = None) -> t
         state = "ready"
     elif matches_image(live, contract["postimage"]):
         state = "split"
+    elif matches_image(live, suspended_image(contract)):
+        state = "suspended"
     else:
         # Name the nearest image and the fields that disagree. "Differs from both"
         # alone sent a reader off to diff two forty-line objects by eye, which is
         # how a key GitHub added looked exactly like a real regression (#1404).
         nearest, mismatches = min(
             (
-                (name, image_mismatches(live, contract[name]))
-                for name in ("preimage", "postimage")
+                (name, image_mismatches(live, image))
+                for name, image in (
+                    ("preimage", contract["preimage"]),
+                    ("postimage", contract["postimage"]),
+                    ("suspended", suspended_image(contract)),
+                )
             ),
             key=lambda candidate: len(candidate[1]),
         )
@@ -1121,22 +1175,35 @@ def verify_selected_workflow_is_schedulable(carrier: dict, read) -> None:
     )
 
 
+# The arm job's reviewed `runs-on`. It matches the gate-rearm.yml that main
+# ships, which is also the revision ruleset 20722935 pins (24db445f, #1927,
+# ADR 0235's 2026-10-27 amendment): public pull-request events run on one
+# hosted image, everything else on the trusted lane. The audit reads the
+# replacement from main and compares it with this constant; it does not read
+# the pinned revision. Pinned here rather than read back from the workflow,
+# because the workflow is what this check reviews. Any other value, including
+# a wider label set or the hosted image for private repositories, is drift.
+REVIEWED_ARM_RUNNER = (
+    "${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review' "
+    "|| github.event_name == 'pull_request_review_comment' || github.event_name == 'merge_group' "
+    "|| github.event_name == 'pull_request_target') && github.event.repository.private != true "
+    "&& 'ubuntu-24.04' || (fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK "
+    "|| '[\"ubuntu-24.04\"]')) }}"
+)
+
+
 def replacement_workflow_findings(contract: dict, read) -> list[str]:
     """Return the replacement's drift; an unreadable or unparsable workflow still raises."""
     selected = selected_workflow(contract["arm_ruleset"])
     workflow = read_workflow(read, selected, "replacement")
     triggers = workflow.get("on")
     arm = workflow.get("jobs", {}).get("arm", {})
-    expected_runner = (
-        "${{ fromJSON(vars.CI_LANE_TRUSTED || vars.CI_LANE_FALLBACK "
-        "|| '[\"ubuntu-24.04\"]') }}"
-    )
     return [
         message
         for conforms, message in (
             (isinstance(triggers, dict) and "pull_request_target" in triggers, "replacement lacks pull_request_target"),
             (arm.get("continue-on-error") == "true", "replacement can veto ADR 0090 human merges"),
-            (arm.get("runs-on") == expected_runner, "required arm is not routed through the trusted lane"),
+            (arm.get("runs-on") == REVIEWED_ARM_RUNNER, "required arm does not use the reviewed runner routing"),
         )
         if not conforms
     ]
@@ -1253,7 +1320,8 @@ def audit(contract: dict, read=gh_pages, allow_unschedulable_selection: bool = F
     # Reported together, for the reason adopter_conformance_findings reports its
     # classes together: the audit runs daily, and anything checked only after a
     # standing finding would never reach the report at all.
-    findings = adopter_conformance_findings(contract, read, repositories, covered, environment_custody)
+    findings = [suspension_finding(contract)] if state == "suspended" else []
+    findings += adopter_conformance_findings(contract, read, repositories, covered, environment_custody)
     findings += replacement_workflow_findings(contract, read)
     report = {
         "unpinned_live_fields": unpinned_live_fields(
@@ -1269,7 +1337,7 @@ def audit(contract: dict, read=gh_pages, allow_unschedulable_selection: bool = F
         "replacement_path": contract["replacement_path"],
         "governed_repositories": len(governed),
         "armed_repositories": len(covered),
-        "state": "split-legacy-selector" if state == "split" and selector == "legacy" else state,
+        "state": f"{state}-legacy-selector" if state != "ready" and selector == "legacy" else state,
     }
     if findings:
         raise AuditFindings(findings, report)
@@ -1383,7 +1451,9 @@ def main() -> int:
         # payload, and a failed render must leave it empty.
         if isinstance(error, AuditFindings) and not any(vars(args).values()):
             print(json.dumps(error.report, sort_keys=True, separators=(",", ":")))
-        print(f"ERROR: authorization-arm-rollout-not-ready: {error}", file=sys.stderr)
+        findings = error.findings if isinstance(error, AuditFindings) else (str(error),)
+        for finding in findings:
+            print(f"ERROR: authorization-arm-rollout-not-ready: {finding}", file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
