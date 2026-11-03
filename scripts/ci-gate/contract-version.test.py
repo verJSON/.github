@@ -238,6 +238,9 @@ GENERATED_HEADER_FORMATS = {
     "AI review caller": "#   scripts/gen-ai-review-caller.sh {sha} > .github/workflows/ai-review-merge.yml",
     "label re-arm caller": (
         "# scripts/gen-ai-review-label-rearm-caller.sh {sha} > .github/workflows/ai-review-label-rearm.yml"),
+    "lifecycle re-arm caller": (
+        "# scripts/gen-ai-review-lifecycle-rearm-caller.sh {sha}"
+        " > .github/workflows/ai-review-lifecycle-rearm.yml"),
     "gate re-arm caller": "#   scripts/gen-gate-rearm-caller.sh {sha} > .github/workflows/gate-rearm.yml",
     "privileged merge caller": (
         "#   scripts/gen-privileged-merge-caller.sh {sha} '[{{\"name\":\"ci\"}}]'"
@@ -254,7 +257,6 @@ GENERATORS_WITHOUT_ADOPTER_SHA_HEADERS = {
     "gen-adr-index.sh": "the hub's own ADR index generator; its output names no contract SHA",
     "gen-ai-review-caller-bootstrap-fragment.sh":
         "writes NEXT fragment prose, where the SHAs are text rather than a generated header",
-    "gen-ai-review-lifecycle-rearm-caller.sh": "accepts only --local, so it has no contract SHA",
     "gen-authn-type-surface-required-workflow.py": "writes the hub's own required workflow",
     "gen-conformance-regression-fixture.py": "writes a hub test fixture",
     "gen-node-ci-caller.py": "its pins are `uses:` lines; the header names no SHA",
@@ -279,6 +281,7 @@ def generator_invocations(sha):
         ("gen-changelog-caller.sh", ["release-artifact", sha, "--build-runner", "ubuntu-24.04-arm"]),
         ("gen-ai-review-caller.sh", [sha]),
         ("gen-ai-review-label-rearm-caller.sh", [sha]),
+        ("gen-ai-review-lifecycle-rearm-caller.sh", [sha]),
         ("gen-gate-rearm-caller.sh", [sha]),
         ("gen-renovate-compatibility-caller.sh", [sha, "@verjson/example", "1.2.3", "node"]),
         ("gen-privileged-merge-caller.sh", [sha, REQUIRED_CHECKS]),

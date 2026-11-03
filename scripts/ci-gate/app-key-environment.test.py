@@ -387,6 +387,7 @@ class WorkflowBoundaryTests(unittest.TestCase):
         cases = [(["gen-ai-review-caller.sh", sha], "ai_review_environment"),
                  (["gen-gate-rearm-caller.sh", sha], "ai_review_environment"),
                  (["gen-ai-review-label-rearm-caller.sh", sha], "ai_review_environment"),
+                 (["gen-ai-review-lifecycle-rearm-caller.sh", sha], "ai_review_environment"),
                  (["gen-privileged-merge-caller.sh", sha, '[{"name":"CI","app_id":1,"workflow_id":2,"workflow_path":".github/workflows/ci.yml"}]'], "merge_environment"),
                  (["gen-container-release.sh", "workflow", sha], "release_environment"),
                  (["gen-changelog-caller.sh", "release-node", sha], "release_environment"),

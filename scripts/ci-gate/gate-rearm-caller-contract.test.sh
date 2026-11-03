@@ -135,6 +135,53 @@ else
   fail "canonical event sets overlap or lifecycle re-arm caller contract drifted"
 fi
 
+# A consumer cannot reach `./.github/workflows/gate-rearm.yml` as the hub's
+# reusable bridge, and since #1666 its generated `gate-rearm.yml` no longer
+# subscribes to lifecycle events, so the pinned lifecycle caller is the only
+# path that delivers them to the canonical arm (#1982).
+pinned_lifecycle_caller="$tmp/pinned-ai-review-lifecycle-rearm.yml"
+if [ ! -x "$lifecycle_generator" ]; then
+  fail "AI review lifecycle re-arm caller generator missing or not executable"
+elif ! "$lifecycle_generator" "$contract_sha" >"$pinned_lifecycle_caller" 2>"$tmp/pinned-lifecycle.err"; then
+  fail "lifecycle re-arm caller generator rejected a valid contract SHA: $(cat "$tmp/pinned-lifecycle.err")"
+elif python3 - "$pinned_lifecycle_caller" "$contract_sha" <<'PY'
+import sys
+import yaml
+
+path, sha = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    doc = yaml.load(stream, Loader=yaml.BaseLoader)
+
+assert doc == {
+    "name": "AI review lifecycle re-arm",
+    "on": {
+        "pull_request_target": {
+            "types": ["ready_for_review", "converted_to_draft", "edited", "unlabeled"],
+        },
+    },
+    "permissions": {"actions": "read", "contents": "read"},
+    "jobs": {
+        "rearm": {
+            "permissions": {
+                "actions": "write",
+                "checks": "write",
+                "contents": "read",
+                "issues": "write",
+                "pull-requests": "write",
+            },
+            "uses": f"Verjson/.github/.github/workflows/gate-rearm.yml@{sha}",
+            "secrets": "inherit",
+            "with": {"ai_review_environment": "ai-review-app"},
+        },
+    },
+}, doc
+PY
+then
+  pass "pinned lifecycle caller delivers lifecycle events to the immutable canonical arm"
+else
+  fail "pinned lifecycle caller triggers, permissions, or immutable target drifted"
+fi
+
 for invalid_ref in main v1 '' \
   0123456789abcdef0123456789abcdef0123456 \
   '0123456789abcdef0123456789abcdef01234567
