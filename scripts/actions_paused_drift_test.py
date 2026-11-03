@@ -302,6 +302,18 @@ class ActionsPausedDriftTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("repos/Verjson/verjson-editor/actions/permissions.enabled must be a boolean", result.stderr)
 
+    def test_unknown_actions_state_value_fails_closed(self):
+        world = default_world()
+        world["repositories"]["verjson-agents"]["state"] = "disabled"
+
+        result, _ = self.run_audit(world)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(
+            "verjson-agents has verjson-actions-state='disabled', expected one of ['enabled', 'paused']",
+            result.stderr,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -166,7 +166,13 @@ def read_actions_states(organization: str, property_name: str):
         # The API lists an unset property with a null value; such a repository is
         # not excluded from anything, so ADR 0252 does not govern it.
         if matching and matching[0].get("value") is not None:
-            states[name] = matching[0]["value"]
+            value = matching[0]["value"]
+            if value not in RELAXATION_ENFORCEMENT:
+                raise AuditDataError(
+                    f"{name} has {property_name}={value!r}, "
+                    f"expected one of {sorted(RELAXATION_ENFORCEMENT)}"
+                )
+            states[name] = value
     return states
 
 
