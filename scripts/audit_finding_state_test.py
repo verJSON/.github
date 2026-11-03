@@ -178,18 +178,25 @@ class AuditFindingStateTest(unittest.TestCase):
         # list the reviewed finding text commits to, not merely a plausible one.
         recorded = item_expectation(CALLERS, RECORDED_ITEMS)
         cases = {
-            "items differ from the finding's digest": {**recorded, "items": RECORDED_ITEMS[:2]},
-            "class is not the finding's prefix": {**recorded, "finding_class": "armed adopters"},
-            "class is empty": {**recorded, "finding_class": ""},
-            "items are unsorted": {**recorded, "items": RECORDED_ITEMS[::-1]},
+            "items differ from the finding's digest": (
+                {**recorded, "items": RECORDED_ITEMS[:2]},
+                "items do not match its finding's item digest",
+            ),
+            "class is not the finding's prefix": (
+                {**recorded, "finding_class": "armed adopters"},
+                "finding_class is not its finding's class",
+            ),
+            "class is empty": ({**recorded, "finding_class": ""}, "finding_class is not its finding's class"),
+            "items are unsorted": ({**recorded, "items": RECORDED_ITEMS[::-1]}, "not sorted and unique"),
             # Self-consistent, so only the empty-set guard can reject it.
-            "items are empty": item_expectation(CALLERS, []),
+            "items are empty": (item_expectation(CALLERS, []), "records an empty item set"),
         }
-        for label, entry in cases.items():
+        for label, (entry, reason) in cases.items():
             with self.subTest(label):
                 completed = self.run_state(entries=[entry], command=emitter(status=0))
                 self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
                 self.assertIn("audit-state-undetermined", completed.stderr)
+                self.assertIn(reason, completed.stderr)
 
     def test_two_recorded_item_sets_for_one_class_fail_closed(self):
         entries = [item_expectation(CALLERS, RECORDED_ITEMS), item_expectation(CALLERS, RECORDED_ITEMS[:2])]
@@ -317,43 +324,74 @@ class AuditFindingStateTest(unittest.TestCase):
     def test_malformed_or_contradictory_structured_evidence_fails_closed(self):
         remaining = RECORDED_ITEMS[:2]
         reported = list_finding(CALLERS, remaining)
+        shape = "must declare exactly ['class', 'items']"
         cases = {
-            "not a list": ([reported], json.dumps({"finding_classes": {}})),
-            "record is not an object": ([reported], json.dumps({"finding_classes": [CALLERS]})),
+            "not a list": ([reported], json.dumps({"finding_classes": {}}), "finding_classes is not a list"),
+            "record is not an object": ([reported], json.dumps({"finding_classes": [CALLERS]}), shape),
             "record has extra keys": (
                 [reported],
                 json.dumps({"finding_classes": [{"class": CALLERS, "items": remaining, "x": 1}]}),
+                shape,
             ),
-            "class is empty": ([reported], json.dumps({"finding_classes": [{"class": "", "items": []}]})),
+            "class is empty": (
+                [reported],
+                json.dumps({"finding_classes": [{"class": "", "items": []}]}),
+                "has no name",
+            ),
             "items are not strings": (
                 [reported],
                 json.dumps({"finding_classes": [{"class": CALLERS, "items": [1, 2]}]}),
+                "items are not a list of names",
             ),
             "items are unsorted": (
                 [reported],
                 json.dumps({"finding_classes": [{"class": CALLERS, "items": remaining[::-1]}]}),
+                "not sorted and unique",
             ),
             "items repeat": (
                 [reported],
                 json.dumps({"finding_classes": [{"class": CALLERS, "items": remaining[:1] * 2}]}),
+                "not sorted and unique",
             ),
             "an item carries a control character": (
                 [list_finding(CALLERS, ["Verjson/a\x1b:a.yml"])],
                 evidence((CALLERS, ["Verjson/a\x1b:a.yml"])),
+                "carry a control character",
             ),
             "an item carries a line break": (
                 [list_finding(CALLERS, ["Verjson/a\n::error::x:a.yml"])],
                 evidence((CALLERS, ["Verjson/a\n::error::x:a.yml"])),
+                "carry a control character",
             ),
-            "a class is reported twice": ([reported], evidence((CALLERS, remaining), (CALLERS, remaining))),
-            "a non-empty class has no finding": (["unrelated: x"], evidence((CALLERS, remaining))),
+            "a class is reported twice": (
+                [reported],
+                evidence((CALLERS, remaining), (CALLERS, remaining)),
+                "more than once",
+            ),
+            "a non-empty class has no finding": (
+                ["unrelated: x"],
+                evidence((CALLERS, remaining)),
+                "matches 0 findings, not one",
+            ),
+            # Both lines carry the class prefix, so only the exactly-one guard can
+            # tell which of them the class's items describe.
+            "a class matches more than one finding": (
+                [reported, list_finding(CALLERS, RECORDED_ITEMS[1:])],
+                evidence((CALLERS, remaining)),
+                "matches 2 findings, not one",
+            ),
             "a finding's digest is not its class's items": (
                 [list_finding(CALLERS, RECORDED_ITEMS[1:])],
                 evidence((CALLERS, remaining)),
+                "items do not match its finding's item digest",
             ),
-            "an empty class still has a finding": ([reported], evidence((CALLERS, []))),
+            "an empty class still has a finding": (
+                [reported],
+                evidence((CALLERS, [])),
+                "reports no items but has a finding",
+            ),
         }
-        for label, (findings, stdout) in cases.items():
+        for label, (findings, stdout, reason) in cases.items():
             with self.subTest(label):
                 completed = self.run_state(
                     entries=[item_expectation(CALLERS, RECORDED_ITEMS)],
@@ -361,6 +399,23 @@ class AuditFindingStateTest(unittest.TestCase):
                 )
                 self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
                 self.assertIn("audit-state-undetermined", completed.stderr)
+                self.assertIn(reason, completed.stderr)
+
+    def test_a_recorded_class_absent_from_a_present_report_is_stale_not_resolved(self):
+        # Only an empty list states that a class was evaluated and has nothing
+        # left. A report that names other classes but omits this one says
+        # nothing about it, so the recorded finding is stale, exactly as before.
+        other = "armed adopters that cannot satisfy the arm"
+        entry = item_expectation(CALLERS, RECORDED_ITEMS)
+        completed = self.run_state(
+            entries=[entry],
+            command=emitter(status=0, stdout=evidence((other, []))),
+        )
+        self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+        state = json.loads(completed.stdout)
+        self.assertEqual(state["verdict"], "drift")
+        self.assertEqual(state["stale"], [entry["fingerprint"]])
+        self.assertEqual((state["improved"], state["resolved"]), ([], []))
 
     def test_every_c0_control_and_del_is_rejected_in_a_structured_item(self):
         # The line scrub spares tab and newline because a line is already split;
