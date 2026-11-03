@@ -212,7 +212,15 @@ def main(arguments: list[str] | None = None) -> int:
                 findings.append(
                     f"{name} is {policy['property']}=paused but its Actions are enabled"
                 )
-            read_branch_ruleset_ids(organization, name, repositories[name]["default_branch"])
+            branch = repositories[name]["default_branch"]
+            governed = policy["baseline_ruleset_id"] in read_branch_ruleset_ids(
+                organization, name, branch
+            )
+            if state == "enabled" and governed:
+                findings.append(
+                    f"{name} is {policy['property']}=enabled but its default branch {branch} "
+                    f"is still governed by the paused baseline ruleset {policy['baseline_ruleset_id']}"
+                )
         for relaxation in policy["relaxations"]:
             read_relaxation(organization, relaxation)
     except (OSError, AuditDataError, RuntimeError) as error:

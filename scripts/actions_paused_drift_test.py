@@ -191,6 +191,19 @@ class ActionsPausedDriftTest(unittest.TestCase):
             result.stderr,
         )
 
+    def test_enabled_repository_still_matched_by_the_baseline_ruleset_is_drift(self):
+        world = default_world()
+        world["repositories"]["verjson-agents"]["baseline"] = True
+
+        result, _ = self.run_audit(world)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "ERROR: verjson-agents is verjson-actions-state=enabled but its default branch "
+            "main is still governed by the paused baseline ruleset 26466984",
+            result.stderr,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
