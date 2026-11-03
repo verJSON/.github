@@ -187,7 +187,7 @@ class BuildArtifactSchemaTests(unittest.TestCase):
         )
         self.assertIn("needs.artifact-producer.result == 'skipped'", jobs["test-levels"]["steps"][1]["with"]["share-selected"])
         self.assertEqual(jobs["test-levels"]["steps"][1]["if"], "always()")
-        self.assertEqual(jobs["test-levels"]["if"], "${{ always() }}")
+        self.assertEqual(jobs["test-levels"]["if"], "${{ !github.event.pull_request.draft && (always()) }}")
         self.assertNotIn("continue-on-error", json.dumps(jobs["test-levels"]))
         aggregate_projection = jobs["test-levels"]["steps"][1]["with"]["needs-json"]
         self.assertIn('"build-artifact-receipt":${{ toJSON(needs.build.outputs.build-artifact-receipt) }}', aggregate_projection)
@@ -211,10 +211,10 @@ class BuildArtifactSchemaTests(unittest.TestCase):
         selected = "toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected))"
         available = "toJSON(fromJSON(needs.artifact-producer.outputs.build-artifact-share-available))"
         participant_if = (
-            "${{ always() && !cancelled() && needs.artifact-mode-gate.result == 'success' "
+            "${{ !github.event.pull_request.draft && (always() && !cancelled() && needs.artifact-mode-gate.result == 'success' "
             "&& needs.artifact-preflight.result == 'success' "
             f"&& ({selected} == 'false' || (github.run_attempt == '1' && {selected} == 'true' "
-            f"&& needs.artifact-producer.result == 'success' && {available} == 'true')) && (true) }}}}"
+            f"&& needs.artifact-producer.result == 'success' && {available} == 'true')) && (true)) }}}}"
         )
         for level_id in ("build", "test"):
             self.assertEqual(jobs[level_id]["if"], participant_if)
@@ -226,6 +226,7 @@ class BuildArtifactSchemaTests(unittest.TestCase):
 
         def route(preflight_result, raw_selected, attempt, producer_result, raw_available):
             bindings = {
+                "github.event.pull_request.draft": False,
                 "needs.artifact-mode-gate.result": "success",
                 "needs.artifact-preflight.result": preflight_result,
                 "github.run_attempt": attempt,
@@ -421,6 +422,8 @@ def simulate(rendered, outcomes, event="pull_request", base="main"):
 
     def evaluate(expression):
         py = expression.replace("&&", " and ").replace("||", " or ").replace("!cancelled()", "True")
+        # Every simulated run is a push, a dispatch, or a ready pull request.
+        py = py.replace(ci_levels.DRAFT_GUARD, "True")
         py = py.replace("github.event_name", repr(event)).replace("github.base_ref", repr(base_ref))
         py = py.replace("github.ref_name", repr(ref_name))
         py = re.sub(r"needs\.([a-z-]+)\.result", lambda m: repr(results[m.group(1)]), py)
@@ -521,8 +524,46 @@ class EdgeConditionTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
 
 
+GOLDENS = tuple(sorted(FIXTURES.glob("*.golden.yml")))
+_NEEDS_REF = re.compile(r"needs\.[a-z][a-z0-9-]*\.(?:result|outputs\.[a-z][a-z0-9-]*)")
+
+
+def schedules(job, *, event="pull_request", draft=None, upstream="success"):
+    """Whether GitHub starts `job`: its `if:` with every upstream at `upstream`.
+
+    Outputs bind to 'true' so the artifact DAG takes its sharing path. A guard
+    without a status function also needs every dependency to have succeeded.
+    """
+    guard = job.get("if")
+    if guard is None:
+        return upstream == "success"
+    bindings = {
+        "github.event_name": event,
+        "github.event.pull_request.draft": draft,
+        "github.base_ref": "main" if event == "pull_request" else "",
+        "github.ref_name": "7/merge" if event == "pull_request" else "main",
+        "github.run_attempt": "1",
+    }
+    for name in _NEEDS_REF.findall(guard):
+        bindings[name] = upstream if name.endswith(".result") else "true"
+    functions = {"always": lambda: True, "cancelled": lambda: False,
+                 "success": lambda: upstream == "success", "failure": lambda: upstream == "failure"}
+    explicit_status = re.search(r"\b(?:always|success|failure|cancelled)\(", guard)
+    runs = Evaluator(bindings, functions=functions).evaluate(guard)
+    return runs and bool(explicit_status or upstream == "success")
+
+
 class DraftDeferralTests(unittest.TestCase):
     """Issue #1984: drafts run no lane; ready and new commits run the whole plan."""
+
+    def test_a_draft_pull_request_schedules_no_job(self):
+        for golden in GOLDENS:
+            for name, job in yaml.safe_load(golden.read_text())["jobs"].items():
+                with self.subTest(caller=golden.name, job=name):
+                    self.assertFalse(
+                        schedules(job, draft=True),
+                        "a draft must hold no runner and report no lane or aggregate result",
+                    )
 
     def test_a_pull_request_caller_reruns_when_a_draft_becomes_ready(self):
         triggers = yaml.safe_load(run_generator(SHA).stdout)[True]

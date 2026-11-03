@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   lint:
-    if: ${{ github.event_name == 'pull_request' }}
+    if: ${{ !github.event.pull_request.draft && (github.event_name == 'pull_request') }}
     permissions:
       contents: read
       packages: read
@@ -29,6 +29,7 @@ jobs:
       NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
 
   unit:
+    if: ${{ !github.event.pull_request.draft }}
     permissions:
       contents: read
       packages: read
@@ -43,7 +44,7 @@ jobs:
 
   integration:
     needs: [unit]
-    if: ${{ !cancelled() && needs.unit.result == 'success' && (github.event_name == 'pull_request' || github.event_name == 'push') }}
+    if: ${{ !github.event.pull_request.draft && (!cancelled() && needs.unit.result == 'success' && (github.event_name == 'pull_request' || github.event_name == 'push')) }}
     permissions:
       contents: read
       packages: read
@@ -57,7 +58,7 @@ jobs:
 
   diagnostics:
     needs: [unit]
-    if: ${{ !cancelled() && (needs.unit.result == 'success' || needs.unit.result == 'failure') && (github.event_name == 'pull_request') }}
+    if: ${{ !github.event.pull_request.draft && (!cancelled() && (needs.unit.result == 'success' || needs.unit.result == 'failure') && (github.event_name == 'pull_request')) }}
     permissions:
       contents: read
       packages: read
@@ -71,7 +72,7 @@ jobs:
 
   release-gate:
     needs: [integration]
-    if: ${{ !cancelled() && needs.integration.result == 'success' && ((github.event_name == 'push') && ((github.base_ref || github.ref_name) == 'main')) }}
+    if: ${{ !github.event.pull_request.draft && (!cancelled() && needs.integration.result == 'success' && ((github.event_name == 'push') && ((github.base_ref || github.ref_name) == 'main'))) }}
     permissions:
       contents: read
       packages: read
@@ -84,7 +85,7 @@ jobs:
       NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
 
   test-levels:
-    if: ${{ always() }}
+    if: ${{ !github.event.pull_request.draft && (always()) }}
     needs: [lint, unit, integration, diagnostics, release-gate]
     permissions: {}
     runs-on: ubuntu-24.04

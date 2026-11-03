@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   artifact-mode-gate:
+    if: ${{ !github.event.pull_request.draft }}
     permissions:
       contents: read
       packages: read
@@ -28,7 +29,7 @@ jobs:
 
   artifact-preflight:
     needs: [artifact-mode-gate]
-    if: ${{ always() && !cancelled() && needs.artifact-mode-gate.result == 'success' }}
+    if: ${{ !github.event.pull_request.draft && (always() && !cancelled() && needs.artifact-mode-gate.result == 'success') }}
     # Static per-lane fallback: participant-prerequisite-cycle.
     runs-on: ubuntu-24.04
     permissions: {}
@@ -47,7 +48,7 @@ jobs:
 
   artifact-producer:
     needs: [artifact-preflight]
-    if: ${{ always() && !cancelled() && needs.artifact-preflight.result == 'success' && github.run_attempt == '1' && toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'true' && (true) }}
+    if: ${{ !github.event.pull_request.draft && (always() && !cancelled() && needs.artifact-preflight.result == 'success' && github.run_attempt == '1' && toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'true' && (true)) }}
     permissions:
       contents: read
       packages: read
@@ -73,7 +74,7 @@ jobs:
 
   build:
     needs: [artifact-mode-gate, artifact-preflight, artifact-producer]
-    if: ${{ always() && !cancelled() && needs.artifact-mode-gate.result == 'success' && needs.artifact-preflight.result == 'success' && (toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'false' || (github.run_attempt == '1' && toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'true' && needs.artifact-producer.result == 'success' && toJSON(fromJSON(needs.artifact-producer.outputs.build-artifact-share-available)) == 'true')) && (true) }}
+    if: ${{ !github.event.pull_request.draft && (always() && !cancelled() && needs.artifact-mode-gate.result == 'success' && needs.artifact-preflight.result == 'success' && (toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'false' || (github.run_attempt == '1' && toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'true' && needs.artifact-producer.result == 'success' && toJSON(fromJSON(needs.artifact-producer.outputs.build-artifact-share-available)) == 'true')) && (true)) }}
     permissions:
       contents: read
       packages: read
@@ -102,7 +103,7 @@ jobs:
 
   test:
     needs: [artifact-mode-gate, artifact-preflight, artifact-producer, build]
-    if: ${{ always() && !cancelled() && needs.artifact-mode-gate.result == 'success' && needs.artifact-preflight.result == 'success' && (toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'false' || (github.run_attempt == '1' && toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'true' && needs.artifact-producer.result == 'success' && toJSON(fromJSON(needs.artifact-producer.outputs.build-artifact-share-available)) == 'true')) && (!cancelled() && needs.build.result == 'success' && (github.event_name == 'push')) }}
+    if: ${{ !github.event.pull_request.draft && (always() && !cancelled() && needs.artifact-mode-gate.result == 'success' && needs.artifact-preflight.result == 'success' && (toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'false' || (github.run_attempt == '1' && toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'true' && needs.artifact-producer.result == 'success' && toJSON(fromJSON(needs.artifact-producer.outputs.build-artifact-share-available)) == 'true')) && (!cancelled() && needs.build.result == 'success' && (github.event_name == 'push'))) }}
     permissions:
       contents: read
       packages: read
@@ -130,7 +131,7 @@ jobs:
       NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
 
   test-levels:
-    if: ${{ always() }}
+    if: ${{ !github.event.pull_request.draft && (always()) }}
     needs: [build, test, artifact-mode-gate, artifact-preflight, artifact-producer]
     permissions: {}
     runs-on: ubuntu-24.04
