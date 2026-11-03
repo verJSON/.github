@@ -137,7 +137,7 @@ def read_policy(policy: Path):
         require_exact_keys(
             require_mapping(entry, location), {"ruleset_id", "scope", "repository"}, location
         )
-        if entry["scope"] not in RELAXATION_SCOPES:
+        if not isinstance(entry["scope"], str) or entry["scope"] not in RELAXATION_SCOPES:
             raise AuditDataError(f"{location}.scope must be one of {sorted(RELAXATION_SCOPES)}")
         relaxations.append(
             {
@@ -176,7 +176,7 @@ def read_actions_states(organization: str, property_name: str):
         # not excluded from anything, so ADR 0252 does not govern it.
         if matching and matching[0].get("value") is not None:
             value = matching[0]["value"]
-            if value not in ACTIONS_STATES:
+            if not isinstance(value, str) or value not in ACTIONS_STATES:
                 raise AuditDataError(
                     f"{name} has {property_name}={value!r}, "
                     f"expected one of {sorted(ACTIONS_STATES)}"
@@ -245,7 +245,7 @@ def read_relaxation(organization: str, relaxation: dict, repository_id: int):
             f"ruleset {ruleset_id} response carries id {ruleset.get('id')!r}"
         )
     enforcement = ruleset.get("enforcement")
-    if enforcement not in RULESET_ENFORCEMENTS:
+    if not isinstance(enforcement, str) or enforcement not in RULESET_ENFORCEMENTS:
         raise AuditDataError(
             f"ruleset {ruleset_id} enforcement {enforcement!r} is not one of "
             f"{sorted(RULESET_ENFORCEMENTS)}"

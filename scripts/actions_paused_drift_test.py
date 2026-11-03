@@ -485,6 +485,43 @@ class ActionsPausedDriftTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("verjson-editor is listed more than once", result.stderr)
 
+    def test_list_valued_actions_state_fails_closed(self):
+        world = default_world()
+        responses = build_responses(world)
+        responses["orgs/Verjson/properties/values?per_page=100"][0][0]["properties"][1]["value"] = ["paused"]
+
+        result, _ = self.run_audit(world, responses=responses)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(
+            "verjson-editor has verjson-actions-state=['paused'], expected one of ['enabled', 'paused']",
+            result.stderr,
+        )
+
+    def test_policy_with_a_list_valued_scope_fails_closed(self):
+        world = default_world()
+        policy = build_policy(world)
+        policy["paused_only_relaxations"][0] = dict(policy["paused_only_relaxations"][0], scope=["organization"])
+
+        result, calls = self.run_audit(world, policy=policy)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(
+            "paused_only_relaxations[0].scope must be one of ['organization', 'repository']",
+            result.stderr,
+        )
+        self.assertEqual(calls, [])
+
+    def test_relaxation_with_an_object_valued_enforcement_fails_closed(self):
+        world = default_world()
+        responses = build_responses(world)
+        responses["repos/Verjson/verjson-ai/rulesets/21551883"][0]["enforcement"] = {"mode": "active"}
+
+        result, _ = self.run_audit(world, responses=responses)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("ruleset 21551883 enforcement {'mode': 'active'} is not one of", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
