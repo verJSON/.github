@@ -365,6 +365,16 @@ class ActionsPausedDriftTest(unittest.TestCase):
             result.stderr,
         )
 
+    def test_relaxation_response_for_another_ruleset_fails_closed(self):
+        world = default_world()
+        responses = build_responses(world)
+        responses["repos/Verjson/verjson-ai/rulesets/21551883"][0]["id"] = 21564092
+
+        result, _ = self.run_audit(world, responses=responses)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("ruleset 21551883 response carries id 21564092", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

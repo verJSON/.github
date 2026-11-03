@@ -229,6 +229,10 @@ def read_relaxation(organization: str, relaxation: dict, repository_id: int):
             or source.casefold() != f"{organization}/{name}".casefold()
         ):
             raise AuditDataError(f"ruleset {ruleset_id} must be a Repository ruleset of {name}")
+    if ruleset.get("id") != ruleset_id:
+        raise AuditDataError(
+            f"ruleset {ruleset_id} response carries id {ruleset.get('id')!r}"
+        )
     enforcement = ruleset.get("enforcement")
     if enforcement not in RULESET_ENFORCEMENTS:
         raise AuditDataError(
