@@ -101,6 +101,7 @@ platform	python3 scripts/gate_coverage_audit_test.py
 platform	python3 scripts/org_secret_scope_audit_test.py
 platform	python3 scripts/provisioning_delegation_validate_test.py
 platform	python3 scripts/org_ruleset_conformance_test.py
+platform	python3 scripts/actions_paused_drift_test.py
 platform	python3 scripts/package_type_surface_ruleset_test.py
 platform	python3 scripts/github_identity_test.py
 platform	python3 scripts/authn_type_surface_ruleset_test.py
