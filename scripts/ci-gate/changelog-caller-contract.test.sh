@@ -4704,7 +4704,7 @@ rename_release_caller() {
   sed -i '/^    needs: verify$/d' "$1/.github/workflows/publish-package.yml"
 }
 
-expect_rejection --reason "the generated adopter set is not atomic" "a renderer pinned to a different commit" break_pin
+expect_rejection --reason "scripts/render-next.sh is still at deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "a renderer pinned to a different commit" break_pin
 # .github/CODEOWNERS is a required member of the adopter set (ADR 0210, #1272):
 # absent, hand-edited, symlinked, or shadowed by a competing location all fail closed.
 drop_codeowners() { rm -f "$1/.github/CODEOWNERS"; }
@@ -4718,26 +4718,22 @@ expect_rejection --reason "must be a regular repository file, not reached throug
 symlink_github_dir() { mv "$1/.github" "$1/.github.real" && ln -s .github.real "$1/.github"; }
 docs_shadow_codeowners() { mkdir -p "$1/docs" && cp "$1/.github/CODEOWNERS" "$1/docs/CODEOWNERS"; }
 directory_codeowners() { rm -f "$1/.github/CODEOWNERS" && mkdir "$1/.github/CODEOWNERS"; }
-expect_rejection --reason "the generated adopter set is not atomic" "a symlinked .github directory in front of CODEOWNERS" symlink_github_dir
+expect_rejection --reason "traverses symlinked path component .github," "a symlinked .github directory in front of CODEOWNERS" symlink_github_dir
 expect_rejection --reason "competes with .github/CODEOWNERS; GitHub reads only the first location it finds, so" "a competing docs/CODEOWNERS beside the canonical file" docs_shadow_codeowners
 expect_rejection --reason "is absent, so main-protection's code-owner review requirement asks for nothing here" "a directory where .github/CODEOWNERS must be a file" directory_codeowners
-expect_rejection --reason "the generated adopter set is not atomic" "a hand-written renderer that bypasses the contract" handwrite_renderer
+expect_rejection --reason "scripts/render-next.sh declares 0 generator-mode headers" "a hand-written renderer that bypasses the contract" handwrite_renderer
 expect_rejection --reason ".releaserc.json reintroduces semantic-release outside the contract" "a .releaserc.json that reintroduces release-on-merge" add_releaserc
 expect_rejection --reason "NEXT.md still holds log entries; NEXT/ is the only unreleased store" "a second authored running log in NEXT.md" add_authored_log
 expect_rejection --reason "filename does not follow the canonical contract" "a fragment whose filename is not canonical" uncanonical_fragment
-expect_rejection --reason "is not executable" "a non-executable renderer" strip_executable
+expect_rejection --reason "scripts/render-next.sh is not executable" "a non-executable renderer" strip_executable
 expect_rejection --reason "does not pass the organization RELEASE_APP_CLIENT_ID variable to the release workflow" "a release caller without RELEASE_APP_CLIENT_ID" drop_release_app_client_id
 expect_rejection --reason "does not select the release-app environment" "a release caller without its release environment" drop_release_environment
 expect_rejection --reason "does not select the release-app environment" "a release caller restoring ORG_ADMIN_TOKEN" restore_org_admin_token
-expect_rejection --reason "does not select the release-app environment" "a release caller wiring GITHUB_TOKEN" wire_github_token
+expect_rejection --reason "does not select the release-app environment" \
+  --pass "the broad-token rejection names the dedicated release App remedy" \
+  --fail "the last credential case failed for some other reason" \
+  "a release caller wiring GITHUB_TOKEN" wire_github_token
 
-# Rejected for the stated reason, not incidentally. expect_rejection only asserts
-# a non-zero exit, so without this the guard could rot while its case stays green.
-# It reads the LAST run, so it has to sit immediately after the credential cases.
-sync_last_rejection
-grep -qE 'snapshot forwards credentials|release-app environment' "$tmproot/run.out" \
-  && pass "the broad-token rejection names the dedicated release App remedy" \
-  || fail "the last credential case failed for some other reason: $(tail -2 "$tmproot/run.out")"
 
 # The cases above replace release_environment, so they are rejected before the
 # forwarding guard runs. These keep it and grow the job past a pipe's capacity:
@@ -5392,7 +5388,7 @@ expect_rejection --reason "has an ambiguous or malformed top-level trigger mappi
 expect_rejection --reason "does not call the release workflow at the pin" "a release caller on a mutable reusable ref" unpin_release_ref
 expect_rejection --reason "passes a contract_ref that differs from its changelog-release.yml pin" "a release caller whose contract_ref drifts from its uses pin" drift_release_contract_ref
 expect_rejection --reason "does not use Node 24 consistently" "a release caller whose Node version became Renovate-visible" expose_node_version_to_renovate
-expect_rejection --reason "the generated adopter set is not atomic" "a hand-written release caller with no generator provenance" strip_release_provenance
+expect_rejection --reason ".github/workflows/release.yml declares 0 generator-mode headers" "a hand-written release caller with no generator provenance" strip_release_provenance
 expect_rejection --reason "has an ambiguous or malformed top-level trigger mapping: trigger mapping must use" "a push: trigger hidden in a flow-style on:" add_flow_style_push_trigger
 for equivalent in on '"on"' true True TRUE yes Yes YES; do
   expect_rejection --reason "has an ambiguous or malformed top-level trigger mapping: duplicate YAML-equivalent" "a duplicate YAML-equivalent $equivalent trigger key (#1070)" \
