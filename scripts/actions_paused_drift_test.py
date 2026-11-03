@@ -422,6 +422,56 @@ class ActionsPausedDriftTest(unittest.TestCase):
         )
         self.assertEqual(calls, [])
 
+    def test_every_failed_api_read_fails_closed(self):
+        world = default_world()
+        for path in build_responses(world):
+            with self.subTest(path=path):
+                result, _ = self.run_audit(world, failing_paths=[path])
+
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn(f"GitHub API read failed for {path}", result.stderr)
+                self.assertNotIn("conformant", result.stdout)
+
+    def test_api_read_with_no_pages_fails_closed(self):
+        world = default_world()
+        responses = build_responses(world)
+        responses["repos/Verjson/verjson-authn/actions/permissions"] = []
+
+        result, _ = self.run_audit(world, responses=responses)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(
+            "GitHub API returned no pages for repos/Verjson/verjson-authn/actions/permissions",
+            result.stderr,
+        )
+
+    def test_every_finding_is_reported_without_masking_another(self):
+        world = default_world()
+        world["repositories"]["verjson-editor"]["actions_enabled"] = True
+        world["repositories"]["verjson-agents"]["baseline"] = True
+        world["enforcement"][21551883] = "evaluate"
+
+        result, _ = self.run_audit(world)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stderr.count("ERROR: "), 3, result.stderr)
+
+    def test_unexpected_argument_is_rejected_before_any_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "called"
+            gh = Path(directory) / "gh"
+            gh.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 97\n", encoding="utf-8")
+            gh.chmod(0o755)
+            env = os.environ | {"PATH": f"{directory}:{os.environ['PATH']}"}
+            result = subprocess.run(
+                ["python3", str(AUDIT), "--apply"], env=env, capture_output=True, text=True
+            )
+            called = marker.exists()
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("usage: actions-paused-drift.py [--test-policy PATH]", result.stderr)
+        self.assertFalse(called)
+
 
 if __name__ == "__main__":
     unittest.main()
