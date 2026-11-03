@@ -126,7 +126,14 @@ def read_policy(policy: Path):
     )
     require_exact_keys(
         document,
-        {"source", "organization", "property", "baseline_ruleset_id", "paused_only_relaxations"},
+        {
+            "source",
+            "organization",
+            "property",
+            "baseline_ruleset_id",
+            "baseline_rule_types",
+            "paused_only_relaxations",
+        },
         "drift policy",
     )
     relaxations = []
@@ -152,8 +159,20 @@ def read_policy(policy: Path):
         "baseline_ruleset_id": require_positive_integer(
             document["baseline_ruleset_id"], "drift policy.baseline_ruleset_id"
         ),
+        "baseline_rule_types": read_rule_types(document["baseline_rule_types"]),
         "relaxations": relaxations,
     }
+
+
+def read_rule_types(value):
+    location = "drift policy.baseline_rule_types"
+    rule_types = [
+        require_string(item, f"{location}[{index}]")
+        for index, item in enumerate(require_array(value, location))
+    ]
+    if not rule_types or len(set(rule_types)) != len(rule_types):
+        raise AuditDataError(f"{location} must be a non-empty list of distinct rule types")
+    return frozenset(rule_types)
 
 
 def read_actions_states(organization: str, property_name: str):
@@ -209,14 +228,16 @@ def read_actions_enabled(organization: str, name: str):
     return enabled
 
 
-def read_branch_ruleset_ids(organization: str, name: str, branch: str):
+def read_branch_rule_types(organization: str, name: str, branch: str):
+    """Map each ruleset that applies to the branch to the rule types it contributes."""
     path = f"repos/{organization}/{name}/rules/branches/{quote(branch, safe='/')}?per_page=100"
-    return {
-        require_positive_integer(
-            require_mapping(rule, f"{path} rule").get("ruleset_id"), f"{path} rule.ruleset_id"
-        )
-        for rule in gh_json_list(path)
-    }
+    rule_types = {}
+    for rule in gh_json_list(path):
+        require_mapping(rule, f"{path} rule")
+        ruleset_id = require_positive_integer(rule.get("ruleset_id"), f"{path} rule.ruleset_id")
+        rule_type = require_string(rule.get("type"), f"{path} rule.type")
+        rule_types.setdefault(ruleset_id, set()).add(rule_type)
+    return rule_types
 
 
 def read_relaxation(organization: str, relaxation: dict, repository_id: int):
@@ -267,7 +288,8 @@ def collect_repository_findings(policy: dict, states: dict, repositories: dict, 
         if state == "paused" and read_actions_enabled(organization, name):
             findings.append(f"{name} is {state_property}=paused but its Actions are enabled")
         branch = repositories[name]["default_branch"]
-        governed = baseline in read_branch_ruleset_ids(organization, name, branch)
+        applied = read_branch_rule_types(organization, name, branch).get(baseline)
+        governed = applied is not None
         if state == "enabled" and governed:
             findings.append(
                 f"{name} is {state_property}=enabled but its default branch {branch} "
@@ -277,6 +299,12 @@ def collect_repository_findings(policy: dict, states: dict, repositories: dict, 
             findings.append(
                 f"{name} is {state_property}=paused but its default branch {branch} "
                 f"is not governed by the paused baseline ruleset {baseline}"
+            )
+        if state == "paused" and governed and not policy["baseline_rule_types"] <= applied:
+            missing = sorted(policy["baseline_rule_types"] - applied)
+            findings.append(
+                f"{name} is {state_property}=paused but its default branch {branch} "
+                f"lacks baseline ruleset {baseline} rule types {missing}"
             )
 
 

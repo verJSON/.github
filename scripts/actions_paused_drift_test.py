@@ -45,6 +45,7 @@ def build_policy(world):
         "organization": "Verjson",
         "property": "verjson-actions-state",
         "baseline_ruleset_id": BASELINE,
+        "baseline_rule_types": ["deletion", "non_fast_forward", "pull_request"],
         "paused_only_relaxations": world["relaxations"],
     }
 
@@ -84,8 +85,9 @@ def build_responses(world):
             ]
         rules = [{"type": "deletion", "ruleset_id": 900, "ruleset_source_type": "Organization"}]
         if detail["baseline"]:
-            rules.append(
-                {"type": "pull_request", "ruleset_id": BASELINE, "ruleset_source_type": "Organization"}
+            rules.extend(
+                {"type": rule_type, "ruleset_id": BASELINE, "ruleset_source_type": "Organization"}
+                for rule_type in ("pull_request", "non_fast_forward", "deletion")
             )
         responses[f"repos/Verjson/{name}/rules/branches/{detail['branch']}?per_page=100"] = [rules]
     for relaxation in world["relaxations"]:
@@ -254,6 +256,7 @@ class ActionsPausedDriftTest(unittest.TestCase):
                 "organization": "Verjson",
                 "property": "verjson-actions-state",
                 "baseline_ruleset_id": 26466984,
+                "baseline_rule_types": ["deletion", "non_fast_forward", "pull_request"],
                 "paused_only_relaxations": [
                     {"ruleset_id": 21750617, "scope": "organization", "repository": "verjson-authn"},
                     {"ruleset_id": 21830367, "scope": "organization", "repository": "verjson-cli-projects"},
@@ -545,6 +548,48 @@ class ActionsPausedDriftTest(unittest.TestCase):
         unestablished = "ERROR: cannot establish Actions-paused state"
         self.assertIn(finding, result.stderr)
         self.assertLess(result.stderr.index(finding), result.stderr.index(unestablished))
+
+    def test_paused_repository_missing_a_baseline_rule_type_is_drift(self):
+        world = default_world()
+        responses = build_responses(world)
+        path = "repos/Verjson/verjson-editor/rules/branches/main?per_page=100"
+        responses[path][0] = [
+            rule
+            for rule in responses[path][0]
+            if not (rule["ruleset_id"] == BASELINE and rule["type"] == "deletion")
+        ]
+
+        result, _ = self.run_audit(world, responses=responses)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "ERROR: verjson-editor is verjson-actions-state=paused but its default branch main "
+            "lacks baseline ruleset 26466984 rule types ['deletion']",
+            result.stderr,
+        )
+
+    def test_branch_rule_without_a_type_fails_closed(self):
+        world = default_world()
+        responses = build_responses(world)
+        del responses["repos/Verjson/verjson-editor/rules/branches/main?per_page=100"][0][-1]["type"]
+
+        result, _ = self.run_audit(world, responses=responses)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(
+            "repos/Verjson/verjson-editor/rules/branches/main?per_page=100 rule.type must be a non-empty string",
+            result.stderr,
+        )
+
+    def test_policy_without_baseline_rule_types_fails_closed(self):
+        world = default_world()
+        policy = dict(build_policy(world), baseline_rule_types=[])
+
+        result, calls = self.run_audit(world, policy=policy)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("baseline_rule_types must be a non-empty list of distinct rule types", result.stderr)
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

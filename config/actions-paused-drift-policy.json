@@ -3,6 +3,7 @@
   "organization": "Verjson",
   "property": "verjson-actions-state",
   "baseline_ruleset_id": 26466984,
+  "baseline_rule_types": ["deletion", "non_fast_forward", "pull_request"],
   "paused_only_relaxations": [
     {"ruleset_id": 21750617, "scope": "organization", "repository": "verjson-authn"},
     {"ruleset_id": 21830367, "scope": "organization", "repository": "verjson-cli-projects"},
