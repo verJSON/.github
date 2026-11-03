@@ -6338,7 +6338,13 @@ class TrustedCandidateStatusTests(unittest.TestCase):
             if event == "candidate-outcome":
                 host_signals.capture(signal.SIGTERM)
 
-        def supervisor_already_exited(_pidfd: int, signum: int) -> None:
+        actual_pidfd_send_signal = signal.pidfd_send_signal
+
+        def supervisor_already_exited(_pidfd: int, signum: int, info=None, flags=0) -> None:
+            # Group probes and cleanup reach the real kernel; only the direct
+            # forward to the supervisor finds it already gone.
+            if flags == artifacts.PIDFD_SIGNAL_PROCESS_GROUP:
+                return actual_pidfd_send_signal(_pidfd, signum, info, flags)
             signal_attempts.append(signum)
             raise ProcessLookupError(errno.ESRCH, "PID 1 exited before signal delivery")
 
