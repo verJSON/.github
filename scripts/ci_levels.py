@@ -33,6 +33,12 @@ MAX_INPUTS = 64
 MAX_INPUT_LENGTH = 4096
 DEFAULT_EVENTS = ("pull_request", "push", "workflow_dispatch")
 ALL_EVENTS = DEFAULT_EVENTS
+# GitHub's defaults plus ready_for_review, which runs the plan a draft deferred (#1984).
+PULL_REQUEST_TYPES = ("opened", "synchronize", "reopened", "ready_for_review")
+# Every generated job carries it, the aggregate included: a skip is never a
+# required SUCCESS to the merge gate, while a draft-time FAILURE would stay on
+# the head after the ready run passed (scripts/assert-mergeable-head.sh, Gate C).
+DRAFT_GUARD = "!github.event.pull_request.draft"
 CONDITIONS = ("success", "completed")
 
 _ID = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -56,7 +62,7 @@ CONCURRENCY = (
     "  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request'"
     " && format('pr-{0}', github.event.pull_request.number)"
     " || format('run-{0}', github.run_id) }}\n"
-    "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n"
+    "  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}\n"
 )
 
 AGGREGATE_SCRIPT = """\
@@ -521,6 +527,11 @@ def _job_condition(level: Level) -> str | None:
     return " && ".join(terms)
 
 
+def _unless_draft(condition: str | None) -> str:
+    """Skip a generated job on a draft pull request; push and dispatch carry no draft flag."""
+    return DRAFT_GUARD if condition is None else f"{DRAFT_GUARD} && ({condition})"
+
+
 def _scalar(value: str | bool | int) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -531,9 +542,7 @@ def _render_level(level: Level, plan: Plan, sha: str) -> list[str]:
     lines = [f"  {level.id}:"]
     if level.needs:
         lines.append(f"    needs: [{', '.join(n.level for n in level.needs)}]")
-    condition = _job_condition(level)
-    if condition:
-        lines.append(f"    if: ${{{{ {condition} }}}}")
+    lines.append(f"    if: ${{{{ {_unless_draft(_job_condition(level))} }}}}")
     lines += [
         "    permissions:",
         "      contents: read",
@@ -606,8 +615,7 @@ def _render_role_job(
     lines = [f"  {job_id}:"]
     if needs:
         lines.append(f"    needs: [{', '.join(needs)}]")
-    if condition:
-        lines.append(f"    if: ${{{{ {condition} }}}}")
+    lines.append(f"    if: ${{{{ {_unless_draft(condition)} }}}}")
     lines += [
         "    permissions:",
         "      contents: read",
@@ -688,7 +696,7 @@ def _render_artifact_level(level: Level, plan: Plan, sha: str) -> list[str]:
     lines = [
         f"  {level.id}:",
         f"    needs: [{', '.join(needs)}]",
-        f"    if: ${{{{ {' && '.join(condition_terms)} }}}}",
+        f"    if: ${{{{ {_unless_draft(' && '.join(condition_terms))} }}}}",
         "    permissions:",
         "      contents: read",
         "      packages: read",
@@ -850,11 +858,12 @@ def _render_artifact_jobs(plan: Plan, sha: str) -> list[list[str]]:
             ("secretless-trusted-ref", "${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}"),
         ),
     )
+    after_mode_gate = "always() && !cancelled() && needs.artifact-mode-gate.result == 'success'"
     if static_fallback:
         preflight = [
             "  artifact-preflight:",
             "    needs: [artifact-mode-gate]",
-            "    if: ${{ always() && !cancelled() && needs.artifact-mode-gate.result == 'success' }}",
+            f"    if: ${{{{ {_unless_draft(after_mode_gate)} }}}}",
             f"    # Static per-lane fallback: {static_fallback_reason}.",
             "    runs-on: ubuntu-24.04",
             "    permissions: {}",
@@ -877,7 +886,7 @@ def _render_artifact_jobs(plan: Plan, sha: str) -> list[list[str]]:
             sha,
             "preflight",
             needs=preflight_needs,
-            condition="always() && !cancelled() && needs.artifact-mode-gate.result == 'success'",
+            condition=after_mode_gate,
             with_values=(
                 ("build-artifact-mode-share-eligible", "${{ fromJSON(needs.artifact-mode-gate.outputs.build-artifact-mode-share-eligible) }}"),
                 ("build-artifact-plan-json", _scalar(full_plan)),
@@ -941,7 +950,7 @@ def _render_aggregate(plan: Plan, sha: str | None = None) -> list[str]:
         dependencies.extend(["artifact-mode-gate", "artifact-preflight", "artifact-producer"])
     lines = [
         f"  {AGGREGATE_ID}:",
-        "    if: ${{ always() }}",
+        f"    if: ${{{{ {_unless_draft('always()')} }}}}",
         f"    needs: [{', '.join(dict.fromkeys(dependencies))}]",
         "    permissions: {}",
         f"    runs-on: {HOSTED}",
@@ -1000,6 +1009,8 @@ def _triggers(plan: Plan) -> list[str]:
             continue
         if event == "push":
             lines += ["  push:", f"    branches: [{', '.join(json.dumps(b) for b in plan.push_branches)}]"]
+        elif event == "pull_request":
+            lines += ["  pull_request:", f"    types: [{', '.join(PULL_REQUEST_TYPES)}]"]
         else:
             lines.append(f"  {event}:")
     return lines

@@ -2,6 +2,7 @@
 name: CI
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: ["main"]
   workflow_dispatch:
@@ -10,10 +11,11 @@ permissions: {}
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}
 
 jobs:
   artifact-mode-gate:
+    if: ${{ !github.event.pull_request.draft }}
     permissions:
       contents: read
       packages: read
@@ -27,7 +29,7 @@ jobs:
 
   artifact-preflight:
     needs: [artifact-mode-gate, setup]
-    if: ${{ always() && !cancelled() && needs.artifact-mode-gate.result == 'success' }}
+    if: ${{ !github.event.pull_request.draft && (always() && !cancelled() && needs.artifact-mode-gate.result == 'success') }}
     permissions:
       contents: read
       packages: read
@@ -42,7 +44,7 @@ jobs:
 
   artifact-producer:
     needs: [artifact-mode-gate, artifact-preflight, setup]
-    if: ${{ always() && !cancelled() && needs.artifact-mode-gate.result == 'success' && needs.artifact-preflight.result == 'success' && github.run_attempt == '1' && toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'true' && (!cancelled() && needs.setup.result == 'success') }}
+    if: ${{ !github.event.pull_request.draft && (always() && !cancelled() && needs.artifact-mode-gate.result == 'success' && needs.artifact-preflight.result == 'success' && github.run_attempt == '1' && toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'true' && (!cancelled() && needs.setup.result == 'success')) }}
     permissions:
       contents: read
       packages: read
@@ -68,7 +70,7 @@ jobs:
 
   setup:
     needs: [artifact-mode-gate]
-    if: ${{ always() && !cancelled() && needs.artifact-mode-gate.result == 'success' && (true) }}
+    if: ${{ !github.event.pull_request.draft && (always() && !cancelled() && needs.artifact-mode-gate.result == 'success' && (true)) }}
     permissions:
       contents: read
       packages: read
@@ -85,7 +87,7 @@ jobs:
 
   build:
     needs: [artifact-mode-gate, artifact-preflight, artifact-producer, setup]
-    if: ${{ always() && !cancelled() && needs.artifact-mode-gate.result == 'success' && needs.artifact-preflight.result == 'success' && (toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'false' || (github.run_attempt == '1' && toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'true' && needs.artifact-producer.result == 'success' && toJSON(fromJSON(needs.artifact-producer.outputs.build-artifact-share-available)) == 'true')) && (!cancelled() && needs.setup.result == 'success') }}
+    if: ${{ !github.event.pull_request.draft && (always() && !cancelled() && needs.artifact-mode-gate.result == 'success' && needs.artifact-preflight.result == 'success' && (toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'false' || (github.run_attempt == '1' && toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'true' && needs.artifact-producer.result == 'success' && toJSON(fromJSON(needs.artifact-producer.outputs.build-artifact-share-available)) == 'true')) && (!cancelled() && needs.setup.result == 'success')) }}
     permissions:
       contents: read
       packages: read
@@ -114,7 +116,7 @@ jobs:
 
   test:
     needs: [artifact-mode-gate, artifact-preflight, artifact-producer, setup]
-    if: ${{ always() && !cancelled() && needs.artifact-mode-gate.result == 'success' && needs.artifact-preflight.result == 'success' && (toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'false' || (github.run_attempt == '1' && toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'true' && needs.artifact-producer.result == 'success' && toJSON(fromJSON(needs.artifact-producer.outputs.build-artifact-share-available)) == 'true')) && (!cancelled() && needs.setup.result == 'success') }}
+    if: ${{ !github.event.pull_request.draft && (always() && !cancelled() && needs.artifact-mode-gate.result == 'success' && needs.artifact-preflight.result == 'success' && (toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'false' || (github.run_attempt == '1' && toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected)) == 'true' && needs.artifact-producer.result == 'success' && toJSON(fromJSON(needs.artifact-producer.outputs.build-artifact-share-available)) == 'true')) && (!cancelled() && needs.setup.result == 'success')) }}
     permissions:
       contents: read
       packages: read
@@ -142,7 +144,7 @@ jobs:
       NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
 
   test-levels:
-    if: ${{ always() }}
+    if: ${{ !github.event.pull_request.draft && (always()) }}
     needs: [setup, build, test, artifact-mode-gate, artifact-preflight, artifact-producer]
     permissions: {}
     runs-on: ubuntu-24.04

@@ -187,7 +187,7 @@ class BuildArtifactSchemaTests(unittest.TestCase):
         )
         self.assertIn("needs.artifact-producer.result == 'skipped'", jobs["test-levels"]["steps"][1]["with"]["share-selected"])
         self.assertEqual(jobs["test-levels"]["steps"][1]["if"], "always()")
-        self.assertEqual(jobs["test-levels"]["if"], "${{ always() }}")
+        self.assertEqual(jobs["test-levels"]["if"], "${{ !github.event.pull_request.draft && (always()) }}")
         self.assertNotIn("continue-on-error", json.dumps(jobs["test-levels"]))
         aggregate_projection = jobs["test-levels"]["steps"][1]["with"]["needs-json"]
         self.assertIn('"build-artifact-receipt":${{ toJSON(needs.build.outputs.build-artifact-receipt) }}', aggregate_projection)
@@ -211,10 +211,10 @@ class BuildArtifactSchemaTests(unittest.TestCase):
         selected = "toJSON(fromJSON(needs.artifact-preflight.outputs.build-artifact-share-selected))"
         available = "toJSON(fromJSON(needs.artifact-producer.outputs.build-artifact-share-available))"
         participant_if = (
-            "${{ always() && !cancelled() && needs.artifact-mode-gate.result == 'success' "
+            "${{ !github.event.pull_request.draft && (always() && !cancelled() && needs.artifact-mode-gate.result == 'success' "
             "&& needs.artifact-preflight.result == 'success' "
             f"&& ({selected} == 'false' || (github.run_attempt == '1' && {selected} == 'true' "
-            f"&& needs.artifact-producer.result == 'success' && {available} == 'true')) && (true) }}}}"
+            f"&& needs.artifact-producer.result == 'success' && {available} == 'true')) && (true)) }}}}"
         )
         for level_id in ("build", "test"):
             self.assertEqual(jobs[level_id]["if"], participant_if)
@@ -226,6 +226,7 @@ class BuildArtifactSchemaTests(unittest.TestCase):
 
         def route(preflight_result, raw_selected, attempt, producer_result, raw_available):
             bindings = {
+                "github.event.pull_request.draft": False,
                 "needs.artifact-mode-gate.result": "success",
                 "needs.artifact-preflight.result": preflight_result,
                 "github.run_attempt": attempt,
@@ -421,6 +422,8 @@ def simulate(rendered, outcomes, event="pull_request", base="main"):
 
     def evaluate(expression):
         py = expression.replace("&&", " and ").replace("||", " or ").replace("!cancelled()", "True")
+        # Every simulated run is a push, a dispatch, or a ready pull request.
+        py = py.replace(ci_levels.DRAFT_GUARD, "True")
         py = py.replace("github.event_name", repr(event)).replace("github.base_ref", repr(base_ref))
         py = py.replace("github.ref_name", repr(ref_name))
         py = re.sub(r"needs\.([a-z-]+)\.result", lambda m: repr(results[m.group(1)]), py)
@@ -519,6 +522,100 @@ class EdgeConditionTests(unittest.TestCase):
     def test_a_failed_diagnostics_level_fails_the_aggregate(self):
         _, code = self.aggregate_exit({"diagnostics": "failure"})
         self.assertNotEqual(code, 0)
+
+
+GOLDENS = tuple(sorted(FIXTURES.glob("*.golden.yml")))
+_NEEDS_REF = re.compile(r"needs\.[a-z][a-z0-9-]*\.(?:result|outputs\.[a-z][a-z0-9-]*)")
+
+
+def schedules(job, *, event="pull_request", draft=None, upstream="success"):
+    """Whether GitHub starts `job`: its `if:` with every upstream at `upstream`.
+
+    Outputs bind to 'true' so the artifact DAG takes its sharing path. A guard
+    without a status function also needs every dependency to have succeeded.
+    """
+    guard = job.get("if")
+    if guard is None:
+        return upstream == "success"
+    bindings = {
+        "github.event_name": event,
+        "github.event.pull_request.draft": draft,
+        "github.base_ref": "main" if event == "pull_request" else "",
+        "github.ref_name": "7/merge" if event == "pull_request" else "main",
+        "github.run_attempt": "1",
+    }
+    for name in _NEEDS_REF.findall(guard):
+        bindings[name] = upstream if name.endswith(".result") else "true"
+    functions = {"always": lambda: True, "cancelled": lambda: False,
+                 "success": lambda: upstream == "success", "failure": lambda: upstream == "failure"}
+    explicit_status = re.search(r"\b(?:always|success|failure|cancelled)\(", guard)
+    runs = Evaluator(bindings, functions=functions).evaluate(guard)
+    return runs and bool(explicit_status or upstream == "success")
+
+
+class DraftDeferralTests(unittest.TestCase):
+    """Issue #1984: drafts run no lane; ready and new commits run the whole plan."""
+
+    def test_a_draft_pull_request_schedules_no_job(self):
+        for golden in GOLDENS:
+            for name, job in yaml.safe_load(golden.read_text())["jobs"].items():
+                with self.subTest(caller=golden.name, job=name):
+                    self.assertFalse(
+                        schedules(job, draft=True),
+                        "a draft must hold no runner and report no lane or aggregate result",
+                    )
+
+    def test_a_ready_pull_request_schedules_its_whole_plan(self):
+        plans = {
+            (): {"ci"},
+            ("--levels", str(FIXTURES / "gitflow.json")): {"lint", "unit", "integration", "diagnostics", ci_levels.AGGREGATE_ID},
+        }
+        for arguments, expected in plans.items():
+            with self.subTest(arguments=arguments):
+                jobs = yaml.safe_load(run_generator(SHA, *arguments).stdout)["jobs"]
+                self.assertEqual({name for name, job in jobs.items() if schedules(job, draft=False)}, expected)
+
+    def test_a_push_carries_no_draft_flag_and_schedules_its_whole_plan(self):
+        plans = {
+            (): {"ci"},
+            ("--levels", str(FIXTURES / "gitflow.json")): {"unit", "integration", "release-gate", ci_levels.AGGREGATE_ID},
+        }
+        for arguments, expected in plans.items():
+            with self.subTest(arguments=arguments):
+                jobs = yaml.safe_load(run_generator(SHA, *arguments).stdout)["jobs"]
+                self.assertEqual({name for name, job in jobs.items() if schedules(job, event="push")}, expected)
+
+    def test_on_a_ready_pull_request_the_aggregate_still_judges_skipped_levels(self):
+        """Paired with the truth table, where an expected level that skipped fails it."""
+        jobs = yaml.safe_load(run_generator(SHA, "--levels", str(FIXTURES / "gitflow.json")).stdout)["jobs"]
+        self.assertTrue(
+            schedules(jobs[ci_levels.AGGREGATE_ID], draft=False, upstream="skipped"),
+            "an aggregate skipped with its levels would pass a ready head nothing verified",
+        )
+
+    @staticmethod
+    def cancels(action):
+        cancel = yaml.safe_load(ci_levels.CONCURRENCY)["concurrency"]["cancel-in-progress"]
+        return Evaluator({"github.event_name": "pull_request", "github.event.action": action}).evaluate(cancel)
+
+    def test_a_same_commit_transition_waits_for_the_running_run(self):
+        for action in ("opened", "reopened", "ready_for_review"):
+            with self.subTest(action=action):
+                self.assertFalse(
+                    self.cancels(action),
+                    "a same-head event must not cancel a running ready run into a red required check",
+                )
+
+    def test_a_new_commit_cancels_the_run_it_supersedes(self):
+        self.assertTrue(self.cancels("synchronize"), "a superseded head's run would keep its runner to the end")
+
+    def test_a_pull_request_caller_reruns_when_a_draft_becomes_ready(self):
+        triggers = yaml.safe_load(run_generator(SHA).stdout)[True]
+        self.assertEqual(
+            triggers["pull_request"],
+            {"types": ["opened", "synchronize", "reopened", "ready_for_review"]},
+            "without ready_for_review nothing re-runs a deferred draft once it is ready",
+        )
 
 
 class ValidatorTests(unittest.TestCase):
