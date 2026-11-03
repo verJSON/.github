@@ -230,7 +230,7 @@ def read_actions_enabled(organization: str, name: str):
 
 def read_branch_rule_types(organization: str, name: str, branch: str):
     """Map each ruleset that applies to the branch to the rule types it contributes."""
-    path = f"repos/{organization}/{name}/rules/branches/{quote(branch, safe='/')}?per_page=100"
+    path = f"repos/{organization}/{name}/rules/branches/{quote(branch, safe='')}?per_page=100"
     rule_types = {}
     for rule in gh_json_list(path):
         require_mapping(rule, f"{path} rule")

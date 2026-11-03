@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import quote
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -89,7 +90,7 @@ def build_responses(world):
                 {"type": rule_type, "ruleset_id": BASELINE, "ruleset_source_type": "Organization"}
                 for rule_type in ("pull_request", "non_fast_forward", "deletion")
             )
-        responses[f"repos/Verjson/{name}/rules/branches/{detail['branch']}?per_page=100"] = [rules]
+        responses[f"repos/Verjson/{name}/rules/branches/{quote(detail['branch'], safe='')}?per_page=100"] = [rules]
     for relaxation in world["relaxations"]:
         name = relaxation["repository"]
         ruleset_id = relaxation["ruleset_id"]
@@ -548,6 +549,17 @@ class ActionsPausedDriftTest(unittest.TestCase):
         unestablished = "ERROR: cannot establish Actions-paused state"
         self.assertIn(finding, result.stderr)
         self.assertLess(result.stderr.index(finding), result.stderr.index(unestablished))
+
+    def test_default_branch_with_a_slash_is_read_as_one_encoded_path_segment(self):
+        world = default_world()
+        world["repositories"]["verjson-editor"]["branch"] = "release/2026.09"
+
+        result, calls = self.run_audit(world)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "repos/Verjson/verjson-editor/rules/branches/release%2F2026.09?per_page=100", calls
+        )
 
     def test_paused_repository_missing_a_baseline_rule_type_is_drift(self):
         world = default_world()
