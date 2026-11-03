@@ -565,6 +565,14 @@ Without `--levels` the output is the single `ci` job, so the required context st
   unless every level expected for the event and branch succeeded and every other level was
   skipped; failed, cancelled, and unexpectedly skipped levels all fail it. Require
   `test-levels` in rulesets, not the per-level contexts. No job uses `continue-on-error`.
+- **Drafts.** Every generated job, the aggregate included, is skipped while the pull
+  request is a draft, so a draft holds no runner. The trigger requests
+  `ready_for_review`, so marking the pull request ready runs the whole plan on its head.
+  A draft skips rather than fails: a skip is never the SUCCESS the merge gate requires
+  of a required context, while a draft-time failure would stay on the head after the
+  ready run passed ([ADR 0253](decisions/0253-generated-node-ci-callers-defer-drafts/README.md)).
+  The single-job caller follows the same rule, and its `ci / build-test` is not reported
+  on a draft.
 - **Errors.** Invalid files exit 1 with one `code path: message` line per error.
 
 ## Publishing a contract-selected release
