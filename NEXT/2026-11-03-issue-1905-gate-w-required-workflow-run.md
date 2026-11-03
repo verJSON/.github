@@ -12,5 +12,6 @@ title: Refuse a merge whose required workflow did not succeed on the exact head 
 - Missing, unbound, stale, undated, ambiguous, changed-between-reads, cancelled and not-successful runs all fail closed with exit 3, as does a `workflows` rule whose shape cannot be read. A refused or foreign ruleset read exits 1. A ref with no `workflows` rule is unaffected.
 - Gate W is a precondition only. Merge admission stays with #1945.
 - A contract test pins that the org-required arm never skips or yields to a local caller on `opened`, `reopened` or `synchronize` (F-3): no condition reads the invocation identity, and the arm classifies only the label and lifecycle callers.
+- `docs/arm-recovery-runbook.md` codifies the interim close-and-reopen recovery (F-6). Only a human or an App actor may run it, at most twice per head, and only when the pull request's whole arm family is quiet. It never uses `gh run rerun` and never a bypass. It stays permanently for watchdog and external cancellations.
 
 Part of #1905.

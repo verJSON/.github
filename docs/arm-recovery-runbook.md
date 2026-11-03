@@ -46,9 +46,9 @@ request whose arm ran before it. So every edit ships with a planned sweep:
    Any other Gate W reason, and any refusal from another gate, is not part of
    this sweep.
 
-3. **Re-arm each stale head** with one close-and-reopen under the recovery
-   rules in [ADR 0255](decisions/0255-gate-w-required-workflow-run-precondition/README.md#decision).
-   The author may push a new head instead.
+3. **Re-arm each stale head** with one close-and-reopen under the
+   [interim recovery rules](#interim-recovery-close-and-reopen). The author may
+   push a new head instead.
 
 4. **Verify the result.** Confirm a new required run exists on the same head,
    created after `updated_at`, with conclusion `success`. Then confirm the
@@ -59,3 +59,67 @@ request whose arm ran before it. So every edit ships with a planned sweep:
 
 A run created in the same second as the change counts as stale. Run times have
 one-second resolution and `updated_at` does not.
+
+## Interim recovery: close and reopen
+
+Use this when the newest required arm run on the exact head is cancelled
+(`Gate W: … cancelled:`), or when the head is `stale` after a ruleset edit. A
+close-and-reopen delivers `reopened`, which starts a new required run on the same
+head. It can fail, so it is an attempt and not a guarantee. These rules are
+[ADR 0255](decisions/0255-gate-w-required-workflow-run-precondition/README.md) §4:
+
+- **Actor.** Only a human, or an App identity whose events start workflows.
+  Never `GITHUB_TOKEN`: its close and reopen events start no workflow.
+- **Quiet family first.** List the runs of the pull request's whole arm family
+  and act only if none of them is `queued` or `in_progress`. The family is the
+  required `AI review authorization arm`, `gate re-arm`, `AI review label
+  re-arm`, and `AI review lifecycle re-arm`, across every head and pin. A new
+  required run that arrives while another family run holds the
+  `ai-review-arm-<PR>` group waits in the single pending slot. A later family run
+  can then displace it, which is the #1905 cancellation again. These runs report
+  no pull-request number, so bind the family by head branch and head repository:
+
+  ```bash
+  gh api --paginate "repos/<owner>/<repo>/actions/runs?branch=<head-branch>&per_page=100" --jq '
+    .workflow_runs[]
+    | select(.head_repository.full_name == "<head-owner>/<head-repo>")
+    | select(.path | IN(".github/workflows/gate-rearm.yml",
+                        ".github/workflows/ai-review-label-rearm.yml",
+                        ".github/workflows/ai-review-lifecycle-rearm.yml"))
+    | select(.status != "completed")
+    | [.id, .name, .status, .head_sha] | @tsv'
+  ```
+
+  An empty result is quiet. If the listing cannot be read or is incomplete,
+  quiet is not established: stop and escalate. The check and the reopen are not
+  atomic, so recheck after every attempt.
+- **At most 2 attempts per head.** After the second unsuccessful attempt, stop and
+  escalate on the pull request and on #1905. Do not keep retrying.
+- **Verify every attempt.** Confirm a new required run on the exact head
+  (`workflow_url` ending `/actions/required_workflows/<id>`) concluded `success`.
+  Then run `bash scripts/assert-mergeable-head.sh <owner>/<repo> <pr>` and confirm
+  Gate W and the admission evidence pass.
+- **Undo the side effects.** Closing a pull request clears native auto-merge, so
+  re-request it if it was set. Reopen a Renovate-authored pull request
+  immediately. If Renovate posted an "ignored" notice while the pull request was
+  closed, recreate it from the dependency dashboard instead.
+- **Never** run `gh run rerun` on a required run: it answers 404, because the
+  workflow is organization-injected. **Never** use an admin or ruleset bypass to
+  merge over the refusal.
+
+Using this recovery against concurrency displacement is interim. It ends once
+the event-time guard (F-1), Gate W, and the F-7 required-only closure are
+verified fleet-wide. The same actor, cap, quiet-family, and never-rerun rules
+stay **permanently** for watchdog and external cancellations. Those are two of
+the three owner-ratified exceptions to "never cancel the required run". The
+third is one required run replacing another (ADR 0255 §5).
+
+## Recovery by refusal reason
+
+| Gate W reason | Recovery |
+| --- | --- |
+| `cancelled` | [Interim recovery](#interim-recovery-close-and-reopen), or push a new head. |
+| `stale` | [Re-arm sweep](#re-arm-sweep-after-a-ruleset-edit): one close-and-reopen under the interim rules. |
+| `absent` | The head has no required run. Check that the repository is enrolled and the base ref carries the rule. Then use the interim recovery. |
+| `not successful` | The required run failed or skipped. Read its log and fix the cause before re-arming. |
+| `unbound`, `ambiguous`, `undated`, `changed`, unreadable rule | Do not re-arm. The evidence cannot be attributed. Re-run the read-only assertion. If the refusal persists, escalate on #1905 with the message. |
