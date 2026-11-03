@@ -521,6 +521,18 @@ class EdgeConditionTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
 
 
+class DraftDeferralTests(unittest.TestCase):
+    """Issue #1984: drafts run no lane; ready and new commits run the whole plan."""
+
+    def test_a_pull_request_caller_reruns_when_a_draft_becomes_ready(self):
+        triggers = yaml.safe_load(run_generator(SHA).stdout)[True]
+        self.assertEqual(
+            triggers["pull_request"],
+            {"types": ["opened", "synchronize", "reopened", "ready_for_review"]},
+            "without ready_for_review nothing re-runs a deferred draft once it is ready",
+        )
+
+
 class ValidatorTests(unittest.TestCase):
     def test_valid_plan_is_immutable(self):
         plan = parse(levels({"id": "unit"}, {"id": "e2e", "needs": [{"level": "unit"}]}))

@@ -33,6 +33,8 @@ MAX_INPUTS = 64
 MAX_INPUT_LENGTH = 4096
 DEFAULT_EVENTS = ("pull_request", "push", "workflow_dispatch")
 ALL_EVENTS = DEFAULT_EVENTS
+# GitHub's defaults plus ready_for_review, which runs the plan a draft deferred (#1984).
+PULL_REQUEST_TYPES = ("opened", "synchronize", "reopened", "ready_for_review")
 CONDITIONS = ("success", "completed")
 
 _ID = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -1000,6 +1002,8 @@ def _triggers(plan: Plan) -> list[str]:
             continue
         if event == "push":
             lines += ["  push:", f"    branches: [{', '.join(json.dumps(b) for b in plan.push_branches)}]"]
+        elif event == "pull_request":
+            lines += ["  pull_request:", f"    types: [{', '.join(PULL_REQUEST_TYPES)}]"]
         else:
             lines.append(f"  {event}:")
     return lines
