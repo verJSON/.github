@@ -230,6 +230,19 @@ class ActionsPausedDriftTest(unittest.TestCase):
             result.stderr,
         )
 
+    def test_paused_repository_whose_relaxation_is_active_is_drift(self):
+        world = default_world()
+        world["enforcement"][21750617] = "active"
+
+        result, _ = self.run_audit(world)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "ERROR: ruleset 21750617 for verjson-authn is active, expected evaluate "
+            "while verjson-actions-state=paused",
+            result.stderr,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,9 @@ from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 CHECKED_IN_POLICY = ROOT / "config/actions-paused-drift-policy.json"
+# ADR 0252: a paused-only relaxation records results without blocking while
+# its repository is paused, and blocks again once the repository is enabled.
+RELAXATION_ENFORCEMENT = {"paused": "evaluate", "enabled": "active"}
 
 
 class AuditDataError(Exception):
@@ -229,10 +232,11 @@ def main(arguments: list[str] | None = None) -> int:
         for relaxation in policy["relaxations"]:
             name = relaxation["repository"]
             enforcement = read_relaxation(organization, relaxation).get("enforcement")
-            if states[name] == "enabled" and enforcement != "active":
+            expected = RELAXATION_ENFORCEMENT[states[name]]
+            if enforcement != expected:
                 findings.append(
                     f"ruleset {relaxation['ruleset_id']} for {name} is {enforcement}, "
-                    f"expected active while {policy['property']}=enabled"
+                    f"expected {expected} while {policy['property']}={states[name]}"
                 )
     except (OSError, AuditDataError, RuntimeError) as error:
         print(f"ERROR: cannot establish Actions-paused state: {error}", file=sys.stderr)
