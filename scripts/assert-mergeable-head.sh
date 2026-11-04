@@ -11,7 +11,7 @@
 # for an opaque `false` is to widen the accepted-conclusion list, which is
 # precisely how `Verjson/verjson-cli#251`'s unexercised-head class returns.
 #
-# This script answers three separable questions and names which one failed, so
+# This script answers four separable questions and names which one failed, so
 # that relaxing any of them is a deliberate, reviewable act rather than an
 # allowlist edit made under time pressure:
 #
@@ -21,6 +21,12 @@
 #           being silently satisfied by its own absence. Every required context
 #           needs a SUCCESS of its own (a skip is not evidence its work ran), and
 #           any workflow run on the head that has not finished is pending (ADR 0229).
+#   Gate W  every required workflow a ruleset `workflows` rule names for the base ref
+#           has a successful provider-recorded run on the head, created after that
+#           ruleset last changed; only a later run of the SAME required workflow
+#           supersedes a cancelled one, and no set-aside below ever satisfies it
+#           (ADR 0255, #1905). A precondition only: it is not AI-authorization
+#           evidence, and merge admission stays with #1945.
 #   Gate B  positive evidence that verification actually executed: the head
 #           carries no ADR 0178 `deferred-ci` check that ran, and no ADR 0156
 #           deferral annotation. This is the gate a deferred Renovate head
@@ -40,7 +46,7 @@
 # repository (ADR 0226 amendment 2026-10-15, verjson-agents#432).
 # No conclusion is added to the passing set, and Gate B always reads the raw inventory.
 #
-# Prints "true" and exits 0 only when all three hold. Every other outcome is a
+# Prints "true" and exits 0 only when all four hold. Every other outcome is a
 # fault: a `::error::` naming the gate, and a distinct exit code — never a bare
 # "false", and never a zero exit on an unanswered question.
 #
@@ -49,6 +55,10 @@
 # of the required set. Workflow runs (`actions/runs`) are read for every head (ADR 0229):
 # an unfinished run is pending, and ADR 0226 places cancelled check runs in their runs.
 # The job listing of a cancelled concurrency-family run is read under that same grant.
+# Gate W reads `repos/{owner}/{repo}/rulesets/{id}` for each ruleset carrying a
+# `workflows` rule, for its `updated_at`; like the rules endpoint it needs only
+# repository read (verified 2026-11-03: `repos/verJSON/.github/rulesets/20722935`
+# answers a wholly unauthenticated caller).
 # A caller missing any read cannot evaluate the assertion, and
 # this script refuses rather than falling back to partial data. `administration` is
 # NOT required, and an organization-level ruleset is returned through this repository
@@ -78,7 +88,9 @@
 # than asserting either cause, because the two remedies are opposite (#1437).
 #
 #   2  usage error
-#   3  Gate A failed (required contexts absent, misattributed, pending, or not passing)
+#   3  Gate A failed (required contexts absent, misattributed, pending, or not passing),
+#      or Gate W failed (a required workflow's run absent, unbound, stale, ambiguous,
+#      undated, cancelled without a same-workflow successor, or not successful)
 #   4  Gate B failed (the head was deferred; nothing on it was verified)
 #   5  Gate C failed (some other check is pending or non-passing)
 #   1  the assertion could not be evaluated (API failure, unresolvable state)
@@ -753,6 +765,121 @@ unbound="$(jq -rn --slurpfile required "$required" '
   || fault 1 "failed to evaluate unbound required contexts for $repo#$pr"
 [ -z "$unbound" ] \
   || annotate warning "Gate A matched these required contexts on display name alone, because $base_ref binds them to no app: $unbound"
+
+# ---------------------------------------------------------------- Gate W ----
+# ADR 0255 (#1905). A ruleset `workflows` rule blocks the merge unless its required
+# workflow succeeded on the head, and nothing above reads it: Gate A reads only
+# `required_status_checks`, and the ADR 0226 family set-aside dismisses exactly the run
+# such a rule needs. Gate W is a fail-closed precondition, never authorization evidence.
+required_workflows="$scratch/required-workflows.json"
+# Types are checked, never truthiness: a rule whose shape Gate W cannot read must not
+# read as a ref with no required workflow, which is the vacuous pass.
+jq -ce '
+  [ .[]? | select(type == "object" and .type == "workflows") ]
+  | if all(.[]; (.ruleset_id | type) == "number" and .ruleset_id >= 1 and (.ruleset_id | floor) == .ruleset_id
+                and (.parameters.workflows | type) == "array" and (.parameters.workflows | length) > 0
+                and all(.parameters.workflows[]; type == "object" and (.path | type) == "string" and .path != ""))
+    then [ .[] | .ruleset_id as $ruleset | .parameters.workflows[] | { ruleset_id: $ruleset, path: .path, entry: . } ]
+    else false end
+' <<<"$rules_json" >"$required_workflows" \
+  || fault 3 "Gate W: the workflows rules of $base_ref carry a rule it cannot read (each needs a numeric ruleset_id and a non-empty parameters.workflows list of entries with a path), so the required workflows of $repo#$pr cannot be established; Gate W refuses rather than read the ref as requiring none"
+# A run reports its path but not the repository its workflow came from, so two required
+# workflows at one path could each be satisfied by the other's run.
+duplicate_paths="$(jq -r '[ group_by(.path)[] | select(length > 1) | "\(length) required workflows at \(.[0].path)" ] | join(", ")' \
+  <"$required_workflows")" \
+  || fault 1 "failed to check the workflows rules of $repo@$base_ref for shared paths"
+[ -z "$duplicate_paths" ] \
+  || fault 3 "Gate W: the workflows rules of $base_ref name $duplicate_paths, and a run binds to its rule only by path, so no run on $repo#$pr head $head_sha can be attributed to one of them; this is ambiguous, not missing evidence, and Gate W refuses rather than guess"
+
+# No provider field binds a run to the rule's pinned SHA, so a run created before the
+# ruleset last changed is stale (owner timing rule, ADR 0255). Each ruleset's change
+# time is read from the repository endpoint, which needs no grant beyond repository read.
+ruleset_ids="$scratch/ruleset-ids.txt"
+jq -r '[ .[].ruleset_id ] | unique | .[]' <"$required_workflows" >"$ruleset_ids" \
+  || fault 1 "failed to list the rulesets carrying workflows rules for $repo@$base_ref"
+rulesets="$scratch/rulesets.json"
+printf '{}\n' >"$rulesets" \
+  || fault 1 "failed to record the empty ruleset inventory for $repo@$base_ref"
+while IFS= read -r ruleset_id; do
+  ruleset_raw="$scratch/ruleset-$ruleset_id.json"
+  gh api "repos/$repo/rulesets/$ruleset_id" </dev/null >"$ruleset_raw" \
+    || permission_fault "Gate W failed to read ruleset $ruleset_id of $repo, which dates its workflows rule" "Metadata" "contents"
+  jq -c --slurpfile acc "$rulesets" --arg id "$ruleset_id" '
+    if type == "object" and .id == ($id | tonumber) then
+      $acc[0] + { ($id): { updated_at: .updated_at,
+                           workflows: [ .rules[]? | select(type == "object" and .type == "workflows")
+                                        | .parameters.workflows[]? ] } }
+    else error("not the ruleset requested") end' \
+    <"$ruleset_raw" >"$rulesets.next" \
+    || fault 1 "the response for ruleset $ruleset_id of $repo is not that ruleset, so it cannot date the workflows rule; it cannot be reasoned over"
+  mv "$rulesets.next" "$rulesets" \
+    || fault 1 "failed to record ruleset $ruleset_id of $repo"
+done <"$ruleset_ids"
+
+gate_w="$(jq -rn --slurpfile required "$required_workflows" --slurpfile runs "$runs" --slurpfile rulesets "$rulesets" \
+  --argjson families "$CONCURRENCY_FAMILIES" --arg repo "$repo" \
+  --arg pr_head_ref "$pr_head_ref" --arg pr_head_repo "$pr_head_repo" "$FAMILY_JQ_DEFS"'
+  $required[0] as $required | $runs[0] as $runs | $rulesets[0] as $rulesets
+  # An ISO 8601 instant, with optional fractional seconds and a Z or +-HH:MM offset, as
+  # epoch seconds; null when absent or unreadable. The rulesets endpoint reports both
+  # `16:39:01.138Z` and `11:39:01.138-05:00` for the same instant.
+  | def instant:
+      if type != "string" then null
+      else (capture("^(?<base>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?<frac>[.][0-9]+)?(?<zone>Z|[+-][0-9]{2}:[0-9]{2})$") // null)
+        | if . == null then null
+          else ((.base + "Z") | try fromdateiso8601 catch null) as $seconds
+          | if $seconds == null then null
+            else $seconds + ((.frac // ".0") | "0" + . | tonumber)
+              - (if .zone == "Z" then 0
+                 else (if .zone[0:1] == "-" then -1 else 1 end)
+                      * ((.zone[1:3] | tonumber) * 3600 + (.zone[4:6] | tonumber) * 60) end) end end end;
+  [ $required[]
+      | . as $rule
+      | $rulesets["\($rule.ruleset_id)"].updated_at as $changed_at
+      | ($changed_at | instant) as $changed
+      # Runs at the path that GitHub records as SOME required workflow. A repository-local
+      # caller shares the path, never the required-workflow URL.
+      | [ $runs[] | select(.path == $rule.path and (.workflow_url | type) == "string"
+                           and (.workflow_url | test("/actions/required_workflows/[0-9]+$"))) ] as $at_path
+      # Provider fields only (ADR 0255): a required-workflow URL naming the workflow id of the run
+      # itself, which a repository cannot forge, the event, and the head branch
+      # and repository of this pull request. The run name is never read: a caller
+      # chooses it.
+      | [ $at_path[]
+          | .workflow_id as $id
+          | select(.event == "pull_request_target"
+                   and (.workflow_url | type) == "string"
+                   and (.workflow_url | endswith("/actions/required_workflows/\($id)"))
+                   and bound_to_pr) ] as $bound
+      | [ $bound[] | select((.created_at | instant) > $changed) ] as $fresh
+      | ($fresh | max_by(.run_number)) as $newest
+      | if (any($rulesets["\($rule.ruleset_id)"].workflows[]?; . == $rule.entry) | not) then
+          "changed: ruleset \($rule.ruleset_id) no longer reports the required workflow \($rule.path)@\($rule.entry.sha // $rule.entry.ref // "an unpinned ref") that the branch rules returned, so its change time does not date that rule; re-run the assertion"
+        elif $changed == null then
+          "undated: ruleset \($rule.ruleset_id) reports no readable change time, so a run of \($rule.path) cannot be shown to postdate the current rule"
+        elif ($at_path | length) == 0 then
+          "absent: no run of required workflow \($rule.path) (ruleset \($rule.ruleset_id)) is recorded on this head; a repository-local run at that path is not one"
+        elif ($bound | length) == 0 then
+          "unbound: run \($at_path | map(.id | tostring) | join(", ")) at \($rule.path) is not bound to ruleset \($rule.ruleset_id)'"'"'s required workflow for this pull request: none is a pull_request_target run that GitHub names by a required-workflow URL for its own workflow id, on this pull request'"'"'s head branch and repository"
+        elif any($bound[]; (.created_at | instant) == null) then
+          ([ $bound[] | select((.created_at | instant) == null) | .id | tostring ] | join(", ")) as $undated
+          | "undated: run \($undated) of required workflow \($rule.path) reports no readable creation time, so it cannot be ordered against the change of ruleset \($rule.ruleset_id)"
+        elif ($fresh | length) == 0 then
+          "stale: every run of required workflow \($rule.path) (ruleset \($rule.ruleset_id)) on this head was created at or before the ruleset last changed at \($changed_at), so none is evidence under the current rule; re-arm the head (docs/arm-recovery-runbook.md)"
+        # Only fresh runs can vouch, so only they can be ambiguous: a required-workflow
+        # id seen only before the ruleset changed is no candidate for this rule.
+        elif ($fresh | map(.workflow_id) | unique | length) > 1 then
+          ($fresh | map(.workflow_id) | unique) as $ids
+          | "ambiguous: runs of \($ids | length) required workflows (\($ids | map(tostring) | join(", "))) at \($rule.path) bind to ruleset \($rule.ruleset_id), and no field the rule carries tells which one it requires"
+        elif $newest.status == "completed" and $newest.conclusion == "success" then empty
+        elif $newest.conclusion == "cancelled" then
+          "cancelled: required run \($newest.id) of \($rule.path) (ruleset \($rule.ruleset_id)) was cancelled and no later run of the same required workflow on this head succeeded"
+        else "not successful: required run \($newest.id) of \($rule.path) (ruleset \($rule.ruleset_id)) is \($newest.status)/\($newest.conclusion)" end ]
+  | join("; ")')" \
+  || fault 1 "failed to evaluate the required workflows of $repo#$pr"
+
+[ -z "$gate_w" ] \
+  || fault 3 "Gate W: $repo#$pr head $head_sha does not carry a successful run of every required workflow of $base_ref — $gate_w. GitHub's workflows rule blocks this merge whatever Gates A and C say. A required run cannot be re-run (gh run rerun answers 404) and must never be bypassed: re-arm the head under docs/arm-recovery-runbook.md, and never widen this gate"
 
 # ---------------------------------------------------------------- Gate B ----
 # A check entry proves a check REPORTED; it does not prove the check did work.

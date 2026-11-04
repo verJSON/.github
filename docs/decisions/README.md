@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0255](0255-gate-w-required-workflow-run-precondition/README.md) | 2026-11-03 | Gate W: a required workflow's own successful run on the exact head is a merge precondition |
 | [0254](0254-audit-recognizes-the-main-protection-suspension/README.md) | 2026-11-03 | The arm audit recognizes the main-protection suspension as a reviewed state |
 | [0253](0253-generated-node-ci-callers-defer-drafts/README.md) | 2026-11-03 | Generated Node CI callers skip drafts and cancel only on new commits |
 | [0252](0252-exclude-actions-paused-repos-from-required-checks/README.md) | 2026-11-03 | Exclude Actions-paused repositories from required-check rulesets |
