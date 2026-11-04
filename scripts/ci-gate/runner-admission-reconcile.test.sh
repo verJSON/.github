@@ -131,7 +131,8 @@ run_case() { : > "$GH_API_LOG"; bash "$script" 2>&1; }
 code_of() { run_case >/dev/null 2>&1; printf '%s' "$?"; }
 
 out="$(run_case)"
-[ "$(code_of)" = "0" ] \
+code=$?
+[ "$code" = "0" ] \
   && grep -qF 'No drift' <<<"$out" \
   && pass "organization-wide permissive group admits new private and public repositories" \
   || fail "clean permissive policy did not reconcile: $out"
@@ -141,7 +142,8 @@ out="$(run_case)"
 # self-hosted fleet label, so the org-admin reconciler must inspect inventory.
 HOSTED_RUNNERS_PAGES='{"total_count":1,"runners":[{"id":42,"name":"general"}]}'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'GitHub-hosted larger runner' <<<"$out" \
   && grep -qF '"general" (id 42)' <<<"$out" \
   && pass "an arbitrary-label larger runner is actionable drift" \
@@ -207,26 +209,30 @@ done
 # keeping only the final page would omit `general` and weaken the report.
 HOSTED_RUNNERS_PAGES=$'{"total_count":2,"runners":[{"id":42,"name":"general"}]}\n{"total_count":2,"runners":[{"id":43,"name":"release-xl"}]}'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF '"general" (id 42)' <<<"$out" \
   && grep -qF '"release-xl" (id 43)' <<<"$out" \
   && pass "larger-runner inventory is collected across every page" \
   || fail "paginated larger-runner inventory was under-reported: $out"
 
 HOSTED_RUNNERS_PAGES='{"total_count":1,"runners":{}}'
-[ "$(code_of)" = "2" ] \
+code="$(code_of)"
+[ "$code" = "2" ] \
   && pass "a malformed larger-runner response is undetermined, never clean" \
-  || fail "malformed larger-runner response did not fail closed: $(code_of)"
+  || fail "malformed larger-runner response did not fail closed: $code"
 
 HOSTED_RUNNERS_PAGES='{"total_count":2,"runners":[{"id":42,"name":"general"}]}'
-[ "$(code_of)" = "2" ] \
+code="$(code_of)"
+[ "$code" = "2" ] \
   && pass "an incomplete larger-runner page count is undetermined" \
-  || fail "incomplete larger-runner pagination did not fail closed: $(code_of)"
+  || fail "incomplete larger-runner pagination did not fail closed: $code"
 
 HOSTED_RUNNERS_PAGES='{"total_count":1,"runners":[{"name":"general"}]}'
-[ "$(code_of)" = "2" ] \
+code="$(code_of)"
+[ "$code" = "2" ] \
   && pass "a larger-runner object without an id is undetermined" \
-  || fail "malformed larger-runner object did not fail closed: $(code_of)"
+  || fail "malformed larger-runner object did not fail closed: $code"
 
 for malformed_inventory in \
   '{"total_count":1,"runners":[{"id":42,"name":""}]}' \
@@ -234,28 +240,32 @@ for malformed_inventory in \
   '{"total_count":2,"runners":[{"id":42,"name":"general"},{"id":43,"name":"general"}]}' \
   $'{"total_count":2,"runners":[{"id":42,"name":"general"}]}\n{"total_count":3,"runners":[{"id":43,"name":"other"}]}'; do
   HOSTED_RUNNERS_PAGES="$malformed_inventory"
-  [ "$(code_of)" = "2" ] \
+  code="$(code_of)"
+  [ "$code" = "2" ] \
     && pass "malformed, duplicate, or count-inconsistent live identity is undetermined" \
     || fail "invalid larger-runner inventory was accepted: $malformed_inventory"
 done
 
 HOSTED_RUNNERS_PAGES='{"total_count":0,"runners":[]}'
 HOSTED_RUNNERS_404='1'
-[ "$(code_of)" = "2" ] \
+code="$(code_of)"
+[ "$code" = "2" ] \
   && pass "a 404 reading larger-runner inventory is undetermined" \
-  || fail "larger-runner 404 did not fail closed: $(code_of)"
+  || fail "larger-runner 404 did not fail closed: $code"
 HOSTED_RUNNERS_404='0'
 
 FAIL_PATH='/actions/hosted-runners'
-[ "$(code_of)" = "2" ] \
+code="$(code_of)"
+[ "$code" = "2" ] \
   && pass "a larger-runner API failure is undetermined" \
-  || fail "larger-runner API failure did not fail closed: $(code_of)"
+  || fail "larger-runner API failure did not fail closed: $code"
 FAIL_PATH=''
 HOSTED_RUNNERS_PAGES='{"total_count":0,"runners":[]}'
 
 G4_GROUP='{"id":4,"name":"DigitalOcean","visibility":"all","allows_public_repositories":false}'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'Verjson/public-app' <<<"$out" \
   && pass "public repository denied by group is reported as drift" \
   || fail "public admission drift not reported: $out"
@@ -265,7 +275,8 @@ G4_GROUP='{"id":4,"name":"DigitalOcean","visibility":"selected","allows_public_r
 # precisely what a per-page collector would drop.
 G4_MEMBERS=$'Verjson/public-app\nVerjson/some-other-repo'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'Verjson/private-lib' <<<"$out" \
   && pass "new private repository missing from selected group is reported" \
   || fail "selected-group new repository gap not reported: $out"
@@ -274,7 +285,8 @@ G4_GROUP='{"id":4,"name":"DigitalOcean","visibility":"all","allows_public_reposi
 G4_MEMBERS=''
 G4_RUNNERS='{"name":"general-1","status":"offline","labels":["self-hosted","general"]}'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'has no matching online runner' <<<"$out" \
   && pass "selector with no online capacity is reported" \
   || fail "capacity drift not reported: $out"
@@ -286,7 +298,8 @@ LEGACY_DEFAULT_VAR=''
 LEGACY_UNTRUSTED_VAR=''
 G4_GROUP='{"id":4,"name":"DigitalOcean","visibility":"all","allows_public_repositories":false,"default":false}'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'Verjson/public-app' <<<"$out" \
   && grep -qF 'privileged lane' <<<"$out" \
   && pass "privileged group admission is checked independently of hosted CI lanes" \
@@ -299,7 +312,8 @@ LEGACY_UNTRUSTED_VAR='{"value":"[\"self-hosted\",\"general\"]","visibility":"all
 G4_GROUP='{"id":4,"name":"DigitalOcean","visibility":"all","allows_public_repositories":true,"default":false}'
 PRIVILEGED_VAR='{"value":"[\"self-hosted\",\"privileged-only\"]","visibility":"all"}'
 out="$(run_case)"
-[ "$(code_of)" = "2" ] \
+code=$?
+[ "$code" = "2" ] \
   && grep -qF 'CI_LANE_PRIVILEGED' <<<"$out" \
   && pass "an ungoverned privileged selector is undetermined, never silently skipped" \
   || fail "privileged selector was not reconciled: $out"
@@ -307,32 +321,37 @@ out="$(run_case)"
 PRIVILEGED_VAR='{"value":"[\"self-hosted\",\"general\"]","visibility":"all"}'
 G4_RUNNERS='{"name":"general-1","status":"offline","labels":["self-hosted","general"]}'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'CI_LANE_PRIVILEGED has no matching online runner' <<<"$out" \
   && pass "privileged selector with no online capacity is reported" \
   || fail "privileged capacity drift not reported: $out"
 
 G4_RUNNERS='{"name":"general-1","status":"online","labels":["self-hosted","general"]}'
 UNTRUSTED_VAR='{"value":"not-json","visibility":"all"}'
-[ "$(code_of)" = "2" ] \
+code="$(code_of)"
+[ "$code" = "2" ] \
   && pass "malformed variable is undetermined, never clean" \
   || fail "malformed variable did not return exit 2"
 
 UNTRUSTED_VAR='{"value":"[\"self-hosted\",\"general\"]","visibility":"selected"}'
-[ "$(code_of)" = "2" ] \
+code="$(code_of)"
+[ "$code" = "2" ] \
   && pass "variable hidden from new repositories is undetermined" \
   || fail "non-global variable did not return exit 2"
 
 UNTRUSTED_VAR='{"value":"[\"self-hosted\",\"unknown-lane\"]","visibility":"all"}'
 out="$(run_case)"
-[ "$(code_of)" = "2" ] \
+code=$?
+[ "$code" = "2" ] \
   && ! grep -qF 'unknown-lane' <<<"$out" \
   && pass "ungoverned lane selector is undetermined" \
   || fail "ungoverned lane did not return exit 2 without leaking its value: $out"
 
 UNTRUSTED_VAR='{"value":"[\"ubuntu-24.04\"]","visibility":"all"}'
 FAIL_PATH='/actions/variables/VERJSON_RUNNER_DEFAULT'
-[ "$(code_of)" = "2" ] \
+code="$(code_of)"
+[ "$code" = "2" ] \
   && pass "org API failure is undetermined, never clean" \
   || fail "API failure did not return exit 2"
 
@@ -348,7 +367,8 @@ G6_GROUP='{"id":6,"name":"isolated","visibility":"all","allows_public_repositori
 G4_RUNNERS='{"name":"general-1","status":"online","labels":["self-hosted","lane-general"]}'
 G6_RUNNERS='{"name":"untrusted-1","status":"online","labels":["self-hosted","lane-untrusted"]}'
 out="$(run_case)"
-[ "$(code_of)" = "0" ] \
+code=$?
+[ "$code" = "0" ] \
   && grep -qF 'No drift' <<<"$out" \
   && pass "namespaced ADR 0035 lane labels map without reconciler changes" \
   || fail "namespaced lane labels did not reconcile: $out"
@@ -360,7 +380,8 @@ PRIVILEGED_VAR='{"value":"[\"self-hosted\",\"lane-general\"]","visibility":"all"
 G6_GROUP='{"id":6,"name":"isolated","visibility":"all","allows_public_repositories":false}'
 G6_MEMBERS=''
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'Verjson/public-app' <<<"$out" \
   && grep -qF 'untrusted lane' <<<"$out" \
   && ! grep -qF 'isolated' <<<"$out" \
@@ -371,14 +392,16 @@ G6_GROUP='{"id":6,"name":"isolated","visibility":"selected","allows_public_repos
 # The required public repository is on page 1 so a last-page-only result fails.
 G6_MEMBERS=$'Verjson/public-app\nVerjson/private-lib'
 out="$(run_case)"
-[ "$(code_of)" = "0" ] \
+code=$?
+[ "$code" = "0" ] \
   && grep -qF 'No drift' <<<"$out" \
   && pass "selected untrusted-group membership spanning API pages is admitted" \
   || fail "selected untrusted-group members were not reconciled: $out"
 
 G6_MEMBERS='Verjson/private-lib'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'Verjson/public-app' <<<"$out" \
   && grep -qF 'untrusted lane' <<<"$out" \
   && ! grep -qF 'isolated' <<<"$out" \
@@ -388,14 +411,16 @@ out="$(run_case)"
 G6_MEMBERS=$'Verjson/private-lib\nVerjson/public-app'
 G6_RUNNERS='{"name":"untrusted-1","status":"offline","labels":["self-hosted","lane-untrusted"]}'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'CI_LANE_UNTRUSTED has no matching online runner' <<<"$out" \
   && pass "offline dedicated untrusted capacity is reported" \
   || fail "offline dedicated untrusted capacity was not reported: $out"
 
 G6_RUNNERS='{"name":"untrusted-1","status":"online","labels":["self-hosted","lane-mismatch"]}'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'CI_LANE_UNTRUSTED has no matching online runner' <<<"$out" \
   && pass "mismatched dedicated untrusted labels do not count as capacity" \
   || fail "mismatched dedicated untrusted labels counted as capacity: $out"
@@ -409,7 +434,7 @@ G6_RUNNERS='{"name":"untrusted-1","status":"online","labels":["self-hosted","lan
 # shipped `isolated` default this replaces, reported a group deleted on
 # 2026-07-31 as missing and read like fleet drift rather than stale code (#401).
 UNTRUSTED_GROUP_NAME='' out="$(run_case)"
-UNTRUSTED_GROUP_NAME='' code="$(code_of)"
+code=$?
 [ "$code" = "2" ] \
   && grep -qF "no runner group is configured for lane 'untrusted'" <<<"$out" \
   && pass "an unconfigured untrusted group is undetermined, and names what to set" \
@@ -424,7 +449,8 @@ UNTRUSTED_GROUP_NAME='isolated'
 #    while keeping the org-variable-backed group name out of public output.
 DELETED_GROUPS='6'
 out="$(run_case)"
-[ "$(code_of)" = "2" ] \
+code=$?
+[ "$code" = "2" ] \
   && grep -qF 'untrusted lane' <<<"$out" \
   && ! grep -qF 'isolated' <<<"$out" \
   && pass "a missing lane-selected group fails closed without disclosing its configured name" \
@@ -435,7 +461,8 @@ out="$(run_case)"
 UNTRUSTED_VAR='{"value":"[\"self-hosted\",\"lane-general\"]","visibility":"all"}'
 PRIVILEGED_VAR='{"value":"[\"self-hosted\",\"lane-general\"]","visibility":"all"}'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'resolves to the persistent general runner lane' <<<"$out" \
   && ! grep -qF 'isolated' <<<"$out" \
   && ! grep -qF '/actions/runner-groups' "$GH_API_LOG" \
@@ -448,7 +475,8 @@ UNTRUSTED_VAR='{"value":"[\"ubuntu-24.04\"]","visibility":"all"}'
 DELETED_GROUPS='4'
 DEFAULT_VAR='{"value":"[\"self-hosted\",\"lane-general\"]","visibility":"all"}'
 out="$(run_case)"
-[ "$(code_of)" = "2" ] \
+code=$?
+[ "$code" = "2" ] \
   && grep -qF 'general lane' <<<"$out" \
   && ! grep -qF 'DigitalOcean' <<<"$out" \
   && pass "the general lane's group going missing fails closed without disclosing its configured name" \
@@ -473,7 +501,8 @@ G4_GROUP='{"id":4,"name":"org-variable-general-canary","visibility":"all","allow
 G6_GROUP='{"id":6,"name":"org-variable-untrusted-canary","visibility":"all","allows_public_repositories":true,"default":false}'
 DELETED_GROUPS=''
 out="$(run_case)"
-[ "$(code_of)" = "0" ] \
+code=$?
+[ "$code" = "0" ] \
   && ! grep -qF 'org-variable-general-canary' <<<"$out" \
   && ! grep -qF 'org-variable-untrusted-canary' <<<"$out" \
   && pass "clean output discloses no org-variable-backed runner-group name" \
@@ -481,7 +510,8 @@ out="$(run_case)"
 
 G4_GROUP='{"id":4,"name":"org-variable-general-canary","visibility":"selected","allows_public_repositories":true,"default":false}'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'general lane' <<<"$out" \
   && grep -qF 'id 4' <<<"$out" \
   && ! grep -qF 'org-variable-general-canary' <<<"$out" \
@@ -505,7 +535,8 @@ G6_GROUP='{"id":6,"name":"isolated","visibility":"all","allows_public_repositori
 #    is the definition of undetermined and must never read as clean.
 DELETED_GROUPS=''
 FAIL_PATH='/actions/runner-groups'
-[ "$(code_of)" = "2" ] \
+code="$(code_of)"
+[ "$code" = "2" ] \
   && pass "an unreadable runner-group listing is undetermined, never clean" \
   || fail "group listing failure did not return exit 2"
 
@@ -734,7 +765,8 @@ read -r comment_rc comment_case < <(run_comment_case "$two_trusted" multiple)
 # --------------------------------------------------------------------------
 export G1_RUNNERS='{"name":"gha-stray-1","status":"online","labels":["self-hosted","Linux","X64"]}'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'gha-stray-1' <<<"$out" \
   && pass "a runner in the default group is drift, and the runner is named" \
   || fail "stray runner in the default group was not reported: $out"
@@ -743,7 +775,8 @@ out="$(run_case)"
 # online on its own. Reusing the online check's shape would have missed it.
 export G1_RUNNERS='{"name":"gha-stray-2","status":"offline","labels":["self-hosted"]}'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'gha-stray-2' <<<"$out" \
   && pass "an offline runner in the default group is still drift" \
   || fail "offline stray runner was not reported: $out"
@@ -751,7 +784,8 @@ out="$(run_case)"
 export GENERAL_GROUP_NAME='org-variable-remediation-canary'
 G4_GROUP='{"id":4,"name":"org-variable-remediation-canary","visibility":"all","allows_public_repositories":true,"default":false}'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'general lane' <<<"$out" \
   && grep -qF 'id 4' <<<"$out" \
   && ! grep -qF 'org-variable-remediation-canary' <<<"$out" \
@@ -780,7 +814,8 @@ grep -qF 'visibility `all`' <<<"$out" \
 # only the last page and silently under-report (the #260 class).
 export G1_RUNNERS=$'{"name":"gha-stray-3","status":"online","labels":["self-hosted"]}\n{"name":"gha-stray-4","status":"online","labels":["self-hosted"]}'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'gha-stray-3' <<<"$out" && grep -qF 'gha-stray-4' <<<"$out" \
   && pass "every stray runner is named, across pages" \
   || fail "paginated stray runners were under-reported: $out"
@@ -789,14 +824,16 @@ out="$(run_case)"
 # line would read "...: . Move them..." and name nothing to act on.
 export G1_RUNNERS='{"id":77,"status":"online","labels":["self-hosted"]}'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'unnamed runner id 77' <<<"$out" \
   && pass "a runner with no name is reported by its id, not as blank" \
   || fail "nameless stray runner produced an unactionable report: $out"
 
 export G1_RUNNERS=''
 out="$(run_case)"
-[ "$(code_of)" = "0" ] \
+code=$?
+[ "$code" = "0" ] \
   && grep -qF 'No drift' <<<"$out" \
   && pass "an empty default group is clean" \
   || fail "empty default group was reported as drift: $out"
@@ -805,18 +842,20 @@ out="$(run_case)"
 # renders a missing name as the literal "null" and exits 0 — the same trap
 # group_id_of documents.
 export G1_GROUP='{"id":1,"visibility":"all","allows_public_repositories":true,"default":true}'
-[ "$(code_of)" = "2" ] \
+code="$(code_of)"
+[ "$code" = "2" ] \
   && pass "a default group with no name is undetermined" \
-  || fail "nameless default group did not fail closed: $(code_of)"
+  || fail "nameless default group did not fail closed: $code"
 export G1_GROUP='{"id":1,"name":"GitHub","visibility":"all","allows_public_repositories":true,"default":true}'
 
 # Fail CLOSED, both directions. A 403 on the placement fetch must not read as
 # "no runners there" — that is the shape that turns a security check into a
 # rubber stamp, and it is the exact defect #266 left in this file.
 export FAIL_PATH='/runner-groups/1/runners'
-[ "$(code_of)" = "2" ] \
+code="$(code_of)"
+[ "$code" = "2" ] \
   && pass "an unreadable default group is undetermined, not clean" \
-  || fail "unreadable default group did not fail closed: $(code_of)"
+  || fail "unreadable default group did not fail closed: $code"
 export FAIL_PATH=''
 
 # The default group is found by its `.default` flag, never by the id 1. The id
@@ -826,7 +865,8 @@ export FAIL_PATH=''
 export G1_GROUP='{"id":9,"name":"Renamed Default","visibility":"all","allows_public_repositories":true,"default":true}'
 export G1_RUNNERS='{"name":"gha-stray-5","status":"online","labels":["self-hosted"]}'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'gha-stray-5' <<<"$out" \
   && grep -qF 'id 9' <<<"$out" \
   && ! grep -qF 'Renamed Default' <<<"$out" \
@@ -840,18 +880,20 @@ export G1_RUNNERS=''
 # enterprise-shared Default alongside the org's own is the plausible route.
 export G1_GROUP=$'{"id":1,"name":"GitHub","visibility":"all","allows_public_repositories":true,"default":true}\n{"id":9,"name":"Enterprise Default","visibility":"all","allows_public_repositories":true,"default":true}'
 export G1_RUNNERS='{"name":"gha-stray-6","status":"online","labels":["self-hosted"]}'
-[ "$(code_of)" = "2" ] \
+code="$(code_of)"
+[ "$code" = "2" ] \
   && pass "more than one default group is undetermined, not silently first-wins" \
-  || fail "multiple default groups did not fail closed: $(code_of)"
+  || fail "multiple default groups did not fail closed: $code"
 export G1_RUNNERS=''
 
 # GitHub always marks exactly one group default and a custom group cannot become
 # one, so no default group in the listing means the listing is not what we think
 # it is. Guessing an id here is how the pinned-id outage (#266) happened.
 export G1_GROUP=''
-[ "$(code_of)" = "2" ] \
+code="$(code_of)"
+[ "$code" = "2" ] \
   && pass "a listing with no default group is undetermined" \
-  || fail "missing default group did not fail closed: $(code_of)"
+  || fail "missing default group did not fail closed: $code"
 export G1_GROUP='{"id":1,"name":"GitHub","visibility":"all","allows_public_repositories":true,"default":true}'
 
 # The migration's own hazard: the retired pair stays set for consumers pinned to
@@ -862,7 +904,8 @@ UNTRUSTED_VAR='{"value":"[\"ubuntu-24.04\"]","visibility":"all"}'
 LEGACY_DEFAULT_VAR='{"value":"[\"self-hosted\",\"gone\"]","visibility":"all"}'
 LEGACY_UNTRUSTED_VAR='{"value":"[\"self-hosted\",\"general\"]","visibility":"all"}'
 out="$(run_case)"
-[ "$(code_of)" = "1" ] \
+code=$?
+[ "$code" = "1" ] \
   && grep -qF 'VERJSON_RUNNER_DEFAULT' <<<"$out" \
   && ! grep -qF 'gone' <<<"$out" \
   && pass "a retired variable that has drifted from its lane is reported" \
@@ -878,7 +921,8 @@ PRIVILEGED_VAR='{"value":"[\"ubuntu-24.04\"]","visibility":"all"}'
 LEGACY_DEFAULT_VAR=''
 export LEGACY_UNTRUSTED_VAR=''
 out="$(run_case)"
-[ "$(code_of)" = "0" ] \
+code=$?
+[ "$code" = "0" ] \
   && grep -qF 'No drift' <<<"$out" \
   && pass "a hosted lane reconciles clean instead of demanding a runner group" \
   || fail "hosted lane did not reconcile: $out"
@@ -929,7 +973,8 @@ G4_GROUP='{"id":4,"name":"DigitalOcean","visibility":"all","allows_public_reposi
 G4_RUNNERS='{"name":"general-1","status":"online","labels":["self-hosted","general"]}'
 set_all_untrusted_aliases "$hosted_record"
 out="$(run_case)"
-[ "$(code_of)" = "0" ] \
+code=$?
+[ "$code" = "0" ] \
   && grep -qF 'No drift' <<<"$out" \
   && pass "the hosted cut preserves trusted, fallback, privileged, and default selectors" \
   || fail "hosted cut changed a preserved lane: $out"
@@ -939,15 +984,16 @@ for index in "${!untrusted_alias_names[@]}"; do
   printf -v "${untrusted_alias_envs[$index]}" '%s' "$persistent_record"
   export "${untrusted_alias_envs[$index]}"
   out="$(run_case)"
+  code=$?
   if [ "$index" = "0" ]; then
-    [ "$(code_of)" = "1" ] \
+    [ "$code" = "1" ] \
       && grep -qF 'resolves to the persistent general runner lane' <<<"$out" \
       && ! grep -qF 'isolated' <<<"$out" \
       && ! grep -qF '/actions/runner-groups' "$GH_API_LOG" \
       && pass "the canonical persistent selector is rejected before alias comparison" \
       || fail "the canonical persistent selector was not safely rejected: $out"
   else
-    [ "$(code_of)" = "1" ] \
+    [ "$code" = "1" ] \
       && grep -qF 'differs from CI_LANE_UNTRUSTED' <<<"$out" \
       && grep -qF 'CI_LANE_UNTRUSTED' <<<"$out" \
       && pass "partial cut at ${untrusted_alias_names[$index]} is reported as alias divergence" \
@@ -960,7 +1006,8 @@ for index in "${!untrusted_alias_names[@]}"; do
   printf -v "${untrusted_alias_envs[$index]}" '%s' "$malformed_record"
   export "${untrusted_alias_envs[$index]}"
   out="$(run_case)"
-  [ "$(code_of)" = "2" ] \
+  code=$?
+  [ "$code" = "2" ] \
     && grep -qF "${untrusted_alias_names[$index]}" <<<"$out" \
     && grep -qF 'not a non-empty JSON array of label strings' <<<"$out" \
     && pass "malformed ${untrusted_alias_names[$index]} fails closed at selector validation" \
@@ -972,7 +1019,8 @@ for index in "${!untrusted_alias_names[@]}"; do
   printf -v "${untrusted_alias_envs[$index]}" '%s' ''
   export "${untrusted_alias_envs[$index]}"
   out="$(run_case)"
-  [ "$(code_of)" = "2" ] \
+  code=$?
+  [ "$code" = "2" ] \
     && grep -qF "${untrusted_alias_names[$index]} is unset" <<<"$out" \
     && pass "missing ${untrusted_alias_names[$index]} fails closed as a partial configuration" \
     || fail "missing ${untrusted_alias_names[$index]} survived or failed for the wrong reason: $out"
@@ -980,21 +1028,24 @@ done
 
 set_all_untrusted_aliases "$wrong_hosted_record"
 out="$(run_case)"
-[ "$(code_of)" = "2" ] \
+code=$?
+[ "$code" = "2" ] \
   && grep -qF 'hosted selector must be exactly ["ubuntu-24.04"]' <<<"$out" \
   && pass "a different hosted label cannot satisfy the cutover contract" \
   || fail "a different hosted label survived or failed for the wrong reason: $out"
 
 set_all_untrusted_aliases "$widened_hosted_record"
 out="$(run_case)"
-[ "$(code_of)" = "2" ] \
+code=$?
+[ "$code" = "2" ] \
   && grep -qF 'hosted selector must be exactly ["ubuntu-24.04"]' <<<"$out" \
   && pass "a widened hosted selector cannot satisfy the exact-label contract" \
   || fail "a widened hosted selector survived or failed for the wrong reason: $out"
 
 set_all_untrusted_aliases "$noncanonical_hosted_record"
 out="$(run_case)"
-[ "$(code_of)" = "2" ] \
+code=$?
+[ "$code" = "2" ] \
   && grep -qF 'hosted selector must be exactly ["ubuntu-24.04"]' <<<"$out" \
   && pass "JSON-equivalent hosted bytes cannot widen the canonical output" \
   || fail "noncanonical hosted bytes survived or failed for the wrong reason: $out"
@@ -1002,7 +1053,8 @@ out="$(run_case)"
 set_all_untrusted_aliases "$hosted_record"
 FALLBACK_VAR="$persistent_record"
 out="$(run_case)"
-[ "$(code_of)" = "0" ] \
+code=$?
+[ "$code" = "0" ] \
   && grep -qF 'No drift' <<<"$out" \
   && pass "canonical untrusted selector takes precedence over persistent fallback" \
   || fail "persistent fallback overrode canonical hosted selector: $out"
@@ -1010,7 +1062,8 @@ out="$(run_case)"
 UNTRUSTED_VAR=''
 FALLBACK_VAR="$hosted_record"
 out="$(run_case)"
-[ "$(code_of)" = "2" ] \
+code=$?
+[ "$code" = "2" ] \
   && grep -qF 'CI_LANE_UNTRUSTED is unset' <<<"$out" \
   && pass "hosted fallback cannot conceal a missing canonical untrusted alias" \
   || fail "fallback concealed missing CI_LANE_UNTRUSTED: $out"
