@@ -82,8 +82,9 @@ fi
 fetch_pinned_commit() {
   local ref="$1"
   git -C "$root" cat-file -e "$ref^{commit}" 2>/dev/null && return 0
-  git -C "$root" fetch --quiet --no-tags --depth 1 origin "$ref" >/dev/null 2>&1 || return 1
-  git -C "$root" cat-file -e "$ref^{commit}" 2>/dev/null
+  # Serialized with every other fetch into this checkout (#2003); see
+  # node-workflow-pins.test.sh.
+  python3 "$here/shared_checkout_fetch.py" ensure-commit "$root" "$ref" >/dev/null 2>&1
 }
 
 read_pinned_generator() {
@@ -179,7 +180,7 @@ for pin in "${pins[@]}"; do
         ancestry=true
         break
       fi
-      git -C "$root" fetch --quiet --no-tags --depth "$depth" origin "$pin" || break
+      python3 "$here/shared_checkout_fetch.py" deepen "$root" "$pin" "$depth" || break
     done
     if [ "$ancestry" = true ] || git -C "$root" merge-base --is-ancestor "$floor" "$pin" 2>/dev/null; then
       pass "recommended pin descends changelog capability floor ${floor:0:8}"

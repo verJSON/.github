@@ -17,8 +17,11 @@ if [ -n "$base_sha" ] || [ -n "$head_sha" ]; then
       "$head_sha" "$(git rev-parse HEAD)" >&2
     exit 2
   fi
+  # Other actions-ci rows fetch into this checkout concurrently, and git aborts
+  # a shallow update another one raced (#2003), so the base is fetched through
+  # the serializing helper. It exits non-zero unless the commit is then present.
   if ! git cat-file -e "$base_sha^{commit}" 2>/dev/null; then
-    git fetch --no-tags --depth=1 origin "$base_sha"
+    python3 "$(dirname "$0")/shared_checkout_fetch.py" ensure-commit . "$base_sha"
   fi
   git cat-file -e "$base_sha^{commit}"
   git diff --name-only --diff-filter=ACMR -z "$base_sha" "$head_sha" -- '*.sh' \

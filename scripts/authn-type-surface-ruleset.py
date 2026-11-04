@@ -15,6 +15,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from github_identity import same_organization, same_repository, strip_repository_url_prefix  # noqa: E402
 import required_workflow_revision as revision  # noqa: E402
+import shared_checkout_fetch  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -141,23 +142,16 @@ def read_contract(path=CONTRACT):
 def read_pinned_node_ci_workflow(pin, repo_root=ROOT):
     require(SHA_PATTERN.fullmatch(pin) is not None,
             "node-ci pin must be an immutable commit SHA")
-    present = subprocess.run(
-        ["git", "cat-file", "-e", f"{pin}^{{commit}}"],
-        cwd=repo_root,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    if present.returncode != 0:
-        fetched = subprocess.run(
-            ["git", "fetch", "--quiet", "--no-tags", "--depth", "1", "origin", pin],
-            cwd=repo_root,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
+    # Other actions-ci rows fetch into the same checkout concurrently, and git
+    # aborts a shallow update another one raced (#2003); the helper serializes
+    # the fetch and re-checks presence under its lock.
+    try:
+        present = shared_checkout_fetch.ensure_commit(
+            repo_root, pin, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        require(fetched.returncode == 0,
-                "node-ci pin does not resolve from the canonical repository")
+    except shared_checkout_fetch.SharedCheckoutError as error:
+        raise ContractError(str(error)) from None
+    require(present, "node-ci pin does not resolve from the canonical repository")
     resolved = subprocess.run(
         ["git", "show", f"{pin}:{NODE_CI_WORKFLOW}"],
         cwd=repo_root,
