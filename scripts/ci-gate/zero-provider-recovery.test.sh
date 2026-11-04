@@ -113,6 +113,7 @@ dispatch_workflow_path=".github/workflows/$dispatch_workflow"
 [ -z "${API_CAPTURE:-}" ] || printf "%s\n" "$*" >>"$API_CAPTURE"
 case "$*" in
   "api repos/$TARGET_REPO/actions/runs/$REVIEW_RUN_ID")
+    [ -z "${RUN_RECORD_RAW+set}" ] || { printf '%s' "$RUN_RECORD_RAW"; exit 0; }
     jq -nc --argjson id "$REVIEW_RUN_ID" --argjson attempt "$REVIEW_RUN_ATTEMPT" \
       --arg title "${RUN_TITLE:-AI review authorization $AUTHORIZATION_CHECK_ID from arm $ARM_RUN_ID.$ARM_RUN_ATTEMPT}" \
       --arg repo "${RUN_REPOSITORY:-verJSON/example}" --arg branch "$DEFAULT_BRANCH" \
@@ -205,19 +206,53 @@ expect_pass "failed preflight with skipped gate is eligible for same-receipt rec
 RUN_REPOSITORY=$'v\u0435rJSON/example' \
   expect_fail "Unicode lookalike repository cannot correlate recovery" "run identity mismatch" verify
 RUN_STATUS=queued expect_pass "queued direct review run remains eligible while a sibling waits" verify
-RUN_STATUS=completed expect_fail "terminal review run cannot be replayed as live" "run identity mismatch" verify
+# Verjson/.github#2012 — GitHub documents waiting, pending and requested as
+# further statuses only Actions sets on a run that has not finished.
+RUN_STATUS=waiting expect_pass "waiting direct review run is still the current live run" verify
+RUN_STATUS=pending expect_pass "pending direct review run is still the current live run" verify
+RUN_STATUS=requested expect_pass "requested direct review run is still the current live run" verify
+RUN_STATUS=completed expect_fail "terminal review run cannot be replayed as live" \
+  'review run status mismatch: observed "completed", which is terminal' verify
+RUN_STATUS=paused expect_fail "unrecognized review run status fails closed" \
+  'review run status mismatch: observed "paused", which is unrecognized' verify
 PREFLIGHT_CONCLUSION=success expect_pass "held preflight with skipped gate is eligible for same-receipt recovery" verify
 PREFLIGHT_CONCLUSION=skipped expect_pass "skipped preflight is eligible for same-receipt recovery" verify
 REVIEW_RUN_ATTEMPT=10 expect_pass "later same-run retry remains eligible with complete prior evidence" verify
 RUN_TITLE='AI review' \
-  expect_fail "generic run name cannot correlate recovery" "run identity mismatch" verify
+  expect_fail "generic run name cannot correlate recovery" 'review run display_title mismatch: observed "AI review"' verify
 RUN_TITLE="AI review authorization 9002 from arm $ARM_RUN_ID.$ARM_RUN_ATTEMPT" \
   expect_fail "substituted authorization check id cannot correlate recovery" "run identity mismatch" verify
 RUN_TITLE="AI review authorization $AUTHORIZATION_CHECK_ID from arm 7002.$ARM_RUN_ATTEMPT" \
   expect_fail "substituted arm run id cannot correlate recovery" "run identity mismatch" verify
 RUN_TITLE="AI review authorization $AUTHORIZATION_CHECK_ID from arm $ARM_RUN_ID.2" \
   expect_fail "substituted arm attempt cannot correlate recovery" "run identity mismatch" verify
+# A character beyond the Basic Multilingual Plane is spelled as its JSON
+# surrogate pair, never as an ambiguous five-digit \u escape.
+RUN_TITLE=$'AI review \xf0\x9f\x98\x80' \
+  expect_fail "a supplementary-plane title character is spelled as a surrogate pair" \
+  'display_title mismatch: observed "AI review \ud83d\ude00"' verify
 unset RUN_TITLE
+# The per-predicate report must not become the verdict's only input: a record
+# that yields no predicate lines because it is empty or not one object is still
+# refused, as `jq -e` refused it before the diagnostics existed.
+RUN_RECORD_RAW='' \
+  expect_fail "an empty review run record fails closed" "review run record is not a single JSON object" verify
+RUN_RECORD_RAW='{"id":' \
+  expect_fail "an unparseable review run record fails closed" "review run record could not be evaluated" verify
+# Every failed predicate is named, under the unchanged first line log scrapers
+# key on, and nothing from the environment reaches the log.
+GH_TOKEN=ghs_sentinelTokenValue RUN_TITLE='AI review' RUN_STATUS=completed verify >"$tmp/out" 2>&1
+diagnostics_status=$?
+if [ "$diagnostics_status" -ne 0 ] &&
+   [ "$(sed -n 1p "$tmp/out")" = "::error::zero-provider recovery run identity mismatch" ] &&
+   [ "$(grep -c '^::error::review run ' "$tmp/out")" -eq 2 ] &&
+   grep -qF 'review run display_title mismatch' "$tmp/out" &&
+   grep -qF 'review run status mismatch' "$tmp/out" &&
+   ! grep -qF sentinelTokenValue "$tmp/out"; then
+  pass "a refusal names each failed predicate after the scraped first line, without secrets"
+else
+  fail "multi-predicate refusal diagnostics are wrong: $(tr '\n' '|' <"$tmp/out")"
+fi
 JOB_NAME_PREFIX='unexpected / ' \
   expect_fail "unexpected nested job-name prefix cannot correlate recovery" "approached the provider boundary" verify
 CURRENT_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \

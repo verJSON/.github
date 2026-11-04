@@ -52,21 +52,61 @@ api() {
 
 api review-run "$tmp/review-run.json" "repos/$TARGET_REPO/actions/runs/$REVIEW_RUN_ID"
 expected_title="AI review authorization $AUTHORIZATION_CHECK_ID from arm $ARM_RUN_ID.$ARM_RUN_ATTEMPT"
-jq -e --argjson run "$REVIEW_RUN_ID" --argjson attempt "$REVIEW_RUN_ATTEMPT" \
+# Verjson/.github#2012 — the verdict and its diagnostics come from one predicate
+# list, so a refusal names every predicate that failed with the value GitHub
+# returned, and the two cannot drift. Only these run-record fields are printed;
+# no token or environment value reaches the log. Observed values are JSON-encoded
+# with non-ASCII spelled as \uXXXX, so a lookalike is visible and an embedded
+# newline cannot start a workflow command. The record is slurped so an empty or
+# multi-document answer is itself a refusal rather than an absence of failures.
+review_run_failures=""
+if ! review_run_failures="$(jq -r --slurp --argjson run "$REVIEW_RUN_ID" --argjson attempt "$REVIEW_RUN_ATTEMPT" \
   --arg title "$expected_title" --arg branch "$DEFAULT_BRANCH" --arg repo "$TARGET_REPO" \
   --arg workflow_path "$dispatch_workflow_path" '
-    .id == $run and .run_attempt == $attempt and .event == "workflow_dispatch" and
-  .path == $workflow_path and .display_title == $title and
-    .head_branch == $branch and (.head_repository.full_name | ascii_downcase) == ($repo | ascii_downcase) and
-    (.repository.full_name | ascii_downcase) == ($repo | ascii_downcase) and
-    # A workflow_dispatch run can remain queued while an environment-gated
-    # sibling job is waiting for admission. That live status is still the
-    # current run and must not be mistaken for a different dispatch (#1393).
-    (.status == "queued" or .status == "in_progress")
-  ' "$tmp/review-run.json" >/dev/null || {
-    echo "::error::zero-provider recovery run identity mismatch"
-    exit 1
-  }
+    def hex: if . < 16 then "0123456789abcdef"[.:. + 1] else (. / 16 | floor | hex) + (. % 16 | hex) end;
+    def u4: "\\u" + (hex | "0000"[0:4 - length] + .);
+    def shown: (if type == "string" and length > 200 then .[0:200] + "..." else . end) | tojson
+      | explode | map(
+          if . < 127 then [.] | implode
+          elif . < 65536 then u4
+          else (. - 65536) as $c | (55296 + ($c / 1024 | floor) | u4) + (56320 + $c % 1024 | u4) end
+        ) | add;
+    def folded: if type == "string" then ascii_downcase else . end;
+    def mismatch($name; $ok; $observed; $expected):
+      if $ok then empty
+      else "::error::review run \($name) mismatch: observed \($observed | shown), expected \($expected | shown)" end;
+    # GitHub documents queued, in_progress, waiting, pending and requested as
+    # the statuses of a run that has not finished; only Actions sets the last
+    # three (REST "List workflow runs for a repository", `status`). A run held
+    # queued or waiting while an environment-gated sibling job awaits admission
+    # is still the current run and must not be mistaken for another dispatch
+    # (#1393, #2012). completed is terminal and anything else fails closed.
+    ["queued", "in_progress", "waiting", "pending", "requested"] as $live |
+    if length != 1 or (.[0] | type) != "object" then "::error::review run record is not a single JSON object"
+    else .[0] | (
+    mismatch("id"; .id == $run; .id; $run),
+    mismatch("run_attempt"; .run_attempt == $attempt; .run_attempt; $attempt),
+    mismatch("event"; .event == "workflow_dispatch"; .event; "workflow_dispatch"),
+    mismatch("path"; .path == $workflow_path; .path; $workflow_path),
+    mismatch("display_title"; .display_title == $title; .display_title; $title),
+    mismatch("head_branch"; .head_branch == $branch; .head_branch; $branch),
+    mismatch("head_repository.full_name"; (.head_repository.full_name | folded) == ($repo | ascii_downcase);
+      .head_repository.full_name; $repo),
+    mismatch("repository.full_name"; (.repository.full_name | folded) == ($repo | ascii_downcase);
+      .repository.full_name; $repo),
+    (.status as $status | $live | join(", ") as $expected |
+      if any(.[]; . == $status) then empty
+      elif $status == "completed" then
+        "::error::review run status mismatch: observed \"completed\", which is terminal; expected a live status (\($expected))"
+      else
+        "::error::review run status mismatch: observed \($status | shown), which is unrecognized and fails closed; expected a live status (\($expected))"
+      end)
+    ) end
+  ' "$tmp/review-run.json" 2>/dev/null)" || [ -n "$review_run_failures" ]; then
+  echo "::error::zero-provider recovery run identity mismatch"
+  printf '%s\n' "${review_run_failures:-::error::review run record could not be evaluated}"
+  exit 1
+fi
 
 api current-head "$tmp/pr.json" "repos/$TARGET_REPO/pulls/$PR_NUMBER"
 jq -e --arg head "$EXPECTED_HEAD_SHA" '
