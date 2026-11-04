@@ -221,6 +221,22 @@ class PostgresSandboxProfileTests(unittest.TestCase):
             acceptance_source,
         )
 
+    def test_hosted_network_boundary_checks_host_listeners_before_the_candidate(self) -> None:
+        acceptance_source = Path(__file__).with_name(
+            "ci-postgres-sandbox-hosted-acceptance.test.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "    def _assert_network_boundary(self, state: dict[str, object]) -> None:\n"
+            "        scope = _sandbox_socket_scope(self._bubblewrap_command(state, []))\n"
+            "        _assert_no_host_distribution_tree_listeners(scope.host_trees)\n",
+            acceptance_source,
+        )
+        self.assertIn(
+            '"__DAEMON_ISOLATION_PROBE__", _daemon_isolation_probe_source(scope.unwalked)',
+            acceptance_source,
+        )
+
     def test_profile_is_opt_in_and_resolves_only_the_reviewed_postgres_image(self) -> None:
         self.assertIsNone(ci_postgres_sandbox.resolve_profile(None))
         self.assertIsNone(ci_postgres_sandbox.resolve_profile(""))
