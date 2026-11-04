@@ -303,6 +303,13 @@ sys.stdout.write(json.dumps(routes[path]))
 
 
 STEP_ENVIRONMENT_ALLOWLIST = frozenset({"PATH", "LD_LIBRARY_PATH", "LANG", "TMPDIR", "pythonLocation"})
+BOOTSTRAP_PROGRAM = "review-caller-bootstrap.py"
+
+# complete() runs the same bootstrap step against the same consumer for nearly
+# every case, and only its outputs and the proof program it writes to RUNNER_TEMP
+# reach bootstrap-complete. Keyed by everything that step reads (#1997).
+bootstrap_cache: dict[tuple[str, str, str], tuple[dict[str, str], bytes | None]] = {}
+bootstrap_cache_lock = threading.Lock()
 
 
 class Harness:
@@ -331,7 +338,7 @@ class Harness:
     def complete(self, consumer: Consumer, authority: str | None = "ai-merge", later: Consumer | None = None,
                  **overrides: str):
         self.reset_state()
-        _, outputs = self.run_step("bootstrap", consumer)
+        outputs = self.bootstrap_outputs(consumer)
         consumer = later or consumer
         env = {
             "EXPECTED_EXTERNAL_ID": EXTERNAL_ID,
@@ -348,6 +355,31 @@ class Harness:
         env.update(overrides)
         result, completion = self.run_step("bootstrap-complete", consumer, env)
         return result, completion, self.recorded()
+
+    def bootstrap_outputs(self, consumer: Consumer) -> dict[str, str]:
+        step = self.steps.get("bootstrap")
+        if step is None:
+            raise AssertionError("arm step 'bootstrap' is missing")
+        key = (step["run"], json.dumps(consumer.routes(), sort_keys=True), self.path_prefix)
+        program = self.tmp / BOOTSTRAP_PROGRAM
+        with bootstrap_cache_lock:
+            cached = bootstrap_cache.get(key)
+        if cached is None:
+            # The program bootstrap-complete runs is the one this step wrote, or
+            # none: never a stale copy from an earlier step in this harness.
+            program.unlink(missing_ok=True)
+            result, outputs = self.run_step("bootstrap", consumer)
+            cached = (outputs, program.read_bytes() if program.exists() else None)
+            # A failed run is not cached, so a transient failure costs one case
+            # rather than every case that shares the key.
+            if result.returncode == 0:
+                with bootstrap_cache_lock:
+                    bootstrap_cache.setdefault(key, cached)
+        elif cached[1] is None:
+            program.unlink(missing_ok=True)
+        else:
+            program.write_bytes(cached[1])
+        return dict(cached[0])
 
     def run_step(self, step_id: str, consumer: Consumer, extra_env: dict[str, str] | None = None):
         step = self.steps.get(step_id)

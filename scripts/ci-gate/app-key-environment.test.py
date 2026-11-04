@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -59,6 +60,15 @@ def workflow_bindings(directory):
     if not bindings:
         raise ValueError("no App key binding was found; the workflow scan is unreliable")
     return bindings
+
+
+def frozen(value):
+    """A read-only copy of a parsed fixture, so a shared one cannot be edited."""
+    if isinstance(value, dict):
+        return types.MappingProxyType({key: frozen(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(frozen(item) for item in value)
+    return value
 
 
 def confinement_pattern(entry):
@@ -561,9 +571,14 @@ class AppKeyRoleManifestTests(unittest.TestCase):
     cannot be added without declaring its confinement (#1285).
     """
 
-    def setUp(self):
-        self.manifest = audit.load_roles()
-        self.bindings = workflow_bindings(ROOT / ".github/workflows")
+    @classmethod
+    def setUpClass(cls):
+        # Parsing every workflow is the expensive part of this class, and no test
+        # changes what it reads. Freezing the shared fixture keeps that true: a
+        # test that tries to edit it raises instead of leaking the edit into the
+        # next test (#1997).
+        cls.manifest = frozen(audit.load_roles())
+        cls.bindings = frozen(workflow_bindings(ROOT / ".github/workflows"))
 
     def test_manifest_and_workflows_declare_exactly_the_same_app_keys(self):
         self.assertEqual({entry["secret"] for entry in self.manifest},
