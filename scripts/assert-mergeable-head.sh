@@ -90,7 +90,9 @@
 #   2  usage error
 #   3  Gate A failed (required contexts absent, misattributed, pending, or not passing),
 #      or Gate W failed (a required workflow's run absent, unbound, stale, ambiguous,
-#      undated, cancelled without a same-workflow successor, or not successful)
+#      undated, cancelled without a same-workflow successor, or not successful; a
+#      workflows rule changed between reads, unreadable, or sharing a path). Each Gate W
+#      refusal ends with the runbook's recovery for every reason it names.
 #   4  Gate B failed (the head was deferred; nothing on it was verified)
 #   5  Gate C failed (some other check is pending or non-passing)
 #   1  the assertion could not be evaluated (API failure, unresolvable state)
@@ -130,6 +132,11 @@ readonly PASSING='["SUCCESS","NEUTRAL","SKIPPED"]'
 # scripts/ci-gate/concurrency-family-map.test.py derives it from the workflows and
 # generators that declare and inherit the group, failing when the two disagree.
 readonly CONCURRENCY_FAMILIES='[{"group_prefix":"ai-review-arm-","group_key":"github.event.pull_request.number","event":"pull_request_target","declared_by":{"repository":"verjson/.github","path":".github/workflows/gate-rearm.yml","name":"AI review authorization arm"},"callers":[{"name":"gate re-arm","path":".github/workflows/gate-rearm.yml"},{"name":"AI review label re-arm","path":".github/workflows/ai-review-label-rearm.yml"},{"name":"AI review lifecycle re-arm","path":".github/workflows/ai-review-lifecycle-rearm.yml"}]}]'
+# The recovery for each Gate W refusal reason, keyed by the label the refusal opens
+# with. docs/arm-recovery-runbook.md's "Recovery by refusal reason" table is the source
+# of truth; scripts/assert-mergeable-head.required-workflow.test.sh fails when the two
+# disagree, with the runbook's links rendered as "label (path#anchor)".
+readonly GATE_W_REMEDIES='{"cancelled":"Interim recovery (docs/arm-recovery-runbook.md#interim-recovery-close-and-reopen), or push a new head.","stale":"Re-arm sweep (docs/arm-recovery-runbook.md#re-arm-sweep-after-a-ruleset-edit): one close-and-reopen under the interim rules.","absent":"The head has no required run. Check that the repository is enrolled and the base ref carries the rule. Then use the interim recovery.","not successful":"The required run failed or skipped. Read its log and fix the cause before re-arming.","unbound":"Do not re-arm. The evidence cannot be attributed. Re-run the read-only assertion. If the refusal persists, escalate on #1905 with the message.","ambiguous":"Do not re-arm. The evidence cannot be attributed. Re-run the read-only assertion. If the refusal persists, escalate on #1905 with the message.","undated":"Do not re-arm. The evidence cannot be attributed. Re-run the read-only assertion. If the refusal persists, escalate on #1905 with the message.","changed":"Do not re-arm. The evidence cannot be attributed. Re-run the read-only assertion. If the refusal persists, escalate on #1905 with the message.","unreadable rule":"Do not re-arm. The evidence cannot be attributed. Re-run the read-only assertion. If the refusal persists, escalate on #1905 with the message.","duplicate paths":"Do not re-arm. The evidence cannot be attributed. Re-run the read-only assertion. If the refusal persists, escalate on #1905 with the message."}'
 # The jq definitions every program reading CONCURRENCY_FAMILIES shares (passed as
 # $families), so the candidate read and the verdict cannot disagree on membership.
 # "Owner/Repo/path@ref" -> "owner/repo/path": owner and repository are
@@ -207,6 +214,18 @@ permission_help() {
     "has been checked."
 }
 
+# The recovery the runbook gives for each distinct Gate W refusal reason, in order.
+# Total by design: a reason the table lacks is still a Gate W refusal (exit 3, never
+# exit 1's "fix access and retry"), so it escalates rather than guessing a recovery.
+readonly GATE_W_NO_RECOVERY='no runbook recovery recorded for this reason; escalate on #1905'
+gate_w_recovery() { # reason-labels-json
+  local heading='Recovery by refusal reason (docs/arm-recovery-runbook.md#recovery-by-refusal-reason): '
+  jq -rn --argjson reasons "$1" --argjson remedies "$GATE_W_REMEDIES" --arg none "$GATE_W_NO_RECOVERY" --arg heading "$heading" '
+    reduce $reasons[] as $reason ([]; if any(.[]; . == $reason) then . else . + [$reason] end)
+    | map("[\(.)] \($remedies[.] // $none)")
+    | $heading + join(" ")' 2>/dev/null \
+    || printf '%s%s\n' "$heading" "$GATE_W_NO_RECOVERY"
+}
 permission_fault() {
   local message="$1" fine_grained="$2" actions="$3"
   fault 1 "$message; if authorization failed, this endpoint needs fine-grained $fine_grained (read) or Actions permissions.$actions: read. Full caller requirements: $(permission_help)"
@@ -782,14 +801,14 @@ jq -ce '
     then [ .[] | .ruleset_id as $ruleset | .parameters.workflows[] | { ruleset_id: $ruleset, path: .path, entry: . } ]
     else false end
 ' <<<"$rules_json" >"$required_workflows" \
-  || fault 3 "Gate W: the workflows rules of $base_ref carry a rule it cannot read (each needs a numeric ruleset_id and a non-empty parameters.workflows list of entries with a path), so the required workflows of $repo#$pr cannot be established; Gate W refuses rather than read the ref as requiring none"
+  || fault 3 "Gate W: the workflows rules of $base_ref carry a rule it cannot read (each needs a numeric ruleset_id and a non-empty parameters.workflows list of entries with a path), so the required workflows of $repo#$pr cannot be established; Gate W refuses rather than read the ref as requiring none. $(gate_w_recovery '["unreadable rule"]')"
 # A run reports its path but not the repository its workflow came from, so two required
 # workflows at one path could each be satisfied by the other's run.
 duplicate_paths="$(jq -r '[ group_by(.path)[] | select(length > 1) | "\(length) required workflows at \(.[0].path)" ] | join(", ")' \
   <"$required_workflows")" \
   || fault 1 "failed to check the workflows rules of $repo@$base_ref for shared paths"
 [ -z "$duplicate_paths" ] \
-  || fault 3 "Gate W: the workflows rules of $base_ref name $duplicate_paths, and a run binds to its rule only by path, so no run on $repo#$pr head $head_sha can be attributed to one of them; this is ambiguous, not missing evidence, and Gate W refuses rather than guess"
+  || fault 3 "Gate W: the workflows rules of $base_ref name $duplicate_paths, and a run binds to its rule only by path, so no run on $repo#$pr head $head_sha can be attributed to one of them; this is ambiguous, not missing evidence, and Gate W refuses rather than guess. $(gate_w_recovery '["duplicate paths"]')"
 
 # No provider field binds a run to the rule's pinned SHA, so a run created before the
 # ruleset last changed is stale (owner timing rule, ADR 0255). Each ruleset's change
@@ -816,7 +835,7 @@ while IFS= read -r ruleset_id; do
     || fault 1 "failed to record ruleset $ruleset_id of $repo"
 done <"$ruleset_ids"
 
-gate_w="$(jq -rn --slurpfile required "$required_workflows" --slurpfile runs "$runs" --slurpfile rulesets "$rulesets" \
+gate_w="$(jq -cn --slurpfile required "$required_workflows" --slurpfile runs "$runs" --slurpfile rulesets "$rulesets" \
   --argjson families "$CONCURRENCY_FAMILIES" --arg repo "$repo" \
   --arg pr_head_ref "$pr_head_ref" --arg pr_head_repo "$pr_head_repo" "$FAMILY_JQ_DEFS"'
   $required[0] as $required | $runs[0] as $runs | $rulesets[0] as $rulesets
@@ -854,7 +873,7 @@ gate_w="$(jq -rn --slurpfile required "$required_workflows" --slurpfile runs "$r
       | [ $bound[] | select((.created_at | instant) > $changed) ] as $fresh
       | ($fresh | max_by(.run_number)) as $newest
       | if (any($rulesets["\($rule.ruleset_id)"].workflows[]?; . == $rule.entry) | not) then
-          "changed: ruleset \($rule.ruleset_id) no longer reports the required workflow \($rule.path)@\($rule.entry.sha // $rule.entry.ref // "an unpinned ref") that the branch rules returned, so its change time does not date that rule; re-run the assertion"
+          "changed: ruleset \($rule.ruleset_id) no longer reports the required workflow \($rule.path)@\($rule.entry.sha // $rule.entry.ref // "an unpinned ref") that the branch rules returned, so its change time does not date that rule"
         elif $changed == null then
           "undated: ruleset \($rule.ruleset_id) reports no readable change time, so a run of \($rule.path) cannot be shown to postdate the current rule"
         elif ($at_path | length) == 0 then
@@ -865,7 +884,7 @@ gate_w="$(jq -rn --slurpfile required "$required_workflows" --slurpfile runs "$r
           ([ $bound[] | select((.created_at | instant) == null) | .id | tostring ] | join(", ")) as $undated
           | "undated: run \($undated) of required workflow \($rule.path) reports no readable creation time, so it cannot be ordered against the change of ruleset \($rule.ruleset_id)"
         elif ($fresh | length) == 0 then
-          "stale: every run of required workflow \($rule.path) (ruleset \($rule.ruleset_id)) on this head was created at or before the ruleset last changed at \($changed_at), so none is evidence under the current rule; re-arm the head (docs/arm-recovery-runbook.md)"
+          "stale: every run of required workflow \($rule.path) (ruleset \($rule.ruleset_id)) on this head was created at or before the ruleset last changed at \($changed_at), so none is evidence under the current rule"
         # Only fresh runs can vouch, so only they can be ambiguous: a required-workflow
         # id seen only before the ruleset changed is no candidate for this rule.
         elif ($fresh | map(.workflow_id) | unique | length) > 1 then
@@ -874,12 +893,17 @@ gate_w="$(jq -rn --slurpfile required "$required_workflows" --slurpfile runs "$r
         elif $newest.status == "completed" and $newest.conclusion == "success" then empty
         elif $newest.conclusion == "cancelled" then
           "cancelled: required run \($newest.id) of \($rule.path) (ruleset \($rule.ruleset_id)) was cancelled and no later run of the same required workflow on this head succeeded"
-        else "not successful: required run \($newest.id) of \($rule.path) (ruleset \($rule.ruleset_id)) is \($newest.status)/\($newest.conclusion)" end ]
-  | join("; ")')" \
+        else "not successful: required run \($newest.id) of \($rule.path) (ruleset \($rule.ruleset_id)) is \($newest.status)/\($newest.conclusion)" end ]')" \
   || fault 1 "failed to evaluate the required workflows of $repo#$pr"
 
-[ -z "$gate_w" ] \
-  || fault 3 "Gate W: $repo#$pr head $head_sha does not carry a successful run of every required workflow of $base_ref — $gate_w. GitHub's workflows rule blocks this merge whatever Gates A and C say. A required run cannot be re-run (gh run rerun answers 404) and must never be bypassed: re-arm the head under docs/arm-recovery-runbook.md, and never widen this gate"
+if [ "$gate_w" != "[]" ]; then
+  # Stating the refusal never changes its exit: every fallback below still faults 3.
+  gate_w_reasons="$(jq -r 'join("; ")' <<<"$gate_w")" || gate_w_reasons="$gate_w"
+  gate_w_labels="$(jq -c 'map((capture("^(?<reason>[^:]+): ") // { reason: "unlabeled" }).reason)' <<<"$gate_w")" \
+    || gate_w_labels='["unlabeled"]'
+  gate_w_recovery="$(gate_w_recovery "$gate_w_labels")"
+  fault 3 "Gate W: $repo#$pr head $head_sha does not carry a successful run of every required workflow of $base_ref — $gate_w_reasons. GitHub's workflows rule blocks this merge whatever Gates A and C say. A required run cannot be re-run (gh run rerun answers 404) and must never be bypassed, and this gate is never widened. $gate_w_recovery"
+fi
 
 # ---------------------------------------------------------------- Gate B ----
 # A check entry proves a check REPORTED; it does not prove the check did work.

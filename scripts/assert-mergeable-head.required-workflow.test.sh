@@ -115,6 +115,18 @@ expect() { # label expected-rc needle
   if [ "$RC" -eq "$2" ] && grep -qF -- "$3" <<<"$OUT"; then pass "$1"
   else fail "$1 (rc=$RC, output: $OUT)"; fi
 }
+# A reason whose evidence cannot be attributed gets the runbook's no-re-arm recovery,
+# and nothing in the refusal advises any way to re-arm: a re-arm itself, a reopen, a
+# new head, a re-run of the run, the interim recovery, or the sweep. The prohibition
+# itself and the required workflow's path (gate-rearm.yml) are not advice.
+expect_no_rearm() { # label reason
+  local advice
+  advice="${OUT//Do not re-arm./}"
+  advice="${advice//"$GATE_PATH"/}"
+  if [ "$RC" -eq 3 ] && grep -qF -- "[$2] Do not re-arm. The evidence cannot be attributed. Re-run the read-only assertion. If the refusal persists, escalate on #1905 with the message." <<<"$OUT" \
+     && ! grep -qiE 're-?arm|reopen|push a new head|re-?run (this|the) (run|arm|required (arm|workflow))|re-?trigger|interim recovery|sweep' <<<"$advice"; then pass "$1"
+  else fail "$1 (rc=$RC, output: $OUT)"; fi
+}
 
 # The live #121 shape. The required run was cancelled before it created a job, so it
 # left no check run for Gates A or C to see, and the local caller succeeded.
@@ -140,6 +152,8 @@ expect "a cancelled required run beside a successful local caller fails Gate W (
   "Gate W: $REPO#121 head $HEAD_SHA"
 expect "the refusal names the cancelled required run and that nothing of the same required workflow succeeded after it" 3 \
   "cancelled: required run 41703191233 of $GATE_PATH (ruleset $RULESET_ID) was cancelled and no later run of the same required workflow on this head succeeded"
+expect "a cancelled refusal carries the runbook's cancelled recovery" 3 \
+  "[cancelled] Interim recovery (docs/arm-recovery-runbook.md#interim-recovery-close-and-reopen), or push a new head."
 
 # The same shape where the cancelled required run DID leave a never-started check and
 # the local caller was created after it: Gates A and C set that check aside as a
@@ -189,6 +203,8 @@ RUNS_FIXTURE="$(wf_runs "$(required_run 41711448295 703 211 2026-11-03T20:19:05Z
 run
 expect "a skipped required run fails Gate W" 3 \
   "not successful: required run 41711448295 of $GATE_PATH (ruleset $RULESET_ID) is completed/skipped"
+expect "a not-successful refusal carries the runbook's fix-the-cause-first recovery" 3 \
+  "[not successful] The required run failed or skipped. Read its log and fix the cause before re-arming."
 
 # --- stale head and retargeting ----------------------------------------------------
 # A required run recorded on another head (the head before a push) is no evidence for
@@ -220,6 +236,23 @@ RUNS_FIXTURE="$(wf_runs "$(local_run 41703192236 702 113 2026-11-03T19:25:55Z su
 run
 expect "a head with no run of the required workflow fails Gate W as absent" 3 \
   "absent: no run of required workflow $GATE_PATH (ruleset $RULESET_ID) is recorded on this head"
+expect "an absent refusal carries the runbook's absent recovery, enrollment first" 3 \
+  "[absent] The head has no required run. Check that the repository is enrolled and the base ref carries the rule. Then use the interim recovery."
+
+# Several refusals each carry their own recovery, in the order the refusals appear,
+# and a reason refused for two required workflows states its recovery once.
+reset_env
+third_entry='{"repository_id":1269388380,"path":".github/workflows/third-arm.yml","sha":"3333333333333333333333333333333333333333","ref":"refs/heads/main"}'
+RULES_FIXTURE="[$status_rule,$(workflows_rule "[$workflow_entry,$release_entry,$third_entry]")]"
+RULESET_FIXTURE="$(ruleset 2026-11-03T11:39:01.138-05:00 "[$workflow_entry,$release_entry,$third_entry]")"
+run
+expect "a refusal for several reasons pairs each reason with its own recovery" 3 \
+  "[cancelled] Interim recovery (docs/arm-recovery-runbook.md#interim-recovery-close-and-reopen), or push a new head. [absent] The head has no required run. Check that the repository is enrolled and the base ref carries the rule. Then use the interim recovery."
+if [ "$(grep -oF '[absent]' <<<"$OUT" | wc -l)" -eq 1 ]; then
+  pass "a reason refused for two required workflows states its recovery once"
+else
+  fail "a reason refused for two required workflows states its recovery once (output: $OUT)"
+fi
 
 # --- binding: provider fields only --------------------------------------------------
 # A run binds to the rule only through fields GitHub records: the path, the event, a
@@ -239,6 +272,7 @@ for field in \
   run
   expect "a successful required-path run carrying $field is unbound and fails Gate W" 3 \
     "unbound: run 41711448295 at $GATE_PATH is not bound to ruleset $RULESET_ID's required workflow for this pull request"
+  expect_no_rearm "an unbound refusal carrying $field never advises a re-arm" unbound
 done
 
 # A run whose own creation time cannot be read cannot be ordered against the rule
@@ -249,6 +283,7 @@ for created in null '"yesterday"' '"2026-11-03 20:19:05Z"'; do
   run
   expect "a bound required run whose creation time reads $created fails Gate W as undated" 3 \
     "undated: run 41711448295 of required workflow $GATE_PATH reports no readable creation time"
+  expect_no_rearm "an undated refusal for a run created at $created never advises a re-arm" undated
 done
 
 # --- ambiguity -----------------------------------------------------------------------
@@ -261,6 +296,7 @@ RUNS_FIXTURE="$(wf_runs "$(required_run 41711448295 703 211 2026-11-03T20:19:05Z
 run
 expect "bound runs of two required-workflow ids at the rule's path fail Gate W as ambiguous" 3 \
   "ambiguous: runs of 2 required workflows (332379840, 332379999) at $GATE_PATH bind to ruleset $RULESET_ID"
+expect_no_rearm "an ambiguous refusal never advises a re-arm" ambiguous
 
 # A run carries its path but not its source repository, so two required workflows the
 # rules name at one path could each be satisfied by the other's run.
@@ -272,6 +308,7 @@ RUNS_FIXTURE="$(wf_runs "$(required_run 41711448295 703 211 2026-11-03T20:19:05Z
 run
 expect "two required workflows the rules name at one path fail Gate W as ambiguous" 3 \
   "Gate W: the workflows rules of main name 2 required workflows at $GATE_PATH"
+expect_no_rearm "a duplicate-paths refusal never advises a re-arm" "duplicate paths"
 
 # Freshness alone narrows ambiguity: a stale run of another required-workflow id (the
 # registration before a re-registration) beside a fresh successful run of the current
@@ -297,6 +334,8 @@ RUNS_FIXTURE="$(wf_runs "$(required_run 41600000001 701 190 2026-11-03T16:00:00Z
 run
 expect "a successful required run created before the ruleset last changed fails Gate W as stale" 3 \
   "stale: every run of required workflow $GATE_PATH (ruleset $RULESET_ID) on this head was created at or before the ruleset last changed at 2026-11-03T11:39:01.138-05:00"
+expect "a stale refusal carries the runbook's stale recovery" 3 \
+  "[stale] Re-arm sweep (docs/arm-recovery-runbook.md#re-arm-sweep-after-a-ruleset-edit): one close-and-reopen under the interim rules."
 
 # Run times are second-granular and the change time is not: a run created in the
 # change's own second may precede it, so it is stale too. The UTC spelling the
@@ -327,6 +366,7 @@ for updated in '' 'yesterday' '2026-11-03 16:39:01Z' '2026-11-03T16:39:01+0500';
   run
   expect "a ruleset whose change time reads '$updated' fails Gate W as undated" 3 \
     "undated: ruleset $RULESET_ID reports no readable change time"
+  expect_no_rearm "an undated refusal for a ruleset changed at '$updated' never advises a re-arm" undated
 done
 reset_env
 RUNS_FIXTURE="$(wf_runs "$(required_run 41711448295 703 211 2026-11-03T20:19:05Z success)")"
@@ -343,6 +383,7 @@ RULESET_FIXTURE="$(ruleset 2026-11-03T11:39:01.138-05:00 "[$(jq -c '.sha = "1111
 run
 expect "a ruleset read that no longer carries the branch rule's required workflow fails Gate W" 3 \
   "changed: ruleset $RULESET_ID no longer reports the required workflow $GATE_PATH@$PINNED_SHA that the branch rules returned"
+expect_no_rearm "a changed refusal never advises a re-arm" changed
 
 # --- a workflows rule Gate W cannot read ------------------------------------------
 # A shape change in the rule (a renamed key, a missing ruleset id) must not read as a
@@ -357,6 +398,7 @@ for mutation in 'del(.ruleset_id)' '.ruleset_id = "20722935"' '.ruleset_id = 0' 
   run
   expect "a workflows rule mutated by '$mutation' fails Gate W as unreadable" 3 \
     "Gate W: the workflows rules of main carry a rule it cannot read"
+  expect_no_rearm "an unreadable-rule refusal for '$mutation' never advises a re-arm" "unreadable rule"
 done
 
 # --- unreadable -------------------------------------------------------------------
@@ -377,6 +419,44 @@ for body in "$(ruleset 2026-11-03T11:39:01.138-05:00 "[$workflow_entry]" 1)" \
   expect "a ruleset response '${body:0:40}' that is not ruleset $RULESET_ID faults" 1 \
     "the response for ruleset $RULESET_ID of $REPO is not that ruleset"
 done
+
+# --- a reason with no recorded recovery -------------------------------------------
+# Exit 1 tells a caller to fix access and retry. A refusal whose reason the table
+# lacks is still a Gate W refusal, so it keeps exit 3 and its reasons, and escalates
+# instead of guessing a recovery. Exercised on a copy whose `cancelled` key is renamed.
+renamed="$tmp/assert-mergeable-head.renamed-key.sh"
+sed 's/"cancelled":"Interim recovery/"cancelled-renamed":"Interim recovery/' "$script" >"$renamed"
+chmod +x "$renamed"
+if cmp -s "$script" "$renamed"; then
+  fail "the renamed-key copy differs from the script (the cancelled key was not found)"
+else
+  reset_env
+  OUT="$("$renamed" "$REPO" 121 2>&1)"; RC=$?
+  expect "a refusal whose reason has no recorded recovery keeps exit 3 and its reasons" 3 \
+    "Gate W: $REPO#121 head $HEAD_SHA does not carry a successful run of every required workflow of main — cancelled: required run 41703191233"
+  expect "a refusal whose reason has no recorded recovery escalates instead of guessing one" 3 \
+    "[cancelled] no runbook recovery recorded for this reason; escalate on #1905"
+fi
+
+# --- recovery agrees with the runbook ---------------------------------------------
+# docs/arm-recovery-runbook.md's "Recovery by refusal reason" table is the source of
+# truth for what each refusal tells its reader to do. The script's table must carry
+# exactly the same reasons with the same recovery, the runbook's in-page links
+# rendered as "label (docs/arm-recovery-runbook.md#anchor)".
+script_remedies="$(sed -n "s/^readonly GATE_W_REMEDIES='\(.*\)'\$/\1/p" "$script" | jq -S .)"
+runbook_remedies="$(awk '/^## Recovery by refusal reason$/ { section = 1; next }
+                          section && /^## / { exit }
+                          section && /^\| / && !/^\| (---|Gate W reason) / { print }' \
+                      "$here/../docs/arm-recovery-runbook.md" \
+  | jq -RnS '[ inputs | capture("^\\| (?<reasons>.+) \\| (?<recovery>.+) \\|$")
+              | (.recovery | gsub("\\[(?<label>[^]]+)\\]\\(#(?<anchor>[^)]+)\\)";
+                                  "\(.label) (docs/arm-recovery-runbook.md#\(.anchor))")) as $recovery
+              | .reasons | split(", ")[] | gsub("`"; "") | { (.): $recovery } ] | add')"
+if [ -n "$script_remedies" ] && [ "$script_remedies" != null ] && [ "$script_remedies" = "$runbook_remedies" ]; then
+  pass "every Gate W refusal reason carries exactly the runbook's recovery for it"
+else
+  fail "every Gate W refusal reason carries exactly the runbook's recovery for it ($(diff <(printf '%s\n' "$script_remedies") <(printf '%s\n' "$runbook_remedies") | tr '\n' ' '))"
+fi
 
 if [ "$fails" -ne 0 ]; then
   printf '\n%d assertion(s) failed\n' "$fails" >&2
