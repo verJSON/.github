@@ -279,6 +279,20 @@ def _sandbox_socket_scope(arguments: list[str]) -> SandboxSocketScope:
         operands = arguments[index + 1 : index + 1 + arity]
         if len(operands) != arity:
             raise ValueError(f"socket scope found {option!r} without its {arity} operands")
+        if option in ("--tmpfs", "--dev", "--proc", "--ro-bind"):
+            # A later mount above, at, or below a skipped tree shows content the
+            # skip was never proven for; an earlier one is hidden by it. --dir
+            # only creates a directory.
+            overlapped = [
+                tree
+                for tree in unwalked
+                if within(tree, operands[-1]) or within(operands[-1], tree)
+            ]
+            if overlapped:
+                raise ValueError(
+                    f"socket scope: mount {operands[-1]} overlaps unwalked "
+                    f"{', '.join(overlapped)}"
+                )
         if option == "--proc":
             unwalked.append(operands[0])
         elif option == "--ro-bind" and any(
@@ -287,14 +301,6 @@ def _sandbox_socket_scope(arguments: list[str]) -> SandboxSocketScope:
         ):
             unwalked.append(operands[1])
             host_trees.append(operands[0])
-        elif option in ("--tmpfs", "--dev", "--dir", "--ro-bind"):
-            # A mount made after an unwalked one, at or below it, would show
-            # content the walk never sees; an earlier one is hidden by it.
-            for tree in unwalked:
-                if within(operands[-1], tree):
-                    raise ValueError(
-                        f"socket scope: walked mount {operands[-1]} lies under unwalked {tree}"
-                    )
         index += 1 + arity
     if index >= len(arguments):
         raise ValueError("socket scope found no '--' ending the bubblewrap options")
@@ -1001,15 +1007,39 @@ class SandboxSocketScopeTests(unittest.TestCase):
             "--ro-bind", "/home/runner/work/_temp/shim", "/usr/local/shim",
         )
 
-        with self.assertRaisesRegex(ValueError, "/usr/local/shim.*unwalked /usr"):
+        with self.assertRaisesRegex(ValueError, "mount /usr/local/shim overlaps unwalked /usr"):
             _sandbox_socket_scope(arguments)
+
+    def test_mount_over_an_ancestor_of_an_unwalked_bind_fails_closed(self) -> None:
+        for extra in (
+            ("--tmpfs", "/opt"),
+            ("--ro-bind", "/home/runner/work/_temp/shim", "/opt/verjson"),
+            ("--ro-bind", "/home/runner/work/_temp/shim", "/"),
+        ):
+            with self.subTest(extra=extra):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"socket scope: mount {re.escape(extra[-1])} overlaps unwalked .*/opt/verjson/node",
+                ):
+                    _sandbox_socket_scope(_hosted_shape_bubblewrap_arguments(*extra))
+
+    def test_device_proc_and_distribution_mounts_over_an_ancestor_fail_closed(self) -> None:
+        for extra in (("--dev", "/opt"), ("--proc", "/opt"), ("--ro-bind", "/usr/share", "/opt")):
+            with self.subTest(extra=extra):
+                with self.assertRaisesRegex(ValueError, "overlaps unwalked /opt/verjson/node"):
+                    _sandbox_socket_scope(_hosted_shape_bubblewrap_arguments(*extra))
+
+    def test_directory_created_at_an_ancestor_of_an_unwalked_bind_is_accepted(self) -> None:
+        scope = _sandbox_socket_scope(_hosted_shape_bubblewrap_arguments("--dir", "/opt/verjson"))
+
+        self.assertEqual(scope, HOSTED_SCOPE)
 
     def test_mount_replacing_an_unwalked_bind_fails_closed(self) -> None:
         arguments = _hosted_shape_bubblewrap_arguments(
             "--ro-bind", "/home/runner/work/_temp/shim", "/opt/verjson/node",
         )
 
-        with self.assertRaisesRegex(ValueError, "/opt/verjson/node.*unwalked /opt/verjson/node"):
+        with self.assertRaisesRegex(ValueError, "mount /opt/verjson/node overlaps unwalked /opt/verjson/node"):
             _sandbox_socket_scope(arguments)
 
 
