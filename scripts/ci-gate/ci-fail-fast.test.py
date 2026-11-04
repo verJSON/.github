@@ -94,15 +94,22 @@ class AggregateStaysRequiredTest(unittest.TestCase):
         step = load("actions-ci.yml")["jobs"]["shell-tests"]["steps"][0]
         env = {"PATH": os.environ["PATH"], "SCOPE_RESULT": "success", "HEAVY": heavy, "GROUP_RESULT": groups,
                "DOCS_RESULT": docs, "COMPATIBILITY_RESULT": compat, "COLLISION_RESULT": "success",
-               "ISOLATION_RESULT": iso}
-        return subprocess.run(["bash", "-c", step["run"]], env=env, capture_output=True, text=True).returncode
+               "ISOLATION_RESULT": iso, "LC_ALL": "C"}
+        self.aggregate = subprocess.run(["bash", "-c", step["run"]], env=env, capture_output=True, text=True)
+        return self.aggregate.returncode
+
+    def assertRejectedFor(self, reason):
+        self.assertEqual(self.aggregate.stdout.splitlines()[-1:], [f"::error::{reason}"], self.aggregate.stderr)
 
     def test_a_gate_failure_that_skips_the_heavy_jobs_still_fails_the_required_context(self):
         self.assertNotEqual(self.aggregate_status(docs="failure", iso="success", groups="skipped", compat="skipped"), 0)
+        self.assertRejectedFor("documentation shell contracts failed")
         self.assertNotEqual(self.aggregate_status(docs="success", iso="failure", groups="skipped", compat="skipped"), 0)
+        self.assertRejectedFor("runner-isolation contract failed (ADR 0235)")
 
     def test_heavy_jobs_skipped_by_ordering_alone_never_read_as_green(self):
         self.assertNotEqual(self.aggregate_status(docs="success", iso="success", groups="skipped", compat="skipped"), 0)
+        self.assertRejectedFor("one or more shell-test groups failed")
 
     def test_a_fully_successful_run_passes(self):
         self.assertEqual(self.aggregate_status(docs="success", iso="success", groups="success", compat="success"), 0)

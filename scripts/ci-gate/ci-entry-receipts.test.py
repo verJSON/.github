@@ -276,7 +276,8 @@ class InnerSupervisorPinTests(unittest.TestCase):
         scope = {"os": os, "select": select, "time": time, "re": __import__("re")}
         exec(source[start:end], scope)
         malformed = b"challenge:" + b"g" * 64 + b"\n"
-        for chunks in ([b"c", b""], [bytes([byte]) for byte in malformed]):
+        for chunks, reason in (([b"c", b""], "host identity challenge ended early"),
+                               ([bytes([byte]) for byte in malformed], "host identity challenge is invalid")):
             with self.subTest(chunks=len(chunks)):
                 with (
                     patch.object(artifacts.subprocess, "Popen"),
@@ -286,7 +287,7 @@ class InnerSupervisorPinTests(unittest.TestCase):
                     patch.object(artifacts.select, "select", return_value=([0], [], [])),
                     patch.object(artifacts.time, "monotonic", return_value=1),
                 ):
-                    with self.assertRaises(RuntimeError):
+                    with self.assertRaisesRegex(RuntimeError, f"^{reason}$"):
                         scope["read_identity_challenge"]()
                 send_signal.assert_not_called()
                 kill_group.assert_not_called()
@@ -2339,8 +2340,9 @@ class AtomicLauncherOwnershipTests(unittest.TestCase):
             patch.object(artifacts.os, "killpg") as kill_group,
             patch.object(artifacts, "_reap_pinned_supervisor") as reap,
         ):
-            with self.assertRaises(OSError):
+            with self.assertRaises(OSError) as raised:
                 artifacts._spawn_atomic_supervisor(["/usr/bin/true"], {}, (), None, native)
+        self.assertEqual((raised.exception.errno, raised.exception.strerror), (errno.EMFILE, "limit"))
         input_stream.close.assert_not_called()
         send_signal.assert_called_once_with(50, signal.SIGKILL)
         self.assertEqual(reap.call_args.args[1:], (50, 5))
@@ -2380,8 +2382,9 @@ class AtomicLauncherOwnershipTests(unittest.TestCase):
             patch.object(artifacts.os, "killpg") as kill_group,
         ):
             native = MagicMock()
-            with self.assertRaises(OSError):
+            with self.assertRaises(OSError) as raised:
                 artifacts._spawn_atomic_supervisor(["/usr/bin/true"], {}, (), None, native)
+        self.assertEqual((raised.exception.errno, raised.exception.strerror), (errno.EMFILE, "limit"))
         self.assertEqual({call.args[0] for call in close.call_args_list}, {10, 11})
         native.assert_not_called()
         popen.assert_not_called()

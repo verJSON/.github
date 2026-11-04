@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Behavioral tests for typed CI test levels (ADR 0238, test-levels amendment)."""
 
+import dataclasses
 import importlib.util
 import itertools
 import json
@@ -48,7 +49,8 @@ def levels(*items, **top):
 
 
 def run_generator(*args):
-    return subprocess.run([sys.executable, str(GENERATOR), *args], capture_output=True, text=True)
+    return subprocess.run([sys.executable, str(GENERATOR), *args], capture_output=True, text=True,
+                          env={**os.environ, "LC_ALL": "C"})
 
 
 def aggregate_script(rendered):
@@ -56,11 +58,15 @@ def aggregate_script(rendered):
     return workflow["jobs"][ci_levels.AGGREGATE_ID]["steps"][0]["run"]
 
 
-def run_aggregate(script, expected, results):
-    env = {"PATH": os.environ["PATH"], "LEVEL_COUNT": str(len(results))}
+def aggregate(script, expected, results):
+    env = {"PATH": os.environ["PATH"], "LC_ALL": "C", "LEVEL_COUNT": str(len(results))}
     for index, (exp, result) in enumerate(zip(expected, results)):
         env.update({f"LEVEL_{index}": f"l{index}", f"EXPECTED_{index}": exp, f"RESULT_{index}": result})
-    return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True).returncode
+    return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+
+
+def run_aggregate(script, expected, results):
+    return aggregate(script, expected, results).returncode
 
 
 class GoldenTests(unittest.TestCase):
@@ -386,13 +392,17 @@ class AggregateTruthTableTests(unittest.TestCase):
                 self.assertEqual(run_aggregate(self.script, [expected], [result]) == 0, passes)
 
     def test_an_unexpected_expectation_value_fails(self):
-        self.assertNotEqual(run_aggregate(self.script, [""], ["success"]), 0)
+        rejected = aggregate(self.script, [""], ["success"])
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(rejected.stdout.splitlines(), ["::error::level l0: expected= result=success"])
 
     def test_any_bad_level_among_good_ones_fails_the_aggregate(self):
         self.assertEqual(run_aggregate(self.script, ["true", "true", "false"], ["success", "success", "skipped"]), 0)
         for bad in ("failure", "cancelled", "skipped"):
             with self.subTest(bad=bad):
-                self.assertNotEqual(run_aggregate(self.script, ["true", "true", "false"], ["success", bad, "skipped"]), 0)
+                rejected = aggregate(self.script, ["true", "true", "false"], ["success", bad, "skipped"])
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertEqual(rejected.stdout.splitlines(), [f"::error::level l1: expected=true result={bad}"])
 
 
 def context(event, target):
@@ -462,7 +472,10 @@ class EdgeConditionTests(unittest.TestCase):
         results = simulate(self.rendered, outcomes, event, base)
         _, flags = expected_flags(self.rendered, event, base)
         ordered = [results[env_level] for env_level in ["lint", "unit", "integration", "diagnostics", "release-gate"]]
-        return results, run_aggregate(aggregate_script(self.rendered), flags, ordered)
+        process = aggregate(aggregate_script(self.rendered), flags, ordered)
+        # Levels are reported by position: l0 lint, l1 unit, l2 integration, l3 diagnostics.
+        self.errors = process.stdout.splitlines()
+        return results, process.returncode
 
     def test_all_success_on_a_pull_request_passes(self):
         results, code = self.aggregate_exit({})
@@ -474,16 +487,22 @@ class EdgeConditionTests(unittest.TestCase):
         self.assertEqual(results["integration"], "skipped")
         self.assertEqual(results["diagnostics"], "success")
         self.assertNotEqual(code, 0)
+        self.assertEqual(self.errors, ["::error::level l1: expected=true result=failure",
+                                       "::error::level l2: expected=true result=skipped"])
 
     def test_a_cancelled_prerequisite_runs_neither_edge_and_fails(self):
         results, code = self.aggregate_exit({"unit": "cancelled"})
         self.assertEqual((results["integration"], results["diagnostics"]), ("skipped", "skipped"))
         self.assertNotEqual(code, 0)
+        self.assertEqual(self.errors, ["::error::level l1: expected=true result=cancelled",
+                                       "::error::level l2: expected=true result=skipped",
+                                       "::error::level l3: expected=true result=skipped"])
 
     def test_a_failing_independent_level_fails_even_when_the_rest_succeed(self):
         results, code = self.aggregate_exit({"lint": "failure"})
         self.assertEqual(results["unit"], "success")
         self.assertNotEqual(code, 0)
+        self.assertEqual(self.errors, ["::error::level l0: expected=true result=failure"])
 
     def test_a_push_to_main_expects_the_release_gate_and_not_diagnostics(self):
         results, code = self.aggregate_exit({}, event="push")
@@ -522,6 +541,7 @@ class EdgeConditionTests(unittest.TestCase):
     def test_a_failed_diagnostics_level_fails_the_aggregate(self):
         _, code = self.aggregate_exit({"diagnostics": "failure"})
         self.assertNotEqual(code, 0)
+        self.assertEqual(self.errors, ["::error::level l3: expected=true result=failure"])
 
 
 GOLDENS = tuple(sorted(FIXTURES.glob("*.golden.yml")))
@@ -622,7 +642,7 @@ class ValidatorTests(unittest.TestCase):
     def test_valid_plan_is_immutable(self):
         plan = parse(levels({"id": "unit"}, {"id": "e2e", "needs": [{"level": "unit"}]}))
         self.assertEqual([l.id for l in plan.levels], ["unit", "e2e"])
-        with self.assertRaises(Exception):
+        with self.assertRaisesRegex(dataclasses.FrozenInstanceError, "^cannot assign to field 'id'$"):
             plan.levels[0].id = "x"
 
     def test_needs_default_to_success(self):
@@ -828,7 +848,10 @@ class CommandLineTests(unittest.TestCase):
         self.assertTrue(result.stderr.startswith("unreadable_file $: "))
 
     def test_sha_must_be_forty_hex(self):
-        self.assertNotEqual(run_generator("main").returncode, 0)
+        result = run_generator("main")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((result.returncode, result.stdout), (2, ""))
+        self.assertTrue(result.stderr.endswith("gen-node-ci-caller.py: error: sha must be a 40-hex commit\n"), result.stderr)
 
 
 if __name__ == "__main__":
