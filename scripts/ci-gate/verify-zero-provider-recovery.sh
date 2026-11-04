@@ -57,17 +57,22 @@ expected_title="AI review authorization $AUTHORIZATION_CHECK_ID from arm $ARM_RU
 # returned, and the two cannot drift. Only these run-record fields are printed;
 # no token or environment value reaches the log. Observed values are JSON-encoded
 # with non-ASCII spelled as \uXXXX, so a lookalike is visible and an embedded
-# newline cannot start a workflow command. The record is slurped so an empty or
-# multi-document answer is itself a refusal rather than an absence of failures.
+# newline cannot start a workflow command; `%` is then spelled `%25`, because
+# Actions decodes `%0A` inside an annotation into a line of its own. The record
+# is slurped so an empty or multi-document answer is itself a refusal rather
+# than an absence of failures, and a jq error is reported even after partial
+# predicate lines, since the lines after it were never evaluated.
 review_run_failures=""
-if ! review_run_failures="$(jq -r --slurp --argjson run "$REVIEW_RUN_ID" --argjson attempt "$REVIEW_RUN_ATTEMPT" \
+review_run_evaluation=0
+review_run_failures="$(jq -r --slurp --argjson run "$REVIEW_RUN_ID" --argjson attempt "$REVIEW_RUN_ATTEMPT" \
   --arg title "$expected_title" --arg branch "$DEFAULT_BRANCH" --arg repo "$TARGET_REPO" \
   --arg workflow_path "$dispatch_workflow_path" '
     def hex: if . < 16 then "0123456789abcdef"[.:. + 1] else (. / 16 | floor | hex) + (. % 16 | hex) end;
     def u4: "\\u" + (hex | "0000"[0:4 - length] + .);
     def shown: (if type == "string" and length > 200 then .[0:200] + "..." else . end) | tojson
       | explode | map(
-          if . < 127 then [.] | implode
+          if . == 37 then "%25"
+          elif . < 127 then [.] | implode
           elif . < 65536 then u4
           else (. - 65536) as $c | (55296 + ($c / 1024 | floor) | u4) + (56320 + $c % 1024 | u4) end
         ) | add;
@@ -102,9 +107,11 @@ if ! review_run_failures="$(jq -r --slurp --argjson run "$REVIEW_RUN_ID" --argjs
         "::error::review run status mismatch: observed \($status | shown), which is unrecognized and fails closed; expected a live status (\($expected))"
       end)
     ) end
-  ' "$tmp/review-run.json" 2>/dev/null)" || [ -n "$review_run_failures" ]; then
+  ' "$tmp/review-run.json" 2>/dev/null)" || review_run_evaluation=$?
+if [ "$review_run_evaluation" -ne 0 ] || [ -n "$review_run_failures" ]; then
   echo "::error::zero-provider recovery run identity mismatch"
-  printf '%s\n' "${review_run_failures:-::error::review run record could not be evaluated}"
+  [ -z "$review_run_failures" ] || printf '%s\n' "$review_run_failures"
+  [ "$review_run_evaluation" -eq 0 ] || echo "::error::review run record could not be evaluated"
   exit 1
 fi
 

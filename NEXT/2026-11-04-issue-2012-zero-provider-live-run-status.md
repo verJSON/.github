@@ -17,9 +17,14 @@ A refusal still begins with `::error::zero-provider recovery run identity mismat
 Each predicate that failed now follows on its own line, with its observed and
 expected values: `id`, `run_attempt`, `event`, `path`, `display_title`,
 `head_branch`, the head repository, the repository, and `status`. The values are
-JSON-encoded and non-ASCII characters are escaped, so a lookalike shows up and a
-value cannot inject a workflow command. Only run-record fields are printed. An empty,
-multi-document, or unparseable run record is refused, as it was before.
+JSON-encoded, non-ASCII characters are escaped, and `%` is written as `%25`, so a
+lookalike shows up and a value cannot inject a workflow command or fake an annotation
+line. Only run-record fields are printed. If the record cannot be evaluated, that is
+reported too, even after partial predicate lines.
+
+An empty or unparseable run record is refused, as before. This change also tightens
+multi-document handling: the old `jq -e` check judged only the last document, so two
+valid copies passed. A run record must now be exactly one JSON object.
 
 `gate-rearm.yml`'s owned-review check already accepted the same live set, so it is
 unchanged. This is the preflight refusal seen while gating #2011; follows #1393.
