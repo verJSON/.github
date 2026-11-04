@@ -108,7 +108,6 @@ write_ruleset_run() {
 }
 
 expect_pass() { label="$1"; shift; if "$@" >"$tmp/out" 2>&1; then pass "$label"; else fail "$label: $(tail -1 "$tmp/out")"; fi; }
-expect_fail() { label="$1"; shift; if "$@" >"$tmp/out" 2>&1; then fail "$label"; else pass "$label"; fi; }
 expect_reason_fail() {
   label="$1" reason="$2"; shift 2
   if "$@" >"$tmp/out" 2>&1; then
@@ -121,7 +120,7 @@ expect_reason_fail() {
 }
 expect_provenance_fail() {
   label="$1"; shift
-  expect_reason_fail "$label" '::error::arm run provenance mismatch' "$@"
+  expect_reason_fail "$label" '::error::arm run provenance mismatch: required-workflow ruleset source' "$@"
 }
 verify() { bash "$verifier"; }
 repack() {
@@ -162,14 +161,18 @@ write_base; expect_pass "exact Actions-owned check and immutable receipt are acc
 write_ruleset_run
 LOCAL_WORKFLOW_MISSING=true expect_pass "ruleset-created arm accepts distinct protected workflow and PR-head identities" verify
 write_label_run; expect_pass "separate pull_request_target label caller accepts an exact schema-2 receipt" verify
-write_label_run; jq 'del(.delivery_event,.delivery_actor,.workflow_ref,.workflow_sha) | .schema=1' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"; repack; expect_fail "label caller rejects schema-1 receipt" verify
+write_label_run; jq 'del(.delivery_event,.delivery_actor,.workflow_ref,.workflow_sha) | .schema=1' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"; repack; expect_reason_fail "label caller rejects schema-1 receipt" '::error::local caller requires a source-bound schema-2 receipt' verify
 for field in delivery_event delivery_actor workflow_ref workflow_sha; do
   write_label_run
   jq --arg field "$field" '.[$field]="attacker-substitution"' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"
-  repack; expect_fail "schema-2 receipt rejects substituted $field" verify
+  case "$field" in
+    workflow_sha) substitution_reason='::error::arm receipt workflow SHA is not a 40-hex commit SHA' ;;
+    *) substitution_reason='::error::arm receipt delivery identity mismatch' ;;
+  esac
+  repack; expect_reason_fail "schema-2 receipt rejects substituted $field" "$substitution_reason" verify
 done
-write_label_run; jq '.workflow_sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"; repack; expect_fail "schema-2 receipt rejects a different valid 40-hex caller workflow SHA" verify
-write_label_run; jq '.workflow_ref="Verjson/example/.github/workflows/ai-review-label-rearm.yml@refs/heads/topic"' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"; repack; expect_fail "label caller rejects wrong protected source branch" verify
+write_label_run; jq '.workflow_sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"; repack; expect_reason_fail "schema-2 receipt rejects a different valid 40-hex caller workflow SHA" '::error::local caller workflow SHA does not resolve to the protected caller revision' verify
+write_label_run; jq '.workflow_ref="Verjson/example/.github/workflows/ai-review-label-rearm.yml@refs/heads/topic"' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"; repack; expect_reason_fail "label caller rejects wrong protected source branch" '::error::arm receipt delivery identity mismatch' verify
 write_label_run
 export ARM_RUN_ATTEMPT=2
 # Every other identity agrees on attempt 2, so the replay guard is the only check
@@ -179,7 +182,7 @@ jq '.run_attempt=2' "$RUN_FILE" >"$tmp/x" && mv "$tmp/x" "$RUN_FILE"
 jq --arg external_id "$replayed_external_id" '.arm_run_attempt=2 | .external_id=$external_id' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"
 jq --arg external_id "$replayed_external_id" '.external_id=$external_id' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK_FILE"
 repack; expect_reason_fail "label delivery rejects attempt greater than one" '::error::local caller delivery replay rejected' verify
-write_label_run; jq '.path=".github/workflows/gate-rearm.yml"' "$RUN_FILE" >"$tmp/x" && mv "$tmp/x" "$RUN_FILE"; expect_fail "required arm run rejects label-caller schema-2 cross-mode receipt" verify
+write_label_run; jq '.path=".github/workflows/gate-rearm.yml"' "$RUN_FILE" >"$tmp/x" && mv "$tmp/x" "$RUN_FILE"; expect_reason_fail "required arm run rejects label-caller schema-2 cross-mode receipt" '::error::schema-2 receipt requires an exact protected local caller' verify
 for valid_event in ready_for_review converted_to_draft edited unlabeled; do
   write_lifecycle_run
   jq --arg event "$valid_event" '.delivery_event=$event' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"
@@ -188,14 +191,14 @@ done
 for invalid_event in labeled pull_request_target opened; do
   write_lifecycle_run
   jq --arg event "$invalid_event" '.delivery_event=$event' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"
-  repack; expect_fail "lifecycle caller rejects delivery event $invalid_event" verify
+  repack; expect_reason_fail "lifecycle caller rejects delivery event $invalid_event" '::error::arm receipt delivery identity mismatch' verify
 done
-write_lifecycle_run; jq '.path=".github/workflows/ai-review-label-rearm.yml"' "$RUN_FILE" >"$tmp/x" && mv "$tmp/x" "$RUN_FILE"; expect_fail "lifecycle receipt rejects a different protected caller path" verify
-write_lifecycle_run; jq '.workflow_ref="Verjson/example/.github/workflows/ai-review-lifecycle-rearm.yml@refs/heads/topic"' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"; repack; expect_fail "lifecycle caller rejects wrong protected branch" verify
-write_lifecycle_run; jq '.workflow_sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"; repack; expect_fail "lifecycle caller rejects a different valid workflow blob" verify
-write_lifecycle_run; jq '.workflow_sha="malformed"' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"; repack; expect_fail "lifecycle caller rejects malformed workflow metadata" verify
-write_lifecycle_run; jq '.workflow_id=77' "$RUN_FILE" >"$tmp/x" && mv "$tmp/x" "$RUN_FILE"; expect_fail "lifecycle caller rejects a mismatched workflow ID" verify
-write_lifecycle_run; jq '.run_attempt=2' "$RUN_FILE" >"$tmp/x" && mv "$tmp/x" "$RUN_FILE"; expect_fail "lifecycle caller rejects replayed source run" verify
+write_lifecycle_run; jq '.path=".github/workflows/ai-review-label-rearm.yml"' "$RUN_FILE" >"$tmp/x" && mv "$tmp/x" "$RUN_FILE"; expect_reason_fail "lifecycle receipt rejects a different protected caller path" '::error::arm run provenance mismatch: workflow ID' verify
+write_lifecycle_run; jq '.workflow_ref="Verjson/example/.github/workflows/ai-review-lifecycle-rearm.yml@refs/heads/topic"' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"; repack; expect_reason_fail "lifecycle caller rejects wrong protected branch" '::error::arm receipt delivery identity mismatch' verify
+write_lifecycle_run; jq '.workflow_sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"; repack; expect_reason_fail "lifecycle caller rejects a different valid workflow blob" '::error::local caller workflow SHA does not resolve to the protected caller revision' verify
+write_lifecycle_run; jq '.workflow_sha="malformed"' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"; repack; expect_reason_fail "lifecycle caller rejects malformed workflow metadata" '::error::arm receipt workflow SHA is not a 40-hex commit SHA' verify
+write_lifecycle_run; jq '.workflow_id=77' "$RUN_FILE" >"$tmp/x" && mv "$tmp/x" "$RUN_FILE"; expect_reason_fail "lifecycle caller rejects a mismatched workflow ID" '::error::arm run provenance mismatch: workflow ID' verify
+write_lifecycle_run; jq '.run_attempt=2' "$RUN_FILE" >"$tmp/x" && mv "$tmp/x" "$RUN_FILE"; expect_reason_fail "lifecycle caller rejects replayed source run" '::error::arm run provenance mismatch: run ID, attempt, event, workflow path, or repository' verify
 export ARM_RUN_ATTEMPT=2
 REVIEW_POLICY="$(encode_policy "$anthropic_policy")"
 export REVIEW_POLICY
@@ -220,36 +223,36 @@ LOCAL_WORKFLOW_MISSING=true expect_provenance_fail "a later matching-path impost
 write_ruleset_run
 jq '.[0].parameters.workflows[0].ref="refs/heads/topic"' "$RULES_FILE" >"$tmp/x" && mv "$tmp/x" "$RULES_FILE"
 LOCAL_WORKFLOW_MISSING=true expect_provenance_fail "a matching-path rule at an untrusted source ref is rejected" verify
-write_base; REVIEW_POLICY="$(encode_policy "$openai_policy")" expect_fail "a provider change after authorization is rejected" verify
+write_base; REVIEW_POLICY="$(encode_policy "$openai_policy")" expect_reason_fail "a provider change after authorization is rejected" '::error::arm receipt content mismatch' verify
 REVIEW_POLICY="$(encode_policy "$openai_policy")"; write_base; expect_pass "maintainer re-review evidence is reauthorized" verify
 write_base; CURRENT_PERMISSION=triage REVERIFY_ACTOR_PERMISSION=false expect_pass "completion trusts the immutable arm permission without repository administration access" verify
-write_base; CURRENT_PERMISSION=triage expect_fail "permission revocation after authorization fails closed" verify; unset CURRENT_PERMISSION
+write_base; CURRENT_PERMISSION=triage expect_reason_fail "permission revocation after authorization fails closed" '::error::re-review actor no longer has maintain/admin permission' verify; unset CURRENT_PERMISSION
 REVIEW_POLICY="$(encode_policy "$anthropic_policy")"
 export REVIEW_POLICY
-write_base; jq '.details_url="https://github.com/Verjson/example/actions/runs/9999"' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK_FILE"; expect_fail "forged same-App details URL is rejected" verify
-write_base; jq '.details_url="https://github.com/Verjson/example/actions/runs/7001"' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK_FILE"; expect_fail "an Actions-owned check carrying the arm-run URL is not the stored check (#1648)" verify
-write_base; jq '.details_url="https://github.com/Verjson/example/runs/9002"' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK_FILE"; expect_fail "a check page URL for another check ID is rejected" verify
-write_base; jq '.check_run_id=9002' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"; repack; expect_fail "receipt/check ID mismatch is rejected" verify
-write_base; jq '.nonce="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"; repack; expect_fail "nonce/external_id mismatch is rejected" verify
-write_base; CURRENT_HEAD=ffffffffffffffffffffffffffffffffffffffff expect_fail "stale PR head is rejected" verify
-write_base; API_FAILURE_MATCH='actions/workflows/gate-rearm.yml' expect_fail "workflow API failures fail closed" verify
+write_base; jq '.details_url="https://github.com/Verjson/example/actions/runs/9999"' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK_FILE"; expect_reason_fail "forged same-App details URL is rejected" '::error::authorization check is not receipt-bound' verify
+write_base; jq '.details_url="https://github.com/Verjson/example/actions/runs/7001"' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK_FILE"; expect_reason_fail "an Actions-owned check carrying the arm-run URL is not the stored check (#1648)" '::error::authorization check is not receipt-bound' verify
+write_base; jq '.details_url="https://github.com/Verjson/example/runs/9002"' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK_FILE"; expect_reason_fail "a check page URL for another check ID is rejected" '::error::authorization check is not receipt-bound' verify
+write_base; jq '.check_run_id=9002' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"; repack; expect_reason_fail "receipt/check ID mismatch is rejected" '::error::arm receipt content mismatch' verify
+write_base; jq '.nonce="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"; repack; expect_reason_fail "nonce/external_id mismatch is rejected" '::error::arm receipt content mismatch' verify
+write_base; CURRENT_HEAD=ffffffffffffffffffffffffffffffffffffffff expect_reason_fail "stale PR head is rejected" '::error::authorization head is stale' verify
+write_base; API_FAILURE_MATCH='actions/workflows/gate-rearm.yml' expect_reason_fail "workflow API failures fail closed" '::error title=arm-workflow failed::Workflow-token arm receipt read failed' verify
 grep -q 'arm-workflow failed' "$tmp/out" \
   && grep -q 'x-github-request-id: TEST:719' "$tmp/out" \
   && grep -q 'authorization: token \*\*\*' "$tmp/out" \
   && ! grep -q 'leaked-test-token' "$tmp/out" \
   && pass "workflow API failure identifies its phase without leaking credentials" \
   || fail "workflow API failure diagnostics are unsafe or ambiguous"
-write_base; jq '.run_attempt=3' "$RUN_FILE" >"$tmp/x" && mv "$tmp/x" "$RUN_FILE"; expect_fail "run-attempt replay is rejected" verify
-write_base; printf '{"artifacts":[]}\n' >"$ARTIFACTS_FILE"; expect_fail "missing arm artifact is rejected" verify
-write_base; rm "$tmp/archive/receipt.json" "$ZIP_FILE"; printf 'bad\n' >"$tmp/archive/other"; (cd "$tmp/archive" && python3 -m zipfile -c "$ZIP_FILE" other); digest="$(sha256sum "$ZIP_FILE"|awk '{print $1}')"; size="$(wc -c <"$ZIP_FILE")"; jq -nc --argjson size "$size" --arg digest "sha256:$digest" '{artifacts:[{id:8001,name:"ai-review-arm-7001-2",expired:false,size_in_bytes:$size,digest:$digest}]}' >"$ARTIFACTS_FILE"; expect_fail "malformed artifact archive is rejected" verify
-write_base; jq '.artifacts[0].digest="sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"' "$ARTIFACTS_FILE" >"$tmp/x" && mv "$tmp/x" "$ARTIFACTS_FILE"; expect_fail "substituted artifact digest is rejected" verify
-write_base; jq '.app.id=9999' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK_FILE"; expect_fail "shared or wrong check-run owner is rejected" verify
+write_base; jq '.run_attempt=3' "$RUN_FILE" >"$tmp/x" && mv "$tmp/x" "$RUN_FILE"; expect_reason_fail "run-attempt replay is rejected" '::error::arm run provenance mismatch: run ID, attempt, event, workflow path, or repository' verify
+write_base; printf '{"artifacts":[]}\n' >"$ARTIFACTS_FILE"; expect_reason_fail "missing arm artifact is rejected" '::error::arm receipt artifact missing or ambiguous' verify
+write_base; rm "$tmp/archive/receipt.json" "$ZIP_FILE"; printf 'bad\n' >"$tmp/archive/other"; (cd "$tmp/archive" && python3 -m zipfile -c "$ZIP_FILE" other); digest="$(sha256sum "$ZIP_FILE"|awk '{print $1}')"; size="$(wc -c <"$ZIP_FILE")"; jq -nc --argjson size "$size" --arg digest "sha256:$digest" '{artifacts:[{id:8001,name:"ai-review-arm-7001-2",expired:false,size_in_bytes:$size,digest:$digest}]}' >"$ARTIFACTS_FILE"; expect_reason_fail "malformed artifact archive is rejected" '::error::arm receipt archive shape is invalid' verify
+write_base; jq '.artifacts[0].digest="sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"' "$ARTIFACTS_FILE" >"$tmp/x" && mv "$tmp/x" "$ARTIFACTS_FILE"; expect_reason_fail "substituted artifact digest is rejected" '::error::arm receipt artifact digest mismatch' verify
+write_base; jq '.app.id=9999' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK_FILE"; expect_reason_fail "shared or wrong check-run owner is rejected" '::error::authorization check is not receipt-bound' verify
 write_base
 jq 'del(.check_app_id, .check_app_slug)' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"
 jq --argjson app "$EXPECTED_APP_ID" --arg slug "$EXPECTED_APP_SLUG" \
   '.app.id=$app | .app.slug=$slug' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK_FILE"
 repack
-expect_fail "legacy review-App-owned receipt is rejected after compatibility retirement" verify
+expect_reason_fail "legacy review-App-owned receipt is rejected after compatibility retirement" '::error::arm receipt content mismatch' verify
 
 # #931/#943: this script never deletes the receipt itself -- deletion happens
 # too early here, before the calling step's own later work (completing the

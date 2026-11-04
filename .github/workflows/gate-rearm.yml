@@ -480,7 +480,10 @@ jobs:
           fi
 
           meta="$(GH_TOKEN="$ACTIONS_TOKEN" gh pr view "$PR_NUMBER" --repo "$TARGET_REPO" \
-            --json id,state,isDraft,title,labels,headRefOid,headRepositoryOwner,autoMergeRequest)"
+            --json id,state,isDraft,title,labels,headRefOid,headRepositoryOwner,autoMergeRequest)" || {
+            echo "::error::current PR metadata could not be read"
+            exit 1
+          }
           state="$(jq -r '.state' <<<"$meta")"
           head_sha="$(jq -r '.headRefOid // ""' <<<"$meta")"
           head_owner="$(jq -r '.headRepositoryOwner.login // ""' <<<"$meta")"
@@ -884,9 +887,15 @@ jobs:
                    $p[2] == $repo and $p[3] == $pr and $p[4] == $head and
                    ($p[5] | test("^[1-9][0-9]*$")) and
                    ($p[6] | test("^[1-9][0-9]*$")) and ($p[7] | test("^[0-9a-f]{64}$")) then $p[5] else "" end' <<<"$latest")"
-            [[ "$arm_run_id" =~ ^[123456789][0123456789]*$ ]] || exit 1
+            [[ "$arm_run_id" =~ ^[123456789][0123456789]*$ ]] || {
+              echo "::error::the approved authorization check does not name an arm run for this exact pull request head; refusing re-promotion"
+              exit 1
+            }
             arm_run_attempt="$(GH_TOKEN="$ACTIONS_TOKEN" gh api "repos/$TARGET_REPO/actions/runs/$arm_run_id" --jq '.run_attempt // ""')"
-            [[ "$arm_run_attempt" =~ ^[123456789][0123456789]*$ ]] || exit 1
+            [[ "$arm_run_attempt" =~ ^[123456789][0123456789]*$ ]] || {
+              echo "::error::the approved authorization's arm run attempt is unavailable or malformed; refusing re-promotion"
+              exit 1
+            }
             receipt_name="ai-review-arm-$arm_run_id-$arm_run_attempt"
             receipt_count="$(GH_TOKEN="$ACTIONS_TOKEN" gh api "repos/$TARGET_REPO/actions/runs/$arm_run_id/artifacts?per_page=100" \
               --jq "[.artifacts[] | select(.name == \"$receipt_name\" and .expired == false)] | length")"
@@ -938,6 +947,7 @@ jobs:
                 'The pending authorization cannot be tied to a live exact arm receipt. An administrator must recover the authorization without dispatching another model review.')"
               GH_TOKEN="$ACTIONS_TOKEN" gh pr comment "$PR_NUMBER" --repo "$TARGET_REPO" \
                 --body "$notice_body"
+              echo "::error::the pending authorization cannot be tied to a live exact arm receipt; administrator recovery is required"
               exit 1
             fi
             notice_body="$(printf '<!-- ai-review-hold-clear:%s -->\n%s' "$head_sha" \
@@ -1557,7 +1567,9 @@ jobs:
           fi
           patched="$(GH_TOKEN="$ACTIONS_TOKEN" gh api --method PATCH "repos/$TARGET_REPO/check-runs/$CHECK_ID" \
             -f status=completed -f conclusion="$conclusion" \
-            -f "output[title]=$title" -f "output[summary]=$summary")"
+            -f "output[title]=$title" -f "output[summary]=$summary")" || {
+              echo "::error::authorization check completion request failed"; exit 1;
+            }
           jq -e --argjson id "$CHECK_ID" --arg conclusion "$conclusion" \
             '.id == $id and .status == "completed" and .conclusion == $conclusion' <<<"$patched" >/dev/null || {
               echo "::error::authorization check completion was not confirmed"; exit 1;
@@ -1573,7 +1585,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ "$DEFAULT_BRANCH" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]+$ ]] || exit 1
+          [[ "$DEFAULT_BRANCH" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]+$ ]] || {
+            echo "::error::default branch is not a safe review dispatch ref"
+            exit 1
+          }
           fail_authorization() {
             local title="$1" summary="$2"
             GH_TOKEN="$ACTIONS_TOKEN" gh api --method PATCH "repos/$TARGET_REPO/check-runs/$CHECK_ID" \
