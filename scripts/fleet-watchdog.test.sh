@@ -123,31 +123,31 @@ poll_job "$old_iso" >"$JOBS_FILE"
 busy_pool >"$RUNNERS_FILE"
 
 # --- the one case where it SHOULD act ---------------------------------------
-run_watchdog >/dev/null
-cancelled \
+rc="$(run_watchdog)"
+[ "$rc" = rc=0 ] && cancelled \
   && pass "preempts a stale poll job when the pool is full and work is queued" \
-  || { fail "did not preempt a stale poll job"; sed 's/^/diag - /' "$tmp/out.txt"; }
+  || { fail "did not preempt a stale poll job ($rc)"; sed 's/^/diag - /' "$tmp/out.txt"; }
 
 # --- every case where it must NOT ------------------------------------------
 idle_pool >"$RUNNERS_FILE"
-run_watchdog >/dev/null
-! cancelled && pass "spare capacity — cancels nothing" || fail "cancelled despite an idle runner"
+rc="$(run_watchdog)"
+[ "$rc" = rc=0 ] && ! cancelled && pass "spare capacity — cancels nothing" || fail "cancelled despite an idle runner ($rc)"
 busy_pool >"$RUNNERS_FILE"
 
 printf '{"workflow_runs":[]}\n' >"$QUEUED_FILE"
-run_watchdog >/dev/null
-! cancelled && pass "empty queue — a long poll harms nobody, cancels nothing" || fail "cancelled with nothing queued"
+rc="$(run_watchdog)"
+[ "$rc" = rc=0 ] && ! cancelled && pass "empty queue — a long poll harms nobody, cancels nothing" || fail "cancelled with nothing queued ($rc)"
 printf '{"workflow_runs":[{"id":9,"name":"CI"}]}\n' >"$QUEUED_FILE"
 
 poll_job "$new_iso" >"$JOBS_FILE"
-run_watchdog >/dev/null
-! cancelled && pass "a young poll job is left alone" || fail "cancelled a job under the age threshold"
+rc="$(run_watchdog)"
+[ "$rc" = rc=0 ] && ! cancelled && pass "a young poll job is left alone" || fail "cancelled a job under the age threshold ($rc)"
 poll_job "$old_iso" >"$JOBS_FILE"
 
 # A CI run must never be a candidate, however long it has been going.
 printf '{"workflow_runs":[{"id":1,"name":"CI"}]}\n' >"$INPROGRESS_FILE"
-run_watchdog >/dev/null
-! cancelled && pass "never preempts a non-poll workflow (CI)" || fail "cancelled a CI run — it would lose real work"
+rc="$(run_watchdog)"
+[ "$rc" = rc=0 ] && ! cancelled && pass "never preempts a non-poll workflow (CI)" || fail "cancelled a CI run — it would lose real work ($rc)"
 printf '{"workflow_runs":[{"id":1,"name":"AI privileged merge"}]}\n' >"$INPROGRESS_FILE"
 
 # Unknown fleet state is inconclusive, and inconclusive must not authorise a
@@ -160,10 +160,10 @@ rc="$(run_watchdog)"
 unset RUNNERS_FAIL; export RUNNERS_FAIL=false
 
 # Dry run reports without acting.
-WATCHDOG_DRY_RUN=true run_watchdog >/dev/null
-{ ! cancelled && grep -q 'DRY RUN' "$tmp/out.txt"; } \
+rc="$(WATCHDOG_DRY_RUN=true run_watchdog)"
+{ [ "$rc" = rc=0 ] && ! cancelled && grep -q 'DRY RUN' "$tmp/out.txt"; } \
   && pass "dry run reports candidates without cancelling" \
-  || fail "dry run either cancelled or reported nothing"
+  || fail "dry run either cancelled or reported nothing ($rc)"
 
 # --- #342: the arm/disarm switch has no implicit default --------------------
 # #336 shipped armed because two layers each carried a default and the running
@@ -200,53 +200,53 @@ rc="$(run_bare false)"
 printf '{"workflow_runs":[{"id":1,"name":"AI review + auto-merge"}]}\n' >"$INPROGRESS_FILE"
 
 gate_job "$mid_iso" in_progress >"$JOBS_FILE"
-run_watchdog >/dev/null
-cancelled \
+rc="$(run_watchdog)"
+[ "$rc" = rc=0 ] && cancelled \
   && pass "a gate still inside ci_wait at 20 minutes is a candidate (#343)" \
-  || { fail "a provably polling gate was not preempted"; sed 's/^/diag - /' "$tmp/out.txt"; }
+  || { fail "a provably polling gate was not preempted ($rc)"; sed 's/^/diag - /' "$tmp/out.txt"; }
 
 gate_job "$old_iso" completed >"$JOBS_FILE"
-run_watchdog >/dev/null
-! cancelled \
+rc="$(run_watchdog)"
+[ "$rc" = rc=0 ] && ! cancelled \
   && pass "a gate past ci_wait is never preempted, however old — that is model review (#343)" \
-  || fail "cancelled a gate that had finished polling; that discards paid review work"
+  || fail "cancelled a gate that had finished polling; that discards paid review work ($rc)"
 
 gate_job "$new_iso" in_progress >"$JOBS_FILE"
-run_watchdog >/dev/null
-! cancelled \
+rc="$(run_watchdog)"
+[ "$rc" = rc=0 ] && ! cancelled \
   && pass "a gate that has only just started polling is under the floor" \
-  || fail "cancelled a gate below WATCHDOG_MIN_POLL_MINUTES"
+  || fail "cancelled a gate below WATCHDOG_MIN_POLL_MINUTES ($rc)"
 
 # The floor guards POLL age, not job age. A job that spent 88 minutes on
 # checkout and 2 minutes polling has not been in anyone's way for long enough.
 gate_job "$old_iso" in_progress "$new_iso" >"$JOBS_FILE"
-run_watchdog >/dev/null
-! cancelled \
+rc="$(run_watchdog)"
+[ "$rc" = rc=0 ] && ! cancelled \
   && pass "an old job whose poll step just started is under the floor" \
-  || { fail "the floor read job age instead of poll-step age"; sed 's/^/diag - /' "$tmp/out.txt"; }
+  || { fail "the floor read job age instead of poll-step age ($rc)"; sed 's/^/diag - /' "$tmp/out.txt"; }
 
 # A step whose start time is missing cannot be aged, and unmeasurable is not a
 # licence to cancel.
 printf '{"jobs":[{"status":"in_progress","started_at":"%s","labels":[%s],"steps":[{"name":"%s","status":"in_progress"}]}]}\n' \
   "$old_iso" "$POOL_LABELS" "$POLL_STEP" >"$JOBS_FILE"
-run_watchdog >/dev/null
-! cancelled \
+rc="$(run_watchdog)"
+[ "$rc" = rc=0 ] && ! cancelled \
   && pass "a poll step with no start time is left alone, not cancelled on job age" \
-  || fail "an unmeasurable poll step authorised a cancel"
+  || fail "an unmeasurable poll step authorised a cancel ($rc)"
 
 # An unrecognised job shape must not be read as "polling".
 printf '{"jobs":[{"status":"in_progress","started_at":"%s","labels":[%s],"steps":[]}]}\n' "$old_iso" "$POOL_LABELS" >"$JOBS_FILE"
-run_watchdog >/dev/null
-! cancelled \
+rc="$(run_watchdog)"
+[ "$rc" = rc=0 ] && ! cancelled \
   && pass "a gate whose poll step cannot be found is left alone, not cancelled on age" \
-  || fail "an unreadable step list authorised a cancel"
+  || fail "an unreadable step list authorised a cancel ($rc)"
 
 printf '{"workflow_runs":[{"id":1,"name":"AI privileged merge"}]}\n' >"$INPROGRESS_FILE"
 poll_job "$old_iso" >"$JOBS_FILE"
-run_watchdog >/dev/null
-cancelled \
+rc="$(run_watchdog)"
+[ "$rc" = rc=0 ] && cancelled \
   && pass "a workflow with no separable poll step keeps the age rule" \
-  || fail "the age fallback stopped selecting AI privileged merge"
+  || fail "the age fallback stopped selecting AI privileged merge ($rc)"
 
 # --- a candidate must occupy the pool the jam is on -------------------------
 # `gate` routes on `CI_RUNNER_OVERFLOW` (or `_FASTLANE` for public targets)
@@ -259,10 +259,10 @@ hosted_gate_job() { # $1 = started_at, $2 = poll step status
 }
 printf '{"workflow_runs":[{"id":1,"name":"AI review + auto-merge"}]}\n' >"$INPROGRESS_FILE"
 hosted_gate_job "$mid_iso" in_progress >"$JOBS_FILE"
-run_watchdog >/dev/null
-{ ! cancelled && grep -q 'stale_poll_jobs=0' "$tmp/out.txt"; } \
+rc="$(run_watchdog)"
+{ [ "$rc" = rc=0 ] && ! cancelled && grep -q 'stale_poll_jobs=0' "$tmp/out.txt"; } \
   && pass "a hosted gate is not a candidate — cancelling it frees no self-hosted runner" \
-  || { fail "a hosted job was selected; cancelling it cannot clear a self-hosted jam"; sed 's/^/diag - /' "$tmp/out.txt"; }
+  || { fail "a hosted job was selected; cancelling it cannot clear a self-hosted jam ($rc)"; sed 's/^/diag - /' "$tmp/out.txt"; }
 
 # `self-hosted` alone is not the pool. The org also runs `hostinger`
 # (`self-hosted,Linux,X64,manish`), so a job can hold a self-hosted runner and
@@ -275,10 +275,10 @@ other_pool_job() { # $1 = started_at — self-hosted, but a DIFFERENT pool
 }
 printf '{"workflow_runs":[{"id":1,"name":"AI privileged merge"}]}\n' >"$INPROGRESS_FILE"
 other_pool_job "$old_iso" >"$JOBS_FILE"
-run_watchdog >/dev/null
-{ ! cancelled && grep -q 'stale_poll_jobs=0' "$tmp/out.txt"; } \
+rc="$(run_watchdog)"
+{ [ "$rc" = rc=0 ] && ! cancelled && grep -q 'stale_poll_jobs=0' "$tmp/out.txt"; } \
   && pass "a self-hosted job in a different pool is not a candidate — it frees no runner here" \
-  || { fail "a job on another self-hosted pool was selected; cancelling it cannot clear this pool's jam"; sed 's/^/diag - /' "$tmp/out.txt"; }
+  || { fail "a job on another self-hosted pool was selected; cancelling it cannot clear this pool's jam ($rc)"; sed 's/^/diag - /' "$tmp/out.txt"; }
 
 poll_job "$old_iso" >"$JOBS_FILE"
 
@@ -287,19 +287,19 @@ poll_job "$old_iso" >"$JOBS_FILE"
 # hosted capacity. Those are not waiting on this pool and no cancellation here
 # can release them, so they are not evidence that a poll job is in anyone's way.
 queued_hosted_job >"$QUEUED_JOBS_FILE"
-run_watchdog >/dev/null
-{ ! cancelled && grep -q 'queued_runs=0' "$tmp/out.txt"; } \
+rc="$(run_watchdog)"
+{ [ "$rc" = rc=0 ] && ! cancelled && grep -q 'queued_runs=0' "$tmp/out.txt"; } \
   && pass "a run queued for hosted capacity is not work starved by this pool" \
-  || { fail "a hosted queue was read as starvation of the self-hosted pool"; sed 's/^/diag - /' "$tmp/out.txt"; }
+  || { fail "a hosted queue was read as starvation of the self-hosted pool ($rc)"; sed 's/^/diag - /' "$tmp/out.txt"; }
 
 # ...and the same for the other half of the label pair: work queued for another
 # self-hosted pool is not waiting on this one either, so it is not the evidence
 # that authorises a cancel.
 printf '{"jobs":[{"status":"queued","labels":["self-hosted","manish"]}]}\n' >"$QUEUED_JOBS_FILE"
-run_watchdog >/dev/null
-{ ! cancelled && grep -q 'queued_runs=0' "$tmp/out.txt"; } \
+rc="$(run_watchdog)"
+{ [ "$rc" = rc=0 ] && ! cancelled && grep -q 'queued_runs=0' "$tmp/out.txt"; } \
   && pass "a run queued for a different self-hosted pool is not starvation of this one" \
-  || { fail "another pool's queue was read as starvation of this pool"; sed 's/^/diag - /' "$tmp/out.txt"; }
+  || { fail "another pool's queue was read as starvation of this pool ($rc)"; sed 's/^/diag - /' "$tmp/out.txt"; }
 queued_pool_job >"$QUEUED_JOBS_FILE"
 
 # --- the two selection rules carry different evidence, so they arm apart -----
@@ -308,17 +308,17 @@ queued_pool_job >"$QUEUED_JOBS_FILE"
 # unproven one, and disarming the unproven one must not disarm the proven one.
 printf '{"workflow_runs":[{"id":1,"name":"AI review + auto-merge"}]}\n' >"$INPROGRESS_FILE"
 gate_job "$mid_iso" in_progress >"$JOBS_FILE"
-WATCHDOG_POLL_STEP_DRY_RUN=true run_watchdog >/dev/null
-{ ! cancelled && grep -q 'DRY RUN would cancel' "$tmp/out.txt"; } \
+rc="$(WATCHDOG_POLL_STEP_DRY_RUN=true run_watchdog)"
+{ [ "$rc" = rc=0 ] && ! cancelled && grep -q 'DRY RUN would cancel' "$tmp/out.txt"; } \
   && pass "a poll-step candidate is reported, not cancelled, while its own rule is unarmed" \
-  || { fail "the unproven poll-step rule cancelled under WATCHDOG_POLL_STEP_DRY_RUN=true"; sed 's/^/diag - /' "$tmp/out.txt"; }
+  || { fail "the unproven poll-step rule cancelled under WATCHDOG_POLL_STEP_DRY_RUN=true ($rc)"; sed 's/^/diag - /' "$tmp/out.txt"; }
 
 printf '{"workflow_runs":[{"id":1,"name":"AI privileged merge"}]}\n' >"$INPROGRESS_FILE"
 poll_job "$old_iso" >"$JOBS_FILE"
-WATCHDOG_POLL_STEP_DRY_RUN=true run_watchdog >/dev/null
-cancelled \
+rc="$(WATCHDOG_POLL_STEP_DRY_RUN=true run_watchdog)"
+[ "$rc" = rc=0 ] && cancelled \
   && pass "the proven age rule still cancels while the poll-step rule is unarmed" \
-  || { fail "disarming the poll-step rule also disarmed the age rule — the only mitigation for a privileged_merge jam"; sed 's/^/diag - /' "$tmp/out.txt"; }
+  || { fail "disarming the poll-step rule also disarmed the age rule — the only mitigation for a privileged_merge jam ($rc)"; sed 's/^/diag - /' "$tmp/out.txt"; }
 
 rc="$(WATCHDOG_POLL_STEP_DRY_RUN=yes run_watchdog)"
 { [ "$rc" = "rc=2" ] && ! cancelled; } \
@@ -327,16 +327,16 @@ rc="$(WATCHDOG_POLL_STEP_DRY_RUN=yes run_watchdog)"
 
 # --- #355: the runner list is paginated -------------------------------------
 busy_pool_2pages >"$RUNNERS_FILE"
-run_watchdog >/dev/null
-{ cancelled && grep -q 'online=2 idle=0' "$tmp/out.txt"; } \
+rc="$(run_watchdog)"
+{ [ "$rc" = rc=0 ] && cancelled && grep -q 'online=2 idle=0' "$tmp/out.txt"; } \
   && pass "runner pages are aggregated, not counted per page (#355)" \
-  || { fail "a two-page runner list did not aggregate"; sed 's/^/diag - /' "$tmp/out.txt"; }
+  || { fail "a two-page runner list did not aggregate ($rc)"; sed 's/^/diag - /' "$tmp/out.txt"; }
 
 mixed_pool_2pages >"$RUNNERS_FILE"
-run_watchdog >/dev/null
-{ ! cancelled && grep -q 'online=2 idle=1' "$tmp/out.txt"; } \
+rc="$(run_watchdog)"
+{ [ "$rc" = rc=0 ] && ! cancelled && grep -q 'online=2 idle=1' "$tmp/out.txt"; } \
   && pass "an idle runner on a later page still means spare capacity (#355)" \
-  || { fail "idle capacity on page 2 was missed"; sed 's/^/diag - /' "$tmp/out.txt"; }
+  || { fail "idle capacity on page 2 was missed ($rc)"; sed 's/^/diag - /' "$tmp/out.txt"; }
 
 malformed_pool_2pages >"$RUNNERS_FILE"
 rc="$(run_watchdog)"

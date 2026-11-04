@@ -300,6 +300,11 @@ for step in doc["jobs"]["release"]["steps"]:
     if step.get("name") == "Prepare job-scoped changelog tool cache":
         print(step["run"])
 PY
+extract_status=$?
+# An empty step runs green and leaves no override, which the case below would
+# misreport as the workflow depending on a persistent cache.
+[ "$extract_status" -eq 0 ] && [ -s "$publish_cache_step" ] \
+  || fail "could not extract the node-release publish-cache step (extractor exit $extract_status)"
 publish_github_env="$(mktemp)"
 RUNNER_TEMP="$publish_runner_temp" GITHUB_WORKSPACE="$publish_workspace" GITHUB_ENV="$publish_github_env" \
   bash -eo pipefail "$publish_cache_step"
@@ -328,8 +333,15 @@ for step in doc["jobs"]["release"]["steps"]:
     if step.get("name") == "Prepare job-scoped changelog tool cache":
         print(step["run"])
 PY
-[ ! -s "$missing_publish_step" ] || fail "the publish-cache removal mutation left an override step"
-if VERJSON_CHANGELOG_TOOL_CACHE="$ambient_publish_cache" populate_publish_cache 2>/dev/null; then
+mutant_status=$?
+# A crashed parse also leaves the step file empty, which would read as the
+# removal having worked; the mutant must parse and differ from its source.
+if [ "$mutant_status" -ne 0 ] || [ ! -s "$release_without_cache" ] \
+  || cmp -s "$release" "$release_without_cache"; then
+  fail "the publish-cache removal mutant was not built (extractor exit $mutant_status), so its verdict proves nothing"
+elif [ -s "$missing_publish_step" ]; then
+  fail "the publish-cache removal mutation left an override step"
+elif VERJSON_CHANGELOG_TOOL_CACHE="$ambient_publish_cache" populate_publish_cache 2>/dev/null; then
   fail "the publish build survived removal of the runner.temp cache override"
 else
   pass "removing the publish override reproduces the hostile persistent-cache failure (#630)"
@@ -359,29 +371,35 @@ awk '
   capture && /^          / { sub(/^          /, ""); print; next }
   capture { exit }
 ' "$ci" > "$guard_script"
-summary="$guard_root/summary.md"
-cache_dir="$guard_root/verjson-npm-cache"
-mkdir -p "$cache_dir"
-dd if=/dev/zero of="$cache_dir/oversized" bs=1048576 count=2 status=none
-if RUNNER_TEMP="$guard_root" CACHE_MAX_MB=1 GITHUB_STEP_SUMMARY="$summary" \
-    bash "$guard_script" >/dev/null \
-    && [ -d "$cache_dir" ] \
-    && [ -z "$(find "$cache_dir" -mindepth 1 -print -quit)" ] \
-    && grep -qF -- '- size:' "$summary" \
-    && grep -qF -- '- upload limit: 1 MB' "$summary"; then
-  pass "cache guard reports and clears an oversized job-scoped cache"
+guard_extract_status=$?
+# An empty guard exits 0 and deletes nothing, so it would pass the in-bound case.
+if [ "$guard_extract_status" -ne 0 ] || [ ! -s "$guard_script" ]; then
+  fail "could not extract the Bound npm cache upload guard from $ci (extractor exit $guard_extract_status)"
 else
-  fail "cache guard did not safely clear an oversized job-scoped cache"
-fi
+  summary="$guard_root/summary.md"
+  cache_dir="$guard_root/verjson-npm-cache"
+  mkdir -p "$cache_dir"
+  dd if=/dev/zero of="$cache_dir/oversized" bs=1048576 count=2 status=none
+  if RUNNER_TEMP="$guard_root" CACHE_MAX_MB=1 GITHUB_STEP_SUMMARY="$summary" \
+      bash "$guard_script" >/dev/null \
+      && [ -d "$cache_dir" ] \
+      && [ -z "$(find "$cache_dir" -mindepth 1 -print -quit)" ] \
+      && grep -qF -- '- size:' "$summary" \
+      && grep -qF -- '- upload limit: 1 MB' "$summary"; then
+    pass "cache guard reports and clears an oversized job-scoped cache"
+  else
+    fail "cache guard did not safely clear an oversized job-scoped cache"
+  fi
 
-: > "$summary"
-printf 'keep' > "$cache_dir/in-bound"
-if RUNNER_TEMP="$guard_root" CACHE_MAX_MB=1 GITHUB_STEP_SUMMARY="$summary" \
-    bash "$guard_script" >/dev/null \
-    && [ -f "$cache_dir/in-bound" ]; then
-  pass "cache guard preserves an in-bound job-scoped cache"
-else
-  fail "cache guard removed an in-bound job-scoped cache"
+  : > "$summary"
+  printf 'keep' > "$cache_dir/in-bound"
+  if RUNNER_TEMP="$guard_root" CACHE_MAX_MB=1 GITHUB_STEP_SUMMARY="$summary" \
+      bash "$guard_script" >/dev/null \
+      && [ -f "$cache_dir/in-bound" ]; then
+    pass "cache guard preserves an in-bound job-scoped cache"
+  else
+    fail "cache guard removed an in-bound job-scoped cache"
+  fi
 fi
 
 if [ "$fails" -eq 0 ]; then
