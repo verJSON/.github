@@ -68,6 +68,7 @@ class PostgresSandboxProfileTests(unittest.TestCase):
                 environment = os.environ.copy()
                 environment.update(
                     {
+                        "LC_ALL": "C",
                         "PATH": f"{bin_dir}:/usr/bin:/bin",
                         "RUNNER_TEMP": str(runner_temp),
                         "POSTGRES_STATE_FILE": str(runner_temp / expected_receipts[0]),
@@ -84,6 +85,10 @@ class PostgresSandboxProfileTests(unittest.TestCase):
                 )
 
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                # Only the stub's first failed cleanup may fail the step: no missing
+                # helper, no shell error, and a status of exactly 1.
+                self.assertEqual((result.returncode, result.stderr), (1, ""))
+                self.assertTrue(cleanup_marker.exists())
                 calls = cleanup_log.read_text(encoding="utf-8").splitlines()
                 for receipt in receipts:
                     self.assertEqual(
@@ -888,6 +893,8 @@ class PostgresSandboxProfileTests(unittest.TestCase):
             raise OSError("state write failed")
 
         faults = (
+            # Each fault names the exact OSError it injects, so a cleanup that
+            # replaced the cause with its own failure cannot pass.
             ("socket mkdir", lambda: patch.object(Path, "mkdir", new=fail_socket_mkdir)),
             ("socket chmod", lambda: patch.object(os, "chmod", new=fail_socket_chmod)),
             ("client mkdir", lambda: patch.object(Path, "mkdir", new=fail_client_mkdir)),
@@ -900,7 +907,7 @@ class PostgresSandboxProfileTests(unittest.TestCase):
                 runner = Path(directory)
                 state_file = runner / "ci-postgres-sandbox-state.json"
                 with fault(), patch.object(ci_postgres_sandbox, "_run_docker") as docker:
-                    with self.assertRaises(OSError):
+                    with self.assertRaisesRegex(OSError, f"^{label} failed$"):
                         ci_postgres_sandbox.provision_profile(
                             "postgres-17.11",
                             runner_temp=runner,

@@ -265,6 +265,8 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
                 output_path.unlink(missing_ok=True)
                 environment = {
                     **os.environ,
+                    "LC_ALL": "C",
+                    "PS4": "+ ",
                     "PATH": f"{directory}:{os.environ['PATH']}",
                     "GH_TOKEN": "bounded-test-token",
                     "REPOSITORY": "Verjson/verjson-cli-projects",
@@ -281,13 +283,20 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
                     "CANDIDATE_FILE": str(candidate_path),
                     "GITHUB_OUTPUT": str(output_path),
                 }
+                # The admission guards reject silently, so the trace names the
+                # one that stopped the script (the EXIT trap runs after it).
                 return subprocess.run(
-                    ["bash", "-c", admission_script],
+                    ["bash", "-xc", admission_script],
                     env=environment,
                     capture_output=True,
                     text=True,
                     check=False,
                 )
+
+            def failed_guard(result):
+                commands = [line for line in result.stderr.splitlines()
+                            if line.startswith("+ ") and not line.startswith("+ rm -f -- ")]
+                return commands[-1] if commands else None
 
             current = execute(generated_bytes)
             self.assertEqual(0, current.returncode, current.stderr)
@@ -297,11 +306,17 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
                 legacy.returncode,
                 "legacy PR caller must fail even when no default-main state is read",
             )
+            self.assertEqual(
+                failed_guard(legacy),
+                f"+ '[' {hashlib.sha256(legacy_bytes).hexdigest()} = "
+                f"{hashlib.sha256(generated_bytes).hexdigest()} ']'",
+            )
             non_main = execute(generated_bytes, base_ref="release")
             self.assertNotEqual(
                 0, non_main.returncode,
                 "admission must reject pull requests that are not based on main",
             )
+            self.assertEqual(failed_guard(non_main), "+ '[' release = main ']'")
 
     def test_workflow_is_exact_repository_hosted_credentialless_boundary(self):
         MODULE.validate_workflow()
@@ -744,8 +759,10 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
                 )
 
     def test_obsolete_repository_activation_mode_is_removed(self):
-        with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr, self.assertRaises(SystemExit) as raised:
             MODULE.main(["activate-repository", "--workflow-sha", SHA])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("argument mode: invalid choice: 'activate-repository'", stderr.getvalue())
 
     def test_apply_requires_acknowledgement_before_mutation(self):
         with (
