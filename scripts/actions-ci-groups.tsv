@@ -280,6 +280,8 @@ merge-gate	python3 scripts/codeowners_test.py
 merge-gate	python3 scripts/codeowners.py check
 platform	bash scripts/ci-gate/pipefail-sigpipe.test.sh
 platform	bash scripts/ci-gate/hub-changelog-validate.test.sh
+platform	bash scripts/ci-gate/hub-changelog-validate-concurrent-deepen.test.sh
+platform	python3 scripts/shared_checkout_fetch_test.py
 platform	bash scripts/ci-gate/hub-changelog-validate.sh
 platform	python3 scripts/ci-gate/merge-gate-provenance-claims.test.py
 # locale-collation runs in actions-ci hosted-compatibility-tests on ubuntu-24.04:
