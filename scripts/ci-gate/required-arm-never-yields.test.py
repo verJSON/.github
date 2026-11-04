@@ -22,17 +22,18 @@ HEAD_ACTIONS = ("opened", "reopened", "synchronize")
 REQUIRED_PATH_JOBS = ("event-policy", "app-key-policy", "validate-ai-review-key", "arm")
 # Contexts that identify the invocation rather than the event: a condition on any of
 # them can make the required run behave differently from a caller's run. Property
-# access is matched in both the dot and the index form (`github['workflow_ref']`).
+# access is matched in both the dot and the index form (`github['workflow_ref']`), and
+# case-insensitively, as GitHub resolves context and property names.
 PROPERTY = r"""(?:\.|\[['"])"""
 INVOCATION_IDENTITY = re.compile(
-    rf"\binputs{PROPERTY}|\bgithub{PROPERTY}(?:job_)?workflow|\bjob{PROPERTY}workflow")
+    rf"\binputs{PROPERTY}|\bgithub{PROPERTY}(?:job_)?workflow|\bjob{PROPERTY}workflow", re.IGNORECASE)
 
 
 def load():
     return yaml.safe_load(ARM.read_text(encoding="utf-8"))
 
 
-ENV_READ = re.compile(rf"\benv{PROPERTY}([A-Za-z_][A-Za-z0-9_]*)")
+ENV_READ = re.compile(rf"\benv{PROPERTY}([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
 
 
 def identity_env_names(*env_maps):
@@ -55,8 +56,9 @@ def conditions(workflow):
 
 
 def reads_invocation_identity(condition, identity_names):
+    bound = {name.casefold() for name in identity_names}
     return bool(INVOCATION_IDENTITY.search(condition)) or any(
-        name in identity_names for name in ENV_READ.findall(condition))
+        name.casefold() in bound for name in ENV_READ.findall(condition))
 
 
 def test_an_env_read_counts_as_identity_only_when_its_name_is_bound_to_identity():
@@ -68,6 +70,12 @@ def test_index_syntax_property_access_counts_as_identity():
     assert reads_invocation_identity("${{ env['WORKFLOW_REF'] != '' }}", {"WORKFLOW_REF"}) is True
     assert reads_invocation_identity("${{ github['workflow_ref'] != '' }}", set()) is True
     assert reads_invocation_identity('${{ inputs["ai_review_environment"] == \'x\' }}', set()) is True
+
+
+def test_identity_names_match_case_insensitively():
+    assert reads_invocation_identity("${{ github.WORKFLOW_REF != '' }}", set()) is True
+    assert reads_invocation_identity("${{ env.workflow_ref != '' }}", {"WORKFLOW_REF"}) is True
+    assert reads_invocation_identity("${{ ENV.WORKFLOW_REF != '' }}", {"WORKFLOW_REF"}) is True
 
 
 def test_every_head_action_reaches_the_required_workflow():
