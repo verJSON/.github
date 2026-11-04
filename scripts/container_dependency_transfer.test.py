@@ -78,12 +78,15 @@ class ContainerDependencyTransferTests(unittest.TestCase):
         encrypted = self.run_transfer("encrypt", self.source, self.encrypted, self.key)
 
         self.assertNotEqual(0, encrypted.returncode)
+        self.assertIn("transfer destination already exists", encrypted.stderr)
         self.assertEqual("preserve", self.encrypted.read_text(encoding="utf-8"))
 
     def test_invalid_key_is_rejected(self) -> None:
-        encrypted = self.run_transfer("encrypt", self.source, self.encrypted, "not-a-key")
+        # Uppercase hex still decodes, so only the key-format check rejects it (#1995).
+        encrypted = self.run_transfer("encrypt", self.source, self.encrypted, "AB" * 32)
 
         self.assertNotEqual(0, encrypted.returncode)
+        self.assertIn("TRANSFER_KEY must be 32 random bytes encoded as lowercase hex", encrypted.stderr)
         self.assertFalse(self.encrypted.exists())
 
     def _encrypted_archive(self, member_name: str = "node_modules/private-package.js") -> Path:

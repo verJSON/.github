@@ -457,6 +457,42 @@ class ActionsPausedDriftTest(unittest.TestCase):
             result.stderr,
         )
 
+    def test_object_read_that_is_not_an_object_fails_closed(self):
+        world = default_world()
+        responses = build_responses(world)
+        responses["repos/Verjson/verjson-editor/actions/permissions"] = [["enabled"]]
+
+        result, _ = self.run_audit(world, responses=responses)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("repos/Verjson/verjson-editor/actions/permissions must be an object", result.stderr)
+
+    def test_list_page_that_is_not_an_array_fails_closed(self):
+        world = default_world()
+        responses = build_responses(world)
+        responses["orgs/Verjson/repos?type=all&per_page=100"] = [{"id": 11, "name": "verjson-editor"}]
+
+        result, _ = self.run_audit(world, responses=responses)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("orgs/Verjson/repos?type=all&per_page=100 page 0 must be an array", result.stderr)
+
+    def test_object_read_spanning_several_pages_fails_closed(self):
+        world = default_world()
+        responses = build_responses(world)
+        responses["repos/Verjson/verjson-editor/actions/permissions"] = [
+            {"enabled": False, "sha_pinning_required": False},
+            {"enabled": False, "sha_pinning_required": False},
+        ]
+
+        result, _ = self.run_audit(world, responses=responses)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(
+            "repos/Verjson/verjson-editor/actions/permissions returned 2 pages, expected one object",
+            result.stderr,
+        )
+
     def test_every_finding_is_reported_without_masking_another(self):
         world = default_world()
         world["repositories"]["verjson-editor"]["actions_enabled"] = True

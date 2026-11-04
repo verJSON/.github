@@ -69,6 +69,16 @@ grep -q "renovate-compatibility-canary.yml@$sha" <<<"$caller" \
   && pass "generated caller is immutable and read-only" || fail "generated caller contract drifted"
 bash "$generator" "$sha" 'bad;echo pwned' 7.1.0 node-jest-ts-jest >/dev/null 2>&1 \
   && fail "generator accepted package injection" || pass "generator rejects package injection"
+# Each value is quoted into the caller's YAML, so a stray quote would end the
+# string and inject keys. The validation fails before anything is emitted (#1995).
+expect_generator_rejects() { # <label> <candidate> <profile>
+  local output code
+  output="$(bash "$generator" "$sha" typescript "$2" "$3" 2>/dev/null)"
+  code=$?
+  [ "$code" = 1 ] && [ -z "$output" ] && pass "$1" || fail "$1: exit $code, emitted ${#output} bytes"
+}
+expect_generator_rejects "generator rejects candidate injection" "7.1.0'"$'\n'"      secrets: inherit #" node-jest-ts-jest
+expect_generator_rejects "generator rejects stack-profile injection" 7.1.0 "node-jest'"$'\n'"      secrets: inherit #"
 
 if [ "$fails" -gt 0 ]; then exit 1; fi
 echo "All tests passed."

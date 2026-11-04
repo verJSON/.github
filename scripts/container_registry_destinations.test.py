@@ -49,8 +49,11 @@ class RegistryDestinationTests(unittest.TestCase):
             normalize_destinations(self.config, OWNER)
 
     def test_ghcr_namespace_must_match_the_repository_owner(self):
+        # The explicit GHCR destination is the owner's, so only the registryNamespace
+        # check can reject this (#1995).
         self.config["registryNamespace"] = "ghcr.io/another-owner"
-        with self.assertRaises(DestinationError):
+        self.config["registryDestinations"] = [{"provider": "ghcr", "namespace": GHCR}]
+        with self.assertRaisesRegex(DestinationError, "registryNamespace must be the repository owner's GHCR namespace"):
             normalize_destinations(self.config, OWNER)
 
     def test_gar_namespace_must_have_a_project_and_repository(self):
