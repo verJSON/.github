@@ -1,4 +1,5 @@
 import json
+import re
 import unittest
 from contextlib import redirect_stdout
 from hashlib import sha256
@@ -24,6 +25,10 @@ GAR_DESTINATION = {
 }
 
 
+def exactly(reason):
+    return "^" + re.escape(reason) + "$"
+
+
 class RegistryDestinationTests(unittest.TestCase):
     def setUp(self):
         self.config = {"registryNamespace": GHCR, "images": [IMAGE]}
@@ -45,7 +50,7 @@ class RegistryDestinationTests(unittest.TestCase):
 
     def test_non_ghcr_primary_is_rejected(self):
         self.config["registryDestinations"] = [GAR_DESTINATION]
-        with self.assertRaises(DestinationError):
+        with self.assertRaisesRegex(DestinationError, exactly("GHCR must remain the canonical build and provenance source")):
             normalize_destinations(self.config, OWNER)
 
     def test_ghcr_namespace_must_match_the_repository_owner(self):
@@ -61,20 +66,22 @@ class RegistryDestinationTests(unittest.TestCase):
             {"provider": "ghcr", "namespace": GHCR},
             {**GAR_DESTINATION, "namespace": "us-central1-docker.pkg.dev/verjson-artifacts"},
         ]
-        with self.assertRaises(DestinationError):
+        with self.assertRaisesRegex(
+            DestinationError, exactly("registryDestinations[1].namespace must be a GAR Docker repository namespace")
+        ):
             normalize_destinations(self.config, OWNER)
 
     def test_gar_requires_a_narrow_oidc_provider_and_service_account(self):
-        for field, value in [
-            ("workloadIdentityProvider", "https://accounts.google.com"),
-            ("serviceAccount", "publisher@example.com"),
+        for field, value, reason in [
+            ("workloadIdentityProvider", "https://accounts.google.com", "is not a Google WIF provider resource"),
+            ("serviceAccount", "publisher@example.com", "is not a Google service-account address"),
         ]:
             with self.subTest(field=field):
                 self.config["registryDestinations"] = [
                     {"provider": "ghcr", "namespace": GHCR},
                     {**GAR_DESTINATION, field: value},
                 ]
-                with self.assertRaises(DestinationError):
+                with self.assertRaisesRegex(DestinationError, exactly(f"registryDestinations[1].{field} {reason}")):
                     normalize_destinations(self.config, OWNER)
 
     def test_duplicate_or_unsupported_destinations_are_rejected(self):
@@ -83,31 +90,31 @@ class RegistryDestinationTests(unittest.TestCase):
             GAR_DESTINATION,
             GAR_DESTINATION,
         ]
-        with self.assertRaises(DestinationError):
+        with self.assertRaisesRegex(DestinationError, exactly("registryDestinations must not contain duplicate namespaces")):
             normalize_destinations(self.config, OWNER)
         self.config["registryDestinations"] = [
             {"provider": "ghcr", "namespace": GHCR},
             {"provider": "nexus", "namespace": "nexus.example/containers"},
         ]
-        with self.assertRaises(DestinationError):
+        with self.assertRaisesRegex(DestinationError, exactly("registryDestinations[1].provider is unsupported")):
             normalize_destinations(self.config, OWNER)
 
     def test_retention_days_must_be_integers_and_reject_booleans(self):
         self.config["registryDestinations"] = [
             {"provider": "ghcr", "namespace": GHCR, "candidateRetentionDays": True}
         ]
-        with self.assertRaises(DestinationError):
+        with self.assertRaisesRegex(DestinationError, exactly("registryDestinations[0].candidateRetentionDays must be 1 through 88")):
             normalize_destinations(self.config, OWNER)
 
         self.config["registryDestinations"] = [
             {"provider": "ghcr", "namespace": GHCR},
             {**GAR_DESTINATION, "candidateRetentionDays": True},
         ]
-        with self.assertRaises(DestinationError):
+        with self.assertRaisesRegex(DestinationError, exactly("registryDestinations[1].candidateRetentionDays must be 1 through 88")):
             normalize_destinations(self.config, OWNER)
 
     def test_image_must_stay_under_the_canonical_namespace(self):
-        with self.assertRaises(DestinationError):
+        with self.assertRaisesRegex(DestinationError, exactly("image.repository escapes the canonical GHCR namespace")):
             expand_image_destinations(self.config, OWNER, {"repository": "ghcr.io/unrelated/api"})
 
     def test_referrer_inventory_requires_evidence_for_its_actual_subject(self):
@@ -156,16 +163,19 @@ class RegistryDestinationTests(unittest.TestCase):
             "reference": f"{GHCR}/api@sha256:" + "b" * 64,
             "artifactType": "application/spdx+json",
         }
-        for descriptors in ([], [sbom], [bundle, sbom, bundle]):
+        duplicate = "registry referrer inventory contains duplicate digests"
+        unbundled = "registry index is missing one unique application/vnd.dev.sigstore.bundle.v0.3+json referrer"
+        for descriptors, reason in (([], unbundled), ([sbom], unbundled), ([bundle, sbom, bundle], duplicate)):
             with self.subTest(descriptors=descriptors):
-                with self.assertRaises(DestinationError):
+                with self.assertRaisesRegex(DestinationError, exactly(reason)):
                     destinations.parse_referrer_inventory(
                         json.dumps({"referrers": descriptors}).encode(),
                         repository=f"{GHCR}/api",
                     )
-        for descriptors in ([], [bundle], [sbom, sbom]):
+        unattested = "registry platform is missing one unique application/spdx+json referrer"
+        for descriptors, reason in (([], unattested), ([bundle], unattested), ([sbom, sbom], duplicate)):
             with self.subTest(platform_descriptors=descriptors):
-                with self.assertRaises(DestinationError):
+                with self.assertRaisesRegex(DestinationError, exactly(reason)):
                     destinations.parse_referrer_inventory(
                         json.dumps({"referrers": descriptors}).encode(),
                         repository=f"{GHCR}/api",
@@ -444,7 +454,7 @@ class RegistryDestinationTests(unittest.TestCase):
             authfile = Path(directory) / "config.json"
             authfile.write_text("{}", encoding="utf-8")
             with patch.object(destinations, "_skopeo", return_value=(1, b"", b"unauthorized")):
-                with self.assertRaisesRegex(DestinationError, "observation failed"):
+                with self.assertRaisesRegex(DestinationError, exactly("registry observation failed: authorization")):
                     destinations.mirror_candidate(
                         self.config, OWNER, "api", "gar", "1.2.3", "sha256:" + "a" * 64, authfile
                     )

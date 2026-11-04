@@ -64,19 +64,31 @@ class ExactReleasePackagesTests(unittest.TestCase):
                     self.assertNotIn('package_dirs=(. ', result.stdout)
 
     def test_invalid_empty_duplicate_and_mixed_selections_produce_no_artifact(self):
-        cases = [['--only-package-dir'], ['--only-package-dir', '',],
-                 ['--only-package-dir', 'schema', '--only-package-dir', 'schema'],
-                 ['--only-package-dir', 'schema', '--package-dir', 'compat'],
-                 ['--package-dir', 'compat', '--only-package-dir', 'schema']]
-        cases += [['--only-package-dir', path] for path in
-                  ('../schema', '/schema', './schema', 'a/../b', 'a/./b', 'a//b',
-                   'schema/', '-schema', 'a b', 'a\nb', 'a\\b', "a'", '$(pwd)')]
-        for args in cases:
+        # The generator rejects a missing value and a mixed selection with its usage text,
+        # which several argument guards share; the other refusals name their guard.
+        usage = 'usage'
+        unnormalized = 'package dir must be a normalized repository-relative path'
+        dotted = 'package dir may not contain . or .. segments'
+        cases = [(['--only-package-dir'], usage), (['--only-package-dir', '',], unnormalized),
+                 (['--only-package-dir', 'schema', '--only-package-dir', 'schema'], 'duplicate package dir: schema'),
+                 (['--only-package-dir', 'schema', '--package-dir', 'compat'], usage),
+                 (['--package-dir', 'compat', '--only-package-dir', 'schema'], usage)]
+        cases += [(['--only-package-dir', path], dotted) for path in ('../schema', './schema', 'a/../b', 'a/./b')]
+        cases += [(['--only-package-dir', path], unnormalized) for path in
+                  ('/schema', 'a//b', 'schema/', '-schema', 'a b', 'a\nb', 'a\\b', "a'", '$(pwd)')]
+        for args, reason in cases:
             with self.subTest(args=args):
                 result = generate('release-node', *args)
                 self.assertEqual(result.returncode, 2)
                 self.assertEqual(result.stdout, '')
-        self.assertEqual(generate('renderer', '--only-package-dir', 'schema').returncode, 2)
+                if reason == usage:
+                    self.assertTrue(result.stderr.startswith('usage: gen-changelog-caller.sh {'), result.stderr)
+                else:
+                    self.assertEqual(result.stderr, f'gen-changelog-caller.sh: {reason}\n')
+        rejected = generate('renderer', '--only-package-dir', 'schema')
+        self.assertEqual(rejected.returncode, 2)
+        self.assertEqual(rejected.stderr, 'gen-changelog-caller.sh: release parameters are accepted only by '
+                                          'release-node, release-artifact, release-snapshot and contract-test\n')
 
 
 if __name__ == '__main__':
