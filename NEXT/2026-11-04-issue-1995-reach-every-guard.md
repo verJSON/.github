@@ -4,7 +4,7 @@ issue: 1995
 impact: patch
 title: Reach guards that no test fixture reached
 ---
-Tests now reach 22 fail-closed guards in the merge-gate, platform, and changelog-release suites that no fixture reached before, and each test checks that guard's own error. Before this change, deleting any of these guards left every test green: an earlier check rejected the fixture first, or no test exercised the guard at all. Each new or corrected fixture passes every earlier check, so deleting its guard now fails its test.
+Tests now reach 22 fail-closed guards in the merge-gate, platform, and changelog-release suites that no fixture reached before, and each test checks that guard's own error. Before this change, deleting any of these guards left every test green, except the App-approval guard, whose wrong-identity and stale-approval cases already caught it but whose missing-approval case was hollow: an earlier check rejected the fixture first, or no test exercised the guard at all. Each new or corrected fixture passes every earlier check, so deleting its guard now fails its test.
 
 - Merge gate: the local-caller run-attempt replay guard in `verify-arm-receipt.sh`, the GraphQL `errors` check on disabling auto-merge in `gate-rearm.yml`, and the exact-head App-approval guard in `ai-privileged-merge.yml`.
 - Platform: the duplicate-secret check in `app-key-environment-audit.py` and its six metadata guards (page, collection, and identity shape; repository format; default branch; owner type). Also the object, array, and single-page guards in `actions-paused-drift.py`, the hosted-runner collection-type check in `runner-admission-reconcile.sh`, and the candidate and stack-profile validation in `gen-renovate-compatibility-caller.sh`.

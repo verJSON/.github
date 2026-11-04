@@ -731,8 +731,8 @@ for mode_args in "release-artifact --build-runner ubuntu-24.04" release-snapshot
   mode_release="$tmp/head-$mode.yml"
   mode_guard="$tmp/head-guard-$mode.sh"
   if ! bash "$gen" "$mode" "$sha" "${mode_argv[@]:1}" >"$mode_release" 2>"$tmp/gen.err" \
-    || ! release="$mode_release" extract_run verify "exact derived head" >"$mode_guard"; then
-    fail "cannot extract the $mode exact-head guard: $(cat "$tmp/gen.err")"
+    || ! release="$mode_release" extract_run verify "exact derived head" >"$mode_guard" 2>"$tmp/extract.err"; then
+    fail "cannot extract the $mode exact-head guard: $(cat "$tmp/gen.err" "$tmp/extract.err" 2>/dev/null)"
   elif run_guard "$mode_guard" "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=$selector_digest" "GITHUB_SHA=$(printf 'd%.0s' {1..40})"; then
     fail "the $mode exact-head guard admitted a newer branch head after proposer derivation"
   elif grep -qF "::error::The default branch advanced from derived head $expected_head" "$tmp/guard.out"; then
