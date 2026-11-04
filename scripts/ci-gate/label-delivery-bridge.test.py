@@ -85,7 +85,9 @@ def main():
         generated.flush()
         validate_caller(load(Path(generated.name)), f"Verjson/.github/.github/workflows/gate-rearm.yml@{sha}")
     for invalid in ("main", "v1", "1" * 39, "1" * 41):
-        assert subprocess.run([str(GENERATOR), invalid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0
+        rejected = subprocess.run([str(GENERATOR), invalid], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        assert rejected.returncode == 2, (invalid, rejected.returncode, rejected.stderr)
+        assert "contract SHA must exactly 40 lowercase hexadecimal characters" in rejected.stderr, (invalid, rejected.stderr)
     script = next(step["run"] for step in arm["jobs"]["arm"]["steps"] if step.get("id") == "arm")
     for marker in (
         '[ "$EVENT_NAME" = pull_request_target ] && [ "$EVENT_ACTION" = labeled ]',

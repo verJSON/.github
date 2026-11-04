@@ -153,14 +153,24 @@ write_base() {
   jq -nc '{id:315894159,path:".github/workflows/actions-ci.yml",state:"active"}' >"$WORKFLOW_METADATA_FILE"
   jq -nc --arg head "$EXPECTED_HEAD_SHA" '{workflow_runs:[{id:7002,workflow_id:315894159,path:".github/workflows/actions-ci.yml",event:"pull_request",head_sha:$head,status:"completed",conclusion:"success"}]}' >"$WORKFLOW_RUNS_FILE"
 }
-run_promote() { (cd "$tmp/run" && bash "$tmp/promote.sh"); }
+# LC_ALL=C: some refusals are asserted by jq's or bash's own wording.
+run_promote() { (cd "$tmp/run" && LC_ALL=C bash "$tmp/promote.sh"); }
 expect_pass() { label="$1"; shift; if "$@" >"$tmp/out" 2>&1; then pass "$label"; else fail "$label: $(tail -1 "$tmp/out")"; fi; }
-expect_fail() { label="$1"; shift; if "$@" >"$tmp/out" 2>&1; then fail "$label"; else pass "$label"; fi; }
+# expect_fail LABEL REASON CMD...: CMD must fail naming REASON, so a refusal by
+# an earlier, unrelated check cannot pass for the guard LABEL is about.
+expect_fail() {
+  label="$1" reason="$2"; shift 2
+  if "$@" >"$tmp/out" 2>&1; then fail "$label"
+  elif grep -qF -- "$reason" "$tmp/out"; then pass "$label"
+  else fail "$label: $(tail -1 "$tmp/out")"; fi
+}
 
-if (cd "$tmp/run" && .gate-trust/scripts/ci-gate/verify-arm-receipt.sh) >"$tmp/out" 2>&1; then
+if (export LC_ALL=C; cd "$tmp/run" && .gate-trust/scripts/ci-gate/verify-arm-receipt.sh) >"$tmp/out" 2>&1; then
   fail "non-executable sparse-checkout fixture unexpectedly supports direct execution"
-else
+elif grep -qF 'verify-arm-receipt.sh: Permission denied' "$tmp/out"; then
   pass "non-executable sparse-checkout fixture rejects direct execution"
+else
+  fail "non-executable sparse-checkout fixture failed for another reason: $(tail -1 "$tmp/out")"
 fi
 write_base; expect_pass "explicit bash invocation supports a non-executable sparse-checkout verifier" run_promote
 grep -q -- '--admin --squash --match-head-commit' "$CALLS" \
@@ -169,7 +179,8 @@ write_base
 for draft_state in '.draft=true' 'del(.draft)' '.draft=null' '.draft="false"'; do
   write_base
   jq "$draft_state" "$TERMINAL_META_FILE" >"$tmp/x" && mv "$tmp/x" "$TERMINAL_META_FILE"
-  expect_fail "terminal REST draft guard rejects $draft_state" run_promote
+  expect_fail "terminal REST draft guard rejects $draft_state" \
+    '::error::terminal merge rejected a moved head, stale base, draft, hold, malformed metadata, or closed pull request' run_promote
   ! grep -q 'pr merge' "$CALLS" || fail "terminal REST draft guard allowed $draft_state"
 done
 write_base
@@ -212,15 +223,16 @@ cp "$REVIEWS_FILE" "$LATEST_REVIEWS_FILE"
 if run_promote >"$tmp/out" 2>&1; then
   fail "flooding the exact head with more junk reviews than the search bound still promoted"
 elif [ "$(grep -c 'collaborators/attacker/permission' "$CALLS")" -le 20 ] &&
-    [ "$(grep -c 'collaborators/independent-reviewer/permission' "$CALLS")" = 0 ]; then
+    [ "$(grep -c 'collaborators/independent-reviewer/permission' "$CALLS")" = 0 ] &&
+    grep -qF '::error::an exact-head independent-review verdict is required before autonomous merge' "$tmp/out"; then
   pass "a junk-review flood past the search bound fails closed with a bounded number of lookups"
 else
   fail "a junk-review flood past the search bound did not stay within its bounded lookup cost"
 fi
-write_base; REVIEW_POLICY="$(encode_policy "$ai_approve_policy")" expect_fail "ai-approve authority never reaches terminal merge" run_promote
+write_base; REVIEW_POLICY="$(encode_policy "$ai_approve_policy")" expect_fail "ai-approve authority never reaches terminal merge" '::error::receipt-bound authority does not permit terminal merge' run_promote
 ! grep -q 'pr merge' "$CALLS" || fail "ai-approve authority attempted a terminal merge"
-write_base; jq '.conclusion="failure"' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK_FILE"; expect_fail "failed authorization never promotes" run_promote
-write_base; jq '.conclusion=null' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK_FILE"; expect_fail "inconclusive authorization never promotes" run_promote
+write_base; jq '.conclusion="failure"' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK_FILE"; expect_fail "failed authorization never promotes" '::error::authorization is absent, stale, unsuccessful, or from the wrong integration' run_promote
+write_base; jq '.conclusion=null' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK_FILE"; expect_fail "inconclusive authorization never promotes" '::error::authorization is absent, stale, unsuccessful, or from the wrong integration' run_promote
 # Only the App approval is removed; the independent-review receipt stays, so the
 # App-approval guard is the one that must reject (#1995).
 write_base; jq 'del(.[0])' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"
@@ -231,22 +243,22 @@ elif grep -qF '::error::the exact-head dedicated App approval is absent' "$tmp/o
 else
   fail "missing exact App approval failed for another reason: $(tail -1 "$tmp/out")"
 fi
-write_base; jq '.[0].user.login="attacker[bot]"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "wrong approval identity never promotes" run_promote
-write_base; jq '.[0].commit_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "stale App approval never promotes" run_promote
-write_base; jq 'del(.[1])' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "missing independent-review receipt never promotes" run_promote
-write_base; jq '.[1].commit_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "stale-head independent-review receipt never promotes" run_promote
-write_base; jq '.body="prefix <!-- independent-review:v1 pr:7 head:0123456789abcdef0123456789abcdef01234567 verdict:approved --> suffix"' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "surrounding context cannot impersonate independent-review receipt" run_promote
-write_base; jq '.body="```\n<!-- independent-review:v1 pr:7 head:0123456789abcdef0123456789abcdef01234567 verdict:approved -->\n```"' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "fenced marker cannot impersonate independent-review receipt" run_promote
-write_base; jq '.body |= sub("pr:7"; "pr:8")' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "foreign-PR independent-review receipt never promotes" run_promote
-write_base; jq '.state="APPROVED"' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "ordinary approval cannot impersonate independent-review receipt" run_promote
-write_base; jq '.body="edited after selection"' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "edited receipt body fails terminal revalidation" run_promote
-write_base; jq '.state="DISMISSED"' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "dismissed receipt fails terminal revalidation" run_promote
-write_base; jq '.body |= sub("verdict:approved"; "verdict:withdrawn")' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "withdrawn receipt fails terminal revalidation" run_promote
-write_base; jq '.[1] as $base | . + [($base | .id=83 | .state="CHANGES_REQUESTED" | .body="changes requested")]' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; jq '.[2]' "$REVIEWS_FILE" >"$REVIEW_REFETCH_FILE"; cp "$REVIEWS_FILE" "$LATEST_REVIEWS_FILE"; expect_fail "later changes-requested verdict supersedes approval" run_promote
-write_base; jq '.[1] as $base | . + [($base | .id=83 | .body="later verdict")]' "$LATEST_REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$LATEST_REVIEWS_FILE"; expect_fail "later review appearing during authorization supersedes receipt" run_promote
-write_base; jq '.[1].user.type="Bot"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "bot-authored independent-review receipt never promotes" run_promote
-write_base; export INDEPENDENT_REVIEWER_ROLE=write; expect_fail "write-only receipt author never promotes" run_promote
-write_base; export TERMINAL_REVIEWER_ROLE=write; expect_fail "permission downgrade before token mint never promotes" run_promote
+write_base; jq '.[0].user.login="attacker[bot]"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "wrong approval identity never promotes" '::error::the exact-head dedicated App approval is absent' run_promote
+write_base; jq '.[0].commit_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "stale App approval never promotes" '::error::the exact-head dedicated App approval is absent' run_promote
+write_base; jq 'del(.[1])' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "missing independent-review receipt never promotes" '::error::an exact-head independent-review verdict is required before autonomous merge' run_promote
+write_base; jq '.[1].commit_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "stale-head independent-review receipt never promotes" '::error::an exact-head independent-review verdict is required before autonomous merge' run_promote
+write_base; jq '.body="prefix <!-- independent-review:v1 pr:7 head:0123456789abcdef0123456789abcdef01234567 verdict:approved --> suffix"' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "surrounding context cannot impersonate independent-review receipt" '::error::latest independent-review verdict is edited, withdrawn, dismissed, or not approving' run_promote
+write_base; jq '.body="```\n<!-- independent-review:v1 pr:7 head:0123456789abcdef0123456789abcdef01234567 verdict:approved -->\n```"' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "fenced marker cannot impersonate independent-review receipt" '::error::latest independent-review verdict is edited, withdrawn, dismissed, or not approving' run_promote
+write_base; jq '.body |= sub("pr:7"; "pr:8")' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "foreign-PR independent-review receipt never promotes" '::error::latest independent-review verdict is edited, withdrawn, dismissed, or not approving' run_promote
+write_base; jq '.state="APPROVED"' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "ordinary approval cannot impersonate independent-review receipt" '::error::latest independent-review verdict is edited, withdrawn, dismissed, or not approving' run_promote
+write_base; jq '.body="edited after selection"' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "edited receipt body fails terminal revalidation" '::error::latest independent-review verdict is edited, withdrawn, dismissed, or not approving' run_promote
+write_base; jq '.state="DISMISSED"' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "dismissed receipt fails terminal revalidation" '::error::latest independent-review verdict is edited, withdrawn, dismissed, or not approving' run_promote
+write_base; jq '.body |= sub("verdict:approved"; "verdict:withdrawn")' "$REVIEW_REFETCH_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEW_REFETCH_FILE"; expect_fail "withdrawn receipt fails terminal revalidation" '::error::latest independent-review verdict is edited, withdrawn, dismissed, or not approving' run_promote
+write_base; jq '.[1] as $base | . + [($base | .id=83 | .state="CHANGES_REQUESTED" | .body="changes requested")]' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; jq '.[2]' "$REVIEWS_FILE" >"$REVIEW_REFETCH_FILE"; cp "$REVIEWS_FILE" "$LATEST_REVIEWS_FILE"; expect_fail "later changes-requested verdict supersedes approval" '::error::latest independent-review verdict is edited, withdrawn, dismissed, or not approving' run_promote
+write_base; jq '.[1] as $base | . + [($base | .id=83 | .body="later verdict")]' "$LATEST_REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$LATEST_REVIEWS_FILE"; expect_fail "later review appearing during authorization supersedes receipt" '::error::a later independent-review verdict superseded receipt 82' run_promote
+write_base; jq '.[1].user.type="Bot"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "bot-authored independent-review receipt never promotes" '::error::an exact-head independent-review verdict is required before autonomous merge' run_promote
+write_base; export INDEPENDENT_REVIEWER_ROLE=write; expect_fail "write-only receipt author never promotes" '::error::an exact-head independent-review verdict is required before autonomous merge' run_promote
+write_base; export TERMINAL_REVIEWER_ROLE=write; expect_fail "permission downgrade before token mint never promotes" '::error::could not revalidate latest independent-review verdict' run_promote
 write_base
 jq '.labels=[{"name":"hold"}]' "$TERMINAL_META_FILE" >"$tmp/x" && mv "$tmp/x" "$TERMINAL_META_FILE"
 if run_promote >"$tmp/out" 2>&1; then
@@ -257,7 +269,7 @@ elif [ "$(cat "$PULL_CALLS_FILE")" = 2 ] &&
 else
   fail "late hold did not fail at the terminal merge boundary"
 fi
-write_base; jq '.headRepositoryOwner.login="outsider"' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"; expect_fail "fork PR fails closed" run_promote
+write_base; jq '.headRepositoryOwner.login="outsider"' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"; expect_fail "fork PR fails closed" '::error::fork PRs are not eligible for autonomous merge' run_promote
 write_base; jq '.isDraft=true' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"; expect_pass "draft PR is a terminal no-op" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "draft merged"
 write_base; jq '.labels=[{"name":"hold"}]' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"; expect_pass "held PR is a terminal no-op" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "hold merged"
 write_base; jq '.labels=[{"name":"DO NOT MERGE"}]' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"; expect_pass "DO NOT MERGE label is a terminal no-op" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "DO NOT MERGE label merged"
@@ -273,7 +285,13 @@ for malformed in truncated labels-not-array label-name-not-string title-not-stri
     label-name-not-string) jq '.labels=[{"name":{"value":"hold"}}]' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE" ;;
     title-not-string) jq '.title=42' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE" ;;
   esac
-  expect_fail "$malformed hold metadata fails closed" run_promote
+  # jq's own diagnostic for the hold field it could not read.
+  case "$malformed" in
+    truncated) malformed_reason='parse error' ;;
+    labels-not-array) malformed_reason='Cannot iterate over string' ;;
+    *) malformed_reason='explode input must be a string' ;;
+  esac
+  expect_fail "$malformed hold metadata fails closed" "$malformed_reason" run_promote
   ! grep -q 'pr merge' "$CALLS" || fail "$malformed hold metadata merged"
 done
 for unreadable in empty null; do
@@ -286,30 +304,30 @@ for unreadable in empty null; do
   ! grep -q 'pr merge' "$CALLS" || fail "$unreadable PR metadata merged"
 done
 write_base; jq '.check_runs[0].conclusion=null | .check_runs[0].status="in_progress"' "$CI_CHECKS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_CHECKS_FILE"; expect_pass "pending required CI exits immediately" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "pending CI merged"
-write_base; jq '.check_runs[0].conclusion="failure"' "$CI_CHECKS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_CHECKS_FILE"; expect_fail "terminal required CI failure blocks" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "failed CI merged"
+write_base; jq '.check_runs[0].conclusion="failure"' "$CI_CHECKS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_CHECKS_FILE"; expect_fail "terminal required CI failure blocks" '::error::latest required check shell-tests is terminally unsuccessful: FAILURE' run_promote; ! grep -q 'pr merge' "$CALLS" || fail "failed CI merged"
 write_base; jq '.check_runs=[]' "$CI_CHECKS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_CHECKS_FILE"; printf '{"workflow_runs":[]}\n' >"$WORKFLOW_RUNS_FILE"; expect_pass "not-yet-started required CI remains pending without mutation" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "not-yet-started CI merged"
-write_base; jq '.check_runs=[]' "$CI_CHECKS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_CHECKS_FILE"; expect_fail "completed workflow without the reviewed check is a permanent rename/misconfiguration" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "renamed CI merged"
+write_base; jq '.check_runs=[]' "$CI_CHECKS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_CHECKS_FILE"; expect_fail "completed workflow without the reviewed check is a permanent rename/misconfiguration" '::error::trusted workflow completed successfully without required check shell-tests; the reviewed policy is missing or renamed' run_promote; ! grep -q 'pr merge' "$CALLS" || fail "renamed CI merged"
 write_base; jq '.check_runs=[]' "$CI_CHECKS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_CHECKS_FILE"; jq '.workflow_runs[0].status="in_progress" | .workflow_runs[0].conclusion=null' "$WORKFLOW_RUNS_FILE" >"$tmp/x" && mv "$tmp/x" "$WORKFLOW_RUNS_FILE"; expect_pass "active workflow with an unreported check remains pending" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "pending workflow merged"
-write_base; export WORKFLOW_METADATA_RC=1; expect_fail "deleted required workflow fails closed before promotion" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "deleted workflow merged"
-write_base; jq '.path=".github/workflows/renamed.yml"' "$WORKFLOW_METADATA_FILE" >"$tmp/x" && mv "$tmp/x" "$WORKFLOW_METADATA_FILE"; expect_fail "renamed required workflow path fails closed before promotion" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "renamed workflow merged"
+write_base; export WORKFLOW_METADATA_RC=1; expect_fail "deleted required workflow fails closed before promotion" '::error::required check shell-tests names a deleted or unreadable workflow ID 315894159' run_promote; ! grep -q 'pr merge' "$CALLS" || fail "deleted workflow merged"
+write_base; jq '.path=".github/workflows/renamed.yml"' "$WORKFLOW_METADATA_FILE" >"$tmp/x" && mv "$tmp/x" "$WORKFLOW_METADATA_FILE"; expect_fail "renamed required workflow path fails closed before promotion" '::error::required check shell-tests names a wrong, renamed, or inactive workflow' run_promote; ! grep -q 'pr merge' "$CALLS" || fail "renamed workflow merged"
 write_base; jq '.check_runs += [{id:102,name:"shell-tests",status:"in_progress",conclusion:null,details_url:"https://github.com/Verjson/example/actions/runs/7002/job/8003",app:{id:15368,slug:"github-actions"}}]' "$CI_CHECKS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_CHECKS_FILE"; expect_pass "newer pending check overrides older success" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "older success bypassed newer pending"
 write_base; jq '.check_runs = [{id:100,name:"shell-tests",status:"completed",conclusion:"failure",details_url:"https://github.com/Verjson/example/actions/runs/7002/job/8001",app:{id:15368,slug:"github-actions"}}, .check_runs[0]]' "$CI_CHECKS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_CHECKS_FILE"; expect_pass "newer success overrides older failure" run_promote
-write_base; jq '.check_runs += [(.check_runs[0] | .id=102 | .app.id=999)]' "$CI_CHECKS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_CHECKS_FILE"; expect_fail "newest duplicate context from wrong App cannot forge required CI" run_promote
-write_base; jq '.workflow_id=999' "$CI_RUN_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_RUN_FILE"; expect_fail "wrong workflow identity cannot satisfy required CI" run_promote
+write_base; jq '.check_runs += [(.check_runs[0] | .id=102 | .app.id=999)]' "$CI_CHECKS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_CHECKS_FILE"; expect_fail "newest duplicate context from wrong App cannot forge required CI" '::error::latest required check shell-tests is from the wrong App' run_promote
+write_base; jq '.workflow_id=999' "$CI_RUN_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_RUN_FILE"; expect_fail "wrong workflow identity cannot satisfy required CI" '::error::required check shell-tests is not backed by the trusted exact-head workflow run' run_promote
 # #1610: a required check's own job can finish (and satisfy $CI_CHECKS_FILE) well before
 # the multi-job run backing it as a whole reaches "completed". That must retry, not
 # hard-fail, as long as the run's identity still matches; only a run that finished
 # unsuccessfully is a terminal block.
 write_base; jq '.status="in_progress" | .conclusion=null' "$CI_RUN_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_RUN_FILE"; expect_pass "in-progress trusted workflow run with an already-completed required-check job remains pending" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "in-progress trusted workflow run merged"
-write_base; jq '.conclusion="failure"' "$CI_RUN_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_RUN_FILE"; expect_fail "terminally unsuccessful trusted workflow run blocks despite a completed required-check job" run_promote; ! grep -q 'pr merge' "$CALLS" || fail "unsuccessful trusted workflow run merged"
-write_base; jq '.check_runs[0].check_suite.id=9999' "$CI_CHECKS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_CHECKS_FILE"; expect_fail "same-App forged check cannot claim an unrelated successful workflow run" run_promote
-write_base; jq '.jobs[0].check_run_url="https://api.github.com/repos/Verjson/example/check-runs/9999"' "$CI_JOBS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_JOBS_FILE"; expect_fail "same-suite forged check must be the exact job check run" run_promote
-write_base; jq '.jobs += [.jobs[0]]' "$CI_JOBS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_JOBS_FILE"; expect_fail "ambiguous duplicate job association fails closed" run_promote
+write_base; jq '.conclusion="failure"' "$CI_RUN_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_RUN_FILE"; expect_fail "terminally unsuccessful trusted workflow run blocks despite a completed required-check job" '::error::workflow run 7002 backing required check shell-tests is terminally unsuccessful: FAILURE' run_promote; ! grep -q 'pr merge' "$CALLS" || fail "unsuccessful trusted workflow run merged"
+write_base; jq '.check_runs[0].check_suite.id=9999' "$CI_CHECKS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_CHECKS_FILE"; expect_fail "same-App forged check cannot claim an unrelated successful workflow run" '::error::required check shell-tests is not a member of its claimed trusted workflow run' run_promote
+write_base; jq '.jobs[0].check_run_url="https://api.github.com/repos/Verjson/example/check-runs/9999"' "$CI_JOBS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_JOBS_FILE"; expect_fail "same-suite forged check must be the exact job check run" '::error::required check shell-tests is not the exact job check run of its claimed trusted workflow run' run_promote
+write_base; jq '.jobs += [.jobs[0]]' "$CI_JOBS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_JOBS_FILE"; expect_fail "ambiguous duplicate job association fails closed" '::error::required check shell-tests is not the exact job check run of its claimed trusted workflow run' run_promote
 grep -q -- 'api --paginate repos/Verjson/example/actions/runs/7002/jobs?per_page=100' "$CALLS" \
   && pass "trusted workflow job association is read with pagination" \
   || fail "trusted workflow job association did not paginate"
-write_base; jq '.check_runs[0].details_url="https://attacker.invalid/actions/runs/7002/job/8002"' "$CI_CHECKS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_CHECKS_FILE"; expect_fail "wrong details URL cannot satisfy required CI" run_promote
-write_base; export WORKFLOW_BLOB_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; expect_fail "PR-modified workflow revision cannot satisfy required CI" run_promote
+write_base; jq '.check_runs[0].details_url="https://attacker.invalid/actions/runs/7002/job/8002"' "$CI_CHECKS_FILE" >"$tmp/x" && mv "$tmp/x" "$CI_CHECKS_FILE"; expect_fail "wrong details URL cannot satisfy required CI" '::error::required check shell-tests has untrusted Actions details' run_promote
+write_base; export WORKFLOW_BLOB_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; expect_fail "PR-modified workflow revision cannot satisfy required CI" '::error::required check shell-tests executed a workflow revision not equal to the trusted default branch' run_promote
 write_base
 if (export REQUIRED_CHECK_POLICY='[{"name":"wrong-check","app_id":15368,"workflow_id":315894159,"workflow_path":".github/workflows/actions-ci.yml"}]'; run_promote) >"$tmp/out" 2>&1; then
   fail "renamed check satisfied required CI"
@@ -354,8 +372,10 @@ write_base
 : >"$GITHUB_OUTPUT"
 if (export MERGE_CONFIRMED=false; run_promote) >"$tmp/out" 2>&1; then
   fail "unconfirmed merge postcondition did not fail closed"
-else
+elif grep -qF '::error::GitHub did not confirm terminal merge of the authorized head' "$tmp/out"; then
   pass "unconfirmed merge postcondition fails closed"
+else
+  fail "unconfirmed merge postcondition failed for another reason: $(tail -1 "$tmp/out")"
 fi
 ! grep -q '^terminal_merge_succeeded=true$' "$GITHUB_OUTPUT" \
   && pass "unconfirmed merge does not export cleanup eligibility" \
@@ -366,8 +386,10 @@ write_base
 export MERGE_CONFIRMED_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 if run_promote >"$tmp/out" 2>&1; then
   fail "wrong-head merged postcondition did not fail closed"
-else
+elif grep -qF '::error::GitHub did not confirm terminal merge of the authorized head' "$tmp/out"; then
   pass "wrong-head merged postcondition fails closed"
+else
+  fail "wrong-head merged postcondition failed for another reason: $(tail -1 "$tmp/out")"
 fi
 unset MERGE_CONFIRMED_HEAD
 ! grep -q '^terminal_merge_succeeded=true$' "$GITHUB_OUTPUT" \
@@ -392,7 +414,7 @@ grep -q 'closed without merging' "$tmp/out" \
 write_base; jq '.headRefOid="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' "$META_FILE" >"$tmp/x" && mv "$tmp/x" "$META_FILE"; expect_pass "superseded promotion is a terminal no-op" run_promote
 ! grep -q 'verify-arm-receipt' "$CALLS" || fail "stale promotion verified an obsolete receipt"
 ! grep -q 'pr merge' "$CALLS" || fail "stale promotion attempted a merge"
-write_base; GH_TOKEN='' expect_fail "missing privileged credential fails before mutation" run_promote
+write_base; GH_TOKEN='' expect_fail "missing privileged credential fails before mutation" '::error::read-only repository token is unavailable' run_promote
 
 [ "$fails" -eq 0 ] && { echo "All tests passed."; exit 0; }
 echo "$fails test(s) failed."

@@ -201,6 +201,15 @@ expect_fail() {
   elif grep -qF "$reason" "$tmp/out"; then pass "$label"
   else fail "$label: $(tail -1 "$tmp/out")"; fi
 }
+# Fails with `reason` and never with `forbidden`: for a refusal whose wrong
+# variant would also name its own reason.
+expect_fail_not_naming() {
+  local label="$1" reason="$2" forbidden="$3"; shift 3
+  if "$@" >"$tmp/out" 2>&1; then fail "$label"
+  elif grep -qF -- "$forbidden" "$tmp/out"; then fail "$label: also names: $forbidden"
+  elif grep -qF -- "$reason" "$tmp/out"; then pass "$label"
+  else fail "$label: $(tail -1 "$tmp/out")"; fi
+}
 expect_fail_naming_each() {
   local label="$1" reason
   shift
@@ -347,8 +356,8 @@ REVIEW_RUN_ATTEMPT=1 CORRELATED_POLLS="$polls_file" CORRELATED_RUN_APPEARS_AFTER
 : >"$polls_file"
 : >"$SLEEP_CALLS"
 REVIEW_RUN_ATTEMPT=1 MISSING_CORRELATED_RUN=true CORRELATED_POLLS="$polls_file" \
-  expect_fail "a permanently absent run is refused after a bounded number of polls" \
-  "has not appeared in the workflow run listing" verify
+  expect_fail_not_naming "a permanently absent run is refused after a bounded number of polls" \
+  "has not appeared in the workflow run listing" "dispatch is duplicated" verify
 [ "$(cat "$polls_file")" -eq 5 ] \
   && pass "a permanently absent listing is polled exactly 5 times, then refused" \
   || fail "absent-listing poll count is not exactly 5 (polls=$(cat "$polls_file"))"

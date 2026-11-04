@@ -106,7 +106,8 @@ class DeepSeekCancellationTest(unittest.TestCase):
         for name in ('deepseek_primary', 'deepseek_fallback'):
             with self.subTest(step=name):
                 result, events = self.run_provider(STEPS[name], lookup_status=1)
-                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('::error::phase=model result=head_unverified', result.stdout)
                 self.assertEqual(events, ['lookup'])
 
 

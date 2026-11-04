@@ -955,8 +955,14 @@ def main() -> int:
         report(harness.eligible(with_files(**{CI_CALLER: (crlf(CI_STALE), crlf(CONTRACT))})),
                "a CRLF reusable CI caller is still a companion", harness.last)
         over_broad = mutated('"\\r(?!\\n)', '"\\r')
-        report(over_broad is not None and not Harness(over_broad).eligible(with_files(**{CI_CALLER: (crlf(CI_STALE), crlf(CONTRACT))})),
-               "mutation proof: refusing every carriage return would refuse a CRLF caller")
+        # Refused by the carriage-return guard itself: a mutant that is merely
+        # ineligible (a missing proof program, say) proves nothing about it.
+        over_broad_harness = Harness(over_broad) if over_broad is not None else None
+        report(over_broad_harness is not None
+               and not over_broad_harness.eligible(with_files(**{CI_CALLER: (crlf(CI_STALE), crlf(CONTRACT))}))
+               and "contains a line break other than" in over_broad_harness.last.stdout,
+               "mutation proof: refusing every carriage return would refuse a CRLF caller",
+               over_broad_harness.last if over_broad_harness else None)
         commented = lambda sha: f"# Canonical node-ci revision: {sha}\n".encode() + ci_caller(sha)
         report(harness.eligible(with_files(**{CI_CALLER: (commented(CI_STALE), commented(CONTRACT))})),
                "a comment pin that moves with the reusable CI pin is a companion", harness.last)
@@ -1100,7 +1106,13 @@ def main() -> int:
             report(False, f"mutation for '{name}' no longer applies exactly once")
             return
         result, _, calls = Harness(text).complete(Consumer(), **kwargs)
-        report(not (result.returncode == 0 and predicate(calls)), f"mutation proof: {name}")
+        # The mutant must reach the App approval the guard withholds, not merely fail.
+        report(result.returncode == 0 and app_approved(calls), f"mutation proof: {name}", result)
+
+    def app_approved(calls) -> bool:
+        return (any(c["args"][:4] == ["api", "--method", "POST", f"repos/{TARGET_REPO}/pulls/{PR_NUMBER}/reviews"]
+                    and c["token"] == "app-token" and "event=APPROVE" in c["args"] for c in calls)
+                and any("conclusion=success" in c["args"] for c in calls))
 
     def refused(calls) -> bool:
         return not any(c["args"][:3] in (["api", "--method", "POST"], ["api", "--method", "PATCH"]) for c in calls)
@@ -1117,32 +1129,33 @@ def main() -> int:
     app_check.overrides[f"repos/{TARGET_REPO}/check-runs/9001"] = {
         **Consumer().routes()[f"repos/{TARGET_REPO}/check-runs/9001"], "app": {"id": 4242, "slug": "verjson-ai-review"}}
     refusal_cases = [
-        ("a bootstrap whose proof breaks before granting is refused", {"later": moved},
+        ("a bootstrap whose proof breaks before granting is refused", {"later": moved}, "::error::stale review caller bootstrap proof no longer holds",
          ('proof="$(GH_TOKEN="$ACTIONS_TOKEN" python3 -I "$RUNNER_TEMP/review-caller-bootstrap.py" 2>"$recheck_errors")" || {',
           'proof="$(printf \'{"stale_sha":"%s","contract_sha":"%s","head_sha":"%s"}\' "$STALE_SHA" "$CONTRACT_SHA" "$EXPECTED_HEAD_SHA")" || {')),
-        ("a completion whose proof names other revisions is refused", {"STALE_SHA": "c" * 40},
+        ("a completion whose proof names other revisions is refused", {"STALE_SHA": "c" * 40}, "::error::stale review caller bootstrap proof changed",
          ("'.stale_sha == $stale and .contract_sha == $contract and .head_sha == $head' <<<\"$proof\" >/dev/null || {",
           "'true' <<<\"$proof\" >/dev/null || {")),
-        ("an already completed check is never overwritten", {"later": completed_check},
+        ("an already completed check is never overwritten", {"later": completed_check}, "::error::authorization check is not this arm's in-progress exact-head check",
          ('.status == "in_progress" and .conclusion == null\n          \' <<<"$check"', 'true\n          \' <<<"$check"')),
-        ("a check from another arm run is never completed", {"later": foreign_check},
+        ("a check from another arm run is never completed", {"later": foreign_check}, "::error::authorization check is not this arm's in-progress exact-head check",
          ('.external_id == $external and .app.id == 15368 and .app.slug == "github-actions" and\n            .status',
           '.app.id == 15368 and .app.slug == "github-actions" and\n            .status')),
-        ("a check owned by another App is never completed", {"later": app_check},
+        ("a check owned by another App is never completed", {"later": app_check}, "::error::authorization check is not this arm's in-progress exact-head check",
          ('.app.id == 15368 and .app.slug == "github-actions" and\n            .status', 'true and\n            .status')),
-        ("a minted App other than the authorization App is refused", {"MINTED_APP_SLUG": "other-app"},
+        ("a minted App other than the authorization App is refused", {"MINTED_APP_SLUG": "other-app"}, "::error::minted App does not match the authorization App",
          ('[ -n "$APP_TOKEN" ] && [ "$MINTED_APP_SLUG" = "$APP_SLUG" ] || {', 'true || {')),
-        ("an unproven classification is refused", {"BOOTSTRAP_ELIGIBLE": "false"},
+        ("an unproven classification is refused", {"BOOTSTRAP_ELIGIBLE": "false"}, "::error::stale review caller bootstrap was not proven",
          ('[ "$BOOTSTRAP_ELIGIBLE" = true ] || { echo "::error::stale review caller bootstrap was not proven"; exit 1; }', ':')),
-        ("a forged receipt authority is refused", {"REVIEW_POLICY": policy("root")}, None),
-        ("a missing App installation identity is refused", {"INSTALLATION_ID": ""}, None),
+        ("a forged receipt authority is refused", {"REVIEW_POLICY": policy("root")}, "::error::receipt authority is invalid", None),
+        ("a missing App installation identity is refused", {"INSTALLATION_ID": ""}, "::error::bootstrap App installation identity is unavailable", None),
     ]
 
-    def refusal(harness: Harness, name: str, overrides: dict, mutation: tuple[str, str] | None) -> None:
+    def refusal(harness: Harness, name: str, overrides: dict, reason: str,
+                mutation: tuple[str, str] | None) -> None:
         kwargs = dict(overrides)
         later = kwargs.pop("later", None)
         result, _, calls = harness.complete(Consumer(), later=later, **kwargs)
-        report(result.returncode != 0 and refused(calls), name)
+        report(result.returncode != 0 and refused(calls) and reason in result.stdout, name, result)
         if mutation is None:
             return
         text = mutated(*mutation)
@@ -1150,7 +1163,8 @@ def main() -> int:
             report(False, f"mutation for '{name}' no longer applies exactly once")
             return
         result, _, calls = Harness(text).complete(Consumer(), later=later, **kwargs)
-        report(not (result.returncode != 0 and refused(calls)), f"mutation proof: {name}")
+        # Without its guard the mutant must reach a write, not fail some other way.
+        report(not refused(calls), f"mutation proof: {name}", result)
 
     def approval_withheld(calls) -> bool:
         return (any("conclusion=neutral" in c["args"] for c in calls)
@@ -1174,11 +1188,14 @@ def main() -> int:
             report(False, f"mutation for '{name}' no longer applies exactly once")
             return
         result, _, calls = Harness(text).complete(Consumer(), **overrides)
-        report(not (result.returncode == 0 and approval_withheld(calls)), f"mutation proof: {name}")
+        # Without its guard the mutant must complete as success, not fail some other way.
+        report(result.returncode == 0 and any("conclusion=success" in c["args"] for c in calls),
+               f"mutation proof: {name}", result)
 
     def unconfirmed_completion(harness: Harness) -> None:
         result, _, calls = harness.complete(Consumer(), GH_FAIL="PATCH repos/")
-        report(result.returncode != 0, "an unconfirmed check completion fails the step for the terminalizer")
+        report(result.returncode != 0 and "::error::authorization check completion request failed" in result.stdout,
+               "an unconfirmed check completion fails the step for the terminalizer", result)
 
     def untrusted_paths(harness: Harness) -> None:
         injected = with_files(**{INJECTED_PATH: (None, b"export {};\n")})
@@ -1260,8 +1277,8 @@ def main() -> int:
         approval_authority,
         *(functools.partial(completion, name=name, kwargs=kwargs, predicate=predicate, mutation=mutation)
           for name, kwargs, predicate, mutation in completion_cases),
-        *(functools.partial(refusal, name=name, overrides=overrides, mutation=mutation)
-          for name, overrides, mutation in refusal_cases),
+        *(functools.partial(refusal, name=name, overrides=overrides, reason=reason, mutation=mutation)
+          for name, overrides, reason, mutation in refusal_cases),
         *(functools.partial(approval, name=name, overrides=overrides, mutation=mutation)
           for name, overrides, mutation in approval_cases),
         unconfirmed_completion,
