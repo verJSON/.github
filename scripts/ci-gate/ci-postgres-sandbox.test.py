@@ -228,7 +228,12 @@ class PostgresSandboxProfileTests(unittest.TestCase):
 
         self.assertIn(
             "    def _assert_network_boundary(self, state: dict[str, object]) -> None:\n"
-            "        _assert_no_host_distribution_tree_listeners()\n",
+            "        scope = _sandbox_socket_scope(self._bubblewrap_command(state, []))\n"
+            "        _assert_no_host_distribution_tree_listeners(scope.host_trees)\n",
+            acceptance_source,
+        )
+        self.assertIn(
+            '"__DAEMON_ISOLATION_PROBE__", _daemon_isolation_probe_source(scope.unwalked)',
             acceptance_source,
         )
 
