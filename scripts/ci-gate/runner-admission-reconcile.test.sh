@@ -128,7 +128,19 @@ export HOSTED_RUNNERS_404='0'
 export UNTRUSTED_GROUP_NAME='isolated'
 
 run_case() { : > "$GH_API_LOG"; bash "$script" 2>&1; }
-code_of() { run_case >/dev/null 2>&1; printf '%s' "$?"; }
+# Exit 2 says only that some guard stopped the run; its UNDETERMINED line says
+# which one. Asserting both keeps an earlier, unrelated guard from standing in.
+assert_undetermined() { # <reason> <pass label> <fail label>
+  local out code
+  out="$(run_case)"
+  code=$?
+  if [ "$code" = "2" ] && grep -qF -- "UNDETERMINED: $1" <<<"$out"; then
+    pass "$2"
+  else
+    printf '  code=%s, expected UNDETERMINED: %s\n%s\n' "$code" "$1" "$out"
+    fail "$3"
+  fi
+}
 
 out="$(run_case)"
 code=$?
@@ -173,6 +185,26 @@ code=$?
   || fail "full hosted-runner API object was compared to the identity allowlist: $out"
 HOSTED_RUNNERS_PAGES='{"total_count":1,"runners":[{"id":42,"name":"general"}]}'
 
+# jq validates each value of a multi-value file and exits 0 when the last one
+# passes, writing the earlier rejections to stderr. Those diagnostics must not
+# join the captured allowlist: the reviewed array is still compared as before,
+# rather than the next jq call rejecting a value polluted with error text.
+printf '5 [{"id":42,"name":"general"}]\n' \
+  >"$allowlisted/hosted-larger-runner-allowlist.json"
+out="$(bash "$allowlisted/runner-admission-reconcile.sh" 2>&1)"
+code=$?
+[ "$code" = "0" ] \
+  && grep -qF '1 reviewed GitHub-hosted larger runner' <<<"$out" \
+  && pass "jq diagnostics on an accepted allowlist never join the compared value" \
+  || fail "an accepted multi-value allowlist was compared with jq's stderr in it: $code: $out"
+
+out="$(TMPDIR="$allowlisted/no-such-dir" bash "$allowlisted/runner-admission-reconcile.sh" 2>&1)"
+code=$?
+[ "$code" = "2" ] \
+  && grep -qxF 'UNDETERMINED: could not create a temporary file for jq diagnostics' <<<"$out" \
+  && pass "an unavailable temporary directory is undetermined, never an allowlist rejection" \
+  || fail "a failed mktemp was not reported as such: $code: $out"
+
 printf '[{"id":42,"name":"general-old"}]\n' \
   >"$allowlisted/hosted-larger-runner-allowlist.json"
 out="$(bash "$allowlisted/runner-admission-reconcile.sh" 2>&1)"
@@ -191,19 +223,22 @@ code=$?
   && pass "a stale reviewed larger-runner identity is drift" \
   || fail "stale larger-runner approval was treated as clean: $out"
 
-for malformed_allowlist in \
-  '[{"id":42,"name":"general"},{"id":42,"name":"other"}]' \
-  '[{"id":42,"name":"general"},{"id":43,"name":"general"}]' \
-  '[{"id":42,"name":""}]' \
-  '[42]'; do
+allowlist_rejection='UNDETERMINED: larger-runner allowlist must contain exact id/name objects with unique ids and names'
+while IFS='|' read -r malformed_allowlist allowlist_reason; do
   printf '%s\n' "$malformed_allowlist" \
     >"$allowlisted/hosted-larger-runner-allowlist.json"
   out="$(bash "$allowlisted/runner-admission-reconcile.sh" 2>&1)"
   code=$?
   [ "$code" = "2" ] \
+    && grep -qxF -- "$allowlist_rejection: $allowlist_reason" <<<"$out" \
     && pass "malformed or duplicate reviewed larger-runner identity is undetermined" \
     || fail "invalid larger-runner allowlist was accepted: $malformed_allowlist: $out"
-done
+done <<'ALLOWLISTS'
+[{"id":42,"name":"general"},{"id":42,"name":"other"}]|an id is duplicated
+[{"id":42,"name":"general"},{"id":43,"name":"general"}]|a name is duplicated
+[{"id":42,"name":""}]|a name is blank
+[42]|an entry is not an exact id/name object
+ALLOWLISTS
 
 # Two response objects model two pages. Both runners must survive collection;
 # keeping only the final page would omit `general` and weaken the report.
@@ -226,43 +261,40 @@ code=$?
   && pass "a malformed larger-runner response is undetermined, never clean" \
   || fail "malformed larger-runner response did not fail closed: $code: $out"
 
+inventory_rejection='GitHub-hosted larger-runner inventory response was malformed, incomplete, or pagination-inconsistent'
 HOSTED_RUNNERS_PAGES='{"total_count":2,"runners":[{"id":42,"name":"general"}]}'
-code="$(code_of)"
-[ "$code" = "2" ] \
-  && pass "an incomplete larger-runner page count is undetermined" \
-  || fail "incomplete larger-runner pagination did not fail closed: $code"
+assert_undetermined "$inventory_rejection: paginated count mismatch" \
+  "an incomplete larger-runner page count is undetermined" \
+  "incomplete larger-runner pagination did not fail closed"
 
 HOSTED_RUNNERS_PAGES='{"total_count":1,"runners":[{"name":"general"}]}'
-code="$(code_of)"
-[ "$code" = "2" ] \
-  && pass "a larger-runner object without an id is undetermined" \
-  || fail "malformed larger-runner object did not fail closed: $code"
+assert_undetermined "$inventory_rejection: malformed runner" \
+  "a larger-runner object without an id is undetermined" \
+  "malformed larger-runner object did not fail closed"
 
-for malformed_inventory in \
-  '{"total_count":1,"runners":[{"id":42,"name":""}]}' \
-  '{"total_count":2,"runners":[{"id":42,"name":"general"},{"id":42,"name":"other"}]}' \
-  '{"total_count":2,"runners":[{"id":42,"name":"general"},{"id":43,"name":"general"}]}' \
-  $'{"total_count":2,"runners":[{"id":42,"name":"general"}]}\n{"total_count":3,"runners":[{"id":43,"name":"other"}]}'; do
-  HOSTED_RUNNERS_PAGES="$malformed_inventory"
-  code="$(code_of)"
-  [ "$code" = "2" ] \
-    && pass "malformed, duplicate, or count-inconsistent live identity is undetermined" \
-    || fail "invalid larger-runner inventory was accepted: $malformed_inventory"
-done
+while IFS='|' read -r malformed_inventory inventory_reason; do
+  HOSTED_RUNNERS_PAGES="${malformed_inventory//\\n/$'\n'}"
+  assert_undetermined "$inventory_rejection: $inventory_reason" \
+    "malformed, duplicate, or count-inconsistent live identity is undetermined" \
+    "invalid larger-runner inventory was accepted: $malformed_inventory"
+done <<'INVENTORIES'
+{"total_count":1,"runners":[{"id":42,"name":""}]}|malformed runner
+{"total_count":2,"runners":[{"id":42,"name":"general"},{"id":42,"name":"other"}]}|duplicate runner id
+{"total_count":2,"runners":[{"id":42,"name":"general"},{"id":43,"name":"general"}]}|duplicate runner name
+{"total_count":2,"runners":[{"id":42,"name":"general"}]}\n{"total_count":3,"runners":[{"id":43,"name":"other"}]}|page counts disagree
+INVENTORIES
 
 HOSTED_RUNNERS_PAGES='{"total_count":0,"runners":[]}'
 HOSTED_RUNNERS_404='1'
-code="$(code_of)"
-[ "$code" = "2" ] \
-  && pass "a 404 reading larger-runner inventory is undetermined" \
-  || fail "larger-runner 404 did not fail closed: $code"
+assert_undetermined 'GET /orgs/Verjson/actions/hosted-runners?per_page=100 failed: {"message":"Not Found","status":"404"} gh: Not Found (HTTP 404)' \
+  "a 404 reading larger-runner inventory is undetermined" \
+  "larger-runner 404 did not fail closed"
 HOSTED_RUNNERS_404='0'
 
 FAIL_PATH='/actions/hosted-runners'
-code="$(code_of)"
-[ "$code" = "2" ] \
-  && pass "a larger-runner API failure is undetermined" \
-  || fail "larger-runner API failure did not fail closed: $code"
+assert_undetermined 'GET /orgs/Verjson/actions/hosted-runners?per_page=100 failed: HTTP 403: Resource not accessible' \
+  "a larger-runner API failure is undetermined" \
+  "larger-runner API failure did not fail closed"
 FAIL_PATH=''
 HOSTED_RUNNERS_PAGES='{"total_count":0,"runners":[]}'
 
@@ -333,31 +365,29 @@ code=$?
 
 G4_RUNNERS='{"name":"general-1","status":"online","labels":["self-hosted","general"]}'
 UNTRUSTED_VAR='{"value":"not-json","visibility":"all"}'
-code="$(code_of)"
-[ "$code" = "2" ] \
-  && pass "malformed variable is undetermined, never clean" \
-  || fail "malformed variable did not return exit 2"
+assert_undetermined 'CI_LANE_UNTRUSTED is not a non-empty JSON array of label strings' \
+  "malformed variable is undetermined, never clean" \
+  "malformed variable did not return exit 2"
 
 UNTRUSTED_VAR='{"value":"[\"self-hosted\",\"general\"]","visibility":"selected"}'
-code="$(code_of)"
-[ "$code" = "2" ] \
-  && pass "variable hidden from new repositories is undetermined" \
-  || fail "non-global variable did not return exit 2"
+assert_undetermined 'CI_LANE_UNTRUSTED is not visible to all repositories' \
+  "variable hidden from new repositories is undetermined" \
+  "non-global variable did not return exit 2"
 
 UNTRUSTED_VAR='{"value":"[\"self-hosted\",\"unknown-lane\"]","visibility":"all"}'
 out="$(run_case)"
 code=$?
 [ "$code" = "2" ] \
+  && grep -qxF 'UNDETERMINED: CI_LANE_UNTRUSTED selector has no governed lane label; value redacted' <<<"$out" \
   && ! grep -qF 'unknown-lane' <<<"$out" \
   && pass "ungoverned lane selector is undetermined" \
   || fail "ungoverned lane did not return exit 2 without leaking its value: $out"
 
 UNTRUSTED_VAR='{"value":"[\"ubuntu-24.04\"]","visibility":"all"}'
 FAIL_PATH='/actions/variables/VERJSON_RUNNER_DEFAULT'
-code="$(code_of)"
-[ "$code" = "2" ] \
-  && pass "org API failure is undetermined, never clean" \
-  || fail "API failure did not return exit 2"
+assert_undetermined 'GET /orgs/Verjson/actions/variables/VERJSON_RUNNER_DEFAULT failed: HTTP 403: Resource not accessible' \
+  "org API failure is undetermined, never clean" \
+  "API failure did not return exit 2"
 
 FAIL_PATH=''
 # Migration complete: the retired pair is gone, so these cases exercise lane
@@ -539,10 +569,9 @@ G6_GROUP='{"id":6,"name":"isolated","visibility":"all","allows_public_repositori
 #    is the definition of undetermined and must never read as clean.
 DELETED_GROUPS=''
 FAIL_PATH='/actions/runner-groups'
-code="$(code_of)"
-[ "$code" = "2" ] \
-  && pass "an unreadable runner-group listing is undetermined, never clean" \
-  || fail "group listing failure did not return exit 2"
+assert_undetermined 'GET /orgs/Verjson/actions/runner-groups?per_page=100 failed: HTTP 403: Resource not accessible' \
+  "an unreadable runner-group listing is undetermined, never clean" \
+  "group listing failure did not return exit 2"
 
 FAIL_PATH=''
 # Migration complete: the retired pair is gone, so these cases exercise lane
@@ -750,7 +779,8 @@ read -r comment_rc comment_case < <(run_comment_case "$one_trusted" one)
 
 two_trusted=$'{"id":100,"body":"<!-- runner-admission-drift -->","author_id":41898282}\n{"id":101,"body":"<!-- runner-admission-drift -->","author_id":41898282}'
 read -r comment_rc comment_case < <(run_comment_case "$two_trusted" multiple)
-[ "$comment_rc" != 0 ] \
+[ "$comment_rc" = 1 ] \
+  && grep -qxF '::error title=Runner admission report target ambiguous::Issue #820 has 2 report comments; refusing to update an arbitrary one.' "$comment_case/output" \
   && [ ! -s "$comment_case/actions" ] \
   && pass "multiple trusted reports fail closed before comment mutation" \
   || fail "ambiguous trusted reports mutated an arbitrary comment"
@@ -846,20 +876,18 @@ code=$?
 # renders a missing name as the literal "null" and exits 0 — the same trap
 # group_id_of documents.
 export G1_GROUP='{"id":1,"visibility":"all","allows_public_repositories":true,"default":true}'
-code="$(code_of)"
-[ "$code" = "2" ] \
-  && pass "a default group with no name is undetermined" \
-  || fail "nameless default group did not fail closed: $code"
+assert_undetermined 'default runner group has no readable name; object contents redacted' \
+  "a default group with no name is undetermined" \
+  "nameless default group did not fail closed"
 export G1_GROUP='{"id":1,"name":"GitHub","visibility":"all","allows_public_repositories":true,"default":true}'
 
 # Fail CLOSED, both directions. A 403 on the placement fetch must not read as
 # "no runners there" — that is the shape that turns a security check into a
 # rubber stamp, and it is the exact defect #266 left in this file.
 export FAIL_PATH='/runner-groups/1/runners'
-code="$(code_of)"
-[ "$code" = "2" ] \
-  && pass "an unreadable default group is undetermined, not clean" \
-  || fail "unreadable default group did not fail closed: $code"
+assert_undetermined 'GET /orgs/Verjson/actions/runner-groups/1/runners?per_page=100 failed: HTTP 403: Resource not accessible' \
+  "an unreadable default group is undetermined, not clean" \
+  "unreadable default group did not fail closed"
 export FAIL_PATH=''
 
 # The default group is found by its `.default` flag, never by the id 1. The id
@@ -884,20 +912,18 @@ export G1_RUNNERS=''
 # enterprise-shared Default alongside the org's own is the plausible route.
 export G1_GROUP=$'{"id":1,"name":"GitHub","visibility":"all","allows_public_repositories":true,"default":true}\n{"id":9,"name":"Enterprise Default","visibility":"all","allows_public_repositories":true,"default":true}'
 export G1_RUNNERS='{"name":"gha-stray-6","status":"online","labels":["self-hosted"]}'
-code="$(code_of)"
-[ "$code" = "2" ] \
-  && pass "more than one default group is undetermined, not silently first-wins" \
-  || fail "multiple default groups did not fail closed: $code"
+assert_undetermined 'expected exactly one runner group in Verjson marked default, found 2;' \
+  "more than one default group is undetermined, not silently first-wins" \
+  "multiple default groups did not fail closed"
 export G1_RUNNERS=''
 
 # GitHub always marks exactly one group default and a custom group cannot become
 # one, so no default group in the listing means the listing is not what we think
 # it is. Guessing an id here is how the pinned-id outage (#266) happened.
 export G1_GROUP=''
-code="$(code_of)"
-[ "$code" = "2" ] \
-  && pass "a listing with no default group is undetermined" \
-  || fail "missing default group did not fail closed: $code"
+assert_undetermined 'expected exactly one runner group in Verjson marked default, found 0;' \
+  "a listing with no default group is undetermined" \
+  "missing default group did not fail closed"
 export G1_GROUP='{"id":1,"name":"GitHub","visibility":"all","allows_public_repositories":true,"default":true}'
 
 # The migration's own hazard: the retired pair stays set for consumers pinned to
