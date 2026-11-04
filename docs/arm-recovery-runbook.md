@@ -46,19 +46,46 @@ request whose arm ran before it. So every edit ships with a planned sweep:
    Any other Gate W reason, and any refusal from another gate, is not part of
    this sweep.
 
-3. **Re-arm each stale head** with one close-and-reopen under the
-   [interim recovery rules](#interim-recovery-close-and-reopen). The author may
-   push a new head instead.
+3. **Re-arm each stale head per pull request, at merge time.** Whoever owns
+   that pull request does one close-and-reopen under the
+   [interim recovery rules](#interim-recovery-close-and-reopen) when it is ready
+   to merge. The author may push a new head instead. Never mass-close and reopen
+   other sessions' pull requests. A bulk reopen stacks arm runs in each pull
+   request's concurrency group, which the quiet-family rule exists to prevent.
 
 4. **Verify the result.** Confirm a new required run exists on the same head,
    created after `updated_at`, with conclusion `success`. Then confirm the
    assertion passes Gate W.
 
-5. **Record the sweep** on the ruleset change: each pull request, its outcome,
-   and every pull request left for escalation.
+5. **Record the sweep** in the [sweep checklist](#sweep-checklist): one entry
+   per ruleset edit, listing its stale pull requests at recording time. Each
+   owner records their pull request's re-arm on that pull request.
 
 A run created in the same second as the change counts as stale. Run times have
 one-second resolution and `updated_at` does not.
+
+### Sweep checklist
+
+One entry per edit to a ruleset carrying a `workflows` rule, newest first. An
+entry stays open until no listed pull request remains open and stale.
+
+- [ ] **2026-11-03T16:39:01.138Z — ruleset 20722935** (`ai-authorization-arm-required`;
+  edit predates ADR 0255, workflows entry unchanged at `24db445f`).
+  - Classified read-only on 2026-11-03 for ADR 0255. Gate W reads `stale` for
+    `verJSON/.github#1968` and `verJSON/verjson-oidc-claims-middleware#97`, and
+    passes `verJSON/verjson-agents#452`. Every other open pull request in the
+    five enrolled repositories that has a required run had its newest one
+    created before 16:39:01Z, so Gate W reads it as `stale`. The assertion run on each pull
+    request decides; this list is for planning:
+    - `verJSON/.github` #1938, #1946, #1950, #1951, #1952, #1955, #1956, #1959,
+      #1960, #1961, #1963, #1968;
+    - `verJSON/verjson-agents` #450, #455, #461;
+    - `verJSON/verjson-git-runners` #237, #239, #242, #244, #245, #246;
+    - `verJSON/verjson-oidc-claims-middleware` #93, #94, #95, #96, #97, #98,
+      #99, #107, #111, #113.
+    Pull requests with no required run at all read `absent`, not `stale`.
+  - Re-arm each one per pull request at merge time under the interim rules, and
+    record it on that pull request.
 
 ## Interim recovery: close and reopen
 

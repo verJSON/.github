@@ -61,12 +61,37 @@ required-workflow entry of every `type: workflows` rule returned by
   The last is the closest PR binding GitHub exposes, because `pull_requests` is
   empty on these runs. It rejects a reused branch name or another fork on the
   same SHA. The run name is never read, because a caller chooses it.
+
+  The `pull_request_target` event is a property of the required workflow that
+  ruleset 20722935 requires today, not of `workflows` rules in general. A future
+  required workflow triggered by another event, such as `pull_request` or
+  `merge_group`, would read as `unbound` and fail closed until Gate W learns the
+  event that workflow is triggered by.
 - **Freshness (owner timing rule).** A bound run counts only if it was created
   strictly after the `updated_at` of its ruleset. Gate W reads that time from
   `repos/{o}/{r}/rulesets/{id}`, which needs only repository read: it answered an
   unauthenticated caller for `verJSON/.github` on 2026-11-03. A run created in
   the same second counts as stale. The endpoint returns both `…Z` and `…-05:00`
   forms, and both are parsed.
+
+  **Assumption: GitHub truncates a run's `created_at` to the second, and never
+  rounds it.** Under truncation, a run reported at the change's second may have
+  been created before the change, so treating it as stale is correct. If GitHub
+  rounded up instead, a run created up to half a second before the change could
+  report the next second and read as fresh. No provider documentation states
+  which applies. A second-granular timestamp gives no way to verify it.
+
+  **Assumption: minimum grant on private repositories.** On 2026-11-03 the
+  rulesets endpoint returned `updated_at` and `rules` for ruleset 20722935
+  through both the public `verJSON/.github` (no authentication) and the private
+  `verJSON/verjson-identity-contracts` and `verJSON/verjson-oidc-claims-middleware`.
+  For the private repositories, the token was a classic OAuth token carrying
+  `repo` and `admin:org`. That proves the response shape. It does not prove that
+  a fine-grained token with only Metadata (read), or an Actions `GITHUB_TOKEN`
+  with `contents: read`, receives the same response. Gate W assumes it does. A
+  refusal exits 1 and names the grant. A body without a readable `updated_at`
+  fails closed as `undated`. Either way, a wrong assumption costs liveness, never
+  safety.
 - **The verdict is the newest fresh run** of the bound required workflow, ordered
   by `run_number`. It must have completed with `success`. A cancelled required
   run is superseded only by a later successful run of the **same** required
@@ -83,7 +108,9 @@ required-workflow entry of every `type: workflows` rule returned by
   - `undated` — the ruleset or a bound run has no readable time;
   - `ambiguous` — fresh runs of more than one required-workflow id share the
     path, or the rules name one path twice, since a run reports no source
-    repository;
+    repository. This includes identical entries carried by two different
+    rulesets on the same ref: they fail closed even though either run would
+    satisfy both;
   - `changed` — the ruleset read no longer carries the entry the branch rules
     returned;
   - `cancelled`;
@@ -120,9 +147,15 @@ edit therefore makes Gate W refuse, as `stale`, every open enrolled pull request
 whose required run predates it. The owner accepted that cost to fail closed. Every
 change that edits a ruleset carrying a `workflows` rule ships a planned re-arm
 sweep. The sweep lists the targeted repositories, classifies open pull requests
-with the read-only assertion, re-arms each `stale` head under the rules in §4,
-verifies the new run, and records the result. The procedure is in
+with the read-only assertion, and records each edit in the runbook's sweep
+checklist. A `stale` head is re-armed **per pull request, at merge time**, by
+whoever owns that pull request, under the rules in §4. Then the new run is
+verified. The sweep is never a mass close-and-reopen across other sessions' pull
+requests. A bulk reopen would also re-create the concurrency pile-up that §4's
+quiet-family rule exists to avoid. The procedure and the checklist are in
 [`docs/arm-recovery-runbook.md`](../../arm-recovery-runbook.md#re-arm-sweep-after-a-ruleset-edit).
+The sweep is this ADR's own scope, recorded here and in the checklist rather
+than in a separate issue.
 
 ### 3. The required workflow never skips or yields (F-3)
 
@@ -223,8 +256,9 @@ and on verified new required-run evidence.
 - Gate W takes effect wherever an adopter runs the canonical script from `main`
   (`rules/workflow.md` → *Pull Requests*). No caller pin moves.
 - The ruleset was edited at 2026-11-03T16:39:01Z. Every open enrolled pull request
-  whose required run predates that is `stale` until it is re-armed. The first
-  sweep is owed for that edit.
+  whose required run predates that is `stale` until it is re-armed. That edit is
+  the first entry in the runbook's sweep checklist. Its known stale heads at
+  recording time are re-armed per pull request at merge time, not in bulk.
 - The F-9 message reaches consumers only when the ruleset pin is rotated past this
   commit, and through regenerated caller pins. Rotating the pin is itself a
   ruleset edit, so it ships with a sweep (§2).
