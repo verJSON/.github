@@ -88,14 +88,29 @@ grep -q 'runs-on: \[self-hosted, untrusted-pr, ephemeral\]' \
   "$tmp/changelog-contract-override.yml"
 echo "ok - --untrusted-runner lets an adopter opt into an isolated self-hosted lane"
 
-for bad in 'self-hosted; rm -rf /' 'ubuntu-26.04/evil' '' 'self-hosted,' ',ephemeral'; do
-  if "$generator" pr-gate "$ref" --untrusted-runner "$bad" >/dev/null 2>&1; then
-    echo "FAIL - accepted invalid --untrusted-runner value: '$bad'" >&2
+# Every generator refusal exits 2 with nothing on stdout, so the one stderr line
+# is what names the guard that refused.
+refuses_with() { # refuses_with <label> <stderr line> <generator args...>
+  local label="$1" reason="$2" status=0
+  shift 2
+  LC_ALL=C "$generator" "$@" >"$tmp/refused.out" 2>"$tmp/refused.err" || status=$?
+  if [ "$status" -eq 0 ]; then
+    echo "FAIL - accepted $label" >&2
     exit 1
   fi
+  if [ "$status" -ne 2 ] || [ -s "$tmp/refused.out" ] \
+    || [ "$(cat "$tmp/refused.err")" != "gen-changelog-caller.sh: $reason" ]; then
+    echo "FAIL - $label was refused (exit $status) without the reason: $reason" >&2
+    sed 's/^/diag - /' "$tmp/refused.err" >&2
+    exit 1
+  fi
+}
+for bad in 'self-hosted; rm -rf /' 'ubuntu-26.04/evil' '' 'self-hosted,' ',ephemeral'; do
+  refuses_with "invalid --untrusted-runner value: '$bad'" \
+    '--untrusted-runner must be a comma-separated list of runner labels' \
+    pr-gate "$ref" --untrusted-runner "$bad"
 done
-if "$generator" generated-artifacts "$ref" --untrusted-runner self-hosted >/dev/null 2>&1; then
-  echo "FAIL - --untrusted-runner accepted outside pr-gate mode" >&2
-  exit 1
-fi
+refuses_with '--untrusted-runner outside pr-gate mode' \
+  '--untrusted-runner is accepted only by pr-gate' \
+  generated-artifacts "$ref" --untrusted-runner self-hosted
 echo "ok - --untrusted-runner rejects malformed values and non-pr-gate modes"

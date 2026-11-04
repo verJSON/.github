@@ -102,6 +102,7 @@ if [ "$1" = api ]; then
     nonstring-name) printf '%s\n' '{"assets":[{"name":7,"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}' ;;
     malformed-digest) printf '%s\n' '{"assets":[{"name":"schema.graphql","digest":"sha512:not-a-sha256"}]}' ;;
     malformed-json) printf '%s\n' '{"assets":[' ;;
+    non-utf8) printf '{"assets":["\377"]}\n' ;;
     api-failure) printf '%s\n' '{"assets":['; exit 24 ;;
   esac
   exit 0
@@ -179,7 +180,8 @@ scalar-member|1|GitHub Release inspection returned an asset without a string nam
 missing-name|1|GitHub Release inspection returned an asset without a string name
 nonstring-name|1|GitHub Release inspection returned an asset without a string name
 malformed-digest|1|GitHub Release returned malformed digest for selected asset: schema.graphql
-malformed-json|1|json.decoder.JSONDecodeError
+malformed-json|1|GitHub Release inspection did not return valid JSON:
+non-utf8|1|GitHub Release inspection did not return valid JSON:
 api-failure|24|
 SPOOFED_API_REFUSALS
 

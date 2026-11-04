@@ -127,15 +127,25 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --package-dir)
-      [ "$#" -ge 2 ] && [ "$release_package_dirs_exact" = false ] || usage
+      [ "$#" -ge 2 ] || usage
+      [ "$release_package_dirs_exact" = false ] || {
+        echo "$(basename "$0"): --package-dir cannot follow --only-package-dir" >&2
+        usage
+      }
       release_package_dirs+=("$2")
       release_package_dirs_set=true
       shift 2
       ;;
     --only-package-dir)
-      [ "$#" -ge 2 ] || usage
+      [ "$#" -ge 2 ] || {
+        echo "$(basename "$0"): --only-package-dir requires a repository-relative directory" >&2
+        usage
+      }
       if [ "$release_package_dirs_exact" = false ]; then
-        [ "$release_package_dirs_set" = false ] || usage
+        [ "$release_package_dirs_set" = false ] || {
+          echo "$(basename "$0"): --only-package-dir cannot follow --package-dir" >&2
+          usage
+        }
         release_package_dirs=()
         release_package_dirs_exact=true
       fi
@@ -7629,6 +7639,7 @@ for job in doc["jobs"].values():
     rm -f "$syntax_input"
     ;;
   *)
+    echo "$(basename "$0"): unknown mode; the usage line lists every mode" >&2
     usage
     ;;
 esac
