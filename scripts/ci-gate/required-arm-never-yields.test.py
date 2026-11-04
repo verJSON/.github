@@ -29,13 +29,31 @@ def load():
     return yaml.safe_load(ARM.read_text(encoding="utf-8"))
 
 
+ENV_READ = re.compile(r"\benv\.([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def identity_env_names(*env_maps):
+    """Names an env map binds to an invocation-identity context."""
+    return {name for env in env_maps for name, value in (env or {}).items()
+            if INVOCATION_IDENTITY.search(str(value))}
+
+
 def conditions(workflow):
+    """(where, condition, env names in scope that carry invocation identity)."""
+    workflow_identity = identity_env_names(workflow.get("env"))
     for job_name, job in workflow["jobs"].items():
+        job_identity = workflow_identity | identity_env_names(job.get("env"))
         if "if" in job:
-            yield job_name, str(job["if"])
+            yield job_name, str(job["if"]), job_identity
         for step in job.get("steps") or []:
             if "if" in step:
-                yield f"{job_name} / {step.get('name', step.get('id'))}", str(step["if"])
+                yield (f"{job_name} / {step.get('name', step.get('id'))}", str(step["if"]),
+                       job_identity | identity_env_names(step.get("env")))
+
+
+def reads_invocation_identity(condition, identity_names):
+    return bool(INVOCATION_IDENTITY.search(condition)) or any(
+        name in identity_names for name in ENV_READ.findall(condition))
 
 
 def test_every_head_action_reaches_the_required_workflow():
@@ -44,9 +62,19 @@ def test_every_head_action_reaches_the_required_workflow():
 
 
 def test_no_condition_reads_the_invocation_identity():
-    offending = [(where, condition) for where, condition in conditions(load())
-                 if INVOCATION_IDENTITY.search(condition)]
+    offending = [(where, condition) for where, condition, identity in conditions(load())
+                 if reads_invocation_identity(condition, identity)]
     assert offending == [], offending
+
+
+def test_the_identity_scan_sees_env_names_bound_to_identity():
+    # Guards the scan itself: the arm binds both kinds of identity into env, so a
+    # condition reading either name would be a yield even without a direct context.
+    workflow = load()
+    arm_identity = identity_env_names(workflow.get("env"), workflow["jobs"]["arm"].get("env"))
+    assert {"WORKFLOW_REF", "AI_REVIEW_ENVIRONMENT"} <= arm_identity, sorted(arm_identity)
+    watchdog_identity = identity_env_names(workflow["jobs"]["runner-acquisition-watchdog"].get("env"))
+    assert {"ARM_WORKFLOW_REF", "ARM_CALLER_ENVIRONMENT"} <= watchdog_identity, sorted(watchdog_identity)
 
 
 def test_required_path_jobs_are_gated_only_by_event_admission():
@@ -60,7 +88,10 @@ def test_required_path_jobs_are_gated_only_by_event_admission():
     assert set(REQUIRED_PATH_JOBS) <= set(jobs), sorted(jobs)
 
 
-def test_head_actions_are_admitted_whatever_the_label_or_title():
+def test_event_policy_admits_head_actions_whatever_the_event_label_or_title_fields():
+    # Scope: the permissionless event-policy classifier only. The arm's own held-PR exit
+    # (draft, hold label, DO NOT MERGE title, read from live PR state) applies to every
+    # invocation alike and is not exercised here.
     script = load()["jobs"]["event-policy"]["steps"][0]["run"]
     with tempfile.TemporaryDirectory() as directory:
         output = Path(directory) / "github-output"
