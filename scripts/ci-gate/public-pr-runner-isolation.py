@@ -1070,6 +1070,7 @@ def read_program(root: str, program: str) -> str | None:
 
 
 SHELL_SHEBANG = re.compile(r"#![ \t]*(?:/usr)?/bin/(?:env[ \t]+)?(?:ba|z|da)?sh\b")
+BASH_SHEBANG = re.compile(r"#![ \t]*(?:/usr)?/bin/(?:env[ \t]+)?bash\b")
 
 
 def is_shell_script(path: str, content: str) -> bool:
@@ -1373,6 +1374,118 @@ def matching_paren(text: str, start: int) -> int:
     return len(text)
 
 
+def runs_bash(shell) -> bool:
+    """Whether a step's explicit `shell:` is bash. An omitted shell falls back
+    to defaults this job alone does not show, so it is not assumed to be."""
+    words = str(shell or "").split()
+    return bool(words) and os.path.basename(words[0]) == "bash"
+
+
+REGEX_OPERATOR = re.compile(r"(?<=[^\s;&|()<>])[ \t]+=~[ \t]+")
+# The word before a `=~`. After a reserved word `=~` is in command position,
+# and after `function` it is a function's name.
+PRECEDING_WORD = re.compile(r"[^\s;&|()<>]+$")
+COMMAND_POSITION_WORDS = frozenset(
+    {"if", "then", "else", "elif", "do", "while", "until", "!", "{", "time", "function"}
+)
+# `name ()` defines a function, whose body is a command; no regex opens with
+# an empty group.
+EMPTY_GROUP = re.compile(r"\([ \t]*\)")
+
+
+def fold_regex_operands(text: str) -> tuple[str, list[str]]:
+    """Fold each bash `=~` regex operand that holds parentheses into one
+    opaque word, returning the process substitutions in it, which run.
+
+    `text` has its command substitutions lifted. Only an unquoted, unescaped
+    `=~` that follows a word counts, read from the raw text. As bash reads
+    the operand, `|`, blanks and other metacharacters are part of it only
+    inside balanced parentheses; it ends at an unparenthesized blank or
+    metacharacter, which the tokenizer then reads as before. A `(` in the
+    middle of a simple command is a syntax error, so if the `[[` around the
+    operand is not real (quoted, escaped, a case pattern), bash runs nothing
+    the fold hides. An operand this cannot read whole is left unfolded."""
+    out: list[str] = []
+    processes: list[str] = []
+    quote, index = "", 0
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == "\\" and quote == '"':
+                out.append(text[index : index + 2])
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        elif char == "\\":
+            out.append(text[index : index + 2])
+            index += 2
+            continue
+        else:
+            operator = REGEX_OPERATOR.match(text, index)
+            if (
+                operator
+                and PRECEDING_WORD.search(text, 0, index).group(0) not in COMMAND_POSITION_WORDS
+                and not EMPTY_GROUP.match(text, operator.end())
+            ):
+                folded = regex_operand(text, operator.end())
+                if folded is not None:
+                    end, inner = folded
+                    out.append(text[index : operator.end()] + "__REGEX__")
+                    processes += inner
+                    index = end
+                    continue
+        out.append(char)
+        index += 1
+    return "".join(out), processes
+
+
+def regex_operand(text: str, start: int) -> tuple[int, list[str]] | None:
+    """(end, process substitutions) of the `=~` operand at `start`, or None
+    when it holds no parentheses or cannot be read whole. A parameter
+    expansion or `$[ ]` is never read: bash does not count the parentheses
+    inside one, so the group around it could close anywhere."""
+    depth, quote, index, grouped = 0, "", start, False
+    processes: list[str] = []
+    while index < len(text):
+        char = text[index]
+        if text.startswith(("${", "$["), index):
+            return None  # bash does not count a parenthesis inside either
+        if quote:
+            if char == "\\" and quote == '"':
+                index += 1
+            elif char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        elif char == "\\":
+            index += 1
+        elif text.startswith(("<(", ">("), index):
+            end = matching_paren(text, index + 2)
+            if end >= len(text):
+                return None
+            processes.append(text[index + 2 : end])
+            grouped = True
+            index = end
+        elif char == "(":
+            depth += 1
+            grouped = True
+        elif char == ")" and depth:
+            depth -= 1
+        elif char == "\n":
+            if depth:
+                return None
+            break
+        elif not depth and (char in " \t" or char in ";&|<>()"):
+            break
+        index += 1
+    if quote or depth or not grouped:
+        return None
+    return index, processes
+
+
 def lift_substitutions(text: str) -> tuple[str, list[str]]:
     """Replace each `$( … )` and backtick command outside single quotes with
     a placeholder word, returning the commands they run. Quoting restarts
@@ -1429,6 +1542,10 @@ def tracked_bytes(root: str, relative: str) -> bytes | None:
         return handle.read()
 
 
+# How a program is reached, in heap order: "invoked" and "plain" before "named".
+TRACE_MODES = ("invoked", "plain", "named")
+
+
 class ProgramTrace:
     """Every scanned-tree program a full-checkout backlog job runs, followed
     from the shallowest depth it is reached at, and every form it cannot
@@ -1461,8 +1578,10 @@ class ProgramTrace:
         self.data_reads = data_reads
         # program -> modes followed. "invoked": reached by an invocation the
         # trace models, so every form in it is traced and an unresolvable
-        # composed target refuses. "named": reached only because a literal
-        # names it, so it is bound and its own literals followed (round 8).
+        # composed target refuses; "plain" likewise, but run by a shell other
+        # than bash, so a bash shebang does not make it fold a `=~` regex.
+        # "named": reached only because a literal names it, so it is bound
+        # and its own literals followed (round 8).
         self.followed: dict[str, set[str]] = {}
         self.best: dict[str, int] = {}
         self.heap: list[tuple[int, int, str]] = []
@@ -1488,17 +1607,17 @@ class ProgramTrace:
             self.package = {}
             self.unresolve("package.json does not parse")
         runs = [
-            step["run"]
+            (step["run"], runs_bash(step.get("shell")))
             for step in job.get("steps") or []
             if isinstance(step, dict) and isinstance(step.get("run"), str)
         ]
-        for run in runs:
-            self.shell(run, "", 0, data=True)
+        for run, bash in runs:
+            self.shell(run, "", 0, data=True, bash=bash)
         while self.heap:
             depth, rank, program = heapq.heappop(self.heap)
-            mode = ("invoked", "named")[rank]
+            mode = TRACE_MODES[rank]
             done = self.followed.setdefault(program, set())
-            if "invoked" in done or mode in done:
+            if mode in done or (mode == "named" and done & {"invoked", "plain"}):
                 continue
             done.add(mode)
             self.follow(program, depth, mode)
@@ -1533,7 +1652,7 @@ class ProgramTrace:
                 self.unresolve(f"{relative} ({why}) is a symbolic link out of the scanned tree, broken, or looping")
                 return
             return self.reach(target, depth, f"{why}, through the link {relative}", mode)
-        if self.capped is not None and mode == "invoked":
+        if self.capped is not None and mode != "named":
             self.unresolve(f"{self.capped} is nested beyond {MAX_CLOSURE_DEPTH} and still runs {relative} ({why})")
             return
         if self.bind(relative) is None and relative not in self.bound:
@@ -1542,7 +1661,7 @@ class ProgramTrace:
         key = f"{mode}:{relative}"
         if depth < self.best.get(key, 1 << 30):
             self.best[key] = depth
-            heapq.heappush(self.heap, (depth, 0 if mode == "invoked" else 1, relative))
+            heapq.heappush(self.heap, (depth, TRACE_MODES.index(mode), relative))
 
     def literals(self, text: str, origin: str, depth: int) -> None:
         """Bind and follow every tracked program a literal in `text` names,
@@ -1578,7 +1697,8 @@ class ProgramTrace:
             elif program.endswith((".js", ".mjs", ".cjs")) or re.match(r"#!.*\bnode\b", content):
                 self.javascript(content, program, depth)
             elif is_shell_script(program, content):
-                self.shell(content, program, depth, data=depth <= 1)
+                bash = mode == "invoked" and bool(BASH_SHEBANG.match(content))
+                self.shell(content, program, depth, data=depth <= 1, bash=bash)
         finally:
             self.capped = None
 
@@ -1616,10 +1736,11 @@ class ProgramTrace:
             return "external", ""
         return "unresolved", token
 
-    def run_target(self, token: str, origin: str, assignments: dict[str, set[str]], depth: int, why: str) -> None:
+    def run_target(self, token: str, origin: str, assignments: dict[str, set[str]], depth: int, why: str,
+                   mode: str = "invoked") -> None:
         kind, value = self.resolve(token, origin, assignments)
         if kind == "tree":
-            self.reach(value, depth + 1, why)
+            self.reach(value, depth + 1, why, mode)
         elif kind == "unresolved":
             if value in self.guarded and "$" not in value and not value.startswith("/"):
                 # An optional hook the scanned tree does not hold: a checkout of
@@ -1628,7 +1749,8 @@ class ProgramTrace:
             self.unresolve(f"{origin or 'a step'} runs {value!r} ({why}), which no rule resolves to a scanned file")
 
     # -- shell -----------------------------------------------------------
-    def shell(self, text: str, origin: str, depth: int, data: bool = False, inherited=None) -> None:
+    def shell(self, text: str, origin: str, depth: int, data: bool = False, inherited=None,
+              bash: bool = False) -> None:
         text = without_comments(text)
         self.texts.append((origin, text))
         if self.tolerated and origin == self.tolerated[0] and self.tolerated[1] in text:
@@ -1650,6 +1772,9 @@ class ProgramTrace:
             text = text.replace(self.tolerated[1], "true", 1)
         body, heredocs = split_heredocs(strip_shell_comments(text.replace("\\\n", " ")))
         body, substitutions = lift_substitutions(body)
+        if bash:
+            body, processes = fold_regex_operands(body)
+            substitutions += processes
         self.guarded |= set(re.findall(r"\[\[?\s+-[xef]\s+([\w./-]+)\s*\]", body))
         assignments: dict[str, set[str]] = {key: set(value) for key, value in (inherited or ({}, set(), {}))[0].items()}
         wrappers = set((inherited or ({}, set(), {}))[1])
@@ -1666,16 +1791,16 @@ class ProgramTrace:
                 assignments.setdefault(match.group(1), set()).add(match.group(2))
         scope = (assignments, wrappers, heredocs)
         for inner in substitutions:
-            self.shell(inner, origin, depth, inherited=scope)
+            self.shell(inner, origin, depth, inherited=scope, bash=bash)
         command: list[str] = []
         for token in tokens + ["\n"]:
             if token in SEPARATOR_TOKENS:
-                self.command(command, origin, depth, scope)
+                self.command(command, origin, depth, scope, bash)
                 command = []
             else:
                 command.append(token)
 
-    def command(self, words, origin, depth, scope) -> None:
+    def command(self, words, origin, depth, scope, bash: bool = False) -> None:
         assignments, wrappers, heredocs = scope
         words = list(words)
         while words and (ASSIGNMENT.match(words[0]) or words[0] in COMPOUND_WORDS or words[0] in PREFIX_OPTIONS):
@@ -1700,7 +1825,7 @@ class ProgramTrace:
             return
         head = words[0]
         if head in wrappers:
-            return self.command(words[1:], origin, depth, scope)
+            return self.command(words[1:], origin, depth, scope, bash)
         stdin = None
         kept: list[str] = []
         index = 0
@@ -1723,7 +1848,7 @@ class ProgramTrace:
         name = os.path.basename(head)
         where = f"{origin or 'a step'}: {' '.join(words)[:80]}"
         if name in SHELL_NAMES:
-            return self.shell_call(words[1:], stdin, origin, depth, scope, where)
+            return self.shell_call(words[1:], stdin, origin, depth, scope, where, bash=name == "bash")
         if name in PYTHON_NAMES:
             return self.python_call(words[1:], stdin, origin, depth, scope, where)
         if name in NODE_NAMES:
@@ -1735,7 +1860,8 @@ class ProgramTrace:
             if len(words) < 2:
                 self.unresolve(f"{where}: source without a file")
                 return
-            return self.run_target(words[1], origin, assignments, depth, "sourced")
+            return self.run_target(words[1], origin, assignments, depth, "sourced",
+                                   "invoked" if bash else "plain")
         if head in ("eval", "xargs", "npx"):
             self.unresolve(f"{where}: {head} runs a command this checker cannot read")
             return
@@ -1770,7 +1896,7 @@ class ProgramTrace:
             return
         self.command(list(words), origin, depth, ({}, set(), {}))
 
-    def shell_call(self, args, stdin, origin, depth, scope, where) -> None:
+    def shell_call(self, args, stdin, origin, depth, scope, where, bash: bool = False) -> None:
         assignments, _, heredocs = scope
         index = 0
         # `-s`: the program is standard input and every operand an argument.
@@ -1784,7 +1910,7 @@ class ProgramTrace:
                 if index + 1 >= len(args):
                     self.unresolve(f"{where}: -c without code")
                     return
-                self.shell(args[index + 1], origin, depth, inherited=scope)
+                self.shell(args[index + 1], origin, depth, inherited=scope, bash=bash)
                 return
             index += 1
             if not flag.startswith("--") and "s" in flag[1:]:
@@ -1793,11 +1919,13 @@ class ProgramTrace:
         if index < len(args) and args[index] == "--":
             index += 1
         if not reads_stdin and index < len(args) and args[index] != "-":
-            return self.run_target(args[index], origin, assignments, depth, "shell script")
+            return self.run_target(args[index], origin, assignments, depth, "shell script",
+                                   "invoked" if bash else "plain")
         if stdin in heredocs:
-            return self.shell(heredocs[stdin], origin, depth, inherited=scope)
+            return self.shell(heredocs[stdin], origin, depth, inherited=scope, bash=bash)
         if stdin:
-            return self.run_target(stdin, origin, assignments, depth, "shell input")
+            return self.run_target(stdin, origin, assignments, depth, "shell input",
+                                   "invoked" if bash else "plain")
         if reads_stdin:
             self.unresolve(f"{where}: `-s` reads its program from a pipe this checker cannot read")
             return
