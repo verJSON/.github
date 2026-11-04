@@ -67,18 +67,30 @@ grep -q "renovate-compatibility-canary.yml@$sha" <<<"$caller" \
   && grep -q '^  contents: read$' <<<"$caller" \
   && ! grep -Eq 'secrets: inherit|write' <<<"$caller" \
   && pass "generated caller is immutable and read-only" || fail "generated caller contract drifted"
-bash "$generator" "$sha" 'bad;echo pwned' 7.1.0 node-jest-ts-jest >/dev/null 2>&1 \
-  && fail "generator accepted package injection" || pass "generator rejects package injection"
+package_injection_error="$(bash "$generator" "$sha" 'bad;echo pwned' 7.1.0 node-jest-ts-jest 2>&1 >/dev/null)"
+package_injection_code=$?
+[ "$package_injection_code" = 1 ] \
+  && [ "$package_injection_error" = 'package must be an npm package name (lowercase, optionally @scope/-qualified)' ] \
+  && pass "generator rejects package injection" \
+  || fail "generator accepted package injection: exit $package_injection_code: $package_injection_error"
 # Each value is quoted into the caller's YAML, so a stray quote would end the
 # string and inject keys. The validation fails before anything is emitted (#1995).
-expect_generator_rejects() { # <label> <candidate> <profile>
+expect_generator_rejects() { # <label> <reason> <candidate> <profile>
   local output code
-  output="$(bash "$generator" "$sha" typescript "$2" "$3" 2>/dev/null)"
+  output="$(bash "$generator" "$sha" typescript "$3" "$4" 2>"$generator_stderr")"
   code=$?
-  [ "$code" = 1 ] && [ -z "$output" ] && pass "$1" || fail "$1: exit $code, emitted ${#output} bytes"
+  [ "$code" = 1 ] && [ -z "$output" ] && [ "$(cat "$generator_stderr")" = "$2" ] \
+    && pass "$1" \
+    || fail "$1: exit $code, emitted ${#output} bytes: $(cat "$generator_stderr")"
 }
-expect_generator_rejects "generator rejects candidate injection" "7.1.0'"$'\n'"      secrets: inherit #" node-jest-ts-jest
-expect_generator_rejects "generator rejects stack-profile injection" 7.1.0 "node-jest'"$'\n'"      secrets: inherit #"
+generator_stderr="$(mktemp)"
+trap 'rm -f "$generator_stderr"' EXIT
+expect_generator_rejects "generator rejects candidate injection" \
+  'candidate must be an exact SemVer version' \
+  "7.1.0'"$'\n'"      secrets: inherit #" node-jest-ts-jest
+expect_generator_rejects "generator rejects stack-profile injection" \
+  'stack-profile must contain only lowercase letters, digits, and hyphens' \
+  7.1.0 "node-jest'"$'\n'"      secrets: inherit #"
 
 if [ "$fails" -gt 0 ]; then exit 1; fi
 echo "All tests passed."

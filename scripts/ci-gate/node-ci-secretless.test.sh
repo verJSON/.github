@@ -98,12 +98,15 @@ for step in doc["jobs"]["acquire-secretless-dependencies"]["steps"]:
         print(step["run"])
 PY
 
+fork_rc=0
+fork_output="$(EVENT_NAME=pull_request HEAD_REPOSITORY=attacker/fork REPOSITORY=verJSON/example \
+  NODE_AUTH_TOKEN=token SCHEMA_DIR='' APPROVED_INTERNAL_PACKAGES='' \
+  SECRETLESS_PR=true SECRETLESS_TRUSTED_REF=false bash "$boundary_script" 2>&1)" || fork_rc=$?
 if EVENT_NAME=pull_request HEAD_REPOSITORY=Verjson/example REPOSITORY=verJSON/example \
     NODE_AUTH_TOKEN=token SCHEMA_DIR='' APPROVED_INTERNAL_PACKAGES='' \
     SECRETLESS_PR=true SECRETLESS_TRUSTED_REF=false bash "$boundary_script" \
-    && ! EVENT_NAME=pull_request HEAD_REPOSITORY=attacker/fork REPOSITORY=verJSON/example \
-      NODE_AUTH_TOKEN=token SCHEMA_DIR='' APPROVED_INTERNAL_PACKAGES='' \
-      SECRETLESS_PR=true SECRETLESS_TRUSTED_REF=false bash "$boundary_script" >/dev/null 2>&1; then
+    && [ "$fork_rc" = 1 ] \
+    && grep -qxF '::error::secretless-pr requires a same-repository pull request; fork PRs receive no package credential' <<<"$fork_output"; then
   pass "case-varied same-repository PRs are admitted and fork PRs fail closed"
 else
   fail "secretless event admission does not enforce same-repository pull requests"
@@ -159,8 +162,12 @@ else
   fail "acquisition npm configuration is not fixed and host-scoped"
 fi
 
-if (cd "$acquire_fixture/malicious" && bash "$consumer_config_script") >/dev/null 2>&1 \
-    || [ -e "$acquire_fixture/malicious.log" ]; then
+consumer_config_rc=0
+consumer_config_output="$(cd "$acquire_fixture/malicious" && bash "$consumer_config_script" 2>&1)" \
+  || consumer_config_rc=$?
+if [ "$consumer_config_rc" != 1 ] || [ -e "$acquire_fixture/malicious.log" ] \
+    || ! grep -qxF '::error::secretless mode rejects repository-controlled npm config: ./.npmrc' <<<"$consumer_config_output"; then
+  printf '  rc=%s: %s\n' "$consumer_config_rc" "$consumer_config_output" >&2
   fail "a PR-controlled external-registry npmrc reached authenticated npm"
 else
   pass "a PR-controlled external-registry/token-interpolation npmrc fails before npm"
@@ -207,6 +214,20 @@ run_validator() {
     TRUSTED_PACKAGE_POLICY="$policy" python3 "$validator")
 }
 
+# The validator exits 1 through sys.exit(<reason>) for every rejection, and so
+# does an uncaught exception; only the reason line says which guard held.
+assert_validator_rejects() { # <reason> <pass label> <fail label> <run_validator args>...
+  local reason="$1" pass_label="$2" fail_label="$3" output rc=0
+  shift 3
+  output="$(run_validator "$@" 2>&1)" || rc=$?
+  if [ "$rc" = 1 ] && grep -qxF -- "$reason" <<<"$output"; then
+    pass "$pass_label"
+  else
+    printf '  rc=%s, expected: %s\n%s\n' "$rc" "$reason" "$output" >&2
+    fail "$fail_label"
+  fi
+}
+
 fixture="$(mktemp -d)"
 trap 'rm -f "$validator" "$acquire_script" "$boundary_script" "$consumer_config_script"; rm -rf "$fixture" "$acquire_fixture"' EXIT
 mkdir -p "$fixture/valid" "$fixture/missing-integrity" "$fixture/second-scope" "$fixture/scoped-root" "$fixture/hidden-name" "$fixture/dot-root" "$fixture/unapproved" "$fixture/external" "$fixture/unused" "$fixture/alias" "$fixture/direct" "$fixture/dot-segment" "$fixture/backslash"
@@ -234,80 +255,75 @@ printf '%s\n' '{"lockfileVersion":3,"packages":{"":{},"node_modules/@verjson/ide
 run_validator "$fixture/valid" '@verjson/identity-contracts' >/dev/null 2>&1 \
   && pass "an exact allowlisted GitHub Packages dependency is accepted" \
   || fail "an exact allowlisted GitHub Packages dependency was rejected"
-if run_validator "$fixture/missing-integrity" '@verjson/identity-contracts' >/dev/null 2>&1; then
-  fail "an approved private package without lock integrity was accepted"
-else
-  pass "every approved private package requires exact sha512 lock integrity"
-fi
+assert_validator_rejects '@verjson/identity-contracts requires one exact sha512 lock integrity' \
+  "every approved private package requires exact sha512 lock integrity" \
+  "an approved private package without lock integrity was accepted" \
+  "$fixture/missing-integrity" '@verjson/identity-contracts'
 package_policy='{"scopes":["@tequityapp","@verjson"],"packages":["@tequityapp/tequity-schema","@verjson/identity-contracts"]}'
 run_validator "$fixture/second-scope" $'@tequityapp/tequity-schema\n@verjson/identity-contracts' \
   $'@tequityapp\n@verjson' "$package_policy" >/dev/null 2>&1 \
   && pass "exact packages under two approved scopes are accepted" \
   || fail "a second exact approved internal scope was rejected"
-if run_validator "$fixture/second-scope" $'@tequityapp/tequity-schema\n@verjson/identity-contracts' \
-    $'@attacker\n@verjson' "$package_policy" >/dev/null 2>&1; then
-  fail "PR-controlled internal scopes overrode trusted repository policy"
-else
-  pass "PR-controlled internal scopes cannot expand trusted package policy"
-fi
-if run_validator "$fixture/second-scope" $'@tequityapp/tequity-schema\n@verjson/identity-contracts' '@verjson' >/dev/null 2>&1; then
-  fail "a package under an unapproved scope was accepted"
-else
-  pass "a package under an unapproved scope is rejected"
-fi
-if run_validator "$fixture/valid" '@verjson/identity-contracts' '@verjson/../attacker' >/dev/null 2>&1; then
-  fail "a malformed internal scope was accepted"
-else
-  pass "malformed internal scopes fail closed"
-fi
+assert_validator_rejects 'approved internal scopes must exactly match, and approved internal packages must be a subset of, trusted repository policy' \
+  "PR-controlled internal scopes cannot expand trusted package policy" \
+  "PR-controlled internal scopes overrode trusted repository policy" \
+  "$fixture/second-scope" $'@tequityapp/tequity-schema\n@verjson/identity-contracts' \
+    $'@attacker\n@tequityapp\n@verjson' "$package_policy"
+# The same guard's other half. The scopes match the policy exactly, so only the
+# package-subset comparison can reject an approval the policy does not list; the
+# lock holds both packages, so no later check would.
+assert_validator_rejects 'approved internal scopes must exactly match, and approved internal packages must be a subset of, trusted repository policy' \
+  "PR-controlled package approvals cannot expand trusted package policy" \
+  "PR-controlled package approvals overrode trusted repository policy" \
+  "$fixture/second-scope" $'@tequityapp/tequity-schema\n@verjson/identity-contracts' \
+    $'@tequityapp\n@verjson' '{"scopes":["@tequityapp","@verjson"],"packages":["@verjson/identity-contracts"]}'
+assert_validator_rejects 'approved-internal-packages accepts exact names under approved-internal-scopes only' \
+  "a package under an unapproved scope is rejected" \
+  "a package under an unapproved scope was accepted" \
+  "$fixture/second-scope" $'@tequityapp/tequity-schema\n@verjson/identity-contracts' '@verjson'
+assert_validator_rejects 'approved-internal-scopes accepts exact lowercase npm scopes only' \
+  "malformed internal scopes fail closed" \
+  "a malformed internal scope was accepted" \
+  "$fixture/valid" '@verjson/identity-contracts' '@verjson/../attacker'
 run_validator "$fixture/scoped-root" '@verjson/identity-contracts' >/dev/null 2>&1 \
   && pass "a scoped @verjson root project is ignored while its dependency is validated" \
   || fail "a scoped @verjson root project was treated as an installed dependency"
-if run_validator "$fixture/hidden-name" '' >/dev/null 2>&1; then
-  fail "an internal dependency hidden under a non-root lock path was ignored"
-else
-  pass "a named internal dependency under a non-root lock path is validated"
-fi
-if run_validator "$fixture/dot-root" '' >/dev/null 2>&1; then
-  fail "a dot-shaped lock path was mistaken for the root project entry"
-else
-  pass "only the exact empty lock path receives the root-project exemption"
-fi
-if run_validator "$fixture/unapproved" '' >/dev/null 2>&1; then
-  fail "an unapproved internal dependency was accepted"
-else
-  pass "an unapproved internal dependency is rejected"
-fi
-if run_validator "$fixture/external" '@verjson/identity-contracts' >/dev/null 2>&1; then
-  fail "an approved name redirected to an external registry was accepted"
-else
-  pass "an approved name redirected to an external registry is rejected"
-fi
-if run_validator "$fixture/unused" '@verjson/identity-contracts' >/dev/null 2>&1; then
-  fail "an unused approval was accepted"
-else
-  pass "an unused approval is rejected"
-fi
-if run_validator "$fixture/alias" '@verjson/identity-contracts' >/dev/null 2>&1; then
-  fail "an internal package path aliased to an attacker-controlled package was accepted"
-else
-  pass "an internal package path alias is rejected"
-fi
-if run_validator "$fixture/direct" '@verjson/identity-contracts' >/dev/null 2>&1; then
-  fail "a direct URL to an unapproved private package was accepted"
-else
-  pass "a direct URL to an unapproved private package is rejected"
-fi
-if run_validator "$fixture/dot-segment" '@verjson/identity-contracts' >/dev/null 2>&1; then
-  fail "a dot-segment URL normalizing to an unapproved private package was accepted"
-else
-  pass "a dot-segment private package URL is rejected"
-fi
-if run_validator "$fixture/backslash" '@verjson/identity-contracts' >/dev/null 2>&1; then
-  fail "a backslash URL normalizing to an unapproved private package was accepted"
-else
-  pass "a backslash-normalized private package URL is rejected"
-fi
+assert_validator_rejects '@verjson/unapproved-private is not pinned to its GitHub Packages download URL' \
+  "a named internal dependency under a non-root lock path is validated" \
+  "an internal dependency hidden under a non-root lock path was ignored" \
+  "$fixture/hidden-name" ''
+assert_validator_rejects '@verjson/unapproved-private is not pinned to its GitHub Packages download URL' \
+  "only the exact empty lock path receives the root-project exemption" \
+  "a dot-shaped lock path was mistaken for the root project entry" \
+  "$fixture/dot-root" ''
+assert_validator_rejects 'unapproved GitHub Packages download: @verjson/identity-contracts' \
+  "an unapproved internal dependency is rejected" \
+  "an unapproved internal dependency was accepted" \
+  "$fixture/unapproved" ''
+assert_validator_rejects '@verjson/identity-contracts is not pinned to its GitHub Packages download URL' \
+  "an approved name redirected to an external registry is rejected" \
+  "an approved name redirected to an external registry was accepted" \
+  "$fixture/external" '@verjson/identity-contracts'
+assert_validator_rejects 'approved internal dependencies absent from lock: @verjson/identity-contracts' \
+  "an unused approval is rejected" \
+  "an unused approval was accepted" \
+  "$fixture/unused" '@verjson/identity-contracts'
+assert_validator_rejects '@verjson/identity-contracts lock entry aliases unexpected package attacker-alias' \
+  "an internal package path alias is rejected" \
+  "an internal package path aliased to an attacker-controlled package was accepted" \
+  "$fixture/alias" '@verjson/identity-contracts'
+assert_validator_rejects 'unapproved GitHub Packages download: @verjson/unapproved-private' \
+  "a direct URL to an unapproved private package is rejected" \
+  "a direct URL to an unapproved private package was accepted" \
+  "$fixture/direct" '@verjson/identity-contracts'
+assert_validator_rejects 'invalid GitHub Packages download URL: https://npm.pkg.github.com/download/@verjson/identity-contracts/../../@verjson/unapproved-private/1.0.0/abc' \
+  "a dot-segment private package URL is rejected" \
+  "a dot-segment URL normalizing to an unapproved private package was accepted" \
+  "$fixture/dot-segment" '@verjson/identity-contracts'
+assert_validator_rejects 'invalid GitHub Packages download URL: https://npm.pkg.github.com/download/@verjson/identity-contracts/..%5C..%5C@verjson%5Cunapproved-private%5C1.0.0/abc' \
+  "a backslash-normalized private package URL is rejected" \
+  "a backslash URL normalizing to an unapproved private package was accepted" \
+  "$fixture/backslash" '@verjson/identity-contracts'
 
 # #1782: a temporary-root sandbox binding /usr must also bind the Debian
 # alternatives farm, or /usr/bin/awk, cc, and similar links dangle. The real
