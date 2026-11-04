@@ -6,7 +6,8 @@ rule. GitHub blocks the merge ("base branch policy prohibits merge") until that
 required workflow has a successful run on the exact head.
 `scripts/assert-mergeable-head.sh` checks the same condition as **Gate W**
 ([ADR 0255](decisions/0255-gate-w-required-workflow-run-precondition/README.md)).
-Gate W exits 3 and names the reason.
+Gate W exits 3, names the reason, and prints that reason's recovery from
+[Recovery by refusal reason](#recovery-by-refusal-reason).
 
 A required run cannot be re-run: `gh run rerun` answers HTTP 404 on its
 `/actions/workflows/<id>` path, because the workflow is injected by the
@@ -158,4 +159,8 @@ third is one required run replacing another (ADR 0255 §5).
 | `stale` | [Re-arm sweep](#re-arm-sweep-after-a-ruleset-edit): one close-and-reopen under the interim rules. |
 | `absent` | The head has no required run. Check that the repository is enrolled and the base ref carries the rule. Then use the interim recovery. |
 | `not successful` | The required run failed or skipped. Read its log and fix the cause before re-arming. |
-| `unbound`, `ambiguous`, `undated`, `changed`, unreadable rule | Do not re-arm. The evidence cannot be attributed. Re-run the read-only assertion. If the refusal persists, escalate on #1905 with the message. |
+| `unbound`, `ambiguous`, `undated`, `changed`, unreadable rule, duplicate paths | Do not re-arm. The evidence cannot be attributed. Re-run the read-only assertion. If the refusal persists, escalate on #1905 with the message. |
+
+The assertion prints this table's recovery for each reason it refuses on.
+`scripts/assert-mergeable-head.required-workflow.test.sh` fails when the
+script's copy and this table disagree, so change them together.
