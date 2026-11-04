@@ -1157,6 +1157,7 @@ def main() -> int:
                "an untrusted path is reported JSON-escaped, never as a raw workflow command")
         report(json.dumps(INJECTED_PATH) in log and not live_commands(log),
                "classification output from untrusted paths runs inside stop-commands", result)
+        harness.reset_state()
         result, _ = harness.run_step("bootstrap-complete", injected, {
             "EXPECTED_EXTERNAL_ID": EXTERNAL_ID, "REVIEW_POLICY": policy("ai-merge"), "BOOTSTRAP_ELIGIBLE": "true",
             "STALE_SHA": STALE, "CONTRACT_SHA": CONTRACT, "APP_TOKEN": "app-token", "APP_SLUG": "verjson-ai-review",
