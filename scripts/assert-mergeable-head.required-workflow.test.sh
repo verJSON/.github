@@ -273,6 +273,20 @@ run
 expect "two required workflows the rules name at one path fail Gate W as ambiguous" 3 \
   "Gate W: the workflows rules of main name 2 required workflows at $GATE_PATH"
 
+# Freshness alone narrows ambiguity: a stale run of another required-workflow id (the
+# registration before a re-registration) beside a fresh successful run of the current
+# one is no candidate for the current rule, so the head passes.
+reset_env
+stale_other="$(wf_run 41600000002 705 332379999 4 'AI review authorization arm' \
+  "https://api.github.com/repos/$REPO/actions/required_workflows/332379999" 2026-11-03T16:00:00Z success '[]')"
+RUNS_FIXTURE="$(wf_runs "$stale_other,$(required_run 41711448295 703 211 2026-11-03T20:19:05Z success)")"
+run
+if [ "$RC" -eq 0 ] && grep -q '^true$' <<<"$OUT"; then
+  pass "a stale run of another required-workflow id beside a fresh success of the current one is not ambiguous"
+else
+  fail "a stale run of another required-workflow id beside a fresh success of the current one is not ambiguous (rc=$RC, output: $OUT)"
+fi
+
 # --- rule change ------------------------------------------------------------------
 # No provider field binds a run to the rule's pinned SHA (a required run reports
 # referenced_workflows []), so a run created before the ruleset last changed is stale
@@ -293,6 +307,15 @@ RUNS_FIXTURE="$(wf_runs "$(required_run 41711448295 703 211 2026-11-03T16:39:01Z
 run
 expect "a required run created in the same second as the ruleset change is stale" 3 \
   "stale: every run of required workflow $GATE_PATH (ruleset $RULESET_ID) on this head was created at or before the ruleset last changed at 2026-11-03T16:39:01.138Z"
+
+# With no fractional part the change and the run share the exact instant. The rule is
+# strictly-after, so a run created at the change instant itself is stale.
+reset_env
+RULESET_FIXTURE="$(ruleset 2026-11-03T16:39:01Z "[$workflow_entry]")"
+RUNS_FIXTURE="$(wf_runs "$(required_run 41711448295 703 211 2026-11-03T16:39:01Z success)")"
+run
+expect "a required run created at the exact instant of a whole-second ruleset change is stale" 3 \
+  "stale: every run of required workflow $GATE_PATH (ruleset $RULESET_ID) on this head was created at or before the ruleset last changed at 2026-11-03T16:39:01Z"
 
 # Where the change time cannot be read, staleness cannot be ruled out, so nothing on
 # the head is evidence. jq orders every number above null, so an unread time would

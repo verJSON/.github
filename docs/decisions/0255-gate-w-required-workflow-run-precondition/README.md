@@ -204,7 +204,11 @@ and on verified new required-run evidence.
   required-workflow id seen only before the ruleset changed is no candidate for
   the current rule. Counting it would make a same-head re-arm after a
   re-registration permanently ambiguous. A stale run never satisfies Gate W in
-  either design.
+  either design. The risk left over: one branch opened as pull requests against
+  two bases whose rulesets require the same path. Those runs carry the same head
+  branch, repository and SHA, so either run binds to both pull requests. That is
+  the F-4(4) PR-identity limit, because no run field reports the pull-request
+  number.
 - **Binding by run name.** A caller chooses the name, as `gate re-arm` does.
 - **Letting the family displacement satisfy Gate W.** That is the #1905 hole
   itself: a repository-controlled run standing in for the organization's.
