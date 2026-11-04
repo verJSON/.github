@@ -15,7 +15,7 @@ GENERATOR = ROOT / 'scripts/gen-changelog-caller.sh'
 
 def generate(mode, *args):
     return subprocess.run(['bash', str(GENERATOR), mode, SHA, *args], cwd=ROOT,
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, env={**os.environ, 'LC_ALL': 'C'})
 
 
 class ExactReleasePackagesTests(unittest.TestCase):
@@ -64,15 +64,18 @@ class ExactReleasePackagesTests(unittest.TestCase):
                     self.assertNotIn('package_dirs=(. ', result.stdout)
 
     def test_invalid_empty_duplicate_and_mixed_selections_produce_no_artifact(self):
-        # The generator rejects a missing value and a mixed selection with its usage text,
-        # which several argument guards share; the other refusals name their guard.
-        usage = 'usage'
+        # A missing value and a mixed selection name their guard and then print the usage
+        # text, which several argument guards share; the other refusals print one line.
+        missing = '--only-package-dir requires a repository-relative directory'
+        exact_then_additive = '--package-dir cannot follow --only-package-dir'
+        additive_then_exact = '--only-package-dir cannot follow --package-dir'
+        with_usage = (missing, exact_then_additive, additive_then_exact)
         unnormalized = 'package dir must be a normalized repository-relative path'
         dotted = 'package dir may not contain . or .. segments'
-        cases = [(['--only-package-dir'], usage), (['--only-package-dir', '',], unnormalized),
+        cases = [(['--only-package-dir'], missing), (['--only-package-dir', '',], unnormalized),
                  (['--only-package-dir', 'schema', '--only-package-dir', 'schema'], 'duplicate package dir: schema'),
-                 (['--only-package-dir', 'schema', '--package-dir', 'compat'], usage),
-                 (['--package-dir', 'compat', '--only-package-dir', 'schema'], usage)]
+                 (['--only-package-dir', 'schema', '--package-dir', 'compat'], exact_then_additive),
+                 (['--package-dir', 'compat', '--only-package-dir', 'schema'], additive_then_exact)]
         cases += [(['--only-package-dir', path], dotted) for path in ('../schema', './schema', 'a/../b', 'a/./b')]
         cases += [(['--only-package-dir', path], unnormalized) for path in
                   ('/schema', 'a//b', 'schema/', '-schema', 'a b', 'a\nb', 'a\\b', "a'", '$(pwd)')]
@@ -81,8 +84,9 @@ class ExactReleasePackagesTests(unittest.TestCase):
                 result = generate('release-node', *args)
                 self.assertEqual(result.returncode, 2)
                 self.assertEqual(result.stdout, '')
-                if reason == usage:
-                    self.assertTrue(result.stderr.startswith('usage: gen-changelog-caller.sh {'), result.stderr)
+                if reason in with_usage:
+                    self.assertTrue(result.stderr.startswith(
+                        f'gen-changelog-caller.sh: {reason}\nusage: gen-changelog-caller.sh {{'), result.stderr)
                 else:
                     self.assertEqual(result.stderr, f'gen-changelog-caller.sh: {reason}\n')
         rejected = generate('renderer', '--only-package-dir', 'schema')

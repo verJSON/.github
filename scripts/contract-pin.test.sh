@@ -144,19 +144,29 @@ for pin in "${pins[@]}"; do
     fi
   done
 
+  # grep exits 1 for a mode that is absent and 2 for a file it cannot read, so
+  # only exit 1 is the semantic mode failure, and only on a mutant that was built.
   missing_mode="$generator_tmp/generator-$pin-missing-workflow.sh"
   awk '$0 != "  workflow)"' "$generator" >"$missing_mode"
-  if generator_supports_mode "$missing_mode" workflow; then
+  mode_status=0
+  generator_supports_mode "$missing_mode" workflow 2>/dev/null || mode_status=$?
+  if [ "$mode_status" -eq 0 ]; then
     fail "a generator missing the 'workflow' case was accepted"
-  else
+  elif [ "$mode_status" -eq 1 ] && [ -s "$missing_mode" ] && ! cmp -s "$generator" "$missing_mode"; then
     pass "a missing generator mode remains a semantic mode failure"
+  else
+    fail "a missing generator mode failed as something other than an absent mode (grep exit $mode_status)"
   fi
 
-  if read_pinned_generator 0000000000000000000000000000000000000000 \
-      "$generator_tmp/unreadable.sh" 2>/dev/null; then
+  # The destination is created before git runs, so an empty file beside a
+  # failed read shows that git, not the redirect, refused the source.
+  unreadable="$generator_tmp/unreadable.sh"
+  if read_pinned_generator 0000000000000000000000000000000000000000 "$unreadable" 2>/dev/null; then
     fail "an unreadable pinned generator was accepted"
-  else
+  elif [ -f "$unreadable" ] && [ ! -s "$unreadable" ]; then
     pass "an unreadable pinned generator remains a source-read failure"
+  else
+    fail "an unreadable pinned generator failed before git could read the source"
   fi
 
   mapfile -t changelog_floors < <(
