@@ -2020,8 +2020,10 @@ for command_id in schema readiness; do
         awk -F '\t' -v command="$command" '$2 != command' "$manifest" >"$mutant"
         ;;
       duplication)
-        cp "$manifest" "$mutant"
-        printf 'changelog-release\t%s\n' "$command" >>"$mutant"
+        # A valid cell, so only the duplicate itself can reject the mutant: the
+        # retired `changelog-release` cell failed the group check first.
+        cp "$manifest" "$mutant" \
+          && printf 'platform\t%s\n' "$command" >>"$mutant"
         ;;
       reassignment)
         awk -F '\t' -v command="$command" '
@@ -2030,8 +2032,13 @@ for command_id in schema readiness; do
         ' "$manifest" >"$mutant"
         ;;
     esac
+    mutator_status=$?
 
-    if validate_manifest "$mutant"; then
+    # validate_manifest rejects an absent or empty file too, so a mutant that
+    # was never written would read as the mutation failing closed.
+    if [ "$mutator_status" -ne 0 ] || [ ! -s "$mutant" ] || cmp -s "$manifest" "$mutant"; then
+      fail "$command_id manifest $mutation mutant was not built (mutator exit $mutator_status), so its rejection proves nothing"
+    elif validate_manifest "$mutant"; then
       fail "$command_id manifest $mutation mutation passed"
     else
       pass "$command_id manifest $mutation mutation fails closed"
