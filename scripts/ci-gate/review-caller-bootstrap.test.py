@@ -365,11 +365,19 @@ class Harness:
         with bootstrap_cache_lock:
             cached = bootstrap_cache.get(key)
         if cached is None:
-            _, outputs = self.run_step("bootstrap", consumer)
+            # The program bootstrap-complete runs is the one this step wrote, or
+            # none: never a stale copy from an earlier step in this harness.
+            program.unlink(missing_ok=True)
+            result, outputs = self.run_step("bootstrap", consumer)
             cached = (outputs, program.read_bytes() if program.exists() else None)
-            with bootstrap_cache_lock:
-                bootstrap_cache.setdefault(key, cached)
-        elif cached[1] is not None:
+            # A failed run is not cached, so a transient failure costs one case
+            # rather than every case that shares the key.
+            if result.returncode == 0:
+                with bootstrap_cache_lock:
+                    bootstrap_cache.setdefault(key, cached)
+        elif cached[1] is None:
+            program.unlink(missing_ok=True)
+        else:
             program.write_bytes(cached[1])
         return dict(cached[0])
 
