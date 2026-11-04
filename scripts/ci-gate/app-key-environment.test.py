@@ -165,6 +165,37 @@ class StorageAuditTests(unittest.TestCase):
             self.assertEqual(audit.github("repos/Verjson/example/actions/secrets?per_page=100"), pages)
         self.assertEqual(run.call_args.args[0][:4], ["gh", "api", "--paginate", "--slurp"])
 
+    def test_a_response_without_pages_never_reads_as_empty_metadata(self):
+        with mock.patch.object(audit.subprocess, "run", return_value=mock.Mock(stdout="[]")):
+            with self.assertRaisesRegex(ValueError, "GitHub returned no metadata pages"):
+                audit.github("repos/Verjson/example/actions/secrets?per_page=100")
+
+    def test_a_page_without_its_collection_never_reads_as_empty(self):
+        with self.assertRaisesRegex(ValueError, "GitHub metadata collection is unavailable"):
+            audit.names([{"total_count": 0}], "secrets")
+
+    def test_a_record_without_a_name_never_counts_toward_the_inventory(self):
+        with self.assertRaisesRegex(ValueError, "GitHub metadata identity is unavailable"):
+            audit.names([{"total_count": 1, "secrets": [{"created_at": "2026-11-04"}]}], "secrets")
+
+    def test_a_repository_that_is_not_owner_name_is_rejected_before_any_read(self):
+        api = mock.Mock(side_effect=metadata().__getitem__)
+        with self.assertRaisesRegex(ValueError, "repository must be owner/name"):
+            audit.audit("Verjson/example/actions", api)
+        api.assert_not_called()
+
+    def test_a_default_branch_other_than_main_is_rejected(self):
+        data = metadata()
+        data["repos/Verjson/example"][0]["default_branch"] = "master"
+        with self.assertRaisesRegex(ValueError, "repository default branch must be main"):
+            audit.audit("Verjson/example", data.__getitem__)
+
+    def test_an_unknown_owner_type_never_skips_the_organization_inventory(self):
+        data = metadata()
+        data["repos/Verjson/example"][0]["owner"] = {}
+        with self.assertRaisesRegex(ValueError, "repository owner identity is unavailable"):
+            audit.audit("Verjson/example", data.__getitem__)
+
 
 class WorkflowBoundaryTests(unittest.TestCase):
     def test_key_consumers_declare_required_environment_and_depend_on_keyless_policy(self):
@@ -729,10 +760,13 @@ class AppKeyRoleManifestValidationTests(unittest.TestCase):
             path = Path(directory) / "roles.json"
             entry = {"role": "release", "secret": "RELEASE_APP_PRIVATE_KEY", "environment": "release-app",
                      "confinement": "canonical", "organization_copy": "withdraw"}
-            for roles in ([], {}, [entry, dict(entry, role="other")]):
+            # The duplicate is otherwise well formed, so only the duplicate check rejects it (#1995).
+            duplicate = dict(entry, role="other", environment="other-app")
+            for roles, reason in (([], "manifest is empty"), ({}, "manifest is empty"),
+                                  ([entry, duplicate], "declares a secret twice")):
                 with self.subTest(roles=roles):
                     path.write_text(json.dumps({"roles": roles}), encoding="utf-8")
-                    with self.assertRaises(ValueError):
+                    with self.assertRaisesRegex(ValueError, reason):
                         audit.load_roles(path)
 
     def test_a_directory_with_no_binding_is_an_error_not_an_empty_result(self):

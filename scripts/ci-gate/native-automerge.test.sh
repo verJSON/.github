@@ -221,7 +221,16 @@ write_base; REVIEW_POLICY="$(encode_policy "$ai_approve_policy")" expect_fail "a
 ! grep -q 'pr merge' "$CALLS" || fail "ai-approve authority attempted a terminal merge"
 write_base; jq '.conclusion="failure"' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK_FILE"; expect_fail "failed authorization never promotes" run_promote
 write_base; jq '.conclusion=null' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK_FILE"; expect_fail "inconclusive authorization never promotes" run_promote
-write_base; printf '[]\n' >"$REVIEWS_FILE"; expect_fail "missing exact App approval never promotes" run_promote
+# Only the App approval is removed; the independent-review receipt stays, so the
+# App-approval guard is the one that must reject (#1995).
+write_base; jq 'del(.[0])' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"
+if run_promote >"$tmp/out" 2>&1; then
+  fail "missing exact App approval never promotes"
+elif grep -qF '::error::the exact-head dedicated App approval is absent' "$tmp/out"; then
+  pass "missing exact App approval never promotes"
+else
+  fail "missing exact App approval failed for another reason: $(tail -1 "$tmp/out")"
+fi
 write_base; jq '.[0].user.login="attacker[bot]"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "wrong approval identity never promotes" run_promote
 write_base; jq '.[0].commit_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "stale App approval never promotes" run_promote
 write_base; jq 'del(.[1])' "$REVIEWS_FILE" >"$tmp/x" && mv "$tmp/x" "$REVIEWS_FILE"; expect_fail "missing independent-review receipt never promotes" run_promote

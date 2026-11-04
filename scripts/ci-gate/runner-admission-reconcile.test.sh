@@ -216,11 +216,15 @@ code=$?
   && pass "larger-runner inventory is collected across every page" \
   || fail "paginated larger-runner inventory was under-reported: $out"
 
-HOSTED_RUNNERS_PAGES='{"total_count":1,"runners":{}}'
-code="$(code_of)"
+# An object of runners iterates to a well-formed, correctly counted runner, so only
+# the collection-type check can reject it (#1995).
+HOSTED_RUNNERS_PAGES='{"total_count":1,"runners":{"general":{"id":42,"name":"general"}}}'
+out="$(run_case)"
+code=$?
 [ "$code" = "2" ] \
+  && grep -qF 'larger-runner inventory response was malformed' <<<"$out" \
   && pass "a malformed larger-runner response is undetermined, never clean" \
-  || fail "malformed larger-runner response did not fail closed: $code"
+  || fail "malformed larger-runner response did not fail closed: $code: $out"
 
 HOSTED_RUNNERS_PAGES='{"total_count":2,"runners":[{"id":42,"name":"general"}]}'
 code="$(code_of)"

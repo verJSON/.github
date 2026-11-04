@@ -109,15 +109,19 @@ write_ruleset_run() {
 
 expect_pass() { label="$1"; shift; if "$@" >"$tmp/out" 2>&1; then pass "$label"; else fail "$label: $(tail -1 "$tmp/out")"; fi; }
 expect_fail() { label="$1"; shift; if "$@" >"$tmp/out" 2>&1; then fail "$label"; else pass "$label"; fi; }
-expect_provenance_fail() {
-  label="$1"; shift
+expect_reason_fail() {
+  label="$1" reason="$2"; shift 2
   if "$@" >"$tmp/out" 2>&1; then
     fail "$label"
-  elif grep -qF '::error::arm run provenance mismatch' "$tmp/out"; then
+  elif grep -qF -- "$reason" "$tmp/out"; then
     pass "$label"
   else
     fail "$label: $(tail -1 "$tmp/out")"
   fi
+}
+expect_provenance_fail() {
+  label="$1"; shift
+  expect_reason_fail "$label" '::error::arm run provenance mismatch' "$@"
 }
 verify() { bash "$verifier"; }
 repack() {
@@ -168,10 +172,13 @@ write_label_run; jq '.workflow_sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' "
 write_label_run; jq '.workflow_ref="Verjson/example/.github/workflows/ai-review-label-rearm.yml@refs/heads/topic"' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"; repack; expect_fail "label caller rejects wrong protected source branch" verify
 write_label_run
 export ARM_RUN_ATTEMPT=2
+# Every other identity agrees on attempt 2, so the replay guard is the only check
+# that can reject this receipt (#1995).
+replayed_external_id="ai-review:v1:$TARGET_REPO:$PR_NUMBER:$EXPECTED_HEAD_SHA:$ARM_RUN_ID:$ARM_RUN_ATTEMPT:$nonce"
 jq '.run_attempt=2' "$RUN_FILE" >"$tmp/x" && mv "$tmp/x" "$RUN_FILE"
-jq '.arm_run_attempt=2 | .external_id=(.external_id | sub(":1:[0-9a-f]{64}$"; ":2:" + .nonce))' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"
-jq '.external_id=(.external_id | sub(":1:[0-9a-f]{64}$"; ":2:" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK_FILE"
-repack; expect_fail "label delivery rejects attempt greater than one" verify
+jq --arg external_id "$replayed_external_id" '.arm_run_attempt=2 | .external_id=$external_id' "$tmp/archive/receipt.json" >"$tmp/x" && mv "$tmp/x" "$tmp/archive/receipt.json"
+jq --arg external_id "$replayed_external_id" '.external_id=$external_id' "$CHECK_FILE" >"$tmp/x" && mv "$tmp/x" "$CHECK_FILE"
+repack; expect_reason_fail "label delivery rejects attempt greater than one" '::error::local caller delivery replay rejected' verify
 write_label_run; jq '.path=".github/workflows/gate-rearm.yml"' "$RUN_FILE" >"$tmp/x" && mv "$tmp/x" "$RUN_FILE"; expect_fail "required arm run rejects label-caller schema-2 cross-mode receipt" verify
 for valid_event in ready_for_review converted_to_draft edited unlabeled; do
   write_lifecycle_run

@@ -503,8 +503,15 @@ elif grep -q 'AI review environment policy did not succeed' "$tmp/out" \
 else
   fail "failed App-key policy did not fail visibly before review dispatch"
 fi
-write_hold; printf '{"data":null,"errors":[{"message":"denied"}]}\n' >"$GRAPHQL_FILE"
-expect_fail "HTTP-200 GraphQL errors fail the hold closed"
+# The mutation still names the expected PR, so only the errors check can reject it (#1995).
+write_hold; printf '{"data":{"disablePullRequestAutoMerge":{"pullRequest":{"id":"PR_id"}}},"errors":[{"message":"denied"}]}\n' >"$GRAPHQL_FILE"
+if run_arm >"$tmp/out" 2>&1; then
+  fail "HTTP-200 GraphQL errors fail the hold closed"
+elif grep -qF '::error::GitHub did not confirm auto-merge was disabled for the expected PR' "$tmp/out"; then
+  pass "HTTP-200 GraphQL errors fail the hold closed"
+else
+  fail "HTTP-200 GraphQL errors failed for another reason: $(tail -1 "$tmp/out")"
+fi
 write_hold; printf '{"data":{"disablePullRequestAutoMerge":{"pullRequest":{"id":"wrong"}}}}\n' >"$GRAPHQL_FILE"
 expect_fail "a mutation response for another PR fails closed"
 write_hold; printf '{"id":"PR_id","autoMergeRequest":{"enabledAt":"still-on"}}\n' >"$DISABLED_META_FILE"
