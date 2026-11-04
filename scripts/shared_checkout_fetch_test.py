@@ -4,7 +4,8 @@
 Mutual exclusion itself is proven against real concurrent gates in
 `scripts/ci-gate/hub-changelog-validate-concurrent-deepen.test.sh`. These tests
 replace the lock with one that lets another writer finish first, and assert that
-the waiting writer then does not undo that writer's work.
+the waiting writer then does not undo that writer's work. A checkout the helper
+cannot inspect or lock is a typed error, never a silent pass.
 """
 from contextlib import contextmanager
 import importlib.util
@@ -76,6 +77,20 @@ class SharedCheckoutFetchTests(unittest.TestCase):
         self.assertTrue(deepened)
         self.assertFalse(is_shallow(self.checkout),
                          "a bounded deepen truncated history another writer completed")
+
+    def test_an_unopenable_git_directory_is_a_typed_error(self):
+        missing = str(self.tmp / "missing-git-dir")
+
+        with mock.patch.object(MODULE, "_common_dir", return_value=missing):
+            with self.assertRaisesRegex(MODULE.SharedCheckoutError, "cannot open .*missing-git-dir"):
+                MODULE.fetch(self.checkout, "origin")
+
+    def test_an_uninspectable_repository_is_not_treated_as_complete(self):
+        not_a_repository = self.tmp / "not-a-repository"
+        not_a_repository.mkdir()
+
+        with self.assertRaisesRegex(MODULE.SharedCheckoutError, "cannot tell whether .* is shallow"):
+            MODULE.unshallow(not_a_repository)
 
     def test_ensure_commit_refuses_an_option_in_place_of_a_commit(self):
         marker = self.tmp / "upload-pack-ran"

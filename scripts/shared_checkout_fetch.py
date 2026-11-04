@@ -48,7 +48,7 @@ _COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 
 class SharedCheckoutError(RuntimeError):
-    """The repository's git directory, and so its lock, cannot be located."""
+    """The repository, its git directory, or its lock cannot be inspected or opened."""
 
 
 def _git(repo: Path | str, *args: str, **run_options) -> subprocess.CompletedProcess:
@@ -69,7 +69,13 @@ def _common_dir(repo: Path | str) -> str:
 
 @contextmanager
 def history_lock(repo: Path | str) -> Iterator[None]:
-    descriptor = os.open(_common_dir(repo), os.O_RDONLY)
+    common_dir = _common_dir(repo)
+    try:
+        descriptor = os.open(common_dir, os.O_RDONLY)
+    except OSError as error:
+        raise SharedCheckoutError(
+            f"cannot open the git directory {common_dir} to lock it: {error}"
+        ) from None
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         yield
@@ -80,7 +86,13 @@ def history_lock(repo: Path | str) -> Iterator[None]:
 
 def _is_shallow(repo: Path | str) -> bool:
     result = _git(repo, "rev-parse", "--is-shallow-repository", capture_output=True, text=True)
-    return result.returncode == 0 and result.stdout.strip() == "true"
+    # Failing open here would report an uninspectable checkout as complete, and
+    # every caller would then skip the fetch its check depends on.
+    if result.returncode != 0:
+        raise SharedCheckoutError(
+            f"cannot tell whether {repo} is shallow: {result.stderr.strip()}"
+        )
+    return result.stdout.strip() == "true"
 
 
 def _has_commit(repo: Path | str, sha: str) -> bool:
