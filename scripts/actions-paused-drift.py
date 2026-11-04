@@ -29,6 +29,10 @@ class PausedRelaxationRefused(Exception):
     """`evaluate` on a ruleset is not ADR 0252's reviewed paused image."""
 
 
+class PausedStateUnreadable(Exception):
+    """The paused state could not be established; that is not drift, so no restore is advised."""
+
+
 def unique_object(pairs):
     result = {}
     for key, value in pairs:
@@ -338,13 +342,14 @@ def collect_relaxation_findings(policy: dict, states: dict, repositories: dict, 
 def accept_paused_evaluate(ruleset_id: int, repository_ids: list, policy_path: Path = CHECKED_IN_POLICY):
     """Describe why `evaluate` on this ruleset is ADR 0252's reviewed paused image.
 
-    Raises PausedRelaxationRefused, naming the repository, when it is not.
+    Raises PausedRelaxationRefused, naming the repository, when it is not, and
+    PausedStateUnreadable when the policy or the live state cannot be read.
     """
     restore = "restore enforcement to active (ADR 0252)"
     try:
         policy = read_policy(policy_path)
     except (OSError, AuditDataError) as error:
-        raise PausedRelaxationRefused(
+        raise PausedStateUnreadable(
             f"enforcement is evaluate but the ADR 0252 policy cannot be read ({error})"
         ) from None
     recorded = [item for item in policy["relaxations"] if item["ruleset_id"] == ruleset_id]
@@ -358,9 +363,8 @@ def accept_paused_evaluate(ruleset_id: int, repository_ids: list, policy_path: P
         listed = read_repositories(policy["organization"]).get(name)
         state = read_actions_states(policy["organization"], policy["property"]).get(name)
     except (AuditDataError, RuntimeError) as error:
-        raise PausedRelaxationRefused(
-            f"enforcement is evaluate but {policy['property']} of {name} cannot be read "
-            f"({error}); {restore}"
+        raise PausedStateUnreadable(
+            f"enforcement is evaluate but {policy['property']} of {name} cannot be read ({error})"
         ) from None
     listed_id = "absent from the organization" if listed is None else listed["id"]
     if list(repository_ids) != [listed_id]:

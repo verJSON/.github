@@ -487,6 +487,8 @@ def paused_image(ruleset_id, live, expected):
         )
     except PAUSED.PausedRelaxationRefused as refusal:
         raise ContractError(str(refusal)) from None
+    except PAUSED.PausedStateUnreadable as error:
+        raise ContractError(f"cannot establish ADR 0252 paused state: {error}") from None
     return {**expected, "enforcement": "evaluate"}, f"; {acceptance}"
 
 

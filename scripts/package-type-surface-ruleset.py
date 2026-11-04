@@ -257,10 +257,18 @@ def paused_image(entry: dict, live: dict):
     desired = entry["desired"]
     if live.get("enforcement") != "evaluate" or desired["enforcement"] != "active":
         return desired, ""
+    # An organization ruleset names its target in the reviewed image the live one must equal.
+    targets = (
+        desired["conditions"]["repository_id"]["repository_ids"]
+        if entry["scope"] == "organization"
+        else [entry["repository_id"]]
+    )
     try:
-        acceptance = PAUSED.accept_paused_evaluate(live.get("id"), [entry["repository_id"]])
+        acceptance = PAUSED.accept_paused_evaluate(live.get("id"), targets)
     except PAUSED.PausedRelaxationRefused as refusal:
         raise ContractError(f"{entry['name']}: {refusal}") from None
+    except PAUSED.PausedStateUnreadable as error:
+        raise ContractError(f"{entry['name']}: cannot establish ADR 0252 paused state: {error}") from None
     return {**desired, "enforcement": "evaluate"}, f" {acceptance}"
 
 

@@ -711,6 +711,7 @@ def main(arguments: list[str] | None = None) -> int:
     failures = []
     paused_acceptances = []
     paused_refusals = []
+    unestablished = []
     for ruleset in default_branch_token_rulesets:
         if has_expected_actor(ruleset, expected_actor) or is_exact_bypassless_required_workflow(
             ruleset, bypassless_exceptions
@@ -720,6 +721,9 @@ def main(arguments: list[str] | None = None) -> int:
             acceptance = paused_evaluate_acceptance(ruleset, bypassless_exceptions)
         except PAUSED.PausedRelaxationRefused as refusal:
             paused_refusals.append((ruleset, str(refusal)))
+            continue
+        except PAUSED.PausedStateUnreadable as error:
+            unestablished.append((ruleset, str(error)))
             continue
         if acceptance is None:
             failures.append(ruleset)
@@ -736,7 +740,7 @@ def main(arguments: list[str] | None = None) -> int:
     bypass_findings = baseline_findings + bypass_contract_findings(
         rulesets, bypass_contracts, frozenset({paused_policy["baseline_ruleset_id"]})
     )
-    if failures or paused_refusals or unbound or bypass_findings:
+    if failures or paused_refusals or unbound or bypass_findings or unestablished:
         for ruleset, refusal in paused_refusals:
             print(f"ERROR: {ruleset['name']} ({ruleset['id']}): {refusal}", file=sys.stderr)
         for ruleset in failures:
@@ -753,7 +757,14 @@ def main(arguments: list[str] | None = None) -> int:
             )
         for finding in bypass_findings:
             print(f"ERROR: {finding}", file=sys.stderr)
-        return 1
+        # Findings above are still reported; an unread paused state makes the verdict unknown.
+        for ruleset, error in unestablished:
+            print(
+                f"ERROR: cannot establish organization ruleset state: "
+                f"{ruleset['name']} ({ruleset['id']}): {error}",
+                file=sys.stderr,
+            )
+        return 2 if unestablished else 1
 
     for ruleset, acceptance in paused_acceptances:
         print(f"paused-relaxation=accepted {ruleset['name']} ({ruleset['id']}) {acceptance}")

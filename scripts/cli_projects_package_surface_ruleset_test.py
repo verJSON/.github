@@ -947,27 +947,38 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
         audit.assert_called_once_with(PREVIOUS)
         mutate.assert_not_called()
 
-    def audit_at_evaluate(self, *, state="paused", mutate=lambda live: None):
+    def audit_at_evaluate(self, *, state="paused", refusal=None, unreadable=None, mutate=lambda live: None):
         live = MODULE.render_payload(self.contract, PREVIOUS) | {
             "id": 21830367, "source_type": "Organization", "source": "Verjson",
             "enforcement": "evaluate",
         }
         mutate(live)
         pages = actions_state_pages(state)
+
+        def read_pages(path):
+            if path == unreadable:
+                raise RuntimeError(f"GitHub API read failed for {path}")
+            return pages[path]
+
         output = io.StringIO()
         with (
             mock.patch.object(MODULE, "list_named_rulesets", return_value=[{"id": 21830367}]),
             mock.patch.object(MODULE, "gh_json", return_value=live),
-            mock.patch.object(MODULE.PAUSED, "gh_json_pages", side_effect=lambda path: pages[path]),
+            mock.patch.object(MODULE.PAUSED, "gh_json_pages", side_effect=read_pages),
             mock.patch.object(MODULE, "audit_live_revision") as audit,
             mock.patch.object(MODULE, "gh_json_input") as mutate_api,
             contextlib.redirect_stdout(output),
         ):
-            try:
+            if refusal is None:
                 MODULE.main(["audit"])
-            finally:
-                mutate_api.assert_not_called()
-        audit.assert_called_once_with(PREVIOUS)
+            else:
+                with self.assertRaisesRegex(MODULE.ContractError, refusal):
+                    MODULE.main(["audit"])
+        mutate_api.assert_not_called()
+        if refusal is None:
+            audit.assert_called_once_with(PREVIOUS)
+        else:
+            audit.assert_not_called()
         return output.getvalue()
 
     def test_audit_accepts_the_recorded_relaxation_at_evaluate_while_its_repository_is_paused(self):
@@ -981,21 +992,30 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
         )
 
     def test_audit_refuses_the_recorded_relaxation_at_evaluate_once_its_repository_is_enabled(self):
-        with self.assertRaisesRegex(
-            MODULE.ContractError,
-            r"^enforcement is evaluate but verjson-cli-projects is verjson-actions-state=enabled; "
-            r"restore enforcement to active \(ADR 0252\)$",
-        ):
-            self.audit_at_evaluate(state="enabled")
+        self.audit_at_evaluate(
+            state="enabled",
+            refusal=(
+                r"^enforcement is evaluate but verjson-cli-projects is verjson-actions-state=enabled; "
+                r"restore enforcement to active \(ADR 0252\)$"
+            ),
+        )
+
+    def test_audit_cannot_establish_the_relaxation_at_evaluate_when_its_repository_state_is_unreadable(self):
+        # An outage is not drift, so the audit gives no restore advice.
+        self.audit_at_evaluate(
+            unreadable="orgs/Verjson/properties/values?per_page=100",
+            refusal=(
+                r"^cannot establish ADR 0252 paused state: enforcement is evaluate but "
+                r"verjson-actions-state of verjson-cli-projects cannot be read \(GitHub API read failed for "
+                r"orgs/Verjson/properties/values\?per_page=100\)$"
+            ),
+        )
 
     def test_audit_refuses_the_recorded_relaxation_at_evaluate_with_any_other_drift(self):
         def widen(live):
             live["bypass_actors"] = [{"actor_type": "OrganizationAdmin", "actor_id": None, "bypass_mode": "always"}]
 
-        with self.assertRaisesRegex(
-            MODULE.ContractError, r"^live organization ruleset differs from reviewed image$"
-        ):
-            self.audit_at_evaluate(mutate=widen)
+        self.audit_at_evaluate(mutate=widen, refusal=r"^live organization ruleset differs from reviewed image$")
 
     def test_audit_refuses_a_live_image_that_is_not_the_reviewed_active_one(self):
         def image(mutate):

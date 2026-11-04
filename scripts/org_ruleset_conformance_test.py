@@ -572,17 +572,18 @@ class OrgRulesetConformanceTest(unittest.TestCase):
             result.stderr,
         )
 
-    def test_recorded_relaxation_at_evaluate_is_refused_when_its_repository_state_is_unreadable(self):
+    def test_recorded_relaxation_at_evaluate_is_unestablished_when_its_repository_state_is_unreadable(self):
+        # An outage is not drift: advising a restore here would re-block paused repositories.
         result, _ = self.run_cli_projects_at_evaluate(
             failing_paths=["orgs/Verjson/properties/values?per_page=100"]
         )
 
-        self.assertEqual(1, result.returncode, result.stderr)
-        self.assertIn(
-            "ERROR: cli-projects-package-surface-required-workflow (21830367): enforcement is "
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertEqual(
+            "ERROR: cannot establish organization ruleset state: "
+            "cli-projects-package-surface-required-workflow (21830367): enforcement is "
             "evaluate but verjson-actions-state of verjson-cli-projects cannot be read "
-            "(GitHub API read failed for orgs/Verjson/properties/values?per_page=100); "
-            "restore enforcement to active (ADR 0252)",
+            "(GitHub API read failed for orgs/Verjson/properties/values?per_page=100)\n",
             result.stderr,
         )
 
@@ -698,6 +699,10 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                 required_approving_review_count=1
             ),
             "parameterized deletion": lambda rules: rules[2].update(parameters={}),
+            "extra pull_request key": lambda rules: rules[0].update(conditions={}),
+            "boolean approvals": lambda rules: pull_request(rules).update(
+                required_approving_review_count=False
+            ),
         }
         for name, mutate in mutations.items():
             baseline = paused_baseline()
