@@ -47,6 +47,7 @@ def build_policy(world):
         "property": "verjson-actions-state",
         "baseline_ruleset_id": BASELINE,
         "baseline_rule_types": ["deletion", "non_fast_forward", "pull_request"],
+        "baseline_bypass_contract_ruleset_id": 20515817,
         "paused_only_relaxations": world["relaxations"],
     }
 
@@ -258,6 +259,7 @@ class ActionsPausedDriftTest(unittest.TestCase):
                 "property": "verjson-actions-state",
                 "baseline_ruleset_id": 26466984,
                 "baseline_rule_types": ["deletion", "non_fast_forward", "pull_request"],
+                "baseline_bypass_contract_ruleset_id": 20515817,
                 "paused_only_relaxations": [
                     {"ruleset_id": 21750617, "scope": "organization", "repository": "verjson-authn"},
                     {"ruleset_id": 21830367, "scope": "organization", "repository": "verjson-cli-projects"},

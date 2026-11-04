@@ -2,6 +2,7 @@
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -20,6 +21,12 @@ import required_workflow_revision as revision  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "config/cli-projects-package-surface-ruleset.json"
+# ADR 0252's paused state is read only through the drift check that owns it.
+_PAUSED_SPEC = importlib.util.spec_from_file_location(
+    "actions_paused_drift", ROOT / "scripts/actions-paused-drift.py"
+)
+PAUSED = importlib.util.module_from_spec(_PAUSED_SPEC)
+_PAUSED_SPEC.loader.exec_module(PAUSED)
 WORKFLOW = ROOT / ".github/workflows/cli-projects-package-surface-required.yml"
 VERIFIER = ROOT / "scripts/cli-projects-package-surface.py"
 GENERATOR = ROOT / "scripts/gen-node-required-workflow.py"
@@ -865,6 +872,19 @@ def describe_dry_run(named, expected, staged, contract, target_sha):
             f"{previous_sha} to {target_sha}")
 
 
+def paused_image(ruleset_id, live, expected):
+    """ADR 0252: the recorded relaxation differs from its reviewed image only by `evaluate`."""
+    if not isinstance(live, dict) or live.get("enforcement") != "evaluate":
+        return expected, ""
+    try:
+        acceptance = PAUSED.accept_paused_evaluate(
+            ruleset_id, expected["conditions"]["repository_id"]["repository_ids"]
+        )
+    except PAUSED.PausedRelaxationRefused as refusal:
+        raise ContractError(str(refusal)) from None
+    return {**expected, "enforcement": "evaluate"}, f"; {acceptance}"
+
+
 def audit(contract):
     named = list_named_rulesets(contract)
     require(len(named) == 1, "canonical organization ruleset is not uniquely present")
@@ -873,10 +893,11 @@ def audit(contract):
             "canonical organization ruleset id is invalid")
     live = gh_json(f"orgs/Verjson/rulesets/{ruleset_id}")
     live_sha = revision.bound_workflow_sha(live, require)
-    validate_org_ruleset(live, render_payload(contract, live_sha))
+    expected, acceptance = paused_image(ruleset_id, live, render_payload(contract, live_sha))
+    validate_org_ruleset(live, expected)
     audit_live_revision(live_sha)
     print(f"verified: organization ruleset {ruleset_id} runs {live_sha}, "
-          "the reviewed required workflow on protected main")
+          f"the reviewed required workflow on protected main{acceptance}")
     return 0
 
 

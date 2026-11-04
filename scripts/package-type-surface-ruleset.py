@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import subprocess
@@ -26,6 +27,12 @@ SHA = re.compile(r"[0-9a-f]{40}")
 # audits that revision. A delegate must expose an `audit` mode that the scheduled
 # org-ruleset-conformance workflow runs (ADR 0151).
 DELEGATED_REVISION_OWNERS = {21750617: "scripts/authn-type-surface-ruleset.py"}
+# ADR 0252's paused state is read only through the drift check that owns it.
+_PAUSED_SPEC = importlib.util.spec_from_file_location(
+    "actions_paused_drift", ROOT / "scripts/actions-paused-drift.py"
+)
+PAUSED = importlib.util.module_from_spec(_PAUSED_SPEC)
+_PAUSED_SPEC.loader.exec_module(PAUSED)
 
 
 class ContractError(Exception):
@@ -245,14 +252,27 @@ def api_input(payload_value: dict):
         stream.close()
 
 
+def paused_image(entry: dict, live: dict):
+    """ADR 0252: a recorded relaxation differs from its reviewed image only by `evaluate`."""
+    desired = entry["desired"]
+    if live.get("enforcement") != "evaluate" or desired["enforcement"] != "active":
+        return desired, ""
+    try:
+        acceptance = PAUSED.accept_paused_evaluate(live.get("id"), [entry["repository_id"]])
+    except PAUSED.PausedRelaxationRefused as refusal:
+        raise ContractError(f"{entry['name']}: {refusal}") from None
+    return {**desired, "enforcement": "evaluate"}, f" {acceptance}"
+
+
 def audit(organization: str, entries: list[dict]):
     failures = []
     for entry in entries:
         try:
             live = read_live(organization, entry)
             require(live is not None, f"{entry['name']}: ruleset is missing")
-            validate_live(organization, entry, live, entry["desired"])
-            print(f"conformant {entry['repository']} {entry['name']} id={live['id']}")
+            image, acceptance = paused_image(entry, live)
+            validate_live(organization, entry, live, image)
+            print(f"conformant {entry['repository']} {entry['name']} id={live['id']}{acceptance}")
         except (ContractError, OSError, RuntimeError) as error:
             failures.append(str(error))
     if failures:

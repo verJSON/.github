@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import contextlib
 import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -13,6 +15,19 @@ ROOT = Path(__file__).resolve().parent.parent
 SPEC = importlib.util.spec_from_file_location("package_type_surface_ruleset", ROOT / "scripts/package-type-surface-ruleset.py")
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+def actions_state_pages(name, repository_id, state):
+    """The ADR 0252 paused-state reads for one repository, as gh --paginate --slurp pages."""
+    return {
+        "orgs/Verjson/repos?type=all&per_page=100": [[
+            {"id": repository_id, "name": name, "default_branch": "main"},
+        ]],
+        "orgs/Verjson/properties/values?per_page=100": [[{
+            "repository_name": name,
+            "properties": [{"property_name": "verjson-actions-state", "value": state}],
+        }]],
+    }
 
 
 class PackageTypeSurfaceRulesetTest(unittest.TestCase):
@@ -196,6 +211,64 @@ class PackageTypeSurfaceRulesetTest(unittest.TestCase):
                 ).stdout
                 self.assertRegex(usage, r"\{[^}]*\baudit\b[^}]*\}")
                 self.assertIn(f"run: python3 -I {tool} audit\n", schedule)
+
+    def audit_identity_lifecycle_at_evaluate(self, *, state="paused", mutate=lambda live: None):
+        organization, _, entries = MODULE.read_policy()
+        entry = next(item for item in entries if item["name"] == "identity-lifecycle-type-surface-required")
+        live = {
+            "id": entry["ruleset_id"], "name": entry["name"], "source_type": "Repository",
+            "source": entry["repository"], **json.loads(json.dumps(entry["desired"])),
+        }
+        live["enforcement"] = "evaluate"
+        mutate(live)
+        pages = actions_state_pages("verjson-identity-lifecycle", entry["repository_id"], state)
+        output = io.StringIO()
+        with (
+            mock.patch.object(MODULE, "gh_json", return_value=live),
+            mock.patch.object(MODULE.PAUSED, "gh_json_pages", side_effect=lambda path: pages[path]),
+            contextlib.redirect_stdout(output),
+        ):
+            MODULE.audit(organization, [entry])
+        return output.getvalue()
+
+    def test_audit_accepts_a_recorded_relaxation_at_evaluate_while_its_repository_is_paused(self):
+        output = self.audit_identity_lifecycle_at_evaluate()
+
+        self.assertIn(
+            "conformant Verjson/verjson-identity-lifecycle identity-lifecycle-type-surface-required "
+            "id=21569694 enforcement=evaluate while verjson-identity-lifecycle is "
+            "verjson-actions-state=paused (ADR 0252)",
+            output,
+        )
+
+    def test_audit_refuses_a_recorded_relaxation_at_evaluate_once_its_repository_is_enabled(self):
+        with self.assertRaisesRegex(
+            MODULE.ContractError,
+            r"identity-lifecycle-type-surface-required: enforcement is evaluate but "
+            r"verjson-identity-lifecycle is verjson-actions-state=enabled; "
+            r"restore enforcement to active \(ADR 0252\)",
+        ):
+            self.audit_identity_lifecycle_at_evaluate(state="enabled")
+
+    def test_audit_refuses_a_relaxation_at_evaluate_with_any_other_drift(self):
+        def widen(live):
+            live["bypass_actors"].append({"actor_type": "OrganizationAdmin", "actor_id": None, "bypass_mode": "always"})
+
+        with self.assertRaisesRegex(
+            MODULE.ContractError, r"^identity-lifecycle-type-surface-required: live image drifted$"
+        ):
+            self.audit_identity_lifecycle_at_evaluate(mutate=widen)
+
+    def test_audit_refuses_a_relaxation_at_evaluate_when_the_adr_0252_policy_is_unreadable(self):
+        with (
+            mock.patch.object(MODULE.PAUSED, "read_policy", side_effect=OSError("policy missing")),
+            self.assertRaisesRegex(
+                MODULE.ContractError,
+                r"^identity-lifecycle-type-surface-required: enforcement is evaluate but the "
+                r"ADR 0252 policy cannot be read \(policy missing\)$",
+            ),
+        ):
+            self.audit_identity_lifecycle_at_evaluate()
 
     def test_validate_live_rejects_a_ruleset_id_reused_by_another_name(self):
         _, _, entries = MODULE.read_policy()

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import contextlib
 import copy
 from datetime import datetime, timezone
 import hashlib
@@ -30,6 +31,20 @@ GENERATOR_SPEC.loader.exec_module(GENERATOR_MODULE)
 SHA = "a" * 40
 HEAD = "b" * 40
 PREVIOUS = "c" * 40
+CLI_PROJECTS_ID = 1277452690
+
+
+def actions_state_pages(state):
+    """The ADR 0252 paused-state reads for verjson-cli-projects, as gh pages."""
+    return {
+        "orgs/Verjson/repos?type=all&per_page=100": [[
+            {"id": CLI_PROJECTS_ID, "name": "verjson-cli-projects", "default_branch": "main"},
+        ]],
+        "orgs/Verjson/properties/values?per_page=100": [[{
+            "repository_name": "verjson-cli-projects",
+            "properties": [{"property_name": "verjson-actions-state", "value": state}],
+        }]],
+    }
 
 # Admission mutants applied to the generator's rendered output: each is (anchor, replacement).
 # M: widened comparisons; N: reviewer bypasses of a reference-pattern denylist (indirect
@@ -931,6 +946,56 @@ class CliProjectsPackageSurfaceRulesetTest(unittest.TestCase):
             self.assertEqual(0, MODULE.main(["audit"]))
         audit.assert_called_once_with(PREVIOUS)
         mutate.assert_not_called()
+
+    def audit_at_evaluate(self, *, state="paused", mutate=lambda live: None):
+        live = MODULE.render_payload(self.contract, PREVIOUS) | {
+            "id": 21830367, "source_type": "Organization", "source": "Verjson",
+            "enforcement": "evaluate",
+        }
+        mutate(live)
+        pages = actions_state_pages(state)
+        output = io.StringIO()
+        with (
+            mock.patch.object(MODULE, "list_named_rulesets", return_value=[{"id": 21830367}]),
+            mock.patch.object(MODULE, "gh_json", return_value=live),
+            mock.patch.object(MODULE.PAUSED, "gh_json_pages", side_effect=lambda path: pages[path]),
+            mock.patch.object(MODULE, "audit_live_revision") as audit,
+            mock.patch.object(MODULE, "gh_json_input") as mutate_api,
+            contextlib.redirect_stdout(output),
+        ):
+            try:
+                MODULE.main(["audit"])
+            finally:
+                mutate_api.assert_not_called()
+        audit.assert_called_once_with(PREVIOUS)
+        return output.getvalue()
+
+    def test_audit_accepts_the_recorded_relaxation_at_evaluate_while_its_repository_is_paused(self):
+        output = self.audit_at_evaluate()
+
+        self.assertIn(
+            f"verified: organization ruleset 21830367 runs {PREVIOUS}, the reviewed required "
+            "workflow on protected main; enforcement=evaluate while verjson-cli-projects is "
+            "verjson-actions-state=paused (ADR 0252)",
+            output,
+        )
+
+    def test_audit_refuses_the_recorded_relaxation_at_evaluate_once_its_repository_is_enabled(self):
+        with self.assertRaisesRegex(
+            MODULE.ContractError,
+            r"^enforcement is evaluate but verjson-cli-projects is verjson-actions-state=enabled; "
+            r"restore enforcement to active \(ADR 0252\)$",
+        ):
+            self.audit_at_evaluate(state="enabled")
+
+    def test_audit_refuses_the_recorded_relaxation_at_evaluate_with_any_other_drift(self):
+        def widen(live):
+            live["bypass_actors"] = [{"actor_type": "OrganizationAdmin", "actor_id": None, "bypass_mode": "always"}]
+
+        with self.assertRaisesRegex(
+            MODULE.ContractError, r"^live organization ruleset differs from reviewed image$"
+        ):
+            self.audit_at_evaluate(mutate=widen)
 
     def test_audit_refuses_a_live_image_that_is_not_the_reviewed_active_one(self):
         def image(mutate):
