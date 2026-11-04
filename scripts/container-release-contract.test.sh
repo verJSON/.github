@@ -63,27 +63,124 @@ test -f "$tmp/consumer/CHANGELOG/v1.0.0.md"
 test "$(git -C "$tmp/consumer" tag --list)" = v1.0.0
 test ! -e "$tmp/consumer/scripts/changelog.py"
 cp "$tmp/consumer/.github/workflows/container-release.yml" "$tmp/workflow.clean"
+cp "$tmp/consumer/scripts/container-release-contract.test.sh" "$tmp/contract-test.clean"
+# Every generated assertion fails with exit 1 and a line of its own, so each
+# negative case runs the generated test once and names the assertion that must
+# refuse it. A crash, or a refusal by an earlier assertion, no longer counts.
+generated_contract_refuses() { # <message if accepted> <adopter directory> <reason>
+  local accepted="$1" adopter="$2" reason="$3" status=0
+  (cd "$adopter" && bash scripts/container-release-contract.test.sh >/dev/null 2>"$tmp/generated-contract.err") || status=$?
+  if [ "$status" -eq 0 ]; then
+    echo "$accepted" >&2; exit 1
+  fi
+  if [ "$status" -ne 1 ] || ! grep -qF -- "container-release contract FAILED: " "$tmp/generated-contract.err" \
+    || ! grep -qF -- "$reason" "$tmp/generated-contract.err"; then
+    echo "refused (exit $status, expected 1) without the reason: $reason; if accepted: $accepted" >&2
+    sed 's/^/diag - /' "$tmp/generated-contract.err" >&2
+    exit 1
+  fi
+}
+caller_digest_reason='container-release contract FAILED: .github/workflows/container-release.yml drifted from contract'
+# The later caller assertions sit behind the caller's digest pin, so no caller
+# mutation alone reaches them. Re-pinning the digest to the mutant -- what
+# regenerating at a contract that emitted that caller would do -- makes them
+# reachable.
+repin_caller_digest() { # <adopter directory>
+  local adopter="$1" digest
+  digest="$(sha256sum "$adopter/.github/workflows/container-release.yml" | cut -d' ' -f1)"
+  cp "$adopter/scripts/container-release-contract.test.sh" "$tmp/contract-test.before-repin"
+  sed -i -E "s|^(assert_digest \.github/workflows/container-release\.yml ).*|\\1'$digest'|" \
+    "$adopter/scripts/container-release-contract.test.sh"
+  if cmp -s "$tmp/contract-test.before-repin" "$adopter/scripts/container-release-contract.test.sh"; then
+    echo "caller digest re-pin did not apply, so its verdict proves nothing" >&2; exit 1
+  fi
+}
+# <label> <pinned|repinned> <reason>: the caller was mutated just before. The
+# package permission and the appended inheritance have no assertion but the
+# digest pin, so they stay pinned and the pin is their reason. Re-pinned, both
+# would pass this test and fail closed only at run time: a `packages: read`
+# caller cannot push the release, and a duplicate `secrets:` key is an invalid
+# workflow.
 reject_caller_mutation() {
+  local label="$1" pin="$2" reason="$3"
   # A mutation that matched nothing leaves the clean caller, and its acceptance
   # would be misreported as the contract missing the drift.
   if cmp -s "$tmp/workflow.clean" "$tmp/consumer/.github/workflows/container-release.yml"; then
-    echo "caller mutation did not apply, so its verdict proves nothing: $1" >&2
+    echo "caller mutation did not apply, so its verdict proves nothing: $label" >&2
     exit 1
   fi
-  if (cd "$tmp/consumer" && bash scripts/container-release-contract.test.sh >/dev/null 2>&1); then
-    echo "generated contract accepted caller drift: $1" >&2
-    exit 1
-  fi
+  [ "$pin" = pinned ] || repin_caller_digest "$tmp/consumer"
+  generated_contract_refuses "generated contract accepted caller drift: $label" "$tmp/consumer" "$reason"
   cp "$tmp/workflow.clean" "$tmp/consumer/.github/workflows/container-release.yml"
+  cp "$tmp/contract-test.clean" "$tmp/consumer/scripts/container-release-contract.test.sh"
 }
 sed -i 's/^  packages: write$/  packages: read/' "$tmp/consumer/.github/workflows/container-release.yml"
-reject_caller_mutation 'package permission'
+reject_caller_mutation 'package permission' pinned "$caller_digest_reason"
 sed -i 's/vars.RELEASE_APP_CLIENT_ID/vars.OTHER_CLIENT_ID/' "$tmp/consumer/.github/workflows/container-release.yml"
-reject_caller_mutation 'App client ID mapping'
+reject_caller_mutation 'App client ID mapping' repinned \
+  "grep -q 'RELEASE_APP_CLIENT_ID' .github/workflows/container-release.yml (exit 1)"
 sed -i 's/release_environment: release-app/release_environment: unguarded/' "$tmp/consumer/.github/workflows/container-release.yml"
-reject_caller_mutation 'App environment selection'
+reject_caller_mutation 'App environment selection' repinned \
+  "grep -q 'release_environment: release-app' .github/workflows/container-release.yml (exit 1)"
 printf '\n    secrets: inherit\n' >> "$tmp/consumer/.github/workflows/container-release.yml"
-reject_caller_mutation 'inherited secrets'
+reject_caller_mutation 'inherited secrets' pinned "$caller_digest_reason"
+# Each absence assertion used to be a bare `! grep`, which `set -e` exempts, so
+# it could never fail and only the digest pin refused these. Re-pinned, each
+# must now refuse on its own.
+legacy_release_token='RELEASE_'"TOKEN"
+legacy_org_release_token='VERJSON_RELEASE_'"TOKEN"
+while IFS='|' read -r label addition; do
+  printf '%s\n' "$addition" >>"$tmp/consumer/.github/workflows/container-release.yml"
+  case "$label" in
+    'a push trigger') reason="grep -Eq ^  (push|pull_request): .github" ;;
+    'a private-key secret') reason="grep -Eq PRIVATE_KEY .github" ;;
+    'a legacy release token') reason="grep -Eq $legacy_release_token|$legacy_org_release_token .github" ;;
+    'a GitHub attestation step') reason="grep -Eq gh attestation verify|actions/attest-build-provenance@ .github" ;;
+    'an undeclared reconciliation allowlist') reason="grep -q reconcile-allowlist .github" ;;
+  esac
+  reject_caller_mutation "$label" repinned \
+    "container-release contract FAILED: found what must be absent: $reason/workflows/container-release.yml"
+done <<ABSENT
+a push trigger|  push:
+a private-key secret|      # RELEASE_APP_PRIVATE_KEY
+a legacy release token|      # $legacy_org_release_token
+a GitHub attestation step|      - run: gh attestation verify candidate.json
+an undeclared reconciliation allowlist|      # reconcile-allowlist
+ABSENT
+# Each pinned helper must refuse its own byte drift, naming its path. The caller
+# is clean here, so each helper's pin is reachable on its own.
+for pinned_helper in \
+  container_release_promotion.py \
+  container_release_manifest.py \
+  container_registry_destinations.py \
+  container_artifact_extract.py \
+  container_attestation_verify.py \
+  container_cosign_provenance.py; do
+  cp "$tmp/consumer/scripts/$pinned_helper" "$tmp/helper.clean"
+  printf '#\n' >>"$tmp/consumer/scripts/$pinned_helper"
+  generated_contract_refuses "generated contract accepted byte drift in $pinned_helper" "$tmp/consumer" \
+    "container-release contract FAILED: scripts/$pinned_helper drifted from contract $ref"
+  cp "$tmp/helper.clean" "$tmp/consumer/scripts/$pinned_helper"
+done
+# A search that cannot read its input exits 2, which is not absence. The
+# generated helpers run on their own, against an input that does not exist.
+generated_helpers="$(sed -n '/^contract_fail() {/,/^}/p;/^assert_absent() {/,/^}/p' "$tmp/consumer/scripts/container-release-contract.test.sh")"
+case "$generated_helpers" in
+  *'contract_fail() {'*'assert_absent() {'*) ;;
+  *) echo "generated contract test does not define contract_fail and assert_absent" >&2; exit 1 ;;
+esac
+unreadable_status=0
+bash -c '
+  eval "$1"
+  assert_absent grep -q anything "$2"
+  echo "assert_absent returned" >&2
+' _ "$generated_helpers" "$tmp/absent-input" >/dev/null 2>"$tmp/unreadable-search.err" || unreadable_status=$?
+if [ "$unreadable_status" -ne 1 ] || ! grep -qF -- \
+  "container-release contract FAILED: could not search (exit 2): grep -q anything $tmp/absent-input" "$tmp/unreadable-search.err"; then
+  echo "generated assert_absent took an unreadable input (exit $unreadable_status) for absence" >&2
+  sed 's/^/diag - /' "$tmp/unreadable-search.err" >&2
+  exit 1
+fi
 # A generator that crashes, or that stops on a different guard, exits non-zero
 # too, so each refusal names the status and the reason it must stop with.
 refuses_generation() {
@@ -159,38 +256,56 @@ fi
   >"$tmp/adopter/scripts/container-release-contract.test.sh"
 printf 'FROM ghcr.io/verjson/base:v1.0.0\n' >"$tmp/adopter/Dockerfile"
 printf 'tag: v1.0.0\n' >"$tmp/adopter/deploy/values.yaml"
-if (cd "$tmp/adopter" && bash scripts/container-release-contract.test.sh >/dev/null 2>&1); then
-  echo "configured contract test passed without the reviewed hook present" >&2; exit 1
-fi
+generated_contract_refuses 'configured contract test passed without the reviewed hook present' "$tmp/adopter" \
+  'test -f scripts/release-reconcile.sh (exit 1)'
 printf '#!/usr/bin/env bash\nexit 0\n' >"$tmp/adopter/scripts/release-reconcile.sh"
 chmod +x "$tmp/adopter/scripts/release-reconcile.sh"
 (cd "$tmp/adopter" && bash scripts/container-release-contract.test.sh >/dev/null)
 chmod -x "$tmp/adopter/scripts/release-reconcile.sh"
-if (cd "$tmp/adopter" && bash scripts/container-release-contract.test.sh >/dev/null 2>&1); then
-  echo "configured contract test accepted a non-executable hook" >&2; exit 1
-fi
+generated_contract_refuses 'configured contract test accepted a non-executable hook' "$tmp/adopter" 'test -x scripts/release-reconcile.sh (exit 1)'
 chmod +x "$tmp/adopter/scripts/release-reconcile.sh"
+# A symlinked hook passes `test -f` and `test -x` through its target, so only
+# the symlink check refuses it.
+mv "$tmp/adopter/scripts/release-reconcile.sh" "$tmp/hook-target.sh"
+ln -s "$tmp/hook-target.sh" "$tmp/adopter/scripts/release-reconcile.sh"
+generated_contract_refuses 'configured contract test accepted a symlinked hook' "$tmp/adopter" \
+  'test ! -L scripts/release-reconcile.sh (exit 1)'
+rm "$tmp/adopter/scripts/release-reconcile.sh"
+mv "$tmp/hook-target.sh" "$tmp/adopter/scripts/release-reconcile.sh"
 rm "$tmp/adopter/deploy/values.yaml"
+generated_contract_refuses 'configured contract test accepted a missing allowlist target' "$tmp/adopter" \
+  "test -f 'deploy/values.yaml' (exit 1)"
 ln -s /etc/passwd "$tmp/adopter/deploy/values.yaml"
-if (cd "$tmp/adopter" && bash scripts/container-release-contract.test.sh >/dev/null 2>&1); then
-  echo "configured contract test accepted a symlinked allowlist target" >&2; exit 1
-fi
+generated_contract_refuses 'configured contract test accepted a symlinked allowlist target' "$tmp/adopter" "test ! -L 'deploy/values.yaml' (exit 1)"
 rm "$tmp/adopter/deploy/values.yaml"
 printf 'tag: v1.0.0\n' >"$tmp/adopter/deploy/values.yaml"
 cp "$tmp/adopter/.github/workflows/container-release.yml" "$tmp/adopter-workflow.before-widening"
+cp "$tmp/adopter/scripts/container-release-contract.test.sh" "$tmp/adopter-test.before-widening"
+# The allowlist must be its own whole line: re-indented, it contains the reviewed
+# text but no longer declares it on the reusable call.
+sed -i "s/^      reconcile-allowlist: /        reconcile-allowlist: /" "$tmp/adopter/.github/workflows/container-release.yml"
+if cmp -s "$tmp/adopter-workflow.before-widening" "$tmp/adopter/.github/workflows/container-release.yml"; then
+  echo "allowlist re-indent mutation did not apply, so its verdict proves nothing" >&2; exit 1
+fi
+repin_caller_digest "$tmp/adopter"
+generated_contract_refuses 'configured contract test accepted a re-indented allowlist' "$tmp/adopter" \
+  'container-release contract FAILED: the caller does not declare exactly the reviewed reconciliation allowlist: ["Dockerfile","deploy/values.yaml"]'
+cp "$tmp/adopter-workflow.before-widening" "$tmp/adopter/.github/workflows/container-release.yml"
+cp "$tmp/adopter-test.before-widening" "$tmp/adopter/scripts/container-release-contract.test.sh"
 sed -i "s/reconcile-allowlist: '\\[\"Dockerfile\",\"deploy\\/values.yaml\"\\]'/reconcile-allowlist: '[\"Dockerfile\",\"docs.md\"]'/" \
   "$tmp/adopter/.github/workflows/container-release.yml"
 if cmp -s "$tmp/adopter-workflow.before-widening" "$tmp/adopter/.github/workflows/container-release.yml"; then
   echo "allowlist-widening mutation did not apply, so its verdict proves nothing" >&2; exit 1
 fi
-if (cd "$tmp/adopter" && bash scripts/container-release-contract.test.sh >/dev/null 2>&1); then
-  echo "configured contract test accepted a widened allowlist" >&2; exit 1
-fi
+# The allowlist assertion sits behind the caller's digest pin; re-pinned, the
+# widened caller reaches it.
+repin_caller_digest "$tmp/adopter"
+generated_contract_refuses 'configured contract test accepted a widened allowlist' "$tmp/adopter" \
+  'container-release contract FAILED: the caller does not declare exactly the reviewed reconciliation allowlist: ["Dockerfile","deploy/values.yaml"]'
 printf '#!/usr/bin/env bash\nexit 0\n' >"$tmp/consumer/scripts/release-reconcile.sh"
 chmod +x "$tmp/consumer/scripts/release-reconcile.sh"
-if (cd "$tmp/consumer" && bash scripts/container-release-contract.test.sh >/dev/null 2>&1); then
-  echo "unconfigured contract test accepted an undeclared reconciliation hook" >&2; exit 1
-fi
+generated_contract_refuses 'unconfigured contract test accepted an undeclared reconciliation hook' "$tmp/consumer" \
+  'test ! -e scripts/release-reconcile.sh (exit 1)'
 rm "$tmp/consumer/scripts/release-reconcile.sh"
 (cd "$tmp/consumer" && bash scripts/container-release-contract.test.sh >/dev/null)
 # --- end reconciliation hook ------------------------------------------------------
@@ -284,12 +399,16 @@ except AssertionError as error:
     assert "sole non-provenance" in str(error)
 PY
 grep -A8 '^  retention:$' "$workflow" | grep -x '    timeout-minutes: 30' >/dev/null
+# Each refusal names its clause, so a mutant refused by the other one, or a
+# failed read, cannot pass for the refusal a case asserts.
 assert_python3_extractor() {
-  local candidate=$1
-  [ "$(grep -cE '^          python3 -I scripts/container_artifact_extract\.py candidate\.zip candidate\.json candidate-manifest\.sigstore\.json$' "$candidate")" -eq 1 ] &&
-    ! grep -Eq '^ +python scripts/container_artifact_extract\.py candidate\.zip candidate\.json candidate-manifest\.sigstore\.json$' "$candidate"
+  local candidate=$1 invocations
+  invocations="$(grep -cE '^          python3 -I scripts/container_artifact_extract\.py candidate\.zip candidate\.json candidate-manifest\.sigstore\.json$' "$candidate" || true)"
+  [ "$invocations" = 1 ] || { echo "extractor is not invoked exactly once as python3 -I (found '$invocations')"; return 1; }
+  (assert_absent -Eq '^ +python scripts/container_artifact_extract\.py candidate\.zip candidate\.json candidate-manifest\.sigstore\.json$' "$candidate") 2>&1 \
+    || { echo "extractor is invoked through a bare python"; return 1; }
 }
-assert_python3_extractor "$workflow"
+assert_python3_extractor "$workflow" >"$tmp/python-extractor.out" || { cat "$tmp/python-extractor.out" >&2; exit 1; }
 cp "$workflow" "$tmp/container-release-python-mutation.yml"
 sed -i 's/^          python3 -I scripts\/container_artifact_extract\.py candidate\.zip candidate\.json candidate-manifest\.sigstore\.json$/          python scripts\/container_artifact_extract.py candidate.zip candidate.json/' \
   "$tmp/container-release-python-mutation.yml"
@@ -297,10 +416,15 @@ if cmp -s "$workflow" "$tmp/container-release-python-mutation.yml"; then
   echo "python extractor mutation did not apply, so its verdict proves nothing" >&2
   exit 1
 fi
-if assert_python3_extractor "$tmp/container-release-python-mutation.yml"; then
+if assert_python3_extractor "$tmp/container-release-python-mutation.yml" >"$tmp/python-extractor.out"; then
   echo "container release contract accepted a python extractor mutation" >&2
   exit 1
 fi
+grep -qF "extractor is not invoked exactly once as python3 -I (found '0')" "$tmp/python-extractor.out" || {
+  echo "container release contract refused the python extractor mutation for another reason" >&2
+  sed 's/^/diag - /' "$tmp/python-extractor.out" >&2
+  exit 1
+}
 grep -q "github.event_name == 'workflow_dispatch'" "$workflow"
 assert_absent -Eq '^  (push|pull_request):' "$workflow"
 grep -q 'imagetools create' "$workflow"
@@ -375,8 +499,6 @@ grep -q 'Mint exact-repository release App token' "$workflow"
 grep -q 'git -c core.hooksPath=/dev/null push --atomic' "$workflow"
 grep -q 'docker/login-action@' "$workflow"
 assert_absent -q 'secrets.release-token' "$workflow"
-legacy_release_token='RELEASE_'"TOKEN"
-legacy_org_release_token='VERJSON_RELEASE_'"TOKEN"
 assert_absent -Eq "$legacy_release_token|$legacy_org_release_token" "$workflow"
 assert_absent -Eq 'gh attestation verify|actions/attest-build-provenance@' "$workflow"
 grep -q 'cosign verify-blob candidate.json' "$workflow"
