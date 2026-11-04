@@ -83,7 +83,16 @@ entry stays open until no listed pull request remains open and stale.
     - `verJSON/verjson-git-runners` #237, #239, #242, #244, #245, #246;
     - `verJSON/verjson-oidc-claims-middleware` #93, #94, #95, #96, #97, #98,
       #99, #107, #111, #113.
-    Pull requests with no required run at all read `absent`, not `stale`.
+    - **Stale and failed:** the newest required run on these heads also
+      concluded `failure`: `verJSON/verjson-agents#450`, and
+      `verJSON/verjson-oidc-claims-middleware` #94, #95, #97 and #98. Gate W
+      names `stale` first, but a reopen alone may not clear them. Read the
+      failed run's log and fix its cause before spending one of the two
+      re-arm attempts.
+    - **Absent, not stale:** these pull requests have no required run at all,
+      so Gate W reads `absent`: `verJSON/.github` #1941 and #1943, and
+      `verJSON/verjson-oidc-claims-middleware` #106 and #110. Use the `absent`
+      row of [Recovery by refusal reason](#recovery-by-refusal-reason).
   - Re-arm each one per pull request at merge time under the interim rules, and
     record it on that pull request.
 
