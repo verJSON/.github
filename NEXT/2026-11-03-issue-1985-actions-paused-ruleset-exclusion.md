@@ -10,3 +10,5 @@ ADR 0252 records the owner's decision to exempt repositories with GitHub Actions
 - Twelve single-repository rulesets drop to `evaluate`.
 - The stand-in ruleset `actions-paused-baseline-protection` (26466984) keeps pull requests required and blocks force-pushes and deletion.
 - Each repository's protection is restored when its Actions is re-enabled.
+
+The scheduled ruleset conformance audits now derive ADR 0252's paused image (amendment of 2026-11-04) instead of reporting the applied state as drift. `evaluate` is accepted only on the 12 recorded relaxations, and only while the targeted repository is `verjson-actions-state=paused`. The stand-in 26466984 must carry exactly the bypass actors of the reviewed `core-checks-node` contract, plus ADR 0252's pull-request, force-push and deletion rules. Any other drift is still an error. A paused state that cannot be read is reported as unestablished, without advice to restore enforcement.

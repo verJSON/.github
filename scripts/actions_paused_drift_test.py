@@ -1,9 +1,12 @@
+import importlib.util
 import json
+import re
 import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from urllib.parse import quote
 
 
@@ -11,6 +14,9 @@ ROOT = Path(__file__).resolve().parent.parent
 AUDIT = ROOT / "scripts/actions-paused-drift.py"
 POLICY = ROOT / "config/actions-paused-drift-policy.json"
 BASELINE = 26466984
+SPEC = importlib.util.spec_from_file_location("actions_paused_drift", AUDIT)
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
 GH_PREFIX = ["api", "--hostname", "github.com", "--method", "GET", "--paginate", "--slurp"]
 
 
@@ -47,6 +53,7 @@ def build_policy(world):
         "property": "verjson-actions-state",
         "baseline_ruleset_id": BASELINE,
         "baseline_rule_types": ["deletion", "non_fast_forward", "pull_request"],
+        "baseline_bypass_contract_ruleset_id": 20515817,
         "paused_only_relaxations": world["relaxations"],
     }
 
@@ -258,6 +265,7 @@ class ActionsPausedDriftTest(unittest.TestCase):
                 "property": "verjson-actions-state",
                 "baseline_ruleset_id": 26466984,
                 "baseline_rule_types": ["deletion", "non_fast_forward", "pull_request"],
+                "baseline_bypass_contract_ruleset_id": 20515817,
                 "paused_only_relaxations": [
                     {"ruleset_id": 21750617, "scope": "organization", "repository": "verjson-authn"},
                     {"ruleset_id": 21830367, "scope": "organization", "repository": "verjson-cli-projects"},
@@ -602,6 +610,91 @@ class ActionsPausedDriftTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("baseline_rule_types must be a non-empty list of distinct rule types", result.stderr)
         self.assertEqual(calls, [])
+
+
+class AcceptPausedEvaluateTest(unittest.TestCase):
+    """The shared ADR 0252 verdict the four ruleset conformance audits rely on."""
+
+    RULESET = 21551883
+    RESTORE = "; restore enforcement to active (ADR 0252)"
+
+    def accept(self, *, state="paused", repository_ids=(13,), unreadable=None, ruleset_id=RULESET):
+        world = {
+            "repositories": {"verjson-ai": repository(13, state)},
+            "relaxations": [{"ruleset_id": self.RULESET, "scope": "repository", "repository": "verjson-ai"}],
+            "enforcement": {},
+        }
+        responses = build_responses(world)
+
+        def read_pages(path):
+            if path == unreadable:
+                raise RuntimeError(f"GitHub API read failed for {path}")
+            return responses[path]
+
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.json"
+            policy.write_text(json.dumps(build_policy(world)), encoding="utf-8")
+            with mock.patch.object(MODULE, "gh_json_pages", side_effect=read_pages):
+                return MODULE.accept_paused_evaluate(ruleset_id, list(repository_ids), policy)
+
+    def test_accepts_evaluate_while_the_targeted_repository_is_paused(self):
+        self.assertEqual(
+            "enforcement=evaluate while verjson-ai is verjson-actions-state=paused (ADR 0252)",
+            self.accept(),
+        )
+
+    def test_refuses_a_ruleset_adr_0252_does_not_record(self):
+        with self.assertRaisesRegex(
+            MODULE.PausedRelaxationRefused,
+            "^enforcement is evaluate but ADR 0252 records no paused-only relaxation for this ruleset"
+            + re.escape(self.RESTORE) + "$",
+        ):
+            self.accept(ruleset_id=99)
+
+    def test_refuses_a_target_that_is_not_exactly_the_recorded_repository(self):
+        for repository_ids in ((14,), (13, 14), ()):
+            with self.subTest(repository_ids), self.assertRaisesRegex(
+                MODULE.PausedRelaxationRefused,
+                "^" + re.escape(
+                    f"enforcement is evaluate but it targets {list(repository_ids)}, "
+                    "not exactly verjson-ai (13)" + self.RESTORE
+                ) + "$",
+            ):
+                self.accept(repository_ids=repository_ids)
+
+    def test_refuses_a_repository_without_an_actions_state(self):
+        with self.assertRaisesRegex(
+            MODULE.PausedRelaxationRefused,
+            "^" + re.escape("enforcement is evaluate but verjson-ai has no verjson-actions-state value"
+                            + self.RESTORE) + "$",
+        ):
+            self.accept(state=None)
+
+    def test_refuses_an_enabled_repository(self):
+        with self.assertRaisesRegex(
+            MODULE.PausedRelaxationRefused,
+            "^" + re.escape("enforcement is evaluate but verjson-ai is verjson-actions-state=enabled"
+                            + self.RESTORE) + "$",
+        ):
+            self.accept(state="enabled")
+
+    def test_an_unreadable_state_is_unestablished_rather_than_drift(self):
+        for path in ("orgs/Verjson/repos?type=all&per_page=100", "orgs/Verjson/properties/values?per_page=100"):
+            with self.subTest(path), self.assertRaisesRegex(
+                MODULE.PausedStateUnreadable,
+                "^" + re.escape(
+                    "enforcement is evaluate but verjson-actions-state of verjson-ai cannot be read "
+                    f"(GitHub API read failed for {path})"
+                ) + "$",
+            ):
+                self.accept(unreadable=path)
+
+    def test_an_unreadable_policy_is_unestablished_rather_than_drift(self):
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(
+            MODULE.PausedStateUnreadable,
+            r"^enforcement is evaluate but the ADR 0252 policy cannot be read \(.+\)$",
+        ):
+            MODULE.accept_paused_evaluate(self.RULESET, [13], Path(directory) / "absent.json")
 
 
 if __name__ == "__main__":

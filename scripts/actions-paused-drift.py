@@ -25,6 +25,14 @@ class AuditDataError(Exception):
     pass
 
 
+class PausedRelaxationRefused(Exception):
+    """`evaluate` on a ruleset is not ADR 0252's reviewed paused image."""
+
+
+class PausedStateUnreadable(Exception):
+    """The paused state could not be established; that is not drift, so no restore is advised."""
+
+
 def unique_object(pairs):
     result = {}
     for key, value in pairs:
@@ -132,6 +140,7 @@ def read_policy(policy: Path):
             "property",
             "baseline_ruleset_id",
             "baseline_rule_types",
+            "baseline_bypass_contract_ruleset_id",
             "paused_only_relaxations",
         },
         "drift policy",
@@ -160,6 +169,11 @@ def read_policy(policy: Path):
             document["baseline_ruleset_id"], "drift policy.baseline_ruleset_id"
         ),
         "baseline_rule_types": read_rule_types(document["baseline_rule_types"]),
+        # The stand-in carries the bypass actors of this reviewed contract, never its own copy.
+        "baseline_bypass_contract_ruleset_id": require_positive_integer(
+            document["baseline_bypass_contract_ruleset_id"],
+            "drift policy.baseline_bypass_contract_ruleset_id",
+        ),
         "relaxations": relaxations,
     }
 
@@ -323,6 +337,50 @@ def collect_relaxation_findings(policy: dict, states: dict, repositories: dict, 
                 f"ruleset {ruleset_id} for {name} is {enforcement}, "
                 f"expected {expected} while {policy['property']}={states[name]}"
             )
+
+
+def accept_paused_evaluate(ruleset_id: int, repository_ids: list, policy_path: Path = CHECKED_IN_POLICY):
+    """Describe why `evaluate` on this ruleset is ADR 0252's reviewed paused image.
+
+    Raises PausedRelaxationRefused, naming the repository, when it is not, and
+    PausedStateUnreadable when the policy or the live state cannot be read.
+    """
+    restore = "restore enforcement to active (ADR 0252)"
+    try:
+        policy = read_policy(policy_path)
+    except (OSError, AuditDataError) as error:
+        raise PausedStateUnreadable(
+            f"enforcement is evaluate but the ADR 0252 policy cannot be read ({error})"
+        ) from None
+    recorded = [item for item in policy["relaxations"] if item["ruleset_id"] == ruleset_id]
+    if not recorded:
+        raise PausedRelaxationRefused(
+            f"enforcement is evaluate but ADR 0252 records no paused-only relaxation "
+            f"for this ruleset; {restore}"
+        )
+    name = recorded[0]["repository"]
+    try:
+        listed = read_repositories(policy["organization"]).get(name)
+        state = read_actions_states(policy["organization"], policy["property"]).get(name)
+    except (AuditDataError, RuntimeError) as error:
+        raise PausedStateUnreadable(
+            f"enforcement is evaluate but {policy['property']} of {name} cannot be read ({error})"
+        ) from None
+    listed_id = "absent from the organization" if listed is None else listed["id"]
+    if list(repository_ids) != [listed_id]:
+        raise PausedRelaxationRefused(
+            f"enforcement is evaluate but it targets {list(repository_ids)}, "
+            f"not exactly {name} ({listed_id}); {restore}"
+        )
+    if state is None:
+        raise PausedRelaxationRefused(
+            f"enforcement is evaluate but {name} has no {policy['property']} value; {restore}"
+        )
+    if state != "paused":
+        raise PausedRelaxationRefused(
+            f"enforcement is evaluate but {name} is {policy['property']}={state}; {restore}"
+        )
+    return f"enforcement=evaluate while {name} is {policy['property']}=paused (ADR 0252)"
 
 
 def print_findings(findings: list):
