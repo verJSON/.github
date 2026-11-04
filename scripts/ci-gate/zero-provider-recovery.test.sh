@@ -179,6 +179,14 @@ case "$*" in
 esac
 SH
 chmod +x "$tmp/bin/gh"
+# The listing retry backs off with `sleep 3`. Record the backoff instead of
+# waiting it out, so the bounded-retry case below can assert it exactly.
+cat >"$tmp/bin/sleep" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SLEEP_CALLS"
+SH
+chmod +x "$tmp/bin/sleep"
+export SLEEP_CALLS="$tmp/sleep-calls"
 export PATH="$tmp/bin:$PATH"
 
 expect_pass() {
@@ -237,9 +245,6 @@ REVIEW_RUN_ATTEMPT=1 AUTHORIZATION_STATE=retained \
 # retried. These assert the distinctness, not merely that each still fails.
 REVIEW_RUN_ATTEMPT=1 DUPLICATE_CORRELATED_RUN=true \
   expect_fail "duplicate attempt-one dispatch is refused as a duplicate" "dispatch is duplicated" verify
-REVIEW_RUN_ATTEMPT=1 MISSING_CORRELATED_RUN=true \
-  expect_fail "a run absent from the listing is refused as absent, not as a duplicate" \
-  "has not appeared in the workflow run listing" verify
 REVIEW_RUN_ATTEMPT=1 CORRELATED_RUN_ATTEMPT=2 \
   expect_fail "a retried initial dispatch is refused as retried, not as a duplicate" \
   "was retried" verify
@@ -256,13 +261,20 @@ REVIEW_RUN_ATTEMPT=1 CORRELATED_POLLS="$polls_file" CORRELATED_RUN_APPEARS_AFTER
 
 # The retry must also be BOUNDED. `-ge 2` above pins only the floor, so a raised
 # or unbounded ceiling would slip through it; assert the exact maximum here.
+# This case also carries the absent-not-duplicate distinction: its reason is the
+# absent message, never "dispatch is duplicated".
 : >"$polls_file"
+: >"$SLEEP_CALLS"
 REVIEW_RUN_ATTEMPT=1 MISSING_CORRELATED_RUN=true CORRELATED_POLLS="$polls_file" \
   expect_fail "a permanently absent run is refused after a bounded number of polls" \
   "has not appeared in the workflow run listing" verify
 [ "$(cat "$polls_file")" -eq 5 ] \
   && pass "a permanently absent listing is polled exactly 5 times, then refused" \
   || fail "absent-listing poll count is not exactly 5 (polls=$(cat "$polls_file"))"
+# Five polls leave four gaps, each a 3-second backoff, and none after the last.
+[ "$(cat "$SLEEP_CALLS")" = $'3\n3\n3\n3' ] \
+  && pass "the absent listing backs off 3 seconds between polls, never after the last" \
+  || fail "absent-listing backoff is not exactly four 'sleep 3' calls: $(tr '\n' ' ' <"$SLEEP_CALLS")"
 
 # A duplicate is NOT eventually consistent — retrying it would only widen the
 # window in which a second dispatch could be accepted as the trusted one, so it

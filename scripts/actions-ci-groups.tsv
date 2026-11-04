@@ -177,6 +177,10 @@ merge-gate	bash scripts/ci-gate/elide-lockfiles.test.sh
 merge-gate	bash scripts/ci-gate/rereview-skip.test.sh
 merge-gate	bash scripts/ci-gate/dispatch-target-guard.test.sh
 merge-gate	bash scripts/ci-gate/target-visibility.test.sh
+# @exclusive: on the first concurrent actions-ci run this row and the required-checks
+# audit were the two CPU-heavy rows that exceeded the command budget while competing
+# with sibling rows, so each reserves the whole runner (ADR 0225 Context and Decision
+# 1; #1736, PR #1746). Re-measure under sibling load before dropping it.
 merge-gate	@exclusive @budget=120 bash scripts/ci-gate/privileged-merge-conformance.test.sh
 merge-gate	bash scripts/ci-gate/privileged-merge-pin-extractor-differential.test.sh
 merge-gate	bash scripts/ci-gate/require-secrets.test.sh
