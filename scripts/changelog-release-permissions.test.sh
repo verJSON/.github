@@ -134,6 +134,13 @@ grep -qF 'git push --atomic origin \' "$workflow" \
   && pass "the release still publishes commit and exact tag atomically" \
   || fail "the atomic commit+tag push shape changed"
 
+# Release commits and tags are authored under the organization's own domain;
+# a lookalike domain would publish immutable history under an identity the
+# organization does not control.
+grep -qxE '          git config user\.email release@verjson\.com' "$workflow" \
+  && pass "the release commits under the release@verjson.com identity" \
+  || fail "the release commit identity is not release@verjson.com"
+
 if [ "$fails" -eq 0 ]; then
   echo "All tests passed."
   exit 0
