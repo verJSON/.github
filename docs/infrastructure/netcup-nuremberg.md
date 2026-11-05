@@ -4,18 +4,23 @@ Service endpoint and registry checks last verified: **2026-09-07**.
 
 ## Endpoints
 
+Concrete hostnames and ports are kept in the private operational record
+(`verJSON/verjson-cli`, `docs/operations/netcup-nuremberg.md`). This public reference uses
+placeholders: `<gitlab-host>`, `<ssh-port>`, `<nexus-host>`, `<nexus-docker-host>` and
+`<s3-host>`.
+
 | Service | Endpoint | Verified state |
 | --- | --- | --- |
-| GitLab CE | <https://git.159-195-78-163.nip.io> | Sign-in page returns HTTP 200 |
-| GitLab REST API | `https://git.159-195-78-163.nip.io/api/v4` | API base; authenticated API use not tested |
-| GitLab SSH clone | `ssh://git@git.159-195-78-163.nip.io:30022/<group>/<repository>.git` | Configured port; clone not tested |
-| Nexus UI | <https://nexus.159-195-78-163.nip.io> | HTTP 200 |
-| Nexus REST API | `https://nexus.159-195-78-163.nip.io/service/rest/v1` | Authenticated repository inventory queried successfully |
-| npm hosted registry | `https://nexus.159-195-78-163.nip.io/repository/npm-hosted/` | Authenticated npm publish/download verified; anonymous reads denied |
-| Docker registry | `docker.nexus.159-195-78-163.nip.io` | Docker login/push/pull verified; anonymous pulls denied |
-| PyPI publishing | `https://nexus.159-195-78-163.nip.io/repository/pypi-hosted/` | Authenticated Twine upload verified |
-| PyPI package index | `https://nexus.159-195-78-163.nip.io/repository/pypi-hosted/simple/` | Authenticated pip download verified; anonymous reads denied |
-| S3 API | <https://s3.159-195-78-163.nip.io> | `/minio/health/live` returns HTTP 200 |
+| GitLab CE | `https://<gitlab-host>` | Sign-in page returns HTTP 200 |
+| GitLab REST API | `https://<gitlab-host>/api/v4` | API base; authenticated API use not tested |
+| GitLab SSH clone | `ssh://git@<gitlab-host>:<ssh-port>/<group>/<repository>.git` | Configured port; clone not tested |
+| Nexus UI | `https://<nexus-host>` | HTTP 200 |
+| Nexus REST API | `https://<nexus-host>/service/rest/v1` | Authenticated repository inventory queried successfully |
+| npm hosted registry | `https://<nexus-host>/repository/npm-hosted/` | Authenticated npm publish/download verified; anonymous reads denied |
+| Docker registry | `<nexus-docker-host>` | Docker login/push/pull verified; anonymous pulls denied |
+| PyPI publishing | `https://<nexus-host>/repository/pypi-hosted/` | Authenticated Twine upload verified |
+| PyPI package index | `https://<nexus-host>/repository/pypi-hosted/simple/` | Authenticated pip download verified; anonymous reads denied |
+| S3 API | `https://<s3-host>` | `/minio/health/live` returns HTTP 200 |
 
 HTTPS checks use normal certificate validation. Health checks establish
 reachability only; they do not verify authentication, persistence, or backups.
@@ -65,13 +70,13 @@ mechanism; do not commit them with these examples.
 For packages in the `@verjson` scope, a project `.npmrc` can contain:
 
 ```ini
-@verjson:registry=https://nexus.159-195-78-163.nip.io/repository/npm-hosted/
+@verjson:registry=https://<nexus-host>/repository/npm-hosted/
 ```
 
 For an individual publish, select the hosted registry explicitly:
 
 ```sh
-npm publish --registry=https://nexus.159-195-78-163.nip.io/repository/npm-hosted/
+npm publish --registry=https://<nexus-host>/repository/npm-hosted/
 ```
 
 This is a hosted repository, not an npmjs proxy or group. It does not provide
@@ -81,16 +86,16 @@ team and keep the resulting credentials in your user configuration.
 
 ```sh
 npm login --auth-type=legacy \
-  --registry=https://nexus.159-195-78-163.nip.io/repository/npm-hosted/
+  --registry=https://<nexus-host>/repository/npm-hosted/
 ```
 
 ### Docker
 
 ```sh
-docker login docker.nexus.159-195-78-163.nip.io
-docker tag example:1.0.0 docker.nexus.159-195-78-163.nip.io/example:1.0.0
-docker push docker.nexus.159-195-78-163.nip.io/example:1.0.0
-docker pull docker.nexus.159-195-78-163.nip.io/example:1.0.0
+docker login <nexus-docker-host>
+docker tag example:1.0.0 <nexus-docker-host>/example:1.0.0
+docker push <nexus-docker-host>/example:1.0.0
+docker pull <nexus-docker-host>/example:1.0.0
 ```
 
 Use the registry hostname without a `/repository/docker-hosted/` path. The
@@ -102,7 +107,7 @@ Publish distribution files using Twine:
 
 ```sh
 python -m twine upload \
-  --repository-url https://nexus.159-195-78-163.nip.io/repository/pypi-hosted/ \
+  --repository-url https://<nexus-host>/repository/pypi-hosted/ \
   dist/*
 ```
 
@@ -110,7 +115,7 @@ Install from the simple package index:
 
 ```sh
 python -m pip install \
-  --index-url https://nexus.159-195-78-163.nip.io/repository/pypi-hosted/simple/ \
+  --index-url https://<nexus-host>/repository/pypi-hosted/simple/ \
   your-package
 ```
 
