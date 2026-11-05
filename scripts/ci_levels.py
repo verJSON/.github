@@ -53,6 +53,17 @@ LEVEL_FIELDS = {"id", "needs", "failFast", "events", "branches", "inputs"}
 NEED_FIELDS = {"level", "condition"}
 BUILD_ARTIFACT_FIELDS = {"producer", "consumers", "paths"}
 BUILD_ARTIFACT_JOBS = frozenset({"artifact-mode-gate", "artifact-preflight", "artifact-producer"})
+# Sharing-selection outputs that participant, producer, and aggregate jobs read from
+# artifact-preflight. The static fallback never selects sharing, so it declares each empty:
+# the exact value its formerly undeclared reads resolved to, now declared for actionlint (#1989).
+STATIC_FALLBACK_UNSELECTED_OUTPUTS = (
+    "producer-plan",
+    "consumer-plans",
+    "profile",
+    "export-paths",
+    "runner-image",
+    "package-manager-version",
+)
 _ARTIFACT_PATH = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 MAX_ARTIFACT_CONSUMERS = 8
 MAX_ARTIFACT_PATHS = 8
@@ -872,13 +883,20 @@ def _render_artifact_jobs(plan: Plan, sha: str) -> list[list[str]]:
             "      build-artifact-participants: ${{ steps.fallback.outputs.participants }}",
             "      build-artifact-aggregate-lanes: ${{ steps.fallback.outputs.aggregate-lanes }}",
             "      build-artifact-needs-results: ${{ steps.fallback.outputs.needs-results }}",
+            *(
+                f"      build-artifact-{name}: ${{{{ steps.fallback.outputs.{name} }}}}"
+                for name in STATIC_FALLBACK_UNSELECTED_OUTPUTS
+            ),
             "    steps:",
             "      - id: fallback",
             "        run: |",
-            "          echo 'share-selected=false' >> \"$GITHUB_OUTPUT\"",
-            f"          echo 'participants={json.dumps([artifact.producer, *artifact.consumers], separators=(',', ':'))}' >> \"$GITHUB_OUTPUT\"",
-            "          echo 'aggregate-lanes=[]' >> \"$GITHUB_OUTPUT\"",
-            "          echo 'needs-results={}' >> \"$GITHUB_OUTPUT\"",
+            "          {",
+            "            echo 'share-selected=false'",
+            f"            echo 'participants={json.dumps([artifact.producer, *artifact.consumers], separators=(',', ':'))}'",
+            "            echo 'aggregate-lanes=[]'",
+            "            echo 'needs-results={}'",
+            *(f"            echo '{name}='" for name in STATIC_FALLBACK_UNSELECTED_OUTPUTS),
+            "          } >> \"$GITHUB_OUTPUT\"",
         ]
     else:
         preflight = _render_role_job(
