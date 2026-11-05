@@ -69,6 +69,30 @@ def run_aggregate(script, expected, results):
     return aggregate(script, expected, results).returncode
 
 
+NEEDS_OUTPUT_READ = re.compile(r"needs\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)")
+
+
+def undeclared_needs_output_reads(rendered):
+    """Return (reader, job, output) for each needs-output read the producing job never declares."""
+    node_ci = yaml.safe_load((ROOT / ".github/workflows/node-ci.yml").read_text())
+    node_ci_outputs = set(node_ci[True]["workflow_call"]["outputs"])
+    jobs = yaml.safe_load(rendered)["jobs"]
+    declared = {}
+    for job_id, job in jobs.items():
+        if "uses" in job:
+            if not job["uses"].startswith("Verjson/.github/.github/workflows/node-ci.yml@"):
+                raise AssertionError(f"{job_id} calls an unmodeled reusable workflow: {job['uses']}")
+            declared[job_id] = node_ci_outputs
+        else:
+            declared[job_id] = set(job.get("outputs", {}))
+    return sorted(
+        (reader, job_id, output)
+        for reader, job in jobs.items()
+        for job_id, output in NEEDS_OUTPUT_READ.findall(json.dumps(job))
+        if output not in declared[job_id]
+    )
+
+
 class GoldenTests(unittest.TestCase):
     def test_without_a_levels_file_the_caller_is_the_single_ci_job_byte_for_byte(self):
         result = run_generator(SHA)
@@ -346,6 +370,17 @@ class BuildArtifactSchemaTests(unittest.TestCase):
             jobs["test-levels"]["steps"][0]["env"]["EXPECTED_1"],
             "${{ github.event_name == 'push' }}",
         )
+
+    def test_generated_artifact_callers_read_only_declared_needs_outputs(self):
+        for golden in ("build-artifact-share.golden.yml", "build-artifact-static-fallback.golden.yml"):
+            with self.subTest(golden=golden):
+                self.assertEqual(undeclared_needs_output_reads((FIXTURES / golden).read_text()), [])
+
+    def test_static_fallback_writes_its_outputs_through_one_redirect(self):
+        # actionlint's shellcheck pass rejects repeated redirects to one file (SC2129).
+        workflow = yaml.safe_load((FIXTURES / "build-artifact-static-fallback.golden.yml").read_text())
+        run = workflow["jobs"]["artifact-preflight"]["steps"][0]["run"]
+        self.assertEqual(run.count(">>"), 1, run)
 
     def test_static_eligibility_uses_canonical_parser_for_string_shorthand(self):
         document = self.artifact_document()

@@ -38,13 +38,27 @@ jobs:
       build-artifact-participants: ${{ steps.fallback.outputs.participants }}
       build-artifact-aggregate-lanes: ${{ steps.fallback.outputs.aggregate-lanes }}
       build-artifact-needs-results: ${{ steps.fallback.outputs.needs-results }}
+      build-artifact-producer-plan: ${{ steps.fallback.outputs.producer-plan }}
+      build-artifact-consumer-plans: ${{ steps.fallback.outputs.consumer-plans }}
+      build-artifact-profile: ${{ steps.fallback.outputs.profile }}
+      build-artifact-export-paths: ${{ steps.fallback.outputs.export-paths }}
+      build-artifact-runner-image: ${{ steps.fallback.outputs.runner-image }}
+      build-artifact-package-manager-version: ${{ steps.fallback.outputs.package-manager-version }}
     steps:
       - id: fallback
         run: |
-          echo 'share-selected=false' >> "$GITHUB_OUTPUT"
-          echo 'participants=["build","test"]' >> "$GITHUB_OUTPUT"
-          echo 'aggregate-lanes=[]' >> "$GITHUB_OUTPUT"
-          echo 'needs-results={}' >> "$GITHUB_OUTPUT"
+          {
+            echo 'share-selected=false'
+            echo 'participants=["build","test"]'
+            echo 'aggregate-lanes=[]'
+            echo 'needs-results={}'
+            echo 'producer-plan='
+            echo 'consumer-plans='
+            echo 'profile='
+            echo 'export-paths='
+            echo 'runner-image='
+            echo 'package-manager-version='
+          } >> "$GITHUB_OUTPUT"
 
   artifact-producer:
     needs: [artifact-preflight]
