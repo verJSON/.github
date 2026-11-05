@@ -124,9 +124,30 @@ capture_mode() {
   printf -v "$target" '%s' "$out"
 }
 
-tmproot="$(mktemp -d)"
+# Unchecked, an empty tmproot would put every scratch file, and the cleanup
+# below, at the filesystem root.
+tmproot="$(mktemp -d)" || { echo "FAIL - could not create the scratch root"; exit 1; }
 trap 'rm -rf "$tmproot"' EXIT
 : >"$tmproot/run.out"
+
+# The generator refuses an invalid invocation with exit 2 and a
+# `gen-changelog-caller.sh: <reason>` line naming the check that refused it. A
+# nonzero exit alone also covers a later check refusing the same arguments, or
+# digest resolution failing, so the reason line is what names the guard under
+# test (#1994). Stderr goes to a file, never into a captured value.
+expect_generator_refusal() {
+  # expect_generator_refusal <reason> <pass-msg> <accepted-msg> <generator-args...>
+  local reason="$1" pass_msg="$2" accepted_msg="$3" status=0 err="$tmproot/generator-refusal.err"
+  shift 3
+  bash "$gen" "$@" >/dev/null 2>"$err" || status=$?
+  if [ "$status" -eq 0 ]; then
+    fail "$accepted_msg"
+  elif [ "$status" -eq 2 ] && grep -qxF -- "gen-changelog-caller.sh: $reason" "$err"; then
+    pass "$pass_msg"
+  else
+    fail "generator refused '${*//$'\n'/\\n}' for a reason other than '$reason' (exit $status): $(head -c 400 "$err" | tr '\n' ' ')"
+  fi
+}
 # Fixtures every mode needs. Case shards skip the generator-only assertions
 # below, so nothing a case reads may be defined there (#1736).
 capture_mode workflow workflow "$sha"
@@ -137,11 +158,10 @@ capture_mode component_release release-node "$sha" --only-package-dir packages/c
 capture_mode custom_contract contract-test "$sha" --scope @acme --node-version 22.23.1 --package-dir compat --release-asset contract/schema.graphql --release-asset contract/schema.sha256
 capture_mode generated_artifacts generated-artifacts "$sha"
 capture_mode generated_artifacts_with_adr generated-artifacts-with-adr-index "$sha"
-if bash "$gen" renovate-attribution "$sha" >/dev/null 2>&1; then
-  fail "retired Renovate fragment-writer mode remains available"
-else
-  pass "retired Renovate fragment-writer mode is unavailable"
-fi
+expect_generator_refusal 'unknown mode; the usage line lists every mode' \
+  "retired Renovate fragment-writer mode is unavailable" \
+  "retired Renovate fragment-writer mode remains available" \
+  renovate-attribution "$sha"
 if [ -e "$repo_root/.github/workflows/renovate-changelog.yml" ] || [ -e "$repo_root/scripts/renovate-changelog.py" ]; then
   fail "canonical Renovate fragment-writer artifacts remain checked in"
 else
@@ -468,24 +488,24 @@ audit_report="$(audit_checkout_credentials release-node "$tampered_reordered" 2>
 # 5. A ref that is not a bare commit is rejected, not quoted and passed through.
 # An earlier sibling generator accepted a ref and let YAML be injected through
 # it; the guard is asserted, not assumed.
+# Without the ref check, most of these still fail later, when the contract
+# digest cannot be resolved at that ref, so only the ref check's own line counts.
 for bad in 'main' "$(printf 'main\n    if: false')" '../../evil' "${sha^^}" "${sha}0" ''; do
-  if bash "$gen" workflow "$bad" >/dev/null 2>&1; then
-    fail "generator accepted a non-commit ref: '$bad'"
-  else
-    pass "generator rejects non-commit ref: '${bad//$'\n'/\\n}'"
-  fi
+  expect_generator_refusal 'ref must be a 40-character lowercase commit SHA' \
+    "generator rejects non-commit ref: '${bad//$'\n'/\\n}'" \
+    "generator accepted a non-commit ref: '$bad'" \
+    workflow "$bad"
 done
 for mode in generated-artifacts generated-artifacts-with-adr-index adr-index-generator pr-gate; do
-  if bash "$gen" "$mode" main >/dev/null 2>&1; then
-    fail "$mode accepted a mutable ref"
-  else
-    pass "$mode rejects a mutable ref"
-  fi
+  expect_generator_refusal 'ref must be a 40-character lowercase commit SHA' \
+    "$mode rejects a mutable ref" "$mode accepted a mutable ref" \
+    "$mode" main
 done
 
 # 6. An unknown mode fails rather than emitting an empty file.
-bash "$gen" bogus "$sha" >/dev/null 2>&1 \
-  && fail "generator accepted an unknown mode" || pass "generator rejects an unknown mode"
+expect_generator_refusal 'unknown mode; the usage line lists every mode' \
+  "generator rejects an unknown mode" "generator accepted an unknown mode" \
+  bogus "$sha"
 
 grep -qF "node-version: \${{ '24' }}" <<<"$default_release" \
   && grep -q "scope: '@verjson'" <<<"$default_release" \
@@ -509,14 +529,25 @@ assert_explicit_release_version release-node "$default_release"
 version_guard="$(python3 -c 'import sys, yaml; print(yaml.safe_load(sys.stdin)["jobs"]["verify"]["steps"][0]["run"])' <<<"$default_release")"
 # Bash's \u escape is locale-dependent; exercise UTF-8 bytes with the emitted step's decoder.
 # The step starts Python isolated, which ignores PYTHONUTF8, so it must request UTF-8 itself.
+# A blank version is refused with exit 1 and the step's one ::error:: line; a
+# traceback, which a decoding failure on the no-break space would raise, is
+# also exit 1, so the line is what shows the guard refused it.
+version_guard_err="$tmproot/version-guard.err"
+version_guard_misses=''
+for blank_version in '' '  ' $'\xc2\xa0'; do
+  version_guard_status=0
+  env -u PYTHONUTF8 LC_ALL=C INPUT_VERSION="$blank_version" bash -c "$version_guard" \
+    >/dev/null 2>"$version_guard_err" || version_guard_status=$?
+  [ "$version_guard_status" -eq 1 ] \
+    && [ "$(cat "$version_guard_err")" = '::error::version is required for release dispatch' ] \
+    || version_guard_misses="$version_guard_misses $(printf '%q' "$blank_version") exited $version_guard_status: $(head -c 200 "$version_guard_err" | tr '\n' ' ');"
+done
 [ -n "$version_guard" ] \
   && grep -qF "python3 -I -X utf8 - <<'PY'" <<<"$version_guard" \
-  && ! env -u PYTHONUTF8 LC_ALL=C INPUT_VERSION='' bash -c "$version_guard" >/dev/null 2>&1 \
-  && ! env -u PYTHONUTF8 LC_ALL=C INPUT_VERSION='  ' bash -c "$version_guard" >/dev/null 2>&1 \
-  && ! env -u PYTHONUTF8 LC_ALL=C INPUT_VERSION=$'\xc2\xa0' bash -c "$version_guard" >/dev/null 2>&1 \
+  && [ -z "$version_guard_misses" ] \
   && env -u PYTHONUTF8 LC_ALL=C INPUT_VERSION='v1.2.3' bash -c "$version_guard" >/dev/null 2>&1 \
   && pass "release dispatch rejects blank versions before resolving a plan" \
-  || fail "release dispatch version guard accepts blank input or rejects an explicit version"
+  || fail "release dispatch version guard accepts blank input or rejects an explicit version${version_guard_misses:+:$version_guard_misses}"
 component_trigger="$(sed -n '/^on:$/,/^permissions:$/p' <<<"$component_release" | sed '$d')"
 expected_component_trigger="$(cat <<'YAML'
 on:
@@ -575,11 +606,10 @@ for component_mode in release-snapshot release-artifact; do
     && pass "$component_mode emits the same byte-exact component workflow defaults (#1565)" \
     || fail "$component_mode component workflow defaults differ from release-node"
 done
-if bash "$gen" contract-test "$sha" --default-prefix schema-v --default-component cli-schema >/dev/null 2>&1; then
-  fail "contract-test accepted release-caller-only default options"
-else
-  pass "non-release modes reject release-caller default options (#1565)"
-fi
+expect_generator_refusal 'release defaults are accepted only by release-node, release-artifact and release-snapshot' \
+  "non-release modes reject release-caller default options (#1565)" \
+  "contract-test accepted release-caller-only default options" \
+  contract-test "$sha" --default-prefix schema-v --default-component cli-schema
 grep -qF '# The verification suite runs after package.json has been stamped to the' <<<"$default_release" \
   && grep -qF '# dispatched version. Its expected version must be read dynamically from' <<<"$default_release" \
   && grep -qF '# package.json; never assert a hardcoded version literal.' <<<"$default_release" \
@@ -636,57 +666,60 @@ grep -q 'EXPECTED_RELEASE_NODE_VERSION="22.23.1"' <<<"$custom_contract" \
   && pass "contract-test preserves generator parameters and checks caller-specific directories" \
   || fail "contract-test does not bind the selected release parameters"
 
-for bad_args in \
-  "--scope Acme" \
-  "--scope @Acme" \
-  "--scope @acme/other" \
-  "--scope @acme --scope @other" \
-  "--node-version lts/*" \
-  "--node-version 022" \
-  "--node-version 22.0.0.1" \
-  "--node-version 24 --node-version 22" \
-  "--default-prefix schema-v" \
-  "--default-component cli-schema" \
-  "--default-prefix v --default-component cli-schema" \
-  "--default-prefix Schema-v --default-component cli-schema" \
-  "--default-prefix schema --default-component cli-schema" \
-  "--default-prefix schema-v --default-component CLI-schema" \
-  "--default-prefix schema-v --default-component -cli-schema" \
-  "--default-prefix schema-v --default-component aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
-  "--default-prefix schema-v --default-prefix other-v --default-component cli-schema" \
-  "--default-prefix schema-v --default-component cli-schema --default-component other" \
-  "--package-dir ../compat" \
-  "--package-dir /tmp/compat" \
-  "--package-dir -compat" \
-  "--package-dir ~compat" \
-  "--package-dir compat --package-dir compat" \
-  "--package-dir ."; do
-  # Intentional word splitting: each fixture is a complete argument sequence.
-  # shellcheck disable=SC2086
-  if bash "$gen" release-node "$sha" $bad_args >/dev/null 2>&1; then
-    fail "release-node accepted invalid or duplicate parameters: $bad_args"
-  else
-    pass "release-node rejects invalid or duplicate parameters: $bad_args"
-  fi
-done
-for bad_assets in \
-  "--release-asset ../schema.graphql" \
-  "--release-asset /tmp/schema.graphql" \
-  "--release-asset contract/./schema.graphql" \
-  "--release-asset contract/schema.graphql --release-asset contract/schema.graphql" \
-  "--release-asset a/schema.graphql --release-asset b/schema.graphql"; do
-  # Intentional word splitting: fixtures contain no whitespace-bearing paths.
-  # shellcheck disable=SC2086
-  bash "$gen" release-node "$sha" $bad_assets >/dev/null 2>&1 \
-    && fail "release-node accepted invalid release assets: $bad_assets" \
-    || pass "release-node rejects invalid release assets: $bad_assets"
-done
-bash "$gen" workflow "$sha" --release-asset contract/schema.graphql >/dev/null 2>&1 \
-  && fail "workflow mode accepted release assets" \
-  || pass "non-release-node modes reject release assets"
-bash "$gen" workflow "$sha" --scope @acme >/dev/null 2>&1 \
-  && fail "workflow mode accepted release-only parameters" \
-  || pass "non-release generator modes reject release-only parameters"
+# Each case names the check that must refuse it: several share an option, and a
+# case whose own check is gone is often still refused by a neighbor.
+# `read -a` splits each sequence into arguments without glob expansion.
+while IFS='|' read -r bad_args bad_args_reason; do
+  read -r -a bad_argv <<<"$bad_args"
+  expect_generator_refusal "$bad_args_reason" \
+    "release-node rejects invalid or duplicate parameters: $bad_args" \
+    "release-node accepted invalid or duplicate parameters: $bad_args" \
+    release-node "$sha" "${bad_argv[@]}"
+done <<'BAD_ARGS'
+--scope Acme|scope must be a lowercase npm scope such as @verjson
+--scope @Acme|scope must be a lowercase npm scope such as @verjson
+--scope @acme/other|scope must be a lowercase npm scope such as @verjson
+--scope @acme --scope @other|--scope was repeated
+--node-version lts/*|node version must be a numeric major, major.minor, or major.minor.patch
+--node-version 022|node version must be a numeric major, major.minor, or major.minor.patch
+--node-version 22.0.0.1|node version must be a numeric major, major.minor, or major.minor.patch
+--node-version 24 --node-version 22|--node-version was repeated
+--default-prefix schema-v|--default-prefix and --default-component must be provided together
+--default-component cli-schema|--default-prefix and --default-component must be provided together
+--default-prefix v --default-component cli-schema|--default-prefix must be a lowercase stream name followed by -v
+--default-prefix Schema-v --default-component cli-schema|--default-prefix must be a lowercase stream name followed by -v
+--default-prefix schema --default-component cli-schema|--default-prefix must be a lowercase stream name followed by -v
+--default-prefix schema-v --default-component CLI-schema|--default-component must be a 1-64 character lowercase component identifier
+--default-prefix schema-v --default-component -cli-schema|--default-component must be a 1-64 character lowercase component identifier
+--default-prefix schema-v --default-component aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|--default-component must be a 1-64 character lowercase component identifier
+--default-prefix schema-v --default-prefix other-v --default-component cli-schema|--default-prefix was repeated
+--default-prefix schema-v --default-component cli-schema --default-component other|--default-component was repeated
+--package-dir ../compat|package dir may not contain . or .. segments
+--package-dir /tmp/compat|package dir must be a normalized repository-relative path
+--package-dir -compat|package dir must be a normalized repository-relative path
+--package-dir ~compat|package dir must be a normalized repository-relative path
+--package-dir compat --package-dir compat|duplicate package dir: compat
+--package-dir .|duplicate package dir: .
+BAD_ARGS
+while IFS='|' read -r bad_assets bad_assets_reason; do
+  read -r -a bad_assets_argv <<<"$bad_assets"
+  expect_generator_refusal "$bad_assets_reason" \
+    "release-node rejects invalid release assets: $bad_assets" \
+    "release-node accepted invalid release assets: $bad_assets" \
+    release-node "$sha" "${bad_assets_argv[@]}"
+done <<'BAD_ASSETS'
+--release-asset ../schema.graphql|--release-asset must be a normalized repository-relative path
+--release-asset /tmp/schema.graphql|--release-asset must be a normalized repository-relative path
+--release-asset contract/./schema.graphql|--release-asset must be a normalized repository-relative path
+--release-asset contract/schema.graphql --release-asset contract/schema.graphql|release asset paths must be unique
+--release-asset a/schema.graphql --release-asset b/schema.graphql|release asset basenames must be unique
+BAD_ASSETS
+expect_generator_refusal '--release-asset is accepted only by release-node and contract-test' \
+  "non-release-node modes reject release assets" "workflow mode accepted release assets" \
+  workflow "$sha" --release-asset contract/schema.graphql
+expect_generator_refusal 'release parameters are accepted only by release-node, release-artifact, release-snapshot and contract-test' \
+  "non-release generator modes reject release-only parameters" "workflow mode accepted release-only parameters" \
+  workflow "$sha" --scope @acme
 
 # 7. The emitted renderer fails closed when the contract cannot be fetched, and
 # leaves no partial file behind for the next run to exec as if it were the
@@ -780,10 +813,21 @@ else
 fi
 # A suite that cannot fail is the defect #1380 reports, so prove this one still
 # detects a broken generator rather than only that it exits 0.
+# The suite exits 1 once any case failed, so the two calendar cases the mutant
+# breaks are what show it was detected, not a fixture the suite could not run.
 sed -i 's/^  \[ "\$day" -le "\$max_day" \]$/  return 0/' "$adr_suite_adopter/scripts/gen-adr-index.sh"
+adr_mutant_status=0
 bash "$adr_suite_adopter/scripts/gen-adr-index.test.sh" >"$tmproot/adr-adopter-mutant.log" 2>&1 \
-  && fail "the generated suite passed against a generator that accepts impossible dates" \
-  || pass "the generated suite detects a broken generator instead of passing vacuously"
+  || adr_mutant_status=$?
+if [ "$adr_mutant_status" -eq 0 ]; then
+  fail "the generated suite passed against a generator that accepts impossible dates"
+elif [ "$adr_mutant_status" -eq 1 ] \
+  && grep -qxF 'FAIL - impossible calendar date must fail (#78)' "$tmproot/adr-adopter-mutant.log" \
+  && grep -qxF 'FAIL - non-leap February 29 must fail (#78)' "$tmproot/adr-adopter-mutant.log"; then
+  pass "the generated suite detects a broken generator instead of passing vacuously"
+else
+  fail "the generated suite failed against the impossible-date generator for another reason (exit $adr_mutant_status): $(grep -m3 '^FAIL' "$tmproot/adr-adopter-mutant.log" | tr '\n' ' ')"
+fi
 
 # The suite is a member of the generated set, so the contract test pins its
 # digest exactly as it pins the generator's — a partial regeneration fails there.
@@ -1153,11 +1197,10 @@ bash -n "$emitted" 2>/dev/null \
   || fail "emitted contract test does not parse"
 
 for bad in 'main' "$(printf 'main\n  if: false')" '../../evil' "${sha^^}" "${sha}0" ''; do
-  if bash "$gen" contract-test "$bad" >/dev/null 2>&1; then
-    fail "contract-test mode accepted a non-commit ref: '$bad'"
-  else
-    pass "contract-test mode rejects a non-commit ref: '${bad//$'\n'/\\n}'"
-  fi
+  expect_generator_refusal 'ref must be a 40-character lowercase commit SHA' \
+    "contract-test mode rejects a non-commit ref: '${bad//$'\n'/\\n}'" \
+    "contract-test mode accepted a non-commit ref: '$bad'" \
+    contract-test "$bad"
 done
 
 grep -q "CONTRACT_REF=\"$sha\"" "$emitted" \
@@ -1269,14 +1312,26 @@ open(target, "w", encoding="utf-8").write(text.replace(header, header + line + "
 PY
   printf '%s\n' "$copy"
 }
+# A copy that cannot run, or cannot resolve the contract digest, also exits
+# nonzero with no output. The injected function's own stderr sentinel is what
+# shows it ran and stopped the mode; the exit status itself is not contractual.
+injected_err="$tmproot/injected-generator.err"
 while IFS='|' read -r injected_function injected_mode injected_args; do
-  injected_gen="$(inject_generator "fail-$injected_function-$injected_mode" "$injected_function" '  return 3')"
+  injected_gen="$(inject_generator "fail-$injected_function-$injected_mode" "$injected_function" \
+    "  echo \"injected-failure:$injected_function\" >&2; return 3")"
+  injected_status=0
   # shellcheck disable=SC2086 # the extra generator arguments are word-split on purpose
-  injected_out="$(GIT_DIR="$injected_generator_git_dir" bash "$injected_gen" "$injected_mode" "$sha" $injected_args 2>/dev/null)" \
-    && fail "the generator exited 0 when $injected_function failed inside $injected_mode" \
-    || { [ -z "$injected_out" ] \
-      && pass "a failing $injected_function stops $injected_mode with no output" \
-      || fail "a failing $injected_function stopped $injected_mode only after emitting output"; }
+  injected_out="$(GIT_DIR="$injected_generator_git_dir" bash "$injected_gen" "$injected_mode" "$sha" $injected_args 2>"$injected_err")" \
+    || injected_status=$?
+  if [ "$injected_status" -eq 0 ]; then
+    fail "the generator exited 0 when $injected_function failed inside $injected_mode"
+  elif ! grep -qxF -- "injected-failure:$injected_function" "$injected_err"; then
+    fail "$injected_mode exited $injected_status without the injected sentinel, so $injected_function never ran: $(head -c 300 "$injected_err" | tr '\n' ' ')"
+  elif [ -n "$injected_out" ]; then
+    fail "a failing $injected_function stopped $injected_mode only after emitting output"
+  else
+    pass "a failing $injected_function stops $injected_mode with no output"
+  fi
 done <<'INJECTIONS'
 release_snapshot_with|release-node|
 release_snapshot_job|release-snapshot|
@@ -1582,6 +1637,32 @@ schedule_adopter_script() {
   adopter_job_pids+=("$last_rejection_pid")
   adopter_job_results+=("$result")
   pump_adopter_jobs
+}
+
+# For a scheduled script: the emitted suite stops at its first failure with
+# exit 1 and a FAIL line naming it. Any other failure is nonzero too, so the
+# reason is what shows the invariant under test refused the adopter (#1994).
+# Only the failure report counts, from the first FAIL line to the end: the
+# `ok -` lines before it can carry a reason's text, and two reasons sit on the
+# indented lines that continue a FAIL. One awk reads the whole log, so no pipe
+# feeds an early-exiting consumer (#1430/#1445).
+# Reads the job's own $status and $ADOPTER_LOG.
+failure_report_names() { # failure_report_names <reason> <log>
+  REASON="$1" awk '
+    /^FAIL - / { reporting = 1 }
+    reporting && index($0, ENVIRON["REASON"]) { found = 1 }
+    END { exit !found }
+  ' "$2"
+}
+expect_scheduled_rejection() {
+  # expect_scheduled_rejection <reason> <pass-msg> <accepted-msg>
+  if [ "$status" -eq 0 ]; then
+    fail "$3"
+  elif [ "$status" -eq 1 ] && failure_report_names "$1" "$ADOPTER_LOG"; then
+    pass "$2"
+  else
+    fail "rejected for a reason other than '$1' (exit $status), so unproven: $2: $(tail -2 "$ADOPTER_LOG")"
+  fi
 }
 
 adopter="$tmproot/adopter"
@@ -2178,11 +2259,9 @@ printf '%s\n' "$custom_release" >"$custom_adopter/.github/workflows/release.yml"
 sed -i "s/scope: '@acme'/scope: '@other'/" \
   "$custom_adopter/.github/workflows/release.yml"
 schedule_adopter_script "$custom_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "custom contract accepted a release scope that drifted after generation"
-else
-  pass "custom contract rejects release parameter drift (#520)"
-fi
+expect_scheduled_rejection 'release.yml does not use npm scope @acme consistently; regenerate release-node and contract-test with the same --scope (#520)' \
+  "custom contract rejects release parameter drift (#520)" \
+  "custom contract accepted a release scope that drifted after generation"
 SCHED_SCRIPT
 )"
 
@@ -2194,11 +2273,9 @@ chmod +x "$omitted_stamp_adopter/scripts/changelog-contract.test.sh"
 sed -i 's/package_dirs=(. compat)/package_dirs=(.)/' \
   "$omitted_stamp_adopter/.github/workflows/release.yml"
 schedule_adopter_script "$omitted_stamp_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "custom contract accepted a verification stamp that omitted a published package"
-else
-  pass "custom contract rejects a verification stamp that omits a published package (#557)"
-fi
+expect_scheduled_rejection 'release.yml does not stamp every package directory selected for publication (#557)' \
+  "custom contract rejects a verification stamp that omits a published package (#557)" \
+  "custom contract accepted a verification stamp that omitted a published package"
 SCHED_SCRIPT
 )"
 
@@ -2220,11 +2297,9 @@ sed -i \
   -e '/^      changelog: true$/d' \
   "$retired_adopter/.github/workflows/changelog.yml"
 schedule_adopter_script "$retired_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts the retired changelog-validate workflow"
-else
-  pass "emitted suite requires the generated workflow behind the required context (#835)"
-fi
+expect_scheduled_rejection 'changelog.yml does not call generated-artifacts.yml at the shared pin' \
+  "emitted suite requires the generated workflow behind the required context (#835)" \
+  "emitted suite accepts the retired changelog-validate workflow"
 SCHED_SCRIPT
 )"
 
@@ -2239,11 +2314,9 @@ cat >>"$cross_job_adopter/.github/workflows/changelog.yml" <<'YAML'
       - run: 'true'
 YAML
 schedule_adopter_script "$cross_job_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts canonical fields spread across different jobs"
-else
-  pass "emitted suite binds the canonical caller fields to the changelog job (#835)"
-fi
+expect_scheduled_rejection 'changelog.yml changelog inputs must be nested under exactly one canonical with mapping' \
+  "emitted suite binds the canonical caller fields to the changelog job (#835)" \
+  "emitted suite accepts canonical fields spread across different jobs"
 SCHED_SCRIPT
 )"
 
@@ -2252,11 +2325,9 @@ cp -a "$generated_adopter" "$named_job_adopter"
 sed -i '/^  changelog:$/a\    name: renamed required check' \
   "$named_job_adopter/.github/workflows/changelog.yml"
 schedule_adopter_script "$named_job_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts a changelog job with a check-name override"
-else
-  pass "emitted suite rejects a job-level name that changes the required context (#835)"
-fi
+expect_scheduled_rejection 'changelog.yml changelog job may contain only the canonical uses and with fields; name, strategy, matrix, and other check-shaping fields are forbidden' \
+  "emitted suite rejects a job-level name that changes the required context (#835)" \
+  "emitted suite accepts a changelog job with a check-name override"
 SCHED_SCRIPT
 )"
 
@@ -2265,11 +2336,9 @@ cp -a "$generated_adopter" "$matrix_job_adopter"
 sed -i '/^  changelog:$/a\    strategy:\n      matrix:\n        shard: [one, two]' \
   "$matrix_job_adopter/.github/workflows/changelog.yml"
 schedule_adopter_script "$matrix_job_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts a matrixed changelog job"
-else
-  pass "emitted suite rejects strategy fields that suffix the required context (#835)"
-fi
+expect_scheduled_rejection 'changelog.yml changelog job may contain only the canonical uses and with fields; name, strategy, matrix, and other check-shaping fields are forbidden' \
+  "emitted suite rejects strategy fields that suffix the required context (#835)" \
+  "emitted suite accepts a matrixed changelog job"
 SCHED_SCRIPT
 )"
 
@@ -2278,11 +2347,9 @@ cp -a "$generated_adopter" "$secrets_job_adopter"
 sed -i 's/^    with:$/    secrets:/' \
   "$secrets_job_adopter/.github/workflows/changelog.yml"
 schedule_adopter_script "$secrets_job_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts changelog inputs nested under secrets"
-else
-  pass "emitted suite binds changelog inputs to the canonical with mapping (#835)"
-fi
+expect_scheduled_rejection 'changelog.yml changelog inputs must be nested under exactly one canonical with mapping' \
+  "emitted suite binds changelog inputs to the canonical with mapping (#835)" \
+  "emitted suite accepts changelog inputs nested under secrets"
 SCHED_SCRIPT
 )"
 
@@ -2291,11 +2358,9 @@ cp -a "$generated_adopter" "$typo_job_adopter"
 sed -i 's/^    with:$/    wiht:/' \
   "$typo_job_adopter/.github/workflows/changelog.yml"
 schedule_adopter_script "$typo_job_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts changelog inputs nested under a typo mapping"
-else
-  pass "emitted suite rejects a typo in the canonical with mapping (#835)"
-fi
+expect_scheduled_rejection 'changelog.yml changelog inputs must be nested under exactly one canonical with mapping' \
+  "emitted suite rejects a typo in the canonical with mapping (#835)" \
+  "emitted suite accepts changelog inputs nested under a typo mapping"
 SCHED_SCRIPT
 )"
 
@@ -2304,22 +2369,18 @@ cp -a "$generated_adopter" "$extra_input_adopter"
 sed -i '/^      contract_ref:/a\      unexpected_input: true' \
   "$extra_input_adopter/.github/workflows/changelog.yml"
 schedule_adopter_script "$extra_input_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts an additional changelog caller input"
-else
-  pass "emitted suite enforces the exact changelog caller input set (#835)"
-fi
+expect_scheduled_rejection 'changelog.yml changelog inputs must be exactly changelog and contract_ref, plus optional canonical adr-index' \
+  "emitted suite enforces the exact changelog caller input set (#835)" \
+  "emitted suite accepts an additional changelog caller input"
 SCHED_SCRIPT
 )"
 
 split_adopter="$tmproot/adopter-split-generated-artifacts"
 build_split_adopter "$split_adopter"
 schedule_adopter_script "$split_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts duplicate changelog callers at two paths"
-else
-  pass "emitted suite retires the ambiguous split caller topology (#835)"
-fi
+expect_scheduled_rejection 'workflow set contains 2 reusable callers capable of publishing changelog / validate; keep only .github/workflows/changelog.yml' \
+  "emitted suite retires the ambiguous split caller topology (#835)" \
+  "emitted suite accepts duplicate changelog callers at two paths"
 SCHED_SCRIPT
 )"
 
@@ -2328,11 +2389,9 @@ cp -a "$generated_adopter" "$renamed_duplicate_adopter"
 cp "$renamed_duplicate_adopter/.github/workflows/changelog.yml" \
   "$renamed_duplicate_adopter/.github/workflows/docs-validation.yml"
 schedule_adopter_script "$renamed_duplicate_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts a duplicate caller hidden behind another filename"
-else
-  pass "emitted suite scans every workflow for renamed duplicate callers (#835)"
-fi
+expect_scheduled_rejection 'workflow set contains 2 reusable callers capable of publishing changelog / validate; keep only .github/workflows/changelog.yml' \
+  "emitted suite scans every workflow for renamed duplicate callers (#835)" \
+  "emitted suite accepts a duplicate caller hidden behind another filename"
 SCHED_SCRIPT
 )"
 
@@ -2349,11 +2408,9 @@ jobs:
       contract_ref: $sha
 YAML
 schedule_adopter_script "$legacy_duplicate_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts a legacy caller beside the canonical caller"
-else
-  pass "emitted suite rejects an additional changelog-validate caller (#835)"
-fi
+expect_scheduled_rejection 'workflow set contains 2 reusable callers capable of publishing changelog / validate; keep only .github/workflows/changelog.yml' \
+  "emitted suite rejects an additional changelog-validate caller (#835)" \
+  "emitted suite accepts a legacy caller beside the canonical caller"
 SCHED_SCRIPT
 )"
 
@@ -2374,11 +2431,9 @@ missing_adr_test_adopter="$tmproot/adopter-adr-without-suite"
 cp -a "$adr_adopter" "$missing_adr_test_adopter"
 rm -f "$missing_adr_test_adopter/scripts/gen-adr-index.test.sh"
 schedule_adopter_script "$missing_adr_test_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts ADR checking without the pinned generator suite"
-else
-  pass "emitted suite rejects ADR checking without its pinned generator suite (#1380)"
-fi
+expect_scheduled_rejection 'adr-index: true requires the pinned scripts/gen-adr-index.test.sh.' \
+  "emitted suite rejects ADR checking without its pinned generator suite (#1380)" \
+  "emitted suite accepts ADR checking without the pinned generator suite"
 SCHED_SCRIPT
 )"
 
@@ -2387,11 +2442,9 @@ cp -a "$adr_adopter" "$handwritten_adr_test_adopter"
 printf '#!/usr/bin/env bash\necho "ok - looks like a test"\n' \
   >"$handwritten_adr_test_adopter/scripts/gen-adr-index.test.sh"
 schedule_adopter_script "$handwritten_adr_test_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts a hand-written ADR generator suite"
-else
-  pass "emitted suite rejects a hand-written ADR generator suite (#1380)"
-fi
+expect_scheduled_rejection 'scripts/gen-adr-index.test.sh declares 0 generator-mode headers' \
+  "emitted suite rejects a hand-written ADR generator suite (#1380)" \
+  "emitted suite accepts a hand-written ADR generator suite"
 SCHED_SCRIPT
 )"
 rm -f "$adr_adopter/scripts/gen-adr-index.sh"
@@ -2582,11 +2635,9 @@ for failure in renderer download digest python; do
   build_adopter "$failing"
   inject_render_failure "$failing" "$failure"
   schedule_adopter_script "$failing" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "a $failure failure with renderable NEXT/ fragments reported success"
-else
-  pass "a $failure failure with renderable NEXT/ fragments fails closed"
-fi
+expect_scheduled_rejection 'render-next failed for a reason other than an emptied NEXT/' \
+  "a $failure failure with renderable NEXT/ fragments fails closed" \
+  "a $failure failure with renderable NEXT/ fragments reported success"
 SCHED_SCRIPT
 )"
 
@@ -5693,10 +5744,19 @@ fi
 
 # Still a renderer, not a front end to a pinned engine: anything else is refused
 # so a caller cannot reach subcommands the contract does not sanction.
-if (cd "$quoted" && ./scripts/render-next.sh release --version v9.9.9) >/dev/null 2>&1; then
+# Forwarded, the engine's own argument parser would refuse it too, so only the
+# renderer's exit 2 and its own line show the renderer refused it.
+renderer_refusal_err="$tmproot/renderer-refusal.err"
+renderer_refusal_status=0
+(cd "$quoted" && ./scripts/render-next.sh release --version v9.9.9) >/dev/null 2>"$renderer_refusal_err" \
+  || renderer_refusal_status=$?
+if [ "$renderer_refusal_status" -eq 0 ]; then
   fail "the generated renderer forwarded an unsanctioned argument"
-else
+elif [ "$renderer_refusal_status" -eq 2 ] \
+  && [ "$(cat "$renderer_refusal_err")" = "render-next: unexpected argument 'release'" ]; then
   pass "the generated renderer still refuses arguments outside its render flags"
+else
+  fail "the generated renderer's refusal of an unsanctioned argument is not its own (exit $renderer_refusal_status): $(head -c 300 "$renderer_refusal_err" | tr '\n' ' ')"
 fi
 
 # Only reachable after a release, so it needs a released fixture.
@@ -5705,11 +5765,9 @@ build_adopter "$edited"
 python3 "$contract_src" release --repo-root "$edited" --version v1.0.0 >/dev/null 2>&1
 printf '\nhand-written addition\n' >>"$edited/CHANGELOG.md"
 schedule_adopter_script "$edited" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepted a hand-edited CHANGELOG.md"
-else
-  pass "emitted suite rejects a hand-edited CHANGELOG.md"
-fi
+expect_scheduled_rejection 'CHANGELOG.md was hand-edited; it must equal the rendered released snapshots' \
+  "emitted suite rejects a hand-edited CHANGELOG.md" \
+  "emitted suite accepted a hand-edited CHANGELOG.md"
 SCHED_SCRIPT
 )"
 
@@ -5730,23 +5788,22 @@ rm -f "$gen_err"
 # GitHub Release assets (e.g. Electron installers) instead of a package.
 # --------------------------------------------------------------------------
 
-if bash "$gen" release-artifact "$sha" >/dev/null 2>&1; then
-  fail "release-artifact accepted generation with no --build-runner"
-else
-  pass "release-artifact requires at least one --build-runner"
-fi
+expect_generator_refusal 'release-artifact requires at least one --build-runner' \
+  "release-artifact requires at least one --build-runner" \
+  "release-artifact accepted generation with no --build-runner" \
+  release-artifact "$sha"
 
-if bash "$gen" release-artifact "$sha" --build-runner 'not a label' >/dev/null 2>&1; then
-  fail "release-artifact accepted a --build-runner value that is not a bare label"
-else
-  pass "release-artifact rejects a --build-runner value that is not a bare label"
-fi
+# One message covers every runner selector the check refuses.
+build_runner_refusal='--build-runner must be a literal label or an exact ADR 0103 fromJSON(vars.CI_LANE_TRUSTED_MACOS|WINDOWS) expression'
+expect_generator_refusal "$build_runner_refusal" \
+  "release-artifact rejects a --build-runner value that is not a bare label" \
+  "release-artifact accepted a --build-runner value that is not a bare label" \
+  release-artifact "$sha" --build-runner 'not a label'
 
-if bash "$gen" release-artifact "$sha" --build-runner 'vars.CI_LANE_TRUSTED_MACOS' >/dev/null 2>&1; then
-  fail "release-artifact accepted a silent variable-name runner literal"
-else
-  pass "release-artifact rejects variable names that omit the required expression"
-fi
+expect_generator_refusal "$build_runner_refusal" \
+  "release-artifact rejects variable names that omit the required expression" \
+  "release-artifact accepted a silent variable-name runner literal" \
+  release-artifact "$sha" --build-runner 'vars.CI_LANE_TRUSTED_MACOS'
 
 lane_expression='${{ fromJSON(vars.CI_LANE_TRUSTED_MACOS) }}'
 windows_lane_expression='${{ fromJSON(vars.CI_LANE_TRUSTED_WINDOWS) }}'
@@ -5756,11 +5813,10 @@ else
   fail "release-artifact rejected the exact ADR 0103 macOS lane expression"
 fi
 for forbidden_metered_literal in macos-14 windows-2022; do
-  if bash "$gen" release-artifact "$sha" --build-runner "$forbidden_metered_literal" >/dev/null 2>&1; then
-    fail "release-artifact accepted literal metered selector: $forbidden_metered_literal"
-  else
-    pass "release-artifact rejects literal metered selector: $forbidden_metered_literal"
-  fi
+  expect_generator_refusal "$build_runner_refusal" \
+    "release-artifact rejects literal metered selector: $forbidden_metered_literal" \
+    "release-artifact accepted literal metered selector: $forbidden_metered_literal" \
+    release-artifact "$sha" --build-runner "$forbidden_metered_literal"
 done
 
 if bash "$gen" release-artifact "$sha" --build-runner ubuntu-24.04 --node-version 22 \
@@ -5770,24 +5826,20 @@ else
   fail "release-artifact rejected a validated --node-version"
 fi
 
-if bash "$gen" release-node "$sha" --build-runner ubuntu-24.04 >/dev/null 2>&1; then
-  fail "release-node accepted --build-runner, a release-artifact-only flag"
-else
-  pass "release-node rejects --build-runner"
-fi
+expect_generator_refusal '--build-runner is accepted only by release-artifact and contract-test' \
+  "release-node rejects --build-runner" \
+  "release-node accepted --build-runner, a release-artifact-only flag" \
+  release-node "$sha" --build-runner ubuntu-24.04
 
-if bash "$gen" release-node "$sha" --approved-internal-package @verjson/ai >/dev/null 2>&1; then
-  fail "release-node accepted release-artifact private acquisition policy"
-else
-  pass "private acquisition policy is release-artifact-only"
-fi
+expect_generator_refusal '--approved-internal-package is accepted only by release-artifact and contract-test' \
+  "private acquisition policy is release-artifact-only" \
+  "release-node accepted release-artifact private acquisition policy" \
+  release-node "$sha" --approved-internal-package @verjson/ai
 for invalid_package in '@Verjson/ai' '@verjson/AI' '@other/ai' '@verjson/ai@latest'; do
-  if bash "$gen" release-artifact "$sha" --build-runner ubuntu-24.04 \
-      --approved-internal-package "$invalid_package" >/dev/null 2>&1; then
-    fail "release-artifact accepted invalid approved package: $invalid_package"
-  else
-    pass "release-artifact rejects invalid approved package: $invalid_package"
-  fi
+  expect_generator_refusal '--approved-internal-package must be an exact lowercase @verjson package name' \
+    "release-artifact rejects invalid approved package: $invalid_package" \
+    "release-artifact accepted invalid approved package: $invalid_package" \
+    release-artifact "$sha" --build-runner ubuntu-24.04 --approved-internal-package "$invalid_package"
 done
 
 artifact_release="$(bash "$gen" release-artifact "$sha" \
@@ -5914,11 +5966,9 @@ assert source.count(binding) == 1
 path.write_text(source.replace(binding, "    # runs-on: ${{ matrix.os }}\n    runs-on: 'general'", 1))
 PY
 schedule_adopter_script "$unbound_build_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts a build job detached from its approved OS matrix"
-else
-  pass "emitted suite rejects a build job detached from its approved OS matrix"
-fi
+expect_scheduled_rejection 'release.yml build job does not run on its approved OS matrix' \
+  "emitted suite rejects a build job detached from its approved OS matrix" \
+  "emitted suite accepts a build job detached from its approved OS matrix"
 SCHED_SCRIPT
 )"
 
@@ -5935,11 +5985,9 @@ assert source.count(binding) == 2
 path.write_text(source.replace(binding, "    # runs-on: ${{ matrix.os }}\n    runs-on: 'general'", 1))
 PY
 schedule_adopter_script "$unbound_acquisition_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepts acquisition detached from its approved OS matrix"
-else
-  pass "emitted suite rejects acquisition detached from its approved OS matrix"
-fi
+expect_scheduled_rejection 'release.yml acquisition job does not run on its approved OS matrix' \
+  "emitted suite rejects acquisition detached from its approved OS matrix" \
+  "emitted suite accepts acquisition detached from its approved OS matrix"
 SCHED_SCRIPT
 )"
 
@@ -7096,11 +7144,9 @@ end = next(
 open(path, "w", encoding="utf-8").writelines(lines[:start] + lines[end:])
 PY
 schedule_adopter_script "$stripped_guard_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepted a release-node caller with its pre-snapshot refusal deleted"
-else
-  pass "emitted suite rejects a release-node caller whose pre-snapshot refusal was deleted (#1206)"
-fi
+expect_scheduled_rejection 'release.yml does not refuse a private, unpublishable package before the snapshot is tagged (#1206)' \
+  "emitted suite rejects a release-node caller whose pre-snapshot refusal was deleted (#1206)" \
+  "emitted suite accepted a release-node caller with its pre-snapshot refusal deleted"
 SCHED_SCRIPT
 )"
 
@@ -7785,11 +7831,9 @@ else:
 open(path, "w", encoding="utf-8").writelines(lines)
 INJECT
 schedule_adopter_script "$injection_adopter" "$(cat <<'SCHED_SCRIPT'
-if [ "$status" -eq 0 ]; then
-  fail "emitted suite accepted a header whose pin is a command substitution"
-else
-  pass "emitted suite refuses a header whose pin is a command substitution"
-fi
+expect_scheduled_rejection 'scripts/render-next.sh declares no contract pin this suite can read' \
+  "emitted suite refuses a header whose pin is a command substitution" \
+  "emitted suite accepted a header whose pin is a command substitution"
 SCHED_SCRIPT
 )"
 [ ! -e "$injection_witness" ] \
