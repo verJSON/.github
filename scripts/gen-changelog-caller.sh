@@ -103,25 +103,41 @@ pr_gate_untrusted_runner_set=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --scope)
-      [ "$#" -ge 2 ] && [ "$release_scope_set" = false ] || usage
+      [ "$#" -ge 2 ] || usage
+      [ "$release_scope_set" = false ] || {
+        echo "$(basename "$0"): --scope was repeated" >&2
+        usage
+      }
       release_scope="$2"
       release_scope_set=true
       shift 2
       ;;
     --node-version)
-      [ "$#" -ge 2 ] && [ "$release_node_version_set" = false ] || usage
+      [ "$#" -ge 2 ] || usage
+      [ "$release_node_version_set" = false ] || {
+        echo "$(basename "$0"): --node-version was repeated" >&2
+        usage
+      }
       release_node_version="$2"
       release_node_version_set=true
       shift 2
       ;;
     --default-prefix)
-      [ "$#" -ge 2 ] && [ "$release_default_prefix_set" = false ] || usage
+      [ "$#" -ge 2 ] || usage
+      [ "$release_default_prefix_set" = false ] || {
+        echo "$(basename "$0"): --default-prefix was repeated" >&2
+        usage
+      }
       release_default_prefix="$2"
       release_default_prefix_set=true
       shift 2
       ;;
     --default-component)
-      [ "$#" -ge 2 ] && [ "$release_default_component_set" = false ] || usage
+      [ "$#" -ge 2 ] || usage
+      [ "$release_default_component_set" = false ] || {
+        echo "$(basename "$0"): --default-component was repeated" >&2
+        usage
+      }
       release_default_component="$2"
       release_default_component_set=true
       shift 2
