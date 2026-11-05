@@ -19,6 +19,9 @@ Service endpoint and registry checks last verified: **2026-09-07**.
 
 HTTPS checks use normal certificate validation. Health checks establish
 reachability only; they do not verify authentication, persistence, or backups.
+Backups and restore drills follow
+[ADR 0256](../decisions/0256-netcup-stack-backup-and-disaster-recovery/README.md)
+and the [backup and restore runbook](netcup-stack-backup-restore.md).
 
 ## Migration status snapshot (2026-10-02, 23:13 UTC)
 
