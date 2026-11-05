@@ -57,3 +57,22 @@ The runner starts every `@exclusive` row first, in manifest order, and each one 
 ## Amendment (2026-11-02): the case-selection count lives in one place
 
 Decision item 4 says every caller-contract run makes "exactly 268 case selections". By [verJSON/.github#1974](https://github.com/verJSON/.github/issues/1974) the pinned count had grown to 388 while that sentence stayed unchanged. The authoritative value is `CHANGELOG_CALLER_CONTRACT_CASES` in `scripts/changelog-caller-contract-shard.sh`. Every shard fails if a run's selections drift from it, and `scripts/ci-gate/changelog-caller-contract-shard.test.sh` checks that the four shards partition it. Read the current number there, not from this record. The decided mechanism is unchanged: a fixed, pinned selection count, partitioned across the four `changelog-release-*` cells.
+
+## Amendment (2026-11-05): every group writes runtime records, and hot cases get their own rows
+
+### Context
+
+[verJSON/.github#1999](https://github.com/verJSON/.github/issues/1999) found three gaps in the records from the 2026-10-17 amendment. The `docs` and `locale-collation` groups wrote none. Records are per row, so a row's cost could not be split into its cases without local profiling. The `RELEASE_CALLER_ISOLATION_PART=contract` row took 23 to 32 seconds over 11 hosted runs but declared no budget. Item 2 requires a budget above 30 seconds.
+
+Pull-request runs that uploaded no records were all runs where `shell-test-groups` was skipped: drafts, or changes without heavy paths. No PR run skipped an upload after its rows had run. A failed `platform` cell still uploaded its records (run 41735004728).
+
+### Decision
+
+1. Every step that runs `scripts/actions-ci-group.sh` sets `ACTIONS_CI_RUNTIME_RECORDS` to `runner.temp/actions-ci-runtime-records-<run_id>-<attempt>/<group>.jsonl`. The next step uploads that file `if: always()`, as `actions-ci-runtime-records-<run_id>-<attempt>-<group>`, from a step named `Upload <group> runtime records`. This now covers `docs-contracts` and the `locale-collation` step in `hosted-compatibility-tests`. The collector already finds an artifact by the groups a job's log announces, so it needs no change. `docs-contracts` runs on every pull request, drafts included, so every PR run now uploads at least one records artifact. `scripts/actions-ci-groups.test.sh` checks every group-runner step rather than the matrix job alone.
+2. The record schema gets no per-case field. The verjson-observability collector rejects any field it does not know and any `schema_version` other than 1. A new field would make every group's records unreadable until a version 2 lands in both repositories. Instead, a case that is known to dominate its row runs as its own row, with the row's existing part selector. Its record then measures that case alone, under schema 1 and the collector's existing cross-checks. The first such case is the release-caller `allowlist sweep`: locally it took 12.3 of the contract part's 13.7 seconds. It now runs as `RELEASE_CALLER_ISOLATION_PART=allowlist-sweep`. Do not give every case its own row: the Context above measured how that multiplies fixture walks.
+3. The sweep row declares `@budget=90`, twice 32 seconds rounded up to 30 seconds. 32 seconds is the slowest hosted run of the contract part that carried the sweep (main run 41921027849), so it bounds the sweep from above. The rest of the contract part took 1.3 seconds locally and stays under the 60-second default. Lower the declaration once hosted records for the sweep row run well under half of it.
+
+### Consequences
+
+- Consumers can now expect a records artifact for `docs` and `locale-collation` wherever the job's log announces the group. The 2026-10-17 amendment's statement that those groups produce no records no longer holds.
+- Per-case cost is recorded only for cases that have their own row. A case that becomes a hot spot gets its own part, and the part's partition test pins that it runs once.

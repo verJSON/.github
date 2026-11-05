@@ -249,12 +249,15 @@ def caller_invocation(path):
     return {"ARM_WORKFLOW_REF": f"{REPOSITORY}/{path}@refs/heads/main", "ARM_CALLER_ENVIRONMENT": "ai-review-app"}
 
 
-def run_watchdog(snapshots, runner_environment="github-hosted", preset_outputs=None, invocation=None):
+def run_watchdog(snapshots, runner_environment="github-hosted", preset_outputs=None, invocation=None,
+                 caller_environment=None):
     """Run the job's steps in order, honoring each step's `if` the way the runner would.
 
     `preset_outputs` runs every step unconditionally with those step outputs, to exercise a
     step's own guard in isolation. `invocation` overrides the default required invocation.
+    `caller_environment` replaces the process environment the harness starts from.
     """
+    caller_environment = os.environ if caller_environment is None else caller_environment
     job_definition = watchdog_job()
     with tempfile.TemporaryDirectory() as directory:
         stub_dir = Path(directory)
@@ -269,11 +272,13 @@ def run_watchdog(snapshots, runner_environment="github-hosted", preset_outputs=N
         (stub_dir / "polls").write_text("0\n", encoding="utf-8")
         (stub_dir / "clock").write_text(f"{START}\n", encoding="utf-8")
         (stub_dir / "calls").write_text("", encoding="utf-8")
-        env = {key: value for key, value in os.environ.items()
+        env = {key: value for key, value in caller_environment.items()
                if not key.startswith(("GITHUB_", "RUNNER_"))}
+        # The hosted runner's zone, never the caller's; the job's own env still overrides it.
+        env["TZ"] = "UTC"
         env.update({key: str(value) for key, value in job_definition["env"].items()})
         env.update({
-            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "PATH": f"{bin_dir}{os.pathsep}{caller_environment['PATH']}",
             "STUB_DIR": str(stub_dir),
             "TARGET_REPO": REPOSITORY,
             "ARM_RUN_ID": RUN_ID,
@@ -377,6 +382,16 @@ def test_unreachable_lane_cancels_then_force_cancels_and_names_the_stalled_job()
     assert "::error title=Runner acquisition stalled::" in completed.stdout, completed.stdout
     assert "app-key-policy / validate-ai-review-key" in completed.stdout, completed.stdout
     assert "self-hosted,general" in completed.stdout, completed.stdout
+    assert limit_seconds() <= elapsed <= limit_seconds() + 300, elapsed
+
+
+def test_a_caller_outside_utc_sees_the_stall_deadline_a_hosted_runner_sees():
+    # Hosted runners run in UTC; jq 1.6's fromdateiso8601 honors TZ, so a caller's
+    # daylight-saving zone would move every job's age by its UTC offset (#1999).
+    caller = {**os.environ, "TZ": "America/New_York"}
+    completed, calls, elapsed = run_watchdog(ghost_key_validation(), caller_environment=caller)
+    assert completed.returncode != 0, completed.stdout
+    assert cancellations(calls) == ["cancel", "force-cancel"], calls
     assert limit_seconds() <= elapsed <= limit_seconds() + 300, elapsed
 
 

@@ -130,18 +130,19 @@ amendment of 2026-10-17). Nothing is pushed from the runner.
   LF and bare CR, the line ends the Actions runner honors, and not after VT,
   FF, NEL, LS, PS, or FS/GS/RS. A consumer that splits on those (Python
   `str.splitlines()`, for example) can see a forged row at column 0.
-- **JSONL (artifact).** Each `shell-test-groups` cell uploads
+- **JSONL (artifact).** Every step that runs a group uploads
   `actions-ci-runtime-records-<run_id>-<attempt>-<group>` (seven-day retention,
-  uploaded even when the cell fails or is cancelled). One object per row, in
-  manifest order. The `docs` and `locale-collation` groups run outside that
-  matrix and produce no records. A records path that cannot be written produces
-  one `::warning::` and does not fail the cell, so treat a record count that
+  uploaded even when the step fails or the job is cancelled). This covers each
+  `shell-test-groups` cell, `docs-contracts`, and the `locale-collation` step of
+  `hosted-compatibility-tests`. One object per row, in
+  manifest order. A records path that cannot be written produces
+  one `::warning::` and does not fail the job, so treat a record count that
   disagrees with the logged `command_count` as unreadable input:
 
 | Field | Type | Meaning |
 |---|---|---|
 | `schema_version` | integer | `1` |
-| `group`, `command` | string | Matrix group and manifest command |
+| `group`, `command` | string | Group and manifest command |
 | `status` | integer, or `"missing"` / `"invalid"` | Exit status as on the row line; a string when the worker left no usable result |
 | `elapsed_seconds` | integer or null | Row wall clock as on the row line |
 | `budget_seconds` | integer or null | Null on push runs, which have no budget |
@@ -149,6 +150,13 @@ amendment of 2026-10-17). Nothing is pushed from the runner.
 | `timed_out` | boolean or null | Stopped at its budget |
 | `left_background` | boolean or null | The runner terminated processes the row left behind |
 | `runner_name`, `runner_environment` | string or null | `RUNNER_NAME`, `RUNNER_ENVIRONMENT`; null outside Actions |
+
+**Per-case cost.** Records are per row and the schema has no per-case field:
+the collector rejects unknown fields. A case known to dominate its row runs as
+its own row through that test's part selector, so its record measures it alone.
+The release-caller `allowlist sweep` is one, as
+`RELEASE_CALLER_ISOLATION_PART=allowlist-sweep` ([ADR 0225](decisions/0225-bound-actions-ci-command-runtimes/README.md),
+amendment of 2026-11-05).
 
 **Integrity limits.** Rows run as the same user as the runner. The records path
 is not exported to rows and the runner rewrites the file from memory after every

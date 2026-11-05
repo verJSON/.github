@@ -58,6 +58,7 @@ platform	python3 scripts/ci-gate/contract-version.test.py
 platform	bash scripts/node-release-publish.test.sh
 platform	python3 scripts/node-release-credential-isolation.test.py
 platform	RELEASE_CALLER_ISOLATION_PART=contract python3 scripts/release-caller-credential-isolation.test.py
+platform	@budget=90 RELEASE_CALLER_ISOLATION_PART=allowlist-sweep python3 scripts/release-caller-credential-isolation.test.py
 platform	RELEASE_CALLER_ISOLATION_PART=npm10 python3 scripts/release-caller-credential-isolation.test.py
 platform	RELEASE_CALLER_ISOLATION_PART=npm11 python3 scripts/release-caller-credential-isolation.test.py
 platform	python3 scripts/release-caller-credential-isolation-parts.test.py
