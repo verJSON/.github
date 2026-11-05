@@ -20,3 +20,12 @@ skip it and could let an older receipt govern past a newer verdict. A checkout-i
 check now fails CI when a job reads a file its sparse `.gate-trust` checkout omits.
 No ruleset, property, or required check changes. Native merges stay with #1990.
 Callers that route by exit code need a row for `6`.
+
+ADR 0257 is accepted by owner decision and makes independence identity-neutral: a receipt
+counts when its reviewer's identity is distinct from the head's author and pushers,
+whether either is a human or an agent. It supersedes the parts of ADR 0202's 2026-10-22
+amendment that distinguished the two. Until #1964 issues separate identities, agents
+author and review through one account. Such a receipt still passes as the named,
+time-boxed `shared-identity-review` exception, and Gate R prints a notice naming it when
+the reviewer is the pull request's author. App-authored pull requests, such as
+Renovate's, get no exemption.

@@ -300,7 +300,7 @@ scratch="$(mktemp -d)" \
   || fault 1 "could not allocate a scratch directory for the API responses this assertion reads"
 trap 'rm -rf "$scratch"' EXIT
 
-pr_json="$(gh pr view "$pr" --repo "$repo" --json headRefOid,baseRefName,headRefName,headRepository </dev/null)" \
+pr_json="$(gh pr view "$pr" --repo "$repo" --json headRefOid,baseRefName,headRefName,headRepository,author </dev/null)" \
   || permission_fault "failed to fetch pull request metadata for $repo#$pr" "Pull requests" "pull-requests"
 
 head_sha="$(jq -r '.headRefOid // ""' <<<"$pr_json")"
@@ -1005,6 +1005,15 @@ if [ "$promotion_enabled" = true ]; then
     || fault 1 "Gate R cannot evaluate $repo#$pr: its receipt verifier $receipt_verifier is missing; run the assertion from a canonical verJSON/.github checkout"
   bash "$receipt_verifier" "$repo" "$pr" "$head_sha" "$scratch/receipt.tsv" </dev/null >"$scratch/receipt.out" 2>&1 \
     || fault 6 "Gate R: $repo#$pr head $head_sha has no valid ADR 0202 independent-review receipt — $(sed -n 's/^::error:://p' "$scratch/receipt.out" | tail -n 1)"
+  # ADR 0257's time-boxed exception: until #1964 issues separate identities, agents
+  # author and review through one account. Such a receipt still counts, but is named so
+  # it is never presented as plain independent review. Visibility only: it gates
+  # nothing, and its absence does not prove distinct identity, because pushers and
+  # committers of the head range are not compared until the #1964 switch-on.
+  IFS=$'\t' read -r receipt_id receipt_reviewer <"$scratch/receipt.tsv"
+  pr_author="$(jq -r '.author.login? // "" | strings' <<<"$pr_json")" || pr_author=""
+  [ -z "$pr_author" ] || [ "$receipt_reviewer" != "$pr_author" ] \
+    || annotate notice "Gate R: receipt $receipt_id on $repo#$pr head $head_sha is a shared-identity-review: its reviewer $receipt_reviewer is the pull request's author, accepted only as ADR 0257's time-boxed exception until #1964 issues distinct identities, not as independent review"
 fi
 
 echo true

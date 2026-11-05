@@ -40,7 +40,11 @@ if [ -n "${FAIL_PERMISSION_FOR:-}" ] && [[ "$args" == *"/collaborators/$FAIL_PER
   echo "gh: Server Error (HTTP 502)" >&2; exit 1
 fi
 case "$args" in
-  *"pr view "*"--json headRefOid,baseRefName"*) printf '%s\n' "$PR_JSON_FIXTURE" ;;
+  # Like gh, answer only the requested fields, so a field the script stops asking for
+  # is absent rather than served from the fixture anyway.
+  *"pr view "*"--json headRefOid,baseRefName"*)
+    fields="${args#*--json }"; fields="${fields%% *}"
+    jq -c --arg fields "$fields" '($fields | split(",")) as $asked | with_entries(select(.key as $k | $asked | index($k)))' <<<"$PR_JSON_FIXTURE" ;;
   *"/rules/branches/"*) printf '%s\n' "$RULES_FIXTURE" ;;
   *"/rulesets/"*) printf '%s\n' "$RULESET_FIXTURE" ;;
   *"/check-runs?per_page"*) printf '%s\n' "$CHECK_RUNS_FIXTURE" ;;
@@ -99,7 +103,7 @@ reset_env() {
   printf '0\n' >"$REVIEW_LIST_CALLS"
   unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_PERMISSION_FOR
   export REVIEWER_ROLE=maintain
-  export PR_JSON_FIXTURE="{\"headRefOid\":\"$HEAD_SHA\",\"baseRefName\":\"main\",\"headRefName\":\"$HEAD_BRANCH\",\"headRepository\":{\"nameWithOwner\":\"$REPO\"}}"
+  export PR_JSON_FIXTURE="{\"headRefOid\":\"$HEAD_SHA\",\"baseRefName\":\"main\",\"headRefName\":\"$HEAD_BRANCH\",\"headRepository\":{\"nameWithOwner\":\"$REPO\"},\"author\":{\"login\":\"delivery-author\"}}"
   export RULES_FIXTURE="[$status_rule,$arm_rule]"
   export RULESET_FIXTURE="$arm_ruleset"
   export CHECK_RUNS_FIXTURE="$default_check_runs"
@@ -130,6 +134,20 @@ if [ "$RC" -eq 0 ] && [ "$OUT" = true ]; then
   pass "a valid exact-head receipt from a maintain reviewer passes Gate R"
 else
   fail "a valid exact-head receipt from a maintain reviewer passes Gate R (rc=$RC, output: $OUT)"
+fi
+
+# --- shared identity ---------------------------------------------------------------
+# Until #1964 issues separate identities, agents author and review through one account.
+# ADR 0257 accepts that receipt as a named, time-boxed exception, so it still passes,
+# but the output must name it and never present it as plain independent review.
+reset_env
+PR_JSON_FIXTURE="$(jq -c '.author.login = "independent-reviewer"' <<<"$PR_JSON_FIXTURE")"
+run
+if [ "$RC" -eq 0 ] && [ "$(tail -n 1 <<<"$OUT")" = true ] \
+  && grep -qF -- "::notice::Gate R: receipt 82 on $REPO#$PR head $HEAD_SHA is a shared-identity-review: its reviewer independent-reviewer is the pull request's author" <<<"$OUT"; then
+  pass "a receipt from the pull request's author passes Gate R and is named shared-identity-review"
+else
+  fail "a receipt from the pull request's author passes Gate R and is named shared-identity-review (rc=$RC, output: $OUT)"
 fi
 
 # --- scope -----------------------------------------------------------------------

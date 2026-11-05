@@ -1,9 +1,10 @@
 # 0257 — Merge admission requires the exact-head independent-review receipt on promotion-enabled repositories
 
 - **Date:** 2026-11-05
-- **Status:** Proposed (ARB input for #2031). It changes no ruleset, property, or required check. Accepted on owner approval.
+- **Status:** Accepted (owner decision in the PM session, 2026-11-05). It changes no ruleset, property, or required check.
 - **Issue:** [verJSON/.github#2031](https://github.com/verJSON/.github/issues/2031), a handoff from [verJSON/verjson-agents#471](https://github.com/verJSON/verjson-agents/issues/471) ([verjson-agents ADR 0035](https://github.com/verJSON/verjson-agents/tree/main/docs/decisions/0035-push-delivery-legs-only-after-the-reviewer-gate))
 - **Amends:** [ADR 0202](../0202-bind-autonomous-merge-to-independent-review-receipt/README.md) (the receipt is also consumed by merge admission, and its check moves to one shared verifier)
+- **Supersedes in part:** ADR 0202's 2026-10-22 amendment, policy items 2 and 3, to the extent that they distinguish human from agent identities (Decision 6)
 - **Extends:** [ADR 0184](../0184-merge-gates-assert-execution-not-absence-of-red/README.md), [ADR 0229](../0229-required-contexts-need-success-and-finished-runs/README.md), [ADR 0255](../0255-gate-w-required-workflow-run-precondition/README.md)
 - **Related:** [#1990](https://github.com/verJSON/.github/issues/1990), [#1964](https://github.com/verJSON/.github/issues/1964), [#1655](https://github.com/verJSON/.github/issues/1655), [ADR 0091](../0091-ruleset-requires-authorization-arm/README.md), [ADR 0206](../0206-ai-authorization-property-is-independent/README.md), [ADR 0252](../0252-exclude-actions-paused-repos-from-required-checks/README.md), [ADR 0254](../0254-audit-recognizes-the-main-protection-suspension/README.md)
 - **Category:** merge-gate admission (sensitive class)
@@ -41,6 +42,17 @@ Facts read live on 2026-11-05:
   checks and the arm workflow, and ADR 0091 made the arm intentionally non-vetoing.
 - 35 generated adopter callers are missing across 23 armed repositories (#1810,
   `config/audit-expected-findings.json`).
+- Agents author pull requests, push, and post receipts through the owner's single
+  account. On an agent-authored pull request, the receipt's reviewer is therefore the
+  author's own identity. verjson-agent-identity does not issue separate identities yet
+  (#1964).
+- ADR 0202's 2026-10-22 amendment admits approval only from a direct human session and
+  names the delegating human's review `delegation-owner-review`. The verifier keeps only
+  `.user.type == "User"` reviewers. Both distinguish humans from agents.
+
+On 2026-11-05 the owner decided, in the PM session: "The goal is not to differentiate
+between human and agent as long as they have distinct identities." Decisions 5 to 9
+record that decision.
 
 ## Options
 
@@ -120,6 +132,60 @@ proposes to cover in general with one admission check.
 4. **Remote enforcement against an agent** needs an agent principal that cannot bypass.
    That is #1964 (issuer-bound agent review authority). Until then, Gate R is as binding
    as the merge guard that requires the assertion.
+5. **Independence is identity-neutral.** An exact-head review receipt counts only when the
+   reviewer's identity is distinct from the head's author and pushers. Human and agent
+   identities are treated alike, on every merge path. Gate R applies the rule to the
+   assertion path now. #1990 is the vehicle for the native merge-button and auto-merge
+   path; how that check relates to ADR 0091's non-vetoing arm remains for #1990's ADR.
+6. **What this supersedes in ADR 0202.** Its 2026-10-22 amendment is superseded to the
+   extent that it distinguishes humans from agents:
+   - *Item 2* ("Approval identity is a direct human session only"): agent credentials are
+     no longer barred, as a class, from carrying review scope. An approval counts by
+     distinct identity, human or agent. The same qualifier in that amendment's re-enable
+     trigger falls with it; the trigger keeps its head-SHA and diff binding.
+   - *Item 3* (delegation-owner review as a named exception): the delegating human is one
+     identity among others. A review from an identity distinct from the author and
+     pushers is plain independent review. A review from the same identity is the
+     `shared-identity-review` exception of Decision 8 until #1964 switches on. The
+     safeguard that barred agents as a class from obtaining, refreshing, or relaying an
+     approval or admin-merge credential is replaced by the identity rule: no identity
+     may obtain, refresh, or relay another identity's approval credential.
+
+   Not superseded, and still in force: item 1 (authorship identity is composite,
+   `{human subject, model, agent/run}`); item 4 (autonomous system actions carry an
+   explicit machine subject); the binding of an approval to the pull request, head, base,
+   and diff digest; its staleness on any push or base change and the recheck before
+   merge; the audit record keeping both the authoring and the approving identity; ADR
+   0208's live `maintain`/`admin` eligibility; and the receipt contract of ADR 0202's
+   Decision, except its non-App `User` restriction, which Decision 7 replaces at the
+   #1964 switch-on.
+7. **"Distinct identity", mechanically, once enabled.** The reviewer's registered identity
+   (a user login or an App identity, human or agent, issued or registered through
+   verjson-agent-identity) must differ from the pull request's author and from every
+   pusher and committer of the commits in the head range. The verifier's
+   `.user.type == "User"` filter, ADR 0202's "non-App `User`", is human-versus-agent
+   differentiation. The target rule removes it in favor of that registered-identity
+   check, and the change lands with the #1964 switch-on, not before. The filter also
+   keeps the merge and review Apps from posting receipts today; the registered-identity
+   check must keep them out by not registering them as reviewers.
+8. **Phasing: `shared-identity-review`, a named, time-boxed exception.** Gate R merges now
+   and requires the exact-head receipt. Until verjson-agent-identity issues separate
+   identities, a receipt whose reviewer shares the author's or a pusher's identity still
+   counts, as `shared-identity-review`, never as plain independent review. Nothing is
+   blocked today. The exception ends when the distinct-identity check switches on in
+   the shared verifier, tracked on #1964.
+   - Gate R names it: when the receipt's reviewer login equals the pull request author's
+     login, it prints a `::notice::` naming `shared-identity-review`. The notice gates
+     nothing. Its absence does not prove distinct identity, because pushers and
+     committers are compared only at the switch-on.
+   - The terminal workflow does not name it yet. Doing so from the verifier needs the
+     pull request author, a new read in a file both paths share, and a change to the
+     terminal workflow's stubbed contract. The switch-on adds that comparison to the
+     verifier anyway, so both paths name the exception from one place then.
+9. **App-authored pull requests get no exemption.** Under the identity-neutral rule, an
+   App author such as Renovate is one more distinct identity, so a receipt from any
+   eligible reviewer counts. Once pushers are compared, an identity that pushed an
+   adaptation commit onto such a branch cannot review it.
 
 ## Relationship to open issues
 
@@ -128,8 +194,11 @@ proposes to cover in general with one admission check.
   its own and lands first. The remainder of #2031 should be tracked as *blocked by*
   #1990.
 - **#1964** (issuer-bound agent review authority) owns the non-bypass agent principal
-  and the successor to ADR 0202's account-based receipt. When it lands, the verifier
-  file is the one place to change.
+  and the successor to ADR 0202's account-based receipt. It also tracks the switch-on
+  that ends `shared-identity-review`: separate identities from verjson-agent-identity,
+  the registered-identity check in place of `.user.type == "User"`, the author, pusher,
+  and committer comparison, and the exception's naming on the terminal path. When it
+  lands, the verifier file is the one place to change.
 - **#1655** (signed merge-gate provenance) authenticates which canonical required
   workflow produced a gate receipt. Option (a) would need it for its check's
   provenance; Gate R posts nothing and does not depend on it.
@@ -149,6 +218,11 @@ proposes to cover in general with one admission check.
   read.
 - **Residual process gap:** an agent that skips the assertion is not stopped, as for
   every other gate in it. #1964 closes this gap.
+- Until the #1964 switch-on, a receipt on an agent-authored pull request is a
+  `shared-identity-review`, and Gate R's output says so. It is not evidence of review
+  by a distinct identity.
+- A Renovate or other App-authored pull request reviewed from the owner's account
+  already has a reviewer distinct from its author, and Gate R prints no notice for it.
 
 ## Verification
 
@@ -165,7 +239,12 @@ that passes Gates A, W, B, and C, then:
   script copied without its verifier;
 - names an unreadable review listing and an unreadable reviewer permission, each with
   exit `6`; the permission case puts it on a newer verdict above a valid receipt;
-- pins the arm identity to the reviewed ruleset image.
+- pins the arm identity to the reviewed ruleset image;
+- passes a receipt whose reviewer is the pull request's author and names it in a
+  `shared-identity-review` notice, while the valid case, with a distinct author, prints
+  `true` alone. The stubbed `gh pr view` answers only the requested fields, so the
+  notice case fails both when the comparison is inverted and when the script stops
+  requesting `author`.
 
 Each case that already held when written was proven by a mutant that fails it for its
 asserted reason. `scripts/ci-gate/native-automerge.test.sh` keeps every ADR 0202 case

@@ -175,3 +175,11 @@ assertion, and it did not read the receipt (#2031, verjson-agents ADR 0035).
 
 **Unchanged.** The protected human merge path still does not consume the receipt. Making
 a native merge depend on it is #1990's decision and needs the owner's approval.
+
+**Superseded in part (2026-11-05).** By owner decision, independence is identity-neutral:
+a receipt counts when its reviewer's identity is distinct from the head's author and
+pushers, human or agent alike. Items 2 and 3 of the 2026-10-22 amendment above are
+superseded to the extent that they distinguish humans from agents; items 1 and 4 and the
+binding and staleness safeguards stand. Shared-account review is a named, time-boxed
+exception until #1964. See [ADR 0257](../0257-merge-admission-requires-the-exact-head-review-receipt/README.md),
+Decisions 5 to 9.
