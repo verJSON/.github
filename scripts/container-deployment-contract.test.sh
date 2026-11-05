@@ -154,8 +154,19 @@ if cmp -s "$tmp/caller.clean" "$consumer/.github/workflows/container-deployment.
   echo "the mutable-ref caller mutation did not apply, so its verdict proves nothing" >&2
   exit 1
 fi
-if (cd "$consumer" && bash scripts/container-deployment-contract.test.sh >/dev/null 2>&1); then
+# Unpinned, the caller's digest is what refuses it; the re-pinned case below
+# reaches the pinned-text assertion behind it.
+mutable_ref_report="$tmp/caller-mutable-ref.log"
+mutable_ref_status=0
+(cd "$consumer" && bash scripts/container-deployment-contract.test.sh >/dev/null 2>"$mutable_ref_report") || mutable_ref_status=$?
+if [ "$mutable_ref_status" -eq 0 ]; then
   echo "generated contract accepted a mutable reusable-workflow ref" >&2
+  exit 1
+fi
+if [ "$mutable_ref_status" -ne 1 ] || ! grep -qF -- \
+  'container-deployment contract FAILED: .github/workflows/container-deployment.yml drifted from contract' "$mutable_ref_report"; then
+  echo "generated contract refused a mutable reusable-workflow ref (exit $mutable_ref_status, expected 1) without naming the caller's digest" >&2
+  sed 's/^/diag - /' "$mutable_ref_report" >&2
   exit 1
 fi
 mv "$tmp/caller.clean" "$consumer/.github/workflows/container-deployment.yml"
@@ -370,34 +381,46 @@ grep -Fq "if: \${{ ${expected_public_call_condition} && (inputs.dry-run) }}" "$w
 grep -Fq "if: \${{ ${expected_public_call_condition} && (!inputs.dry-run) }}" "$workflow"
 grep -q 'cancel-in-progress: false' "$workflow"
 grep -q 'container_deployment_preflight.py' "$workflow"
+# Each refusal names its clause, so a drift refused by another clause, or by a
+# failed read, cannot pass for the one a case asserts.
 assert_cli_cloud_lock_matches_manifest() {
   local manifest="$1" lock="$2" cli_cloud_version
-  cli_cloud_version="$(jq -er '.dependencies["@verjson/cli-cloud"]' "$manifest")" || return 1
-  [[ "$cli_cloud_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || return 1
+  cli_cloud_version="$(jq -er '.dependencies["@verjson/cli-cloud"]' "$manifest")" \
+    || { echo "manifest names no @verjson/cli-cloud dependency"; return 1; }
+  [[ "$cli_cloud_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+    || { echo "manifest @verjson/cli-cloud is not an exact version: $cli_cloud_version"; return 1; }
   test "$(jq -er '.packages[""].dependencies["@verjson/cli-cloud"]' "$lock")" = \
-    "$cli_cloud_version" || return 1
+    "$cli_cloud_version" || { echo "lock root pin differs from manifest $cli_cloud_version"; return 1; }
   test "$(jq -er '.packages["node_modules/@verjson/cli-cloud"].version' "$lock")" = \
-    "$cli_cloud_version" || return 1
+    "$cli_cloud_version" || { echo "lock package version differs from manifest $cli_cloud_version"; return 1; }
 }
 
 cli_manifest="$root/contracts/container-deployment-cli/package.json"
 cli_lock="$root/contracts/container-deployment-cli/package-lock.json"
-assert_cli_cloud_lock_matches_manifest "$cli_manifest" "$cli_lock"
+assert_cli_cloud_lock_matches_manifest "$cli_manifest" "$cli_lock" >"$tmp/cli-cloud-lock.out" \
+  || { cat "$tmp/cli-cloud-lock.out" >&2; exit 1; }
 
 for mutation in root-pin package-version; do
   mutated_lock="$tmp/cli-cloud-$mutation-lock.json"
   case "$mutation" in
     root-pin)
       jq '.packages[""].dependencies["@verjson/cli-cloud"] = "9.9.9"' \
-        "$cli_lock" > "$mutated_lock" ;;
+        "$cli_lock" > "$mutated_lock"
+      expected_drift='lock root pin differs from manifest' ;;
     package-version)
       jq '.packages["node_modules/@verjson/cli-cloud"].version = "9.9.9"' \
-        "$cli_lock" > "$mutated_lock" ;;
+        "$cli_lock" > "$mutated_lock"
+      expected_drift='lock package version differs from manifest' ;;
   esac
-  if assert_cli_cloud_lock_matches_manifest "$cli_manifest" "$mutated_lock"; then
+  if assert_cli_cloud_lock_matches_manifest "$cli_manifest" "$mutated_lock" >"$tmp/cli-cloud-lock.out"; then
     echo "container deployment contract accepted cli-cloud $mutation drift" >&2
     exit 1
   fi
+  grep -qF -- "$expected_drift" "$tmp/cli-cloud-lock.out" || {
+    echo "container deployment contract refused cli-cloud $mutation drift for another reason" >&2
+    sed 's/^/diag - /' "$tmp/cli-cloud-lock.out" >&2
+    exit 1
+  }
 done
 python3 "$root/scripts/validate-container-deployment-cli-lock.py" \
   "$root/contracts/container-deployment-cli/package-lock.json"
@@ -439,10 +462,23 @@ if [ "$built_locks" -ne 6 ]; then
   echo "built $built_locks hostile deployment CLI locks, expected 6, so their rejection proves nothing" >&2
   exit 1
 fi
+# The validator refuses through argparse, which exits 2; the reason after its
+# prefix is the validator's own.
 for hostile_lock in "${hostile_locks[@]}"; do
-  if python3 "$root/scripts/validate-container-deployment-cli-lock.py" \
-      "$hostile_lock" >/dev/null 2>&1; then
+  case "${hostile_lock##*/}" in
+    lock-missing-integrity.json|lock-wrong-integrity.json) expected_refusal='lacks exact sha512 integrity' ;;
+    *) expected_refusal='uses a non-canonical registry URL' ;;
+  esac
+  lock_status=0
+  python3 "$root/scripts/validate-container-deployment-cli-lock.py" \
+    "$hostile_lock" >/dev/null 2>"$tmp/hostile-lock.err" || lock_status=$?
+  if [ "$lock_status" -eq 0 ]; then
     echo "deployment CLI lock validator accepted $(basename "$hostile_lock")" >&2
+    exit 1
+  fi
+  if [ "$lock_status" -ne 2 ] || ! grep -qF -- "$expected_refusal" "$tmp/hostile-lock.err"; then
+    echo "deployment CLI lock validator refused $(basename "$hostile_lock") (exit $lock_status, expected 2) without: $expected_refusal" >&2
+    sed 's/^/diag - /' "$tmp/hostile-lock.err" >&2
     exit 1
   fi
 done

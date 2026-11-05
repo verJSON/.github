@@ -72,6 +72,19 @@ class PnpmCandidateTests(unittest.TestCase):
             with self.subTest(candidate=candidate), self.assertRaisesRegex(contract.DependencyError, "^" + re.escape(reason) + "$"):
                 contract.build_pnpm_plan(candidate, ["@tequityapp/schema", "@verjson/authz"])
 
+    def test_rejects_an_unbalanced_peer_context_the_key_pattern_admits(self):
+        # The key pattern only brackets the peer context with its first "(" and
+        # last ")", so these keys pass it and reach the balance check. The first
+        # closes below depth zero and then rebalances, so only the in-loop check
+        # refuses it; the second never closes, so only the final check does.
+        for key in ("@verjson/authz@2.0.0(peer@1.0.0))((other@1.0.0)", "@verjson/authz@2.0.0((peer@1.0.0)"):
+            lock = pnpm_lock()
+            lock["packages"][key] = lock["packages"].pop("@verjson/authz@2.0.0(peer@1.0.0)")
+            with self.subTest(key=key), self.assertRaisesRegex(
+                contract.DependencyError, "^" + re.escape(f"unbalanced pnpm peer context: {key}") + "$"
+            ):
+                contract.build_pnpm_plan(lock, ["@tequityapp/schema", "@verjson/authz"])
+
     def test_workflows_bind_reviewed_manager_lock_and_credentials_to_acquisition(self):
         for name in ("container-candidate.yml", "container-candidate-publish.yml"):
             workflow = yaml.safe_load((ROOT / ".github/workflows" / name).read_text())

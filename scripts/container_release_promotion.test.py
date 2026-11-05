@@ -209,7 +209,7 @@ class PromotionTest(unittest.TestCase):
     def test_divergent_partial_alias_is_rejected(self):
         image = self.candidate["images"][0]
         state = copy.deepcopy(self.state); state["aliases"] = {f"{image['repository']}:1.2.3": "sha256:" + "f" * 64}
-        with self.assertRaisesRegex(Exception, "different digest"):
+        with self.assertRaisesRegex(promotion.ManifestError, "different digest"):
             self.release(self.candidate, self.config, state, "1.2.3")
 
     def test_repeat_and_downgrade_are_rejected(self):
@@ -219,13 +219,13 @@ class PromotionTest(unittest.TestCase):
                 promotion.ManifestError, exactly("stable Git, changelog, or GitHub Release identity already exists")
             ):
                 self.release(self.candidate, self.config, state, "1.2.3")
-        with self.assertRaisesRegex(Exception, "reviewed next stable"):
+        with self.assertRaisesRegex(promotion.ManifestError, "reviewed next stable"):
             self.release(self.candidate, self.config, self.state, "1.2.2")
 
     def test_stable_line_cannot_overwrite_or_move_backward(self):
         state = copy.deepcopy(self.state)
         state["previousRelease"] = {"releaseVersion": "1.2.3", "manifestDigest": "sha256:" + "6" * 64}
-        with self.assertRaisesRegex(Exception, "advance"):
+        with self.assertRaisesRegex(promotion.ManifestError, "advance"):
             self.release(self.candidate, self.config, state, "1.2.3")
 
     def test_tampered_candidate_is_rejected_before_plan(self):
@@ -236,7 +236,7 @@ class PromotionTest(unittest.TestCase):
             self.release(self.candidate, self.config, self.state, "1.2.3")
 
     def test_expired_candidate_fails_closed_without_rebuilding_or_substituting(self):
-        with self.assertRaisesRegex(Exception, "rebuilding or substituting is forbidden"):
+        with self.assertRaisesRegex(promotion.ManifestError, "rebuilding or substituting is forbidden"):
             self.release(
                 self.candidate,
                 self.config,

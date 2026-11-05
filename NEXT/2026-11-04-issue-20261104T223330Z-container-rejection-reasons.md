@@ -1,0 +1,14 @@
+---
+date: 2026-11-04
+id: 20261104T223330Z
+refs: 1994
+impact: patch
+title: Container contract negative tests name the assertion that must reject them
+---
+The container candidate, release, and deployment contract suites, the candidate disk-usage suite, and the release-promotion and pnpm dependency tests now check why each negative case is rejected. They check the generated contract test's own failure line, the workflow's `::error::` line, or the exact exception type and message. Before this, any nonzero exit or any exception passed, so a guard could stop working while an earlier, unrelated check kept its test green.
+
+- The contract test that `scripts/gen-container-release.sh` generates had bare `! grep` absence checks. `set -e` exempts a negated command, so those checks could never fail, and only the caller's digest pin refused the drift they named. The generated test now runs them through an `assert_absent` helper, which also fails when grep cannot read its input. It reports every failure with a `container-release contract FAILED:` line: digest drift names the file and both digests, and any other failing assertion names its line and command. Accept and reject behavior is otherwise unchanged. Adopters pick this up when they regenerate at a contract that includes it.
+- The release suite's caller-mutation and allowlist cases re-pin the caller digest to the mutant, so each reaches its own assertion. The package-permission and appended-inheritance mutants have no assertion besides the digest pin, so they stay pinned and assert that pin.
+- The candidate suite's Actions-permission mutant deleted the whole caller header along with the permission line, so the contract-pin check refused it instead of the permission check. It now deletes only the permission line.
+- The candidate suite's check on the private-dependency acquisition job, which holds the package token, was a bare `! grep` denylist of install spellings, so it could never fail, and no scan of the install step's shell text can hold: `n""pm`, a line continuation, or a package manager named by a variable all get past one, and an earlier step, a job-level `env:` or `defaults:`, or a workflow-level one can change how it runs. The job is now pinned byte for byte instead. The test pins one sha256 over the whole `acquire-private-node-dependencies` job as YAML parses it, every key and every step in order, together with the workflow's top-level `env:` and `defaults:`, which the pin records as absent. The loader refuses a repeated key and a `<<` merge key, as GitHub's does, so no other copy of the job or of a key can be the one hashed. Any edit to that job fails the test until a reviewer re-pins that digest.
+- A new pnpm test reaches the unbalanced peer-context guard in `container_private_dependencies.py`. The key pattern admits both keys, and each one is refused by a different one of the guard's two checks.
