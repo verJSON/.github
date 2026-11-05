@@ -55,12 +55,21 @@ case "$args" in
     [ -r "$fixture" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
     cat "$fixture" ;;
   *"/annotations?per_page"*) printf '[]\n' ;;
+  # The repository is promotion-enabled, so Gate R (ADR 0257) also reads its
+  # independent-review receipt; every case here carries a valid one for the head.
+  *"/pulls/121/reviews?per_page=100"*) printf '[%s]\n' "$RECEIPT_FIXTURE" ;;
+  *"/pulls/121/reviews/"*) printf '%s\n' "$RECEIPT_FIXTURE" ;;
+  *"/collaborators/independent-reviewer/permission"*) printf 'maintain\n' ;;
   *) echo "gh: unstubbed call: $args" >&2; exit 1 ;;
 esac
 GH
 chmod +x "$tmp/bin/gh"
 export PATH="$tmp/bin:$PATH"
 export JOBS_DIR="$tmp/jobs"
+RECEIPT_FIXTURE="$(jq -nc --arg head "$HEAD_SHA" '{id: 82, state: "COMMENTED", commit_id: $head,
+  user: {login: "independent-reviewer", type: "User"},
+  body: "<!-- independent-review:v1 pr:121 head:\($head) verdict:approved -->"}')"
+export RECEIPT_FIXTURE
 
 check_run() { # id name conclusion check-suite-id
   printf '{"id":%s,"name":"%s","status":"completed","conclusion":"%s","app":{"id":%s},"check_suite":{"id":%s}}' \

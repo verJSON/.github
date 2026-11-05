@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0257](0257-merge-admission-requires-the-exact-head-review-receipt/README.md) | 2026-11-05 | Merge admission requires the exact-head independent-review receipt on promotion-enabled repositories |
 | [0256](0256-netcup-stack-backup-and-disaster-recovery/README.md) | 2026-11-05 | Back up the Netcup Git/CI stack to configured, locked off-site storage and drill every restore path |
 | [0255](0255-gate-w-required-workflow-run-precondition/README.md) | 2026-11-03 | Gate W: a required workflow's own successful run on the exact head is a merge precondition |
 | [0254](0254-audit-recognizes-the-main-protection-suspension/README.md) | 2026-11-03 | The arm audit recognizes the main-protection suspension as a reviewed state |

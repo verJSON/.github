@@ -49,6 +49,7 @@ SH
 chmod 0644 "$tmp/run/.gate-trust/scripts/ci-gate/verify-arm-receipt.sh"
 cp "$root/scripts/ci-gate/review-policy-envelope.py" "$tmp/run/.gate-trust/scripts/ci-gate/review-policy-envelope.py"
 cp "$root/scripts/ci-gate/terminal-merge.sh" "$tmp/run/.gate-trust/scripts/ci-gate/terminal-merge.sh"
+cp "$root/scripts/ci-gate/independent-review-receipt.sh" "$tmp/run/.gate-trust/scripts/ci-gate/independent-review-receipt.sh"
 cat >"$tmp/bin/gh" <<'GH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$CALLS"

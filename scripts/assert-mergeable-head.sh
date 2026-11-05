@@ -11,7 +11,7 @@
 # for an opaque `false` is to widen the accepted-conclusion list, which is
 # precisely how `Verjson/verjson-cli#251`'s unexercised-head class returns.
 #
-# This script answers four separable questions and names which one failed, so
+# This script answers five separable questions and names which one failed, so
 # that relaxing any of them is a deliberate, reviewable act rather than an
 # allowlist edit made under time pressure:
 #
@@ -32,6 +32,10 @@
 #           deferral annotation. This is the gate a deferred Renovate head
 #           fails, and it says so in those words.
 #   Gate C  no other check on the head is pending or non-passing.
+#   Gate R  on a promotion-enabled repository (its base ref's workflows rules name the
+#           organization's arm, verJSON/.github gate-rearm.yml), the head carries a
+#           valid ADR 0202 independent-review receipt bound to this exact head,
+#           checked by the verifier the terminal merge runs (ADR 0257, #2031).
 #
 # Gates A and C set aside two shapes only. First, a non-passing check run whose
 # workflow run was cancelled and then superseded by a later successful run of the same
@@ -46,7 +50,7 @@
 # repository (ADR 0226 amendment 2026-10-15, verjson-agents#432).
 # No conclusion is added to the passing set, and Gate B always reads the raw inventory.
 #
-# Prints "true" and exits 0 only when all four hold. Every other outcome is a
+# Prints "true" and exits 0 only when all five hold. Every other outcome is a
 # fault: a `::error::` naming the gate, and a distinct exit code — never a bare
 # "false", and never a zero exit on an unanswered question.
 #
@@ -55,6 +59,11 @@
 # of the required set. Workflow runs (`actions/runs`) are read for every head (ADR 0229):
 # an unfinished run is pending, and ADR 0226 places cancelled check runs in their runs.
 # The job listing of a cancelled concurrency-family run is read under that same grant.
+# Gate R, on a promotion-enabled repository only, runs scripts/ci-gate/
+# independent-review-receipt.sh beside this script, which reads the pull request's
+# reviews (Pull requests read) and each candidate reviewer's live collaborator
+# permission (repository read). The script must therefore run from a canonical
+# checkout; without the verifier it exits 1.
 # Gate W reads `repos/{owner}/{repo}/rulesets/{id}` for each ruleset carrying a
 # `workflows` rule, for its `updated_at`; like the rules endpoint it needs only
 # repository read (verified 2026-11-03: `repos/verJSON/.github/rulesets/20722935`
@@ -95,6 +104,9 @@
 #      refusal ends with the runbook's recovery for every reason it names.
 #   4  Gate B failed (the head was deferred; nothing on it was verified)
 #   5  Gate C failed (some other check is pending or non-passing)
+#   6  Gate R failed (no valid exact-head independent-review receipt on a
+#      promotion-enabled repository; the refusal names the verifier's reason). A
+#      review or permission read that fails is exit 1, not 6.
 #   1  the assertion could not be evaluated (API failure, unresolvable state)
 #
 # There is deliberately NO environment override for any gate's matching rule.
@@ -125,6 +137,13 @@ pr="$2"
 readonly DEFERRED_JOB_PATTERN='(^|[/ ])deferred-ci([ (/]|$)'
 readonly DEFERRED_ANNOTATION_PATTERN='^CI deferred$'
 readonly PASSING='["SUCCESS","NEUTRAL","SKIPPED"]'
+# The organization's required authorization arm (ADR 0091, ADR 0255): verJSON/.github's
+# gate-rearm.yml. A base ref whose workflows rules name it is promotion-enabled, and
+# Gate R demands its independent-review receipt (ADR 0257). The values equal the
+# reviewed arm ruleset image in config/ai-review-required-workflow-rollout.json, and
+# scripts/assert-mergeable-head.review-receipt.test.sh fails when the two disagree.
+readonly ARM_WORKFLOW_REPOSITORY_ID=1269388380
+readonly ARM_WORKFLOW_PATH=.github/workflows/gate-rearm.yml
 # Declared concurrency families (ADR 0226, amendment 2026-10-15). A family is one
 # workflow-level concurrency group that a reusable workflow declares and every caller
 # inherits, so runs of DIFFERENT workflows displace each other from it. Membership is
@@ -282,7 +301,7 @@ scratch="$(mktemp -d)" \
   || fault 1 "could not allocate a scratch directory for the API responses this assertion reads"
 trap 'rm -rf "$scratch"' EXIT
 
-pr_json="$(gh pr view "$pr" --repo "$repo" --json headRefOid,baseRefName,headRefName,headRepository </dev/null)" \
+pr_json="$(gh pr view "$pr" --repo "$repo" --json headRefOid,baseRefName,headRefName,headRepository,author </dev/null)" \
   || permission_fault "failed to fetch pull request metadata for $repo#$pr" "Pull requests" "pull-requests"
 
 head_sha="$(jq -r '.headRefOid // ""' <<<"$pr_json")"
@@ -964,5 +983,55 @@ gate_c="$(jq -rn --argjson pass "$PASSING" --slurpfile checks "$gated_checks" '
 
 [ -z "$gate_c" ] \
   || fault 5 "Gate C: $repo#$pr head $head_sha has pending or non-passing checks outside the required set — $gate_c"
+
+# ---------------------------------------------------------------- Gate R ----
+# ADR 0257 (#2031). A promotion-enabled repository is one whose base ref carries the
+# organization's required authorization arm: a `workflows` rule naming
+# verJSON/.github's gate-rearm.yml. Reading the effective rule, not a property, keeps
+# this true under either arm selector (ADR 0206) and false where ADR 0252 excludes a
+# paused repository. There, an autonomous merge needs the ADR 0202 independent-review
+# receipt for this exact head, checked by the same verifier the terminal merge runs.
+# Types are checked, never truthiness: an entry at the arm's path whose repository is
+# unreadable would otherwise read as "not promotion-enabled", the direction that skips
+# the receipt.
+promotion_enabled="$(jq -r --argjson id "$ARM_WORKFLOW_REPOSITORY_ID" --arg path "$ARM_WORKFLOW_PATH" '
+  [ .[]? | select(type == "object" and .type == "workflows") | .parameters.workflows[]?
+    | select(type == "object" and .path == $path) ]
+  | if all(.[]; (.repository_id | type) == "number") then any(.[]; .repository_id == $id)
+    else error("unclassifiable arm entry") end' <<<"$rules_json")" \
+  || fault 1 "Gate R cannot establish whether $repo@$base_ref is promotion-enabled: a workflows rule names $ARM_WORKFLOW_PATH without a numeric repository_id"
+if [ "$promotion_enabled" = true ]; then
+  receipt_verifier="$(dirname "${BASH_SOURCE[0]}")/ci-gate/independent-review-receipt.sh"
+  [ -r "$receipt_verifier" ] \
+    || fault 1 "Gate R cannot evaluate $repo#$pr: its receipt verifier $receipt_verifier is missing; run the assertion from a canonical verJSON/.github checkout"
+  # Only the verifier's documented results are trusted: 0 passes, 1 refuses the receipt
+  # (exit 6), and 3 means a read failed, so the receipt is unanswered, an evaluation
+  # fault like every other API failure here. Any other status, a usage error or a
+  # signal, is an evaluation fault too, never a refusal and never a pass.
+  receipt_status=0
+  bash "$receipt_verifier" "$repo" "$pr" "$head_sha" "$scratch/receipt.tsv" </dev/null >"$scratch/receipt.out" 2>&1 \
+    || receipt_status=$?
+  receipt_reason="$(sed -n 's/^::error:://p' "$scratch/receipt.out" | tail -n 1)"
+  case "$receipt_status" in
+    0) ;;
+    1) fault 6 "Gate R: $repo#$pr head $head_sha has no valid ADR 0202 independent-review receipt — $receipt_reason" ;;
+    3) fault 1 "Gate R cannot evaluate $repo#$pr head $head_sha: $receipt_reason" ;;
+    *) fault 1 "Gate R cannot evaluate $repo#$pr head $head_sha: its receipt verifier exited with unexpected status $receipt_status" ;;
+  esac
+  # A pass is believed only with the result it promises. This script runs without -e,
+  # so an unread or malformed result must fault here rather than reach `echo true`.
+  IFS=$'\t' read -r receipt_id receipt_reviewer <"$scratch/receipt.tsv" \
+    || fault 1 "Gate R cannot evaluate $repo#$pr head $head_sha: could not read the verifier's result"
+  [[ "$receipt_id" =~ ^[123456789][0123456789]*$ ]] && [ -n "$receipt_reviewer" ] \
+    || fault 1 "Gate R cannot evaluate $repo#$pr head $head_sha: the verifier's result is malformed"
+  # ADR 0257's time-boxed exception: until #1964 issues separate identities, agents
+  # author and review through one account. Such a receipt still counts, but is named so
+  # it is never presented as plain independent review. Visibility only: it gates
+  # nothing, and its absence does not prove distinct identity, because pushers and
+  # committers of the head range are not compared until the #1964 switch-on.
+  pr_author="$(jq -r '.author.login? // "" | strings' <<<"$pr_json")" || pr_author=""
+  [ -z "$pr_author" ] || [ "$receipt_reviewer" != "$pr_author" ] \
+    || annotate notice "Gate R: receipt $receipt_id on $repo#$pr head $head_sha is a shared-identity-review: its reviewer $receipt_reviewer is the pull request's author, accepted only as ADR 0257's time-boxed exception until #1964 issues distinct identities, not as independent review"
+fi
 
 echo true
