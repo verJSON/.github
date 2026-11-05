@@ -36,6 +36,9 @@ cat >"$tmp/bin/gh" <<'GH'
 set -uo pipefail
 args="$*"
 printf '%s\n' "$args" >>"$CALLS"
+if [ -n "${FAIL_PERMISSION_FOR:-}" ] && [[ "$args" == *"/collaborators/$FAIL_PERMISSION_FOR/permission"* ]]; then
+  echo "gh: Server Error (HTTP 502)" >&2; exit 1
+fi
 case "$args" in
   *"pr view "*"--json headRefOid,baseRefName"*) printf '%s\n' "$PR_JSON_FIXTURE" ;;
   *"/rules/branches/"*) printf '%s\n' "$RULES_FIXTURE" ;;
@@ -94,7 +97,7 @@ default_check_runs="$(printf '{"total_count":3,"check_runs":[%s,%s,%s]}' \
 reset_env() {
   : >"$CALLS"
   printf '0\n' >"$REVIEW_LIST_CALLS"
-  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST
+  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_PERMISSION_FOR
   export REVIEWER_ROLE=maintain
   export PR_JSON_FIXTURE="{\"headRefOid\":\"$HEAD_SHA\",\"baseRefName\":\"main\",\"headRefName\":\"$HEAD_BRANCH\",\"headRepository\":{\"nameWithOwner\":\"$REPO\"}}"
   export RULES_FIXTURE="[$status_rule,$arm_rule]"
@@ -164,11 +167,29 @@ run
 expect "an arm-path workflows entry without a repository id cannot be classified" 1 \
   "Gate R cannot establish whether $REPO@main is promotion-enabled: a workflows rule names $GATE_PATH without a numeric repository_id"
 
+# A present but non-numeric id is the same unreadable repository, not a foreign one: a
+# truthiness check would accept the string and then find it unequal to the numeric arm.
+reset_env
+RULES_FIXTURE="$(jq -c '(.[] | select(.type == "workflows") | .parameters.workflows[0].repository_id) |= tostring' <<<"$RULES_FIXTURE")"
+RULESET_FIXTURE="$(jq -c '.rules[0].parameters.workflows[0].repository_id |= tostring' <<<"$RULESET_FIXTURE")"
+REVIEWS_FIXTURE='[]'
+run
+expect "an arm-path workflows entry with a string repository id cannot be classified" 1 \
+  "Gate R cannot establish whether $REPO@main is promotion-enabled: a workflows rule names $GATE_PATH without a numeric repository_id"
+
 # --- malformed -------------------------------------------------------------------
 reset_env
 REVIEWS_FIXTURE="[$(review 82 COMMENTED "$HEAD_SHA" independent-reviewer User "LGTM $MARKER")]"
 run
 expect "a receipt marker inside other text fails Gate R" 6 \
+  "Gate R: $REPO#$PR head $HEAD_SHA has no valid ADR 0202 independent-review receipt — latest independent-review verdict is edited, withdrawn, dismissed, or not approving"
+
+# Only a COMMENTED review carries the receipt: a dismissed review keeps its exact-head
+# commit and its marker body, so the state is the one field that withdraws it.
+reset_env
+REVIEWS_FIXTURE="[$(review 82 DISMISSED "$HEAD_SHA" independent-reviewer User "$MARKER")]"
+run
+expect "a dismissed review carrying a valid marker fails Gate R" 6 \
   "Gate R: $REPO#$PR head $HEAD_SHA has no valid ADR 0202 independent-review receipt — latest independent-review verdict is edited, withdrawn, dismissed, or not approving"
 
 # --- stale head ------------------------------------------------------------------
@@ -212,6 +233,15 @@ expect "a receipt from a write-only collaborator fails Gate R" 6 \
   "Gate R: $REPO#$PR head $HEAD_SHA has no valid ADR 0202 independent-review receipt — an exact-head independent-review verdict is required before autonomous merge"
 
 # --- unreadable ----------------------------------------------------------------------
+# A reviewer whose permission cannot be read is unknown, not unprivileged. Skipping it
+# would let an older receipt govern past a newer verdict that may have withdrawn it.
+reset_env
+REVIEWS_FIXTURE="[$receipt,$(review 83 CHANGES_REQUESTED "$HEAD_SHA" second-maintainer User 'one more fix')]"
+export FAIL_PERMISSION_FOR=second-maintainer
+run
+expect "an unreadable reviewer permission fails Gate R and names the lookup that failed" 6 \
+  "Gate R: $REPO#$PR head $HEAD_SHA has no valid ADR 0202 independent-review receipt — could not read the repository permission of second-maintainer on $REPO"
+
 # A review listing that cannot be read is a refusal that says so, never a silent one.
 reset_env
 export FAIL_REVIEW_LIST=1

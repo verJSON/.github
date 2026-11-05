@@ -49,6 +49,10 @@ marker="<!-- independent-review:v1 pr:${PR_NUMBER} head:${EXPECTED_HEAD_SHA} ver
 # predictable, small amount of API calls rather than a griefing PR's review count —
 # exceeding it fails closed (no autonomous merge), same as finding no candidate at
 # all, rather than exhausting the token's request budget.
+#
+# A permission that cannot be read is unknown, not unprivileged. Skipping that candidate
+# would let an older receipt govern past a newer verdict that may have withdrawn it, so
+# the walk stops and the check refuses, naming the lookup (exit status 3 below).
 MAX_CANDIDATE_LOOKUPS=20
 select_privileged_candidate() {
   local reviews_json="$1" cid clogin role attempts=0
@@ -57,7 +61,10 @@ select_privileged_candidate() {
     attempts=$((attempts + 1))
     [ "$attempts" -le "$MAX_CANDIDATE_LOOKUPS" ] || return 1
     role="$(gh api "repos/$TARGET_REPO/collaborators/$clogin/permission" \
-      --jq '.role_name // ""' 2>/dev/null)" || role=""
+      --jq '.role_name // ""')" || {
+      echo "::error::could not read the repository permission of $clogin on $TARGET_REPO" >&2
+      return 3
+    }
     case "$role" in
       admin|maintain) printf '%s\t%s\n' "$cid" "$clogin"; return 0 ;;
     esac
@@ -80,6 +87,7 @@ reviews="$(gh api --paginate \
   echo "::error::could not list the reviews of $TARGET_REPO#$PR_NUMBER"; exit 1;
 }
 selected="$(select_privileged_candidate "$reviews")" || {
+  [ "$?" -eq 3 ] && exit 1
   echo "::error::an exact-head independent-review verdict is required before autonomous merge"; exit 1;
 }
 review_id="$(cut -f1 <<<"$selected")"
@@ -105,6 +113,7 @@ latest_reviews="$(gh api --paginate \
   echo "::error::could not list the reviews of $TARGET_REPO#$PR_NUMBER"; exit 1;
 }
 latest_selected="$(select_privileged_candidate "$latest_reviews")" || {
+  [ "$?" -eq 3 ] && exit 1
   echo "::error::could not revalidate latest independent-review verdict"; exit 1;
 }
 [ "$latest_selected" = "$selected" ] || {

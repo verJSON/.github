@@ -12,8 +12,11 @@ carries a valid ADR 0202 independent-review receipt for that exact head. An auto
 `--admin` or `--auto` merge there therefore needs the receipt, as the terminal merge App
 already did.
 
-The receipt check moves verbatim from `ai-privileged-merge.yml` into
-`scripts/ci-gate/independent-review-receipt.sh`, and both paths run that one file. The
-only addition is that an unreadable review listing is now refused with a named reason.
+The receipt check moves from `ai-privileged-merge.yml` into
+`scripts/ci-gate/independent-review-receipt.sh`, and both paths run that one file. An
+unreadable review listing is now refused with a named reason. A reviewer whose
+repository permission cannot be read is also refused by name, where the search used to
+skip it and could let an older receipt govern past a newer verdict. A checkout-isolation
+check now fails CI when a job reads a file its sparse `.gate-trust` checkout omits.
 No ruleset, property, or required check changes. Native merges stay with #1990.
 Callers that route by exit code need a row for `6`.

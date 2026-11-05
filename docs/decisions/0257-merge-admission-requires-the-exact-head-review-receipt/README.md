@@ -108,8 +108,11 @@ proposes to cover in general with one admission check.
 2. **One verifier.** The receipt check moves verbatim from the terminal workflow's inline
    step into `scripts/ci-gate/independent-review-receipt.sh`. The terminal workflow runs
    it from its immutable `.gate-trust` checkout, and Gate R runs it from beside the
-   script. The only behavioral addition is a named refusal when the review listing
-   cannot be read; before, that step failed without a reason.
+   script. Two behaviors change. A review listing that cannot be read is refused with a
+   named reason; before, that step failed without a reason. A reviewer whose repository
+   permission cannot be read now stops the search with a named refusal; before, the
+   search skipped that reviewer as unprivileged, so an older receipt could govern past
+   a newer verdict that a failed lookup hid.
 3. **No receipt-only required context.** Native-path coverage belongs to #1990's
    admission check. When that check runs this assertion, Gate R comes with it. Whether
    that check may veto the human merge path is the owner decision that ADR 0091 and
@@ -152,16 +155,22 @@ proposes to cover in general with one admission check.
 `scripts/assert-mergeable-head.review-receipt.test.sh` (merge-gate group) runs a fixture
 that passes Gates A, W, B, and C, then:
 
-- rejects absent, malformed (marker inside other text), stale-head, App-authored,
-  superseded (a later changes-requested verdict, and a verdict that lands during
-  revalidation), and write-only receipts, each with exit `6` and its specific reason;
+- rejects absent, malformed (marker inside other text), dismissed, stale-head,
+  App-authored, superseded (a later changes-requested verdict, and a verdict that lands
+  during revalidation), and write-only receipts, each with exit `6` and its specific
+  reason;
 - accepts a valid maintain-role receipt;
 - reads no reviews on a base ref without the arm rule;
-- exits `1` for an arm-path entry without a repository id and for a script copied
-  without its verifier, and names an unreadable review listing;
+- exits `1` for an arm-path entry whose repository id is absent or a string, and for a
+  script copied without its verifier;
+- names an unreadable review listing and an unreadable reviewer permission, each with
+  exit `6`; the permission case puts it on a newer verdict above a valid receipt;
 - pins the arm identity to the reviewed ruleset image.
 
 Each case that already held when written was proven by a mutant that fails it for its
 asserted reason. `scripts/ci-gate/native-automerge.test.sh` keeps every ADR 0202 case
 and now exercises the shared verifier through the terminal workflow; the verifier
-mutants also fail it.
+mutants also fail it. `scripts/workflow-checkout-isolation.test.py` requires every file a
+job reads from a fixed-path sparse checkout, such as `.gate-trust`, to be in that job's
+sparse list, so dropping the verifier from the terminal workflow's checkout fails CI
+rather than every terminal merge.

@@ -166,8 +166,9 @@ not yet enforced by code. Enforcing it, and the issuer decision, are separate wo
 adds Gate R to `scripts/assert-mergeable-head.sh`. On a promotion-enabled repository, an
 autonomous `--admin` or `--auto` merge now needs this receipt for the exact head too, not
 only the terminal merge workflow. The receipt contract above is unchanged. Its check
-moved verbatim from the workflow's inline step into
-`scripts/ci-gate/independent-review-receipt.sh`, which both paths run.
+moved from the workflow's inline step into
+`scripts/ci-gate/independent-review-receipt.sh`, which both paths run. A reviewer
+permission that cannot be read is now a named refusal rather than a skipped candidate.
 
 **Why.** Agents merging under organization-admin bypass were held only by the admission
 assertion, and it did not read the receipt (#2031, verjson-agents ADR 0035).
