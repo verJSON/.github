@@ -561,5 +561,7 @@ candidate_identity="9631224154@sha256:70be36dfceee65146fd9942840a227d498506c1edc
 [ "${BASH_REMATCH[2]}" = "sha256:70be36dfceee65146fd9942840a227d498506c1edc61af53ed4cb6e642b8d3cd" ]
 grep -q 'existing tag records a divergent release manifest' "$workflow"
 grep -q 'existing GitHub Release manifest diverges' "$workflow"
+# The only run of the coexistence suite: container-candidate-contract.test.sh,
+# in the same CI group, relies on it.
 bash "$root/scripts/container-contract-coexistence.test.sh"
 echo 'container release canonical contract passed'
