@@ -159,3 +159,18 @@ merged in verjson-docs#18 on 2026-10-22.
 
 No gate verifies direct-human sessions or head and diff binding today, so this policy is
 not yet enforced by code. Enforcing it, and the issuer decision, are separate work.
+
+## 2026-11-05 amendment — Merge admission also consumes the receipt (ADR 0257)
+
+**What.** [ADR 0257](../0257-merge-admission-requires-the-exact-head-review-receipt/README.md)
+adds Gate R to `scripts/assert-mergeable-head.sh`. On a promotion-enabled repository, an
+autonomous `--admin` or `--auto` merge now needs this receipt for the exact head too, not
+only the terminal merge workflow. The receipt contract above is unchanged. Its check
+moved verbatim from the workflow's inline step into
+`scripts/ci-gate/independent-review-receipt.sh`, which both paths run.
+
+**Why.** Agents merging under organization-admin bypass were held only by the admission
+assertion, and it did not read the receipt (#2031, verjson-agents ADR 0035).
+
+**Unchanged.** The protected human merge path still does not consume the receipt. Making
+a native merge depend on it is #1990's decision and needs the owner's approval.
