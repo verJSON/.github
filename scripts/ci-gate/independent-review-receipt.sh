@@ -10,8 +10,13 @@
 # newest exact-head review from a current maintain/admin account is a COMMENTED review
 # whose entire trimmed body is the canonical approval marker, and a second read finds
 # no later verdict. Every refusal prints one `::error::` line naming its reason and
-# exits non-zero; an API failure is a refusal, never a pass. Needs a token that can
-# read pull-request reviews and collaborator permission (GH_TOKEN).
+# exits non-zero; an API failure is a refusal, never a pass. Exit 1 means no valid
+# receipt; exit 3 means a review listing or a reviewer permission could not be read, so
+# the receipt is unanswered rather than refused (Gate R reports that as exit 1, the
+# terminal workflow refuses on either); exit 2 is a malformed argument. A failed re-fetch
+# of the selected review stays exit 1: a deleted review answers it just as a server
+# error does. Needs a token that can read pull-request reviews and collaborator
+# permission (GH_TOKEN).
 set -euo pipefail
 
 [ "$#" -eq 4 ] || { echo "usage: $0 <owner/repo> <pr-number> <40-hex-head> <result-file>" >&2; exit 2; }
@@ -52,7 +57,8 @@ marker="<!-- independent-review:v1 pr:${PR_NUMBER} head:${EXPECTED_HEAD_SHA} ver
 #
 # A permission that cannot be read is unknown, not unprivileged. Skipping that candidate
 # would let an older receipt govern past a newer verdict that may have withdrawn it, so
-# the walk stops and the check refuses, naming the lookup (exit status 3 below).
+# the walk stops and the check refuses, naming the lookup (return status 3 below, which
+# the script exits with).
 MAX_CANDIDATE_LOOKUPS=20
 select_privileged_candidate() {
   local reviews_json="$1" cid clogin role attempts=0
@@ -84,10 +90,10 @@ select_privileged_candidate() {
 
 reviews="$(gh api --paginate \
   "repos/$TARGET_REPO/pulls/$PR_NUMBER/reviews?per_page=100" | jq -s '.')" || {
-  echo "::error::could not list the reviews of $TARGET_REPO#$PR_NUMBER"; exit 1;
+  echo "::error::could not list the reviews of $TARGET_REPO#$PR_NUMBER"; exit 3;
 }
 selected="$(select_privileged_candidate "$reviews")" || {
-  [ "$?" -eq 3 ] && exit 1
+  [ "$?" -eq 3 ] && exit 3
   echo "::error::an exact-head independent-review verdict is required before autonomous merge"; exit 1;
 }
 review_id="$(cut -f1 <<<"$selected")"
@@ -110,10 +116,10 @@ jq -e --argjson id "$review_id" --arg head "$EXPECTED_HEAD_SHA" \
 
 latest_reviews="$(gh api --paginate \
   "repos/$TARGET_REPO/pulls/$PR_NUMBER/reviews?per_page=100" | jq -s '.')" || {
-  echo "::error::could not list the reviews of $TARGET_REPO#$PR_NUMBER"; exit 1;
+  echo "::error::could not list the reviews of $TARGET_REPO#$PR_NUMBER"; exit 3;
 }
 latest_selected="$(select_privileged_candidate "$latest_reviews")" || {
-  [ "$?" -eq 3 ] && exit 1
+  [ "$?" -eq 3 ] && exit 3
   echo "::error::could not revalidate latest independent-review verdict"; exit 1;
 }
 [ "$latest_selected" = "$selected" ] || {

@@ -105,7 +105,8 @@
 #   4  Gate B failed (the head was deferred; nothing on it was verified)
 #   5  Gate C failed (some other check is pending or non-passing)
 #   6  Gate R failed (no valid exact-head independent-review receipt on a
-#      promotion-enabled repository; the refusal names the verifier's reason)
+#      promotion-enabled repository; the refusal names the verifier's reason). A
+#      review or permission read that fails is exit 1, not 6.
 #   1  the assertion could not be evaluated (API failure, unresolvable state)
 #
 # There is deliberately NO environment override for any gate's matching rule.
@@ -1003,8 +1004,16 @@ if [ "$promotion_enabled" = true ]; then
   receipt_verifier="$(dirname "${BASH_SOURCE[0]}")/ci-gate/independent-review-receipt.sh"
   [ -r "$receipt_verifier" ] \
     || fault 1 "Gate R cannot evaluate $repo#$pr: its receipt verifier $receipt_verifier is missing; run the assertion from a canonical verJSON/.github checkout"
+  # The verifier exits 3 when a read failed: the receipt is then unanswered, an
+  # evaluation fault like every other API failure here, not a receipt refusal.
+  receipt_status=0
   bash "$receipt_verifier" "$repo" "$pr" "$head_sha" "$scratch/receipt.tsv" </dev/null >"$scratch/receipt.out" 2>&1 \
-    || fault 6 "Gate R: $repo#$pr head $head_sha has no valid ADR 0202 independent-review receipt — $(sed -n 's/^::error:://p' "$scratch/receipt.out" | tail -n 1)"
+    || receipt_status=$?
+  receipt_reason="$(sed -n 's/^::error:://p' "$scratch/receipt.out" | tail -n 1)"
+  [ "$receipt_status" -ne 3 ] \
+    || fault 1 "Gate R cannot evaluate $repo#$pr head $head_sha: $receipt_reason"
+  [ "$receipt_status" -eq 0 ] \
+    || fault 6 "Gate R: $repo#$pr head $head_sha has no valid ADR 0202 independent-review receipt — $receipt_reason"
   # ADR 0257's time-boxed exception: until #1964 issues separate identities, agents
   # author and review through one account. Such a receipt still counts, but is named so
   # it is never presented as plain independent review. Visibility only: it gates

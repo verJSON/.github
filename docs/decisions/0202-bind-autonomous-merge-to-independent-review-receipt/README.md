@@ -168,7 +168,8 @@ autonomous `--admin` or `--auto` merge now needs this receipt for the exact head
 only the terminal merge workflow. The receipt contract above is unchanged. Its check
 moved from the workflow's inline step into
 `scripts/ci-gate/independent-review-receipt.sh`, which both paths run. A reviewer
-permission that cannot be read is now a named refusal rather than a skipped candidate.
+permission that cannot be read is now a named refusal rather than a skipped candidate;
+the verifier exits `3` for such a failed read, which Gate R reports as exit `1`.
 
 **Why.** Agents merging under organization-admin bypass were held only by the admission
 assertion, and it did not read the receipt (#2031, verjson-agents ADR 0035).
@@ -177,9 +178,13 @@ assertion, and it did not read the receipt (#2031, verjson-agents ADR 0035).
 a native merge depend on it is #1990's decision and needs the owner's approval.
 
 **Superseded in part (2026-11-05).** By owner decision, independence is identity-neutral:
-a receipt counts when its reviewer's identity is distinct from the head's author and
-pushers, human or agent alike. Items 2 and 3 of the 2026-10-22 amendment above are
-superseded to the extent that they distinguish humans from agents; items 1 and 4 and the
-binding and staleness safeguards stand. Shared-account review is a named, time-boxed
-exception until #1964. See [ADR 0257](../0257-merge-admission-requires-the-exact-head-review-receipt/README.md),
+a receipt is to count when its reviewer's acting identity is distinct from the head's
+author and pushers, human or agent alike, and admin-merge follows the identity's role,
+not its class. Items 2 and 3 of the 2026-10-22 amendment above are superseded to the
+extent that they distinguish humans from agents, including item 2's admin-merge bar.
+Items 1 and 4 stand, as does the interim-state paragraph: the receipt is not evidence
+for any reviewer ruleset. The receipt still binds only the pull request and the head;
+base and diff-digest binding and staleness on a base change are the target contract for
+the #1964 switch-on and the reviewer-ruleset re-enable. Shared-account review is a
+named, time-boxed exception until #1964. See [ADR 0257](../0257-merge-admission-requires-the-exact-head-review-receipt/README.md),
 Decisions 5 to 9.

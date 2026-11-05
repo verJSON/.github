@@ -251,21 +251,31 @@ expect "a receipt from a write-only collaborator fails Gate R" 6 \
   "Gate R: $REPO#$PR head $HEAD_SHA has no valid ADR 0202 independent-review receipt — an exact-head independent-review verdict is required before autonomous merge"
 
 # --- unreadable ----------------------------------------------------------------------
+# A read that fails leaves the receipt unanswered, not refused: like every other API
+# failure in the assertion it exits 1, never 6, and names the read.
 # A reviewer whose permission cannot be read is unknown, not unprivileged. Skipping it
 # would let an older receipt govern past a newer verdict that may have withdrawn it.
 reset_env
 REVIEWS_FIXTURE="[$receipt,$(review 83 CHANGES_REQUESTED "$HEAD_SHA" second-maintainer User 'one more fix')]"
 export FAIL_PERMISSION_FOR=second-maintainer
 run
-expect "an unreadable reviewer permission fails Gate R and names the lookup that failed" 6 \
-  "Gate R: $REPO#$PR head $HEAD_SHA has no valid ADR 0202 independent-review receipt — could not read the repository permission of second-maintainer on $REPO"
+expect "an unreadable reviewer permission leaves Gate R unevaluated and names the lookup that failed" 1 \
+  "Gate R cannot evaluate $REPO#$PR head $HEAD_SHA: could not read the repository permission of second-maintainer on $REPO"
 
-# A review listing that cannot be read is a refusal that says so, never a silent one.
+# The same holds on the revalidating search: a newer reviewer that appears only on the
+# second read, and whose permission cannot be read, must not let the receipt stand.
+reset_env
+LATEST_REVIEWS_FIXTURE="[$receipt,$(review 83 CHANGES_REQUESTED "$HEAD_SHA" second-maintainer User 'one more fix')]"
+export LATEST_REVIEWS_FIXTURE FAIL_PERMISSION_FOR=second-maintainer
+run
+expect "an unreadable permission on the revalidating search leaves Gate R unevaluated and names the lookup" 1 \
+  "Gate R cannot evaluate $REPO#$PR head $HEAD_SHA: could not read the repository permission of second-maintainer on $REPO"
+
 reset_env
 export FAIL_REVIEW_LIST=1
 run
-expect "an unreadable review listing fails Gate R and names the read that failed" 6 \
-  "Gate R: $REPO#$PR head $HEAD_SHA has no valid ADR 0202 independent-review receipt — could not list the reviews of $REPO#$PR"
+expect "an unreadable review listing leaves Gate R unevaluated and names the read that failed" 1 \
+  "Gate R cannot evaluate $REPO#$PR head $HEAD_SHA: could not list the reviews of $REPO#$PR"
 
 # --- verifier unavailable ------------------------------------------------------------
 # Gate R runs the verifier beside this script in the canonical checkout. A copy of the

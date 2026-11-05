@@ -51,8 +51,9 @@ Facts read live on 2026-11-05:
   `.user.type == "User"` reviewers. Both distinguish humans from agents.
 
 On 2026-11-05 the owner decided, in the PM session: "The goal is not to differentiate
-between human and agent as long as they have distinct identities." Decisions 5 to 9
-record that decision.
+between human and agent as long as they have distinct identities." The same day the
+owner answered two follow-up questions: admin-merge scope is "role-based, not class",
+and distinctness should "compare acting identity". Decisions 5 to 9 record all three.
 
 ## Options
 
@@ -115,16 +116,23 @@ proposes to cover in general with one admission check.
      and exits `1`. Reading it as unarmed would skip the receipt.
    - On a promotion-enabled base ref, the head must carry an ADR 0202 receipt that
      passes `scripts/ci-gate/independent-review-receipt.sh` for this repository, pull
-     request, and exact head. A refusal exits `6` and quotes the verifier's reason.
+     request, and exact head. A refusal exits `6` and quotes the verifier's reason. A
+     review listing or reviewer permission the verifier could not read leaves the
+     receipt unanswered, so Gate R exits `1` and quotes the failed read (Decision 2).
    - Off promotion-enabled base refs, Gate R reads nothing and requires nothing.
 2. **One verifier.** The receipt check moves verbatim from the terminal workflow's inline
    step into `scripts/ci-gate/independent-review-receipt.sh`. The terminal workflow runs
    it from its immutable `.gate-trust` checkout, and Gate R runs it from beside the
    script. Two behaviors change. A review listing that cannot be read is refused with a
    named reason; before, that step failed without a reason. A reviewer whose repository
-   permission cannot be read now stops the search with a named refusal; before, the
-   search skipped that reviewer as unprivileged, so an older receipt could govern past
-   a newer verdict that a failed lookup hid.
+   permission cannot be read now stops the search, on the first read and on the
+   revalidating one, with a named refusal; before, the search skipped that reviewer as
+   unprivileged, so an older receipt could govern past a newer verdict that a failed
+   lookup hid. The verifier exits `3` for either failed read and `1` for a receipt it
+   refuses. The terminal workflow refuses on any non-zero exit; Gate R maps `3` to its
+   exit `1`, like every other API failure in the assertion. A failed re-fetch of the
+   selected review stays a refusal, because a deleted review answers it the same way
+   a server error does.
 3. **No receipt-only required context.** Native-path coverage belongs to #1990's
    admission check. When that check runs this assertion, Gate R comes with it. Whether
    that check may veto the human merge path is the owner decision that ADR 0091 and
@@ -132,37 +140,63 @@ proposes to cover in general with one admission check.
 4. **Remote enforcement against an agent** needs an agent principal that cannot bypass.
    That is #1964 (issuer-bound agent review authority). Until then, Gate R is as binding
    as the merge guard that requires the assertion.
-5. **Independence is identity-neutral.** An exact-head review receipt counts only when the
-   reviewer's identity is distinct from the head's author and pushers. Human and agent
-   identities are treated alike, on every merge path. Gate R applies the rule to the
-   assertion path now. #1990 is the vehicle for the native merge-button and auto-merge
-   path; how that check relates to ADR 0091's non-vetoing arm remains for #1990's ADR.
+5. **Independence is identity-neutral.** The target rule: an exact-head review receipt
+   counts only when the reviewer's acting identity (Decision 7) is distinct from the
+   head's author and pushers, and human and agent identities are treated alike, on
+   every merge path. Gate R does not compare identities today. It now requires the
+   exact-head receipt on the assertion path; the distinct-identity rule takes effect
+   when #1964 switches on. Until then, a receipt from the same identity passes under the
+   Decision 8 exception, and Gate R shows the notice. #1990 is the vehicle for the
+   native merge-button and auto-merge path; how that check relates to ADR 0091's
+   non-vetoing arm remains for #1990's ADR.
 6. **What this supersedes in ADR 0202.** Its 2026-10-22 amendment is superseded to the
    extent that it distinguishes humans from agents:
    - *Item 2* ("Approval identity is a direct human session only"): agent credentials are
      no longer barred, as a class, from carrying review scope. An approval counts by
-     distinct identity, human or agent. The same qualifier in that amendment's re-enable
-     trigger falls with it; the trigger keeps its head-SHA and diff binding.
+     distinct acting identity, human or agent. Item 2's bar on admin-merge scope for
+     agent credentials is superseded too, by a second owner decision of 2026-11-05:
+     "role-based, not class". Admin-merge follows the identity's RBAC role and is
+     subject to the same gates for every identity: the exact-head receipt, the merge
+     assertion, and, once enabled, a distinct reviewer. An agent identity holds admin
+     only when the identity infrastructure grants it that role, which it does not today.
+     The direct-human qualifier in that amendment's re-enable trigger falls with item 2;
+     the trigger keeps its head-SHA and diff binding.
    - *Item 3* (delegation-owner review as a named exception): the delegating human is one
-     identity among others. A review from an identity distinct from the author and
-     pushers is plain independent review. A review from the same identity is the
-     `shared-identity-review` exception of Decision 8 until #1964 switches on. The
-     safeguard that barred agents as a class from obtaining, refreshing, or relaying an
-     approval or admin-merge credential is replaced by the identity rule: no identity
-     may obtain, refresh, or relay another identity's approval credential.
+     acting identity among others. Their review of work their agent authored under a
+     distinct agent identity is plain independent review, not a separate approval kind.
+     A review from the same acting identity is the `shared-identity-review` exception of
+     Decision 8 until #1964 switches on. The safeguard that barred agents as a class
+     from obtaining, refreshing, or relaying an approval or admin-merge credential is
+     replaced by the identity rule: no identity may use another identity's approval or
+     admin-merge credential.
 
    Not superseded, and still in force: item 1 (authorship identity is composite,
-   `{human subject, model, agent/run}`); item 4 (autonomous system actions carry an
-   explicit machine subject); the binding of an approval to the pull request, head, base,
-   and diff digest; its staleness on any push or base change and the recheck before
-   merge; the audit record keeping both the authoring and the approving identity; ADR
-   0208's live `maintain`/`admin` eligibility; and the receipt contract of ADR 0202's
-   Decision, except its non-App `User` restriction, which Decision 7 replaces at the
-   #1964 switch-on.
-7. **"Distinct identity", mechanically, once enabled.** The reviewer's registered identity
-   (a user login or an App identity, human or agent, issued or registered through
-   verjson-agent-identity) must differ from the pull request's author and from every
-   pusher and committer of the commits in the head range. The verifier's
+   `{human subject, model, agent/run}`), which Decision 7 keeps for attribution and
+   records while comparing only its acting element; item 4 (autonomous system actions
+   carry an explicit machine subject); the recheck immediately before merge; ADR 0208's
+   live `maintain`/`admin` eligibility; the receipt contract of ADR 0202's Decision,
+   except its non-App `User` restriction, which Decision 7 replaces at the #1964
+   switch-on; and ADR 0202's interim-state paragraph: the receipt remains evidence for
+   the autonomous merge path only, and is not evidence for any reviewer ruleset.
+
+   Also kept, but as the **target** contract for the #1964 switch-on and the
+   reviewer-ruleset re-enable, not as current behavior: binding an approval to the
+   base and the diff digest, its staleness on a change of base, and an audit record
+   that keeps the composite authorship identity beside the reviewer. Today's ADR 0202
+   receipt binds only the pull request number and the head SHA. It goes stale on a push
+   by construction, and it does not go stale when only the base changes.
+7. **"Distinct identity", mechanically, once enabled.** Distinctness compares **acting
+   identities**, by a third owner decision of 2026-11-05: "compare acting identity". An
+   acting identity is the credential that authored, pushed, or reviewed: an agent
+   identity (with its run) or a human credential. It is not the principal subject `sub`
+   of the composite authorship identity. A human's review of their own agent's work
+   therefore counts as independent, while a review by the same agent identity or run
+   never counts. Records keep both the composite authorship identity of item 1 and the
+   reviewer's acting identity. The reviewer's registered acting identity (a user login
+   or an App identity, human or agent, issued or registered through
+   verjson-agent-identity) must differ from the acting identity of the pull request's
+   author and of every pusher and committer of the commits in the head range. The
+   verifier's
    `.user.type == "User"` filter, ADR 0202's "non-App `User`", is human-versus-agent
    differentiation. The target rule removes it in favor of that registered-identity
    check, and the change lands with the #1964 switch-on, not before. The filter also
@@ -170,8 +204,10 @@ proposes to cover in general with one admission check.
    check must keep them out by not registering them as reviewers.
 8. **Phasing: `shared-identity-review`, a named, time-boxed exception.** Gate R merges now
    and requires the exact-head receipt. Until verjson-agent-identity issues separate
-   identities, a receipt whose reviewer shares the author's or a pusher's identity still
-   counts, as `shared-identity-review`, never as plain independent review. Nothing is
+   identities, agents and the owner act through one GitHub account, so their acting
+   identities cannot be told apart. A receipt whose reviewer shares the author's or a
+   pusher's account therefore still counts, as `shared-identity-review`, never as plain
+   independent review. Nothing is
    blocked today. The exception ends when the distinct-identity check switches on in
    the shared verifier, tracked on #1964.
    - Gate R names it: when the receipt's reviewer login equals the pull request author's
@@ -218,6 +254,9 @@ proposes to cover in general with one admission check.
   read.
 - **Residual process gap:** an agent that skips the assertion is not stopped, as for
   every other gate in it. #1964 closes this gap.
+- A Gate R read failure is now exit `1`, not `6`: a server error on the review listing
+  or a permission lookup is an unanswered question, not a missing receipt. The
+  terminal workflow still refuses on it.
 - Until the #1964 switch-on, a receipt on an agent-authored pull request is a
   `shared-identity-review`, and Gate R's output says so. It is not evidence of review
   by a distinct identity.
@@ -238,7 +277,9 @@ that passes Gates A, W, B, and C, then:
 - exits `1` for an arm-path entry whose repository id is absent or a string, and for a
   script copied without its verifier;
 - names an unreadable review listing and an unreadable reviewer permission, each with
-  exit `6`; the permission case puts it on a newer verdict above a valid receipt;
+  exit `1`; the permission case puts it on a newer verdict above a valid receipt, once
+  on the first read and once on a verdict that appears only on the revalidating read
+  (removing the second search's exit-`3` handling fails that case);
 - pins the arm identity to the reviewed ruleset image;
 - passes a receipt whose reviewer is the pull request's author and names it in a
   `shared-identity-review` notice, while the valid case, with a distinct author, prints
