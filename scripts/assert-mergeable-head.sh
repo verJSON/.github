@@ -1004,22 +1004,31 @@ if [ "$promotion_enabled" = true ]; then
   receipt_verifier="$(dirname "${BASH_SOURCE[0]}")/ci-gate/independent-review-receipt.sh"
   [ -r "$receipt_verifier" ] \
     || fault 1 "Gate R cannot evaluate $repo#$pr: its receipt verifier $receipt_verifier is missing; run the assertion from a canonical verJSON/.github checkout"
-  # The verifier exits 3 when a read failed: the receipt is then unanswered, an
-  # evaluation fault like every other API failure here, not a receipt refusal.
+  # Only the verifier's documented results are trusted: 0 passes, 1 refuses the receipt
+  # (exit 6), and 3 means a read failed, so the receipt is unanswered, an evaluation
+  # fault like every other API failure here. Any other status, a usage error or a
+  # signal, is an evaluation fault too, never a refusal and never a pass.
   receipt_status=0
   bash "$receipt_verifier" "$repo" "$pr" "$head_sha" "$scratch/receipt.tsv" </dev/null >"$scratch/receipt.out" 2>&1 \
     || receipt_status=$?
   receipt_reason="$(sed -n 's/^::error:://p' "$scratch/receipt.out" | tail -n 1)"
-  [ "$receipt_status" -ne 3 ] \
-    || fault 1 "Gate R cannot evaluate $repo#$pr head $head_sha: $receipt_reason"
-  [ "$receipt_status" -eq 0 ] \
-    || fault 6 "Gate R: $repo#$pr head $head_sha has no valid ADR 0202 independent-review receipt — $receipt_reason"
+  case "$receipt_status" in
+    0) ;;
+    1) fault 6 "Gate R: $repo#$pr head $head_sha has no valid ADR 0202 independent-review receipt — $receipt_reason" ;;
+    3) fault 1 "Gate R cannot evaluate $repo#$pr head $head_sha: $receipt_reason" ;;
+    *) fault 1 "Gate R cannot evaluate $repo#$pr head $head_sha: its receipt verifier exited with unexpected status $receipt_status" ;;
+  esac
+  # A pass is believed only with the result it promises. This script runs without -e,
+  # so an unread or malformed result must fault here rather than reach `echo true`.
+  IFS=$'\t' read -r receipt_id receipt_reviewer <"$scratch/receipt.tsv" \
+    || fault 1 "Gate R cannot evaluate $repo#$pr head $head_sha: could not read the verifier's result"
+  [[ "$receipt_id" =~ ^[123456789][0123456789]*$ ]] && [ -n "$receipt_reviewer" ] \
+    || fault 1 "Gate R cannot evaluate $repo#$pr head $head_sha: the verifier's result is malformed"
   # ADR 0257's time-boxed exception: until #1964 issues separate identities, agents
   # author and review through one account. Such a receipt still counts, but is named so
   # it is never presented as plain independent review. Visibility only: it gates
   # nothing, and its absence does not prove distinct identity, because pushers and
   # committers of the head range are not compared until the #1964 switch-on.
-  IFS=$'\t' read -r receipt_id receipt_reviewer <"$scratch/receipt.tsv"
   pr_author="$(jq -r '.author.login? // "" | strings' <<<"$pr_json")" || pr_author=""
   [ -z "$pr_author" ] || [ "$receipt_reviewer" != "$pr_author" ] \
     || annotate notice "Gate R: receipt $receipt_id on $repo#$pr head $head_sha is a shared-identity-review: its reviewer $receipt_reviewer is the pull request's author, accepted only as ADR 0257's time-boxed exception until #1964 issues distinct identities, not as independent review"

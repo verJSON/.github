@@ -155,10 +155,14 @@ proposes to cover in general with one admission check.
      no longer barred, as a class, from carrying review scope. An approval counts by
      distinct acting identity, human or agent. Item 2's bar on admin-merge scope for
      agent credentials is superseded too, by a second owner decision of 2026-11-05:
-     "role-based, not class". Admin-merge follows the identity's RBAC role and is
-     subject to the same gates for every identity: the exact-head receipt, the merge
-     assertion, and, once enabled, a distinct reviewer. An agent identity holds admin
-     only when the identity infrastructure grants it that role, which it does not today.
+     "role-based, not class". The target rule: admin-merge follows the identity's RBAC
+     role and is subject to the same gates for every identity, namely the exact-head
+     receipt, the merge assertion, and, once enabled, a distinct reviewer. An agent
+     identity of its own holds admin only when the identity infrastructure grants it
+     that role. Today agents act through the owner's account and use its
+     `OrganizationAdmin` bypass. They are held only by the merge assertion and its Gate
+     R, which the merge guard makes them run (Decision 4). The human admin-bypass path
+     (the Context table) and the native merge path (Decision 3) are not held by either.
      The direct-human qualifier in that amendment's re-enable trigger falls with item 2;
      the trigger keeps its head-SHA and diff binding.
    - *Item 3* (delegation-owner review as a named exception): the delegating human is one
@@ -254,6 +258,10 @@ proposes to cover in general with one admission check.
   read.
 - **Residual process gap:** an agent that skips the assertion is not stopped, as for
   every other gate in it. #1964 closes this gap.
+- Gate R accepts a pass only with the result line the verifier promises, a numeric
+  review id and a reviewer, and it maps any verifier status other than `0`, `1`, and
+  `3` to exit `1`. The assertion runs without `set -e`, so an unread result would
+  otherwise reach `true`.
 - A Gate R read failure is now exit `1`, not `6`: a server error on the review listing
   or a permission lookup is an unanswered question, not a missing receipt. The
   terminal workflow still refuses on it.
@@ -276,11 +284,14 @@ that passes Gates A, W, B, and C, then:
 - reads no reviews on a base ref without the arm rule;
 - exits `1` for an arm-path entry whose repository id is absent or a string, and for a
   script copied without its verifier;
-- names an unreadable review listing and an unreadable reviewer permission, each with
-  exit `1`; the permission case puts it on a newer verdict above a valid receipt, once
+- names an unreadable review listing, on either read, and an unreadable reviewer
+  permission, each with exit `1`; the permission case puts it on a newer verdict above a valid receipt, once
   on the first read and once on a verdict that appears only on the revalidating read
   (removing the second search's exit-`3` handling fails that case);
 - pins the arm identity to the reviewed ruleset image;
+- with a stub verifier and a null pull request author, exits `1` for a pass that wrote
+  no result or a malformed one (the first printed `true` before the fix), and for
+  verifier status `2` and a signal (`143`);
 - passes a receipt whose reviewer is the pull request's author and names it in a
   `shared-identity-review` notice, while the valid case, with a distinct author, prints
   `true` alone. The stubbed `gh pr view` answers only the requested fields, so the

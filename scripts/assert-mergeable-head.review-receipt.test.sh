@@ -53,9 +53,11 @@ case "$args" in
   *"/annotations?per_page"*) printf '[]\n' ;;
   # The list is read twice: once to select the receipt, once to prove nothing later
   # superseded it. LATEST_REVIEWS_FIXTURE stands in for a review that lands between.
+  # FAIL_REVIEW_LIST fails every listing; FAIL_REVIEW_LIST_AT fails only that one.
   *"/pulls/$PR/reviews?per_page=100"*)
     [ "${FAIL_REVIEW_LIST:-0}" -eq 0 ] || { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }
     count="$(cat "$REVIEW_LIST_CALLS")"; count=$((count + 1)); printf '%s\n' "$count" >"$REVIEW_LIST_CALLS"
+    [ "${FAIL_REVIEW_LIST_AT:-0}" -ne "$count" ] || { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }
     if [ "$count" -le 1 ]; then printf '%s\n' "$REVIEWS_FIXTURE"
     else printf '%s\n' "${LATEST_REVIEWS_FIXTURE:-$REVIEWS_FIXTURE}"; fi ;;
   *"/pulls/$PR/reviews/"*)
@@ -101,7 +103,7 @@ default_check_runs="$(printf '{"total_count":3,"check_runs":[%s,%s,%s]}' \
 reset_env() {
   : >"$CALLS"
   printf '0\n' >"$REVIEW_LIST_CALLS"
-  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_PERMISSION_FOR
+  unset LATEST_REVIEWS_FIXTURE FAIL_REVIEW_LIST FAIL_REVIEW_LIST_AT FAIL_PERMISSION_FOR
   export REVIEWER_ROLE=maintain
   export PR_JSON_FIXTURE="{\"headRefOid\":\"$HEAD_SHA\",\"baseRefName\":\"main\",\"headRefName\":\"$HEAD_BRANCH\",\"headRepository\":{\"nameWithOwner\":\"$REPO\"},\"author\":{\"login\":\"delivery-author\"}}"
   export RULES_FIXTURE="[$status_rule,$arm_rule]"
@@ -276,6 +278,48 @@ export FAIL_REVIEW_LIST=1
 run
 expect "an unreadable review listing leaves Gate R unevaluated and names the read that failed" 1 \
   "Gate R cannot evaluate $REPO#$PR head $HEAD_SHA: could not list the reviews of $REPO#$PR"
+
+# Only the revalidating listing fails: the receipt was found, but nothing proves that no
+# later verdict superseded it.
+reset_env
+export FAIL_REVIEW_LIST_AT=2
+run
+expect "an unreadable revalidating review listing leaves Gate R unevaluated" 1 \
+  "Gate R cannot evaluate $REPO#$PR head $HEAD_SHA: could not list the reviews of $REPO#$PR"
+
+# --- verifier contract -------------------------------------------------------------
+# Gate R trusts only the verifier's documented results: 0 with a well-formed result
+# line, 1 (refused), and 3 (a read failed). Anything else is an evaluation fault. The
+# author is null, as for a deleted account, so the shared-identity comparison cannot
+# stand in for a check on the result.
+run_with_verifier() { # verifier-body
+  rm -rf "$tmp/stubbed"; mkdir -p "$tmp/stubbed/ci-gate"
+  cp "$script" "$tmp/stubbed/assert-mergeable-head.sh"
+  printf '#!/usr/bin/env bash\n%s\n' "$1" >"$tmp/stubbed/ci-gate/independent-review-receipt.sh"
+  OUT="$(bash "$tmp/stubbed/assert-mergeable-head.sh" "$REPO" "$PR" 2>&1)"
+  RC=$?
+}
+reset_env
+PR_JSON_FIXTURE="$(jq -c '.author = null' <<<"$PR_JSON_FIXTURE")"
+run_with_verifier 'exit 0'
+expect "a verifier that passes without writing its result leaves Gate R unevaluated" 1 \
+  "Gate R cannot evaluate $REPO#$PR head $HEAD_SHA: could not read the verifier's result"
+
+reset_env
+PR_JSON_FIXTURE="$(jq -c '.author = null' <<<"$PR_JSON_FIXTURE")"
+run_with_verifier 'printf "%s\t%s\n" not-an-id independent-reviewer >"$4"'
+expect "a verifier result without a numeric review id leaves Gate R unevaluated" 1 \
+  "Gate R cannot evaluate $REPO#$PR head $HEAD_SHA: the verifier's result is malformed"
+
+reset_env
+run_with_verifier 'echo "::error::pull request number is malformed"; exit 2'
+expect "a verifier usage failure (exit 2) leaves Gate R unevaluated, not refused" 1 \
+  "Gate R cannot evaluate $REPO#$PR head $HEAD_SHA: its receipt verifier exited with unexpected status 2"
+
+reset_env
+run_with_verifier 'kill -TERM $$'
+expect "a verifier killed by a signal leaves Gate R unevaluated, not refused" 1 \
+  "Gate R cannot evaluate $REPO#$PR head $HEAD_SHA: its receipt verifier exited with unexpected status 143"
 
 # --- verifier unavailable ------------------------------------------------------------
 # Gate R runs the verifier beside this script in the canonical checkout. A copy of the
