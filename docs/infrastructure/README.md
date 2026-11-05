@@ -6,7 +6,7 @@ public; obtain an account and repository permissions from the platform team.
 
 | Environment | Services | Endpoint reference |
 | --- | --- | --- |
-| Nuremberg development stack | GitLab CE, Nexus Repository Community Edition, npm, Docker, PyPI, S3 | [Service endpoints and client settings](netcup-nuremberg.md); [backup and restore runbook](netcup-stack-backup-restore.md) |
+| Nuremberg development stack | GitLab CE, Nexus Repository Community Edition, npm, Docker, PyPI, S3 | [Service endpoints and client settings](netcup-nuremberg.md); [backup and restore runbook](netcup-stack-backup-restore.md); [GitLab estate migration wave 0 rehearsal plan](gitlab-rehearsal-wave0.md) |
 
 ## Documentation ownership
 
