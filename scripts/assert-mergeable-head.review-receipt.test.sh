@@ -307,8 +307,15 @@ expect "a verifier that passes without writing its result leaves Gate R unevalua
 
 reset_env
 PR_JSON_FIXTURE="$(jq -c '.author = null' <<<"$PR_JSON_FIXTURE")"
-run_with_verifier 'printf "%s\t%s\n" not-an-id independent-reviewer >"$4"'
+# A digit prefix is not a review id: only an anchored match rejects it.
+run_with_verifier 'printf "%s\t%s\n" 82x independent-reviewer >"$4"'
 expect "a verifier result without a numeric review id leaves Gate R unevaluated" 1 \
+  "Gate R cannot evaluate $REPO#$PR head $HEAD_SHA: the verifier's result is malformed"
+
+reset_env
+PR_JSON_FIXTURE="$(jq -c '.author = null' <<<"$PR_JSON_FIXTURE")"
+run_with_verifier 'printf "%s\t\n" 82 >"$4"'
+expect "a verifier result without a reviewer leaves Gate R unevaluated" 1 \
   "Gate R cannot evaluate $REPO#$PR head $HEAD_SHA: the verifier's result is malformed"
 
 reset_env
