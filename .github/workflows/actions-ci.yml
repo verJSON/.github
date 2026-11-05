@@ -189,8 +189,8 @@ jobs:
           # The runner unsets this before any row starts and writes one JSON
           # record per row after it is reaped (verjson-observability#271). The
           # run and attempt keep reused self-hosted temp dirs apart, as for
-          # the checkout path above. The docs and locale-collation groups
-          # write no records.
+          # the checkout path above. Every other group-runner step writes and
+          # uploads its records the same way (#1999).
           ACTIONS_CI_RUNTIME_RECORDS: ${{ runner.temp }}/actions-ci-runtime-records-${{ github.run_id }}-${{ github.run_attempt }}/${{ matrix.group }}.jsonl
         run: |
           source_root="$GITHUB_WORKSPACE/.actions-ci-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.group }}"
@@ -239,6 +239,7 @@ jobs:
         env:
           RUNNER_LABELS: ''
           ACTIONS_CI_COMMAND_BUDGET_SECONDS: ${{ github.event_name == 'pull_request' && '60' || '' }}
+          ACTIONS_CI_RUNTIME_RECORDS: ${{ runner.temp }}/actions-ci-runtime-records-${{ github.run_id }}-${{ github.run_attempt }}/docs.jsonl
         run: |
           source_root="$GITHUB_WORKSPACE/.actions-ci-source-${{ github.run_id }}-${{ github.run_attempt }}-docs"
           group_root="$(mktemp -d "$RUNNER_TEMP/actions-ci-docs.XXXXXX")"
@@ -247,6 +248,14 @@ jobs:
           rm -rf "$source_root"
           cd "$group_root"
           bash scripts/actions-ci-group.sh docs
+      - name: Upload docs runtime records
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: actions-ci-runtime-records-${{ github.run_id }}-${{ github.run_attempt }}-docs
+          path: ${{ runner.temp }}/actions-ci-runtime-records-${{ github.run_id }}-${{ github.run_attempt }}/docs.jsonl
+          retention-days: 7
+          if-no-files-found: warn
 
   hosted-compatibility-tests:
     needs: [change-scope, docs-contracts, runner-isolation]
@@ -1992,7 +2001,16 @@ jobs:
         env:
           RUNNER_LABELS: ''
           ACTIONS_CI_COMMAND_BUDGET_SECONDS: ${{ github.event_name == 'pull_request' && '60' || '' }}
+          ACTIONS_CI_RUNTIME_RECORDS: ${{ runner.temp }}/actions-ci-runtime-records-${{ github.run_id }}-${{ github.run_attempt }}/locale-collation.jsonl
         run: bash scripts/actions-ci-group.sh locale-collation
+      - name: Upload locale-collation runtime records
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: actions-ci-runtime-records-${{ github.run_id }}-${{ github.run_attempt }}-locale-collation
+          path: ${{ runner.temp }}/actions-ci-runtime-records-${{ github.run_id }}-${{ github.run_attempt }}/locale-collation.jsonl
+          retention-days: 7
+          if-no-files-found: warn
 
       - name: Clean up Postgres sandbox containers
         if: always()

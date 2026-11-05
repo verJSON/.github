@@ -63,6 +63,10 @@ check(set(module.CONTRACT_CHECKS) == {case[1] for case in cases if case[0] == "c
       and set(module.ISOLATION_LABELS) == {case[1] for case in cases if case[0] == "isolation"},
       "the runner tables' keys are the case space's checks and labels")
 check(bool(cases), f"the test defines a non-empty case space ({len(cases)} cases)")
+# The allowlist sweep is about nine tenths of the npm-free checks' cost, so it is its
+# own row: its runtime record then measures that case alone (#1999).
+check(parts.get("allowlist-sweep") == {("contract", "allowlist sweep")},
+      "the allowlist sweep runs alone in its own part")
 check(len(parts) >= 2, f"the case space is split into at least two parts ({sorted(parts)})")
 for name, selected in sorted(parts.items()):
     check(bool(selected), f"part {name} selects at least one case")

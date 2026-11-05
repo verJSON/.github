@@ -110,6 +110,10 @@ assert docs_group_step["env"] == {
     "ACTIONS_CI_COMMAND_BUDGET_SECONDS": (
         "${{ github.event_name == 'pull_request' && '60' || '' }}"
     ),
+    "ACTIONS_CI_RUNTIME_RECORDS": (
+        "${{ runner.temp }}/actions-ci-runtime-records-${{ github.run_id }}-"
+        "${{ github.run_attempt }}/docs.jsonl"
+    ),
 }
 assert jobs["change-scope"]["outputs"]["heavy"] == "${{ steps.scope.outputs.heavy }}"
 scope_run = next(
@@ -827,6 +831,10 @@ def validate_locale_collation(candidate, candidate_manifest, sources=script_sour
             "ACTIONS_CI_COMMAND_BUDGET_SECONDS": (
                 "${{ github.event_name == 'pull_request' && '60' || '' }}"
             ),
+            "ACTIONS_CI_RUNTIME_RECORDS": (
+                "${{ runner.temp }}/actions-ci-runtime-records-${{ github.run_id }}-"
+                f"${{{{ github.run_attempt }}}}/{LOCALE_GROUP}.jsonl"
+            ),
         },
         "run": f"bash scripts/actions-ci-group.sh {LOCALE_GROUP}",
     }:
@@ -856,6 +864,99 @@ def validate_locale_collation(candidate, candidate_manifest, sources=script_sour
 
 validate_locale_collation(document, manifest_text)
 print("ok - every manifest group has one runner; en_US.UTF-8 contracts run hosted")
+
+
+RUNTIME_RECORDS_DIRECTORY = (
+    "${{ runner.temp }}/actions-ci-runtime-records-${{ github.run_id }}-${{ github.run_attempt }}"
+)
+
+
+def validate_runtime_records(candidate):
+    """Every step that runs the group runner writes its records and uploads them next (#1999).
+
+    The collector looks up `actions-ci-runtime-records-<run>-<attempt>-<group>` from the
+    step named `Upload <group> runtime records` for every group a job's log announces.
+    """
+    for job_name, job in candidate["jobs"].items():
+        steps = job.get("steps", [])
+        for index, step in enumerate(steps):
+            run = step.get("run", "")
+            if 'bash scripts/actions-ci-group.sh "${{ matrix.group }}"' in run:
+                group = "${{ matrix.group }}"
+            else:
+                named = re.findall(r"^\s*bash scripts/actions-ci-group\.sh ([a-z0-9-]+)\s*$", run, re.MULTILINE)
+                if not named:
+                    continue
+                if len(named) != 1:
+                    raise AssertionError(f"{job_name} step runs several groups: {named}")
+                group = named[0]
+            records = f"{RUNTIME_RECORDS_DIRECTORY}/{group}.jsonl"
+            if (step.get("env") or {}).get("ACTIONS_CI_RUNTIME_RECORDS") != records:
+                raise AssertionError(f"{job_name} runs group {group} without writing its runtime records")
+            upload = steps[index + 1] if index + 1 < len(steps) else None
+            if upload != {
+                "name": f"Upload {group} runtime records",
+                "if": "${{ always() }}",
+                "uses": "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+                "with": {
+                    "name": (
+                        "actions-ci-runtime-records-${{ github.run_id }}-"
+                        f"${{{{ github.run_attempt }}}}-{group}"
+                    ),
+                    "path": records,
+                    "retention-days": 7,
+                    "if-no-files-found": "warn",
+                },
+            }:
+                raise AssertionError(f"{job_name} does not upload group {group} runtime records next: {upload}")
+
+
+validate_runtime_records(document)
+print("ok - every group-runner step writes and uploads its runtime records")
+
+
+def expect_records_failure(label, mutate, reason):
+    candidate = copy.deepcopy(document)
+    mutate(candidate)
+    try:
+        validate_runtime_records(candidate)
+    except AssertionError as error:
+        if reason not in str(error):
+            raise AssertionError(f"{label} failed for another reason: {error}") from error
+        print(f"ok - {label} fails closed")
+    else:
+        raise AssertionError(f"{label} passed")
+
+
+def runner_step(candidate, job_name, marker):
+    return next(step for step in candidate["jobs"][job_name]["steps"] if marker in step.get("run", ""))
+
+
+def upload_step(candidate, job_name, group):
+    steps = candidate["jobs"][job_name]["steps"]
+    return next(step for step in steps if step.get("name") == f"Upload {group} runtime records")
+
+
+for job_name, group, marker in (
+    ("shell-test-groups", "${{ matrix.group }}", '"${{ matrix.group }}"'),
+    ("docs-contracts", "docs", "actions-ci-group.sh docs"),
+    ("hosted-compatibility-tests", "locale-collation", "actions-ci-group.sh locale-collation"),
+):
+    expect_records_failure(
+        f"{group} runner without runtime records",
+        lambda candidate: runner_step(candidate, job_name, marker)["env"].pop("ACTIONS_CI_RUNTIME_RECORDS"),
+        f"runs group {group} without writing its runtime records",
+    )
+    expect_records_failure(
+        f"{group} records upload removed",
+        lambda candidate: candidate["jobs"][job_name]["steps"].remove(upload_step(candidate, job_name, group)),
+        f"does not upload group {group} runtime records next",
+    )
+    expect_records_failure(
+        f"{group} records upload skipped after a failed row",
+        lambda candidate: upload_step(candidate, job_name, group).update({"if": "${{ success() }}"}),
+        f"does not upload group {group} runtime records next",
+    )
 
 
 def expect_locale_failure(
@@ -2138,6 +2239,10 @@ expected = shards | {
     "platform\tRUNNER_ISOLATION_TEST_PART=probes-r11-r14 python3 scripts/ci-gate/public-pr-runner-isolation.test.py": 240,
     # 51s on main run 38799238936, before #1822 added 15 assertions to it.
     "merge-gate\tbash scripts/assert-mergeable-head.test.sh": 120,
+    # The release-caller contract part that carried this case took 23-32s over 11
+    # hosted runs (32s on main run 41921027849); the sweep was 12.3s of its 13.7s
+    # locally, so twice 32s rounded up (#1999).
+    "platform\tRELEASE_CALLER_ISOLATION_PART=allowlist-sweep python3 scripts/release-caller-credential-isolation.test.py": 90,
 }
 if declared != expected:
     drift = sorted(
