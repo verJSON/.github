@@ -371,10 +371,16 @@ class BuildArtifactSchemaTests(unittest.TestCase):
             "${{ github.event_name == 'push' }}",
         )
 
-    def test_generated_artifact_callers_read_only_declared_needs_outputs(self):
-        for golden in ("build-artifact-share.golden.yml", "build-artifact-static-fallback.golden.yml"):
-            with self.subTest(golden=golden):
-                self.assertEqual(undeclared_needs_output_reads((FIXTURES / golden).read_text()), [])
+    def test_every_generated_caller_reads_only_declared_needs_outputs(self):
+        goldens = sorted(FIXTURES.glob("*.golden.yml"))
+        self.assertLessEqual(
+            {"default.golden.yml", "gitflow.golden.yml", "build-artifact-share.golden.yml",
+             "build-artifact-static-fallback.golden.yml"},
+            {golden.name for golden in goldens},
+        )
+        for golden in goldens:
+            with self.subTest(golden=golden.name):
+                self.assertEqual(undeclared_needs_output_reads(golden.read_text()), [])
 
     def test_static_fallback_writes_its_outputs_through_one_redirect(self):
         # actionlint's shellcheck pass rejects repeated redirects to one file (SC2129).
