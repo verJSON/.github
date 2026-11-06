@@ -226,7 +226,8 @@ jobs:
                   } >>"$GITHUB_OUTPUT"
                   # The recovery differs by invocation (ADR 0255 section 6). A required
                   # run and a label or lifecycle delivery cannot be re-run, so only a
-                  # caller head run is advised to; recovery is possible, never assured.
+                  # caller head run is advised to, and only where no organization arm is
+                  # required (amended 2026-11-06); recovery is possible, never assured.
                   runbook="https://github.com/verJSON/.github/blob/main/docs/arm-recovery-runbook.md#interim-recovery-close-and-reopen"
                   reopen="close and reopen the pull request (a human or App actor only, at most 2 attempts per head, only when no run of its arm family is queued or in progress, never a bypass), or push a new head; see $runbook"
                   if [ -z "${ARM_CALLER_ENVIRONMENT:-}" ]; then
@@ -234,7 +235,7 @@ jobs:
                   else
                     case "${ARM_WORKFLOW_REF:-}" in
                       "$TARGET_REPO/.github/workflows/gate-rearm.yml@"*)
-                        recovery="This is the repository's gate re-arm caller run: re-run this run, or push a new head. Re-running it does not restore a cancelled org-required arm on this head; see $runbook." ;;
+                        recovery="This is the repository's gate re-arm caller run: push a new head, or re-run this run only where the base ref requires no organization arm. Where it does, a re-run joins the arm's concurrency group and can displace the pending required run, and it never restores a cancelled one; see $runbook." ;;
                       "$TARGET_REPO/.github/workflows/ai-review-label-rearm.yml@"*)
                         recovery="This is a label delivery, which refuses a second attempt: remove and re-apply the label." ;;
                       "$TARGET_REPO/.github/workflows/ai-review-lifecycle-rearm.yml@"*)
