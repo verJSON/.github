@@ -324,7 +324,9 @@ ledger was not found, so members reconstructed its dissent from this ADR and
    That includes another event or action, a read error, and a body that is not
    JSON or not an array. Every decision logs its reason. A step failure also
    yields `true`: the step has `continue-on-error`, and the job output maps
-   anything but `false` to `true`. The `workflow_call` path that the label and
+   anything but `false` to `true`. A failed or timed-out `guard` job keeps the
+   arm too: `rearm` runs under `!cancelled()` unless the guard's output is
+   exactly `false`. The `workflow_call` path that the label and
    lifecycle callers use keeps its local arm.
    GitHub's REST reference says this endpoint does not return rules from rulesets
    in `evaluate` or `disabled` enforcement (read 2026-11-06). The response
@@ -343,13 +345,17 @@ ledger was not found, so members reconstructed its dissent from this ADR and
    - the per-reason Gate W remedy (met by #2010, which landed before this
      amendment);
    - this amendment (met);
-   - the `assert-mergeable-head` fixture below (met).
+   - the `assert-mergeable-head` fixture below. It exists, but its verdict
+     differs from the one the decision expected. The decision asked for a fixture
+     showing ADR 0226 setting the displaced run aside. The fixture shows Gate C
+     exiting `5` instead (§5 below). That divergence is recorded on #1905 for
+     the board, not self-certified here. Canary (a) observes it live.
 5. **The residual risk stays recorded.** F-2 and F-7 remain deferred: label and
    lifecycle runs can still displace a pending required run. F-6 close-and-reopen
    remains interim. F-1R adds two residuals:
-   - A `guard` job that never acquires a runner leaves `rearm` skipped. This costs
-     the local arm on a base ref with no organization arm. The required run is
-     unaffected.
+   - A `guard` job that never acquires a runner keeps `rearm` waiting until the
+     run is cancelled, and a cancelled run skips `rearm`. This costs the local arm
+     on a base ref with no organization arm. The required run is unaffected.
    - A guard-skipped `gate re-arm` run still matches the declared family's caller
      list, although it never entered the group. ADR 0226's displacer consults
      only the newest later-created family run and needs a SUCCESS-only suite. So

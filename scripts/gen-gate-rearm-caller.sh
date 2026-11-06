@@ -120,7 +120,7 @@ YAML
   cat <<YAML
   rearm:
     needs: guard
-    if: \${{ needs.guard.outputs.local_arm == 'true' }}
+    if: \${{ !cancelled() && needs.guard.outputs.local_arm != 'false' }}
     permissions:
       contents: read
       actions: write

@@ -48,11 +48,12 @@ job = doc["jobs"]["rearm"]
 # ADR 0166 fixes this role environment to `ai-review-app` for both trigger
 # paths. The reusable input is required by the workflow-call contract; the
 # generated-caller contract test pins these callers to the fixed role name.
-# F-1R (ADR 0255 amendment 2026-11-06): the arm runs only when the guard keeps
-# it, so a skipped arm never enters the reusable workflow's concurrency group.
+# F-1R (ADR 0255 amendment 2026-11-06): the arm is skipped only when the guard
+# explicitly yields `false`, so a skipped arm never enters the reusable workflow's
+# concurrency group, and a failed or timed-out guard job keeps the arm.
 assert job == {
     "needs": "guard",
-    "if": "${{ needs.guard.outputs.local_arm == 'true' }}",
+    "if": "${{ !cancelled() && needs.guard.outputs.local_arm != 'false' }}",
     "permissions": {
         "contents": "read",
         "actions": "write",
