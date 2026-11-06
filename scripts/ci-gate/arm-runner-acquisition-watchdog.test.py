@@ -416,9 +416,15 @@ def test_a_stalled_required_run_advises_close_and_reopen_under_the_interim_rules
     assert "re-run the arm" not in message, message
 
 
-def test_a_stalled_caller_head_run_advises_rerunning_that_run_or_pushing():
+def test_a_stalled_caller_head_run_advises_a_new_head_and_a_rerun_only_where_no_org_arm_is_required():
+    # ADR 0255 section 6 as amended 2026-11-06 (F-1R): a re-run of the caller joins the
+    # arm's group outside the quiet-family check and can displace a pending required run.
     message = stall_message(caller_invocation(".github/workflows/gate-rearm.yml"))
-    assert "the repository's gate re-arm caller run: re-run this run, or push a new head" in message, message
+    assert ("the repository's gate re-arm caller run: push a new head, or re-run this run only where "
+            "the base ref requires no organization arm") in message, message
+    assert "a re-run joins the arm's concurrency group and can displace the pending required run" in message, message
+    assert RUNBOOK in message, message
+    assert "re-run this run, or push" not in message, message
     assert "close and reopen" not in message, message
 
 

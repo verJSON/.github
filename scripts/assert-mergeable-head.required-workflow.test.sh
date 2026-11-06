@@ -179,6 +179,26 @@ expect "the family set-aside dismissed the displaced required run's check before
 expect "a family-displaced required run never satisfies Gate W" 3 \
   "cancelled: required run 41703191233 of $GATE_PATH (ruleset $RULESET_ID) was cancelled"
 
+# --- F-1R: a guard-skipped local run (ADR 0255 amendment 2026-11-06) -----------------
+# ARB-G1-2026-11-06 precondition 5. A label re-arm run on this head is displaced while
+# pending (its one job never started), and the required run then arms the head. The
+# regenerated local `gate re-arm` caller, created after both, yields: `guard` SUCCESS,
+# `rearm` SKIPPED, run `success`. It never entered the group, but it still matches the
+# family's caller list, so it is the newest family run the ADR 0226 rule consults, and
+# that rule sets a displaced run aside only for a SUCCESS-only suite. The recorded
+# verdict is a Gate C refusal (exit 5) on the displaced check -- a liveness cost, never
+# a pass -- while Gate W is satisfied by the required run.
+reset_env
+label_refs='[{"path":"Verjson/.github/.github/workflows/gate-rearm.yml@7ec2cf81fcdeda0209c3f4b2cb8774cb28b49de5"}]'
+CHECK_RUNS_FIXTURE="$(check_runs "$(check_run 1 'CI / test' success 500),$(check_run 11 'event-policy' success 701),$(check_run 12 'arm' success 701),$(check_run 41 'rearm / event-policy' cancelled 704),$(check_run 51 'guard' success 705),$(check_run 52 'rearm' skipped 705)")"
+RUNS_FIXTURE="$(wf_runs "$(wf_run 41703200001 704 365716791 9 'AI review label re-arm' "https://api.github.com/repos/$REPO/actions/workflows/365716791" 2026-11-06T19:26:10Z cancelled "$label_refs" '{"path":".github/workflows/ai-review-label-rearm.yml"}'),$(required_run 41703200002 701 199 2026-11-06T19:26:19Z success),$(local_run 41703200003 705 114 2026-11-06T19:26:20Z success)")"
+printf '{"total_count":1,"jobs":[{"id":41,"run_id":41703200001,"run_attempt":1,"head_sha":"%s","name":"rearm / event-policy","status":"completed","conclusion":"cancelled","steps":[],"runner_id":0}]}\n' \
+  "$HEAD_SHA" >"$JOBS_DIR/41703200001-1.json"
+# Gate W runs before Gate C and would exit 3, so exit 5 also shows Gate W passed.
+run
+expect "a displaced family run is not set aside by a later guard-skipped local run, so Gate C refuses" 5 \
+  "rearm / event-policy=CANCELLED"
+
 # --- supersession: only a later run of the same required workflow ---------------------
 # The runner-acquisition watchdog cancels an arm whose job never gets a runner (its own
 # cancellation, an owner-ratified exception, ADR 0255). A later run of the SAME
