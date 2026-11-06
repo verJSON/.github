@@ -53,8 +53,7 @@ base="refs/remotes/origin/$base_branch"
 shared_fetch() { python3 "$here/../shared_checkout_fetch.py" "$@"; }
 
 fetch_base_branch() {
-  shared_fetch fetch "$repo_root" --no-tags --quiet origin \
-    "+refs/heads/$base_branch:refs/remotes/origin/$base_branch"
+  shared_fetch fetch-branch "$repo_root" "$base_branch"
 }
 
 # actions-ci checks out with `fetch-depth: 1`, so neither the base ref nor any
