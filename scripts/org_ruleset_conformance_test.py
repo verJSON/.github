@@ -587,6 +587,38 @@ class OrgRulesetConformanceTest(unittest.TestCase):
             result.stderr,
         )
 
+    def test_drift_beside_an_unestablished_paused_state_is_reported_and_the_verdict_is_unknown(self):
+        # An unread paused state must neither hide a finding the audit did establish
+        # nor let that finding's exit 1 claim the verdict is known.
+        unreadable = self.cli_projects_required_workflow()
+        unreadable["enforcement"] = "evaluate"
+        drift = ruleset(
+            20515822,
+            name="core-checks-actions",
+            bypass_actors=[
+                {"actor_type": "OrganizationAdmin", "actor_id": None, "bypass_mode": "always"}
+            ],
+        )
+
+        result, _ = self.run_audit(
+            [[{"id": unreadable["id"]}, {"id": drift["id"]}]],
+            {unreadable["id"]: unreadable, drift["id"]: drift},
+            raw_policy=self.committed_policy_without_bypass_contracts(),
+            failing_paths=["orgs/Verjson/properties/values?per_page=100"],
+        )
+
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn(
+            "ERROR: core-checks-actions (20515822): required release authorization bypass is absent",
+            result.stderr,
+        )
+        self.assertIn(
+            "ERROR: cannot establish organization ruleset state: "
+            "cli-projects-package-surface-required-workflow (21830367)",
+            result.stderr,
+        )
+        self.assertNotIn("ruleset-policy=conformant", result.stdout)
+
     def test_recorded_relaxation_at_evaluate_is_refused_when_its_repository_has_no_actions_state(self):
         result, _ = self.run_cli_projects_at_evaluate(state=None)
 
