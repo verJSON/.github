@@ -143,6 +143,36 @@ head. It can fail, so it is an attempt and not a guarantee. These rules are
 - **Never** run `gh run rerun` on a required run: it answers 404, because the
   workflow is organization-injected. **Never** use an admin or ruleset bypass to
   merge over the refusal.
+- **Never** run `gh run rerun` (including `--failed`) on a repository-local
+  re-arm caller either:
+  - `ai-review-label-rearm.yml` and `ai-review-lifecycle-rearm.yml`: their
+    `rearm / arm` job refuses a replay by design ("local arm deliveries cannot
+    be replayed by rerunning a workflow"), so the rerun concludes `failure`.
+    Gate C never sets a failed run aside, even once a later run replaces it
+    (ADR 0226).
+  - `gate-rearm.yml`: a rerun joins the `ai-review-arm-<PR>` concurrency group
+    outside the quiet-family check and can displace a pending required run,
+    which is the cancellation this runbook recovers from (#1905).
+- **If the reopen succeeded but Gate C still refuses on cancelled re-arm jobs**,
+  for example a lifecycle re-arm the watchdog cancelled together with the
+  required run: Gate C sets a cancelled run aside only when a later successful
+  run of the same workflow and event replaced it on that head, and the reopen
+  does not re-run that caller. The recovery that worked on #2022 is a new head,
+  for example an empty commit, pushed under the same rules as a reopen:
+  - only after the quiet-family check above, because the push starts the
+    required run and the local `gate re-arm` run in one group;
+  - it counts as one of the two attempts per head, not as a way around them;
+  - the new head runs full CI again and needs a fresh exact-head review
+    receipt before a promotion-enabled merge (Gate R, ADR 0257). Once pushers
+    are compared, whoever pushed it cannot also be its reviewer;
+  - on a Renovate branch, prefer close and reopen, because a pushed commit stops
+    Renovate from managing the branch.
+
+  Untried alternative: a fresh lifecycle event on the same head (for example
+  `edited`), after the quiet-family check, gives the cancelled caller a later
+  run of the same workflow and event. If that run succeeds and the cancelled
+  run was never rerun, ADR 0226 should set the cancelled run aside without
+  a new head. Record the outcome on #1905 the first time it is tried.
 
 Using this recovery against concurrency displacement is interim. It ends once
 the event-time guard (F-1), Gate W, and the F-7 required-only closure are
