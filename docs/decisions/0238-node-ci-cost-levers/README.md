@@ -490,3 +490,26 @@ A pinned source descriptor does not pin the destination, and this disclosure is
 not evidence that competing host writers are absent. Candidate-process cleanup,
 receipt validation, hosted sandbox acceptance, and merge protections remain
 independent requirements.
+
+## Amendment 2026-11-06 — PID 1 reaps adopted orphans while the candidate runs
+
+- **Issue:** [Verjson/.github#2043](https://github.com/Verjson/.github/issues/2043).
+
+The 2026-10-25 amendment had PID 1 wait exclusively for its direct child and reap
+adopted children only during cleanup. Under `--as-pid-1` the supervisor is the
+namespace init, so every orphan is re-parented to it; a killed orphan stayed a zombie,
+and therefore a process-group member, until the candidate ended. Candidates that kill
+a process tree and wait for `kill(-pgid, 0)` to fail timed out, which broke
+`ci / build-test` for v4.4.0 adopters (Verjson/verjson-ai run 42152694304).
+
+PID 1 now reaps adopted children on every candidate polling cycle, as an init does.
+The reaper must never consume the candidate's own status: `Popen` maps a lost status
+(`ECHILD`) to return code 0, so a bare `waitpid(-1)` that wins the race would turn a
+failing candidate into a pass. The reaper therefore peeks with
+`waitid(P_ALL, WEXITED | WNOHANG | WNOWAIT)` and reaps only the specific exited pid,
+stopping when the peeked pid is a candidate whose `Popen.returncode` is still unset;
+`Popen.poll()` remains the only consumer of that status. A zombie's pid cannot be
+reused until it is reaped, so the peek and the targeted reap name the same process.
+Recording a stolen status back onto the `Popen` object was rejected: it depends on
+every reaping path remembering to forward the status, and a single omission fails open.
+`reaped` in the terminal record still counts the candidate once plus each adopted child.

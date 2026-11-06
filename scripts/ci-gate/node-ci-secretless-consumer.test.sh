@@ -308,7 +308,7 @@ assert "os.getpid() != 1" in sandbox_entrypoint
 assert "libc.prctl(4, 0, 0, 0, 0)" in sandbox_entrypoint
 assert "candidate.wait()" in sandbox_entrypoint
 assert "close_fds=True" in sandbox_entrypoint
-assert "os.waitpid(-1, os.WNOHANG)" in sandbox_entrypoint
+assert "os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)" in sandbox_entrypoint
 assert '"--tmpfs", "/"' in protected_plan_source
 assert '"--ro-bind", "/", "/"' not in protected_plan_source
 assert "network_args = ci_build_artifacts.bubblewrap_network_args(" in protected_plan_source

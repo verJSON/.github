@@ -401,6 +401,51 @@ class InnerSupervisorPinTests(unittest.TestCase):
                 send_signal.assert_not_called()
                 kill_group.assert_not_called()
 
+    def test_orphan_reaper_reaps_adopted_zombies_but_leaves_the_candidates_status_to_popen(self) -> None:
+        # Deterministic form of the #2043 contract, isolated in a fresh process so the
+        # reaper sees only its fixtures: an older exited child stands in for an adopted
+        # orphan, and the candidate has exited but Popen has not collected it. Popen maps a
+        # status stolen by another reaper to exit code 0.
+        source = artifacts.SANDBOX_SUPERVISOR_ENTRYPOINT
+        start = source.index("def reap_adopted_children():")
+        end = source.index("def terminate_namespace_children():", start)
+        harness = textwrap.dedent(
+            """\
+            import json, os, subprocess, sys
+            adopted = os.fork()
+            if adopted == 0:
+                os._exit(0)
+            os.waitid(os.P_PID, adopted, os.WEXITED | os.WNOWAIT)
+            candidate = subprocess.Popen([sys.executable, "-I", "-c", "raise SystemExit(37)"])
+            os.waitid(os.P_PID, candidate.pid, os.WEXITED | os.WNOWAIT)
+            scope = {"os": os, "candidate": candidate, "reaped_count": 0}
+            exec(sys.argv[1], scope)
+            scope["reap_adopted_children"]()
+            try:
+                os.waitid(os.P_PID, adopted, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                adopted_reaped = False
+            except ChildProcessError:
+                adopted_reaped = True
+            print(json.dumps({
+                "adoptedReaped": adopted_reaped,
+                "reapedCount": scope["reaped_count"],
+                "candidateReturnCode": candidate.poll(),
+            }))
+            """
+        )
+        completed = subprocess.run(
+            [sys.executable, "-I", "-c", harness, source[start:end]],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {"adoptedReaped": True, "reapedCount": 1, "candidateReturnCode": 37},
+        )
+
 
 class NativeNamespaceNoticeTests(unittest.TestCase):
     def make_notice(self, launcher):
@@ -6239,6 +6284,84 @@ class TrustedCandidateStatusTests(unittest.TestCase):
         self.assertEqual(status.cleanup, "complete")
         self.assertGreaterEqual(status.reaped_count, 2)
 
+    def _run_pid1_supervisor_without_apparmor_gate(self, candidate: str) -> artifacts.TrustedCandidateStatus:
+        # Exercise the real PID 1 reaping code without claiming local AppArmor enforcement.
+        security_gate = "def enforce_candidate_security_state():"
+        source = artifacts.SANDBOX_SUPERVISOR_ENTRYPOINT
+        self.assertEqual(source.count(security_gate), 1, "supervisor security gate fixture boundary changed")
+        supervisor = source.replace(security_gate, security_gate + "\n    return", 1)
+        bubblewrap = Path("/usr/bin/bwrap")
+        self.assertTrue(bubblewrap.is_file(), "Bubblewrap is required for the registered platform suite")
+        arguments = [
+            str(bubblewrap), "--unshare-user", "--unshare-pid", "--as-pid-1",
+            "--unshare-ipc", "--unshare-uts", "--unshare-net", "--cap-drop", "ALL",
+            "--die-with-parent", "--new-session",
+            "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin",
+            "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64",
+            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--chdir", "/",
+            "--", "/usr/bin/python3", "-I", "-c", supervisor,
+            "/usr/bin/python3", "-I", "-c", candidate,
+        ]
+        return artifacts.run_supervised_bubblewrap(
+            arguments,
+            environment={"PATH": "/usr/bin:/bin"},
+            pass_fds=(),
+            cancellation_signal=lambda: None,
+            execution_timeout_seconds=20,
+        )
+
+    @unittest.skipUnless(os.environ.get("VERJSON_TEST_REAL_BWRAP") == "1", "requires Bubblewrap PID namespaces")
+    def test_pid1_supervisor_reaps_an_orphan_while_the_candidate_still_runs(self) -> None:
+        # The consumer pattern from #2043: kill a process group whose leader dies first,
+        # then wait for kill(-pgid, 0) to fail. An orphan adopted by PID 1 stays a group
+        # member until PID 1 reaps it, so the group disappears only if reaping is live.
+        candidate = textwrap.dedent(
+            """\
+            import os, signal, time
+            ready_read, ready_write = os.pipe()
+            leader = os.fork()
+            if leader == 0:
+                os.setpgid(0, 0)
+                if os.fork() == 0:
+                    os.write(ready_write, b"g")
+                    time.sleep(30)
+                    os._exit(0)
+                time.sleep(30)
+                os._exit(0)
+            os.setpgid(leader, leader)
+            os.close(ready_write)
+            if os.read(ready_read, 1) != b"g":
+                raise SystemExit(125)
+            os.kill(leader, signal.SIGKILL)
+            os.waitpid(leader, 0)
+            os.killpg(leader, signal.SIGKILL)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                try:
+                    os.killpg(leader, 0)
+                except ProcessLookupError:
+                    raise SystemExit(0)
+                time.sleep(0.01)
+            raise SystemExit(7)
+            """
+        )
+        status = self._run_pid1_supervisor_without_apparmor_gate(candidate)
+        self.assertEqual(
+            (status.state, status.return_code),
+            ("candidate-exit", 0),
+            "killed process group outlived the candidate's wait: PID 1 left the orphan a zombie",
+        )
+        self.assertEqual(status.cleanup, "complete")
+        self.assertEqual(status.reaped_count, 2)
+
+    @unittest.skipUnless(os.environ.get("VERJSON_TEST_REAL_BWRAP") == "1", "requires Bubblewrap PID namespaces")
+    def test_pid1_orphan_reaping_preserves_a_failing_candidate_exit_status(self) -> None:
+        # A reaper that consumes the candidate's own status makes Popen report exit 0,
+        # turning a failing test command into a pass.
+        status = self._run_pid1_supervisor_without_apparmor_gate("import time\ntime.sleep(0.2)\nraise SystemExit(37)\n")
+        self.assertEqual((status.state, status.return_code), ("candidate-exit", 37))
+        self.assertEqual(status.reaped_count, 1)
+
 
     def test_pidfd_esrch_after_simulated_pid1_exit_preserves_terminal_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -6489,7 +6612,12 @@ class ExecutorParityTests(unittest.TestCase):
         self.assertIn("close_fds=True", protected)
         self.assertIn("libc.prctl(4, 0, 0, 0, 0)", protected)
         self.assertIn("candidate.wait()", protected)
-        self.assertIn("os.waitpid(-1, os.WNOHANG)", protected)
+        # PID 1 peeks before reaping so it never consumes the candidate's own status (#2043).
+        self.assertIn(
+            "os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)",
+            artifacts.SANDBOX_SUPERVISOR_ENTRYPOINT,
+        )
+        self.assertNotIn("os.waitpid(-1", artifacts.SANDBOX_SUPERVISOR_ENTRYPOINT)
 
     def test_both_executor_adapters_use_shared_cleanup_verification(self) -> None:
         workflow = yaml.safe_load(
