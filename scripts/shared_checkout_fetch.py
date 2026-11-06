@@ -28,7 +28,11 @@ Run as a program for shell callers:
     shared_checkout_fetch.py unshallow <repo>
     shared_checkout_fetch.py ensure-commit <repo> <sha>
     shared_checkout_fetch.py deepen <repo> <sha> <depth>
-    shared_checkout_fetch.py fetch <repo> <git fetch arguments...>
+    shared_checkout_fetch.py fetch-branch <repo> <branch>
+
+There is deliberately no pass-through to `git fetch`: an argument such as
+`--upload-pack=<command>` would run that command, so every operation builds its
+own fetch arguments from a validated object or branch name (#2020).
 """
 from __future__ import annotations
 
@@ -43,7 +47,9 @@ import sys
 from typing import Iterator
 
 
-# A full object name, never an option or a refspec a caller did not mean.
+# A full object name, never an option or a refspec a caller did not mean: 40 hex
+# digits for a SHA-1 repository or 64 for a SHA-256 one (`extensions.objectFormat`).
+# Abbreviations are refused, because git would resolve them only locally (#2019).
 _COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 
@@ -100,11 +106,6 @@ def _has_commit(repo: Path | str, sha: str) -> bool:
     return result.returncode == 0
 
 
-def fetch(repo: Path | str, *args: str, **run_options) -> subprocess.CompletedProcess:
-    with history_lock(repo):
-        return _git(repo, "fetch", *args, **run_options)
-
-
 def unshallow(repo: Path | str, **run_options) -> bool:
     """Make `repo` complete from `origin`; True when it is complete afterwards."""
     if not _is_shallow(repo):
@@ -127,6 +128,30 @@ def ensure_commit(repo: Path | str, sha: str, **run_options) -> bool:
             return True
         _git(repo, "fetch", "--quiet", "--no-tags", "--depth", "1", "origin", sha, **run_options)
         return _has_commit(repo, sha)
+
+
+def _is_branch_name(branch: str) -> bool:
+    # The full refname is checked, not `--branch`, which would expand `@{-1}`;
+    # a valid refname has no glob, so the refspec below names exactly one branch.
+    # The name only ever appears inside that refspec, never as its own argument.
+    if not branch:
+        return False
+    result = subprocess.run(
+        ["git", "check-ref-format", f"refs/heads/{branch}"], check=False, capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def fetch_branch(repo: Path | str, branch: str, **run_options) -> bool:
+    """Update `refs/remotes/origin/<branch>` from `origin`; True when the fetch succeeds."""
+    if not _is_branch_name(branch):
+        return False
+    with history_lock(repo):
+        result = _git(
+            repo, "fetch", "--quiet", "--no-tags", "origin",
+            f"+refs/heads/{branch}:refs/remotes/origin/{branch}", **run_options,
+        )
+        return result.returncode == 0
 
 
 def deepen(repo: Path | str, sha: str, depth: int, **run_options) -> bool:
@@ -159,9 +184,9 @@ def main(argv: list[str]) -> int:
     deepening.add_argument("repo")
     deepening.add_argument("sha")
     deepening.add_argument("depth", type=int)
-    raw = operations.add_parser("fetch")
-    raw.add_argument("repo")
-    raw.add_argument("arguments", nargs=argparse.REMAINDER)
+    branch_fetch = operations.add_parser("fetch-branch")
+    branch_fetch.add_argument("repo")
+    branch_fetch.add_argument("branch")
     options = parser.parse_args(argv)
     try:
         if options.operation == "unshallow":
@@ -170,7 +195,10 @@ def main(argv: list[str]) -> int:
             return 0 if ensure_commit(options.repo, options.sha) else 1
         if options.operation == "deepen":
             return 0 if deepen(options.repo, options.sha, options.depth) else 1
-        return fetch(options.repo, *options.arguments).returncode
+        if not _is_branch_name(options.branch):
+            print(f"shared_checkout_fetch: {options.branch!r} is not a branch name", file=sys.stderr)
+            return 1
+        return 0 if fetch_branch(options.repo, options.branch) else 1
     except SharedCheckoutError as error:
         print(f"shared_checkout_fetch: {error}", file=sys.stderr)
         return 1

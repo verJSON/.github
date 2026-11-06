@@ -83,7 +83,15 @@ class SharedCheckoutFetchTests(unittest.TestCase):
 
         with mock.patch.object(MODULE, "_common_dir", return_value=missing):
             with self.assertRaisesRegex(MODULE.SharedCheckoutError, "cannot open .*missing-git-dir"):
-                MODULE.fetch(self.checkout, "origin")
+                with MODULE.history_lock(self.checkout):
+                    pass
+
+    def test_fetch_branch_takes_the_shared_lock(self):
+        missing = str(self.tmp / "missing-git-dir")
+
+        with mock.patch.object(MODULE, "_common_dir", return_value=missing):
+            with self.assertRaisesRegex(MODULE.SharedCheckoutError, "cannot open .*missing-git-dir"):
+                MODULE.fetch_branch(self.checkout, "main")
 
     def test_an_uninspectable_repository_is_not_treated_as_complete(self):
         not_a_repository = self.tmp / "not-a-repository"
@@ -99,6 +107,37 @@ class SharedCheckoutFetchTests(unittest.TestCase):
 
         self.assertFalse(present)
         self.assertFalse(marker.exists(), "an option-shaped commit reached git fetch")
+
+    def test_fetch_branch_restores_the_branch_remote_tracking_ref(self):
+        git("-C", str(self.checkout), "update-ref", "-d", "refs/remotes/origin/main")
+
+        fetched = MODULE.fetch_branch(self.checkout, "main")
+
+        self.assertTrue(fetched)
+        self.assertEqual(
+            git("-C", str(self.tmp / "origin.git"), "rev-parse", "refs/heads/main"),
+            git("-C", str(self.checkout), "rev-parse", "refs/remotes/origin/main"),
+        )
+
+    def test_fetch_branch_refuses_a_name_that_is_not_one_branch(self):
+        git("-C", str(self.tmp / "origin.git"), "branch", "other", "main")
+
+        fetched = MODULE.fetch_branch(self.checkout, "*")
+
+        self.assertFalse(fetched)
+        self.assertEqual(
+            "", git("-C", str(self.checkout), "for-each-ref", "refs/remotes/origin/other"),
+            "a pattern fetched branches nobody named",
+        )
+
+    def test_the_program_passes_no_caller_arguments_through_to_git_fetch(self):
+        marker = self.tmp / "upload-pack-ran"
+
+        with mock.patch("sys.stderr"), self.assertRaises(SystemExit) as rejected:
+            MODULE.main(["fetch", str(self.checkout), f"--upload-pack=touch {marker}", "origin"])
+
+        self.assertEqual(rejected.exception.code, 2, "the program accepted a raw fetch operation")
+        self.assertFalse(marker.exists(), "a caller's option reached git fetch")
 
 
 if __name__ == "__main__":
