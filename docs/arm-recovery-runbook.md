@@ -144,7 +144,8 @@ head. It can fail, so it is an attempt and not a guarantee. These rules are
   workflow is organization-injected. **Never** use an admin or ruleset bypass to
   merge over the refusal.
 - **Never** run `gh run rerun` (including `--failed`) on a repository-local
-  re-arm caller either:
+  re-arm caller either. The one exception is `gate-rearm.yml` on a base ref with
+  no organization arm (below):
   - `ai-review-label-rearm.yml` and `ai-review-lifecycle-rearm.yml`: their
     `rearm / arm` job refuses a replay by design ("local arm deliveries cannot
     be replayed by rerunning a workflow"), so the rerun concludes `failure`.
