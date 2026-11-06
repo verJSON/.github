@@ -111,6 +111,16 @@ def test_the_arm_path_from_another_repository_keeps_the_local_arm():
     assert f"names {ORG_ARM_PATH} from repository 42, not the organization arm" in stdout, stdout
 
 
+def test_another_organization_workflow_or_a_path_variant_keeps_the_local_arm():
+    # A rule from the organization repository that requires some other workflow does
+    # not arm this head, and only the exact path GitHub reports for the arm counts.
+    for path in (".github/workflows/ci.yml", "./" + ORG_ARM_PATH, ORG_ARM_PATH.upper(),
+                 ORG_ARM_PATH + "@refs/heads/main"):
+        outputs, stdout, _ = run_guard([arm_rule(path=path)])
+        assert outputs == {"local_arm": "true"}, (path, outputs, stdout)
+        assert f"no workflows rule names {ORG_ARM_PATH}" in stdout, (path, stdout)
+
+
 def test_a_failed_rules_read_keeps_the_local_arm_and_names_the_failure():
     outputs, stdout, _ = run_guard("", status=1, stderr="HTTP 403: Resource not accessible by integration")
     assert outputs == {"local_arm": "true"}, (outputs, stdout)
