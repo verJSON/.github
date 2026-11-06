@@ -324,9 +324,12 @@ ledger was not found, so members reconstructed its dissent from this ADR and
    That includes another event or action, a read error, and a body that is not
    JSON or not an array. Every decision logs its reason. A step failure also
    yields `true`: the step has `continue-on-error`, and the job output maps
-   anything but `false` to `true`. A failed or timed-out `guard` job keeps the
-   arm too: `rearm` runs under `!cancelled()` unless the guard's output is
-   exactly `false`. The `workflow_call` path that the label and
+   anything but `false` to `true`. A failed `guard` job keeps the arm too:
+   `rearm` runs under `!cancelled()` unless the guard's output is exactly
+   `false`. A *timed-out* `guard` job is not yet verified. GitHub documents
+   `timeout-minutes` as cancelling the job, and whether `cancelled()` then reads
+   true in `rearm` is for canary (c) to observe. If it does, a timeout costs the
+   local arm, which was the behavior before this fix. The `workflow_call` path that the label and
    lifecycle callers use keeps its local arm.
    GitHub's REST reference says this endpoint does not return rules from rulesets
    in `evaluate` or `disabled` enforcement (read 2026-11-06). The response
@@ -353,8 +356,10 @@ ledger was not found, so members reconstructed its dissent from this ADR and
 5. **The residual risk stays recorded.** F-2 and F-7 remain deferred: label and
    lifecycle runs can still displace a pending required run. F-6 close-and-reopen
    remains interim. F-1R adds two residuals:
-   - A `guard` job that never acquires a runner keeps `rearm` waiting until the
-     run is cancelled, and a cancelled run skips `rearm`. This costs the local arm
+   - A `guard` job that never acquires a runner keeps `rearm` waiting. The arm's
+     watchdog runs inside `rearm` and cannot end that wait. The run is cancelled
+     or reaches GitHub's queue limit for its runner lane, and either way `rearm`
+     is skipped. This costs the local arm
      on a base ref with no organization arm. The required run is unaffected.
    - A guard-skipped `gate re-arm` run still matches the declared family's caller
      list, although it never entered the group. ADR 0226's displacer consults
