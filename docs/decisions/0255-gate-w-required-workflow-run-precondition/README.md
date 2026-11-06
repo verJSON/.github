@@ -7,6 +7,7 @@
 - **Extends:** [ADR 0184](../0184-merge-gates-assert-execution-not-absence-of-red/README.md)
 - **Related:** [ADR 0226](../0226-superseded-cancelled-check-runs-do-not-block-admission/README.md), [ADR 0229](../0229-required-contexts-need-success-and-finished-runs/README.md), [ADR 0230](../0230-arm-bounds-runner-acquisition/README.md), [ADR 0091](../0091-ruleset-requires-authorization-arm/README.md)
 - **Category:** merge-gate admission and repository rulesets (sensitive class)
+- **Amended:** 2026-11-06 — F-1R, the local caller's event-time guard (ARB-G1-2026-11-06); reconciles §4, §6, and the rejected alternatives (see below)
 
 ## Context
 
@@ -199,6 +200,7 @@ close-and-reopen of the pull request, under these rules:
 Its use against concurrency displacement is interim. It ends when F-1, Gate W, and
 the F-7 closure are verified fleet-wide. The same actor, cap, quiet-family, and
 never-rerun rules remain **permanently** for watchdog and external cancellations.
+*(Amended 2026-11-06: F-1 here reads F-1R; see the amendment below.)*
 
 ### 5. The three "never cancel" exceptions (owner-ratified)
 
@@ -222,6 +224,8 @@ recovery for the kind of run it cancelled:
 - **required run** (a direct invocation): close and reopen the pull request
   under §4, or push. It cannot be re-run.
 - **caller head run** (the local `gate re-arm`): re-run that run, or push.
+  *(Amended 2026-11-06: push a new head, or re-run only where the base ref
+  requires no organization arm; see the amendment below.)*
 - **label or lifecycle delivery**: the delivery refuses a second attempt.
   Re-deliver the event instead: remove and re-apply the label, or repeat the
   lifecycle transition.
@@ -250,6 +254,8 @@ and on verified new required-run evidence.
 - **A yielding required workflow, or a local caller that skips.** Rejected by F-3
   (§3). F-1, the event-time guard in the local caller, ships separately with
   enroll-first order.
+  *(Amended 2026-11-06: F-3 rejected a yielding required run; F-1R's liveness
+  skip of the non-required head-event arm is adopted; see the amendment below.)*
 
 ## Consequences
 
@@ -264,6 +270,7 @@ and on verified new required-run evidence.
   ruleset edit, so it ships with a sweep (§2).
 - The duplicate-authorization no-op, the group split (F-2/F-7), and the
   event-time guard (F-1) are untouched.
+  *(Amended 2026-11-06: the guard ships as F-1R; see the amendment below.)*
 
 ## Verification
 
@@ -277,3 +284,124 @@ and on verified new required-run evidence.
   W cannot read; a refused or foreign ruleset read. Each case that already held
   when written was proven by a mutation that makes it fail for its asserted
   reason.
+
+## Amendment (2026-11-06) — F-1R: the local caller yields to the required arm
+
+### Context
+
+ARB decision ARB-G1-2026-11-06, candidate C1, replaced F-1 with F-1R:
+`ADOPTED_WITH_CONSTRAINTS`, 3-0, final slate revision 3, digest
+`ba9aada5c945eb8f…` ([#1905 comment](https://github.com/verJSON/.github/issues/1905#issuecomment-6691352431)).
+F-1 had failed 0-3 in RUN-F. All three identity-verified members judged that F-1R
+answers that dissent: the guard carries no admission authority, and an uncertain
+read keeps the behavior before this amendment. The repository owner delegated
+ratification to the board on 2026-11-06. The board recorded two gaps: the RUN-F
+ledger was not found, so members reconstructed its dissent from this ADR and
+#1905, and the organization context came from the unmerged verjson-docs#20.
+
+### Decision
+
+1. **The generated caller gains a `guard` job.** `scripts/gen-gate-rearm-caller.sh`
+   emits a `guard` job ahead of `rearm`. The guard has a read-only token
+   (`contents: read`) and no concurrency. `rearm` has `needs: guard` and runs only
+   when the guard outputs `local_arm=true`. The caller declares no workflow-level
+   concurrency. The `ai-review-arm-<PR>` group is declared by the reusable workflow
+   and engages only when `rearm` starts, so a skipped `rearm` cannot displace the
+   pending required run.
+2. **The guard yields only on positive evidence.** It reads
+   `repos/{owner}/{repo}/rules/branches/{base}` only for `pull_request_target`
+   `opened`, `reopened`, and `synchronize`. It outputs `local_arm=false` only when
+   the response meets all of these conditions:
+   - it is a JSON array of objects;
+   - every `workflows` rule has a numeric `ruleset_id` and a non-empty list of
+     entries, each with a string `path` and a numeric `repository_id`;
+   - an entry names `.github/workflows/gate-rearm.yml` from repository
+     `1269388380`;
+   - no entry at that path names another repository. A run reports its path but
+     not its source repository, so a shared path is ambiguous.
+
+   Any other outcome outputs `local_arm=true`, the behavior before this amendment.
+   That includes another event or action, a read error, and a body that is not
+   JSON or not an array. Every decision logs its reason. A step failure also
+   yields `true`: the step has `continue-on-error`, and the job output maps
+   anything but `false` to `true`. The `workflow_call` path that the label and
+   lifecycle callers use keeps its local arm.
+   GitHub's REST reference says this endpoint does not return rules from rulesets
+   in `evaluate` or `disabled` enforcement (read 2026-11-06). The response
+   carries no enforcement field, so the guard has nothing to check there. The
+   live `verJSON/verjson-ai` response read on 2026-11-06 has the fields above.
+   The logic is `scripts/local-arm-guard.sh`, which the generator embeds
+   byte for byte.
+3. **The guard is never admission evidence.** Gate W (§1) remains the only
+   required-run check, and it fails closed. A wrong guard decision costs liveness,
+   which §4 recovers, never safety.
+4. **No ruleset pin rotation.** Only regenerated callers change. These
+   preconditions apply before fleet regeneration:
+   - the generator contract test, with every assertion mutation-proven (met);
+   - the live canaries (a), (b), and (c) that the decision specifies (not yet
+     run);
+   - the per-reason Gate W remedy (met by #2010, which landed before this
+     amendment);
+   - this amendment (met);
+   - the `assert-mergeable-head` fixture below (met).
+5. **The residual risk stays recorded.** F-2 and F-7 remain deferred: label and
+   lifecycle runs can still displace a pending required run. F-6 close-and-reopen
+   remains interim. F-1R adds two residuals:
+   - A `guard` job that never acquires a runner leaves `rearm` skipped. This costs
+     the local arm on a base ref with no organization arm. The required run is
+     unaffected.
+   - A guard-skipped `gate re-arm` run still matches the declared family's caller
+     list, although it never entered the group. ADR 0226's displacer consults
+     only the newest later-created family run and needs a SUCCESS-only suite. So
+     a displaced family run followed by a guard-skipped local run (`guard`
+     SUCCESS, `rearm` SKIPPED) is not set aside. The assertion exits `5` on Gate
+     C, naming the displaced check (`rearm / event-policy=CANCELLED`), and gives
+     no recovery text. Gate W is satisfied by the required run. To recover,
+     re-deliver the displaced event as §6 describes. A later successful run of
+     that workflow sets the cancelled check aside under ADR 0226's same-workflow
+     rule. A new head also recovers. A change that stops the family rule from
+     consulting a run whose arm job was skipped is a Gate C admission change,
+     outside this decision.
+
+### Reconciliation with this ADR's own text
+
+- **Rejected alternatives, "a local caller that skips".** F-3 rejected a
+  *yielding required run*: a run that satisfies ruleset 20722935 without an
+  organization-controlled arm. §3 is unchanged, and the required run still never
+  skips or yields. F-1R is a liveness skip of the *non-required* head-event arm.
+  It happens only where the base ref already requires the organization's arm,
+  which is the enroll-first order this ADR named.
+- **§4, "It ends when F-1, Gate W, and the F-7 closure are verified
+  fleet-wide".** F-1 now reads F-1R. Close-and-reopen remains interim until F-1R
+  is regenerated fleet-wide after the canaries and F-7 closes.
+- **§6, caller head run.** "Re-run that run, or push" contradicted the runbook's
+  never-rerun rule (#2047). A re-run joins `ai-review-arm-<PR>` outside the
+  quiet-family check and can displace a pending required run. Under F-1R, a
+  caller head run reaches the arm only when the guard kept the local arm. That
+  happens on a base ref with no organization arm, where a re-run is safe, or
+  after an uncertain read on one that has the arm, where a re-run is not safe.
+  The watchdog now advises pushing a new head, or re-running only where the
+  base ref requires no organization arm (`.github/workflows/gate-rearm.yml`).
+- **Consequences, "the event-time guard (F-1) [is] untouched".** It ships as
+  F-1R in the generator. Adopters receive it only through regenerated callers.
+
+### Verification
+
+- `scripts/ci-gate/local-arm-guard.test.py` (merge-gate group) runs the helper
+  under Actions' `bash -eo pipefail` against a stubbed `gh`. It covers each
+  `true`/`false` outcome above with its logged reason, the encoded
+  single-segment base ref, a later page, and an injected workflow command in a
+  read error.
+- `scripts/ci-gate/gate-rearm-caller-contract.test.sh` pins these properties:
+  - the `guard`, `needs`, and `if` shape;
+  - the guard's read-only grant and its normalized output;
+  - the embedded helper bytes;
+  - no concurrency at the workflow or job level.
+- Mutations were killed: 12 against the helper and 10 against the generator.
+- `scripts/assert-mergeable-head.required-workflow.test.sh` records the
+  displaced-family-run verdict above. A mutation that lets the displacer accept
+  a SKIPPED check makes that test fail.
+- Not verified here: the live canaries, and two GitHub behaviors the fixture
+  assumes. The fixture assumes that a run whose reusable-call job was skipped
+  still lists its `referenced_workflows`, and that the skipped job reports one
+  check run named `rearm`. Canary (a) observes both.

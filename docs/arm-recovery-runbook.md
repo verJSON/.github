@@ -152,7 +152,10 @@ head. It can fail, so it is an attempt and not a guarantee. These rules are
     (ADR 0226).
   - `gate-rearm.yml`: a rerun joins the `ai-review-arm-<PR>` concurrency group
     outside the quiet-family check and can displace a pending required run,
-    which is the cancellation this runbook recovers from (#1905).
+    which is the cancellation this runbook recovers from (#1905). The arm
+    watchdog's advice to re-run this caller applies only to a base ref with
+    no organization arm. On such a ref there is no required run to displace,
+    and Gate W does not apply.
 - **If the reopen succeeded but Gate C still refuses on cancelled re-arm jobs**,
   for example a lifecycle re-arm the watchdog cancelled together with the
   required run: Gate C sets a cancelled run aside only when a later successful
@@ -173,9 +176,22 @@ head. It can fail, so it is an attempt and not a guarantee. These rules are
   run of the same workflow and event. If that run succeeds and the cancelled
   run was never rerun, ADR 0226 should set the cancelled run aside without
   a new head. Record the outcome on #1905 the first time it is tried.
+- **If Gate C refuses on a displaced family run after a guard-skipped local
+  run.** A regenerated `gate re-arm` caller (F-1R,
+  [ADR 0255 amendment 2026-11-06](decisions/0255-gate-w-required-workflow-run-precondition/README.md#amendment-2026-11-06--f-1r-the-local-caller-yields-to-the-required-arm))
+  yields where the base ref requires the organization arm. Its run concludes
+  `success` with `guard` SUCCESS and `rearm` SKIPPED. ADR 0226 consults only
+  the newest family run and needs every check in its suite to be a SUCCESS. A
+  guard-skipped run fails that test, so a family run displaced before it stays
+  red. In that case the assertion exits `5` on the displaced check, for example
+  `rearm / event-policy=CANCELLED`, while Gate W passes. Recover by
+  re-delivering the displaced run's event: re-apply the label, or repeat the
+  lifecycle transition. Do this after the quiet-family check. A later
+  successful run of that same workflow sets the cancelled check aside. If that
+  does not clear it, push a new head under the rules above.
 
 Using this recovery against concurrency displacement is interim. It ends once
-the event-time guard (F-1), Gate W, and the F-7 required-only closure are
+the event-time guard (F-1R), Gate W, and the F-7 required-only closure are
 verified fleet-wide. The same actor, cap, quiet-family, and never-rerun rules
 stay **permanently** for watchdog and external cancellations. Those are two of
 the three owner-ratified exceptions to "never cancel the required run". The
