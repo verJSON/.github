@@ -934,14 +934,19 @@ def namespace_pids():
     )
 
 def reap_adopted_children():
+    # Peek before reaping: an unreaped candidate's status belongs to its Popen object.
+    # Consuming it here would make Popen report the lost status as exit code 0.
     global reaped_count
     while True:
         try:
-            pid, _status = os.waitpid(-1, os.WNOHANG)
+            exited = os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         except ChildProcessError:
             return
-        if pid == 0:
+        if exited is None:
             return
+        if candidate is not None and candidate.returncode is None and exited.si_pid == candidate.pid:
+            return
+        os.waitpid(exited.si_pid, 0)
         reaped_count += 1
 
 def terminate_namespace_children():
@@ -1161,6 +1166,7 @@ def main():
                             pass
                         candidate_killed = True
                     time.sleep(0.01)
+                    reap_adopted_children()
                 candidate_return_code = candidate.wait()
                 reaped_count += 1
                 candidate_reaped = True

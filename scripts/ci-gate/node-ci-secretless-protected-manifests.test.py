@@ -327,7 +327,7 @@ class ProtectedCandidateManifestTests(unittest.TestCase):
         trusted_wrapper = artifacts.SANDBOX_SUPERVISOR_ENTRYPOINT
         self.assertIn("close_fds=True", trusted_wrapper)
         self.assertIn("libc.prctl(4, 0", trusted_wrapper)
-        self.assertIn("os.waitpid(-1", trusted_wrapper)
+        self.assertIn("os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)", trusted_wrapper)
         self.assertIn("cleanup-complete", trusted_wrapper)
 
         command = arguments_assignment.value
