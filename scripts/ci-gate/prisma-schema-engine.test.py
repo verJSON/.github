@@ -133,6 +133,25 @@ class PrismaSchemaEngineTest(unittest.TestCase):
         self.assertEqual(spec.engine_version, ENGINE_VERSION)
         self.assertEqual(spec.commit, ENGINE_COMMIT)
 
+    def test_downloader_rejects_malformed_engine_commit_before_network(self):
+        spec = prisma_schema_engine.EngineSpec(
+            package_version=PACKAGE_VERSION,
+            engine_version=ENGINE_VERSION,
+            commit="../outside",
+        )
+
+        with self.assertRaisesRegex(
+            prisma_schema_engine.PrismaEngineError, "commit"
+        ):
+            prisma_schema_engine._download_and_stage(
+                spec,
+                TARGET,
+                None,
+                lambda *_args, **_kwargs: self.fail(
+                    "invalid engine commit reached the network"
+                ),
+            )
+
     def test_non_prisma_lockfile_does_not_download_an_engine(self):
         self.lockfile.write_text('{"lockfileVersion":3,"packages":{"":{"name":"app"}}}')
         requested = []

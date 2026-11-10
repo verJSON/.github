@@ -369,6 +369,8 @@ def _write_engine(stage_fd, compressed, expected_digest):
 
 
 def _download_and_stage(spec, target, stage_fd, opener):
+    if re.fullmatch(r"[0-9a-f]{40}", spec.commit) is None:
+        raise PrismaEngineError("locked Prisma engine commit is malformed")
     base_url = f"https://{PRISMA_HOST}/all_commits/{spec.commit}/{target}/schema-engine.gz"
     checksum_url = f"{base_url}.sha256"
     checksum_bytes = _download_bounded(checksum_url, MAX_CHECKSUM_BYTES, opener)
