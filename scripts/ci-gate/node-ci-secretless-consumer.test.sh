@@ -441,6 +441,8 @@ runner_environment.update({
     "NESTED_MANIFESTS": "",
     "RUNNER_ENVIRONMENT": "github-hosted",
     "RUNNER_OS": "Linux",
+"PRISMA_SCHEMA_ENGINE_AVAILABLE": "false",
+"PRISMA_SCHEMA_ENGINE_HOST_PATH": str(Path(runner_environment["RUNNER_TEMP"]) / "verjson-prisma-schema-engine-42-2" / "schema-engine"),
     "GITHUB_WORKSPACE": str(fixture),
     "GITHUB_ENV": str(command_file),
     "GITHUB_OUTPUT": str(fixture / "runner-output"),

@@ -274,6 +274,20 @@ Candidate npm uses `/dev/null` for user configuration and a fresh empty global
 configuration file inside the sandbox, while retaining only the generated
 private cache setting.
 
+When an npm `package-lock.json` pins Prisma, trusted Node CI code validates the
+locked `prisma`, `@prisma/engines`, and `@prisma/engines-version` metadata before
+it downloads anything. The capability supports npm lockfile versions 2 and 3 on
+GitHub-hosted Ubuntu 24.04 x64 with OpenSSL 3.0. It downloads the locked
+`schema-engine.gz` only from `binaries.prisma.sh`, verifies the published
+SHA-256 and bounded gzip payload, then exposes the executable outside the
+workspace through a read-only bind at `/run/verjson-prisma/schema-engine`.
+Candidate scripts receive that fixed path as `PRISMA_SCHEMA_ENGINE_BINARY`;
+they do not receive the host staging path or credentials, and their existing
+network-isolation policy remains in effect. An `always()` cleanup step removes
+only the stage carrying the current run's owner marker. Unsupported metadata
+or runner targets fail before candidate scripts run. See
+[ADR 0259](decisions/0259-stage-locked-prisma-engine-outside-offline-sandbox/README.md).
+
 The auxiliary source accepts exactly `repository`, `pinFile`, `checkoutPath`, and
 `sparsePath`; the pin file must name the same repository and a lowercase 40-hex
 commit. Rebuild entries must be exact locked package names. The script plan must
