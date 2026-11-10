@@ -1,6 +1,6 @@
 ---
 date: 2026-11-10
-issue: 2052
+id: 8b31d4
 impact: minor
 title: Refresh Node CI runner isolation pin
 ---
