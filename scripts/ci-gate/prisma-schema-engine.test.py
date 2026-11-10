@@ -395,6 +395,18 @@ class PrismaSchemaEngineTest(unittest.TestCase):
         self.assertIn("binaries.prisma.sh", Path(prisma_schema_engine.__file__).read_text())
         self.assertIn("always()", cleanup["if"])
 
+    def test_protected_workflow_passes_run_identity_to_the_staging_helper(self):
+        workflow = yaml.safe_load(
+            (ROOT / ".github/workflows/node-ci-protected.yml").read_text()
+        )
+        execute = next(
+            step
+            for step in workflow["jobs"]["build-test"]["steps"]
+            if step.get("id") == "run-script-plan"
+        )
+
+        self.assertEqual("${{ github.run_id }}", execute["env"].get("RUN_ID"))
+        self.assertEqual("${{ github.run_attempt }}", execute["env"].get("RUN_ATTEMPT"))
 
 if __name__ == "__main__":
     unittest.main()

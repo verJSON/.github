@@ -46,7 +46,9 @@ existing offline sandbox before any candidate script executes.
    `RUNNER_TEMP`. The candidate sandbox sees the engine through a read-only
    Bubblewrap bind at `/run/verjson-prisma/schema-engine` and receives that
    fixed path as `PRISMA_SCHEMA_ENGINE_BINARY`. The host path, stager, and
-   owner marker are removed from the candidate environment.
+   owner marker are removed from the candidate environment. The generated
+   protected workflow carries the same binding through its trusted candidate
+   helper, with the run identity retained only in the trusted step environment.
 5. The existing candidate network and credential policy remains unchanged.
    In particular, the Prisma engine does not receive external network access;
    database scripts retain only the service access already granted by their

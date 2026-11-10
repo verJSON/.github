@@ -6977,6 +6977,20 @@ def _authorize_role_from_environment() -> None:
 
 
 
+def prisma_schema_engine_candidate_binding(
+    candidate_environment: dict[str, str],
+    host_path: str | None,
+    sandbox_path: Path,
+) -> list[str]:
+    candidate_environment.pop("PRISMA_SCHEMA_ENGINE_BINARY", None)
+    if host_path is None:
+        return []
+    candidate_environment["PRISMA_SCHEMA_ENGINE_BINARY"] = str(
+        sandbox_path
+    )
+    return ["--ro-bind", host_path, str(sandbox_path)]
+
+
 def run_protected_candidate_plan() -> None:
     import hashlib
     import hashlib
@@ -6998,6 +7012,24 @@ def run_protected_candidate_plan() -> None:
     env_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
     entries_path = Path(os.environ["SCRIPT_PLAN_ENTRIES_FILE"])
     runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve()
+    prisma_engine_available_value = os.environ.get("PRISMA_SCHEMA_ENGINE_AVAILABLE", "")
+    if prisma_engine_available_value not in {"true", "false"}:
+        sys.exit("trusted Prisma schema engine availability output is invalid")
+    prisma_engine_available = prisma_engine_available_value == "true"
+    prisma_engine_host_path = os.environ.get("PRISMA_SCHEMA_ENGINE_HOST_PATH", "")
+    prisma_engine_target = Path("/run/verjson-prisma/schema-engine")
+    if prisma_engine_available:
+        expected_prisma_engine = (
+            runner_temp
+            / f"verjson-prisma-schema-engine-{os.environ.get('RUN_ID', '')}-{os.environ.get('RUN_ATTEMPT', '')}"
+            / "schema-engine"
+        )
+        if (
+            Path(prisma_engine_host_path) != expected_prisma_engine
+            or Path(prisma_engine_host_path).is_symlink()
+            or not Path(prisma_engine_host_path).is_file()
+        ):
+            sys.exit("trusted Prisma schema engine is not at its run-scoped staging path")
     if str(runner_temp) not in sys.path:
         sys.path.insert(0, str(runner_temp))
     import normalized_entries as normalized_script_plan
@@ -8082,6 +8114,13 @@ def run_protected_candidate_plan() -> None:
                 )
             for env_name in unset_env:
                 script_env.pop(env_name, None)
+            prisma_engine_mount_args = (
+                ci_build_artifacts.prisma_schema_engine_candidate_binding(
+                    script_env,
+                    prisma_engine_host_path if prisma_engine_available else None,
+                    prisma_engine_target,
+                )
+            )
             script_env["BUILD_ARTIFACT_ROLE"] = os.environ.get("BUILD_ARTIFACT_ROLE", "")
             script_env["NPM_CONFIG_SCRIPT_SHELL"] = "/bin/sh"
             script_env["npm_config_script_shell"] = "/bin/sh"
@@ -8100,6 +8139,7 @@ def run_protected_candidate_plan() -> None:
                 cache_root,
                 changelog_cache_root,
                 *isolated_paths,
+                *((prisma_engine_target.parent,) if prisma_engine_mount_args else ()),
                 *tool_prefixes,
                 *((browser_cache,) if browser_cache is not None else ()),
             )
@@ -8227,6 +8267,7 @@ def run_protected_candidate_plan() -> None:
                               "--ro-bind", "/etc/passwd", "/etc/passwd",
                               "--ro-bind", "/etc/group", "/etc/group",
                               *tool_mount_args,
+                              *prisma_engine_mount_args,
                               "--bind", str(workspace), str(workspace),
                               *artifact_mount_args,
                               *git_mount_args,

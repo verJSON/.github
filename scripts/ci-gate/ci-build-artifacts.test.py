@@ -2955,6 +2955,47 @@ class RoleAuthorizationTests(unittest.TestCase):
                 self.assertEqual(candidate_environment["BUILD_ARTIFACT_ROLE"], "consumer")
 
 
+class PrismaSchemaEngineCandidateBindingTests(unittest.TestCase):
+    def test_available_engine_uses_fixed_candidate_path_and_read_only_mount(self) -> None:
+        candidate_environment = {
+            "PRISMA_SCHEMA_ENGINE_BINARY": "/runner/private/schema-engine"
+        }
+        host_path = "/runner/temp/verjson-prisma-schema-engine-123-2/schema-engine"
+
+        mount_arguments = artifacts.prisma_schema_engine_candidate_binding(
+            candidate_environment,
+            host_path,
+            Path("/run/verjson-prisma/schema-engine"),
+        )
+
+        self.assertEqual(
+            "/run/verjson-prisma/schema-engine",
+            candidate_environment["PRISMA_SCHEMA_ENGINE_BINARY"],
+        )
+        self.assertEqual(
+            [
+                "--ro-bind",
+                host_path,
+                "/run/verjson-prisma/schema-engine",
+            ],
+            mount_arguments,
+        )
+
+    def test_unavailable_engine_clears_inherited_binary_and_skips_mount(self) -> None:
+        candidate_environment = {
+            "PRISMA_SCHEMA_ENGINE_BINARY": "/runner/private/schema-engine"
+        }
+
+        mount_arguments = artifacts.prisma_schema_engine_candidate_binding(
+            candidate_environment,
+            None,
+            Path("/run/verjson-prisma/schema-engine"),
+        )
+
+        self.assertNotIn("PRISMA_SCHEMA_ENGINE_BINARY", candidate_environment)
+        self.assertEqual([], mount_arguments)
+
+
 class ProtectedCandidatePlanValidationTests(unittest.TestCase):
     def test_normalized_nested_manifest_errors_identify_the_invalid_field(self) -> None:
         nested_manifests = json.dumps(
@@ -3034,6 +3075,7 @@ class ProtectedCandidatePlanValidationTests(unittest.TestCase):
                     os.environ,
                     {
                         "RUNNER_TEMP": str(runner_temp),
+                    "PRISMA_SCHEMA_ENGINE_AVAILABLE": "false",
                         "SCRIPT_PLAN_ENTRIES_FILE": str(entries_path),
                         "SCRIPT_PLAN_DEFAULT_PLAN": "false",
                         "NESTED_MANIFESTS": "",

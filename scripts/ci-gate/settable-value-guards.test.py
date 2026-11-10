@@ -41,8 +41,9 @@ NON_ASCII_PROBES = ("\u00e9", "\uff41", "\uff21", "\u0663", "\uff13", "\u00a0")
 # in the generator's HEAD output. A change is a review point. Repinning this
 # repository's release caller at 3619ce18 adds its CI_PACKAGE_RETENTION_KEEP
 # guard, which enumerates its digits, to the prior reviewed inventory.
-# The pinned Prisma stager fetch adds another JOB_WORKFLOW_SHA guard.
-GUARD_COUNT = 517
+# The pinned Prisma stager fetch adds a JOB_WORKFLOW_SHA guard in both the
+# canonical and generated protected workflows.
+GUARD_COUNT = 518
 # Shapes the scanner cannot judge, each with the reason it is safe.
 # Each unreadable guard reviewed by its exact text at its site: an edit to the
 # pattern, including a range added around a reviewed expansion, changes the
