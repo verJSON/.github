@@ -6977,18 +6977,21 @@ def _authorize_role_from_environment() -> None:
 
 
 
-def prisma_schema_engine_candidate_binding(
+def prisma_schema_engine_candidate_mount(
     candidate_environment: dict[str, str],
+    engine_available: bool,
     host_path: str | None,
     sandbox_path: Path,
-) -> list[str]:
+) -> tuple[list[str], tuple[Path, ...]]:
     candidate_environment.pop("PRISMA_SCHEMA_ENGINE_BINARY", None)
+    if not engine_available:
+        return [], ()
     if host_path is None:
-        return []
+        raise ValueError("available Prisma schema engine requires a host path")
     candidate_environment["PRISMA_SCHEMA_ENGINE_BINARY"] = str(
         sandbox_path
     )
-    return ["--ro-bind", host_path, str(sandbox_path)]
+    return ["--ro-bind", host_path, str(sandbox_path)], (sandbox_path.parent,)
 
 
 def run_protected_candidate_plan() -> None:
@@ -8114,10 +8117,11 @@ def run_protected_candidate_plan() -> None:
                 )
             for env_name in unset_env:
                 script_env.pop(env_name, None)
-            prisma_engine_mount_args = (
-                ci_build_artifacts.prisma_schema_engine_candidate_binding(
+            prisma_engine_mount_args, prisma_engine_mount_targets = (
+                ci_build_artifacts.prisma_schema_engine_candidate_mount(
                     script_env,
-                    prisma_engine_host_path if prisma_engine_available else None,
+                    prisma_engine_available,
+                    prisma_engine_host_path or None,
                     prisma_engine_target,
                 )
             )
@@ -8139,7 +8143,7 @@ def run_protected_candidate_plan() -> None:
                 cache_root,
                 changelog_cache_root,
                 *isolated_paths,
-                *((prisma_engine_target.parent,) if prisma_engine_mount_args else ()),
+                *prisma_engine_mount_targets,
                 *tool_prefixes,
                 *((browser_cache,) if browser_cache is not None else ()),
             )

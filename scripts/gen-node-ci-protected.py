@@ -1710,10 +1710,11 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                       )
                   for env_name in unset_env:
                       script_env.pop(env_name, None)
-                  prisma_engine_mount_args = (
-                      ci_build_artifacts.prisma_schema_engine_candidate_binding(
+                  prisma_engine_mount_args, prisma_engine_mount_targets = (
+                      ci_build_artifacts.prisma_schema_engine_candidate_mount(
                           script_env,
-                          prisma_engine_host_path if prisma_engine_available else None,
+                          prisma_engine_available,
+                          prisma_engine_host_path or None,
                           prisma_engine_target,
                       )
                   )
@@ -1735,7 +1736,7 @@ def isolate_candidate_runtime_cache(document: str) -> str:
                       cache_root,
                       changelog_cache_root,
                       *isolated_paths,
-                      *((prisma_engine_target.parent,) if prisma_engine_mount_args else ()),
+                      *prisma_engine_mount_targets,
                       *tool_prefixes,
                       *((browser_cache,) if browser_cache is not None else ()),
                   )
