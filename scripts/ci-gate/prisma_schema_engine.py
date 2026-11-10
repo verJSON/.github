@@ -80,6 +80,8 @@ def parse_engine_spec(lockfile_bytes):
 
     lockfile_version = lockfile.get("lockfileVersion")
     if type(lockfile_version) is not int or lockfile_version not in {2, 3}:
+        # Keep older non-Prisma projects out of this opt-in stager, but reject
+        # Prisma metadata rather than staging from an unsupported lock format.
         packages = lockfile.get("packages")
         packages_contain_prisma = isinstance(packages, dict) and any(
             _package_records(packages, package_name)

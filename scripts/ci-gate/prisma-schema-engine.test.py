@@ -160,6 +160,16 @@ class PrismaSchemaEngineTest(unittest.TestCase):
         self.assertEqual(requested, [])
         self.assertFalse((self.runner_temp / "verjson-prisma-schema-engine-42763747771-1").exists())
 
+    def test_unsupported_non_prisma_lockfile_does_not_download_an_engine(self):
+        self.lockfile.write_text(
+            '{"lockfileVersion":1,"dependencies":{"left-pad":{"version":"1.3.0"}}}'
+        )
+        requested = []
+
+        self.assertFalse(self.stage(opener=lambda *_args, **_kwargs: requested.append(True)))
+        self.assertEqual(requested, [])
+        self.assertFalse((self.runner_temp / "verjson-prisma-schema-engine-42763747771-1").exists())
+
     def test_rejects_malformed_or_inconsistent_locked_engine_metadata_before_download(self):
         self.lockfile.write_bytes(lockfile_bytes(engine_version="8.1.0-1.not-a-commit"))
         requested = []
@@ -170,13 +180,31 @@ class PrismaSchemaEngineTest(unittest.TestCase):
         self.assertEqual(requested, [])
 
     def test_rejects_unsupported_lockfile_version_before_download(self):
-        self.lockfile.write_bytes(lockfile_bytes(lockfile_version=1))
-        requested = []
+        unsupported_prisma_lockfiles = (
+            lockfile_bytes(lockfile_version=1),
+            json.dumps(
+                {
+                    "lockfileVersion": 1,
+                    "dependencies": {
+                        "legacy": {
+                            "version": "1.0.0",
+                            "dependencies": {
+                                "prisma": {"version": PACKAGE_VERSION},
+                            },
+                        },
+                    },
+                }
+            ).encode(),
+        )
+        for lockfile in unsupported_prisma_lockfiles:
+            with self.subTest(lockfile=lockfile):
+                self.lockfile.write_bytes(lockfile)
+                requested = []
 
-        with self.assertRaises(prisma_schema_engine.PrismaEngineError):
-            self.stage(opener=lambda *_args, **_kwargs: requested.append(True))
+                with self.assertRaises(prisma_schema_engine.PrismaEngineError):
+                    self.stage(opener=lambda *_args, **_kwargs: requested.append(True))
 
-        self.assertEqual(requested, [])
+                self.assertEqual(requested, [])
 
     def test_rejects_unsupported_runner_targets_before_download(self):
         for unsupported in (
