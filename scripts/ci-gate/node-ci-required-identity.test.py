@@ -1825,6 +1825,7 @@ ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_cleanup
                 "RUNNER_TEMP": str(runner_temp),
                 "RUNNER_ENVIRONMENT": "github-hosted",
                 "RUNNER_OS": "Linux",
+                "PRISMA_SCHEMA_ENGINE_AVAILABLE": "false",
             "GITHUB_ENV": str(command_file),
                 "GITHUB_OUTPUT": str(runner_temp / "GITHUB_OUTPUT"),
                 "VERJSON_CI_OUTPUT_FILE": str(runner_temp / "GITHUB_OUTPUT"),
