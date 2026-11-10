@@ -12,6 +12,7 @@ Reverse-chronological index of org-level decisions.
 <!-- prettier-ignore -->
 | # | Date | Decision |
 |---|------|----------|
+| [0259](0259-stage-locked-prisma-engine-outside-offline-sandbox/README.md) | 2026-11-10 | Stage the locked Prisma schema engine outside the offline candidate sandbox |
 | [0258](0258-gitlab-estate-migration/README.md) | 2026-11-05 | Migrate the repository estate to GitLab CE in owner-approved waves behind a verified one-way mirror from GitHub |
 | [0257](0257-merge-admission-requires-the-exact-head-review-receipt/README.md) | 2026-11-05 | Merge admission requires the exact-head independent-review receipt on promotion-enabled repositories |
 | [0256](0256-netcup-stack-backup-and-disaster-recovery/README.md) | 2026-11-05 | Back up the Netcup Git/CI stack to configured, locked off-site storage and drill every restore path |

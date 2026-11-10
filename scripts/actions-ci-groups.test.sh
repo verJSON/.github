@@ -245,6 +245,7 @@ compatibility_commands = (
     "VERJSON_TEST_REAL_BWRAP=1 python3 -I scripts/ci-gate/pidfd-launcher.test.py",
     "VERJSON_TEST_REAL_BWRAP=1 python3 -I scripts/ci-gate/ci-mount-destination.test.py",
     "VERJSON_TEST_REAL_BWRAP=1 python3 -I scripts/ci-gate/node-ci-secretless-rebuild-env.test.py",
+    "python3 -I scripts/ci-gate/prisma-schema-engine.test.py",
     "bash scripts/ci-gate/node-ci-secretless-consumer.test.sh",
     "bash scripts/ci-gate/node-ci-secretless-nested-manifests.test.sh",
     "python3 -I scripts/container_release_reconcile.test.py",

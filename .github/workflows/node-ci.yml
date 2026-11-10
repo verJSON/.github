@@ -6008,6 +6008,37 @@ jobs:
         run: |
           set -euo pipefail
           python3 -I "$RUNNER_TEMP/ci-postgres-sandbox-hosted-acceptance.test.py"
+      - name: Download trusted Prisma schema engine stager
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        env:
+          JOB_WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          PRISMA_ENGINE_STAGER: ${{ runner.temp }}/prisma-schema-engine-${{ github.run_id }}-${{ github.run_attempt }}.py
+        run: |
+          set -euo pipefail
+          [[ "$JOB_WORKFLOW_SHA" =~ ^[0123456789abcdef]{40}$ ]]
+          curl --fail --silent --show-error --location --max-filesize 1000000 \
+            "https://raw.githubusercontent.com/Verjson/.github/${JOB_WORKFLOW_SHA}/scripts/ci-gate/prisma_schema_engine.py" \
+            -o "$PRISMA_ENGINE_STAGER"
+      - name: Stage pinned Prisma schema engine
+        id: stage-prisma-schema-engine
+        if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        env:
+          PRISMA_ENGINE_STAGER: ${{ runner.temp }}/prisma-schema-engine-${{ github.run_id }}-${{ github.run_attempt }}.py
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RUNNER_OS: ${{ runner.os }}
+          RUNNER_ARCH: ${{ runner.arch }}
+        run: |
+          set -euo pipefail
+          python3 -I "$PRISMA_ENGINE_STAGER" stage \
+            --workspace "$GITHUB_WORKSPACE" \
+            --runner-temp "$RUNNER_TEMP" \
+            --run-id "$RUN_ID" \
+            --run-attempt "$RUN_ATTEMPT" \
+            --runner-environment "$RUNNER_ENVIRONMENT" \
+            --runner-os "$RUNNER_OS" \
+            --runner-arch "$RUNNER_ARCH"
       - name: Parse Node CI script plan
         if: needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
         id: node-ci-script-plan
@@ -6050,6 +6081,8 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_ID: ${{ github.run_id }}
           SECRETLESS_RUNTIME_PUBLIC_CACHE: ${{ inputs.secretless-runtime-public-cache }}
+          PRISMA_SCHEMA_ENGINE_AVAILABLE: ${{ steps.stage-prisma-schema-engine.outputs.available }}
+          PRISMA_SCHEMA_ENGINE_HOST_PATH: ${{ runner.temp }}/verjson-prisma-schema-engine-${{ github.run_id }}-${{ github.run_attempt }}/schema-engine
           BASH_ENV: /dev/null
         run: |
           set -euo pipefail
@@ -6080,6 +6113,24 @@ jobs:
           env_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
           entries_path = Path(os.environ["SCRIPT_PLAN_ENTRIES_FILE"])
           runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve()
+          prisma_engine_available_value = os.environ.get("PRISMA_SCHEMA_ENGINE_AVAILABLE", "")
+          if prisma_engine_available_value not in {"true", "false"}:
+              sys.exit("trusted Prisma schema engine availability output is invalid")
+          prisma_engine_available = prisma_engine_available_value == "true"
+          prisma_engine_host_path = os.environ.get("PRISMA_SCHEMA_ENGINE_HOST_PATH", "")
+          prisma_engine_target = Path("/run/verjson-prisma/schema-engine")
+          if prisma_engine_available:
+              expected_prisma_engine = (
+                  runner_temp
+                  / f"verjson-prisma-schema-engine-{os.environ.get('RUN_ID', '')}-{os.environ.get('RUN_ATTEMPT', '')}"
+                  / "schema-engine"
+              )
+              if (
+                  Path(prisma_engine_host_path) != expected_prisma_engine
+                  or Path(prisma_engine_host_path).is_symlink()
+                  or not Path(prisma_engine_host_path).is_file()
+              ):
+                  sys.exit("trusted Prisma schema engine is not at its run-scoped staging path")
           if str(runner_temp) not in sys.path:
               sys.path.insert(0, str(runner_temp))
           import normalized_entries as normalized_script_plan
@@ -6554,6 +6605,8 @@ jobs:
               Path("/dev/shm/home/.cache/node/corepack"),
               Path("/dev/shm/npm-cache"), Path("/dev/shm/playwright-browsers"),
           }
+          if prisma_engine_available:
+              sandbox_directories.add(prisma_engine_target.parent)
           if node_toolchain_destination is not None:
               sandbox_directories.add(Path(node_toolchain_destination))
           namespace_directories = set()
@@ -6747,6 +6800,8 @@ jobs:
                   "VERJSON_CI_POSTGRES_PROFILE", "VERJSON_CI_POSTGRES_SANDBOX_STATE",
                   "VERJSON_CI_LEGACY_DB_IMAGE", "VERJSON_CI_LEGACY_CACHE_IMAGE",
                   "VERJSON_CI_POSTGRES_SECRETLESS_MODE",
+                  "PRISMA_SCHEMA_ENGINE_AVAILABLE", "PRISMA_SCHEMA_ENGINE_HOST_PATH",
+                  "PRISMA_SCHEMA_ENGINE_BINARY",
               ):
                   script_env.pop(env_name, None)
               for env_name in service_env_names:
@@ -6786,6 +6841,8 @@ jobs:
                   "npm_config_globalconfig": "/dev/shm/npm-globalconfig",
                   "npm_config_userconfig": "/dev/shm/npm-userconfig",
               })
+              if prisma_engine_available:
+                  script_env["PRISMA_SCHEMA_ENGINE_BINARY"] = str(prisma_engine_target)
               if postgres_profile is not None and requires_services:
                   script_env = postgres_profile_module.candidate_environment(
                       script_env,
@@ -6869,6 +6926,12 @@ jobs:
               ]
               for source, destination in system_mounts:
                   bind_source(arguments, source, destination)
+              if prisma_engine_available:
+                  bind_source(
+                      arguments,
+                      prisma_engine_host_path,
+                      str(prisma_engine_target),
+                  )
               if node_toolchain_root is not None:
                   bind_source(arguments, node_toolchain_root, node_toolchain_destination)
               bind_source(arguments, workspace, sandbox_workspace, writable=True)
@@ -7061,6 +7124,26 @@ jobs:
           user_config_file.close()
           # END source candidate script execution
           PY
+      - name: Remove staged Prisma schema engine
+        if: always() && needs.eligibility.outputs.should-run != 'false' && (inputs.secretless-pr || inputs.secretless-trusted-ref)
+        env:
+          PRISMA_ENGINE_STAGER: ${{ runner.temp }}/prisma-schema-engine-${{ github.run_id }}-${{ github.run_attempt }}.py
+          PRISMA_ENGINE_STAGE_DIR: ${{ runner.temp }}/verjson-prisma-schema-engine-${{ github.run_id }}-${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          trap 'rm -f -- "$PRISMA_ENGINE_STAGER"' EXIT
+          if [[ -e "$PRISMA_ENGINE_STAGE_DIR" || -L "$PRISMA_ENGINE_STAGE_DIR" ]]; then
+            if [[ ! -f "$PRISMA_ENGINE_STAGER" || -L "$PRISMA_ENGINE_STAGER" ]]; then
+              echo '::error::Prisma engine stage exists but its trusted cleanup helper is missing' >&2
+              exit 1
+            fi
+            python3 -I "$PRISMA_ENGINE_STAGER" cleanup \
+              --runner-temp "$RUNNER_TEMP" \
+              --run-id "$RUN_ID" \
+              --run-attempt "$RUN_ATTEMPT"
+          fi
       - name: Export build outputs after producer process is reaped
         id: export-build-artifact
         if: needs.eligibility.outputs.should-run != 'false' && inputs.build-artifact-role == 'producer' && steps.run-script-plan.outcome == 'success'

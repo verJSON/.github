@@ -31,7 +31,7 @@ PROTECTED = ROOT / ".github/workflows/node-ci-protected.yml"
 GENERATOR = ROOT / "scripts/gen-node-ci-protected.py"
 TRUSTED_HELPER = ROOT / "scripts/ci_build_artifacts.py"
 HEAD = "a" * 40
-LEGACY_SHA256 = "de1315ab709ddfbc2c501e0bb42aa2ac74320e82e985712f8573d1aa4ec128a8"
+LEGACY_SHA256 = "a9efe95f67e20128929b1371a4326131ee98813cff8d0b779ba3eb21cc8fc44d"
 
 
 class RequiredWorkflowIdentityTest(unittest.TestCase):
@@ -1825,7 +1825,8 @@ ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_cleanup
                 "RUNNER_TEMP": str(runner_temp),
                 "RUNNER_ENVIRONMENT": "github-hosted",
                 "RUNNER_OS": "Linux",
-            "GITHUB_ENV": str(command_file),
+                "PRISMA_SCHEMA_ENGINE_AVAILABLE": "false",
+                "GITHUB_ENV": str(command_file),
                 "GITHUB_OUTPUT": str(runner_temp / "GITHUB_OUTPUT"),
                 "VERJSON_CI_OUTPUT_FILE": str(runner_temp / "GITHUB_OUTPUT"),
                 **plan_environment,
@@ -2085,20 +2086,21 @@ ci_build_artifacts.run_supervised_bubblewrap = _d1_cancel_cleanup
                             "RUNNER_TEMP": str(runner_temp),
                             "RUNNER_ENVIRONMENT": "github-hosted",
                             "RUNNER_OS": "Linux",
+                            "PRISMA_SCHEMA_ENGINE_AVAILABLE": "false",
                             "GITHUB_ENV": str(command_file),
                             "GITHUB_OUTPUT": str(runner_temp / "GITHUB_OUTPUT"),
-                        "VERJSON_CI_OUTPUT_FILE": str(runner_temp / "GITHUB_OUTPUT"),
-                        "CI_ENTRY_REPOSITORY": "Verjson/fixture",
-                        "CI_ENTRY_EVENT": "pull_request",
-                        "CI_ENTRY_REF": "refs/pull/7/merge",
-                        "CI_ENTRY_COMMIT": "a" * 40,
-                        "CI_ENTRY_WORKFLOW_SHA": "b" * 40,
-                        "CI_ENTRY_RUN_ID": "123",
-                        "CI_ENTRY_RUN_ATTEMPT": "1",
-                        "CI_ENTRY_JOB_ID": "build-test",
-                        "CI_LEVEL_ID": "test-levels",
-                        "CI_LEVEL_FAIL_FAST": "true",
-                        "PWD": str(workspace),
+                            "VERJSON_CI_OUTPUT_FILE": str(runner_temp / "GITHUB_OUTPUT"),
+                            "CI_ENTRY_REPOSITORY": "Verjson/fixture",
+                            "CI_ENTRY_EVENT": "pull_request",
+                            "CI_ENTRY_REF": "refs/pull/7/merge",
+                            "CI_ENTRY_COMMIT": "a" * 40,
+                            "CI_ENTRY_WORKFLOW_SHA": "b" * 40,
+                            "CI_ENTRY_RUN_ID": "123",
+                            "CI_ENTRY_RUN_ATTEMPT": "1",
+                            "CI_ENTRY_JOB_ID": "build-test",
+                            "CI_LEVEL_ID": "test-levels",
+                            "CI_LEVEL_FAIL_FAST": "true",
+                            "PWD": str(workspace),
                             **self.script_plan_environment(runner_temp, '["first"]'),
                             "CANDIDATE_CACHE_ROOT": str(baseline),
                             "npm_config_cache": str(baseline),
@@ -2606,6 +2608,7 @@ PY
                     "RUNNER_TEMP": str(runner_temp),
                     "RUNNER_ENVIRONMENT": "github-hosted",
                     "RUNNER_OS": "Linux",
+                    "PRISMA_SCHEMA_ENGINE_AVAILABLE": "false",
                     "GITHUB_ENV": str(command_file),
                     "GITHUB_OUTPUT": str(runner_temp / "GITHUB_OUTPUT"),
                     "VERJSON_CI_OUTPUT_FILE": str(runner_temp / "GITHUB_OUTPUT"),

@@ -9,7 +9,7 @@ runner_temp="$tmp/runner-temp"
 tool_cache="$tmp/tool-cache"
 toolchain="$tool_cache/node/24.19.0"
 mkdir -p "$tmp/home" "$runner_temp" "$toolchain/bin"
-export RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux BWRAP_BINARY="${BWRAP_BINARY:-/usr/bin/bwrap}" HOME="$tmp/home" RUNNER_TEMP="$runner_temp" RUNNER_TOOL_CACHE="$tool_cache" GITHUB_ENV="$runner_temp/_runner_file_commands/GITHUB_ENV" GITHUB_OUTPUT="$runner_temp/GITHUB_OUTPUT" CI_ENTRY_REPOSITORY=Verjson/fixture CI_ENTRY_EVENT=pull_request CI_ENTRY_REF=refs/pull/7/merge CI_ENTRY_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa CI_ENTRY_WORKFLOW_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb CI_ENTRY_RUN_ID=42 CI_ENTRY_RUN_ATTEMPT=1 CI_ENTRY_JOB_ID=build-test CI_LEVEL_ID=fixture CI_LEVEL_FAIL_FAST=true
+export RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux PRISMA_SCHEMA_ENGINE_AVAILABLE=false BWRAP_BINARY="${BWRAP_BINARY:-/usr/bin/bwrap}" HOME="$tmp/home" RUNNER_TEMP="$runner_temp" RUNNER_TOOL_CACHE="$tool_cache" GITHUB_ENV="$runner_temp/_runner_file_commands/GITHUB_ENV" GITHUB_OUTPUT="$runner_temp/GITHUB_OUTPUT" CI_ENTRY_REPOSITORY=Verjson/fixture CI_ENTRY_EVENT=pull_request CI_ENTRY_REF=refs/pull/7/merge CI_ENTRY_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa CI_ENTRY_WORKFLOW_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb CI_ENTRY_RUN_ID=42 CI_ENTRY_RUN_ATTEMPT=1 CI_ENTRY_JOB_ID=build-test CI_LEVEL_ID=fixture CI_LEVEL_FAIL_FAST=true
 cat > "$toolchain/bin/node" <<'NODE'
 #!/usr/bin/env bash
 exit 0
@@ -441,6 +441,8 @@ runner_environment.update({
     "NESTED_MANIFESTS": "",
     "RUNNER_ENVIRONMENT": "github-hosted",
     "RUNNER_OS": "Linux",
+    "PRISMA_SCHEMA_ENGINE_AVAILABLE": "false",
+    "PRISMA_SCHEMA_ENGINE_HOST_PATH": str(Path(runner_environment["RUNNER_TEMP"]) / "verjson-prisma-schema-engine-42-2" / "schema-engine"),
     "GITHUB_WORKSPACE": str(fixture),
     "GITHUB_ENV": str(command_file),
     "GITHUB_OUTPUT": str(fixture / "runner-output"),
