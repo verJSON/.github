@@ -885,7 +885,7 @@ gate_w="$(jq -cn --slurpfile required "$required_workflows" --slurpfile runs "$r
       # chooses it.
       | [ $at_path[]
           | .workflow_id as $id
-          | select(.event == "pull_request_target"
+          | select((.event == "pull_request" or .event == "pull_request_target")
                    and (.workflow_url | type) == "string"
                    and (.workflow_url | endswith("/actions/required_workflows/\($id)"))
                    and bound_to_pr) ] as $bound
@@ -898,7 +898,7 @@ gate_w="$(jq -cn --slurpfile required "$required_workflows" --slurpfile runs "$r
         elif ($at_path | length) == 0 then
           "absent: no run of required workflow \($rule.path) (ruleset \($rule.ruleset_id)) is recorded on this head; a repository-local run at that path is not one"
         elif ($bound | length) == 0 then
-          "unbound: run \($at_path | map(.id | tostring) | join(", ")) at \($rule.path) is not bound to ruleset \($rule.ruleset_id)'"'"'s required workflow for this pull request: none is a pull_request_target run that GitHub names by a required-workflow URL for its own workflow id, on this pull request'"'"'s head branch and repository"
+          "unbound: run \($at_path | map(.id | tostring) | join(", ")) at \($rule.path) is not bound to ruleset \($rule.ruleset_id)'"'"'s required workflow for this pull request: none is a run from pull_request or pull_request_target that GitHub names by a required-workflow URL for its own workflow id, on this pull request'"'"'s head branch and repository"
         elif any($bound[]; (.created_at | instant) == null) then
           ([ $bound[] | select((.created_at | instant) == null) | .id | tostring ] | join(", ")) as $undated
           | "undated: run \($undated) of required workflow \($rule.path) reports no readable creation time, so it cannot be ordered against the change of ruleset \($rule.ruleset_id)"

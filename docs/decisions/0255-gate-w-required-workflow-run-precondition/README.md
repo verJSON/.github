@@ -53,7 +53,7 @@ required-workflow entry of every `type: workflows` rule returned by
 - **Binding uses provider fields only.** A run binds to the entry only when all
   of these hold:
   - its `path` equals the entry's path;
-  - its `event` is `pull_request_target`;
+  - its `event` is `pull_request_target` or `pull_request` (as amended below);
   - its `head_sha` is the exact head (the run inventory admits nothing else);
   - its `workflow_url` ends in `/actions/required_workflows/<its own workflow_id>`,
     which a repository cannot forge;
@@ -63,11 +63,13 @@ required-workflow entry of every `type: workflows` rule returned by
   empty on these runs. It rejects a reused branch name or another fork on the
   same SHA. The run name is never read, because a caller chooses it.
 
-  The `pull_request_target` event is a property of the required workflow that
-  ruleset 20722935 requires today, not of `workflows` rules in general. A future
-  required workflow triggered by another event, such as `pull_request` or
-  `merge_group`, would read as `unbound` and fail closed until Gate W learns the
-  event that workflow is triggered by.
+  The original Gate W decision accepted only `pull_request_target`, the event
+  required by ruleset 20722935. On 2026-11-10, issue #1905 recorded a live
+  authn#356 run that GitHub names as a required `pull_request` workflow with
+  its `/actions/required_workflows/<workflow_id>` URL. The amendment below
+  admits that event under the same path, head, branch, repository, freshness
+  and success checks. `push`, `merge_group` and every other event remain
+  unbound.
 - **Freshness (owner timing rule).** A bound run counts only if it was created
   strictly after the `updated_at` of its ruleset. Gate W reads that time from
   `repos/{o}/{r}/rulesets/{id}`, which needs only repository read: it answered an
@@ -416,3 +418,21 @@ ledger was not found, so members reconstructed its dissent from this ADR and
   assumes. The fixture assumes that a run whose reusable-call job was skipped
   still lists its `referenced_workflows`, and that the skipped job reports one
   check run named `rearm`. Canary (a) observes both.
+
+### Amendment 2026-11-10 — accept provider-bound `pull_request` runs
+
+The exact-head run for verJSON/verjson-authn#356 (head
+`b724569a9a4ec2f36004829917dfe4ae23c96507`, run `42731662927`) completed
+successfully as `event=pull_request`. GitHub returned workflow id `346741024`
+and `workflow_url=https://api.github.com/repos/verJSON/verjson-authn/actions/required_workflows/346741024`
+for `.github/workflows/authn-type-surface-required.yml`. The matching ruleset
+`21750617` names that path and was updated at `2026-11-10T00:40:41.641Z`; the
+run started at `2026-11-10T00:52:55Z`. This is provider evidence for a
+`pull_request` required-workflow run, not a caller-selected workflow name.
+
+Gate W therefore accepts both `pull_request_target` and `pull_request`, while
+keeping its required-workflow URL, workflow-id, exact-head, branch, repository,
+freshness and successful-newest-run checks unchanged. `push`, `merge_group` and
+other event values remain unbound. The concurrency-family event contract and
+Gate C behavior are unchanged; the F-1R fixture can still refuse at Gate C with
+exit 5 as a liveness hold.

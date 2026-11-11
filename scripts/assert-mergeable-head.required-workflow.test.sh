@@ -290,11 +290,44 @@ fi
 # closest PR binding exposed (`pull_requests` is empty on these runs), so a run of a
 # reused branch name or another fork sharing the SHA binds nothing. The run name is
 # never consulted: a caller chooses it.
+# --- required pull_request event ---------------------------------------------------
+# Authn#356's required type-surface run is a GitHub-named required workflow on the
+# exact head and ruleset, but uses `pull_request` rather than `pull_request_target`.
+saved_repo=$REPO
+saved_head_sha=$HEAD_SHA
+saved_head_branch=$HEAD_BRANCH
+saved_ruleset_id=$RULESET_ID
+REPO=verJSON/verjson-authn
+HEAD_SHA=b724569a9a4ec2f36004829917dfe4ae23c96507
+HEAD_BRANCH=ci/355-canonical-adoption
+RULESET_ID=21750617
+type_surface_path=.github/workflows/authn-type-surface-required.yml
+type_surface_entry="{\"repository_id\":1269388380,\"path\":\"$type_surface_path\",\"sha\":\"c78fcd4ef9ab83b6775ae2ede94ebce475b3943c\",\"ref\":\"refs/heads/main\"}"
+reset_env
+RULES_FIXTURE="[$status_rule,$(workflows_rule "[$type_surface_entry]" "$RULESET_ID")]"
+RULESET_FIXTURE="$(ruleset 2026-11-10T00:40:41.641Z "[$type_surface_entry]")"
+type_surface_run="$(wf_run 42731662927 712 346741024 74 'Authn required type surface' \
+  "https://api.github.com/repos/$REPO/actions/required_workflows/346741024" \
+  2026-11-10T00:52:55Z success '[]' \
+  '{"event":"pull_request","path":".github/workflows/authn-type-surface-required.yml"}')"
+RUNS_FIXTURE="$(wf_runs "$(required_run 41703191233 701 198 2026-11-03T19:25:55Z cancelled),$(local_run 41703192236 702 113 2026-11-03T19:25:55Z success),$type_surface_run")"
+run
+if [ "$RC" -eq 0 ] && grep -q '^true$' <<<"$OUT"; then
+  pass "a fresh pull_request run with GitHub required-workflow provenance satisfies Gate W"
+else
+  fail "a fresh pull_request run with GitHub required-workflow provenance satisfies Gate W (rc=$RC, output: $OUT)"
+fi
+REPO=$saved_repo
+HEAD_SHA=$saved_head_sha
+HEAD_BRANCH=$saved_head_branch
+RULESET_ID=$saved_ruleset_id
+
 for field in \
   '{"head_branch":"renovate/reused-branch"}' \
   '{"head_repository":{"full_name":"someone/verjson-identity-contracts"}}' \
   '{"head_repository":null}' \
-  '{"event":"pull_request"}' \
+  '{"event":"push"}' \
+  '{"event":"merge_group"}' \
   "{\"workflow_url\":\"https://api.github.com/repos/$REPO/actions/required_workflows/1$WF_REQUIRED\"}"; do
   reset_env
   RUNS_FIXTURE="$(wf_runs "$(required_run 41711448295 703 211 2026-11-03T20:19:05Z success "$field")")"
