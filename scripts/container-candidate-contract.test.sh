@@ -126,6 +126,21 @@ for fixture in single multi; do
     'public-only caller exposes package credentials or read authority'
   reject_caller_mutation 'the package token in a public-only caller' '$a\      # NODE_AUTH_TOKEN' repinned \
     'public-only caller exposes package credentials or read authority'
+  # ADR 0261: a draft holds no runner, so a regenerated caller without the
+  # guard would rebuild every architecture on each draft push.
+  reject_caller_mutation 'validation without the draft guard' 's/ \&\& !github.event.pull_request.draft$//' repinned \
+    'pull-request validation must skip drafts'
+  # Without ready_for_review nothing re-runs a deferred draft once it is ready.
+  reject_caller_mutation 'a trigger without ready_for_review' 's/, ready_for_review\]$/]/' repinned \
+    'pull-request validation must run when a draft becomes ready'
+  # A same-head ready_for_review run must queue, not cancel a running ready run
+  # into a cancelled validation (verjson-agents#457).
+  reject_caller_mutation 'cancellation on every pull-request event' "s/ \&\& github.event.action == 'synchronize' }}\$/ }}/" repinned \
+    'only a new commit may cancel pull-request validation'
+  # Pushes to main share no group: GitHub keeps one pending run per group, so a
+  # later push would replace a queued publication of an earlier main commit.
+  reject_caller_mutation 'publication runs sharing one concurrency group' "s/format('run-{0}', github.run_id)/github.ref/" repinned \
+    'every non-pull-request run must keep its own concurrency group'
   # Each generated helper refuses its own byte drift. The caller is clean, so
   # each helper's pin is reachable on its own.
   for pinned_helper in 'container_release_manifest.py|generated validator was edited' \
