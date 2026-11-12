@@ -414,15 +414,15 @@ about `impact:` — inspect the fragments directly.
 
 ## 7. Release path rehearsed — **blocker**
 
-**Why.** The npm/package release path is a `workflow_dispatch` that states the version to
-cut. Nothing is inferred from a merge or branch push. Discovering at dispatch time that the
+**Why.** The npm/package release path is an explicit `workflow_dispatch`; its
+verified plan derives the version from selected fragment impacts when omitted. Nothing is inferred from a merge or branch push. Discovering at dispatch time that the
 path is broken is a failure that cannot be rolled back cheaply, because the version and tag
 are immutable.
 
 **Bar.**
 
 - [ ] The `@verjson/*` npm publication path starts only from `workflow_dispatch` with a
-      required, explicit version. No merge, branch-push, or other `push` event can publish
+      version resolved from the selected fragments or explicitly supplied for validation. No merge, branch-push, or other `push` event can publish
       the npm package or derive its version from commit subjects.
 - [ ] An independent non-npm language lane does not fail this item solely because it
       consumes a tag-push event. Its tag must use an explicit, disjoint namespace that

@@ -80,8 +80,8 @@ if set(triggers) != {"workflow_dispatch"}:
     )
 inputs = (triggers.get("workflow_dispatch") or {}).get("inputs") or {}
 version_input = inputs.get("version") or {}
-if version_input.get("required") is not True or "default" in version_input:
-    bad("workflow_dispatch must require `version` without a default")
+if version_input.get("required") is not False or version_input.get("default") != "":
+    bad("workflow_dispatch must make `version` optional with an empty default")
 if (inputs.get("prefix") or {}).get("default") != "v":
     bad("workflow_dispatch does not default the independent release prefix to `v`")
 for receipt_input in ("expected_head", "selector_digest"):
@@ -199,11 +199,10 @@ cache_steps = [
 ]
 if (
     len(cache_steps) != 1
-    or len(steps_of(verify)) < 2
-    or steps_of(verify)[0].get("name") != "Require an explicit release version"
-    or "if" in steps_of(verify)[0]
-    or "continue-on-error" in steps_of(verify)[0]
-    or steps_of(verify)[1] is not cache_steps[0]
+    or not steps_of(verify)
+    or steps_of(verify)[0] is not cache_steps[0]
+    or "if" in cache_steps[0]
+    or "continue-on-error" in cache_steps[0]
     or cache_steps[0].get("run") != 'echo "VERJSON_CHANGELOG_TOOL_CACHE=$RUNNER_TEMP/verjson-changelog-tools" >> "$GITHUB_ENV"'
 ):
     bad("`verify` does not export a job-writable runner.temp cache before repository steps (#630)")
@@ -239,7 +238,7 @@ else:
     if "GITHUB_STEP_SUMMARY" not in selector_run or "GITHUB_SHA" not in selector_run:
         bad("the release-plan step does not publish the operator-facing resolution summary")
     if selector_env.get("INPUT_VERSION") != "${{ inputs.version }}":
-        bad("the release-plan step does not read the required version input")
+        bad("the release-plan step does not read the optional version input")
 
 
 # #465(1). A repository-scoped GITHUB_TOKEN cannot read a private GitHub
@@ -769,24 +768,43 @@ done
 
 expected_head="$(printf 'a%.0s' {1..40})"
 selector_digest="$(printf 'b%.0s' {1..64})"
-if run_guard "$head_guard" EXPECTED_HEAD= SELECTOR_DIGEST= GITHUB_SHA="$(printf 'c%.0s' {1..40})"; then
+if run_guard "$head_guard" INPUT_VERSION=v1.2.3 EXPECTED_HEAD= SELECTOR_DIGEST= GITHUB_SHA="$(printf 'c%.0s' {1..40})"; then
   pass "the exact-head guard preserves explicit manual dispatch"
 else
   fail "the exact-head guard rejected a manual dispatch: $(cat "$tmp/guard.out")"
 fi
-if run_guard "$head_guard" "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=$selector_digest" "GITHUB_SHA=$expected_head"; then
+if run_guard "$head_guard" INPUT_VERSION=v1.2.3 "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=$selector_digest" "GITHUB_SHA=$expected_head"; then
   pass "the exact-head guard accepts the derived default-branch head"
 else
   fail "the exact-head guard rejected its derived head: $(cat "$tmp/guard.out")"
 fi
 expect_guard_rejection "the exact-head guard rejects the mutable-branch TOCTOU race before verification" \
   "the exact-head guard admitted a newer branch head after proposer derivation" \
-  1 "::error::The default branch advanced from derived head $expected_head to dispatch head $(printf 'd%.0s' {1..40})." \
-  "$head_guard" "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=$selector_digest" "GITHUB_SHA=$(printf 'd%.0s' {1..40})"
+  1 "::error::The default branch moved from stated head $expected_head to dispatch head $(printf 'd%.0s' {1..40})." \
+  "$head_guard" INPUT_VERSION=v1.2.3 "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=$selector_digest" "GITHUB_SHA=$(printf 'd%.0s' {1..40})"
 expect_guard_rejection "the exact-head guard rejects partial proposer receipts" \
   "the exact-head guard admitted a partial proposer receipt" \
   1 "::error::expected_head and selector_digest must either both be empty or both be canonical lowercase digests." \
-  "$head_guard" "EXPECTED_HEAD=$expected_head" SELECTOR_DIGEST= "GITHUB_SHA=$expected_head"
+  "$head_guard" INPUT_VERSION=v1.2.3 "EXPECTED_HEAD=$expected_head" SELECTOR_DIGEST= "GITHUB_SHA=$expected_head"
+# A blank version derives its release from the dispatched tree, so the operator
+# must state the exact default-branch commit the derivation authorizes (#1939).
+expect_guard_rejection "the exact-head guard requires a stated head for a blank version" \
+  "the exact-head guard admitted a blank version without a stated head" \
+  1 "::error::A blank version derives the release from the dispatched commit, so expected_head must name that exact default-branch commit as a canonical lowercase 40-hex SHA." \
+  "$head_guard" INPUT_VERSION= EXPECTED_HEAD= SELECTOR_DIGEST= "GITHUB_SHA=$expected_head"
+if run_guard "$head_guard" INPUT_VERSION= "EXPECTED_HEAD=$expected_head" SELECTOR_DIGEST= "GITHUB_SHA=$expected_head"; then
+  pass "the exact-head guard accepts a blank version bound to its stated head without a selector digest"
+else
+  fail "the exact-head guard rejected a blank version bound to its stated head: $(cat "$tmp/guard.out")"
+fi
+expect_guard_rejection "the exact-head guard rejects a malformed selector digest on a blank version" \
+  "the exact-head guard admitted a malformed selector digest on a blank version" \
+  1 "::error::selector_digest must be empty or a canonical lowercase 64-hex digest." \
+  "$head_guard" INPUT_VERSION= "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=${selector_digest^^}" "GITHUB_SHA=$expected_head"
+expect_guard_rejection "the exact-head guard rejects a blank version once the branch moved from its stated head" \
+  "the exact-head guard admitted a blank version after the branch moved from its stated head" \
+  1 "::error::The default branch moved from stated head $expected_head to dispatch head $(printf 'd%.0s' {1..40})." \
+  "$head_guard" INPUT_VERSION= "EXPECTED_HEAD=$expected_head" SELECTOR_DIGEST= "GITHUB_SHA=$(printf 'd%.0s' {1..40})"
 # release-artifact and release-snapshot each emit their own copy of the guard, so
 # each copy is executed rather than matched by its step text (#1995).
 for mode_args in "release-artifact --build-runner ubuntu-24.04" release-snapshot; do
@@ -797,9 +815,9 @@ for mode_args in "release-artifact --build-runner ubuntu-24.04" release-snapshot
   if ! bash "$gen" "$mode" "$sha" "${mode_argv[@]:1}" >"$mode_release" 2>"$tmp/gen.err" \
     || ! release="$mode_release" extract_run verify "exact derived head" >"$mode_guard" 2>"$tmp/extract.err"; then
     fail "cannot extract the $mode exact-head guard: $(cat "$tmp/gen.err" "$tmp/extract.err" 2>/dev/null)"
-  elif run_guard "$mode_guard" "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=$selector_digest" "GITHUB_SHA=$(printf 'd%.0s' {1..40})"; then
+  elif run_guard "$mode_guard" INPUT_VERSION=v1.2.3 "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=$selector_digest" "GITHUB_SHA=$(printf 'd%.0s' {1..40})"; then
     fail "the $mode exact-head guard admitted a newer branch head after proposer derivation"
-  elif grep -qF "::error::The default branch advanced from derived head $expected_head" "$tmp/guard.out"; then
+  elif grep -qF "::error::The default branch moved from stated head $expected_head" "$tmp/guard.out"; then
     pass "the $mode exact-head guard rejects the mutable-branch TOCTOU race before verification"
   else
     fail "the $mode exact-head guard failed for another reason: $(cat "$tmp/guard.out")"
@@ -874,6 +892,11 @@ if run_guard "$version_guard" PREFIX=v INPUT_VERSION= GITHUB_OUTPUT="$tmp/versio
 else
   fail "the blank version failed to derive the canonical next version: $(cat "$tmp/guard.out")"
 fi
+for whitespace in ' ' $'\302\240'; do
+  expect_guard_rejection "the release plan rejects whitespace-only explicit version input" \
+    "the release plan accepted whitespace-only explicit version input" 1 "$not_semver" \
+    "$version_guard" PREFIX=v "INPUT_VERSION=$whitespace" "GITHUB_OUTPUT=$tmp/version-output"
+done
 : >"$tmp/version-output"
 if run_guard "$version_guard" PREFIX=v INPUT_VERSION= COMPONENT=python GITHUB_OUTPUT="$tmp/version-output"; then
   grep -q '^selected=false$' "$tmp/version-output" \
