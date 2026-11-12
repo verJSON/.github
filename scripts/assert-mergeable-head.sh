@@ -38,9 +38,10 @@
 #           checked by the verifier the terminal merge runs (ADR 0257, #2031).
 #
 # Gates A and C also set aside this assertion's own output: every `merge-admission` check
-# run produced by the AI review App, and the `merge-admission` context only where the
-# ruleset binds it to that App (ADR 0260, #1990). A same-named check from any other App
-# or a same-named commit status is never set aside.
+# run produced by the AI review App that is still in progress or concluded success, and the
+# `merge-admission` context only where the ruleset binds it to that App (ADR 0260, #1990).
+# A same-named check from any other App, a completed non-success from that App, or a
+# same-named commit status is never set aside.
 #
 # An optional third argument names the head the caller answers for; when the pull
 # request's head is another SHA the assertion exits 1 (ADR 0260).
@@ -664,11 +665,14 @@ fi
 
 # ------------------------------------------------------- merge admission ----
 # ADR 0260. The producer's own `merge-admission` check runs are this assertion's output,
-# never its input. Only check runs whose App is the bound one are set aside; Gate B keeps
-# reading the raw inventory.
+# never its input. Only check runs whose App is the bound one, and only in the two states the
+# producer leaves them in (still in progress, or completed as success), are set aside; a
+# completed non-success from that App is not the producer's output and stays a failure.
+# Gate B keeps reading the raw inventory.
 admitted_checks="$scratch/admission-gated-checks.json"
 jq -c --arg context "$MERGE_ADMISSION_CONTEXT" --argjson app "$MERGE_ADMISSION_APP_ID" '
-  [ .[] | select((.kind == "check_run" and .name == $context and .app_id == $app) | not) ]' \
+  [ .[] | select((.kind == "check_run" and .name == $context and .app_id == $app
+                  and (.status != "COMPLETED" or .conclusion == "SUCCESS")) | not) ]' \
   <"$gated_checks" >"$admitted_checks" \
   || fault 1 "failed to set aside the merge-admission producer's own checks for $repo@$head_sha"
 gated_checks="$admitted_checks"

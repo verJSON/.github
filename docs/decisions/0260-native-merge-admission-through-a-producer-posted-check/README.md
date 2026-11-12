@@ -130,9 +130,11 @@ rotation (ADR 0091).
 **Self-exclusion.** `assert-mergeable-head.sh` binds `MERGE_ADMISSION_APP_ID=4528902` (the
 AI review App, `ai-review-authorization`, read from the organization variable and
 `apps/ai-review-authorization` on 2026-11-12). Gates A and C set aside every
-`merge-admission` check run produced by that App, including earlier in-progress ones,
-which every refusal leaves behind and which would otherwise block every later evaluation
-of the same head. Gate A skips the required context only where the ruleset binds it to
+`merge-admission` check run produced by that App that is still in progress or concluded
+success, including earlier in-progress ones, which every refusal leaves behind and which
+would otherwise block every later evaluation of the same head. The producer never
+concludes its check any other way, so a completed non-success from that App is not its
+output and stays a Gate C failure. Gate A skips the required context only where the ruleset binds it to
 that App. A same-named check run from any other App and a same-named commit status stay in
 the inventory. Gate B keeps reading the raw inventory. The assertion also takes an
 optional third argument, the expected head, and exits 1 when the pull request's head is
@@ -223,7 +225,7 @@ kept rather than a third behaviorally matched copy.
 ## Verification
 
 - `scripts/assert-mergeable-head.merge-admission.test.sh` (merge-gate): Gate C sets aside
-  the bound App's in-progress check; Gate A sets aside the context the ruleset binds to
+  the bound App's in-progress check but keeps its completed failure; Gate A sets aside the context the ruleset binds to
   that App; a same-named GitHub Actions check stays a Gate C failure; a context bound to
   GitHub Actions stays required; a mismatched expected head exits 1, a matching one is
   evaluated, and a malformed one is a usage error.

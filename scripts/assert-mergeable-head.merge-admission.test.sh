@@ -151,6 +151,15 @@ run
 expect "a merge-admission check run that names no App stays a Gate C pending check" 5 \
   "Gate C: $REPO#$PR head $HEAD_SHA has pending or non-passing checks outside the required set — merge-admission=IN_PROGRESS"
 
+# The producer only ever leaves its check in progress or completes it as success, so a
+# completed non-success from the bound App is not its output: whatever concluded it, the
+# assertion still reads it as a Gate C failure.
+reset_env
+with_checks "$ci_check" "$(check_run 2 merge-admission completed failure "$AI_REVIEW_APP_ID")"
+run
+expect "a merge-admission check from the bound AI review App that concluded failure stays a Gate C failure" 5 \
+  "Gate C: $REPO#$PR head $HEAD_SHA has pending or non-passing checks outside the required set — merge-admission=FAILURE"
+
 if [ "$fails" -ne 0 ]; then
   printf '%s merge-admission self-exclusion case(s) failed\n' "$fails" >&2
   exit 1
