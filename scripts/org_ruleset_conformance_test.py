@@ -1843,11 +1843,10 @@ class OrgRulesetConformanceTest(unittest.TestCase):
     def test_absent_merge_admission_ruleset_yields_the_pre_creation_receipt(self):
         # ARB-2031-2026-11-12 C10: before creation the receipt checks the org variable
         # and names the ruleset as absent, never passing silently.
-        result, calls = self.run_audit([[{"id": 1}]], {1: ruleset(1)})
+        result, _ = self.run_audit([[{"id": 1}]], {1: ruleset(1)})
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(PRE_CREATION_RECEIPT, result.stdout.splitlines())
-        self.assertIn(APP_ID_VARIABLE_PATH, [call[-1] for call in calls])
 
     def test_org_variable_naming_another_app_fails_before_creation(self):
         result, _ = self.run_audit(
@@ -1937,6 +1936,122 @@ class OrgRulesetConformanceTest(unittest.TestCase):
                     "organization variable name",
                     result.stderr,
                 )
+                self.assertEqual(calls, [])
+
+    def test_merge_admission_ruleset_with_its_context_unbound_or_on_actions_yields_no_receipt(self):
+        cases = [
+            ({"context": "merge-admission", "integration_id": 15368},
+             "is bound to App 15368, not the declared merge-admission producer App 4528902"),
+            ({"context": "merge-admission", "integration_id": None},
+             "is not bound to a producer App"),
+            ({"context": "merge-admission"}, "is not bound to a producer App"),
+        ]
+        for check, diagnostic in cases:
+            with self.subTest(check=check):
+                result, _ = self.run_audit(
+                    [[{"id": 41}]], {41: merge_admission_ruleset(41, check)}
+                )
+
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(
+                    "merge-admission-required (41): required status check "
+                    f"'merge-admission' {diagnostic}",
+                    result.stderr,
+                )
+                self.assertNotIn("merge-admission-receipt=", result.stdout)
+
+    def test_any_other_context_bound_to_the_ai_review_app_still_fails(self):
+        detail = ruleset(1, rules=[required_checks_rule(
+            {"context": "shell-tests", "integration_id": 4528902},
+        )])
+
+        result, _ = self.run_audit([[{"id": 1}]], {1: detail})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(
+            "ruleset-1 (1): required status check 'shell-tests' is bound to App 4528902, "
+            "not the declared producer App 15368",
+            result.stderr,
+        )
+
+    def test_org_variable_naming_another_app_fails_once_the_ruleset_exists(self):
+        detail = merge_admission_ruleset(
+            41, {"context": "merge-admission", "integration_id": 4528902}
+        )
+
+        result, _ = self.run_audit(
+            [[{"id": 41}]],
+            {41: detail},
+            extra_responses={APP_ID_VARIABLE_PATH: [{"name": "AI_REVIEW_APP_ID", "value": "15368"}]},
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(
+            "ERROR: merge-admission ruleset merge-admission-required (41): organization "
+            "variable AI_REVIEW_APP_ID does not name the policy's merge-admission producer "
+            "App 4528902",
+            result.stderr,
+        )
+        self.assertNotIn("merge-admission-receipt=", result.stdout)
+
+    def test_org_variable_compares_as_the_exact_id_string(self):
+        for value in ("04528902", " 4528902", "4528902\n", "4528902.0"):
+            with self.subTest(value=value):
+                result, _ = self.run_audit(
+                    [[{"id": 1}]],
+                    {1: ruleset(1)},
+                    extra_responses={
+                        APP_ID_VARIABLE_PATH: [{"name": "AI_REVIEW_APP_ID", "value": value}]
+                    },
+                )
+
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("does not name the policy's merge-admission producer App", result.stderr)
+
+    def test_unreadable_or_malformed_org_variable_fails_closed(self):
+        cases = [
+            ({"failing_paths": [APP_ID_VARIABLE_PATH]},
+             "GitHub API read failed for orgs/Verjson/actions/variables/AI_REVIEW_APP_ID"),
+            ({"extra_responses": {APP_ID_VARIABLE_PATH: [{"name": "OTHER", "value": "4528902"}]}},
+             "organization variable AI_REVIEW_APP_ID response names another variable"),
+            ({"extra_responses": {APP_ID_VARIABLE_PATH: [{"name": "AI_REVIEW_APP_ID", "value": 4528902}]}},
+             "organization variable AI_REVIEW_APP_ID.value must be a non-empty string"),
+            ({"extra_responses": {APP_ID_VARIABLE_PATH: [{"name": "AI_REVIEW_APP_ID"}]}},
+             "organization variable AI_REVIEW_APP_ID.value must be a non-empty string"),
+            ({"extra_responses": {APP_ID_VARIABLE_PATH: [[]]}},
+             "organization variable AI_REVIEW_APP_ID must be an object"),
+        ]
+        for arguments, diagnostic in cases:
+            with self.subTest(diagnostic=diagnostic):
+                result, _ = self.run_audit([[{"id": 1}]], {1: ruleset(1)}, **arguments)
+
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertIn(diagnostic, result.stderr)
+                self.assertNotIn("merge-admission-receipt=", result.stdout)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_malformed_merge_admission_binding_fails_closed(self):
+        cases = [
+            (lambda binding: binding.pop("ruleset_name"), "merge_admission_binding keys are"),
+            (lambda binding: binding.update(extra=True), "merge_admission_binding keys are"),
+            (lambda binding: binding.update(integration_id="4528902"),
+             "merge_admission_binding.integration_id must be a positive integer"),
+            (lambda binding: binding.update(integration_id=True),
+             "merge_admission_binding.integration_id must be a positive integer"),
+            (lambda binding: binding.update(context=""),
+             "merge_admission_binding.context must be a non-empty string"),
+        ]
+        for mutate, diagnostic in cases:
+            with self.subTest(diagnostic=diagnostic):
+                policy = json.loads(self.committed_policy_without_bypass_contracts())
+                mutate(policy["merge_admission_binding"])
+
+                result, calls = self.run_audit(
+                    [[{"id": 1}]], {1: ruleset(1)}, raw_policy=json.dumps(policy)
+                )
+
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertIn(diagnostic, result.stderr)
                 self.assertEqual(calls, [])
 
     def test_bindings_outside_default_branch_rulesets_are_still_required(self):
