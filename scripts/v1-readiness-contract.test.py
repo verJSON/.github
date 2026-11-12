@@ -45,7 +45,7 @@ REQUIREMENTS: dict[int, tuple[tuple[str, str], ...]] = {
         ("exactly v1 is accepted", r"exactly v1\.0\.0 is accepted"),
     ),
     7: (
-        ("npm starts from an explicit dispatch", r"npm publication path starts only from workflow_dispatch.*required, explicit version"),
+        ("npm starts from an explicit dispatch", r"npm publication path starts only from workflow_dispatch.*version resolved from the selected fragments"),
         ("merge and branch pushes cannot publish npm", r"no merge, branch-push, or other push event can publish"),
         ("a disjoint non-npm tag lane is allowed", r"independent non-npm language lane does not fail this item solely.*tag-push event"),
         ("the non-npm namespace states a version", r"explicit, disjoint namespace that states the exact version"),
