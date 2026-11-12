@@ -19,3 +19,7 @@ selectors, refusal checks, and pending justifications remain unchanged.
 
 PR #1941 remains a proposal: issuer-backed release-manager enforcement and the
 remote expected-head guard evidence stay with #1940 and #1942.
+
+After the review round that required a stated head for blank-version dispatches and
+made the push guard read release commit headers to EOF, rebind the capability-floor
+observer and release verification digests again; only their digest columns change.
