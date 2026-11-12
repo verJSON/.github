@@ -47,8 +47,9 @@ check_id="$(jq -r 'if (.id? | type) == "number" then .id else "" end' <<<"$creat
   || skip "the created check run carries no numeric id"
 
 # Admission is exit 0 AND the exact output `true`; anything else leaves the check in
-# progress, which blocks natively (ADR 0260, action 4).
-verdict="$(bash "$assertion" "$repo" "$pr" "$head_sha" </dev/null)"
+# progress, which blocks natively (ADR 0260, action 4). The assertion reads with GH_TOKEN
+# alone; the App token, which can write check runs, is withheld from it.
+verdict="$(env -u APP_TOKEN bash "$assertion" "$repo" "$pr" "$head_sha" </dev/null)"
 assertion_status=$?
 if [ "$assertion_status" -eq 0 ] && [ "$verdict" = true ]; then
   GH_TOKEN="$APP_TOKEN" gh api -X PATCH "repos/$repo/check-runs/$check_id" \

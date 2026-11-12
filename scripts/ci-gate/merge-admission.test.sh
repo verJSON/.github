@@ -28,6 +28,7 @@ producer="$tmp/tree/scripts/ci-gate/merge-admission.sh"
 cat >"$tmp/tree/scripts/assert-mergeable-head.sh" <<'ASSERT'
 #!/usr/bin/env bash
 printf 'assert %s token=%s\n' "$*" "${GH_TOKEN:-}" >>"$CALLS"
+printf '%s\n' "${APP_TOKEN-<unset>}" >"$ASSERT_APP_TOKEN"
 printf '%s' "$ASSERT_STDOUT"
 exit "$ASSERT_RC"
 ASSERT
@@ -47,7 +48,7 @@ case "$*" in
 esac
 GH
 chmod +x "$tmp/bin/gh"
-export PATH="$tmp/bin:$PATH" CALLS="$tmp/calls"
+export PATH="$tmp/bin:$PATH" CALLS="$tmp/calls" ASSERT_APP_TOKEN="$tmp/assert-app-token"
 
 reset_env() {
   : >"$CALLS"
@@ -78,6 +79,17 @@ if [ "$RC" -eq 0 ] \
   pass "the producer creates an in-progress merge-admission check on the exact head with the App token before it runs the assertion"
 else
   fail "the producer creates an in-progress merge-admission check on the exact head with the App token before it runs the assertion (rc=$RC, calls: $(cat "$CALLS"), output: $OUT)"
+fi
+
+# --- least privilege: the assertion reads with the read-only token only ----------------------
+# The App token can write check runs; the assertion has no use for it, so it never sees it.
+reset_env
+rm -f "$ASSERT_APP_TOKEN"
+run
+if [ "$RC" -eq 0 ] && [ "$(cat "$ASSERT_APP_TOKEN" 2>/dev/null)" = "<unset>" ]; then
+  pass "the assertion runs without the App token in its environment"
+else
+  fail "the assertion runs without the App token in its environment (rc=$RC, assertion saw APP_TOKEN: $(cat "$ASSERT_APP_TOKEN" 2>/dev/null), output: $OUT)"
 fi
 
 # --- admission: exit 0 printing exactly true --------------------------------------------------
