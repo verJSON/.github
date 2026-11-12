@@ -29,7 +29,7 @@ a runner. Existing path filters and job predicates remain in effect.
 | `CLI projects required package surface` | Protected full Node CI at both supported Node versions, plus `package-surface` validation |
 | `container candidate reusable-call contract` | The reusable candidate build validation in `validate` |
 
-The candidate `publish` job is `workflow_dispatch`-only and is not part of the
+This repository's own candidate canary `publish` job is `workflow_dispatch`-only and is not part of the
 pull-request tiering. `pull_request_target` authorization and merge-gate
 workflows are also outside this policy.
 
@@ -52,6 +52,15 @@ and
 Keep workflow classifications and their draft/ready conformance assertions in
 `scripts/ci-gate/pr-ci-tiers.test.py`, registered in
 `scripts/actions-ci-groups.tsv`.
+
+## Generated adopter callers
+
+Generated callers apply the draft rule in the caller, which owns the trigger.
+Their pull-request jobs skip drafts and run on `ready_for_review`; they do not request
+`converted_to_draft`, and only a new commit cancels a running run. Node CI
+callers follow [ADR 0253](decisions/0253-generated-node-ci-callers-defer-drafts/README.md)
+and container-candidate callers follow
+[ADR 0261](decisions/0261-generated-container-candidate-callers-defer-drafts/README.md).
 
 ## Runner placement for pull-request code
 
