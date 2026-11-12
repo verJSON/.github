@@ -24,8 +24,9 @@ disabled, it also requires the ruleset to require `merge-admission` bound to tha
 prints a `full` receipt naming the ruleset id and enforcement. Any ruleset under another
 name, a case variant included, that requires `merge-admission` withholds both receipts,
 so neither can report the ruleset absent while another enforces the context. The
-pre-creation receipt gates creation; the full receipt gates activation and each enrollment
-edit. The variable's value is compared and never printed.
+pre-creation receipt gates creation; the full receipt gates activation only, because it
+checks no enrollment scope, so an enrollment edit also needs the C8 scope check, which is
+not implemented yet. The variable's value is compared and never printed.
 
 `scripts/assert-mergeable-head.merge-admission.test.sh` and
 `scripts/ci-gate/merge-admission.test.sh` (merge-gate) now each fail when

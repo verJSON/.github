@@ -1867,8 +1867,9 @@ class OrgRulesetConformanceTest(unittest.TestCase):
         self.assertNotIn("merge-admission-receipt=", result.stdout)
 
     def test_disabled_merge_admission_ruleset_bound_to_the_app_yields_the_full_receipt(self):
-        # C10: once the ruleset exists, even disabled, the receipt also reads its binding,
-        # and that receipt gates activation and each enrollment edit.
+        # C10: once the ruleset exists, even disabled, the receipt also reads its binding.
+        # It gates activation only: it checks no enrollment scope (C3 canary id, paused
+        # exclusion, C8 caller presence), so it must not claim to gate an enrollment edit.
         detail = merge_admission_ruleset(
             41, {"context": "merge-admission", "integration_id": 4528902}
         )
@@ -1877,7 +1878,7 @@ class OrgRulesetConformanceTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(
-            "merge-admission-receipt=full gates=activation,enrollment-edit "
+            "merge-admission-receipt=full gates=activation "
             "context=merge-admission app_id=4528902 app_id_variable=AI_REVIEW_APP_ID "
             "ruleset=merge-admission-required ruleset_id=41 enforcement=disabled",
             result.stdout.splitlines(),

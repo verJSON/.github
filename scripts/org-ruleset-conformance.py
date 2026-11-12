@@ -773,7 +773,8 @@ def merge_admission_receipt(merge_admission: dict, rulesets: list[dict], app_id_
     reported absent. Once it exists, even disabled, it must also require the context;
     its binding is producer_binding_findings' to judge, like every other ruleset's.
     The receipt is printed only when the whole audit conforms: the pre-creation one
-    gates creation, the full one gates activation and each enrollment edit.
+    gates creation, the full one gates activation only. It checks no enrollment scope,
+    so an enrollment edit also needs C8's scope check, which is not implemented yet.
     """
     context = merge_admission["context"]
     app_id = merge_admission["integration_id"]
@@ -798,7 +799,7 @@ def merge_admission_receipt(merge_admission: dict, rulesets: list[dict], app_id_
         [live] = named
         label = f"merge-admission ruleset {name} ({live['id']})"
         receipt = (
-            f"merge-admission-receipt=full gates=activation,enrollment-edit {fields} "
+            f"merge-admission-receipt=full gates=activation {fields} "
             f"ruleset_id={live['id']} enforcement={live['enforcement']}"
         )
         if not requires_context(live, context):

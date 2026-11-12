@@ -53,7 +53,7 @@ The same run also reads the organization variable the binding names
 - **Once it exists, even disabled**, the ruleset must also require
   `merge-admission`, bound to that App (unbound or 15368 fails, as above), and a
   conformant run prints
-  `merge-admission-receipt=full gates=activation,enrollment-edit … ruleset_id=<id> enforcement=<state>`.
+  `merge-admission-receipt=full gates=activation … ruleset_id=<id> enforcement=<state>`.
   Two live rulesets with that name print no receipt.
 
 In either phase, a ruleset under any other name, a case variant included, that
@@ -62,8 +62,12 @@ accepts the context in any ruleset, so otherwise the receipt could report the na
 ruleset absent while another one enforces the context.
 
 A receipt is printed only on exit `0`. The pre-creation receipt gates creating the
-ruleset; the full receipt gates activating it and each enrollment edit. Neither is
-reusable across a later change: run the audit again immediately before each step.
+ruleset; the full receipt gates activating it, and only that. It checks no enrollment
+scope: not that the scope is the C3 canary (`repository_id` 1269388380), not that
+paused repositories are excluded, and not that each enrolled repository carries the
+generated caller. An enrollment edit therefore also needs the C8 scope check, which is
+not implemented yet; until it is, no receipt gates an enrollment edit. Neither receipt
+is reusable across a later change: run the audit again immediately before each step.
 The variable's value is compared, never printed.
 
 The program has no mutation path. It calls only paginated GitHub REST GETs and

@@ -544,13 +544,16 @@ differs from it.
   `merge-admission-receipt=pre-creation gates=creation … ruleset_state=absent`. Once it
   exists, even disabled, it also fails unless the ruleset requires `merge-admission` bound to
   that id (unbound or 15368 fails), and prints
-  `merge-admission-receipt=full gates=activation,enrollment-edit … ruleset_id=<id> enforcement=<state>`.
+  `merge-admission-receipt=full gates=activation … ruleset_id=<id> enforcement=<state>`.
   Two live rulesets with that name print no receipt, and in either phase neither does a
   ruleset under any other name, a case variant included, that requires `merge-admission`:
   the binding check accepts the context in any ruleset, so the receipt could otherwise
-  report the named ruleset absent while another enforces it. A receipt prints only on exit 0, so any
-  other conformance finding withholds it. **The pre-creation receipt gates creation; the full
-  receipt gates activation and each enrollment edit.** The scheduled
+  report the named ruleset absent while another enforces it. A receipt prints only on
+  exit 0, so any other conformance finding withholds it. **The pre-creation receipt gates
+  creation; the full receipt gates activation only.** It checks no enrollment scope: not the
+  C3 canary's `repository_id` 1269388380, not the paused-repository exclusion, and not C8's
+  caller presence. An enrollment edit therefore also needs the C8 scope check, which is not
+  done (below); until it lands, no receipt gates an enrollment edit. The scheduled
   `org-ruleset-conformance.yml` run repeats the check daily with its unchanged no-argument
   command. Verified read-only against the live organization on 2026-11-12: exit 0 with the
   pre-creation receipt.
@@ -581,4 +584,7 @@ bypass.
 5. The C10 (vi) hosted-minute budget, before a generated caller lands on any private
    repository (verjson-agents and verjson-ai are private).
 6. The C9 non-bypass canary principal.
-7. The C8 audit check above, and C3-OBS (at least 20 merges across at least 3 repositories).
+7. The C8 enrollment-scope audit check above (the C3 canary's `repository_id` 1269388380,
+   the paused-repository exclusion, and generated-caller presence), which every enrollment
+   edit needs beside the full receipt, and C3-OBS (at least 20 merges across at least 3
+   repositories).
