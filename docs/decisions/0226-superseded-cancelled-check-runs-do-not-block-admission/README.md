@@ -418,3 +418,169 @@ declared `@budget=120` since this amendment, because the PR row default is 60s. 
 took 85s locally on the re-reviewed head under host load average 15, and 89-90s on
 the final head under load average 9-10, which leaves about 30s of margin. CI ran its predecessor in 51s on `main` run 38799238936. The mutation table is on the pull
 request.
+
+## Amendment (2026-11-12, PROPOSED pending ARB) — a guard-yielded caller run is no family candidate
+
+**Status of this amendment: proposed.** It changes Gate C admission, a sensitive
+class, and takes effect only on an ARB decision recorded on
+[#1905](https://github.com/verJSON/.github/issues/1905). It is not covered by
+ARB-G1-2026-11-06 C1.
+
+### Context
+
+[ADR 0255's F-1R amendment](../0255-gate-w-required-workflow-run-precondition/README.md#amendment-2026-11-06--f-1r-the-local-caller-yields-to-the-required-arm)
+gave the generated local `gate re-arm` caller a `guard` job. On a base ref that
+provably requires the organization's arm, the guard yields: `guard` concludes
+`SUCCESS`, the calling job `rearm` is `SKIPPED`, and the run concludes `success`.
+The `ai-review-arm-<PR>` group is declared by the called workflow and engages only
+when `rearm` starts, so that run never enters the group. Live canary (a) on
+verjson-git-runners#255 confirmed this: the yielding run 42278249000 finished while
+the group's holder was still in progress, and the required run 42278248583 was not
+cancelled.
+
+The run still matches the family's caller list, though, and every opened, reopened,
+or synchronize event creates one about a second after the required run. The rule
+above consults only the newest later-created successful family run and requires
+its whole suite to be `SUCCESS`. So when a label or lifecycle re-arm run was
+displaced and the required run then armed the head, the yielding run is the newest,
+its `SKIPPED` check blocks the set-aside, and Gate C exits `5` on
+`rearm / event-policy=CANCELLED`, even though Gate W passes. ARB-G1-2026-11-06 C1
+precondition 5 asked for a fixture showing the set-aside; the fixture showed this
+refusal instead ([#1905 comment of 2026-11-06](https://github.com/verJSON/.github/issues/1905)).
+
+### Decision (proposed)
+
+When the displacer is chosen (condition 3 of the 2026-10-15 family amendment), a
+**guard-yielded run** is left out of the candidates and out of the same-second
+ambiguity count. A run is guard-yielded only when all of the following hold:
+
+1. **A declared yielding caller.** Its exact `name` and `path` match a caller in
+   `CONCURRENCY_FAMILIES` that carries a `yield` declaration naming the guard job and
+   the calling job: today only `gate re-arm`, with
+   `"yield":{"guard":"guard","arm":"rearm"}`. It is already a family member by the
+   existing rules (caller identity, `referenced_workflows` naming the declaring
+   workflow, and the family event `pull_request_target`, whose workflow file comes
+   from the base branch, not the head). `scripts/ci-gate/concurrency-family-map.test.py`
+   derives `yield` from the generator: exactly one other job, which the calling job
+   `needs` and whose output its `if` reads, and neither job carries a `name`, so
+   their check runs are named by job id.
+2. **The run concluded success.** Its `status` is `completed` and its
+   `conclusion` is `success`.
+3. **Its own suite is exactly the yield.** The check runs whose `check_suite.id` is
+   the run's `check_suite_id`, from the same check inventory the displacer's
+   `SUCCESS`-only rule reads, number exactly two: one named for the guard job with
+   conclusion `SUCCESS`, and one named for the calling job with conclusion `SKIPPED`.
+
+The predicate is `guard_yielded` in `scripts/assert-mergeable-head.sh`. Everything
+else in the family rule is unchanged: the displacer must still be created strictly
+after the displaced attempt started, belong to the family, be bound to the pull
+request's head branch and repository, be the unambiguous newest of the remaining
+candidates, and report a non-empty, all-`SUCCESS` suite.
+
+**Fail-closed shapes.** Each keeps the run a candidate, so the refusal stays as it
+was before this amendment:
+
+- the guard concluded `FAILURE` or `CANCELLED`;
+- the calling job ran (it reports its own nested checks, for example
+  `rearm / event-policy` and `rearm / arm`) or is reported as anything but `SKIPPED`;
+- an extra check in the suite, or a missing one (no check at all, or a skipped
+  `rearm` with no guard);
+- the run concluded anything but `success` (it still counts toward a same-second tie);
+- another family caller, such as `AI review label re-arm`, even with `guard` and
+  `rearm` checks: the map declares no yield for it.
+
+A run with only a successful guard is not a yield either, but that suite is all
+`SUCCESS`, so the existing rule already accepts it as a displacer.
+
+**Why this cannot admit a non-success check.** Leaving a run out only removes a
+candidate; it adds no conclusion to the passing set and never vouches for a check.
+The check set aside is still only a never-started `CANCELLED` check of a
+displacement-shaped run, and only when a remaining family run created after it
+reports only `SUCCESS`. With no such run, nothing is set aside. The guard-yielded
+run's own checks stay in the inventory and are judged as before (`SUCCESS` and
+`SKIPPED` are passing conclusions already). Gate W reads only the required
+workflow's own runs and is untouched, and Gate B still reads the raw inventory.
+
+**Why the check inventory and not the job listing.** The displacer's `SUCCESS`-only
+rule already reads the candidate's suite from the check inventory, which the script
+reads, paginates, and reconciles before any gate. A `SKIPPED` conclusion is GitHub's
+own statement that the job did not run, and a job's runner and step fields would add
+nothing for a skipped job. Reading a job listing for every successful caller run
+would add an API read and a failure mode, and an unreadable check inventory already
+faults with exit `1`. A check run injected into the suite by another writer makes the
+count wrong, which keeps the run a candidate.
+
+**Why the same-second tie also excludes it.** The tie rule exists because the newest
+of two runs created in one second cannot be told. A guard-yielded run took no part
+in the group, so which of the two is newer does not matter; counting it would refuse
+the realistic case, since the yielding run is created about a second after the
+required run.
+
+### Alternatives rejected
+
+- **Exclude any family run with a `SKIPPED` calling job.** This would also leave out
+  a run whose guard failed or was cancelled, or one where the skip came from a
+  different cause. The exact two-check shape is the only provable yield.
+- **Treat any run whose suite has a `SKIPPED` check as a non-participant.** That
+  would bring back the "newer skip" the newest-only rule exists to refuse (the
+  arm itself skipped inside a run that did take part).
+- **Wait for the label or lifecycle event to be delivered again.** This is the
+  current recovery. It costs a delivery per affected head, and the yielding run
+  recurs on every head event of an enrolled base.
+
+### Consequences
+
+- The precondition 5 shape is admitted without a re-delivery, provided the required
+  run armed the head (Gate W) and reports only `SUCCESS`.
+- **Known limit, accepted:** the yield shape comes from the current map and
+  generator. A caller generated before F-1R has no guard job, so its runs are never
+  guard-yielded and keep the earlier behavior.
+- **Known limit, accepted:** the guard's check name is its job id. A future
+  generator that names the jobs fails the map test until the map follows.
+
+### Verification
+
+Fixtures in `scripts/assert-mergeable-head.required-workflow.test.sh`, in the
+section headed "F-1R: a guard-yielded local run is no family participant":
+
+| Case | Expected |
+| --- | --- |
+| precondition 5: displaced label run, required run, then a yielding local run | exit `0`, `true`; the required run is named as displacer |
+| the yielding run created in the required run's second | exit `0`, `true` |
+| guard `FAILURE` / `CANCELLED` | exit `5`, `rearm / event-policy=CANCELLED` |
+| an extra `audit` check | exit `5`, same reason |
+| rearm ran (`rearm / event-policy`, `rearm / arm` skipped); `rearm` `FAILURE` | exit `5`, same reason |
+| no check in the suite; a skipped `rearm` alone | exit `5`, same reason |
+| yield-shaped run that concluded `failure`, in the required run's second | exit `5`, same reason |
+| `AI review label re-arm` with `guard`/`rearm` checks | exit `5`, same reason |
+| required run created before the displaced run, yielding run after | exit `5`, same reason |
+
+`scripts/ci-gate/concurrency-family-map.test.py` derives the `yield` declaration.
+
+**Live shape, read on 2026-11-12.** Canary (a)'s yielding run
+verjson-git-runners 42278249000 (`gate re-arm`, `.github/workflows/gate-rearm.yml`,
+`pull_request_target`, `success`, referencing
+`Verjson/.github/.github/workflows/gate-rearm.yml@635aca97…`) has check suite
+114554870963 with exactly two check runs: `guard` `success` and `rearm` `skipped`,
+both from `github-actions`. It was created at 19:17:02Z, the same second as the
+required run 42278248583, which is why the same-second tie must leave it out.
+
+Each condition was mutated out and a suite failed for its asserted reason:
+
+| Mutation | Failing case(s) |
+| --- | --- |
+| drop the guard `SUCCESS` condition | guard `FAILURE`; guard `CANCELLED` |
+| drop the two-check count | extra `audit` check |
+| drop the calling job `SKIPPED` condition | `rearm` `FAILURE` |
+| drop the run-level `success` condition | yield-shaped run that concluded `failure` |
+| match the yield by job names for any caller | `AI review label re-arm` with `guard`/`rearm` |
+| count a guard-yielded run in the same-second tie | yielding run in the required run's second |
+| drop the exclusion from the candidates | precondition 5; same-second case |
+| replace count and both matches with an `all(...)` | no check in the suite; skipped `rearm` alone |
+| drop "created after the displaced attempt started" | required run created before the displaced run (and two existing family cases) |
+| match the calling job by name prefix, no count | extra check; rearm ran with nested checks |
+| rename the map's calling job `rearm` to `arm` | map test; precondition 5; same-second case |
+| declare a yield on the label caller | map test; label caller case |
+
+Every mutant was killed; the concurrency-family suite stayed green except where
+noted, and the script was restored byte-for-byte.

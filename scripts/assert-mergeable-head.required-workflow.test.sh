@@ -179,24 +179,96 @@ expect "the family set-aside dismissed the displaced required run's check before
 expect "a family-displaced required run never satisfies Gate W" 3 \
   "cancelled: required run 41703191233 of $GATE_PATH (ruleset $RULESET_ID) was cancelled"
 
-# --- F-1R: a guard-skipped local run (ADR 0255 amendment 2026-11-06) -----------------
-# ARB-G1-2026-11-06 precondition 5. A label re-arm run on this head is displaced while
-# pending (its one job never started), and the required run then arms the head. The
-# regenerated local `gate re-arm` caller, created after both, yields: `guard` SUCCESS,
-# `rearm` SKIPPED, run `success`. It never entered the group, but it still matches the
-# family's caller list, so it is the newest family run the ADR 0226 rule consults, and
-# that rule sets a displaced run aside only for a SUCCESS-only suite. The recorded
-# verdict is a Gate C refusal (exit 5) on the displaced check -- a liveness cost, never
-# a pass -- while Gate W is satisfied by the required run.
-reset_env
-label_refs='[{"path":"Verjson/.github/.github/workflows/gate-rearm.yml@7ec2cf81fcdeda0209c3f4b2cb8774cb28b49de5"}]'
-CHECK_RUNS_FIXTURE="$(check_runs "$(check_run 1 'CI / test' success 500),$(check_run 11 'event-policy' success 701),$(check_run 12 'arm' success 701),$(check_run 41 'rearm / event-policy' cancelled 704),$(check_run 51 'guard' success 705),$(check_run 52 'rearm' skipped 705)")"
-RUNS_FIXTURE="$(wf_runs "$(wf_run 41703200001 704 365716791 9 'AI review label re-arm' "https://api.github.com/repos/$REPO/actions/workflows/365716791" 2026-11-06T19:26:10Z cancelled "$label_refs" '{"path":".github/workflows/ai-review-label-rearm.yml"}'),$(required_run 41703200002 701 199 2026-11-06T19:26:19Z success),$(local_run 41703200003 705 114 2026-11-06T19:26:20Z success)")"
-printf '{"total_count":1,"jobs":[{"id":41,"run_id":41703200001,"run_attempt":1,"head_sha":"%s","name":"rearm / event-policy","status":"completed","conclusion":"cancelled","steps":[],"runner_id":0}]}\n' \
-  "$HEAD_SHA" >"$JOBS_DIR/41703200001-1.json"
-# Gate W runs before Gate C and would exit 3, so exit 5 also shows Gate W passed.
+# --- F-1R: a guard-yielded local run is no family participant -----------------------
+# ARB-G1-2026-11-06 C1 precondition 5 (#1905). A label re-arm run on this head is
+# displaced while pending (its one job never started), and the required run then arms
+# the head. The regenerated local `gate re-arm` caller (F-1R, ADR 0255 amendment
+# 2026-11-06), created after both, yields: `guard` SUCCESS, `rearm` SKIPPED, run
+# `success`. The arm's group is declared by the reusable workflow and engages only when
+# `rearm` starts, so that run never entered the group. ADR 0226's amendment 2026-11-12
+# therefore leaves it out of the newest-family-run selection, and the required run --
+# the newest participant, SUCCESS-only -- sets the displaced check aside. Gate W runs
+# before Gate C, so a pass also shows Gate W accepted the required run.
+f1r_label_refs='[{"path":"Verjson/.github/.github/workflows/gate-rearm.yml@7ec2cf81fcdeda0209c3f4b2cb8774cb28b49de5"}]'
+f1r_label_run() { # created
+  wf_run 41703200001 704 365716791 9 'AI review label re-arm' "https://api.github.com/repos/$REPO/actions/workflows/365716791" \
+    "$1" cancelled "$f1r_label_refs" '{"path":".github/workflows/ai-review-label-rearm.yml"}'
+}
+f1r_required_checks="$(check_run 11 'event-policy' success 701),$(check_run 12 'arm' success 701)"
+f1r_displaced_check="$(check_run 41 'rearm / event-policy' cancelled 704)"
+f1r_yield_checks="$(check_run 51 'guard' success 705),$(check_run 52 'rearm' skipped 705)"
+# f1r_env [checks of the local run's suite 705] [local-run overrides]
+f1r_env() {
+  local local_checks="${1-$f1r_yield_checks}"
+  reset_env
+  CHECK_RUNS_FIXTURE="$(check_runs "$(check_run 1 'CI / test' success 500),$f1r_required_checks,$f1r_displaced_check${local_checks:+,$local_checks}")"
+  RUNS_FIXTURE="$(wf_runs "$(f1r_label_run 2026-11-06T19:26:10Z),$(required_run 41703200002 701 199 2026-11-06T19:26:19Z success),$(local_run 41703200003 705 114 2026-11-06T19:26:20Z success "${2:-{\}}")")"
+  printf '{"total_count":1,"jobs":[{"id":41,"run_id":41703200001,"run_attempt":1,"head_sha":"%s","name":"rearm / event-policy","status":"completed","conclusion":"cancelled","steps":[],"runner_id":0}]}\n' \
+    "$HEAD_SHA" >"$JOBS_DIR/41703200001-1.json"
+}
+expect_true() { # label needle
+  if [ "$RC" -eq 0 ] && grep -q '^true$' <<<"$OUT" && grep -qF -- "$2" <<<"$OUT"; then pass "$1"
+  else fail "$1 (rc=$RC, output: $OUT)"; fi
+}
+
+f1r_env; run
+expect_true "a displaced family run is set aside by the required run when the newer local run's guard yielded" \
+  "check run 41, run 41703200001 displaced by run 41703200002 within declared concurrency family"
+
+# Event delivery creates the yielding local run about a second after the required run,
+# often within the same second. A non-participant cannot be the run that displaced
+# anything, so it does not make the newest participant ambiguous.
+f1r_env "$f1r_yield_checks" '{"created_at":"2026-11-06T19:26:19Z","run_started_at":"2026-11-06T19:26:19Z"}'; run
+expect_true "a guard-yielded local run created in the required run's second leaves that run the unambiguous newest participant" \
+  "check run 41, run 41703200001 displaced by run 41703200002 within declared concurrency family"
+
+# Fail closed: only the exact yield shape is left out. Any other local run stays the
+# newest family run, so the displaced check stays red exactly as before the amendment.
+for guard in failure cancelled; do
+  f1r_env "$(check_run 51 'guard' "$guard" 705),$(check_run 52 'rearm' skipped 705)"; run
+  expect "a local run whose guard concluded ${guard^^} is still the newest family run, so Gate C refuses" 5 \
+    "rearm / event-policy=CANCELLED"
+done
+
+f1r_env "$f1r_yield_checks,$(check_run 53 'audit' success 705)"; run
+expect "a local run reporting a job beyond guard and rearm is still the newest family run, so Gate C refuses" 5 \
+  "rearm / event-policy=CANCELLED"
+
+# A rearm that ran reports its own jobs, not a SKIPPED `rearm`; a rearm reported as
+# anything but SKIPPED ran or failed. Either way the local run took part.
+for shape in "$(check_run 51 'guard' success 705),$(check_run 52 'rearm / event-policy' success 705),$(check_run 53 'rearm / arm' skipped 705)" \
+             "$(check_run 51 'guard' success 705),$(check_run 52 'rearm' failure 705)"; do
+  f1r_env "$shape"; run
+  expect "a local run whose rearm ran ($(jq -r '[.[] | "\(.name)=\(.conclusion)"] | join(", ")' <<<"[$shape]")) is still the newest family run, so Gate C refuses" 5 \
+    "rearm / event-policy=CANCELLED"
+done
+
+# Missing evidence is never a yield: a suite the inventory reports no check of, or a
+# skipped rearm with no guard. (A guard alone is SUCCESS-only, which already displaces.)
+for shape in '' "$(check_run 52 'rearm' skipped 705)"; do
+  f1r_env "$shape"; run
+  expect "a local run whose suite reports [${shape:+$(jq -r '[.[] | .name] | join(", ")' <<<"[$shape]")}] is still the newest family run, so Gate C refuses" 5 \
+    "rearm / event-policy=CANCELLED"
+done
+
+# The run itself must have concluded success: a yield-shaped suite in a run that ended
+# any other way still ties the newest participant's second.
+f1r_env "$f1r_yield_checks" '{"conclusion":"failure","created_at":"2026-11-06T19:26:19Z","run_started_at":"2026-11-06T19:26:19Z"}'; run
+expect "a yield-shaped local run that concluded FAILURE still makes the newest participant ambiguous, so Gate C refuses" 5 \
+  "rearm / event-policy=CANCELLED"
+
+# Only the caller the family map declares as yielding: the label re-arm caller is a
+# family member with no guard, so a `guard`/`rearm`-shaped run of it stays a candidate.
+f1r_env "$f1r_yield_checks" '{"name":"AI review label re-arm","path":".github/workflows/ai-review-label-rearm.yml"}'; run
+expect "a family caller the map declares no yield for is still the newest family run, even with guard and rearm jobs" 5 \
+  "rearm / event-policy=CANCELLED"
+
+# Leaving the local run out never reaches back past the displaced run: a SUCCESS-only
+# family run created before the displaced run started displaces nothing.
+f1r_env
+RUNS_FIXTURE="$(wf_runs "$(required_run 41703200002 701 199 2026-11-06T19:26:05Z success),$(f1r_label_run 2026-11-06T19:26:10Z),$(local_run 41703200003 705 114 2026-11-06T19:26:20Z success)")"
 run
-expect "a displaced family run is not set aside by a later guard-skipped local run, so Gate C refuses" 5 \
+expect "with the local run left out, a required run created before the displaced run displaces nothing" 5 \
   "rearm / event-policy=CANCELLED"
 
 # --- supersession: only a later run of the same required workflow ---------------------

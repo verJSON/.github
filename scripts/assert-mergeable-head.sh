@@ -57,7 +57,9 @@
 # later run of ANOTHER workflow in its declared concurrency family displaced it from
 # the group's pending slot, when the newest later-created successful family run on
 # the head reports only SUCCESS and both runs carry this pull request's head branch and
-# repository (ADR 0226 amendment 2026-10-15, verjson-agents#432).
+# repository (ADR 0226 amendment 2026-10-15, verjson-agents#432). A run of a caller the
+# map declares a yield for, whose suite is exactly its guard's SUCCESS and its calling
+# job's SKIPPED, never entered the group and is no candidate (amendment 2026-11-12, #1905).
 # No conclusion is added to the passing set, and Gate B always reads the raw inventory.
 #
 # Prints "true" and exits 0 only when all five hold. Every other outcome is a
@@ -174,7 +176,9 @@ readonly MERGE_ADMISSION_APP_ID=4528902
 # this list and nothing else -- never a name resemblance -- and
 # scripts/ci-gate/concurrency-family-map.test.py derives it from the workflows and
 # generators that declare and inherit the group, failing when the two disagree.
-readonly CONCURRENCY_FAMILIES='[{"group_prefix":"ai-review-arm-","group_key":"github.event.pull_request.number","event":"pull_request_target","declared_by":{"repository":"verjson/.github","path":".github/workflows/gate-rearm.yml","name":"AI review authorization arm"},"callers":[{"name":"gate re-arm","path":".github/workflows/gate-rearm.yml"},{"name":"AI review label re-arm","path":".github/workflows/ai-review-label-rearm.yml"},{"name":"AI review lifecycle re-arm","path":".github/workflows/ai-review-lifecycle-rearm.yml"}]}]'
+# A caller's `yield` names the guard job that gates its calling job and that calling
+# job (ADR 0226 amendment 2026-11-12); the same test derives it from the generator.
+readonly CONCURRENCY_FAMILIES='[{"group_prefix":"ai-review-arm-","group_key":"github.event.pull_request.number","event":"pull_request_target","declared_by":{"repository":"verjson/.github","path":".github/workflows/gate-rearm.yml","name":"AI review authorization arm"},"callers":[{"name":"gate re-arm","path":".github/workflows/gate-rearm.yml","yield":{"guard":"guard","arm":"rearm"}},{"name":"AI review label re-arm","path":".github/workflows/ai-review-label-rearm.yml"},{"name":"AI review lifecycle re-arm","path":".github/workflows/ai-review-lifecycle-rearm.yml"}]}]'
 # The recovery for each Gate W refusal reason, keyed by the label the refusal opens
 # with. docs/arm-recovery-runbook.md's "Recovery by refusal reason" table is the source
 # of truth; scripts/assert-mergeable-head.required-workflow.test.sh fails when the two
@@ -550,6 +554,25 @@ if [ "$nonpassing_count" -gt 0 ]; then
           and all($own_jobs[];
                   .status == "completed" and .conclusion == "cancelled"
                   and (.steps | length) == 0 and (.runner_id == null or .runner_id == 0));
+    # ADR 0226 amendment 2026-11-12 (#1905). A run of the caller the family map declares
+    # a yield for (F-1R, ADR 0255 amendment 2026-11-06) whose guard yielded: the run
+    # concluded success and its own suite is exactly two check runs, the guard'"'"'s
+    # SUCCESS and the calling job'"'"'s SKIPPED. The group is declared by the called
+    # workflow and engages only when the calling job starts, so this run never entered
+    # it: it displaced nothing and says nothing about the arm, and is no candidate for
+    # the newest family run. Any other shape -- a failed or cancelled guard, a calling
+    # job that ran, an extra or missing check, another caller -- stays a candidate.
+    # Leaving a run out only narrows the candidates; the newest one left must still
+    # pass every condition below, so no non-success check is ever admitted.
+    def guard_yielded($f):
+      . as $run
+      | [ $f.callers[] | select(.name == $run.name and .path == $run.path) | .yield | objects ] as $yield
+      | [ $all[] | select(.kind == "check_run" and .suite_id == $run.check_suite_id) ] as $suite
+      | ($yield | length) == 1
+        and .status == "completed" and .conclusion == "success"
+        and ($suite | length) == 2
+        and any($suite[]; .name == $yield[0].guard and .conclusion == "SUCCESS")
+        and any($suite[]; .name == $yield[0].arm and .conclusion == "SKIPPED");
     # The newest later-created successful run of the cancelled run'"'"'s declared
     # concurrency family on this head, or null.
     def displacer($o; $check_id):
@@ -559,13 +582,15 @@ if [ "$nonpassing_count" -gt 0 ]; then
         | [ $runs[]
             | select(.status == "completed" and .conclusion == "success"
                      and (family_index) == $fam and bound_to_pr
-                     and (.created_at | fromdateiso8601) > $start) ]
+                     and (.created_at | fromdateiso8601) > $start
+                     and (guard_yielded($families[$fam]) | not)) ]
         | max_by(.created_at | fromdateiso8601)
         | if . == null then null
           # created_at is second-granular: when any other family run on this head shares
           # the newest displacer'"'"'s second, which is newest cannot be told.
           elif (.created_at | epoch) as $newest
-               | ([ $runs[] | select((family_index) == $fam and (.created_at | epoch) == $newest) ]
+               | ([ $runs[] | select((family_index) == $fam and (.created_at | epoch) == $newest
+                                     and (guard_yielded($families[$fam]) | not)) ]
                   | length) != 1
             then null
           else .check_suite_id as $ssid
