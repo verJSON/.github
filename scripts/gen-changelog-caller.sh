@@ -1065,20 +1065,34 @@ release_head_binding_step=$(cat <<'EOF'
       - name: Bind a proposer dispatch to its exact derived head
         env:
           EXPECTED_HEAD: ${{ inputs.expected_head }}
+          INPUT_VERSION: ${{ inputs.version }}
           SELECTOR_DIGEST: ${{ inputs.selector_digest }}
         run: |
-          if [ -z "$EXPECTED_HEAD" ] && [ -z "$SELECTOR_DIGEST" ]; then
-            echo "Manual dispatch has no proposer receipt to bind."
+          # A blank version is derived from the dispatched tree, so the operator
+          # must state that exact commit (#1939); an explicit version keeps the
+          # proposer receipt both-or-neither.
+          if [ -z "$INPUT_VERSION" ]; then
+            if [[ ! "$EXPECTED_HEAD" =~ ^[0123456789abcdef]{40}$ ]]; then
+              echo "::error::A blank version derives the release from the dispatched commit, so expected_head must name that exact default-branch commit as a canonical lowercase 40-hex SHA."
+              exit 1
+            fi
+            if [ -n "$SELECTOR_DIGEST" ] && [[ ! "$SELECTOR_DIGEST" =~ ^[0123456789abcdef]{64}$ ]]; then
+              echo "::error::selector_digest must be empty or a canonical lowercase 64-hex digest."
+              exit 1
+            fi
+          elif [ -z "$EXPECTED_HEAD" ] && [ -z "$SELECTOR_DIGEST" ]; then
+            echo "Explicit-version dispatch has no proposer receipt to bind."
+            exit 0
           elif [[ ! "$EXPECTED_HEAD" =~ ^[0123456789abcdef]{40}$ ]] ||
             [[ ! "$SELECTOR_DIGEST" =~ ^[0123456789abcdef]{64}$ ]]; then
             echo "::error::expected_head and selector_digest must either both be empty or both be canonical lowercase digests."
             exit 1
-          elif [ "$GITHUB_SHA" != "$EXPECTED_HEAD" ]; then
-            echo "::error::The default branch advanced from derived head $EXPECTED_HEAD to dispatch head $GITHUB_SHA. Derive the proposal again; this run will not verify, snapshot, or publish."
-            exit 1
-          else
-            echo "Dispatch is bound to derived head $EXPECTED_HEAD and selector $SELECTOR_DIGEST."
           fi
+          if [ "$GITHUB_SHA" != "$EXPECTED_HEAD" ]; then
+            echo "::error::The default branch moved from stated head $EXPECTED_HEAD to dispatch head $GITHUB_SHA. Derive the release again at the current head; this run will not verify, snapshot, or publish."
+            exit 1
+          fi
+          echo "Dispatch is bound to head $EXPECTED_HEAD and selector ${SELECTOR_DIGEST:-none}."
 EOF
 )
 
@@ -1306,7 +1320,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Optional exact SemVer tag; blank derives the next version from selected fragments
+        description: Optional exact SemVer tag; blank derives the next version from selected fragments at expected_head
         required: false
         type: string
         default: ''
@@ -1316,12 +1330,12 @@ on:
         type: string
         default: ${release_default_prefix_yaml}
       expected_head:
-        description: Optional exact default-branch head derived by release-propose
+        description: Exact default-branch commit this dispatch authorizes; required when version is blank
         required: false
         type: string
         default: ''
       selector_digest:
-        description: Optional canonical selection digest derived by release-propose
+        description: Canonical selection digest; optional for a blank version, otherwise paired with expected_head
         required: false
         type: string
         default: ''
@@ -1926,7 +1940,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Optional exact SemVer tag; blank derives the next version from selected fragments
+        description: Optional exact SemVer tag; blank derives the next version from selected fragments at expected_head
         required: false
         type: string
         default: ''
@@ -1936,12 +1950,12 @@ on:
         type: string
         default: ${release_default_prefix_yaml}
       expected_head:
-        description: Optional exact default-branch head derived by release-propose
+        description: Exact default-branch commit this dispatch authorizes; required when version is blank
         required: false
         type: string
         default: ''
       selector_digest:
-        description: Optional canonical selection digest derived by release-propose
+        description: Canonical selection digest; optional for a blank version, otherwise paired with expected_head
         required: false
         type: string
         default: ''
@@ -2341,7 +2355,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Optional exact SemVer tag; blank derives the next version from selected fragments
+        description: Optional exact SemVer tag; blank derives the next version from selected fragments at expected_head
         required: false
         type: string
         default: ''
@@ -2351,12 +2365,12 @@ on:
         type: string
         default: ${release_default_prefix_yaml}
       expected_head:
-        description: Optional exact default-branch head derived by release-propose
+        description: Exact default-branch commit this dispatch authorizes; required when version is blank
         required: false
         type: string
         default: ''
       selector_digest:
-        description: Optional canonical selection digest derived by release-propose
+        description: Canonical selection digest; optional for a blank version, otherwise paired with expected_head
         required: false
         type: string
         default: ''
@@ -4049,7 +4063,7 @@ EXPECTED_TRIGGER_BLOCK = (
     (2, "workflow_dispatch:"),
     (4, "inputs:"),
     (6, "version:"),
-    (8, "description: Optional exact SemVer tag; blank derives the next version from selected fragments"),
+    (8, "description: Optional exact SemVer tag; blank derives the next version from selected fragments at expected_head"),
     (8, "required: false"),
     (8, "type: string"),
     (8, "default: ''"),
@@ -4059,12 +4073,12 @@ EXPECTED_TRIGGER_BLOCK = (
     (8, "type: string"),
     (8, f"default: {release_default_prefix_yaml}"),
     (6, "expected_head:"),
-    (8, "description: Optional exact default-branch head derived by release-propose"),
+    (8, "description: Exact default-branch commit this dispatch authorizes; required when version is blank"),
     (8, "required: false"),
     (8, "type: string"),
     (8, "default: ''"),
     (6, "selector_digest:"),
-    (8, "description: Optional canonical selection digest derived by release-propose"),
+    (8, "description: Canonical selection digest; optional for a blank version, otherwise paired with expected_head"),
     (8, "required: false"),
     (8, "type: string"),
     (8, "default: ''"),
@@ -4708,9 +4722,9 @@ APPROVED_RELEASE_VERIFICATION_RUNTIME_SCRIPT_SHA256 = {
     "release-snapshot": "0caf167486937a2def16a5223fcb64b1a4a737447d424c83a891c2aac4e3b3a2",
 }
 APPROVED_RELEASE_PREACQUISITION_STEPS_SHA256 = {
-    "release-node": "3040af91a675c5d82c4704bed128dcb114876567a8cb88304789df3bea330cd2",
-    "release-artifact": "3eea02355f661dad891de16344dd8bf23126ccf312392cf1246df553a33b2dc0",
-    "release-snapshot": "0ad23fabe300c3f06f9c5d9c98743af351f6052f940cae64bc5ad27bdb761539",
+    "release-node": "639d473d29fff274a0ff6e439df02fb6d8e3f76baa0531e77197f40a56aa65a7",
+    "release-artifact": "6c7bf75144cf3cefe489a23624eab40367c85c93537db5b228eee60c8a8268c0",
+    "release-snapshot": "7eceae921350cc602532030f3b8ff7a28fea0397d292aa2644415b0af9ddf5be",
 }
 EXPECTED_RELEASE_STATE_ENV = {
     "VERSION": "${{ steps.release-version.outputs.version }}",

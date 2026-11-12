@@ -517,7 +517,7 @@ grep -qF '# Legacy compatibility input; all Node release jobs use fresh ubuntu-2
 assert_optional_release_version() {
   local mode="$1" workflow="$2" version_input
   version_input="$(sed -n '/^      version:$/,/^      prefix:$/p' <<<"$workflow" | sed '$d')"
-  grep -qF 'description: Optional exact SemVer tag; blank derives the next version from selected fragments' <<<"$version_input" \
+  grep -qF 'description: Optional exact SemVer tag; blank derives the next version from selected fragments at expected_head' <<<"$version_input" \
     && grep -qF 'required: false' <<<"$version_input" \
     && grep -qF "default: ''" <<<"$version_input" \
     && pass "$mode supports a manually dispatched derived version" \
@@ -530,7 +530,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Optional exact SemVer tag; blank derives the next version from selected fragments
+        description: Optional exact SemVer tag; blank derives the next version from selected fragments at expected_head
         required: false
         type: string
         default: ''
@@ -540,12 +540,12 @@ on:
         type: string
         default: 'schema-v'
       expected_head:
-        description: Optional exact default-branch head derived by release-propose
+        description: Exact default-branch commit this dispatch authorizes; required when version is blank
         required: false
         type: string
         default: ''
       selector_digest:
-        description: Optional canonical selection digest derived by release-propose
+        description: Canonical selection digest; optional for a blank version, otherwise paired with expected_head
         required: false
         type: string
         default: ''

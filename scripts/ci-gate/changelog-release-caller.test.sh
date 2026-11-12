@@ -768,24 +768,43 @@ done
 
 expected_head="$(printf 'a%.0s' {1..40})"
 selector_digest="$(printf 'b%.0s' {1..64})"
-if run_guard "$head_guard" EXPECTED_HEAD= SELECTOR_DIGEST= GITHUB_SHA="$(printf 'c%.0s' {1..40})"; then
+if run_guard "$head_guard" INPUT_VERSION=v1.2.3 EXPECTED_HEAD= SELECTOR_DIGEST= GITHUB_SHA="$(printf 'c%.0s' {1..40})"; then
   pass "the exact-head guard preserves explicit manual dispatch"
 else
   fail "the exact-head guard rejected a manual dispatch: $(cat "$tmp/guard.out")"
 fi
-if run_guard "$head_guard" "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=$selector_digest" "GITHUB_SHA=$expected_head"; then
+if run_guard "$head_guard" INPUT_VERSION=v1.2.3 "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=$selector_digest" "GITHUB_SHA=$expected_head"; then
   pass "the exact-head guard accepts the derived default-branch head"
 else
   fail "the exact-head guard rejected its derived head: $(cat "$tmp/guard.out")"
 fi
 expect_guard_rejection "the exact-head guard rejects the mutable-branch TOCTOU race before verification" \
   "the exact-head guard admitted a newer branch head after proposer derivation" \
-  1 "::error::The default branch advanced from derived head $expected_head to dispatch head $(printf 'd%.0s' {1..40})." \
-  "$head_guard" "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=$selector_digest" "GITHUB_SHA=$(printf 'd%.0s' {1..40})"
+  1 "::error::The default branch moved from stated head $expected_head to dispatch head $(printf 'd%.0s' {1..40})." \
+  "$head_guard" INPUT_VERSION=v1.2.3 "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=$selector_digest" "GITHUB_SHA=$(printf 'd%.0s' {1..40})"
 expect_guard_rejection "the exact-head guard rejects partial proposer receipts" \
   "the exact-head guard admitted a partial proposer receipt" \
   1 "::error::expected_head and selector_digest must either both be empty or both be canonical lowercase digests." \
-  "$head_guard" "EXPECTED_HEAD=$expected_head" SELECTOR_DIGEST= "GITHUB_SHA=$expected_head"
+  "$head_guard" INPUT_VERSION=v1.2.3 "EXPECTED_HEAD=$expected_head" SELECTOR_DIGEST= "GITHUB_SHA=$expected_head"
+# A blank version derives its release from the dispatched tree, so the operator
+# must state the exact default-branch commit the derivation authorizes (#1939).
+expect_guard_rejection "the exact-head guard requires a stated head for a blank version" \
+  "the exact-head guard admitted a blank version without a stated head" \
+  1 "::error::A blank version derives the release from the dispatched commit, so expected_head must name that exact default-branch commit as a canonical lowercase 40-hex SHA." \
+  "$head_guard" INPUT_VERSION= EXPECTED_HEAD= SELECTOR_DIGEST= "GITHUB_SHA=$expected_head"
+if run_guard "$head_guard" INPUT_VERSION= "EXPECTED_HEAD=$expected_head" SELECTOR_DIGEST= "GITHUB_SHA=$expected_head"; then
+  pass "the exact-head guard accepts a blank version bound to its stated head without a selector digest"
+else
+  fail "the exact-head guard rejected a blank version bound to its stated head: $(cat "$tmp/guard.out")"
+fi
+expect_guard_rejection "the exact-head guard rejects a malformed selector digest on a blank version" \
+  "the exact-head guard admitted a malformed selector digest on a blank version" \
+  1 "::error::selector_digest must be empty or a canonical lowercase 64-hex digest." \
+  "$head_guard" INPUT_VERSION= "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=${selector_digest^^}" "GITHUB_SHA=$expected_head"
+expect_guard_rejection "the exact-head guard rejects a blank version once the branch moved from its stated head" \
+  "the exact-head guard admitted a blank version after the branch moved from its stated head" \
+  1 "::error::The default branch moved from stated head $expected_head to dispatch head $(printf 'd%.0s' {1..40})." \
+  "$head_guard" INPUT_VERSION= "EXPECTED_HEAD=$expected_head" SELECTOR_DIGEST= "GITHUB_SHA=$(printf 'd%.0s' {1..40})"
 # release-artifact and release-snapshot each emit their own copy of the guard, so
 # each copy is executed rather than matched by its step text (#1995).
 for mode_args in "release-artifact --build-runner ubuntu-24.04" release-snapshot; do
@@ -796,9 +815,9 @@ for mode_args in "release-artifact --build-runner ubuntu-24.04" release-snapshot
   if ! bash "$gen" "$mode" "$sha" "${mode_argv[@]:1}" >"$mode_release" 2>"$tmp/gen.err" \
     || ! release="$mode_release" extract_run verify "exact derived head" >"$mode_guard" 2>"$tmp/extract.err"; then
     fail "cannot extract the $mode exact-head guard: $(cat "$tmp/gen.err" "$tmp/extract.err" 2>/dev/null)"
-  elif run_guard "$mode_guard" "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=$selector_digest" "GITHUB_SHA=$(printf 'd%.0s' {1..40})"; then
+  elif run_guard "$mode_guard" INPUT_VERSION=v1.2.3 "EXPECTED_HEAD=$expected_head" "SELECTOR_DIGEST=$selector_digest" "GITHUB_SHA=$(printf 'd%.0s' {1..40})"; then
     fail "the $mode exact-head guard admitted a newer branch head after proposer derivation"
-  elif grep -qF "::error::The default branch advanced from derived head $expected_head" "$tmp/guard.out"; then
+  elif grep -qF "::error::The default branch moved from stated head $expected_head" "$tmp/guard.out"; then
     pass "the $mode exact-head guard rejects the mutable-branch TOCTOU race before verification"
   else
     fail "the $mode exact-head guard failed for another reason: $(cat "$tmp/guard.out")"

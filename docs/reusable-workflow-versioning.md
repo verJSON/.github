@@ -79,7 +79,10 @@ does not rewrite their workflow files.
 1. Land the change on `main` after review and green CI.
 2. Select the intended fragments and dispatch the pinned `.github/workflows/release.yml`.
    Leave version blank to derive it from their highest impact, or supply an exact
-   `vX.Y.Z` version for validation. A new namespace needs an explicit initial version.
+   `vX.Y.Z` version for validation. A blank version must state the exact `main`
+   commit it authorizes as `expected_head`; preview the derived version offline
+   with the pinned `release-plan` at that commit first. If `main` has moved, the
+   run fails before checkout. A new namespace needs an explicit initial version.
 3. Inspect the resolved version and selection in the release plan. The verification
    and publication jobs use the same
    dispatch commit. A concurrent change to `main` makes publication fail closed;

@@ -369,6 +369,14 @@ valid version. Enter a version only when bootstrapping a namespace or when an
 explicit version is required; it is checked by the same impact and namespace
 rules before any snapshot or publication occurs.
 
+A blank version must also state, in `expected_head`, the exact default-branch
+commit the dispatch authorizes. The derived version is a deterministic function
+of that commit, the stated `prefix`, `component`, and `fragments`, and the
+immutable release history, so run the pinned `release-plan` against that commit
+to preview it before dispatching. The run fails before checkout when
+`expected_head` is missing or the default branch has moved from it.
+`selector_digest` is optional for a blank version and verified when supplied.
+
 The verify job's summary is the review surface: it records the previous
 release, resolved version, highest selected impact and rationale, component,
 selection digest, exact source commit, selected fragment names, and assembled
