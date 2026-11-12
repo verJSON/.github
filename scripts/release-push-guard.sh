@@ -26,7 +26,7 @@ if [ "$(git cat-file -t "$expected")" != commit ] || [ "$(git cat-file -t "$rele
   echo 'dispatch and release IDs must identify commits' >&2
   exit 1
 fi
-mapfile -t parents < <(git cat-file -p "$release" | awk '/^$/ {exit} /^parent / {print $2}')
+mapfile -t parents < <(git cat-file -p "$release" | awk 'body {next} /^$/ {body = 1; next} /^parent / {print $2}')
 if [ "${#parents[@]}" -ne 1 ] || [ "${parents[0]}" != "$expected" ]; then
   echo 'release commit must have the dispatch commit as its sole parent' >&2
   exit 1
