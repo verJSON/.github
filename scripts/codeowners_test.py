@@ -95,22 +95,45 @@ class CodeownersTests(unittest.TestCase):
         self.assertIn('EXPECTED_CODEOWNERS_ORG="Acme"', contract)
         self.assertIn('EXPECTED_CODEOWNERS_TEAM="platform"', contract)
         self.assertIn('contract-test ' + pin + ' --codeowners-org Acme --codeowners-team platform', contract)
-        self.assertNotEqual(hashlib.sha256(artifact + b'* @Acme/other\n').hexdigest(), hashlib.sha256(artifact).hexdigest())
         self.assertIsNotNone(re.search(r'\[ ! -L "\$root/\.github" \]', contract))
 
-    def test_owner_parameters_reject_unsafe_and_incomplete_values(self):
+    OWNER_OPTION_REFUSAL = (b'gen-changelog-caller.sh: --codeowners-org and --codeowners-team require valid '
+                            b'GitHub names and are accepted together only for codeowners or contract-test\n')
+
+    def generate(self, mode, options):
         pin = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
-        generator = ['bash', str(ROOT / 'scripts/gen-changelog-caller.sh')]
+        return subprocess.run(['bash', str(ROOT / 'scripts/gen-changelog-caller.sh'), mode, pin] + options,
+                              capture_output=True)
+
+    def test_owner_parameters_reject_unsafe_and_incomplete_values(self):
         for mode in ('codeowners', 'contract-test'):
             for options in (['--codeowners-org', 'Acme'], ['--codeowners-team', 'devs'],
                             ['--codeowners-org', '', '--codeowners-team', 'devs'],
                             ['--codeowners-org', 'Acme\n* @other/owners', '--codeowners-team', 'devs'],
-                            ['--codeowners-org', 'Acme', '--codeowners-team', 'devs/other'],
+                            ['--codeowners-org', 'Acme', '--codeowners-team', 'devs/other']):
+                with self.subTest(mode=mode, options=options):
+                    result = self.generate(mode, options)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertEqual(result.stdout, b'')
+                    self.assertEqual(result.stderr, self.OWNER_OPTION_REFUSAL)
+
+    def test_a_repeated_owner_parameter_is_a_usage_error(self):
+        for mode in ('codeowners', 'contract-test'):
+            for options in (['--codeowners-org', 'Acme', '--codeowners-org', 'Other', '--codeowners-team', 'devs'],
                             ['--codeowners-org', 'Acme', '--codeowners-team', 'devs', '--codeowners-team', 'other']):
                 with self.subTest(mode=mode, options=options):
-                    result = subprocess.run(generator + [mode, pin] + options, capture_output=True)
-                    self.assertNotEqual(result.returncode, 0)
+                    result = self.generate(mode, options)
+                    self.assertEqual(result.returncode, 2, result.stderr)
                     self.assertEqual(result.stdout, b'')
+                    self.assertTrue(result.stderr.startswith(b'usage: gen-changelog-caller.sh '), result.stderr)
+
+    def test_owner_parameters_are_refused_outside_the_owner_modes(self):
+        for mode in ('workflow', 'pr-gate'):
+            with self.subTest(mode=mode):
+                result = self.generate(mode, ['--codeowners-org', 'Acme', '--codeowners-team', 'devs'])
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, b'')
+                self.assertEqual(result.stderr, self.OWNER_OPTION_REFUSAL)
 
     def test_competing_fallback_locations_fail(self):
         for path in ('CODEOWNERS', 'docs/CODEOWNERS'):

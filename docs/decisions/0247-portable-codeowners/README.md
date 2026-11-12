@@ -16,4 +16,4 @@ The supplied team is an operator selection, not proof that GitHub recognizes it 
 
 ## Consequences
 
-Adopters must generate the owner file and contract test with identical parameters and review ownership changes. Existing default adopters require no change. This does not change live rulesets or permissions.
+Adopters must generate the owner file and contract test with identical parameters and review ownership changes. A default adopter, generated without owner options, requires no change only while its repository is owned by verJSON: in GitHub Actions its contract test now fails for any other repository owner, which must regenerate both files with `--codeowners-org` and `--codeowners-team`. On 2026-11-12 every repository carrying the generated CODEOWNERS header, `EXPECTED_CODEOWNERS_SHA256`, or a `gen-changelog-caller.sh contract-test` invocation that GitHub code search returned across every organization visible to the maintainer was owned by verJSON, so no current adopter is affected. This does not change live rulesets or permissions.
