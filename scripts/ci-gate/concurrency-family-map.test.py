@@ -168,6 +168,14 @@ class ConcurrencyFamilyMapTests(unittest.TestCase):
                         for named in (guard, job):
                             self.assertNotIn("name", named,
                                              f"{source} must leave its yield jobs named by their ids, as their checks are")
+                        # The yield premise (ARB-2059-2026-11-12 C3): the group engages
+                        # only when the calling job starts, so a skipped calling job
+                        # displaces nothing. A group held by the caller's workflow or by
+                        # the calling job itself would engage before the skip.
+                        self.assertIsNone(own_group,
+                                          f"{source} must declare no workflow-level group when it yields")
+                        self.assertNotIn("concurrency", job,
+                                         f"{source} must hold no group on its calling job when it yields")
                         entry["yield"] = {"guard": guard_id, "arm": arm_id}
                     key = (entry["name"], entry["path"])
                     self.assertEqual(callers.get(key, entry), entry, f"{source} disagrees with another source on {key}")
