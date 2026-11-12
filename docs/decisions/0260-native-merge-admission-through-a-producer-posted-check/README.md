@@ -32,9 +32,18 @@ The adopted action items, distilled:
    SKIPPED-passes semantics. This answers ADR 0257 Decision 3: on an enrolled repository
    the check does veto the native path for every principal that cannot bypass the
    ruleset.
-2. **Ruleset.** A new organization ruleset, scoped to `verjson-core-checks=enforced`
-   repositories that hold the AI review App key, requires the context `merge-admission`
-   bound to the AI review App's integration id. The conformance policy and the
+2. **Ruleset.** A new organization ruleset, `merge-admission-required`, requires the
+   context `merge-admission` bound to the AI review App's integration id. *Scope amended
+   2026-11-12 (ARB-2031-2026-11-12 C8, C3-CANARY; see the amendment below):* its first
+   scope is this repository alone, by `repository_id` 1269388380. Wider enrollment is by an
+   explicit enrollment property (for example `verjson-merge-admission=enforced`), set on a
+   repository only after its generated caller and trigger have landed and a bound-App
+   `merge-admission` SUCCESS has been observed there. The ruleset excludes
+   `verjson-actions-state=paused` repositories (ADR 0252), its ref set matches ruleset
+   20722935's or the record states why not, and the audit fails a ruleset whose scope
+   includes a repository without the generated caller. This replaces the original scope,
+   `verjson-core-checks=enforced` repositories that hold the AI review App key, which would
+   enroll a repository before its caller exists. The conformance policy and the
    org-ruleset-conformance audit are amended to allow exactly this per-context binding
    (`merge-admission` to the App id) and to fail when that context is bound to 15368 or
    unbound; every other required context stays bound to 15368 (ADR 0190).
@@ -59,7 +68,12 @@ The adopted action items, distilled:
    in-progress run is the first action of every evaluation; the canaries measure the
    residual window between a same-head change and that run, and this ADR states it.
 6. **Stated limits.** Ruleset bypass actors are not held: the Renovate App (renovate-config
-   `default.json`) and administrators with bypass. Native merges gain no human-review
+   `default.json`) and administrators with bypass. *Amended 2026-11-12
+   (ARB-2031-2026-11-12 C6):* the bypass list mirrors ruleset 20722935 (OrganizationAdmin,
+   4693283, 4583107, and Renovate 2740, all `always`) and never includes the AI review App
+   4528902. **Renovate pull requests therefore land on enrolled repositories without the
+   exact-head ADR 0202 review receipt.** That is a named carve-out from #2031's outcome, not
+   an oversight, and it is re-decided at the #1964 switch. Native merges gain no human-review
    requirement (GH-03, out of scope). The App key sits in each consumer's `ai-review-app`
    environment, so the trust boundary is the repository's main branch plus that
    environment's protection, the same as the authorization arm.
@@ -88,7 +102,8 @@ Binding preconditions from the dissents:
   must accept that window explicitly. Canaries try to merge, through the merge button and
   through already-enabled auto-merge, throughout the interval before the superseding run
   exists, and report any merge that gets through as a limitation. If full merge-time
-  parity is required, rollout stays blocked.
+  parity is required, rollout stays blocked. *Accepted by the owner on 2026-11-12, scoped
+  and time-boxed; see the C1 amendment below.*
 - **Serialization and completion triggers.** Evaluations are serialized per head (a
   producer concurrency group without cancel-in-progress), or an out-of-order-completion
   negative canary is added. A completion trigger covers checks from non-Actions Apps, or
@@ -103,7 +118,8 @@ Gate R (ADR 0257) is part of the assertion that the producer runs, so once the i
 ruleset is enabled on a repository, a native merge of a head without a valid exact-head
 ADR 0202 receipt on a promotion-enabled repository is held: the producer leaves
 `merge-admission` in progress on Gate R's exit 6, exactly as on any other refusal. That
-is the outcome #2031 requested, for every non-bypass principal. It takes effect only with
+is the outcome #2031 requested, for every non-bypass principal. Renovate is a bypass actor,
+so its pull requests are outside it (Decision 6, amended 2026-11-12). It takes effect only with
 the rollout steps below; this change performs none of them.
 
 ## Implementation in this change
@@ -460,3 +476,106 @@ events and `sweep` for every other completed run, the schedule, and a manual dis
 Dropping the concurrency, setting `cancel-in-progress: true`, keying on `github.sha`, or
 keying on `head_sha` for every event fails it, and so does narrowing the planner's event
 list alone.
+
+## 2026-11-12 amendment: ARB-2031-2026-11-12 pre-enrollment contract
+
+The architecture review board decided the item-2 rollout on 2026-11-12
+([decision record](https://github.com/verJSON/.github/issues/2031#issuecomment-6831855094)):
+12 of 13 candidates adopted 3-0, C10 escalated to the owner. The owner's acts followed
+([owner acts](https://github.com/verJSON/.github/issues/2031#issuecomment-6831955600)). The
+owner and agents share one account, so each owner act is recorded as **user-attested**.
+This amendment records them and ships the policy and audit part of the C10 bundle. It
+creates, edits, and enables no ruleset, and changes no organization property or variable.
+
+**C1, precondition (b) accepted (user-attested).** The owner explicitly accepts the
+stale-SUCCESS window, scoped to two same-head classes plus the outage window:
+
+- *Trigger-bounded:* a review dismissed or edited, a base retarget, a later-failing
+  GitHub Actions check from a listed workflow, and a pull request opened or synchronized to
+  a commit that already carries a `merge-admission` SUCCESS, including a push or force-push
+  back to an earlier admitted commit. The window lasts until the superseding in-progress run
+  exists. **Ceiling: 10 minutes** from the change to that run.
+- *Sweep-bounded:* a permission downgrade, a ruleset edit, and a later-failing check from a
+  non-Actions App. The window lasts until the next sweep (15-minute target, best-effort, as
+  stated above) plus run latency. **Ceiling: 30 minutes.**
+- *Outage window:* unbounded in principle, bounded in practice by the C10 outage alert,
+  which does not exist yet (below).
+
+A push to a commit that carries no `merge-admission` check run is outside the window: the
+required context is absent and blocks natively. The ceilings are this amendment's reading of
+the bounds this ADR already states (one trigger-to-run latency; one sweep interval plus an
+evaluation); the owner's act accepted that each class has a ceiling, not these numbers, so
+the owner may re-decide them before the canary. If a C3 canary measures a window above its
+class ceiling, or a canary merge gets through inside a window, the acceptance lapses for
+wider enrollment (C8) and the owner re-decides from the measurements; the canary ruleset may
+stay active meanwhile. The acceptance lapses at the #1964 switch and must be re-decided
+then.
+
+**C8, Decision 2's scope.** Amended inline above: the canary first (`repository_id`
+1269388380), then an explicit enrollment property set only after a repository's caller,
+trigger, and a bound-App SUCCESS exist, with paused repositories excluded. The audit check
+that fails a scope including a repository without the generated caller is not implemented
+yet (below).
+
+**C6, Decision 6's Renovate carve-out.** Amended inline above. The bypass contract is in
+`config/org-ruleset-conformance-policy.json` as the name-keyed (`ruleset_id: null`)
+`merge-admission-required` entry, before the ruleset exists, and is to be pinned to the ruleset
+id after creation. `scripts/org-ruleset-conformance.py` refuses a policy without that
+contract or with the AI review App in it, and fails a live ruleset whose bypass list
+differs from it.
+
+**C10, as the owner adopted it (fable's two-phase correction, verbatim semantics).**
+
+- *(i) policy and audit.* The policy's `merge_admission_binding` binds `merge-admission` to
+  4528902 beside `required_check_producer_app_id` 15368. The audit fails a `merge-admission`
+  context that is unbound or bound to any other App, 15368 included, keeps every other
+  context on 15368, and refuses a policy that binds `merge-admission` to 15368.
+- *(i)(a) App-id equality.* `scripts/assert-mergeable-head.merge-admission.test.sh` and
+  `scripts/ci-gate/merge-admission.test.sh` (merge-gate) each fail when
+  `MERGE_ADMISSION_APP_ID` in `scripts/assert-mergeable-head.sh` or
+  `scripts/ci-gate/merge-admission.sh` differs from the policy's binding.
+- *(i)(b) two-phase live audit.* It lives in `scripts/org-ruleset-conformance.py` rather than
+  `scripts/ai-review-required-workflow-audit.py`: the conformance audit already owns the
+  policy that holds the binding and the name-keyed contract, and reads every organization
+  ruleset, while the arm audit's verdict is adjudicated against recorded findings
+  (`config/audit-expected-findings.json`), which would let a receipt pass beside a quiet
+  finding. Before the ruleset exists, the audit fails unless the organization variable
+  `AI_REVIEW_APP_ID` equals the binding, and reports the ruleset as absent:
+  `merge-admission-receipt=pre-creation gates=creation … ruleset_state=absent`. Once it
+  exists, even disabled, it also fails unless the ruleset requires `merge-admission` bound to
+  that id (unbound or 15368 fails), and prints
+  `merge-admission-receipt=full gates=activation,enrollment-edit … ruleset_id=<id> enforcement=<state>`.
+  Two live rulesets with that name print no receipt. A receipt prints only on exit 0, so any
+  other conformance finding withholds it. **The pre-creation receipt gates creation; the full
+  receipt gates activation and each enrollment edit.** The scheduled
+  `org-ruleset-conformance.yml` run repeats the check daily with its unchanged no-argument
+  command. Verified read-only against the live organization on 2026-11-12: exit 0 with the
+  pre-creation receipt.
+- *Numbering.* Item (v), the runbook, moves before item (vi), the hosted-minute budget.
+
+**C11, ordering.** Nothing removes the OrganizationAdmin bypass from the item-2 ruleset or
+the core rulesets before #1964's C4 criterion is met. The native edge #1945 blocked-by #1964
+now exists (read through the issue-dependencies API on 2026-11-12). #1956 is a draft pull
+request and carries no edge; its bypass-retiring work is tracked under #1945. Replacing the
+`--admin` terminal merge (#1945) is not blocked by #1964 if the same change keeps the owner
+account's explicit-bypass path (the assertion, then `--admin`), a canary exercises it, and
+the runbook states that a producer outage stalls autonomous merges until the owner merges by
+bypass.
+
+**Not yet done.** Each of these gates the canary ruleset (C3) and none is claimed here:
+
+1. The C10 (ii) outage alert: failed runs, cancelled runs with at least one started job,
+   `was not evaluated` annotations, no producer run reaching `evaluate` and concluding
+   success for 45 minutes while open non-draft heads exist, and a disabled producer
+   schedule. A fixture proves it does not fire on displaced pending cancellations. It names
+   its delivery channel and owner, and either detects independently of Actions in the
+   monitored repository or names the Actions-wide or billing outage as the accepted C1 gap.
+2. The C10 (iii) REST budget, measured on this repository, adopting one of the two
+   mitigations above if it does not fit.
+3. The C10 (iv) consumer caller-and-trigger generator.
+4. The C10 (v) runbook: ruleset-edit and arm-rotation caller dispatches, deactivating the
+   ruleset, closing a foreign same-head pull request, and C7 recovery.
+5. The C10 (vi) hosted-minute budget, before a generated caller lands on any private
+   repository (verjson-agents and verjson-ai are private).
+6. The C9 non-bypass canary principal.
+7. The C8 audit check above, and C3-OBS (at least 20 merges across at least 3 repositories).

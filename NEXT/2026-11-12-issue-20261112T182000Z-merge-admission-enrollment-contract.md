@@ -29,3 +29,9 @@ value is compared and never printed.
 `scripts/ci-gate/merge-admission.test.sh` (merge-gate) now each fail when
 `MERGE_ADMISSION_APP_ID` in the assertion or the producer differs from the policy's
 `merge-admission` binding, so the three cannot drift apart (C10 (i)(a)).
+
+ADR 0260 gains a dated amendment recording the owner's user-attested C1 acceptance (with
+class ceilings and the #1964 lapse), C8's enrollment-property scope for Decision 2, C6's
+visible Renovate carve-out in Decision 6, C10 as adopted, C11's ordering edge, and the
+bundle items still to do: the outage alert, REST and hosted-minute budgets, caller
+generator, runbook, and C9 canary principal.
