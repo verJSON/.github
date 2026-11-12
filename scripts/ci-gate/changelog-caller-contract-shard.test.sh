@@ -33,7 +33,7 @@ fi
 
 if ! grep -qE 'CHANGELOG_CONTRACT_SECTIONS|contract_section_selected|contract_sections_finish' "$gen" \
   && ! grep -qE 'CHANGELOG_CONTRACT_SECTIONS|changelog_contract_run_for|contract_section_selected' "$caller" \
-  && grep -Fq 'env "${cache_env[@]}" ./scripts/changelog-contract.test.sh' "$caller"; then
+  && grep -Fq 'env "${cache_env[@]}" "GITHUB_REPOSITORY_OWNER=${ADOPTER_GITHUB_OWNER:-}" ./scripts/changelog-contract.test.sh' "$caller"; then
   pass "each selected caller mutation runs the complete generated contract"
 else
   fail "caller mutations can skip assertions in the generated contract"
@@ -282,7 +282,7 @@ import sys
 
 caller, shard, manifest = sys.argv[1:]
 text = open(caller, encoding="utf-8").read()
-expected_calls = 330
+expected_calls = 333
 calls = len(re.findall(r"^schedule_adopter_script ", text, re.M))
 calls += len(re.findall(r"^[ \t]*expect_rejection ", text, re.M))
 calls += len(re.findall(r"^expect_release_mode_rejection ", text, re.M))

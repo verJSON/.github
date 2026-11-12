@@ -15,7 +15,7 @@ download_artifact_pin="uses: actions/download-artifact@$download_artifact_sha # 
 test "$(grep -F -c "$download_artifact_pin" "$trusted")" -eq 3
 ! grep -qF 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1' "$trusted"
 grep -qF 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9' "$trusted"
-grep -qF 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1' "$trusted"
+grep -qF 'actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510' "$trusted"
 grep -qF 'permission-checks: write' "$trusted"
 grep -qF "ref: '\${{ needs.environment-preflight.outputs.workflow-sha }}'" "$trusted"
 grep -qF "repository: '\${{ needs.environment-preflight.outputs.workflow-repository }}'" "$trusted"
@@ -49,7 +49,7 @@ assert workflow["jobs"]["environment-preflight"]["permissions"] == {"actions": "
 for kind in ("code", "security", "ai"):
     job = workflow["jobs"][f"publish-{kind}"]
     mint = next(step for step in job["steps"] if step.get("id") == "publisher")
-    assert mint["uses"] == "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"
+    assert mint["uses"] == "actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510"
     assert mint["with"] == {
         "client-id": f"${{{{ vars.RUNNER_DEPLOY_{kind.upper()}_REVIEW_APP_CLIENT_ID }}}}",
         "private-key": f"${{{{ secrets.RUNNER_DEPLOY_{kind.upper()}_REVIEW_APP_PRIVATE_KEY }}}}",

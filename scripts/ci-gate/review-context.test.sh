@@ -2,6 +2,9 @@
 # Pin the review model's PR-head versus base-branch evidence boundary (#377).
 set -uo pipefail
 
+# These tests create disposable repositories and must not run user Git hooks.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+
 here="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
 workflow="$repo_root/.github/workflows/ai-review-merge.yml"

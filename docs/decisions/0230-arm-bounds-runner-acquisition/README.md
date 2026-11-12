@@ -155,3 +155,21 @@ timeout covers the worst case.
 - `ai-review-merge.yml` nests the same `app-key-policy` call and has the same exposure in
   its review run. That run is dispatched rather than required and has its own retry path.
   Extending the watchdog there is follow-up work, not part of this decision.
+
+## Amendment 2026-11-12 — the stall bound is evaluated in UTC
+
+The watchdog ages each queued job with jq's `fromdateiso8601`. jq 1.6 applies the
+process zone's daylight-saving offset in that conversion, so in a daylight-saving
+process zone every job looked up to an hour younger than it was and the 15-minute stall
+bound fired up to an hour late ([#1958](https://github.com/Verjson/.github/issues/1958)).
+GitHub-hosted runner images default to UTC, but the bound must not depend on an image
+default or on a caller's environment. The watchdog job now sets
+`TZ: UTC` in its own `env` (`.github/workflows/gate-rearm.yml`), and the test harness no
+longer forces UTC on the job, so a caller's zone reaches the script exactly as a runner's
+would ([PR #1960](https://github.com/Verjson/.github/pull/1960)).
+
+Evidence: `scripts/ci-gate/arm-runner-acquisition-watchdog.test.py` runs the at-limit
+stall in both UTC and `America/New_York` and requires the cancel on the first poll.
+Deleting `TZ: UTC` fails that test on a UTC host (1 of 25 behaviors) and fails 5 of 25
+on an `America/New_York` host, where the exact-timing cancellation tests also see the
+hour of delay. The decision itself is unchanged: this restores the bound it records.

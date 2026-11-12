@@ -274,8 +274,6 @@ def run_watchdog(snapshots, runner_environment="github-hosted", preset_outputs=N
         (stub_dir / "calls").write_text("", encoding="utf-8")
         env = {key: value for key, value in caller_environment.items()
                if not key.startswith(("GITHUB_", "RUNNER_"))}
-        # The hosted runner's zone, never the caller's; the job's own env still overrides it.
-        env["TZ"] = "UTC"
         env.update({key: str(value) for key, value in job_definition["env"].items()})
         env.update({
             "PATH": f"{bin_dir}{os.pathsep}{caller_environment['PATH']}",
@@ -353,11 +351,11 @@ def healthy_runs(prefix=""):
     ]
 
 
-def ghost_key_validation(prefix=""):
+def ghost_key_validation(prefix="", created_offset=0):
     n = lambda name: f"{prefix}{name}"
     return [snapshot(job(n("event-policy"), "completed", labels=("ubuntu-24.04",)),
                      job(n("app-key-policy / validate"), "completed", 5, ("ubuntu-24.04",)),
-                     job(n("app-key-policy / validate-ai-review-key"), "queued", 0))]
+                     job(n("app-key-policy / validate-ai-review-key"), "queued", created_offset))]
 
 
 def test_admitted_repository_whose_jobs_acquire_runners_exits_without_cancelling():
@@ -386,13 +384,15 @@ def test_unreachable_lane_cancels_then_force_cancels_and_names_the_stalled_job()
 
 
 def test_a_caller_outside_utc_sees_the_stall_deadline_a_hosted_runner_sees():
-    # Hosted runners run in UTC; jq 1.6's fromdateiso8601 honors TZ, so a caller's
-    # daylight-saving zone would move every job's age by its UTC offset (#1999).
-    caller = {**os.environ, "TZ": "America/New_York"}
-    completed, calls, elapsed = run_watchdog(ghost_key_validation(), caller_environment=caller)
-    assert completed.returncode != 0, completed.stdout
-    assert cancellations(calls) == ["cancel", "force-cancel"], calls
-    assert limit_seconds() <= elapsed <= limit_seconds() + 300, elapsed
+    # Hosted runners run in UTC; jq 1.6's fromdateiso8601 adds the process zone's
+    # daylight-saving offset, so a caller's zone would delay the deadline (#1958, #1999).
+    at_limit = ghost_key_validation(created_offset=-limit_seconds())
+    for zone in ("UTC", "America/New_York"):
+        caller = {**os.environ, "TZ": zone}
+        completed, calls, _ = run_watchdog(at_limit, caller_environment=caller)
+        assert completed.returncode != 0, (zone, completed.stdout)
+        assert posts(calls)[0][0] == START, (zone, calls)
+        assert cancellations(calls) == ["cancel", "force-cancel"], (zone, calls)
 
 
 RUNBOOK = "https://github.com/verJSON/.github/blob/main/docs/arm-recovery-runbook.md#interim-recovery-close-and-reopen"
