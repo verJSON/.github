@@ -18,3 +18,8 @@ refuses to continue unless GitHub reports that App as its producer, runs the can
 assertion for that head with the read-only token, and completes the check as success
 only when the assertion exits 0 printing exactly `true`. Every refusal or error leaves
 the check in progress and exits 0 (ADR 0260 precondition (a)).
+
+`scripts/ci-gate/merge-admission-plan.sh` lists the heads one producer run evaluates:
+every open pull request that is not a draft, or only those at the head an event names.
+An unreadable listing plans nothing and a malformed entry is skipped, each named in a
+warning, so the producer's own job still succeeds.
